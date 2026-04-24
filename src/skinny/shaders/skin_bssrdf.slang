@@ -1,0 +1,313 @@
+// Physically-based skin BSSRDF using a separable multi-layer diffusion model.
+//
+// References:
+//   [1] Jensen et al., "A Practical Model for Subsurface Light Transport" (2001)
+//   [2] d'Eon & Irving, "A Quantized-Diffusion Model for Rendering
+//       Translucent Materials" (2011)
+//   [3] Christensen & Burley, "Approximate Reflectance Profiles for
+//       Efficient Subsurface Scattering" (Disney, 2015)
+
+import common;
+
+// ── Skin optical parameters ─────────────────────────────────────
+
+struct SkinLayer
+{
+    float3 sigmaA;      // absorption coefficient  (mm⁻¹)
+    float3 sigmaS;      // scattering coefficient  (mm⁻¹)
+    float  thickness;   // layer thickness          (mm)
+    float  g;           // Henyey-Greenstein anisotropy
+    float  ior;         // index of refraction
+};
+
+struct SkinParams
+{
+    float melaninFraction;
+    float hemoglobinFraction;
+    float bloodOxygenation;
+    float epidermisThickness;
+    float dermisThickness;
+    float subcutThickness;
+    float3 scatteringCoeff;
+    float anisotropy;
+    float roughness;
+    float ior;
+    float poreDensity;      // 0 = off, 1 = visible cheek-like pore pattern
+    float poreDepth;        // normal perturbation amplitude inside pores
+    float hairDensity;      // 0 = no vellus hair, 1 = heavy peach-fuzz rim
+    float hairTilt;         // 0 = hairs lying flat, 1 = standing up (strong rim)
+};
+
+// Melanin absorption (Donner & Jensen 2006 fit)
+float3 melaninAbsorption(float melaninFraction)
+{
+    // Eumelanin dominant; wavelength-dependent fit at RGB centres (611, 549, 464 nm)
+    float3 eumelanin = float3(6.6, 11.0, 24.0);
+    return melaninFraction * eumelanin;
+}
+
+// Hemoglobin absorption from oxygenated / deoxygenated mix
+float3 hemoglobinAbsorption(float hbFraction, float oxygenation)
+{
+    float3 hbO2  = float3(0.3, 7.0, 1.0);   // oxy-hemoglobin  (RGB approx)
+    float3 hb    = float3(1.6, 8.5, 3.2);    // deoxy-hemoglobin
+    return hbFraction * (oxygenation * hbO2 + (1.0 - oxygenation) * hb);
+}
+
+SkinLayer buildEpidermis(SkinParams p)
+{
+    SkinLayer layer;
+    layer.sigmaA   = melaninAbsorption(p.melaninFraction) + float3(0.015);
+    layer.sigmaS   = p.scatteringCoeff;
+    layer.thickness = p.epidermisThickness;
+    layer.g         = p.anisotropy;
+    layer.ior       = p.ior;
+    return layer;
+}
+
+SkinLayer buildDermis(SkinParams p)
+{
+    SkinLayer layer;
+    layer.sigmaA   = hemoglobinAbsorption(p.hemoglobinFraction, p.bloodOxygenation)
+                     + float3(0.015);
+    layer.sigmaS   = p.scatteringCoeff;
+    layer.thickness = p.dermisThickness;
+    layer.g         = p.anisotropy;
+    layer.ior       = p.ior;
+    return layer;
+}
+
+// ── Tattoo ink optical contribution ─────────────────────────────
+//
+// Tattoo inks are micron-scale pigment particles deposited in the papillary
+// dermis. Each particle absorbs strongly in its complement spectrum and
+// scatters weakly in its own. We model this as an *additive* σ_a / σ_s on
+// top of the baseline dermis, driven by the ink sample taken from the
+// tattoo texture:
+//
+//   σ_a_ink = density · ( INK_ABS_MAX · (1 − rgb) + INK_ABS_MIN · rgb )
+//   σ_s_ink = density · INK_SCATTER_BASE · (1 + 0.5 · luminance(rgb))
+//
+// "density" is texture-alpha × global tattooDensity in [0, 1]. A white-
+// pigment (TiO₂) ink ends up with near-zero absorption but higher scatter
+// — hence the luminance term on σ_s. The constants below are chosen so
+// that a fully opaque mid-saturation colour gives a visually convincing
+// tattoo without completely dominating the underlying hemoglobin.
+
+static const float INK_ABS_MAX        = 22.0;  // mm⁻¹ in the complement channels
+static const float INK_ABS_MIN        = 1.2;   // mm⁻¹ residual in the ink's own colour
+static const float INK_SCATTER_BASE   = 3.5;   // mm⁻¹ baseline ink scattering
+
+float3 inkSigmaAbsorption(float3 inkRgb, float density)
+{
+    float3 absContribution = INK_ABS_MAX * (1.0 - inkRgb) + INK_ABS_MIN * inkRgb;
+    return density * absContribution;
+}
+
+float3 inkSigmaScattering(float3 inkRgb, float density)
+{
+    float luminance = dot(inkRgb, float3(0.299, 0.587, 0.114));
+    return density * INK_SCATTER_BASE * (1.0 + 0.5 * luminance);
+}
+
+SkinLayer buildDermisInked(SkinParams p, float4 ink)
+{
+    SkinLayer layer = buildDermis(p);
+    float density = clamp(ink.a, 0.0, 1.0);
+    if (density > 1e-6)
+    {
+        layer.sigmaA += inkSigmaAbsorption(ink.rgb, density);
+        layer.sigmaS += inkSigmaScattering(ink.rgb, density);
+    }
+    return layer;
+}
+
+SkinLayer buildSubcutaneous(SkinParams p)
+{
+    SkinLayer layer;
+    layer.sigmaA   = float3(0.05, 0.06, 0.08);
+    layer.sigmaS   = float3(1.2, 1.1, 0.95);
+    layer.thickness = p.subcutThickness;
+    layer.g         = 0.8;
+    layer.ior       = 1.4;
+    return layer;
+}
+
+// ── Burley normalised diffusion profile ─────────────────────────
+// Single-channel reflectance profile R(r) ≈ A * (e^(-r/d) + e^(-r/(3d))) / (8πdr)
+// where d = 1 / (σ_a + σ_s') is the diffuse mean free path.
+
+float3 burleyDiffusionProfile(float r, float3 d)
+{
+    float3 rd = max(float3(r), float3(1e-6)) / d;
+    return (exp(-rd) + exp(-rd / 3.0)) / (8.0 * PI * d * max(float3(r), float3(1e-6)));
+}
+
+float3 effectiveMFP(SkinLayer layer)
+{
+    float3 sigmaSprime = layer.sigmaS * (1.0 - layer.g);
+    float3 sigmaT      = layer.sigmaA + sigmaSprime;
+    return 1.0 / max(sigmaT, float3(1e-6));
+}
+
+// ── Fresnel ─────────────────────────────────────────────────────
+
+float fresnelSchlick(float cosTheta, float ior)
+{
+    float r0 = (1.0 - ior) / (1.0 + ior);
+    r0 = r0 * r0;
+    float c  = 1.0 - cosTheta;
+    return r0 + (1.0 - r0) * c * c * c * c * c;
+}
+
+// ── GGX microfacet specular for skin surface ────────────────────
+
+float ggxDistribution(float NdotH, float roughness)
+{
+    float a  = roughness * roughness;
+    float a2 = a * a;
+    float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float ggxSmithG1(float NdotV, float roughness)
+{
+    float a = roughness * roughness;
+    float k = a / 2.0;
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
+
+float3 evaluateSkinSpecular(float3 N, float3 V, float3 L, float roughness, float ior)
+{
+    float3 H    = normalize(V + L);
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float VdotH = max(dot(V, H), 0.0);
+
+    float D = ggxDistribution(NdotH, roughness);
+    float G = ggxSmithG1(NdotV, roughness) * ggxSmithG1(NdotL, roughness);
+    float F = fresnelSchlick(VdotH, ior);
+
+    return float3(D * G * F / max(4.0 * NdotV * NdotL, 1e-6));
+}
+
+float ggxSpecularPdf(float3 N, float3 V, float3 L, float roughness)
+{
+    float3 H = normalize(V + L);
+    float NdotH = max(dot(N, H), 0.0);
+    float VdotH = max(dot(V, H), 1e-6);
+    if (dot(N, L) <= 0.0 || NdotH <= 0.0)
+        return 0.0;
+    return ggxDistribution(NdotH, roughness) * NdotH / (4.0 * VdotH);
+}
+
+// GGX importance-sampled specular direction for IBL. Returns the sampled
+// direction plus the MC weight BRDF*cosθ/pdf = G*F*VdotH/(NdotV*NdotH).
+// A single call is an unbiased one-sample estimate of the specular IBL
+// integral ∫ f_spec(ω)·L(ω)·cos(θ) dω when multiplied by L(ω_sample).
+// Zero weight is returned for below-horizon samples.
+struct SpecularIBLSample
+{
+    float3 direction;
+    float3 weight;
+};
+
+SpecularIBLSample sampleGGXSpecularIBL(
+    float3 N, float3 V, float roughness, float ior, float2 u
+)
+{
+    float a = max(roughness * roughness, 1e-4);
+    float a2 = a * a;
+
+    float cosTheta = sqrt((1.0 - u.y) / (1.0 + (a2 - 1.0) * u.y));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float phi      = 2.0 * PI * u.x;
+
+    float3 tangent   = abs(N.x) > 0.9 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 bitangent = normalize(cross(N, tangent));
+    tangent          = cross(bitangent, N);
+
+    float3 H = normalize(
+        tangent   * cos(phi) * sinTheta +
+        bitangent * sin(phi) * sinTheta +
+        N * cosTheta
+    );
+
+    float3 L = reflect(-V, H);
+
+    float NdotV = max(dot(N, V), 1e-6);
+    float NdotL = dot(N, L);
+    float NdotH = max(dot(N, H), 1e-6);
+    float VdotH = max(dot(V, H), 1e-6);
+
+    SpecularIBLSample s;
+    s.direction = L;
+    if (NdotL <= 0.0)
+    {
+        s.weight = float3(0.0);
+        return s;
+    }
+
+    float G = ggxSmithG1(NdotV, roughness) * ggxSmithG1(NdotL, roughness);
+    float F = fresnelSchlick(VdotH, ior);
+    s.weight = float3(G * F * VdotH / (NdotV * NdotH));
+    return s;
+}
+
+// ── Subsurface evaluation (disk-based sampling) ─────────────────
+
+// Reduced single-scattering albedo σ_s' / (σ_a + σ_s'). This is the fraction
+// of incident radiance that survives absorption per scattering event and sets
+// the diffuse "skin tint" — melanin darkens it, hemoglobin pushes it red.
+float3 layerAlbedo(SkinLayer layer)
+{
+    float3 sigmaSprime = layer.sigmaS * (1.0 - layer.g);
+    float3 sigmaT      = layer.sigmaA + sigmaSprime;
+    return sigmaSprime / max(sigmaT, float3(1e-6));
+}
+
+// Point-wise SSS: returns outgoing radiance for irradiance landing on a skin
+// patch, using the layered diffuse albedo as a Lambertian BRDF. This is an
+// unblurred approximation — the full Burley profile below is retained for
+// disk-sampled BSSRDF if/when we add multi-tap sampling.
+//
+// `ink` samples a tattoo texture at this pixel: rgb is the linear ink colour,
+// a is the effective density (texture-alpha × global tattooDensity). When
+// a == 0 the function is identical to the bare-skin case.
+float3 evaluateSubsurfaceScattering(
+    SkinParams params,
+    float3 position,
+    float3 normal,
+    float  sampleRadius,
+    float3 sampleIrradiance,
+    float4 ink
+)
+{
+    SkinLayer epidermis = buildEpidermis(params);
+    SkinLayer dermis    = buildDermisInked(params, ink);
+    SkinLayer subcut    = buildSubcutaneous(params);
+
+    // Weight each layer's single-scatter albedo by its per-channel optical
+    // depth τ = σ_t · thickness. τ / Σ τ approximates the probability that
+    // a photon's first scatter event occurs in that layer — the same
+    // quantity the volume march integrates path-wise, so the two estimators
+    // now agree in steady state. The previous fixed 0.2/0.6/0.2 mix was
+    // insensitive to thickness and wavelength, which pushed BSSRDF toward
+    // dermis-magenta regardless of how thick the dermis actually was.
+    float3 sigmaT_e = epidermis.sigmaA + epidermis.sigmaS * (1.0 - epidermis.g);
+    float3 sigmaT_d = dermis.sigmaA    + dermis.sigmaS    * (1.0 - dermis.g);
+    float3 sigmaT_s = subcut.sigmaA    + subcut.sigmaS    * (1.0 - subcut.g);
+
+    float3 tau_e = sigmaT_e * epidermis.thickness;
+    float3 tau_d = sigmaT_d * dermis.thickness;
+    float3 tau_s = sigmaT_s * subcut.thickness;
+    float3 totalTau = max(tau_e + tau_d + tau_s, float3(1e-6));
+
+    float3 skinAlbedo =
+        (tau_e * layerAlbedo(epidermis)
+       + tau_d * layerAlbedo(dermis)
+       + tau_s * layerAlbedo(subcut)) / totalTau;
+
+    return skinAlbedo * sampleIrradiance / PI;
+}

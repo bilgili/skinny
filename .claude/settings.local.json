@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(python *)",
+      "Bash(where slangc *)",
+      "Bash(\"D:/projects/skinny/Scripts/python.exe\" -c \"from skinny.renderer import Renderer; print\\('import OK'\\)\")",
+      "Bash(slangc main_pass.slang -target spirv -entry mainImage -stage compute -o /tmp/main_pass.spv -I .)",
+      "Bash(\"D:/projects/skinny/Scripts/python.exe\" -c \"from skinny.renderer import Renderer; from skinny.app import InputHandler; print\\('import OK'\\)\")",
+      "Bash(\"D:/projects/skinny/Scripts/pip.exe\" install *)",
+      "Bash(D:/projects/skinny/Scripts/python.exe *)",
+      "Bash(slangc main_pass.slang -target spirv -profile glsl_450 -entry mainImage -stage compute -o /tmp/main_pass.spv)",
+      "Bash(slangc main_pass.slang -target spirv -entry mainImage -stage compute -o main_pass.spv -I .)",
+      "Bash(ls *)",
+      "Bash(slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute -o /tmp/main_pass.spv)",
+      "Bash(grep -oE '\"lastPrompt\":\"[^\"]{1,500}\"')",
+      "Bash(grep -oE '\"lastPrompt\":\"[^\"]{1,500}\"' \"C:/Users/a_bil/.claude/projects/D--projects-skinny/7ab2de72-9604-4e72-9c7f-a7c26ad1ac2c.jsonl\")",
+      "Bash(slangc *)",
+      "Bash(/d/projects/skinny/Scripts/python -c ' *)",
+      "Bash(find *)",
+      "Bash(mv \"heads/8MZNV7RZYRS2VVU8BXSSQKUGI.obj\" \"heads/HEAD/head.obj\")",
+      "Bash(mv \"heads/8MZNV7RZYRS2VVU8BXSSQKUGI.mtl\" \"heads/HEAD/head.mtl\")",
+      "Bash(timeout 12 python -u -m skinny.app)",
+      "Bash(echo \"exit=$?\")"
+    ]
+  }
+}
