@@ -1,0 +1,234 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <!--
+    Skinny material library.
+
+    Defines a decomposed layered-skin material that mirrors the legacy
+    SkinParameters/SkinLayer shading model 1:1 while exposing biology
+    inputs (melanin, hemoglobin, blood oxygenation, layer thicknesses) as
+    first-class MaterialX inputs that can be either constants or driven by
+    UV-sampled images.
+
+    Composition:
+
+      skinny_skin_epidermis ─┐
+      skinny_skin_dermis    ─┼─► (15 layer fields)
+      skinny_skin_subcut    ─┘            │
+                                          ├─► skinny_skin_layered_bsdf ─► BSDF ─► <surface> ─► surfaceshader
+                                          │
+                                          └─► skinny_skin_layered_vdf  ─► VDF  ─► <volumematerial> ─► volumeshader
+
+    Each layer nodedef emits five flat outputs (absorption, scattering,
+    anisotropy, thickness, ior). Both the BSDF and VDF nodedefs consume the
+    same 15-field layer state. The canonical wiring lives in the nodegraph
+    skinny_skin_default.mtlx so most scenes only need to bind that one
+    element with a few input overrides (melanin, hemoglobin, etc.).
+
+    The ND_skinny_scattering_layer escape hatch lets a non-skin layered
+    medium (wax, marble, frosted plastic) reuse the BSDF + VDF combo with
+    custom σ_a / σ_s values.
+  -->
+
+  <!-- ──────────────────────────────────────────────────────────── -->
+  <!-- Layer nodedefs                                               -->
+  <!--                                                              -->
+  <!-- Each takes biology-side inputs and emits the five fields a   -->
+  <!-- scattering layer needs (σ_a, σ_s, g, thickness, ior) so the  -->
+  <!-- BSDF and VDF nodes can integrate over the layered medium.    -->
+  <!-- ──────────────────────────────────────────────────────────── -->
+
+  <nodedef name="ND_skinny_skin_epidermis"
+           node="skinny_skin_epidermis"
+           nodegroup="skinny"
+           doc="Epidermis layer: σ_a is driven by melanin fraction (Donner &amp; Jensen 2006 fit), σ_s passes through, anisotropy/ior are forwarded.">
+    <input name="melanin"          type="float"  value="0.15"
+           uimin="0.0" uimax="1.0" uiname="Melanin Fraction" uifolder="Epidermis"
+           doc="Eumelanin volume fraction. 0=albino, 0.4=Fitzpatrick VI." />
+    <input name="thickness"        type="float"  value="0.1"
+           uimin="0.01" uimax="1.0" uiname="Thickness (mm)" uifolder="Epidermis" />
+    <input name="scattering_coeff" type="color3" value="3.7, 4.4, 5.05"
+           uiname="Scattering Coefficient (mm^-1)" uifolder="Epidermis" />
+    <input name="anisotropy"       type="float"  value="0.8"
+           uimin="0.0" uimax="0.99" uiname="Anisotropy g" uifolder="Epidermis" />
+    <input name="ior"              type="float"  value="1.4"
+           uimin="1.0" uimax="2.0" uiname="IOR" uifolder="Epidermis" />
+    <output name="absorption"      type="color3" />
+    <output name="scattering"      type="color3" />
+    <output name="anisotropy_out"  type="float"  />
+    <output name="thickness_out"   type="float"  />
+    <output name="ior_out"         type="float"  />
+  </nodedef>
+
+  <nodedef name="ND_skinny_skin_dermis"
+           node="skinny_skin_dermis"
+           nodegroup="skinny"
+           doc="Dermis layer: σ_a is driven by hemoglobin fraction and oxygenation, with an optional pigment overlay (replaces the legacy tattoo path). σ_s passes through.">
+    <input name="hemoglobin"         type="float"  value="0.05"
+           uimin="0.0" uimax="1.0" uiname="Hemoglobin Fraction" uifolder="Dermis" />
+    <input name="blood_oxygenation"  type="float"  value="0.75"
+           uimin="0.0" uimax="1.0" uiname="Blood Oxygenation" uifolder="Dermis" />
+    <input name="thickness"          type="float"  value="1.0"
+           uimin="0.1" uimax="5.0" uiname="Thickness (mm)" uifolder="Dermis" />
+    <input name="scattering_coeff"   type="color3" value="3.7, 4.4, 5.05"
+           uiname="Scattering Coefficient (mm^-1)" uifolder="Dermis" />
+    <input name="anisotropy"         type="float"  value="0.8"
+           uimin="0.0" uimax="0.99" uiname="Anisotropy g" uifolder="Dermis" />
+    <input name="ior"                type="float"  value="1.4"
+           uimin="1.0" uimax="2.0" uiname="IOR" uifolder="Dermis" />
+    <input name="pigment"            type="color4" value="0.0, 0.0, 0.0, 0.0"
+           uiname="Pigment (rgb=ink color, a=density)" uifolder="Dermis"
+           doc="Optional dermal pigment overlay (e.g. tattoo). Connect a UV-sampled image; alpha=0 is bare dermis." />
+    <output name="absorption"        type="color3" />
+    <output name="scattering"        type="color3" />
+    <output name="anisotropy_out"    type="float"  />
+    <output name="thickness_out"     type="float"  />
+    <output name="ior_out"           type="float"  />
+  </nodedef>
+
+  <nodedef name="ND_skinny_skin_subcut"
+           node="skinny_skin_subcut"
+           nodegroup="skinny"
+           doc="Subcutaneous fat layer with fixed default optics; defaults reproduce the legacy hard-coded values.">
+    <input name="thickness"   type="float"  value="3.0"
+           uimin="0.5" uimax="10.0" uiname="Thickness (mm)" uifolder="Subcutaneous" />
+    <input name="absorption"  type="color3" value="0.05, 0.06, 0.08"
+           uiname="Absorption (mm^-1)" uifolder="Subcutaneous" />
+    <input name="scattering"  type="color3" value="1.2, 1.1, 0.95"
+           uiname="Scattering (mm^-1)" uifolder="Subcutaneous" />
+    <input name="anisotropy"  type="float"  value="0.8"
+           uimin="0.0" uimax="0.99" uiname="Anisotropy g" uifolder="Subcutaneous" />
+    <input name="ior"         type="float"  value="1.4"
+           uimin="1.0" uimax="2.0" uiname="IOR" uifolder="Subcutaneous" />
+    <output name="absorption_out"   type="color3" />
+    <output name="scattering_out"   type="color3" />
+    <output name="anisotropy_out"   type="float"  />
+    <output name="thickness_out"    type="float"  />
+    <output name="ior_out"          type="float"  />
+  </nodedef>
+
+  <nodedef name="ND_skinny_scattering_layer"
+           node="skinny_scattering_layer"
+           nodegroup="skinny"
+           doc="Generic scattering layer escape hatch: lets non-skin layered media (wax, marble, frosted plastic) reuse the skin BSDF/VDF nodes with custom σ_a / σ_s.">
+    <input name="absorption" type="color3" value="0.0, 0.0, 0.0"
+           uiname="Absorption (mm^-1)" uifolder="Layer" />
+    <input name="scattering" type="color3" value="0.0, 0.0, 0.0"
+           uiname="Scattering (mm^-1)" uifolder="Layer" />
+    <input name="thickness"  type="float"  value="1.0"
+           uiname="Thickness (mm)" uifolder="Layer" />
+    <input name="anisotropy" type="float"  value="0.0"
+           uimin="-0.99" uimax="0.99" uiname="Anisotropy g" uifolder="Layer" />
+    <input name="ior"        type="float"  value="1.4"
+           uimin="1.0" uimax="2.0" uiname="IOR" uifolder="Layer" />
+    <output name="absorption_out"  type="color3" />
+    <output name="scattering_out"  type="color3" />
+    <output name="anisotropy_out"  type="float"  />
+    <output name="thickness_out"   type="float"  />
+    <output name="ior_out"         type="float"  />
+  </nodedef>
+
+  <!-- ──────────────────────────────────────────────────────────── -->
+  <!-- BSDF nodedef — surface side                                  -->
+  <!--                                                              -->
+  <!-- Outputs a BSDF combining: GGX specular (with optional pore   -->
+  <!-- perturbation) + layered Lambertian diffuse (the τ-weighted   -->
+  <!-- layer-albedo BSSRDF estimator) + vellus-hair sheen rim.      -->
+  <!-- A standard <surface> node consumes the BSDF and produces     -->
+  <!-- the surfaceshader.                                           -->
+  <!-- ──────────────────────────────────────────────────────────── -->
+
+  <nodedef name="ND_skinny_skin_layered_bsdf"
+           node="skinny_skin_layered_bsdf"
+           nodegroup="skinny"
+           doc="Composite BSDF for layered skin: GGX specular + layered Lambertian (τ-weighted layer albedo) + optional vellus-hair sheen + pigment overlay through the dermis. Consumes the 15 layer fields plus surface params and pigment.">
+
+    <!-- Top layer (typically epidermis) -->
+    <input name="top_absorption" type="color3" value="0.0, 0.0, 0.0" uifolder="Top Layer" />
+    <input name="top_scattering" type="color3" value="3.7, 4.4, 5.05" uifolder="Top Layer" />
+    <input name="top_anisotropy" type="float"  value="0.8"           uifolder="Top Layer" />
+    <input name="top_thickness"  type="float"  value="0.1"           uifolder="Top Layer" />
+    <input name="top_ior"        type="float"  value="1.4"           uifolder="Top Layer" />
+
+    <!-- Middle layer (typically dermis) -->
+    <input name="middle_absorption" type="color3" value="0.0, 0.0, 0.0" uifolder="Middle Layer" />
+    <input name="middle_scattering" type="color3" value="3.7, 4.4, 5.05" uifolder="Middle Layer" />
+    <input name="middle_anisotropy" type="float"  value="0.8"           uifolder="Middle Layer" />
+    <input name="middle_thickness"  type="float"  value="1.0"           uifolder="Middle Layer" />
+    <input name="middle_ior"        type="float"  value="1.4"           uifolder="Middle Layer" />
+
+    <!-- Bottom layer (typically subcutaneous) -->
+    <input name="bottom_absorption" type="color3" value="0.05, 0.06, 0.08" uifolder="Bottom Layer" />
+    <input name="bottom_scattering" type="color3" value="1.2, 1.1, 0.95"   uifolder="Bottom Layer" />
+    <input name="bottom_anisotropy" type="float"  value="0.8"              uifolder="Bottom Layer" />
+    <input name="bottom_thickness"  type="float"  value="3.0"              uifolder="Bottom Layer" />
+    <input name="bottom_ior"        type="float"  value="1.4"              uifolder="Bottom Layer" />
+
+    <!-- Pigment overlay (multiplied into dermis σ_a / σ_s based on alpha) -->
+    <input name="pigment"        type="color4"  value="0.0, 0.0, 0.0, 0.0"
+           uiname="Pigment Overlay" uifolder="Detail"
+           doc="Color: linear ink RGB. Alpha: ink density 0..1. Connect to a UV-sampled image for tattoos." />
+
+    <!-- Surface -->
+    <input name="weight"     type="float"   value="1.0"
+           uimin="0.0" uimax="1.0" uiname="Weight" uifolder="Surface" />
+    <input name="roughness"  type="float"   value="0.35"
+           uimin="0.01" uimax="1.0" uiname="Roughness" uifolder="Surface" />
+    <input name="ior"        type="float"   value="1.4"
+           uimin="1.0" uimax="2.0" uiname="IOR" uifolder="Surface" />
+    <input name="normal"     type="vector3" defaultgeomprop="Nworld"
+           uiname="Normal" uifolder="Surface" />
+    <input name="tangent"    type="vector3" defaultgeomprop="Tworld"
+           uiname="Tangent" uifolder="Surface" />
+
+    <!-- Sub-mm detail (pores + vellus hair sheen) -->
+    <input name="pore_density"  type="float" value="0.0"
+           uimin="0.0" uimax="1.0" uiname="Pore Density" uifolder="Detail" />
+    <input name="pore_depth"    type="float" value="0.0"
+           uimin="0.0" uimax="1.0" uiname="Pore Depth" uifolder="Detail" />
+    <input name="hair_density"  type="float" value="0.0"
+           uimin="0.0" uimax="1.0" uiname="Vellus Hair Density" uifolder="Detail" />
+    <input name="hair_tilt"     type="float" value="0.0"
+           uimin="0.0" uimax="1.0" uiname="Vellus Hair Tilt" uifolder="Detail" />
+
+    <output name="bsdf" type="BSDF" />
+  </nodedef>
+
+  <!-- ──────────────────────────────────────────────────────────── -->
+  <!-- VDF nodedef — volume side                                    -->
+  <!--                                                              -->
+  <!-- Outputs a VDF describing the depth-stratified medium for the -->
+  <!-- delta-tracked volume estimator. A standard <volumematerial>  -->
+  <!-- node consumes the VDF and produces the volumeshader.         -->
+  <!-- ──────────────────────────────────────────────────────────── -->
+
+  <nodedef name="ND_skinny_skin_layered_vdf"
+           node="skinny_skin_layered_vdf"
+           nodegroup="skinny"
+           doc="Layered scattering VDF for delta-tracking through the three skin layers. The integrator samples free flight against a per-layer majorant and queries σ_a / σ_s / g at each sample depth.">
+
+    <input name="top_absorption" type="color3" value="0.0, 0.0, 0.0" uifolder="Top Layer" />
+    <input name="top_scattering" type="color3" value="3.7, 4.4, 5.05" uifolder="Top Layer" />
+    <input name="top_anisotropy" type="float"  value="0.8"           uifolder="Top Layer" />
+    <input name="top_thickness"  type="float"  value="0.1"           uifolder="Top Layer" />
+    <input name="top_ior"        type="float"  value="1.4"           uifolder="Top Layer" />
+
+    <input name="middle_absorption" type="color3" value="0.0, 0.0, 0.0" uifolder="Middle Layer" />
+    <input name="middle_scattering" type="color3" value="3.7, 4.4, 5.05" uifolder="Middle Layer" />
+    <input name="middle_anisotropy" type="float"  value="0.8"           uifolder="Middle Layer" />
+    <input name="middle_thickness"  type="float"  value="1.0"           uifolder="Middle Layer" />
+    <input name="middle_ior"        type="float"  value="1.4"           uifolder="Middle Layer" />
+
+    <input name="bottom_absorption" type="color3" value="0.05, 0.06, 0.08" uifolder="Bottom Layer" />
+    <input name="bottom_scattering" type="color3" value="1.2, 1.1, 0.95"   uifolder="Bottom Layer" />
+    <input name="bottom_anisotropy" type="float"  value="0.8"              uifolder="Bottom Layer" />
+    <input name="bottom_thickness"  type="float"  value="3.0"              uifolder="Bottom Layer" />
+    <input name="bottom_ior"        type="float"  value="1.4"              uifolder="Bottom Layer" />
+
+    <input name="pigment" type="color4" value="0.0, 0.0, 0.0, 0.0"
+           uiname="Pigment Overlay" uifolder="Detail"
+           doc="Same as on the BSDF: dermal ink overlay. Should be wired to the same source so surface and volume agree." />
+
+    <output name="vdf" type="VDF" />
+  </nodedef>
+
+</materialx>
