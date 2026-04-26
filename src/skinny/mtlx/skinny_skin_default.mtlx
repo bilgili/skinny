@@ -1,0 +1,132 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <!--
+    Canonical wiring of skinny_defs nodedefs into a complete skin material.
+
+    Outputs:
+      out_surface        — surfaceshader
+      out_volume         — volumeshader
+      out_material       — material (combines surface + volume + a placeholder displacement)
+
+    Default constants reproduce the legacy SkinParameters defaults so a USD
+    scene that simply binds this nodegraph (with no overrides) renders the
+    same skin as the legacy single-head pipeline.
+  -->
+
+  <nodegraph name="NG_skinny_skin_default">
+
+    <!-- ─── Layer construction ────────────────────────────────── -->
+
+    <skinny_skin_epidermis name="layer_top" type="multioutput">
+      <input name="melanin"          type="float"  value="0.15" />
+      <input name="thickness"        type="float"  value="0.1"  />
+      <input name="scattering_coeff" type="color3" value="3.7, 4.4, 5.05" />
+      <input name="anisotropy"       type="float"  value="0.8"  />
+      <input name="ior"              type="float"  value="1.4"  />
+    </skinny_skin_epidermis>
+
+    <skinny_skin_dermis name="layer_middle" type="multioutput">
+      <input name="hemoglobin"        type="float"  value="0.05" />
+      <input name="blood_oxygenation" type="float"  value="0.75" />
+      <input name="thickness"         type="float"  value="1.0"  />
+      <input name="scattering_coeff"  type="color3" value="3.7, 4.4, 5.05" />
+      <input name="anisotropy"        type="float"  value="0.8"  />
+      <input name="ior"               type="float"  value="1.4"  />
+      <input name="pigment"           type="color4" value="0.0, 0.0, 0.0, 0.0" />
+    </skinny_skin_dermis>
+
+    <skinny_skin_subcut name="layer_bottom" type="multioutput">
+      <input name="thickness"  type="float"  value="3.0" />
+      <input name="absorption" type="color3" value="0.05, 0.06, 0.08" />
+      <input name="scattering" type="color3" value="1.2, 1.1, 0.95"   />
+      <input name="anisotropy" type="float"  value="0.8" />
+      <input name="ior"        type="float"  value="1.4" />
+    </skinny_skin_subcut>
+
+    <!-- ─── BSDF: surface side ────────────────────────────────── -->
+
+    <skinny_skin_layered_bsdf name="skin_bsdf" type="BSDF">
+      <input name="top_absorption" type="color3" nodename="layer_top" output="absorption" />
+      <input name="top_scattering" type="color3" nodename="layer_top" output="scattering" />
+      <input name="top_anisotropy" type="float"  nodename="layer_top" output="anisotropy_out" />
+      <input name="top_thickness"  type="float"  nodename="layer_top" output="thickness_out"  />
+      <input name="top_ior"        type="float"  nodename="layer_top" output="ior_out"        />
+
+      <input name="middle_absorption" type="color3" nodename="layer_middle" output="absorption" />
+      <input name="middle_scattering" type="color3" nodename="layer_middle" output="scattering" />
+      <input name="middle_anisotropy" type="float"  nodename="layer_middle" output="anisotropy_out" />
+      <input name="middle_thickness"  type="float"  nodename="layer_middle" output="thickness_out"  />
+      <input name="middle_ior"        type="float"  nodename="layer_middle" output="ior_out"        />
+
+      <input name="bottom_absorption" type="color3" nodename="layer_bottom" output="absorption_out" />
+      <input name="bottom_scattering" type="color3" nodename="layer_bottom" output="scattering_out" />
+      <input name="bottom_anisotropy" type="float"  nodename="layer_bottom" output="anisotropy_out" />
+      <input name="bottom_thickness"  type="float"  nodename="layer_bottom" output="thickness_out"  />
+      <input name="bottom_ior"        type="float"  nodename="layer_bottom" output="ior_out"        />
+
+      <input name="pigment"      type="color4" value="0.0, 0.0, 0.0, 0.0" />
+      <input name="weight"       type="float"  value="1.0"  />
+      <input name="roughness"    type="float"  value="0.35" />
+      <input name="ior"          type="float"  value="1.4"  />
+      <input name="pore_density" type="float"  value="0.0"  />
+      <input name="pore_depth"   type="float"  value="0.0"  />
+      <input name="hair_density" type="float"  value="0.0"  />
+      <input name="hair_tilt"    type="float"  value="0.0"  />
+    </skinny_skin_layered_bsdf>
+
+    <!-- ─── VDF: volume side ──────────────────────────────────── -->
+
+    <skinny_skin_layered_vdf name="skin_vdf" type="VDF">
+      <input name="top_absorption" type="color3" nodename="layer_top" output="absorption" />
+      <input name="top_scattering" type="color3" nodename="layer_top" output="scattering" />
+      <input name="top_anisotropy" type="float"  nodename="layer_top" output="anisotropy_out" />
+      <input name="top_thickness"  type="float"  nodename="layer_top" output="thickness_out"  />
+      <input name="top_ior"        type="float"  nodename="layer_top" output="ior_out"        />
+
+      <input name="middle_absorption" type="color3" nodename="layer_middle" output="absorption" />
+      <input name="middle_scattering" type="color3" nodename="layer_middle" output="scattering" />
+      <input name="middle_anisotropy" type="float"  nodename="layer_middle" output="anisotropy_out" />
+      <input name="middle_thickness"  type="float"  nodename="layer_middle" output="thickness_out"  />
+      <input name="middle_ior"        type="float"  nodename="layer_middle" output="ior_out"        />
+
+      <input name="bottom_absorption" type="color3" nodename="layer_bottom" output="absorption_out" />
+      <input name="bottom_scattering" type="color3" nodename="layer_bottom" output="scattering_out" />
+      <input name="bottom_anisotropy" type="float"  nodename="layer_bottom" output="anisotropy_out" />
+      <input name="bottom_thickness"  type="float"  nodename="layer_bottom" output="thickness_out"  />
+      <input name="bottom_ior"        type="float"  nodename="layer_bottom" output="ior_out"        />
+
+      <input name="pigment" type="color4" value="0.0, 0.0, 0.0, 0.0" />
+    </skinny_skin_layered_vdf>
+
+    <!-- ─── Compose into shaders ──────────────────────────────── -->
+
+    <surface name="skin_surface" type="surfaceshader">
+      <input name="bsdf" type="BSDF" nodename="skin_bsdf" />
+    </surface>
+
+    <volume name="skin_volume" type="volumeshader">
+      <input name="vdf" type="VDF" nodename="skin_vdf" />
+    </volume>
+
+    <!-- ─── Outputs ───────────────────────────────────────────── -->
+
+    <output name="out_surface" type="surfaceshader" nodename="skin_surface" />
+    <output name="out_volume"  type="volumeshader"  nodename="skin_volume"  />
+
+  </nodegraph>
+
+  <!--
+    Surface material binding for USD/MaterialX. References both shader
+    outputs from the nodegraph above so a USD <Material> targeting this
+    element gets surface + volume in one bind.
+  -->
+
+  <surfacematerial name="M_skinny_skin_default" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodegraph="NG_skinny_skin_default" output="out_surface" />
+  </surfacematerial>
+
+  <volumematerial name="M_skinny_skin_default_volume" type="material">
+    <input name="volumeshader" type="volumeshader" nodegraph="NG_skinny_skin_default" output="out_volume" />
+  </volumematerial>
+
+</materialx>

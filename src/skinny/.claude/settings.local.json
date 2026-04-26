@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(cmake --version)",
+      "Bash(git --version)",
+      "Bash(where cl *)",
+      "Read(//c/Program Files/Microsoft Visual Studio//**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio//**)",
+      "Read(//c/Program Files/CMake/**)",
+      "PowerShell($vswhere = \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\"; Write-Output \"=== Installed products ===\"; & $vswhere -prerelease -all -format json | ConvertFrom-Json | ForEach-Object { Write-Output \"DisplayName: $\\($_.displayName\\)\"; Write-Output \"ProductId: $\\($_.productId\\)\"; Write-Output \"InstallationVersion: $\\($_.installationVersion\\)\"; Write-Output \"InstallationPath: $\\($_.installationPath\\)\"; Write-Output \"\" }; Write-Output \"=== Workloads installed ===\"; & $vswhere -prerelease -all -format value -property packages | Select-String -Pattern \"Workload|VCTools|VC\\\\.Tools|MSVC|CMake\" | Select-Object -First 30)",
+      "PowerShell($vswhere = \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\"; Write-Output \"=== ALL packages installed \\(full list\\) ===\"; & $vswhere -prerelease -all -format value -property packages)",
+      "PowerShell(Get-ChildItem *)",
+      "Bash(/d/projects/skinny/Scripts/python.exe *)",
+      "Bash(Scripts/python.exe scripts/validate_mtlx.py)",
+      "Bash(Scripts/python.exe -m py_compile src/skinny/app.py src/skinny/renderer.py src/skinny/vk_compute.py)",
+      "Bash(echo \"py_compile: $?\")",
+      "Bash(Scripts/python.exe -c \"from skinny import renderer, app, vk_compute; print\\('imports OK'\\)\")",
+      "Bash(Scripts/slangc.exe src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute -o build/main_pass.spv -I src/skinny/shaders)",
+      "Bash(Scripts/python.exe -c \"import slangpy; print\\(slangpy.__file__\\)\")",
+      "Bash(slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute -o build/main_pass.spv -I src/skinny/shaders)"
+    ]
+  }
+}

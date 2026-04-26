@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <!--
+    Slang shader-generation implementations for skinny_defs.mtlx.
+
+    Each <implementation> binds a nodedef to a Slang source file plus the
+    function name MaterialXGenSlang should emit a call to. The Slang sources
+    use Slang-native syntax (float3 etc.) and follow the same ClosureData /
+    inout-BSDF / inout-VDF conventions as the standard pbrlib BSDFs/VDFs.
+  -->
+
+  <!-- Layer nodedefs (biology → optics). Each emits 5 outputs via `out` params. -->
+
+  <implementation name="IM_skinny_skin_epidermis_genslang"
+                  nodedef="ND_skinny_skin_epidermis"
+                  target="genslang"
+                  file="skinny_skin_epidermis_genslang.slang"
+                  function="skinny_skin_epidermis" />
+
+  <implementation name="IM_skinny_skin_dermis_genslang"
+                  nodedef="ND_skinny_skin_dermis"
+                  target="genslang"
+                  file="skinny_skin_dermis_genslang.slang"
+                  function="skinny_skin_dermis" />
+
+  <implementation name="IM_skinny_skin_subcut_genslang"
+                  nodedef="ND_skinny_skin_subcut"
+                  target="genslang"
+                  file="skinny_skin_subcut_genslang.slang"
+                  function="skinny_skin_subcut" />
+
+  <implementation name="IM_skinny_scattering_layer_genslang"
+                  nodedef="ND_skinny_scattering_layer"
+                  target="genslang"
+                  file="skinny_scattering_layer_genslang.slang"
+                  function="skinny_scattering_layer" />
+
+  <!-- Composite BSDF + VDF for layered skin. -->
+
+  <implementation name="IM_skinny_skin_layered_bsdf_genslang"
+                  nodedef="ND_skinny_skin_layered_bsdf"
+                  target="genslang"
+                  file="skinny_skin_layered_bsdf_genslang.slang"
+                  function="skinny_skin_layered_bsdf" />
+
+  <implementation name="IM_skinny_skin_layered_vdf_genslang"
+                  nodedef="ND_skinny_skin_layered_vdf"
+                  target="genslang"
+                  file="skinny_skin_layered_vdf_genslang.slang"
+                  function="skinny_skin_layered_vdf" />
+
+</materialx>
