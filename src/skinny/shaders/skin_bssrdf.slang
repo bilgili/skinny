@@ -133,6 +133,69 @@ SkinLayer buildSubcutaneous(SkinParams p)
     return layer;
 }
 
+struct SkinLayerStack
+{
+    SkinLayer epi;
+    SkinLayer der;
+    SkinLayer sub;
+};
+
+SkinLayerStack buildSkinLayerStackFromMtlx(MtlxSkinParams skin, float4 ink)
+{
+    SkinLayerStack s;
+
+    s.epi.sigmaA    = melaninAbsorption(skin.layer_top_melanin) + float3(0.015);
+    s.epi.sigmaS    = skin.layer_top_scattering_coeff;
+    s.epi.thickness = skin.layer_top_thickness;
+    s.epi.g         = skin.layer_top_anisotropy;
+    s.epi.ior       = skin.layer_top_ior;
+
+    s.der.sigmaA = hemoglobinAbsorption(
+                       skin.layer_middle_hemoglobin,
+                       skin.layer_middle_blood_oxygenation
+                   ) + float3(0.015);
+    s.der.sigmaS = skin.layer_middle_scattering_coeff;
+    {
+        float density = clamp(ink.a, 0.0, 1.0);
+        if (density > 1e-6)
+        {
+            s.der.sigmaA += inkSigmaAbsorption(ink.rgb, density);
+            s.der.sigmaS += inkSigmaScattering(ink.rgb, density);
+        }
+    }
+    s.der.thickness = skin.layer_middle_thickness;
+    s.der.g         = skin.layer_middle_anisotropy;
+    s.der.ior       = skin.layer_middle_ior;
+
+    s.sub.sigmaA    = skin.layer_bottom_absorption;
+    s.sub.sigmaS    = skin.layer_bottom_scattering;
+    s.sub.thickness = skin.layer_bottom_thickness;
+    s.sub.g         = skin.layer_bottom_anisotropy;
+    s.sub.ior       = skin.layer_bottom_ior;
+
+    return s;
+}
+
+SkinParams skinParamsFromMtlx(MtlxSkinParams m)
+{
+    SkinParams p;
+    p.melaninFraction    = m.layer_top_melanin;
+    p.hemoglobinFraction = m.layer_middle_hemoglobin;
+    p.bloodOxygenation   = m.layer_middle_blood_oxygenation;
+    p.epidermisThickness = m.layer_top_thickness;
+    p.dermisThickness    = m.layer_middle_thickness;
+    p.subcutThickness    = m.layer_bottom_thickness;
+    p.scatteringCoeff    = m.layer_top_scattering_coeff;
+    p.anisotropy         = m.layer_top_anisotropy;
+    p.roughness          = m.skin_bsdf_roughness;
+    p.ior                = m.skin_bsdf_ior;
+    p.poreDensity        = m.skin_bsdf_pore_density;
+    p.poreDepth          = m.skin_bsdf_pore_depth;
+    p.hairDensity        = m.skin_bsdf_hair_density;
+    p.hairTilt           = m.skin_bsdf_hair_tilt;
+    return p;
+}
+
 // ── Burley normalised diffusion profile ─────────────────────────
 // Single-channel reflectance profile R(r) ≈ A * (e^(-r/d) + e^(-r/(3d))) / (8πdr)
 // where d = 1 / (σ_a + σ_s') is the diffuse mean free path.
@@ -168,13 +231,6 @@ float ggxDistribution(float NdotH, float roughness)
     float a2 = a * a;
     float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
     return a2 / (PI * d * d);
-}
-
-float ggxSmithG1(float NdotV, float roughness)
-{
-    float a = roughness * roughness;
-    float k = a / 2.0;
-    return NdotV / (NdotV * (1.0 - k) + k);
 }
 
 float3 evaluateSkinSpecular(float3 N, float3 V, float3 L, float roughness, float ior)

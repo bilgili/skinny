@@ -156,12 +156,15 @@ void skinny_skin_layered_bsdf(
     else if (closureData.closureType == CLOSURE_TYPE_INDIRECT)
     {
         // IBL approximation: directional albedo × environment irradiance.
-        // The full GGX + cosine-hemisphere IBL passes from main_pass.slang
-        // are reinstated when the gen output is wired into the integrator
-        // (Phase C/E). For now give a flat directional-albedo response.
-        // mx_environment_irradiance is provided by the genslang environment
-        // helper; if unresolved this branch silently produces zero.
+        // mx_environment_irradiance is provided by the MaterialXGenSlang
+        // environment helper. Skinny's compute pipeline runs its own IBL
+        // importance-sampling outside the BSDF closure, so the helper is
+        // intentionally absent there — guard with SKINNY_COMPUTE_PIPELINE
+        // (set via slangc `-D` in vk_compute._compile_slang) so this branch
+        // becomes a no-op when the impl is reused inside main_pass.spv.
+#ifndef SKINNY_COMPUTE_PIPELINE
         float3 irradiance = mx_environment_irradiance(N);
         bsdf.response = irradiance * albedo * (1.0 - F) * weight;
+#endif
     }
 }

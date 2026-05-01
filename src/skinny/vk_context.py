@@ -150,7 +150,19 @@ class VulkanContext:
             for idx in unique_families
         ]
 
+        # Phase C-4: enable Vulkan 1.2 descriptor-indexing features so the
+        # bindless flat-material texture array (binding 14) can hold partially
+        # populated slots and tolerate non-uniform index accesses across
+        # threads in the same dispatch (different pixels hit different
+        # materials, so the texture index is not invocation-uniform).
+        indexing_features = vk.VkPhysicalDeviceVulkan12Features(
+            descriptorBindingPartiallyBound=vk.VK_TRUE,
+            shaderSampledImageArrayNonUniformIndexing=vk.VK_TRUE,
+            scalarBlockLayout=vk.VK_TRUE,
+        )
+
         device_create_info = vk.VkDeviceCreateInfo(
+            pNext=indexing_features,
             queueCreateInfoCount=len(queue_create_infos),
             pQueueCreateInfos=queue_create_infos,
             enabledExtensionCount=len(self.DEVICE_EXTENSIONS),
