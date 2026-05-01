@@ -204,11 +204,13 @@ static const float MARCH_MAX_DIST  = 20.0;
 HitInfo marchHead(Ray ray)
 {
     HitInfo info;
-    info.hit        = false;
-    info.t          = 0.0;
-    info.backT      = -1.0;
-    info.tangent    = float3(1, 0, 0);
-    info.hasTangent = false;
+    info.hit            = false;
+    info.t              = 0.0;
+    info.backT          = -1.0;
+    info.positionObject = float3(0.0);
+    info.tangent        = float3(1, 0, 0);
+    info.hasTangent     = false;
+    info.materialId     = 0u;
 
     float t = 0.01;
     for (int i = 0; i < MAX_MARCH_STEPS; i++)
@@ -218,9 +220,10 @@ HitInfo marchHead(Ray ray)
 
         if (d < MARCH_EPSILON)
         {
-            info.hit      = true;
-            info.t        = t;
-            info.position = p;
+            info.hit            = true;
+            info.t              = t;
+            info.position       = p;
+            info.positionObject = p;
             info.normal   = calcHeadNormal(p);
             float3 lp     = normalize(p - float3(0, 0.05, 0));
             info.uv       = float2(

@@ -93,7 +93,7 @@ class ControlPanel:
 
         self.root: tk.Tk | None = tk.Tk()
         self.root.title("Skinny Controls")
-        self.root.geometry("380x780")
+        self.root.geometry("720x580")
         # Widgets indexed by dotted path: (variable, primary widget, value label).
         self._widgets: dict[str, tuple[tk.Variable, tk.Widget, ttk.Label | None]] = {}
         # Custom-row widget refs (filled in by _build_widgets).
@@ -106,89 +106,249 @@ class ControlPanel:
 
     # ── Widget construction ─────────────────────────────────────────
 
+    _LABEL_WIDTH = 16
+
     def _build_widgets(self) -> None:
-        from skinny.app import _get_nested  # late import — app imports this module
+        columns = ttk.Frame(self.root)
+        columns.pack(fill="both", expand=True, padx=4, pady=4)
 
-        container = ttk.Frame(self.root)
-        container.pack(fill="both", expand=True, padx=4, pady=4)
+        left_col = ttk.Frame(columns)
+        left_col.pack(side="left", fill="both", expand=True, padx=(0, 2))
+        right_col = ttk.Frame(columns)
+        right_col.pack(side="left", fill="both", expand=True, padx=(2, 0))
 
-        color_row_built = False
-        direction_row_built = False
+        # ── Left: Render settings ──
+        render_frame = ttk.LabelFrame(left_col, text="Render", padding=4)
+        render_frame.pack(fill="x", padx=2, pady=2)
 
         for p in self.params:
-            if p.path in _HIDDEN_PANEL_PATHS:
-                # Collapse the three RGB sliders into a swatch + Pick... row,
-                # and the elevation/azimuth sliders into an arrow-preview + Pick...
-                # row. Built once at the position of the first-seen path so the
-                # custom rows slot in where the original sliders used to be.
-                if p.path.startswith("light_color_"):
-                    if not color_row_built:
-                        self._build_color_row(container)
-                        color_row_built = True
-                else:
-                    if not direction_row_built:
-                        self._build_direction_row(container)
-                        direction_row_built = True
+            if p.path.startswith(("skin.", "mtlx.")) or p.path.startswith("light_"):
                 continue
-
-            row = ttk.Frame(container)
-            row.pack(fill="x", pady=1)
-            ttk.Label(row, text=p.name, width=18, anchor="w").pack(side="left")
-
-            if p.kind == "continuous":
-                var = tk.DoubleVar(value=float(_get_nested(self.renderer, p.path)))
-                scale = ttk.Scale(
-                    row,
-                    from_=p.lo,
-                    to=p.hi,
-                    variable=var,
-                    orient="horizontal",
-                    command=lambda v, path=p.path: self._on_continuous(path, float(v)),
+            if p.path in _HIDDEN_PANEL_PATHS:
+                continue
+            self._build_param_row(render_frame, p)
+            if p.path == "preset_index":
+                btn_row = ttk.Frame(render_frame)
+                btn_row.pack(fill="x", pady=(0, 4))
+                ttk.Button(
+                    btn_row, text="Save preset...",
+                    command=self._on_save_preset,
+                ).pack(side="left", padx=(0, 4))
+                self._delete_btn = ttk.Button(
+                    btn_row, text="Delete",
+                    command=self._on_delete_preset,
                 )
-                scale.pack(side="left", fill="x", expand=True, padx=(0, 4))
-                val_lbl = ttk.Label(row, width=7, anchor="e",
-                                    text=f"{float(var.get()):.3f}")
-                val_lbl.pack(side="left")
-                self._widgets[p.path] = (var, scale, val_lbl)
-            else:
-                choices = getattr(self.renderer, p.choice_source)
-                names = [self._choice_label(c) for c in choices]
-                current = int(_get_nested(self.renderer, p.path))
-                var = tk.StringVar(value=names[current] if names else "")
-                combo = ttk.Combobox(
-                    row,
-                    textvariable=var,
-                    values=names,
-                    state="readonly",
-                )
-                combo.pack(side="left", fill="x", expand=True)
-                combo.bind(
-                    "<<ComboboxSelected>>",
-                    lambda _e, path=p.path, w=combo: self._on_discrete(path, w.current()),
-                )
-                self._widgets[p.path] = (var, combo, None)
+                self._delete_btn.pack(side="left")
+                self._update_delete_btn_state()
 
-                # Save / Delete buttons live directly under the Preset combo
-                # so the user can write the current slider values back to
-                # ~/.skinny/presets/<name>.json, or remove a user entry.
-                if p.path == "preset_index":
-                    btn_row = ttk.Frame(container)
-                    btn_row.pack(fill="x", padx=4, pady=(0, 4))
-                    ttk.Button(
-                        btn_row, text="Save as user preset...",
-                        command=self._on_save_preset,
-                    ).pack(side="left", padx=(0, 4))
-                    self._delete_btn = ttk.Button(
-                        btn_row, text="Delete",
-                        command=self._on_delete_preset,
-                    )
-                    self._delete_btn.pack(side="left")
-                    self._update_delete_btn_state()
+        # ── Left: Light ──
+        light_frame = ttk.LabelFrame(left_col, text="Light", padding=4)
+        light_frame.pack(fill="x", padx=2, pady=2)
+
+        self._build_color_row(light_frame)
+        self._build_direction_row(light_frame)
+        for p in self.params:
+            if p.path.startswith("light_") and p.path not in _HIDDEN_PANEL_PATHS:
+                self._build_param_row(light_frame, p)
+
+        # ── Right: Materials (skin + scene) ──
+        self._build_material_widgets(right_col)
+
+    def _build_param_row(self, container: ttk.Frame, p) -> None:
+        from skinny.app import _get_nested
+
+        row = ttk.Frame(container)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text=p.name, width=self._LABEL_WIDTH, anchor="w").pack(
+            side="left",
+        )
+
+        if p.kind == "continuous":
+            var = tk.DoubleVar(value=float(_get_nested(self.renderer, p.path)))
+            scale = ttk.Scale(
+                row,
+                from_=p.lo,
+                to=p.hi,
+                variable=var,
+                orient="horizontal",
+                command=lambda v, path=p.path: self._on_continuous(path, float(v)),
+            )
+            scale.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            val_lbl = ttk.Label(row, width=7, anchor="e",
+                                text=f"{float(var.get()):.3f}")
+            val_lbl.pack(side="left")
+            self._widgets[p.path] = (var, scale, val_lbl)
+        else:
+            choices = getattr(self.renderer, p.choice_source)
+            names = [self._choice_label(c) for c in choices]
+            current = int(_get_nested(self.renderer, p.path))
+            var = tk.StringVar(value=names[current] if names else "")
+            combo = ttk.Combobox(
+                row,
+                textvariable=var,
+                values=names,
+                state="readonly",
+            )
+            combo.pack(side="left", fill="x", expand=True)
+            combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, path=p.path, w=combo: self._on_discrete(path, w.current()),
+            )
+            self._widgets[p.path] = (var, combo, None)
+
+    def _build_material_widgets(self, container: ttk.Frame) -> None:
+        """Per-USD-material editor section. One labeled frame per non-skin
+        material in the scene with sliders for roughness/metallic/specular
+        and a colour swatch + picker for diffuseColor (hidden when the
+        diffuseColor is texture-bound).
+
+        Callbacks route through Renderer.apply_material_override which
+        re-uploads the flat-material buffer and bumps `_material_version`
+        so progressive accumulation resets cleanly on every drag.
+        """
+        outer = ttk.LabelFrame(container, text="Materials", padding=4)
+        outer.pack(fill="x", padx=2, pady=2)
+
+        # Skin material — collapsible, same style as scene materials
+        mtlx_params = [p for p in self.params if p.path.startswith("mtlx.")]
+        if mtlx_params:
+            skin_section = _CollapsibleSection(
+                outer, title="Skin Material", expanded=True,
+            )
+            skin_section.pack(fill="x", padx=2, pady=2)
+            for p in mtlx_params:
+                self._build_param_row(skin_section.body, p)
+
+        # Scene materials (USD-loaded, slot 1+)
+        scene = getattr(self.renderer, "_usd_scene", None)
+        editable = (
+            list(enumerate(scene.materials))[1:]
+            if scene is not None and scene.materials else []
+        )
+        for mat_id, mat in editable:
+            section = _CollapsibleSection(outer, title=mat.name, expanded=False)
+            section.pack(fill="x", padx=2, pady=2)
+            body = section.body
+
+            self._build_mat_color_row(body, mat_id, mat)
+            for key, lo, hi in (
+                ("roughness",      0.04, 1.0),
+                ("metallic",       0.0,  1.0),
+                ("specular",       0.0,  1.0),
+                ("opacity",        0.0,  1.0),
+                ("ior",            1.0,  3.0),
+                ("coat",           0.0,  1.0),
+                ("coat_roughness", 0.0,  1.0),
+            ):
+                self._build_mat_slider_row(body, mat_id, mat, key, lo, hi)
+
+    def _build_mat_color_row(self, parent: ttk.Frame, mat_id: int, mat) -> None:
+        # Hide the swatch when diffuseColor is texture-bound — the texture
+        # drives shading there, the constant override is dead state.
+        if "diffuseColor" in mat.texture_paths:
+            return
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text="diffuseColor", width=14, anchor="w").pack(side="left")
+        diff = mat.parameter_overrides.get("diffuseColor")
+        r, g, b = self._color3_to_floats(diff)
+        canvas = tk.Canvas(row, width=36, height=18, bd=1, relief="sunken",
+                           highlightthickness=0)
+        canvas.pack(side="left", padx=(0, 4))
+        fill = _rgb_floats_to_hex(r, g, b)
+        rect_id = canvas.create_rectangle(0, 0, 36, 18, fill=fill, outline="")
+        ttk.Button(
+            row, text="Pick...", width=8,
+            command=lambda c=canvas, rid=rect_id, mid=mat_id, m=mat:
+                self._on_pick_material_color(c, rid, mid, m),
+        ).pack(side="left")
+
+    def _build_mat_slider_row(
+        self, parent: ttk.Frame, mat_id: int, mat,
+        key: str, lo: float, hi: float,
+    ) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text=key, width=14, anchor="w").pack(side="left")
+        current = mat.parameter_overrides.get(key)
+        try:
+            val = float(current) if current is not None else 0.5
+        except (TypeError, ValueError):
+            val = 0.5
+        var = tk.DoubleVar(value=val)
+        scale = ttk.Scale(
+            row, from_=lo, to=hi, variable=var, orient="horizontal",
+            command=lambda v, mid=mat_id, k=key, lbl_ref=[None]:
+                self._on_material_slider(mid, k, float(v), lbl_ref[0]),
+        )
+        scale.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        val_lbl = ttk.Label(row, width=7, anchor="e", text=f"{val:.3f}")
+        val_lbl.pack(side="left")
+        # Re-bind so the lambda's closure captures the real label after
+        # creation (lambda default-arg trick).
+        scale.configure(
+            command=lambda v, mid=mat_id, k=key, lbl=val_lbl:
+                self._on_material_slider(mid, k, float(v), lbl),
+        )
+
+    def _on_material_slider(
+        self, mat_id: int, key: str, value: float, lbl: ttk.Label | None
+    ) -> None:
+        if self._suppress_cb:
+            return
+        self.renderer.apply_material_override(mat_id, key, float(value))
+        if lbl is not None:
+            try:
+                lbl.configure(text=f"{value:.3f}")
+            except tk.TclError:
+                pass
+
+    def _on_pick_material_color(
+        self, canvas: tk.Canvas, rect_id: int, mat_id: int, mat,
+    ) -> None:
+        diff = mat.parameter_overrides.get("diffuseColor")
+        r, g, b = self._color3_to_floats(diff)
+        init = (
+            max(0, min(255, int(round(r * 255)))),
+            max(0, min(255, int(round(g * 255)))),
+            max(0, min(255, int(round(b * 255)))),
+        )
+        result = colorchooser.askcolor(
+            color="#%02x%02x%02x" % init, title=f"{mat.name} diffuseColor"
+        )
+        if result is None or result[0] is None:
+            return
+        rr, gg, bb = result[0]
+        rf, gf, bf = rr / 255.0, gg / 255.0, bb / 255.0
+        # Store as a 3-tuple — pack_flat_material's _override_to_color3
+        # path accepts tuple/list/numpy/Color3 alike.
+        self.renderer.apply_material_override(
+            mat_id, "diffuseColor", (rf, gf, bf)
+        )
+        try:
+            canvas.itemconfig(rect_id, fill=_rgb_floats_to_hex(rf, gf, bf))
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _color3_to_floats(value) -> tuple[float, float, float]:
+        if value is None:
+            return 0.72, 0.72, 0.72
+        if hasattr(value, "asTuple"):
+            seq = value.asTuple()
+        elif hasattr(value, "__getitem__") and not isinstance(value, str):
+            try:
+                seq = (value[0], value[1], value[2])
+            except (IndexError, TypeError):
+                return 0.72, 0.72, 0.72
+        else:
+            return 0.72, 0.72, 0.72
+        return float(seq[0]), float(seq[1]), float(seq[2])
 
     def _build_color_row(self, container: ttk.Frame) -> None:
         row = ttk.Frame(container)
         row.pack(fill="x", pady=1)
-        ttk.Label(row, text="Light color", width=18, anchor="w").pack(side="left")
+        ttk.Label(row, text="Color", width=self._LABEL_WIDTH, anchor="w").pack(side="left")
 
         canvas = tk.Canvas(row, width=36, height=18, bd=1, relief="sunken",
                            highlightthickness=0)
@@ -208,7 +368,7 @@ class ControlPanel:
     def _build_direction_row(self, container: ttk.Frame) -> None:
         row = ttk.Frame(container)
         row.pack(fill="x", pady=1)
-        ttk.Label(row, text="Light direction", width=18, anchor="w").pack(side="left")
+        ttk.Label(row, text="Direction", width=self._LABEL_WIDTH, anchor="w").pack(side="left")
 
         canvas = tk.Canvas(row, width=36, height=36, bg="grey25",
                            highlightthickness=0)
@@ -331,10 +491,6 @@ class ControlPanel:
     # ── Preset save / delete / refresh ──────────────────────────────
 
     def _on_save_preset(self) -> None:
-        from dataclasses import fields
-
-        from skinny.renderer import SkinParameters
-
         name = simpledialog.askstring(
             "Save preset", "Preset name:", parent=self.root
         )
@@ -343,10 +499,13 @@ class ControlPanel:
         name = name.strip()
 
         values: dict[str, float] = {}
-        for f in fields(SkinParameters):
-            if f.name == "scattering_coefficient":
-                continue  # vec3 — presets intentionally skip it
-            values[f"skin.{f.name}"] = float(getattr(self.renderer.skin, f.name))
+        for k, v in getattr(self.renderer, "mtlx_overrides", {}).items():
+            if isinstance(v, (int, float)):
+                values[f"mtlx.{k}"] = float(v)
+            elif isinstance(v, (list, tuple)):
+                for i, comp in enumerate(v):
+                    if isinstance(comp, (int, float)):
+                        values[f"mtlx.{k}.{i}"] = float(comp)
 
         try:
             save_user_preset(name, values)
@@ -599,3 +758,37 @@ class _DirectionPickerPopup:
         except tk.TclError:
             pass
         self.panel._on_direction_popup_closed()
+
+
+# ── Collapsible section ─────────────────────────────────────────────
+
+
+class _CollapsibleSection(ttk.Frame):
+    """Header bar with a disclosure triangle that hides/shows a body frame."""
+
+    def __init__(self, parent, title: str, expanded: bool = False) -> None:
+        super().__init__(parent)
+        self._expanded = expanded
+        self._title = title
+
+        self._header = ttk.Label(
+            self, text=self._header_text(), anchor="w", cursor="hand2",
+        )
+        self._header.pack(fill="x")
+        self._header.bind("<Button-1>", lambda _e: self.toggle())
+
+        self.body = ttk.Frame(self, padding=(8, 2, 2, 4))
+        if expanded:
+            self.body.pack(fill="x")
+
+    def _header_text(self) -> str:
+        marker = "▼" if self._expanded else "▶"
+        return f"{marker} {self._title}"
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        self._header.configure(text=self._header_text())
+        if self._expanded:
+            self.body.pack(fill="x")
+        else:
+            self.body.pack_forget()

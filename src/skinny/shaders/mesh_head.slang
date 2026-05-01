@@ -35,6 +35,29 @@ struct BvhNode
 [[vk::binding(6)]] StructuredBuffer<uint>       meshIndices;
 [[vk::binding(7)]] StructuredBuffer<BvhNode>    bvhNodes;
 
+// ── TLAS instance record ───────────────────────────────────────
+//
+// One entry per renderable mesh instance. With a single instance carrying
+// an identity transform and offsets all zero, this layer is mathematically
+// a no-op — the ray traverses the same BLAS as before. The indirection is
+// what lets Phase B-3 follow-ups (and Phase D's USD ingestion) attach many
+// meshes to one scene.
+//
+// Note: the BLAS offsets are *not yet wired into the BLAS traversal*; the
+// existing code reads from index/vertex/bvh buffers starting at zero. They
+// are stored here so the multi-BLAS expansion in a follow-up only needs to
+// touch findNearestHit, not the upload or layout side.
+struct Instance
+{
+    float4x4 worldFromLocal;       // model→world
+    float4x4 localFromWorld;       // world→model (precomputed inverse)
+    uint     blasNodeOffset;       // bvhNodes[] starting index for this instance's BLAS
+    uint     blasIndexOffset;      // meshIndices[] starting index
+    uint     blasVertexOffset;     // meshVertices[] starting index
+    uint     materialId;           // index into the active material set
+};
+[[vk::binding(12)]] StructuredBuffer<Instance> instances;
+
 // ── Ray / AABB slab test ────────────────────────────────────────
 
 bool intersectAabb(Ray ray, float3 invDir, float3 aabbMin, float3 aabbMax, float tMax, out float tNear)
@@ -89,9 +112,14 @@ bool intersectTriangle(
 static const int BVH_STACK_SIZE = 64;
 static const float RAY_MAX_T    = 1e20;
 
-// Find the nearest triangle hit with t > tMinExcl. Returns t and triangle
-// index (triIdx * 3), or -1 if nothing is hit.
-float findNearestHit(Ray ray, float tMinExcl, out int outTri, out float2 outBary)
+// Find the nearest triangle hit with t > tMinExcl in the BLAS that lives
+// at the given offsets in the unified vertex/index/bvh buffers. Returns
+// t and triangle index (the GLOBAL triIdx*3 into meshIndices, so the
+// caller can look up the hit's vertices directly), or -1 if nothing hits.
+float findNearestHit(
+    Ray ray, float tMinExcl,
+    uint blasNodeOffset, uint blasIndexOffset, uint blasVertexOffset,
+    out int outTri, out float2 outBary)
 {
     outTri  = -1;
     outBary = float2(0.0);
@@ -106,7 +134,7 @@ float findNearestHit(Ray ray, float tMinExcl, out int outTri, out float2 outBary
     while (sp > 0)
     {
         int nodeIndex = stack[--sp];
-        BvhNode node  = bvhNodes[nodeIndex];
+        BvhNode node  = bvhNodes[uint(nodeIndex) + blasNodeOffset];
 
         float tBox;
         if (!intersectAabb(ray, invDir, node.aabbMin, node.aabbMax, closestT, tBox))
@@ -118,10 +146,13 @@ float findNearestHit(Ray ray, float tMinExcl, out int outTri, out float2 outBary
             int first = node.rightOrFirst;
             for (int k = 0; k < count; k++)
             {
-                uint triIdx = uint(first + k) * 3u;
-                uint i0 = meshIndices[triIdx + 0u];
-                uint i1 = meshIndices[triIdx + 1u];
-                uint i2 = meshIndices[triIdx + 2u];
+                // Local triangle index within this BLAS, then global into
+                // the unified meshIndices buffer.
+                uint triLocal  = uint(first + k);
+                uint triIdx    = (triLocal + blasIndexOffset) * 3u;
+                uint i0 = meshIndices[triIdx + 0u] + blasVertexOffset;
+                uint i1 = meshIndices[triIdx + 1u] + blasVertexOffset;
+                uint i2 = meshIndices[triIdx + 2u] + blasVertexOffset;
 
                 float tHit;
                 float2 bary;
@@ -142,8 +173,8 @@ float findNearestHit(Ray ray, float tMinExcl, out int outTri, out float2 outBary
         {
             int L = node.leftOrCount;
             int R = node.rightOrFirst;
-            BvhNode nl = bvhNodes[L];
-            BvhNode nr = bvhNodes[R];
+            BvhNode nl = bvhNodes[uint(L) + blasNodeOffset];
+            BvhNode nr = bvhNodes[uint(R) + blasNodeOffset];
             float tL, tR;
             bool hitL = intersectAabb(ray, invDir, nl.aabbMin, nl.aabbMax, closestT, tL);
             bool hitR = intersectAabb(ray, invDir, nr.aabbMin, nr.aabbMax, closestT, tR);
@@ -167,9 +198,17 @@ float findNearestHit(Ray ray, float tMinExcl, out int outTri, out float2 outBary
     return closestT;
 }
 
-// ── BVH traversal entry point ──────────────────────────────────
+// ── BLAS traversal — local-space ray against one mesh ────────────
+//
+// Same algorithm as the legacy entry point: front-hit + back-hit lookup,
+// barycentric interpolation, asset-or-fallback UVs, tangent build. The
+// ray is expected in BLAS-local space; the caller transforms it.
 
-HitInfo marchHeadMesh(Ray ray)
+HitInfo marchHeadBLAS(
+    Ray ray,
+    uint blasNodeOffset,
+    uint blasIndexOffset,
+    uint blasVertexOffset)
 {
     HitInfo info;
     info.hit        = false;
@@ -177,10 +216,15 @@ HitInfo marchHeadMesh(Ray ray)
     info.backT      = -1.0;
     info.tangent    = float3(1, 0, 0);
     info.hasTangent = false;
+    info.materialId = 0u;
 
     int    closestTri;
     float2 closestBary;
-    float  closestT = findNearestHit(ray, 0.0, closestTri, closestBary);
+    float  closestT = findNearestHit(
+        ray, 0.0,
+        blasNodeOffset, blasIndexOffset, blasVertexOffset,
+        closestTri, closestBary
+    );
 
     if (closestTri < 0)
         return info;
@@ -188,13 +232,20 @@ HitInfo marchHeadMesh(Ray ray)
     // Second traversal: find the back-face exit (next hit beyond front).
     int    backTri;
     float2 backBary;
-    float  backT = findNearestHit(ray, closestT + 1e-4, backTri, backBary);
+    float  backT = findNearestHit(
+        ray, closestT + 1e-4,
+        blasNodeOffset, blasIndexOffset, blasVertexOffset,
+        backTri, backBary
+    );
     if (backTri >= 0)
         info.backT = backT;
 
-    uint i0 = meshIndices[uint(closestTri) + 0u];
-    uint i1 = meshIndices[uint(closestTri) + 1u];
-    uint i2 = meshIndices[uint(closestTri) + 2u];
+    // closestTri is the global meshIndices offset (in uints) for the hit
+    // triangle's first vertex; vertices are local indices that need the
+    // BLAS's vertex offset added before reading from meshVertices.
+    uint i0 = meshIndices[uint(closestTri) + 0u] + blasVertexOffset;
+    uint i1 = meshIndices[uint(closestTri) + 1u] + blasVertexOffset;
+    uint i2 = meshIndices[uint(closestTri) + 2u] + blasVertexOffset;
     MeshVertex a = meshVertices[i0];
     MeshVertex b = meshVertices[i1];
     MeshVertex c = meshVertices[i2];
@@ -206,10 +257,11 @@ HitInfo marchHeadMesh(Ray ray)
     float3 position = a.position * w + b.position * u + c.position * v;
     float3 normal   = normalize(a.normal * w + b.normal * u + c.normal * v);
 
-    info.hit      = true;
-    info.t        = closestT;
-    info.position = position;
-    info.normal   = normal;
+    info.hit            = true;
+    info.t              = closestT;
+    info.position       = position;
+    info.positionObject = position;
+    info.normal         = normal;
 
     // Interpolate asset-space UVs. If the OBJ had no `vt` data the loader
     // left them all at zero — detect that and fall back to the spherical UV
@@ -260,4 +312,84 @@ HitInfo marchHeadMesh(Ray ray)
         info.hasTangent = false;
     }
     return info;
+}
+
+// ── TLAS broad-phase: iterate instances, transform rays into BLAS-
+//    local space, keep the nearest hit, transform results back to
+//    world space ───────────────────────────────────────────────────
+//
+// With a single instance carrying an identity transform, the broad-phase
+// loop is mathematically a no-op pass-through to the BLAS traversal — the
+// rendered output is byte-identical to pre-TLAS.
+//
+// Phase B-3 follow-up: when fc.numInstances > 1, the sort by t-world
+// across instances naturally handles overlapping BLAS bounds. Future BLAS
+// concatenation reads BLAS offsets from inst.blas{Node,Index,Vertex}Offset.
+
+HitInfo marchHeadMesh(Ray rayWorld, uint count)
+{
+    HitInfo best;
+    best.hit            = false;
+    best.t              = 1e20;
+    best.backT          = -1.0;
+    best.positionObject = float3(0.0);
+    best.tangent        = float3(1, 0, 0);
+    best.hasTangent     = false;
+    best.materialId     = 0u;
+
+    for (uint i = 0u; i < count; i++)
+    {
+        Instance inst = instances[i];
+
+        // World→local ray transform. Direction is treated as a vector (w=0)
+        // so it doesn't pick up the translation; for non-rigid (scaled)
+        // transforms, t-values would need rescaling — we recompute t in
+        // world space below to stay scale-correct.
+        Ray rayLocal;
+        rayLocal.origin    = mul(inst.localFromWorld, float4(rayWorld.origin, 1.0)).xyz;
+        rayLocal.direction = mul(inst.localFromWorld, float4(rayWorld.direction, 0.0)).xyz;
+
+        HitInfo h = marchHeadBLAS(
+            rayLocal,
+            inst.blasNodeOffset,
+            inst.blasIndexOffset,
+            inst.blasVertexOffset
+        );
+        if (!h.hit)
+            continue;
+
+        // Local→world transforms. Position uses worldFromLocal (w=1).
+        // Normal uses (localFromWorld)^T to handle non-uniform scale; the
+        // upper 3x3 of localFromWorld^T is the inverse-transpose of
+        // worldFromLocal's upper 3x3.
+        float3 posWorld     = mul(inst.worldFromLocal, float4(h.position, 1.0)).xyz;
+        float3 normalWorld  = normalize(mul(transpose(inst.localFromWorld), float4(h.normal, 0.0)).xyz);
+        float3 tangentWorld = h.hasTangent
+            ? normalize(mul(inst.worldFromLocal, float4(h.tangent, 0.0)).xyz)
+            : h.tangent;
+
+        // Recompute t along the world-space ray. With unit |direction|
+        // and identity transform this equals h.t.
+        float tWorld = dot(posWorld - rayWorld.origin, rayWorld.direction);
+
+        if (tWorld < best.t)
+        {
+            best                = h;
+            best.t              = tWorld;
+            best.position       = posWorld;
+            best.positionObject = h.position;
+            best.normal         = normalWorld;
+            best.tangent        = tangentWorld;
+            best.materialId     = inst.materialId;
+            // backT scales with the same direction-projection convention.
+            if (h.backT > 0.0)
+            {
+                float3 backPosLocal = rayLocal.origin + rayLocal.direction * h.backT;
+                float3 backPosWorld = mul(inst.worldFromLocal, float4(backPosLocal, 1.0)).xyz;
+                best.backT = dot(backPosWorld - rayWorld.origin, rayWorld.direction);
+            }
+        }
+    }
+
+    return best;
 }

@@ -13,6 +13,12 @@ import vulkan as vk
 from skinny.vk_context import VulkanContext
 
 
+# Hard cap on the bindless flat-material texture array (binding 14). Each
+# slot is one combined-image-sampler descriptor. Bumping this requires no
+# shader change but consumes more descriptor slots.
+BINDLESS_TEXTURE_CAPACITY = 16
+
+
 class ComputePipeline:
     """Wraps a single Vulkan compute pipeline compiled from a Slang entry point."""
 
@@ -43,6 +49,13 @@ class ComputePipeline:
         slangc = shutil.which("slangc")
         if slangc is None:
             raise RuntimeError("slangc not found on PATH — install the Slang compiler")
+        # Include paths:
+        #   - shader_dir: main_pass.slang and friends; also hosts the
+        #     Slang-compatible `lib/mx_closure_type.glsl` shim.
+        #   - mtlx/genslang/: MaterialXGenSlang impl files for skinny's
+        #     custom nodedefs. Their `#include "lib/mx_closure_type.glsl"`
+        #     resolves to the shader_dir shim above.
+        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
         cmd = [
             slangc,
             str(src),
@@ -51,6 +64,13 @@ class ComputePipeline:
             "-stage", "compute",
             "-o", str(out),
             "-I", str(self.shader_dir),
+            "-I", str(mtlx_genslang),
+            # Tells the genslang impls to omit gen-prelude-only paths
+            # (e.g. mx_environment_irradiance) so they compile standalone
+            # in skinny's compute pipeline. The MaterialX gen path doesn't
+            # set this and keeps the gen-provided helpers.
+            "-D", "SKINNY_COMPUTE_PIPELINE=1",
+            "-fvk-use-scalar-layout",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -156,9 +176,105 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # binding 12: storage buffer (TLAS instance records)
+            vk.VkDescriptorSetLayoutBinding(
+                binding=12,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 13: storage buffer (per-material flat-shading params)
+            vk.VkDescriptorSetLayoutBinding(
+                binding=13,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 14: bindless flat-material texture array. Descriptor
+            # count is the hard cap; PARTIALLY_BOUND lets us leave unused
+            # slots empty (the shader gates reads behind a sentinel index).
+            vk.VkDescriptorSetLayoutBinding(
+                binding=14,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                descriptorCount=BINDLESS_TEXTURE_CAPACITY,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 15: per-material skin UBO array. StructuredBuffer<T>
+            # (storage buffer, std430 layout) with one MtlxSkinParams
+            # record per material slot. Slot 0 = legacy SDF-head skin;
+            # slots > 0 = USD-bound skin-typed materials. Layout matches
+            # the gen-reflected M_skinny_skin_default uniform_block.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=15,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 16: per-material-slot type codes (uint each, see
+            # MATERIAL_TYPE_* in renderer.py). The shader reads
+            # materialTypes[hit.materialId] to dispatch between the skin
+            # path and evalFlatMaterial.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=16,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 17: UsdLux.SphereLight records. 32 B each
+            # (vec3 position, float radius, vec3 radiance, float pad);
+            # capacity SPHERE_LIGHT_CAPACITY. fc.numSphereLights bounds
+            # the active range. Empty when no SphereLight prims authored.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=17,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 18: Emissive triangle records for NEE. 64 B each
+            # (v0+pad, v1+pad, v2+pad, emission+area). Built at scene
+            # load from instances whose material has non-zero emissiveColor.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=18,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 19: StdSurfaceParams records. 256 B each; one per
+            # material slot. Carries the full MaterialX standard_surface
+            # input set for evalStdSurfaceBSDF (mtlx_std_surface.slang).
+            vk.VkDescriptorSetLayoutBinding(
+                binding=19,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 20: Per-material procedural evaluation params. 96 B
+            # each (ProceduralParams struct, scalar layout). type == 0
+            # means no procedural eval; type == 1 is 3D marble noise.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=20,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
         ]
 
+        # Per-binding flags — only binding 14 needs PARTIALLY_BOUND. Vulkan
+        # requires the array length to match `bindings`, so all other
+        # bindings get a zero flag.
+        binding_flags = [0] * len(bindings)
+        # Find binding 14's index (it's not always second-to-last after
+        # binding 15 was added) and set the PARTIALLY_BOUND flag there.
+        for i, b in enumerate(bindings):
+            if b.binding == 14:
+                binding_flags[i] = vk.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+                break
+        flags_info = vk.VkDescriptorSetLayoutBindingFlagsCreateInfo(
+            bindingCount=len(binding_flags),
+            pBindingFlags=binding_flags,
+        )
         layout_info = vk.VkDescriptorSetLayoutCreateInfo(
+            pNext=flags_info,
             bindingCount=len(bindings),
             pBindings=bindings,
         )

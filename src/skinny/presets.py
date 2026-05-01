@@ -1,14 +1,14 @@
 """Biological skin-parameter presets.
 
-A preset is a named bundle of values for fields on Renderer.skin (and nearby
-state), keyed by the same dotted paths used by `app._set_nested`. This means
-applying a preset goes through the same path that keyboard and Tk sliders use,
-so the accumulation reset in `Renderer._current_state_hash` fires automatically.
+A preset is a named bundle of ``mtlx.*`` values keyed by the same dotted paths
+used by ``app._set_nested``.  Applying a preset writes directly into
+``Renderer.mtlx_overrides``, triggering the accumulation reset via
+``Renderer._current_state_hash``.
 
-The Fitzpatrick scale (I–VI, palest to darkest) is the dominant clinical axis
+The Fitzpatrick scale (I-VI, palest to darkest) is the dominant clinical axis
 for skin colour; here we cross it with a coarse male/female split that nudges
 dermis thickness, vellus hair density/tilt, surface roughness, and subcutaneous
-thickness. The numbers are starting points — the sliders let the user tune
+thickness.  The numbers are starting points -- the sliders let the user tune
 from there.
 """
 
@@ -39,18 +39,18 @@ def _make(fitz: int, sex: str) -> Preset:
     return Preset(
         name=f"Fitzpatrick {_FITZ_ROMAN[fitz - 1]} ({sex})",
         values={
-            "skin.melanin_fraction":       m,
-            "skin.hemoglobin_fraction":    0.055 if female else 0.05,
-            "skin.blood_oxygenation":      0.75,
-            "skin.epidermis_thickness_mm": 0.08 + 0.01 * fitz,
-            "skin.dermis_thickness_mm":    0.95 if female else 1.10,
-            "skin.subcut_thickness_mm":    3.5 if female else 3.0,
-            "skin.roughness":              0.34 if female else 0.42,
-            "skin.ior":                    1.4,
-            "skin.pore_density":           0.30 if female else 0.40,
-            "skin.pore_depth":             0.35 if female else 0.45,
-            "skin.hair_density":           0.08 if female else 0.35,
-            "skin.hair_tilt":              0.2 if female else 0.5,
+            "mtlx.layer_top_melanin":              m,
+            "mtlx.layer_middle_hemoglobin":         0.055 if female else 0.05,
+            "mtlx.layer_middle_blood_oxygenation":  0.75,
+            "mtlx.layer_top_thickness":             0.08 + 0.01 * fitz,
+            "mtlx.layer_middle_thickness":          0.95 if female else 1.10,
+            "mtlx.layer_bottom_thickness":          3.5 if female else 3.0,
+            "mtlx.skin_bsdf_roughness":             0.34 if female else 0.42,
+            "mtlx.skin_bsdf_ior":                   1.4,
+            "mtlx.skin_bsdf_pore_density":          0.30 if female else 0.40,
+            "mtlx.skin_bsdf_pore_depth":            0.35 if female else 0.45,
+            "mtlx.skin_bsdf_hair_density":          0.08 if female else 0.35,
+            "mtlx.skin_bsdf_hair_tilt":             0.2 if female else 0.5,
         },
     )
 
@@ -61,7 +61,8 @@ PRESETS: list[Preset] = [
 
 
 def apply_preset(renderer, preset: Preset) -> None:
-    from skinny.app import _set_nested
+    from skinny.app import _SKIN_TO_MTLX, _set_nested
 
     for path, value in preset.values.items():
+        path = _SKIN_TO_MTLX.get(path, path)
         _set_nested(renderer, path, value)

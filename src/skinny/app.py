@@ -36,8 +36,41 @@ def _disc(name: str, path: str, choice_source: str) -> ParamSpec:
     return ParamSpec(name, path, "discrete", choice_source=choice_source)
 
 
+def build_dynamic_params(renderer) -> list[ParamSpec]:
+    """Return one ParamSpec per editable MaterialX uniform on the active
+    skin material, excluding fields already covered by STATIC_PARAMS.
+    Empty when the runtime hasn't loaded a material.
+    """
+    cm = getattr(renderer, "_mtlx_skin_material", None)
+    if cm is None or not getattr(cm, "uniform_block", None):
+        return []
+    static_paths = {p.path for p in STATIC_PARAMS}
+    ganged_targets = set()
+    for targets in _GANGED_MTLX_FIELDS.values():
+        for t in targets:
+            ganged_targets.add(t)
+    from skinny.materialx_runtime import ui_specs_from_uniform_block
+    out: list[ParamSpec] = []
+    for spec in ui_specs_from_uniform_block(cm.uniform_block):
+        if spec["path"] in static_paths:
+            continue
+        field_name = spec["path"].split(".")[1] if "." in spec["path"] else ""
+        if field_name in ganged_targets:
+            continue
+        out.append(ParamSpec(
+            name=spec["name"], path=spec["path"], kind=spec["kind"],
+            step=spec["step"], lo=spec["lo"], hi=spec["hi"],
+        ))
+    return out
+
+
+def build_all_params(renderer) -> list[ParamSpec]:
+    """Concatenate the static base + material-driven dynamic params."""
+    return STATIC_PARAMS + build_dynamic_params(renderer)
+
+
 # Discrete first so Preset / Environment show up at the top.
-ALL_PARAMS: list[ParamSpec] = [
+STATIC_PARAMS: list[ParamSpec] = [
     _disc("Preset",            "preset_index",                "presets"),
     _disc("Environment",       "env_index",                   "environments"),
     _cont("IBL intensity",     "env_intensity",               0.05, 0.0,  3.0),
@@ -54,20 +87,20 @@ ALL_PARAMS: list[ParamSpec] = [
     _disc("Tattoo",            "tattoo_index",                "tattoos"),
     _cont("Tattoo density",    "tattoo_density",              0.05, 0.0,  1.0),
 
-    _cont("Melanin",            "skin.melanin_fraction",       0.01, 0.0,  1.0),
-    _cont("Hemoglobin",         "skin.hemoglobin_fraction",    0.01, 0.0,  1.0),
-    _cont("Blood oxygenation",  "skin.blood_oxygenation",      0.05, 0.0,  1.0),
-    _cont("Epidermis thickness", "skin.epidermis_thickness_mm", 0.02, 0.01, 1.0),
-    _cont("Dermis thickness",   "skin.dermis_thickness_mm",    0.1,  0.1,  5.0),
-    _cont("Subcut thickness",   "skin.subcut_thickness_mm",    0.2,  0.5,  10.0),
-    _cont("Anisotropy (g)",     "skin.anisotropy_g",           0.02, 0.0,  0.99),
-    _cont("Roughness",          "skin.roughness",              0.02, 0.01, 1.0),
-    _cont("IOR",                "skin.ior",                    0.02, 1.0,  2.0),
+    _cont("Melanin",            "mtlx.layer_top_melanin",            0.01, 0.0,  1.0),
+    _cont("Hemoglobin",         "mtlx.layer_middle_hemoglobin",      0.01, 0.0,  1.0),
+    _cont("Blood oxygenation",  "mtlx.layer_middle_blood_oxygenation", 0.05, 0.0, 1.0),
+    _cont("Epidermis thickness", "mtlx.layer_top_thickness",         0.02, 0.01, 1.0),
+    _cont("Dermis thickness",   "mtlx.layer_middle_thickness",       0.1,  0.1,  5.0),
+    _cont("Subcut thickness",   "mtlx.layer_bottom_thickness",       0.2,  0.5,  10.0),
+    _cont("Anisotropy (g)",     "mtlx.layer_top_anisotropy",         0.02, 0.0,  0.99),
+    _cont("Roughness",          "mtlx.skin_bsdf_roughness",          0.02, 0.01, 1.0),
+    _cont("IOR",                "mtlx.skin_bsdf_ior",                0.02, 1.0,  2.0),
 
-    _cont("Pore density",       "skin.pore_density",           0.05, 0.0,  1.0),
-    _cont("Pore depth",         "skin.pore_depth",             0.05, 0.0,  1.0),
-    _cont("Vellus hair density", "skin.hair_density",          0.05, 0.0,  1.0),
-    _cont("Vellus hair tilt",   "skin.hair_tilt",              0.05, 0.0,  1.0),
+    _cont("Pore density",       "mtlx.skin_bsdf_pore_density",       0.05, 0.0,  1.0),
+    _cont("Pore depth",         "mtlx.skin_bsdf_pore_depth",         0.05, 0.0,  1.0),
+    _cont("Vellus hair density", "mtlx.skin_bsdf_hair_density",      0.05, 0.0,  1.0),
+    _cont("Vellus hair tilt",   "mtlx.skin_bsdf_hair_tilt",          0.05, 0.0,  1.0),
 
     _cont("Light elevation",    "light_elevation",             5.0, -90.0, 90.0),
     _cont("Light azimuth",      "light_azimuth",               5.0, -180.0, 180.0),
@@ -77,9 +110,74 @@ ALL_PARAMS: list[ParamSpec] = [
     _cont("Light color B",      "light_color_b",               0.05, 0.0,  1.0),
 ]
 
+# Backward-compat alias. New code should call build_all_params(renderer)
+# to get the live list including dynamic material params; older code that
+# imports ALL_PARAMS directly still gets the static base.
+ALL_PARAMS = STATIC_PARAMS
+
+
+_GANGED_MTLX_FIELDS: dict[str, list[str]] = {
+    "layer_top_anisotropy": ["layer_middle_anisotropy", "layer_bottom_anisotropy"],
+    "skin_bsdf_ior": ["layer_top_ior", "layer_middle_ior", "layer_bottom_ior"],
+    "layer_top_scattering_coeff": ["layer_middle_scattering_coeff"],
+}
+
+_SKIN_TO_MTLX: dict[str, str] = {
+    "skin.melanin_fraction":       "mtlx.layer_top_melanin",
+    "skin.hemoglobin_fraction":    "mtlx.layer_middle_hemoglobin",
+    "skin.blood_oxygenation":      "mtlx.layer_middle_blood_oxygenation",
+    "skin.epidermis_thickness_mm": "mtlx.layer_top_thickness",
+    "skin.dermis_thickness_mm":    "mtlx.layer_middle_thickness",
+    "skin.subcut_thickness_mm":    "mtlx.layer_bottom_thickness",
+    "skin.anisotropy_g":           "mtlx.layer_top_anisotropy",
+    "skin.roughness":              "mtlx.skin_bsdf_roughness",
+    "skin.ior":                    "mtlx.skin_bsdf_ior",
+    "skin.pore_density":           "mtlx.skin_bsdf_pore_density",
+    "skin.pore_depth":             "mtlx.skin_bsdf_pore_depth",
+    "skin.hair_density":           "mtlx.skin_bsdf_hair_density",
+    "skin.hair_tilt":              "mtlx.skin_bsdf_hair_tilt",
+}
+
 
 def _get_nested(obj, path):
+    """Resolve `path` on `obj`. Routes:
+    - "mtlx.<field>"          → obj.mtlx_overrides[field]   (scalar)
+    - "mtlx.<field>.<idx>"    → obj.mtlx_overrides[field][idx]  (vector comp)
+    - "<a>.<b>"               → getattr chain (legacy)
+    Falls back to the active material's uniform_block default when an
+    `mtlx.*` path hasn't been explicitly overridden yet, so the slider
+    starts at the authored MaterialX value.
+    """
     parts = path.split(".")
+    if parts[0] == "mtlx" and len(parts) >= 2:
+        field_name = parts[1]
+        overrides = getattr(obj, "mtlx_overrides", {})
+        cm = getattr(obj, "_mtlx_skin_material", None)
+        if field_name in overrides:
+            value = overrides[field_name]
+        else:
+            # Fall back to the live SkinParameters → MaterialX mapping so
+            # the slider tracks the biological-parameter sliders until the
+            # user explicitly touches it. After that, the override wins.
+            try:
+                base = obj._mtlx_skin_overrides()
+            except (AttributeError, TypeError):
+                base = {}
+            if field_name in base:
+                value = base[field_name]
+            elif cm is not None:
+                value = next(
+                    (uf.default for uf in cm.uniform_block if uf.name == field_name),
+                    0.0,
+                )
+            else:
+                value = 0.0
+        if len(parts) == 3:
+            idx = int(parts[2])
+            if isinstance(value, (tuple, list)):
+                return float(value[idx]) if idx < len(value) else 0.0
+            return 0.0
+        return float(value) if isinstance(value, (int, float)) else value
     for p in parts:
         obj = getattr(obj, p)
     return obj
@@ -87,6 +185,32 @@ def _get_nested(obj, path):
 
 def _set_nested(obj, path, value):
     parts = path.split(".")
+    if parts[0] == "mtlx" and len(parts) >= 2:
+        field_name = parts[1]
+        overrides = obj.mtlx_overrides
+        if len(parts) == 3:
+            idx = int(parts[2])
+            cur = overrides.get(field_name)
+            if cur is None:
+                cm = getattr(obj, "_mtlx_skin_material", None)
+                cur = next(
+                    (uf.default for uf in cm.uniform_block if uf.name == field_name),
+                    (0.0, 0.0, 0.0),
+                ) if cm is not None else (0.0, 0.0, 0.0)
+            cur_list = list(cur) if isinstance(cur, (tuple, list)) else [0.0, 0.0, 0.0]
+            while len(cur_list) <= idx:
+                cur_list.append(0.0)
+            cur_list[idx] = float(value)
+            val_tuple = tuple(cur_list)
+            overrides[field_name] = val_tuple
+            for linked in _GANGED_MTLX_FIELDS.get(field_name, ()):
+                overrides[linked] = val_tuple
+        else:
+            fval = float(value)
+            overrides[field_name] = fval
+            for linked in _GANGED_MTLX_FIELDS.get(field_name, ()):
+                overrides[linked] = fval
+        return
     for p in parts[:-1]:
         obj = getattr(obj, p)
     setattr(obj, parts[-1], value)
@@ -98,9 +222,9 @@ def _set_nested(obj, path, value):
 _NON_PERSISTED_PARAMS = {"preset_index"}
 
 
-def _snapshot_params(renderer) -> dict[str, float | int]:
+def _snapshot_params(renderer, params: list[ParamSpec] | None = None) -> dict[str, float | int]:
     out: dict[str, float | int] = {}
-    for p in ALL_PARAMS:
+    for p in (params if params is not None else build_all_params(renderer)):
         if p.path in _NON_PERSISTED_PARAMS:
             continue
         val = _get_nested(renderer, p.path)
@@ -111,10 +235,13 @@ def _snapshot_params(renderer) -> dict[str, float | int]:
     return out
 
 
-def _apply_saved_params(renderer, saved_params) -> None:
+def _apply_saved_params(renderer, saved_params, params: list[ParamSpec] | None = None) -> None:
     if not isinstance(saved_params, dict):
         return
-    for p in ALL_PARAMS:
+    for old_key, new_key in _SKIN_TO_MTLX.items():
+        if old_key in saved_params and new_key not in saved_params:
+            saved_params[new_key] = saved_params[old_key]
+    for p in (params if params is not None else build_all_params(renderer)):
         if p.path in _NON_PERSISTED_PARAMS or p.path not in saved_params:
             continue
         raw = saved_params[p.path]
@@ -208,6 +335,10 @@ class InputHandler:
         self.window = window
         self.renderer = renderer
         self.selected_param = 0
+        # Live param list — static base + dynamic MaterialX inputs from
+        # the active skin material. Built once after the renderer's MtlX
+        # runtime has loaded so uniform_block reflection is available.
+        self.params: list[ParamSpec] = build_all_params(renderer)
 
         # Mouse state
         self._last_mx = 0.0
@@ -258,10 +389,10 @@ class InputHandler:
             return
 
         if key == glfw.KEY_TAB:
-            self.selected_param = (self.selected_param + 1) % len(ALL_PARAMS)
+            self.selected_param = (self.selected_param + 1) % len(self.params)
             self._print_param()
         elif key == glfw.KEY_LEFT_SHIFT and action == glfw.PRESS:
-            self.selected_param = (self.selected_param - 1) % len(ALL_PARAMS)
+            self.selected_param = (self.selected_param - 1) % len(self.params)
             self._print_param()
         elif key in (glfw.KEY_UP, glfw.KEY_RIGHT):
             self._adjust_param(1)
@@ -285,7 +416,7 @@ class InputHandler:
             print("[Camera recentred on head]")
         elif glfw.KEY_1 <= key <= glfw.KEY_9:
             idx = key - glfw.KEY_1
-            if idx < len(ALL_PARAMS):
+            if idx < len(self.params):
                 self.selected_param = idx
                 self._print_param()
 
@@ -301,7 +432,7 @@ class InputHandler:
             self.renderer.camera.move(float(f), float(r), float(u), dt)
 
     def _adjust_param(self, direction: int) -> None:
-        p = ALL_PARAMS[self.selected_param]
+        p = self.params[self.selected_param]
         if p.kind == "continuous":
             val = _get_nested(self.renderer, p.path)
             val = float(np.clip(val + direction * p.step, p.lo, p.hi))
@@ -323,6 +454,8 @@ class InputHandler:
     def _reset_params(self) -> None:
         from skinny.renderer import SkinParameters
         self.renderer.skin = SkinParameters()
+        self.renderer.mtlx_overrides.clear()
+        self.renderer.mtlx_overrides.update(self.renderer._mtlx_skin_overrides())
         self.renderer.light_azimuth = 45.0
         self.renderer.light_elevation = 35.0
         self.renderer.light_intensity = 5.0
@@ -351,12 +484,12 @@ class InputHandler:
         return f"{label}  [{idx + 1}/{len(choices)}]"
 
     def _print_param(self) -> None:
-        p = ALL_PARAMS[self.selected_param]
-        print(f"  [{self.selected_param + 1}/{len(ALL_PARAMS)}] {p.name}: {self._param_value_str(p)}")
+        p = self.params[self.selected_param]
+        print(f"  [{self.selected_param + 1}/{len(self.params)}] {p.name}: {self._param_value_str(p)}")
 
     def _print_all_params(self) -> None:
         print("\n--- Current Parameters ---")
-        for i, p in enumerate(ALL_PARAMS):
+        for i, p in enumerate(self.params):
             marker = " >> " if i == self.selected_param else "    "
             print(f"{marker}{p.name}: {self._param_value_str(p)}")
         cam = self.renderer.camera
@@ -377,7 +510,7 @@ class InputHandler:
     def build_hud_lines(self) -> list[str]:
         """Text lines that the renderer rasterises into the on-screen HUD each frame."""
         r = self.renderer
-        p = ALL_PARAMS[self.selected_param]
+        p = self.params[self.selected_param]
 
         if r.camera_mode == "orbit":
             cam_line = "Camera: Orbit    L drag orbit  R drag pan  scroll zoom"
@@ -392,7 +525,7 @@ class InputHandler:
             f"Environment: {r.env_name}",
             cam_line,
             "",
-            f"[{self.selected_param + 1}/{len(ALL_PARAMS)}] {p.name}: {self._param_value_str(p)}",
+            f"[{self.selected_param + 1}/{len(self.params)}] {p.name}: {self._param_value_str(p)}",
             "",
             "Tab / Shift    : next / prev param",
             "Arrows         : adjust parameter",
@@ -432,6 +565,35 @@ class InputHandler:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="skinny")
+    parser.add_argument(
+        "scene", nargs="?", type=Path, default=None,
+        help="Path to a USD stage (.usda / .usdc / .usdz).",
+    )
+    parser.add_argument(
+        "--usd", type=Path, default=None,
+        help="(deprecated, use positional arg) Path to a USD stage.",
+    )
+    parser.add_argument(
+        "--usdMtlx", action="store_true", default=False,
+        help="Rely on USD's built-in usdMtlx plugin for .mtlx file "
+             "resolution instead of the MaterialX API fallback.",
+    )
+    args = parser.parse_args()
+
+    scene_path: Path | None = args.scene or args.usd
+    usd_scene = None
+    if scene_path is not None:
+        from skinny.usd_loader import load_scene_from_usd
+        usd_scene = load_scene_from_usd(
+            scene_path, use_usd_mtlx_plugin=args.usdMtlx,
+        )
+        n_inst = len(usd_scene.instances)
+        n_mat = len(usd_scene.materials)
+        print(f"[USD] {scene_path.name}: {n_inst} instances, {n_mat} materials")
+
     ensure_dirs()
     saved = load_settings()
 
@@ -465,6 +627,7 @@ def main() -> None:
         hdr_dir=repo_root / "hdrs",
         head_dir=repo_root / "heads",
         tattoo_dir=repo_root / "tattoos",
+        usd_scene=usd_scene,
     )
 
     _apply_saved_params(renderer, saved.get("params", {}))
@@ -474,7 +637,7 @@ def main() -> None:
     input_handler = InputHandler(window, renderer)
 
     from skinny.control_panel import ControlPanel
-    panel = ControlPanel(renderer, ALL_PARAMS)
+    panel = ControlPanel(renderer, input_handler.params)
 
     tk_geom = saved.get("tk_window")
     if isinstance(tk_geom, str):
@@ -499,7 +662,7 @@ def main() -> None:
     try:
         out: dict = {
             "vulkan_window": _window_pos_dict(window),
-            "params": _snapshot_params(renderer),
+            "params": _snapshot_params(renderer, input_handler.params),
             "camera": _snapshot_camera(renderer),
         }
         geom = panel.get_geometry()
