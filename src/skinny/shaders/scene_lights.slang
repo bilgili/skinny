@@ -16,6 +16,16 @@ struct SphereSample
     bool  hit;
 };
 
+/// Ray / sphere intersection via quadratic discriminant.
+///
+///   b    = dot(o − c, d)
+///   c_   = ‖o − c‖² − r²
+///   disc = b² − c_
+///   t    = −b − √disc   (near root; use far root if t ≤ ε)
+///
+/// where  o = ray origin, d = ray direction, c = sphere centre, r = radius.
+/// Returns the nearest positive t and cos_y = dot(lN, −d) for the solid
+/// angle PDF.
 SphereSample intersectSphere(SphereLight light, Ray r)
 {
     SphereSample out_;
@@ -63,6 +73,15 @@ NearestSphereHit intersectSphereLights(Ray r, float t_max, uint numSphereLights)
     return best;
 }
 
+/// Solid angle PDF for a sphere light at shading point x in direction L.
+///
+///   p(L) = t² / (cos_y · A)
+///
+/// where  t      = hit distance along L to the sphere surface
+///        cos_y  = dot(sphere normal at hit, −L)   (angle w.r.t. surface)
+///        A      = 4π·r²   (sphere surface area)
+/// This converts the area-measure PDF (1/A) to solid-angle measure via
+/// the Jacobian |∂A/∂ω| = t²/cos_y.
 float sphereLightSolidPdfAt(uint idx, float3 x, float3 L, uint numSphereLights)
 {
     if (idx >= numSphereLights) return 0.0;

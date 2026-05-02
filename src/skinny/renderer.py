@@ -553,6 +553,17 @@ class SkinParameters:
 
 
 def _perspective(fov_deg: float, aspect: float) -> np.ndarray:
+    """Reverse-depth perspective projection matrix (stored transposed for GPU).
+
+    Math (OpenGL/Vulkan infinite-far convention, z_near = 0.1, z_far = 100):
+        f   = 1 / tan(fov/2)
+        P   = [[f/a,  0,        0,          0],
+               [0,    f,        0,          0],
+               [0,    0,  far/(n-f), n·far/(n-f)],
+               [0,    0,       -1,          0]]
+
+    numpy stores row-major → GPU reads column-major → receives Pᵀ → correct.
+    """
     fov_rad = np.radians(fov_deg)
     f = 1.0 / np.tan(fov_rad / 2.0)
     near, far = 0.1, 100.0
@@ -566,11 +577,20 @@ def _perspective(fov_deg: float, aspect: float) -> np.ndarray:
 
 
 def _look_at(pos: np.ndarray, forward: np.ndarray) -> np.ndarray:
-    # Returns V^T — the math view matrix transposed. numpy .tobytes() writes
-    # row-major; GLSL reads that as column-major, which transposes once more,
-    # so the GPU ends up seeing V. The camera basis therefore lives in the
-    # columns of this numpy array, not the rows. (Same convention as
-    # _perspective above, which stores P^T for the same reason.)
+    """View matrix from camera position and forward direction (stored transposed).
+
+    Math (camera basis via cross-product):
+        r = normalize(forward × up)      (right axis)
+        u = r × forward                  (up axis, re-orthogonalised)
+        V = [[r.x,  r.y,  r.z, −r·pos],
+             [u.x,  u.y,  u.z, −u·pos],
+             [−d.x, −d.y, −d.z, d·pos],
+             [0,    0,    0,    1     ]]
+
+    where d = forward. Stored transposed for the same numpy/GPU convention as
+    _perspective — the GPU reads column-major and recovers V.
+    """
+    # Returns V^T — numpy row-major, GPU reads column-major → cancels back to V.
     world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     right = np.cross(forward, world_up)
     right = right / max(np.linalg.norm(right), 1e-6)
@@ -605,6 +625,17 @@ class OrbitCamera:
 
     @property
     def position(self) -> np.ndarray:
+        """Camera world position from spherical orbit coordinates.
+
+        Math (spherical → Cartesian):
+            x = d · cos(pitch) · sin(yaw)
+            y = d · sin(pitch)
+            z = d · cos(pitch) · cos(yaw)
+
+        where  d     = orbit distance
+               yaw   = azimuth angle (radians)
+               pitch = elevation angle (radians, clamped ±89°)
+        """
         x = self.distance * np.cos(self.pitch) * np.sin(self.yaw)
         y = self.distance * np.sin(self.pitch)
         z = self.distance * np.cos(self.pitch) * np.cos(self.yaw)
@@ -989,14 +1020,15 @@ class Renderer:
             self.preset_index = 0
 
     def _furnace_environment(self) -> Environment:
-        """Return a constant-white 1x1 HDR environment for furnace-mode tests.
+        """Return a constant-white HDR environment for furnace-mode tests.
 
         Cached after first build so the per-frame scene rebuild stays cheap.
         """
         cached = getattr(self, "_furnace_env_cache", None)
         if cached is not None:
             return cached
-        white = np.ones((1, 1, 4), dtype=np.float32)
+        from skinny.environment import ENV_HEIGHT, ENV_WIDTH
+        white = np.ones((ENV_HEIGHT, ENV_WIDTH, 4), dtype=np.float32)
         env = Environment(name="Furnace (white)", data=white)
         self._furnace_env_cache = env
         return env

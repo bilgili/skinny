@@ -2,6 +2,11 @@
 // functions.  Extracted from the MaterialX stdlib GenSlang output so
 // procedural material evaluation (marble, wood, etc.) can run in our
 // compute pipeline without pulling in the full GenSlang runtime.
+//
+// References:
+//   [1] Perlin, "An Image Synthesizer", SIGGRAPH 1985.
+//   [2] Musgrave, "Procedural Fractal Terrains", in Texturing and Modelling:
+//       A Procedural Approach, 3rd ed., Morgan Kaufmann 2002.
 
 #define mx_sin sin
 #define mx_float_bits_to_int asint
@@ -143,6 +148,14 @@ uint mx_hash_int(int x, int y, int z, int xx, int yy)
 
 // ── Perlin noise ───────────────────────────────────────────────
 
+/// Classic Perlin gradient noise [1] — trilinear interpolation of random gradients.
+///
+///   n(p) = Σ_{i∈corners} w(p−iᵢ) · g(h(iᵢ)) · (p − iᵢ)
+///
+/// where  iᵢ = integer lattice corners of the unit cell containing p
+///        w   = Fade(t) = t³·(6t²−15t+10)   (quintic smoothstep)
+///        g   = gradient from Bob Jenkins hash h(iᵢ)
+/// Result is scaled by 0.9820 to approximately normalise output to [−1, 1].
 float mx_perlin_noise_float(float3 p)
 {
     int X, Y, Z;
@@ -165,8 +178,16 @@ float mx_perlin_noise_float(float3 p)
     return mx_gradient_scale3d(result);
 }
 
-// ── Fractal noise (octaved Perlin) ────────────────────────────
+// ── Fractal noise (octaved Perlin / fBm) ─────────────────────
 
+/// Fractional Brownian motion — summed octaves of Perlin noise [2].
+///
+///   fBm(p) = Σ_{i=0}^{octaves−1} amplitude_i · noise(p · lacunarity^i)
+///
+/// where  amplitude₀ = 1,  amplitudeᵢ = amplitudeᵢ₋₁ · diminish
+///        lacunarity  = frequency multiplier per octave  (typically 2)
+///        diminish    = amplitude decay per octave       (typically 0.5)
+/// Each octave adds finer detail at higher frequency with lower amplitude.
 float mx_fractal3d_noise_float(float3 p, int octaves, float lacunarity, float diminish)
 {
     float result = 0.0;

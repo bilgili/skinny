@@ -1,4 +1,12 @@
 // Common types and utilities shared across all shader modules.
+//
+// References:
+//   [1] O'Neill, "PCG: A Family of Simple Fast Space-Efficient Statistically
+//       Good Algorithms for Random Number Generation", HMC-CS-2014-0905, 2014.
+//   [2] Veach, "Robust Monte Carlo Methods for Light Transport Simulation",
+//       PhD thesis, Stanford University 1997.
+//   [3] Walter, Marschner, Li, Torrance,
+//       "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007.
 
 static const float PI = 3.14159265358979;
 
@@ -166,6 +174,13 @@ struct FrameConstants
 
 // ── Random number generation (PCG) ──────────────────────────────
 
+/// PCG-32 hash — one step of the PCG random-number generator [1].
+///
+///   state = input · 747796405 + 2891336453            (LCG advance)
+///   word  = ((state >> ((state >> 28) + 4)) ^ state) · 277803737   (output XSH-RR)
+///   hash  = (word >> 22) ^ word
+///
+/// Produces a statistically high-quality 32-bit hash with period 2³².
 uint pcgHash(uint input)
 {
     uint state = input * 747796405u + 2891336453u;
@@ -200,6 +215,14 @@ RNG createRNG(uint2 pixel, uint frame)
 
 // ── Sampling helpers ────────────────────────────────────────────
 
+/// Cosine-weighted hemisphere sampling via Malley's method.
+///
+///   φ = 2π·u₁
+///   cosθ = √u₂          → projection of uniform disk sample onto hemisphere
+///   sinθ = √(1 − u₂)
+///
+/// Probability density:  p(ω) = cosθ / π
+/// Used as the diffuse-BRDF importance sampler: weight = f_d · cosθ / p = 1/π · π = 1.
 float3 sampleCosineHemisphere(float2 u, float3 normal)
 {
     float phi      = 2.0 * PI * u.x;
@@ -218,12 +241,25 @@ float3 sampleCosineHemisphere(float2 u, float3 normal)
     );
 }
 
+/// PDF of cosine-weighted hemisphere sampling.
+///
+///   p(ω) = (n · ω) / π
+///
+/// where  n · ω = max(dot(normal, dir), 0)
 float cosineHemispherePdf(float3 dir, float3 normal)
 {
     float nDotW = max(dot(normalize(dir), normalize(normal)), 0.0);
     return nDotW / PI;
 }
 
+/// Uniform sphere sampling via equal-area mapping.
+///
+///   z   = 1 − 2·u₁              (uniform in [−1, 1])
+///   r   = √(1 − z²)
+///   φ   = 2π·u₂
+///   dir = (r·cosφ, z, r·sinφ)
+///
+/// PDF: p(ω) = 1 / (4π)
 float3 sampleUniformSphere(float2 u)
 {
     float z = 1.0 - 2.0 * u.x;
@@ -232,11 +268,22 @@ float3 sampleUniformSphere(float2 u)
     return float3(r * cos(phi), z, r * sin(phi));
 }
 
+/// PDF of uniform sphere sampling.
+///
+///   p(ω) = 1 / (4π)
 float uniformSpherePdf()
 {
     return 1.0 / (4.0 * PI);
 }
 
+/// GGX Smith G₁ masking term (single-direction) [3].
+///
+///   G₁(v, α) = 2·(n·v) / ((n·v) + √(α² + (1 − α²)·(n·v)²))
+///
+/// where  α  = roughness²  (Disney remap)
+///        v  = view / light direction
+///        n·v = dot(shading normal, v)
+/// The separable product G₁(v)·G₁(l) approximates the joint Smith G₂.
 float ggxSmithG1(float NdotV, float roughness)
 {
     float a = roughness * roughness;
@@ -244,6 +291,13 @@ float ggxSmithG1(float NdotV, float roughness)
     return NdotV / (NdotV * (1.0 - k) + k);
 }
 
+/// Power heuristic for multiple importance sampling (MIS) [2].
+///
+///   w(pₐ, p_b) = pₐ² / (pₐ² + p_b²)       (β = 2)
+///
+/// Combines two sampling strategies A and B so their sum is an unbiased
+/// estimator of the integrand with near-optimal variance reduction.
+/// The β = 2 exponent minimises expected squared error (Veach §9.2).
 float powerHeuristic(float pdfA, float pdfB)
 {
     float a2 = pdfA * pdfA;
@@ -258,6 +312,13 @@ void buildBasis(float3 n, out float3 t, out float3 b)
     t = cross(b, n);
 }
 
+/// Uniform disk sampling via concentric mapping.
+///
+///   r   = √u₁              (area-preserving radial CDF inversion)
+///   φ   = 2π·u₂
+///   p   = (r·cosφ, r·sinφ)
+///
+/// PDF: p(x, y) = 1 / π  (uniform over unit disk)
 float2 sampleUniformDisk(float2 u)
 {
     float r = sqrt(u.x);

@@ -2,6 +2,17 @@
 //
 // Performs delta-tracking (Woodcock tracking) through a heterogeneous
 // participating medium defined by the skin layer stack.
+//
+// References:
+//   [1] Henyey, Greenstein,
+//       "Diffuse Radiation in the Galaxy", ApJ 1941.
+//   [2] Woodcock et al.,
+//       "Techniques Used in the GEM Code for Monte Carlo Neutronics
+//       Calculations", Applications of Computing Methods to Reactor Problems,
+//       Argonne National Laboratory 1965.
+//   [3] Veach,
+//       "Robust Monte Carlo Methods for Light Transport Simulation",
+//       PhD thesis, Stanford University 1997.
 
 import common;
 import skin_bssrdf;
@@ -11,6 +22,13 @@ static const int   VOLUME_DEFAULT_BOUNCES = 8;
 
 // ── Phase functions ─────────────────────────────────────────────
 
+/// Henyey-Greenstein phase function [1].
+///
+///   p(cosθ, g) = (1 − g²) / (4π · (1 + g² − 2g·cosθ)^(3/2))
+///
+/// where  cosθ = dot(ω_in, ω_out)
+///        g    = anisotropy ∈ (−1, 1);  g > 0 → forward, g < 0 → back,
+///               g = 0 → isotropic (reduces to 1/(4π))
 float henyeyGreenstein(float cosTheta, float g)
 {
     float g2  = g * g;
@@ -19,12 +37,15 @@ float henyeyGreenstein(float cosTheta, float g)
     return num / (4.0 * PI * den);
 }
 
-// Sample the Henyey-Greenstein phase function around `forward`. The returned
-// direction is distributed on the unit sphere with pdf = HG(cosθ, g) where
-// cosθ = dot(result, forward). When used to pick a "direction to the light"
-// and scattering from the photon travel direction = `forward`, phase/pdf ≡ 1
-// so a single tap is an unbiased one-sample estimator of the in-scattered
-// radiance integral.
+/// Importance-sample the HG phase function by CDF inversion [1].
+///
+/// Analytic inverse CDF for cosθ:
+///   cosθ = [1 + g² − ((1−g²) / (1 − g + 2g·u))²] / (2g)   (g ≠ 0)
+///   cosθ = 1 − 2·u                                          (|g| < 10⁻³)
+///
+/// The returned direction has pdf = p(cosθ, g), so the sampling weight
+/// phase/pdf ≡ 1 — each call is a zero-variance one-sample estimator
+/// of the phase-function integral over the unit sphere.
 float3 sampleHenyeyGreenstein(float3 forward, float g, float2 u)
 {
     float cosTheta;
@@ -74,14 +95,19 @@ SkinLayer layerAtDepth(float depthMM, SkinParams params, float4 ink)
     return buildSubcutaneous(params);
 }
 
-// Delta-tracking through layered skin volume.
-//
-// σ is in mm⁻¹ but ray distances (tMin, tMax, result.t) are in world units.
-// `mmPerUnit` bridges the two: step sizes sampled from an mm⁻¹ majorant are
-// divided by mmPerUnit to walk in world units, and depth-from-surface is
-// multiplied by mmPerUnit when deciding which skin layer the sample landed
-// in. Without this the march integrated ~mmPerUnit-times-too-much optical
-// depth and output was absurdly red-shifted.
+/// Delta-tracking (Woodcock / null-collision method) through layered skin [2].
+///
+/// Free-flight distance from a majorant extinction σ̄_t (mm⁻¹):
+///   dt = −ln(u) / σ̄_t         (exponential free-flight)
+///
+/// At each candidate event, accept as a real interaction with probability:
+///   p_real = σ_t(x) / σ̄_t
+///
+/// Otherwise it is a null collision — the local weight is unchanged and the
+/// walk continues. The estimator is unbiased for any majorant ≥ σ_t(x).
+///
+/// Unit bridge: σ in mm⁻¹, ray t in world units; mmPerUnit converts between
+/// them. Depth from surface = (t − tMin) · mmPerUnit.
 MediumSample sampleMedium(
     Ray         ray,
     float       tMin,

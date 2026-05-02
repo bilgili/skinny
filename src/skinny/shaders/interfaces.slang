@@ -1,5 +1,5 @@
-// Pluggable interface seams for materials, samplers, estimators, and
-// integrators.
+// Pluggable interface seams for materials, samplers, lights, estimators,
+// and integrators.
 //
 // Dispatch policy:
 //   - IMaterial: tag-switch monomorphization in material_eval.slang. Never
@@ -8,6 +8,9 @@
 //   - IIntegrator: uniform per dispatch (selected by fc.integratorMode in
 //     main_pass.slang); safe to keep as runtime switch.
 //   - ISampler: generic parameter on estimators; compile-time monomorphized.
+//   - ILight: generic parameter on estimators or loaded per-light from
+//     buffer; compile-time monomorphized. Delta lights (directional) set
+//     pdfArea=0 as a sentinel — callers skip geometry-term conversion.
 
 import common;
 
@@ -31,6 +34,23 @@ interface IMaterial
 interface IIntegrator
 {
     float3 estimateRadiance(Ray ray, HitInfo firstHit, inout RNG rng);
+}
+
+// ── Lights ──────────────────────────────────────────────────────
+
+struct LightSample
+{
+    float3 point;       // world-space sampled point on light surface
+    float3 normal;      // outward surface normal at sampled point
+    float3 radiance;    // emitted radiance
+    float  pdfArea;     // area-measure probability density of this sample
+    bool   valid;       // false = degenerate / no contribution
+};
+
+interface ILight
+{
+    LightSample samplePoint(float3 shadingPos, float2 u);
+    float pdfSolidAngle(float3 shadingPos, float3 direction);
 }
 
 // ── Generic dispatchers ─────────────────────────────────────────

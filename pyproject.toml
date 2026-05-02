@@ -48,6 +48,7 @@ skinny = [
     "shaders/*.slang",
     "shaders/estimators/*.slang",
     "shaders/samplers/*.slang",
+    "shaders/lights/*.slang",
     "shaders/integrators/*.slang",
     "mtlx/*.mtlx",
     "mtlx/genslang/*.mtlx",

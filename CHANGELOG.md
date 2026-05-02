@@ -7,9 +7,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0] - 2026-05-02
 
-First release. Skinny is a physically based human skin renderer built on a
-Vulkan compute shader pipeline with MaterialX material descriptions and OpenUSD
-scene loading.
+First release. Skinny is a physically based renderer built on a Vulkan compute
+shader pipeline. It started as a human skin rendering testbed; this release
+ships the full skin feature set alongside generic MaterialX material support
+and OpenUSD scene loading.
 
 ### Rendering
 

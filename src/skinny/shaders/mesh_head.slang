@@ -5,6 +5,14 @@
 // and uploads three storage buffers: vertices, triangle indices, and
 // 32-byte BVH nodes in depth-first order.
 //
+// References:
+//   [1] Möller, Trumbore,
+//       "Fast, Minimum Storage Ray/Triangle Intersection",
+//       Journal of Graphics Tools, 1997.
+//   [2] d'Eon, Luebke,
+//       "Advanced Techniques for Realistic Real-Time Skin Rendering",
+//       GPU Gems 3, Chapter 14, Addison-Wesley 2007.
+//
 // Node encoding (matches `mesh.py::_pack_bvh`):
 //   float3 aabbMin
 //   int    leftOrCount   // <0 : leaf, -count triangles starting at rightOrFirst.
@@ -60,6 +68,17 @@ struct Instance
 
 // ── Ray / AABB slab test ────────────────────────────────────────
 
+/// Ray / axis-aligned bounding box intersection via the slab method.
+///
+///   t_near = max(t_min_x, t_min_y, t_min_z)
+///   t_far  = min(t_max_x, t_max_y, t_max_z)
+///
+/// For each axis i:
+///   t₀ᵢ = (aabbMin[i] − origin[i]) / direction[i]
+///   t₁ᵢ = (aabbMax[i] − origin[i]) / direction[i]
+///   (t_minᵢ, t_maxᵢ) = (min(t₀ᵢ, t₁ᵢ), max(t₀ᵢ, t₁ᵢ))
+///
+/// Hit iff t_far ≥ max(t_near, 0) and t_near ≤ tMax (any-hit early-exit).
 bool intersectAabb(Ray ray, float3 invDir, float3 aabbMin, float3 aabbMax, float tMax, out float tNear)
 {
     float3 t0 = (aabbMin - ray.origin) * invDir;
@@ -74,6 +93,20 @@ bool intersectAabb(Ray ray, float3 invDir, float3 aabbMin, float3 aabbMax, float
 
 // ── Möller-Trumbore ray/triangle intersection ──────────────────
 
+/// Möller-Trumbore ray / triangle intersection [1].
+///
+/// Expresses the hit point as P = (1−u−v)·v₀ + u·v₁ + v·v₂ and solves:
+///
+///   [e₁ | e₂ | −d] · [u, v, t]ᵀ = o − v₀
+///
+/// using Cramer's rule (determinant form):
+///   det = e₁ · (d × e₂)
+///   u   = (o−v₀) · (d × e₂) / det
+///   v   = d · ((o−v₀) × e₁) / det
+///   t   = e₂ · ((o−v₀) × e₁) / det
+///
+/// where  e₁ = v₁−v₀,  e₂ = v₂−v₀,  d = ray direction,  o = ray origin.
+/// Returns barycentric coords (u, v); w = 1 − u − v implicitly.
 bool intersectTriangle(
     Ray ray,
     float3 v0, float3 v1, float3 v2,
@@ -112,10 +145,15 @@ bool intersectTriangle(
 static const int BVH_STACK_SIZE = 64;
 static const float RAY_MAX_T    = 1e20;
 
-// Find the nearest triangle hit with t > tMinExcl in the BLAS that lives
-// at the given offsets in the unified vertex/index/bvh buffers. Returns
-// t and triangle index (the GLOBAL triIdx*3 into meshIndices, so the
-// caller can look up the hit's vertices directly), or -1 if nothing hits.
+/// Depth-first stack-based BVH traversal (nearest-hit query).
+///
+/// At each inner node, both children are tested against the AABB slab test.
+/// Both-hit children are pushed in far-first order so the nearer child is
+/// popped first — this allows early termination via the `closestT` bound
+/// passed to subsequent AABB tests, pruning far subtrees automatically.
+///
+/// Leaf nodes (leftOrCount < 0) iterate |leftOrCount| triangles starting at
+/// rightOrFirst and call intersectTriangle [1] on each.
 float findNearestHit(
     Ray ray, float tMinExcl,
     uint blasNodeOffset, uint blasIndexOffset, uint blasVertexOffset,
