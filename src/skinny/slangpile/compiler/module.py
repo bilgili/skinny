@@ -122,7 +122,7 @@ class ModuleCompiler:
 
     def compile(self) -> CompiledModule:
         slang_module_name = self.module_name.rsplit(".", 1)[-1]
-        lines = [f"module {slang_module_name};", ""]
+        lines = []
         function_sources: list[str] = []
         for name in sorted(self.shaders):
             function_sources.append(self._compile_function(name, self.shaders[name]))

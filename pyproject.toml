@@ -55,5 +55,13 @@ skinny = [
     "mtlx/genslang/*.slang",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires Vulkan GPU + slangpy",
+    "slow: Monte Carlo / many-sample statistical tests",
+    "slangpile: exercises slangpile transpiler",
+]
+
 [tool.ruff]
 line-length = 100

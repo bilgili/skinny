@@ -111,7 +111,8 @@
       "WebFetch(domain:slangpy.shader-slang.org)",
       "WebFetch(domain:shader-slang.org)",
       "Read(//mnt/d/projects/**)",
-      "Bash(./Scripts/slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders)"
+      "Bash(./Scripts/slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders)",
+      "PowerShell(python D:\\\\projects\\\\skinny\\\\gen_sphere.py)"
     ]
   }
 }
