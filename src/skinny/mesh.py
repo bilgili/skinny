@@ -1,5 +1,13 @@
 """Triangle mesh loading and linear BVH construction for ray traced heads.
 
+References:
+    [1] Shirley, Morley, "Realistic Ray Tracing", 2nd ed., AK Peters 2003.
+        Median-split BVH construction (§12.3).
+    [2] Möller, Trumbore, "Fast, Minimum Storage Ray/Triangle Intersection",
+        Journal of Graphics Tools, 1997.
+        TBN tangent computation mirrors the shader-side formula in
+        mesh_head.slang which uses the same edge + UV-delta system.
+
 The mesh pipeline in `main_pass.slang` consumes three flat storage buffers:
 
     vertices  : Vertex[] ─ position (vec3) + u + normal (vec3) + v
@@ -232,6 +240,20 @@ def _triangle_aabbs(positions: np.ndarray, tri_idx: np.ndarray) -> tuple[np.ndar
 def build_bvh(
     positions: np.ndarray, tri_idx: np.ndarray
 ) -> tuple[np.ndarray, list]:
+    """Build a median-split BVH over the given triangles [1].
+
+    Math (median-split heuristic, SAH approximation):
+        split axis  = argmax(aabb_max − aabb_min)   (longest extent)
+        split pos   = centroid median along that axis
+        leaf size   = BVH_LEAF_SIZE (4 triangles)
+
+    Node cost estimate (not computed, just the heuristic motivation):
+        C(node) = C_trav + Σᵢ (Aᵢ/A_parent) · Nᵢ · C_isect
+
+    Nodes are stored depth-first (left subtree contiguous) for cache locality.
+    Returns (permuted_tri_idx, nodes) where tri_idx has been reordered to
+    match leaf firstTri + count ranges.
+    """
     tmin, tmax, centroids = _triangle_aabbs(positions, tri_idx)
     tri_ids = np.arange(tri_idx.shape[0], dtype=np.int32)
 
@@ -392,6 +414,14 @@ def subdivide_midpoint(
     adjacent triangles via a (min,max) edge key, so the mesh stays watertight
     — no cracks at shared edges. Positions, normals, and UVs are all linearly
     interpolated at midpoints; normals are then renormalised.
+
+    Math (midpoint rule):
+        mᵢⱼ = (vᵢ + vⱼ) / 2          (positions and UVs)
+        n_mᵢⱼ = normalize(nᵢ + nⱼ)   (normals renormalised after averaging)
+
+    The four child triangles for parent (v₀, v₁, v₂):
+        (v₀, m₀₁, m₀₂),  (v₁, m₁₂, m₀₁),
+        (v₂, m₀₂, m₁₂),  (m₀₁, m₁₂, m₀₂)
     """
     new_pos: list[np.ndarray] = [positions]
     new_nrm: list[np.ndarray] = [normals]
@@ -480,10 +510,19 @@ def _per_vertex_tangents(
 ) -> np.ndarray:
     """Area-weighted per-vertex tangent, orthonormalised against the stored normals.
 
-    Mirrors the shader-side TBN formula in mesh_head.slang:226-247 — triangle
+    Mirrors the shader-side TBN formula in mesh_head.slang — triangle
     edge + UV-delta system solved for the +U axis, averaged per vertex by
     summing contributions, then Gram-Schmidt against N. Degenerate UVs
     (zero-area in texture space) fall back to an axis orthogonal to N.
+
+    Math (per-triangle tangent from edge/UV deltas) [2]:
+        e₁ = v₁ − v₀,  e₂ = v₂ − v₀
+        (Δu₁, Δv₁) = uv₁ − uv₀,  (Δu₂, Δv₂) = uv₂ − uv₀
+        det = Δu₁·Δv₂ − Δu₂·Δv₁
+        T   = (e₁·Δv₂ − e₂·Δv₁) / det         (tangent = +U axis)
+
+    Per-vertex tangent: area-weighted sum of T over incident triangles,
+    then Gram-Schmidt:  T ← normalize(T − N·(T·N))
     """
     p0 = positions[tri_idx[:, 0]]
     p1 = positions[tri_idx[:, 1]]
@@ -531,11 +570,19 @@ def _bake_normal_map_into_normals(
 ) -> np.ndarray:
     """Rotate per-vertex N by the tangent-space perturbation of the normal map.
 
-    Matches the shader-side decoding in main_pass.slang:138-143: nxy from
-    the (R, G) channels in [-1, 1], scaled by strength, z rebuilt to unit
-    length. Produces an output guaranteed unit-length and roughly consistent
-    with the runtime path so disabling the bake (subdivision=Off) gives a
-    similar look at coarser resolution.
+    Matches the shader-side decoding in main_pass.slang: nxy from the (R, G)
+    channels in [-1, 1], scaled by strength, z rebuilt to unit length. Produces
+    an output guaranteed unit-length and roughly consistent with the runtime path
+    so disabling the bake (subdivision=Off) gives a similar look at coarser
+    resolution.
+
+    Math (tangent-space normal reconstruction):
+        nxy = (rg * 2 − 1) · strength     (decode R,G to signed, scale)
+        nz  = √max(1 − ‖nxy‖², ε)        (rebuild +Z assuming unit length)
+        n_ts = normalize(T·nxy.x + B·nxy.y + N·nz)
+
+    where T = tangent, B = cross(N, T) (bitangent), N = shading normal.
+    The TBN rotation maps the tangent-space normal vector into world space.
     """
     rg = _bilinear_sample_rg8(normal_bytes, normal_res, uvs)
     nxy = (rg * 2.0 - 1.0) * float(max(0.0, min(4.0, strength)))

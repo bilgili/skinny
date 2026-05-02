@@ -102,7 +102,16 @@
       "PowerShell(python -c \"from skinny.vk_compute import ComputePipeline; print\\('import OK'\\)\" 2>&1)",
       "PowerShell(python -c \"from skinny.slangpile import build_module, shader, extern; print\\('embedded slangpile import OK'\\)\" 2>&1)",
       "PowerShell(python -c \"from skinny.slangpile.compiler import ModuleCompiler; print\\('compiler subpackage OK'\\)\" 2>&1)",
-      "PowerShell(python -c \"from skinny.vk_compute import ComputePipeline; print\\('vk_compute OK'\\)\" 2>&1)"
+      "PowerShell(python -c \"from skinny.vk_compute import ComputePipeline; print\\('vk_compute OK'\\)\" 2>&1)",
+      "Bash(Select-Object FullName, Length)",
+      "Bash(Sort-Object FullName)",
+      "Bash(Format-Table -AutoSize -Wrap)",
+      "Bash(Select-Object -Property FullName)",
+      "WebSearch",
+      "WebFetch(domain:slangpy.shader-slang.org)",
+      "WebFetch(domain:shader-slang.org)",
+      "Read(//mnt/d/projects/**)",
+      "Bash(./Scripts/slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders)"
     ]
   }
 }

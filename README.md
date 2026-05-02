@@ -4,11 +4,11 @@
 > and serves as a testbed for experimenting with new rendering algorithms.
 > The codebase evolves rapidly and stability is not guaranteed.
 
-Skinny is a physically based human skin renderer built on a Vulkan compute
-shader pipeline. It combines ray-traced geometry, image-based lighting,
-microfacet specular, point-BSSRDF subsurface scattering, delta-tracked volume
-transport through layered skin tissue, and energy-conservation checks -- all
-driven by MaterialX material descriptions and loadable from OpenUSD scenes.
+Skinny is a physically based renderer built on a Vulkan compute shader
+pipeline. It started as a human skin rendering testbed -- and retains
+first-class skin support -- but the core pipeline handles arbitrary MaterialX
+materials, OpenUSD scenes, ray-traced geometry, image-based lighting,
+microfacet specular, and energy-conservation checks.
 
 ## Features
 

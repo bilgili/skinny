@@ -1,5 +1,15 @@
 // Main render pass — dispatches camera rays through the unified material
 // evaluator and composites the final display.
+//
+// References:
+//   [1] Veach, Guibas, "Bidirectional Estimators for Light Transport",
+//       EGSR 1995.
+//   [2] Lafortune, Willems, "Bi-Directional Path Tracing",
+//       Compugraphics 1993.
+//   [3] Veach, "Robust Monte Carlo Methods for Light Transport Simulation",
+//       PhD thesis, Stanford 1997.  (MIS, §9; BDPT, §10)
+//   [4] Narkowicz, "ACES Filmic Tone Mapping Curve" (approximation fit),
+//       blog post 2016; original ACES matrices by the Academy S-2014-003.
 
 import common;
 import bindings;
@@ -9,6 +19,13 @@ import material_eval;
 
 // ── Tonemapping ─────────────────────────────────────────────────
 
+/// ACES filmic tone-mapping curve (Narkowicz rational approximation) [4].
+///
+///   f(x) = (x · (a·x + b)) / (x · (c·x + d) + e)
+///
+/// where  a = 2.51,  b = 0.03,  c = 2.43,  d = 0.59,  e = 0.14
+/// Maps linear HDR radiance → display [0, 1]. Applied per channel;
+/// result is clamped to [0, 1] before sRGB gamma encoding.
 float3 acesFilmic(float3 x)
 {
     float a = 2.51;
@@ -19,6 +36,13 @@ float3 acesFilmic(float3 x)
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+/// Simplified sRGB gamma encoding (power-law approximation, γ = 2.2).
+///
+///   f(c) = max(c, 0)^(1/2.2)
+///
+/// The IEC 61966-2-1 standard uses a piecewise form with a linear toe;
+/// the power-law approximation is accurate to < 1% for c > 0.003 and
+/// avoids a branch in the shader.
 float3 linearToSRGB(float3 linear)
 {
     return pow(max(linear, float3(0.0)), float3(1.0 / 2.2));

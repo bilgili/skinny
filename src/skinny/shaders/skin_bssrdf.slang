@@ -1,11 +1,20 @@
 // Physically-based skin BSSRDF using a separable multi-layer diffusion model.
 //
 // References:
-//   [1] Jensen et al., "A Practical Model for Subsurface Light Transport" (2001)
-//   [2] d'Eon & Irving, "A Quantized-Diffusion Model for Rendering
-//       Translucent Materials" (2011)
-//   [3] Christensen & Burley, "Approximate Reflectance Profiles for
-//       Efficient Subsurface Scattering" (Disney, 2015)
+//   [1] Jensen, Marschner, Levoy, Hanrahan,
+//       "A Practical Model for Subsurface Light Transport", SIGGRAPH 2001.
+//   [2] d'Eon, Irving,
+//       "A Quantized-Diffusion Model for Rendering Translucent Materials",
+//       ACM TOG (SIGGRAPH) 2011.
+//   [3] Christensen, Burley,
+//       "Approximate Reflectance Profiles for Efficient Subsurface Scattering",
+//       Disney Research / SIGGRAPH 2015.
+//   [4] Donner, Jensen,
+//       "A Spectral BSSRDF for Shading Human Skin", EGSR 2006.
+//   [5] Walter, Marschner, Li, Torrance,
+//       "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007.
+//   [6] Schlick,
+//       "An Inexpensive BRDF Model for Physically-Based Rendering", CGF 1994.
 
 import common;
 
@@ -38,7 +47,12 @@ struct SkinParams
     float hairTilt;         // 0 = hairs lying flat, 1 = standing up (strong rim)
 };
 
-// Melanin absorption (Donner & Jensen 2006 fit)
+/// Eumelanin absorption fit at RGB centres 611 nm / 549 nm / 464 nm [4].
+///
+///   σ_a(λ) = c_mel · μ_eu(λ)
+///
+/// where  c_mel      = melanin volume fraction ∈ [0, 1]
+///        μ_eu(λ)   = {6.6, 11.0, 24.0} mm⁻¹  (eumelanin RGB coefficients)
 float3 melaninAbsorption(float melaninFraction)
 {
     // Eumelanin dominant; wavelength-dependent fit at RGB centres (611, 549, 464 nm)
@@ -46,7 +60,14 @@ float3 melaninAbsorption(float melaninFraction)
     return melaninFraction * eumelanin;
 }
 
-// Hemoglobin absorption from oxygenated / deoxygenated mix
+/// Haemoglobin absorption from oxygenated / deoxygenated mix [4].
+///
+///   σ_a = c_hb · (sat · μ_HbO₂ + (1 − sat) · μ_Hb)
+///
+/// where  c_hb    = haemoglobin volume fraction
+///        sat     = blood oxygenation ∈ [0, 1]
+///        μ_HbO₂ ≈ {0.3, 7.0, 1.0} mm⁻¹  (oxy-haemoglobin RGB)
+///        μ_Hb   ≈ {1.6, 8.5, 3.2} mm⁻¹  (deoxy-haemoglobin RGB)
 float3 hemoglobinAbsorption(float hbFraction, float oxygenation)
 {
     float3 hbO2  = float3(0.3, 7.0, 1.0);   // oxy-hemoglobin  (RGB approx)
@@ -197,15 +218,26 @@ SkinParams skinParamsFromMtlx(MtlxSkinParams m)
 }
 
 // ── Burley normalised diffusion profile ─────────────────────────
-// Single-channel reflectance profile R(r) ≈ A * (e^(-r/d) + e^(-r/(3d))) / (8πdr)
-// where d = 1 / (σ_a + σ_s') is the diffuse mean free path.
 
+/// Burley normalised diffusion profile (Christensen & Burley [3]).
+///
+///   R(r) = (e^(−r/d) + e^(−r/(3d))) / (8π·d·r)
+///
+/// where  r = radial distance from entry point (mm)
+///        d = diffuse mean free path per RGB channel (mm); d = 1/(σ_a + σ_s')
 float3 burleyDiffusionProfile(float r, float3 d)
 {
     float3 rd = max(float3(r), float3(1e-6)) / d;
     return (exp(-rd) + exp(-rd / 3.0)) / (8.0 * PI * d * max(float3(r), float3(1e-6)));
 }
 
+/// Reduced mean free path, corrected for anisotropic scattering.
+///
+///   σ_s' = σ_s · (1 − g)      (reduced scattering, anisotropy-corrected)
+///   σ_t  = σ_a + σ_s'         (effective extinction coefficient, mm⁻¹)
+///   d    = 1 / σ_t            (diffuse MFP per channel, mm)
+///
+/// where  g = Henyey-Greenstein anisotropy ∈ [−1, 1]
 float3 effectiveMFP(SkinLayer layer)
 {
     float3 sigmaSprime = layer.sigmaS * (1.0 - layer.g);
@@ -215,6 +247,12 @@ float3 effectiveMFP(SkinLayer layer)
 
 // ── Fresnel ─────────────────────────────────────────────────────
 
+/// Schlick Fresnel approximation for dielectrics [6].
+///
+///   F(θ) = F₀ + (1 − F₀) · (1 − cosθ)⁵
+///
+/// where  F₀ = ((1 − n) / (1 + n))²   (normal-incidence reflectance)
+///        θ  = angle between the view direction and the half-vector
 float fresnelSchlick(float cosTheta, float ior)
 {
     float r0 = (1.0 - ior) / (1.0 + ior);
@@ -225,6 +263,13 @@ float fresnelSchlick(float cosTheta, float ior)
 
 // ── GGX microfacet specular for skin surface ────────────────────
 
+/// GGX (Trowbridge-Reitz) normal distribution function [5].
+///
+///   D(h) = α² / (π · ((n·h)² · (α² − 1) + 1)²)
+///
+/// where  h   = microfacet half-vector (normalised)
+///        α   = roughness²  (Disney perceptual remapping)
+///        n·h = dot(shading normal, half-vector)
 float ggxDistribution(float NdotH, float roughness)
 {
     float a  = roughness * roughness;
@@ -233,6 +278,14 @@ float ggxDistribution(float NdotH, float roughness)
     return a2 / (PI * d * d);
 }
 
+/// Microfacet specular BRDF: GGX NDF + separable Smith G + Schlick F [5, 6].
+///
+///   f_spec(l, v) = D(h) · G₁(v) · G₁(l) · F(v·h) / (4 · (n·l) · (n·v))
+///
+/// where  h = normalize(v + l)
+///        D = GGX NDF (ggxDistribution)   [5]
+///        G = separable Smith G₁ product  (ggxSmithG1 × ggxSmithG1)
+///        F = Schlick Fresnel             [6]
 float3 evaluateSkinSpecular(float3 N, float3 V, float3 L, float roughness, float ior)
 {
     float3 H    = normalize(V + L);
@@ -248,6 +301,14 @@ float3 evaluateSkinSpecular(float3 N, float3 V, float3 L, float roughness, float
     return float3(D * G * F / max(4.0 * NdotV * NdotL, 1e-6));
 }
 
+/// Sampling PDF for GGX NDF importance sampling (half-vector form) [5].
+///
+///   p(l) = D(h) · (n·h) / (4 · (v·h))
+///
+/// where  h   = normalize(v + l)
+///        D   = GGX NDF evaluated at h
+///        The Jacobian |∂h/∂l| = 1/(4·(v·h)) converts half-vector PDF to
+///        outgoing-direction PDF.
 float ggxSpecularPdf(float3 N, float3 V, float3 L, float roughness)
 {
     float3 H = normalize(V + L);
@@ -258,11 +319,16 @@ float ggxSpecularPdf(float3 N, float3 V, float3 L, float roughness)
     return ggxDistribution(NdotH, roughness) * NdotH / (4.0 * VdotH);
 }
 
-// GGX importance-sampled specular direction for IBL. Returns the sampled
-// direction plus the MC weight BRDF*cosθ/pdf = G*F*VdotH/(NdotV*NdotH).
-// A single call is an unbiased one-sample estimate of the specular IBL
-// integral ∫ f_spec(ω)·L(ω)·cos(θ) dω when multiplied by L(ω_sample).
-// Zero weight is returned for below-horizon samples.
+/// GGX NDF importance-sampled specular for image-based lighting [5].
+///
+/// Samples a half-vector h from the NDF, reflects V to get L.
+/// The Monte Carlo weight simplifies to:
+///
+///   w = BRDF · cosθ / pdf = G₁(v) · G₁(l) · F · (v·h) / ((n·v) · (n·h))
+///
+/// Multiplied by L(l), this gives an unbiased one-sample estimate of
+///   ∫ f_spec(ω) · L(ω) · (n·ω) dω.
+/// Zero weight is returned for below-horizon samples (n·l ≤ 0).
 struct SpecularIBLSample
 {
     float3 direction;
@@ -313,9 +379,14 @@ SpecularIBLSample sampleGGXSpecularIBL(
 
 // ── Subsurface evaluation (disk-based sampling) ─────────────────
 
-// Reduced single-scattering albedo σ_s' / (σ_a + σ_s'). This is the fraction
-// of incident radiance that survives absorption per scattering event and sets
-// the diffuse "skin tint" — melanin darkens it, hemoglobin pushes it red.
+/// Reduced single-scatter albedo (transport theory).
+///
+///   ω₀ = σ_s' / (σ_a + σ_s')
+///
+/// where  σ_s' = σ_s · (1 − g)   (anisotropy-corrected scattering, mm⁻¹)
+///        σ_a  = absorption coefficient (mm⁻¹)
+/// The ratio sets the diffuse skin tint: melanin raises σ_a → darker ω₀,
+/// haemoglobin shifts ω₀ toward red.
 float3 layerAlbedo(SkinLayer layer)
 {
     float3 sigmaSprime = layer.sigmaS * (1.0 - layer.g);

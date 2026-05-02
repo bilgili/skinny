@@ -1,6 +1,15 @@
 // SDF-based human head using Loomis proportions.
 //
 // Conventions — one unit = approx. half a head height.
+//
+// References:
+//   [1] Quilez, "Modeling with Distance Functions",
+//       https://iquilezles.org/articles/distfunctions/ (ongoing reference).
+//   [2] d'Eon, Luebke,
+//       "Advanced Techniques for Realistic Real-Time Skin Rendering",
+//       GPU Gems 3, Chapter 14, Addison-Wesley 2007.
+//   [3] Hart, "Sphere Tracing: A Geometric Method for the Antialiased Ray
+//       Tracing of Implicit Surfaces", The Visual Computer, 1996.
 // The head's canonical bounds are roughly:
 //   x:  [-0.85, +0.85]   (sides, including ears)
 //   y:  [-0.97, +1.05]   (chin to crown; neck extends further down)
@@ -16,11 +25,21 @@ import common;
 
 // ── SDF primitives ──────────────────────────────────────────────
 
+/// Signed distance to a sphere centred at the origin [1].
+///
+///   d(p) = ‖p‖ − r
 float sdSphere(float3 p, float radius)
 {
     return length(p) - radius;
 }
 
+/// Signed distance to an axis-aligned ellipsoid [1].
+///
+///   k₀ = ‖p / r‖,   k₁ = ‖p / r²‖
+///   d(p) = k₀ · (k₀ − 1) / k₁
+///
+/// where r = per-axis radii.  The formula is an approximation;
+/// exact ellipsoid SDF has no closed form in 3D.
 float sdEllipsoid(float3 p, float3 radii)
 {
     float k0 = length(p / radii);
@@ -28,6 +47,10 @@ float sdEllipsoid(float3 p, float3 radii)
     return k0 * (k0 - 1.0) / k1;
 }
 
+/// Signed distance to a capsule (swept sphere) from a to b with radius r [1].
+///
+///   t    = clamp(dot(p−a, b−a) / ‖b−a‖², 0, 1)
+///   d(p) = ‖p − a − (b−a)·t‖ − r
 float sdCapsule(float3 p, float3 a, float3 b, float r)
 {
     float3 ab = b - a;
@@ -43,6 +66,13 @@ float sdRoundBox(float3 p, float3 b, float r)
 
 // ── Smooth boolean operators ────────────────────────────────────
 
+/// Smooth minimum (polynomial blend) — rounded SDF union [1].
+///
+///   h     = max(k − |a − b|, 0) / k
+///   smin  = min(a, b) − h² · k / 4
+///
+/// where  k = smoothing radius.  Blends the two SDFs within distance k of
+/// the union seam, giving a C¹-continuous rounded merge.
 float smin(float a, float b, float k)
 {
     float h = max(k - abs(a - b), 0.0) / k;
@@ -185,6 +215,14 @@ float sdHead(float3 p)
 
 // ── Normal via central differences ──────────────────────────────
 
+/// Surface normal via 6-tap central finite differences.
+///
+///   N(p) = normalize( (f(p + ε·eₓ) − f(p − ε·eₓ),
+///                      f(p + ε·eᵧ) − f(p − ε·eᵧ),
+///                      f(p + ε·e_z) − f(p − ε·e_z)) )
+///
+/// where  ε = 5×10⁻⁴  (MARCH_EPSILON, chosen to balance truncation and
+///        round-off error for the ~unit-scale head SDF).
 float3 calcHeadNormal(float3 p)
 {
     float2 e = float2(0.0005, 0.0);
@@ -201,6 +239,15 @@ static const int   MAX_MARCH_STEPS = 128;
 static const float MARCH_EPSILON   = 0.0005;
 static const float MARCH_MAX_DIST  = 20.0;
 
+/// Sphere tracing (ray marching) against the head SDF [3].
+///
+/// At each step, advance along the ray by d = f(p) (the safe step-size
+/// property of SDFs guarantees no surface overshoot when d > 0):
+///   t ← t + f(ray.origin + ray.direction · t)
+///
+/// Terminate when f < ε (surface hit) or t > t_max (miss).
+/// A second pass from the hit point finds the back-face exit for the
+/// volume march (delta-tracking needs slab entry/exit t-values).
 HitInfo marchHead(Ray ray)
 {
     HitInfo info;

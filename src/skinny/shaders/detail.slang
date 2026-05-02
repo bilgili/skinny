@@ -3,6 +3,13 @@
 // Both features are too small to represent as explicit geometry in a Monte-
 // Carlo path tracer, but both admit an analytic, per-pixel treatment:
 //
+// References:
+//   [1] Worley, "A Cellular Texture Basis Function", SIGGRAPH 1996.
+//   [2] Box, Muller, "A Note on the Generation of Random Normal Deviates",
+//       Annals of Mathematical Statistics, 1958.
+//   [3] Schlick, "An Inexpensive BRDF Model for Physically-Based Rendering",
+//       CGF 1994.
+//
 //   * Pores perturb the macro-surface normal + roughness around feature
 //     points defined by a 3D Worley noise on the shading position.
 //   * Vellus hair (fine, translucent body hair) contributes an anisotropic
@@ -33,8 +40,14 @@ float3 _hash3(int3 cell)
     return float3(_hash1(cell, 1u), _hash1(cell, 2u), _hash1(cell, 3u));
 }
 
-// Box-Muller pair from two uniform cell hashes — standard-normal variates
-// used to sample per-pore physical attributes (size, depth).
+/// Box-Muller transform — two uniform variates → two independent N(0,1) variates [2].
+///
+///   Z₀ = √(−2 ln u₁) · cos(2π·u₂)
+///   Z₁ = √(−2 ln u₁) · sin(2π·u₂)
+///
+/// where  u₁, u₂ ∈ (0, 1]  (uniform cell hashes; u₁ clamped away from 0)
+/// Used to sample per-pore physical attributes (size, depth) from a
+/// log-normal distribution: exp(μ + σ·Z) for chosen μ, σ.
 float2 _sampleNormal2(int3 cell, uint saltA, uint saltB)
 {
     float u1  = max(_hash1(cell, saltA), 1e-6);
@@ -45,9 +58,17 @@ float2 _sampleNormal2(int3 cell, uint saltA, uint saltB)
 }
 
 // ── Worley F1 ───────────────────────────────────────────────────
-// Returns the distance to the nearest jittered cell centre and the
-// vector from the query point toward that centre (used for normal tilt).
 
+/// 3D Worley (cellular) noise — F1 distance to the nearest jittered cell [1].
+///
+/// For a query point p, each integer cell c ∈ Z³ has a jittered centre:
+///   centre(c) = c + hash3(c)       (per-component uniform in [0, 1))
+///
+/// F1(p) = min_{c ∈ 3³ neighbourhood} ‖centre(c) − p‖₂
+///
+/// The 3×3×3 neighbour search (27 cells) guarantees the nearest centre is
+/// found for any jitter amplitude ≤ 1. Returns F1 distance plus the vector
+/// to the winning centre (used to tilt the surface normal toward pore walls).
 struct WorleyResult
 {
     float  f1;
@@ -164,9 +185,19 @@ PoreSample applyPores(float3 N, float3 P, float density, float depth)
 // Sub-pixel translucent hairs viewed as a statistical ensemble — at
 // grazing angles they backscatter incident light toward the viewer,
 // giving skin its characteristic pale silhouette rim. We encode this as
-// a bounded Schlick-Fresnel-shaped rim term and return it as a *BRDF*
+// a Schlick-Fresnel-shaped rim term [3] and return it as a *BRDF*
 // (no NdotL baked in) so both direct and IBL integrators can consume it
 // with the correct cosine weighting.
+///
+/// Vellus hair sheen BRDF — Schlick-Fresnel rim approximation [3].
+///
+///   f_hair(v) = 0.3 · density · tiltK · (1 − n·v)⁵ · hairColour
+///
+/// where  n·v   = dot(shading normal, view dir) ∈ [0, 1]
+///        tiltK = lerp(0.35, 1.0, tilt)   (hair population inclination)
+///        (1 − n·v)⁵ = Schlick rim factor (grazing-angle back-scatter)
+/// Returned as a BRDF; caller multiplies by (n·l) for direct light or
+/// by π for IBL cosine-sampled integral.
 //
 // `tilt` rotates the hair population from lying flat (tilt=0, faint rim)
 // to standing up (tilt=1, strong rim). The 0.3 leading constant was set

@@ -10,6 +10,13 @@ for skin colour; here we cross it with a coarse male/female split that nudges
 dermis thickness, vellus hair density/tilt, surface roughness, and subcutaneous
 thickness.  The numbers are starting points -- the sliders let the user tune
 from there.
+
+References:
+    [1] Donner, Jensen, "A Spectral BSSRDF for Shading Human Skin", EGSR 2006.
+        Melanin volume fractions (_FITZ_MELANIN) are derived from the light /
+        medium / dark skin classification in Table 1.
+    [2] Fitzpatrick, "A New Approach to the Classification of Photomorphotypes",
+        Archives of Dermatology, 1988.
 """
 
 from __future__ import annotations
@@ -28,8 +35,10 @@ class Preset:
 
 _FITZ_ROMAN = ["I", "II", "III", "IV", "V", "VI"]
 
-# Melanin volume fraction per Fitzpatrick type. Rough fit matching Donner &
-# Jensen (2006) light / medium / dark bands, stretched to six steps.
+# Melanin volume fraction per Fitzpatrick type [1, 2].
+# Rough fit to Donner & Jensen Table 1 light / medium / dark bands,
+# stretched across six Fitzpatrick steps:
+#   c_mel ∈ [0.03, 0.65]   (eumelanin volume fraction driving σ_a in skin_bssrdf.slang)
 _FITZ_MELANIN = {1: 0.03, 2: 0.07, 3: 0.15, 4: 0.25, 5: 0.40, 6: 0.65}
 
 
