@@ -42,7 +42,34 @@ class ComputePipeline:
 
     # ── Slang → SPIR-V compilation ───────────────────────────────
 
+    def _run_codegen(self) -> None:
+        """Regenerate .slang from python_materials/ via embedded SlangPile."""
+        import logging
+        import sys
+
+        from skinny.slangpile import build_module
+
+        log = logging.getLogger("skinny.codegen")
+        materials_dir = Path(__file__).resolve().parent.parent.parent / "python_materials"
+        if not materials_dir.is_dir():
+            return
+        py_files = [f for f in sorted(materials_dir.glob("*.py")) if f.name != "__init__.py"]
+        if not py_files:
+            return
+        out_dir = self.shader_dir.parent / "mtlx" / "genslang"
+        sys.path.insert(0, str(materials_dir.parent))
+        try:
+            for f in py_files:
+                mod_name = f"python_materials.{f.stem}"
+                log.debug("codegen: %s", mod_name)
+                build_module(mod_name, out_dir)
+        except Exception as exc:
+            log.debug("codegen failed (non-fatal): %s", exc)
+        finally:
+            sys.path.pop(0)
+
     def _compile_slang(self) -> Path:
+        self._run_codegen()
         src = self.shader_dir / f"{self.entry_module}.slang"
         out = self.shader_dir / f"{self.entry_module}.spv"
 

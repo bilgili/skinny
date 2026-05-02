@@ -42,12 +42,23 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 
     if (hit.hit)
     {
+        // IIntegrator dispatch deferred to Phase 4 — until path / MIS /
+        // light tracers diverge in body, monomorphizing all three at the
+        // call site triples SPV size with no behavioral gain. The
+        // integrator structs (integrators/{path,mis,light}.slang) define
+        // the seam; today the slider still steers behavior via the
+        // fc.integratorMode reads inside skin estimators.
         sample = evalMaterial(hit, ray, rng);
     }
     else
     {
         sample = sceneEnvRadiance(ray.direction, fc.envIntensity, fc.furnaceMode);
     }
+
+    // Reject NaN / negative / inf samples — a single corrupted value
+    // permanently poisons the running mean for that pixel.
+    if (any(isnan(sample)) || any(isinf(sample)) || any(sample < float3(0.0)))
+        sample = float3(0.0);
 
     // Progressive accumulation — running mean in linear HDR.
     uint n = fc.accumFrame;

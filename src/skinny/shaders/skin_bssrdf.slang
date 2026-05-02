@@ -236,10 +236,10 @@ float ggxDistribution(float NdotH, float roughness)
 float3 evaluateSkinSpecular(float3 N, float3 V, float3 L, float roughness, float ior)
 {
     float3 H    = normalize(V + L);
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float VdotH = max(dot(V, H), 0.0);
+    float NdotH = max(dot(N, H), 1e-6);
+    float NdotV = max(dot(N, V), 1e-6);
+    float NdotL = max(dot(N, L), 1e-6);
+    float VdotH = max(dot(V, H), 1e-6);
 
     float D = ggxDistribution(NdotH, roughness);
     float G = ggxSmithG1(NdotV, roughness) * ggxSmithG1(NdotL, roughness);

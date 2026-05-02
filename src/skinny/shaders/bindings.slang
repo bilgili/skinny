@@ -17,5 +17,6 @@ uniform float3         lightRadiance;
 [[vk::binding(19)]] StructuredBuffer<StdSurfaceParams> stdSurfaceParams;
 [[vk::binding(20)]] StructuredBuffer<ProceduralParams> proceduralParams;
 
-static const uint MATERIAL_TYPE_SKIN = 0u;
-static const uint MATERIAL_TYPE_FLAT = 1u;
+static const uint MATERIAL_TYPE_SKIN         = 0u;
+static const uint MATERIAL_TYPE_FLAT         = 1u;
+static const uint MATERIAL_TYPE_DEBUG_NORMAL = 2u;

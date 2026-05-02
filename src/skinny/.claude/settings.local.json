@@ -89,7 +89,20 @@
       "PowerShell(Set-Location D:\\\\projects\\\\skinny; $env:PYTHONUNBUFFERED=\"1\"; Start-Process python -ArgumentList \"-m\",\"skinny.app\" -NoNewWindow -RedirectStandardOutput \"$env:TEMP\\\\skinny_sdf_stdout.txt\" -RedirectStandardError \"$env:TEMP\\\\skinny_sdf_stderr.txt\")",
       "PowerShell(Set-Location D:\\\\projects\\\\skinny; $env:PYTHONUNBUFFERED=\"1\"; Start-Process python -ArgumentList \"-m\",\"skinny.app\" -NoNewWindow -RedirectStandardOutput \"$env:TEMP\\\\skinny_dbg_stdout.txt\" -RedirectStandardError \"$env:TEMP\\\\skinny_dbg_stderr.txt\")",
       "PowerShell(python -c \"scatter_bits=[0b11,0b01,0b10,0b00]; t=0; idx=2; print\\('volume-only packing:', hex\\(t | \\(scatter_bits[idx] << 8\\)\\)\\)\")",
-      "PowerShell(Start-Sleep -Seconds 10; Get-Content C:\\\\Users\\\\a_bil\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\D--projects-skinny-src-skinny\\\\39b774f2-c877-47ba-8258-2f8a909223de\\\\tasks\\\\bfibb05ae.output -ErrorAction SilentlyContinue; if \\($LASTEXITCODE\\) { \"exit: $LASTEXITCODE\" })"
+      "PowerShell(Start-Sleep -Seconds 10; Get-Content C:\\\\Users\\\\a_bil\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\D--projects-skinny-src-skinny\\\\39b774f2-c877-47ba-8258-2f8a909223de\\\\tasks\\\\bfibb05ae.output -ErrorAction SilentlyContinue; if \\($LASTEXITCODE\\) { \"exit: $LASTEXITCODE\" })",
+      "Bash(Get-ChildItem *)",
+      "PowerShell(Get-ChildItem -Recurse D:\\\\projects\\\\skinny\\\\src | Where-Object {$_.Extension -match '\\(cpp|h|py\\)$'} | Select-Object FullName)",
+      "PowerShell(Get-ChildItem -Recurse D:\\\\projects\\\\skinny | Where-Object {$_.Extension -match '\\(cpp|h|py\\)$'} | Select-Object FullName)",
+      "PowerShell(Get-ChildItem D:\\\\projects\\\\skinny\\\\src -Recurse | Where-Object {$_.Extension -in @\\('.py', '.cpp', '.h', '.slang', '.txt'\\)} -and -not $_.FullName -match 'site-packages' | Select-Object FullName | Sort-Object)",
+      "Bash(echo \"EXIT=$?\")",
+      "PowerShell(New-Item *)",
+      "PowerShell($shaderDir = \"D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\shaders\"; $mtlxDir = \"D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\mtlx\\\\genslang\"; $src = \"$shaderDir\\\\main_pass.slang\"; $out = \"$shaderDir\\\\main_pass_test.spv\"; & slangc $src -target spirv -entry mainImage -stage compute -o $out -I $shaderDir -I $mtlxDir -D SKINNY_COMPUTE_PIPELINE=1 -fvk-use-scalar-layout 2>&1 | Out-String)",
+      "PowerShell(python -c \"from pathlib import Path; p = Path\\('D:/projects/skinny/src/skinny/vk_compute.py'\\).resolve\\(\\).parent.parent.parent / 'python_materials'; print\\(p\\); print\\('exists:', p.is_dir\\(\\)\\)\")",
+      "PowerShell(python -c \"from skinny.vk_compute import VulkanComputePipeline; print\\('import OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from skinny.vk_compute import ComputePipeline; print\\('import OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from skinny.slangpile import build_module, shader, extern; print\\('embedded slangpile import OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from skinny.slangpile.compiler import ModuleCompiler; print\\('compiler subpackage OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"from skinny.vk_compute import ComputePipeline; print\\('vk_compute OK'\\)\" 2>&1)"
     ]
   }
 }
