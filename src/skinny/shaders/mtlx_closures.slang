@@ -262,6 +262,18 @@ float3 mx_forward_facing_normal(float3 N, float3 V)
     return (dot(N, V) < 0.0) ? -N : N;
 }
 
+// Gram-Schmidt orthogonalize tangent X against normal N.
+// Falls back to a safe perpendicular when X is (nearly) parallel to N.
+float3 mx_orthogonalize_tangent(float3 X, float3 N)
+{
+    float3 proj = X - dot(X, N) * N;
+    float lenSq = dot(proj, proj);
+    if (lenSq > 1e-6)
+        return proj * rsqrt(lenSq);
+    float3 up = abs(N.x) > 0.9 ? float3(0, 1, 0) : float3(1, 0, 0);
+    return normalize(up - dot(up, N) * N);
+}
+
 // https://www.graphics.rwth-aachen.de/publication/2/jgt.pdf
 float mx_golden_ratio_sequence(int i)
 {
@@ -1299,7 +1311,7 @@ void mx_dielectric_bsdf(ClosureData closureData, float weight, float3 tint, floa
 
     if (closureData.closureType == CLOSURE_TYPE_REFLECTION)
     {
-        X = normalize(X - dot(X, N) * N);
+        X = mx_orthogonalize_tangent(X, N);
         float3 Y = cross(N, X);
         float3 H = normalize(L + V);
 
@@ -1368,7 +1380,7 @@ void mx_conductor_bsdf(ClosureData closureData, float weight, float3 ior_n, floa
 
     if (closureData.closureType == CLOSURE_TYPE_REFLECTION)
     {
-        X = normalize(X - dot(X, N) * N);
+        X = mx_orthogonalize_tangent(X, N);
         float3 Y = cross(N, X);
         float3 H = normalize(L + V);
 

@@ -249,11 +249,15 @@ float3 volumeRenderSkin(
         //   dot(currentRay.direction, lightDir).
         if (hasDirect)
         {
-            float cosScatter = dot(currentRay.direction, lightDir);
-            float phase      = henyeyGreenstein(cosScatter, layer.g);
-            float shadowDist = totalThicknessMM - depthMM;   // mm, matches sigmaT units
-            float3 shadowTr  = exp(-sigmaT * shadowDist);
-            radiance += throughput * ms.scattering * phase * lightRadiance * shadowTr;
+            float cosLight = dot(lightDir, slabOut);
+            if (cosLight > 0.001)
+            {
+                float cosScatter = dot(currentRay.direction, lightDir);
+                float phase      = henyeyGreenstein(cosScatter, layer.g);
+                float shadowDist = depthMM / cosLight;
+                float3 shadowTr  = exp(-sigmaT * shadowDist);
+                radiance += throughput * ms.scattering * phase * lightRadiance * shadowTr;
+            }
         }
 
         // NEE (b) — environment. Importance-sample HG around the photon's

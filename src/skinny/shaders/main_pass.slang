@@ -79,10 +79,12 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
         sample = sceneEnvRadiance(ray.direction, fc.envIntensity, fc.furnaceMode);
     }
 
-    // Reject NaN / negative / inf samples — a single corrupted value
-    // permanently poisons the running mean for that pixel.
-    if (any(isnan(sample)) || any(isinf(sample)) || any(sample < float3(0.0)))
-        sample = float3(0.0);
+    // Sanitize NaN / Inf / negative components without nuking healthy
+    // channels: a tiny float-noise negative in green should not zero out
+    // a valid red contribution.
+    bool3 bad = isnan(sample) | isinf(sample);
+    sample = select(bad, float3(0.0), sample);
+    sample = max(sample, float3(0.0));
 
     // Progressive accumulation — running mean in linear HDR.
     uint n = fc.accumFrame;

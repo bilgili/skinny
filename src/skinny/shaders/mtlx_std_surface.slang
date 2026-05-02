@@ -230,6 +230,12 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
     BSDF coat_layer;
     mx_layer_bsdf(cd, coat_bsdf, attenuated, coat_layer);
 
+    // Guard against NaN / negative response from energy-compensation
+    // overestimates or degenerate half-vector configurations.
+    bool3 bad = isnan(coat_layer.response) | isinf(coat_layer.response);
+    coat_layer.response = select(bad, float3(0.0), coat_layer.response);
+    coat_layer.response = max(coat_layer.response, float3(0.0));
+
     return coat_layer;
 }
 
