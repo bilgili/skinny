@@ -8,11 +8,17 @@
 //
 // `bindings.slang` defines `materialTypes[]`; the encoding below is the
 // agreed contract with `_pack_material_types_buffer()` on the renderer.
+//
+// Adding a new material is one case statement: load the concrete IMaterial
+// struct, call runEstimators<TM>(m, ray, rng). Slang monomorphizes one
+// instantiation per material type — no shared dispatch plumbing to update.
 
 import common;
 import bindings;
+import interfaces;
 import flat_material;
 import skin_material;
+import debug_normal_material;
 
 float3 evalMaterial(HitInfo hit, Ray ray, inout RNG rng)
 {
@@ -20,10 +26,22 @@ float3 evalMaterial(HitInfo hit, Ray ray, inout RNG rng)
     uint matType     = matFlags & 0xFFu;
     uint scatterBits = (matFlags >> 8) & 0x3u;
 
-    if (matType == MATERIAL_TYPE_FLAT)
-        return evalFlatMaterial(hit, ray, rng);
-
-    return evalSkinMaterial(
-        hit, ray, rng, fc, lightDirection, lightRadiance, scatterBits
-    );
+    switch (matType)
+    {
+        case MATERIAL_TYPE_FLAT:
+        {
+            FlatMaterial m = loadFlat(hit);
+            return runEstimators(m, ray, rng);
+        }
+        case MATERIAL_TYPE_DEBUG_NORMAL:
+        {
+            DebugNormalMaterial m = loadDebugNormal(hit);
+            return runEstimators(m, ray, rng);
+        }
+        default:
+        {
+            SkinMaterial m = loadSkin(hit, scatterBits);
+            return runEstimators(m, ray, rng);
+        }
+    }
 }
