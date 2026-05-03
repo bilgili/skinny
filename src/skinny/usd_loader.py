@@ -16,10 +16,13 @@ mesh in the loaded stage shares it.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
@@ -484,6 +487,7 @@ def _resolve_layer_asset(
     p = (stage_dir / asset_path).resolve()
     if p.exists():
         return p
+    log.warning("could not resolve asset %r (stage_dir=%s)", asset_path, stage_dir)
     return None
 
 
@@ -497,6 +501,7 @@ def _load_mtlx_materials(
     fails (typical symptom of the missing usdMtlx file-format plugin).
     """
     if not _HAS_MATERIALX:
+        log.warning("MaterialX Python package not installed — cannot load .mtlx fallback materials")
         return {}
 
     asset_paths = _collect_mtlx_asset_paths(stage)
@@ -514,7 +519,7 @@ def _load_mtlx_materials(
             doc = mx.createDocument()
             mx.readFromXmlFile(doc, str(mtlx_file))
         except Exception as e:
-            print(f"[skinny] failed to load MaterialX {mtlx_file.name}: {e}")
+            log.warning("failed to load MaterialX %s: %s", mtlx_file.name, e)
             continue
 
         mtlx_dir = mtlx_file.parent
@@ -599,9 +604,15 @@ def _load_mtlx_materials(
             )
 
     if result:
-        print(
-            f"[skinny] loaded {len(result)} material(s) from "
-            f"{len(asset_paths)} .mtlx file(s) via MaterialX API fallback"
+        log.info(
+            "loaded %d material(s) from %d .mtlx file(s) via MaterialX API fallback",
+            len(result), len(asset_paths),
+        )
+    else:
+        log.warning(
+            "found %d .mtlx asset path(s) but loaded 0 materials "
+            "(MaterialX API fallback produced nothing)",
+            len(asset_paths),
         )
     return result
 
@@ -645,6 +656,7 @@ def _resolve_material_binding(
             ancestor = ancestor.GetParent()
 
     if not bound:
+        log.debug("prim %s: no material binding resolved — using skin fallback", prim.GetPath())
         return 0  # fallback skin material
 
     mat_path = str(bound.GetPath())

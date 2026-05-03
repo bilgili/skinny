@@ -108,6 +108,15 @@ class SkinnySession:
                 jpeg = self.encoder.encode_jpeg(raw, quality=quality)
                 self._push_frame(2, jpeg)
 
+            # Adaptive rate: full speed during interaction, throttle when converging
+            af = self.accum_frame
+            if af > 200:
+                time.sleep(0.5)
+            elif af > 50:
+                time.sleep(0.1)
+            elif af > 10:
+                time.sleep(0.03)
+
     def _push_frame(self, frame_type: int, data: bytes) -> None:
         header = struct.pack("!BI", frame_type, self.accum_frame)
         frame = header + data
@@ -134,13 +143,15 @@ class SkinnySession:
             cam.pan(data.get("dx", 0), data.get("dy", 0))
         elif action == "zoom":
             cam.zoom(data.get("delta", 0))
-        elif action == "move":
+        elif action == "move" and hasattr(cam, "move"):
             cam.move(
                 float(data.get("forward", 0)),
                 float(data.get("right", 0)),
                 float(data.get("up", 0)),
                 float(data.get("dt", 0.016)),
             )
+        if self.encoder.is_h264:
+            self.encoder.force_keyframe()
 
     def cleanup(self) -> None:
         log.info("Cleaning up session %s", self.session_id)
@@ -321,6 +332,73 @@ def create_panel_app() -> pn.viewable.Viewable:
         group_widgets = [make_widget(p) for p in group_params]
         sections.append((group_name, pn.Column(*group_widgets)))
 
+    usd_scene = getattr(session.renderer, "_usd_scene", None)
+    if usd_scene is not None and usd_scene.materials:
+        mat_widgets = []
+        for mat_id, mat in list(enumerate(usd_scene.materials))[1:]:
+            mat_section_widgets = []
+            for key, lo, hi in (
+                ("roughness",      0.04, 1.0),
+                ("metallic",       0.0,  1.0),
+                ("specular",       0.0,  1.0),
+                ("opacity",        0.0,  1.0),
+                ("ior",            1.0,  3.0),
+                ("coat",           0.0,  1.0),
+                ("coat_roughness", 0.0,  1.0),
+            ):
+                cur = mat.parameter_overrides.get(key)
+                try:
+                    val = float(cur) if cur is not None else 0.5
+                except (TypeError, ValueError):
+                    val = 0.5
+                val = max(lo, min(hi, val))
+                w = pn.widgets.FloatSlider(
+                    name=key, start=lo, end=hi, step=0.01, value=val,
+                )
+
+                def on_mat_change(event, mid=mat_id, k=key):
+                    session.renderer.apply_material_override(mid, k, event.new)
+                    if session.encoder.is_h264:
+                        session.encoder.force_keyframe()
+
+                w.param.watch(on_mat_change, "value")
+                mat_section_widgets.append(w)
+
+            diff = mat.parameter_overrides.get("diffuseColor")
+            if diff is not None and "diffuseColor" not in mat.texture_paths:
+                try:
+                    r, g, b = float(diff[0]), float(diff[1]), float(diff[2])
+                except (TypeError, IndexError, ValueError):
+                    r, g, b = 0.8, 0.8, 0.8
+                hex_color = "#{:02x}{:02x}{:02x}".format(
+                    max(0, min(255, int(round(r * 255)))),
+                    max(0, min(255, int(round(g * 255)))),
+                    max(0, min(255, int(round(b * 255)))),
+                )
+                cw = pn.widgets.ColorPicker(name="diffuseColor", value=hex_color)
+
+                def on_color(event, mid=mat_id):
+                    h = event.new.lstrip("#")
+                    rf = int(h[0:2], 16) / 255.0
+                    gf = int(h[2:4], 16) / 255.0
+                    bf = int(h[4:6], 16) / 255.0
+                    session.renderer.apply_material_override(
+                        mid, "diffuseColor", (rf, gf, bf)
+                    )
+                    if session.encoder.is_h264:
+                        session.encoder.force_keyframe()
+
+                cw.param.watch(on_color, "value")
+                mat_section_widgets.insert(0, cw)
+
+            mat_widgets.append(
+                (mat.name, pn.Column(*mat_section_widgets))
+            )
+
+        if mat_widgets:
+            mat_accordion = pn.Accordion(*mat_widgets, active=[])
+            sections.append(("Materials", pn.Column(mat_accordion)))
+
     sidebar = pn.Accordion(*sections, active=list(range(len(sections))))
 
     iframe_html = (
@@ -364,12 +442,14 @@ def main() -> None:
     parser.add_argument("--gpu", type=str, default="auto",
                         help="GPU preference: intel, nvidia, amd, discrete, auto")
     parser.add_argument("--max-sessions", type=int, default=4)
+    parser.add_argument("--usd", type=Path, default=None,
+                        help="Path to a USD stage (alternative to positional scene arg).")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
     args = parser.parse_args()
 
     global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX
     _GPU_PREFERENCE = args.gpu
-    _USD_PATH = args.scene
+    _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
