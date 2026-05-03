@@ -1626,6 +1626,20 @@ class Renderer:
         # per-material panel.
         self._material_version: int = 0
 
+        # Offscreen output image + readback buffer for headless mode.
+        # Must be created before _create_descriptors which writes binding 1.
+        if self.ctx.swapchain_info is None:
+            from skinny.vk_compute import ReadbackBuffer
+            self._offscreen_output = StorageImage(
+                self.ctx, self.width, self.height,
+                format=vk.VK_FORMAT_R8G8B8A8_UNORM,
+                transfer_src=True,
+            )
+            self._readback = ReadbackBuffer(self.ctx, self.width, self.height)
+        else:
+            self._offscreen_output = None
+            self._readback = None
+
         # Descriptor pool and sets
         self._create_descriptors()
 
@@ -1633,21 +1647,24 @@ class Renderer:
         self.command_buffers = self.ctx.allocate_command_buffers(MAX_FRAMES_IN_FLIGHT)
 
         # Synchronisation
-        swapchain_image_count = len(self.ctx.swapchain_info.images)
-        self.image_available = [
-            vk.vkCreateSemaphore(
-                self.ctx.device, vk.VkSemaphoreCreateInfo(), None
-            )
-            for _ in range(MAX_FRAMES_IN_FLIGHT)
-        ]
-        # One render_finished semaphore per swapchain image to avoid
-        # signalling a semaphore still in use by a prior present.
-        self.render_finished = [
-            vk.vkCreateSemaphore(
-                self.ctx.device, vk.VkSemaphoreCreateInfo(), None
-            )
-            for _ in range(swapchain_image_count)
-        ]
+        if self.ctx.swapchain_info is not None:
+            swapchain_image_count = len(self.ctx.swapchain_info.images)
+            self.image_available = [
+                vk.vkCreateSemaphore(
+                    self.ctx.device, vk.VkSemaphoreCreateInfo(), None
+                )
+                for _ in range(MAX_FRAMES_IN_FLIGHT)
+            ]
+            self.render_finished = [
+                vk.vkCreateSemaphore(
+                    self.ctx.device, vk.VkSemaphoreCreateInfo(), None
+                )
+                for _ in range(swapchain_image_count)
+            ]
+        else:
+            self.image_available = []
+            self.render_finished = []
+
         self.in_flight_fences = [
             vk.vkCreateFence(
                 self.ctx.device,
@@ -1714,7 +1731,8 @@ class Renderer:
 
         # Write descriptors (UBO at binding 0, accumulation image at binding 2).
         # Binding 1 (swapchain image) is updated per-frame in render() because
-        # the acquired image index changes.
+        # the acquired image index changes. In headless mode, binding 1 points
+        # to the persistent offscreen output image and is written here once.
         for ds in self.descriptor_sets:
             buf_info = vk.VkDescriptorBufferInfo(
                 buffer=self.uniform_buffer.buffer,
@@ -1955,6 +1973,19 @@ class Renderer:
                     pBufferInfo=[procedural_info],
                 ),
             ]
+            if self._offscreen_output is not None:
+                output_info = vk.VkDescriptorImageInfo(
+                    imageView=self._offscreen_output.view,
+                    imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+                )
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=1,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    pImageInfo=[output_info],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _upload_mesh(self, mesh: Mesh) -> None:
@@ -2879,6 +2910,108 @@ class Renderer:
 
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
 
+    def render_headless(self) -> bytes:
+        """Render one frame to an offscreen image and return raw RGBA8 pixels."""
+        f = self.current_frame
+
+        vk.vkWaitForFences(
+            self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
+        )
+        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
+
+        self.uniform_buffer.upload(self._pack_uniforms())
+        mtlx_bytes = self._pack_mtlx_skin_array()
+        if mtlx_bytes:
+            self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+
+        cmd = self.command_buffers[f]
+        vk.vkResetCommandBuffer(cmd, 0)
+        begin_info = vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        )
+        vk.vkBeginCommandBuffer(cmd, begin_info)
+
+        accum_mem_barrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, [accum_mem_barrier], 0, None, 0, None,
+        )
+
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            self.pipeline.pipeline_layout,
+            0, 1, [self.descriptor_sets[f]],
+            0, None,
+        )
+
+        groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+
+        # Transition offscreen output: GENERAL → TRANSFER_SRC for readback
+        barrier_to_src = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image=self._offscreen_output.image,
+            subresourceRange=vk.VkImageSubresourceRange(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                baseMipLevel=0, levelCount=1,
+                baseArrayLayer=0, layerCount=1,
+            ),
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, None, 0, None, 1, [barrier_to_src],
+        )
+
+        self._readback.record_copy_from(cmd, self._offscreen_output.image)
+
+        # Transition back: TRANSFER_SRC → GENERAL for next frame's compute write
+        barrier_to_general = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            image=self._offscreen_output.image,
+            subresourceRange=vk.VkImageSubresourceRange(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                baseMipLevel=0, levelCount=1,
+                baseArrayLayer=0, layerCount=1,
+            ),
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, None, 0, None, 1, [barrier_to_general],
+        )
+
+        vk.vkEndCommandBuffer(cmd)
+
+        submit_info = vk.VkSubmitInfo(
+            commandBufferCount=1,
+            pCommandBuffers=[cmd],
+        )
+        vk.vkQueueSubmit(self.ctx.compute_queue, 1, [submit_info], self.in_flight_fences[f])
+
+        vk.vkWaitForFences(
+            self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
+        )
+
+        self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
+        return self._readback.read()
+
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
 
@@ -2889,6 +3022,7 @@ class Renderer:
 
         vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
         self.texture_pool.destroy()
+        self.procedural_params_buffer.destroy()
         self.std_surface_buffer.destroy()
         self.emissive_tri_buffer.destroy()
         self.sphere_lights_buffer.destroy()
@@ -2905,6 +3039,10 @@ class Renderer:
         self.env_image.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
+        if self._offscreen_output is not None:
+            self._offscreen_output.destroy()
+        if self._readback is not None:
+            self._readback.destroy()
         self.uniform_buffer.destroy()
         self.mtlx_skin_buffer.destroy()
         self.pipeline.destroy()

@@ -1,12 +1,18 @@
-"""Vulkan context — instance, device, queues, and swapchain management."""
+"""Vulkan context — instance, device, queues, and swapchain management.
+
+Supports two modes:
+- **Windowed** (default): pass a GLFW window → creates surface + swapchain.
+- **Headless** (``window=None``): compute-only, no surface/swapchain.
+"""
 
 from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass
 
-import glfw
 import vulkan as vk
+
+from skinny.hardware import GpuInfo, select_gpu
 
 
 @dataclass
@@ -22,32 +28,57 @@ class VulkanContext:
     """Manages the core Vulkan objects needed for compute-based rendering."""
 
     VALIDATION_LAYERS = ["VK_LAYER_KHRONOS_validation"]
-    DEVICE_EXTENSIONS = [vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME]
 
-    def __init__(self, window, width: int, height: int, enable_validation: bool = True) -> None:
+    def __init__(
+        self,
+        window=None,
+        width: int = 1280,
+        height: int = 720,
+        *,
+        enable_validation: bool = True,
+        gpu_preference: str | None = None,
+    ) -> None:
         self.width = width
         self.height = height
         self._enable_validation = enable_validation
+        self._headless = window is None
 
-        self.instance = self._create_instance()
-        self._load_instance_functions()
-        self.surface = self._create_surface(window)
-        self.physical_device = self._pick_physical_device()
+        self.instance = self._create_instance(window)
+
+        if not self._headless:
+            self._load_surface_instance_functions()
+
+        self.surface = None if self._headless else self._create_surface(window)
+
+        gpu = select_gpu(self.instance, gpu_preference)
+        self.gpu_info: GpuInfo = gpu
+        self.physical_device = gpu.vk_physical_device
+        print(f"[GPU] Selected: {gpu}")
+
         self.queue_family_indices = self._find_queue_families()
         self.device = self._create_device()
-        self._load_device_functions()
+
+        if not self._headless:
+            self._load_swapchain_device_functions()
+
         self.compute_queue = vk.vkGetDeviceQueue(
             self.device, self.queue_family_indices["compute"], 0
         )
-        self.present_queue = vk.vkGetDeviceQueue(
-            self.device, self.queue_family_indices["present"], 0
-        )
-        self.swapchain_info = self._create_swapchain()
+
+        if self._headless:
+            self.present_queue = None
+            self.swapchain_info = None
+        else:
+            self.present_queue = vk.vkGetDeviceQueue(
+                self.device, self.queue_family_indices["present"], 0
+            )
+            self.swapchain_info = self._create_swapchain()
+
         self.command_pool = self._create_command_pool()
 
     # ── Instance ─────────────────────────────────────────────────
 
-    def _create_instance(self):
+    def _create_instance(self, window):
         app_info = vk.VkApplicationInfo(
             pApplicationName="Skinny",
             applicationVersion=vk.VK_MAKE_VERSION(0, 1, 0),
@@ -56,7 +87,12 @@ class VulkanContext:
             apiVersion=vk.VK_MAKE_VERSION(1, 3, 0),
         )
 
-        extensions = glfw.get_required_instance_extensions()
+        if self._headless:
+            extensions = []
+        else:
+            import glfw
+            extensions = glfw.get_required_instance_extensions()
+
         layers = self.VALIDATION_LAYERS if self._enable_validation else []
 
         create_info = vk.VkInstanceCreateInfo(
@@ -68,7 +104,7 @@ class VulkanContext:
         )
         return vk.vkCreateInstance(create_info, None)
 
-    def _load_instance_functions(self):
+    def _load_surface_instance_functions(self):
         get = vk.vkGetInstanceProcAddr
         self._vkGetPhysicalDeviceSurfaceSupportKHR = get(
             self.instance, "vkGetPhysicalDeviceSurfaceSupportKHR"
@@ -84,7 +120,7 @@ class VulkanContext:
         )
         self._vkDestroySurfaceKHR = get(self.instance, "vkDestroySurfaceKHR")
 
-    def _load_device_functions(self):
+    def _load_swapchain_device_functions(self):
         get = vk.vkGetDeviceProcAddr
         self._vkCreateSwapchainKHR = get(self.device, "vkCreateSwapchainKHR")
         self._vkGetSwapchainImagesKHR = get(self.device, "vkGetSwapchainImagesKHR")
@@ -95,7 +131,7 @@ class VulkanContext:
     # ── Surface ──────────────────────────────────────────────────
 
     def _create_surface(self, window):
-        # Convert cffi VkInstance to raw integer for ctypes-based glfw
+        import glfw
         instance_handle = int(vk.ffi.cast("uintptr_t", self.instance))
         surface = ctypes.c_void_p(0)
         result = glfw.create_window_surface(
@@ -105,26 +141,18 @@ class VulkanContext:
             raise RuntimeError(f"Failed to create Vulkan surface: {result}")
         return vk.ffi.cast("VkSurfaceKHR", surface.value)
 
-    # ── Physical device ──────────────────────────────────────────
-
-    def _pick_physical_device(self):
-        devices = vk.vkEnumeratePhysicalDevices(self.instance)
-        if not devices:
-            raise RuntimeError("No Vulkan-capable GPU found")
-
-        # Prefer discrete GPU
-        for dev in devices:
-            props = vk.vkGetPhysicalDeviceProperties(dev)
-            if props.deviceType == vk.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-                return dev
-        return devices[0]
-
     # ── Queue families ───────────────────────────────────────────
 
     def _find_queue_families(self) -> dict[str, int]:
         families = vk.vkGetPhysicalDeviceQueueFamilyProperties(self.physical_device)
-        indices: dict[str, int | None] = {"compute": None, "present": None}
 
+        if self._headless:
+            for i, family in enumerate(families):
+                if family.queueFlags & vk.VK_QUEUE_COMPUTE_BIT:
+                    return {"compute": i}
+            raise RuntimeError("No compute queue family found")
+
+        indices: dict[str, int | None] = {"compute": None, "present": None}
         for i, family in enumerate(families):
             if family.queueFlags & vk.VK_QUEUE_COMPUTE_BIT:
                 indices["compute"] = i
@@ -150,23 +178,23 @@ class VulkanContext:
             for idx in unique_families
         ]
 
-        # Phase C-4: enable Vulkan 1.2 descriptor-indexing features so the
-        # bindless flat-material texture array (binding 14) can hold partially
-        # populated slots and tolerate non-uniform index accesses across
-        # threads in the same dispatch (different pixels hit different
-        # materials, so the texture index is not invocation-uniform).
         indexing_features = vk.VkPhysicalDeviceVulkan12Features(
             descriptorBindingPartiallyBound=vk.VK_TRUE,
             shaderSampledImageArrayNonUniformIndexing=vk.VK_TRUE,
             scalarBlockLayout=vk.VK_TRUE,
         )
 
+        device_extensions = (
+            [] if self._headless
+            else [vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME]
+        )
+
         device_create_info = vk.VkDeviceCreateInfo(
             pNext=indexing_features,
             queueCreateInfoCount=len(queue_create_infos),
             pQueueCreateInfos=queue_create_infos,
-            enabledExtensionCount=len(self.DEVICE_EXTENSIONS),
-            ppEnabledExtensionNames=self.DEVICE_EXTENSIONS,
+            enabledExtensionCount=len(device_extensions),
+            ppEnabledExtensionNames=device_extensions,
             pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
         )
         return vk.vkCreateDevice(self.physical_device, device_create_info, None)
@@ -182,7 +210,6 @@ class VulkanContext:
             self.physical_device, self.surface
         )
 
-        # Pick B8G8R8A8_UNORM (storage-compatible) if available, else first
         chosen_format = formats[0]
         for fmt in formats:
             if (
@@ -192,7 +219,6 @@ class VulkanContext:
                 chosen_format = fmt
                 break
 
-        # Prefer mailbox, fall back to FIFO
         chosen_mode = vk.VK_PRESENT_MODE_FIFO_KHR
         if vk.VK_PRESENT_MODE_MAILBOX_KHR in present_modes:
             chosen_mode = vk.VK_PRESENT_MODE_MAILBOX_KHR
@@ -283,10 +309,15 @@ class VulkanContext:
     def destroy(self) -> None:
         vk.vkDeviceWaitIdle(self.device)
 
-        for view in self.swapchain_info.image_views:
-            vk.vkDestroyImageView(self.device, view, None)
-        self._vkDestroySwapchainKHR(self.device, self.swapchain_info.swapchain, None)
+        if self.swapchain_info is not None:
+            for view in self.swapchain_info.image_views:
+                vk.vkDestroyImageView(self.device, view, None)
+            self._vkDestroySwapchainKHR(self.device, self.swapchain_info.swapchain, None)
+
         vk.vkDestroyCommandPool(self.device, self.command_pool, None)
         vk.vkDestroyDevice(self.device, None)
-        self._vkDestroySurfaceKHR(self.instance, self.surface, None)
+
+        if self.surface is not None:
+            self._vkDestroySurfaceKHR(self.instance, self.surface, None)
+
         vk.vkDestroyInstance(self.instance, None)
