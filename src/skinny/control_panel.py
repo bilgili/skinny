@@ -155,7 +155,7 @@ class ControlPanel:
         self._build_material_widgets(right_col)
 
     def _build_param_row(self, container: ttk.Frame, p) -> None:
-        from skinny.app import _get_nested
+        from skinny.params import _get_nested
 
         row = ttk.Frame(container)
         row.pack(fill="x", pady=1)
@@ -435,7 +435,7 @@ class ControlPanel:
     def _on_continuous(self, path: str, value: float) -> None:
         if self._suppress_cb:
             return
-        from skinny.app import _set_nested
+        from skinny.params import _set_nested
 
         _set_nested(self.renderer, path, value)
         if path.startswith("light"):
@@ -448,7 +448,7 @@ class ControlPanel:
     def _on_discrete(self, path: str, index: int) -> None:
         if self._suppress_cb:
             return
-        from skinny.app import _set_nested
+        from skinny.params import _set_nested
 
         if index < 0:
             return
@@ -586,7 +586,7 @@ class ControlPanel:
     def tick(self) -> None:
         if self.root is None:
             return
-        from skinny.app import _get_nested
+        from skinny.params import _get_nested
 
         self._suppress_cb = True
         try:

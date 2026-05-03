@@ -36,9 +36,15 @@ dev = [
 usd = [
     "usd-core>=24.0",
 ]
+web = [
+    "panel>=1.4",
+    "bokeh>=3.4",
+    "av>=12.0",
+]
 
 [project.scripts]
 skinny = "skinny.app:main"
+skinny-web = "skinny.web_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -53,6 +59,8 @@ skinny = [
     "mtlx/*.mtlx",
     "mtlx/genslang/*.mtlx",
     "mtlx/genslang/*.slang",
+    "web_templates/*.html",
+    "web_templates/*.js",
 ]
 
 [tool.pytest.ini_options]

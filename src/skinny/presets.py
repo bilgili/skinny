@@ -70,7 +70,7 @@ PRESETS: list[Preset] = [
 
 
 def apply_preset(renderer, preset: Preset) -> None:
-    from skinny.app import _SKIN_TO_MTLX, _set_nested
+    from skinny.params import _SKIN_TO_MTLX, _set_nested
 
     for path, value in preset.values.items():
         path = _SKIN_TO_MTLX.get(path, path)

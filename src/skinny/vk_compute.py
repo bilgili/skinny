@@ -404,11 +404,16 @@ class StorageImage:
         width: int,
         height: int,
         format: int = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+        transfer_src: bool = False,
     ) -> None:
         self.ctx = ctx
         self.width = width
         self.height = height
         self.format = format
+
+        usage = vk.VK_IMAGE_USAGE_STORAGE_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT
+        if transfer_src:
+            usage |= vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 
         img_info = vk.VkImageCreateInfo(
             imageType=vk.VK_IMAGE_TYPE_2D,
@@ -418,7 +423,7 @@ class StorageImage:
             arrayLayers=1,
             samples=vk.VK_SAMPLE_COUNT_1_BIT,
             tiling=vk.VK_IMAGE_TILING_OPTIMAL,
-            usage=vk.VK_IMAGE_USAGE_STORAGE_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            usage=usage,
             sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
             initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
         )
@@ -503,6 +508,71 @@ class StorageImage:
     def destroy(self) -> None:
         vk.vkDestroyImageView(self.ctx.device, self.view, None)
         vk.vkDestroyImage(self.ctx.device, self.image, None)
+        vk.vkFreeMemory(self.ctx.device, self.memory, None)
+
+
+class ReadbackBuffer:
+    """Host-visible staging buffer for GPU-to-CPU image readback."""
+
+    def __init__(self, ctx: VulkanContext, width: int, height: int, bytes_per_pixel: int = 4):
+        self.ctx = ctx
+        self.width = width
+        self.height = height
+        self._size = width * height * bytes_per_pixel
+
+        buf_info = vk.VkBufferCreateInfo(
+            size=self._size,
+            usage=vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+        )
+        self.buffer = vk.vkCreateBuffer(ctx.device, buf_info, None)
+
+        mem_reqs = vk.vkGetBufferMemoryRequirements(ctx.device, self.buffer)
+        mem_props = vk.vkGetPhysicalDeviceMemoryProperties(ctx.physical_device)
+        mem_type_index = UniformBuffer._find_memory_type(
+            mem_reqs.memoryTypeBits,
+            vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            mem_props,
+        )
+        alloc_info = vk.VkMemoryAllocateInfo(
+            allocationSize=mem_reqs.size,
+            memoryTypeIndex=mem_type_index,
+        )
+        self.memory = vk.vkAllocateMemory(ctx.device, alloc_info, None)
+        vk.vkBindBufferMemory(ctx.device, self.buffer, self.memory, 0)
+
+    def record_copy_from(self, cmd, src_image) -> None:
+        """Record vkCmdCopyImageToBuffer. Caller must insert appropriate barriers."""
+        region = vk.VkBufferImageCopy(
+            bufferOffset=0,
+            bufferRowLength=0,
+            bufferImageHeight=0,
+            imageSubresource=vk.VkImageSubresourceLayers(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                mipLevel=0,
+                baseArrayLayer=0,
+                layerCount=1,
+            ),
+            imageOffset=vk.VkOffset3D(x=0, y=0, z=0),
+            imageExtent=vk.VkExtent3D(width=self.width, height=self.height, depth=1),
+        )
+        vk.vkCmdCopyImageToBuffer(
+            cmd, src_image, vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            self.buffer, 1, [region],
+        )
+
+    def read(self) -> bytes:
+        """Map the staging buffer and return a copy of the pixel data."""
+        data_ptr = vk.vkMapMemory(self.ctx.device, self.memory, 0, self._size, 0)
+        import cffi
+        ffi = cffi.FFI()
+        buf = ffi.new(f"char[{self._size}]")
+        ffi.memmove(buf, data_ptr, self._size)
+        vk.vkUnmapMemory(self.ctx.device, self.memory)
+        return bytes(ffi.buffer(buf, self._size))
+
+    def destroy(self) -> None:
+        vk.vkDestroyBuffer(self.ctx.device, self.buffer, None)
         vk.vkFreeMemory(self.ctx.device, self.memory, None)
 
 
