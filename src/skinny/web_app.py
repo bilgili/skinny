@@ -257,14 +257,19 @@ def _group_params(params: list[ParamSpec]) -> dict[str, list[ParamSpec]]:
         "Render": [],
         "Skin": [],
         "Detail": [],
-        "Light": [],
+        "IBL": [],
+        "Direct Light": [],
     }
     for p in params:
         path = p.path
-        if path.startswith("mtlx."):
+        if path == "preset_index":
             groups["Skin"].append(p)
-        elif path.startswith("light") or "color" in path:
-            groups["Light"].append(p)
+        elif path.startswith("mtlx."):
+            groups["Skin"].append(p)
+        elif path in ("env_index", "env_intensity"):
+            groups["IBL"].append(p)
+        elif path.startswith("light") or path == "direct_light_index":
+            groups["Direct Light"].append(p)
         elif path in ("normal_map_strength", "displacement_scale_mm",
                        "detail_maps_index", "subdivision_index"):
             groups["Detail"].append(p)
@@ -327,10 +332,14 @@ def create_panel_app() -> pn.viewable.Viewable:
         widgets_by_path[p.path] = w
         return w
 
+    collapsed_groups = {"Skin"}
     sections = []
+    active_indices = []
     for group_name, group_params in grouped.items():
         group_widgets = [make_widget(p) for p in group_params]
         sections.append((group_name, pn.Column(*group_widgets)))
+        if group_name not in collapsed_groups:
+            active_indices.append(len(sections) - 1)
 
     usd_scene = getattr(session.renderer, "_usd_scene", None)
     if usd_scene is not None and usd_scene.materials:
@@ -398,8 +407,9 @@ def create_panel_app() -> pn.viewable.Viewable:
         if mat_widgets:
             mat_accordion = pn.Accordion(*mat_widgets, active=[])
             sections.append(("Materials", pn.Column(mat_accordion)))
+            active_indices.append(len(sections) - 1)
 
-    sidebar = pn.Accordion(*sections, active=list(range(len(sections))))
+    sidebar = pn.Accordion(*sections, active=active_indices)
 
     iframe_html = (
         f'<iframe src="/video_page/{session_id}" '

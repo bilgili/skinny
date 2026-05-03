@@ -35,6 +35,13 @@ microfacet specular, and energy-conservation checks.
 - **Tattoo support** -- alpha-driven ink density in the dermis layer
 - **Tk control panel** -- collapsible per-material sliders, colour pickers,
   light direction picker, preset save/load
+- **Web mode** -- Panel (HoloViz) browser UI with per-user server-side
+  rendering, H264 video streaming over WebSocket, hardware-accelerated encoding
+  (NVENC / QSV / AMF), and WebCodecs decoding in the browser
+- **Multi-user sessions** -- up to 4 concurrent browser sessions, each with
+  independent renderer, camera, and parameters
+- **GPU selection** -- `--gpu {intel,nvidia,amd,discrete,auto}` flag on both
+  desktop and web entry points
 - **Persistent settings** -- parameter snapshots saved and restored between
   sessions
 
@@ -61,6 +68,9 @@ Optional:
 | Package | Purpose |
 |---------|---------|
 | `usd-core` | OpenUSD scene loading (`pip install -e ".[usd]"`) |
+| `panel` | Web UI framework (`pip install -e ".[web]"`) |
+| `bokeh` | Panel dependency (Tornado server) |
+| `av` (PyAV) | H264 video encoding via FFmpeg bindings |
 
 ## Setup
 
@@ -74,6 +84,12 @@ For USD scene support:
 
 ```powershell
 .\Scripts\python -m pip install -e ".[usd]"
+```
+
+For web mode (Panel + H264 streaming):
+
+```powershell
+.\Scripts\python -m pip install -e ".[web]"
 ```
 
 For development tools:
@@ -115,6 +131,38 @@ The renderer has been tested with the
 [Usd-Mtlx-Example](https://github.com/pablode/Usd-Mtlx-Example) repository, a
 USD scene using MaterialX resources designed to assess rendering consistency
 across different renderers.
+
+### Web mode
+
+```powershell
+.\Scripts\skinny-web.exe --port 8080
+```
+
+With a USD scene:
+
+```powershell
+.\Scripts\skinny-web.exe --port 8080 --usd assets/Usd-Mtlx-Example/scene.usda
+```
+
+Or as a module:
+
+```powershell
+.\Scripts\python -m skinny.web_app --port 8080 --gpu auto --usd assets/demo_head.usda
+```
+
+Open `http://localhost:8080/skinny` in a browser. Each tab gets an independent
+renderer session with its own camera and parameters. Video is H264-encoded
+server-side and decoded via WebCodecs in the browser.
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | 8080 | Server port |
+| `--gpu` | auto | GPU selection: `intel`, `nvidia`, `amd`, `discrete`, `auto` |
+| `--max-sessions` | 4 | Max concurrent browser sessions |
+| `--usd` | — | Path to USD scene (alternative to positional arg) |
+| `--usdMtlx` | off | Use USD's built-in usdMtlx plugin instead of MaterialX API fallback |
 
 ### Mesh heads (legacy)
 
@@ -236,14 +284,18 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 
 | File | Purpose |
 |------|---------|
-| `app.py` | GLFW window, input handling, parameter list, settings persistence |
+| `app.py` | GLFW window, input handling, settings persistence (desktop entry point) |
+| `web_app.py` | Panel web app, per-session renderer, Tornado video WebSocket (web entry point) |
+| `params.py` | Shared parameter definitions (`ParamSpec`), get/set helpers |
+| `hardware.py` | GPU enumeration, vendor detection, encoder selection |
+| `video_encoder.py` | H264/JPEG encoding with hardware-aware fallback chain |
 | `control_panel.py` | Tk control panel with collapsible per-material sections |
 | `renderer.py` | Vulkan resources, uniforms, environment/mesh/texture upload, frame loop |
 | `vk_compute.py` | Compute pipeline, descriptor layout, GPU buffer/image helpers |
-| `vk_context.py` | Vulkan instance, device, queue setup |
+| `vk_context.py` | Vulkan instance, device, queue setup (windowed + headless) |
 | `scene.py` | Scene graph data classes (`MeshInstance`, `Material`, `Light*`, `Scene`) |
 | `materialx_runtime.py` | MaterialX document loading, Slang code generation, uniform packing |
-| `usd_loader.py` | USD stage to `Scene` conversion |
+| `usd_loader.py` | USD stage to `Scene` conversion (with MaterialX API fallback) |
 | `environment.py` | Built-in and HDR environment loading |
 | `mesh.py` | OBJ loading, normalization, subdivision, displacement, BVH construction |
 | `head_textures.py` | Head texture loading (normal, roughness, displacement) |
