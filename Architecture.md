@@ -10,22 +10,33 @@ compute dispatch.
 
 ## High-Level Pipeline
 
+Two entry points share the same renderer core:
+
 ```
-┌─────────────┐      ┌────────────────┐      ┌──────────────────┐
-│  GLFW + UI  │─────▶│ Renderer.py    │─────▶│ Vulkan Compute   │
-│  (Tkinter   │      │  packs UBO,    │      │  Dispatch        │
-│   panel)    │      │  uploads bufs  │      │  mainImage()     │
-└─────────────┘      └────────────────┘      └──────────────────┘
-                            │                         │
-                     SkinParameters              Camera Ray
-                     MaterialX codegen           ─▶ Trace
-                     USD scene loading           ─▶ Material Eval
-                     Mesh + BVH baking           ─▶ Progressive Accum
-                                                 ─▶ Tonemap + sRGB
-                                                 ─▶ HUD composite
+Desktop (GLFW)                              Web (Panel + Tornado)
+┌─────────────┐                             ┌─────────────────────┐
+│  GLFW + UI  │───┐                    ┌────│  Browser tab        │
+│  (Tkinter   │   │                    │    │  (Panel widgets     │
+│   panel)    │   │                    │    │   + WebCodecs <canvas>)
+└─────────────┘   │                    │    └─────────────────────┘
+                  ▼                    ▼
+            ┌────────────────┐   ┌─────────────────────┐
+            │ Renderer.py    │   │ SkinnySession        │
+            │  packs UBO,    │   │  per-user renderer   │
+            │  uploads bufs  │   │  + H264 encoder      │
+            └────────┬───────┘   └──────────┬──────────┘
+                     │                      │
+                     ▼                      ▼
+              ┌──────────────────┐   ┌──────────────────┐
+              │ Vulkan Compute   │   │ Vulkan Compute   │
+              │  Dispatch        │   │  (headless)      │
+              │  → swapchain     │   │  → readback      │
+              └──────────────────┘   │  → H264 encode   │
+                                     │  → WebSocket     │
+                                     └──────────────────┘
 ```
 
-### Per-Frame Render Loop
+### Per-Frame Render Loop (Desktop)
 
 1. **`app.main()`**: GLFW poll → `InputHandler.update(dt)` → `panel.tick()` →
    `renderer.update(dt)` → `renderer.render()`.
@@ -34,6 +45,16 @@ compute dispatch.
 3. **`renderer.render()`**: packs FrameConstants + SkinParams + light data into
    UBO, updates descriptor sets, records command buffer, dispatches
    `ceil(W/8) × ceil(H/8)`, presents via swapchain.
+
+### Per-Frame Render Loop (Web)
+
+1. **`SkinnySession._render_loop()`**: background thread per session.
+2. **`renderer.update(dt)`**: same as desktop.
+3. **`renderer.render_headless()`**: dispatches compute, copies result to
+   `ReadbackBuffer` via staging buffer, returns raw RGBA bytes.
+4. **`VideoEncoder.encode_h264()`**: RGBA → YUV420p → H264 AVCC packets.
+5. Packets pushed to `frame_queue` → Tornado `VideoStreamHandler` sends binary
+   WebSocket messages → browser decodes via WebCodecs.
 
 ---
 
@@ -249,6 +270,116 @@ UsdPreviewSurface parameter overrides. Converts `metersPerUnit` → `mm_per_unit
 
 ---
 
+## Web Application Architecture
+
+### Overview
+
+`skinny-web` serves a Panel (HoloViz) web application with per-user
+server-side rendering. Each browser session gets its own Vulkan renderer,
+H264 encoder, and render thread. The Panel/Bokeh protocol handles widget sync
+and session isolation; a custom Tornado WebSocket streams encoded video.
+
+### Session Lifecycle
+
+```
+Browser connects → Panel creates session → SkinnySession.__init__()
+  ├─ VulkanContext(window=None)  # headless, no GLFW
+  ├─ Renderer(vk_ctx, ..., usd_scene)
+  ├─ VideoEncoder(w, h, gpu_info)  # H264 hw or sw
+  └─ Thread(_render_loop)  # starts immediately
+
+Browser disconnects → on_session_destroyed → session.cleanup()
+  ├─ _running = False → thread joins
+  ├─ encoder.close()
+  ├─ renderer.cleanup()
+  └─ ctx.destroy()
+```
+
+Max concurrent sessions capped (default 4) to bound GPU memory.
+
+### Video Streaming Protocol
+
+Binary WebSocket at `/video_ws/<session_id>`:
+
+| Frame type | Byte 0 | Payload |
+|------------|--------|---------|
+| H264 keyframe | 0 | AVCC-framed NAL units |
+| H264 delta | 1 | AVCC-framed NAL units |
+| JPEG fallback | 2 | JPEG image |
+| AVCC description | 3 | SPS/PPS for decoder init |
+
+Header: `!BI` (1 byte type + 4 byte accum frame number) + payload.
+
+On WebSocket open, stale frames are drained and encoder forced to emit a
+keyframe so the browser decoder starts clean.
+
+Browser-side: WebCodecs `VideoDecoder` for H264 → `<canvas>` blit. Falls back
+to JPEG `<img>` when WebCodecs unavailable.
+
+### Hardware Abstraction (`hardware.py`)
+
+GPU selection is vendor-aware:
+
+```
+enumerate_gpus(vk_instance) → list[GpuInfo]
+select_gpu(vk_instance, preference) → GpuInfo
+```
+
+`GpuInfo.preferred_h264_encoder` maps vendor → encoder:
+- Intel (0x8086) → `h264_qsv`
+- NVIDIA (0x10DE) → `h264_nvenc`
+- AMD (0x1002) → `h264_amf`
+- Fallback → `libx264`
+
+Both `skinny` and `skinny-web` accept `--gpu {intel,nvidia,amd,discrete,auto}`.
+
+### H264 Encoder (`video_encoder.py`)
+
+Wraps PyAV for H264 encoding with hardware-aware fallback chain:
+
+1. Try `gpu_info.preferred_h264_encoder`
+2. Fall back to `libx264`
+3. If all fail, JPEG-only mode
+
+Encoder outputs **Annex B** NAL units (PyAV default), converted to **AVCC**
+framing for WebCodecs compatibility. AVCC description (SPS+PPS) sent once on
+WebSocket open.
+
+Key methods:
+- `encode_h264(rgba_bytes)` → list of `(is_key, avcc_data)` tuples
+- `encode_jpeg(rgba_bytes, quality)` → JPEG bytes (fallback)
+- `force_keyframe()` → next frame forced as IDR (called on param/camera change)
+
+### Panel UI Layout
+
+Sidebar sections (collapsible `pn.Accordion`):
+
+| Section | Contents |
+|---------|----------|
+| Render | Head model, scattering, sampling, furnace, tattoo, mm/unit |
+| Skin | Preset selector + all `mtlx.*` skin params (collapsed by default) |
+| Detail | Normal map strength, displacement, detail maps, subdivision |
+| IBL | Environment selector, IBL intensity |
+| Direct Light | Direct light mode, elevation, azimuth, intensity, color R/G/B |
+| Materials | Per-USD-material accordion (roughness, metallic, specular, opacity, IOR, coat, diffuseColor) |
+
+Video pane: iframe loading `/video_page/<session_id>` with WebCodecs decoder
+and mouse-driven camera controls (orbit, pan, zoom via WebSocket messages).
+
+### Headless Vulkan Path
+
+`VulkanContext(window=None)`:
+- No GLFW dependency, no surface/swapchain
+- Compute queue only (no present queue)
+- No surface extensions in instance creation
+
+`Renderer.render_headless()`:
+- Dispatches to persistent offscreen `StorageImage` (not swapchain image)
+- Barrier → `ReadbackBuffer.record_copy_from()` → fence wait → `read()`
+- Returns raw RGBA bytes
+
+---
+
 ## Descriptor Binding Map
 
 | Binding | Type | Content | Owner |
@@ -347,20 +478,24 @@ only).
 
 | Module | Key Classes | Purpose |
 |--------|-------------|---------|
-| `app.py` | `InputHandler`, `ParamSpec` | GLFW window, render loop, camera + param hotkeys |
+| `app.py` | `InputHandler` | GLFW window, render loop, camera + param hotkeys |
 | `renderer.py` | `Renderer`, `SkinParameters`, `OrbitCamera`, `FreeCamera`, `TexturePool` | GPU resource orchestration, per-frame dispatch |
-| `vk_context.py` | `VulkanContext`, `SwapchainInfo` | Vulkan 1.3 instance, device, swapchain |
-| `vk_compute.py` | `ComputePipeline`, `UniformBuffer`, `StorageImage`, `StorageBuffer`, `SampledImage`, `HudOverlay` | Shader compilation (Slang→SPIR-V), GPU resource types |
+| `vk_context.py` | `VulkanContext`, `SwapchainInfo` | Vulkan 1.3 instance, device, swapchain (+ headless mode) |
+| `vk_compute.py` | `ComputePipeline`, `UniformBuffer`, `StorageImage`, `StorageBuffer`, `SampledImage`, `ReadbackBuffer`, `HudOverlay` | Shader compilation (Slang→SPIR-V), GPU resource types |
 | `scene.py` | `Scene`, `Material`, `MeshInstance`, `LightDir`, `LightSphere`, `LightEnvHDR` | Scene description dataclasses |
 | `materialx_runtime.py` | `MaterialLibrary`, `CompiledMaterial`, `UniformField` | MaterialX loading, GenSlang codegen, uniform reflection |
 | `mesh.py` | `Mesh`, `MeshSource` | OBJ loading, subdivision, displacement, BVH construction |
 | `environment.py` | `Environment` | HDR env map loading (.hdr decoder), built-in presets |
+| `params.py` | `ParamSpec` | Shared parameter definitions, get/set helpers, persistence |
+| `hardware.py` | `GpuInfo`, `GpuVendor` | GPU enumeration, vendor detection, encoder selection |
+| `video_encoder.py` | `VideoEncoder` | H264/JPEG encoding with hw-aware fallback, Annex B→AVCC |
+| `web_app.py` | `SkinnySession`, `VideoStreamHandler` | Panel web app, per-session renderer, Tornado video WS |
 | `control_panel.py` | `ControlPanel` | Tkinter UI: arcball light widget, auto-generated sliders |
 | `presets.py` | `Preset` | 12 built-in skin presets (Fitzpatrick I–VI × Female/Male) |
 | `settings.py` | — | Persistent storage at `~/.skinny/` (JSON) |
 | `tattoos.py` | `Tattoo` | Procedural + image-based tattoo loading |
 | `head_textures.py` | `TextureStats` | Detail map loading (normal, roughness, displacement) at 2048² |
-| `usd_loader.py` | — | USD stage → Scene (meshes, lights, cameras, materials) |
+| `usd_loader.py` | — | USD stage → Scene (meshes, lights, cameras, materials, MaterialX fallback) |
 | `fetch_hdrs.py` | — | Downloads CC0 HDRIs from Poly Haven |
 
 ---
@@ -443,9 +578,16 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 __init__.py              app.py                 renderer.py
 vk_context.py            vk_compute.py          scene.py
 materialx_runtime.py     mesh.py                environment.py
-control_panel.py         presets.py              settings.py
-tattoos.py               head_textures.py        fetch_hdrs.py
-usd_loader.py
+params.py                hardware.py            video_encoder.py
+web_app.py               control_panel.py       presets.py
+settings.py              tattoos.py             head_textures.py
+fetch_hdrs.py            usd_loader.py
+```
+
+### Web Templates (`src/skinny/web_templates/`)
+
+```
+video_player.html        WebCodecs decoder + camera controls (JS)
 ```
 
 ### SlangPile (`src/skinny/slangpile/`)
