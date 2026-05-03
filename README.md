@@ -10,6 +10,13 @@ first-class skin support -- but the core pipeline handles arbitrary MaterialX
 materials, OpenUSD scenes, ray-traced geometry, image-based lighting,
 microfacet specular, and energy-conservation checks.
 
+## Gallery
+
+<p align="center">
+  <img src="docs/skinny_20260504_001357.png" alt="Skinny render — layered skin under HDR environment lighting" width="48%">
+  <img src="docs/skinny_20260504_001938.png" alt="Skinny render — alternate pose / lighting" width="48%">
+</p>
+
 ## Features
 
 - **Three-layer skin optics** -- epidermis (melanin), dermis (hemoglobin + ink),
