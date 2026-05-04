@@ -27,6 +27,7 @@ loaded (with no texture maps) for backward compatibility.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,9 +67,9 @@ class Mesh:
 class MeshSource:
     """Undisplaced base geometry loaded from an OBJ.
 
-    Kept around so the renderer can rebake (subdivide + displace + rebuild BVH)
-    when the user changes subdivision or displacement scale without paying the
-    OBJ parse cost again. UVs are already V-flipped to image convention.
+    Kept around so the renderer can rebake (displace + rebuild BVH) when the
+    user changes displacement scale without paying the OBJ parse cost again.
+    UVs are already V-flipped to image convention.
     """
 
     name: str
@@ -79,6 +80,7 @@ class MeshSource:
     normal_map: Path | None = None
     roughness_map: Path | None = None
     displacement_map: Path | None = None
+    content_hash: str = ""         # SHA-256 of geometry arrays, set at load time
 
 
 # ── OBJ loading ────────────────────────────────────────────────────
@@ -402,75 +404,7 @@ def _load_model_dir(model_dir: Path) -> MeshSource | None:
     return source
 
 
-# ── Subdivision, displacement, and baking ───────────────────────────
-
-def subdivide_midpoint(
-    positions: np.ndarray, normals: np.ndarray, uvs: np.ndarray, tri_idx: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """One level of 1-to-4 midpoint triangle subdivision.
-
-    Each triangle is replaced by four: three corner children plus a centre
-    triangle made from the three edge midpoints. Midpoints are shared across
-    adjacent triangles via a (min,max) edge key, so the mesh stays watertight
-    — no cracks at shared edges. Positions, normals, and UVs are all linearly
-    interpolated at midpoints; normals are then renormalised.
-
-    Math (midpoint rule):
-        mᵢⱼ = (vᵢ + vⱼ) / 2          (positions and UVs)
-        n_mᵢⱼ = normalize(nᵢ + nⱼ)   (normals renormalised after averaging)
-
-    The four child triangles for parent (v₀, v₁, v₂):
-        (v₀, m₀₁, m₀₂),  (v₁, m₁₂, m₀₁),
-        (v₂, m₀₂, m₁₂),  (m₀₁, m₁₂, m₀₂)
-    """
-    new_pos: list[np.ndarray] = [positions]
-    new_nrm: list[np.ndarray] = [normals]
-    new_uv:  list[np.ndarray] = [uvs]
-    next_idx = positions.shape[0]
-
-    mid_pos_rows: list[np.ndarray] = []
-    mid_nrm_rows: list[np.ndarray] = []
-    mid_uv_rows:  list[np.ndarray] = []
-    edge_cache: dict[tuple[int, int], int] = {}
-
-    def mid(a: int, b: int) -> int:
-        nonlocal next_idx
-        key = (a, b) if a < b else (b, a)
-        cached = edge_cache.get(key)
-        if cached is not None:
-            return cached
-        mid_pos_rows.append((positions[a] + positions[b]) * 0.5)
-        mid_nrm_rows.append((normals[a] + normals[b]) * 0.5)
-        mid_uv_rows.append((uvs[a] + uvs[b]) * 0.5)
-        edge_cache[key] = next_idx
-        next_idx += 1
-        return edge_cache[key]
-
-    out_tris: list[tuple[int, int, int]] = []
-    for a, b, c in tri_idx:
-        ab = mid(int(a), int(b))
-        bc = mid(int(b), int(c))
-        ca = mid(int(c), int(a))
-        out_tris.append((int(a), ab, ca))
-        out_tris.append((ab, int(b), bc))
-        out_tris.append((ca, bc, int(c)))
-        out_tris.append((ab, bc, ca))
-
-    if mid_pos_rows:
-        new_pos.append(np.asarray(mid_pos_rows, dtype=np.float32))
-        mid_n = np.asarray(mid_nrm_rows, dtype=np.float32)
-        lengths = np.linalg.norm(mid_n, axis=1, keepdims=True)
-        mid_n = mid_n / np.maximum(lengths, 1e-8)
-        new_nrm.append(mid_n)
-        new_uv.append(np.asarray(mid_uv_rows, dtype=np.float32))
-
-    return (
-        np.concatenate(new_pos, axis=0).astype(np.float32),
-        np.concatenate(new_nrm, axis=0).astype(np.float32),
-        np.concatenate(new_uv, axis=0).astype(np.float32),
-        np.asarray(out_tris, dtype=np.int32),
-    )
-
+# ── Displacement and baking ────────────────────────────────────────
 
 def _smooth_normals(positions: np.ndarray, tri_idx: np.ndarray) -> np.ndarray:
     """Area-weighted per-vertex normals. Same method as the OBJ loader fallback."""
@@ -573,7 +507,7 @@ def _bake_normal_map_into_normals(
     Matches the shader-side decoding in main_pass.slang: nxy from the (R, G)
     channels in [-1, 1], scaled by strength, z rebuilt to unit length. Produces
     an output guaranteed unit-length and roughly consistent with the runtime path
-    so disabling the bake (subdivision=Off) gives a similar look at coarser
+    so disabling displacement gives a similar look at the shader's pixel
     resolution.
 
     Math (tangent-space normal reconstruction):
@@ -594,26 +528,6 @@ def _bake_normal_map_into_normals(
            + normals * nz)
     lengths = np.linalg.norm(out, axis=1, keepdims=True)
     return (out / np.maximum(lengths, 1e-8)).astype(np.float32)
-
-
-def pick_auto_subdivision_level(
-    disp_activity: float, normal_activity: float, max_level: int = 2
-) -> int:
-    """Pick a uniform subdivision level from per-map frequency summaries.
-
-    Thresholds were picked from representative face-scan assets: typical
-    8-bit normal maps have mean-grad ≈ 0.01–0.03; the Texturing.xyz TIF
-    displacement used for the bundled `face` model has std ≈ 0.075. The
-    combined score treats either map being active (> its weight-weighted
-    threshold) as enough to warrant one level, both being strong as enough
-    for two. Users can always override via the explicit modes.
-    """
-    score = max(disp_activity * 12.0, normal_activity * 30.0)
-    if score < 0.35:
-        return 0
-    if score < 0.9:
-        return min(1, max_level)
-    return min(2, max_level)
 
 
 def _bilinear_sample_r8(data: bytes, res: int, uvs: np.ndarray) -> np.ndarray:
@@ -645,7 +559,6 @@ def _bilinear_sample_r8(data: bytes, res: int, uvs: np.ndarray) -> np.ndarray:
 
 def bake_mesh(
     source: MeshSource,
-    subdivision_levels: int,
     displacement_bytes: bytes | None,
     displacement_res: int,
     displacement_scale_world: float,
@@ -653,29 +566,22 @@ def bake_mesh(
     normal_res: int = 0,
     normal_map_strength: float = 1.0,
 ) -> Mesh:
-    """Subdivide, displace, rebuild normals, (optionally) bake normal map, build BVH.
+    """Displace, rebuild normals, (optionally) bake normal map, build BVH.
 
     Displacement offset: ``offset = (disp - 0.5) * scale_world``, evaluated
     along each vertex's (pre-displacement) smooth normal.  The (disp - 0.5)
     bias maps mid-grey to zero offset; scale_world is already in world
     units (displacement_scale_mm / mm_per_unit). Smooth normals are re-synthesised from
     the displaced geometry so specular / shading responds to the new surface
-    relief. When `normal_bytes` is supplied *and* the mesh got subdivided or
-    displaced (so the geometry is meaningfully denser than base), each vertex
-    normal is additionally rotated by the tangent-space perturbation of the
-    normal map at its UV. The Mesh is marked `normals_baked=True` so the
+    relief. When `normal_bytes` is supplied and the mesh was displaced, each
+    vertex normal is additionally rotated by the tangent-space perturbation of
+    the normal map at its UV. The Mesh is marked `normals_baked=True` so the
     shader knows to skip its own normal-map sample for mesh hits.
     """
     positions = source.positions
     normals   = source.normals
     uvs       = source.uvs
     tri_idx   = source.tri_idx
-
-    levels = max(0, int(subdivision_levels))
-    for _ in range(levels):
-        positions, normals, uvs, tri_idx = subdivide_midpoint(
-            positions, normals, uvs, tri_idx
-        )
 
     displace_active = (
         displacement_bytes is not None
@@ -685,19 +591,13 @@ def bake_mesh(
         h = _bilinear_sample_r8(displacement_bytes, displacement_res, uvs)
         offset = (h - 0.5) * displacement_scale_world
         positions = positions + normals * offset[:, None]
-
-    if levels > 0 or displace_active:
         normals = _smooth_normals(positions, tri_idx)
 
-    # Bake the normal map into vertex normals only when we actually added
-    # detail to the mesh — baking on the base-res mesh would just smear the
-    # map across large triangles and still leave the shader doing the work
-    # at pixel resolution, so we keep the runtime path in that case.
     normals_baked = False
     if (
         normal_bytes is not None
         and normal_res > 0
-        and (levels > 0 or displace_active)
+        and displace_active
     ):
         tangents = _per_vertex_tangents(positions, normals, uvs, tri_idx)
         normals = _bake_normal_map_into_normals(
@@ -724,17 +624,29 @@ def bake_mesh(
 
 # ── Public entry point ─────────────────────────────────────────────
 
+def compute_source_hash(source: MeshSource) -> str:
+    """SHA-256 of geometry arrays — content-based identity for caching."""
+    h = hashlib.sha256()
+    h.update(source.positions.tobytes())
+    h.update(source.normals.tobytes())
+    h.update(source.uvs.tobytes())
+    h.update(source.tri_idx.tobytes())
+    return h.hexdigest()
+
+
 def load_head_source(path: Path) -> MeshSource:
     """Load an OBJ and normalise to the head frame — no BVH yet."""
     positions, normals, uvs, tri_idx = load_obj(path)
     positions = normalise_to_head_frame(positions)
-    return MeshSource(
+    source = MeshSource(
         name=path.stem,
         positions=positions.astype(np.float32),
         normals=normals.astype(np.float32),
         uvs=uvs.astype(np.float32),
         tri_idx=tri_idx.astype(np.int32),
     )
+    source.content_hash = compute_source_hash(source)
+    return source
 
 
 def discover_mesh_sources(head_dir: Path | None) -> list[MeshSource]:

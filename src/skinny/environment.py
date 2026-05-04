@@ -8,8 +8,9 @@ it with well-known CC0 HDRIs from Poly Haven.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -19,8 +20,26 @@ ENV_HEIGHT = 512
 
 @dataclass
 class Environment:
+    """HDR environment map with lazy loading.
+
+    Data is computed/loaded on first access to ``.data`` and cached.
+    Pass either ``_data`` (eager) or ``_loader`` (lazy).
+    """
+
     name: str
-    data: np.ndarray  # (H, W, 4) float32 RGBA, linear HDR
+    _data: np.ndarray | None = field(default=None, repr=False)
+    _loader: Callable[[], np.ndarray] | None = field(default=None, repr=False)
+
+    @property
+    def data(self) -> np.ndarray:
+        if self._data is None:
+            if self._loader is not None:
+                print(f"[skinny] loading environment '{self.name}'...")
+                self._data = self._loader()
+                self._loader = None
+            else:
+                self._data = _blank_rgba()
+        return self._data
 
 
 def _blank_rgba() -> np.ndarray:
@@ -193,20 +212,27 @@ def _resize_equirect(img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(rgba[ys][:, xs].astype(np.float32))
 
 
+def _make_hdr_loader(path: Path) -> Callable[[], np.ndarray]:
+    def loader() -> np.ndarray:
+        raw = _load_radiance_hdr(path)
+        return _resize_equirect(raw)
+    return loader
+
+
 def load_environments(hdr_dir: Path | None = None) -> list[Environment]:
-    """Return built-in presets, then any `.hdr` files found in `hdr_dir`."""
-    envs: list[Environment] = [Environment(name, fn()) for name, fn in BUILT_IN]
+    """Return built-in presets, then any `.hdr` files found in `hdr_dir`.
+
+    All environments are lazy — data is generated/loaded on first access.
+    """
+    envs: list[Environment] = [
+        Environment(name=name, _loader=fn) for name, fn in BUILT_IN
+    ]
 
     if hdr_dir is None or not hdr_dir.exists():
         return envs
 
     for path in sorted(hdr_dir.glob("*.hdr")):
-        try:
-            raw = _load_radiance_hdr(path)
-            env = _resize_equirect(raw)
-            envs.append(Environment(path.stem, env))
-            print(f"[skinny] loaded HDR: {path.name}")
-        except Exception as exc:
-            print(f"[skinny] failed to load {path.name}: {exc}")
+        envs.append(Environment(name=path.stem, _loader=_make_hdr_loader(path)))
+        print(f"[skinny] found HDR: {path.name} (lazy)")
 
     return envs

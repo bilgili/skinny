@@ -18,7 +18,6 @@ Blank fallbacks are provided so the GPU descriptors always have valid data:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -27,55 +26,6 @@ from PIL import Image
 
 DETAIL_TEX_RES = 2048
 _BYTES_PER_TEX = DETAIL_TEX_RES * DETAIL_TEX_RES * 4  # RGBA8
-
-
-@dataclass
-class TextureStats:
-    """Per-map frequency-content summaries used to pick a subdivision level.
-
-    `disp_activity` is the std of the displacement R channel in [0, 1] —
-    roughly the RMS height deviation of the map. 0 means a flat map with
-    nothing to resolve; 0.2+ indicates bold relief that benefits from extra
-    triangles. `normal_activity` is the mean gradient magnitude of the
-    tangent (R, G) channels, also in [0, 1] — a rough measure of how
-    wrinkly the normal map is. Both are cheap to compute (single numpy
-    pass over a 2K RGBA8 image, ~20-50 ms each).
-    """
-
-    disp_activity: float = 0.0
-    normal_activity: float = 0.0
-
-
-def compute_disp_activity(bytes_: bytes | None) -> float:
-    if bytes_ is None:
-        return 0.0
-    arr = np.frombuffer(bytes_, dtype=np.uint8).reshape(DETAIL_TEX_RES, DETAIL_TEX_RES, 4)
-    r = arr[..., 0].astype(np.float32) / 255.0
-    return float(r.std())
-
-
-def compute_normal_activity(bytes_: bytes | None) -> float:
-    """Mean |∇(R,G)| of the normal map, normalised to [0, 1]-ish.
-
-    Uses a one-pixel-forward-difference per row/column. Flat (128,128,255)
-    normal maps return 0; bumpy maps return 0.01–0.05 range typically.
-    """
-    if bytes_ is None:
-        return 0.0
-    arr = np.frombuffer(bytes_, dtype=np.uint8).reshape(DETAIL_TEX_RES, DETAIL_TEX_RES, 4)
-    rg = arr[..., :2].astype(np.float32) / 255.0
-    dx = np.abs(np.diff(rg, axis=1))   # (H, W-1, 2)
-    dy = np.abs(np.diff(rg, axis=0))   # (H-1, W, 2)
-    return float(0.5 * (dx.mean() + dy.mean()))
-
-
-def compute_texture_stats(
-    normal_bytes: bytes | None, displacement_bytes: bytes | None
-) -> TextureStats:
-    return TextureStats(
-        disp_activity=compute_disp_activity(displacement_bytes),
-        normal_activity=compute_normal_activity(normal_bytes),
-    )
 
 
 def _to_rgba_img(img: Image.Image) -> Image.Image:

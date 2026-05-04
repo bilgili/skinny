@@ -16,11 +16,9 @@ from skinny.environment import Environment, load_environments
 from skinny.scene import Scene, build_default_scene
 from skinny.head_textures import (
     DETAIL_TEX_RES,
-    TextureStats,
     blank_displacement_bytes,
     blank_normal_bytes,
     blank_roughness_bytes,
-    compute_texture_stats,
     expected_bytes as detail_expected_bytes,
     load_texture_bytes,
 )
@@ -30,7 +28,12 @@ from skinny.mesh import (
     bake_mesh,
     discover_mesh_sources,
     dummy_mesh,
-    pick_auto_subdivision_level,
+)
+from skinny.mesh_cache import (
+    load_cache_index,
+    lookup_cached_mesh,
+    make_cache_key,
+    save_cached_mesh,
 )
 from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
@@ -868,25 +871,22 @@ class Renderer:
         else:
             self._usd_head_index = -1
             self.head_index = 0
-        # Rebake-tracking: each (source, subdivision, displacement-scale)
-        # combination produces a different GPU mesh, so we remember the
-        # triple we last baked and rebuild when any of them change. -1 and
-        # NaN sentinels force an initial bake on the first mesh selection.
+        self._mesh_cache_index: dict = load_cache_index()
+        # Rebake-tracking: each (source, displacement-scale) combination
+        # produces a different GPU mesh, so we remember what we last baked and
+        # rebuild when any input changes. -1 and NaN sentinels force an initial
+        # bake on the first mesh selection.
         self._baked_source_idx: int = -1
-        self._baked_subdivision: int = -1      # resolved (0/1/2), not the UI index
         self._baked_scale_mm: float = float("nan")
         self._baked_scale_world: float = float("nan")
         self._baked_mm_per_unit: float = float("nan")
         self._baked_normals: bool = False      # tracks Mesh.normals_baked
         self._baked_normal_strength: float = float("nan")   # bake-time strength
         self._dirty_since: float | None = None      # monotonic wall-clock
-        # Texture bytes + stats cached per source index. Loading a 2K TIF/TGA
-        # takes ~1 s; rebaking on slider drag would feel terrible without a
-        # cache. The normal cache additionally feeds the normal-bake path in
-        # bake_mesh; stats drive the auto-subdivision level.
+        # Texture bytes cached per source index. Loading a 2K TIF/TGA takes
+        # ~1 s; rebaking on slider drag would feel terrible without a cache.
         self._displacement_cache: dict[int, bytes | None] = {}
         self._normal_cache: dict[int, bytes | None] = {}
-        self._source_stats: dict[int, TextureStats] = {}
 
         # Tattoo library — procedural presets plus any PNG/JPG in tattoo_dir.
         # Index 0 ("None") is an all-zero-alpha image so "no tattoo" is just
@@ -910,22 +910,6 @@ class Renderer:
         # unaffected — bake_mesh skips the offset step when bytes are absent.
         self.displacement_scale_mm = 1.0    # mm offset at (disp - 0.5); 0 = off
         self._detail_available = (False, False, False)  # (normal, rough, disp)
-
-        # CPU mesh subdivision before displacement. Each level splits every
-        # triangle into 4 via midpoint subdivision; two levels gets us ~16×
-        # the original tri count, which is usually enough for displacement
-        # to read as real geometry on a ~10k-tri face scan.
-        #
-        # "Auto" picks a level from per-texture frequency stats (see
-        # head_textures.compute_texture_stats + mesh.pick_auto_subdivision_level)
-        # so models with bold displacement + bumpy normals get more triangles
-        # without manual tuning; flat maps stay cheap. Explicit Off/1×/2× are
-        # still offered as overrides.
-        self.subdivision_modes: list[str] = [
-            "Auto", "Off", "1 level (4x)", "2 levels (16x)",
-        ]
-        self.subdivision_index = 0   # Auto by default
-        self._max_subdivision_level = 2
 
         # Phase B-1: keep a CPU-side `Scene` that summarizes the renderer's
         # current selection (env, mesh, materials, lights). Today's UI
@@ -1029,7 +1013,7 @@ class Renderer:
             return cached
         from skinny.environment import ENV_HEIGHT, ENV_WIDTH
         white = np.ones((ENV_HEIGHT, ENV_WIDTH, 4), dtype=np.float32)
-        env = Environment(name="Furnace (white)", data=white)
+        env = Environment(name="Furnace (white)", _data=white)
         self._furnace_env_cache = env
         return env
 
@@ -1398,7 +1382,7 @@ class Renderer:
             env_hdr = scene.environment
             self.environments.append(Environment(
                 name=f"USD: {env_hdr.name}",
-                data=env_hdr.data,
+                _data=env_hdr.data,
             ))
             self.env_index = len(self.environments) - 1
             if env_hdr.intensity > 0:
@@ -1505,19 +1489,17 @@ class Renderer:
 
         # Mesh storage buffers — always bound even when the SDF path is
         # active, so the shader's StructuredBuffer bindings are valid.
-        # Size to the biggest mesh at the max subdivision level (each level
-        # is bounded by 4× the triangles, so level 2 = 16× upper bound on
-        # verts/tris/bvh nodes; add a generous per-source allowance).
+        # Sized for the largest source mesh (displacement doesn't change
+        # vertex/triangle counts).
         self._dummy_mesh = dummy_mesh()
-        max_sub_mul = 4 ** self._max_subdivision_level   # 16 at level 2
         max_v = max(
             (src.positions.shape[0] for src in self._mesh_sources),
             default=self._dummy_mesh.num_vertices,
-        ) * max_sub_mul
+        )
         max_t = max(
             (src.tri_idx.shape[0] for src in self._mesh_sources),
             default=self._dummy_mesh.num_triangles,
-        ) * max_sub_mul
+        )
         # BVH node count is <= 2·tri_count with our leaf size of 4, but
         # we over-size to keep headroom — cheaper than reallocation on rebake.
         v_size = max_v * 32 + 256
@@ -2343,10 +2325,8 @@ class Renderer:
         """Upload this source's detail maps (or blanks when absent).
 
         Caches decoded bytes for both the normal and displacement maps so the
-        CPU bake (which needs both for auto-subdivision + normal-into-vertex
-        baking) doesn't have to re-read TIF/TGA files on every rebake, and
-        computes a one-shot TextureStats record driving Auto subdivision.
-        SDF mode (src_idx=None) just restores blanks.
+        CPU bake (which needs normal-into-vertex baking) doesn't have to re-read
+        TIF/TGA files on every rebake. SDF mode (src_idx=None) restores blanks.
         """
         if src_idx is None:
             self.normal_image.upload_sync(blank_normal_bytes())
@@ -2368,9 +2348,6 @@ class Renderer:
             dsp = load_texture_bytes(src.displacement_map)
             self._displacement_cache[src_idx] = dsp
 
-        if src_idx not in self._source_stats:
-            self._source_stats[src_idx] = compute_texture_stats(nrm, dsp)
-
         self.normal_image.upload_sync(nrm if nrm is not None else blank_normal_bytes())
         self.roughness_image.upload_sync(rgh if rgh is not None else blank_roughness_bytes())
         self.displacement_image.upload_sync(dsp if dsp is not None else blank_displacement_bytes())
@@ -2382,41 +2359,34 @@ class Renderer:
         mm_per_unit = max(float(self.mm_per_unit), 1e-6)
         return float(self.displacement_scale_mm) / mm_per_unit
 
-    def _resolved_subdivision_level(self, src_idx: int) -> int:
-        """Map the UI subdivision index to an actual level ∈ [0, max_level].
-
-        subdivision_modes = ["Auto", "Off", "1 level (4x)", "2 levels (16x)"]
-            index 0 → stats-driven (pick_auto_subdivision_level)
-            index 1 → 0 (Off)
-            index 2 → 1
-            index 3 → 2
-        """
-        idx = int(self.subdivision_index)
-        if idx <= 0:
-            stats = self._source_stats.get(src_idx, TextureStats())
-            return pick_auto_subdivision_level(
-                stats.disp_activity, stats.normal_activity,
-                max_level=self._max_subdivision_level,
-            )
-        return max(0, min(idx - 1, self._max_subdivision_level))
-
     def _bake_and_upload(self, src_idx: int) -> None:
-        """Subdivide + displace + (optionally) bake normals + rebuild BVH."""
+        """Displace + (optionally) bake normals + rebuild BVH, with disk cache."""
         src = self._mesh_sources[src_idx]
         disp_bytes = self._displacement_cache.get(src_idx)
         nrm_bytes  = self._normal_cache.get(src_idx)
-        sub_levels = self._resolved_subdivision_level(src_idx)
         scale_world = self._current_scale_world()
-        mesh = bake_mesh(
-            src,
-            subdivision_levels=sub_levels,
-            displacement_bytes=disp_bytes,
-            displacement_res=DETAIL_TEX_RES,
-            displacement_scale_world=scale_world,
-            normal_bytes=nrm_bytes,
-            normal_res=DETAIL_TEX_RES,
-            normal_map_strength=float(self.normal_map_strength),
+        nrm_strength = float(self.normal_map_strength)
+
+        cache_key = make_cache_key(
+            src.content_hash, disp_bytes, DETAIL_TEX_RES, scale_world,
+            nrm_bytes, DETAIL_TEX_RES, nrm_strength,
         )
+        mesh = lookup_cached_mesh(self._mesh_cache_index, cache_key, src)
+        if mesh is None:
+            t0 = time.monotonic()
+            mesh = bake_mesh(
+                src,
+                displacement_bytes=disp_bytes,
+                displacement_res=DETAIL_TEX_RES,
+                displacement_scale_world=scale_world,
+                normal_bytes=nrm_bytes,
+                normal_res=DETAIL_TEX_RES,
+                normal_map_strength=nrm_strength,
+            )
+            dt = time.monotonic() - t0
+            print(f"[skinny] mesh bake '{src.name}' ({dt:.1f}s)")
+            save_cached_mesh(self._mesh_cache_index, cache_key, mesh)
+
         self._upload_mesh(mesh)
         # Reset the instance buffer to a single identity-transform record
         # at offsets (0, 0, 0). Necessary when the previous active slot
@@ -2428,7 +2398,6 @@ class Renderer:
             material_ids=[0],
         )
         self._baked_source_idx      = src_idx
-        self._baked_subdivision     = sub_levels
         self._baked_scale_mm        = float(self.displacement_scale_mm)
         self._baked_scale_world     = scale_world
         self._baked_mm_per_unit     = float(self.mm_per_unit)
@@ -2439,10 +2408,9 @@ class Renderer:
     def _rebake_if_needed(self, now: float) -> None:
         """Decide whether the mesh buffers need rebuilding this frame.
 
-        Rebakes immediately on head-model or subdivision-level change, and
-        after a 300 ms debounce on the displacement-scale slider (so the
-        user can drag smoothly without triggering a ~second-long bake on
-        every intermediate value).
+        Rebakes immediately on head-model change, and after a 300 ms debounce
+        on the displacement-scale slider (so the user can drag smoothly without
+        triggering a bake on every intermediate value).
         """
         self.head_index = int(np.clip(self.head_index, 0, len(self.head_models) - 1))
 
@@ -2465,6 +2433,7 @@ class Renderer:
             and self._usd_scene.instances
         ):
             if self._baked_source_idx != -2:
+                print("[skinny] switching to USD scene (pre-baked, no BVH cache)")
                 self._upload_usd_scene()
                 self._upload_detail_maps(None)
                 self._baked_source_idx = -2
@@ -2474,30 +2443,19 @@ class Renderer:
         if not (0 <= src_idx < len(self._mesh_sources)):
             return
 
-        # Source change: upload this source's detail maps, then force a bake
-        # with the current subdivision + scale settings.
+        # Source change: upload this source's detail maps, then force a bake.
         if src_idx != self._baked_source_idx:
             self._upload_detail_maps(src_idx)
             self._bake_and_upload(src_idx)
             return
 
-        target_sub = self._resolved_subdivision_level(src_idx)
         target_scale_world = self._current_scale_world()
 
-        sub_changed = target_sub != self._baked_subdivision
         scale_changed = abs(target_scale_world - self._baked_scale_world) > 1e-9
-        # Strength only affects the mesh when normals were actually baked in
-        # (bake_mesh skips the bake at level 0 with displacement off).
         strength_changed = (
             self._baked_normals
             and abs(float(self.normal_map_strength) - self._baked_normal_strength) > 1e-9
         )
-
-        if sub_changed:
-            # Dropdown change (or Auto resolving to a different level) —
-            # commit immediately; no drag to debounce.
-            self._bake_and_upload(src_idx)
-            return
 
         if scale_changed or strength_changed:
             if self._dirty_since is None:
@@ -2717,7 +2675,6 @@ class Renderer:
             int(self.detail_maps_index),
             float(self.normal_map_strength),
             float(self.displacement_scale_mm),
-            int(self.subdivision_index),
             int(self.preset_index),
             int(self._material_version),
             # E-4: user-direct MaterialX field overrides — sort for stable hash
@@ -2748,9 +2705,9 @@ class Renderer:
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()
-        # Rebake the head mesh if source / subdivision / displacement-scale
-        # drifted from whatever we last built. Uses wall-clock time so slider
-        # drags get debounced cleanly regardless of frame rate.
+        # Rebake the head mesh if source or displacement-scale drifted from
+        # whatever we last built. Uses wall-clock time so slider drags get
+        # debounced cleanly regardless of frame rate.
         self._rebake_if_needed(time.monotonic())
         # And for the tattoo texture.
         self._ensure_tattoo_uploaded()
@@ -2906,7 +2863,7 @@ class Renderer:
             vk.VK_FILTER_LINEAR,
         )
 
-        # Offscreen TRANSFER_SRC → GENERAL for the next dispatch.
+        # Offscreen TRANSFER_SRC → GENERAL for the next compute dispatch.
         offscreen_to_general = vk.VkImageMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
             dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
@@ -2914,6 +2871,13 @@ class Renderer:
             newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
             image=self._offscreen_output.image,
             subresourceRange=sub_color,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, None, 0, None,
+            1, [offscreen_to_general],
         )
         # Swapchain TRANSFER_DST → PRESENT_SRC for present.
         swap_to_present = vk.VkImageMemoryBarrier(
@@ -2929,7 +2893,7 @@ class Renderer:
             vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
             vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             0, 0, None, 0, None,
-            2, [offscreen_to_general, swap_to_present],
+            1, [swap_to_present],
         )
 
         vk.vkEndCommandBuffer(cmd)

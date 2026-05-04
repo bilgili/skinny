@@ -69,7 +69,6 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Head model",        "head_index",                  "head_models"),
     _disc("Detail maps",       "detail_maps_index",           "detail_maps_modes"),
     _cont("Normal map strength", "normal_map_strength",       0.05, 0.0,  2.0),
-    _disc("Subdivision",       "subdivision_index",           "subdivision_modes"),
     _cont("Displacement (mm)", "displacement_scale_mm",       0.05, 0.0,  2.0),
     _disc("Tattoo",            "tattoo_index",                "tattoos"),
     _cont("Tattoo density",    "tattoo_density",              0.05, 0.0,  1.0),
