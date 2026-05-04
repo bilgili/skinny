@@ -64,39 +64,64 @@ class SkinnySession:
         self._running = False
         self.frame_queue: Queue[tuple[int, bytes]] = Queue(maxsize=2)
         self.accum_frame = 0
-        # Serialises Vulkan-touching ops (render/resize/screenshot) so the
-        # UI thread can drive resize + screenshot without racing the render
-        # thread on the compute queue.
         self._lock = Lock()
-        # Active WebSocket handlers streaming this session's video — used
-        # to push out-of-band messages (resize, codec reconfig).
         self._handlers: list["VideoStreamHandler"] = []
-
-        usd_scene = None
-        if _USD_PATH is not None:
-            from skinny.usd_loader import load_scene_from_usd
-            usd_scene = load_scene_from_usd(_USD_PATH, use_usd_mtlx_plugin=_USE_USD_MTLX)
-
-        self.ctx = VulkanContext(
-            window=None, width=1280, height=720,
-            gpu_preference=_GPU_PREFERENCE,
-        )
-        repo_root = Path(__file__).resolve().parents[2]
-        self.renderer = Renderer(
-            vk_ctx=self.ctx,
-            shader_dir=Path(__file__).parent / "shaders",
-            hdr_dir=repo_root / "hdrs",
-            head_dir=repo_root / "heads",
-            tattoo_dir=repo_root / "tattoos",
-            usd_scene=usd_scene,
-        )
-        self.encoder = VideoEncoder(1280, 720, gpu_info=self.ctx.gpu_info)
-        log.info("Session %s: encoder=%s", session_id, self.encoder.encoder_name)
-
-        self._render_thread = Thread(target=self._render_loop, daemon=True)
-        self._running = True
-        self._render_thread.start()
+        self.ready = False
+        self._init_error: Exception | None = None
+        self._init_log: list[str] = []
+        self.ctx: VulkanContext | None = None
+        self.renderer: Renderer | None = None
+        self.encoder: VideoEncoder | None = None
         self._active[session_id] = self
+
+    def _log_init(self, msg: str) -> None:
+        self._init_log.append(msg)
+        log.info("Session %s: %s", self.session_id, msg)
+
+    def initialize(self) -> None:
+        """Heavy initialization — run from a background thread."""
+        try:
+            usd_scene = None
+            if _USD_PATH is not None:
+                self._log_init("Loading USD scene...")
+                from skinny.usd_loader import load_scene_from_usd
+                usd_scene = load_scene_from_usd(
+                    _USD_PATH, use_usd_mtlx_plugin=_USE_USD_MTLX,
+                )
+
+            self._log_init("Creating Vulkan context...")
+            self.ctx = VulkanContext(
+                window=None, width=1280, height=720,
+                gpu_preference=_GPU_PREFERENCE,
+            )
+            self._log_init(f"GPU: {self.ctx.gpu_info.name}")
+
+            self._log_init("Initializing renderer (shaders, meshes, materials)...")
+            repo_root = Path(__file__).resolve().parents[2]
+            self.renderer = Renderer(
+                vk_ctx=self.ctx,
+                shader_dir=Path(__file__).parent / "shaders",
+                hdr_dir=repo_root / "hdrs",
+                head_dir=repo_root / "heads",
+                tattoo_dir=repo_root / "tattoos",
+                usd_scene=usd_scene,
+            )
+
+            self._log_init("Setting up video encoder...")
+            self.encoder = VideoEncoder(1280, 720, gpu_info=self.ctx.gpu_info)
+            self._log_init(f"Encoder: {self.encoder.encoder_name}")
+
+            self._render_thread = Thread(target=self._render_loop, daemon=True)
+            self._running = True
+            self._render_thread.start()
+
+            self._log_init("Renderer ready")
+            self.ready = True
+        except Exception as e:
+            self._log_init(f"Initialization failed: {e}")
+            self._init_error = e
+            log.error("Session %s init failed: %s", self.session_id, e,
+                       exc_info=True)
 
     def _render_loop(self) -> None:
         prev = time.perf_counter()
@@ -230,10 +255,14 @@ class SkinnySession:
     def cleanup(self) -> None:
         log.info("Cleaning up session %s", self.session_id)
         self._running = False
-        self._render_thread.join(timeout=5)
-        self.encoder.close()
-        self.renderer.cleanup()
-        self.ctx.destroy()
+        if hasattr(self, "_render_thread"):
+            self._render_thread.join(timeout=5)
+        if self.encoder is not None:
+            self.encoder.close()
+        if self.renderer is not None:
+            self.renderer.cleanup()
+        if self.ctx is not None:
+            self.ctx.destroy()
         self._active.pop(self.session_id, None)
 
     @classmethod
@@ -256,24 +285,8 @@ class VideoStreamHandler(WebSocketHandler):
             self.close(1008, "Unknown session")
             return
         self._streaming = True
-        # Capture the IOLoop that owns this WebSocket so out-of-band
-        # writes (resize/codec) from worker threads can be marshalled back.
         self._ioloop = IOLoop.current()
         self.session.register_handler(self)
-        # Drain stale frames so browser gets a fresh keyframe first
-        while not self.session.frame_queue.empty():
-            try:
-                self.session.frame_queue.get_nowait()
-            except Empty:
-                break
-        self.session.encoder.force_keyframe()
-        # Send initial resolution so the client canvas matches the renderer
-        # if the user already resized before reconnecting.
-        self.send_resize(self.session.renderer.width, self.session.renderer.height)
-        desc = self.session.encoder.avcc_description
-        if desc:
-            self.send_codec_config(desc)
-            log.info("Video WS: sent AVCC description (%d bytes)", len(desc))
         IOLoop.current().spawn_callback(self._stream_frames)
         log.info("Video WS opened for session %s", session_id)
 
@@ -308,6 +321,23 @@ class VideoStreamHandler(WebSocketHandler):
 
     async def _stream_frames(self):
         loop = asyncio.get_event_loop()
+        while self._streaming and self.ws_connection and not self.session.ready:
+            if self.session._init_error:
+                return
+            await asyncio.sleep(0.3)
+        if not self._streaming or not self.ws_connection:
+            return
+        while not self.session.frame_queue.empty():
+            try:
+                self.session.frame_queue.get_nowait()
+            except Empty:
+                break
+        self.session.encoder.force_keyframe()
+        self.send_resize(self.session.renderer.width, self.session.renderer.height)
+        desc = self.session.encoder.avcc_description
+        if desc:
+            self.send_codec_config(desc)
+            log.info("Video WS: sent AVCC description (%d bytes)", len(desc))
         while self._streaming and self.ws_connection:
             try:
                 frame = await loop.run_in_executor(
@@ -494,15 +524,8 @@ def _build_capture_section(session: "SkinnySession") -> pn.viewable.Viewable:
     return pn.Column(fmt_select, download)
 
 
-def create_panel_app() -> pn.viewable.Viewable:
-    """Called per browser session by Panel serve."""
-    session_id = str(uuid.uuid4())[:8]
-
-    try:
-        session = SkinnySession(session_id)
-    except RuntimeError as e:
-        return pn.pane.Alert(str(e), alert_type="danger")
-
+def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
+    """Build the full sidebar accordion — requires session.ready."""
     params = build_all_params(session.renderer)
     grouped = _group_params(params)
 
@@ -552,8 +575,6 @@ def create_panel_app() -> pn.viewable.Viewable:
     sections = []
     active_indices = []
 
-    # Resolution + Capture come before the param-driven groups so they
-    # land at the top of the sidebar accordion.
     sections.append(("Resolution", _build_resolution_section(session)))
     active_indices.append(len(sections) - 1)
     sections.append(("Capture", _build_capture_section(session)))
@@ -633,7 +654,29 @@ def create_panel_app() -> pn.viewable.Viewable:
             sections.append(("Materials", pn.Column(mat_accordion)))
             active_indices.append(len(sections) - 1)
 
-    sidebar = pn.Accordion(*sections, active=active_indices)
+    return pn.Accordion(*sections, active=active_indices)
+
+
+def create_panel_app() -> pn.viewable.Viewable:
+    """Called per browser session by Panel serve."""
+    session_id = str(uuid.uuid4())[:8]
+
+    try:
+        session = SkinnySession(session_id)
+    except RuntimeError as e:
+        return pn.pane.Alert(str(e), alert_type="danger")
+
+    _doc = pn.state.curdoc
+
+    def _init_and_signal():
+        log.info("Init thread started for session %s", session_id)
+        session.initialize()
+        log.info("Init thread finished for session %s (ready=%s, error=%s)",
+                 session_id, session.ready, session._init_error)
+
+    Thread(
+        target=_init_and_signal, daemon=True, name=f"init-{session_id}",
+    ).start()
 
     iframe_html = (
         f'<iframe src="/video_page/{session_id}" '
@@ -642,21 +685,79 @@ def create_panel_app() -> pn.viewable.Viewable:
     )
     video_pane = pn.pane.HTML(iframe_html, sizing_mode="stretch_both", min_height=500)
 
-    encoder_info = session.encoder.encoder_name
-    hw_tag = " (HW)" if session.encoder.is_hardware else " (SW)"
     info_bar = pn.pane.Markdown(
-        f"**Session:** {session_id} | **GPU:** {session.ctx.gpu_info.name} | "
-        f"**Encoder:** {encoder_info}{hw_tag}",
+        f"**Session:** {session_id} | Initializing...",
         styles={"font-size": "11px", "color": "#888"},
     )
 
+    log_pane = pn.pane.HTML(
+        '<pre style="margin:0;padding:4px 8px;font-size:11px;color:#aaa;'
+        'background:#1a1a1a;max-height:120px;overflow-y:auto;'
+        'white-space:pre-wrap;">Initializing renderer...</pre>',
+        sizing_mode="stretch_width",
+    )
+
+    sidebar_col = pn.Column(
+        pn.indicators.LoadingSpinner(value=True, size=25),
+        pn.pane.Markdown("*Initializing renderer...*"),
+        width=340, scroll=True,
+    )
+
     layout = pn.Row(
-        pn.Column(video_pane, info_bar, sizing_mode="stretch_both"),
-        pn.Column(sidebar, width=340, scroll=True),
+        pn.Column(video_pane, info_bar, log_pane, sizing_mode="stretch_both"),
+        sidebar_col,
         sizing_mode="stretch_both",
     )
 
+    _poll_active = [True]
+    _prev_log_len = [0]
+
+    def _update_ui():
+        if not _poll_active[0]:
+            return
+        msgs = list(session._init_log)
+        if len(msgs) > _prev_log_len[0]:
+            _prev_log_len[0] = len(msgs)
+            text = "\n".join(msgs)
+            log_pane.object = (
+                '<pre style="margin:0;padding:4px 8px;font-size:11px;color:#aaa;'
+                'background:#1a1a1a;max-height:120px;overflow-y:auto;'
+                f'white-space:pre-wrap;">{text}</pre>'
+            )
+
+        if session.ready:
+            _poll_active[0] = False
+            sidebar_col.clear()
+            sidebar_col.append(_build_sidebar_widgets(session))
+            encoder_info = session.encoder.encoder_name
+            hw_tag = " (HW)" if session.encoder.is_hardware else " (SW)"
+            info_bar.object = (
+                f"**Session:** {session_id} | **GPU:** {session.ctx.gpu_info.name}"
+                f" | **Encoder:** {encoder_info}{hw_tag}"
+            )
+        elif session._init_error:
+            _poll_active[0] = False
+            sidebar_col.clear()
+            sidebar_col.append(
+                pn.pane.Alert(str(session._init_error), alert_type="danger"),
+            )
+            info_bar.object = (
+                f"**Session:** {session_id} | **Error:** {session._init_error}"
+            )
+
+    def _poll_loop():
+        while _poll_active[0]:
+            time.sleep(0.5)
+            if _doc:
+                try:
+                    _doc.add_next_tick_callback(_update_ui)
+                except Exception:
+                    break
+
+    Thread(target=_poll_loop, daemon=True, name=f"poll-{session_id}").start()
+
     def on_session_destroyed(session_context):
+        _poll_active[0] = False
         session.cleanup()
 
     pn.state.on_session_destroyed(on_session_destroyed)

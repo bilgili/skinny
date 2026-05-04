@@ -126,7 +126,8 @@
       "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-WebRequest -Uri \"http://localhost:8082/skinny\" -UseBasicParsing -TimeoutSec 120; $r.StatusCode } catch { $_.Exception.Message })",
       "PowerShell(python D:\\\\projects\\\\skinny\\\\diag_materials.py 2>&1)",
       "PowerShell(python -m skinny.web_app \"assets/Usd-Mtlx-Example/scene.usda\" --port 8083 2>&1)",
-      "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-WebRequest -Uri \"http://localhost:8083/skinny\" -UseBasicParsing -TimeoutSec 120; $r.StatusCode } catch { $_.Exception.Message })"
+      "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-WebRequest -Uri \"http://localhost:8083/skinny\" -UseBasicParsing -TimeoutSec 120; $r.StatusCode } catch { $_.Exception.Message })",
+      "Bash(Measure-Object -Line)"
     ]
   }
 }
