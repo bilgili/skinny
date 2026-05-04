@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import logging
 import struct
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, Full, Queue
-from threading import Thread
+from threading import Lock, Thread
 from typing import ClassVar
 
 import panel as pn
@@ -28,7 +30,8 @@ from tornado.web import RequestHandler
 from tornado.websocket import WebSocketHandler
 
 from skinny.params import (
-    ParamSpec, build_all_params, _get_nested, _set_nested,
+    ParamSpec, RESOLUTION_PRESETS, build_all_params,
+    find_resolution_preset_index, _get_nested, _set_nested,
 )
 from skinny.vk_context import VulkanContext
 from skinny.renderer import Renderer
@@ -61,6 +64,13 @@ class SkinnySession:
         self._running = False
         self.frame_queue: Queue[tuple[int, bytes]] = Queue(maxsize=2)
         self.accum_frame = 0
+        # Serialises Vulkan-touching ops (render/resize/screenshot) so the
+        # UI thread can drive resize + screenshot without racing the render
+        # thread on the compute queue.
+        self._lock = Lock()
+        # Active WebSocket handlers streaming this session's video — used
+        # to push out-of-band messages (resize, codec reconfig).
+        self._handlers: list["VideoStreamHandler"] = []
 
         usd_scene = None
         if _USD_PATH is not None:
@@ -95,18 +105,29 @@ class SkinnySession:
             dt = now - prev
             prev = now
 
-            self.renderer.update(dt)
-            raw = self.renderer.render_headless()
-            self.accum_frame = self.renderer.accum_frame
+            with self._lock:
+                self.renderer.update(dt)
+                raw = self.renderer.render_headless()
+                self.accum_frame = self.renderer.accum_frame
+                width = self.renderer.width
+                height = self.renderer.height
+                is_h264 = self.encoder.is_h264
+                has_desc = bool(self.encoder.avcc_description)
 
-            if self.encoder.is_h264 and self.encoder.avcc_description:
-                results = self.encoder.encode_h264(raw)
+                if is_h264 and has_desc:
+                    results = self.encoder.encode_h264(raw)
+                else:
+                    quality = 92 if self.accum_frame > 30 else 75
+                    results = None
+                    jpeg = self.encoder.encode_jpeg(raw, quality=quality)
+
+            if results is not None:
                 for is_key, avcc_data in results:
                     self._push_frame(0 if is_key else 1, avcc_data)
             else:
-                quality = 92 if self.accum_frame > 30 else 75
-                jpeg = self.encoder.encode_jpeg(raw, quality=quality)
                 self._push_frame(2, jpeg)
+            # Suppresses an unused-variable warning when not in JPEG path.
+            del width, height
 
             # Adaptive rate: full speed during interaction, throttle when converging
             af = self.accum_frame
@@ -153,6 +174,59 @@ class SkinnySession:
         if self.encoder.is_h264:
             self.encoder.force_keyframe()
 
+    # ── Resize + screenshot (called from UI / WS threads) ──────────────
+
+    def resize(self, width: int, height: int) -> tuple[int, int]:
+        """Change render + encoder resolution. Returns the actual (W, H)
+        the renderer settled on (clamped + rounded to workgroup multiple).
+        """
+        from skinny.video_encoder import VideoEncoder
+
+        with self._lock:
+            self.renderer.resize(width, height)
+            actual_w = int(self.renderer.width)
+            actual_h = int(self.renderer.height)
+            if (actual_w, actual_h) != (self.encoder.width, self.encoder.height):
+                self.encoder.close()
+                self.encoder = VideoEncoder(
+                    actual_w, actual_h, gpu_info=self.ctx.gpu_info,
+                )
+            self.encoder.force_keyframe()
+            # Drop any frames queued at the previous resolution so the
+            # browser doesn't try to decode old-dim H264 packets with
+            # the new decoder configuration.
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except Empty:
+                    break
+
+            # Schedule the type=4 (resize) and type=3 (codec config)
+            # WebSocket writes BEFORE the render thread is unblocked so
+            # the IOLoop sees them ahead of any new H264 frames.
+            desc = self.encoder.avcc_description
+            for handler in list(self._handlers):
+                handler.send_resize(actual_w, actual_h)
+                if desc:
+                    handler.send_codec_config(desc)
+        return actual_w, actual_h
+
+    def screenshot(self, fmt: str) -> bytes:
+        """Render a screenshot in the requested format and return its bytes."""
+        buf = io.BytesIO()
+        with self._lock:
+            self.renderer.save_screenshot(buf, fmt)
+        return buf.getvalue()
+
+    def register_handler(self, handler: "VideoStreamHandler") -> None:
+        self._handlers.append(handler)
+
+    def unregister_handler(self, handler: "VideoStreamHandler") -> None:
+        try:
+            self._handlers.remove(handler)
+        except ValueError:
+            pass
+
     def cleanup(self) -> None:
         log.info("Cleaning up session %s", self.session_id)
         self._running = False
@@ -182,6 +256,10 @@ class VideoStreamHandler(WebSocketHandler):
             self.close(1008, "Unknown session")
             return
         self._streaming = True
+        # Capture the IOLoop that owns this WebSocket so out-of-band
+        # writes (resize/codec) from worker threads can be marshalled back.
+        self._ioloop = IOLoop.current()
+        self.session.register_handler(self)
         # Drain stale frames so browser gets a fresh keyframe first
         while not self.session.frame_queue.empty():
             try:
@@ -189,13 +267,44 @@ class VideoStreamHandler(WebSocketHandler):
             except Empty:
                 break
         self.session.encoder.force_keyframe()
+        # Send initial resolution so the client canvas matches the renderer
+        # if the user already resized before reconnecting.
+        self.send_resize(self.session.renderer.width, self.session.renderer.height)
         desc = self.session.encoder.avcc_description
         if desc:
-            header = struct.pack("!BI", 3, 0)
-            self.write_message(header + desc, binary=True)
+            self.send_codec_config(desc)
             log.info("Video WS: sent AVCC description (%d bytes)", len(desc))
         IOLoop.current().spawn_callback(self._stream_frames)
         log.info("Video WS opened for session %s", session_id)
+
+    def send_resize(self, width: int, height: int) -> None:
+        """Push a type=4 resize message to the client. Type byte + accum
+        placeholder + (uint16 width, uint16 height)."""
+        payload = struct.pack("!BIHH", 4, 0, width, height)
+        self._write_safely(payload)
+
+    def send_codec_config(self, desc: bytes) -> None:
+        header = struct.pack("!BI", 3, 0)
+        self._write_safely(header + desc)
+
+    def _write_safely(self, data: bytes) -> None:
+        # write_message must run on the IOLoop thread; resize/screenshot
+        # run on the Bokeh worker thread, so schedule the write.
+        loop = getattr(self, "_ioloop", None)
+        if loop is None:
+            return
+        try:
+            loop.add_callback(lambda: self._do_write(data))
+        except Exception:
+            pass
+
+    def _do_write(self, data: bytes) -> None:
+        if self.ws_connection is None:
+            return
+        try:
+            self.write_message(data, binary=True)
+        except Exception:
+            pass
 
     async def _stream_frames(self):
         loop = asyncio.get_event_loop()
@@ -225,6 +334,8 @@ class VideoStreamHandler(WebSocketHandler):
 
     def on_close(self):
         self._streaming = False
+        if self.session is not None:
+            self.session.unregister_handler(self)
         log.info("Video WS closed")
 
 
@@ -276,6 +387,111 @@ def _group_params(params: list[ParamSpec]) -> dict[str, list[ParamSpec]]:
         else:
             groups["Render"].append(p)
     return {k: v for k, v in groups.items() if v}
+
+
+_CAPTURE_FORMATS = [
+    ("PNG",  "png",  "png"),
+    ("JPEG", "jpeg", "jpg"),
+    ("BMP",  "bmp",  "bmp"),
+    ("EXR",  "exr",  "exr"),
+    ("HDR",  "hdr",  "hdr"),
+]
+
+
+def _build_resolution_section(session: "SkinnySession") -> pn.viewable.Viewable:
+    """Resolution preset + W/H inputs that drive ``session.resize``."""
+    cur_w = int(session.renderer.width)
+    cur_h = int(session.renderer.height)
+    preset_idx = find_resolution_preset_index(cur_w, cur_h)
+    preset_names = [name for name, _w, _h in RESOLUTION_PRESETS]
+
+    preset = pn.widgets.Select(
+        name="Preset", options=preset_names,
+        value=preset_names[preset_idx],
+    )
+    w_input = pn.widgets.IntInput(
+        name="Width", value=cur_w, start=64, end=8192, step=8,
+    )
+    h_input = pn.widgets.IntInput(
+        name="Height", value=cur_h, start=64, end=8192, step=8,
+    )
+    apply_btn = pn.widgets.Button(
+        name="Apply Resolution", button_type="primary",
+    )
+
+    # _suppress prevents the preset → W/H sync writes from re-firing the
+    # preset watcher (which would loop).
+    state = {"suppress": False}
+
+    def do_resize(w: int, h: int) -> None:
+        try:
+            actual_w, actual_h = session.resize(int(w), int(h))
+        except Exception as exc:
+            log.error("Resize failed: %s", exc)
+            return
+        state["suppress"] = True
+        try:
+            w_input.value = actual_w
+            h_input.value = actual_h
+            idx = find_resolution_preset_index(actual_w, actual_h)
+            preset.value = RESOLUTION_PRESETS[idx][0]
+        finally:
+            state["suppress"] = False
+
+    def on_preset(event):
+        if state["suppress"]:
+            return
+        for name, w, h in RESOLUTION_PRESETS:
+            if name == event.new:
+                if w == 0 or h == 0:  # "Custom" — leave entries alone
+                    return
+                do_resize(w, h)
+                return
+
+    def on_apply(_event):
+        do_resize(int(w_input.value), int(h_input.value))
+
+    preset.param.watch(on_preset, "value")
+    apply_btn.on_click(on_apply)
+
+    return pn.Column(preset, w_input, h_input, apply_btn)
+
+
+def _build_capture_section(session: "SkinnySession") -> pn.viewable.Viewable:
+    """Format select + FileDownload that produces a screenshot on click."""
+    fmt_select = pn.widgets.Select(
+        name="Format",
+        options=[label for label, _fmt, _ext in _CAPTURE_FORMATS],
+        value="PNG",
+    )
+
+    def screenshot_callback():
+        label = fmt_select.value
+        for lab, fmt, _ext in _CAPTURE_FORMATS:
+            if lab == label:
+                data = session.screenshot(fmt)
+                return io.BytesIO(data)
+        return io.BytesIO(b"")
+
+    download = pn.widgets.FileDownload(
+        callback=screenshot_callback,
+        filename="skinny.png",
+        button_type="primary",
+        label="Screenshot",
+        embed=False,
+    )
+
+    def update_filename(*_):
+        for lab, _fmt, ext in _CAPTURE_FORMATS:
+            if lab == fmt_select.value:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                download.filename = f"skinny_{ts}.{ext}"
+                return
+
+    fmt_select.param.watch(update_filename, "value")
+    update_filename()
+
+    return pn.Column(fmt_select, download)
 
 
 def create_panel_app() -> pn.viewable.Viewable:
@@ -335,6 +551,14 @@ def create_panel_app() -> pn.viewable.Viewable:
     collapsed_groups = {"Skin"}
     sections = []
     active_indices = []
+
+    # Resolution + Capture come before the param-driven groups so they
+    # land at the top of the sidebar accordion.
+    sections.append(("Resolution", _build_resolution_section(session)))
+    active_indices.append(len(sections) - 1)
+    sections.append(("Capture", _build_capture_section(session)))
+    active_indices.append(len(sections) - 1)
+
     for group_name, group_params in grouped.items():
         group_widgets = [make_widget(p) for p in group_params]
         sections.append((group_name, pn.Column(*group_widgets)))
@@ -413,7 +637,7 @@ def create_panel_app() -> pn.viewable.Viewable:
 
     iframe_html = (
         f'<iframe src="/video_page/{session_id}" '
-        f'style="width:100%;aspect-ratio:16/9;border:none;display:block;" '
+        f'style="width:100%;height:100%;border:none;display:block;background:#000;" '
         f'allow="autoplay"></iframe>'
     )
     video_pane = pn.pane.HTML(iframe_html, sizing_mode="stretch_both", min_height=500)

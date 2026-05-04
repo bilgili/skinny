@@ -243,7 +243,9 @@ class VulkanContext:
             imageExtent=extent,
             imageArrayLayers=1,
             imageUsage=(
-                vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.VK_IMAGE_USAGE_STORAGE_BIT
+                vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                | vk.VK_IMAGE_USAGE_STORAGE_BIT
+                | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT
             ),
             imageSharingMode=sharing_mode,
             queueFamilyIndexCount=len(queue_indices),
@@ -286,6 +288,26 @@ class VulkanContext:
             format=chosen_format.format,
             extent=extent,
         )
+
+    def recreate_swapchain(self, width: int, height: int) -> None:
+        """Tear down the current swapchain and rebuild at the new extent.
+        Caller must vkDeviceWaitIdle and re-record any per-image command
+        buffers / descriptor writes that referenced the old image views.
+        """
+        if self._headless or self.swapchain_info is None:
+            self.width = width
+            self.height = height
+            return
+
+        for view in self.swapchain_info.image_views:
+            vk.vkDestroyImageView(self.device, view, None)
+        self._vkDestroySwapchainKHR(
+            self.device, self.swapchain_info.swapchain, None
+        )
+
+        self.width = width
+        self.height = height
+        self.swapchain_info = self._create_swapchain()
 
     # ── Command pool ─────────────────────────────────────────────
 

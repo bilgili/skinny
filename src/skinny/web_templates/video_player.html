@@ -4,13 +4,27 @@
 <meta charset="utf-8">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; }
   body { background: #111; overflow: hidden; }
-  canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #wrap {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  /* Canvas keeps its intrinsic aspect ratio inside the wrapper. */
+  canvas {
+    max-width: 100%; max-height: 100%;
+    width: auto; height: auto;
+    display: block; cursor: crosshair;
+    object-fit: contain;
+  }
   #status { position: absolute; bottom: 4px; left: 8px; color: #aaa; font: 11px monospace; pointer-events: none; }
 </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
+<div id="wrap">
+  <canvas id="canvas"></canvas>
+</div>
 <div id="status">connecting...</div>
 
 <script>
@@ -24,8 +38,16 @@
   var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') +
                location.host + '/video_ws/' + SESSION_ID;
 
-  canvas.width = W;
-  canvas.height = H;
+  function applyCanvasSize(w, h) {
+    W = w; H = h;
+    // Set the bitmap size; CSS object-fit keeps aspect ratio inside wrap.
+    canvas.width = w;
+    canvas.height = h;
+    // Hint browser of intrinsic ratio so the layout box matches before
+    // any pixels arrive (esp. on Safari without object-fit support).
+    canvas.style.aspectRatio = w + ' / ' + h;
+  }
+  applyCanvasSize(W, H);
 
   var decoder = null;
   var useWebCodecs = ('VideoDecoder' in window);
@@ -45,7 +67,7 @@
     if (!useWebCodecs) return;
     try {
       if (decoder) {
-        decoder.close();
+        try { decoder.close(); } catch (e) { /* already closed */ }
       }
       decoder = new VideoDecoder({
         output: function(frame) {
@@ -60,13 +82,26 @@
           updateStatus('decoder error, using JPEG');
         }
       });
+      // Derive codec string from AVCC description (bytes 1=profile,
+      // 2=profile_compat, 3=level). Hardcoding 'avc1.42c01e' (baseline
+      // L3.0) breaks for resolutions above 720p — the configure call
+      // silently fails and the canvas stays black.
+      var codecStr = 'avc1.42c01e';
+      if (description) {
+        var b = new Uint8Array(description);
+        if (b.length >= 4) {
+          var hex = function(v) { return v.toString(16).padStart(2, '0'); };
+          codecStr = 'avc1.' + hex(b[1]) + hex(b[2]) + hex(b[3]);
+        }
+      }
       var config = {
-        codec: 'avc1.42c01e',
+        codec: codecStr,
         optimizeForLatency: true,
       };
       if (description) {
         config.description = description;
       }
+      console.log('VideoDecoder.configure codec=' + codecStr);
       decoder.configure(config);
       decoderReady = true;
       console.log('VideoDecoder configured with description:', !!description);
@@ -87,7 +122,7 @@
       lastFpsTime = now;
     }
     frameCount++;
-    updateStatus(displayFps + ' fps | frame ' + frameCount);
+    updateStatus(displayFps + ' fps | frame ' + frameCount + ' | ' + W + 'x' + H);
   }
 
   function handleJpeg(data) {
@@ -114,15 +149,30 @@
       var data = new Uint8Array(event.data);
       if (data.length < 5) return;
 
-      var type = data[0];  // 0=H264 key, 1=H264 delta, 2=JPEG, 3=codec config
+      // Header: 1 byte type + 4 bytes uint (accum/placeholder).
+      var type = data[0];  // 0=H264 key, 1=H264 delta, 2=JPEG, 3=codec, 4=resize
       var payload = data.slice(5);
 
       if (type === 3) {
-        // AVCC description — configure decoder
         avccDescription = payload.buffer.slice(
           payload.byteOffset, payload.byteOffset + payload.byteLength
         );
         initDecoder(avccDescription);
+        return;
+      }
+
+      if (type === 4) {
+        // Resize message: payload = uint16 width, uint16 height (big-endian).
+        if (payload.length < 4) return;
+        var w = (payload[0] << 8) | payload[1];
+        var h = (payload[2] << 8) | payload[3];
+        applyCanvasSize(w, h);
+        // Drop the existing decoder; the next type=3 message will rebuild it.
+        if (decoder) {
+          try { decoder.close(); } catch (e) { /* nothing */ }
+          decoder = null;
+        }
+        decoderReady = false;
         return;
       }
 

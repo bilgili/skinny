@@ -12,6 +12,31 @@ from dataclasses import dataclass
 import numpy as np
 
 
+# Common render resolutions surfaced in the desktop and web "Resolution"
+# sections. First entry "Custom" is the sentinel selected when the live
+# width/height don't match any preset; its (0, 0) tuple is never applied.
+RESOLUTION_PRESETS: list[tuple[str, int, int]] = [
+    ("Custom",      0,    0),
+    ("640x360",     640,  360),
+    ("960x540",     960,  540),
+    ("1280x720",    1280, 720),
+    ("1600x900",    1600, 900),
+    ("1920x1080",   1920, 1080),
+    ("2560x1440",   2560, 1440),
+    ("3840x2160",   3840, 2160),
+    ("1024x1024",   1024, 1024),
+    ("2048x2048",   2048, 2048),
+]
+
+
+def find_resolution_preset_index(width: int, height: int) -> int:
+    """Return RESOLUTION_PRESETS index whose (W, H) matches; 0 ("Custom") otherwise."""
+    for i, (_name, w, h) in enumerate(RESOLUTION_PRESETS):
+        if w == width and h == height:
+            return i
+    return 0
+
+
 @dataclass
 class ParamSpec:
     name: str

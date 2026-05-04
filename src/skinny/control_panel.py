@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import math
 import tkinter as tk
-from tkinter import colorchooser, messagebox, simpledialog, ttk
+from datetime import datetime
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from typing import Any
 
 import numpy as np
 
+from skinny.params import RESOLUTION_PRESETS, find_resolution_preset_index
 from skinny.presets import apply_preset
 from skinny.settings import delete_user_preset, save_user_preset
 
@@ -117,6 +119,12 @@ class ControlPanel:
         right_col = ttk.Frame(columns)
         right_col.pack(side="left", fill="both", expand=True, padx=(2, 0))
 
+        # ── Left: Resolution ──
+        self._build_resolution_section(left_col)
+
+        # ── Left: Capture ──
+        self._build_capture_section(left_col)
+
         # ── Left: Render settings ──
         render_frame = ttk.LabelFrame(left_col, text="Render", padding=4)
         render_frame.pack(fill="x", padx=2, pady=2)
@@ -153,6 +161,148 @@ class ControlPanel:
 
         # ── Right: Materials (skin + scene) ──
         self._build_material_widgets(right_col)
+
+    def _build_resolution_section(self, container: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(container, text="Resolution", padding=4)
+        frame.pack(fill="x", padx=2, pady=2)
+
+        cur_w = int(getattr(self.renderer, "width", 1280))
+        cur_h = int(getattr(self.renderer, "height", 720))
+        preset_idx = find_resolution_preset_index(cur_w, cur_h)
+
+        preset_row = ttk.Frame(frame)
+        preset_row.pack(fill="x", pady=1)
+        ttk.Label(preset_row, text="Preset", width=self._LABEL_WIDTH,
+                  anchor="w").pack(side="left")
+        self._resolution_preset_var = tk.StringVar(
+            value=RESOLUTION_PRESETS[preset_idx][0]
+        )
+        preset_combo = ttk.Combobox(
+            preset_row,
+            textvariable=self._resolution_preset_var,
+            values=[name for name, _w, _h in RESOLUTION_PRESETS],
+            state="readonly",
+        )
+        preset_combo.pack(side="left", fill="x", expand=True)
+        preset_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._on_resolution_preset_selected(),
+        )
+        self._resolution_preset_combo = preset_combo
+
+        wh_row = ttk.Frame(frame)
+        wh_row.pack(fill="x", pady=1)
+        ttk.Label(wh_row, text="Width × Height", width=self._LABEL_WIDTH,
+                  anchor="w").pack(side="left")
+        self._resolution_width_var = tk.StringVar(value=str(cur_w))
+        self._resolution_height_var = tk.StringVar(value=str(cur_h))
+        w_entry = ttk.Entry(
+            wh_row, textvariable=self._resolution_width_var, width=6,
+        )
+        w_entry.pack(side="left", padx=(0, 2))
+        ttk.Label(wh_row, text="×").pack(side="left", padx=2)
+        h_entry = ttk.Entry(
+            wh_row, textvariable=self._resolution_height_var, width=6,
+        )
+        h_entry.pack(side="left", padx=(2, 6))
+        # Commit on Return or focus-out.
+        for entry in (w_entry, h_entry):
+            entry.bind("<Return>", lambda _e: self._on_resolution_apply())
+            entry.bind("<FocusOut>", lambda _e: self._on_resolution_apply())
+        ttk.Button(
+            wh_row, text="Apply", width=8,
+            command=self._on_resolution_apply,
+        ).pack(side="left")
+
+    def _on_resolution_preset_selected(self) -> None:
+        name = self._resolution_preset_var.get()
+        for entry_name, w, h in RESOLUTION_PRESETS:
+            if entry_name == name:
+                if w == 0 or h == 0:  # "Custom" — leave entries alone
+                    return
+                self._resolution_width_var.set(str(w))
+                self._resolution_height_var.set(str(h))
+                self._apply_resolution(w, h)
+                return
+
+    def _on_resolution_apply(self) -> None:
+        try:
+            w = int(self._resolution_width_var.get())
+            h = int(self._resolution_height_var.get())
+        except (TypeError, ValueError):
+            return
+        self._apply_resolution(w, h)
+
+    def _apply_resolution(self, width: int, height: int) -> None:
+        try:
+            self.renderer.resize(width, height)
+        except Exception as exc:
+            messagebox.showerror(
+                "Resize failed", f"Could not resize to {width}x{height}:\n{exc}",
+                parent=self.root,
+            )
+            return
+        # Re-read what the renderer actually settled on (may be clamped /
+        # rounded to a workgroup multiple) and update the entries.
+        actual_w = int(self.renderer.width)
+        actual_h = int(self.renderer.height)
+        self._resolution_width_var.set(str(actual_w))
+        self._resolution_height_var.set(str(actual_h))
+        idx = find_resolution_preset_index(actual_w, actual_h)
+        self._resolution_preset_var.set(RESOLUTION_PRESETS[idx][0])
+
+    _CAPTURE_FORMAT_EXTENSIONS = {
+        "PNG":  ("png",  "PNG image",         ".png"),
+        "JPEG": ("jpeg", "JPEG image",        ".jpg"),
+        "BMP":  ("bmp",  "Bitmap",            ".bmp"),
+        "EXR":  ("exr",  "OpenEXR (linear)",  ".exr"),
+        "HDR":  ("hdr",  "Radiance HDR",      ".hdr"),
+    }
+
+    def _build_capture_section(self, container: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(container, text="Capture", padding=4)
+        frame.pack(fill="x", padx=2, pady=2)
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text="Format", width=self._LABEL_WIDTH,
+                  anchor="w").pack(side="left")
+        self._capture_format_var = tk.StringVar(value="PNG")
+        ttk.Combobox(
+            row,
+            textvariable=self._capture_format_var,
+            values=list(self._CAPTURE_FORMAT_EXTENSIONS.keys()),
+            state="readonly",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Button(
+            row, text="Screenshot", width=12,
+            command=self._on_screenshot,
+        ).pack(side="left")
+
+    def _on_screenshot(self) -> None:
+        label = self._capture_format_var.get()
+        spec = self._CAPTURE_FORMAT_EXTENSIONS.get(label)
+        if spec is None:
+            return
+        fmt, desc, ext = spec
+        default_name = f"skinny_{datetime.now():%Y%m%d_%H%M%S}{ext}"
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Save screenshot",
+            defaultextension=ext,
+            initialfile=default_name,
+            filetypes=[(desc, f"*{ext}"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self.renderer.save_screenshot(path, fmt)
+        except Exception as exc:
+            messagebox.showerror(
+                "Screenshot failed",
+                f"Could not save {label} screenshot:\n{exc}",
+                parent=self.root,
+            )
 
     def _build_param_row(self, container: ttk.Frame, p) -> None:
         from skinny.params import _get_nested
