@@ -1,0 +1,9 @@
+{
+  "modules": [
+    {
+      "name": "python_materials.example_freckles",
+      "file": "python_materials/example_freckles.slang",
+      "imports": []
+    }
+  ]
+}

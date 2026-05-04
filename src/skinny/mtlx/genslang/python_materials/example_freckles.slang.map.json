@@ -1,0 +1,20 @@
+{
+  "generated": "python_materials/example_freckles.slang",
+  "sources": [
+    "D:\\projects\\skinny\\python_materials\\example_freckles.py"
+  ],
+  "mappings": [
+    {
+      "generated_line": 1,
+      "source": "D:\\projects\\skinny\\python_materials\\example_freckles.py",
+      "source_line": 2,
+      "symbol": "freckle_albedo_tint"
+    },
+    {
+      "generated_line": 1,
+      "source": "D:\\projects\\skinny\\python_materials\\example_freckles.py",
+      "source_line": 2,
+      "symbol": "freckle_density"
+    }
+  ]
+}
