@@ -1,4 +1,20 @@
-from .api import build_module, compile_module, configure_runtime, extern, load_module, shader
+from .api import (
+    build_module,
+    compile_module,
+    configure_runtime,
+    const,
+    extern,
+    extern_type,
+    generic,
+    inout,
+    load_module,
+    mutating,
+    out,
+    shader,
+    slang_import,
+    struct,
+    verbatim,
+)
 from .runtime import SlangPyModule
 from .types import (
     bool,
@@ -31,7 +47,16 @@ from .types import (
 
 __all__ = [
     "shader",
+    "struct",
+    "mutating",
+    "const",
     "extern",
+    "extern_type",
+    "generic",
+    "slang_import",
+    "verbatim",
+    "inout",
+    "out",
     "compile_module",
     "build_module",
     "load_module",
