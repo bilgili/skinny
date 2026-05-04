@@ -1460,10 +1460,18 @@ class Renderer:
             self.mtlx_skin_buffer.upload_sync(seed)
 
         # Persistent HDR accumulation image (progressive convergence).
-        self.accum_image = StorageImage(self.ctx, self.width, self.height)
+        # transfer_src=True so screenshot path can copy raw float radiance
+        # to a host-visible staging buffer for EXR/HDR export.
+        self.accum_image = StorageImage(
+            self.ctx, self.width, self.height, transfer_src=True,
+        )
 
         # Per-frame HUD overlay (R8 alpha mask rasterised by Pillow).
+        # Pre-zero the staging buffer so the GPU image starts clean even if
+        # render() never gets to upload before render_headless() / a
+        # screenshot dispatch reads it.
         self.hud_overlay = HudOverlay(self.ctx, self.width, self.height)
+        self.hud_overlay.upload(bytes(self.width * self.height))
 
         # HDR environment texture (RGBA32F, equirectangular).
         from skinny.environment import ENV_HEIGHT, ENV_WIDTH
@@ -1626,19 +1634,19 @@ class Renderer:
         # per-material panel.
         self._material_version: int = 0
 
-        # Offscreen output image + readback buffer for headless mode.
+        # Offscreen output image + readback buffer. Always created — used by
+        # render_headless() (web path) and by save_screenshot() in both
+        # windowed and headless modes. In windowed mode render() rebinds
+        # binding 1 to the swapchain image per frame, so this offscreen
+        # only sees writes during the screenshot path.
         # Must be created before _create_descriptors which writes binding 1.
-        if self.ctx.swapchain_info is None:
-            from skinny.vk_compute import ReadbackBuffer
-            self._offscreen_output = StorageImage(
-                self.ctx, self.width, self.height,
-                format=vk.VK_FORMAT_R8G8B8A8_UNORM,
-                transfer_src=True,
-            )
-            self._readback = ReadbackBuffer(self.ctx, self.width, self.height)
-        else:
-            self._offscreen_output = None
-            self._readback = None
+        from skinny.vk_compute import ReadbackBuffer
+        self._offscreen_output = StorageImage(
+            self.ctx, self.width, self.height,
+            format=vk.VK_FORMAT_R8G8B8A8_UNORM,
+            transfer_src=True,
+        )
+        self._readback = ReadbackBuffer(self.ctx, self.width, self.height)
 
         # Descriptor pool and sets
         self._create_descriptors()
@@ -1973,19 +1981,18 @@ class Renderer:
                     pBufferInfo=[procedural_info],
                 ),
             ]
-            if self._offscreen_output is not None:
-                output_info = vk.VkDescriptorImageInfo(
-                    imageView=self._offscreen_output.view,
-                    imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-                )
-                writes.append(vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=1,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[output_info],
-                ))
+            output_info = vk.VkDescriptorImageInfo(
+                imageView=self._offscreen_output.view,
+                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            )
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=ds,
+                dstBinding=1,
+                dstArrayElement=0,
+                descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                pImageInfo=[output_info],
+            ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _upload_mesh(self, mesh: Mesh) -> None:
@@ -2790,20 +2797,20 @@ class Renderer:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
         self.hud_overlay.upload(self._build_hud_bytes())
 
-        # Update binding 1 (storage image) with the acquired swapchain image view
-        img_info = vk.VkDescriptorImageInfo(
-            imageView=self.ctx.swapchain_info.image_views[image_index],
-            imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+        # Compute writes binding 1 (offscreen) at the user-chosen render
+        # resolution; we then blit that into the acquired swapchain image
+        # (which is locked to the window's surface extent). The descriptor
+        # for binding 1 was already written to ``_offscreen_output`` at
+        # init / resize, so no per-frame rewrite is needed here.
+        swap_extent = self.ctx.swapchain_info.extent
+        swap_w = int(swap_extent.width)
+        swap_h = int(swap_extent.height)
+        swap_image = self.ctx.swapchain_info.images[image_index]
+        sub_color = vk.VkImageSubresourceRange(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel=0, levelCount=1,
+            baseArrayLayer=0, layerCount=1,
         )
-        write = vk.VkWriteDescriptorSet(
-            dstSet=self.descriptor_sets[f],
-            dstBinding=1,
-            dstArrayElement=0,
-            descriptorCount=1,
-            descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            pImageInfo=[img_info],
-        )
-        vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
 
         # Record command buffer
         cmd = self.command_buffers[f]
@@ -2812,26 +2819,6 @@ class Renderer:
             flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         )
         vk.vkBeginCommandBuffer(cmd, begin_info)
-
-        # Transition swapchain image to GENERAL for compute write
-        barrier = vk.VkImageMemoryBarrier(
-            srcAccessMask=0,
-            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
-            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            image=self.ctx.swapchain_info.images[image_index],
-            subresourceRange=vk.VkImageSubresourceRange(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                baseMipLevel=0, levelCount=1,
-                baseArrayLayer=0, layerCount=1,
-            ),
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, None, 0, None, 1, [barrier],
-        )
 
         # Cross-frame memory dependency on the accumulation image: previous
         # frame's writes must be visible to this frame's reads.
@@ -2859,29 +2846,90 @@ class Renderer:
             0, None,
         )
 
-        # Dispatch
+        # Dispatch into the offscreen image at render resolution.
         groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
         groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
         vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
 
-        # Transition to PRESENT_SRC
-        barrier2 = vk.VkImageMemoryBarrier(
+        # Offscreen GENERAL → TRANSFER_SRC for the blit source.
+        offscreen_to_src = vk.VkImageMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=0,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
             oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            image=self.ctx.swapchain_info.images[image_index],
-            subresourceRange=vk.VkImageSubresourceRange(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                baseMipLevel=0, levelCount=1,
-                baseArrayLayer=0, layerCount=1,
-            ),
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image=self._offscreen_output.image,
+            subresourceRange=sub_color,
+        )
+        # Swapchain UNDEFINED → TRANSFER_DST for the blit destination.
+        swap_to_dst = vk.VkImageMemoryBarrier(
+            srcAccessMask=0,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            image=swap_image,
+            subresourceRange=sub_color,
         )
         vk.vkCmdPipelineBarrier(
             cmd,
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, None, 0, None,
+            2, [offscreen_to_src, swap_to_dst],
+        )
+
+        # Blit offscreen → swapchain image (linear filter scales when sizes differ).
+        blit = vk.VkImageBlit(
+            srcSubresource=vk.VkImageSubresourceLayers(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                mipLevel=0, baseArrayLayer=0, layerCount=1,
+            ),
+            srcOffsets=[
+                vk.VkOffset3D(x=0, y=0, z=0),
+                vk.VkOffset3D(x=int(self.width), y=int(self.height), z=1),
+            ],
+            dstSubresource=vk.VkImageSubresourceLayers(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                mipLevel=0, baseArrayLayer=0, layerCount=1,
+            ),
+            dstOffsets=[
+                vk.VkOffset3D(x=0, y=0, z=0),
+                vk.VkOffset3D(x=swap_w, y=swap_h, z=1),
+            ],
+        )
+        vk.vkCmdBlitImage(
+            cmd,
+            self._offscreen_output.image,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swap_image,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, [blit],
+            vk.VK_FILTER_LINEAR,
+        )
+
+        # Offscreen TRANSFER_SRC → GENERAL for the next dispatch.
+        offscreen_to_general = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            image=self._offscreen_output.image,
+            subresourceRange=sub_color,
+        )
+        # Swapchain TRANSFER_DST → PRESENT_SRC for present.
+        swap_to_present = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+            dstAccessMask=0,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            image=swap_image,
+            subresourceRange=sub_color,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
             vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            0, 0, None, 0, None, 1, [barrier2],
+            0, 0, None, 0, None,
+            2, [offscreen_to_general, swap_to_present],
         )
 
         vk.vkEndCommandBuffer(cmd)
@@ -2911,13 +2959,37 @@ class Renderer:
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
 
     def render_headless(self) -> bytes:
-        """Render one frame to an offscreen image and return raw RGBA8 pixels."""
+        """Render one frame to an offscreen image and return raw RGBA8 pixels.
+
+        Works in both headless and windowed modes — binding 1 (storage
+        image output) is rewritten to ``_offscreen_output`` here so a
+        windowed session that just rebound binding 1 to a swapchain image
+        in render() doesn't corrupt the screenshot.
+        """
         f = self.current_frame
 
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
         )
         vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
+
+        # Point binding 1 at the offscreen image. In headless mode this is
+        # already its initial value; in windowed mode render() points it at
+        # the acquired swapchain image, so we restore it here.
+        offscreen_info = vk.VkDescriptorImageInfo(
+            imageView=self._offscreen_output.view,
+            imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+        )
+        vk.vkUpdateDescriptorSets(
+            self.ctx.device, 1,
+            [vk.VkWriteDescriptorSet(
+                dstSet=self.descriptor_sets[f],
+                dstBinding=1, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                pImageInfo=[offscreen_info],
+            )],
+            0, None,
+        )
 
         self.uniform_buffer.upload(self._pack_uniforms())
         mtlx_bytes = self._pack_mtlx_skin_array()
@@ -2941,6 +3013,13 @@ class Renderer:
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 1, [accum_mem_barrier], 0, None, 0, None,
         )
+
+        # Push (pre-zeroed) HUD staging into the device-local image. Without
+        # this the GPU side of hud_overlay has UNDEFINED contents after a
+        # fresh allocation (driver-dependent garbage) and the shader's
+        # binding 3 sample reads garbage alpha — visible as smeared/banded
+        # artefacts in the rendered frame after a resize.
+        self.hud_overlay.record_copy(cmd)
 
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
         vk.vkCmdBindDescriptorSets(
@@ -3012,6 +3091,248 @@ class Renderer:
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
         return self._readback.read()
 
+    # ── Resolution + screenshot ─────────────────────────────────────
+
+    def resize(self, width: int, height: int) -> None:
+        """Change *render* resolution at runtime. Recreates the offscreen
+        output, readback buffer, accumulation image, and HUD overlay.
+
+        The window-side swapchain is intentionally not touched — surface
+        capabilities lock its extent to the OS window size. In windowed
+        mode the compute shader writes into the offscreen image at the
+        new render resolution and ``render()`` blits that to the swapchain
+        (with scaling) for present, so render and present resolutions
+        stay decoupled.
+        """
+        width = max(64, min(8192, int(width)))
+        height = max(64, min(8192, int(height)))
+        # Round up to a workgroup-aligned extent so the dispatch grid
+        # covers exactly the image with no waste.
+        width = ((width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE) * WORKGROUP_SIZE
+        height = ((height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE) * WORKGROUP_SIZE
+        if width == self.width and height == self.height:
+            return
+
+        from skinny.vk_compute import ReadbackBuffer
+
+        vk.vkDeviceWaitIdle(self.ctx.device)
+
+        self._offscreen_output.destroy()
+        self._readback.destroy()
+        self.accum_image.destroy()
+        self.hud_overlay.destroy()
+
+        self.width = width
+        self.height = height
+        self.ctx.width = width
+        self.ctx.height = height
+
+        self._offscreen_output = StorageImage(
+            self.ctx, width, height,
+            format=vk.VK_FORMAT_R8G8B8A8_UNORM,
+            transfer_src=True,
+        )
+        self._readback = ReadbackBuffer(self.ctx, width, height)
+        self.accum_image = StorageImage(
+            self.ctx, width, height, transfer_src=True,
+        )
+        self.hud_overlay = HudOverlay(self.ctx, width, height)
+        self.hud_overlay.upload(bytes(width * height))
+
+        self._rewrite_size_dependent_descriptors()
+
+        self.accum_frame = 0
+        self._last_state_hash = None
+
+    def _rewrite_size_dependent_descriptors(self) -> None:
+        """Re-write the descriptor entries that point at images recreated
+        by resize(): binding 1 (offscreen output), binding 2 (accumulation),
+        binding 3 (HUD overlay).
+        """
+        for ds in self.descriptor_sets:
+            output_info = vk.VkDescriptorImageInfo(
+                imageView=self._offscreen_output.view,
+                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            )
+            accum_info = vk.VkDescriptorImageInfo(
+                imageView=self.accum_image.view,
+                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            )
+            hud_info = vk.VkDescriptorImageInfo(
+                imageView=self.hud_overlay.view,
+                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            )
+            writes = [
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=1, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    pImageInfo=[output_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=2, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    pImageInfo=[accum_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=3, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    pImageInfo=[hud_info],
+                ),
+            ]
+            vk.vkUpdateDescriptorSets(
+                self.ctx.device, len(writes), writes, 0, None,
+            )
+
+    def read_accumulation_hdr(self) -> tuple[np.ndarray, int]:
+        """Copy the float32 RGBA accumulation image to the host. Returns
+        ``(array, sample_count)`` where ``array`` is shape (H, W, 4) and
+        the caller divides by ``sample_count`` to get linear mean radiance.
+        """
+        from skinny.vk_compute import ReadbackBuffer
+
+        vk.vkDeviceWaitIdle(self.ctx.device)
+
+        rb = ReadbackBuffer(
+            self.ctx, self.width, self.height, bytes_per_pixel=16,
+        )
+
+        alloc = vk.VkCommandBufferAllocateInfo(
+            commandPool=self.ctx.command_pool,
+            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        )
+        cmd = vk.vkAllocateCommandBuffers(self.ctx.device, alloc)[0]
+        vk.vkBeginCommandBuffer(
+            cmd,
+            vk.VkCommandBufferBeginInfo(
+                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            ),
+        )
+
+        sub = vk.VkImageSubresourceRange(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1,
+        )
+        to_src = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image=self.accum_image.image,
+            subresourceRange=sub,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, None, 0, None, 1, [to_src],
+        )
+        rb.record_copy_from(cmd, self.accum_image.image)
+        to_general = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            image=self.accum_image.image,
+            subresourceRange=sub,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, None, 0, None, 1, [to_general],
+        )
+        vk.vkEndCommandBuffer(cmd)
+
+        fence = vk.vkCreateFence(
+            self.ctx.device, vk.VkFenceCreateInfo(), None,
+        )
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1,
+            [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+            fence,
+        )
+        vk.vkWaitForFences(
+            self.ctx.device, 1, [fence], vk.VK_TRUE, 2**64 - 1,
+        )
+        vk.vkDestroyFence(self.ctx.device, fence, None)
+        vk.vkFreeCommandBuffers(
+            self.ctx.device, self.ctx.command_pool, 1, [cmd],
+        )
+
+        raw = rb.read()
+        rb.destroy()
+
+        arr = np.frombuffer(raw, dtype=np.float32).reshape(
+            self.height, self.width, 4,
+        ).copy()
+        samples = max(1, int(self.accum_frame) + 1)
+        return arr, samples
+
+    def save_screenshot(self, path_or_file, fmt: str) -> None:
+        """Save the current render to disk (or a file-like object).
+
+        Supported ``fmt``:
+        - ``"png"`` / ``"jpeg"`` / ``"bmp"``: tonemapped LDR via the same
+          compute pass as live rendering, captured from the offscreen
+          output. HUD is suppressed for this dispatch.
+        - ``"exr"`` / ``"hdr"``: linear HDR from the accumulation image
+          divided by sample count. Alpha is dropped.
+        """
+        fmt = fmt.lower().lstrip(".")
+        if fmt == "jpg":
+            fmt = "jpeg"
+
+        if fmt in ("png", "jpeg", "bmp"):
+            raw = self.render_headless()
+            img = Image.frombuffer(
+                "RGBA", (self.width, self.height), raw, "raw", "RGBA", 0, 1,
+            )
+            if fmt == "jpeg":
+                img = img.convert("RGB")
+                img.save(path_or_file, format="JPEG", quality=95)
+            elif fmt == "png":
+                img.save(path_or_file, format="PNG")
+            else:
+                img.save(path_or_file, format="BMP")
+            return
+
+        if fmt in ("exr", "hdr"):
+            arr, samples = self.read_accumulation_hdr()
+            rgb = (arr[..., :3] / float(samples)).astype(np.float32)
+            import imageio.v3 as iio
+            ext = ".exr" if fmt == "exr" else ".hdr"
+            if hasattr(path_or_file, "write"):
+                # FreeImage backend can't write directly to a file-like
+                # object; round-trip through a tempfile so EXR/HDR works
+                # for the web download path.
+                import os
+                import tempfile
+                fd, tmp_path = tempfile.mkstemp(suffix=ext)
+                os.close(fd)
+                try:
+                    iio.imwrite(tmp_path, rgb, extension=ext)
+                    with open(tmp_path, "rb") as fh:
+                        path_or_file.write(fh.read())
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            else:
+                iio.imwrite(str(path_or_file), rgb, extension=ext)
+            return
+
+        raise ValueError(f"Unsupported screenshot format: {fmt!r}")
+
+    @staticmethod
+    def screenshot_format_options() -> list[str]:
+        """User-facing format names — order is also the GUI dropdown order."""
+        return ["PNG", "JPEG", "BMP", "EXR", "HDR"]
+
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
 
@@ -3039,10 +3360,8 @@ class Renderer:
         self.env_image.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
-        if self._offscreen_output is not None:
-            self._offscreen_output.destroy()
-        if self._readback is not None:
-            self._readback.destroy()
+        self._offscreen_output.destroy()
+        self._readback.destroy()
         self.uniform_buffer.destroy()
         self.mtlx_skin_buffer.destroy()
         self.pipeline.destroy()

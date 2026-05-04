@@ -18,6 +18,10 @@ dependencies = [
     "vulkan>=1.3",
     "glfw>=2.7",
     "Pillow>=10.0",
+    # imageio + freeimage plugin for HDR / EXR screenshot output. Pillow
+    # alone can't write Radiance .hdr or OpenEXR; the [freeimage] extra
+    # pulls in the FreeImage backend that handles both.
+    "imageio[freeimage]>=2.34",
     # MaterialX is required for skin material descriptions and (in Phase C)
     # GPU shader generation. The PyPI 1.39.4 wheel ships GenGlsl/Mdl/Msl/Osl
     # but not GenSlang yet — for full feature coverage build MaterialX from
