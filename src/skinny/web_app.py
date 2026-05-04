@@ -382,7 +382,7 @@ def _group_params(params: list[ParamSpec]) -> dict[str, list[ParamSpec]]:
         elif path.startswith("light") or path == "direct_light_index":
             groups["Direct Light"].append(p)
         elif path in ("normal_map_strength", "displacement_scale_mm",
-                       "detail_maps_index", "subdivision_index"):
+                       "detail_maps_index"):
             groups["Detail"].append(p)
         else:
             groups["Render"].append(p)

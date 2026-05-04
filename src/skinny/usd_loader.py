@@ -4,7 +4,7 @@ Phase D-1 scope (geometry only):
   - Open a USD stage with usd-core (pxr.Usd / pxr.UsdGeom).
   - Walk every UsdGeom.Mesh, pull points / faceVertexCounts /
     faceVertexIndices / normals / primvars:st and bake the result through
-    `mesh.bake_mesh` (no displacement, no subdivision) into a `Mesh`.
+    `mesh.bake_mesh` (no displacement) into a `Mesh`.
   - Compute each prim's local-to-world transform via UsdGeom.Xformable.
   - Wrap one `MeshInstance` per mesh with a single placeholder `Material`.
   - Convert the stage's metersPerUnit into the renderer's mm_per_unit.
@@ -27,7 +27,13 @@ log = logging.getLogger(__name__)
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
 from skinny.environment import ENV_HEIGHT, ENV_WIDTH, _load_radiance_hdr, _resize_equirect
-from skinny.mesh import Mesh, MeshSource, bake_mesh
+from skinny.mesh import Mesh, MeshSource, bake_mesh, compute_source_hash
+from skinny.mesh_cache import (
+    load_cache_index,
+    lookup_cached_mesh,
+    make_cache_key,
+    save_cached_mesh,
+)
 from skinny.scene import (
     LightDir,
     LightEnvHDR,
@@ -816,7 +822,8 @@ def _area_light_to_instance(
         uvs=uvs,
         tri_idx=tri_idx.astype(np.int32),
     )
-    mesh = bake_mesh(source, subdivision_levels=0, displacement_bytes=None,
+    source.content_hash = compute_source_hash(source)
+    mesh = bake_mesh(source, displacement_bytes=None,
                      displacement_res=0, displacement_scale_world=0.0)
     transform = _world_transform(prim, time)
     return MeshInstance(
@@ -1044,6 +1051,8 @@ def load_scene_from_usd(
     materials: list[Material] = [Material(name="skin")]
     material_index: dict[str, int] = {}
 
+    cache_index = load_cache_index()
+
     instances: list[MeshInstance] = []
     for prim in stage.Traverse():
         if not prim.IsA(UsdGeom.Mesh):
@@ -1055,16 +1064,19 @@ def load_scene_from_usd(
         if source is None:
             continue
 
-        # Bake the source into a GPU-ready Mesh. No subdivision / displacement
-        # for Phase D-1/2; those land alongside displacement-driving
-        # MaterialX outputs in Phase D-3.
-        mesh = bake_mesh(
-            source,
-            subdivision_levels=0,
-            displacement_bytes=None,
-            displacement_res=0,
-            displacement_scale_world=0.0,
+        source.content_hash = compute_source_hash(source)
+        cache_key = make_cache_key(
+            source.content_hash, None, 0, 0.0, None, 0, 1.0,
         )
+        mesh = lookup_cached_mesh(cache_index, cache_key, source)
+        if mesh is None:
+            mesh = bake_mesh(
+                source,
+                displacement_bytes=None,
+                displacement_res=0,
+                displacement_scale_world=0.0,
+            )
+            save_cached_mesh(cache_index, cache_key, mesh)
 
         transform = _world_transform(prim, eval_time)
         material_id = _resolve_material_binding(

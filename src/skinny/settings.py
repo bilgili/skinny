@@ -25,12 +25,14 @@ from skinny.presets import Preset
 
 SETTINGS_DIR = Path.home() / ".skinny"
 PRESETS_DIR = SETTINGS_DIR / "presets"
+MESH_CACHE_DIR = SETTINGS_DIR / "mesh_cache"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
 
 def ensure_dirs() -> None:
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
     PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+    MESH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── settings.json ───────────────────────────────────────────────────
