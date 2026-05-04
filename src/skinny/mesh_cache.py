@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import struct
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ INDEX_FILE = CACHE_DIR / "index.json"
 _INDEX_VERSION = 1
 _ZSTD_LEVEL = 3
 _TAG = "[skinny:cache]"
+_INDEX_LOCK = threading.Lock()
 
 
 def _fmt_size(n: int) -> str:
@@ -115,8 +117,9 @@ def lookup_cached_mesh(
     blob_path = CACHE_DIR / f"{cache_key}.skmc"
     if not blob_path.exists():
         print(f"{_TAG} stale entry {cache_key} — blob missing, removing from index")
-        index.pop(cache_key, None)
-        _save_index(index)
+        with _INDEX_LOCK:
+            index.pop(cache_key, None)
+            _save_index(index)
         return None
 
     try:
@@ -127,8 +130,9 @@ def lookup_cached_mesh(
     except Exception as exc:  # noqa: BLE001
         print(f"{_TAG} corrupt blob {cache_key} ({exc}), removing")
         blob_path.unlink(missing_ok=True)
-        index.pop(cache_key, None)
-        _save_index(index)
+        with _INDEX_LOCK:
+            index.pop(cache_key, None)
+            _save_index(index)
         return None
 
     v_len = entry["vertex_bytes_len"]
@@ -141,8 +145,9 @@ def lookup_cached_mesh(
             f"expected {_fmt_size(expected)}, got {_fmt_size(len(raw))}, removing"
         )
         blob_path.unlink(missing_ok=True)
-        index.pop(cache_key, None)
-        _save_index(index)
+        with _INDEX_LOCK:
+            index.pop(cache_key, None)
+            _save_index(index)
         return None
 
     ratio = len(compressed) / max(len(raw), 1) * 100
@@ -187,20 +192,21 @@ def save_cached_mesh(
         tmp.write_bytes(compressed)
         os.replace(tmp, blob_path)
 
-        index[cache_key] = {
-            "name": mesh.name,
-            "num_vertices": mesh.num_vertices,
-            "num_triangles": mesh.num_triangles,
-            "num_nodes": mesh.num_nodes,
-            "normals_baked": mesh.normals_baked,
-            "vertex_bytes_len": len(mesh.vertex_bytes),
-            "index_bytes_len": len(mesh.index_bytes),
-            "bvh_bytes_len": len(mesh.bvh_bytes),
-            "uncompressed_size": len(raw),
-            "compressed_size": len(compressed),
-            "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        _save_index(index)
+        with _INDEX_LOCK:
+            index[cache_key] = {
+                "name": mesh.name,
+                "num_vertices": mesh.num_vertices,
+                "num_triangles": mesh.num_triangles,
+                "num_nodes": mesh.num_nodes,
+                "normals_baked": mesh.normals_baked,
+                "vertex_bytes_len": len(mesh.vertex_bytes),
+                "index_bytes_len": len(mesh.index_bytes),
+                "bvh_bytes_len": len(mesh.bvh_bytes),
+                "uncompressed_size": len(raw),
+                "compressed_size": len(compressed),
+                "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            _save_index(index)
 
         ratio = len(compressed) / max(len(raw), 1) * 100
         total_compressed = sum(e.get("compressed_size", 0) for e in index.values())

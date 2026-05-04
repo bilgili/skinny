@@ -127,7 +127,8 @@
       "PowerShell(python D:\\\\projects\\\\skinny\\\\diag_materials.py 2>&1)",
       "PowerShell(python -m skinny.web_app \"assets/Usd-Mtlx-Example/scene.usda\" --port 8083 2>&1)",
       "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-WebRequest -Uri \"http://localhost:8083/skinny\" -UseBasicParsing -TimeoutSec 120; $r.StatusCode } catch { $_.Exception.Message })",
-      "Bash(Measure-Object -Line)"
+      "Bash(Measure-Object -Line)",
+      "PowerShell(python -m py_compile D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\mesh_cache.py; python -m py_compile D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\mesh.py; python -m py_compile D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\renderer.py; python -m py_compile D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\usd_loader.py; echo \"All OK\")"
     ]
   }
 }
