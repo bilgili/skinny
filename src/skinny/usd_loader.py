@@ -1053,7 +1053,8 @@ def load_scene_from_usd(
 
     cache_index = load_cache_index()
 
-    instances: list[MeshInstance] = []
+    # Phase 1: serial USD prim reading (USD API not thread-safe for traversal)
+    prim_data: list[tuple[MeshSource, np.ndarray, int]] = []
     for prim in stage.Traverse():
         if not prim.IsA(UsdGeom.Mesh):
             continue
@@ -1065,6 +1066,16 @@ def load_scene_from_usd(
             continue
 
         source.content_hash = compute_source_hash(source)
+        transform = _world_transform(prim, eval_time)
+        material_id = _resolve_material_binding(
+            prim, materials, material_index, mtlx_materials,
+        )
+        prim_data.append((source, transform, material_id))
+
+    # Phase 2: parallel bake + cache
+    _POOL_SIZE = 4
+
+    def _bake_one(source: MeshSource) -> Mesh:
         cache_key = make_cache_key(
             source.content_hash, None, 0, 0.0, None, 0, 1.0,
         )
@@ -1077,11 +1088,15 @@ def load_scene_from_usd(
                 displacement_scale_world=0.0,
             )
             save_cached_mesh(cache_index, cache_key, mesh)
+        return mesh
 
-        transform = _world_transform(prim, eval_time)
-        material_id = _resolve_material_binding(
-            prim, materials, material_index, mtlx_materials,
-        )
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=_POOL_SIZE) as pool:
+        meshes = list(pool.map(_bake_one, [s for s, _, _ in prim_data]))
+
+    instances: list[MeshInstance] = []
+    for (source, transform, material_id), mesh in zip(prim_data, meshes):
         instances.append(
             MeshInstance(
                 mesh=mesh,

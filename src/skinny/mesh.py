@@ -649,6 +649,22 @@ def load_head_source(path: Path) -> MeshSource:
     return source
 
 
+def _load_loose_obj(path: Path) -> MeshSource | None:
+    try:
+        src = load_head_source(path)
+        print(
+            f"[skinny] loaded head mesh: {path.name} "
+            f"({src.positions.shape[0]} verts, {src.tri_idx.shape[0]} tris)"
+        )
+        return src
+    except Exception as exc:  # noqa: BLE001
+        print(f"[skinny] failed to load {path.name}: {exc}")
+        return None
+
+
+_POOL_SIZE = 4
+
+
 def discover_mesh_sources(head_dir: Path | None) -> list[MeshSource]:
     """Scan `head_dir` and return undisplaced MeshSource objects.
 
@@ -658,26 +674,30 @@ def discover_mesh_sources(head_dir: Path | None) -> list[MeshSource]:
          attached by filename keyword (normal/roughness/displacement).
       2. Any loose `*.obj` directly under `head_dir` is loaded as a model
          with no texture maps — preserves existing behaviour for flat layouts.
+
+    Both stages run in parallel via ThreadPoolExecutor(max_workers=4).
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     if head_dir is None or not head_dir.exists():
         return []
-    out: list[MeshSource] = []
 
-    for sub in sorted(p for p in head_dir.iterdir() if p.is_dir()):
-        src = _load_model_dir(sub)
+    dirs = sorted(p for p in head_dir.iterdir() if p.is_dir())
+    loose = sorted(head_dir.glob("*.obj"))
+
+    with ThreadPoolExecutor(max_workers=_POOL_SIZE) as pool:
+        dir_futures = [(d, pool.submit(_load_model_dir, d)) for d in dirs]
+        loose_futures = [(p, pool.submit(_load_loose_obj, p)) for p in loose]
+
+    out: list[MeshSource] = []
+    for _, fut in dir_futures:
+        src = fut.result()
         if src is not None:
             out.append(src)
-
-    for p in sorted(head_dir.glob("*.obj")):
-        try:
-            src = load_head_source(p)
-            print(
-                f"[skinny] loaded head mesh: {p.name} "
-                f"({src.positions.shape[0]} verts, {src.tri_idx.shape[0]} tris)"
-            )
+    for _, fut in loose_futures:
+        src = fut.result()
+        if src is not None:
             out.append(src)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[skinny] failed to load {p.name}: {exc}")
     return out
 
 

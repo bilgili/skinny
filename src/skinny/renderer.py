@@ -2335,18 +2335,27 @@ class Renderer:
             self._detail_available = (False, False, False)
             return
 
+        from concurrent.futures import ThreadPoolExecutor
+
         src = self._mesh_sources[src_idx]
-        if src_idx in self._normal_cache:
-            nrm = self._normal_cache[src_idx]
-        else:
-            nrm = load_texture_bytes(src.normal_map)
-            self._normal_cache[src_idx] = nrm
-        rgh = load_texture_bytes(src.roughness_map)
-        if src_idx in self._displacement_cache:
-            dsp = self._displacement_cache[src_idx]
-        else:
-            dsp = load_texture_bytes(src.displacement_map)
-            self._displacement_cache[src_idx] = dsp
+        to_load: dict[str, Path | None] = {}
+        if src_idx not in self._normal_cache:
+            to_load["nrm"] = src.normal_map
+        if src_idx not in self._displacement_cache:
+            to_load["dsp"] = src.displacement_map
+        to_load["rgh"] = src.roughness_map
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {k: pool.submit(load_texture_bytes, p) for k, p in to_load.items()}
+            loaded = {k: f.result() for k, f in futures.items()}
+
+        if "nrm" in loaded:
+            self._normal_cache[src_idx] = loaded["nrm"]
+        nrm = self._normal_cache.get(src_idx)
+        rgh = loaded["rgh"]
+        if "dsp" in loaded:
+            self._displacement_cache[src_idx] = loaded["dsp"]
+        dsp = self._displacement_cache.get(src_idx)
 
         self.normal_image.upload_sync(nrm if nrm is not None else blank_normal_bytes())
         self.roughness_image.upload_sync(rgh if rgh is not None else blank_roughness_bytes())
