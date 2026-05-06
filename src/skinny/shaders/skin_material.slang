@@ -147,16 +147,13 @@ float3 evalSkinMaterial(
 
     // §2 IBL specular
     GGXSampler specSampler;
-    specSampler.N         = s.ctx.Nspec;
-    specSampler.V         = V;
     specSampler.roughness = s.ctx.roughSpec;
     float3 envSpec = skinIBLSpecularEstimator(specSampler, s.ctx, V, s.volumeOnly, fc, rng);
 
     // §3 IBL diffuse via BSSRDF (also exposes envIrradiance/diffDir for §6)
     LambertSampler diffSampler;
-    diffSampler.N = s.N;
     SkinIBLDiffuseResult diff = skinIBLDiffuseEstimator(
-        diffSampler, s.ctx, hit, s.N, s.bssrdfWeight, fc, rng);
+        diffSampler, s.ctx, hit, s.N, V, s.bssrdfWeight, fc, rng);
 
     // §4 volume march
     float3 volume = skinVolumeEstimator(

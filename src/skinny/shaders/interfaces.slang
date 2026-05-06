@@ -7,7 +7,8 @@
 //     would serialize otherwise.
 //   - IIntegrator: uniform per dispatch (selected by fc.integratorMode in
 //     main_pass.slang); safe to keep as runtime switch.
-//   - ISampler: generic parameter on estimators; compile-time monomorphized.
+//   - ISampler: tangent-space sampler (N=+Z); generic parameter on estimators,
+//     compile-time monomorphized. Callers transform world↔tangent.
 //   - ILight: generic parameter on estimators or loaded per-light from
 //     buffer; compile-time monomorphized. Delta lights (directional) set
 //     pdfArea=0 as a sentinel — callers skip geometry-term conversion.
@@ -18,8 +19,8 @@ import common;
 
 interface ISampler
 {
-    float3 sampleDirection(float2 u);
-    float  pdf(float3 L);
+    float3 sample(float3 wo, float2 uv);
+    float  pdf(float3 wi, float3 wo);
 }
 
 // ── Materials ───────────────────────────────────────────────────

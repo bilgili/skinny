@@ -6,13 +6,13 @@ import common;
 import interfaces;
 
 float misPrimaryWeight<TA : ISampler, TB : ISampler>(
-    TA primary, TB companion, float3 L)
+    TA primary, TB companion, float3 wi, float3 wo)
 {
-    return powerHeuristic(primary.pdf(L), companion.pdf(L));
+    return powerHeuristic(primary.pdf(wi, wo), companion.pdf(wi, wo));
 }
 
 float misCompanionWeight<TA : ISampler, TB : ISampler>(
-    TA primary, TB companion, float3 L)
+    TA primary, TB companion, float3 wi, float3 wo)
 {
-    return powerHeuristic(companion.pdf(L), primary.pdf(L));
+    return powerHeuristic(companion.pdf(wi, wo), primary.pdf(wi, wo));
 }
