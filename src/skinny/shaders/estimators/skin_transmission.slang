@@ -17,7 +17,7 @@ float3 skinTransmissionEstimator(
     FrameConstants fc, inout RNG rng)
 {
     float3 transmission = float3(0.0);
-    if (hit.backT > 0.0 && fc.furnaceMode == 0u)
+    if (hit.backT > 0.0 && effectiveFurnaceMode(hit.materialId) == 0u)
     {
         float localThicknessMM = (hit.backT - hit.t) * fc.mmPerUnit;
         float skinSlabMM = ctx.sp.epidermisThickness + ctx.sp.dermisThickness + ctx.sp.subcutThickness;
@@ -40,7 +40,7 @@ float3 skinTransmissionEstimator(
                 transmission += tr * lightRadiance * backNdotL;
             }
             float3 backDiffDir = sampleCosineHemisphere(rng.next2(), backN);
-            float3 backEnv     = sceneEnvRadiance(backDiffDir, fc.envIntensity, fc.furnaceMode);
+            float3 backEnv     = sceneEnvRadiance(backDiffDir, fc.envIntensity, effectiveFurnaceMode(hit.materialId));
             transmission += tr * backEnv;
             transmission /= PI;
         }

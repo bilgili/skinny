@@ -39,6 +39,7 @@ struct SkinEvalContext
     float3           Nspec;
     float            roughSpec;
     bool             useBSSRDF;
+    uint             materialId;
 };
 
 float3 evalSkinBSDF(

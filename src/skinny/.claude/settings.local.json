@@ -139,7 +139,9 @@
       "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/mesh.py'\\).read\\(\\)\\); print\\('mesh.py: OK'\\)\")",
       "PowerShell(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\)\\) or print\\(f'{f}: OK'\\) for f in ['D:/projects/skinny/src/skinny/mesh.py','D:/projects/skinny/src/skinny/renderer.py','D:/projects/skinny/src/skinny/control_panel.py','D:/projects/skinny/src/skinny/web_app.py','D:/projects/skinny/src/skinny/params.py','D:/projects/skinny/src/skinny/app.py']]\")",
       "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/scripts/convert_heads_to_usda.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/renderer.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/renderer.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(Select-Object -First 20)",
+      "Bash(sed 's/.*\\\\.//')"
     ]
   }
 }

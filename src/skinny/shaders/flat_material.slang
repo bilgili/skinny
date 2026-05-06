@@ -29,7 +29,7 @@ float3 evalFlatMaterial(HitInfo cameraHit, Ray cameraRay, inout RNG rng)
         if (!h.hit)
         {
             radiance += throughput * sceneEnvRadiance(
-                r.direction, fc.envIntensity, fc.furnaceMode
+                r.direction, fc.envIntensity, effectiveFurnaceMode(h.materialId)
             );
             break;
         }

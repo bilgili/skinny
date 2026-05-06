@@ -33,7 +33,7 @@ SkinIBLDiffuseResult skinIBLDiffuseEstimator<TS : ISampler>(
 {
     SkinIBLDiffuseResult r;
     r.diffDir       = sampler.sampleDirection(rng.next2());
-    r.envIrradiance = sceneEnvRadiance(r.diffDir, fc.envIntensity, fc.furnaceMode);
+    r.envIrradiance = sceneEnvRadiance(r.diffDir, fc.envIntensity, effectiveFurnaceMode(hit.materialId));
 
     UniformSphereSampler uniSampler;
     float uniPdf = uniSampler.pdf(float3(0.0));
@@ -51,7 +51,7 @@ SkinIBLDiffuseResult skinIBLDiffuseEstimator<TS : ISampler>(
         float  diffNdotL    = max(dot(N, diffLightDir), 0.0);
         if (diffNdotL > 0.0)
         {
-            float3 diffEnv  = sceneEnvRadiance(diffLightDir, fc.envIntensity, fc.furnaceMode);
+            float3 diffEnv  = sceneEnvRadiance(diffLightDir, fc.envIntensity, effectiveFurnaceMode(hit.materialId));
             float  wMis     = misCompanionWeight(sampler, uniSampler, diffLightDir);
             r.envSSS += evaluateSubsurfaceScattering(ctx.sp, hit.position, N, 0.0, diffEnv, ctx.ink)
                       * diffNdotL * (wMis / uniPdf) * bssrdfWeight;

@@ -59,7 +59,7 @@ float3 skinBDPTEstimator(
         sp, lightHit.position, lightHit.normal, 0.0, float3(1.0), lightInk
     );
 
-    float3 Le = sceneEnvRadiance(wiEnv, fc.envIntensity, fc.furnaceMode);
+    float3 Le = sceneEnvRadiance(wiEnv, fc.envIntensity, effectiveFurnaceMode(cameraHit.materialId));
     float geometry = cosCamera * cosLightOut / dist2;
     return Le * fLight * fCamera * geometry * invPdfArea;
 }

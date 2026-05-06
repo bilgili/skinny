@@ -20,3 +20,11 @@ uniform float3         lightRadiance;
 static const uint MATERIAL_TYPE_SKIN         = 0u;
 static const uint MATERIAL_TYPE_FLAT         = 1u;
 static const uint MATERIAL_TYPE_DEBUG_NORMAL = 2u;
+
+static const uint MATERIAL_FURNACE_BIT = 10u;
+
+uint effectiveFurnaceMode(uint materialId)
+{
+    if (fc.furnaceMode != 0u) return 1u;
+    return (materialTypes[materialId] >> MATERIAL_FURNACE_BIT) & 1u;
+}

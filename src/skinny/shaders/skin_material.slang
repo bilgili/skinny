@@ -50,7 +50,7 @@ SkinShading buildSkinShading(HitInfo hit, FrameConstants fc, uint scatterBits)
     SkinParams sp = skinParamsFromMtlx(skin);
 
     bool detailMaster    = (fc.detailFlags & 1u) != 0u;
-    bool detailEligible  = detailMaster && hit.hasTangent && fc.useMesh != 0u && fc.furnaceMode == 0u;
+    bool detailEligible  = detailMaster && hit.hasTangent && fc.useMesh != 0u && effectiveFurnaceMode(hit.materialId) == 0u;
     bool normalsBaked    = (fc.detailFlags & 16u) != 0u;
     bool useNormalMap    = detailEligible && !normalsBaked && ((fc.detailFlags & 2u) != 0u);
     bool useRoughnessMap = detailEligible && ((fc.detailFlags & 4u) != 0u);
@@ -88,7 +88,7 @@ SkinShading buildSkinShading(HitInfo hit, FrameConstants fc, uint scatterBits)
     float3 Nspec     = N;
     float  baseRough = mapRough >= 0.0 ? mapRough : sp.roughness;
     float  roughSpec = baseRough;
-    if (fc.furnaceMode == 0u)
+    if (effectiveFurnaceMode(hit.materialId) == 0u)
     {
         PoreSample ps = applyPores(N, hit.position, sp.poreDensity, sp.poreDepth);
         Nspec     = ps.N;
@@ -103,7 +103,8 @@ SkinShading buildSkinShading(HitInfo hit, FrameConstants fc, uint scatterBits)
     s.ctx.ink       = ink;
     s.ctx.Nspec     = Nspec;
     s.ctx.roughSpec = roughSpec;
-    s.ctx.useBSSRDF = useBSSRDF;
+    s.ctx.useBSSRDF   = useBSSRDF;
+    s.ctx.materialId  = hit.materialId;
     s.N             = N;
     s.bssrdfWeight  = bssrdfWeight;
     s.volumeWeight  = volumeWeight;
