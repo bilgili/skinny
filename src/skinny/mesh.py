@@ -31,6 +31,7 @@ import hashlib
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -699,6 +700,37 @@ def discover_mesh_sources(head_dir: Path | None) -> list[MeshSource]:
         if src is not None:
             out.append(src)
     return out
+
+
+def discover_mesh_sources_streaming(
+    head_dir: Path | None,
+    on_ready: Callable[[MeshSource], None],
+) -> None:
+    """Load mesh sources in parallel, calling *on_ready* for each as it completes.
+
+    Results arrive in completion order (fastest first), not directory order.
+    Designed to be run from a background thread so the renderer can start
+    immediately and pick up models as they appear.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if head_dir is None or not head_dir.exists():
+        return
+
+    dirs = sorted(p for p in head_dir.iterdir() if p.is_dir())
+    loose = sorted(head_dir.glob("*.obj"))
+
+    with ThreadPoolExecutor(max_workers=_POOL_SIZE) as pool:
+        futures = {}
+        for d in dirs:
+            futures[pool.submit(_load_model_dir, d)] = d
+        for p in loose:
+            futures[pool.submit(_load_loose_obj, p)] = p
+
+        for fut in as_completed(futures):
+            src = fut.result()
+            if src is not None:
+                on_ready(src)
 
 
 def dummy_mesh() -> Mesh:

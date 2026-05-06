@@ -1010,25 +1010,22 @@ def _world_transform(prim: Usd.Prim, time: Usd.TimeCode) -> np.ndarray:
 
 # ─── Public entry point ───────────────────────────────────────────────
 
+_USD_POOL_SIZE = 4
 
-def load_scene_from_usd(
+
+def _read_usd_stage(
     stage_path: Path,
     *,
     time: Optional[Usd.TimeCode] = None,
     use_usd_mtlx_plugin: bool = False,
-) -> Scene:
-    """Open a USD stage and return a `Scene` populated with mesh instances.
+) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]]]:
+    """Serial USD stage read: materials, lights, camera, and raw prim data.
 
-    Args:
-      use_usd_mtlx_plugin: when True, rely on USD's built-in usdMtlx
-          file-format plugin to resolve .mtlx references (requires a
-          USD build that ships the plugin). When False (default), .mtlx
-          files referenced by the stage are loaded directly via the
-          MaterialX Python API as a fallback.
-
-    Raises:
-      FileNotFoundError: if the stage cannot be opened.
-      ValueError: if the stage opens but contains no usable meshes.
+    Returns ``(partial_scene, prim_data)`` where *partial_scene* has all
+    metadata (materials, lights, camera, mm_per_unit) populated and an
+    ``instances`` list containing only emissive-light instances. The mesh
+    prim data is returned separately for the caller to bake (blocking or
+    background).
     """
     stage = Usd.Stage.Open(str(stage_path))
     if stage is None:
@@ -1036,24 +1033,14 @@ def load_scene_from_usd(
 
     eval_time = time if time is not None else Usd.TimeCode.Default()
 
-    # When the usdMtlx plugin is unavailable (the common case with pip-
-    # installed usd-core), .mtlx references in the stage fail silently and
-    # material bindings fall through to the skin fallback. Pre-load those
-    # .mtlx files via the MaterialX Python API so bindings resolve.
     mtlx_materials: dict[str, Material] = {}
     if not use_usd_mtlx_plugin:
         stage_dir = Path(stage.GetRootLayer().realPath).parent
         mtlx_materials = _load_mtlx_materials(stage, stage_dir)
 
-    # Materials: index 0 is always the legacy skin fallback so meshes with
-    # no UsdShade binding can render. Bound USD materials are deduped by
-    # prim path and appended at higher indices.
     materials: list[Material] = [Material(name="skin")]
     material_index: dict[str, int] = {}
 
-    cache_index = load_cache_index()
-
-    # Phase 1: serial USD prim reading (USD API not thread-safe for traversal)
     prim_data: list[tuple[MeshSource, np.ndarray, int]] = []
     for prim in stage.Traverse():
         if not prim.IsA(UsdGeom.Mesh):
@@ -1072,42 +1059,7 @@ def load_scene_from_usd(
         )
         prim_data.append((source, transform, material_id))
 
-    # Phase 2: parallel bake + cache
-    _POOL_SIZE = 4
-
-    def _bake_one(source: MeshSource) -> Mesh:
-        cache_key = make_cache_key(
-            source.content_hash, None, 0, 0.0, None, 0, 1.0,
-        )
-        mesh = lookup_cached_mesh(cache_index, cache_key, source)
-        if mesh is None:
-            mesh = bake_mesh(
-                source,
-                displacement_bytes=None,
-                displacement_res=0,
-                displacement_scale_world=0.0,
-            )
-            save_cached_mesh(cache_index, cache_key, mesh)
-        return mesh
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(max_workers=_POOL_SIZE) as pool:
-        meshes = list(pool.map(_bake_one, [s for s, _, _ in prim_data]))
-
-    instances: list[MeshInstance] = []
-    for (source, transform, material_id), mesh in zip(prim_data, meshes):
-        instances.append(
-            MeshInstance(
-                mesh=mesh,
-                transform=transform,
-                material_id=material_id,
-                name=source.name,
-                source=source,
-            )
-        )
-
-    if not instances:
+    if not prim_data:
         raise ValueError(
             f"USD stage at {stage_path} contains no usable UsdGeom.Mesh prims"
         )
@@ -1115,22 +1067,93 @@ def load_scene_from_usd(
     lights_dir, lights_sphere, environment, emissive_instances = _extract_lights(
         stage, eval_time, materials, material_index,
     )
-    instances.extend(emissive_instances)
     camera_override = _extract_camera(stage, eval_time)
 
-    # metersPerUnit: stage metadata describing how big one stage unit is.
-    # mm_per_unit is the mm-equivalent for the renderer's volume math.
     meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
     mm_per_unit = max(meters_per_unit * 1000.0, 1e-6)
 
-    return Scene(
-        instances=instances,
+    partial_scene = Scene(
+        instances=list(emissive_instances),
         materials=materials,
         lights_dir=lights_dir,
         lights_sphere=lights_sphere,
         environment=environment,
         camera_override=camera_override,
         mm_per_unit=mm_per_unit,
+    )
+    return partial_scene, prim_data
+
+
+def bake_usd_prim(
+    source: MeshSource,
+    transform: np.ndarray,
+    material_id: int,
+    cache_index: dict,
+) -> MeshInstance:
+    """Bake one USD prim's mesh (with cache). Thread-safe."""
+    cache_key = make_cache_key(
+        source.content_hash, None, 0, 0.0, None, 0, 1.0,
+    )
+    mesh = lookup_cached_mesh(cache_index, cache_key, source)
+    if mesh is None:
+        mesh = bake_mesh(
+            source,
+            displacement_bytes=None,
+            displacement_res=0,
+            displacement_scale_world=0.0,
+        )
+        save_cached_mesh(cache_index, cache_key, mesh)
+    return MeshInstance(
+        mesh=mesh,
+        transform=transform,
+        material_id=material_id,
+        name=source.name,
+        source=source,
+    )
+
+
+def load_scene_from_usd(
+    stage_path: Path,
+    *,
+    time: Optional[Usd.TimeCode] = None,
+    use_usd_mtlx_plugin: bool = False,
+) -> Scene:
+    """Open a USD stage and return a fully-baked `Scene`.
+
+    Reads prims serially, then bakes meshes in parallel. Blocking.
+    """
+    scene, prim_data = _read_usd_stage(
+        stage_path, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
+    )
+
+    cache_index = load_cache_index()
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=_USD_POOL_SIZE) as pool:
+        instances = list(pool.map(
+            lambda pd: bake_usd_prim(pd[0], pd[1], pd[2], cache_index),
+            prim_data,
+        ))
+
+    scene.instances.extend(instances)
+    return scene
+
+
+def prepare_usd_streaming(
+    stage_path: Path,
+    *,
+    time: Optional[Usd.TimeCode] = None,
+    use_usd_mtlx_plugin: bool = False,
+) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]]]:
+    """Read USD stage metadata (fast), return prim data for background baking.
+
+    The returned Scene has materials, lights, camera, and mm_per_unit
+    populated. Its instances list contains only emissive-light quads;
+    mesh instances should be baked in the background via `bake_usd_prim`.
+    """
+    return _read_usd_stage(
+        stage_path, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
     )
 
 
