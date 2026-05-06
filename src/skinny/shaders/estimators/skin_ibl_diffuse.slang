@@ -1,7 +1,7 @@
-// Skin IBL diffuse estimator (term §3 from skin_material.slang).
+// Skin IBL diffuse estimator (term S3 from skin_material.slang).
 // Generic over ISampler — caller picks the primary diffuse sampling
 // strategy (typically LambertSampler). Returns envIrradiance + diffDir
-// so the hair-sheen estimator (term §6) can reuse them.
+// so the hair-sheen estimator (term S6) can reuse them.
 
 import common;
 import bindings;
@@ -28,31 +28,37 @@ float3 _evalDiffuseBSSRDF(
 }
 
 SkinIBLDiffuseResult skinIBLDiffuseEstimator<TS : ISampler>(
-    TS sampler, SkinEvalContext ctx, HitInfo hit, float3 N,
+    TS sampler, SkinEvalContext ctx, HitInfo hit, float3 N, float3 V,
     float bssrdfWeight, FrameConstants fc, inout RNG rng)
 {
+    float3 T, B;
+    buildBasis(N, T, B);
+    float3 wo = worldToTangent(V, T, B, N);
+
     SkinIBLDiffuseResult r;
-    r.diffDir       = sampler.sampleDirection(rng.next2());
+    float3 wi   = sampler.sample(wo, rng.next2());
+    r.diffDir       = tangentToWorld(wi, T, B, N);
     r.envIrradiance = sceneEnvRadiance(r.diffDir, fc.envIntensity, effectiveFurnaceMode(hit.materialId));
 
     UniformSphereSampler uniSampler;
-    float uniPdf = uniSampler.pdf(float3(0.0));
+    float uniPdf = uniSampler.pdf(float3(0, 0, 1), wo);
 
     r.envSSS = ctx.useBSSRDF
         ? _evalDiffuseBSSRDF(ctx, hit, N, r.envIrradiance, bssrdfWeight)
               * (fc.integratorMode != 0u
-                    ? misPrimaryWeight(sampler, uniSampler, r.diffDir)
+                    ? misPrimaryWeight(sampler, uniSampler, wi, wo)
                     : 1.0)
         : float3(0.0);
 
     if (ctx.useBSSRDF && fc.integratorMode != 0u)
     {
-        float3 diffLightDir = uniSampler.sampleDirection(rng.next2());
+        float3 wiUni       = uniSampler.sample(wo, rng.next2());
+        float3 diffLightDir = tangentToWorld(wiUni, T, B, N);
         float  diffNdotL    = max(dot(N, diffLightDir), 0.0);
         if (diffNdotL > 0.0)
         {
             float3 diffEnv  = sceneEnvRadiance(diffLightDir, fc.envIntensity, effectiveFurnaceMode(hit.materialId));
-            float  wMis     = misCompanionWeight(sampler, uniSampler, diffLightDir);
+            float  wMis     = misCompanionWeight(sampler, uniSampler, wiUni, wo);
             r.envSSS += evaluateSubsurfaceScattering(ctx.sp, hit.position, N, 0.0, diffEnv, ctx.ink)
                       * diffNdotL * (wMis / uniPdf) * bssrdfWeight;
         }

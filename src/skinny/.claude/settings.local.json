@@ -141,7 +141,9 @@
       "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/scripts/convert_heads_to_usda.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/renderer.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(Select-Object -First 20)",
-      "Bash(sed 's/.*\\\\.//')"
+      "Bash(sed 's/.*\\\\.//')",
+      "Bash(xargs grep -l \"interface\")",
+      "Bash(xargs grep -l \"interface\\\\|:.*IMaterial\\\\|:.*ILight\\\\|:.*ISampler\\\\|:.*IIntegrator\")"
     ]
   }
 }

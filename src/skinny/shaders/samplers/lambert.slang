@@ -1,19 +1,18 @@
 // Cosine-weighted hemisphere sampler (Lambertian diffuse).
+// Operates in tangent space (N = +Z).
 
 import common;
 import interfaces;
 
 struct LambertSampler : ISampler
 {
-    float3 N;
-
-    float3 sampleDirection(float2 u)
+    float3 sample(float3 wo, float2 uv)
     {
-        return sampleCosineHemisphere(u, N);
+        return sampleCosineHemisphereTS(uv);
     }
 
-    float pdf(float3 L)
+    float pdf(float3 wi, float3 wo)
     {
-        return cosineHemispherePdf(L, N);
+        return cosineHemispherePdfTS(wi);
     }
 }

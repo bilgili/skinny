@@ -6,12 +6,12 @@ import interfaces;
 
 struct UniformSphereSampler : ISampler
 {
-    float3 sampleDirection(float2 u)
+    float3 sample(float3 wo, float2 uv)
     {
-        return sampleUniformSphere(u);
+        return sampleUniformSphere(uv);
     }
 
-    float pdf(float3 L)
+    float pdf(float3 wi, float3 wo)
     {
         return uniformSpherePdf();
     }

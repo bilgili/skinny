@@ -312,6 +312,29 @@ void buildBasis(float3 n, out float3 t, out float3 b)
     t = cross(b, n);
 }
 
+float3 worldToTangent(float3 dir, float3 T, float3 B, float3 N)
+{
+    return float3(dot(dir, T), dot(dir, B), dot(dir, N));
+}
+
+float3 tangentToWorld(float3 dir, float3 T, float3 B, float3 N)
+{
+    return T * dir.x + B * dir.y + N * dir.z;
+}
+
+float3 sampleCosineHemisphereTS(float2 u)
+{
+    float phi      = 2.0 * PI * u.x;
+    float cosTheta = sqrt(u.y);
+    float sinTheta = sqrt(1.0 - u.y);
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+float cosineHemispherePdfTS(float3 wi)
+{
+    return max(wi.z, 0.0) / PI;
+}
+
 /// Uniform disk sampling via concentric mapping.
 ///
 ///   r   = √u₁              (area-preserving radial CDF inversion)
