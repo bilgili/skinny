@@ -376,7 +376,6 @@ def main() -> None:
         vk_ctx=vk_ctx,
         shader_dir=Path(__file__).parent / "shaders",
         hdr_dir=repo_root / "hdrs",
-        head_dir=repo_root / "heads",
         tattoo_dir=repo_root / "tattoos",
         usd_scene_path=scene_path,
         use_usd_mtlx_plugin=args.usdMtlx,

@@ -25,10 +25,10 @@ from skinny.head_textures import (
 from skinny.mesh import (
     Mesh,
     MeshSource,
+    _load_model_dir,
     bake_mesh,
-    discover_mesh_sources,
-    discover_mesh_sources_streaming,
     dummy_mesh,
+    load_obj_source,
 )
 from skinny.mesh_cache import (
     load_cache_index,
@@ -744,7 +744,6 @@ class Renderer:
         vk_ctx: VulkanContext,
         shader_dir: Path,
         hdr_dir: Path | None = None,
-        head_dir: Path | None = None,
         tattoo_dir: Path | None = None,
         usd_scene_path: Path | None = None,
         use_usd_mtlx_plugin: bool = False,
@@ -853,73 +852,22 @@ class Renderer:
         # mesh heads of other sizes can be dialled in without editing code.
         self.mm_per_unit = 120.0
 
-        # Head-model library. Index 0 is always the analytic SDF from
-        # sdf_head.slang; further entries are triangle meshes discovered in
-        # `head_dir`. The GPU Gems 3 Ch.14 pipeline wants a laser-scanned
-        # polygonal head — drop any OBJ into heads/ and it appears here.
         import queue as _queue
-        import threading as _threading
 
-        self.head_models: list[str] = ["SDF (Loomis)"]
+        self.models: list[str] = []
         self._mesh_sources: list[MeshSource] = []
+        self.model_index: int = -1
 
-        # OBJ streaming: load models in background, deliver via queue
-        self._loading_queue: _queue.Queue[MeshSource] = _queue.Queue()
-        self._loader_done = _threading.Event()
-
-        def _bg_obj_loader() -> None:
-            discover_mesh_sources_streaming(head_dir, self._loading_queue.put)
-            self._loader_done.set()
-
-        _threading.Thread(
-            target=_bg_obj_loader, daemon=True, name="skinny-mesh-loader",
-        ).start()
-
-        # USD streaming: read stage + bake meshes entirely in background
+        # USD streaming state (populated by _load_usd_model / load_model_from_path)
         self._usd_instance_queue: _queue.Queue = _queue.Queue()
         self._usd_metadata_queue: _queue.Queue = _queue.Queue()
-        self._usd_bake_done: _threading.Event | None = None
+        self._usd_bake_done = None
         self._usd_uploaded_count: int = 0
+        self._usd_model_index: int = -1
+        self._use_usd_mtlx_plugin: bool = use_usd_mtlx_plugin
 
         if usd_scene_path is not None:
-            self.head_models.append("USD: (loading...)")
-            self._usd_head_index = len(self.head_models) - 1
-            self.head_index = self._usd_head_index
-            self._usd_bake_done = _threading.Event()
-
-            def _bg_usd_stream() -> None:
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                from skinny.usd_loader import _read_usd_stage, bake_usd_prim
-                scene, prim_data = _read_usd_stage(
-                    usd_scene_path, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
-                )
-                self._usd_metadata_queue.put(scene)
-                print(
-                    f"[skinny] USD stage read: {len(prim_data)} meshes, "
-                    f"baking in background"
-                )
-                cache_idx = load_cache_index()
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    futs = {
-                        pool.submit(
-                            bake_usd_prim, src, xform, mat_id, cache_idx,
-                        ): src.name
-                        for src, xform, mat_id in prim_data
-                    }
-                    for fut in as_completed(futs):
-                        try:
-                            inst = fut.result()
-                            self._usd_instance_queue.put(inst)
-                        except Exception as exc:  # noqa: BLE001
-                            print(f"[skinny] USD bake failed for {futs[fut]}: {exc}")
-                self._usd_bake_done.set()
-
-            _threading.Thread(
-                target=_bg_usd_stream, daemon=True, name="skinny-usd-stream",
-            ).start()
-        else:
-            self._usd_head_index = -1
-            self.head_index = 0
+            self._load_usd_model(usd_scene_path)
 
         self._mesh_cache_index: dict = load_cache_index()
         # Rebake-tracking: each (source, displacement-scale) combination
@@ -963,7 +911,7 @@ class Renderer:
 
         # Phase B-1: keep a CPU-side `Scene` that summarizes the renderer's
         # current selection (env, mesh, materials, lights). Today's UI
-        # state still owns the source of truth — head_index, env_index,
+        # state still owns the source of truth — model_index, env_index,
         # skin sliders, etc. — but each update() materializes a Scene off
         # those fields and the GPU-upload paths read from it. The Scene
         # is the seam Phase B-3 will replace with TLAS-driven multi-mesh
@@ -1182,6 +1130,131 @@ class Renderer:
         self.orbit_camera.yaw = yaw
         self.orbit_camera.pitch = pitch
         self.orbit_camera.fov = fov_v_deg
+
+    def _frame_camera_to_mesh(self, source: MeshSource) -> None:
+        """Auto-fit orbit camera to a MeshSource's bounding box."""
+        amin = source.positions.min(axis=0)
+        amax = source.positions.max(axis=0)
+        diag = amax - amin
+        radius = float(np.linalg.norm(diag) * 0.5)
+        if radius < 1e-6:
+            return
+        center = ((amin + amax) * 0.5).astype(np.float32)
+
+        fov_v_rad = np.radians(self.orbit_camera.fov)
+        margin = 1.4
+        distance = radius / np.tan(fov_v_rad * 0.5) * margin
+        distance = float(np.clip(distance, 0.5, 50.0))
+
+        self.orbit_camera.target = center
+        self.orbit_camera.distance = distance
+        self.orbit_camera.yaw = 0.0
+        self.orbit_camera.pitch = 0.0
+
+    def _clear_model_state(self) -> None:
+        """Reset all model/scene state so a fresh load starts clean."""
+        self.models.clear()
+        self._mesh_sources.clear()
+        self.model_index = -1
+        self._usd_scene = None
+        self._usd_model_index = -1
+        self._usd_bake_done = None
+        self._usd_uploaded_count = 0
+        self._baked_source_idx = -1
+        self._displacement_cache.clear()
+        self._normal_cache.clear()
+        self._dirty_since = None
+        # Reset GPU mesh to dummy so stale geometry doesn't render
+        self._upload_mesh(self._dummy_mesh)
+        self._upload_detail_maps(None)
+
+    def load_model_from_path(self, path: Path) -> int:
+        """Load a model file (USDA/USDC/USDZ/OBJ), replacing any previous model.
+
+        Returns the index of the newly loaded model. Loading runs in a
+        background thread; the model appears in the UI as soon as it's ready.
+        """
+        import threading as _threading
+
+        self._clear_model_state()
+        ext = path.suffix.lower()
+
+        if ext in (".usda", ".usdc", ".usdz"):
+            self._load_usd_model(path)
+            return 0
+
+        if ext == ".obj":
+            self.models.append(f"(loading {path.name}...)")
+            self.model_index = 0
+
+            def _bg_load() -> None:
+                try:
+                    if path.parent.is_dir():
+                        src = _load_model_dir(path.parent)
+                        if src is None:
+                            src = load_obj_source(path)
+                    else:
+                        src = load_obj_source(path)
+                    self._mesh_sources.append(src)
+                    self.models[0] = src.name
+                    self._frame_camera_to_mesh(src)
+                    self.model_index = 0
+                    print(
+                        f"[skinny] loaded model '{src.name}' "
+                        f"({src.positions.shape[0]} verts, "
+                        f"{src.tri_idx.shape[0]} tris)"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[skinny] failed to load {path.name}: {exc}")
+                    if self.models:
+                        self.models[0] = f"(failed: {path.name})"
+
+            _threading.Thread(
+                target=_bg_load, daemon=True, name="skinny-load-model",
+            ).start()
+            return 0
+
+        raise ValueError(f"Unsupported model format: {ext}")
+
+    def _load_usd_model(self, path: Path) -> None:
+        """Load a USD file as the active model, replacing any previous."""
+        import threading as _threading
+
+        self.models.append(f"USD: (loading {path.name}...)")
+        self._usd_model_index = 0
+        self.model_index = 0
+        self._usd_bake_done = _threading.Event()
+
+        def _bg_usd_stream() -> None:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from skinny.usd_loader import _read_usd_stage, bake_usd_prim
+            scene, prim_data = _read_usd_stage(
+                path, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
+            )
+            self._usd_metadata_queue.put(scene)
+            print(
+                f"[skinny] USD stage read: {len(prim_data)} meshes, "
+                f"baking in background"
+            )
+            cache_idx = load_cache_index()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futs = {
+                    pool.submit(
+                        bake_usd_prim, src, xform, mat_id, cache_idx,
+                    ): src.name
+                    for src, xform, mat_id in prim_data
+                }
+                for fut in as_completed(futs):
+                    try:
+                        inst = fut.result()
+                        self._usd_instance_queue.put(inst)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[skinny] USD bake failed for {futs[fut]}: {exc}")
+            self._usd_bake_done.set()
+
+        _threading.Thread(
+            target=_bg_usd_stream, daemon=True, name="skinny-usd-stream",
+        ).start()
 
     def _mtlx_skin_overrides(self) -> dict[str, object]:
         """Map the renderer's SkinParameters dataclass into MaterialX input
@@ -2084,34 +2157,6 @@ class Renderer:
         self.index_buffer.upload_sync(self._dummy_mesh.index_bytes)
         self.bvh_buffer.upload_sync(self._dummy_mesh.bvh_bytes)
 
-    def _poll_streaming_sources(self) -> None:
-        """Drain the loading queue, integrating newly loaded models into the UI."""
-        if self._loader_done is None:
-            return
-        import queue as _queue
-        while True:
-            try:
-                src = self._loading_queue.get_nowait()
-            except _queue.Empty:
-                break
-            self._mesh_sources.append(src)
-            # Insert before the USD entry if present, otherwise append
-            if self._usd_head_index >= 0:
-                insert_at = self._usd_head_index
-                self.head_models.insert(insert_at, f"Mesh: {src.name}")
-                self._usd_head_index += 1
-                if self.head_index >= insert_at:
-                    self.head_index += 1
-            else:
-                self.head_models.append(f"Mesh: {src.name}")
-            print(
-                f"[skinny] streamed model '{src.name}' — "
-                f"{len(self._mesh_sources)} model(s) available"
-            )
-        if self._loader_done.is_set() and self._loading_queue.empty():
-            self._loader_done = None
-            print(f"[skinny] streaming load complete — {len(self._mesh_sources)} model(s)")
-
     def _poll_usd_streaming(self) -> None:
         """Poll USD background thread: metadata first, then instances."""
         if self._usd_bake_done is None:
@@ -2154,8 +2199,8 @@ class Renderer:
                 f"[skinny] USD streamed '{inst.name}' — "
                 f"{len(self._usd_scene.instances)} instance(s)"
             )
-        if first_name is not None and self.head_models[self._usd_head_index].endswith("(loading...)"):
-            self.head_models[self._usd_head_index] = f"USD: {first_name}"
+        if first_name is not None and self.models[self._usd_model_index].endswith("(loading...)"):
+            self.models[self._usd_model_index] = f"USD: {first_name}"
 
         if added > 0 and self._is_usd_active():
             self._upload_usd_scene()
@@ -2170,8 +2215,8 @@ class Renderer:
 
     def _is_usd_active(self) -> bool:
         return (
-            self._usd_head_index >= 0
-            and self.head_index == self._usd_head_index
+            self._usd_model_index >= 0
+            and self.model_index == self._usd_model_index
         )
 
     def _upload_mesh(self, mesh: Mesh) -> None:
@@ -2618,25 +2663,19 @@ class Renderer:
     def _rebake_if_needed(self, now: float) -> None:
         """Decide whether the mesh buffers need rebuilding this frame.
 
-        Rebakes immediately on head-model change, and after a 300 ms debounce
-        on the displacement-scale slider (so the user can drag smoothly without
-        triggering a bake on every intermediate value).
+        Rebakes immediately on model change, and after a 300 ms debounce
+        on the displacement-scale slider.
         """
-        self.head_index = int(np.clip(self.head_index, 0, len(self.head_models) - 1))
-
-        # SDF mode: nothing to rebake; just clear detail maps if we were
-        # previously showing a textured mesh.
-        if self.head_index == 0:
+        if not self.models:
             if self._baked_source_idx != -1:
                 self._upload_detail_maps(None)
                 self._baked_source_idx = -1
             return
 
-        # USD mode: meshes ship pre-baked from the loader, so we just re-
-        # upload the geometry + per-instance records when entering this
-        # slot from any other selection. _baked_source_idx == -2 is the
-        # USD sentinel, distinct from -1 (SDF) and ≥0 (OBJ source index).
-        if self._usd_head_index >= 0 and self.head_index == self._usd_head_index:
+        self.model_index = int(np.clip(self.model_index, 0, len(self.models) - 1))
+
+        # USD mode: meshes ship pre-baked from the loader.
+        if self._usd_model_index >= 0 and self.model_index == self._usd_model_index:
             if self._usd_scene is not None and self._usd_scene.instances:
                 if self._baked_source_idx != -2:
                     print("[skinny] switching to USD scene")
@@ -2646,7 +2685,9 @@ class Renderer:
                     self._usd_uploaded_count = len(self._usd_scene.instances)
             return
 
-        src_idx = self.head_index - 1
+        src_idx = self.model_index
+        if self._usd_model_index >= 0 and self.model_index > self._usd_model_index:
+            src_idx = self.model_index - 1
         if not (0 <= src_idx < len(self._mesh_sources)):
             return
 
@@ -2698,7 +2739,7 @@ class Renderer:
         data += struct.pack("II", self.width, self.height)   # 8 bytes
         use_direct = 1 if self.direct_light_index == 0 else 0
         data += struct.pack("I", use_direct)                 # 4 bytes
-        use_mesh = 1 if self.head_index > 0 else 0
+        use_mesh = 1
         data += struct.pack("I", use_mesh)                   # 4 bytes
         # Pigment density: today's tattoo slider, surfaced via the scene's
         # active material so a future per-instance override falls out for free.
@@ -2871,7 +2912,7 @@ class Renderer:
             float(self.light_color_r), float(self.light_color_g), float(self.light_color_b),
             int(self.env_index),
             int(self.direct_light_index),
-            int(self.head_index),
+            int(self.model_index),
             int(self.tattoo_index),
             float(self.tattoo_density),
             int(self.scatter_index),
@@ -2912,8 +2953,7 @@ class Renderer:
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()
-        # Pick up any models that finished loading in the background.
-        self._poll_streaming_sources()
+        # Pick up USD meshes that finished baking in the background.
         self._poll_usd_streaming()
         # Rebake the head mesh if source or displacement-scale drifted from
         # whatever we last built. Uses wall-clock time so slider drags get

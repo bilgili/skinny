@@ -157,7 +157,7 @@ struct FrameConstants
     uint   width;
     uint   height;
     uint   useDirectLight;  // 0 = IBL only; 1 = IBL + direct analytical light
-    uint   useMesh;         // 0 = SDF head (sdf_head.slang); 1 = triangle mesh (mesh_head.slang)
+    uint   useMesh;         // always 1 — triangle mesh pipeline (mesh_head.slang)
     float  tattooDensity;   // 0 = no ink; 1 = full pigment load at alpha-1 texels
     float  envIntensity;    // scalar on every sampleEnvironment() result
     uint   furnaceMode;     // 1 = energy-conservation test: unit sphere + white env + pink on violation

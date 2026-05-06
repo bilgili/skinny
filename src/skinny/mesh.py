@@ -1,4 +1,4 @@
-"""Triangle mesh loading and linear BVH construction for ray traced heads.
+"""Triangle mesh loading and linear BVH construction.
 
 References:
     [1] Shirley, Morley, "Realistic Ray Tracing", 2nd ed., AK Peters 2003.
@@ -14,15 +14,8 @@ The mesh pipeline in `main_pass.slang` consumes three flat storage buffers:
     indices   : uint[]   ─ triangle-index list in BVH-permuted order
     bvhNodes  : BvhNode[]─ 32-byte nodes, depth-first layout
 
-See `build_bvh` for the node encoding. Mesh normalisation centres the model at
-the origin and scales it so its Y-extent is roughly [-1, +1] — matching the
-SDF head's frame so the orbit camera doesn't need adjusting when switching.
-
-Per-model layout: each immediate subdirectory of `heads/` is one model. The
-first `.obj` in the directory is the geometry; other images are attached as
-detail maps, selected by filename keyword — `normal`, `roughness`, and
-`displacement` (case-insensitive). A loose `.obj` at the top level is still
-loaded (with no texture maps) for backward compatibility.
+See `build_bvh` for the node encoding. Models are loaded on demand via
+`load_obj_source()` with geometry positions kept as-is (no normalisation).
 """
 
 from __future__ import annotations
@@ -31,7 +24,7 @@ import hashlib
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+
 
 import numpy as np
 
@@ -66,15 +59,15 @@ class Mesh:
 
 @dataclass
 class MeshSource:
-    """Undisplaced base geometry loaded from an OBJ.
+    """Undisplaced base geometry loaded from a file.
 
     Kept around so the renderer can rebake (displace + rebuild BVH) when the
-    user changes displacement scale without paying the OBJ parse cost again.
+    user changes displacement scale without paying the parse cost again.
     UVs are already V-flipped to image convention.
     """
 
     name: str
-    positions: np.ndarray          # (N, 3) float32, normalised to head frame
+    positions: np.ndarray          # (N, 3) float32
     normals: np.ndarray            # (N, 3) float32, smooth per-vertex
     uvs: np.ndarray                # (N, 2) float32, V-flipped
     tri_idx: np.ndarray            # (T, 3) int32
@@ -82,6 +75,7 @@ class MeshSource:
     roughness_map: Path | None = None
     displacement_map: Path | None = None
     content_hash: str = ""         # SHA-256 of geometry arrays, set at load time
+    material_hint: str | None = None  # MaterialX target name (e.g. "M_skinny_skin_default")
 
 
 # ── OBJ loading ────────────────────────────────────────────────────
@@ -202,20 +196,6 @@ def load_obj(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray
 
     return pos.astype(np.float32), nrm.astype(np.float32), uv.astype(np.float32), tri_idx.astype(np.int32)
 
-
-def normalise_to_head_frame(positions: np.ndarray) -> np.ndarray:
-    """Recentre the mesh and scale it to fit roughly y∈[-1, +1.1].
-
-    The SDF head spans about y∈[-0.97, +1.05]. Matching that frame means the
-    existing orbit-camera pivot (0, 0.1, 0.05) still looks sensible when the
-    user flips to the mesh pipeline.
-    """
-    lo = positions.min(axis=0)
-    hi = positions.max(axis=0)
-    centre = (lo + hi) * 0.5
-    y_extent = max(hi[1] - lo[1], 1e-6)
-    scale = 2.0 / y_extent                  # target height = 2 world units
-    return ((positions - centre) * scale).astype(np.float32)
 
 
 # ── Linear BVH ──────────────────────────────────────────────────────
@@ -383,7 +363,7 @@ def _load_model_dir(model_dir: Path) -> MeshSource | None:
     images = sorted(p for p in model_dir.iterdir() if p.suffix.lower() in _IMAGE_EXTS)
 
     try:
-        source = load_head_source(objs[0])
+        source = load_obj_source(objs[0])
     except Exception as exc:  # noqa: BLE001
         print(f"[skinny] failed to load {objs[0]}: {exc}")
         return None
@@ -635,10 +615,9 @@ def compute_source_hash(source: MeshSource) -> str:
     return h.hexdigest()
 
 
-def load_head_source(path: Path) -> MeshSource:
-    """Load an OBJ and normalise to the head frame — no BVH yet."""
+def load_obj_source(path: Path) -> MeshSource:
+    """Load an OBJ into a MeshSource — geometry as-is, no BVH yet."""
     positions, normals, uvs, tri_idx = load_obj(path)
-    positions = normalise_to_head_frame(positions)
     source = MeshSource(
         name=path.stem,
         positions=positions.astype(np.float32),
@@ -649,88 +628,6 @@ def load_head_source(path: Path) -> MeshSource:
     source.content_hash = compute_source_hash(source)
     return source
 
-
-def _load_loose_obj(path: Path) -> MeshSource | None:
-    try:
-        src = load_head_source(path)
-        print(
-            f"[skinny] loaded head mesh: {path.name} "
-            f"({src.positions.shape[0]} verts, {src.tri_idx.shape[0]} tris)"
-        )
-        return src
-    except Exception as exc:  # noqa: BLE001
-        print(f"[skinny] failed to load {path.name}: {exc}")
-        return None
-
-
-_POOL_SIZE = 4
-
-
-def discover_mesh_sources(head_dir: Path | None) -> list[MeshSource]:
-    """Scan `head_dir` and return undisplaced MeshSource objects.
-
-    Scans two sources, in order:
-      1. Each immediate subdirectory that contains at least one `.obj` is
-         treated as a named model. Texture files inside the directory are
-         attached by filename keyword (normal/roughness/displacement).
-      2. Any loose `*.obj` directly under `head_dir` is loaded as a model
-         with no texture maps — preserves existing behaviour for flat layouts.
-
-    Both stages run in parallel via ThreadPoolExecutor(max_workers=4).
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    if head_dir is None or not head_dir.exists():
-        return []
-
-    dirs = sorted(p for p in head_dir.iterdir() if p.is_dir())
-    loose = sorted(head_dir.glob("*.obj"))
-
-    with ThreadPoolExecutor(max_workers=_POOL_SIZE) as pool:
-        dir_futures = [(d, pool.submit(_load_model_dir, d)) for d in dirs]
-        loose_futures = [(p, pool.submit(_load_loose_obj, p)) for p in loose]
-
-    out: list[MeshSource] = []
-    for _, fut in dir_futures:
-        src = fut.result()
-        if src is not None:
-            out.append(src)
-    for _, fut in loose_futures:
-        src = fut.result()
-        if src is not None:
-            out.append(src)
-    return out
-
-
-def discover_mesh_sources_streaming(
-    head_dir: Path | None,
-    on_ready: Callable[[MeshSource], None],
-) -> None:
-    """Load mesh sources in parallel, calling *on_ready* for each as it completes.
-
-    Results arrive in completion order (fastest first), not directory order.
-    Designed to be run from a background thread so the renderer can start
-    immediately and pick up models as they appear.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    if head_dir is None or not head_dir.exists():
-        return
-
-    dirs = sorted(p for p in head_dir.iterdir() if p.is_dir())
-    loose = sorted(head_dir.glob("*.obj"))
-
-    with ThreadPoolExecutor(max_workers=_POOL_SIZE) as pool:
-        futures = {}
-        for d in dirs:
-            futures[pool.submit(_load_model_dir, d)] = d
-        for p in loose:
-            futures[pool.submit(_load_loose_obj, p)] = p
-
-        for fut in as_completed(futures):
-            src = fut.result()
-            if src is not None:
-                on_ready(src)
 
 
 def dummy_mesh() -> Mesh:
