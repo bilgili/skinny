@@ -27,6 +27,7 @@ from skinny.mesh import (
     MeshSource,
     bake_mesh,
     discover_mesh_sources,
+    discover_mesh_sources_streaming,
     dummy_mesh,
 )
 from skinny.mesh_cache import (
@@ -745,7 +746,8 @@ class Renderer:
         hdr_dir: Path | None = None,
         head_dir: Path | None = None,
         tattoo_dir: Path | None = None,
-        usd_scene: Scene | None = None,
+        usd_scene_path: Path | None = None,
+        use_usd_mtlx_plugin: bool = False,
     ) -> None:
         self.ctx = vk_ctx
         self.width = vk_ctx.width
@@ -855,22 +857,70 @@ class Renderer:
         # sdf_head.slang; further entries are triangle meshes discovered in
         # `head_dir`. The GPU Gems 3 Ch.14 pipeline wants a laser-scanned
         # polygonal head — drop any OBJ into heads/ and it appears here.
+        import queue as _queue
+        import threading as _threading
+
         self.head_models: list[str] = ["SDF (Loomis)"]
-        self._mesh_sources: list[MeshSource] = discover_mesh_sources(head_dir)
-        for src in self._mesh_sources:
-            self.head_models.append(f"Mesh: {src.name}")
-        # Phase D: USD-loaded scene's first instance shows up as one
-        # additional head_models entry. The renderer doesn't yet support
-        # multi-instance USD scenes; selecting the entry just displays the
-        # first instance with its own world transform.
-        if usd_scene is not None and usd_scene.instances:
-            primary = usd_scene.instances[0]
-            self.head_models.append(f"USD: {primary.name}")
+        self._mesh_sources: list[MeshSource] = []
+
+        # OBJ streaming: load models in background, deliver via queue
+        self._loading_queue: _queue.Queue[MeshSource] = _queue.Queue()
+        self._loader_done = _threading.Event()
+
+        def _bg_obj_loader() -> None:
+            discover_mesh_sources_streaming(head_dir, self._loading_queue.put)
+            self._loader_done.set()
+
+        _threading.Thread(
+            target=_bg_obj_loader, daemon=True, name="skinny-mesh-loader",
+        ).start()
+
+        # USD streaming: read stage + bake meshes entirely in background
+        self._usd_instance_queue: _queue.Queue = _queue.Queue()
+        self._usd_metadata_queue: _queue.Queue = _queue.Queue()
+        self._usd_bake_done: _threading.Event | None = None
+        self._usd_uploaded_count: int = 0
+
+        if usd_scene_path is not None:
+            self.head_models.append("USD: (loading...)")
             self._usd_head_index = len(self.head_models) - 1
             self.head_index = self._usd_head_index
+            self._usd_bake_done = _threading.Event()
+
+            def _bg_usd_stream() -> None:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from skinny.usd_loader import _read_usd_stage, bake_usd_prim
+                scene, prim_data = _read_usd_stage(
+                    usd_scene_path, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
+                )
+                self._usd_metadata_queue.put(scene)
+                print(
+                    f"[skinny] USD stage read: {len(prim_data)} meshes, "
+                    f"baking in background"
+                )
+                cache_idx = load_cache_index()
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futs = {
+                        pool.submit(
+                            bake_usd_prim, src, xform, mat_id, cache_idx,
+                        ): src.name
+                        for src, xform, mat_id in prim_data
+                    }
+                    for fut in as_completed(futs):
+                        try:
+                            inst = fut.result()
+                            self._usd_instance_queue.put(inst)
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[skinny] USD bake failed for {futs[fut]}: {exc}")
+                self._usd_bake_done.set()
+
+            _threading.Thread(
+                target=_bg_usd_stream, daemon=True, name="skinny-usd-stream",
+            ).start()
         else:
             self._usd_head_index = -1
             self.head_index = 0
+
         self._mesh_cache_index: dict = load_cache_index()
         # Rebake-tracking: each (source, displacement-scale) combination
         # produces a different GPU mesh, so we remember what we last baked and
@@ -920,20 +970,11 @@ class Renderer:
         # state and Phase C will populate with MaterialX-driven materials.
         self.scene: Scene = Scene()
 
-        # Phase D renderer hookup: stash the USD scene now; the GPU upload
-        # happens after _init_gpu has built the buffers. _usd_head_index
-        # was already set by the head_models init block (above) when a
-        # USD scene was supplied; preserve it so _rebake_if_needed's USD
-        # re-upload branch fires correctly when toggling back from OBJ.
-        self._usd_scene: Scene | None = usd_scene
-
-        # Phase D lights/env: pre-populate the renderer's light + env
-        # state from any USD lights the loader extracted. The user's UI
-        # sliders still own these post-startup; we just seed them with
-        # sensible scene-supplied values instead of the global defaults.
-        if usd_scene is not None:
-            self._apply_usd_lights(usd_scene)
-            self._frame_camera_to_scene(usd_scene)
+        # USD scene is loaded in the background; starts as None.
+        # Metadata (lights/camera/mm_per_unit) arrives via _usd_metadata_queue
+        # and is applied in _poll_usd_streaming(). Mesh instances stream in
+        # via _usd_instance_queue.
+        self._usd_scene: Scene | None = None
 
         # Load the MaterialX library and generate Slang for the canonical
         # skin material. The CompiledMaterial drives the per-material
@@ -951,15 +992,8 @@ class Renderer:
 
         self._init_gpu()
 
-        # Upload all USD meshes concatenated + their per-instance records
-        # AFTER the GPU buffers and instance buffer exist. Each instance's
-        # blasNodeOffset / blasIndexOffset / blasVertexOffset point at its
-        # slice of the unified buffers so the shader's TLAS broad-phase
-        # finds the right BLAS data per instance. Setting the bake sentinel
-        # to -2 tells _rebake_if_needed not to re-upload on the first frame.
-        if self._usd_scene is not None and self._usd_scene.instances:
-            self._upload_usd_scene()
-            self._baked_source_idx = -2
+        # USD meshes are uploaded as they arrive via _poll_usd_streaming().
+        # No blocking upload here — scene starts empty.
 
     @property
     def camera(self):
@@ -1977,7 +2011,173 @@ class Renderer:
             ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
+    def _rebind_mesh_descriptors(self) -> None:
+        """Re-write descriptor bindings 5, 6, 7 after buffer reallocation."""
+        vtx_info = vk.VkDescriptorBufferInfo(
+            buffer=self.vertex_buffer.buffer, offset=0, range=self.vertex_buffer.size,
+        )
+        idx_info = vk.VkDescriptorBufferInfo(
+            buffer=self.index_buffer.buffer, offset=0, range=self.index_buffer.size,
+        )
+        bvh_info = vk.VkDescriptorBufferInfo(
+            buffer=self.bvh_buffer.buffer, offset=0, range=self.bvh_buffer.size,
+        )
+        for ds in self.descriptor_sets:
+            writes = [
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=5, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vtx_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=6, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[idx_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=7, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[bvh_info],
+                ),
+            ]
+            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+
+    def _ensure_mesh_buffer_capacity(
+        self, num_vertices: int, num_triangles: int, num_nodes: int,
+    ) -> None:
+        """Grow mesh storage buffers if needed, rebinding descriptors."""
+        v_need = num_vertices * 32 + 256
+        i_need = num_triangles * 12 + 256
+        b_need = num_nodes * 32 + 256
+
+        if (v_need <= self.vertex_buffer.size
+                and i_need <= self.index_buffer.size
+                and b_need <= self.bvh_buffer.size):
+            return
+
+        vk.vkDeviceWaitIdle(self.ctx.device)
+
+        v_new = max(self.vertex_buffer.size * 2, v_need)
+        i_new = max(self.index_buffer.size * 2, i_need)
+        b_new = max(self.bvh_buffer.size * 2, b_need)
+
+        print(
+            f"[skinny] growing mesh buffers: "
+            f"vtx {self.vertex_buffer.size}→{v_new}, "
+            f"idx {self.index_buffer.size}→{i_new}, "
+            f"bvh {self.bvh_buffer.size}→{b_new}"
+        )
+
+        self.vertex_buffer.destroy()
+        self.index_buffer.destroy()
+        self.bvh_buffer.destroy()
+
+        self.vertex_buffer = StorageBuffer(self.ctx, v_new)
+        self.index_buffer = StorageBuffer(self.ctx, i_new)
+        self.bvh_buffer = StorageBuffer(self.ctx, b_new)
+
+        self._rebind_mesh_descriptors()
+        self.vertex_buffer.upload_sync(self._dummy_mesh.vertex_bytes)
+        self.index_buffer.upload_sync(self._dummy_mesh.index_bytes)
+        self.bvh_buffer.upload_sync(self._dummy_mesh.bvh_bytes)
+
+    def _poll_streaming_sources(self) -> None:
+        """Drain the loading queue, integrating newly loaded models into the UI."""
+        if self._loader_done is None:
+            return
+        import queue as _queue
+        while True:
+            try:
+                src = self._loading_queue.get_nowait()
+            except _queue.Empty:
+                break
+            self._mesh_sources.append(src)
+            # Insert before the USD entry if present, otherwise append
+            if self._usd_head_index >= 0:
+                insert_at = self._usd_head_index
+                self.head_models.insert(insert_at, f"Mesh: {src.name}")
+                self._usd_head_index += 1
+                if self.head_index >= insert_at:
+                    self.head_index += 1
+            else:
+                self.head_models.append(f"Mesh: {src.name}")
+            print(
+                f"[skinny] streamed model '{src.name}' — "
+                f"{len(self._mesh_sources)} model(s) available"
+            )
+        if self._loader_done.is_set() and self._loading_queue.empty():
+            self._loader_done = None
+            print(f"[skinny] streaming load complete — {len(self._mesh_sources)} model(s)")
+
+    def _poll_usd_streaming(self) -> None:
+        """Poll USD background thread: metadata first, then instances."""
+        if self._usd_bake_done is None:
+            return
+        import queue as _queue
+
+        # Phase 1: metadata (lights, camera, materials, mm_per_unit)
+        if self._usd_scene is None:
+            try:
+                scene = self._usd_metadata_queue.get_nowait()
+            except _queue.Empty:
+                return
+            self._usd_scene = scene
+            self._apply_usd_lights(scene)
+            self._frame_camera_to_scene(scene)
+            if scene.mm_per_unit != 120.0:
+                self.mm_per_unit = scene.mm_per_unit
+            if scene.instances:
+                self._upload_usd_scene()
+                self._usd_uploaded_count = len(scene.instances)
+            print(
+                f"[skinny] USD metadata applied — "
+                f"{len(scene.materials)} materials, "
+                f"{len(scene.lights_dir)} dir lights"
+            )
+
+        # Phase 2: baked mesh instances
+        added = 0
+        first_name = None
+        while True:
+            try:
+                inst = self._usd_instance_queue.get_nowait()
+            except _queue.Empty:
+                break
+            self._usd_scene.instances.append(inst)
+            added += 1
+            if first_name is None:
+                first_name = inst.name
+            print(
+                f"[skinny] USD streamed '{inst.name}' — "
+                f"{len(self._usd_scene.instances)} instance(s)"
+            )
+        if first_name is not None and self.head_models[self._usd_head_index].endswith("(loading...)"):
+            self.head_models[self._usd_head_index] = f"USD: {first_name}"
+
+        if added > 0 and self._is_usd_active():
+            self._upload_usd_scene()
+            self._usd_uploaded_count = len(self._usd_scene.instances)
+
+        if self._usd_bake_done.is_set() and self._usd_instance_queue.empty():
+            self._usd_bake_done = None
+            print(
+                f"[skinny] USD streaming complete — "
+                f"{len(self._usd_scene.instances)} instance(s)"
+            )
+
+    def _is_usd_active(self) -> bool:
+        return (
+            self._usd_head_index >= 0
+            and self.head_index == self._usd_head_index
+        )
+
     def _upload_mesh(self, mesh: Mesh) -> None:
+        self._ensure_mesh_buffer_capacity(
+            mesh.num_vertices, mesh.num_triangles, mesh.num_nodes,
+        )
         self.vertex_buffer.upload_sync(mesh.vertex_bytes)
         self.index_buffer.upload_sync(mesh.index_bytes)
         self.bvh_buffer.upload_sync(mesh.bvh_bytes)
@@ -2268,6 +2468,7 @@ class Renderer:
             v_off += mesh.num_vertices
             t_off += mesh.num_triangles
             n_off += mesh.num_nodes
+        self._ensure_mesh_buffer_capacity(v_off, t_off, n_off)
         self.vertex_buffer.upload_sync(b"".join(v_chunks))
         self.index_buffer.upload_sync(b"".join(i_chunks))
         self.bvh_buffer.upload_sync(b"".join(b_chunks))
@@ -2435,17 +2636,14 @@ class Renderer:
         # upload the geometry + per-instance records when entering this
         # slot from any other selection. _baked_source_idx == -2 is the
         # USD sentinel, distinct from -1 (SDF) and ≥0 (OBJ source index).
-        if (
-            self._usd_head_index >= 0
-            and self.head_index == self._usd_head_index
-            and self._usd_scene is not None
-            and self._usd_scene.instances
-        ):
-            if self._baked_source_idx != -2:
-                print("[skinny] switching to USD scene (pre-baked, no BVH cache)")
-                self._upload_usd_scene()
-                self._upload_detail_maps(None)
-                self._baked_source_idx = -2
+        if self._usd_head_index >= 0 and self.head_index == self._usd_head_index:
+            if self._usd_scene is not None and self._usd_scene.instances:
+                if self._baked_source_idx != -2:
+                    print("[skinny] switching to USD scene")
+                    self._upload_usd_scene()
+                    self._upload_detail_maps(None)
+                    self._baked_source_idx = -2
+                    self._usd_uploaded_count = len(self._usd_scene.instances)
             return
 
         src_idx = self.head_index - 1
@@ -2714,6 +2912,9 @@ class Renderer:
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()
+        # Pick up any models that finished loading in the background.
+        self._poll_streaming_sources()
+        self._poll_usd_streaming()
         # Rebake the head mesh if source or displacement-scale drifted from
         # whatever we last built. Uses wall-clock time so slider drags get
         # debounced cleanly regardless of frame rate.

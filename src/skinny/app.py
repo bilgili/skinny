@@ -344,15 +344,6 @@ def main() -> None:
     args = parser.parse_args()
 
     scene_path: Path | None = args.scene or args.usd
-    usd_scene = None
-    if scene_path is not None:
-        from skinny.usd_loader import load_scene_from_usd
-        usd_scene = load_scene_from_usd(
-            scene_path, use_usd_mtlx_plugin=args.usdMtlx,
-        )
-        n_inst = len(usd_scene.instances)
-        n_mat = len(usd_scene.materials)
-        print(f"[USD] {scene_path.name}: {n_inst} instances, {n_mat} materials")
 
     ensure_dirs()
     saved = load_settings()
@@ -387,7 +378,8 @@ def main() -> None:
         hdr_dir=repo_root / "hdrs",
         head_dir=repo_root / "heads",
         tattoo_dir=repo_root / "tattoos",
-        usd_scene=usd_scene,
+        usd_scene_path=scene_path,
+        use_usd_mtlx_plugin=args.usdMtlx,
     )
 
     _apply_saved_params(renderer, saved.get("params", {}))

@@ -81,14 +81,6 @@ class SkinnySession:
     def initialize(self) -> None:
         """Heavy initialization — run from a background thread."""
         try:
-            usd_scene = None
-            if _USD_PATH is not None:
-                self._log_init("Loading USD scene...")
-                from skinny.usd_loader import load_scene_from_usd
-                usd_scene = load_scene_from_usd(
-                    _USD_PATH, use_usd_mtlx_plugin=_USE_USD_MTLX,
-                )
-
             self._log_init("Creating Vulkan context...")
             self.ctx = VulkanContext(
                 window=None, width=1280, height=720,
@@ -104,7 +96,8 @@ class SkinnySession:
                 hdr_dir=repo_root / "hdrs",
                 head_dir=repo_root / "heads",
                 tattoo_dir=repo_root / "tattoos",
-                usd_scene=usd_scene,
+                usd_scene_path=_USD_PATH,
+                use_usd_mtlx_plugin=_USE_USD_MTLX,
             )
 
             self._log_init("Setting up video encoder...")
