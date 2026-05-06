@@ -66,7 +66,7 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Sampling",          "integrator_index",            "integrator_modes"),
     _disc("Furnace mode",      "furnace_index",               "furnace_modes"),
-    _disc("Head model",        "head_index",                  "head_models"),
+    _disc("Model",             "model_index",                 "models"),
     _disc("Detail maps",       "detail_maps_index",           "detail_maps_modes"),
     _cont("Normal map strength", "normal_map_strength",       0.05, 0.0,  2.0),
     _cont("Displacement (mm)", "displacement_scale_mm",       0.05, 0.0,  2.0),

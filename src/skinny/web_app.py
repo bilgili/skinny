@@ -94,7 +94,6 @@ class SkinnySession:
                 vk_ctx=self.ctx,
                 shader_dir=Path(__file__).parent / "shaders",
                 hdr_dir=repo_root / "hdrs",
-                head_dir=repo_root / "heads",
                 tattoo_dir=repo_root / "tattoos",
                 usd_scene_path=_USD_PATH,
                 use_usd_mtlx_plugin=_USE_USD_MTLX,
@@ -517,6 +516,55 @@ def _build_capture_section(session: "SkinnySession") -> pn.viewable.Viewable:
     return pn.Column(fmt_select, download)
 
 
+def _build_model_loader_section(
+    session: "SkinnySession",
+    model_select_widget: pn.widgets.Select | None = None,
+) -> pn.viewable.Viewable:
+    """FileSelector + Load button for loading models from the server filesystem."""
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[2]
+    default_dir = str(repo_root / "assets")
+
+    file_sel = pn.widgets.FileSelector(
+        default_dir,
+        file_pattern="*",
+        only_files=True,
+        name="Model files",
+    )
+    load_btn = pn.widgets.Button(name="Load Selected", button_type="primary")
+    status = pn.pane.Alert("No model loaded", alert_type="info", visible=True)
+
+    def _refresh_model_select():
+        if model_select_widget is None:
+            return
+        models = session.renderer.models
+        opts = {name: i for i, name in enumerate(models)} if models else {"(none)": -1}
+        model_select_widget.options = opts
+        idx = session.renderer.model_index
+        if 0 <= idx < len(models):
+            model_select_widget.value = idx
+
+    def on_load(_event):
+        selected = file_sel.value
+        if not selected:
+            status.object = "No file selected"
+            status.alert_type = "warning"
+            return
+        path = _Path(selected[0])
+        try:
+            session.renderer.load_model_from_path(path)
+            status.object = f"Loading: {path.name}"
+            status.alert_type = "success"
+            pn.state.execute(_refresh_model_select, schedule="later")
+        except Exception as exc:
+            status.object = f"Error: {exc}"
+            status.alert_type = "danger"
+
+    load_btn.on_click(on_load)
+    return pn.Column(file_sel, load_btn, status)
+
+
 def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
     """Build the full sidebar accordion — requires session.ready."""
     params = build_all_params(session.renderer)
@@ -544,13 +592,16 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
                 name = getattr(c, "name", str(c))
                 labels.append(name)
             current_idx = int(_get_nested(session.renderer, p.path))
+            opts = {label: i for i, label in enumerate(labels)}
             w = pn.widgets.Select(
                 name=p.name,
-                options={label: i for i, label in enumerate(labels)},
-                value=current_idx if current_idx < len(labels) else 0,
+                options=opts if opts else {"(none)": -1},
+                value=current_idx if current_idx < len(labels) else (0 if labels else -1),
             )
 
             def on_select(event, path=p.path, source=p.choice_source):
+                if event.new is None or event.new == -1:
+                    return
                 session.set_param(path, event.new)
                 if source == "presets":
                     from skinny.presets import apply_preset
@@ -578,6 +629,11 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
         sections.append((group_name, pn.Column(*group_widgets)))
         if group_name not in collapsed_groups:
             active_indices.append(len(sections) - 1)
+
+    model_widget = widgets_by_path.get("model_index")
+    sections.insert(0, ("Load Model", _build_model_loader_section(session, model_widget)))
+    active_indices = [i + 1 for i in active_indices]
+    active_indices.insert(0, 0)
 
     usd_scene = getattr(session.renderer, "_usd_scene", None)
     if usd_scene is not None and usd_scene.materials:

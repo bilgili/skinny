@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 import tkinter as tk
 from datetime import datetime
+from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from typing import Any
 
@@ -304,6 +305,28 @@ class ControlPanel:
                 parent=self.root,
             )
 
+    def _on_load_model(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Open model",
+            filetypes=[
+                ("All supported", "*.usda *.usdc *.usdz *.obj"),
+                ("USD files", "*.usda *.usdc *.usdz"),
+                ("OBJ files", "*.obj"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            self.renderer.load_model_from_path(Path(path))
+        except Exception as exc:
+            messagebox.showerror(
+                "Load failed",
+                f"Could not load model:\n{exc}",
+                parent=self.root,
+            )
+
     def _build_param_row(self, container: ttk.Frame, p) -> None:
         from skinny.params import _get_nested
 
@@ -332,7 +355,7 @@ class ControlPanel:
             choices = getattr(self.renderer, p.choice_source)
             names = [self._choice_label(c) for c in choices]
             current = int(_get_nested(self.renderer, p.path))
-            var = tk.StringVar(value=names[current] if names else "")
+            var = tk.StringVar(value=names[current] if 0 <= current < len(names) else "")
             combo = ttk.Combobox(
                 row,
                 textvariable=var,
@@ -345,6 +368,12 @@ class ControlPanel:
                 lambda _e, path=p.path, w=combo: self._on_discrete(path, w.current()),
             )
             self._widgets[p.path] = (var, combo, None)
+
+            if p.path == "model_index":
+                ttk.Button(
+                    row, text="Load...", width=6,
+                    command=self._on_load_model,
+                ).pack(side="left", padx=(4, 0))
 
     def _build_material_widgets(self, container: ttk.Frame) -> None:
         """Per-USD-material editor section. One labeled frame per non-skin
@@ -754,6 +783,10 @@ class ControlPanel:
                         val_lbl.configure(text=f"{cur_f:.3f}")
                 else:
                     choices = getattr(self.renderer, p.choice_source)
+                    names = [self._choice_label(c) for c in choices]
+                    combo = _widget
+                    if list(combo["values"]) != names:
+                        combo.configure(values=names)
                     idx = int(cur)
                     if 0 <= idx < len(choices):
                         name = self._choice_label(choices[idx])
