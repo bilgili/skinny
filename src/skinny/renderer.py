@@ -845,6 +845,8 @@ class Renderer:
         self.furnace_modes: list[str] = ["Off", "On"]
         self.furnace_index: int = 0
 
+        self._per_material_furnace: list[bool] = [False] * FLAT_MATERIAL_CAPACITY
+
         # Scene-scale bridge between mm-valued skin params and world-unit
         # ray distances. 1 world unit = mm_per_unit millimetres. The SDF
         # Loomis head is roughly unit-scale (~2 units tall), so with a ~240
@@ -1167,6 +1169,9 @@ class Renderer:
         # Reset GPU mesh to dummy so stale geometry doesn't render
         self._upload_mesh(self._dummy_mesh)
         self._upload_detail_maps(None)
+        self._per_material_furnace = [False] * FLAT_MATERIAL_CAPACITY
+        self._procedural_params.clear()
+        self._mtlx_scene_materials.clear()
 
     def load_model_from_path(self, path: Path) -> int:
         """Load a model file (USDA/USDC/USDZ/OBJ), replacing any previous model.
@@ -1405,53 +1410,60 @@ class Renderer:
             f"({n_overrides}/{n_uniforms} fields driven by SkinParameters)"
         )
 
-        # Milestone 4-a: when a USD scene was loaded, run each non-skin
-        # material through the gen as a standard_surface network. This
-        # builds a per-material CompiledMaterial cache the future GPU
-        # integration (4-c) will use to dispatch on hit.materialId. No
-        # GPU effect today; failures log but don't abort startup.
         self._mtlx_scene_materials: dict[int, object] = {}
-        if self._usd_scene is not None and self._usd_scene.materials:
-            ok_std = 0
-            ok_mtlx = 0
-            fail = 0
-            total_kb = 0.0
-            for i, mat in enumerate(self._usd_scene.materials):
-                if i == 0:
-                    continue  # legacy skin slot
-                try:
-                    if mat.mtlx_target_name:
-                        if mat.mtlx_document is not None:
-                            lib.import_document(mat.mtlx_document)
-                        cm = lib.generate(
-                            mat.mtlx_target_name, compile_check=False
-                        )
-                    else:
-                        cm = lib.compile_for_scene_material(mat)
-                except Exception as e:  # noqa: BLE001 - gen raises generic
-                    print(f"[skinny] mat[{i}] {mat.name!r}: gen FAIL  "
-                          f"{type(e).__name__}: {e}")
-                    fail += 1
-                    continue
-                self._mtlx_scene_materials[i] = cm
-                # Detect procedural materials by checking if the gen
-                # emitted fractal-noise uniform fields (marble 3D, etc.).
-                proc = _extract_procedural_params(cm)
-                if proc is not None:
-                    self._procedural_params[i] = proc
+        self._gen_scene_materials()
+
+    def _gen_scene_materials(self) -> None:
+        """Run MaterialX gen for each non-skin scene material.
+
+        Populates _mtlx_scene_materials and _procedural_params. Called
+        at init and again whenever _usd_scene changes so dynamically
+        loaded models get their procedural materials (marble, etc.).
+        """
+        lib = self._mtlx_library
+        scene = self._usd_scene
+        if lib is None or scene is None or not scene.materials:
+            return
+        self._mtlx_scene_materials.clear()
+        self._procedural_params.clear()
+        ok_std = 0
+        ok_mtlx = 0
+        fail = 0
+        total_kb = 0.0
+        for i, mat in enumerate(scene.materials):
+            if i == 0:
+                continue
+            try:
                 if mat.mtlx_target_name:
-                    ok_mtlx += 1
+                    if mat.mtlx_document is not None:
+                        lib.import_document(mat.mtlx_document)
+                    cm = lib.generate(
+                        mat.mtlx_target_name, compile_check=False
+                    )
                 else:
-                    ok_std += 1
-                total_kb += len(cm.pixel_source) / 1024.0
-            if ok_std or ok_mtlx or fail:
-                n_proc = len(self._procedural_params)
-                print(
-                    f"[skinny] MaterialX per-scene-material gen: "
-                    f"{ok_std} std_surface, {ok_mtlx} mtlx-targeted, "
-                    f"{fail} fail, {n_proc} procedural, "
-                    f"total {total_kb:.1f}KB slang"
-                )
+                    cm = lib.compile_for_scene_material(mat)
+            except Exception as e:  # noqa: BLE001
+                print(f"[skinny] mat[{i}] {mat.name!r}: gen FAIL  "
+                      f"{type(e).__name__}: {e}")
+                fail += 1
+                continue
+            self._mtlx_scene_materials[i] = cm
+            proc = _extract_procedural_params(cm)
+            if proc is not None:
+                self._procedural_params[i] = proc
+            if mat.mtlx_target_name:
+                ok_mtlx += 1
+            else:
+                ok_std += 1
+            total_kb += len(cm.pixel_source) / 1024.0
+        if ok_std or ok_mtlx or fail:
+            n_proc = len(self._procedural_params)
+            print(
+                f"[skinny] MaterialX per-scene-material gen: "
+                f"{ok_std} std_surface, {ok_mtlx} mtlx-targeted, "
+                f"{fail} fail, {n_proc} procedural, "
+                f"total {total_kb:.1f}KB slang"
+            )
 
     def _apply_usd_lights(self, scene: Scene) -> None:
         """Seed the renderer's light + environment state from a USD scene.
@@ -2170,6 +2182,7 @@ class Renderer:
             except _queue.Empty:
                 return
             self._usd_scene = scene
+            self._gen_scene_materials()
             self._apply_usd_lights(scene)
             self._frame_camera_to_scene(scene)
             if scene.mm_per_unit != 120.0:
@@ -2420,10 +2433,11 @@ class Renderer:
         Encoding per slot (uint):
           bits  0-7 : material type code (skin=0, flat=1)
           bits  8-9 : scatter mode for skin slots (bit0=BSSRDF, bit1=volume)
-          bits 10-31: reserved.
+          bit  10   : per-material furnace mode
+          bits 11-31: reserved.
 
-        Re-uploaded whenever the global scatter mode changes (cheap — the
-        buffer is FLAT_MATERIAL_CAPACITY uints).
+        Re-uploaded whenever scatter mode or per-material furnace changes
+        (cheap — the buffer is FLAT_MATERIAL_CAPACITY uints).
         """
         scatter_idx = int(np.clip(self.scatter_index, 0, len(self._scatter_mode_bits) - 1))
         scatter_bits = int(self._scatter_mode_bits[scatter_idx]) & 0x3
@@ -2434,6 +2448,8 @@ class Renderer:
             packed = (t & 0xFF)
             if t == MATERIAL_TYPE_SKIN:
                 packed |= (scatter_bits & 0x3) << 8
+            if self._per_material_furnace[i]:
+                packed |= 1 << 10
             type_bytes += struct.pack("I", packed)
         self.material_types_buffer.upload_sync(bytes(type_bytes))
         self._last_scatter_index = scatter_idx
@@ -2454,6 +2470,17 @@ class Renderer:
             return
         mats[material_id].parameter_overrides[key] = value
         self._upload_flat_materials(mats)
+        self._material_version += 1
+
+    def toggle_material_furnace(self, material_id: int, enabled: bool) -> None:
+        if material_id < 0 or material_id >= FLAT_MATERIAL_CAPACITY:
+            return
+        if enabled:
+            for i in range(FLAT_MATERIAL_CAPACITY):
+                self._per_material_furnace[i] = (i == material_id)
+        else:
+            self._per_material_furnace[material_id] = False
+        self._upload_material_types()
         self._material_version += 1
 
     def _update_texture_pool_descriptors(self) -> None:

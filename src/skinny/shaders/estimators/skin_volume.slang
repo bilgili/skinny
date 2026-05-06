@@ -17,7 +17,7 @@ float3 skinVolumeEstimator(
         return float3(0.0);
     return volumeRenderSkin(
         ray, hit, analyticLightDir, analyticLightRad,
-        ctx.sp, ctx.ink, fc.envIntensity, fc.furnaceMode,
+        ctx.sp, ctx.ink, fc.envIntensity, effectiveFurnaceMode(hit.materialId),
         fc.integratorMode >= 2u ? fc.integratorMode : 0u,
         fc.mmPerUnit, volumeBounces, rng) * volumeWeight;
 }

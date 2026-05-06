@@ -23,7 +23,7 @@ SkinHairContribution skinHairSheenEstimator(
     SkinHairContribution out_;
     out_.direct   = float3(0.0);
     out_.envSheen = float3(0.0);
-    if (!volumeOnly && fc.furnaceMode == 0u && ctx.sp.hairDensity > 1e-3)
+    if (!volumeOnly && effectiveFurnaceMode(ctx.materialId) == 0u && ctx.sp.hairDensity > 1e-3)
     {
         float3 hairBRDF = vellusHairBRDF(N, V, float3(1.0), ctx.sp.hairDensity, ctx.sp.hairTilt);
         if (useDirect)

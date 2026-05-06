@@ -4,7 +4,8 @@
 // Per-material flags packed into materialTypes[i]:
 //   bits  0-7 : material type code (MATERIAL_TYPE_SKIN | MATERIAL_TYPE_FLAT)
 //   bits  8-9 : scatter mode for skin slots — bit 0 = BSSRDF, bit 1 = volume
-//   bits 10-31: reserved
+//   bit  10   : per-material furnace mode (energy-conservation probe)
+//   bits 11-31: reserved
 //
 // `bindings.slang` defines `materialTypes[]`; the encoding below is the
 // agreed contract with `_pack_material_types_buffer()` on the renderer.

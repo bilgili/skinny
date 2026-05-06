@@ -105,6 +105,9 @@ class ControlPanel:
         self._direction_preview: tk.Canvas | None = None
         self._direction_preview_dot: int | None = None
         self._direction_popup: _DirectionPickerPopup | None = None
+        self._material_container: ttk.Frame | None = None
+        self._material_outer: ttk.LabelFrame | None = None
+        self._last_scene_id: int = -1
         self._build_widgets()
 
     # ── Widget construction ─────────────────────────────────────────
@@ -376,30 +379,43 @@ class ControlPanel:
                 ).pack(side="left", padx=(4, 0))
 
     def _build_material_widgets(self, container: ttk.Frame) -> None:
-        """Per-USD-material editor section. One labeled frame per non-skin
-        material in the scene with sliders for roughness/metallic/specular
-        and a colour swatch + picker for diffuseColor (hidden when the
-        diffuseColor is texture-bound).
-
-        Callbacks route through Renderer.apply_material_override which
-        re-uploads the flat-material buffer and bumps `_material_version`
-        so progressive accumulation resets cleanly on every drag.
+        """Per-material editor section. Rebuilt when the loaded model changes
+        so the widget list always reflects the current scene's materials.
         """
+        self._material_container = container
+        if self._material_outer is not None:
+            for p in self.params:
+                if p.path.startswith("mtlx."):
+                    self._widgets.pop(p.path, None)
+            self._material_outer.destroy()
+            self._material_outer = None
+
+        scene = getattr(self.renderer, "_usd_scene", None)
+        self._last_scene_id = id(scene)
+
         outer = ttk.LabelFrame(container, text="Materials", padding=4)
         outer.pack(fill="x", padx=2, pady=2)
+        self._material_outer = outer
 
-        # Skin material — collapsible, same style as scene materials
+        has_skin = scene is None or any(
+            m.mtlx_target_name == "M_skinny_skin_default"
+            for m in (scene.materials if scene else [])
+        )
+
         mtlx_params = [p for p in self.params if p.path.startswith("mtlx.")]
-        if mtlx_params:
+        if mtlx_params and has_skin:
             skin_section = _CollapsibleSection(
                 outer, title="Skin Material", expanded=True,
             )
             skin_section.pack(fill="x", padx=2, pady=2)
             for p in mtlx_params:
                 self._build_param_row(skin_section.body, p)
+            furnace_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                skin_section.body, text="Furnace", variable=furnace_var,
+                command=lambda v=furnace_var: self.renderer.toggle_material_furnace(0, v.get()),
+            ).pack(fill="x", pady=1)
 
-        # Scene materials (USD-loaded, slot 1+)
-        scene = getattr(self.renderer, "_usd_scene", None)
         editable = (
             list(enumerate(scene.materials))[1:]
             if scene is not None and scene.materials else []
@@ -420,6 +436,11 @@ class ControlPanel:
                 ("coat_roughness", 0.0,  1.0),
             ):
                 self._build_mat_slider_row(body, mat_id, mat, key, lo, hi)
+            furnace_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                body, text="Furnace", variable=furnace_var,
+                command=lambda v=furnace_var, mid=mat_id: self.renderer.toggle_material_furnace(mid, v.get()),
+            ).pack(fill="x", pady=1)
 
     def _build_mat_color_row(self, parent: ttk.Frame, mat_id: int, mat) -> None:
         # Hide the swatch when diffuseColor is texture-bound — the texture
@@ -794,6 +815,10 @@ class ControlPanel:
                             var.set(name)
         finally:
             self._suppress_cb = False
+
+        cur_scene = getattr(self.renderer, "_usd_scene", None)
+        if id(cur_scene) != self._last_scene_id:
+            self._build_material_widgets(self._material_container)
 
         self._refresh_color_swatch()
         self._refresh_direction_preview()

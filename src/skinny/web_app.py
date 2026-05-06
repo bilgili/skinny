@@ -635,8 +635,21 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
     active_indices = [i + 1 for i in active_indices]
     active_indices.insert(0, 0)
 
-    usd_scene = getattr(session.renderer, "_usd_scene", None)
-    if usd_scene is not None and usd_scene.materials:
+    mat_col = pn.Column()
+    sections.append(("Materials", mat_col))
+    active_indices.append(len(sections) - 1)
+
+    _last_scene_id = [id(None)]
+
+    def _rebuild_material_col():
+        usd_scene = getattr(session.renderer, "_usd_scene", None)
+        cur_id = id(usd_scene)
+        if cur_id == _last_scene_id[0]:
+            return
+        _last_scene_id[0] = cur_id
+        mat_col.clear()
+        if usd_scene is None or not usd_scene.materials:
+            return
         mat_widgets = []
         for mat_id, mat in list(enumerate(usd_scene.materials))[1:]:
             mat_section_widgets = []
@@ -694,14 +707,26 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
                 cw.param.watch(on_color, "value")
                 mat_section_widgets.insert(0, cw)
 
+            furnace_cb = pn.widgets.Checkbox(name="Furnace", value=False)
+
+            def on_furnace(event, mid=mat_id):
+                session.renderer.toggle_material_furnace(mid, event.new)
+                if session.encoder.is_h264:
+                    session.encoder.force_keyframe()
+
+            furnace_cb.param.watch(on_furnace, "value")
+            mat_section_widgets.append(furnace_cb)
+
             mat_widgets.append(
                 (mat.name, pn.Column(*mat_section_widgets))
             )
 
         if mat_widgets:
-            mat_accordion = pn.Accordion(*mat_widgets, active=[])
-            sections.append(("Materials", pn.Column(mat_accordion)))
-            active_indices.append(len(sections) - 1)
+            mat_col.append(pn.Accordion(*mat_widgets, active=[]))
+
+    _rebuild_material_col()
+
+    session._material_rebuild_cb = _rebuild_material_col
 
     return pn.Accordion(*sections, active=active_indices)
 
@@ -778,6 +803,14 @@ def create_panel_app() -> pn.viewable.Viewable:
             _poll_active[0] = False
             sidebar_col.clear()
             sidebar_col.append(_build_sidebar_widgets(session))
+
+            def _check_materials():
+                cb = getattr(session, "_material_rebuild_cb", None)
+                if cb is not None:
+                    cb()
+
+            pn.state.add_periodic_callback(_check_materials, period=1000)
+
             encoder_info = session.encoder.encoder_name
             hw_tag = " (HW)" if session.encoder.is_hardware else " (SW)"
             info_bar.object = (

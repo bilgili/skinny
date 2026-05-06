@@ -102,7 +102,7 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 
     float3 display = linearToSRGB(acesFilmic(accum));
 
-    if (fc.furnaceMode != 0u && hit.hit)
+    if (hit.hit && effectiveFurnaceMode(hit.materialId) != 0u)
     {
         float maxChan = max(accum.r, max(accum.g, accum.b));
         if (maxChan > 1.02)

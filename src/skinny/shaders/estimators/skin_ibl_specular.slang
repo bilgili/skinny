@@ -30,7 +30,7 @@ float3 skinIBLSpecularEstimator<TS : ISampler>(
     if (NdotL > 0.0 && primaryPdf > 1e-12)
     {
         float3 brdf   = evaluateSkinSpecular(ctx.Nspec, V, primaryDir, ctx.roughSpec, ctx.sp.ior);
-        float3 envRad = sceneEnvRadiance(primaryDir, fc.envIntensity, fc.furnaceMode);
+        float3 envRad = sceneEnvRadiance(primaryDir, fc.envIntensity, effectiveFurnaceMode(ctx.materialId));
         float  wMis   = fc.integratorMode != 0u
             ? misPrimaryWeight(sampler, uniSampler, primaryDir)
             : 1.0;
@@ -44,7 +44,7 @@ float3 skinIBLSpecularEstimator<TS : ISampler>(
         if (specNdotL > 0.0)
         {
             float  wMis   = misCompanionWeight(sampler, uniSampler, specLightDir);
-            float3 specEnv = sceneEnvRadiance(specLightDir, fc.envIntensity, fc.furnaceMode);
+            float3 specEnv = sceneEnvRadiance(specLightDir, fc.envIntensity, effectiveFurnaceMode(ctx.materialId));
             envSpec += evaluateSkinSpecular(ctx.Nspec, V, specLightDir, ctx.roughSpec, ctx.sp.ior)
                      * specEnv * specNdotL * (wMis / uniPdf);
         }
