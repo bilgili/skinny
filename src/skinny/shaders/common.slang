@@ -143,6 +143,8 @@ struct Camera
 {
     float4x4 viewInverse;
     float4x4 projInverse;
+    float4x4 view;          // forward view matrix (world → camera space)
+    float4x4 proj;          // forward projection matrix (camera → clip)
     float3   position;
     float    fov;
 };
@@ -168,7 +170,11 @@ struct FrameConstants
     uint   numInstances;         // size of the TLAS instance list; 0 disables mesh ray traversal
     uint   numSphereLights;      // active count in sphereLights buffer (binding 17)
     uint   numEmissiveTriangles; // active count in emissiveTriangles buffer (binding 18)
+    uint   integratorType;       // 0 = unidirectional path tracer, 1 = BDPT (flat first-hit only)
 };
+
+static const uint INTEGRATOR_PATH = 0u;
+static const uint INTEGRATOR_BDPT = 1u;
 
 // ── Random number generation (PCG) ──────────────────────────────
 

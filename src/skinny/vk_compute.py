@@ -34,11 +34,19 @@ class ComputePipeline:
         self.entry_module = entry_module
         self.entry_point = entry_point
 
+        import time as _time
+        t0 = _time.perf_counter()
+        print(f"[skinny] slangc → SPIR-V: {entry_module}.slang …", flush=True)
         self._spirv_path = self._compile_slang()
+        print(f"[skinny] slangc done in {_time.perf_counter() - t0:.2f}s "
+              f"({self._spirv_path.stat().st_size // 1024} KB SPIR-V)", flush=True)
+        t0 = _time.perf_counter()
         self._shader_module = self._create_shader_module()
         self.descriptor_set_layout = self._create_descriptor_set_layout()
         self.pipeline_layout = self._create_pipeline_layout()
+        print(f"[skinny] driver pipeline compile …", flush=True)
         self.pipeline = self._create_pipeline()
+        print(f"[skinny] pipeline ready in {_time.perf_counter() - t0:.2f}s", flush=True)
 
     # ── Slang → SPIR-V compilation ───────────────────────────────
 
@@ -280,6 +288,16 @@ class ComputePipeline:
             # means no procedural eval; type == 1 is 3D marble noise.
             vk.VkDescriptorSetLayoutBinding(
                 binding=20,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 21: BDPT light-tracer splat buffer. Per-pixel 3 × uint32
+            # fixed-point cumulative radiance (Q22.10). Atomic-added by
+            # bdpt.slang's splatLightVertex(), consumed by main_pass.slang's
+            # final composite. Cleared on accumulation reset.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=21,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1107,6 +1125,34 @@ class StorageBuffer:
         )
         region = vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=len(payload))
         vk.vkCmdCopyBuffer(cmd, self.staging_buffer, self.buffer, 1, [region])
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1,
+            [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+            vk.VK_NULL_HANDLE,
+        )
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
+    def fill_zero_sync(self) -> None:
+        """Zero the device-local buffer via vkCmdFillBuffer."""
+        alloc_info = vk.VkCommandBufferAllocateInfo(
+            commandPool=self.ctx.command_pool,
+            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        )
+        cmd = vk.vkAllocateCommandBuffers(self.ctx.device, alloc_info)[0]
+        vk.vkBeginCommandBuffer(
+            cmd,
+            vk.VkCommandBufferBeginInfo(
+                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            ),
+        )
+        # vkCmdFillBuffer requires size to be a multiple of 4 and the buffer
+        # to be created with TRANSFER_DST_BIT (already set in __init__).
+        # Round down to nearest 4-byte boundary defensively.
+        fill_size = (self.size // 4) * 4
+        vk.vkCmdFillBuffer(cmd, self.buffer, 0, fill_size, 0)
         vk.vkEndCommandBuffer(cmd)
         vk.vkQueueSubmit(
             self.ctx.compute_queue, 1,

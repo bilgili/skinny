@@ -16,6 +16,9 @@ uniform float3         lightRadiance;
 [[vk::binding(16)]] StructuredBuffer<uint> materialTypes;
 [[vk::binding(19)]] StructuredBuffer<StdSurfaceParams> stdSurfaceParams;
 [[vk::binding(20)]] StructuredBuffer<ProceduralParams> proceduralParams;
+// BDPT light-tracer splat buffer: per-pixel R, G, B as fixed-point uint
+// (Q22.10). Indexed as [pixel.y * width * 3 + pixel.x * 3 + channel].
+[[vk::binding(21)]] RWStructuredBuffer<uint> lightSplatBuffer;
 
 static const uint MATERIAL_TYPE_SKIN         = 0u;
 static const uint MATERIAL_TYPE_FLAT         = 1u;
