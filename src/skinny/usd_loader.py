@@ -10,8 +10,8 @@ Phase D-1 scope (geometry only):
   - Convert the stage's metersPerUnit into the renderer's mm_per_unit.
 
 Materials, lights, cameras, and displacement come in subsequent Phase D
-steps. The default material is the legacy skin material (matId=0); every
-mesh in the loaded stage shares it.
+steps. The default material is a flat fallback (matId=0); meshes without
+an explicit material binding share it.
 """
 
 from __future__ import annotations
@@ -165,6 +165,12 @@ def _read_mesh_attrs(prim: Usd.Prim, time: Usd.TimeCode) -> Optional[MeshSource]
                 )
                 normals = _smooth_normals(positions, tri_idx)
                 uvs = arr
+
+    # USD puts V=0 at the bottom of the texture; Vulkan + image loaders
+    # put V=0 at the top.  Flip to match the OBJ loader convention.
+    if uvs is not None and uvs.size > 0:
+        uvs = uvs.copy()
+        uvs[:, 1] = 1.0 - uvs[:, 1]
 
     return MeshSource(
         name=str(prim.GetPath()),
@@ -594,8 +600,13 @@ def _load_mtlx_materials(
                     )
 
             transmission = overrides.pop("transmission", None)
+            transmission_color = overrides.pop("transmission_color", None)
             if isinstance(transmission, (int, float)) and float(transmission) > 0:
                 overrides["opacity"] = max(0.0, 1.0 - float(transmission))
+                if isinstance(transmission_color, tuple) and len(transmission_color) >= 3:
+                    overrides["diffuseColor"] = transmission_color[:3]
+                elif overrides.get("diffuseColor") == (0.0, 0.0, 0.0):
+                    overrides["diffuseColor"] = (1.0, 1.0, 1.0)
 
             opacity_val = overrides.get("opacity")
             if isinstance(opacity_val, tuple):
@@ -631,7 +642,7 @@ def _resolve_material_binding(
 ) -> int:
     """Return a Scene.materials index for the prim's bound material.
 
-    Materials list invariant: index 0 is always the legacy fallback skin
+    Materials list invariant: index 0 is always the flat fallback
     material. Bound USD materials are appended at indices 1..N and cached
     by prim path so multi-instance bindings share a single entry.
 
@@ -639,12 +650,15 @@ def _resolve_material_binding(
     and .mtlx references couldn't be resolved), falls back to matching
     the binding target's leaf name against pre-loaded mtlx_materials.
     """
+    if not prim.HasAPI(UsdShade.MaterialBindingAPI):
+        UsdShade.MaterialBindingAPI.Apply(prim)
     binding_api = UsdShade.MaterialBindingAPI(prim)
     bound, _relationship = binding_api.ComputeBoundMaterial()
 
-    if not bound and mtlx_materials:
+    if not bound:
+        stage = prim.GetStage()
         ancestor = prim
-        while ancestor and ancestor != prim.GetStage().GetPseudoRoot():
+        while ancestor and ancestor != stage.GetPseudoRoot():
             binding_rel = ancestor.GetRelationship("material:binding")
             if binding_rel:
                 for target_path in binding_rel.GetTargets():
@@ -652,17 +666,25 @@ def _resolve_material_binding(
                     cached = material_index.get(target_str)
                     if cached is not None:
                         return cached
-                    leaf = target_path.name
-                    mtlx_mat = mtlx_materials.get(leaf)
-                    if mtlx_mat is not None:
-                        idx = len(materials)
-                        material_index[target_str] = idx
-                        materials.append(mtlx_mat)
-                        return idx
+                    if mtlx_materials:
+                        leaf = target_path.name
+                        mtlx_mat = mtlx_materials.get(leaf)
+                        if mtlx_mat is not None:
+                            idx = len(materials)
+                            material_index[target_str] = idx
+                            materials.append(mtlx_mat)
+                            return idx
+                    target_prim = stage.GetPrimAtPath(target_path)
+                    if target_prim and target_prim.IsValid():
+                        bound = UsdShade.Material(target_prim)
+                        if bound:
+                            break
+            if bound:
+                break
             ancestor = ancestor.GetParent()
 
     if not bound:
-        log.debug("prim %s: no material binding resolved — using skin fallback", prim.GetPath())
+        log.debug("prim %s: no material binding resolved — using flat fallback", prim.GetPath())
         return 0  # fallback skin material
 
     mat_path = str(bound.GetPath())
@@ -1018,14 +1040,17 @@ def _read_usd_stage(
     *,
     time: Optional[Usd.TimeCode] = None,
     use_usd_mtlx_plugin: bool = False,
-) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]]]:
+    keep_stage: bool = False,
+) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]], Optional["Usd.Stage"]]:
     """Serial USD stage read: materials, lights, camera, and raw prim data.
 
-    Returns ``(partial_scene, prim_data)`` where *partial_scene* has all
-    metadata (materials, lights, camera, mm_per_unit) populated and an
-    ``instances`` list containing only emissive-light instances. The mesh
-    prim data is returned separately for the caller to bake (blocking or
-    background).
+    Returns ``(partial_scene, prim_data, stage_or_none)`` where
+    *partial_scene* has all metadata (materials, lights, camera,
+    mm_per_unit) populated and an ``instances`` list containing only
+    emissive-light instances. The mesh prim data is returned separately
+    for the caller to bake (blocking or background). When
+    ``keep_stage=True`` the open ``Usd.Stage`` handle is returned as the
+    third element so the caller can build a scene graph tree from it.
     """
     stage = Usd.Stage.Open(str(stage_path))
     if stage is None:
@@ -1038,7 +1063,7 @@ def _read_usd_stage(
         stage_dir = Path(stage.GetRootLayer().realPath).parent
         mtlx_materials = _load_mtlx_materials(stage, stage_dir)
 
-    materials: list[Material] = [Material(name="skin")]
+    materials: list[Material] = [Material(name="default")]
     material_index: dict[str, int] = {}
 
     prim_data: list[tuple[MeshSource, np.ndarray, int]] = []
@@ -1081,7 +1106,7 @@ def _read_usd_stage(
         camera_override=camera_override,
         mm_per_unit=mm_per_unit,
     )
-    return partial_scene, prim_data
+    return partial_scene, prim_data, (stage if keep_stage else None)
 
 
 def bake_usd_prim(
@@ -1122,7 +1147,7 @@ def load_scene_from_usd(
 
     Reads prims serially, then bakes meshes in parallel. Blocking.
     """
-    scene, prim_data = _read_usd_stage(
+    scene, prim_data, _ = _read_usd_stage(
         stage_path, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
     )
 
@@ -1152,9 +1177,10 @@ def prepare_usd_streaming(
     populated. Its instances list contains only emissive-light quads;
     mesh instances should be baked in the background via `bake_usd_prim`.
     """
-    return _read_usd_stage(
+    scene, prim_data, _ = _read_usd_stage(
         stage_path, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
     )
+    return scene, prim_data
 
 
 def summarize(scene: Scene) -> str:

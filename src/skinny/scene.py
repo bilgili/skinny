@@ -280,8 +280,6 @@ def build_default_scene(
     env_intensity: float,
     mesh: Optional[Mesh],
     transform: Optional[np.ndarray] = None,
-    pigment: Optional[Tattoo] = None,
-    pigment_density: float = 1.0,
     light_direction: Optional[np.ndarray] = None,
     light_radiance: Optional[np.ndarray] = None,
     direct_light_enabled: bool = True,
@@ -299,9 +297,7 @@ def build_default_scene(
     material scenes are mechanically supported by the data shape.
     """
     instances: list[MeshInstance] = []
-    materials: list[Material] = [
-        Material(name="skin", pigment=pigment, pigment_density=pigment_density)
-    ]
+    materials: list[Material] = [Material(name="default")]
 
     if mesh is not None:
         xform = transform if transform is not None else np.eye(4, dtype=np.float32)

@@ -16,7 +16,7 @@ from skinny.vk_context import VulkanContext
 # Hard cap on the bindless flat-material texture array (binding 14). Each
 # slot is one combined-image-sampler descriptor. Bumping this requires no
 # shader change but consumes more descriptor slots.
-BINDLESS_TEXTURE_CAPACITY = 16
+BINDLESS_TEXTURE_CAPACITY = 128
 
 
 class ComputePipeline:
@@ -228,9 +228,9 @@ class ComputePipeline:
             ),
             # binding 15: per-material skin UBO array. StructuredBuffer<T>
             # (storage buffer, std430 layout) with one MtlxSkinParams
-            # record per material slot. Slot 0 = legacy SDF-head skin;
-            # slots > 0 = USD-bound skin-typed materials. Layout matches
-            # the gen-reflected M_skinny_skin_default uniform_block.
+            # record per material slot. Only skin-typed slots carry data.
+            # Layout matches the gen-reflected M_skinny_skin_default
+            # uniform_block.
             vk.VkDescriptorSetLayoutBinding(
                 binding=15,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,

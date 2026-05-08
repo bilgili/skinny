@@ -67,14 +67,21 @@ mainImage()                                          main_pass.slang
   │    ├─ furnace → unit sphere
   │    ├─ mesh    → marchHeadMesh()                  mesh_head.slang
   │    └─ SDF     → marchHead()                      sdf_head.slang
-  ├─ evalMaterial(hit, ray, rng)                     material_eval.slang
-  │    ├─ MATERIAL_TYPE_FLAT  → FlatMaterial          flat_material.slang
-  │    ├─ MATERIAL_TYPE_DEBUG → DebugNormalMaterial   debug_normal_material.slang
-  │    └─ default (SKIN)      → SkinMaterial          skin_material.slang
+  ├─ PathTracer.estimateRadiance(ray, hit, rng)      integrators/path.slang
+  │    ├─ cutout transparency skip loop
+  │    ├─ for bounce 0..5:
+  │    │    ├─ evaluateBounce(h, r, bounce, rng)
+  │    │    │    ├─ FLAT → loadFlatMaterial → allLightsNEE + sample
+  │    │    │    ├─ SKIN → evalSkinRadiance (§1-§6, self-integrating)
+  │    │    │    └─ DEBUG → 0.5 + 0.5·N
+  │    │    ├─ accumulate emission + direct + throughput
+  │    │    ├─ Russian roulette (bounce > 0)
+  │    │    ├─ sphere-light MIS on BSDF ray
+  │    │    └─ traceScene for next bounce
   ├─ NaN / inf / negative guard
   ├─ progressive accumulation (running mean)
   ├─ ACES filmic tonemap → sRGB gamma
-  ├─ furnace energy-violation overlay (pink)
+  ├─ per-material furnace energy-violation overlay (pink)
   └─ HUD alpha composite → outputBuffer
 ```
 
@@ -82,18 +89,20 @@ mainImage()                                          main_pass.slang
 
 ## Pluggable Interface Architecture
 
-All interfaces live in `shaders/interfaces.slang`. Dispatch strategies are
-chosen to avoid existential warp serialisation on GPUs.
+All interfaces live in `shaders/interfaces.slang`. Per-material furnace
+probes use `effectiveFurnaceMode()` from `bindings.slang`. Dispatch
+strategies are chosen to avoid existential warp serialisation on GPUs.
 
 ### ISampler
 
 ```
-sampleDirection(float2 u) → float3
-pdf(float3 L)             → float
+sample(float3 wo, float2 uv) → float3
+pdf(float3 wi, float3 wo)    → float
 ```
 
-Sampler state (N, V, roughness, g, etc.) is stored in struct fields. Generic
-parameter on estimators — compile-time monomorphised, zero runtime cost.
+Tangent-space sampler (N = +Z). Callers transform world↔tangent. Sampler
+state (roughness, g, etc.) is stored in struct fields. Generic parameter on
+estimators — compile-time monomorphised, zero runtime cost.
 
 | Implementation | File | Purpose |
 |---|---|---|
@@ -108,23 +117,30 @@ MIS utilities in `samplers/mis_combine.slang`: `misPrimaryWeight<TA,TB>`,
 ### IMaterial
 
 ```
-evalRadiance(Ray ray, inout RNG rng) → float3
+sample(float3 wo, inout RNG rng)  → BSDFSample
+evaluate(float3 wo, float3 wi)    → BSDFEval
 ```
 
-Tag-switch monomorphisation in `material_eval.slang` — each `case` loads a
-concrete struct and calls `runEstimators<TM>(mat, ray, rng)`. Never used as
-an existential value (divergent material hits in a warp would serialise).
+All directions in tangent space (N=+Z). `BSDFSample` carries `wi`, `weight`
+(BSDF×cos/pdf), `pdf`, `emission`, `valid`, and `transmitted` (refraction
+flag). `BSDFEval` returns `response` (f×cos) and `pdf`. Tag-switch
+monomorphisation in `evaluateBounce()` (`integrators/path.slang`). Never
+used as existential — divergent material hits in a warp would serialise.
+
+Skin uses its own 6-estimator chain and returns full radiance via
+`BounceResult.fullRadiance`; `bsdfSample.valid = false` terminates bouncing.
 
 | Implementation | File | Type Code |
 |---|---|---|
-| `SkinMaterial` | `skin_material.slang` | 0 (default) |
-| `FlatMaterial` | `flat_material.slang` | 1 |
-| `DebugNormalMaterial` | `debug_normal_material.slang` | 2 |
+| `SkinMaterial` | `skin_material.slang` | 0 (default) — self-integrating, returns full radiance |
+| `FlatMaterial` | `flat_material.slang` | 1 — opacity/refraction, coat, spec/diff MIS |
+| `DebugNormalMaterial` | `debug_normal_material.slang` | 2 — normal visualisation |
 
 Material type encoding in `materialTypes[id]` (binding 16):
 - bits 0–7: type code
 - bits 8–9: scatter mode for skin (bit 0 = BSSRDF, bit 1 = volume)
-- bits 10–31: reserved
+- bit 10: per-material furnace mode (energy-conservation probe)
+- bits 11–31: reserved
 
 ### ILight
 
@@ -149,19 +165,20 @@ geometry-term conversion.
 estimateRadiance(Ray ray, HitInfo firstHit, inout RNG rng) → float3
 ```
 
-Uniform per dispatch — selected by `fc.integratorMode` in `main_pass.slang`.
-All three currently delegate to `evalMaterial()` pending divergence.
+`PathTracer` owns the 6-bounce loop with Russian roulette, cutout
+transparency traversal, per-bounce NEE via generic `allLightsNEE<TM>()`,
+and sphere-light MIS on BSDF-sampled rays. Material dispatch happens in
+`evaluateBounce()` which returns `BounceResult` (direct light + full
+radiance + BSDF sample with world-space direction).
 
-| Implementation | File | Mode |
+| Implementation | File | Notes |
 |---|---|---|
-| `PathTracer` | `integrators/path.slang` | 0 |
-| `MISPathTracer` | `integrators/mis.slang` | 1 |
-| `LightTracer` | `integrators/light.slang` | 2 |
+| `PathTracer` | `integrators/path.slang` | Bounce loop, NEE, material dispatch |
 
-### Adding a New Material (One-File Add)
+### Adding a New Material (Two-File Add)
 
-1. Create `shaders/my_material.slang` — `struct MyMat : IMaterial { ... }` + `loadMyMat(HitInfo)`.
-2. In `material_eval.slang` — add `import my_material;` and one `case` line.
+1. Create `shaders/my_material.slang` — `struct MyMat : IMaterial { sample(), evaluate() }` + `loadMyMat(HitInfo)`.
+2. In `integrators/path.slang` — add `import my_material;` and a `case` in `evaluateBounce()`.
 3. In `renderer.py` — add `MATERIAL_TYPE_MYMAT = N` constant + packing branch.
 
 ---
@@ -194,7 +211,7 @@ Key functions:
 
 ### Skin Material Orchestrator (`skin_material.slang`)
 
-Chains 7 estimator terms in fixed RNG order:
+Chains 6 estimator terms in fixed RNG order:
 
 | Term | Estimator | File |
 |------|-----------|------|
@@ -204,19 +221,19 @@ Chains 7 estimator terms in fixed RNG order:
 | §4 | Volume march (delta tracking) | `estimators/skin_volume.slang` |
 | §5 | Thin-geometry translucency | `estimators/skin_transmission.slang` |
 | §6 | Vellus hair sheen | `estimators/skin_hair_sheen.slang` |
-| §7 | Stored light-subpath BDPT | `estimators/skin_bdpt.slang` |
 
 `buildSkinShading()` handles detail maps (normal, roughness, displacement from
 bindings 9–11), tattoo ink (binding 8), and pore perturbation (Worley noise).
 
-### Flat Material Bounce Loop (`flat_material.slang`)
+### Flat Material BSDF (`flat_material.slang`)
 
-6-bounce path tracer with:
+Implements `IMaterial` interface — provides `sample()` / `evaluate()` in
+tangent space. Bounce loop and NEE are in `PathTracer`. BSDF layers:
+
 - Opacity / refraction (Fresnel-weighted reflect/refract split)
 - Clear coat (GGX, coat color tinting)
-- Specular / diffuse split (Schlick F0, luminance-weighted probability)
-- Russian roulette (bounce > 0)
-- MIS: sphere light intersection on BSDF-sampled rays via `intersectSphereLights`
+- Specular / diffuse MIS split (Schlick F0, luminance-weighted probability)
+- Cutout alpha masking via `isCutoutTransparent()` (in `flat_shading.slang`)
 - Procedural color via `ProceduralParams` (marble 3D noise)
 
 ---
@@ -260,13 +277,29 @@ Two-level acceleration structure:
 - else → `marchHead()` (SDF sphere tracing)
 
 Shadow tests: `visibleSegment()` (point-to-point), `visibleDirectional()`
-(point toward infinity).
+(point toward infinity). Both traverse up to 8 transparent surfaces
+(cutout alpha or refractive) before declaring occlusion.
+
+Transparency helpers (defined in `flat_shading.slang`):
+- `isCutoutTransparent(h)` — alpha below `opacityThreshold`
+- `isMaterialTransparent(materialId)` — opacity < 1 or opacity texture
+- `isShadowTransparent(h)` — cutout or refractive
 
 ### USD Loading (`usd_loader.py`)
 
 Walks USD stage for `UsdGeom.Mesh`, `UsdLux` lights (DistantLight,
 SphereLight, DomeLight), `UsdGeom.Camera`, `UsdShade.Material` bindings with
 UsdPreviewSurface parameter overrides. Converts `metersPerUnit` → `mm_per_unit`.
+
+### Scene Graph Inspector (`scene_graph.py`, `scene_graph_window.py`)
+
+Preserves the USD prim hierarchy as a browsable tree with typed,
+editable properties on each node. `SceneGraphNode` carries a
+`RendererRef` (kind + index) mapping back to the flat renderer arrays
+(material, light, instance). Property edits flow through
+`apply_material_override` / `apply_light_override` /
+`apply_instance_transform`. Desktop uses a Tkinter `SceneGraphWindow`;
+web uses `scene_tree.html` served as a Panel iframe.
 
 ---
 
@@ -485,12 +518,15 @@ only).
 | `scene.py` | `Scene`, `Material`, `MeshInstance`, `LightDir`, `LightSphere`, `LightEnvHDR` | Scene description dataclasses |
 | `materialx_runtime.py` | `MaterialLibrary`, `CompiledMaterial`, `UniformField` | MaterialX loading, GenSlang codegen, uniform reflection |
 | `mesh.py` | `Mesh`, `MeshSource` | OBJ loading, subdivision, displacement, BVH construction |
+| `mesh_cache.py` | — | On-disk BVH cache (zstd-compressed vertex/index/BVH blobs, `~/.skinny/mesh_cache/`) |
 | `environment.py` | `Environment` | HDR env map loading (.hdr decoder), built-in presets |
 | `params.py` | `ParamSpec` | Shared parameter definitions, get/set helpers, persistence |
 | `hardware.py` | `GpuInfo`, `GpuVendor` | GPU enumeration, vendor detection, encoder selection |
 | `video_encoder.py` | `VideoEncoder` | H264/JPEG encoding with hw-aware fallback, Annex B→AVCC |
 | `web_app.py` | `SkinnySession`, `VideoStreamHandler` | Panel web app, per-session renderer, Tornado video WS |
 | `control_panel.py` | `ControlPanel` | Tkinter UI: arcball light widget, auto-generated sliders |
+| `scene_graph.py` | `SceneGraphNode`, `SceneGraphProperty`, `RendererRef` | USD prim hierarchy tree model with typed editable properties |
+| `scene_graph_window.py` | `SceneGraphWindow` | Tkinter tree view + property editor for USD scene graph |
 | `presets.py` | `Preset` | 12 built-in skin presets (Fitzpatrick I–VI × Female/Male) |
 | `settings.py` | — | Persistent storage at `~/.skinny/` (JSON) |
 | `tattoos.py` | `Tattoo` | Procedural + image-based tattoo loading |
@@ -508,15 +544,17 @@ only).
               interfaces    bindings    skin_bssrdf
               ╱  |  |  ╲      |         |       ╲
         ISampler ILight  IMaterial  scene_trace  skin_shading
-          |              IIntegrator   |    ╲         |
-     samplers/*                    sdf_head mesh_head  ╲
+          |              BSDFSample    |    ╲         |
+     samplers/*          BSDFEval  sdf_head mesh_head  ╲
           |                                         estimators/*
      lights/*                                           |
                                                    skin_material ─┐
                                                    flat_material ─┤
                                                    debug_normal ──┤
+                                                   flat_shading ──┤
                                                                   ▼
-                                              material_eval.slang
+                                              integrators/path.slang
+                                              (evaluateBounce + bounce loop)
                                                       |
                                               main_pass.slang
 ```
@@ -539,11 +577,10 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | float | tattooDensity |
 | ... | float | envIntensity |
 | ... | uint | furnaceMode |
-| +156 | float | mmPerUnit |
+| ... | float | mmPerUnit |
 | ... | uint | detailFlags |
 | ... | float | normalMapStrength |
 | ... | float | displacementScaleMM |
-| +192 | uint | integratorMode |
 | ... | uint | numInstances |
 | ... | uint | numSphereLights |
 | ... | uint | numEmissiveTriangles |
@@ -560,13 +597,17 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 - **Progressive accumulation**: running mean in linear HDR. One NaN permanently
   poisons a pixel — guarded in `main_pass.slang` (reject NaN / inf / negative
   before accumulation).
-- **Furnace mode**: `main_pass.slang` lines 79–86 flag energy-conservation
-  violations in pink. Every integrator × every material must converge to L=1.0
-  under a white unit-sphere environment.
-- **Material dispatch**: always tag-switch monomorphisation (never existential
-  `IMaterial`). Keeps warp occupancy uniform.
-- **RNG order**: skin estimators are called in fixed sequence so RNG state
-  stays pixel-identical across refactors.
+- **Furnace mode**: `main_pass.slang` flags energy-conservation violations
+  in pink. Supports both global (`fc.furnaceMode`) and per-material (bit 10
+  in `materialTypes[]`) furnace probes via `effectiveFurnaceMode()`. Every
+  material must converge to L=1.0 under a white unit-sphere environment.
+- **Material dispatch**: tag-switch monomorphisation in `evaluateBounce()`
+  (`integrators/path.slang`). Never existential `IMaterial`. NEE is generic
+  (`allLightsNEE<TM>`) — monomorphised per material type.
+- **RNG order**: skin estimators (§1–§6) are called in fixed sequence so RNG
+  state stays pixel-identical across refactors.
+- **BVH caching**: `mesh_cache.py` stores zstd-compressed vertex/index/BVH
+  blobs keyed by content hash. Cache hit skips subdivision + BVH build.
 
 ---
 
@@ -577,9 +618,10 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 ```
 __init__.py              app.py                 renderer.py
 vk_context.py            vk_compute.py          scene.py
-materialx_runtime.py     mesh.py                environment.py
-params.py                hardware.py            video_encoder.py
-web_app.py               control_panel.py       presets.py
+materialx_runtime.py     mesh.py                mesh_cache.py
+environment.py           params.py              hardware.py
+video_encoder.py         web_app.py             control_panel.py
+scene_graph.py           scene_graph_window.py  presets.py
 settings.py              tattoos.py             head_textures.py
 fetch_hdrs.py            usd_loader.py
 ```
@@ -588,6 +630,7 @@ fetch_hdrs.py            usd_loader.py
 
 ```
 video_player.html        WebCodecs decoder + camera controls (JS)
+scene_tree.html          USD scene graph tree + property editor (web)
 ```
 
 ### SlangPile (`src/skinny/slangpile/`)
@@ -603,7 +646,7 @@ compiler/module.py
 
 ```
 common.slang             interfaces.slang        bindings.slang
-main_pass.slang          scene_trace.slang        material_eval.slang
+main_pass.slang          scene_trace.slang
 skin_material.slang      flat_material.slang      debug_normal_material.slang
 skin_bssrdf.slang        skin_shading.slang       flat_shading.slang
 volume_render.slang      sdf_head.slang           mesh_head.slang
@@ -616,7 +659,6 @@ mtlx_closures.slang      mtlx_std_surface.slang   mtlx_noise.slang
 ```
 skin_direct.slang         skin_ibl_specular.slang  skin_ibl_diffuse.slang
 skin_volume.slang         skin_transmission.slang  skin_hair_sheen.slang
-skin_bdpt.slang           flat_direct.slang
 ```
 
 ### Samplers (`shaders/samplers/`)
@@ -636,7 +678,7 @@ directional_light.slang
 ### Integrators (`shaders/integrators/`)
 
 ```
-path.slang               mis.slang                light.slang
+path.slang
 ```
 
 ### MaterialX (`src/skinny/mtlx/`)
@@ -650,4 +692,19 @@ genslang/skinny_skin_subcut_genslang.slang
 genslang/skinny_scattering_layer_genslang.slang
 genslang/skinny_skin_layered_bsdf_genslang.slang
 genslang/skinny_skin_layered_vdf_genslang.slang
+```
+
+### Tests (`tests/`)
+
+```
+conftest.py              helpers.py               __init__.py
+test_environment.py      test_headless.py         test_integration.py
+test_intersections.py    test_lights.py           test_math.py
+test_mis.py              test_mtlx_closures.py    test_sampling.py
+test_skin_optics.py      test_slangpile.py        test_slangpile_execution.py
+test_struct_layout.py    test_volume.py           test_web.py
+harnesses/test_common_harness.slang               harnesses/test_environment_harness.slang
+harnesses/test_light_harness.slang                harnesses/test_sampler_harness.slang
+harnesses/test_skin_harness.slang                 harnesses/test_volume_harness.slang
+kernels/energy_ref.py    kernels/sampling_ref.py
 ```

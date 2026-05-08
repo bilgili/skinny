@@ -1,129 +1,92 @@
-// Skin direct-light estimators: analytic directional, sphere area lights,
-// emissive triangles. Extracted from skin_material.slang term §1. Bodies
-// are byte-identical to the original inline blocks — orchestrator calls
-// them in the same RNG order so output stays pixel-identical to Phase 1.
+// Skin direct-light estimator — generic over ILight. Handles both delta
+// lights (directional, pdfArea == 0) and area lights (sphere, emissive
+// triangle) through a single code path.
 
 import common;
 import bindings;
 import scene_trace;
 import scene_lights;
+import interfaces;
 import skin_bssrdf;
 import skin_shading;
+import lights.sphere_light;
+import lights.emissive_triangle_light;
+import lights.directional_light;
 
-// Analytic directional light (BSSRDF or specular branch).
-float3 skinAnalyticDirectEstimator(
-    HitInfo hit, SkinEvalContext ctx,
-    float3 N, float3 V,
-    bool useDirect, bool volumeOnly,
-    float3 analyticLightDir, float3 analyticLightRad)
+float3 skinLightEstimator<TL : ILight>(
+    TL light, HitInfo h, float3 N, float3 V,
+    SkinEvalContext ctx, FrameConstants fc, float2 u)
 {
-    if (volumeOnly || !useDirect)
+    LightSample ls = light.samplePoint(h.position, u);
+    if (!ls.valid)
         return float3(0.0);
 
-    if (ctx.useBSSRDF)
+    float3 toLight = ls.point - h.position;
+    float d2 = dot(toLight, toLight);
+    if (d2 <= 1e-8)
+        return float3(0.0);
+    float3 dir = toLight / sqrt(d2);
+
+    float NdotL = max(dot(N, dir), 0.0);
+    if (NdotL <= 0.0)
+        return float3(0.0);
+
+    if (ls.pdfArea == 0.0)
     {
-        return evalSkinBSDF(
-            analyticLightDir, V, hit.position, hit.tangent, ctx
-        ) * analyticLightRad;
+        if (!visibleDirectional(fc, h.position, N, dir))
+            return float3(0.0);
+        if (ctx.useBSSRDF)
+            return evalSkinBSDF(dir, V, h.position, h.tangent, ctx) * ls.radiance;
+        return evaluateSkinSpecular(ctx.Nspec, V, dir, ctx.roughSpec, ctx.sp.ior)
+             * NdotL * ls.radiance;
     }
 
-    float NdotL = max(dot(N, analyticLightDir), 0.0);
-    return evaluateSkinSpecular(
-        ctx.Nspec, V, analyticLightDir, ctx.roughSpec, ctx.sp.ior
-    ) * analyticLightRad * NdotL;
+    float cosLight = max(dot(ls.normal, -dir), 0.0);
+    if (cosLight <= 0.0)
+        return float3(0.0);
+    if (!visibleSegment(fc, h.position, ls.point))
+        return float3(0.0);
+
+    float invPdfOmega = cosLight / (d2 * ls.pdfArea);
+
+    if (ctx.useBSSRDF)
+        return evalSkinBSDF(dir, V, h.position, h.tangent, ctx)
+             * ls.radiance * invPdfOmega;
+    return evaluateSkinSpecular(ctx.Nspec, V, dir, ctx.roughSpec, ctx.sp.ior)
+         * NdotL * ls.radiance * invPdfOmega;
 }
 
-float3 skinSphereLightsEstimator(
+float3 skinAllLightsEstimator(
     HitInfo h, float3 N, float3 V,
-    SkinEvalContext ctx, FrameConstants fc, inout RNG rng)
+    SkinEvalContext ctx, bool useDirect, bool volumeOnly,
+    FrameConstants fc, inout RNG rng)
 {
     float3 total = float3(0.0);
-    if (fc.numSphereLights == 0u)
+
+    if (useDirect && !volumeOnly)
+    {
+        DirectionalLightImpl dirLight = loadDirectionalLightImpl(
+            lightDirection, lightRadiance);
+        total += skinLightEstimator(dirLight, h, N, V, ctx, fc, float2(0.0));
+    }
+
+    if (volumeOnly)
         return total;
+
     for (uint i = 0u; i < fc.numSphereLights; i++)
     {
-        SphereLight L = sphereLights[i];
-        float r = max(L.radius, 1e-4);
-        float2 u  = rng.next2();
-        float z   = 2.0 * u.x - 1.0;
-        float phi = 2.0 * PI * u.y;
-        float st  = sqrt(max(0.0, 1.0 - z * z));
-        float3 lN = float3(st * cos(phi), st * sin(phi), z);
-        float3 P  = L.position + r * lN;
-
-        float3 toLight = P - h.position;
-        float d2 = dot(toLight, toLight);
-        if (d2 <= 1e-8) continue;
-        float dist = sqrt(d2);
-        float3 dir = toLight / dist;
-        float NdotL    = max(dot(N, dir), 0.0);
-        float cosLight = max(dot(lN, -dir), 0.0);
-        if (NdotL <= 0.0 || cosLight <= 0.0) continue;
-        if (!visibleSegment(fc, h.position, P)) continue;
-
-        float area = 4.0 * PI * r * r;
-        float geom = cosLight * area / d2;
-
-        if (ctx.useBSSRDF)
-        {
-            float3 response = evalSkinBSDF(dir, V, h.position, h.tangent, ctx);
-            total += response * L.radiance * geom;
-        }
-        else
-        {
-            float3 spec = evaluateSkinSpecular(
-                ctx.Nspec, V, dir, ctx.roughSpec, ctx.sp.ior) * NdotL;
-            total += spec * L.radiance * geom;
-        }
+        SphereLightImpl sl = loadSphereLightImpl(sphereLights[i]);
+        total += skinLightEstimator(sl, h, N, V, ctx, fc, rng.next2());
     }
-    return total;
-}
 
-float3 skinEmissiveTrianglesEstimator(
-    HitInfo h, float3 N, float3 V,
-    SkinEvalContext ctx, FrameConstants fc, inout RNG rng)
-{
-    float3 total = float3(0.0);
-    if (fc.numEmissiveTriangles == 0u)
-        return total;
-
-    uint idx = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
-                   fc.numEmissiveTriangles - 1u);
-    EmissiveTriangle tri = emissiveTriangles[idx];
-
-    float2 u = rng.next2();
-    float su = sqrt(u.x);
-    float b0 = 1.0 - su;
-    float b1 = u.y * su;
-    float3 P = tri.v0 * b0 + tri.v1 * b1 + tri.v2 * (1.0 - b0 - b1);
-
-    float3 e1 = tri.v1 - tri.v0;
-    float3 e2 = tri.v2 - tri.v0;
-    float3 triN = normalize(cross(e1, e2));
-
-    float3 toLight = P - h.position;
-    float d2 = dot(toLight, toLight);
-    if (d2 <= 1e-8) return total;
-    float dist = sqrt(d2);
-    float3 dir = toLight / dist;
-
-    float NdotL    = max(dot(N, dir), 0.0);
-    float cosLight = max(dot(triN, -dir), 0.0);
-    if (NdotL <= 0.0 || cosLight <= 0.0) return total;
-    if (!visibleSegment(fc, h.position, P)) return total;
-
-    float geom = float(fc.numEmissiveTriangles) * tri.area * cosLight / d2;
-
-    if (ctx.useBSSRDF)
+    if (fc.numEmissiveTriangles > 0u)
     {
-        float3 response = evalSkinBSDF(dir, V, h.position, h.tangent, ctx);
-        total = response * tri.emission * geom;
+        uint idx = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
+                       fc.numEmissiveTriangles - 1u);
+        EmissiveTriangleLightImpl el = loadEmissiveTriangleLightImpl(
+            emissiveTriangles[idx], fc.numEmissiveTriangles);
+        total += skinLightEstimator(el, h, N, V, ctx, fc, rng.next2());
     }
-    else
-    {
-        float3 spec = evaluateSkinSpecular(
-            ctx.Nspec, V, dir, ctx.roughSpec, ctx.sp.ior) * NdotL;
-        total = spec * tri.emission * geom;
-    }
+
     return total;
 }

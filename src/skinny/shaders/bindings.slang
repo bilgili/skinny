@@ -12,7 +12,7 @@ uniform float3         lightRadiance;
 [[vk::binding(2)]]  RWTexture2D<float4> accumBuffer;
 [[vk::binding(3)]]  [[vk::image_format("r8")]] RWTexture2D<float> hudMask;
 [[vk::binding(13)]] StructuredBuffer<FlatMaterialParams> flatMaterials;
-[[vk::binding(14)]] Sampler2D<float4> flatMaterialTextures[16];
+[[vk::binding(14)]] Sampler2D<float4> flatMaterialTextures[128];
 [[vk::binding(16)]] StructuredBuffer<uint> materialTypes;
 [[vk::binding(19)]] StructuredBuffer<StdSurfaceParams> stdSurfaceParams;
 [[vk::binding(20)]] StructuredBuffer<ProceduralParams> proceduralParams;

@@ -1,16 +1,13 @@
-// Skin material orchestrator. Loads detail maps + skin params, then chains
-// estimators (under shaders/estimators/) in the same RNG order as the
-// pre-Phase-2 monolithic evaluator so the output stays pixel-identical.
+// Skin material orchestrator. Loads detail maps + skin params, then
+// chains estimators (§1-§6) for unidirectional path tracing.
 //
-// The seven contribution terms now live in independent estimator files —
-// new integrators can pick which subset to call without editing this file:
+// Contribution terms:
 //   §1 direct + area + emissive (estimators/skin_direct.slang)
 //   §2 IBL specular            (estimators/skin_ibl_specular.slang)
 //   §3 IBL diffuse via BSSRDF   (estimators/skin_ibl_diffuse.slang)
 //   §4 volume march             (estimators/skin_volume.slang)
 //   §5 thin-geometry transmit   (estimators/skin_transmission.slang)
 //   §6 vellus hair sheen        (estimators/skin_hair_sheen.slang)
-//   §7 stored light-subpath BDPT (estimators/skin_bdpt.slang)
 
 import common;
 import bindings;
@@ -27,7 +24,6 @@ import estimators.skin_ibl_diffuse;
 import estimators.skin_volume;
 import estimators.skin_transmission;
 import estimators.skin_hair_sheen;
-import estimators.skin_bdpt;
 
 // ── Detail / params staging ─────────────────────────────────────
 
@@ -115,9 +111,9 @@ SkinShading buildSkinShading(HitInfo hit, FrameConstants fc, uint scatterBits)
     return s;
 }
 
-// ── Orchestrator ────────────────────────────────────────────────
+// ── Path tracing (§1-§6, no volume connections, no BDPT) ────────
 
-float3 evalSkinMaterial(
+float3 evalSkinPath(
     HitInfo hit, Ray ray, inout RNG rng,
     FrameConstants fc,
     float3 lightDirection, float3 lightRadiance,
@@ -135,27 +131,21 @@ float3 evalSkinMaterial(
             analyticLightRad = lightRadiance;
     }
 
-    // §1 direct + area lights
-    float3 directContrib = skinAnalyticDirectEstimator(
-        hit, s.ctx, s.N, V, s.useDirect, s.volumeOnly,
-        analyticLightDir, analyticLightRad);
-    if (!s.volumeOnly)
-    {
-        directContrib += skinSphereLightsEstimator(hit, s.N, V, s.ctx, fc, rng);
-        directContrib += skinEmissiveTrianglesEstimator(hit, s.N, V, s.ctx, fc, rng);
-    }
+    // §1 all lights (directional + sphere + emissive triangle via ILight)
+    float3 directContrib = skinAllLightsEstimator(
+        hit, s.N, V, s.ctx, s.useDirect, s.volumeOnly, fc, rng);
 
     // §2 IBL specular
     GGXSampler specSampler;
     specSampler.roughness = s.ctx.roughSpec;
     float3 envSpec = skinIBLSpecularEstimator(specSampler, s.ctx, V, s.volumeOnly, fc, rng);
 
-    // §3 IBL diffuse via BSSRDF (also exposes envIrradiance/diffDir for §6)
+    // §3 IBL diffuse via BSSRDF
     LambertSampler diffSampler;
     SkinIBLDiffuseResult diff = skinIBLDiffuseEstimator(
         diffSampler, s.ctx, hit, s.N, V, s.bssrdfWeight, fc, rng);
 
-    // §4 volume march
+    // §4 volume march (no light connections)
     float3 volume = skinVolumeEstimator(
         ray, hit, s.ctx, analyticLightDir, analyticLightRad,
         s.volumeBounces, s.volumeWeight, s.useVolume, fc, rng);
@@ -164,40 +154,56 @@ float3 evalSkinMaterial(
     float3 transmission = skinTransmissionEstimator(
         hit, s.ctx, s.useDirect, analyticLightDir, lightRadiance, fc, rng);
 
-    // §6 vellus hair sheen (reuses diff.envIrradiance from §3)
+    // §6 vellus hair sheen
     SkinHairContribution hair = skinHairSheenEstimator(
         s.N, V, s.ctx, s.useDirect, s.volumeOnly,
         analyticLightDir, analyticLightRad, diff.envIrradiance, fc);
 
-    // §7 stored light-subpath BDPT
-    float3 bdptSSS = s.ctx.useBSSRDF
-        ? skinBDPTEstimator(hit, s.N, s.ctx.ink, s.ctx.sp, fc, rng)
-        : float3(0.0);
-
     float F = fresnelSchlick(max(dot(s.N, V), 0.0), s.ctx.sp.ior);
     return directContrib + envSpec + hair.direct + hair.envSheen
-         + (diff.envSSS + bdptSSS + volume + transmission) * (1.0 - F);
+         + (diff.envSSS + volume + transmission) * (1.0 - F);
 }
 
-// ── IMaterial adapter ───────────────────────────────────────────
+// ── IMaterial compatibility wrapper ─────────────────────────────
+// Skin uses 6 chained estimators, not a bounce loop. The wrapper
+// returns the full integrated radiance from emission() and signals
+// no further bouncing via sample().valid = false.
 
 struct SkinMaterial : IMaterial
 {
     HitInfo hit;
-    uint    scatterBits;
+    Ray ray;
+    uint scatterBits;
 
-    float3 evalRadiance(Ray ray, inout RNG rng)
+    BSDFSample sample(float3 wo, inout RNG rng)
     {
-        return evalSkinMaterial(
-            hit, ray, rng, fc, lightDirection, lightRadiance, scatterBits
-        );
+        BSDFSample s;
+        s.valid    = false;
+        s.emission = float3(0.0);
+        return s;
+    }
+
+    BSDFEval evaluate(float3 wo, float3 wi)
+    {
+        BSDFEval e;
+        e.response = float3(0.0);
+        e.pdf      = 0.0;
+        return e;
     }
 }
 
-SkinMaterial loadSkin(HitInfo h, uint scatterBits)
+float3 evalSkinRadiance(HitInfo hit, Ray ray, inout RNG rng, uint scatterBits)
+{
+    return evalSkinPath(hit, ray, rng, fc,
+        lightDirection, lightRadiance, scatterBits);
+}
+
+SkinMaterial loadSkinMaterial(HitInfo h, Ray r, uint scatterBits)
 {
     SkinMaterial m;
-    m.hit         = h;
-    m.scatterBits = scatterBits;
+    m.hit          = h;
+    m.ray          = r;
+    m.scatterBits  = scatterBits;
     return m;
 }
+
