@@ -15,7 +15,7 @@ import common;
 import bindings;
 import scene_trace;
 import environment;
-import material_eval;
+import integrators.path;
 
 // ── Tonemapping ─────────────────────────────────────────────────
 
@@ -66,13 +66,8 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 
     if (hit.hit)
     {
-        // IIntegrator dispatch deferred to Phase 4 — until path / MIS /
-        // light tracers diverge in body, monomorphizing all three at the
-        // call site triples SPV size with no behavioral gain. The
-        // integrator structs (integrators/{path,mis,light}.slang) define
-        // the seam; today the slider still steers behavior via the
-        // fc.integratorMode reads inside skin estimators.
-        sample = evalMaterial(hit, ray, rng);
+        PathTracer integrator;
+        sample = integrator.estimateRadiance(ray, hit, rng);
     }
     else
     {

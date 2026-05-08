@@ -45,12 +45,10 @@ SkinIBLDiffuseResult skinIBLDiffuseEstimator<TS : ISampler>(
 
     r.envSSS = ctx.useBSSRDF
         ? _evalDiffuseBSSRDF(ctx, hit, N, r.envIrradiance, bssrdfWeight)
-              * (fc.integratorMode != 0u
-                    ? misPrimaryWeight(sampler, uniSampler, wi, wo)
-                    : 1.0)
+              * misPrimaryWeight(sampler, uniSampler, wi, wo)
         : float3(0.0);
 
-    if (ctx.useBSSRDF && fc.integratorMode != 0u)
+    if (ctx.useBSSRDF)
     {
         float3 wiUni       = uniSampler.sample(wo, rng.next2());
         float3 diffLightDir = tangentToWorld(wiUni, T, B, N);

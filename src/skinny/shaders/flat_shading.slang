@@ -104,6 +104,19 @@ struct FlatHitData
     float3 N;
 };
 
+bool isCutoutTransparent(HitInfo h)
+{
+    uint matType = materialTypes[h.materialId] & 0xFFu;
+    if (matType != MATERIAL_TYPE_FLAT) return false;
+    FlatMaterialParams p = flatMaterials[h.materialId];
+    if (p.opacityThreshold <= 0.0) return false;
+    float alpha = 1.0;
+    if (p.opacityTextureIdx != 0xFFFFFFFFu)
+        alpha = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
+                    .SampleLevel(h.uv, 0.0).a;
+    return alpha < p.opacityThreshold;
+}
+
 FlatHitData fetchFlatHitData(HitInfo h)
 {
     FlatHitData out_;
@@ -152,6 +165,16 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.specular = clamp(p.specular, 0.0, 1.0);
     out_.mat.ior = max(p.ior, 1.0);
     out_.mat.opacity = clamp(p.opacity, 0.0, 1.0);
+    if (p.opacityTextureIdx != 0xFFFFFFFFu)
+    {
+        float a = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
+                      .SampleLevel(h.uv, 0.0).a;
+        out_.mat.opacity = a;
+    }
+    if (p.opacityThreshold > 0.0 && out_.mat.opacity < p.opacityThreshold)
+    {
+        out_.mat.opacity = 0.0;
+    }
     out_.mat.coat = clamp(p.coat, 0.0, 1.0);
     out_.mat.coatRoughness = clamp(p.coatRoughness, 0.04, 1.0);
     out_.mat.coatIOR = max(p.coatIOR, 1.0);
@@ -160,8 +183,12 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.emission = p.emissiveColor;
     if (p.emissiveTextureIdx != 0xFFFFFFFFu)
     {
-        out_.mat.emission *= flatMaterialTextures[NonUniformResourceIndex(p.emissiveTextureIdx)]
-                                .SampleLevel(h.uv, 0.0).rgb;
+        float3 emTex = flatMaterialTextures[NonUniformResourceIndex(p.emissiveTextureIdx)]
+                           .SampleLevel(h.uv, 0.0).rgb;
+        if (all(out_.mat.emission == float3(0.0)))
+            out_.mat.emission = emTex;
+        else
+            out_.mat.emission *= emTex;
     }
 
     out_.N = h.normal;

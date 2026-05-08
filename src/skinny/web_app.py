@@ -728,7 +728,221 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
 
     session._material_rebuild_cb = _rebuild_material_col
 
+    # ── Scene Graph section ──
+    sg_col = pn.Column()
+    sections.append(("Scene Graph", sg_col))
+
+    _last_sg_id = [id(None)]
+
+    def _rebuild_scene_graph_col():
+        graph = session.renderer.scene_graph
+        cur_id = id(graph)
+        if cur_id == _last_sg_id[0]:
+            return
+        _last_sg_id[0] = cur_id
+        sg_col.clear()
+        if graph is None:
+            sg_col.append(pn.pane.Markdown("*No scene loaded*"))
+            return
+        sg_col.append(_build_scene_graph_section(session, graph))
+
+    _rebuild_scene_graph_col()
+    session._scene_graph_rebuild_cb = _rebuild_scene_graph_col
+
     return pn.Accordion(*sections, active=active_indices)
+
+
+def _build_scene_graph_section(
+    session: "SkinnySession", graph,
+) -> pn.viewable.Viewable:
+    """Build the scene graph tree + property editor for the web sidebar."""
+    from skinny.scene_graph import find_node_by_path, type_icon
+
+    options = {}
+    def _collect(node, depth):
+        indent = "  " * depth
+        icon = type_icon(node.type_name)
+        label = f"{indent}{icon} {node.name}  ({node.type_name})"
+        options[label] = node.path
+        for child in node.children:
+            _collect(child, depth + 1)
+    _collect(graph, 0)
+
+    selector = pn.widgets.Select(
+        name="Node", options=options,
+        size=min(20, max(8, len(options))),
+    )
+    props_col = pn.Column()
+
+    def on_select(event):
+        path = event.new
+        if not path:
+            return
+        node = find_node_by_path(graph, path)
+        if node is None:
+            return
+        _build_web_properties(props_col, session, node, graph)
+
+    selector.param.watch(on_select, "value")
+    return pn.Column(selector, props_col)
+
+
+
+
+def _build_web_properties(
+    props_col: "pn.Column",
+    session: "SkinnySession",
+    node,
+    graph,
+) -> None:
+    """Rebuild the properties column with Panel widgets for the selected node."""
+    from skinny.scene_graph import SceneGraphNode, find_node_by_path
+    props_col.clear()
+
+    props_col.append(pn.pane.Markdown(
+        f"**{node.name}** `{node.type_name}`\n\n`{node.path}`"
+    ))
+
+    if not node.properties:
+        props_col.append(pn.pane.Markdown("*No properties*"))
+        return
+
+    ref = node.renderer_ref
+    # For shader nodes, try to find parent material ref
+    if ref is None:
+        ref = _find_web_ancestor_material_ref(node, graph)
+
+    for prop in node.properties:
+        if prop.type_name == "float" and prop.editable:
+            lo = prop.metadata.get("min", 0.0)
+            hi = prop.metadata.get("max", 1.0)
+            w = pn.widgets.FloatSlider(
+                name=prop.display_name, start=lo, end=hi,
+                step=0.01, value=float(prop.value),
+            )
+
+            def on_change(event, r=ref, p=prop):
+                if r is None:
+                    return
+                if r.kind == "material":
+                    session.renderer.apply_material_override(r.index, p.name, event.new)
+                elif r.kind in ("light_dir", "light_sphere"):
+                    lt = "dir" if r.kind == "light_dir" else "sphere"
+                    session.renderer.apply_light_override(lt, r.index, p.name, event.new)
+                if session.encoder.is_h264:
+                    session.encoder.force_keyframe()
+
+            w.param.watch(on_change, "value")
+            props_col.append(w)
+
+        elif prop.type_name == "color3f" and prop.editable:
+            color = prop.value
+            r, g, b = float(color[0]), float(color[1]), float(color[2])
+            hex_color = "#{:02x}{:02x}{:02x}".format(
+                max(0, min(255, int(round(r * 255)))),
+                max(0, min(255, int(round(g * 255)))),
+                max(0, min(255, int(round(b * 255)))),
+            )
+            cw = pn.widgets.ColorPicker(name=prop.display_name, value=hex_color)
+
+            def on_color(event, r=ref, p=prop):
+                if r is None:
+                    return
+                h = event.new.lstrip("#")
+                rf = int(h[0:2], 16) / 255.0
+                gf = int(h[2:4], 16) / 255.0
+                bf = int(h[4:6], 16) / 255.0
+                if r.kind == "material":
+                    session.renderer.apply_material_override(
+                        r.index, p.name, (rf, gf, bf))
+                elif r.kind in ("light_dir", "light_sphere"):
+                    lt = "dir" if r.kind == "light_dir" else "sphere"
+                    session.renderer.apply_light_override(
+                        lt, r.index, p.name, (rf, gf, bf))
+                if session.encoder.is_h264:
+                    session.encoder.force_keyframe()
+
+            cw.param.watch(on_color, "value")
+            props_col.append(cw)
+
+        elif prop.type_name == "vec3f" and prop.editable and ref is not None and ref.kind == "instance":
+            row_widgets = []
+            for i, axis in enumerate(("X", "Y", "Z")):
+                w = pn.widgets.FloatInput(
+                    name=f"{prop.display_name} {axis}",
+                    value=float(prop.value[i]),
+                    step=0.1,
+                )
+                row_widgets.append(w)
+
+            def on_vec3_change(event, r=ref, p=prop, ws=row_widgets):
+                vals = tuple(float(w.value) for w in ws)
+                # Collect all TRS from the properties
+                t = s = (0.0, 0.0, 0.0)
+                rot = (0.0, 0.0, 0.0)
+                for pp in node.properties:
+                    if pp.name == "translate":
+                        t = vals if pp is p else pp.value
+                    elif pp.name == "rotate":
+                        rot = vals if pp is p else pp.value
+                    elif pp.name == "scale":
+                        s = vals if pp is p else pp.value
+                session.renderer.apply_instance_transform(r.index, t, rot, s)
+                if session.encoder.is_h264:
+                    session.encoder.force_keyframe()
+
+            for w in row_widgets:
+                w.param.watch(on_vec3_change, "value")
+
+            props_col.append(pn.Row(*row_widgets))
+
+        elif prop.type_name == "vec3f":
+            val = prop.value
+            props_col.append(pn.pane.Markdown(
+                f"**{prop.display_name}**: ({val[0]:.3f}, {val[1]:.3f}, {val[2]:.3f})"
+            ))
+        elif prop.type_name == "color3f":
+            val = prop.value
+            r, g, b = float(val[0]), float(val[1]), float(val[2])
+            hex_c = "#{:02x}{:02x}{:02x}".format(
+                max(0, min(255, int(round(r * 255)))),
+                max(0, min(255, int(round(g * 255)))),
+                max(0, min(255, int(round(b * 255)))),
+            )
+            props_col.append(pn.pane.HTML(
+                f'<div style="font-size:12px;color:#ccc;padding:2px 0;">'
+                f'<b>{prop.display_name}</b>: '
+                f'<span style="display:inline-block;width:16px;height:16px;'
+                f'background:{hex_c};border:1px solid #555;vertical-align:middle;'
+                f'margin:0 4px;"></span>'
+                f'({r:.2f}, {g:.2f}, {b:.2f})</div>'
+            ))
+        elif prop.type_name == "rel":
+            props_col.append(pn.pane.Markdown(
+                f"**{prop.display_name}**: &rarr; `{prop.value}`"
+            ))
+        elif prop.type_name == "asset":
+            props_col.append(pn.pane.Markdown(
+                f"**{prop.display_name}**: `{prop.value}`"
+            ))
+        else:
+            val_str = f"{prop.value:.4f}" if isinstance(prop.value, float) else str(prop.value)
+            props_col.append(pn.pane.Markdown(
+                f"**{prop.display_name}**: {val_str}"
+            ))
+
+
+def _find_web_ancestor_material_ref(node, graph):
+    """Walk up the tree to find an ancestor Material's RendererRef."""
+    from skinny.scene_graph import find_node_by_path
+    parts = node.path.rstrip("/").split("/")
+    for i in range(len(parts) - 1, 0, -1):
+        parent_path = "/".join(parts[:i]) or "/"
+        parent = find_node_by_path(graph, parent_path)
+        if parent is not None and parent.renderer_ref is not None:
+            if parent.renderer_ref.kind == "material":
+                return parent.renderer_ref
+    return None
 
 
 def create_panel_app() -> pn.viewable.Viewable:
@@ -808,6 +1022,9 @@ def create_panel_app() -> pn.viewable.Viewable:
                 cb = getattr(session, "_material_rebuild_cb", None)
                 if cb is not None:
                     cb()
+                sg_cb = getattr(session, "_scene_graph_rebuild_cb", None)
+                if sg_cb is not None:
+                    sg_cb()
 
             pn.state.add_periodic_callback(_check_materials, period=1000)
 

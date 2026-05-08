@@ -108,6 +108,7 @@ class ControlPanel:
         self._material_container: ttk.Frame | None = None
         self._material_outer: ttk.LabelFrame | None = None
         self._last_scene_id: int = -1
+        self._scene_graph_window = None
         self._build_widgets()
 
     # ── Widget construction ─────────────────────────────────────────
@@ -128,6 +129,13 @@ class ControlPanel:
 
         # ── Left: Capture ──
         self._build_capture_section(left_col)
+
+        # ── Left: Scene Graph button ──
+        sg_btn = ttk.Button(
+            left_col, text="Scene Graph...",
+            command=self._on_open_scene_graph,
+        )
+        sg_btn.pack(fill="x", padx=2, pady=2)
 
         # ── Left: Render settings ──
         render_frame = ttk.LabelFrame(left_col, text="Render", padding=4)
@@ -397,9 +405,9 @@ class ControlPanel:
         outer.pack(fill="x", padx=2, pady=2)
         self._material_outer = outer
 
-        has_skin = scene is None or any(
+        has_skin = scene is not None and any(
             m.mtlx_target_name == "M_skinny_skin_default"
-            for m in (scene.materials if scene else [])
+            for m in scene.materials
         )
 
         mtlx_params = [p for p in self.params if p.path.startswith("mtlx.")]
@@ -678,6 +686,19 @@ class ControlPanel:
         self._on_continuous("light_color_b", bf)
         self._refresh_color_swatch()
 
+    def _on_open_scene_graph(self) -> None:
+        if self._scene_graph_window is not None and self._scene_graph_window.is_open():
+            self._scene_graph_window.focus()
+            return
+        from skinny.scene_graph_window import SceneGraphWindow
+        if self.renderer.scene_graph is None:
+            messagebox.showinfo(
+                "Scene Graph",
+                "No scene graph available.\nLoad a USD scene first.",
+            )
+            return
+        self._scene_graph_window = SceneGraphWindow(self)
+
     def _on_pick_direction(self) -> None:
         popup = self._direction_popup
         if popup is not None and popup.is_open():
@@ -823,6 +844,12 @@ class ControlPanel:
         self._refresh_color_swatch()
         self._refresh_direction_preview()
         self._update_delete_btn_state()
+
+        if self._scene_graph_window is not None:
+            if self._scene_graph_window.is_open():
+                self._scene_graph_window.tick()
+            else:
+                self._scene_graph_window = None
 
         try:
             self.root.update()

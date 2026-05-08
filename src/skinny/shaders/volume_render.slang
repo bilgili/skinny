@@ -197,7 +197,6 @@ float3 volumeRenderSkin(
     float4      ink,
     float       envIntensity,
     uint        furnaceMode,
-    uint        integratorMode,
     float       mmPerUnit,
     int         maxBounces,
     inout RNG   rng
@@ -273,28 +272,7 @@ float3 volumeRenderSkin(
                 float  exitDist = depthMM / cosN;
                 float3 shadowTr = exp(-sigmaT * exitDist);
                 float3 envRad   = sceneEnvRadiance(wEnv, envIntensity, furnaceMode);
-                float  phasePdf = henyeyGreenstein(dot(wEnv, currentRay.direction), layer.g);
-                float  wMis     = integratorMode != 0u
-                    ? powerHeuristic(phasePdf, uniformSpherePdf())
-                    : 1.0;
-                radiance += throughput * ms.scattering * envRad * shadowTr * wMis;
-            }
-
-            if (integratorMode != 0u)
-            {
-                float3 wLight = sampleUniformSphere(rng.next2());
-                float  cosL   = dot(wLight, slabOut);
-                if (cosL > 0.001)
-                {
-                    float  exitDistL = depthMM / cosL;
-                    float3 shadowTrL = exp(-sigmaT * exitDistL);
-                    float3 envRadL   = sceneEnvRadiance(wLight, envIntensity, furnaceMode);
-                    float  phasePdfL = henyeyGreenstein(dot(wLight, currentRay.direction), layer.g);
-                    float  lightPdf  = uniformSpherePdf();
-                    float  wLightMis = powerHeuristic(lightPdf, phasePdfL);
-                    radiance += throughput * ms.scattering
-                              * phasePdfL * envRadL * shadowTrL * (wLightMis / lightPdf);
-                }
+                radiance += throughput * ms.scattering * envRad * shadowTr;
             }
         }
 

@@ -143,7 +143,19 @@
       "Bash(Select-Object -First 20)",
       "Bash(sed 's/.*\\\\.//')",
       "Bash(xargs grep -l \"interface\")",
-      "Bash(xargs grep -l \"interface\\\\|:.*IMaterial\\\\|:.*ILight\\\\|:.*ISampler\\\\|:.*IIntegrator\")"
+      "Bash(xargs grep -l \"interface\\\\|:.*IMaterial\\\\|:.*ILight\\\\|:.*ISampler\\\\|:.*IIntegrator\")",
+      "Bash(Select-Object FullName)",
+      "Bash(Select-Object -ExpandProperty Name)",
+      "Bash(Sort-Object -Unique)",
+      "Bash(grep -n \"\\\\\\\\[\\\\\\\\[vk::binding\" \"D:\\\\projects\\\\skinny\\\\src\\\\skinny\\\\shaders\"/*.slang)",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/scene_graph.py'\\).read\\(\\)\\); print\\('scene_graph.py OK'\\)\"; python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/scene_graph_window.py'\\).read\\(\\)\\); print\\('scene_graph_window.py OK'\\)\"; python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/usd_loader.py'\\).read\\(\\)\\); print\\('usd_loader.py OK'\\)\"; python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/control_panel.py'\\).read\\(\\)\\); print\\('control_panel.py OK'\\)\"; python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/web_app.py'\\).read\\(\\)\\); print\\('web_app.py OK'\\)\")",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('D:/projects/skinny/src/skinny/renderer.py'\\).read\\(\\)\\); print\\('renderer.py OK'\\)\")",
+      "PowerShell(python -c \"p = 'D:/projects/skinny/src/skinny/web_templates/scene_tree.html'; f = open\\(p\\); c = f.read\\(\\); f.close\\(\\); print\\(f'scene_tree.html OK \\({len\\(c\\)} chars\\)'\\)\")",
+      "Bash(del *)",
+      "PowerShell(python D:\\\\projects\\\\skinny\\\\assets\\\\_gen_cornell.py)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "PowerShell(python -c \"import struct; print\\(struct.calcsize\\('fff f f f f I I I I I fff f  f f f I  fff f'\\)\\)\")",
+      "PowerShell(python -c \"from PIL import Image; import numpy as np; img = Image.open\\('D:/projects/skinny/assets/McUsd/model/McUsd_materials/tex/sunflower_back.png'\\); print\\(f'Mode: {img.mode}, Size: {img.size}'\\); arr = np.array\\(img\\); print\\(f'Shape: {arr.shape}'\\); a = arr[:,:,3] if arr.ndim == 3 and arr.shape[2] >= 4 else None; print\\(f'Alpha min={a.min\\(\\)}, max={a.max\\(\\)}, unique={len\\(np.unique\\(a\\)\\)}'\\) if a is not None else print\\('NO ALPHA'\\)\")"
     ]
   }
 }

@@ -27,13 +27,12 @@ struct HitInfo
     float2 uv;
     bool   hit;
     bool   hasTangent;     // true when uv comes from an asset (not the fallback sphere map)
-    uint   materialId;     // index into the active material set; 0 = legacy skin material
+    uint   materialId;     // index into the active material set
 };
 
 // Per-material flat-shading record. Used by main_pass.slang when a hit's
-// materialId > 0 (the legacy skin material lives in slot 0 and never reads
-// from this buffer). Layout matches renderer.pack_flat_material exactly:
-// 96 B / record, std430-compatible.
+// materialTypes[id] == MATERIAL_TYPE_FLAT. Layout matches
+// renderer.pack_flat_material exactly: 96 B / record, std430-compatible.
 struct FlatMaterialParams
 {
     float3 diffuseColor;          // 0..12
@@ -51,9 +50,9 @@ struct FlatMaterialParams
     float  coat;                  // 64..68; clear coat weight (0..1)
     float  coatRoughness;         // 68..72
     float  coatIOR;               // 72..76
-    float  pad0;                  // 76..80
+    uint   opacityTextureIdx;     // 76..80; sentinel = use constant
     float3 coatColor;             // 80..92
-    float  pad1;                  // 92..96
+    float  opacityThreshold;      // 92..96; cutout alpha threshold
 };
 
 // Per-material procedural evaluation parameters. Scalar layout, 96 B.
@@ -166,7 +165,6 @@ struct FrameConstants
     uint   detailFlags;     // bit0 = master enable; bit1 = normal avail; bit2 = roughness avail; bit3 = disp avail; bit4 = normals pre-baked into vertex data
     float  normalMapStrength;    // 0..1 scale on tangent-space XY before rebuilding +Z
     float  displacementScaleMM;  // millimetres per (disp - 0.5); 0 disables displacement offset
-    uint   integratorMode;       // 0 = path, 1 = MIS, 2 = volume light connections, 3 = stored light-subpath BDPT
     uint   numInstances;         // size of the TLAS instance list; 0 disables mesh ray traversal
     uint   numSphereLights;      // active count in sphereLights buffer (binding 17)
     uint   numEmissiveTriangles; // active count in emissiveTriangles buffer (binding 18)

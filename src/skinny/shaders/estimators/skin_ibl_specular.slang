@@ -1,7 +1,6 @@
 // Skin IBL specular estimator (term S2 from skin_material.slang).
 // Generic over ISampler — caller picks the primary sampling strategy
-// (typically GGXSampler). MIS companion is always uniform sphere,
-// gated by fc.integratorMode != 0.
+// (typically GGXSampler). MIS with uniform sphere companion.
 
 import common;
 import bindings;
@@ -37,13 +36,12 @@ float3 skinIBLSpecularEstimator<TS : ISampler>(
     {
         float3 brdf   = evaluateSkinSpecular(N, V, primaryDir, ctx.roughSpec, ctx.sp.ior);
         float3 envRad = sceneEnvRadiance(primaryDir, fc.envIntensity, effectiveFurnaceMode(ctx.materialId));
-        float  wMis   = fc.integratorMode != 0u
-            ? misPrimaryWeight(sampler, uniSampler, wi, wo)
-            : 1.0;
+        float  wMis   = misPrimaryWeight(sampler, uniSampler, wi, wo);
         envSpec = brdf * NdotL * envRad * wMis / primaryPdf;
     }
 
-    if (fc.integratorMode != 0u)
+    // MIS companion arm (uniform sphere)
+
     {
         float3 wiUni       = uniSampler.sample(wo, rng.next2());
         float3 specLightDir = tangentToWorld(wiUni, T, B, N);

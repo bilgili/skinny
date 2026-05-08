@@ -70,7 +70,7 @@ INSTANCE_STRIDE = 144
 #   80: coatColor (vec3, 12) + pad1
 # 96 B / record, naturally 16-byte aligned.
 FLAT_MATERIAL_STRIDE = 96
-FLAT_MATERIAL_CAPACITY = 16
+FLAT_MATERIAL_CAPACITY_INIT = 16
 
 
 def _hashable_value(v: object) -> object:
@@ -81,10 +81,19 @@ def _hashable_value(v: object) -> object:
         return float(v)
     return v
 
+
+def _light_value_to_vec3(value: object) -> np.ndarray:
+    """Convert a color/vec3 value (tuple, list, Gf.Vec3f) to float32 array."""
+    if hasattr(value, "asTuple"):
+        value = value.asTuple()
+    if isinstance(value, (list, tuple)):
+        return np.array([float(value[0]), float(value[1]), float(value[2])], np.float32)
+    return np.array([float(value)] * 3, np.float32)
+
 # Material type codes consumed by main_pass.slang's dispatcher.
-MATERIAL_TYPE_SKIN = 0  # legacy skin slot 0, or any mtlx_target_name pointing
-                         # at the layered-skin material — routes to the inline
-                         # skin BSSRDF/specular path.
+MATERIAL_TYPE_SKIN = 0  # any mtlx_target_name pointing at the layered-skin
+                         # material — routes to the inline skin BSSRDF/specular
+                         # path. Only active when explicitly authored.
 MATERIAL_TYPE_FLAT = 1  # UsdPreviewSurface-style standard surface — routes
                          # to evalFlatMaterial's bounded path tracer.
 
@@ -102,12 +111,12 @@ EMISSIVE_TRI_CAPACITY = 256
 # parameters packed in scalar layout matching the Slang struct in
 # mtlx_std_surface.slang.  256 B / record.
 STD_SURFACE_STRIDE = 256
-STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY
+STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 
 # ProceduralParams record (binding 20): per-material procedural evaluation
 # parameters (marble 3D noise, etc.).  96 B / record, scalar layout.
 PROCEDURAL_PARAMS_STRIDE = 96
-PROCEDURAL_PARAMS_CAPACITY = FLAT_MATERIAL_CAPACITY
+PROCEDURAL_PARAMS_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 
 # Default diffuse for materials whose UsdPreviewSurface diffuseColor is
 # texture-connected rather than constant — mid-grey keeps unbound prims
@@ -220,14 +229,18 @@ class TexturePool:
         self._by_path: dict[str, int] = {}
         self._next_slot = 0
 
-    def add_or_get(self, path: Path) -> int:
+    def add_or_get(self, path: Path, *, linear: bool = False) -> int:
         """Decode the file at `path` and return the array slot it lives in.
 
-        Subsequent calls with the same path return the cached slot. Returns
-        SENTINEL when the file can't be loaded (missing/corrupt) — callers
-        should treat that as "no texture; use the constant fallback".
+        Subsequent calls with the same (path, linear) pair return the cached
+        slot. Returns SENTINEL when the file can't be loaded (missing/corrupt).
+
+        `linear=True` uploads as VK_FORMAT_R8G8B8A8_UNORM (no gamma decode) —
+        use for normal, roughness, metallic, and other non-colour data textures.
         """
         key = str(path.resolve()) if path.is_absolute() else str(path)
+        if linear:
+            key += ":linear"
         cached = self._by_path.get(key)
         if cached is not None:
             return cached
@@ -238,9 +251,10 @@ class TexturePool:
         if self._next_slot >= BINDLESS_TEXTURE_CAPACITY:
             return self.SENTINEL
         w, h = img.size
+        fmt = vk.VK_FORMAT_R8G8B8A8_UNORM if linear else vk.VK_FORMAT_R8G8B8A8_SRGB
         slot = SampledImage(
             self.ctx, w, h,
-            format=vk.VK_FORMAT_R8G8B8A8_SRGB,
+            format=fmt,
             bytes_per_pixel=4,
         )
         slot.upload_sync(img.tobytes())
@@ -268,6 +282,7 @@ def pack_flat_material(
     metallic_texture_idx: int = 0xFFFFFFFF,
     normal_texture_idx: int = 0xFFFFFFFF,
     emissive_texture_idx: int = 0xFFFFFFFF,
+    opacity_texture_idx: int = 0xFFFFFFFF,
 ) -> bytes:
     """Pack a Material's overrides into 96 bytes (FlatMaterialParams).
 
@@ -287,9 +302,9 @@ def pack_flat_material(
       64: coat                    (float; clear coat weight 0..1)
       68: coatRoughness           (float)
       72: coatIOR                 (float)
-      76: pad0                    (float)
+      76: opacityTextureIdx       (uint; sentinel = use constant)
       80: coatColor.r/g/b         (vec3 → 12 B)
-      92: pad1                    (float)
+      92: opacityThreshold        (float; cutout alpha threshold)
     """
     overrides = material.parameter_overrides
     diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
@@ -304,8 +319,9 @@ def pack_flat_material(
     coat_ior_raw = overrides.get("coat_IOR")
     coat_ior = float(coat_ior_raw) if coat_ior_raw is not None else 1.5
     coat_color = _override_color3(overrides, "coat_color", (1.0, 1.0, 1.0))
+    opacity_threshold = _override_float(overrides, "opacityThreshold", 0.0)
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f f  fff f",
+        "fff f f f f I I I I I fff f  f f f I  fff f",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -315,8 +331,10 @@ def pack_flat_material(
         int(emissive_texture_idx) & 0xFFFFFFFF,
         emissive[0], emissive[1], emissive[2],
         ior,
-        coat, coat_roughness, coat_ior, 0.0,
-        coat_color[0], coat_color[1], coat_color[2], 0.0,
+        coat, coat_roughness, coat_ior,
+        int(opacity_texture_idx) & 0xFFFFFFFF,
+        coat_color[0], coat_color[1], coat_color[2],
+        opacity_threshold,
     )
 
 
@@ -819,15 +837,6 @@ class Renderer:
         self.scatter_index = 0
         self._last_scatter_index = -1  # forces first _upload_material_types
 
-        # Sampling / integration strategy consumed by main_pass.slang.
-        # MIS affects surface IBL. "Bidirectional" keeps the camera-path
-        # renderer but also adds explicit light-connection samples in volume.
-        # "Stored BDPT" additionally builds a light-side surface vertex and
-        # connects the camera hit to it with a visibility-tested geometry term.
-        self.integrator_modes: list[str] = [
-            "Path tracing", "MIS", "Bidirectional", "Stored BDPT",
-        ]
-        self.integrator_index = 0
 
         # Scalar applied to every sampleEnvironment() lookup. With many HDR
         # environments the raw luminance swamps skin albedo once multiplied
@@ -845,7 +854,8 @@ class Renderer:
         self.furnace_modes: list[str] = ["Off", "On"]
         self.furnace_index: int = 0
 
-        self._per_material_furnace: list[bool] = [False] * FLAT_MATERIAL_CAPACITY
+        self.material_capacity = FLAT_MATERIAL_CAPACITY_INIT
+        self._per_material_furnace: list[bool] = [False] * self.material_capacity
 
         # Scene-scale bridge between mm-valued skin params and world-unit
         # ray distances. 1 world unit = mm_per_unit millimetres. The SDF
@@ -925,6 +935,7 @@ class Renderer:
         # and is applied in _poll_usd_streaming(). Mesh instances stream in
         # via _usd_instance_queue.
         self._usd_scene: Scene | None = None
+        self._scene_graph: object | None = None
 
         # Load the MaterialX library and generate Slang for the canonical
         # skin material. The CompiledMaterial drives the per-material
@@ -1049,8 +1060,6 @@ class Renderer:
             direct_light_enabled=direct_enabled,
             mm_per_unit=float(self.mm_per_unit),
             furnace_mode=is_furnace,
-            pigment=active_tattoo,
-            pigment_density=float(self.tattoo_density),
         )
 
     def _frame_camera_to_scene(self, scene: Scene) -> None:
@@ -1159,6 +1168,7 @@ class Renderer:
         self._mesh_sources.clear()
         self.model_index = -1
         self._usd_scene = None
+        self._scene_graph = None
         self._usd_model_index = -1
         self._usd_bake_done = None
         self._usd_uploaded_count = 0
@@ -1169,7 +1179,7 @@ class Renderer:
         # Reset GPU mesh to dummy so stale geometry doesn't render
         self._upload_mesh(self._dummy_mesh)
         self._upload_detail_maps(None)
-        self._per_material_furnace = [False] * FLAT_MATERIAL_CAPACITY
+        self._per_material_furnace = [False] * self.material_capacity
         self._procedural_params.clear()
         self._mtlx_scene_materials.clear()
 
@@ -1233,10 +1243,23 @@ class Renderer:
         def _bg_usd_stream() -> None:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             from skinny.usd_loader import _read_usd_stage, bake_usd_prim
-            scene, prim_data = _read_usd_stage(
+            scene, prim_data, stage = _read_usd_stage(
                 path, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
+                keep_stage=True,
             )
-            self._usd_metadata_queue.put(scene)
+            # Build scene graph here in the background thread while we
+            # have exclusive access to the stage — avoids GIL conflicts
+            # with GLFW poll_events on the main thread.
+            sg = None
+            if stage is not None:
+                from skinny.scene_graph import build_scene_graph
+                try:
+                    sg = build_scene_graph(stage, scene)
+                except Exception as exc:
+                    import traceback
+                    print(f"[skinny] scene graph build failed: {exc}")
+                    traceback.print_exc()
+            self._usd_metadata_queue.put((scene, sg))
             print(
                 f"[skinny] USD stage read: {len(prim_data)} meshes, "
                 f"baking in background"
@@ -1319,11 +1342,9 @@ class Renderer:
     def _pack_mtlx_skin_array(self) -> bytes:
         """Pack one MtlxSkinParams record per material slot, concatenated.
 
-        Slot 0 uses the current mtlx_overrides dict (seeded from
-        SkinParameters defaults, edited live via mtlx.* sliders).
-        Slots 1+ layer each USD-bound skin material's
-        `parameter_overrides` dict on top of the global overrides.
-        Slots typed FLAT or unused are zeroed.
+        Skin-typed slots (mtlx_target_name == "M_skinny_skin_default")
+        get the global mtlx_overrides merged with per-material overrides.
+        All other slots are zeroed.
         """
         cm = self._mtlx_skin_material
         if cm is None or not cm.uniform_block:
@@ -1336,11 +1357,9 @@ class Renderer:
         )
 
         out = bytearray()
-        for slot in range(FLAT_MATERIAL_CAPACITY):
-            if slot == 0 or slot >= len(scene_mats):
-                # Slot 0 is the legacy SDF skin; padding slots get the
-                # global defaults too so any stray dispatch is sane.
-                out += pack_material_values(cm.uniform_block, base)
+        for slot in range(self.material_capacity):
+            if slot >= len(scene_mats):
+                out += b"\x00" * self.mtlx_skin_record_size
                 continue
             mat = scene_mats[slot]
             if mat.mtlx_target_name == "M_skinny_skin_default":
@@ -1544,17 +1563,16 @@ class Renderer:
         self.uniform_buffer = UniformBuffer(self.ctx, self.uniform_size)
 
         # Per-material skin UBO array (binding 15). StructuredBuffer of
-        # MtlxSkinParams, one per material slot — slot 0 mirrors the
-        # legacy SDF-head SkinParameters, slots 1+ each USD-bound skin
-        # material's overrides on top of the global defaults. Filled
-        # per-frame in render() via _pack_mtlx_skin_array.
+        # MtlxSkinParams, one per material slot — only skin-typed slots
+        # (mtlx_target_name == "M_skinny_skin_default") carry data; other
+        # slots are zeroed. Filled per-frame via _pack_mtlx_skin_array.
         # Each record is 164 scalar-layout bytes (27 fields, no vec3 padding).
         # _init_materialx_runtime may have set this already from reflection.
         if not hasattr(self, 'mtlx_skin_record_size') or self.mtlx_skin_record_size == 0:
             self.mtlx_skin_record_size = 164
         self.mtlx_skin_buffer = StorageBuffer(
             self.ctx,
-            FLAT_MATERIAL_CAPACITY * self.mtlx_skin_record_size + 256,
+            self.material_capacity * self.mtlx_skin_record_size + 256,
         )
         # Seed with current SkinParameters → MaterialX defaults so the
         # buffer is valid on frame 0.
@@ -1662,11 +1680,10 @@ class Renderer:
         self._upload_instances([np.eye(4, dtype=np.float32)], material_ids=[0])
         self._num_instances = 1
 
-        # Flat-material parameter buffer — one record per scene material,
-        # consumed when hit.materialId > 0 (skin still owns slot 0). Sized
-        # for FLAT_MATERIAL_CAPACITY entries up front.
+        # Flat-material parameter buffer — one record per scene material.
+        # Sized for FLAT_MATERIAL_CAPACITY entries up front.
         self.flat_material_buffer = StorageBuffer(
-            self.ctx, FLAT_MATERIAL_CAPACITY * FLAT_MATERIAL_STRIDE + 256
+            self.ctx, self.material_capacity * FLAT_MATERIAL_STRIDE + 256
         )
         # Initialize with one zeroed record so the buffer is valid even
         # before any USD scene is loaded.
@@ -1678,15 +1695,16 @@ class Renderer:
         self.texture_pool = TexturePool(self.ctx)
 
         # Per-material type-code buffer (binding 16). One uint per slot,
-        # written each time _upload_flat_materials runs. Default is all
-        # MATERIAL_TYPE_SKIN so an unmapped slot routes to the skin path.
+        # written each time _upload_flat_materials runs.
         self.material_types_buffer = StorageBuffer(
-            self.ctx, FLAT_MATERIAL_CAPACITY * 4 + 16
+            self.ctx, self.material_capacity * 4 + 16
         )
-        self.material_types_buffer.upload_sync(
-            b"\x00" * (FLAT_MATERIAL_CAPACITY * 4)
-        )
-        self._material_types: list[int] = [MATERIAL_TYPE_SKIN]
+        self._material_types: list[int] = [MATERIAL_TYPE_FLAT]
+        # Seed with MATERIAL_TYPE_FLAT so no slot defaults to skin.
+        init_types = bytearray()
+        for _ in range(self.material_capacity):
+            init_types += struct.pack("I", MATERIAL_TYPE_FLAT)
+        self.material_types_buffer.upload_sync(bytes(init_types))
 
         # Sphere-light buffer (binding 17). Filled from
         # scene.lights_sphere; fc.numSphereLights bounds the active range.
@@ -1713,20 +1731,20 @@ class Renderer:
         # material slot, carrying the full MaterialX standard_surface input
         # set for evalStdSurfaceBSDF in mtlx_std_surface.slang.
         self.std_surface_buffer = StorageBuffer(
-            self.ctx, STD_SURFACE_CAPACITY * STD_SURFACE_STRIDE + 16
+            self.ctx, self.material_capacity * STD_SURFACE_STRIDE + 16
         )
         self.std_surface_buffer.upload_sync(
-            b"\x00" * (STD_SURFACE_CAPACITY * STD_SURFACE_STRIDE)
+            b"\x00" * (self.material_capacity * STD_SURFACE_STRIDE)
         )
 
         # ProceduralParams buffer (binding 20). One 96-byte record per
         # material slot. type==0 means no procedural eval; non-zero
         # triggers per-pixel noise evaluation in the shader.
         self.procedural_params_buffer = StorageBuffer(
-            self.ctx, PROCEDURAL_PARAMS_CAPACITY * PROCEDURAL_PARAMS_STRIDE + 16
+            self.ctx, self.material_capacity * PROCEDURAL_PARAMS_STRIDE + 16
         )
         self.procedural_params_buffer.upload_sync(
-            b"\x00" * (PROCEDURAL_PARAMS_CAPACITY * PROCEDURAL_PARAMS_STRIDE)
+            b"\x00" * (self.material_capacity * PROCEDURAL_PARAMS_STRIDE)
         )
 
         # Bumped any time apply_material_override mutates a scene material's
@@ -2096,6 +2114,80 @@ class Renderer:
             ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
+    def _rebind_scene_descriptors(self) -> None:
+        """Re-write descriptor bindings 12, 13, 15, 16 after buffer reallocation."""
+        inst_info = vk.VkDescriptorBufferInfo(
+            buffer=self.instance_buffer.buffer, offset=0,
+            range=self.instance_buffer.size,
+        )
+        mat_info = vk.VkDescriptorBufferInfo(
+            buffer=self.flat_material_buffer.buffer, offset=0,
+            range=self.flat_material_buffer.size,
+        )
+        mtlx_skin_info = vk.VkDescriptorBufferInfo(
+            buffer=self.mtlx_skin_buffer.buffer, offset=0,
+            range=self.mtlx_skin_buffer.size,
+        )
+        mat_types_info = vk.VkDescriptorBufferInfo(
+            buffer=self.material_types_buffer.buffer, offset=0,
+            range=self.material_types_buffer.size,
+        )
+        for ds in self.descriptor_sets:
+            writes = [
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=12, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[inst_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=13, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[mat_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=15, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[mtlx_skin_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=16, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[mat_types_info],
+                ),
+            ]
+            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+
+    def _rebind_aux_material_descriptors(self) -> None:
+        """Re-write descriptor bindings 19, 20 after buffer reallocation."""
+        ss_info = vk.VkDescriptorBufferInfo(
+            buffer=self.std_surface_buffer.buffer, offset=0,
+            range=self.std_surface_buffer.size,
+        )
+        pp_info = vk.VkDescriptorBufferInfo(
+            buffer=self.procedural_params_buffer.buffer, offset=0,
+            range=self.procedural_params_buffer.size,
+        )
+        for ds in self.descriptor_sets:
+            writes = [
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=19, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[ss_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=20, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[pp_info],
+                ),
+            ]
+            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+
     def _rebind_mesh_descriptors(self) -> None:
         """Re-write descriptor bindings 5, 6, 7 after buffer reallocation."""
         vtx_info = vk.VkDescriptorBufferInfo(
@@ -2178,10 +2270,11 @@ class Renderer:
         # Phase 1: metadata (lights, camera, materials, mm_per_unit)
         if self._usd_scene is None:
             try:
-                scene = self._usd_metadata_queue.get_nowait()
+                scene, sg = self._usd_metadata_queue.get_nowait()
             except _queue.Empty:
                 return
             self._usd_scene = scene
+            self._scene_graph = sg
             self._gen_scene_materials()
             self._apply_usd_lights(scene)
             self._frame_camera_to_scene(scene)
@@ -2225,6 +2318,11 @@ class Renderer:
                 f"[skinny] USD streaming complete — "
                 f"{len(self._usd_scene.instances)} instance(s)"
             )
+
+
+    @property
+    def scene_graph(self):
+        return self._scene_graph
 
     def _is_usd_active(self) -> bool:
         return (
@@ -2343,34 +2441,48 @@ class Renderer:
 
     def _upload_flat_materials(self, materials: list) -> None:
         """Pack each scene Material into the FLAT_MATERIAL_STRIDE record format
-        and upload. Slot 0 is the legacy skin material — its record is never
-        consumed by the shader (skin path branches before the buffer read), so
-        we still emit a zeroed record to keep slot indices stable.
+        and upload.
+
+        Skin-typed materials (mtlx_target_name == "M_skinny_skin_default")
+        get a zeroed record (the shader dispatches to the skin path before
+        reading the flat-material buffer). All other materials — including
+        the fallback slot 0 — are packed as flat materials.
 
         Also walks each Material.texture_paths.diffuseColor (when present)
         through the bindless TexturePool so the GPU has the actual image and
         the packed record carries the resolved array slot.
         """
-        if len(materials) > FLAT_MATERIAL_CAPACITY:
-            raise ValueError(
-                f"material count {len(materials)} exceeds "
-                f"capacity {FLAT_MATERIAL_CAPACITY}"
+        if len(materials) > self.material_capacity:
+            new_cap = max(len(materials), self.material_capacity * 2)
+            self.material_capacity = new_cap
+            self._per_material_furnace = [False] * new_cap
+            self.flat_material_buffer.destroy()
+            self.flat_material_buffer = StorageBuffer(
+                self.ctx, new_cap * FLAT_MATERIAL_STRIDE + 256
             )
+            self.material_types_buffer.destroy()
+            self.material_types_buffer = StorageBuffer(
+                self.ctx, new_cap * 4 + 16
+            )
+            self.mtlx_skin_buffer.destroy()
+            self.mtlx_skin_buffer = StorageBuffer(
+                self.ctx, new_cap * self.mtlx_skin_record_size + 256
+            )
+            self.std_surface_buffer.destroy()
+            self.std_surface_buffer = StorageBuffer(
+                self.ctx, new_cap * STD_SURFACE_STRIDE + 16
+            )
+            self.procedural_params_buffer.destroy()
+            self.procedural_params_buffer = StorageBuffer(
+                self.ctx, new_cap * PROCEDURAL_PARAMS_STRIDE + 16
+            )
+            self._rebind_scene_descriptors()
+            self._rebind_aux_material_descriptors()
         data = bytearray()
         types: list[int] = []
         for i, mat in enumerate(materials):
-            # Slot 0 is the legacy SDF-head skin material. Slots > 0 are
-            # USD-bound materials; classify by mtlx_target_name (skin if
-            # the author hinted at a layered-skin MaterialX target, else
-            # flat-material).
-            if i == 0:
-                types.append(MATERIAL_TYPE_SKIN)
-                data += b"\x00" * FLAT_MATERIAL_STRIDE
-                continue
             if mat.mtlx_target_name == "M_skinny_skin_default":
                 types.append(MATERIAL_TYPE_SKIN)
-                # Skin materials don't read the flat-material record; pad
-                # the slot so indexing stays aligned.
                 data += b"\x00" * FLAT_MATERIAL_STRIDE
                 continue
             types.append(MATERIAL_TYPE_FLAT)
@@ -2380,11 +2492,15 @@ class Renderer:
                 "metallic":      TexturePool.SENTINEL,
                 "normal":        TexturePool.SENTINEL,
                 "emissiveColor": TexturePool.SENTINEL,
+                "opacity":       TexturePool.SENTINEL,
             }
+            _LINEAR_INPUTS = {"roughness", "metallic", "normal"}
             for input_name in indices:
                 tex_path = mat.texture_paths.get(input_name)
                 if tex_path is not None:
-                    indices[input_name] = self.texture_pool.add_or_get(tex_path)
+                    indices[input_name] = self.texture_pool.add_or_get(
+                        tex_path, linear=input_name in _LINEAR_INPUTS,
+                    )
             data += pack_flat_material(
                 mat,
                 diffuse_texture_idx=indices["diffuseColor"],
@@ -2392,10 +2508,11 @@ class Renderer:
                 metallic_texture_idx=indices["metallic"],
                 normal_texture_idx=indices["normal"],
                 emissive_texture_idx=indices["emissiveColor"],
+                opacity_texture_idx=indices["opacity"],
             )
         if not data:
             data += b"\x00" * FLAT_MATERIAL_STRIDE
-            types.append(MATERIAL_TYPE_SKIN)
+            types.append(MATERIAL_TYPE_FLAT)
         self.flat_material_buffer.upload_sync(bytes(data))
         self._num_flat_materials = len(materials)
         self._material_types = types
@@ -2410,18 +2527,18 @@ class Renderer:
                 ss_data += pack_std_surface_params(mat)
             else:
                 ss_data += b"\x00" * STD_SURFACE_STRIDE
-        while len(ss_data) < STD_SURFACE_CAPACITY * STD_SURFACE_STRIDE:
+        while len(ss_data) < self.material_capacity * STD_SURFACE_STRIDE:
             ss_data += b"\x00" * STD_SURFACE_STRIDE
         self.std_surface_buffer.upload_sync(
-            bytes(ss_data[: STD_SURFACE_CAPACITY * STD_SURFACE_STRIDE])
+            bytes(ss_data[: self.material_capacity * STD_SURFACE_STRIDE])
         )
         # Pack ProceduralParams for every material slot into binding 20.
         proc_data = bytearray()
-        for i in range(PROCEDURAL_PARAMS_CAPACITY):
+        for i in range(self.material_capacity):
             params = self._procedural_params.get(i)
             proc_data += pack_procedural_params(params)
         self.procedural_params_buffer.upload_sync(
-            bytes(proc_data[: PROCEDURAL_PARAMS_CAPACITY * PROCEDURAL_PARAMS_STRIDE])
+            bytes(proc_data[: self.material_capacity * PROCEDURAL_PARAMS_STRIDE])
         )
         # Refresh binding-14 descriptor writes so newly populated slots
         # are visible to the shader.
@@ -2437,14 +2554,14 @@ class Renderer:
           bits 11-31: reserved.
 
         Re-uploaded whenever scatter mode or per-material furnace changes
-        (cheap — the buffer is FLAT_MATERIAL_CAPACITY uints).
+        (cheap — the buffer is material_capacity uints).
         """
         scatter_idx = int(np.clip(self.scatter_index, 0, len(self._scatter_mode_bits) - 1))
         scatter_bits = int(self._scatter_mode_bits[scatter_idx]) & 0x3
         types = self._material_types
         type_bytes = bytearray()
-        for i in range(FLAT_MATERIAL_CAPACITY):
-            t = int(types[i]) if i < len(types) else MATERIAL_TYPE_SKIN
+        for i in range(self.material_capacity):
+            t = int(types[i]) if i < len(types) else MATERIAL_TYPE_FLAT
             packed = (t & 0xFF)
             if t == MATERIAL_TYPE_SKIN:
                 packed |= (scatter_bits & 0x3) << 8
@@ -2473,14 +2590,87 @@ class Renderer:
         self._material_version += 1
 
     def toggle_material_furnace(self, material_id: int, enabled: bool) -> None:
-        if material_id < 0 or material_id >= FLAT_MATERIAL_CAPACITY:
+        if material_id < 0 or material_id >= self.material_capacity:
             return
         if enabled:
-            for i in range(FLAT_MATERIAL_CAPACITY):
+            for i in range(self.material_capacity):
                 self._per_material_furnace[i] = (i == material_id)
         else:
             self._per_material_furnace[material_id] = False
         self._upload_material_types()
+        self._material_version += 1
+
+    def apply_light_override(
+        self, light_type: str, light_index: int, key: str, value: object,
+    ) -> None:
+        """Mutate a scene light parameter and re-upload."""
+        if self._usd_scene is None:
+            return
+
+        if light_type == "dir":
+            lights = self._usd_scene.lights_dir
+            if light_index < 0 or light_index >= len(lights):
+                return
+            light = lights[light_index]
+            if key == "color":
+                color = _light_value_to_vec3(value)
+                intensity = float(np.linalg.norm(light.radiance))
+                if intensity < 1e-6:
+                    intensity = 1.0
+                light.radiance = (color * intensity).astype(np.float32)
+                self.light_color_r = float(color[0])
+                self.light_color_g = float(color[1])
+                self.light_color_b = float(color[2])
+            elif key == "intensity":
+                color = light.radiance.copy()
+                norm = float(np.linalg.norm(color))
+                if norm > 1e-6:
+                    color = color / norm
+                light.radiance = (color * float(value)).astype(np.float32)
+                self.light_intensity = float(value)
+            self._update_light()
+            self._material_version += 1
+
+        elif light_type == "sphere":
+            lights = self._usd_scene.lights_sphere
+            if light_index < 0 or light_index >= len(lights):
+                return
+            light = lights[light_index]
+            if key == "color":
+                color = _light_value_to_vec3(value)
+                intensity = float(np.linalg.norm(light.radiance))
+                if intensity < 1e-6:
+                    intensity = 1.0
+                light.radiance = (color * intensity).astype(np.float32)
+            elif key == "intensity":
+                color = light.radiance.copy()
+                norm = float(np.linalg.norm(color))
+                if norm > 1e-6:
+                    color = color / norm
+                light.radiance = (color * float(value)).astype(np.float32)
+            elif key == "radius":
+                light.radius = float(value)
+            self._upload_sphere_lights(lights)
+            self._material_version += 1
+
+    def apply_instance_transform(
+        self,
+        instance_index: int,
+        translate: tuple[float, float, float],
+        rotate_deg: tuple[float, float, float],
+        scale: tuple[float, float, float],
+    ) -> None:
+        """Recompose TRS into a 4x4 and re-upload the scene."""
+        if self._usd_scene is None:
+            return
+        instances = self._usd_scene.instances
+        if instance_index < 0 or instance_index >= len(instances):
+            return
+        from skinny.scene_graph import compose_trs_matrix
+        instances[instance_index].transform = compose_trs_matrix(
+            translate, rotate_deg, scale,
+        )
+        self._upload_usd_scene()
         self._material_version += 1
 
     def _update_texture_pool_descriptors(self) -> None:
@@ -2570,10 +2760,13 @@ class Renderer:
         if len(blas_offsets) != len(transforms):
             raise ValueError("blas_offsets must have one entry per transform")
         if len(transforms) > self.instance_capacity:
-            raise ValueError(
-                f"instance count {len(transforms)} exceeds "
-                f"capacity {self.instance_capacity}"
+            new_cap = max(len(transforms), self.instance_capacity * 2)
+            self.instance_capacity = new_cap
+            self.instance_buffer.destroy()
+            self.instance_buffer = StorageBuffer(
+                self.ctx, self.instance_capacity * INSTANCE_STRIDE + 256
             )
+            self._rebind_scene_descriptors()
 
         data = bytearray()
         for xform, mat_id, (n_off, t_off, v_off) in zip(
@@ -2807,10 +3000,6 @@ class Renderer:
         data += struct.pack("I", flags)                              # 4 bytes
         data += struct.pack("f", float(self.normal_map_strength))    # 4 bytes
         data += struct.pack("f", float(self.displacement_scale_mm))  # 4 bytes
-        data += struct.pack(
-            "I",
-            int(np.clip(self.integrator_index, 0, len(self.integrator_modes) - 1)),
-        )                                                            # 4 bytes
         # TLAS instance count consumed by mesh_head.slang::marchHeadMesh.
         # When useMesh==0 the shader skips marchHeadMesh entirely; we still
         # write the count for completeness so the field is always defined.
@@ -2943,7 +3132,6 @@ class Renderer:
             int(self.tattoo_index),
             float(self.tattoo_density),
             int(self.scatter_index),
-            int(self.integrator_index),
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),

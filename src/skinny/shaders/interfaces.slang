@@ -1,12 +1,10 @@
-// Pluggable interface seams for materials, samplers, lights, estimators,
-// and integrators.
+// Pluggable interface seams for materials, samplers, lights, and integrators.
 //
 // Dispatch policy:
-//   - IMaterial: tag-switch monomorphization in material_eval.slang. Never
-//     used as an existential value — divergent material hits in a warp
-//     would serialize otherwise.
-//   - IIntegrator: uniform per dispatch (selected by fc.integratorMode in
-//     main_pass.slang); safe to keep as runtime switch.
+//   - IMaterial: tag-switch monomorphization in PathTracer's evaluateBounce().
+//     Never used as an existential value — divergent material hits in a warp
+//     would serialize otherwise.  All directions in tangent space (N=+Z).
+//   - IIntegrator: PathTracer with MIS.
 //   - ISampler: tangent-space sampler (N=+Z); generic parameter on estimators,
 //     compile-time monomorphized. Callers transform world↔tangent.
 //   - ILight: generic parameter on estimators or loaded per-light from
@@ -25,10 +23,34 @@ interface ISampler
 
 // ── Materials ───────────────────────────────────────────────────
 
+struct BSDFSample
+{
+    float3 wi;            // sampled direction in tangent space (N=+Z)
+    float3 weight;        // BSDF * cos / pdf
+    float  pdf;           // solid-angle PDF for BSDF-path MIS
+    float3 emission;      // self-emission at this surface point
+    bool   valid;
+    bool   transmitted;   // refraction — caller offsets ray along −N
+};
+
+struct BSDFEval
+{
+    float3 response;      // f(wo, wi) * cos(theta_i)
+    float  pdf;           // solid-angle sampling PDF for this wi
+};
+
 interface IMaterial
 {
-    float3 evalRadiance(Ray ray, inout RNG rng);
+    BSDFSample sample(float3 wo, inout RNG rng);
+    BSDFEval evaluate(float3 wo, float3 wi);
 }
+
+struct BounceResult
+{
+    float3 directLight;    // NEE contribution
+    float3 fullRadiance;   // self-integrating materials (skin, debug)
+    BSDFSample bsdfSample; // wi converted to world space by evaluateBounce
+};
 
 // ── Integrators ─────────────────────────────────────────────────
 
@@ -52,11 +74,4 @@ interface ILight
 {
     LightSample samplePoint(float3 shadingPos, float2 u);
     float pdfSolidAngle(float3 shadingPos, float3 direction);
-}
-
-// ── Generic dispatchers ─────────────────────────────────────────
-
-float3 runEstimators<TM : IMaterial>(TM mat, Ray ray, inout RNG rng)
-{
-    return mat.evalRadiance(ray, rng);
 }

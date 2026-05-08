@@ -29,19 +29,24 @@ microfacet specular, and energy-conservation checks.
   lights (`DomeLight`, `DistantLight`, `SphereLight`, `RectLight`), and
   per-prim material assignment
 - **Flat material support** -- USD prims bound to `UsdPreviewSurface` or
-  MaterialX `standard_surface` render alongside skin materials in the same scene
-- **Four sampling strategies** -- path tracing, MIS, bidirectional, and stored
-  BDPT
+  MaterialX `standard_surface` render alongside skin materials in the same scene,
+  with opacity / refraction, clear coat, and cutout alpha masking
+- **MIS path tracing** -- unified bounce loop with per-bounce NEE, Russian
+  roulette, and sphere-light MIS; materials provide BSDF sample/evaluate
 - **Scattering modes** -- BSSRDF + Volume, BSSRDF only, Volume only, or Off,
   selectable per scene
 - **Furnace mode** -- unit-sphere + white-environment energy conservation test;
-  violations tinted pink
+  violations tinted pink; supports per-material furnace probes
+- **BVH caching** -- zstd-compressed mesh/BVH data cached to disk
+  (`~/.skinny/mesh_cache/`) for fast reload
 - **Fitzpatrick I--VI presets** -- male/female variants covering the clinical
   skin-colour axis
 - **Detail layer** -- statistical pores and vellus hair sheen
 - **Tattoo support** -- alpha-driven ink density in the dermis layer
 - **Tk control panel** -- collapsible per-material sliders, colour pickers,
   light direction picker, preset save/load
+- **Scene graph inspector** -- Tkinter tree view of USD prim hierarchy with
+  editable property panel; edits flow through renderer overrides
 - **Web mode** -- Panel (HoloViz) browser UI with per-user server-side
   rendering, H264 video streaming over WebSocket, hardware-accelerated encoding
   (NVENC / QSV / AMF), and WebCodecs decoding in the browser
@@ -68,6 +73,7 @@ Python dependencies (`pyproject.toml`):
 | `vulkan` | Vulkan API bindings |
 | `glfw` | Window creation and input |
 | `Pillow` | Image I/O (HDR, textures, tattoos) |
+| `imageio[freeimage]` | HDR / EXR screenshot output |
 | `MaterialX` | Material definitions and Slang code generation |
 
 Optional:
@@ -224,11 +230,11 @@ Example scenes ship in `assets/`:
 | File | Description |
 |------|-------------|
 | `demo_head.usda` | Head mesh with layered skin material |
-| `cornell_box.usda` | Classic Cornell box |
 | `cornell_box_emissive.usda` | Cornell box with emissive geometry |
 | `cornell_box_rectlight.usda` | Cornell box with rect light |
 | `cornell_box_sphere.usda` | Cornell box with sphere light |
 | `dual_skin_demo.usda` | Two prims with different skin materials |
+| `glass_caustics_test.usda` | Glass material refraction / caustics test |
 | `mtlx_skin_demo.usda` | MaterialX skin material demo |
 | `skin_sphere_light_demo.usda` | Skin under sphere lighting |
 | `test_scene.usda` | Multi-material test scene |
@@ -251,17 +257,15 @@ colour contribution in the dermis.
 
 ### Sampling
 
-| Strategy | Description |
-|----------|-------------|
-| Path tracing | Camera-path estimator |
-| MIS | BSDF + light samples combined via power heuristic |
-| Bidirectional | MIS plus explicit volume light-connection samples |
-| Stored BDPT | Light-side surface vertex stored per invocation, connected with visibility-tested geometry term |
+Single unidirectional path tracer with MIS. Each estimator pairs a primary
+sampler (GGX, Lambert, Henyey-Greenstein) with a companion sampler and
+combines them via power-heuristic weights.
 
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding
-energy conservation tolerance are tinted pink.
+energy conservation tolerance are tinted pink. Supports global and
+per-material furnace probes.
 
 ## MaterialX Skin Model
 
@@ -297,6 +301,8 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 | `hardware.py` | GPU enumeration, vendor detection, encoder selection |
 | `video_encoder.py` | H264/JPEG encoding with hardware-aware fallback chain |
 | `control_panel.py` | Tk control panel with collapsible per-material sections |
+| `scene_graph.py` | USD prim hierarchy tree model with typed editable properties |
+| `scene_graph_window.py` | Tkinter scene graph tree view + property editor window |
 | `renderer.py` | Vulkan resources, uniforms, environment/mesh/texture upload, frame loop |
 | `vk_compute.py` | Compute pipeline, descriptor layout, GPU buffer/image helpers |
 | `vk_context.py` | Vulkan instance, device, queue setup (windowed + headless) |
@@ -305,7 +311,8 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 | `usd_loader.py` | USD stage to `Scene` conversion (with MaterialX API fallback) |
 | `environment.py` | Built-in and HDR environment loading |
 | `mesh.py` | OBJ loading, normalization, subdivision, displacement, BVH construction |
-| `head_textures.py` | Head texture loading (normal, roughness, displacement) |
+| `mesh_cache.py` | On-disk BVH cache (zstd-compressed vertex/index/BVH blobs) |
+| `head_textures.py` | Detail map loading (normal, roughness, displacement) at 2048² |
 | `presets.py` | Fitzpatrick I--VI presets and user preset save/load |
 | `settings.py` | User settings persistence |
 | `tattoos.py` | Tattoo image loading |
@@ -315,14 +322,14 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 
 | File | Purpose |
 |------|---------|
-| `main_pass.slang` | Primary camera path, composition, MIS, stored-BDPT |
+| `main_pass.slang` | Primary camera path, progressive accumulation, tone mapping |
 | `common.slang` | Shared types, `FrameConstants`, `MtlxSkinParams` UBO layout |
 | `bindings.slang` | Descriptor set bindings |
 | `skin_material.slang` | Skin shading entry point (specular + BSSRDF + volume dispatch) |
 | `skin_bssrdf.slang` | Layered skin optics, BSSRDF, GGX specular |
 | `volume_render.slang` | Delta-tracked volume transport through layered medium |
-| `material_eval.slang` | Per-hit material dispatch (`evalMaterial`) |
-| `flat_material.slang` | Flat (non-skin) material evaluation |
+| `flat_material.slang` | Flat (non-skin) BSDF: sample/evaluate via IMaterial |
+| `flat_shading.slang` | Flat-material data loading, GGX helpers, procedural color |
 | `mtlx_std_surface.slang` | MaterialX `standard_surface` approximation |
 | `mtlx_closures.slang` | MaterialX closure helpers |
 | `mtlx_noise.slang` | MaterialX noise functions |
@@ -342,7 +349,7 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 | Normalized diffusion | `skin_bssrdf.slang` | Christensen and Burley, "Approximate Reflectance Profiles for Efficient Subsurface Scattering", Disney/SIGGRAPH 2015 |
 | Human skin optics | `skin_bssrdf.slang`, `presets.py` | Donner and Jensen, "A Spectral BSSRDF for Shading Human Skin", EGSR 2006 |
 | Real-time skin pipeline | `renderer.py`, `mesh_head.slang`, `sdf_head.slang` | d'Eon and Luebke, "Advanced Techniques for Realistic Real-Time Skin Rendering", GPU Gems 3 Ch. 14, 2007 |
-| MIS | `common.slang`, `main_pass.slang`, `volume_render.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
+| MIS | `samplers/mis_combine.slang`, `main_pass.slang`, `volume_render.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
 | Bidirectional path tracing | `main_pass.slang` | Veach and Guibas, "Bidirectional Estimators for Light Transport", 1995 |
 | Bidirectional path tracing | `main_pass.slang` | Lafortune and Willems, "Bi-Directional Path Tracing", 1993 |
 | GGX microfacet | `skin_bssrdf.slang` | Walter, Marschner, Li, Torrance, "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007 |
@@ -354,6 +361,21 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 Supporting techniques (ACES tone mapping, PCG hashing, median-split BVH,
 Worley noise, Box-Muller sampling, Loomis-style head proportions) are standard
 implementation building blocks.
+
+## Testing
+
+The test suite covers shader math, sampling, lighting, volume rendering,
+struct layout, MaterialX closures, skin optics, headless rendering,
+SlangPile transpilation, and the web application. Tests are organized by
+subsystem with Slang harness shaders in `tests/harnesses/` and reference
+kernels in `tests/kernels/`.
+
+```powershell
+.\Scripts\python -m pytest
+```
+
+GPU-dependent tests are marked `@pytest.mark.gpu`; statistical Monte Carlo
+tests are marked `@pytest.mark.slow`.
 
 ## Development
 
@@ -367,12 +389,6 @@ Compile main shader:
 
 ```powershell
 slangc src\skinny\shaders\main_pass.slang -target spirv -entry mainImage -stage compute -o src\skinny\shaders\main_pass.spv -I src\skinny\shaders
-```
-
-Run tests:
-
-```powershell
-.\Scripts\python -m pytest
 ```
 
 ## License

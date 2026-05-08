@@ -5,8 +5,10 @@
 // uniform — the caller (main_pass.slang) passes its module-scope fc.
 
 import common;
+import bindings;
 import sdf_head;
 import mesh_head;
+import flat_shading;
 
 HitInfo traceFurnaceSphere(Ray ray)
 {
@@ -49,6 +51,21 @@ HitInfo traceScene(FrameConstants fc, Ray r)
         : marchHead(r);
 }
 
+bool isMaterialTransparent(uint materialId)
+{
+    uint matType = materialTypes[materialId] & 0xFFu;
+    if (matType != MATERIAL_TYPE_FLAT) return false;
+    FlatMaterialParams p = flatMaterials[materialId];
+    if (p.opacity < 1.0) return true;
+    if (p.opacityTextureIdx != 0xFFFFFFFFu) return true;
+    return false;
+}
+
+bool isShadowTransparent(HitInfo h)
+{
+    return isMaterialTransparent(h.materialId) || isCutoutTransparent(h);
+}
+
 bool visibleSegment(FrameConstants fc, float3 a, float3 b)
 {
     float3 d = b - a;
@@ -60,8 +77,19 @@ bool visibleSegment(FrameConstants fc, float3 a, float3 b)
     Ray shadow;
     shadow.origin = a + dir * 0.002;
     shadow.direction = dir;
-    HitInfo h = traceScene(fc, shadow);
-    return !h.hit || h.t > dist - 0.004;
+    float remaining = dist - 0.004;
+
+    for (int i = 0; i < 8; i++)
+    {
+        HitInfo h = traceScene(fc, shadow);
+        if (!h.hit || h.t > remaining)
+            return true;
+        if (!isShadowTransparent(h))
+            return false;
+        shadow.origin = h.position + dir * 0.004;
+        remaining -= (h.t + 0.004);
+    }
+    return false;
 }
 
 bool visibleDirectional(FrameConstants fc, float3 origin, float3 N, float3 L)
@@ -69,6 +97,15 @@ bool visibleDirectional(FrameConstants fc, float3 origin, float3 N, float3 L)
     Ray shadow;
     shadow.origin    = origin + N * 0.002;
     shadow.direction = L;
-    HitInfo h = traceScene(fc, shadow);
-    return !h.hit;
+
+    for (int i = 0; i < 8; i++)
+    {
+        HitInfo h = traceScene(fc, shadow);
+        if (!h.hit)
+            return true;
+        if (!isShadowTransparent(h))
+            return false;
+        shadow.origin = h.position + L * 0.004;
+    }
+    return false;
 }

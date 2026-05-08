@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a1a; color: #ccc; font-family: monospace; font-size: 12px;
+    user-select: none; overflow-y: auto; overflow-x: hidden;
+  }
+  .tree { padding: 4px 0; }
+  .node { cursor: pointer; }
+  .node-row {
+    display: flex; align-items: center; padding: 2px 4px; white-space: nowrap;
+    border-radius: 2px;
+  }
+  .node-row:hover { background: #2a2a2a; }
+  .node-row.selected { background: #1e3a5f; color: #fff; }
+  .toggle {
+    display: inline-block; width: 14px; text-align: center; color: #666;
+    flex-shrink: 0; font-size: 10px;
+  }
+  .toggle:hover { color: #aaa; }
+  .icon { margin: 0 4px; flex-shrink: 0; font-size: 13px; }
+  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .type-tag {
+    color: #666; font-size: 10px; margin-left: 8px; flex-shrink: 0;
+  }
+  .children { display: none; }
+  .children.open { display: block; }
+</style>
+</head>
+<body>
+<div id="tree" class="tree"></div>
+
+<script>
+let treeData = null;
+let selectedPath = null;
+const bridgeId = "{{BRIDGE_ID}}";
+
+function setTreeData(data) {
+  treeData = data;
+  const container = document.getElementById("tree");
+  container.innerHTML = "";
+  if (data) renderNode(container, data, 0);
+}
+
+function renderNode(parent, node, depth) {
+  const div = document.createElement("div");
+  div.className = "node";
+  div.dataset.path = node.path;
+
+  const row = document.createElement("div");
+  row.className = "node-row";
+  row.style.paddingLeft = (depth * 16 + 4) + "px";
+
+  const toggle = document.createElement("span");
+  toggle.className = "toggle";
+  const hasChildren = node.children && node.children.length > 0;
+  toggle.textContent = hasChildren ? "▶" : " ";
+
+  const icon = document.createElement("span");
+  icon.className = "icon";
+  icon.textContent = node.icon || "•";
+
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = node.name;
+
+  const typeTag = document.createElement("span");
+  typeTag.className = "type-tag";
+  typeTag.textContent = node.type;
+
+  row.appendChild(toggle);
+  row.appendChild(icon);
+  row.appendChild(name);
+  row.appendChild(typeTag);
+  div.appendChild(row);
+
+  let childContainer = null;
+  if (hasChildren) {
+    childContainer = document.createElement("div");
+    childContainer.className = "children";
+    // Auto-expand nodes with few children at shallow depth
+    if (depth < 2 || node.children.length <= 4) {
+      childContainer.classList.add("open");
+      toggle.textContent = "▼";
+    }
+    for (const child of node.children) {
+      renderNode(childContainer, child, depth + 1);
+    }
+    div.appendChild(childContainer);
+  }
+
+  toggle.addEventListener("click", function(e) {
+    e.stopPropagation();
+    if (!childContainer) return;
+    const isOpen = childContainer.classList.contains("open");
+    childContainer.classList.toggle("open");
+    toggle.textContent = isOpen ? "▶" : "▼";
+  });
+
+  row.addEventListener("click", function(e) {
+    e.stopPropagation();
+    // Toggle expand on click too
+    if (childContainer) {
+      const isOpen = childContainer.classList.contains("open");
+      if (!isOpen) {
+        childContainer.classList.add("open");
+        toggle.textContent = "▼";
+      }
+    }
+    selectNode(node.path, row);
+  });
+
+  parent.appendChild(div);
+}
+
+function selectNode(path, rowElement) {
+  // Deselect previous
+  const prev = document.querySelector(".node-row.selected");
+  if (prev) prev.classList.remove("selected");
+  // Select new
+  if (rowElement) rowElement.classList.add("selected");
+  selectedPath = path;
+  // Notify Panel via the bridge input
+  notifySelection(path);
+}
+
+function notifySelection(path) {
+  // Post message to parent frame (Panel) with the selected path
+  try {
+    window.parent.postMessage({type: "sg_select", path: path}, "*");
+  } catch(e) {}
+  // Also set a hidden element if it exists
+  const bridge = document.getElementById(bridgeId);
+  if (bridge) {
+    bridge.value = path;
+    bridge.dispatchEvent(new Event("change"));
+  }
+}
+
+// Receive tree data from parent
+window.addEventListener("message", function(e) {
+  if (e.data && e.data.type === "sg_tree") {
+    setTreeData(e.data.data);
+  }
+});
+
+// Initial data injection (set by Panel before iframe loads)
+if (window.__sg_tree_data) {
+  setTreeData(window.__sg_tree_data);
+}
+</script>
+</body>
+</html>
