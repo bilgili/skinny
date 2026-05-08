@@ -63,7 +63,11 @@ bool isMaterialTransparent(uint materialId)
 
 bool isShadowTransparent(HitInfo h)
 {
-    return isMaterialTransparent(h.materialId) || isCutoutTransparent(h);
+    // Only true cutout-alpha surfaces (opacityThreshold > 0) pass shadow
+    // rays. Refractive surfaces (opacity < 1 with no threshold) bend light
+    // and must occlude direct shadow rays so glass casts a shadow; their
+    // caustic contribution comes from BSDF-sampled paths.
+    return isCutoutTransparent(h);
 }
 
 bool visibleSegment(FrameConstants fc, float3 a, float3 b)

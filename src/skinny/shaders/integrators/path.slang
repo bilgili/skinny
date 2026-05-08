@@ -214,29 +214,29 @@ struct PathTracer : IIntegrator
             r.origin    = h.position + spawnOffset;
             r.direction = br.bsdfSample.wi;
 
-            if (!br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
+            NearestSphereHit sph = intersectSphereLights(
+                r, 1e30, fc.numSphereLights);
+            HitInfo hNext = traceScene(fc, r);
+            float geom_t = hNext.hit ? hNext.t : 1e30;
+            if (sph.idx != 0xFFFFFFFFu && sph.t < geom_t)
             {
-                NearestSphereHit sph = intersectSphereLights(
-                    r, 1e30, fc.numSphereLights);
-                HitInfo hNext = traceScene(fc, r);
-                float geom_t = hNext.hit ? hNext.t : 1e30;
-                if (sph.idx != 0xFFFFFFFFu && sph.t < geom_t)
+                SphereLight light = sphereLights[sph.idx];
+                float w_bsdf = 1.0;
+                // Non-delta reflective bounce: NEE also samples this light,
+                // so combine via power heuristic. Delta lobes (pdf == 0)
+                // and transmitted paths have no NEE counterpart for this
+                // direction — take the BSDF estimate at full weight.
+                if (!br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
                 {
-                    SphereLight light = sphereLights[sph.idx];
                     float area = 4.0 * PI * light.radius * light.radius;
                     float pdf_light_sa = (sph.t * sph.t) /
                         max(sph.cos_y * area, 1e-12);
-                    float w_bsdf = powerHeuristic(br.bsdfSample.pdf,
-                                                  pdf_light_sa);
-                    radiance += throughput * light.radiance * w_bsdf;
-                    break;
+                    w_bsdf = powerHeuristic(br.bsdfSample.pdf, pdf_light_sa);
                 }
-                h = hNext;
+                radiance += throughput * light.radiance * w_bsdf;
+                break;
             }
-            else
-            {
-                h = traceScene(fc, r);
-            }
+            h = hNext;
 
             for (uint skip = 0u; skip < 16u && h.hit && isCutoutTransparent(h); skip++)
             {
