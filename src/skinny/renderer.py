@@ -837,6 +837,13 @@ class Renderer:
         self.scatter_index = 0
         self._last_scatter_index = -1  # forces first _upload_material_types
 
+        # Integrator selector. Index 0 = existing unidirectional path tracer
+        # (untouched). Index 1 = BDPT, which only engages when the camera's
+        # first hit is a FlatMaterial; skin / debug-normal first hits silently
+        # fall through to the path tracer in main_pass.slang.
+        self.integrator_modes: list[str] = ["Path", "BDPT"]
+        self.integrator_index = 0
+
 
         # Scalar applied to every sampleEnvironment() lookup. With many HDR
         # environments the raw luminance swamps skin albedo once multiplied
@@ -1747,6 +1754,14 @@ class Renderer:
             b"\x00" * (self.material_capacity * PROCEDURAL_PARAMS_STRIDE)
         )
 
+        # BDPT light-tracer splat buffer (binding 21). 3 × uint32 per pixel
+        # (Q22.10 fixed-point, atomic-add target). Cleared via fill_zero_sync
+        # whenever the accumulation resets so the running mean stays correct.
+        self.light_splat_buffer = StorageBuffer(
+            self.ctx, self.width * self.height * 3 * 4
+        )
+        self.light_splat_buffer.fill_zero_sync()
+
         # Bumped any time apply_material_override mutates a scene material's
         # parameter_overrides. Hashed into _current_state_hash so the
         # progressive accumulation resets on a slider drag in the
@@ -1834,7 +1849,8 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * 11,
+                # Bumped from 11 → 12 for the BDPT light-splat buffer (binding 21).
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * 12,
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -1945,6 +1961,11 @@ class Renderer:
                 buffer=self.procedural_params_buffer.buffer,
                 offset=0,
                 range=self.procedural_params_buffer.size,
+            )
+            light_splat_info = vk.VkDescriptorBufferInfo(
+                buffer=self.light_splat_buffer.buffer,
+                offset=0,
+                range=self.light_splat_buffer.size,
             )
             writes = [
                 vk.VkWriteDescriptorSet(
@@ -2098,6 +2119,14 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     pBufferInfo=[procedural_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=21,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[light_splat_info],
                 ),
             ]
             output_info = vk.VkDescriptorImageInfo(
@@ -2943,14 +2972,18 @@ class Renderer:
 
     def _pack_uniforms(self) -> bytes:
         aspect = self.width / self.height
-        view_inv = np.linalg.inv(self.camera.view_matrix())
-        proj_inv = np.linalg.inv(self.camera.projection_matrix(aspect))
+        view_fwd = self.camera.view_matrix()
+        proj_fwd = self.camera.projection_matrix(aspect)
+        view_inv = np.linalg.inv(view_fwd)
+        proj_inv = np.linalg.inv(proj_fwd)
 
         data = bytearray()
-        # FrameConstants: viewInverse (mat4), projInverse (mat4), position (vec3),
-        # fov, frameIndex, accumFrame, time, width, height
+        # FrameConstants: viewInverse (mat4), projInverse (mat4),
+        # view (mat4), proj (mat4), position (vec3), fov, frameIndex, ...
         data += view_inv.astype(np.float32).tobytes()       # 64 bytes
         data += proj_inv.astype(np.float32).tobytes()        # 64 bytes
+        data += view_fwd.astype(np.float32).tobytes()        # 64 bytes
+        data += proj_fwd.astype(np.float32).tobytes()        # 64 bytes
         data += self.camera.position.tobytes()               # 12 bytes
         data += struct.pack("f", self.camera.fov)            # 4 bytes
         data += struct.pack("I", self.frame_index)           # 4 bytes
@@ -3008,6 +3041,9 @@ class Renderer:
         data += struct.pack("I", int(self._num_sphere_lights))        # 4 bytes
         # Active emissive-triangle count (bounds the shader's NEE loop).
         data += struct.pack("I", int(self._num_emissive_tris))        # 4 bytes
+        # Integrator selector — 0 = path, 1 = BDPT. main_pass.slang dispatches
+        # on this; PathTracer codepath is byte-identical for value 0.
+        data += struct.pack("I", int(self.integrator_index))          # 4 bytes
         # No padding here — scalar layout (`-fvk-use-scalar-layout`) aligns
         # the next field (float3 lightDirection) at 4 bytes, not 16.
 
@@ -3132,6 +3168,7 @@ class Renderer:
             int(self.tattoo_index),
             float(self.tattoo_density),
             int(self.scatter_index),
+            int(self.integrator_index),
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),
@@ -3189,6 +3226,11 @@ class Renderer:
         if state != self._last_state_hash:
             self.accum_frame = 0
             self._last_state_hash = state
+            # Zero the BDPT light-tracer splat buffer so the running mean
+            # restarts cleanly. Cheap on integrated/dedicated GPUs (single
+            # FillBuffer command + queue wait) and only fires on state change.
+            if hasattr(self, 'light_splat_buffer'):
+                self.light_splat_buffer.fill_zero_sync()
         else:
             self.accum_frame += 1
 

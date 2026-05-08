@@ -16,6 +16,7 @@ import bindings;
 import scene_trace;
 import environment;
 import integrators.path;
+import integrators.bdpt;
 
 // ── Tonemapping ─────────────────────────────────────────────────
 
@@ -64,7 +65,16 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 
     float3 sample;
 
-    if (hit.hit)
+    bool useBdpt = (fc.integratorType == INTEGRATOR_BDPT)
+                && hit.hit
+                && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT);
+
+    if (useBdpt)
+    {
+        BDPTIntegrator bdpt;
+        sample = bdpt.estimateRadiance(ray, hit, rng);
+    }
+    else if (hit.hit)
     {
         PathTracer integrator;
         sample = integrator.estimateRadiance(ray, hit, rng);
@@ -94,6 +104,22 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
         accum = (prev * float(n) + sample) / float(n + 1);
     }
     accumBuffer[pixel] = float4(accum, 1.0);
+
+    // BDPT light-tracer (s = 1) composite. lightSplatBuffer accumulates
+    // fixed-point Q22.10 radiance over all frames (atomic-added by
+    // bdpt.slang's splatLightVertex); divide by frames-so-far to get the
+    // running mean of the light-tracer estimator and add to the eye-side
+    // accumulation. For non-BDPT modes the buffer stays zeroed (cleared on
+    // accumulation reset) so the contribution is zero.
+    uint base = (pixel.y * fc.width + pixel.x) * 3u;
+    uint sR = lightSplatBuffer[base + 0u];
+    uint sG = lightSplatBuffer[base + 1u];
+    uint sB = lightSplatBuffer[base + 2u];
+    float invScale = 1.0 / 1024.0;
+    float3 splatSum = float3(sR, sG, sB) * invScale;
+    float frames = float(fc.accumFrame + 1u);
+    float3 splatMean = splatSum / frames;
+    accum = accum + splatMean;
 
     float3 display = linearToSRGB(acesFilmic(accum));
 
