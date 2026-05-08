@@ -33,6 +33,8 @@ microfacet specular, and energy-conservation checks.
   with opacity / refraction, clear coat, and cutout alpha masking
 - **MIS path tracing** -- unified bounce loop with per-bounce NEE, Russian
   roulette, and sphere-light MIS; materials provide BSDF sample/evaluate
+- **Bidirectional path tracing** -- BDPT integrator with light-tracer splatting
+  for caustics on flat materials; Veach §10 MIS weighting
 - **Scattering modes** -- BSSRDF + Volume, BSSRDF only, Volume only, or Off,
   selectable per scene
 - **Furnace mode** -- unit-sphere + white-environment energy conservation test;
@@ -257,9 +259,12 @@ colour contribution in the dermis.
 
 ### Sampling
 
-Single unidirectional path tracer with MIS. Each estimator pairs a primary
-sampler (GGX, Lambert, Henyey-Greenstein) with a companion sampler and
-combines them via power-heuristic weights.
+Two integrators selectable at runtime:
+
+| Strategy | Description |
+|----------|-------------|
+| Path tracing | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
+| BDPT | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, Lambertian connection approximation |
 
 ### Furnace Mode
 
@@ -349,9 +354,9 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 | Normalized diffusion | `skin_bssrdf.slang` | Christensen and Burley, "Approximate Reflectance Profiles for Efficient Subsurface Scattering", Disney/SIGGRAPH 2015 |
 | Human skin optics | `skin_bssrdf.slang`, `presets.py` | Donner and Jensen, "A Spectral BSSRDF for Shading Human Skin", EGSR 2006 |
 | Real-time skin pipeline | `renderer.py`, `mesh_head.slang`, `sdf_head.slang` | d'Eon and Luebke, "Advanced Techniques for Realistic Real-Time Skin Rendering", GPU Gems 3 Ch. 14, 2007 |
-| MIS | `samplers/mis_combine.slang`, `main_pass.slang`, `volume_render.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
-| Bidirectional path tracing | `main_pass.slang` | Veach and Guibas, "Bidirectional Estimators for Light Transport", 1995 |
-| Bidirectional path tracing | `main_pass.slang` | Lafortune and Willems, "Bi-Directional Path Tracing", 1993 |
+| MIS | `samplers/mis_combine.slang`, `integrators/bdpt.slang`, `volume_render.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
+| Bidirectional path tracing | `integrators/bdpt.slang` | Veach and Guibas, "Bidirectional Estimators for Light Transport", 1995 |
+| Bidirectional path tracing | `integrators/bdpt.slang` | Lafortune and Willems, "Bi-Directional Path Tracing", 1993 |
 | GGX microfacet | `skin_bssrdf.slang` | Walter, Marschner, Li, Torrance, "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007 |
 | Fresnel approximation | `skin_bssrdf.slang`, `detail.slang` | Schlick, "An Inexpensive BRDF Model for Physically-Based Rendering", 1994 |
 | Henyey-Greenstein phase | `volume_render.slang` | Henyey and Greenstein, "Diffuse Radiation in the Galaxy", 1941 |
