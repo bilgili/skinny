@@ -67,19 +67,25 @@ mainImage()                                          main_pass.slang
   │    ├─ furnace → unit sphere
   │    ├─ mesh    → marchHeadMesh()                  mesh_head.slang
   │    └─ SDF     → marchHead()                      sdf_head.slang
-  ├─ PathTracer.estimateRadiance(ray, hit, rng)      integrators/path.slang
-  │    ├─ cutout transparency skip loop
-  │    ├─ for bounce 0..5:
-  │    │    ├─ evaluateBounce(h, r, bounce, rng)
-  │    │    │    ├─ FLAT → loadFlatMaterial → allLightsNEE + sample
-  │    │    │    ├─ SKIN → evalSkinRadiance (§1-§6, self-integrating)
-  │    │    │    └─ DEBUG → 0.5 + 0.5·N
-  │    │    ├─ accumulate emission + direct + throughput
-  │    │    ├─ Russian roulette (bounce > 0)
-  │    │    ├─ sphere-light MIS on BSDF ray
-  │    │    └─ traceScene for next bounce
+  ├─ if BDPT + flat first-hit:
+  │    └─ BDPTIntegrator.estimateRadiance()          integrators/bdpt.slang
+  │         ├─ eye walk (4 verts, FlatMaterial)
+  │         ├─ light walk (4 verts, sphere/emissive/dir)
+  │         ├─ (s,t) connections with Lambertian approx
+  │         └─ light-tracer splat (s=1) → lightSplatBuffer
+  ├─ else:
+  │    └─ PathTracer.estimateRadiance()              integrators/path.slang
+  │         ├─ cutout transparency skip loop
+  │         ├─ for bounce 0..5:
+  │         │    ├─ evaluateBounce(h, r, bounce, rng)
+  │         │    │    ├─ FLAT → allLightsNEE + sample
+  │         │    │    ├─ SKIN → evalSkinRadiance (§1-§6)
+  │         │    │    └─ DEBUG → 0.5 + 0.5·N
+  │         │    ├─ Russian roulette (bounce > 0)
+  │         │    └─ sphere-light MIS on BSDF ray
   ├─ NaN / inf / negative guard
   ├─ progressive accumulation (running mean)
+  ├─ + BDPT light-splat mean (Q22.10 → float)
   ├─ ACES filmic tonemap → sRGB gamma
   ├─ per-material furnace energy-violation overlay (pink)
   └─ HUD alpha composite → outputBuffer
@@ -165,15 +171,23 @@ geometry-term conversion.
 estimateRadiance(Ray ray, HitInfo firstHit, inout RNG rng) → float3
 ```
 
-`PathTracer` owns the 6-bounce loop with Russian roulette, cutout
-transparency traversal, per-bounce NEE via generic `allLightsNEE<TM>()`,
-and sphere-light MIS on BSDF-sampled rays. Material dispatch happens in
-`evaluateBounce()` which returns `BounceResult` (direct light + full
-radiance + BSDF sample with world-space direction).
+Two implementations, selected by `fc.integratorType`:
 
-| Implementation | File | Notes |
+- **`PathTracer`** — 6-bounce loop with Russian roulette, cutout
+  transparency traversal, per-bounce NEE via generic `allLightsNEE<TM>()`,
+  and sphere-light MIS on BSDF-sampled rays. Material dispatch in
+  `evaluateBounce()` returns `BounceResult` (direct light + full radiance
+  + BSDF sample with world-space direction).
+- **`BDPTIntegrator`** — bidirectional path tracer (Veach §10).
+  4-vertex eye + light subpaths, Lambertian connection approximation,
+  light-tracer splatting (s=1) for caustics via atomic adds to
+  `lightSplatBuffer` (binding 21, Q22.10 fixed-point). Flat materials
+  only; skin hits fall through to PathTracer.
+
+| Implementation | File | Mode |
 |---|---|---|
-| `PathTracer` | `integrators/path.slang` | Bounce loop, NEE, material dispatch |
+| `PathTracer` | `integrators/path.slang` | `INTEGRATOR_PATH` (0) |
+| `BDPTIntegrator` | `integrators/bdpt.slang` | `INTEGRATOR_BDPT` (1) |
 
 ### Adding a New Material (Two-File Add)
 
@@ -235,6 +249,22 @@ tangent space. Bounce loop and NEE are in `PathTracer`. BSDF layers:
 - Specular / diffuse MIS split (Schlick F0, luminance-weighted probability)
 - Cutout alpha masking via `isCutoutTransparent()` (in `flat_shading.slang`)
 - Procedural color via `ProceduralParams` (marble 3D noise)
+
+### Bidirectional Path Tracer (`integrators/bdpt.slang`)
+
+Veach §10 BDPT with V1 simplifications for shader compile time:
+
+- **Subpaths**: eye walk + light walk, each capped at 4 vertices
+- **Connections**: (s ≥ 1, t ≥ 1) use Lambertian BSDF approximation
+  (f ≈ albedo/π); full `FlatMaterial.sample()` used for walk bounces
+- **Light tracer** (s = 1): non-delta light vertices projected onto camera,
+  atomic-added to `lightSplatBuffer` (binding 21, Q22.10 fixed-point per
+  R/G/B channel). `main_pass.slang` composites the running mean after
+  accumulation
+- **Scope**: flat-material first-hit only; skin/debug hits fall through to
+  PathTracer
+- **MIS**: balance heuristic over all (s, t) strategies per path length;
+  `convertSAtoArea()` handles geometry-term conversion
 
 ---
 
@@ -431,13 +461,14 @@ and mouse-driven camera controls (orbit, pan, zoom via WebSocket messages).
 | 11 | Sampler2D | Displacement detail map (2048²) | `skin_shading.slang` |
 | 12 | StructuredBuffer | TLAS instances (144 B each) | `mesh_head.slang` |
 | 13 | StructuredBuffer | FlatMaterialParams (96 B each) | `bindings.slang` |
-| 14 | Sampler2D[16] | Bindless material textures (PARTIALLY_BOUND) | `bindings.slang` |
+| 14 | Sampler2D[128] | Bindless material textures (PARTIALLY_BOUND) | `bindings.slang` |
 | 15 | StructuredBuffer | MtlxSkinParams (164 B each, scalar layout) | `skin_shading.slang` |
 | 16 | StructuredBuffer | Material type codes (uint32 each) | `bindings.slang` |
 | 17 | StructuredBuffer | SphereLight (32 B each) | `scene_lights.slang` |
 | 18 | StructuredBuffer | EmissiveTriangle (64 B each) | `scene_lights.slang` |
 | 19 | StructuredBuffer | StdSurfaceParams (256 B each) | `bindings.slang` |
 | 20 | StructuredBuffer | ProceduralParams (96 B each) | `bindings.slang` |
+| 21 | RWStructuredBuffer | BDPT light-splat buffer (Q22.10 uint per R/G/B) | `bindings.slang` |
 
 Light uniforms (part of UBO, not separate bindings):
 - `lightDirection` (float3) — analytic directional light toward-light vector
@@ -553,10 +584,12 @@ only).
                                                    debug_normal ──┤
                                                    flat_shading ──┤
                                                                   ▼
-                                              integrators/path.slang
+                                              integrators/path.slang ──┐
                                               (evaluateBounce + bounce loop)
-                                                      |
-                                              main_pass.slang
+                                              integrators/bdpt.slang ──┤
+                                              (eye/light walks + MIS)  │
+                                                                       ▼
+                                                              main_pass.slang
 ```
 
 ---
@@ -584,6 +617,7 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | numInstances |
 | ... | uint | numSphereLights |
 | ... | uint | numEmissiveTriangles |
+| ... | uint | integratorType (0 = path, 1 = BDPT) |
 
 ---
 
@@ -602,8 +636,9 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
   in `materialTypes[]`) furnace probes via `effectiveFurnaceMode()`. Every
   material must converge to L=1.0 under a white unit-sphere environment.
 - **Material dispatch**: tag-switch monomorphisation in `evaluateBounce()`
-  (`integrators/path.slang`). Never existential `IMaterial`. NEE is generic
-  (`allLightsNEE<TM>`) — monomorphised per material type.
+  (`integrators/path.slang`) and `BDPTIntegrator` (`integrators/bdpt.slang`).
+  Never existential `IMaterial`. NEE is generic (`allLightsNEE<TM>`) —
+  monomorphised per material type.
 - **RNG order**: skin estimators (§1–§6) are called in fixed sequence so RNG
   state stays pixel-identical across refactors.
 - **BVH caching**: `mesh_cache.py` stores zstd-compressed vertex/index/BVH
@@ -678,7 +713,7 @@ directional_light.slang
 ### Integrators (`shaders/integrators/`)
 
 ```
-path.slang
+path.slang               bdpt.slang
 ```
 
 ### MaterialX (`src/skinny/mtlx/`)

@@ -3835,4 +3835,5 @@ class Renderer:
         self._readback.destroy()
         self.uniform_buffer.destroy()
         self.mtlx_skin_buffer.destroy()
+        self.light_splat_buffer.destroy()
         self.pipeline.destroy()

@@ -16,7 +16,8 @@
 //     is the path that produces caustic spots on diffuse floors (pure-spec
 //     connections via the t≥2 generic path are zero on co-planar surfaces).
 //   - Directional light only via t=1 NEE (delta — no light walk).
-//   - No env contribution from intermediate eye-walk escapes.
+//   - Env (IBL) contribution: BSDF-strategy only, accumulated when an
+//     eye-walk ray escapes the scene. No env-NEE — matches PathTracer.
 
 import common;
 import bindings;
@@ -25,6 +26,7 @@ import scene_trace;
 import scene_lights;
 import flat_shading;
 import flat_material;
+import environment;
 import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
@@ -200,7 +202,9 @@ int randomWalk(
     Ray ray,
     float3 throughput,
     float pdfDirOmegaIn,
-    inout RNG rng)
+    inout RNG rng,
+    bool isEyeWalk,
+    inout float3 escapedRadiance)
 {
     int idx = startIdx;
     float pdfFwdOmega = pdfDirOmegaIn;
@@ -215,7 +219,16 @@ int randomWalk(
             ray.origin = h.position + ray.direction * 0.002;
             h = traceScene(fc, ray);
         }
-        if (!h.hit) break;
+        if (!h.hit)
+        {
+            if (isEyeWalk)
+            {
+                escapedRadiance += throughput * sceneEnvRadiance(
+                    ray.direction, fc.envIntensity,
+                    effectiveFurnaceMode(h.materialId));
+            }
+            break;
+        }
         if ((materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT) break;
 
         FlatMaterial mat = loadFlatMaterial(h);
@@ -650,6 +663,7 @@ struct BDPTIntegrator : IIntegrator
         }
         float3 wo_ts = worldToTangent(-ray.direction, T, B, z1.N);
         BSDFSample bs = fmat.sample(wo_ts, rng);
+        float3 escapedRadiance = float3(0.0);
         if (bs.valid)
         {
             if (bs.pdf <= 0.0)
@@ -661,7 +675,8 @@ struct BDPTIntegrator : IIntegrator
             r2.origin = z1.position + spawnOffset;
             r2.direction = wi_world;
             float pdfFwdOmega = (bs.pdf > 0.0) ? bs.pdf : 1.0;
-            eyeLen = randomWalk(eye, 2, r2, throughput, pdfFwdOmega, rng);
+            eyeLen = randomWalk(eye, 2, r2, throughput, pdfFwdOmega, rng,
+                                true, escapedRadiance);
         }
 
         // Light subpath.
@@ -678,7 +693,9 @@ struct BDPTIntegrator : IIntegrator
                 Ray rL;
                 rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
                 rL.direction = lo.dirOut;
-                lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng);
+                float3 unusedEscape = float3(0.0);
+                lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
+                                      false, unusedEscape);
             }
         }
 
@@ -687,7 +704,7 @@ struct BDPTIntegrator : IIntegrator
         // main_pass.slang composites the splat at end-of-frame.
         splatLightWalk(lightPath, lightLen);
 
-        float3 L = float3(0.0);
+        float3 L = escapedRadiance;
 
         // (s ≥ 2, t = 0): emissive eye-vertex hits.
         [loop]

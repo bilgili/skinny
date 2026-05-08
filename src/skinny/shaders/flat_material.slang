@@ -132,12 +132,23 @@ struct FlatMaterial : IMaterial
     BSDFEval evaluate(float3 wo, float3 wi)
     {
         BSDFEval e;
+        // Opacity gates the reflective/diffuse lobes — sample() routes
+        // (1 - opacity) of evaluations to the delta transmission branch,
+        // so the non-delta response must scale accordingly. Without this,
+        // NEE lights up fully-transparent surfaces (e.g. glass, opacity=0).
+        float op = data.mat.opacity;
+        if (op <= 0.0)
+        {
+            e.response = float3(0.0);
+            e.pdf      = 0.0;
+            return e;
+        }
         ClosureData cd = makeClosureData(
             CLOSURE_TYPE_REFLECTION, wi, wo,
             float3(0, 0, 1), float3(0), 1.0);
         BSDF bsdf  = evalStdSurfaceBSDF(cd, sp, float3(0, 0, 1), float3(1, 0, 0));
-        e.response = bsdf.response;
-        e.pdf      = stdSurfaceSamplingPdf(float3(0, 0, 1), wo, wi, sp);
+        e.response = bsdf.response * op;
+        e.pdf      = stdSurfaceSamplingPdf(float3(0, 0, 1), wo, wi, sp) * op;
         return e;
     }
 }
