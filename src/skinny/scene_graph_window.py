@@ -137,6 +137,14 @@ class SceneGraphWindow:
         node = find_node_by_path(graph, path)
         if node is None:
             return
+        # Auto-target the rotate gizmo when a mesh instance is selected.
+        ref = node.renderer_ref
+        if ref is not None and ref.kind == "instance" and hasattr(
+            self.renderer, "set_gizmo_target"
+        ):
+            self.renderer.set_gizmo_target(ref.index)
+        elif hasattr(self.renderer, "set_gizmo_target"):
+            self.renderer.set_gizmo_target(-1)
         self._build_properties(node)
 
     # ── Property panel ───────────────────────────────────────────
@@ -177,7 +185,9 @@ class SceneGraphWindow:
         label = ttk.Label(row, text=prop.display_name, width=16, anchor="w")
         label.pack(side="left")
 
-        if prop.type_name == "float" and prop.editable:
+        if prop.type_name == "bool" and prop.editable:
+            self._build_bool_toggle(row, node, prop)
+        elif prop.type_name == "float" and prop.editable:
             self._build_float_slider(row, node, prop)
         elif prop.type_name == "color3f" and prop.editable:
             self._build_color_picker(row, node, prop)
@@ -200,6 +210,27 @@ class SceneGraphWindow:
                 side="left", fill="x", expand=True)
         else:
             ttk.Label(row, text=str(prop.value)).pack(side="left", fill="x", expand=True)
+
+    def _build_bool_toggle(
+        self, parent: ttk.Frame, node: SceneGraphNode, prop: SceneGraphProperty,
+    ) -> None:
+        var = tk.BooleanVar(value=bool(prop.value))
+
+        def on_toggle():
+            value = bool(var.get())
+            prop.value = value
+            toggle = prop.metadata.get("toggle", "node")
+            if toggle == "subtree":
+                self.renderer.apply_subtree_enabled(node.path, value)
+            else:
+                ref = node.renderer_ref
+                if ref is None:
+                    return
+                self.renderer.apply_node_enabled(ref.kind, ref.index, value)
+
+        chk = ttk.Checkbutton(parent, variable=var, command=on_toggle)
+        chk.pack(side="left")
+        self._prop_widgets.append((var, chk, node, prop))
 
     def _build_float_slider(
         self, parent: ttk.Frame, node: SceneGraphNode, prop: SceneGraphProperty,
@@ -328,13 +359,30 @@ class SceneGraphWindow:
         elif ref.kind in ("light_dir", "light_sphere"):
             light_type = "dir" if ref.kind == "light_dir" else "sphere"
             self.renderer.apply_light_override(light_type, ref.index, prop.name, value)
+        elif ref.kind == "renderer_camera":
+            self.renderer.apply_camera_param(prop.name, value)
 
     def _apply_vec3_property(
         self, node: SceneGraphNode, prop: SceneGraphProperty,
         value: tuple[float, float, float],
     ) -> None:
         ref = node.renderer_ref
-        if ref is None or ref.kind != "instance":
+        if ref is None:
+            return
+
+        if ref.kind == "renderer_camera":
+            axis_kind = prop.metadata.get("camera_axis", "")
+            if axis_kind == "target":
+                self.renderer.apply_camera_param("target_x", float(value[0]))
+                self.renderer.apply_camera_param("target_y", float(value[1]))
+                self.renderer.apply_camera_param("target_z", float(value[2]))
+            elif axis_kind == "position":
+                self.renderer.apply_camera_param("position_x", float(value[0]))
+                self.renderer.apply_camera_param("position_y", float(value[1]))
+                self.renderer.apply_camera_param("position_z", float(value[2]))
+            return
+
+        if ref.kind != "instance":
             return
 
         # Collect all TRS values from current widgets

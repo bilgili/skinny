@@ -142,5 +142,23 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
         display = lerp(display, float3(0.02, 0.02, 0.03), hud);
     }
 
+    // Gizmo overlay: cheap CPU→GPU 2D line list. For each segment we
+    // measure the perpendicular distance from the current pixel to the
+    // segment and blend the segment colour in with a 1-pixel anti-alias
+    // falloff. Cap the loop at numGizmoSegments to skip the work entirely
+    // when no gizmo is active.
+    float2 px = float2(float(pixel.x) + 0.5, float(pixel.y) + 0.5);
+    for (uint gi = 0u; gi < fc.numGizmoSegments; ++gi)
+    {
+        GizmoSegment seg = gizmoSegments[gi];
+        float2 ab = seg.b - seg.a;
+        float ab2 = max(dot(ab, ab), 1e-6);
+        float t = clamp(dot(px - seg.a, ab) / ab2, 0.0, 1.0);
+        float2 closest = seg.a + ab * t;
+        float d = length(px - closest);
+        float aa = clamp(seg.width + 1.0 - d, 0.0, 1.0);
+        display = lerp(display, seg.color, aa);
+    }
+
     outputBuffer[pixel] = float4(display, 1.0);
 }

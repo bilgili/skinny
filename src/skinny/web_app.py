@@ -813,7 +813,29 @@ def _build_web_properties(
         ref = _find_web_ancestor_material_ref(node, graph)
 
     for prop in node.properties:
-        if prop.type_name == "float" and prop.editable:
+        if prop.type_name == "bool" and prop.editable:
+            cb = pn.widgets.Checkbox(
+                name=prop.display_name, value=bool(prop.value),
+            )
+
+            def on_bool(event, p=prop, n=node):
+                value = bool(event.new)
+                p.value = value
+                toggle = p.metadata.get("toggle", "node")
+                if toggle == "subtree":
+                    session.renderer.apply_subtree_enabled(n.path, value)
+                else:
+                    r = n.renderer_ref
+                    if r is None:
+                        return
+                    session.renderer.apply_node_enabled(r.kind, r.index, value)
+                if session.encoder.is_h264:
+                    session.encoder.force_keyframe()
+
+            cb.param.watch(on_bool, "value")
+            props_col.append(cb)
+
+        elif prop.type_name == "float" and prop.editable:
             lo = prop.metadata.get("min", 0.0)
             hi = prop.metadata.get("max", 1.0)
             w = pn.widgets.FloatSlider(
@@ -829,6 +851,8 @@ def _build_web_properties(
                 elif r.kind in ("light_dir", "light_sphere"):
                     lt = "dir" if r.kind == "light_dir" else "sphere"
                     session.renderer.apply_light_override(lt, r.index, p.name, event.new)
+                elif r.kind == "renderer_camera":
+                    session.renderer.apply_camera_param(p.name, event.new)
                 if session.encoder.is_h264:
                     session.encoder.force_keyframe()
 
@@ -864,6 +888,35 @@ def _build_web_properties(
 
             cw.param.watch(on_color, "value")
             props_col.append(cw)
+
+        elif prop.type_name == "vec3f" and prop.editable and ref is not None and ref.kind == "renderer_camera":
+            row_widgets = []
+            for i, axis in enumerate(("X", "Y", "Z")):
+                w = pn.widgets.FloatInput(
+                    name=f"{prop.display_name} {axis}",
+                    value=float(prop.value[i]),
+                    step=0.05,
+                )
+                row_widgets.append(w)
+
+            def on_cam_vec3(event, p=prop, ws=row_widgets):
+                vals = tuple(float(w.value) for w in ws)
+                axis_kind = p.metadata.get("camera_axis", "")
+                if axis_kind == "target":
+                    keys = ("target_x", "target_y", "target_z")
+                elif axis_kind == "position":
+                    keys = ("position_x", "position_y", "position_z")
+                else:
+                    return
+                for k, v in zip(keys, vals):
+                    session.renderer.apply_camera_param(k, v)
+                if session.encoder.is_h264:
+                    session.encoder.force_keyframe()
+
+            for w in row_widgets:
+                w.param.watch(on_cam_vec3, "value")
+
+            props_col.append(pn.Row(*row_widgets))
 
         elif prop.type_name == "vec3f" and prop.editable and ref is not None and ref.kind == "instance":
             row_widgets = []
