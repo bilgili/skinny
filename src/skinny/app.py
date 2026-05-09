@@ -106,6 +106,7 @@ class InputHandler:
         self._left_down = False
         self._right_down = False
         self._middle_down = False
+        self._gizmo_dragging = False
 
         glfw.set_cursor_pos_callback(window, self._on_mouse_move)
         glfw.set_mouse_button_callback(window, self._on_mouse_button)
@@ -118,6 +119,16 @@ class InputHandler:
     def _on_mouse_button(self, _win, button, action, _mods):
         if button == glfw.MOUSE_BUTTON_LEFT:
             self._left_down = action == glfw.PRESS
+            if action == glfw.PRESS:
+                mx, my = glfw.get_cursor_pos(self.window)
+                axis = self.renderer.gizmo_hit_test(mx, my)
+                if axis is not None:
+                    if self.renderer.gizmo_begin_drag(axis, mx, my):
+                        self._gizmo_dragging = True
+            else:  # release
+                if self._gizmo_dragging:
+                    self.renderer.gizmo_end_drag()
+                    self._gizmo_dragging = False
         elif button == glfw.MOUSE_BUTTON_RIGHT:
             self._right_down = action == glfw.PRESS
         elif button == glfw.MOUSE_BUTTON_MIDDLE:
@@ -130,6 +141,14 @@ class InputHandler:
         dy = my - self._last_my
         self._last_mx = mx
         self._last_my = my
+
+        # Gizmo drag has priority over camera. Hover highlight runs
+        # whenever no mouse button is down so the picked axis lights up.
+        if self._gizmo_dragging:
+            self.renderer.gizmo_update_drag(mx, my)
+            return
+        if not (self._left_down or self._right_down or self._middle_down):
+            self.renderer.gizmo.set_hover(self.renderer.gizmo_hit_test(mx, my))
 
         cam = self.renderer.camera
         if self.renderer.camera_mode == "orbit":

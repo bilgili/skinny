@@ -574,7 +574,9 @@ class SkinParameters:
         )
 
 
-def _perspective(fov_deg: float, aspect: float) -> np.ndarray:
+def _perspective(
+    fov_deg: float, aspect: float, near: float = 0.1, far: float = 100.0,
+) -> np.ndarray:
     """Reverse-depth perspective projection matrix (stored transposed for GPU).
 
     Math (OpenGL/Vulkan infinite-far convention, z_near = 0.1, z_far = 100):
@@ -588,7 +590,6 @@ def _perspective(fov_deg: float, aspect: float) -> np.ndarray:
     """
     fov_rad = np.radians(fov_deg)
     f = 1.0 / np.tan(fov_rad / 2.0)
-    near, far = 0.1, 100.0
     proj = np.zeros((4, 4), dtype=np.float32)
     proj[0, 0] = f / aspect
     proj[1, 1] = f
@@ -644,6 +645,10 @@ class OrbitCamera:
     yaw: float = 0.0
     pitch: float = 0.0
     fov: float = 45.0
+    near: float = 0.1
+    far: float = 100.0
+    fstop: float = 0.0          # 0 ⇒ pinhole; >0 enables DOF when shader supports it
+    focus_distance: float = 0.0  # 0 ⇒ track orbit distance
 
     @property
     def position(self) -> np.ndarray:
@@ -687,13 +692,15 @@ class OrbitCamera:
         return _look_at(pos, f / np.linalg.norm(f))
 
     def projection_matrix(self, aspect: float) -> np.ndarray:
-        return _perspective(self.fov, aspect)
+        return _perspective(self.fov, aspect, self.near, self.far)
 
     def state_signature(self) -> tuple:
         return (
             "orbit",
             float(self.yaw), float(self.pitch), float(self.distance), float(self.fov),
             float(self.target[0]), float(self.target[1]), float(self.target[2]),
+            float(self.near), float(self.far),
+            float(self.fstop), float(self.focus_distance),
         )
 
 
@@ -708,6 +715,10 @@ class FreeCamera:
     pitch: float = 0.0
     fov: float = 45.0
     move_speed: float = 1.5   # world units / second
+    near: float = 0.1
+    far: float = 100.0
+    fstop: float = 0.0
+    focus_distance: float = 0.0
 
     def forward(self) -> np.ndarray:
         cp = np.cos(self.pitch)
@@ -744,13 +755,15 @@ class FreeCamera:
         return _look_at(self.position, self.forward())
 
     def projection_matrix(self, aspect: float) -> np.ndarray:
-        return _perspective(self.fov, aspect)
+        return _perspective(self.fov, aspect, self.near, self.far)
 
     def state_signature(self) -> tuple:
         return (
             "free",
             float(self.position[0]), float(self.position[1]), float(self.position[2]),
             float(self.yaw), float(self.pitch), float(self.fov),
+            float(self.near), float(self.far),
+            float(self.fstop), float(self.focus_distance),
         )
 
 
@@ -817,6 +830,13 @@ class Renderer:
         self.light_color_r = 0.624
         self.light_color_g = 0.583
         self.light_color_b = 0.520
+        # In-memory USD stage holding the synthesized default DistantLight.
+        # Populated below; treat it as the canonical representation of the
+        # built-in light so it lives alongside imported USD lights in the
+        # scene graph editor.
+        self._default_light_stage = None
+        self._default_light_prim = None
+        self._init_default_light_stage()
         self._update_light()
 
         # Direct-light toggle. Exposed to the UI as a discrete choice so the
@@ -993,6 +1013,7 @@ class Renderer:
             self.orbit_camera.pitch = float(np.arcsin(offset[1] / dist))
             self.orbit_camera.yaw = float(np.arctan2(offset[0], offset[2]))
             self.camera_mode = "orbit"
+        self._refresh_camera_node()
 
     def refresh_user_presets(self) -> None:
         """Re-scan ~/.skinny/presets/ and rebuild the preset list.
@@ -1541,6 +1562,64 @@ class Renderer:
             # wants chrome reflections of the default env.
             self.env_intensity = 0.0
 
+    def _init_default_light_stage(self) -> None:
+        """Create an anonymous in-memory stage with /Skinny/DefaultLight as a
+        UsdLuxDistantLight. The prim mirrors the renderer's elevation/
+        azimuth/intensity/color state so the scene graph editor treats it
+        identically to imported USD lights.
+        """
+        try:
+            from pxr import Sdf, Usd, UsdGeom, UsdLux
+        except Exception:
+            return
+        try:
+            stage = Usd.Stage.CreateInMemory()
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            xf = UsdGeom.Xform.Define(stage, "/Skinny")
+            light = UsdLux.DistantLight.Define(stage, "/Skinny/DefaultLight")
+            stage.SetDefaultPrim(xf.GetPrim())
+            self._default_light_stage = stage
+            self._default_light_prim = light.GetPrim()
+        except Exception:
+            self._default_light_stage = None
+            self._default_light_prim = None
+
+    def _sync_default_light_prim(self) -> None:
+        """Push current scalar light state onto the in-memory prim attrs."""
+        prim = self._default_light_prim
+        if prim is None:
+            return
+        try:
+            from pxr import Gf, UsdLux, UsdGeom
+            light = UsdLux.DistantLight(prim)
+            light.CreateColorAttr().Set(Gf.Vec3f(
+                float(self.light_color_r),
+                float(self.light_color_g),
+                float(self.light_color_b),
+            ))
+            light.CreateIntensityAttr().Set(float(self.light_intensity))
+            light.CreateExposureAttr().Set(0.0)
+            xformable = UsdGeom.Xformable(prim)
+            ops = xformable.GetOrderedXformOps()
+            rot_op = next(
+                (op for op in ops
+                 if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ),
+                None,
+            )
+            if rot_op is None:
+                rot_op = xformable.AddRotateXYZOp()
+            # USD distant light shines down its local -Z. Map elevation/
+            # azimuth (renderer convention) to a rotation that aims -Z at
+            # the light direction.
+            rot_op.Set(Gf.Vec3f(
+                float(-self.light_elevation),
+                float(self.light_azimuth),
+                0.0,
+            ))
+        except Exception:
+            pass
+
     def _update_light(self) -> None:
         az = np.radians(self.light_azimuth)
         el = np.radians(self.light_elevation)
@@ -1555,6 +1634,7 @@ class Renderer:
             dtype=np.float32,
         )
         self.light_radiance = color * self.light_intensity
+        self._sync_default_light_prim()
 
     def _init_gpu(self) -> None:
         # Compute pipeline from Slang
@@ -1762,6 +1842,25 @@ class Renderer:
         )
         self.light_splat_buffer.fill_zero_sync()
 
+        # Gizmo segment buffer (binding 22). Holds at most
+        # GIZMO_SEGMENT_CAPACITY 32-byte records (2 float2 endpoints, float3
+        # colour, float half-width). Repacked every frame from
+        # ``self.gizmo`` when the user has selected an instance.
+        from skinny.gizmo import (
+            GIZMO_SEGMENT_CAPACITY, GIZMO_SEGMENT_STRIDE, RotateGizmo,
+        )
+        self.gizmo_segment_capacity = GIZMO_SEGMENT_CAPACITY
+        self.gizmo_segment_stride = GIZMO_SEGMENT_STRIDE
+        self.gizmo_segments_buffer = StorageBuffer(
+            self.ctx,
+            self.gizmo_segment_capacity * self.gizmo_segment_stride + 16,
+        )
+        self.gizmo_segments_buffer.upload_sync(
+            b"\x00" * (self.gizmo_segment_capacity * self.gizmo_segment_stride)
+        )
+        self.gizmo = RotateGizmo()
+        self._num_gizmo_segments: int = 0
+
         # Bumped any time apply_material_override mutates a scene material's
         # parameter_overrides. Hashed into _current_state_hash so the
         # progressive accumulation resets on a slider drag in the
@@ -1849,8 +1948,10 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # Bumped from 11 → 12 for the BDPT light-splat buffer (binding 21).
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * 12,
+                # 13 = vertices+indices+bvh+instances+flatMaterials+
+                #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
+                #      stdSurface+procedural+lightSplat+gizmoSegments.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * 13,
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -1966,6 +2067,11 @@ class Renderer:
                 buffer=self.light_splat_buffer.buffer,
                 offset=0,
                 range=self.light_splat_buffer.size,
+            )
+            gizmo_info = vk.VkDescriptorBufferInfo(
+                buffer=self.gizmo_segments_buffer.buffer,
+                offset=0,
+                range=self.gizmo_segments_buffer.size,
             )
             writes = [
                 vk.VkWriteDescriptorSet(
@@ -2127,6 +2233,14 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     pBufferInfo=[light_splat_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=22,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[gizmo_info],
                 ),
             ]
             output_info = vk.VkDescriptorImageInfo(
@@ -2304,6 +2418,7 @@ class Renderer:
                 return
             self._usd_scene = scene
             self._scene_graph = sg
+            self._refresh_camera_node()
             self._gen_scene_materials()
             self._apply_usd_lights(scene)
             self._frame_camera_to_scene(scene)
@@ -2340,6 +2455,14 @@ class Renderer:
         if added > 0 and self._is_usd_active():
             self._upload_usd_scene()
             self._usd_uploaded_count = len(self._usd_scene.instances)
+
+        if added > 0 and self._scene_graph is not None:
+            from skinny.scene_graph import populate_instance_refs
+            updated = populate_instance_refs(self._scene_graph, self._usd_scene)
+            if updated:
+                print(
+                    f"[skinny] scene graph: attached {updated} instance ref(s)"
+                )
 
         if self._usd_bake_done.is_set() and self._usd_instance_queue.empty():
             self._usd_bake_done = None
@@ -2381,12 +2504,18 @@ class Renderer:
             return
         meshes = [inst.mesh for inst in scene.instances]
         offsets = self._upload_meshes_concatenated(meshes)
-        transforms = [inst.transform for inst in scene.instances]
-        material_ids = [inst.material_id for inst in scene.instances]
+        # TLAS records only for enabled instances. Disabled instances keep
+        # their BLAS data resident (cheap) but never get walked by rays.
+        enabled_idx = [
+            i for i, inst in enumerate(scene.instances) if inst.enabled
+        ]
+        transforms = [scene.instances[i].transform for i in enabled_idx]
+        material_ids = [scene.instances[i].material_id for i in enabled_idx]
+        enabled_offsets = [offsets[i] for i in enabled_idx]
         self._upload_instances(
             transforms,
             material_ids=material_ids,
-            blas_offsets=offsets,
+            blas_offsets=enabled_offsets,
         )
         self._upload_flat_materials(scene.materials)
         self._upload_sphere_lights(scene.lights_sphere)
@@ -2401,6 +2530,8 @@ class Renderer:
         """
         records: list[tuple] = []
         for inst in scene.instances:
+            if not inst.enabled:
+                continue
             if inst.source is None:
                 continue
             mat_id = inst.material_id
@@ -2449,11 +2580,12 @@ class Renderer:
         """Pack each LightSphere into binding 17. Active count goes to
         FrameConstants.numSphereLights for the shader to bound its loop.
         """
-        n = min(len(lights), SPHERE_LIGHT_CAPACITY)
+        enabled = [lt for lt in lights if getattr(lt, "enabled", True)]
+        n = min(len(enabled), SPHERE_LIGHT_CAPACITY)
         data = bytearray()
         for i in range(SPHERE_LIGHT_CAPACITY):
             if i < n:
-                light = lights[i]
+                light = enabled[i]
                 pos = light.position
                 rad = light.radiance
                 data += struct.pack(
@@ -2701,6 +2833,251 @@ class Renderer:
         )
         self._upload_usd_scene()
         self._material_version += 1
+
+    def apply_node_enabled(self, kind: str, index: int, enabled: bool) -> None:
+        """Toggle a single scene node on/off and re-upload affected GPU buffers."""
+        if self._usd_scene is None:
+            return
+        enabled = bool(enabled)
+        scene = self._usd_scene
+        if kind == "instance":
+            if 0 <= index < len(scene.instances):
+                scene.instances[index].enabled = enabled
+                self._upload_usd_scene()
+        elif kind == "light_dir":
+            if 0 <= index < len(scene.lights_dir):
+                scene.lights_dir[index].enabled = enabled
+        elif kind == "light_sphere":
+            if 0 <= index < len(scene.lights_sphere):
+                scene.lights_sphere[index].enabled = enabled
+                self._upload_sphere_lights(scene.lights_sphere)
+        elif kind == "environment":
+            if scene.environment is not None:
+                scene.environment.enabled = enabled
+        elif kind == "camera":
+            if scene.camera_override is not None:
+                scene.camera_override.enabled = enabled
+        else:
+            return
+        self._material_version += 1
+
+    def apply_subtree_enabled(self, usd_path: str, enabled: bool) -> None:
+        """Toggle every renderer-bound leaf in the subtree rooted at ``usd_path``.
+
+        Walks the SceneGraphNode tree (which mirrors the USD hierarchy) and
+        flips the ``enabled`` flag on every instance / light / camera below
+        the node, then issues one GPU re-upload for each affected buffer.
+        """
+        if self._usd_scene is None or self._scene_graph is None:
+            return
+        from skinny.scene_graph import find_node_by_path
+        root = find_node_by_path(self._scene_graph, usd_path)
+        if root is None:
+            return
+        flags = {"instance": False, "light_sphere": False}
+        self._walk_apply_enabled(root, bool(enabled), flags)
+        if flags["instance"]:
+            self._upload_usd_scene()
+        if flags["light_sphere"]:
+            self._upload_sphere_lights(self._usd_scene.lights_sphere)
+        self._material_version += 1
+
+    # ── Gizmo (Phase D) ─────────────────────────────────────────────
+
+    def set_gizmo_target(self, instance_index: int) -> None:
+        """Select a mesh instance for the rotate gizmo. Pass -1 to clear."""
+        if instance_index < 0 or self._usd_scene is None:
+            self.gizmo.clear_target()
+            return
+        instances = self._usd_scene.instances
+        if not (0 <= instance_index < len(instances)):
+            self.gizmo.clear_target()
+            return
+        inst = instances[instance_index]
+        # Pivot = instance origin in world (last row of the row-vector-
+        # convention transform). Good enough for now; mesh centroid would
+        # be marginally nicer for off-origin geometry.
+        pivot = np.array(inst.transform[3, :3], dtype=np.float32)
+        self.gizmo.set_target(instance_index, pivot)
+
+    def gizmo_hit_test(self, mouse_x: float, mouse_y: float) -> str | None:
+        if not self.gizmo.has_target:
+            return None
+        view = self.camera.view_matrix()
+        proj = self.camera.projection_matrix(self.width / max(self.height, 1))
+        return self.gizmo.hit_test(
+            mouse_x, mouse_y, view, proj, self.width, self.height,
+        )
+
+    def gizmo_begin_drag(
+        self, axis: str, mouse_x: float, mouse_y: float,
+    ) -> bool:
+        if not self.gizmo.has_target or self._usd_scene is None:
+            return False
+        idx = self.gizmo.target_index
+        if not (0 <= idx < len(self._usd_scene.instances)):
+            return False
+        view = self.camera.view_matrix()
+        proj = self.camera.projection_matrix(self.width / max(self.height, 1))
+        self.gizmo.begin_drag(
+            axis, mouse_x, mouse_y, view, proj, self.width, self.height,
+            self._usd_scene.instances[idx].transform,
+        )
+        return True
+
+    def gizmo_update_drag(self, mouse_x: float, mouse_y: float) -> bool:
+        if not self.gizmo.is_dragging or self._usd_scene is None:
+            return False
+        view = self.camera.view_matrix()
+        proj = self.camera.projection_matrix(self.width / max(self.height, 1))
+        result = self.gizmo.update_drag(
+            mouse_x, mouse_y, view, proj, self.width, self.height,
+        )
+        if result is None:
+            return False
+        t, r, s = result
+        idx = self.gizmo.target_index
+        self.apply_instance_transform(idx, t, r, s)
+        return True
+
+    def gizmo_end_drag(self) -> None:
+        self.gizmo.end_drag()
+
+    def _refresh_gizmo_segments(self) -> None:
+        if not self.gizmo.has_target:
+            if self._num_gizmo_segments != 0:
+                self._upload_gizmo_segments([])
+            return
+        view = self.camera.view_matrix()
+        proj = self.camera.projection_matrix(self.width / max(self.height, 1))
+        # Refresh pivot from the live instance transform so dragging
+        # follows the geometry.
+        if self._usd_scene is not None:
+            idx = self.gizmo.target_index
+            if 0 <= idx < len(self._usd_scene.instances):
+                pivot = np.array(
+                    self._usd_scene.instances[idx].transform[3, :3],
+                    dtype=np.float32,
+                )
+                self.gizmo.pivot_world = pivot
+        segs = self.gizmo.build_segments(view, proj, self.width, self.height)
+        self._upload_gizmo_segments(segs)
+
+    def _upload_gizmo_segments(self, segments: list) -> None:
+        n = min(len(segments), self.gizmo_segment_capacity)
+        data = bytearray()
+        for i in range(self.gizmo_segment_capacity):
+            if i < n:
+                s = segments[i]
+                data += struct.pack(
+                    "ff ff fff f",
+                    float(s.ax), float(s.ay),
+                    float(s.bx), float(s.by),
+                    float(s.r), float(s.g), float(s.b),
+                    float(s.width),
+                )
+            else:
+                data += b"\x00" * self.gizmo_segment_stride
+        self.gizmo_segments_buffer.upload_sync(bytes(data))
+        self._num_gizmo_segments = n
+
+    def _ensure_default_scene_graph(self) -> None:
+        """Build a minimal SceneGraphNode tree off the in-memory default-light
+        stage so the editor shows ``/Skinny/DefaultLight`` even before any USD
+        scene is loaded. Idempotent — bails if a real graph already exists.
+        """
+        if self._scene_graph is not None:
+            return
+        if self._default_light_stage is None:
+            return
+        if not self.scene.lights_dir:
+            return
+        try:
+            from skinny.scene_graph import build_scene_graph
+            self._scene_graph = build_scene_graph(
+                self._default_light_stage, self.scene,
+            )
+            self._refresh_camera_node()
+        except Exception as exc:
+            print(f"[skinny] default scene graph build failed: {exc}")
+
+    def _refresh_camera_node(self) -> None:
+        """(Re)attach the synthetic ``/Skinny/MainCamera`` node so the UI sees
+        the active camera with current values."""
+        if self._scene_graph is None:
+            return
+        from skinny.scene_graph import inject_renderer_camera
+        inject_renderer_camera(self._scene_graph, self.camera, self.camera_mode)
+
+    def apply_camera_param(self, key: str, value: object) -> None:
+        """Mutate a single parameter on the active camera.
+
+        Keys:
+          - ``fov`` (degrees)
+          - ``near`` / ``far`` (world units)
+          - ``fstop`` / ``focus_distance`` (DOF — inert until DOF pass lands)
+          - ``focal_length_mm`` / ``vertical_aperture_mm`` (USD camera units;
+            converted to vertical FOV: ``fov = 2·atan(0.5·va / fl)`` deg)
+          - orbit only: ``distance``, ``yaw``, ``pitch``,
+            ``target_x`` / ``target_y`` / ``target_z``
+          - free only: ``yaw``, ``pitch``,
+            ``position_x`` / ``position_y`` / ``position_z``
+        """
+        cam = self.camera
+        v = float(value) if not isinstance(value, bool) else float(value)
+
+        if key == "fov":
+            cam.fov = float(np.clip(v, 1.0, 170.0))
+        elif key == "near":
+            cam.near = max(1e-4, v)
+        elif key == "far":
+            cam.far = max(cam.near + 1e-3, v)
+        elif key == "fstop":
+            cam.fstop = max(0.0, v)
+        elif key == "focus_distance":
+            cam.focus_distance = max(0.0, v)
+        elif key == "focal_length_mm":
+            va = 24.0  # default vertical aperture if not set elsewhere
+            cam.fov = float(np.degrees(2.0 * np.arctan(0.5 * va / max(v, 1e-3))))
+        elif key == "vertical_aperture_mm":
+            # Treat current fov as fixed by previous focal length; only used
+            # when the UI surfaces both. Re-derive fov assuming 50mm if no
+            # focal length is tracked.
+            fl = 50.0
+            cam.fov = float(np.degrees(2.0 * np.arctan(0.5 * v / max(fl, 1e-3))))
+        elif key == "yaw":
+            cam.yaw = v
+        elif key == "pitch":
+            cam.pitch = float(np.clip(v, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
+        elif self.camera_mode == "orbit":
+            if key == "distance":
+                cam.distance = float(np.clip(v, 0.5, 50.0))
+            elif key in ("target_x", "target_y", "target_z"):
+                axis = "xyz".index(key[-1])
+                cam.target[axis] = v
+        else:  # free
+            if key in ("position_x", "position_y", "position_z"):
+                axis = "xyz".index(key[-1])
+                cam.position[axis] = v
+
+        self._material_version += 1
+
+    def _walk_apply_enabled(self, node, enabled: bool, flags: dict) -> None:
+        scene = self._usd_scene
+        ref = node.renderer_ref
+        if ref is not None:
+            if ref.kind == "instance" and 0 <= ref.index < len(scene.instances):
+                scene.instances[ref.index].enabled = enabled
+                flags["instance"] = True
+            elif ref.kind == "light_dir" and 0 <= ref.index < len(scene.lights_dir):
+                scene.lights_dir[ref.index].enabled = enabled
+            elif ref.kind == "light_sphere" and 0 <= ref.index < len(scene.lights_sphere):
+                scene.lights_sphere[ref.index].enabled = enabled
+                flags["light_sphere"] = True
+            elif ref.kind == "camera" and scene.camera_override is not None:
+                scene.camera_override.enabled = enabled
+        for child in node.children:
+            self._walk_apply_enabled(child, enabled, flags)
 
     def _update_texture_pool_descriptors(self) -> None:
         """Push the current TexturePool slots into binding 14 (bindless
@@ -3004,10 +3381,13 @@ class Renderer:
         data += struct.pack("f", float(pigment_density))    # 4 bytes
         # E-2: scatterMode is no longer in FrameConstants — the per-material
         # entry in materialTypes[i] carries scatter flags in bits 8-9.
-        env_intensity = (
-            self.scene.environment.intensity if self.scene.environment is not None
-            else float(self.env_intensity)
-        )
+        env = self.scene.environment
+        if env is not None and env.enabled:
+            env_intensity = float(env.intensity)
+        elif env is not None and not env.enabled:
+            env_intensity = 0.0
+        else:
+            env_intensity = float(self.env_intensity)
         data += struct.pack("f", float(env_intensity))      # 4 bytes
         data += struct.pack("I", 1 if self.scene.furnace_mode else 0)  # 4 bytes
         data += struct.pack("f", float(self.scene.mm_per_unit))        # 4 bytes
@@ -3044,6 +3424,8 @@ class Renderer:
         # Integrator selector — 0 = path, 1 = BDPT. main_pass.slang dispatches
         # on this; PathTracer codepath is byte-identical for value 0.
         data += struct.pack("I", int(self.integrator_index))          # 4 bytes
+        # Active gizmo-segment count (bounds main_pass's overlay loop).
+        data += struct.pack("I", int(self._num_gizmo_segments))       # 4 bytes
         # No padding here — scalar layout (`-fvk-use-scalar-layout`) aligns
         # the next field (float3 lightDirection) at 4 bytes, not 16.
 
@@ -3053,8 +3435,10 @@ class Renderer:
         # analytic NEE). Multi-light scenes will iterate
         # `self.scene.lights_dir` here once the shader is updated to
         # consume a light array (Phase E).
-        if self.scene.lights_dir:
-            primary = self.scene.lights_dir[0]
+        primary = next(
+            (lt for lt in self.scene.lights_dir if lt.enabled), None,
+        )
+        if primary is not None:
             data += primary.direction.tobytes()  # 12 bytes (float3, scalar-aligned)
             data += primary.radiance.tobytes()   # 12 bytes (float3, scalar-aligned)
         else:
@@ -3202,6 +3586,8 @@ class Renderer:
         # reads from it. Cheap (a few attribute copies); rebuilt every
         # frame so UI changes propagate without an explicit notification.
         self.scene = self._build_scene_from_state()
+        if self._scene_graph is None:
+            self._ensure_default_scene_graph()
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()
@@ -3233,6 +3619,12 @@ class Renderer:
                 self.light_splat_buffer.fill_zero_sync()
         else:
             self.accum_frame += 1
+
+        # Refresh the gizmo overlay each frame (cheap CPU-side rebuild +
+        # one storage-buffer upload). Camera moves and instance edits
+        # both shift the on-screen ring, so building per-frame keeps it
+        # synced without an explicit dirty signal.
+        self._refresh_gizmo_segments()
 
     def render(self) -> None:
         f = self.current_frame
@@ -3836,4 +4228,5 @@ class Renderer:
         self.uniform_buffer.destroy()
         self.mtlx_skin_buffer.destroy()
         self.light_splat_buffer.destroy()
+        self.gizmo_segments_buffer.destroy()
         self.pipeline.destroy()

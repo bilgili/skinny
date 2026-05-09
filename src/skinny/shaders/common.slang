@@ -139,6 +139,14 @@ struct SphereLight
     float  pad;
 };
 
+struct GizmoSegment
+{
+    float2 a;       // screen-space pixel coords (origin at bottom-left)
+    float2 b;
+    float3 color;   // linear RGB
+    float  width;   // half-width in pixels
+};
+
 struct Camera
 {
     float4x4 viewInverse;
@@ -171,6 +179,7 @@ struct FrameConstants
     uint   numSphereLights;      // active count in sphereLights buffer (binding 17)
     uint   numEmissiveTriangles; // active count in emissiveTriangles buffer (binding 18)
     uint   integratorType;       // 0 = unidirectional path tracer, 1 = BDPT (flat first-hit only)
+    uint   numGizmoSegments;     // active count in gizmoSegments buffer (binding 22)
 };
 
 static const uint INTEGRATOR_PATH = 0u;

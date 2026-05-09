@@ -302,6 +302,14 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # binding 22: gizmo segment list (read-only). 32-byte records:
+            # float2 a + float2 b + float3 color + float halfWidth.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=22,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
         ]
 
         # Per-binding flags — only binding 14 needs PARTIALLY_BOUND. Vulkan

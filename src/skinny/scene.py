@@ -99,6 +99,7 @@ class MeshInstance:
     # vertex buffer. Optional because non-USD instances (legacy SDF/OBJ)
     # don't flow through Scene yet.
     source: Optional[MeshSource] = None
+    enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.transform.dtype != np.float32:
@@ -157,6 +158,7 @@ class LightDir:
 
     direction: np.ndarray  # (3,) float32, expected unit length
     radiance: np.ndarray   # (3,) float32, color × intensity in linear HDR
+    enabled: bool = True
 
     def __post_init__(self) -> None:
         self.direction = np.asarray(self.direction, np.float32).reshape(3)
@@ -176,6 +178,7 @@ class LightSphere:
     position: np.ndarray  # (3,) float32 world-space centre
     radius: float
     radiance: np.ndarray  # (3,) float32, color × intensity in linear HDR
+    enabled: bool = True
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, np.float32).reshape(3)
@@ -199,6 +202,7 @@ class CameraOverride:
     focal_length_mm: float = 50.0
     vertical_aperture_mm: float = 24.0
     focus_distance: Optional[float] = None
+    enabled: bool = True
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, np.float32).reshape(3)
@@ -215,6 +219,7 @@ class LightEnvHDR:
     name: str
     data: np.ndarray  # (H, W, 4) float32
     intensity: float = 1.0
+    enabled: bool = True
 
 
 # ─── Scene ────────────────────────────────────────────────────────────

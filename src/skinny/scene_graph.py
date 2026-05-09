@@ -172,6 +172,8 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
         if prim.IsA(UsdGeom.Xformable) and not prim.IsA(UsdGeom.Camera):
             _add_transform_props(node, prim, time, instance_map)
 
+        _add_enabled_prop(node, prim, scene, time)
+
         # Recurse children
         for child in prim.GetChildren():
             if child.IsActive() and not child.IsAbstract():
@@ -516,6 +518,54 @@ def _add_light_props(node: SceneGraphNode, prim, time) -> None:
                 ))
 
 
+def _add_enabled_prop(node: SceneGraphNode, prim, scene, time) -> None:
+    """Append an editable bool ``enabled`` property to ``node``.
+
+    Two flavours, distinguished by ``metadata['toggle']``:
+      - ``"node"``: leaf with a renderer_ref (instance/light/camera). Initial
+        value reads from the scene object's ``enabled`` flag.
+      - ``"subtree"``: an Xformable container with no renderer_ref. Initial
+        value reads from UsdGeom.Imageable visibility (``"invisible"`` ⇒ off).
+    """
+    from pxr import UsdGeom
+
+    if node.renderer_ref is not None:
+        ref = node.renderer_ref
+        initial = True
+        try:
+            if ref.kind == "instance" and 0 <= ref.index < len(scene.instances):
+                initial = bool(scene.instances[ref.index].enabled)
+            elif ref.kind == "light_dir" and 0 <= ref.index < len(scene.lights_dir):
+                initial = bool(scene.lights_dir[ref.index].enabled)
+            elif ref.kind == "light_sphere" and 0 <= ref.index < len(scene.lights_sphere):
+                initial = bool(scene.lights_sphere[ref.index].enabled)
+            elif ref.kind == "camera" and scene.camera_override is not None:
+                initial = bool(scene.camera_override.enabled)
+        except Exception:
+            initial = True
+        node.properties.append(SceneGraphProperty(
+            name="enabled", display_name="enabled",
+            type_name="bool", value=initial,
+            editable=True, metadata={"toggle": "node"},
+        ))
+        return
+
+    if prim.IsA(UsdGeom.Xformable):
+        imageable = UsdGeom.Imageable(prim)
+        initial = True
+        if imageable:
+            try:
+                vis = imageable.GetVisibilityAttr().Get(time)
+                initial = (vis != UsdGeom.Tokens.invisible)
+            except Exception:
+                initial = True
+        node.properties.append(SceneGraphProperty(
+            name="enabled", display_name="enabled",
+            type_name="bool", value=bool(initial),
+            editable=True, metadata={"toggle": "subtree"},
+        ))
+
+
 def _add_camera_props(node: SceneGraphNode, prim, time) -> None:
     from pxr import UsdGeom
     cam = UsdGeom.Camera(prim)
@@ -606,6 +656,132 @@ def _serialize_value(value: object) -> object:
 # ─── Lookup ─────────────────────────────────────────────────────────
 
 
+def inject_renderer_camera(
+    root: SceneGraphNode, camera, camera_mode: str,
+) -> None:
+    """Append a synthetic ``/Skinny/MainCamera`` node exposing the renderer's
+    active camera as editable properties.
+
+    Removes any prior synthesized node so this can be called repeatedly
+    (e.g. on camera-mode toggle).
+    """
+    SYNTH_PATH = "/Skinny/MainCamera"
+    root.children = [c for c in root.children if c.path != SYNTH_PATH]
+
+    node = SceneGraphNode(
+        path=SYNTH_PATH,
+        name="MainCamera",
+        type_name="Camera",
+        renderer_ref=RendererRef("renderer_camera", 0),
+    )
+
+    node.properties.append(SceneGraphProperty(
+        name="fov", display_name="fov (deg)",
+        type_name="float", value=float(camera.fov),
+        editable=True, metadata={"min": 1.0, "max": 170.0},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="near", display_name="near",
+        type_name="float", value=float(camera.near),
+        editable=True, metadata={"min": 1e-3, "max": 10.0},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="far", display_name="far",
+        type_name="float", value=float(camera.far),
+        editable=True, metadata={"min": 1.0, "max": 10000.0},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="fstop", display_name="f-stop",
+        type_name="float", value=float(getattr(camera, "fstop", 0.0)),
+        editable=True, metadata={"min": 0.0, "max": 32.0},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="focus_distance", display_name="focus dist",
+        type_name="float", value=float(getattr(camera, "focus_distance", 0.0)),
+        editable=True, metadata={"min": 0.0, "max": 100.0},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="yaw", display_name="yaw (rad)",
+        type_name="float", value=float(camera.yaw),
+        editable=True, metadata={"min": -math.pi * 2, "max": math.pi * 2},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="pitch", display_name="pitch (rad)",
+        type_name="float", value=float(camera.pitch),
+        editable=True, metadata={"min": -math.pi / 2, "max": math.pi / 2},
+    ))
+
+    if camera_mode == "orbit":
+        node.properties.append(SceneGraphProperty(
+            name="distance", display_name="distance",
+            type_name="float", value=float(camera.distance),
+            editable=True, metadata={"min": 0.5, "max": 50.0},
+        ))
+        target = (
+            float(camera.target[0]),
+            float(camera.target[1]),
+            float(camera.target[2]),
+        )
+        node.properties.append(SceneGraphProperty(
+            name="target", display_name="target",
+            type_name="vec3f", value=target,
+            editable=True, metadata={"camera_axis": "target"},
+        ))
+    else:
+        position = (
+            float(camera.position[0]),
+            float(camera.position[1]),
+            float(camera.position[2]),
+        )
+        node.properties.append(SceneGraphProperty(
+            name="position", display_name="position",
+            type_name="vec3f", value=position,
+            editable=True, metadata={"camera_axis": "position"},
+        ))
+
+    root.children.append(node)
+
+
+def populate_instance_refs(root: SceneGraphNode, scene) -> int:
+    """Walk ``root`` and assign ``RendererRef('instance', i)`` to every Mesh
+    node whose USD path matches a ``scene.instances[i].name``.
+
+    Returns the number of refs that were newly attached. Idempotent — nodes
+    that already have a renderer_ref are left alone.
+    """
+    name_to_idx: dict[str, int] = {}
+    for i, inst in enumerate(scene.instances):
+        if inst.name:
+            name_to_idx[inst.name] = i
+
+    updated = 0
+
+    def walk(node: SceneGraphNode) -> None:
+        nonlocal updated
+        if node.renderer_ref is None and node.type_name == "Mesh":
+            idx = name_to_idx.get(node.path)
+            if idx is not None:
+                node.renderer_ref = RendererRef("instance", idx)
+                # The 'enabled' prop was created in the Xformable branch
+                # (toggle=subtree) before we knew the ref. Re-tag it as a
+                # node toggle now that this Mesh has a renderer leaf.
+                for p in node.properties:
+                    if p.name == "enabled":
+                        p.editable = True
+                        p.metadata = dict(p.metadata)
+                        p.metadata["toggle"] = "node"
+                        try:
+                            p.value = bool(scene.instances[idx].enabled)
+                        except Exception:
+                            pass
+                updated += 1
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return updated
+
+
 def find_node_by_path(root: SceneGraphNode, path: str) -> Optional[SceneGraphNode]:
     if root.path == path:
         return root
@@ -617,6 +793,53 @@ def find_node_by_path(root: SceneGraphNode, path: str) -> Optional[SceneGraphNod
 
 
 # ─── TRS → 4x4 composition (for apply_instance_transform) ──────────
+
+
+def decompose_trs_matrix(
+    matrix: np.ndarray,
+) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    """Decompose a 4x4 row-vector-convention matrix into (translate,
+    rotate_deg, scale). Inverse of ``compose_trs_matrix``. Pitch is
+    clamped to (-90°, 90°) to avoid gimbal-lock NaN; for matrices that
+    sit on the singular pole, roll is folded into yaw.
+    """
+    m = np.asarray(matrix, dtype=np.float64)
+    tx, ty, tz = float(m[3, 0]), float(m[3, 1]), float(m[3, 2])
+
+    # Each row of the upper 3x3 carries the corresponding axis scaled by
+    # its scale factor (since we packed S then R into rows). Magnitudes
+    # recover the per-axis scales; row directions, after dividing out
+    # those magnitudes, give the rotation matrix.
+    row0 = m[0, :3]
+    row1 = m[1, :3]
+    row2 = m[2, :3]
+    sx = float(np.linalg.norm(row0))
+    sy = float(np.linalg.norm(row1))
+    sz = float(np.linalg.norm(row2))
+    if sx < 1e-9 or sy < 1e-9 or sz < 1e-9:
+        return (tx, ty, tz), (0.0, 0.0, 0.0), (sx, sy, sz)
+    r0 = row0 / sx
+    r1 = row1 / sy
+    r2 = row2 / sz
+
+    # compose_trs_matrix layout (row-vector convention):
+    #   row0 = (cy·cz,             -cy·sz,            sy)
+    #   row1 = (cx·sz + sx·sy·cz,   cx·cz - sx·sy·sz, -sx·cy)
+    #   row2 = (sx·sz - cx·sy·cz,   sx·cz + cx·sy·sz,  cx·cy)
+    sin_y = float(np.clip(r0[2], -1.0, 1.0))
+    cos_y = math.sqrt(max(0.0, 1.0 - sin_y * sin_y))
+    if cos_y > 1e-6:
+        rx = math.atan2(-r1[2], r2[2])
+        ry = math.asin(sin_y)
+        rz = math.atan2(-r0[1], r0[0])
+    else:
+        # Gimbal lock: pitch ≈ ±90°. Fold roll into yaw.
+        rx = 0.0
+        ry = math.asin(sin_y)
+        rz = math.atan2(r1[0], r1[1])
+
+    rotate_deg = (math.degrees(rx), math.degrees(ry), math.degrees(rz))
+    return (tx, ty, tz), rotate_deg, (sx, sy, sz)
 
 
 def compose_trs_matrix(
