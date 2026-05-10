@@ -35,6 +35,8 @@ from skinny.mesh_cache import (
     save_cached_mesh,
 )
 from skinny.scene import (
+    LensElement,
+    LensSystem,
     LightDir,
     LightEnvHDR,
     Material,
@@ -1000,14 +1002,85 @@ def _extract_camera(
         v_ap  = float(cam.GetVerticalApertureAttr().Get(time) or 24.0)
         focus_attr = cam.GetFocusDistanceAttr().Get(time)
         focus = float(focus_attr) if focus_attr is not None else None
+        fstop_attr = cam.GetFStopAttr().Get(time)
+        fstop = float(fstop_attr) if fstop_attr is not None else 0.0
+        lens = _extract_lens_system(prim, time)
         return CameraOverride(
             position=position,
             forward=forward,
             focal_length_mm=focal,
             vertical_aperture_mm=v_ap,
             focus_distance=focus,
+            fstop=fstop,
+            lens=lens,
         )
     return None
+
+
+def _extract_lens_system(
+    cam_prim: Usd.Prim, time: Usd.TimeCode
+) -> Optional[LensSystem]:
+    """Walk camera children for skinny:lens:* attributes.
+
+    Returns None if no child carries a `skinny:lens:role` attribute, so a
+    plain authored camera collapses to the existing pinhole path. When at
+    least one element is found, sort by `skinny:lens:order` and honour
+    each child's USD `visibility` (invisible ⇒ element disabled).
+    """
+    elements: list[tuple[int, LensElement]] = []
+    for child in cam_prim.GetChildren():
+        if not child.IsActive() or child.IsAbstract():
+            continue
+        role_attr = child.GetAttribute("skinny:lens:role")
+        if not role_attr or not role_attr.IsValid() or not role_attr.HasAuthoredValue():
+            continue
+        role_val = role_attr.Get(time)
+        role = str(role_val) if role_val is not None else "element"
+
+        radius    = _read_float(child, "skinny:lens:radius",    time, 0.0)
+        thickness = _read_float(child, "skinny:lens:thickness", time, 0.0)
+        ior       = _read_float(child, "skinny:lens:ior",       time, 1.0)
+        aperture  = _read_float(child, "skinny:lens:aperture",  time, 0.0)
+        order_attr = child.GetAttribute("skinny:lens:order")
+        order = int(order_attr.Get(time)) if order_attr and order_attr.IsValid() and order_attr.HasAuthoredValue() else len(elements)
+
+        if aperture <= 0.0:
+            log.warning(
+                "lens element %s has non-positive aperture %.3f; skipping",
+                child.GetPath(), aperture,
+            )
+            continue
+
+        enabled = True
+        imageable = UsdGeom.Imageable(child)
+        if imageable:
+            try:
+                vis = imageable.GetVisibilityAttr().Get(time)
+                enabled = (vis != UsdGeom.Tokens.invisible)
+            except Exception:
+                enabled = True
+
+        elements.append((order, LensElement(
+            radius_mm=radius,
+            thickness_mm=thickness,
+            ior=ior,
+            aperture_mm=aperture,
+            is_aperture_stop=(role == "aperture") or (radius == 0.0),
+            enabled=enabled,
+        )))
+
+    if not elements:
+        return None
+    elements.sort(key=lambda t: t[0])
+    return LensSystem(elements=[e for _, e in elements])
+
+
+def _read_float(prim: Usd.Prim, name: str, time: Usd.TimeCode, default: float) -> float:
+    attr = prim.GetAttribute(name)
+    if not attr or not attr.IsValid() or not attr.HasAuthoredValue():
+        return float(default)
+    val = attr.Get(time)
+    return float(val) if val is not None else float(default)
 
 
 def _world_transform(prim: Usd.Prim, time: Usd.TimeCode) -> np.ndarray:

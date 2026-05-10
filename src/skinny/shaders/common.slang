@@ -180,6 +180,56 @@ struct FrameConstants
     uint   numEmissiveTriangles; // active count in emissiveTriangles buffer (binding 18)
     uint   integratorType;       // 0 = unidirectional path tracer, 1 = BDPT (flat first-hit only)
     uint   numGizmoSegments;     // active count in gizmoSegments buffer (binding 22)
+    uint   numLensElements;      // active count in lensElements buffer (binding 23); 0 = pinhole
+    float  filmDistance;         // world-space distance from film plane to rear lens surface
+    float  rearZ;                // world-space z of rear surface in lens-local frame
+    float  rearAperture;         // world-space half-aperture (radius) of the rear element
+    float  frontZ;               // world-space z of front (scene-side) surface; used to anchor
+                                 // the lens so its front element sits at fc.camera.position
+    float  filmHalfH;            // half the sensor height in world units (verticalAperture/2);
+                                 // governs framing in the lens path (camera.fov is ignored there)
+    float  irisZ;                // [unused; reserved] kept so UBO byte layout matches Python
+    uint   numPupilBounds;       // active count in exitPupilBounds buffer (binding 24)
+    float  filmDiagRadiusW;      // half of the film-plane diagonal in world units; bin index =
+                                 //   floor(length(pFilm.xy) / filmDiagRadiusW · numPupilBounds)
+    uint   focusOverlay;         // 0 = off; 1 = composite the translucent focal-plane visualiser
+    float3 focusPlaneOrigin;     // world-space point on the focal plane (camera + forward·focusDist)
+    float3 focusPlaneNormal;     // unit world-space normal of the focal plane
+    float2 zoomMin;              // viewport sub-rect lower-left in [0, 1]² normalised pixel coords
+    float2 zoomMax;              // viewport sub-rect upper-right; (0,0)→(1,1) = no zoom
+    uint   lensVignetteDebug;    // 1 = render the per-pixel lens-ray success rate as grayscale
+                                 //     instead of the integrator's radiance (black corners ⇒
+                                 //     vignetting, full white ⇒ all rays survive)
+};
+
+/// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for
+/// the current zoom-rect. When the zoom rect is the full frame this
+/// reduces to the canonical `pixel/dim · 2 − 1` mapping; otherwise the
+/// sub-rect is stretched to fill the output. Use this everywhere an
+/// integrator needs a primary-ray NDC.
+float2 zoomedNDC(FrameConstants fc, uint2 pixel, float2 jitter)
+{
+    float2 uv = (float2(pixel) + 0.5 + jitter) / float2(fc.width, fc.height);
+    float2 sub = lerp(fc.zoomMin, fc.zoomMax, uv);
+    float2 ndc = sub * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    return ndc;
+}
+
+/// One spherical interface in a thick-lens stack (PBRT § 6.4).
+/// Packed as float4 (radius, thickness, ior, halfAperture) — see
+/// renderer.py::_sync_lens_buffer. Matches PBRT-v3's
+/// `LensElementInterface` exactly: `thickness` is the axial distance
+/// to the *next surface toward the film* (the rearmost element's
+/// thickness is the film distance). `ior` is the medium *between this
+/// surface and the next one toward the film*. `radius == 0` means a
+/// planar interface (the aperture stop).
+struct LensSurface
+{
+    float radius;
+    float thickness;
+    float ior;
+    float halfAperture;
 };
 
 static const uint INTEGRATOR_PATH = 0u;
@@ -365,8 +415,7 @@ float2 sampleUniformDisk(float2 u)
 Ray generateCameraRay(FrameConstants fc, uint2 pixel, inout RNG rng)
 {
     float2 jitter = rng.next2() - 0.5;
-    float2 ndc    = (float2(pixel) + 0.5 + jitter) / float2(fc.width, fc.height) * 2.0 - 1.0;
-    ndc.y         = -ndc.y;
+    float2 ndc    = zoomedNDC(fc, pixel, jitter);
 
     float4 target    = mul(fc.camera.projInverse, float4(ndc, 1.0, 1.0));
     float3 direction = mul(fc.camera.viewInverse, float4(normalize(target.xyz / target.w), 0.0)).xyz;
@@ -376,3 +425,7 @@ Ray generateCameraRay(FrameConstants fc, uint2 pixel, inout RNG rng)
     ray.direction = normalize(direction);
     return ray;
 }
+
+// generateCameraRayWithWeight() is defined in cameras/thick_lens.slang
+// (which depends on the binding-23 lens buffer and so cannot live here).
+// main_pass.slang imports cameras.thick_lens and uses that wrapper.

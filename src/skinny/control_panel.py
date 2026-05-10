@@ -137,6 +137,28 @@ class ControlPanel:
         )
         sg_btn.pack(fill="x", padx=2, pady=2)
 
+        # ── Left: Debug viewport toggle ──
+        ttk.Button(
+            left_col, text="Camera Debug View (F2)",
+            command=self._on_toggle_debug_viewport,
+        ).pack(fill="x", padx=2, pady=2)
+
+        # ── Left: Debug-view shortcuts (top/left/back) ──
+        view_row = ttk.Frame(left_col)
+        view_row.pack(fill="x", padx=2, pady=(0, 2))
+        ttk.Button(
+            view_row, text="Top (T)", width=8,
+            command=lambda: self._on_debug_view("top"),
+        ).pack(side="left", padx=(0, 2))
+        ttk.Button(
+            view_row, text="Left (L)", width=8,
+            command=lambda: self._on_debug_view("left"),
+        ).pack(side="left", padx=(0, 2))
+        ttk.Button(
+            view_row, text="Back (B)", width=8,
+            command=lambda: self._on_debug_view("back"),
+        ).pack(side="left")
+
         # ── Left: Render settings ──
         render_frame = ttk.LabelFrame(left_col, text="Render", padding=4)
         render_frame.pack(fill="x", padx=2, pady=2)
@@ -685,6 +707,29 @@ class ControlPanel:
         self._on_continuous("light_color_g", gf)
         self._on_continuous("light_color_b", bf)
         self._refresh_color_swatch()
+
+    def _on_toggle_debug_viewport(self) -> None:
+        viewport = getattr(self.renderer, "debug_viewport", None)
+        if viewport is None:
+            messagebox.showinfo(
+                "Camera Debug View",
+                "Debug viewport not initialised.",
+            )
+            return
+        viewport.toggle()
+
+    def _on_debug_view(self, which: str) -> None:
+        viewport = getattr(self.renderer, "debug_viewport", None)
+        if viewport is None:
+            return
+        if not viewport.is_open:
+            viewport.open()
+        if which == "top":
+            viewport.view_top()
+        elif which == "left":
+            viewport.view_left()
+        elif which == "back":
+            viewport.view_back()
 
     def _on_open_scene_graph(self) -> None:
         if self._scene_graph_window is not None and self._scene_graph_window.is_open():

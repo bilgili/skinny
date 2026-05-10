@@ -1,0 +1,221 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1.0
+    upAxis = "Y"
+    doc = "Debug #3 - fStop=22, focusDistance=1.5 m. Stopped down: nearly all panels sharp; image dimmer. Image must fill the window."
+)
+
+def Xform "World"
+{
+    def Material "RedMat"
+    {
+        token outputs:surface.connect = </World/RedMat/PreviewSurface.outputs:surface>
+        def Shader "PreviewSurface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/RedMat/Tex.outputs:rgb>
+            float inputs:roughness = 0.6
+            float inputs:metallic = 0.0
+            float inputs:specular = 0.3
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+        def Shader "Tex"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./textures/panel_red.png@
+            float3 outputs:rgb
+        }
+    }
+
+    def Material "OrangeMat"
+    {
+        token outputs:surface.connect = </World/OrangeMat/PreviewSurface.outputs:surface>
+        def Shader "PreviewSurface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/OrangeMat/Tex.outputs:rgb>
+            float inputs:roughness = 0.6
+            float inputs:metallic = 0.0
+            float inputs:specular = 0.3
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+        def Shader "Tex"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./textures/panel_orange.png@
+            float3 outputs:rgb
+        }
+    }
+
+    def Material "WhiteMat"
+    {
+        token outputs:surface.connect = </World/WhiteMat/PreviewSurface.outputs:surface>
+        def Shader "PreviewSurface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/WhiteMat/Tex.outputs:rgb>
+            float inputs:roughness = 0.6
+            float inputs:metallic = 0.0
+            float inputs:specular = 0.3
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+        def Shader "Tex"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./textures/panel_white.png@
+            float3 outputs:rgb
+        }
+    }
+
+    def Material "GreenMat"
+    {
+        token outputs:surface.connect = </World/GreenMat/PreviewSurface.outputs:surface>
+        def Shader "PreviewSurface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/GreenMat/Tex.outputs:rgb>
+            float inputs:roughness = 0.6
+            float inputs:metallic = 0.0
+            float inputs:specular = 0.3
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+        def Shader "Tex"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./textures/panel_green.png@
+            float3 outputs:rgb
+        }
+    }
+
+    def Material "BlueMat"
+    {
+        token outputs:surface.connect = </World/BlueMat/PreviewSurface.outputs:surface>
+        def Shader "PreviewSurface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/BlueMat/Tex.outputs:rgb>
+            float inputs:roughness = 0.6
+            float inputs:metallic = 0.0
+            float inputs:specular = 0.3
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+        def Shader "Tex"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./textures/panel_blue.png@
+            float3 outputs:rgb
+        }
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 8.0
+        color3f inputs:color = (1, 0.97, 0.92)
+        float inputs:angle = 0.5
+        float3 xformOp:rotateXYZ = (-30, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Camera "cam" (
+        references = @../lenses/dgauss50.usda@</DGauss50>
+    )
+    {
+        float focalLength = 50.0
+        float verticalAperture = 24.0
+        float horizontalAperture = 36.0
+        float focusDistance = 1.5
+        float fStop = 22.0
+        double3 xformOp:translate = (0.0, 0.5, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Panel_0p5_Red" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/RedMat>
+        point3f[] points = [(-0.15, 0.35, -0.5), (0.15, 0.35, -0.5), (0.15, 0.65, -0.5), (-0.15, 0.65, -0.5)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "Panel_1p0_Orange" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/OrangeMat>
+        point3f[] points = [(-0.15, 0.35, -1.0), (0.15, 0.35, -1.0), (0.15, 0.65, -1.0), (-0.15, 0.65, -1.0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "Panel_1p5_White" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/WhiteMat>
+        point3f[] points = [(-0.15, 0.35, -1.5), (0.15, 0.35, -1.5), (0.15, 0.65, -1.5), (-0.15, 0.65, -1.5)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "Panel_2p0_Green" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/GreenMat>
+        point3f[] points = [(-0.15, 0.35, -2.0), (0.15, 0.35, -2.0), (0.15, 0.65, -2.0), (-0.15, 0.65, -2.0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "Panel_3p0_Blue" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/BlueMat>
+        point3f[] points = [(-0.15, 0.35, -3.0), (0.15, 0.35, -3.0), (0.15, 0.65, -3.0), (-0.15, 0.65, -3.0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/WhiteMat>
+        point3f[] points = [(-3, 0, 2.5), (3, 0, 2.5), (3, 0, -4), (-3, 0, -4)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (6, 0), (6, 6), (0, 6)] (
+            interpolation = "vertex"
+        )
+    }
+}

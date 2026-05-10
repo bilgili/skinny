@@ -310,6 +310,24 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # binding 23: thick-lens elements (read-only). float4 records:
+            # (radius, thickness, ior, halfAperture) all in world units;
+            # consumed by cameras/thick_lens.slang::generateLensRay.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=23,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            # binding 24: per-film-radius exit-pupil bounds (read-only).
+            # float4 (xMin, xMax, yMin, yMax) per bin; PBRT
+            # `BoundExitPupil`. Used by `SampleExitPupil`.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=24,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
         ]
 
         # Per-binding flags — only binding 14 needs PARTIALLY_BOUND. Vulkan

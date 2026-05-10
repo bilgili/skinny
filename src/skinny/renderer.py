@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import vulkan as vk
@@ -13,7 +15,7 @@ import vulkan as vk
 from PIL import Image, ImageDraw, ImageFont
 
 from skinny.environment import Environment, load_environments
-from skinny.scene import Scene, build_default_scene
+from skinny.scene import LensSystem, Scene, build_default_scene
 from skinny.head_textures import (
     DETAIL_TEX_RES,
     blank_displacement_bytes,
@@ -52,6 +54,12 @@ from skinny.vk_compute import (
 
 WORKGROUP_SIZE = 8
 MAX_FRAMES_IN_FLIGHT = 2
+
+# Cap on lens elements packed into the binding-23 SSBO. PBRT lens designs
+# in the wild peak around 11-13 surfaces (Canon FD 200/1.8, double-Gauss
+# variants); 32 leaves headroom for compound zooms without bloating the
+# fixed SSBO allocation.
+MAX_LENS_ELEMENTS = 32
 
 # Per-instance storage record consumed by mesh_head.slang::Instance.
 # Layout (std430-compatible): worldFromLocal (mat4x4, 64 B), localFromWorld
@@ -647,8 +655,11 @@ class OrbitCamera:
     fov: float = 45.0
     near: float = 0.1
     far: float = 100.0
-    fstop: float = 0.0          # 0 ⇒ pinhole; >0 enables DOF when shader supports it
+    fstop: float = 0.0          # 0 ⇒ wide open; >0 closes the iris to f/N
     focus_distance: float = 0.0  # 0 ⇒ track orbit distance
+    focal_length_mm: float = 50.0  # used with fstop to drive iris diameter
+    vertical_aperture_mm: float = 24.0  # sensor height in mm; used by the lens path
+    lens: Optional["LensSystem"] = None  # PBRT-style thick lens; None ⇒ pinhole
 
     @property
     def position(self) -> np.ndarray:
@@ -701,6 +712,7 @@ class OrbitCamera:
             float(self.target[0]), float(self.target[1]), float(self.target[2]),
             float(self.near), float(self.far),
             float(self.fstop), float(self.focus_distance),
+            self.lens.signature() if self.lens is not None else ("lens", "none"),
         )
 
 
@@ -719,6 +731,9 @@ class FreeCamera:
     far: float = 100.0
     fstop: float = 0.0
     focus_distance: float = 0.0
+    focal_length_mm: float = 50.0
+    vertical_aperture_mm: float = 24.0
+    lens: Optional["LensSystem"] = None
 
     def forward(self) -> np.ndarray:
         cp = np.cos(self.pitch)
@@ -764,6 +779,7 @@ class FreeCamera:
             float(self.yaw), float(self.pitch), float(self.fov),
             float(self.near), float(self.far),
             float(self.fstop), float(self.focus_distance),
+            self.lens.signature() if self.lens is not None else ("lens", "none"),
         )
 
 
@@ -869,7 +885,7 @@ class Renderer:
         # environments the raw luminance swamps skin albedo once multiplied
         # through the SSS estimator; this lets the user rebalance direct vs.
         # indirect contribution.
-        self.env_intensity = 1.0
+        self.env_intensity = 0.5
 
         # Furnace / energy-conservation probe. In this mode the shader swaps
         # the head for a unit sphere, clamps the environment to white (L=1)
@@ -988,10 +1004,18 @@ class Renderer:
         return self.orbit_camera if self.camera_mode == "orbit" else self.free_camera
 
     def reset_camera(self) -> None:
-        """Snap both cameras back to a known-good frame on the head."""
+        """Snap both cameras back to a known-good frame on the head.
+
+        Re-applies the active scene's camera override afterwards so the
+        authored thick lens / focus distance / fstop are not lost when
+        the user hits F.
+        """
         self.orbit_camera = OrbitCamera()
         self.free_camera = FreeCamera()
         self.camera_mode = "orbit"
+        if self._usd_scene is not None and self._usd_scene.camera_override is not None:
+            self._apply_camera_override(self._usd_scene)
+        self._refresh_camera_node()
 
     def toggle_camera_mode(self) -> None:
         """Flip between orbit and free while preserving the current viewpoint."""
@@ -1169,6 +1193,16 @@ class Renderer:
         self.orbit_camera.yaw = yaw
         self.orbit_camera.pitch = pitch
         self.orbit_camera.fov = fov_v_deg
+        self.orbit_camera.focal_length_mm = float(ov.focal_length_mm)
+        self.orbit_camera.vertical_aperture_mm = float(ov.vertical_aperture_mm)
+        self.orbit_camera.fstop = float(ov.fstop)
+        self.orbit_camera.focus_distance = float(d)
+        self.orbit_camera.lens = ov.lens
+        self.free_camera.focal_length_mm = float(ov.focal_length_mm)
+        self.free_camera.vertical_aperture_mm = float(ov.vertical_aperture_mm)
+        self.free_camera.fstop = float(ov.fstop)
+        self.free_camera.focus_distance = float(d)
+        self.free_camera.lens = ov.lens
 
     def _frame_camera_to_mesh(self, source: MeshSource) -> None:
         """Auto-fit orbit camera to a MeshSource's bounding box."""
@@ -1554,13 +1588,10 @@ class Renderer:
             if env_hdr.intensity > 0:
                 self.env_intensity = float(env_hdr.intensity)
         else:
-            # USD scene without a DomeLight: assume the scene is self-
-            # contained (Cornell-style closed interior, emissive lights,
-            # or just a dim direct-only setup). Mute the built-in noon-
-            # sky so indirect bounces don't get swamped. The user can
-            # bump env_intensity via the UI when a scene like test_scene
-            # wants chrome reflections of the default env.
-            self.env_intensity = 0.0
+            # USD scene without a DomeLight: keep a soft IBL fill so
+            # indirect bounces don't black out closed interiors / direct-
+            # only setups. 0.5 reads as "ambient", easy to dial up.
+            self.env_intensity = 0.5
 
     def _init_default_light_stage(self) -> None:
         """Create an anonymous in-memory stage with /Skinny/DefaultLight as a
@@ -1860,6 +1891,55 @@ class Renderer:
         )
         self.gizmo = RotateGizmo()
         self._num_gizmo_segments: int = 0
+        self.show_focus_overlay: bool = False
+        self.lens_vignette_debug: bool = False
+
+        # Viewport zoom-rect: a sub-rectangle of the output (in
+        # normalised pixel coords) that gets stretched to fill the
+        # window. (0,0)→(1,1) means no zoom; tighter bounds magnify a
+        # selected region without moving the camera.
+        self.zoom_rect: list[float] = [0.0, 0.0, 1.0, 1.0]
+        # Live drag rectangle (pixel coords) — drawn as a yellow outline
+        # via the gizmo segment list while the user picks a sub-region.
+        self._zoom_drag_overlay: Optional[tuple[float, float, float, float]] = None
+
+        # Thick-lens element buffer (binding 23). Each element is a
+        # 16-byte float4: (radius_world, thickness_world, ior, half_aperture_world).
+        # Capped at MAX_LENS_ELEMENTS so the SSBO size is fixed at startup.
+        # Repacked from the active camera's `LensSystem` whenever the lens
+        # signature changes; otherwise reused frame to frame.
+        self.lens_element_capacity = MAX_LENS_ELEMENTS
+        self.lens_element_stride = 16   # float4
+        self.lens_elements_buffer = StorageBuffer(
+            self.ctx,
+            self.lens_element_capacity * self.lens_element_stride + 16,
+        )
+        self.lens_elements_buffer.upload_sync(
+            b"\x00" * (self.lens_element_capacity * self.lens_element_stride)
+        )
+        self._packed_lens_signature: object = None
+        self._lens_film_distance_world: float = 0.0
+        self._lens_rear_z_world: float = 0.0
+        self._lens_rear_aperture_world: float = 0.0
+        self._lens_front_z_world: float = 0.0
+        self._lens_iris_z_world: float = 0.0
+        self._lens_active_count: int = 0
+        self._lens_film_diag_world: float = 0.0
+        self._lens_num_pupil_bounds: int = 0
+        # Exit-pupil bounds buffer (binding 24): 64 × float4
+        # (xMin, xMax, yMin, yMax) per film-radius bin. PBRT's
+        # `BoundExitPupil`. Lets the shader sample only the rear-disk
+        # subregion that produces non-vignetted rays for each pixel,
+        # keeping the rendered area full-screen even at small fstops.
+        self.lens_pupil_capacity = 64
+        self.lens_pupil_stride = 16
+        self.lens_pupil_buffer = StorageBuffer(
+            self.ctx,
+            self.lens_pupil_capacity * self.lens_pupil_stride + 16,
+        )
+        self.lens_pupil_buffer.upload_sync(
+            b"\x00" * (self.lens_pupil_capacity * self.lens_pupil_stride)
+        )
 
         # Bumped any time apply_material_override mutates a scene material's
         # parameter_overrides. Hashed into _current_state_hash so the
@@ -1948,10 +2028,11 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 13 = vertices+indices+bvh+instances+flatMaterials+
+                # 15 = vertices+indices+bvh+instances+flatMaterials+
                 #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
-                #      stdSurface+procedural+lightSplat+gizmoSegments.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * 13,
+                #      stdSurface+procedural+lightSplat+gizmoSegments+
+                #      lensElements+lensPupilBounds.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * 15,
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -2072,6 +2153,16 @@ class Renderer:
                 buffer=self.gizmo_segments_buffer.buffer,
                 offset=0,
                 range=self.gizmo_segments_buffer.size,
+            )
+            lens_info = vk.VkDescriptorBufferInfo(
+                buffer=self.lens_elements_buffer.buffer,
+                offset=0,
+                range=self.lens_elements_buffer.size,
+            )
+            lens_pupil_info = vk.VkDescriptorBufferInfo(
+                buffer=self.lens_pupil_buffer.buffer,
+                offset=0,
+                range=self.lens_pupil_buffer.size,
             )
             writes = [
                 vk.VkWriteDescriptorSet(
@@ -2241,6 +2332,22 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     pBufferInfo=[gizmo_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=23,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[lens_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=24,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[lens_pupil_info],
                 ),
             ]
             output_info = vk.VkDescriptorImageInfo(
@@ -2418,10 +2525,12 @@ class Renderer:
                 return
             self._usd_scene = scene
             self._scene_graph = sg
-            self._refresh_camera_node()
             self._gen_scene_materials()
             self._apply_usd_lights(scene)
             self._frame_camera_to_scene(scene)
+            # Inject /Skinny/MainCamera *after* _apply_camera_override so the
+            # node snapshot captures any authored thick lens.
+            self._refresh_camera_node()
             if scene.mm_per_unit != 120.0:
                 self.mm_per_unit = scene.mm_per_unit
             if scene.instances:
@@ -2944,15 +3053,12 @@ class Renderer:
         self.gizmo.end_drag()
 
     def _refresh_gizmo_segments(self) -> None:
-        if not self.gizmo.has_target:
-            if self._num_gizmo_segments != 0:
-                self._upload_gizmo_segments([])
-            return
         view = self.camera.view_matrix()
         proj = self.camera.projection_matrix(self.width / max(self.height, 1))
+
         # Refresh pivot from the live instance transform so dragging
         # follows the geometry.
-        if self._usd_scene is not None:
+        if self.gizmo.has_target and self._usd_scene is not None:
             idx = self.gizmo.target_index
             if 0 <= idx < len(self._usd_scene.instances):
                 pivot = np.array(
@@ -2960,8 +3066,138 @@ class Renderer:
                     dtype=np.float32,
                 )
                 self.gizmo.pivot_world = pivot
-        segs = self.gizmo.build_segments(view, proj, self.width, self.height)
+
+        segs: list = []
+        if self.gizmo.has_target:
+            segs.extend(
+                self.gizmo.build_segments(view, proj, self.width, self.height)
+            )
+        if self._zoom_drag_overlay is not None:
+            from skinny.gizmo import GizmoSegment
+            x0, y0, x1, y1 = self._zoom_drag_overlay
+            color = (0.95, 0.85, 0.20)
+            for ax, ay, bx, by in (
+                (x0, y0, x1, y0), (x1, y0, x1, y1),
+                (x1, y1, x0, y1), (x0, y1, x0, y0),
+            ):
+                segs.append(GizmoSegment(
+                    ax=ax, ay=ay, bx=bx, by=by,
+                    r=color[0], g=color[1], b=color[2], width=1.5,
+                ))
+
+        if not segs and self._num_gizmo_segments == 0:
+            return
         self._upload_gizmo_segments(segs)
+
+    def set_zoom_drag_overlay(
+        self, rect: Optional[tuple[float, float, float, float]],
+    ) -> None:
+        """Display (or clear) a yellow rectangle over the viewport while
+        the user is picking a zoom region."""
+        self._zoom_drag_overlay = rect
+
+    def commit_zoom_rect(
+        self,
+        start_px: tuple[float, float],
+        end_px: tuple[float, float],
+    ) -> None:
+        """Commit a pixel-space rectangle as the new viewport zoom
+        sub-region. Tiny drags are ignored to avoid jumping into a
+        single-pixel zoom by accident; degenerate inputs reset to
+        full-frame.
+        """
+        x0 = min(start_px[0], end_px[0])
+        x1 = max(start_px[0], end_px[0])
+        y0 = min(start_px[1], end_px[1])
+        y1 = max(start_px[1], end_px[1])
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return  # treat as a click, not a drag
+        u0 = float(np.clip(x0 / max(self.width, 1), 0.0, 1.0))
+        u1 = float(np.clip(x1 / max(self.width, 1), 0.0, 1.0))
+        v0 = float(np.clip(y0 / max(self.height, 1), 0.0, 1.0))
+        v1 = float(np.clip(y1 / max(self.height, 1), 0.0, 1.0))
+        # GLFW pixel y goes top→bottom; UBO zoom uv expects 0=top to
+        # match the existing pinhole's `ndc.y = -ndc.y` convention.
+        self.zoom_rect = [u0, v0, u1, v1]
+        self._material_version += 1   # force accumulation reset
+
+    def reset_zoom_rect(self) -> None:
+        self.zoom_rect = [0.0, 0.0, 1.0, 1.0]
+        self._material_version += 1
+
+    def apply_camera_lens_file(self, path: str) -> bool:
+        """Load a `.usda` lens definition and attach it to the active
+        camera, replacing any current lens stack. The file may be a
+        bare lens prim (a top-level `Xform` with `skinny:lens:*` child
+        prims) or any prim path; we walk the children until we find
+        the first child carrying a `skinny:lens:role` attribute.
+        Returns True on success.
+        """
+        from pathlib import Path
+        try:
+            from pxr import Usd
+            from skinny.usd_loader import _extract_lens_system
+        except Exception as exc:
+            print(f"[skinny] lens load failed (USD unavailable): {exc}", flush=True)
+            return False
+        p = Path(path)
+        if not p.is_file():
+            print(f"[skinny] lens load failed: {p} not found", flush=True)
+            return False
+        try:
+            stage = Usd.Stage.Open(str(p))
+        except Exception as exc:
+            print(f"[skinny] lens load failed to open stage: {exc}", flush=True)
+            return False
+        # Walk every prim and use the first one whose children include
+        # at least one lens-element child.
+        ls = None
+        for prim in stage.Traverse():
+            if not prim.IsActive() or prim.IsAbstract():
+                continue
+            ls = _extract_lens_system(prim, Usd.TimeCode.Default())
+            if ls is not None:
+                break
+        if ls is None:
+            print(f"[skinny] lens load: no skinny:lens:* prims found in {p}", flush=True)
+            return False
+        self.orbit_camera.lens = ls
+        self.free_camera.lens = ls
+        self._material_version += 1
+        self._refresh_camera_node()
+        print(
+            f"[skinny] lens loaded: {p.name} ({len(ls.elements)} elements)",
+            flush=True,
+        )
+        return True
+
+    def _focus_plane_state(self) -> tuple[bool, np.ndarray, np.ndarray]:
+        """Return (enabled, origin, normal) for the focal-plane visualiser.
+
+        Origin = camera_position + forward · focus_distance.
+        Normal = forward (so the plane faces the camera and ray-plane
+        intersection is well-defined). Disabled state still returns
+        valid arrays so the UBO layout stays fixed.
+        """
+        cam = self.camera
+        if hasattr(cam, "forward") and callable(cam.forward):
+            fwd = np.asarray(cam.forward(), dtype=np.float32)
+        else:
+            tgt = np.asarray(cam.target, dtype=np.float32)
+            pos = np.asarray(cam.position, dtype=np.float32)
+            fwd = tgt - pos
+        n = float(np.linalg.norm(fwd))
+        if n < 1e-9:
+            fwd = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        else:
+            fwd = (fwd / n).astype(np.float32)
+
+        focus = float(getattr(cam, "focus_distance", 0.0))
+        if focus <= 1e-3:
+            focus = float(getattr(cam, "distance", 5.0))
+        origin = (np.asarray(cam.position, dtype=np.float32) + fwd * focus).astype(np.float32)
+        enabled = bool(getattr(self, "show_focus_overlay", False))
+        return enabled, origin, fwd
 
     def _upload_gizmo_segments(self, segments: list) -> None:
         n = min(len(segments), self.gizmo_segment_capacity)
@@ -3008,9 +3244,18 @@ class Renderer:
             return
         from skinny.scene_graph import inject_renderer_camera
         inject_renderer_camera(self._scene_graph, self.camera, self.camera_mode)
+        # Bump the version so scene_graph_window.tick() repopulates its tree
+        # — the graph object itself is mutated in place, so an `id()`
+        # comparison alone wouldn't trigger a redraw.
+        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
 
     def apply_camera_param(self, key: str, value: object) -> None:
         """Mutate a single parameter on the active camera.
+
+        Logs every write so the scene-graph window's slider/checkbox
+        edits are observable on the console (`[skinny] camera.<key> =
+        <value>`). Filtered to one line per call to keep the noise
+        bounded.
 
         Keys:
           - ``fov`` (degrees)
@@ -3036,6 +3281,9 @@ class Renderer:
             cam.fstop = max(0.0, v)
         elif key == "focus_distance":
             cam.focus_distance = max(0.0, v)
+        elif key == "lens_enabled":
+            if cam.lens is not None:
+                cam.lens.enabled = bool(value)
         elif key == "focal_length_mm":
             va = 24.0  # default vertical aperture if not set elsewhere
             cam.fov = float(np.degrees(2.0 * np.arctan(0.5 * va / max(v, 1e-3))))
@@ -3061,6 +3309,26 @@ class Renderer:
                 cam.position[axis] = v
 
         self._material_version += 1
+        try:
+            print(f"[skinny] camera.{key} = {value!r}", flush=True)
+        except Exception:
+            pass
+        # Hard reset the accumulation when the camera *model* toggles,
+        # so the previous frames' pinhole / lens samples don't bleed
+        # through the running mean while the state-hash detection
+        # catches up.
+        if key == "lens_enabled":
+            self.accum_frame = 0
+            if hasattr(self, "light_splat_buffer"):
+                try:
+                    self.light_splat_buffer.fill_zero_sync()
+                except Exception:
+                    pass
+        # Note: do *not* bump _scene_graph_version here — the property
+        # widgets are bound to the live SceneGraphProperty objects, so
+        # rebuilding the tree mid-drag would destroy the slider the
+        # user is interacting with. Structural refreshes happen via
+        # _refresh_camera_node only.
 
     def _walk_apply_enabled(self, node, enabled: bool, flags: dict) -> None:
         scene = self._usd_scene
@@ -3347,7 +3615,215 @@ class Renderer:
         self.tattoo_image.upload_sync(self.tattoos[self.tattoo_index].data)
         self._last_tattoo_index = self.tattoo_index
 
+    def _sync_lens_buffer(self) -> None:
+        """Repack lens_elements_buffer if the active camera's lens has
+        changed since the last upload. Sets self._lens_* fields used by
+        _pack_uniforms.
+
+        f-stop coupling: when ``camera.fstop > 0`` the aperture-stop
+        element's clear-aperture diameter is overridden to
+        ``focal_length_mm / fstop`` (clamped not to exceed the authored
+        design aperture, since a real iris can stop down but not open
+        wider than the lens design allows).
+        """
+        lens = getattr(self.camera, "lens", None)
+        fstop = float(getattr(self.camera, "fstop", 0.0))
+        focal = float(getattr(self.camera, "focal_length_mm", 50.0))
+        focus_d = float(getattr(self.camera, "focus_distance", 0.0))
+        # Combined cache key: lens identity + iris-driving inputs +
+        # focus distance (drives the rear-element-to-film gap below).
+        sig = (
+            lens.signature() if lens is not None else None,
+            round(fstop, 6),
+            round(focal, 6),
+            round(focus_d, 6),
+        )
+        if sig == self._packed_lens_signature:
+            return
+
+        active = lens.active_elements if lens is not None else []
+        n = min(len(active), self.lens_element_capacity)
+        if n == 0:
+            if self._lens_active_count != 0:
+                zeros = b"\x00" * (self.lens_element_capacity * self.lens_element_stride)
+                self.lens_elements_buffer.upload_sync(zeros)
+            self._lens_active_count = 0
+            self._lens_film_distance_world = 0.0
+            self._lens_rear_z_world = 0.0
+            self._lens_rear_aperture_world = 0.0
+            self._lens_front_z_world = 0.0
+            self._packed_lens_signature = sig
+            return
+
+        # mm → world via Scene.mm_per_unit (1 world unit = N mm).
+        mm_per_unit = float(self.scene.mm_per_unit) if self.scene.mm_per_unit > 0 else 1.0
+        scale = 1.0 / mm_per_unit  # world units per mm
+
+        # Element thicknesses in world units, in PBRT order (index 0 =
+        # front, index N-1 = rear).
+        thicknesses_world = [float(e.thickness_mm) * scale for e in active]
+
+        # PBRT FocusThickLens — paraxial-trace through the actual lens
+        # to find the principal-plane positions, then solve for the
+        # rear-element-to-film gap that images `focus_distance` onto
+        # the film. This is exact for the lens design (subject to the
+        # paraxial approximation), unlike the naive `F²/(s−F)`
+        # thin-lens shortcut which assumes the authored
+        # focalLength = effective F (often false for real designs).
+        if focus_d > 0.0:
+            from skinny.lens_optics import LensInterface, focus_thick_lens
+            elems_for_focus = [
+                LensInterface(
+                    radius=float(e.radius_mm),
+                    thickness=float(e.thickness_mm),
+                    ior=float(e.ior),
+                    half_aperture=float(e.aperture_mm) * 0.5,
+                    is_stop=bool(e.is_aperture_stop),
+                )
+                for e in active
+            ]
+            va_mm_focus = float(getattr(self.camera, "vertical_aperture_mm", 24.0))
+            film_diag_focus = math.sqrt(va_mm_focus * va_mm_focus
+                                        + (va_mm_focus * 1.5) ** 2)
+            try:
+                new_rear_mm = focus_thick_lens(
+                    elems_for_focus, film_diag_focus, focus_d * mm_per_unit,
+                )
+                thicknesses_world[-1] = new_rear_mm * scale
+            except Exception:
+                pass    # paraxial trace failed — keep authored back focal length
+
+        film_distance = thicknesses_world[-1]
+        front_z = sum(thicknesses_world)
+
+        # Iris diameter (mm) implied by the user's f-stop. Stops down
+        # the aperture-stop element only; PBRT additionally precomputes
+        # the *exit pupil* (image of the iris seen through any lens
+        # elements between it and the film) and samples within that
+        # bound to keep almost every sample valid. We approximate
+        # without the per-film-position bound by linearly projecting
+        # the iris through the in-between elements onto the rear plane:
+        #     r_rear ≈ irisHalfAp · (rearZ / irisZ)
+        # This is exact for axial film points and a thin air gap; for
+        # off-axis points it is conservative enough that most samples
+        # survive the iris clip rather than getting averaged in as
+        # zeros. Without this, large fstops vignette > 99 % of rays and
+        # the image reads as black/noise instead of sharp pinhole.
+        iris_diameter_mm = (focal / fstop) if fstop > 1e-6 else 0.0
+        authored_rear_half = 0.5 * float(active[-1].aperture_mm) * scale
+        # Locate the iris element to size the cone.
+        iris_idx = next(
+            (k for k, e in enumerate(active) if e.is_aperture_stop),
+            None,
+        )
+        if iris_idx is None:
+            rear_aperture_world = authored_rear_half
+        else:
+            iris_half_world = 0.5 * float(active[iris_idx].aperture_mm) * scale
+            if iris_diameter_mm > 0.0:
+                iris_half_world = min(iris_half_world, 0.5 * iris_diameter_mm * scale)
+            # Distance from rear surface to iris (sum of thicknesses
+            # between iris and rear inclusive of iris's own thickness).
+            iris_to_rear = sum(thicknesses_world[iris_idx:])
+            iris_z_abs = iris_to_rear  # |irisZ| in PBRT-speak (rearZ is at thickness[-1])
+            rear_z_abs = thicknesses_world[-1]
+            if iris_z_abs > 1e-9:
+                projected = iris_half_world * (rear_z_abs / iris_z_abs)
+                rear_aperture_world = min(authored_rear_half, projected)
+            else:
+                rear_aperture_world = authored_rear_half
+
+        # Pack float4 per element: (radius, thickness, ior, halfAperture).
+        # Matches PBRT-v3's LensElementInterface; the shader walks
+        # rear→front decrementing a running `elementZ` by `thickness`.
+        buf = bytearray(self.lens_element_capacity * self.lens_element_stride)
+        for k, e in enumerate(active[:n]):
+            radius_world = float(e.radius_mm) * scale
+            thickness_world = thicknesses_world[k]
+            aperture_mm = float(e.aperture_mm)
+            if e.is_aperture_stop and iris_diameter_mm > 0.0:
+                aperture_mm = min(aperture_mm, iris_diameter_mm)
+            half_ap_world = 0.5 * aperture_mm * scale
+            struct.pack_into(
+                "ffff", buf, k * self.lens_element_stride,
+                radius_world, thickness_world, float(e.ior), half_ap_world,
+            )
+        self.lens_elements_buffer.upload_sync(bytes(buf))
+
+        # PBRT exit-pupil bounds — pre-compute the rear-plane rectangle
+        # of valid (non-vignetting) lens samples per film radius, so
+        # closing the iris doesn't shrink the rendered area to a
+        # central pinhole at the cost of off-axis pixels.
+        from skinny.lens_optics import LensInterface, compute_exit_pupil_bounds
+        lens_in_mm = [
+            LensInterface(
+                radius=float(e.radius_mm),
+                thickness=float(e.thickness_mm),
+                ior=float(e.ior),
+                half_aperture=float(e.aperture_mm) * 0.5,
+                is_stop=bool(e.is_aperture_stop),
+            )
+            for e in active
+        ]
+        if iris_diameter_mm > 0.0:
+            for li in lens_in_mm:
+                if li.is_stop:
+                    li.half_aperture = min(li.half_aperture, 0.5 * iris_diameter_mm)
+                    break
+        # Mirror the autofocus rear-thickness adjustment so the bounds
+        # are computed against the same lens geometry the shader sees.
+        # Ignored if the focus_thick_lens helper isn't available.
+        if focus_d > 0.0:
+            try:
+                from skinny.lens_optics import focus_thick_lens
+                lens_in_mm[-1].thickness = focus_thick_lens(
+                    lens_in_mm,
+                    math.sqrt(24.0 * 24.0 + 36.0 * 36.0),
+                    focus_d * mm_per_unit,
+                )
+            except Exception:
+                pass
+        va_mm = float(getattr(self.camera, "vertical_aperture_mm", 24.0))
+        film_diag_mm = math.sqrt(va_mm * va_mm + (va_mm * 1.5) ** 2)
+        n_bins = 16
+        bounds_mm = compute_exit_pupil_bounds(
+            lens_in_mm, film_diag_mm, num_bounds=n_bins, samples_per_bound=64,
+        )
+        bounds_world = bounds_mm * float(scale)
+        upload = np.zeros((self.lens_pupil_capacity, 4), dtype=np.float32)
+        upload[:n_bins] = bounds_world
+        self.lens_pupil_buffer.upload_sync(upload.tobytes())
+
+        self._lens_active_count = n
+        self._lens_film_distance_world = float(film_distance)
+        self._lens_rear_z_world = float(film_distance)   # |LensRearZ()| in PBRT-speak
+        self._lens_rear_aperture_world = float(rear_aperture_world)
+        self._lens_front_z_world = float(front_z)
+        self._lens_iris_z_world = 0.0   # legacy; no longer consumed
+        self._lens_film_diag_world = float(film_diag_mm) * float(scale)
+        self._lens_num_pupil_bounds = int(n_bins)
+        self._packed_lens_signature = sig
+
+        # Throttle the diagnostic — slider drags re-sign the lens every
+        # frame, and a print per frame on the main thread compounds with
+        # GLFW/Tk message-pump pressure during a window resize.
+        now = time.perf_counter()
+        last = getattr(self, "_last_lens_print_t", 0.0)
+        if now - last > 0.5:
+            iris_mm = (focal / fstop) if fstop > 1e-6 else float("inf")
+            print(
+                f"[skinny] lens repack: N={n} "
+                f"filmDist={film_distance:.3f}wu "
+                f"frontZ={front_z:.3f}wu "
+                f"rearAp={rear_aperture_world:.3f}wu "
+                f"fstop={fstop:.2f} iris={iris_mm:.2f}mm "
+                f"mm_per_unit={mm_per_unit:.2f}",
+                flush=True,
+            )
+            self._last_lens_print_t = now
+
     def _pack_uniforms(self) -> bytes:
+        self._sync_lens_buffer()
         aspect = self.width / self.height
         view_fwd = self.camera.view_matrix()
         proj_fwd = self.camera.projection_matrix(aspect)
@@ -3426,6 +3902,51 @@ class Renderer:
         data += struct.pack("I", int(self.integrator_index))          # 4 bytes
         # Active gizmo-segment count (bounds main_pass's overlay loop).
         data += struct.pack("I", int(self._num_gizmo_segments))       # 4 bytes
+        # Thick-lens parameters. numLensElements > 0 swaps the pinhole ray
+        # generator for cameras/thick_lens.slang::generateLensRay. All
+        # distances are in world units (Scene.mm_per_unit applied).
+        data += struct.pack("I", int(self._lens_active_count))        # 4 bytes
+        data += struct.pack("f", float(self._lens_film_distance_world))   # 4 bytes
+        data += struct.pack("f", float(self._lens_rear_z_world))          # 4 bytes
+        data += struct.pack("f", float(self._lens_rear_aperture_world))   # 4 bytes
+        data += struct.pack("f", float(self._lens_front_z_world))         # 4 bytes
+        # Sensor half-height in world units. Lens path frames the image
+        # off this (verticalAperture/2 / mm_per_unit), making `camera.fov`
+        # inert when a lens is active — the lens stack alone determines
+        # field of view.
+        # Sensor half-height adjusted so the lens path frames the same
+        # field of view as the pinhole. Pinhole's fov derives from the
+        # idealised image distance F (focal length); the realistic lens
+        # actually images onto a plane at the back focal length BFL ≠ F
+        # for a thick lens, which would otherwise widen or narrow the
+        # frame on lens enable. Scale by `filmDistance / F` so a unit
+        # NDC at the lens path projects to the same world angle as it
+        # does through the pinhole.
+        va_mm = float(getattr(self.camera, "vertical_aperture_mm", 24.0))
+        focal_mm = float(getattr(self.camera, "focal_length_mm", 50.0))
+        mm_per_unit = max(float(self.scene.mm_per_unit), 1e-6)
+        film_half_h_world = 0.5 * va_mm / mm_per_unit
+        if self._lens_active_count > 0 and focal_mm > 1e-3:
+            ratio = self._lens_film_distance_world / (focal_mm / mm_per_unit)
+            film_half_h_world *= ratio
+        data += struct.pack("f", film_half_h_world)                        # 4 bytes
+        data += struct.pack("f", float(self._lens_iris_z_world))           # 4 bytes
+        data += struct.pack("I", int(self._lens_num_pupil_bounds))         # 4 bytes
+        data += struct.pack("f", float(self._lens_film_diag_world * 0.5))  # 4 bytes
+        # Focal-plane visualiser: a translucent infinite plane main_pass.slang
+        # alpha-composites over the integrator output when `focusOverlay`==1.
+        # Plane is defined by a world-space origin and unit normal — origin
+        # sits at camera + forward · focus_distance, normal = forward.
+        focus_on, fp_origin, fp_normal = self._focus_plane_state()
+        data += struct.pack("I", 1 if focus_on else 0)                  # 4 bytes
+        data += fp_origin.tobytes()                                      # 12 bytes
+        data += fp_normal.tobytes()                                      # 12 bytes
+        # Viewport zoom-rect — sub-region of the output in [0, 1]² that
+        # gets stretched to fill the window.
+        zr = self.zoom_rect
+        data += struct.pack("ff", float(zr[0]), float(zr[1]))            # 8 bytes (zoomMin)
+        data += struct.pack("ff", float(zr[2]), float(zr[3]))            # 8 bytes (zoomMax)
+        data += struct.pack("I", 1 if getattr(self, "lens_vignette_debug", False) else 0)  # 4 bytes
         # No padding here — scalar layout (`-fvk-use-scalar-layout`) aligns
         # the next field (float3 lightDirection) at 4 bytes, not 16.
 
