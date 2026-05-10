@@ -17,6 +17,7 @@ import scene_trace;
 import environment;
 import integrators.path;
 import integrators.bdpt;
+import cameras.thick_lens;
 
 // ── Tonemapping ─────────────────────────────────────────────────
 
@@ -60,14 +61,46 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
         return;
 
     RNG rng = createRNG(pixel, fc.frameIndex);
-    Ray ray = generateCameraRay(fc, pixel, rng);
+
+    // Vignette-debug mode: sample N lens rays at this pixel, count how
+    // many produce a non-zero throughput, and output the success rate
+    // as grayscale. Bypasses the integrator entirely so the cost is
+    // bounded. Skips when no lens is active (success rate ≡ 1).
+    if (fc.lensVignetteDebug != 0u && fc.numLensElements > 0u)
+    {
+        const uint N = 16u;
+        uint hits = 0u;
+        for (uint s = 0u; s < N; ++s)
+        {
+            float w;
+            generateLensRay(fc, pixel, rng, w);
+            if (w > 0.0) hits += 1u;
+        }
+        float rate = float(hits) / float(N);
+        float3 col = lerp(float3(0.6, 0.0, 0.0),    // red = vignetted
+                          float3(0.0, 0.9, 0.0),    // green = passing
+                          rate);
+        outputBuffer[pixel] = float4(col, 1.0);
+        return;
+    }
+
+    float lensWeight;
+    Ray ray = generateCameraRayWithWeight(fc, pixel, rng, lensWeight);
     HitInfo hit = traceScene(fc, ray);
 
     float3 sample;
 
     bool useBdpt = (fc.integratorType == INTEGRATOR_BDPT)
                 && hit.hit
-                && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT);
+                && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT)
+                // BDPT's `projectToCamera` uses pinhole `camera.proj` /
+                // `view`, so the s=1 light-tracer splat would land on
+                // pixels that don't correspond to the lens-traced eye
+                // ray. Fall back to the unidirectional path tracer
+                // when a thick lens is active. (Splat buffer stays
+                // zero in this case, so the unconditional composite
+                // below contributes nothing.)
+                && (fc.numLensElements == 0u);
 
     if (useBdpt)
     {
@@ -83,6 +116,11 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
     {
         sample = sceneEnvRadiance(ray.direction, fc.envIntensity, fc.furnaceMode);
     }
+
+    // Apply the realistic-camera throughput weight (cos⁴θ / Z² · A_rear,
+    // PBRT eq. 6.10). For pinhole rays this factor is 1.0; for vignetted
+    // / TIR'd lens rays it is 0.0 and the sample blacks out.
+    sample *= lensWeight;
 
     // Sanitize NaN / Inf / negative components without nuking healthy
     // channels: a tiny float-noise negative in green should not zero out
@@ -122,6 +160,32 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
     accum = accum + splatMean;
 
     float3 display = linearToSRGB(acesFilmic(accum));
+
+    // Focal-plane visualiser: an infinite world-space plane (origin
+    // `focusPlaneOrigin`, normal `focusPlaneNormal`). Intersect the
+    // primary ray with the plane; if the intersection sits in front of
+    // the camera and in front of the scene hit, alpha-blend a
+    // translucent blue tint over `display`. The plane fades out
+    // grazing-on so it reads as a soft sheet rather than a hard mask.
+    if (fc.focusOverlay != 0u)
+    {
+        float denom = dot(ray.direction, fc.focusPlaneNormal);
+        if (abs(denom) > 1e-5)
+        {
+            float tPlane = dot(fc.focusPlaneOrigin - ray.origin,
+                               fc.focusPlaneNormal) / denom;
+            float sceneT = hit.hit ? hit.t : 1e30;
+            if (tPlane > 1e-3 && tPlane < sceneT)
+            {
+                // Grazing-angle falloff: dimmer when looking edge-on so the
+                // plane reads volumetrically without a hard horizon line.
+                float facing = clamp(abs(denom), 0.0, 1.0);
+                float alpha = 0.32 * facing;
+                float3 planeColor = float3(0.20, 0.55, 1.00);
+                display = lerp(display, planeColor, alpha);
+            }
+        }
+    }
 
     if (hit.hit && effectiveFurnaceMode(hit.materialId) != 0u)
     {

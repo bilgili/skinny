@@ -203,6 +203,11 @@ Keyboard and mouse controls are shown in the on-screen HUD.
 | `R` | Reset parameters |
 | `P` | Print all parameters |
 | `H` | Print help |
+| `L` | Toggle lens focus overlay |
+| `V` | Toggle lens vignette debug (green=ray valid, red=clipped) |
+| `Z` | Arm zoom rectangle (drag in viewport, release to apply) |
+| `X` | Reset zoom rectangle |
+| `F2` | Toggle debug viewport window |
 | `Space / F1` | Toggle HUD |
 | `Esc` | Quit |
 

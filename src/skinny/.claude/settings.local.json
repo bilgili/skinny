@@ -160,7 +160,9 @@
       "Bash(Format-Table FullName)",
       "Bash(findstr /R \"generateCameraRay\\\\|generateRay\\\\|cameraRay\" shaders/*.slang)",
       "Bash(xargs grep -l \"migration\\\\|SlangPile migration\\\\|samplers.*lights.*math\")",
-      "Bash(xargs grep -l \"samplers\\\\|lights\\\\|math\\\\|orchestrators\")"
+      "Bash(xargs grep -l \"samplers\\\\|lights\\\\|math\\\\|orchestrators\")",
+      "Bash(python3 *)",
+      "Bash(echo \"RC=$?\")"
     ]
   }
 }

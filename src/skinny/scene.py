@@ -186,6 +186,82 @@ class LightSphere:
 
 
 @dataclass
+class LensElement:
+    """One spherical interface in a thick-lens stack (PBRT § 6.4).
+
+    Authored under a `UsdGeom.Camera` as a child `UsdGeom.Xform` with
+    `skinny:lens:*` custom attributes. All distances are in millimetres
+    in the lens's intrinsic frame; the renderer converts to world units
+    via `Scene.mm_per_unit` before upload.
+
+    Sign convention: `radius > 0` ⇒ centre of curvature on the scene
+    side of the surface; `radius < 0` ⇒ centre on the film side;
+    `radius == 0` ⇒ planar interface (used for the aperture stop).
+    `thickness` is the axial distance from this surface to the **next**
+    one toward the film (the rearmost element's `thickness` is the film
+    distance). `ior` is the refractive index of the medium **after**
+    this surface in the film direction (`1.0` for air gaps).
+    """
+
+    radius_mm: float
+    thickness_mm: float
+    ior: float
+    aperture_mm: float            # clear aperture diameter
+    is_aperture_stop: bool = False
+    enabled: bool = True
+
+    @property
+    def half_aperture_mm(self) -> float:
+        return 0.5 * float(self.aperture_mm)
+
+
+@dataclass
+class LensSystem:
+    """Ordered stack of `LensElement`s describing one camera's optics.
+
+    Elements are stored front-to-rear (index 0 = scene-side surface,
+    index N-1 = film-side surface) per PBRT convention. Backward-compat
+    with the existing pinhole pipeline: a `LensSystem` with no enabled
+    elements collapses to pinhole (the renderer skips the lens path).
+    """
+
+    elements: list[LensElement] = field(default_factory=list)
+    enabled: bool = True
+
+    @property
+    def active_elements(self) -> list[LensElement]:
+        return [e for e in self.elements if e.enabled] if self.enabled else []
+
+    @property
+    def film_distance_mm(self) -> float:
+        return sum(float(e.thickness_mm) for e in self.active_elements)
+
+    @property
+    def rear_aperture_mm(self) -> float:
+        active = self.active_elements
+        return float(active[-1].aperture_mm) if active else 0.0
+
+    def signature(self) -> tuple:
+        """Stable identity tuple for accumulation-reset detection."""
+        if not self.enabled:
+            return ("lens", "off")
+        return (
+            "lens",
+            tuple(
+                (
+                    float(e.radius_mm),
+                    float(e.thickness_mm),
+                    float(e.ior),
+                    float(e.aperture_mm),
+                    bool(e.is_aperture_stop),
+                    bool(e.enabled),
+                )
+                for e in self.elements
+            ),
+        )
+
+
+@dataclass
 class CameraOverride:
     """Authored camera viewpoint extracted from a USD UsdGeom.Camera.
 
@@ -194,7 +270,10 @@ class CameraOverride:
     to world). `focal_length_mm` and `vertical_aperture_mm` come straight
     from the USD attributes and convert to a vertical FOV via
     `2·atan(0.5·va / fl)`. When `focus_distance` is None, the renderer
-    picks a sensible distance from scene bounds.
+    picks a sensible distance from scene bounds. `lens` carries an
+    optional thick-lens stack authored as child prims; when present and
+    enabled the renderer's pinhole ray-gen path is replaced with a
+    PBRT-style realistic camera trace.
     """
 
     position: np.ndarray            # (3,) float32, world space
@@ -202,6 +281,8 @@ class CameraOverride:
     focal_length_mm: float = 50.0
     vertical_aperture_mm: float = 24.0
     focus_distance: Optional[float] = None
+    fstop: float = 0.0              # 0 ⇒ wide open; from USD `fStop` attr
+    lens: Optional[LensSystem] = None
     enabled: bool = True
 
     def __post_init__(self) -> None:

@@ -29,9 +29,9 @@ from skinny.scene_graph import (
 class SceneGraphWindow:
     """Non-modal Toplevel with a tree view (left) and property editor (right)."""
 
-    TREE_WIDTH = 320
-    PROPS_WIDTH = 380
-    WIN_HEIGHT = 560
+    TREE_WIDTH = 380
+    PROPS_WIDTH = 520
+    WIN_HEIGHT = 620
 
     def __init__(self, panel) -> None:
         self.panel = panel
@@ -39,6 +39,7 @@ class SceneGraphWindow:
         self._alive = True
         self._suppress_cb = False
         self._last_graph_id: int = -1
+        self._last_graph_version: int = -1
 
         top = tk.Toplevel(panel.root)
         top.title("Scene Graph")
@@ -87,8 +88,13 @@ class SceneGraphWindow:
         self._props_frame = ttk.Frame(self._props_canvas)
         self._props_canvas.create_window((0, 0), window=self._props_frame,
                                           anchor="nw")
-        self._props_frame.bind("<Configure>", lambda _e:
-            self._props_canvas.configure(scrollregion=self._props_canvas.bbox("all")))
+        # Intentionally NOT binding <Configure> on _props_frame: on Windows
+        # the OS modal resize loop dispatches WM_SIZE/Configure events to all
+        # Tk windows synchronously inside the system pump (and inside
+        # glfwPollEvents). Python-bound Tk callbacks invoked from that pump
+        # crash the interpreter ("PyEval_RestoreThread: the GIL is released,
+        # thread state is NULL") because tkinter's tcl_tstate is NULL after
+        # the first dispatch. Scrollregion is refreshed from tick() instead.
 
         self._selected_path: str | None = None
         self._prop_widgets: list = []  # keep refs alive
@@ -102,10 +108,16 @@ class SceneGraphWindow:
         if graph is None:
             return
         self._last_graph_id = id(graph)
+        self._last_graph_version = getattr(self.renderer, "_scene_graph_version", 0)
         # Clear existing
         for item in self.tree.get_children():
             self.tree.delete(item)
         self._insert_node("", graph)
+        try:
+            count = sum(1 for _ in self.tree.get_children())
+            print(f"[skinny] scene-graph tree populated: {count} root entries", flush=True)
+        except Exception:
+            pass
 
     def _insert_node(self, parent_iid: str, node: SceneGraphNode) -> None:
         icon = type_icon(node.type_name)
@@ -137,6 +149,17 @@ class SceneGraphWindow:
         node = find_node_by_path(graph, path)
         if node is None:
             return
+        # Print node + its property snapshot so the console shows
+        # exactly what the panel is bound to. Helps verify that, e.g.,
+        # selecting /Skinny/MainCamera reports the live fstop / focus.
+        try:
+            props_str = ", ".join(
+                f"{p.name}={p.value!r}" for p in node.properties
+                if p.type_name in ("float", "int", "bool", "vec3f")
+            )
+            print(f"[skinny] selected {node.path} ({node.type_name}): {props_str}", flush=True)
+        except Exception:
+            pass
         # Auto-target the rotate gizmo when a mesh instance is selected.
         ref = node.renderer_ref
         if ref is not None and ref.kind == "instance" and hasattr(
@@ -176,6 +199,17 @@ class SceneGraphWindow:
         for prop in node.properties:
             self._build_property_widget(node, prop)
 
+        self._refresh_scrollregion()
+
+    def _refresh_scrollregion(self) -> None:
+        try:
+            self._props_canvas.update_idletasks()
+            bbox = self._props_canvas.bbox("all")
+            if bbox is not None:
+                self._props_canvas.configure(scrollregion=bbox)
+        except tk.TclError:
+            pass
+
     def _build_property_widget(
         self, node: SceneGraphNode, prop: SceneGraphProperty,
     ) -> None:
@@ -208,8 +242,41 @@ class SceneGraphWindow:
         elif prop.type_name == "asset":
             ttk.Label(row, text=str(prop.value), foreground="gray").pack(
                 side="left", fill="x", expand=True)
+        elif prop.type_name == "lens_file" and prop.editable:
+            self._build_lens_file_picker(row, node, prop)
         else:
             ttk.Label(row, text=str(prop.value)).pack(side="left", fill="x", expand=True)
+
+    def _build_lens_file_picker(
+        self, parent: ttk.Frame, node: SceneGraphNode, prop: SceneGraphProperty,
+    ) -> None:
+        """Button that opens a `.usda` file dialog and hands the result
+        to ``renderer.apply_camera_lens_file`` so the active camera's
+        thick-lens stack is replaced live."""
+        from tkinter import filedialog
+        from pathlib import Path
+
+        cur = tk.StringVar(value=str(prop.value))
+        ttk.Label(parent, textvariable=cur, foreground="steelblue", width=28
+                  ).pack(side="left", fill="x", expand=True)
+
+        def on_pick():
+            path = filedialog.askopenfilename(
+                title="Load lens (.usda)",
+                filetypes=[("USDA lens", "*.usda"), ("All files", "*.*")],
+                initialdir=str(Path(__file__).resolve().parent.parent.parent / "lenses"),
+            )
+            if not path:
+                return
+            ok = False
+            if hasattr(self.renderer, "apply_camera_lens_file"):
+                ok = self.renderer.apply_camera_lens_file(path)
+            if ok:
+                cur.set(Path(path).name)
+                prop.value = Path(path).name
+
+        ttk.Button(parent, text="Load…", width=8, command=on_pick).pack(side="left")
+        self._prop_widgets.append((cur, None, node, prop))
 
     def _build_bool_toggle(
         self, parent: ttk.Frame, node: SceneGraphNode, prop: SceneGraphProperty,
@@ -225,6 +292,12 @@ class SceneGraphWindow:
             else:
                 ref = node.renderer_ref
                 if ref is None:
+                    return
+                # Synthetic /Skinny/MainCamera node: bool props (lens_enabled,
+                # ...) are scalar camera params, not enable-flags on a scene
+                # record. Route them through apply_camera_param.
+                if ref.kind == "renderer_camera":
+                    self.renderer.apply_camera_param(prop.name, value)
                     return
                 self.renderer.apply_node_enabled(ref.kind, ref.index, value)
 
@@ -423,14 +496,82 @@ class SceneGraphWindow:
                     return parent.renderer_ref
         return None
 
+    # ── Live property mirror ─────────────────────────────────────
+
+    def _refresh_live_widgets(self) -> None:
+        """Push live values from the renderer's active camera onto the
+        bound widgets for the synthetic ``/Skinny/MainCamera`` node so
+        the GUI tracks orbit / zoom / pan / focus changes that happen
+        outside the property panel.
+        """
+        cam = getattr(self.renderer, "camera", None)
+        if cam is None:
+            return
+        for entry in self._prop_widgets:
+            if len(entry) < 4:
+                continue
+            # Float slider: (var, scale, val_lbl, node, prop)
+            # Bool toggle:  (var, chk, node, prop)
+            # Vec3 entry:   (var_x, var_y, var_z, node, prop) or similar
+            node = entry[-2]
+            prop = entry[-1]
+            ref = getattr(node, "renderer_ref", None)
+            if ref is None or ref.kind != "renderer_camera":
+                continue
+            try:
+                if prop.type_name == "float":
+                    live = self._read_camera_param(cam, prop.name)
+                    if live is None:
+                        continue
+                    var, _scale, val_lbl = entry[0], entry[1], entry[2]
+                    cur = float(var.get())
+                    if abs(cur - float(live)) > 1e-4:
+                        var.set(float(live))
+                        prop.value = float(live)
+                        if val_lbl is not None:
+                            val_lbl.configure(text=f"{float(live):.3f}")
+                elif prop.type_name == "bool":
+                    live = self._read_camera_param(cam, prop.name)
+                    if live is None:
+                        continue
+                    var = entry[0]
+                    if bool(var.get()) != bool(live):
+                        var.set(bool(live))
+                        prop.value = bool(live)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _read_camera_param(cam, name: str):
+        """Mirror of the keys recognised by ``Renderer.apply_camera_param``."""
+        if name == "fov":             return float(getattr(cam, "fov", 0.0))
+        if name == "near":            return float(getattr(cam, "near", 0.0))
+        if name == "far":             return float(getattr(cam, "far", 0.0))
+        if name == "fstop":           return float(getattr(cam, "fstop", 0.0))
+        if name == "focus_distance":  return float(getattr(cam, "focus_distance", 0.0))
+        if name == "yaw":             return float(getattr(cam, "yaw", 0.0))
+        if name == "pitch":           return float(getattr(cam, "pitch", 0.0))
+        if name == "distance":        return float(getattr(cam, "distance", 0.0)) if hasattr(cam, "distance") else None
+        if name == "lens_enabled":
+            lens = getattr(cam, "lens", None)
+            return bool(lens.enabled) if lens is not None else None
+        return None
+
     # ── Per-frame update ─────────────────────────────────────────
 
     def tick(self) -> None:
         if not self._alive:
             return
         graph = self.renderer.scene_graph
-        if graph is not None and id(graph) != self._last_graph_id:
+        version = getattr(self.renderer, "_scene_graph_version", 0)
+        if graph is not None and (
+            id(graph) != self._last_graph_id
+            or version != self._last_graph_version
+        ):
             self._populate_tree()
+            self._last_graph_version = version
+        self._refresh_live_widgets()
+        self._refresh_scrollregion()
         try:
             self.top.update()
         except tk.TclError:

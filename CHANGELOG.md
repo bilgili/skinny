@@ -5,6 +5,20 @@ All notable changes to Skinny are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### UI and interaction
+
+- Camera debug viewport (`F2`) with frustum, lens rings, focus plane, DOF
+  planes, render-area outline, ground grid, mesh wireframes, AABBs, and
+  camera-body glyph
+- Screen-space HUD inside the debug viewport listing its keyboard
+  shortcuts; toggleable with `Space`
+- Lens focus overlay (`L`), lens-vignette debug visualisation (`V`),
+  zoom-rectangle drag (`Z` to arm, `X` to reset) hotkeys on the main
+  window
+- Updated on-screen HUD and `H` help text to list the full key set
+
 ## [0.1.0] - 2026-05-02
 
 First release. Skinny is a physically based renderer built on a Vulkan compute

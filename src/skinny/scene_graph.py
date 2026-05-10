@@ -693,12 +693,46 @@ def inject_renderer_camera(
     node.properties.append(SceneGraphProperty(
         name="fstop", display_name="f-stop",
         type_name="float", value=float(getattr(camera, "fstop", 0.0)),
-        editable=True, metadata={"min": 0.0, "max": 32.0},
+        editable=True, metadata={"min": 2.8, "max": 22.0},
     ))
     node.properties.append(SceneGraphProperty(
         name="focus_distance", display_name="focus dist",
         type_name="float", value=float(getattr(camera, "focus_distance", 0.0)),
         editable=True, metadata={"min": 0.0, "max": 100.0},
+    ))
+
+    # Thick-lens controls. `lens_active` is read-only telemetry; the
+    # toggle below flips LensSystem.enabled and routes through
+    # apply_camera_param. When no lens is authored both are inert.
+    lens = getattr(camera, "lens", None)
+    n_elem = len(lens.elements) if lens is not None else 0
+    node.properties.append(SceneGraphProperty(
+        name="lens_active", display_name="lens active",
+        type_name="bool", value=bool(lens is not None and lens.enabled and n_elem > 0),
+        editable=False, metadata={},
+    ))
+    node.properties.append(SceneGraphProperty(
+        name="lens_element_count", display_name="lens elements",
+        type_name="int", value=int(n_elem),
+        editable=False, metadata={},
+    ))
+    # Enable / disable the realistic-lens path entirely (toggling it
+    # off makes the renderer fall back to its pinhole model). Always
+    # exposed so the user has a single switch even before any lens is
+    # loaded — tied through `apply_camera_param("lens_enabled", ...)`.
+    node.properties.append(SceneGraphProperty(
+        name="lens_enabled", display_name="lens enabled",
+        type_name="bool",
+        value=bool(lens is not None and lens.enabled),
+        editable=True, metadata={"toggle": "node"},
+    ))
+    # File-picker for swapping the authored lens at runtime. The
+    # button opens an "Open USDA" dialog and feeds the result to
+    # Renderer.apply_camera_lens_file.
+    node.properties.append(SceneGraphProperty(
+        name="lens_file", display_name="lens file",
+        type_name="lens_file", value="(load .usda)",
+        editable=True, metadata={},
     ))
     node.properties.append(SceneGraphProperty(
         name="yaw", display_name="yaw (rad)",

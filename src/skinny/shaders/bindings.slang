@@ -20,6 +20,8 @@ uniform float3         lightRadiance;
 // (Q22.10). Indexed as [pixel.y * width * 3 + pixel.x * 3 + channel].
 [[vk::binding(21)]] RWStructuredBuffer<uint> lightSplatBuffer;
 [[vk::binding(22)]] StructuredBuffer<GizmoSegment> gizmoSegments;
+[[vk::binding(23)]] StructuredBuffer<float4>       lensElements;
+[[vk::binding(24)]] StructuredBuffer<float4>       exitPupilBounds;
 
 static const uint MATERIAL_TYPE_SKIN         = 0u;
 static const uint MATERIAL_TYPE_FLAT         = 1u;

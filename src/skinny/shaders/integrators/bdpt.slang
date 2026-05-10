@@ -23,6 +23,8 @@ import common;
 import bindings;
 import interfaces;
 import scene_trace;
+import cameras.thick_lens;   // for traceLensesFromScene + unpackLensSurface
+                             // when projecting splats through a thick lens
 import scene_lights;
 import flat_shading;
 import flat_material;
@@ -520,10 +522,9 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
 
 static const float BDPT_SPLAT_SCALE = 1024.0;     // Q22.10 fixed-point
 
-// Project world-space `p` to raster pixel coords. Returns true if visible
-// in the camera frustum and within image bounds. Out: pixel (px,py),
-// cosCam = dot(camera_forward, -wToCam) for camera-importance term.
-bool projectToCamera(float3 p, out int2 outPixel, out float cosCam, out float distToCam)
+// Pinhole projection. Used when no thick lens is active.
+bool projectToCameraPinhole(float3 p, out int2 outPixel,
+                            out float cosCam, out float distToCam)
 {
     outPixel = int2(0);
     cosCam = 0.0;
@@ -531,28 +532,105 @@ bool projectToCamera(float3 p, out int2 outPixel, out float cosCam, out float di
     float3 toP = p - fc.camera.position;
     distToCam = length(toP);
     if (distToCam <= 1e-4) return false;
-    // _look_at builds V with row-2 = -forward, so visible points (in front
-    // of camera) have view-space z < 0. Likewise the projection matrix sets
-    // clip.w = -viewSp.z so visible points yield clip.w > 0.
     float4 viewSp = mul(fc.camera.view, float4(p, 1.0));
     float4 clip = mul(fc.camera.proj, viewSp);
     if (clip.w <= 1e-4) return false;
     float3 ndc = clip.xyz / clip.w;
     if (any(abs(ndc.xy) > float2(1.0))) return false;
-    // Match generateCameraRay's NDC.y flip.
     float xs = (ndc.x * 0.5 + 0.5) * float(fc.width);
     float ys = (-ndc.y * 0.5 + 0.5) * float(fc.height);
     if (xs < 0.0 || ys < 0.0 || xs >= float(fc.width) || ys >= float(fc.height))
         return false;
     outPixel = int2(int(xs), int(ys));
 
-    // Camera forward in world: ray-gen reconstructs forward as
-    // `viewInverse · normalize(projInverse · (0, 0, 1, 1))`. The +Z hemisphere
-    // of view space holds nothing visible (visible viewSp.z < 0), so the
-    // canonical world-space forward is `viewInverse · (0, 0, -1, 0)`.
     float3 camForward = normalize(mul(fc.camera.viewInverse, float4(0, 0, -1, 0)).xyz);
     cosCam = max(dot(camForward, toP / distToCam), 0.0);
     return cosCam > 1e-4;
+}
+
+// Lens projection: trace a ray from world point `p` through the
+// authored lens stack scene→film, find the film hit, convert to a
+// pixel. Mirrors `cameras/thick_lens.slang::generateLensRay`'s
+// pixel-to-film mapping so the splatted image registers with the
+// eye-side render. Samples a uniform point on the rear element disk
+// to pick a specific connection direction (one ray per call); the
+// caller atomic-adds the splat into `lightSplatBuffer`.
+bool projectToCameraLens(float3 p, inout RNG rng, out int2 outPixel,
+                         out float cosCam, out float distToCam)
+{
+    outPixel = int2(0);
+    cosCam = 0.0;
+    distToCam = 0.0;
+    if (fc.numLensElements == 0u) return false;
+
+    // 1. Sample rear-element disk in lens-local frame.
+    float2 diskUV = sampleUniformDisk(rng.next2());
+    LensSurface eRear = unpackLensSurface(fc.numLensElements - 1u);
+    float lensRearZ = -eRear.thickness;
+    float3 pLens = float3(diskUV.x * fc.rearAperture,
+                          diskUV.y * fc.rearAperture, lensRearZ);
+
+    // 2. World point → camera-local → lens-local. The lens path
+    //    anchors the front-element vertex at the camera's world
+    //    position, with lens-local +z pointing back toward film.
+    //    Camera-local (-x, y, -z) ↔ lens-local (x, y, z) (the same
+    //    180° y-rotation generateLensRay applies on output, inverted
+    //    here for input).
+    float3 pCam = mul(fc.camera.view, float4(p, 1.0)).xyz;
+    float3 pLensSpace = float3(-pCam.x, pCam.y, -pCam.z + fc.frontZ);
+
+    // 3. Build the connection ray in lens-local. Heading from
+    //    scene-side `p` toward sampled rear-disk point.
+    float3 origin = pLensSpace;
+    float3 dir = pLens - pLensSpace;
+    float pLensDist = length(dir);
+    if (pLensDist <= 1e-6) return false;
+    dir /= pLensDist;
+    if (dir.z >= 0.0) return false;        // wrong hemisphere
+
+    // 4. Trace through lens stack scene→film. Reject if blocked.
+    if (!traceLensesFromScene(origin, dir, fc)) return false;
+
+    // 5. Continue from the rear-element exit to the film plane (z=0).
+    if (dir.z >= -1e-9) return false;
+    float tFilm = -origin.z / dir.z;
+    if (tFilm < 0.0) return false;
+    float3 pFilm = origin + tFilm * dir;
+
+    // 6. Film → NDC → pixel. Mirrors generateLensRay's mapping.
+    float aspect = float(fc.width) / max(float(fc.height), 1.0);
+    float filmHalfH = fc.filmHalfH;
+    float filmHalfW = filmHalfH * aspect;
+    if (filmHalfW <= 0.0 || filmHalfH <= 0.0) return false;
+    float2 ndc = float2(-pFilm.x / filmHalfW, pFilm.y / filmHalfH);
+    if (any(abs(ndc) > float2(1.0))) return false;
+    float xs = (ndc.x * 0.5 + 0.5) * float(fc.width);
+    float ys = (ndc.y * 0.5 + 0.5) * float(fc.height);
+    if (xs < 0.0 || ys < 0.0 || xs >= float(fc.width) || ys >= float(fc.height))
+        return false;
+    outPixel = int2(int(xs), int(ys));
+
+    // 7. Geometric terms. distToCam = world-space distance from `p`
+    //    to the camera anchor; cosCam = angle between camera forward
+    //    (world-space -z in camera-local) and the world ray from
+    //    camera to `p`. Approximate with the pinhole values — for a
+    //    well-behaved lens these are within a few percent.
+    float3 toP_world = p - fc.camera.position;
+    distToCam = max(length(toP_world), 1e-6);
+    float3 camForward = normalize(
+        mul(fc.camera.viewInverse, float4(0, 0, -1, 0)).xyz);
+    cosCam = max(dot(camForward, toP_world / distToCam), 0.0);
+    return cosCam > 1e-4;
+}
+
+// Project world-space `p` to raster pixel coords. Dispatches to the
+// pinhole or lens path based on whether a thick lens is active.
+bool projectToCamera(float3 p, inout RNG rng,
+                     out int2 outPixel, out float cosCam, out float distToCam)
+{
+    if (fc.numLensElements > 0u)
+        return projectToCameraLens(p, rng, outPixel, cosCam, distToCam);
+    return projectToCameraPinhole(p, outPixel, cosCam, distToCam);
 }
 
 void atomicSplatRadiance(int2 pixel, float3 radiance)
@@ -570,13 +648,13 @@ void atomicSplatRadiance(int2 pixel, float3 radiance)
 // Splat a single light-walk vertex onto the camera. Implements the s = 1
 // BDPT strategy: the camera vertex is the deterministic camera position
 // (pinhole), connected to a non-delta light-walk surface vertex.
-void splatLightVertex(BDPTVertex y)
+void splatLightVertex(BDPTVertex y, inout RNG rng)
 {
     if (y.isDelta || y.kind != BDPT_VK_SURFACE) return;
     int2 pixel;
     float cosCam;
     float distCam;
-    if (!projectToCamera(y.position, pixel, cosCam, distCam)) return;
+    if (!projectToCamera(y.position, rng, pixel, cosCam, distCam)) return;
 
     float3 toCam = (fc.camera.position - y.position) / distCam;
     float cosY = max(dot(y.N, toCam), 0.0);
@@ -605,12 +683,13 @@ void splatLightVertex(BDPTVertex y)
     atomicSplatRadiance(pixel, contrib);
 }
 
-void splatLightWalk(BDPTVertex lightPath[BDPT_MAX_VERTS], int lightLen)
+void splatLightWalk(BDPTVertex lightPath[BDPT_MAX_VERTS], int lightLen,
+                    inout RNG rng)
 {
     [loop]
     for (int i = 1; i < lightLen; i++)
     {
-        splatLightVertex(lightPath[i]);
+        splatLightVertex(lightPath[i], rng);
     }
 }
 
@@ -702,7 +781,7 @@ struct BDPTIntegrator : IIntegrator
         // s = 1 light tracer: project each non-delta light vertex onto the
         // camera and atomic-add the contribution into lightSplatBuffer.
         // main_pass.slang composites the splat at end-of-frame.
-        splatLightWalk(lightPath, lightLen);
+        splatLightWalk(lightPath, lightLen, rng);
 
         float3 L = escapedRadiance;
 

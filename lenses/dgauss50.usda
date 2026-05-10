@@ -1,0 +1,108 @@
+#usda 1.0
+(
+    defaultPrim = "DGauss50"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = "Double-Gauss 50 mm f/2 lens design (PBRT-V3 lens database). Reference each <World/cam> to attach. Six elements + aperture stop, all dimensions in millimetres."
+)
+
+# Reference into a UsdGeomCamera prim, e.g.:
+#
+#   def Camera "cam" (references = @./lenses/dgauss50.usda@</DGauss50>) { }
+#
+# Lens stack stored front (scene side) → rear (film side) per PBRT
+# convention. Element 3 carries radius=0 = aperture stop.
+
+def Xform "DGauss50"
+{
+    def Xform "e0"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = 29.475
+        float skinny:lens:thickness = 3.76
+        float skinny:lens:ior       = 1.67
+        float skinny:lens:aperture  = 25.2
+        int   skinny:lens:order     = 0
+    }
+    def Xform "e1"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = 84.83
+        float skinny:lens:thickness = 0.12
+        float skinny:lens:ior       = 1.0
+        float skinny:lens:aperture  = 25.2
+        int   skinny:lens:order     = 1
+    }
+    def Xform "e2"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = 19.275
+        float skinny:lens:thickness = 4.025
+        float skinny:lens:ior       = 1.67
+        float skinny:lens:aperture  = 23.0
+        int   skinny:lens:order     = 2
+    }
+    def Xform "e3"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = 40.77
+        float skinny:lens:thickness = 3.275
+        float skinny:lens:ior       = 1.699
+        float skinny:lens:aperture  = 23.0
+        int   skinny:lens:order     = 3
+    }
+    def Xform "stop"
+    {
+        token skinny:lens:role      = "aperture"
+        float skinny:lens:radius    = 0.0
+        float skinny:lens:thickness = 4.5
+        float skinny:lens:ior       = 1.0
+        float skinny:lens:aperture  = 18.0
+        int   skinny:lens:order     = 4
+    }
+    def Xform "e5"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = -20.275
+        float skinny:lens:thickness = 1.575
+        float skinny:lens:ior       = 1.603
+        float skinny:lens:aperture  = 17.1
+        int   skinny:lens:order     = 5
+    }
+    def Xform "e6"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = 25.5
+        float skinny:lens:thickness = 3.95
+        float skinny:lens:ior       = 1.658
+        float skinny:lens:aperture  = 17.1
+        int   skinny:lens:order     = 6
+    }
+    def Xform "e7"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = -28.99
+        float skinny:lens:thickness = 0.19
+        float skinny:lens:ior       = 1.0
+        float skinny:lens:aperture  = 17.1
+        int   skinny:lens:order     = 7
+    }
+    def Xform "e8"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = 81.54
+        float skinny:lens:thickness = 2.525
+        float skinny:lens:ior       = 1.717
+        float skinny:lens:aperture  = 16.5
+        int   skinny:lens:order     = 8
+    }
+    def Xform "e9"
+    {
+        token skinny:lens:role      = "element"
+        float skinny:lens:radius    = -40.77
+        float skinny:lens:thickness = 42.0
+        float skinny:lens:ior       = 1.0
+        float skinny:lens:aperture  = 16.5
+        int   skinny:lens:order     = 9
+    }
+}

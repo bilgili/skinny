@@ -107,6 +107,12 @@ class InputHandler:
         self._right_down = False
         self._middle_down = False
         self._gizmo_dragging = False
+        # Zoom-rect select mode: 'Z' arms it; the next left-drag picks a
+        # rectangle; release applies it as a viewport sub-region. 'X'
+        # resets to full-frame.
+        self._zoom_arming = False
+        self._zoom_dragging = False
+        self._zoom_start_px: tuple[float, float] = (0.0, 0.0)
 
         glfw.set_cursor_pos_callback(window, self._on_mouse_move)
         glfw.set_mouse_button_callback(window, self._on_mouse_button)
@@ -121,11 +127,23 @@ class InputHandler:
             self._left_down = action == glfw.PRESS
             if action == glfw.PRESS:
                 mx, my = glfw.get_cursor_pos(self.window)
-                axis = self.renderer.gizmo_hit_test(mx, my)
-                if axis is not None:
-                    if self.renderer.gizmo_begin_drag(axis, mx, my):
-                        self._gizmo_dragging = True
+                # Zoom-rect drag overrides the gizmo / camera entirely.
+                if self._zoom_arming:
+                    self._zoom_dragging = True
+                    self._zoom_start_px = (mx, my)
+                    self.renderer.set_zoom_drag_overlay((mx, my, mx, my))
+                else:
+                    axis = self.renderer.gizmo_hit_test(mx, my)
+                    if axis is not None:
+                        if self.renderer.gizmo_begin_drag(axis, mx, my):
+                            self._gizmo_dragging = True
             else:  # release
+                if self._zoom_dragging:
+                    mx, my = glfw.get_cursor_pos(self.window)
+                    self.renderer.commit_zoom_rect(self._zoom_start_px, (mx, my))
+                    self.renderer.set_zoom_drag_overlay(None)
+                    self._zoom_dragging = False
+                    self._zoom_arming = False
                 if self._gizmo_dragging:
                     self.renderer.gizmo_end_drag()
                     self._gizmo_dragging = False
@@ -141,6 +159,12 @@ class InputHandler:
         dy = my - self._last_my
         self._last_mx = mx
         self._last_my = my
+
+        # Zoom-rect drag has priority over everything else.
+        if self._zoom_dragging:
+            sx, sy = self._zoom_start_px
+            self.renderer.set_zoom_drag_overlay((sx, sy, mx, my))
+            return
 
         # Gizmo drag has priority over camera. Hover highlight runs
         # whenever no mouse button is down so the picked axis lights up.
@@ -187,12 +211,33 @@ class InputHandler:
             glfw.set_window_should_close(win, True)
         elif key == glfw.KEY_F1 or key == glfw.KEY_SPACE:
             self.renderer.show_hud = not self.renderer.show_hud
+        elif key == glfw.KEY_F2:
+            viewport = getattr(self.renderer, "debug_viewport", None)
+            if viewport is not None:
+                viewport.toggle()
+                print(f"[Debug viewport: {'on' if viewport.is_open else 'off'}]")
         elif key == glfw.KEY_C:
             self.renderer.toggle_camera_mode()
             print(f"[Camera mode: {self.renderer.camera_mode}]")
         elif key == glfw.KEY_F:
             self.renderer.reset_camera()
             print("[Camera recentred on head]")
+        elif key == glfw.KEY_L:
+            self.renderer.show_focus_overlay = not self.renderer.show_focus_overlay
+            print(f"[Focus overlay: {'on' if self.renderer.show_focus_overlay else 'off'}]")
+        elif key == glfw.KEY_V:
+            self.renderer.lens_vignette_debug = not self.renderer.lens_vignette_debug
+            self.renderer._material_version += 1
+            print(f"[Lens vignette debug: {'on' if self.renderer.lens_vignette_debug else 'off'} — green=ray succeeds, red=clipped]")
+        elif key == glfw.KEY_Z:
+            self._zoom_arming = True
+            print("[Zoom: drag a rectangle, release to apply]")
+        elif key == glfw.KEY_X:
+            self.renderer.reset_zoom_rect()
+            self._zoom_arming = False
+            self._zoom_dragging = False
+            self.renderer.set_zoom_drag_overlay(None)
+            print("[Zoom: reset]")
         elif glfw.KEY_1 <= key <= glfw.KEY_9:
             idx = key - glfw.KEY_1
             if idx < len(self.params):
@@ -309,8 +354,9 @@ class InputHandler:
             "Tab / Shift    : next / prev param",
             "Arrows         : adjust parameter",
             "1-9            : jump to parameter",
-            "C  camera   F  recentre   R  reset   P  print   H  help   Space  HUD",
-            "Esc            : quit",
+            "C camera  F recentre  R reset  P print  H help",
+            "L focus  V vignette  Z zoom  X reset zoom  F2 debug",
+            "Space / F1 HUD       Esc quit",
         ]
         return lines
 
@@ -337,6 +383,11 @@ class InputHandler:
             "  R                 : reset all to defaults\n"
             "  P                 : print all parameters\n"
             "  H                 : show this help\n"
+            "  L                 : toggle lens focus overlay\n"
+            "  V                 : toggle lens vignette debug (green=ok, red=clipped)\n"
+            "  Z                 : arm zoom rectangle (drag, release to apply)\n"
+            "  X                 : reset zoom rectangle\n"
+            "  F2                : toggle debug viewport window\n"
             "  Space / F1        : toggle on-screen HUD\n"
             "  Esc               : quit\n"
             "=======================\n"
@@ -404,6 +455,14 @@ def main() -> None:
     _apply_saved_camera(renderer, saved.get("camera"))
     renderer._update_light()
 
+    from skinny.debug_viewport import DebugViewport
+    debug_viewport = DebugViewport(
+        vk_ctx=vk_ctx,
+        shader_dir=Path(__file__).parent / "shaders",
+    )
+    renderer.debug_viewport = debug_viewport
+    debug_viewport.attach_renderer(renderer)
+
     input_handler = InputHandler(window, renderer)
 
     from skinny.control_panel import ControlPanel
@@ -426,6 +485,8 @@ def main() -> None:
         renderer.update(dt)
         renderer.hud_text_lines = input_handler.build_hud_lines()
         renderer.render()
+        debug_viewport.update(dt)
+        debug_viewport.render(renderer)
 
     # Snapshot state before tearing things down. Write failures are swallowed
     # so a read-only home dir can't break shutdown.
@@ -443,6 +504,7 @@ def main() -> None:
         pass
 
     panel.destroy()
+    debug_viewport.destroy()
     renderer.cleanup()
     vk_ctx.destroy()
     glfw.terminate()
