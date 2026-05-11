@@ -4750,4 +4750,6 @@ class Renderer:
         self.mtlx_skin_buffer.destroy()
         self.light_splat_buffer.destroy()
         self.gizmo_segments_buffer.destroy()
+        self.lens_elements_buffer.destroy()
+        self.lens_pupil_buffer.destroy()
         self.pipeline.destroy()

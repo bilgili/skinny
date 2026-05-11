@@ -5,7 +5,7 @@
 // orchestrator itself owns nothing beyond the chained estimator calls.
 
 import common;
-import skin_bssrdf;
+import materials.skin.skin_bssrdf;
 import skinny_skin_layered_bsdf_genslang;
 
 // ── Skin-specific resource bindings ─────────────────────────────

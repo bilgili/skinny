@@ -26,8 +26,8 @@ import scene_trace;
 import cameras.thick_lens;   // for traceLensesFromScene + unpackLensSurface
                              // when projecting splats through a thick lens
 import scene_lights;
-import flat_shading;
-import flat_material;
+import materials.flat.flat_shading;
+import materials.flat.flat_material;
 import environment;
 import lights.sphere_light;
 import lights.emissive_triangle_light;

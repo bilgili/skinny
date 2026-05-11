@@ -15,7 +15,7 @@
 //       PhD thesis, Stanford University 1997.
 
 import common;
-import skin_bssrdf;
+import materials.skin.skin_bssrdf;
 import environment;
 static const int   MAX_VOLUME_STEPS = 128;
 static const int   VOLUME_DEFAULT_BOUNCES = 8;

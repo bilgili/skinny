@@ -4,9 +4,9 @@
 
 import common;
 import bindings;
-import skin_bssrdf;
-import detail;
-import skin_shading;
+import materials.skin.skin_bssrdf;
+import materials.skin.detail;
+import materials.skin.skin_shading;
 
 struct SkinHairContribution
 {

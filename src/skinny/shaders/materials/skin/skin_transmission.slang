@@ -8,8 +8,8 @@ import bindings;
 import scene_trace;
 import scene_lights;
 import environment;
-import skin_bssrdf;
-import skin_shading;
+import materials.skin.skin_bssrdf;
+import materials.skin.skin_shading;
 
 float3 skinTransmissionEstimator(
     HitInfo hit, SkinEvalContext ctx,

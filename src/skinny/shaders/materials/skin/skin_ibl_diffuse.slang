@@ -6,9 +6,9 @@
 import common;
 import bindings;
 import interfaces;
-import skin_bssrdf;
+import materials.skin.skin_bssrdf;
 import environment;
-import skin_shading;
+import materials.skin.skin_shading;
 import samplers.uniform_sphere;
 import samplers.mis_combine;
 
