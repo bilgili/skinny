@@ -861,24 +861,36 @@ class ControlPanel:
                 if entry is None:
                     continue  # hidden paths (RGB, elev/az) — no slider row
                 var, _widget, val_lbl = entry
+                # Widget may have been torn down by a material-section rebuild
+                # mid-frame; skip dead handles instead of crashing.
+                try:
+                    if not _widget.winfo_exists():
+                        self._widgets.pop(p.path, None)
+                        continue
+                except tk.TclError:
+                    self._widgets.pop(p.path, None)
+                    continue
                 cur = _get_nested(self.renderer, p.path)
-                if p.kind == "continuous":
-                    cur_f = float(cur)
-                    if abs(float(var.get()) - cur_f) > 1e-5:
-                        var.set(cur_f)
-                    if val_lbl is not None:
-                        val_lbl.configure(text=f"{cur_f:.3f}")
-                else:
-                    choices = getattr(self.renderer, p.choice_source)
-                    names = [self._choice_label(c) for c in choices]
-                    combo = _widget
-                    if list(combo["values"]) != names:
-                        combo.configure(values=names)
-                    idx = int(cur)
-                    if 0 <= idx < len(choices):
-                        name = self._choice_label(choices[idx])
-                        if var.get() != name:
-                            var.set(name)
+                try:
+                    if p.kind == "continuous":
+                        cur_f = float(cur)
+                        if abs(float(var.get()) - cur_f) > 1e-5:
+                            var.set(cur_f)
+                        if val_lbl is not None:
+                            val_lbl.configure(text=f"{cur_f:.3f}")
+                    else:
+                        choices = getattr(self.renderer, p.choice_source)
+                        names = [self._choice_label(c) for c in choices]
+                        combo = _widget
+                        if list(combo["values"]) != names:
+                            combo.configure(values=names)
+                        idx = int(cur)
+                        if 0 <= idx < len(choices):
+                            name = self._choice_label(choices[idx])
+                            if var.get() != name:
+                                var.set(name)
+                except tk.TclError:
+                    self._widgets.pop(p.path, None)
         finally:
             self._suppress_cb = False
 

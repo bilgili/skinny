@@ -162,7 +162,11 @@
       "Bash(xargs grep -l \"migration\\\\|SlangPile migration\\\\|samplers.*lights.*math\")",
       "Bash(xargs grep -l \"samplers\\\\|lights\\\\|math\\\\|orchestrators\")",
       "Bash(python3 *)",
-      "Bash(echo \"RC=$?\")"
+      "Bash(echo \"RC=$?\")",
+      "Bash(mkdir -p flat skin)",
+      "Bash(mv flat_material.slang flat_shading.slang flat/)",
+      "Bash(mv skin_material.slang skin_shading.slang skin_bssrdf.slang detail.slang skin/)",
+      "Bash(mv ../estimators/skin_*.slang skin/)"
     ]
   }
 }

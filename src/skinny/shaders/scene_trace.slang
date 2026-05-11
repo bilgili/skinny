@@ -8,7 +8,7 @@ import common;
 import bindings;
 import sdf_head;
 import mesh_head;
-import flat_shading;
+import materials.flat.flat_shading;
 
 HitInfo traceFurnaceSphere(Ray ray)
 {

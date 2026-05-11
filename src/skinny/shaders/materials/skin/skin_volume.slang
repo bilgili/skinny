@@ -5,7 +5,7 @@
 import common;
 import bindings;
 import volume_render;
-import skin_shading;
+import materials.skin.skin_shading;
 
 float3 skinVolumeEstimator(
     Ray ray, HitInfo hit, SkinEvalContext ctx,

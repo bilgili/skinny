@@ -13,17 +13,17 @@ import common;
 import bindings;
 import interfaces;
 import scene_trace;
-import skin_bssrdf;
-import detail;
-import skin_shading;
+import materials.skin.skin_bssrdf;
+import materials.skin.detail;
+import materials.skin.skin_shading;
 import samplers.ggx;
 import samplers.lambert;
-import estimators.skin_direct;
-import estimators.skin_ibl_specular;
-import estimators.skin_ibl_diffuse;
-import estimators.skin_volume;
-import estimators.skin_transmission;
-import estimators.skin_hair_sheen;
+import materials.skin.skin_direct;
+import materials.skin.skin_ibl_specular;
+import materials.skin.skin_ibl_diffuse;
+import materials.skin.skin_volume;
+import materials.skin.skin_transmission;
+import materials.skin.skin_hair_sheen;
 
 // ── Detail / params staging ─────────────────────────────────────
 
