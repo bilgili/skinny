@@ -1,0 +1,128 @@
+"""Tests for MaterialX nodegraph extraction + per-graph SSBO packing.
+
+Covers `MaterialLibrary.generate_for_compute` and `pack_uniform_block` —
+the two functions the renderer relies on to translate a MaterialX
+surfacematerial into Slang code + GPU-ready bytes. Pure Python, no GPU
+required.
+"""
+from __future__ import annotations
+
+import struct
+from pathlib import Path
+
+import pytest
+
+mx = pytest.importorskip("MaterialX")
+
+from skinny.materialx_runtime import (
+    GRAPH_ID_FIRST,
+    MaterialLibrary,
+    assign_graph_ids,
+    pack_uniform_block,
+)
+
+ASSETS = Path(__file__).resolve().parent.parent / "assets" / "Usd-Mtlx-Example" / "materials"
+
+
+@pytest.fixture(scope="module")
+def lib():
+    library = MaterialLibrary.from_install()
+    library.load()
+    return library
+
+
+def _import_asset(library: MaterialLibrary, fname: str) -> None:
+    doc = mx.createDocument()
+    mx.readFromXmlFile(doc, str(ASSETS / fname))
+    library.import_document(doc)
+
+
+# ─── generate_for_compute ─────────────────────────────────────────────
+
+
+def test_marble_extracts_graph(lib):
+    """Marble_3D's nodegraph emits a non-trivial evaluator + uniform set."""
+    _import_asset(lib, "standard_surface_marble_solid.mtlx")
+    gf = lib.generate_for_compute("Marble_3D", write_to_disk=False)
+    assert gf is not None, "marble must produce a graph fragment"
+    assert gf.func_name == "evalGraph_Marble_3D"
+    assert gf.struct_name == "GraphParams_Marble_3D"
+    names = {u.name for u in gf.uniform_block}
+    # Marble's nodegraph wires these inputs through to the math body.
+    for required in ("add_xyz_in2", "noise_octaves", "noise_amplitude",
+                     "color_mix_fg", "color_mix_bg"):
+        assert required in names, f"marble missing uniform {required!r}"
+    # The extracted function body must invoke fractal3d.
+    assert "mx_fractal3d_float(" in gf.slang_source
+    # And return a color computed inside the function (not a uniform load).
+    assert "return base_color_out;" in gf.slang_source or \
+           "return color_mix_out;" in gf.slang_source
+
+
+@pytest.mark.parametrize("asset,target", [
+    ("standard_surface_glass.mtlx",       "Glass"),
+    ("standard_surface_brass_tiled.mtlx", "Tiled_Brass"),
+    ("standard_surface_jade.mtlx",        "Jade"),
+    ("standard_surface_chrome.mtlx",      "Chrome"),
+    ("standard_surface_velvet.mtlx",      "Velvet"),
+])
+def test_constant_input_materials_return_none(lib, asset, target):
+    """Constant-input or texture-bound materials must not produce a fragment.
+
+    They get rendered through the existing flat / std_surface SSBO path;
+    `generate_for_compute` returning None is the signal for that branch.
+    """
+    _import_asset(lib, asset)
+    gf = lib.generate_for_compute(target, write_to_disk=False)
+    assert gf is None, f"{target} should fall back to flat path"
+
+
+def test_texture_bound_graph_rejected(lib):
+    """Texture-using graphs (NG_tiledimage_*) are out-of-scope for now."""
+    _import_asset(lib, "standard_surface_wood_tiled.mtlx")
+    gf = lib.generate_for_compute("Tiled_Wood", write_to_disk=False)
+    assert gf is None, "Tiled_Wood uses textures; should return None"
+
+
+# ─── pack_uniform_block ────────────────────────────────────────────────
+
+
+def test_pack_uniform_block_round_trip(lib):
+    _import_asset(lib, "standard_surface_marble_solid.mtlx")
+    gf = lib.generate_for_compute("Marble_3D", write_to_disk=False)
+    assert gf is not None
+
+    # Default-packed bytes must match offsets+sizes from the uniform block.
+    buf = pack_uniform_block(gf.uniform_block)
+    expected_size = max(f.offset + f.size for f in gf.uniform_block)
+    expected_size = (expected_size + 3) & ~3
+    assert len(buf) == expected_size
+
+    # Override packs at the correct offset + reads back as int32.
+    buf2 = pack_uniform_block(gf.uniform_block, {"noise_octaves": 7})
+    oct_field = next(f for f in gf.uniform_block if f.name == "noise_octaves")
+    val = struct.unpack_from("<i", buf2, oct_field.offset)[0]
+    assert val == 7, "noise_octaves override must round-trip"
+
+
+def test_pack_uniform_block_color3_override(lib):
+    _import_asset(lib, "standard_surface_marble_solid.mtlx")
+    gf = lib.generate_for_compute("Marble_3D", write_to_disk=False)
+    assert gf is not None
+    fg_field = next(f for f in gf.uniform_block if f.name == "color_mix_fg")
+
+    buf = pack_uniform_block(gf.uniform_block, {"color_mix_fg": (0.25, 0.5, 0.75)})
+    r, g, b = struct.unpack_from("<3f", buf, fg_field.offset)
+    assert (r, g, b) == pytest.approx((0.25, 0.5, 0.75))
+
+
+# ─── assign_graph_ids ──────────────────────────────────────────────────
+
+
+def test_assign_graph_ids_starts_at_first(lib):
+    _import_asset(lib, "standard_surface_marble_solid.mtlx")
+    gf = lib.generate_for_compute("Marble_3D", write_to_disk=False)
+    ids = assign_graph_ids([gf])
+    assert ids == {"Marble_3D": GRAPH_ID_FIRST}
+    # Empty list maps to empty dict.
+    assert assign_graph_ids([]) == {}

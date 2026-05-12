@@ -1692,13 +1692,35 @@ class Renderer:
         # tears all three down.
         self.pipeline.destroy()
         # Re-emit aggregator + per-graph SSBO bindings; recompile Slang.
-        self.pipeline = ComputePipeline(
-            self.ctx,
-            self.shader_dir,
-            entry_module="main_pass",
-            entry_point="mainImage",
-            graph_fragments=list(self._scene_graph_fragments),
-        )
+        # If slangc fails (malformed extracted fragment, extractor
+        # regression, ...) fall back to an empty-graph pipeline so the
+        # rest of the scene still renders. Affected materials show
+        # magenta from evalSceneGraph's `default` case.
+        try:
+            self.pipeline = ComputePipeline(
+                self.ctx,
+                self.shader_dir,
+                entry_module="main_pass",
+                entry_point="mainImage",
+                graph_fragments=list(self._scene_graph_fragments),
+            )
+        except RuntimeError as e:
+            print(
+                f"[skinny] WARNING: pipeline rebuild with "
+                f"{len(self._scene_graph_fragments)} MaterialX graph(s) "
+                f"failed:\n  {e}\n"
+                f"[skinny]   → falling back to empty-graph pipeline. "
+                f"Affected materials will render magenta."
+            )
+            self._scene_graph_fragments = []
+            self._material_graph_ids.clear()
+            self.pipeline = ComputePipeline(
+                self.ctx,
+                self.shader_dir,
+                entry_module="main_pass",
+                entry_point="mainImage",
+                graph_fragments=[],
+            )
         # Recreate descriptor pool, allocate fresh sets, write every
         # binding's initial descriptor. Pool sizing reads
         # `_scene_graph_fragments` so it scales with the new fragment count.
