@@ -210,7 +210,7 @@ FlatMaterial loadFlatMaterial(HitInfo h)
     FlatMaterial m;
     m.data = fetchFlatHitData(h);
     m.sp   = loadStdSurfaceParams(h.materialId, h.positionObject,
-                                   h.normal, h.tangent);
+                                   h.normal, h.tangent, h.uv);
 
     // Mirror loadStdSurfaceParams's graph dispatch onto the flat path's
     // albedo so direct lobes (used by flatBsdfPdf / FlatMaterial.sample)
@@ -220,7 +220,7 @@ FlatMaterial loadFlatMaterial(HitInfo h)
     {
         m.data.mat.albedo = evalSceneGraph(graphId, h.materialId,
                                             h.positionObject,
-                                            h.normal, h.tangent);
+                                            h.normal, h.tangent, h.uv);
     }
 
     m.F0 = schlickF0(m.data.mat.albedo, m.data.mat.metallic,
