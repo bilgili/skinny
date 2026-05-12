@@ -709,16 +709,22 @@ def _coerce_scalar(value: Any, type_name: str) -> tuple:
     """Coerce a Python / MaterialX value into a flat tuple of floats/ints
     matching the type's component count. None or unparseable values
     collapse to zeros."""
+    # Integer-shaped types (incl. filename → bindless slot, string →
+    # gen-lowered int framerange) need to return an int zero, not 0.0 —
+    # struct.pack_into("<I", ...) and "<i" reject floats.
+    _INT_TYPES = ("integer", "boolean", "filename", "string")
     if value is None:
-        if type_name in ("float", "integer", "boolean"):
+        if type_name in _INT_TYPES:
             return (0,)
+        if type_name == "float":
+            return (0.0,)
         comps = {"vector2": 2, "vector3": 3, "vector4": 4,
                  "color3": 3, "color4": 4}.get(type_name, 1)
         return tuple([0.0] * comps)
 
     if type_name == "boolean":
         return (1 if bool(value) else 0,)
-    if type_name == "integer":
+    if type_name in ("integer", "filename", "string"):
         try:
             return (int(value),)
         except (TypeError, ValueError):
