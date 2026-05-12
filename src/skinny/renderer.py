@@ -1503,7 +1503,12 @@ class Renderer:
             target = getattr(cm, "target_name", None) or mat.mtlx_target_name
             if target and target not in fragments_by_target:
                 try:
-                    gf = lib.generate_for_compute(target, write_to_disk=False)
+                    # Reuse the CompiledMaterial we already built above —
+                    # generate_for_compute would otherwise re-run gen for
+                    # every graph-bound material.
+                    gf = lib.generate_for_compute(
+                        target, write_to_disk=False, compiled=cm,
+                    )
                 except Exception as e:  # noqa: BLE001
                     print(f"[skinny] mat[{i}] {mat.name!r}: graph-extract FAIL  "
                           f"{type(e).__name__}: {e}")

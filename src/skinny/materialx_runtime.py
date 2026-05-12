@@ -531,6 +531,7 @@ class MaterialLibrary:
         target_name: str,
         *,
         write_to_disk: bool = True,
+        compiled: "Optional[CompiledMaterial]" = None,
     ) -> "Optional[GraphFragment]":
         """Generate a header-form Slang fragment for the compute pipeline.
 
@@ -566,8 +567,16 @@ class MaterialLibrary:
         Raises RuntimeError when markers don't appear (e.g. the target is
         not a surfacematerial wrapping standard_surface).
         """
-        cm = self.generate(target_name, write_to_disk=write_to_disk,
-                           compile_check=False)
+        # Allow callers (e.g. the renderer's _gen_scene_materials, which
+        # already runs `self.generate(target)` for each scene material)
+        # to pass the CompiledMaterial back in so we don't re-run gen on
+        # every graph-bound material — that path doubles per-material gen
+        # cost otherwise.
+        if compiled is not None and compiled.target_name == target_name:
+            cm = compiled
+        else:
+            cm = self.generate(target_name, write_to_disk=write_to_disk,
+                               compile_check=False)
         sanitized = _sanitize_ident(target_name)
         struct_name = f"GraphParams_{sanitized}"
         outputs_struct = f"GraphOutputs_{sanitized}"
