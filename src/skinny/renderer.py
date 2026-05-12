@@ -1752,8 +1752,15 @@ class Renderer:
         self._create_descriptors()
         # Re-write graph SSBO descriptors against the freshly-allocated
         # descriptor sets (they were skipped during pipeline-build's first
-        # call to _create_descriptors). Also refreshes their content.
+        # call to _create_descriptors). Also refreshes their content +
+        # may grow the bindless texture pool when a graph references a
+        # new image path.
         self._upload_graph_param_buffers()
+        # Push every populated texture-pool slot into binding 14 of the
+        # fresh descriptor sets so graph-driven texture samples have a
+        # valid descriptor — `_create_descriptors` leaves the partially-
+        # bound array empty by default.
+        self._update_texture_pool_descriptors()
         # And material-types so per-material graphId stays current.
         self._upload_material_types()
         self._pipeline_built_for_targets = self._graph_set_signature()
