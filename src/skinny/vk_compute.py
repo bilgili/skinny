@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import struct
 import subprocess
@@ -236,6 +237,46 @@ class ComputePipeline:
             for idx, gf in enumerate(self.graph_fragments)
         }
 
+    # SPIR-V cache: every pipeline build hashes its (entry point + Slang
+    # source tree + flags) into `<build>/spv_cache/<hash>.spv`. Pipeline
+    # rebuilds (scene reload, mid-session graph swap) re-emit the same
+    # generated_materials.slang for repeated scene sets, so the next
+    # rebuild hits the cache and skips slangc (≈1.4 s).
+    _CACHE_DIRNAME = "spv_cache"
+
+    def _build_dir(self) -> Path:
+        """Where the SPIR-V cache lives. Mirrors materialx_runtime._build_dir."""
+        return Path(__file__).resolve().parents[2] / "build"
+
+    def _cache_key(self, src: Path, flags: tuple[str, ...]) -> str:
+        """Stable hash over the Slang source tree + compile flags.
+
+        Walks every `.slang` file under shader_dir (including the
+        aggregator + per-graph generated/ files written this turn) and
+        every `.slang` under mtlx/genslang. Content hashing is necessary
+        because some files (generated_materials.slang) change per scene
+        without their mtime changing in a predictable way.
+        """
+        h = hashlib.blake2b(digest_size=16)
+        h.update(self.entry_point.encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(src).encode("utf-8"))
+        h.update(b"\0")
+        for flag in flags:
+            h.update(flag.encode("utf-8"))
+            h.update(b"\0")
+        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
+        roots = [self.shader_dir, mtlx_genslang]
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob("*.slang")):
+                h.update(str(path.relative_to(root)).encode("utf-8"))
+                h.update(b"\0")
+                h.update(path.read_bytes())
+                h.update(b"\0")
+        return h.hexdigest()
+
     def _compile_slang(self) -> Path:
         self._run_codegen()
         src = self.shader_dir / f"{self.entry_module}.slang"
@@ -251,13 +292,10 @@ class ComputePipeline:
         #     custom nodedefs. Their `#include "lib/mx_closure_type.glsl"`
         #     resolves to the shader_dir shim above.
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        cmd = [
-            slangc,
-            str(src),
+        flags = (
             "-target", "spirv",
             "-entry", self.entry_point,
             "-stage", "compute",
-            "-o", str(out),
             "-I", str(self.shader_dir),
             "-I", str(mtlx_genslang),
             # Tells the genslang impls to omit gen-prelude-only paths
@@ -266,10 +304,27 @@ class ComputePipeline:
             # set this and keeps the gen-provided helpers.
             "-D", "SKINNY_COMPUTE_PIPELINE=1",
             "-fvk-use-scalar-layout",
-        ]
+        )
+
+        cache_dir = self._build_dir() / self._CACHE_DIRNAME
+        key = self._cache_key(src, flags)
+        cached = cache_dir / f"{key}.spv"
+        if cached.exists():
+            shutil.copyfile(cached, out)
+            return out
+
+        cmd = [slangc, str(src), *flags, "-o", str(out)]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"Slang compilation failed:\n{result.stderr}")
+        # Populate cache for next pipeline build over the same source tree.
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(out, cached)
+        except OSError:
+            # Cache writes are best-effort; transient FS errors must not
+            # break the pipeline build itself.
+            pass
         return out
 
     # ── Shader module ────────────────────────────────────────────
