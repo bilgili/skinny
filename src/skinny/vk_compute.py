@@ -159,24 +159,25 @@ class ComputePipeline:
                 f"        }}\n"
             )
 
-        # Convenience: the per-hit base_color result (or magenta when no
-        # graph). Lets call sites also use the FlatMaterial.albedo path
-        # without an extra applyGraphOutputs invocation.
-        base_color_cases = "".join(
-            (
+        # Per-hit base_color override path (FlatMaterial.albedo). Only
+        # graphs whose outputs include `base_color` participate; for
+        # graphs that drive other inputs (brass: specular_roughness +
+        # coat_*) the caller must NOT override albedo, so the case
+        # simply returns false and the caller keeps the SSBO constant.
+        base_color_cases = ""
+        for idx, gf in enumerate(self.graph_fragments):
+            has_base = any(i == "base_color" for i, _ in gf.outputs)
+            if not has_base:
+                continue
+            base_color_cases += (
                 f"        case {idx + 2}u:\n"
                 f"        {{\n"
                 f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
                 f"_graphParams_{gf.sanitized_name}(matId));\n"
-                + (
-                    f"            return g.base_color;\n"
-                    if any(i == "base_color" for i, _ in gf.outputs)
-                    else "            return float3(1.0);\n"
-                )
-                + "        }\n"
+                f"            outColor = g.base_color;\n"
+                f"            return true;\n"
+                f"        }}\n"
             )
-            for idx, gf in enumerate(self.graph_fragments)
-        )
 
         switch_body = "".join(cases) if cases else ""
 
@@ -212,17 +213,21 @@ class ComputePipeline:
             "            return;\n"
             "    }\n"
             "}\n\n"
-            "// Convenience for sites that need only the base_color value\n"
-            "// (e.g. FlatMaterial direct-lobe albedo) without applying the\n"
-            "// full StdSurfaceParams override.\n"
-            "float3 evalSceneGraphBaseColor(uint graphId, uint matId,\n"
-            "                                float3 P, float3 N, float3 T, float2 UV)\n"
+            "// Returns true and fills `outColor` only when the active graph\n"
+            "// drives std_surface.base_color (marble, wood). Graphs that\n"
+            "// drive only other inputs (brass: specular_roughness + coat_*)\n"
+            "// return false; the caller keeps the SSBO-uploaded constant\n"
+            "// for FlatMaterial.albedo.\n"
+            "bool evalSceneGraphBaseColor(uint graphId, uint matId,\n"
+            "                              float3 P, float3 N, float3 T, float2 UV,\n"
+            "                              out float3 outColor)\n"
             "{\n"
+            "    outColor = float3(0.0);\n"
             "    switch (graphId)\n"
             "    {\n"
             f"{base_color_cases}"
             "        default:\n"
-            "            return float3(1.0, 0.0, 1.0);\n"
+            "            return false;\n"
             "    }\n"
             "}\n"
         )
