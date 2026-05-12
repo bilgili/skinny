@@ -616,9 +616,10 @@ class MaterialLibrary:
         used_uniforms.sort(key=lambda u: u.offset)
 
         struct_src = _emit_param_struct(struct_name, used_uniforms,
-                                        type_map=self._SLANG_TYPES)
+                                        type_map=self._SLANG_TYPES,
+                                        public=True)
         func_src = (
-            f"float3 evalGraph_{sanitized}(float3 P_in, float3 N_in,\n"
+            f"public float3 evalGraph_{sanitized}(float3 P_in, float3 N_in,\n"
             f"                              float3 T_in, float2 UV_in,\n"
             f"                              in {struct_name} p)\n"
             f"{{\n"
@@ -626,18 +627,22 @@ class MaterialLibrary:
             f"    return {return_var};\n"
             f"}}\n"
         )
-        # MaterialXGenSlang emits calls to mx_sin / mx_cos / mx_inversesqrt /
-        # etc., which mtlx_noise.slang + mtlx_closures.slang expose as `#define`
-        # aliases for the HLSL/Slang built-ins. Slang's `import` does not
-        # propagate preprocessor macros, so we materialise the aliases at the
-        # top of every generated fragment. Guarded so multi-graph builds don't
-        # redefine.
+        # Per-graph fragments are Slang modules: `internal` shields the
+        # mx_sin / mx_cos / etc. macro aliases (and any future internal
+        # helpers added when texture-graph support lands) so multiple
+        # graphs in the same scene can carry name-colliding helpers
+        # without ambiguous-call errors. Only struct_name + evalGraph_*
+        # are `public` and visible to importers.
+        #
+        # MaterialXGenSlang emits calls to mx_sin / mx_cos / mx_inversesqrt
+        # / etc. as identifiers; mtlx_noise.slang + mtlx_closures.slang
+        # expose those as `#define` aliases for the HLSL/Slang built-ins.
+        # Slang's `import` does not propagate preprocessor macros, so we
+        # materialise the aliases inside each module's translation unit.
         header = (
-            f"// Auto-generated graph fragment for target '{target_name}'.\n"
+            f"// Auto-generated graph module for target '{target_name}'.\n"
             f"// Source: MaterialXGenSlang via MaterialLibrary.generate_for_compute().\n"
             f"// Edits will be overwritten on next scene load.\n\n"
-            f"#ifndef SKINNY_MX_FN_ALIASES\n"
-            f"#define SKINNY_MX_FN_ALIASES\n"
             f"#define mx_sin sin\n"
             f"#define mx_cos cos\n"
             f"#define mx_tan tan\n"
@@ -646,8 +651,12 @@ class MaterialLibrary:
             f"#define mx_atan atan2\n"
             f"#define mx_radians radians\n"
             f"#define mx_inversesqrt rsqrt\n"
-            f"#define mx_float_bits_to_int asint\n"
-            f"#endif\n\n"
+            f"#define mx_float_bits_to_int asint\n\n"
+            # Pull in mx_fractal3d_float and friends from skinny's shared
+            # noise/closure modules. Their symbols are public there and
+            # remain visible to this module without polluting importers
+            # because we re-export nothing from those modules.
+            f"import mtlx_noise;\n\n"
         )
         full_src = header + struct_src + "\n" + func_src
 
@@ -874,14 +883,18 @@ def _emit_param_struct(
     uniforms: Iterable[UniformField],
     *,
     type_map: dict[str, str],
+    public: bool = False,
 ) -> str:
     """Emit a Slang struct with one field per UniformField.
 
     Caller pre-filters `uniforms` to only those referenced in the graph
     body. Fields are emitted in offset order so the struct layout under
-    scalar-layout matches the Python packer.
+    scalar-layout matches the Python packer. `public=True` marks the
+    struct visible to module importers (required when the per-graph
+    fragment is compiled as a Slang module).
     """
-    lines = [f"struct {struct_name}", "{"]
+    visibility = "public " if public else ""
+    lines = [f"{visibility}struct {struct_name}", "{"]
     for u in uniforms:
         slang_t = type_map.get(u.type_name)
         if slang_t is None:
