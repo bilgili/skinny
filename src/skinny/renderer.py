@@ -1721,6 +1721,12 @@ class Renderer:
         # regression, ...) fall back to an empty-graph pipeline so the
         # rest of the scene still renders. Affected materials show
         # magenta from evalSceneGraph's `default` case.
+        # Snapshot the attempted signature BEFORE the rebuild — if slangc
+        # fails we still want to record what we tried so the gate in
+        # `_gen_scene_materials` doesn't trigger an infinite retry loop
+        # for the same broken fragment set on every subsequent scene
+        # poll.
+        attempted_sig = self._graph_set_signature()
         try:
             self.pipeline = ComputePipeline(
                 self.ctx,
@@ -1729,6 +1735,7 @@ class Renderer:
                 entry_point="mainImage",
                 graph_fragments=list(self._scene_graph_fragments),
             )
+            built_sig = attempted_sig
         except RuntimeError as e:
             print(
                 f"[skinny] WARNING: pipeline rebuild with "
@@ -1746,6 +1753,11 @@ class Renderer:
                 entry_point="mainImage",
                 graph_fragments=[],
             )
+            # Record the attempted (broken) signature so re-loading the
+            # same scene doesn't retry slangc on every poll. A scene that
+            # *changes* its graph set after the failure will produce a
+            # new signature and re-trigger the rebuild as usual.
+            built_sig = attempted_sig
         # Recreate descriptor pool, allocate fresh sets, write every
         # binding's initial descriptor. Pool sizing reads
         # `_scene_graph_fragments` so it scales with the new fragment count.
@@ -1763,7 +1775,9 @@ class Renderer:
         self._update_texture_pool_descriptors()
         # And material-types so per-material graphId stays current.
         self._upload_material_types()
-        self._pipeline_built_for_targets = self._graph_set_signature()
+        # `built_sig` reflects what the rebuild *attempted*, not the
+        # post-fallback state — keeps the rebuild gate idempotent.
+        self._pipeline_built_for_targets = built_sig
         print(
             f"[skinny] pipeline rebuilt for "
             f"{len(self._scene_graph_fragments)} MaterialX graph(s)"
