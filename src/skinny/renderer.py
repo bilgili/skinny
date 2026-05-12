@@ -930,9 +930,10 @@ class Renderer:
         self._scene_graph_fragments: list = []
         self._material_graph_ids: dict[int, int] = {}
         self._material_graph_overrides: dict[int, dict] = {}
-        # Tuple of target names the current ComputePipeline was built for.
-        # _gen_scene_materials triggers _rebuild_pipeline_for_graphs() when
-        # the new set differs.
+        # Signature (target_name, slang-content-hash) per fragment in the
+        # currently-built pipeline. _gen_scene_materials compares against
+        # `_graph_set_signature()` to decide whether _rebuild_pipeline_for_graphs
+        # needs to run.
         self._pipeline_built_for_targets: tuple = ()
         # MaterialX field overrides keyed by uniform field name
         # (e.g. "layer_top_melanin"). Seeded from SkinParameters defaults;
@@ -1547,13 +1548,17 @@ class Renderer:
             )
 
         # Rebuild pipeline if the scene's MaterialX nodegraph set differs
-        # from what the live pipeline was compiled against. The first-boot
-        # path (no GPU yet — _init_gpu hasn't run) skips: __init__'s
-        # `_init_gpu()` will build with the populated fragment list.
-        new_targets = tuple(gf.target_name for gf in self._scene_graph_fragments)
+        # from what the live pipeline was compiled against. The signature
+        # `_graph_set_signature()` pairs each target name with a stable
+        # hash of the emitted Slang, so two scenes that use the same
+        # target_name from different `.mtlx` documents (different node
+        # wiring, different texture paths) still trigger a rebuild.
+        # First-boot path (no GPU yet — `_init_gpu` hasn't run) skips:
+        # `__init__`'s `_init_gpu()` will build with the populated
+        # fragment list.
         if (
             getattr(self, "pipeline", None) is not None
-            and new_targets != self._pipeline_built_for_targets
+            and self._graph_set_signature() != self._pipeline_built_for_targets
         ):
             self._rebuild_pipeline_for_graphs()
 
@@ -1678,6 +1683,21 @@ class Renderer:
         self.light_radiance = color * self.light_intensity
         self._sync_default_light_prim()
 
+    def _graph_set_signature(self) -> tuple:
+        """Hashable identity of the active MaterialX graph set.
+
+        Pairs each fragment's `target_name` with a content hash of its
+        emitted Slang so the rebuild gate distinguishes scenes that
+        share a target name but came from different `.mtlx` documents.
+        """
+        import hashlib
+        return tuple(
+            (gf.target_name,
+             hashlib.blake2b(gf.slang_source.encode("utf-8"),
+                             digest_size=8).hexdigest())
+            for gf in self._scene_graph_fragments
+        )
+
     def _rebuild_pipeline_for_graphs(self) -> None:
         """Rebuild compute pipeline + descriptor pool/sets when scene graphs change.
 
@@ -1736,9 +1756,7 @@ class Renderer:
         self._upload_graph_param_buffers()
         # And material-types so per-material graphId stays current.
         self._upload_material_types()
-        self._pipeline_built_for_targets = tuple(
-            gf.target_name for gf in self._scene_graph_fragments
-        )
+        self._pipeline_built_for_targets = self._graph_set_signature()
         print(
             f"[skinny] pipeline rebuilt for "
             f"{len(self._scene_graph_fragments)} MaterialX graph(s)"
@@ -1757,9 +1775,7 @@ class Renderer:
             entry_point="mainImage",
             graph_fragments=list(self._scene_graph_fragments),
         )
-        self._pipeline_built_for_targets = tuple(
-            gf.target_name for gf in self._scene_graph_fragments
-        )
+        self._pipeline_built_for_targets = self._graph_set_signature()
 
         # Uniform buffer — FrameConstants + SkinParams + light
         self.uniform_size = 512  # generous, std140 aligned
