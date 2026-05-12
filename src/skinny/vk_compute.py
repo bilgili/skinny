@@ -110,14 +110,15 @@ class ComputePipeline:
         for old in gen_dir.glob("*_graph.slang"):
             old.unlink()
 
-        includes: list[str] = []
+        imports: list[str] = []
         ssbo_decls: list[str] = []
         param_helpers: list[str] = []
         cases: list[str] = []
         for idx, gf in enumerate(self.graph_fragments):
-            fname = f"{gf.sanitized_name}_graph.slang"
+            module_name = f"{gf.sanitized_name}_graph"
+            fname = f"{module_name}.slang"
             (gen_dir / fname).write_text(gf.slang_source, encoding="utf-8")
-            includes.append(f'#include "generated/{fname}"')
+            imports.append(f"import generated.{module_name};")
             binding = GRAPH_BINDING_BASE + idx
             ssbo_decls.append(
                 f"[[vk::binding({binding}, 0)]]\n"
@@ -140,26 +141,13 @@ class ComputePipeline:
         aggregator = (
             "// Auto-generated. Do not edit — written by "
             "ComputePipeline._emit_generated_materials().\n"
-            "// Concatenates per-MaterialX-graph evaluators for the loaded scene.\n\n"
-            "import mtlx_noise;\n"
-            "import mtlx_closures;\n\n"
-            "// Macro aliases gen-emitted graph code references. Slang `import`\n"
-            "// does not propagate `#define`, so each fragment also defines them\n"
-            "// under SKINNY_MX_FN_ALIASES; the guard makes both safe.\n"
-            "#ifndef SKINNY_MX_FN_ALIASES\n"
-            "#define SKINNY_MX_FN_ALIASES\n"
-            "#define mx_sin sin\n"
-            "#define mx_cos cos\n"
-            "#define mx_tan tan\n"
-            "#define mx_asin asin\n"
-            "#define mx_acos acos\n"
-            "#define mx_atan atan2\n"
-            "#define mx_radians radians\n"
-            "#define mx_inversesqrt rsqrt\n"
-            "#define mx_float_bits_to_int asint\n"
-            "#endif\n\n"
-            + "\n".join(includes)
-            + ("\n\n" if includes else "\n")
+            "// Imports each scene MaterialX nodegraph as a Slang module.\n"
+            "// Per-graph modules expose only `evalGraph_<target>` + the\n"
+            "// matching `GraphParams_<target>` struct; their `internal`\n"
+            "// helpers stay module-private, so duplicate symbol names\n"
+            "// across graphs do not collide.\n\n"
+            + "\n".join(imports)
+            + ("\n\n" if imports else "\n")
             + "\n".join(ssbo_decls)
             + ("\n" if ssbo_decls else "")
             + "\n".join(param_helpers)
