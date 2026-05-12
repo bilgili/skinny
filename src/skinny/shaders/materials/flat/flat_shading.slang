@@ -168,13 +168,12 @@ StdSurfaceParams loadStdSurfaceParams(uint matId, float3 posObject,
     uint graphId = materialGraphId(matId);
     if (graphId >= 2u)
     {
-        // Per-hit MaterialX nodegraph evaluator emitted by
-        // MaterialLibrary.generate_for_compute() — replaces the legacy
-        // hard-coded Marble3D procedural path. Drives base_color (and
-        // subsurface_color for layered media).
-        float3 c = evalSceneGraph(graphId, matId, posObject, normal, tangent, uv);
-        sp.base_color = c;
-        sp.subsurface_color = c;
+        // Per-hit MaterialX nodegraph evaluator (gen-emitted via
+        // MaterialLibrary.generate_for_compute). evalSceneGraph mutates
+        // `sp` in place — each graph-driven std_surface input is
+        // overwritten with the graph's per-pixel result, others keep
+        // the SSBO-uploaded constant.
+        evalSceneGraph(graphId, matId, posObject, normal, tangent, uv, sp);
     }
     return sp;
 }
