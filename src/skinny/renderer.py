@@ -2895,12 +2895,12 @@ class Renderer:
                     self.ctx, buf_size
                 )
             data = bytearray(self.material_capacity * stride)
-            # Pre-compute filename input names so we can resolve overrides
-            # for those fields through the bindless texture pool. The
-            # MaterialXGenSlang reflection sets `type_name='filename'`;
-            # pack_uniform_block packs whatever value sits in `overrides`
-            # for those names as a uint (bindless slot).
-            filename_fields = [f.name for f in gf.uniform_block
+            # Filename uniforms come from MaterialXGenSlang reflection with
+            # the `.mtlx`-authored path as their `default` (str). We pair
+            # each one with the resolved bindless texture-pool slot so
+            # pack_uniform_block writes a uint slot index rather than
+            # trying to pack the path string as an int.
+            filename_fields = [f for f in gf.uniform_block
                                if f.type_name == "filename"]
             for mat_idx, gid in self._material_graph_ids.items():
                 if gid != idx + 2:  # matches assign_graph_ids: GRAPH_ID_FIRST=2
@@ -2908,27 +2908,40 @@ class Renderer:
                 if mat_idx >= self.material_capacity:
                     continue
                 overrides = dict(self._material_graph_overrides.get(mat_idx, {}))
-                # Resolve each filename input → bindless slot. Source order:
-                #   1. mat.parameter_overrides[name] (a Path or str).
-                #   2. mat.texture_paths[name] (Loader-decoded texture path).
-                #   3. Skip — pack_uniform_block falls back to slot 0.
                 mat = (self._usd_scene.materials[mat_idx]
                        if self._usd_scene is not None else None)
-                for fname in filename_fields:
-                    raw = overrides.get(fname)
+                # Resolve each filename input → bindless slot. Source
+                # precedence per uniform:
+                #   1. mat.parameter_overrides[name] (slider override).
+                #   2. mat.texture_paths[name] (USD loader-decoded path).
+                #   3. UniformField.default (the .mtlx-authored value,
+                #      typically a path string).
+                # Relative paths resolve against the .mtlx document's
+                # source URI so the example `textures/foo.jpg` references
+                # work regardless of the renderer's CWD.
+                mtlx_dir: Optional[Path] = None
+                if mat is not None and mat.mtlx_document is not None:
+                    src_uri = mat.mtlx_document.getSourceUri()
+                    if src_uri:
+                        mtlx_dir = Path(src_uri).resolve().parent
+                for f in filename_fields:
+                    raw = overrides.get(f.name)
                     if raw is None and mat is not None:
-                        raw = mat.texture_paths.get(fname)
+                        raw = mat.texture_paths.get(f.name)
                     if raw is None:
+                        raw = f.default
+                    if raw is None or raw == "":
                         continue
+                    p = Path(str(raw))
+                    if not p.is_absolute() and mtlx_dir is not None:
+                        p = (mtlx_dir / p).resolve()
                     try:
-                        slot = self.texture_pool.add_or_get(
-                            Path(raw), linear=False,
-                        )
+                        slot = self.texture_pool.add_or_get(p, linear=False)
                     except Exception as e:  # noqa: BLE001
                         print(f"[skinny] graph[{gf.target_name}] mat[{mat_idx}] "
-                              f"'{fname}' texture load fail: {e}")
+                              f"'{f.name}' texture load fail ({p}): {e}")
                         slot = 0
-                    overrides[fname] = slot
+                    overrides[f.name] = slot
                 packed = pack_uniform_block(gf.uniform_block, overrides)
                 data[mat_idx * stride : mat_idx * stride + len(packed)] = packed
             self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
