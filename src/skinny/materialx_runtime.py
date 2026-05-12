@@ -623,6 +623,16 @@ class MaterialLibrary:
         body = body.replace("vd.tangentWorld",   "T_in")
         body = body.replace("vd.positionWorld",  "P_in")  # fallback
         body = body.replace("vd.i_geomprop_UVMap", "UV_in")
+        # MaterialXGenSlang emits raw `pow(x, y)` for the `power` node.
+        # HLSL `pow` is undefined on negative bases (typically NaN); the
+        # marble example graph chains sin → multiply → add → power, so
+        # ~half of the input range goes negative and produces NaN that
+        # `mtlx_std_surface.slang` then clamps to 0 (black). Match the
+        # MaterialX spec's documented behavior — `power` with a negative
+        # base returns 0 — by guarding the first argument with max().
+        body = re.sub(
+            r"\bpow\(([^,]+),", r"pow(max(\1, 0.0),", body,
+        )
 
         # Substitute each uniform name with `p.<name>` when it appears as
         # a whole-word identifier. Walk uniforms longest-first so prefix
