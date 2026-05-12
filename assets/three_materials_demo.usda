@@ -1,0 +1,124 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = """Demo scene: three spheres bound to the MaterialX
+            example assets that the compute pipeline drives end-to-end:
+              - Marble_3D    (base_color + subsurface_color driven by fractal3d)
+              - Tiled_Wood   (base_color + specular_roughness via NG_tiledimage_*)
+              - Tiled_Brass  (specular_roughness + coat_color + coat_roughness)
+
+            The .mtlx files are referenced as USD asset paths; the
+            skinny loader's MaterialX API fallback resolves them and
+            matches the binding leaf name against each .mtlx's
+            surfacematerial element (Marble_3D / Tiled_Wood / Tiled_Brass).
+            """
+)
+
+# ──────────────────────────────────────────────────────────────────
+# Material library — references the three example .mtlx files. The
+# referenced files contain the surfacematerial + nodegraph + (for
+# wood/brass) the tiledimage texture inputs.
+# ──────────────────────────────────────────────────────────────────
+
+def Scope "Materials"
+{
+    def "MarbleLib" (
+        prepend references = @./Usd-Mtlx-Example/materials/standard_surface_marble_solid.mtlx@
+    )
+    {
+    }
+
+    def "WoodLib" (
+        prepend references = @./Usd-Mtlx-Example/materials/standard_surface_wood_tiled.mtlx@
+    )
+    {
+    }
+
+    def "BrassLib" (
+        prepend references = @./Usd-Mtlx-Example/materials/standard_surface_brass_tiled.mtlx@
+    )
+    {
+    }
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Geometry — three spheres laid out left-to-right along +X.
+# ──────────────────────────────────────────────────────────────────
+
+def Xform "World"
+{
+    def Sphere "MarbleSphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Materials/MarbleLib/Marble_3D>
+        double radius = 1.0
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.8)]
+        double3 xformOp:translate = (-2.5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "WoodSphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Materials/WoodLib/Tiled_Wood>
+        double radius = 1.0
+        color3f[] primvars:displayColor = [(0.6, 0.4, 0.2)]
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BrassSphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Materials/BrassLib/Tiled_Brass>
+        double radius = 1.0
+        color3f[] primvars:displayColor = [(0.85, 0.7, 0.3)]
+        double3 xformOp:translate = (2.5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Light — a single directional light + a sphere area light for fill.
+# ──────────────────────────────────────────────────────────────────
+
+def Xform "Lights"
+{
+    def DistantLight "KeyLight"
+    {
+        float inputs:angle = 1.5
+        color3f inputs:color = (1.0, 0.97, 0.92)
+        float inputs:intensity = 3.0
+        double3 xformOp:rotateXYZ = (-45, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def SphereLight "Fill"
+    {
+        float inputs:intensity = 5.0
+        color3f inputs:color = (0.6, 0.7, 1.0)
+        float inputs:radius = 0.5
+        double3 xformOp:translate = (-3, 3, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Camera — frames the three spheres from in front.
+# ──────────────────────────────────────────────────────────────────
+
+def Camera "MainCam"
+{
+    float focalLength = 35
+    float horizontalAperture = 36
+    float verticalAperture = 24
+    float2 clippingRange = (0.01, 1000)
+    double3 xformOp:translate = (0, 1.0, 7.0)
+    double3 xformOp:rotateXYZ = (-5, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
