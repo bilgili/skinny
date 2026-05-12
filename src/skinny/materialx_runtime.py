@@ -570,19 +570,35 @@ class MaterialLibrary:
                            compile_check=False)
         sanitized = _sanitize_ident(target_name)
         struct_name = f"GraphParams_{sanitized}"
+        outputs_struct = f"GraphOutputs_{sanitized}"
 
-        body, return_var = _extract_graph_body(cm.pixel_source)
+        body, ng_args = _extract_graph_body(cm.pixel_source)
 
-        # Pure constant-input materials (e.g. plain Glass without a base_color
-        # nodegraph) emit no per-pixel math — the wrapping standard_surface
-        # receives base_color directly from a cbuffer uniform. In that case
-        # the return_var is a uniform from the full uniform_block and the
-        # body holds only geomprop normalisations. There's nothing for the
-        # compute pipeline to evaluate; the existing flat-material /
-        # std_surface SSBO path covers these. Return None so callers can
-        # skip them.
+        # Identify graph-driven std_surface inputs: for each positional arg
+        # in the wrapping NG_standard_surface call, the arg is either a
+        # cbuffer uniform name (constant — flat path covers it) or a
+        # locally-computed var (graph drives that input). Skip positions
+        # marked None in `_STD_SURFACE_ARG_MAP` (geomprop fallbacks + the
+        # trailing out handle) and the final wrapping `<wrapper>_out`.
         full_uniform_names = {u.name for u in cm.uniform_block}
-        if return_var in full_uniform_names:
+        outputs: list[tuple[str, str, str]] = []  # (input_name, slang_type, var)
+        for pos, arg in enumerate(ng_args):
+            if pos >= len(_STD_SURFACE_ARG_MAP):
+                break
+            spec = _STD_SURFACE_ARG_MAP[pos]
+            if spec is None:
+                continue
+            input_name, slang_type, _mtlx_type = spec
+            var = arg.strip()
+            if not var or var in full_uniform_names:
+                continue
+            if var.startswith("geomprop_"):
+                continue
+            outputs.append((input_name, slang_type, var))
+
+        # No graph-driven inputs ⇒ pure constant-input material (Glass etc.)
+        # — fall back to flat / std_surface SSBO path.
+        if not outputs:
             return None
 
         # Reject geomprop inputs we don't pipe yet. UVMap is allowed
@@ -615,13 +631,32 @@ class MaterialLibrary:
         struct_src = _emit_param_struct(struct_name, used_uniforms,
                                         type_map=self._SLANG_TYPES,
                                         public=True)
+        # GraphOutputs holds one field per graph-driven std_surface input.
+        # Aggregator's per-graph `apply` function copies each field onto
+        # the matching StdSurfaceParams slot. Fields are `public` because
+        # the aggregator lives in a different module and Slang otherwise
+        # treats struct fields as internal.
+        out_lines = [f"public struct {outputs_struct}", "{"]
+        for input_name, slang_type, _ in outputs:
+            out_lines.append(f"    public {slang_type} {input_name};")
+        out_lines.append("};")
+        out_lines.append("")
+        outputs_struct_src = "\n".join(out_lines)
+
+        assignments = "\n".join(
+            f"    o.{input_name} = {var};"
+            for input_name, _slang_type, var in outputs
+        )
         func_src = (
-            f"public float3 evalGraph_{sanitized}(float3 P_in, float3 N_in,\n"
+            f"public {outputs_struct} evalGraph_{sanitized}("
+            f"float3 P_in, float3 N_in,\n"
             f"                              float3 T_in, float2 UV_in,\n"
             f"                              in {struct_name} p)\n"
             f"{{\n"
             f"{_indent(body, '    ')}\n"
-            f"    return {return_var};\n"
+            f"    {outputs_struct} o;\n"
+            f"{assignments}\n"
+            f"    return o;\n"
             f"}}\n"
         )
         # Per-graph fragments are Slang modules: every gen-emitted top-level
@@ -646,6 +681,8 @@ class MaterialLibrary:
             + "\n\n"
             + struct_src
             + "\n"
+            + outputs_struct_src
+            + "\n"
             + func_src
         )
 
@@ -659,6 +696,8 @@ class MaterialLibrary:
             target_name=target_name,
             sanitized_name=sanitized,
             struct_name=struct_name,
+            outputs_struct=outputs_struct,
+            outputs=[(name, slang_type) for name, slang_type, _ in outputs],
             func_name=f"evalGraph_{sanitized}",
             slang_source=full_src,
             uniform_block=used_uniforms,
@@ -682,6 +721,11 @@ class GraphFragment:
     target_name: str
     sanitized_name: str
     struct_name: str
+    outputs_struct: str
+    # (std_surface_input_name, slang_type) for each graph-driven output.
+    # Aggregator uses this to emit a per-graph apply function that
+    # overlays the GraphOutputs struct onto StdSurfaceParams.
+    outputs: list[tuple[str, str]]
     func_name: str
     slang_source: str
     uniform_block: list[UniformField]
@@ -804,14 +848,87 @@ def _indent(text: str, prefix: str) -> str:
 # Captures (var, value) from `surfaceshader VAR = surfaceshader(...);`.
 _SURFACESHADER_DECL = re.compile(r"\bsurfaceshader\s+(\w+)\s*=\s*surfaceshader\s*\(")
 
-# Captures the wrapping NG_standard_surface_surfaceshader_<ver>(arg0, arg1, …) call.
-# arg1 (the second positional argument) names the base_color variable.
-_NG_STD_SURFACE_CALL = re.compile(
-    r"NG_standard_surface_surfaceshader_\d+\s*\(\s*"
-    r"[^,]+,\s*"          # arg0 = base weight
-    r"([^,]+)\s*,",       # arg1 = base_color (capture)
-    re.DOTALL,
+# NG_standard_surface_surfaceshader_<ver>(arg0, arg1, …) — extract the
+# full positional arg list. Pattern allows args containing nested calls.
+_NG_STD_SURFACE_CALL_HEAD = re.compile(
+    r"NG_standard_surface_surfaceshader_\d+\s*\(",
 )
+
+
+# Positional argument map for NG_standard_surface_surfaceshader_<ver>().
+# Index = position in the call. Tuple = (input_name, slang_type, mtlx_type)
+# for inputs we treat as graph-driveable; `None` for positions that gen
+# fills with geomprop fallbacks or the wrapping output handle.
+_STD_SURFACE_ARG_MAP: tuple = (
+    ("base", "float", "float"),
+    ("base_color", "float3", "color3"),
+    ("diffuse_roughness", "float", "float"),
+    ("metalness", "float", "float"),
+    ("specular", "float", "float"),
+    ("specular_color", "float3", "color3"),
+    ("specular_roughness", "float", "float"),
+    ("specular_IOR", "float", "float"),
+    ("specular_anisotropy", "float", "float"),
+    ("specular_rotation", "float", "float"),
+    ("transmission", "float", "float"),
+    ("transmission_color", "float3", "color3"),
+    ("transmission_depth", "float", "float"),
+    ("transmission_scatter", "float3", "color3"),
+    ("transmission_scatter_anisotropy", "float", "float"),
+    ("transmission_dispersion", "float", "float"),
+    ("transmission_extra_roughness", "float", "float"),
+    ("subsurface", "float", "float"),
+    ("subsurface_color", "float3", "color3"),
+    ("subsurface_radius", "float3", "vector3"),
+    ("subsurface_scale", "float", "float"),
+    ("subsurface_anisotropy", "float", "float"),
+    ("sheen", "float", "float"),
+    ("sheen_color", "float3", "color3"),
+    ("sheen_roughness", "float", "float"),
+    ("coat", "float", "float"),
+    ("coat_color", "float3", "color3"),
+    ("coat_roughness", "float", "float"),
+    ("coat_anisotropy", "float", "float"),
+    ("coat_rotation", "float", "float"),
+    ("coat_IOR", "float", "float"),
+    None,                              # 31: geomprop normal
+    ("coat_affect_color", "float", "float"),
+    ("coat_affect_roughness", "float", "float"),
+    ("thin_film_thickness", "float", "float"),
+    ("thin_film_IOR", "float", "float"),
+    ("emission", "float", "float"),
+    ("emission_color", "float3", "color3"),
+    ("opacity", "float3", "color3"),
+    ("thin_walled", "uint", "boolean"),
+    None,                              # 40: geomprop normal (2nd)
+    None,                              # 41: geomprop tangent
+    None,                              # 42: out handle
+)
+
+
+def _parse_positional_args(source: str, paren_start: int) -> list[str]:
+    """Return positional args of a function call whose `(` is at index
+    `paren_start - 1` (so `source[paren_start]` is the first character
+    inside the parens). Splits on commas at the top brace/paren level."""
+    args: list[str] = []
+    depth = 0
+    start = paren_start
+    i = paren_start
+    while i < len(source):
+        c = source[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                if i > start:
+                    args.append(source[start:i].strip())
+                return args
+            depth -= 1
+        elif c == "," and depth == 0:
+            args.append(source[start:i].strip())
+            start = i + 1
+        i += 1
+    return args
 
 
 # Top-level declarations we mark `internal` so they stay private to a
@@ -1089,8 +1206,13 @@ def _extract_helper_block(pixel_source: str) -> str:
     return _INTERNAL_DECL_PATTERN.sub(r"internal \1", block)
 
 
-def _extract_graph_body(pixel_source: str) -> tuple[str, str]:
-    """Return (body, return_var) extracted from MaterialXGenSlang's pixel emit.
+def _extract_graph_body(pixel_source: str) -> tuple[str, list[str]]:
+    """Return (body, ng_args) extracted from MaterialXGenSlang's pixel emit.
+
+    `ng_args` is the full positional-argument list of the wrapping
+    NG_standard_surface_surfaceshader_<ver>() call. Caller intersects
+    those with `_STD_SURFACE_ARG_MAP` to identify which std_surface inputs
+    the nodegraph drives.
 
     Raises RuntimeError when expected markers aren't found.
     """
@@ -1138,16 +1260,19 @@ def _extract_graph_body(pixel_source: str) -> tuple[str, str]:
         )
     graph_body = after_marker[: decl_match.start()].rstrip() + "\n"
 
-    # The wrapping call names base_color as its 2nd positional arg.
-    call_match = _NG_STD_SURFACE_CALL.search(after_marker, decl_match.end())
-    if not call_match:
+    # Parse the wrapping NG_standard_surface call to recover the full
+    # positional arg list. Each arg is either a uniform from cbuffer (the
+    # graph does not drive that input) or a graph-computed local — the
+    # latter become outputs we expose to the renderer.
+    head_match = _NG_STD_SURFACE_CALL_HEAD.search(after_marker, decl_match.end())
+    if not head_match:
         raise RuntimeError(
             "generate_for_compute: NG_standard_surface_surfaceshader call not found — "
-            "cannot determine which graph variable feeds base_color"
+            "cannot determine which graph variables feed std_surface inputs"
         )
-    return_var = call_match.group(1).strip()
+    ng_args = _parse_positional_args(after_marker, head_match.end())
 
-    return graph_body, return_var
+    return graph_body, ng_args
 
 
 def _emit_param_struct(
@@ -1166,6 +1291,7 @@ def _emit_param_struct(
     fragment is compiled as a Slang module).
     """
     visibility = "public " if public else ""
+    field_visibility = "public " if public else ""
     lines = [f"{visibility}struct {struct_name}", "{"]
     for u in uniforms:
         slang_t = type_map.get(u.type_name)
@@ -1174,7 +1300,7 @@ def _emit_param_struct(
                 f"generate_for_compute: no Slang type mapping for MaterialX type "
                 f"'{u.type_name}' (uniform '{u.name}')"
             )
-        lines.append(f"    {slang_t} {u.name};  // offset {u.offset}")
+        lines.append(f"    {field_visibility}{slang_t} {u.name};  // offset {u.offset}")
     lines.append("};")
     lines.append("")
     return "\n".join(lines)

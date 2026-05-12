@@ -47,6 +47,7 @@ def test_marble_extracts_graph(lib):
     assert gf is not None, "marble must produce a graph fragment"
     assert gf.func_name == "evalGraph_Marble_3D"
     assert gf.struct_name == "GraphParams_Marble_3D"
+    assert gf.outputs_struct == "GraphOutputs_Marble_3D"
     names = {u.name for u in gf.uniform_block}
     # Marble's nodegraph wires these inputs through to the math body.
     for required in ("add_xyz_in2", "noise_octaves", "noise_amplitude",
@@ -54,27 +55,40 @@ def test_marble_extracts_graph(lib):
         assert required in names, f"marble missing uniform {required!r}"
     # The extracted function body must invoke fractal3d.
     assert "mx_fractal3d_float(" in gf.slang_source
-    # And return a color computed inside the function (not a uniform load).
-    assert "return base_color_out;" in gf.slang_source or \
-           "return color_mix_out;" in gf.slang_source
+    # base_color must be one of the graph-driven std_surface inputs.
+    output_names = {name for name, _ in gf.outputs}
+    assert "base_color" in output_names
 
 
 @pytest.mark.parametrize("asset,target", [
-    ("standard_surface_glass.mtlx",       "Glass"),
-    ("standard_surface_brass_tiled.mtlx", "Tiled_Brass"),
-    ("standard_surface_jade.mtlx",        "Jade"),
-    ("standard_surface_chrome.mtlx",      "Chrome"),
-    ("standard_surface_velvet.mtlx",      "Velvet"),
+    ("standard_surface_glass.mtlx",   "Glass"),
+    ("standard_surface_jade.mtlx",    "Jade"),
+    ("standard_surface_chrome.mtlx",  "Chrome"),
+    ("standard_surface_velvet.mtlx",  "Velvet"),
 ])
 def test_constant_input_materials_return_none(lib, asset, target):
-    """Constant-input or texture-bound materials must not produce a fragment.
-
-    They get rendered through the existing flat / std_surface SSBO path;
-    `generate_for_compute` returning None is the signal for that branch.
-    """
+    """Constant-input materials produce no graph-driven std_surface inputs
+    — `generate_for_compute` returns None and the renderer routes them
+    through the flat / std_surface SSBO path."""
     _import_asset(lib, asset)
     gf = lib.generate_for_compute(target, write_to_disk=False)
     assert gf is None, f"{target} should fall back to flat path"
+
+
+def test_brass_multi_output_graph(lib):
+    """Tiled_Brass drives specular_roughness + coat_color + coat_roughness
+    via its nodegraph (base_color stays constant). The extractor must
+    surface all three as outputs even though base_color is not driven."""
+    _import_asset(lib, "standard_surface_brass_tiled.mtlx")
+    gf = lib.generate_for_compute("Tiled_Brass", write_to_disk=False)
+    assert gf is not None
+    output_names = {name for name, _ in gf.outputs}
+    assert output_names == {"specular_roughness", "coat_color", "coat_roughness"}
+    # GraphOutputs struct exposes all three with public fields.
+    for name in output_names:
+        assert f"public float" in gf.slang_source or \
+               f"public float3" in gf.slang_source
+        assert name in gf.slang_source
 
 
 def test_texture_bound_graph_supported(lib):

@@ -214,13 +214,14 @@ FlatMaterial loadFlatMaterial(HitInfo h)
 
     // Mirror loadStdSurfaceParams's graph dispatch onto the flat path's
     // albedo so direct lobes (used by flatBsdfPdf / FlatMaterial.sample)
-    // pick up the same color the std_surface BSDF sees.
+    // pick up the same color the std_surface BSDF sees. Use the
+    // base-color-only convenience to avoid running the full graph twice.
     uint graphId = materialGraphId(h.materialId);
     if (graphId >= 2u)
     {
-        m.data.mat.albedo = evalSceneGraph(graphId, h.materialId,
-                                            h.positionObject,
-                                            h.normal, h.tangent, h.uv);
+        m.data.mat.albedo = evalSceneGraphBaseColor(
+            graphId, h.materialId,
+            h.positionObject, h.normal, h.tangent, h.uv);
     }
 
     m.F0 = schlickF0(m.data.mat.albedo, m.data.mat.metallic,

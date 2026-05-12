@@ -113,6 +113,7 @@ class ComputePipeline:
         imports: list[str] = []
         ssbo_decls: list[str] = []
         param_helpers: list[str] = []
+        apply_helpers: list[str] = []
         cases: list[str] = []
         for idx, gf in enumerate(self.graph_fragments):
             module_name = f"{gf.sanitized_name}_graph"
@@ -130,11 +131,51 @@ class ComputePipeline:
                 f"    return graphParams_{gf.sanitized_name}[matId];\n"
                 f"}}\n"
             )
+
+            # Per-graph apply: copy each output field onto the matching
+            # StdSurfaceParams slot. Built from the fragment's `outputs`
+            # metadata so multi-output graphs (brass = specular_roughness +
+            # coat_color + coat_roughness) drive several inputs at once.
+            assignments = "\n".join(
+                f"    sp.{input_name} = g.{input_name};"
+                for input_name, _ in gf.outputs
+            )
+            apply_helpers.append(
+                f"void applyGraphOutputs_{gf.sanitized_name}("
+                f"inout StdSurfaceParams sp, in {gf.outputs_struct} g)\n"
+                f"{{\n"
+                f"{assignments}\n"
+                f"}}\n"
+            )
+
             cases.append(
                 f"        case {idx + 2}u:  // graphId 0=skin, 1=flat reserved\n"
-                f"            return {gf.func_name}(P, N, T, UV, "
+                f"        {{\n"
+                f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
                 f"_graphParams_{gf.sanitized_name}(matId));\n"
+                f"            applyGraphOutputs_{gf.sanitized_name}(sp, g);\n"
+                f"            return;\n"
+                f"        }}\n"
             )
+
+        # Convenience: the per-hit base_color result (or magenta when no
+        # graph). Lets call sites also use the FlatMaterial.albedo path
+        # without an extra applyGraphOutputs invocation.
+        base_color_cases = "".join(
+            (
+                f"        case {idx + 2}u:\n"
+                f"        {{\n"
+                f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
+                f"_graphParams_{gf.sanitized_name}(matId));\n"
+                + (
+                    f"            return g.base_color;\n"
+                    if any(i == "base_color" for i, _ in gf.outputs)
+                    else "            return float3(1.0);\n"
+                )
+                + "        }\n"
+            )
+            for idx, gf in enumerate(self.graph_fragments)
+        )
 
         switch_body = "".join(cases) if cases else ""
 
@@ -143,22 +184,44 @@ class ComputePipeline:
             "ComputePipeline._emit_generated_materials().\n"
             "// Imports each scene MaterialX nodegraph as a Slang module.\n"
             "// Per-graph modules expose only `evalGraph_<target>` + the\n"
-            "// matching `GraphParams_<target>` struct; their `internal`\n"
-            "// helpers stay module-private, so duplicate symbol names\n"
-            "// across graphs do not collide.\n\n"
+            "// matching `GraphParams_<target>` / `GraphOutputs_<target>`\n"
+            "// structs; their `internal` helpers stay module-private, so\n"
+            "// duplicate symbol names across graphs do not collide.\n\n"
+            "import mtlx_std_surface;  // StdSurfaceParams\n\n"
             + "\n".join(imports)
             + ("\n\n" if imports else "\n")
             + "\n".join(ssbo_decls)
             + ("\n" if ssbo_decls else "")
             + "\n".join(param_helpers)
             + ("\n" if param_helpers else "")
-            + "float3 evalSceneGraph(uint graphId, uint matId, float3 P, float3 N, float3 T, float2 UV)\n"
+            + "\n".join(apply_helpers)
+            + ("\n" if apply_helpers else "")
+            + "// Evaluate the per-hit nodegraph and overlay each driven\n"
+            "// std_surface input on `sp`. graphId 0 / 1 reserved (skin /\n"
+            "// flat) — callers gate the call by `materialGraphId(mid) >= 2`.\n"
+            "void evalSceneGraph(uint graphId, uint matId,\n"
+            "                    float3 P, float3 N, float3 T, float2 UV,\n"
+            "                    inout StdSurfaceParams sp)\n"
             "{\n"
             "    switch (graphId)\n"
             "    {\n"
             f"{switch_body}"
             "        default:\n"
-            "            return float3(1.0, 0.0, 1.0);  // magenta: no graph for id\n"
+            "            sp.base_color = float3(1.0, 0.0, 1.0);\n"
+            "            return;\n"
+            "    }\n"
+            "}\n\n"
+            "// Convenience for sites that need only the base_color value\n"
+            "// (e.g. FlatMaterial direct-lobe albedo) without applying the\n"
+            "// full StdSurfaceParams override.\n"
+            "float3 evalSceneGraphBaseColor(uint graphId, uint matId,\n"
+            "                                float3 P, float3 N, float3 T, float2 UV)\n"
+            "{\n"
+            "    switch (graphId)\n"
+            "    {\n"
+            f"{base_color_cases}"
+            "        default:\n"
+            "            return float3(1.0, 0.0, 1.0);\n"
             "    }\n"
             "}\n"
         )
