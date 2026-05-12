@@ -8,6 +8,7 @@ import interfaces;
 import mtlx_closures;
 import mtlx_std_surface;
 import materials.flat.flat_shading;
+import generated_materials;
 import samplers.ggx;
 import samplers.lambert;
 
@@ -208,14 +209,18 @@ FlatMaterial loadFlatMaterial(HitInfo h)
 {
     FlatMaterial m;
     m.data = fetchFlatHitData(h);
-    m.sp   = loadStdSurfaceParams(h.materialId, h.positionObject);
+    m.sp   = loadStdSurfaceParams(h.materialId, h.positionObject,
+                                   h.normal, h.tangent);
 
-    ProceduralParams pp = proceduralParams[h.materialId];
-    if (pp.type != PROC_TYPE_NONE)
+    // Mirror loadStdSurfaceParams's graph dispatch onto the flat path's
+    // albedo so direct lobes (used by flatBsdfPdf / FlatMaterial.sample)
+    // pick up the same color the std_surface BSDF sees.
+    uint graphId = materialGraphId(h.materialId);
+    if (graphId >= 2u)
     {
-        float3 procColor = evalProceduralColor(pp, h.positionObject);
-        if (procColor.x >= 0.0)
-            m.data.mat.albedo = procColor;
+        m.data.mat.albedo = evalSceneGraph(graphId, h.materialId,
+                                            h.positionObject,
+                                            h.normal, h.tangent);
     }
 
     m.F0 = schlickF0(m.data.mat.albedo, m.data.mat.metallic,

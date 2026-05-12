@@ -18,6 +18,12 @@ from skinny.vk_context import VulkanContext
 # shader change but consumes more descriptor slots.
 BINDLESS_TEXTURE_CAPACITY = 128
 
+# First descriptor binding for MaterialX nodegraph parameter SSBOs. Each
+# loaded graph gets its own StructuredBuffer<GraphParams_X> at
+# GRAPH_BINDING_BASE + graphIdx; idx 0 == graphId 2 in the dispatch (0=skin,
+# 1=flat are reserved). Keep clear of bindings 0..24 used by the renderer.
+GRAPH_BINDING_BASE = 25
+
 
 class ComputePipeline:
     """Wraps a single Vulkan compute pipeline compiled from a Slang entry point."""
@@ -28,15 +34,23 @@ class ComputePipeline:
         shader_dir: Path,
         entry_module: str,
         entry_point: str,
+        graph_fragments: "list | None" = None,
     ) -> None:
         self.ctx = ctx
         self.shader_dir = shader_dir
         self.entry_module = entry_module
         self.entry_point = entry_point
+        # GraphFragment list (skinny.materialx_runtime). Each fragment is a
+        # MaterialXGenSlang-extracted nodegraph evaluator that gets
+        # concatenated into shaders/generated_materials.slang. Empty list ⇒
+        # aggregator emits no per-graph code (still required by main_pass's
+        # import).
+        self.graph_fragments = list(graph_fragments) if graph_fragments else []
 
         import time as _time
         t0 = _time.perf_counter()
         print(f"[skinny] slangc → SPIR-V: {entry_module}.slang …", flush=True)
+        self._emit_generated_materials()
         self._spirv_path = self._compile_slang()
         print(f"[skinny] slangc done in {_time.perf_counter() - t0:.2f}s "
               f"({self._spirv_path.stat().st_size // 1024} KB SPIR-V)", flush=True)
@@ -75,6 +89,101 @@ class ComputePipeline:
             log.debug("codegen failed (non-fatal): %s", exc)
         finally:
             sys.path.pop(0)
+
+    def _emit_generated_materials(self) -> None:
+        """Materialise shaders/generated_materials.slang + per-graph files.
+
+        `main_pass.slang` `import generated_materials;` always, even when
+        the scene carries no MaterialX graphs. Empty list ⇒ aggregator
+        emits only the macro-alias prelude and a no-op `evalSceneGraph`
+        switch that returns magenta for any graphId (caller never invokes
+        it when no graphs are bound).
+
+        Per-graph files are written under `shaders/generated/` so slangc's
+        existing `-I shaders/` include path resolves them.
+        """
+        gen_dir = self.shader_dir / "generated"
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        # Clear stale per-graph files: a scene reload may drop materials,
+        # and stale Slang in the include dir can mask missing wiring or
+        # collide on struct names.
+        for old in gen_dir.glob("*_graph.slang"):
+            old.unlink()
+
+        includes: list[str] = []
+        ssbo_decls: list[str] = []
+        param_helpers: list[str] = []
+        cases: list[str] = []
+        for idx, gf in enumerate(self.graph_fragments):
+            fname = f"{gf.sanitized_name}_graph.slang"
+            (gen_dir / fname).write_text(gf.slang_source, encoding="utf-8")
+            includes.append(f'#include "generated/{fname}"')
+            binding = GRAPH_BINDING_BASE + idx
+            ssbo_decls.append(
+                f"[[vk::binding({binding}, 0)]]\n"
+                f"StructuredBuffer<{gf.struct_name}> graphParams_{gf.sanitized_name};\n"
+            )
+            param_helpers.append(
+                f"{gf.struct_name} _graphParams_{gf.sanitized_name}(uint matId)\n"
+                f"{{\n"
+                f"    return graphParams_{gf.sanitized_name}[matId];\n"
+                f"}}\n"
+            )
+            cases.append(
+                f"        case {idx + 2}u:  // graphId 0=skin, 1=flat reserved\n"
+                f"            return {gf.func_name}(P, N, T, "
+                f"_graphParams_{gf.sanitized_name}(matId));\n"
+            )
+
+        switch_body = "".join(cases) if cases else ""
+
+        aggregator = (
+            "// Auto-generated. Do not edit — written by "
+            "ComputePipeline._emit_generated_materials().\n"
+            "// Concatenates per-MaterialX-graph evaluators for the loaded scene.\n\n"
+            "import mtlx_noise;\n"
+            "import mtlx_closures;\n\n"
+            "// Macro aliases gen-emitted graph code references. Slang `import`\n"
+            "// does not propagate `#define`, so each fragment also defines them\n"
+            "// under SKINNY_MX_FN_ALIASES; the guard makes both safe.\n"
+            "#ifndef SKINNY_MX_FN_ALIASES\n"
+            "#define SKINNY_MX_FN_ALIASES\n"
+            "#define mx_sin sin\n"
+            "#define mx_cos cos\n"
+            "#define mx_tan tan\n"
+            "#define mx_asin asin\n"
+            "#define mx_acos acos\n"
+            "#define mx_atan atan2\n"
+            "#define mx_radians radians\n"
+            "#define mx_inversesqrt rsqrt\n"
+            "#define mx_float_bits_to_int asint\n"
+            "#endif\n\n"
+            + "\n".join(includes)
+            + ("\n\n" if includes else "\n")
+            + "\n".join(ssbo_decls)
+            + ("\n" if ssbo_decls else "")
+            + "\n".join(param_helpers)
+            + ("\n" if param_helpers else "")
+            + "float3 evalSceneGraph(uint graphId, uint matId, float3 P, float3 N, float3 T)\n"
+            "{\n"
+            "    switch (graphId)\n"
+            "    {\n"
+            f"{switch_body}"
+            "        default:\n"
+            "            return float3(1.0, 0.0, 1.0);  // magenta: no graph for id\n"
+            "    }\n"
+            "}\n"
+        )
+        (self.shader_dir / "generated_materials.slang").write_text(
+            aggregator, encoding="utf-8"
+        )
+
+        # Expose binding map so the renderer can vkUpdateDescriptorSets into
+        # the right slot when uploading per-material graph params.
+        self.graph_bindings: dict[str, int] = {
+            gf.target_name: GRAPH_BINDING_BASE + idx
+            for idx, gf in enumerate(self.graph_fragments)
+        }
 
     def _compile_slang(self) -> Path:
         self._run_codegen()
@@ -283,15 +392,6 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
-            # binding 20: Per-material procedural evaluation params. 96 B
-            # each (ProceduralParams struct, scalar layout). type == 0
-            # means no procedural eval; type == 1 is 3D marble noise.
-            vk.VkDescriptorSetLayoutBinding(
-                binding=20,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                descriptorCount=1,
-                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
-            ),
             # binding 21: BDPT light-tracer splat buffer. Per-pixel 3 × uint32
             # fixed-point cumulative radiance (Q22.10). Atomic-added by
             # bdpt.slang's splatLightVertex(), consumed by main_pass.slang's
@@ -329,6 +429,20 @@ class ComputePipeline:
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
         ]
+        # Bindings GRAPH_BINDING_BASE..(GRAPH_BINDING_BASE + N - 1): one
+        # storage buffer per MaterialX nodegraph compiled into this pipeline.
+        # Each holds an array of GraphParams_<sanitized> records indexed by
+        # material slot (matches the FlatMaterialParams / StdSurfaceParams
+        # pattern at bindings 13 / 19).
+        for idx in range(len(self.graph_fragments)):
+            bindings.append(
+                vk.VkDescriptorSetLayoutBinding(
+                    binding=GRAPH_BINDING_BASE + idx,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    descriptorCount=1,
+                    stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                )
+            )
 
         # Per-binding flags — only binding 14 needs PARTIALLY_BOUND. Vulkan
         # requires the array length to match `bindings`, so all other

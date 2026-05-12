@@ -28,3 +28,9 @@ Thumbs.db
 *.dxil
 *.dxbc
 .grepai/
+
+# Auto-generated Slang aggregator + per-graph fragments (written by
+# ComputePipeline._emit_generated_materials each scene load)
+src/skinny/shaders/generated_materials.slang
+src/skinny/shaders/generated/
+

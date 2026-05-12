@@ -55,33 +55,6 @@ struct FlatMaterialParams
     float  opacityThreshold;      // 92..96; cutout alpha threshold
 };
 
-// Per-material procedural evaluation parameters. Scalar layout, 96 B.
-// type == 0 → no procedural evaluation; type == 1 → marble 3D noise pattern.
-static const uint PROC_TYPE_NONE      = 0u;
-static const uint PROC_TYPE_MARBLE_3D = 1u;
-
-struct ProceduralParams
-{
-    uint   type;              // PROC_TYPE_*
-    float3 add_xyz_in2;      // dot-product direction for xyz sum
-    float  scale_pos_in2;    // position frequency scale
-    float  scale_xyz_in2;    // xyz-component scaling
-    float  noise_amplitude;
-    int    noise_octaves;
-    float  noise_lacunarity;
-    float  noise_diminish;
-    float  scale_noise_in2;  // noise output multiplier
-    float  scale_in2;        // sin output multiplier
-    float  bias_in2;         // additive bias after sin·scale
-    float  power_in2;        // exponent on biased value
-    float3 color_mix_fg;     // foreground (vein) colour
-    float3 color_mix_bg;     // background (base) colour
-    float  _pad0;
-    float  _pad1;
-    float  _pad2;
-    float  _pad3;
-};
-
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang
 // running on M_skinny_skin_default. 164 scalar-layout bytes / 27 fields.
 // The renderer fills this each frame via materialx_runtime.pack_material_values
@@ -412,20 +385,7 @@ float2 sampleUniformDisk(float2 u)
     return float2(r * cos(phi), r * sin(phi));
 }
 
-Ray generateCameraRay(FrameConstants fc, uint2 pixel, inout RNG rng)
-{
-    float2 jitter = rng.next2() - 0.5;
-    float2 ndc    = zoomedNDC(fc, pixel, jitter);
-
-    float4 target    = mul(fc.camera.projInverse, float4(ndc, 1.0, 1.0));
-    float3 direction = mul(fc.camera.viewInverse, float4(normalize(target.xyz / target.w), 0.0)).xyz;
-
-    Ray ray;
-    ray.origin    = fc.camera.position;
-    ray.direction = normalize(direction);
-    return ray;
-}
-
-// generateCameraRayWithWeight() is defined in cameras/thick_lens.slang
-// (which depends on the binding-23 lens buffer and so cannot live here).
-// main_pass.slang imports cameras.thick_lens and uses that wrapper.
+// Camera ray generation lives in the ICamera implementations under
+// `cameras/` (pinhole.slang and thick_lens.slang). main_pass.slang
+// tag-switches on `fc.numLensElements` and dispatches through the
+// interface; common.slang stays free of the lens-buffer binding.
