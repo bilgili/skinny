@@ -588,7 +588,10 @@ class MaterialLibrary:
         # the material renders with constants only).
         if re.search(r"\bNG_[A-Za-z0-9_]+\s*\(", body):
             return None
-        if re.search(r"\bvd\.i_[A-Za-z0-9_]+", body):
+        # Reject geomprop inputs we don't pipe yet. UVMap is allowed (becomes
+        # `UV_in` from h.uv); anything else (Color sets, secondary UVs, etc.)
+        # falls back to flat path.
+        if re.search(r"\bvd\.i_(?!geomprop_UVMap\b)[A-Za-z0-9_]+", body):
             return None
 
         # Identifier rewrites:
@@ -597,6 +600,7 @@ class MaterialLibrary:
         body = body.replace("vd.normalWorld",    "N_in")
         body = body.replace("vd.tangentWorld",   "T_in")
         body = body.replace("vd.positionWorld",  "P_in")  # fallback
+        body = body.replace("vd.i_geomprop_UVMap", "UV_in")
 
         # Substitute each uniform name with `p.<name>` when it appears as
         # a whole-word identifier. Walk uniforms longest-first so prefix
@@ -615,7 +619,7 @@ class MaterialLibrary:
                                         type_map=self._SLANG_TYPES)
         func_src = (
             f"float3 evalGraph_{sanitized}(float3 P_in, float3 N_in,\n"
-            f"                              float3 T_in,\n"
+            f"                              float3 T_in, float2 UV_in,\n"
             f"                              in {struct_name} p)\n"
             f"{{\n"
             f"{_indent(body, '    ')}\n"

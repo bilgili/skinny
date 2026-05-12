@@ -131,7 +131,7 @@ class ComputePipeline:
             )
             cases.append(
                 f"        case {idx + 2}u:  // graphId 0=skin, 1=flat reserved\n"
-                f"            return {gf.func_name}(P, N, T, "
+                f"            return {gf.func_name}(P, N, T, UV, "
                 f"_graphParams_{gf.sanitized_name}(matId));\n"
             )
 
@@ -164,7 +164,7 @@ class ComputePipeline:
             + ("\n" if ssbo_decls else "")
             + "\n".join(param_helpers)
             + ("\n" if param_helpers else "")
-            + "float3 evalSceneGraph(uint graphId, uint matId, float3 P, float3 N, float3 T)\n"
+            + "float3 evalSceneGraph(uint graphId, uint matId, float3 P, float3 N, float3 T, float2 UV)\n"
             "{\n"
             "    switch (graphId)\n"
             "    {\n"

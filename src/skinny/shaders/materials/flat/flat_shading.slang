@@ -161,7 +161,8 @@ FlatHitData fetchFlatHitData(HitInfo h)
 }
 
 StdSurfaceParams loadStdSurfaceParams(uint matId, float3 posObject,
-                                       float3 normal, float3 tangent)
+                                       float3 normal, float3 tangent,
+                                       float2 uv)
 {
     StdSurfaceParams sp = stdSurfaceParams[matId];
     uint graphId = materialGraphId(matId);
@@ -171,7 +172,7 @@ StdSurfaceParams loadStdSurfaceParams(uint matId, float3 posObject,
         // MaterialLibrary.generate_for_compute() — replaces the legacy
         // hard-coded Marble3D procedural path. Drives base_color (and
         // subsurface_color for layered media).
-        float3 c = evalSceneGraph(graphId, matId, posObject, normal, tangent);
+        float3 c = evalSceneGraph(graphId, matId, posObject, normal, tangent, uv);
         sp.base_color = c;
         sp.subsurface_color = c;
     }
