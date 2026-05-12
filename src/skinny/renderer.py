@@ -2880,7 +2880,6 @@ class Renderer:
                 del self._graph_param_buffers[stale]
 
         pipeline_bindings = getattr(self.pipeline, "graph_bindings", {}) or {}
-        skipped: list[str] = []
         for idx, gf in enumerate(self._scene_graph_fragments):
             stride = max(
                 (f.offset + f.size for f in gf.uniform_block), default=0
@@ -2934,13 +2933,10 @@ class Renderer:
                 data[mat_idx * stride : mat_idx * stride + len(packed)] = packed
             self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
 
-            # Pipeline built without this fragment ⇒ descriptor layout has
-            # no slot at GRAPH_BINDING_BASE+idx. Skip the write to avoid a
-            # Vulkan validation error; the shader's evalSceneGraph hits the
-            # `default` magenta case for this material until the pipeline is
-            # rebuilt (TODO: mid-session pipeline rebuild).
+            # Defensive: if rebuild fell back to an empty-graph pipeline
+            # (slangc failure), this fragment's binding may be absent.
+            # Skip rather than emit a Vulkan validation error.
             if gf.target_name not in pipeline_bindings:
-                skipped.append(gf.target_name)
                 continue
 
             binding = pipeline_bindings[gf.target_name]
@@ -2959,14 +2955,6 @@ class Renderer:
                     pBufferInfo=[info],
                 )
                 vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
-
-        if skipped:
-            print(
-                f"[skinny] WARNING: pipeline built without these MaterialX "
-                f"graphs: {skipped}. They will render magenta until "
-                f"pipeline rebuild on next scene load lands. Restart with "
-                f"the scene loaded to render correctly for now."
-            )
 
     def _upload_material_types(self) -> None:
         """Pack per-material type+flags into binding 16.
@@ -3015,6 +3003,14 @@ class Renderer:
         if material_id <= 0 or material_id >= len(mats):
             return
         mats[material_id].parameter_overrides[key] = value
+        # Mirror into the graph-overrides cache so per-graph SSBO packs
+        # see UI slider drags on MaterialX-graph materials. Without this,
+        # the cache stays seeded from scene-load time and slider edits
+        # silently don't take effect for graph-bound prims.
+        if material_id in self._material_graph_ids:
+            self._material_graph_overrides.setdefault(
+                material_id, {}
+            )[key] = value
         self._upload_flat_materials(mats)
         self._material_version += 1
 
