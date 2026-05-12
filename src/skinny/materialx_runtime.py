@@ -91,6 +91,14 @@ _SCALAR_LAYOUT: dict[str, tuple[int, int]] = {
     "color4":    (4, 16),
     "matrix33":  (4, 36),      # 9 floats tightly packed
     "matrix44":  (4, 64),
+    # MaterialX `filename` inputs become bindless texture slot indices
+    # (uint) in our compute pipeline; mtlx_gen_shim.SamplerTexture2D wraps
+    # the slot for sample/dimension queries.
+    "filename":  (4, 4),
+    # `string` is used by MaterialXGenSlang for animated-image framerange
+    # tokens ("first,last"). The gen lowers it to a single int in cbuffer
+    # output — we pack identically and the body uses the int directly.
+    "string":    (4, 4),
 }
 
 # Types we never put in the parameter UBO. surfaceshader / displacement /
@@ -105,7 +113,6 @@ _SKIP_PARAM_TYPES: set[str] = {
     "EDF",
     "VDF",
     "BSDF",
-    "filename",
 }
 
 
@@ -507,14 +514,16 @@ class MaterialLibrary:
     # Slang type for each MaterialX scalar/vector type. Booleans become
     # uint (Slang `bool` has no defined buffer layout).
     _SLANG_TYPES: dict[str, str] = {
-        "float":   "float",
-        "integer": "int",
-        "boolean": "uint",
-        "vector2": "float2",
-        "vector3": "float3",
-        "vector4": "float4",
-        "color3":  "float3",
-        "color4":  "float4",
+        "float":    "float",
+        "integer":  "int",
+        "boolean":  "uint",
+        "vector2":  "float2",
+        "vector3":  "float3",
+        "vector4":  "float4",
+        "color3":   "float3",
+        "color4":   "float4",
+        "filename": "SamplerTexture2D",  # mtlx_gen_shim wrapper
+        "string":   "int",               # framerange — gen lowers to int
     }
 
     def generate_for_compute(
@@ -576,21 +585,9 @@ class MaterialLibrary:
         if return_var in full_uniform_names:
             return None
 
-        # Unsupported graph features:
-        #   - Texture/image nodes: the gen emits `NG_tiledimage_*` /
-        #     `NG_image_*` helper functions and references file uniforms +
-        #     framerange arrays we don't extract. Texture-bindless wiring
-        #     for arbitrary MaterialX graphs is a future milestone.
-        #   - Geomprop inputs other than position / normal / tangent /
-        #     positionWorld: signal `vd.i_*` channels we don't plumb.
-        # Both reject paths return None so the caller falls back to the
-        # flat / std_surface SSBO path (which still ignores the graph —
-        # the material renders with constants only).
-        if re.search(r"\bNG_[A-Za-z0-9_]+\s*\(", body):
-            return None
-        # Reject geomprop inputs we don't pipe yet. UVMap is allowed (becomes
-        # `UV_in` from h.uv); anything else (Color sets, secondary UVs, etc.)
-        # falls back to flat path.
+        # Reject geomprop inputs we don't pipe yet. UVMap is allowed
+        # (becomes `UV_in` from h.uv); anything else (Color sets, secondary
+        # UVs, vertex colors, etc.) falls back to flat path.
         if re.search(r"\bvd\.i_(?!geomprop_UVMap\b)[A-Za-z0-9_]+", body):
             return None
 
@@ -627,38 +624,30 @@ class MaterialLibrary:
             f"    return {return_var};\n"
             f"}}\n"
         )
-        # Per-graph fragments are Slang modules: `internal` shields the
-        # mx_sin / mx_cos / etc. macro aliases (and any future internal
-        # helpers added when texture-graph support lands) so multiple
-        # graphs in the same scene can carry name-colliding helpers
-        # without ambiguous-call errors. Only struct_name + evalGraph_*
-        # are `public` and visible to importers.
-        #
-        # MaterialXGenSlang emits calls to mx_sin / mx_cos / mx_inversesqrt
-        # / etc. as identifiers; mtlx_noise.slang + mtlx_closures.slang
-        # expose those as `#define` aliases for the HLSL/Slang built-ins.
-        # Slang's `import` does not propagate preprocessor macros, so we
-        # materialise the aliases inside each module's translation unit.
+        # Per-graph fragments are Slang modules: every gen-emitted top-level
+        # decl (mx_* helpers, NG_* helpers, BSDF/FresnelData/etc. structs)
+        # gets the `internal` modifier so two graphs in the same scene can
+        # carry identically-named helpers without ambiguous-call errors.
+        # Only struct_name + evalGraph_* wear `public`.
+        helper_block = _extract_helper_block(cm.pixel_source)
+        helper_block = _filter_helpers_for_body(helper_block, body)
         header = (
             f"// Auto-generated graph module for target '{target_name}'.\n"
             f"// Source: MaterialXGenSlang via MaterialLibrary.generate_for_compute().\n"
             f"// Edits will be overwritten on next scene load.\n\n"
-            f"#define mx_sin sin\n"
-            f"#define mx_cos cos\n"
-            f"#define mx_tan tan\n"
-            f"#define mx_asin asin\n"
-            f"#define mx_acos acos\n"
-            f"#define mx_atan atan2\n"
-            f"#define mx_radians radians\n"
-            f"#define mx_inversesqrt rsqrt\n"
-            f"#define mx_float_bits_to_int asint\n\n"
-            # Pull in mx_fractal3d_float and friends from skinny's shared
-            # noise/closure modules. Their symbols are public there and
-            # remain visible to this module without polluting importers
-            # because we re-export nothing from those modules.
-            f"import mtlx_noise;\n\n"
+            # SamplerTexture2D + texture* free functions come from the
+            # shared shim, which resolves against skinny's bindless
+            # flatMaterialTextures[] array (binding 14).
+            f"import mtlx_gen_shim;\n\n"
         )
-        full_src = header + struct_src + "\n" + func_src
+        full_src = (
+            header
+            + helper_block.rstrip()
+            + "\n\n"
+            + struct_src
+            + "\n"
+            + func_src
+        )
 
         path: Optional[Path] = None
         if write_to_disk:
@@ -703,14 +692,16 @@ class GraphFragment:
 # All sub-elements are 4-byte (float/int/uint), so per-field formats
 # concatenate sizes from `_SCALAR_LAYOUT` above.
 _PACK_FORMAT: dict[str, str] = {
-    "float":   "<f",
-    "integer": "<i",
-    "boolean": "<I",       # 0/1
-    "vector2": "<2f",
-    "vector3": "<3f",
-    "vector4": "<4f",
-    "color3":  "<3f",
-    "color4":  "<4f",
+    "float":    "<f",
+    "integer":  "<i",
+    "boolean":  "<I",       # 0/1
+    "vector2":  "<2f",
+    "vector3":  "<3f",
+    "vector4":  "<4f",
+    "color3":   "<3f",
+    "color4":   "<4f",
+    "filename": "<I",       # uint bindless slot index
+    "string":   "<i",       # gen framerange → int
 }
 
 
@@ -815,6 +806,281 @@ _NG_STD_SURFACE_CALL = re.compile(
     r"([^,]+)\s*,",       # arg1 = base_color (capture)
     re.DOTALL,
 )
+
+
+# Top-level declarations we mark `internal` so they stay private to a
+# per-graph Slang module. Anchored at start-of-line because nested
+# declarations inside function bodies don't need the modifier (and would
+# break if Slang doesn't allow `internal` on locals).
+_INTERNAL_DECL_PATTERN = re.compile(
+    r"^("
+    r"struct\s+[A-Za-z_]"
+    r"|void\s+[A-Za-z_]"
+    r"|float\s+[A-Za-z_]"
+    r"|float[234]\s+[A-Za-z_]"
+    r"|float[234]x[234]\s+[A-Za-z_]"
+    r"|int\s+[A-Za-z_]"
+    r"|int2\s+[A-Za-z_]"
+    r"|bool\s+[A-Za-z_]"
+    r"|uint\s+[A-Za-z_]"
+    r"|FresnelData\s+[A-Za-z_]"
+    r"|ClosureData\s+[A-Za-z_]"
+    r")",
+    re.MULTILINE,
+)
+
+# Function/struct headers we strip wholesale from the gen prelude before
+# emitting a per-graph module. mtlx_gen_shim.slang replaces them with a
+# uint-slot wrapper that resolves against skinny's bindless texture array.
+_GEN_PRELUDE_DROP_HEADERS = (
+    "struct SamplerTexture2D",
+    "float4 textureLod(SamplerTexture2D",
+    "float4 texture(SamplerTexture2D",
+    "float4 textureGrad(SamplerTexture2D",
+    "int2 textureSize(SamplerTexture2D",
+)
+
+
+def _skip_brace_block(lines: list[str], i: int) -> int:
+    """Advance past a brace-balanced block starting at or after `lines[i]`.
+
+    Walks forward until the matching closing brace of the first opening
+    brace encountered. The closing line itself is consumed. Used to drop
+    `cbuffer { ... }`, `struct Foo { ... };`, and individual function
+    bodies whose header is on `lines[i]`.
+    """
+    depth = 0
+    seen_open = False
+    j = i
+    while j < len(lines):
+        opens = lines[j].count("{")
+        closes = lines[j].count("}")
+        if opens > 0:
+            seen_open = True
+        depth += opens
+        depth -= closes
+        j += 1
+        if seen_open and depth <= 0:
+            break
+    return j
+
+
+# Slang/HLSL keywords + skinny-provided / gen-prelude names we never want to
+# treat as "decl identifiers" when walking the helper-block call graph.
+# Their presence inside a kept helper body must not pull in extra decls.
+_NON_DECL_TOKENS = frozenset({
+    "if", "else", "for", "while", "do", "switch", "case", "default",
+    "return", "break", "continue", "true", "false",
+    "float", "float2", "float3", "float4",
+    "float2x2", "float3x3", "float4x4",
+    "int", "int2", "int3", "int4", "uint", "uint2",
+    "bool", "bool2", "bool3",
+    "void", "struct", "const", "static",
+    "in", "out", "inout",
+    "internal", "public", "private",
+    "uniform",
+    "NonUniformResourceIndex", "GetDimensions",
+    "Texture2D", "SamplerState", "Sampler2D",
+    "min", "max", "abs", "clamp", "lerp", "saturate", "pow", "exp", "log",
+    "sqrt", "rsqrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "floor", "ceil", "round", "frac", "fmod", "step", "smoothstep",
+    "dot", "cross", "normalize", "length", "reflect", "refract",
+    "select", "isnan", "isinf", "all", "any", "mul",
+    "float3x3", "asfloat", "asint", "asuint", "asuint",
+    "radians", "degrees", "transpose",
+    # Comes from the shared mtlx_gen_shim module — gen output's own
+    # SamplerTexture2D + texture* are stripped from the helper block, so
+    # filter must not try to look them up in `by_name`.
+    "texture", "textureLod", "textureGrad", "textureSize",
+    "SamplerTexture2D",
+})
+
+
+# Top-level decl header: <return-or-struct> <name>(args) at column 0.
+# `internal ` is optional because callers may invoke this regex either
+# before or after `_INTERNAL_DECL_PATTERN` annotation.
+_HELPER_HEADER = re.compile(
+    r"^(?:internal\s+)?"
+    r"(?:struct\s+([A-Za-z_]\w*)"
+    r"|(?:void|float|float[234]|float[234]x[234]|int|int2|bool|uint|FresnelData|ClosureData)"
+    r"\s+([A-Za-z_]\w*)\s*\()",
+    re.MULTILINE,
+)
+
+
+def _scan_idents(text: str) -> set[str]:
+    """Return the set of identifier tokens in `text`, excluding keywords."""
+    return {
+        tok for tok in re.findall(r"\b([A-Za-z_]\w*)\b", text)
+        if tok not in _NON_DECL_TOKENS
+    }
+
+
+def _split_helper_decls(block: str) -> list[tuple[str, str, str]]:
+    """Split a helper block into (name, header_kind, chunk) tuples.
+
+    `chunk` is the full decl text (header + brace-balanced body + optional
+    trailing `;`). `header_kind` is 'struct' for struct decls, 'func' for
+    everything else. We track brace depth across the whole block; a new
+    decl begins whenever depth is 0 and a header pattern matches at start
+    of a line.
+    """
+    lines = block.splitlines(keepends=True)
+    decls: list[tuple[str, str, str]] = []
+    i = 0
+    depth = 0
+    while i < len(lines):
+        line = lines[i]
+        if depth == 0:
+            m = _HELPER_HEADER.match(line)
+            if m:
+                struct_name, func_name = m.group(1), m.group(2)
+                name = struct_name or func_name
+                kind = "struct" if struct_name else "func"
+                # Collect from here until matching close brace.
+                start = i
+                # Walk forward to find balanced brace block. Treat the
+                # first `{` we see as opening (it may be on a later line).
+                seen_open = False
+                while i < len(lines):
+                    opens = lines[i].count("{")
+                    closes = lines[i].count("}")
+                    if opens > 0:
+                        seen_open = True
+                    depth += opens
+                    depth -= closes
+                    i += 1
+                    if seen_open and depth <= 0:
+                        break
+                if depth < 0:
+                    depth = 0
+                # Capture trailing `;` for `struct X { ... };` patterns.
+                while i < len(lines) and lines[i].strip() in (";", ""):
+                    if lines[i].strip() == ";":
+                        i += 1
+                        break
+                    i += 1
+                chunk = "".join(lines[start:i])
+                decls.append((name, kind, chunk))
+                continue
+        # Lines outside a top-level decl (macros, blanks). Track brace
+        # depth defensively but don't capture.
+        depth += line.count("{")
+        depth -= line.count("}")
+        if depth < 0:
+            depth = 0
+        i += 1
+    return decls
+
+
+def _filter_helpers_for_body(block: str, body: str) -> str:
+    """Keep only decls transitively reachable from `body` identifiers.
+
+    Discards env-/light-related helpers (which reference `u_env*` private
+    uniforms and `vd.*` we don't bind) along with the rest of the
+    closure-tree machinery our nodegraph extraction doesn't call. Macros
+    (`#define …`) and any text outside a top-level decl pass through
+    unchanged.
+    """
+    decls = _split_helper_decls(block)
+    # Same name can repeat (function overloads on argument types). Walk
+    # all chunks for each name when expanding the call graph so an
+    # overload's transitive deps aren't lost.
+    by_name: dict[str, list[str]] = {}
+    for name, _kind, chunk in decls:
+        by_name.setdefault(name, []).append(chunk)
+
+    # Seed reachability from identifiers referenced in fragmentMain body.
+    needed: set[str] = set()
+    frontier = _scan_idents(body) & by_name.keys()
+    while frontier:
+        nxt: set[str] = set()
+        for name in frontier:
+            if name in needed:
+                continue
+            needed.add(name)
+            for chunk in by_name[name]:
+                nxt |= _scan_idents(chunk) & by_name.keys()
+        frontier = nxt - needed
+
+    # Preserve original ordering of kept decls + intersperse any text that
+    # lived between decls (macros, blank lines, comments).
+    kept: list[str] = []
+    # Re-walk the block, emitting either a kept decl chunk or pass-through
+    # text. We do this by recomputing positions: find each decl chunk in
+    # the original block and substitute.
+    cursor = 0
+    for name, kind, chunk in decls:
+        idx = block.find(chunk, cursor)
+        if idx < 0:
+            # Shouldn't happen — chunk came from `block` — but fall back
+            # to skipping rather than producing garbage.
+            continue
+        # Pass-through interstitial text (macros, comments).
+        kept.append(block[cursor:idx])
+        if name in needed:
+            kept.append(chunk)
+        cursor = idx + len(chunk)
+    kept.append(block[cursor:])
+    return "".join(kept)
+
+
+def _extract_helper_block(pixel_source: str) -> str:
+    """Return MaterialXGenSlang's helper-function block as a single string.
+
+    Strips the gen prelude pieces that collide with skinny / our shim:
+        - `struct SamplerTexture2D` and its accompanying texture* funcs
+          (replaced by mtlx_gen_shim.slang's uint-slot wrapper).
+        - `cbuffer pixelCB { ... }` (each uniform becomes a struct field
+          in the per-graph GraphParams).
+        - `struct VertexData` + `static VertexData vd;` (caller passes
+          P_in / N_in / T_in / UV_in by argument).
+        - `[shader("fragment")] float4 fragmentMain(...)` (extracted
+          separately by `_extract_graph_body`).
+
+    Everything else — BSDF/EDF/VDF struct decls, mx_* helper funcs, NG_*
+    nodegraph helpers, M_FLOAT_EPS and other macro #defines, etc. — is
+    kept verbatim and emitted as the per-graph module's body.
+    """
+    lines = pixel_source.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+
+        # Stop at the fragment entry point; its body is `_extract_graph_body`'s job.
+        if "[shader(\"fragment\")]" in line:
+            break
+
+        # Drop the gen `cbuffer` block — uniforms move into GraphParams.
+        if stripped.startswith("cbuffer "):
+            i = _skip_brace_block(lines, i)
+            continue
+        # Drop `struct VertexData { ... };` + the matching `static VertexData vd;`.
+        if stripped.startswith("struct VertexData"):
+            i = _skip_brace_block(lines, i)
+            # The `;` line after `}` may live on the next line; consume it.
+            while i < len(lines) and lines[i].strip() in ("", ";"):
+                i += 1
+            continue
+        if stripped.startswith("static VertexData"):
+            i += 1
+            continue
+
+        # Drop gen-prelude pieces replaced by mtlx_gen_shim.slang.
+        if any(stripped.startswith(h) for h in _GEN_PRELUDE_DROP_HEADERS):
+            i = _skip_brace_block(lines, i)
+            continue
+
+        out.append(line)
+        i += 1
+
+    block = "".join(out)
+    # Mark every surviving top-level decl `internal` so it stays private
+    # to the per-graph module (prevents ambiguous-call errors when two
+    # graphs both emit stdlib helpers with identical names).
+    return _INTERNAL_DECL_PATTERN.sub(r"internal \1", block)
 
 
 def _extract_graph_body(pixel_source: str) -> tuple[str, str]:

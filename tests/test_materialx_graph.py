@@ -77,11 +77,20 @@ def test_constant_input_materials_return_none(lib, asset, target):
     assert gf is None, f"{target} should fall back to flat path"
 
 
-def test_texture_bound_graph_rejected(lib):
-    """Texture-using graphs (NG_tiledimage_*) are out-of-scope for now."""
+def test_texture_bound_graph_supported(lib):
+    """Texture-using graphs (NG_tiledimage_*) compile via the helper-block
+    inclusion path; mtlx_gen_shim resolves SamplerTexture2D against the
+    bindless flatMaterialTextures array."""
     _import_asset(lib, "standard_surface_wood_tiled.mtlx")
     gf = lib.generate_for_compute("Tiled_Wood", write_to_disk=False)
-    assert gf is None, "Tiled_Wood uses textures; should return None"
+    assert gf is not None, "Tiled_Wood must produce a graph fragment now"
+    names = {u.name: u.type_name for u in gf.uniform_block}
+    assert names.get("image_color_file") == "filename"
+    assert names.get("image_roughness_file") == "filename"
+    # Slang struct emission maps `filename` → SamplerTexture2D shim.
+    assert "SamplerTexture2D image_color_file" in gf.slang_source
+    # NG_tiledimage_* helpers are inlined as `internal` decls.
+    assert "internal void NG_tiledimage_color3" in gf.slang_source
 
 
 # ─── pack_uniform_block ────────────────────────────────────────────────

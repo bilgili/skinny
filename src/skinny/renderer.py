@@ -2896,12 +2896,40 @@ class Renderer:
                     self.ctx, buf_size
                 )
             data = bytearray(self.material_capacity * stride)
+            # Pre-compute filename input names so we can resolve overrides
+            # for those fields through the bindless texture pool. The
+            # MaterialXGenSlang reflection sets `type_name='filename'`;
+            # pack_uniform_block packs whatever value sits in `overrides`
+            # for those names as a uint (bindless slot).
+            filename_fields = [f.name for f in gf.uniform_block
+                               if f.type_name == "filename"]
             for mat_idx, gid in self._material_graph_ids.items():
                 if gid != idx + 2:  # matches assign_graph_ids: GRAPH_ID_FIRST=2
                     continue
                 if mat_idx >= self.material_capacity:
                     continue
-                overrides = self._material_graph_overrides.get(mat_idx, {})
+                overrides = dict(self._material_graph_overrides.get(mat_idx, {}))
+                # Resolve each filename input → bindless slot. Source order:
+                #   1. mat.parameter_overrides[name] (a Path or str).
+                #   2. mat.texture_paths[name] (Loader-decoded texture path).
+                #   3. Skip — pack_uniform_block falls back to slot 0.
+                mat = (self._usd_scene.materials[mat_idx]
+                       if self._usd_scene is not None else None)
+                for fname in filename_fields:
+                    raw = overrides.get(fname)
+                    if raw is None and mat is not None:
+                        raw = mat.texture_paths.get(fname)
+                    if raw is None:
+                        continue
+                    try:
+                        slot = self.texture_pool.add_or_get(
+                            Path(raw), linear=False,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[skinny] graph[{gf.target_name}] mat[{mat_idx}] "
+                              f"'{fname}' texture load fail: {e}")
+                        slot = 0
+                    overrides[fname] = slot
                 packed = pack_uniform_block(gf.uniform_block, overrides)
                 data[mat_idx * stride : mat_idx * stride + len(packed)] = packed
             self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
