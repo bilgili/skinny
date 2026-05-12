@@ -166,7 +166,11 @@
       "Bash(mkdir -p flat skin)",
       "Bash(mv flat_material.slang flat_shading.slang flat/)",
       "Bash(mv skin_material.slang skin_shading.slang skin_bssrdf.slang detail.slang skin/)",
-      "Bash(mv ../estimators/skin_*.slang skin/)"
+      "Bash(mv ../estimators/skin_*.slang skin/)",
+      "Bash(findstr /r \"evalFlatMaterial|evalProcedural|materialTypes\" shaders/*.slang)",
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

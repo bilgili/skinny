@@ -75,3 +75,25 @@ interface ILight
     LightSample samplePoint(float3 shadingPos, float2 u);
     float pdfSolidAngle(float3 shadingPos, float3 direction);
 }
+
+// ── Cameras ─────────────────────────────────────────────────────
+//
+// Pluggable camera model (PBRT CameraBase analogue).
+//   - `generateRay`: primary eye ray for pixel `pixel` (PBRT GenerateRay).
+//      `weight` is the per-ray throughput multiplier (1.0 for an
+//      ideal pinhole; cos⁴θ vignetting for the realistic lens path).
+//   - `sampleWi`: project a world point onto the film for BDPT s=1
+//      light-tracer splatting (PBRT SampleWi). Returns false when the
+//      point is off-frame or blocked by an aperture / TIR.
+//
+// Concrete cameras read uniform `fc` (bindings.slang) directly; the
+// struct itself carries no state. Dispatch is by compile-time
+// generic parameter on integrator entry points — same monomorphization
+// pattern as IMaterial/ISampler.
+
+interface ICamera
+{
+    Ray  generateRay(uint2 pixel, inout RNG rng, out float weight);
+    bool sampleWi(float3 p, inout RNG rng,
+                  out int2 outPixel, out float cosCam, out float distToCam);
+}

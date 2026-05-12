@@ -24,6 +24,7 @@
 
 import common;
 import bindings;
+import interfaces;
 
 LensSurface unpackLensSurface(uint k)
 {
@@ -137,99 +138,6 @@ bool traceLensesFromFilm(
     return true;
 }
 
-Ray generateLensRay(FrameConstants fc, uint2 pixel, inout RNG rng,
-                    out float weight)
-{
-    Ray ray;
-    weight = 0.0;
-    ray.origin    = fc.camera.position;
-    ray.direction = float3(0.0);
-
-    if (fc.numLensElements == 0u || fc.rearAperture <= 0.0) return ray;
-
-    // 1. Sample film point. PBRT applies a single x-flip to handle the
-    //    real-camera optical image inversion (sensor is upside-down +
-    //    left-right swapped relative to the scene image; the digital
-    //    readout convention undoes one of those flips, leaving x). We
-    //    therefore drop the pinhole's NDC y-flip in the lens path.
-    float2 jitter = rng.next2() - 0.5;
-    // Same zoom remap as the pinhole path so the lens viewport tracks
-    // the user-selected zoom rectangle.
-    float2 ndc = zoomedNDC(fc, pixel, jitter);
-    ndc.y = -ndc.y;   // zoomedNDC pre-flips for the pinhole; undo before the lens code does its own
-    float aspect = float(fc.width) / max(float(fc.height), 1.0);
-    float filmHalfH = fc.filmHalfH;
-    float filmHalfW = filmHalfH * aspect;
-    float3 pFilm = float3(-ndc.x * filmHalfW, ndc.y * filmHalfH, 0.0);
-
-    // 2. Sample point on the rear element. To keep image position the
-    //    same regardless of aperture (and avoid the off-axis pixels
-    //    vignetting to black at small fstops), centre the rear-plane
-    //    disk on each pixel's chief ray rather than on the optical
-    //    axis. Chief = line from pFilm through (0,0,-irisZ). At
-    //    z = -rearZ that line crosses
-    //        chief.xy = pFilm.xy · (1 − rearZ / irisZ)
-    //    (rearZ and irisZ are positive distances from the film here).
-    LensSurface eRear = unpackLensSurface(fc.numLensElements - 1u);
-    float lensRearZ = -eRear.thickness;
-    // Reconstruct iris-z (positive) by walking the stack rear→front
-    // until we hit the aperture stop (radius == 0).
-    float irisZpos = eRear.thickness;
-    {
-        float zwalk = eRear.thickness;
-        for (int j = int(fc.numLensElements) - 2; j >= 0; --j)
-        {
-            LensSurface ej = unpackLensSurface(uint(j));
-            zwalk += ej.thickness;
-            if (ej.radius == 0.0) { irisZpos = zwalk; break; }
-        }
-    }
-    float kRatio = (irisZpos > 1e-9) ? (eRear.thickness / irisZpos) : 0.0;
-    float2 chiefXY = pFilm.xy * (1.0 - kRatio);
-    float2 diskUV = sampleUniformDisk(rng.next2());
-    float3 pRear = float3(chiefXY.x + diskUV.x * fc.rearAperture,
-                          chiefXY.y + diskUV.y * fc.rearAperture,
-                          lensRearZ);
-
-    // 3. Trace film→rear ray through the lens stack.
-    float3 origin = pFilm;
-    float3 dir = pRear - pFilm;     // PBRT does *not* normalise here
-    if (!traceLensesFromFilm(origin, dir, fc)) return ray;
-    // Guard against NaN / Inf escaping into traceScene — degenerate
-    // refractions or near-coincident-surface precision can produce
-    // non-finite directions that cause downstream Vulkan state to
-    // crash. Treat as a rejected sample.
-    if (any(isnan(dir)) || any(isinf(dir))
-        || any(isnan(origin)) || any(isinf(origin)))
-        return ray;
-    float dirLen = length(dir);
-    if (dirLen < 1e-6) return ray;
-    dir /= dirLen;
-
-    // 4. Throughput weight. Full PBRT eq. 6.10 is
-    //       (cos⁴θ' · A_rear) / Z²
-    //    but A_rear/Z² collapses to a tiny constant in world units and
-    //    visibly crushes the image. Keep just the cos⁴ vignetting
-    //    falloff so axial rays land at unit weight.
-    float3 filmToRear = pRear - pFilm;
-    float Z = max(length(filmToRear), 1e-6);
-    float cosVignette = abs(filmToRear.z) / Z;
-    float cos4 = cosVignette * cosVignette * cosVignette * cosVignette;
-    weight = cos4;
-
-    // 5. Map lens-local → camera-local → world. Skinny's camera looks
-    //    down -z (USD convention), and PBRT's lens-local frame also
-    //    has the scene at -z, so the direction passes through without
-    //    a z-flip. Translate so the front lens vertex lands at the
-    //    authored camera position (camera-local origin) — `frontZ`
-    //    holds |sum of thicknesses| (always ≥ 0).
-    float3 oCam = float3(origin.x, origin.y, origin.z + fc.frontZ);
-    float3 dCam = dir;
-    ray.origin    = mul(fc.camera.viewInverse, float4(oCam, 1.0)).xyz;
-    ray.direction = normalize(mul(fc.camera.viewInverse, float4(dCam, 0.0)).xyz);
-    return ray;
-}
-
 /// PBRT-v3 `RealisticCamera::TraceLensesFromScene`. Walks front (i=0)
 /// to rear (i=N-1). Caller passes a ray heading toward the film
 /// (lens-local `dir.z < 0`); returns false if the ray is blocked by
@@ -283,16 +191,176 @@ bool traceLensesFromScene(
     return true;
 }
 
-/// Dispatcher: lens path when the camera carries an authored stack,
-/// pinhole otherwise. Weight is 1.0 for pinhole rays (so the existing
-/// estimator math is unchanged when no lens is authored).
-Ray generateCameraRayWithWeight(FrameConstants fc, uint2 pixel,
-                                inout RNG rng, out float weight)
+struct ThickLensCamera : ICamera
 {
-    if (fc.numLensElements > 0u)
+    Ray generateRay(uint2 pixel, inout RNG rng, out float weight)
     {
-        return generateLensRay(fc, pixel, rng, weight);
+        Ray ray;
+        weight = 0.0;
+        ray.origin    = fc.camera.position;
+        ray.direction = float3(0.0);
+
+        if (fc.numLensElements == 0u || fc.rearAperture <= 0.0) return ray;
+
+        // 1. Sample film point. PBRT applies a single x-flip to handle the
+        //    real-camera optical image inversion (sensor is upside-down +
+        //    left-right swapped relative to the scene image; the digital
+        //    readout convention undoes one of those flips, leaving x). We
+        //    therefore drop the pinhole's NDC y-flip in the lens path.
+        float2 jitter = rng.next2() - 0.5;
+        // Same zoom remap as the pinhole path so the lens viewport tracks
+        // the user-selected zoom rectangle.
+        float2 ndc = zoomedNDC(fc, pixel, jitter);
+        ndc.y = -ndc.y;   // zoomedNDC pre-flips for the pinhole; undo before the lens code does its own
+        float aspect = float(fc.width) / max(float(fc.height), 1.0);
+        float filmHalfH = fc.filmHalfH;
+        float filmHalfW = filmHalfH * aspect;
+        float3 pFilm = float3(-ndc.x * filmHalfW, ndc.y * filmHalfH, 0.0);
+
+        // 2. Sample point on the rear element. To keep image position the
+        //    same regardless of aperture (and avoid the off-axis pixels
+        //    vignetting to black at small fstops), centre the rear-plane
+        //    disk on each pixel's chief ray rather than on the optical
+        //    axis. Chief = line from pFilm through (0,0,-irisZ). At
+        //    z = -rearZ that line crosses
+        //        chief.xy = pFilm.xy · (1 − rearZ / irisZ)
+        //    (rearZ and irisZ are positive distances from the film here).
+        LensSurface eRear = unpackLensSurface(fc.numLensElements - 1u);
+        float lensRearZ = -eRear.thickness;
+        // Reconstruct iris-z (positive) by walking the stack rear→front
+        // until we hit the aperture stop (radius == 0).
+        float irisZpos = eRear.thickness;
+        {
+            float zwalk = eRear.thickness;
+            for (int j = int(fc.numLensElements) - 2; j >= 0; --j)
+            {
+                LensSurface ej = unpackLensSurface(uint(j));
+                zwalk += ej.thickness;
+                if (ej.radius == 0.0) { irisZpos = zwalk; break; }
+            }
+        }
+        float kRatio = (irisZpos > 1e-9) ? (eRear.thickness / irisZpos) : 0.0;
+        float2 chiefXY = pFilm.xy * (1.0 - kRatio);
+        float2 diskUV = sampleUniformDisk(rng.next2());
+        float3 pRear = float3(chiefXY.x + diskUV.x * fc.rearAperture,
+                              chiefXY.y + diskUV.y * fc.rearAperture,
+                              lensRearZ);
+
+        // 3. Trace film→rear ray through the lens stack.
+        float3 origin = pFilm;
+        float3 dir = pRear - pFilm;     // PBRT does *not* normalise here
+        if (!traceLensesFromFilm(origin, dir, fc)) return ray;
+        // Guard against NaN / Inf escaping into traceScene — degenerate
+        // refractions or near-coincident-surface precision can produce
+        // non-finite directions that cause downstream Vulkan state to
+        // crash. Treat as a rejected sample.
+        if (any(isnan(dir)) || any(isinf(dir))
+            || any(isnan(origin)) || any(isinf(origin)))
+            return ray;
+        float dirLen = length(dir);
+        if (dirLen < 1e-6) return ray;
+        dir /= dirLen;
+
+        // 4. Throughput weight. Full PBRT eq. 6.10 is
+        //       (cos⁴θ' · A_rear) / Z²
+        //    but A_rear/Z² collapses to a tiny constant in world units and
+        //    visibly crushes the image. Keep just the cos⁴ vignetting
+        //    falloff so axial rays land at unit weight.
+        float3 filmToRear = pRear - pFilm;
+        float Z = max(length(filmToRear), 1e-6);
+        float cosVignette = abs(filmToRear.z) / Z;
+        float cos4 = cosVignette * cosVignette * cosVignette * cosVignette;
+        weight = cos4;
+
+        // 5. Map lens-local → camera-local → world. Skinny's camera looks
+        //    down -z (USD convention), and PBRT's lens-local frame also
+        //    has the scene at -z, so the direction passes through without
+        //    a z-flip. Translate so the front lens vertex lands at the
+        //    authored camera position (camera-local origin) — `frontZ`
+        //    holds |sum of thicknesses| (always ≥ 0).
+        float3 oCam = float3(origin.x, origin.y, origin.z + fc.frontZ);
+        float3 dCam = dir;
+        ray.origin    = mul(fc.camera.viewInverse, float4(oCam, 1.0)).xyz;
+        ray.direction = normalize(mul(fc.camera.viewInverse, float4(dCam, 0.0)).xyz);
+        return ray;
     }
-    weight = 1.0;
-    return generateCameraRay(fc, pixel, rng);
+
+    bool sampleWi(float3 p, inout RNG rng,
+                  out int2 outPixel, out float cosCam, out float distToCam)
+    {
+        outPixel = int2(0);
+        cosCam = 0.0;
+        distToCam = 0.0;
+        if (fc.numLensElements == 0u) return false;
+
+        // 1. Sample rear-element disk in lens-local frame.
+        float2 diskUV = sampleUniformDisk(rng.next2());
+        LensSurface eRear = unpackLensSurface(fc.numLensElements - 1u);
+        float lensRearZ = -eRear.thickness;
+        float3 pLens = float3(diskUV.x * fc.rearAperture,
+                              diskUV.y * fc.rearAperture, lensRearZ);
+
+        // 2. World point → camera-local → lens-local. The lens path
+        //    anchors the front-element vertex at the camera's world
+        //    position, with lens-local +z pointing back toward film.
+        //    Camera-local (-x, y, -z) ↔ lens-local (x, y, z) (the same
+        //    180° y-rotation generateRay applies on output, inverted
+        //    here for input).
+        float3 pCam = mul(fc.camera.view, float4(p, 1.0)).xyz;
+        float3 pLensSpace = float3(-pCam.x, pCam.y, -pCam.z + fc.frontZ);
+
+        // 3. Build the connection ray in lens-local. Heading from
+        //    scene-side `p` toward sampled rear-disk point.
+        float3 origin = pLensSpace;
+        float3 dir = pLens - pLensSpace;
+        float pLensDist = length(dir);
+        if (pLensDist <= 1e-6) return false;
+        dir /= pLensDist;
+        if (dir.z >= 0.0) return false;        // wrong hemisphere
+
+        // 4. Trace through lens stack scene→film. Reject if blocked.
+        if (!traceLensesFromScene(origin, dir, fc)) return false;
+
+        // 5. Continue from the rear-element exit to the film plane (z=0).
+        if (dir.z >= -1e-9) return false;
+        float tFilm = -origin.z / dir.z;
+        if (tFilm < 0.0) return false;
+        float3 pFilm = origin + tFilm * dir;
+
+        // 6. Film → NDC → pixel. Mirrors generateRay's mapping.
+        float aspect = float(fc.width) / max(float(fc.height), 1.0);
+        float filmHalfH = fc.filmHalfH;
+        float filmHalfW = filmHalfH * aspect;
+        if (filmHalfW <= 0.0 || filmHalfH <= 0.0) return false;
+        float2 ndc = float2(-pFilm.x / filmHalfW, pFilm.y / filmHalfH);
+        if (any(abs(ndc) > float2(1.0))) return false;
+        float xs = (ndc.x * 0.5 + 0.5) * float(fc.width);
+        float ys = (ndc.y * 0.5 + 0.5) * float(fc.height);
+        if (xs < 0.0 || ys < 0.0 || xs >= float(fc.width) || ys >= float(fc.height))
+            return false;
+        outPixel = int2(int(xs), int(ys));
+
+        // 7. Geometric terms. distToCam = world-space distance from `p`
+        //    to the camera anchor; cosCam = angle between camera forward
+        //    (world-space -z in camera-local) and the world ray from
+        //    camera to `p`. Approximate with the pinhole values — for a
+        //    well-behaved lens these are within a few percent.
+        float3 toP_world = p - fc.camera.position;
+        distToCam = max(length(toP_world), 1e-6);
+        float3 camForward = normalize(
+            mul(fc.camera.viewInverse, float4(0, 0, -1, 0)).xyz);
+        cosCam = max(dot(camForward, toP_world / distToCam), 0.0);
+        return cosCam > 1e-4;
+    }
+}
+
+// Vignette-debug wrapper — main_pass.slang's lens-vignette overlay path
+// keeps calling `generateLensRay(fc, ...)` as a free function so the
+// debug branch stays a pure ICamera::generateRay invocation without
+// reaching into the integrator. Signature kept for grep stability.
+Ray generateLensRay(FrameConstants fcUnused, uint2 pixel, inout RNG rng,
+                    out float weight)
+{
+    ThickLensCamera cam;
+    return cam.generateRay(pixel, rng, weight);
 }
