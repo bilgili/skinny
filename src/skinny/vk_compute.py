@@ -248,6 +248,7 @@ class ComputePipeline:
     # generated_materials.slang for repeated scene sets, so the next
     # rebuild hits the cache and skips slangc (≈1.4 s).
     _CACHE_DIRNAME = "spv_cache"
+    _CACHE_MAX_ENTRIES = 32  # roughly 32 × 5 MB = 160 MB worst case
 
     def _build_dir(self) -> Path:
         """Where the SPIR-V cache lives. Mirrors materialx_runtime._build_dir."""
@@ -316,6 +317,11 @@ class ComputePipeline:
         cached = cache_dir / f"{key}.spv"
         if cached.exists():
             shutil.copyfile(cached, out)
+            # Bump mtime so LRU eviction keeps recently-used entries.
+            try:
+                cached.touch()
+            except OSError:
+                pass
             return out
 
         cmd = [slangc, str(src), *flags, "-o", str(out)]
@@ -326,6 +332,19 @@ class ComputePipeline:
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(out, cached)
+            # LRU evict: keep the cache bounded so a long-running session
+            # iterating many distinct graph sets doesn't fill the disk.
+            # `_CACHE_MAX_ENTRIES × ~5 MB` is the upper bound. Order by
+            # mtime (Vulkan touches files via copyfile both on hit + miss
+            # in our scheme via touch on hit — see `_compile_slang` cache-
+            # hit branch).
+            entries = sorted(cache_dir.glob("*.spv"),
+                             key=lambda p: p.stat().st_mtime)
+            for old in entries[: max(0, len(entries) - self._CACHE_MAX_ENTRIES)]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
         except OSError:
             # Cache writes are best-effort; transient FS errors must not
             # break the pipeline build itself.
