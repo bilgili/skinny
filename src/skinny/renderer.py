@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import math
 import struct
 import time
@@ -121,78 +122,10 @@ EMISSIVE_TRI_CAPACITY = 256
 STD_SURFACE_STRIDE = 256
 STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 
-# ProceduralParams record (binding 20): per-material procedural evaluation
-# parameters (marble 3D noise, etc.).  96 B / record, scalar layout.
-PROCEDURAL_PARAMS_STRIDE = 96
-PROCEDURAL_PARAMS_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
-
 # Default diffuse for materials whose UsdPreviewSurface diffuseColor is
 # texture-connected rather than constant — mid-grey keeps unbound prims
 # visible until bindless textures (Phase C-4) actually sample the file.
 _FLAT_DEFAULT_DIFFUSE = (0.72, 0.72, 0.72)
-
-
-def _extract_procedural_params(cm) -> dict | None:
-    """Detect a procedural material from its CompiledMaterial uniform_block.
-
-    Returns a dict suitable for `pack_procedural_params` when the material
-    has fractal-noise uniforms (e.g. marble 3D), or None otherwise.
-    """
-    if not cm.uniform_block:
-        return None
-    field_map = {f.name: f for f in cm.uniform_block}
-    if "noise_amplitude" not in field_map or "noise_octaves" not in field_map:
-        return None
-
-    def _f(name, default=0.0):
-        f = field_map.get(name)
-        if f is None or f.default is None:
-            return float(default)
-        try:
-            return float(f.default)
-        except (TypeError, ValueError):
-            return float(default)
-
-    def _i(name, default=0):
-        f = field_map.get(name)
-        if f is None or f.default is None:
-            return int(default)
-        try:
-            return int(f.default)
-        except (TypeError, ValueError):
-            return int(default)
-
-    def _c3(name, default=(0.0, 0.0, 0.0)):
-        f = field_map.get(name)
-        if f is None or f.default is None:
-            return tuple(float(c) for c in default)
-        v = f.default
-        try:
-            if hasattr(v, "__getitem__"):
-                return float(v[0]), float(v[1]), float(v[2])
-            if hasattr(v, "asTuple"):
-                t = v.asTuple()
-                return float(t[0]), float(t[1]), float(t[2])
-        except (TypeError, IndexError, ValueError):
-            pass
-        return tuple(float(c) for c in default)
-
-    return {
-        "type": PROC_TYPE_MARBLE_3D,
-        "add_xyz_in2": _c3("add_xyz_in2", (1.0, 1.0, 1.0)),
-        "scale_pos_in2": _f("scale_pos_in2", 6.0),
-        "scale_xyz_in2": _f("scale_xyz_in2", 4.0),
-        "noise_amplitude": _f("noise_amplitude", 1.0),
-        "noise_octaves": _i("noise_octaves", 3),
-        "noise_lacunarity": _f("noise_lacunarity", 2.0),
-        "noise_diminish": _f("noise_diminish", 0.5),
-        "scale_noise_in2": _f("scale_noise_in2", 3.0),
-        "scale_in2": _f("scale_in2", 0.5),
-        "bias_in2": _f("bias_in2", 0.5),
-        "power_in2": _f("power_in2", 3.0),
-        "color_mix_fg": _c3("color_mix_fg", (0.1, 0.1, 0.3)),
-        "color_mix_bg": _c3("color_mix_bg", (0.8, 0.8, 1.0)),
-    }
 
 
 def _override_float(overrides: dict, key: str, default: float) -> float:
@@ -460,48 +393,6 @@ def pack_std_surface_params(material) -> bytes:
     )
 
 
-# Procedural type codes matching PROC_TYPE_* in common.slang.
-PROC_TYPE_NONE = 0
-PROC_TYPE_MARBLE_3D = 1
-
-
-def pack_procedural_params(params: dict | None) -> bytes:
-    """Pack procedural evaluation parameters into 96 bytes (ProceduralParams).
-
-    `params` is a dict with keys matching the ProceduralParams struct fields.
-    When None or type==0, returns a zeroed record (no procedural evaluation).
-    """
-    if params is None or params.get("type", 0) == 0:
-        return b"\x00" * PROCEDURAL_PARAMS_STRIDE
-
-    proc_type = int(params.get("type", 0))
-    add_xyz = params.get("add_xyz_in2", (1.0, 1.0, 1.0))
-    scale_pos = float(params.get("scale_pos_in2", 6.0))
-    scale_xyz = float(params.get("scale_xyz_in2", 4.0))
-    noise_amp = float(params.get("noise_amplitude", 1.0))
-    noise_oct = int(params.get("noise_octaves", 3))
-    noise_lac = float(params.get("noise_lacunarity", 2.0))
-    noise_dim = float(params.get("noise_diminish", 0.5))
-    scale_noise = float(params.get("scale_noise_in2", 3.0))
-    scale = float(params.get("scale_in2", 0.5))
-    bias = float(params.get("bias_in2", 0.5))
-    power = float(params.get("power_in2", 3.0))
-    fg = params.get("color_mix_fg", (0.1, 0.1, 0.3))
-    bg = params.get("color_mix_bg", (0.8, 0.8, 1.0))
-
-    return struct.pack(
-        "I fff ff fi ffffff fff fff ffff",
-        proc_type,
-        float(add_xyz[0]), float(add_xyz[1]), float(add_xyz[2]),
-        scale_pos, scale_xyz,
-        noise_amp, noise_oct,
-        noise_lac, noise_dim, scale_noise, scale, bias, power,
-        float(fg[0]), float(fg[1]), float(fg[2]),
-        float(bg[0]), float(bg[1]), float(bg[2]),
-        0.0, 0.0, 0.0, 0.0,
-    )
-
-
 @dataclass
 class SkinParameters:
     """Physically-based skin parameters.
@@ -636,8 +527,61 @@ def _look_at(pos: np.ndarray, forward: np.ndarray) -> np.ndarray:
     return view
 
 
+class CameraBase(abc.ABC):
+    """PBRT CameraBase analogue — abstract camera-model surface.
+
+    Concrete subclasses (OrbitCamera, FreeCamera) are `@dataclass`es that
+    own their controller state. The base contributes the methods that
+    every camera shares: the projection matrix and the common slice of
+    the change-detection signature (the fields the lens-buffer sync /
+    accumulation-reset paths read off the camera).
+
+    Subclasses must expose attribute `position: np.ndarray` and implement
+    `forward`, `view_matrix`, and `state_signature`. `position` is not
+    declared abstract here because dataclass subclasses use either a
+    field (FreeCamera) or a computed `@property` (OrbitCamera), and an
+    abstract `@property` in the base would collide with the field form.
+    """
+
+    # Attributes every subclass is expected to provide. Listed for typing
+    # / readers; concrete declarations live in the @dataclass subclasses.
+    fov: float
+    near: float
+    far: float
+    fstop: float
+    focus_distance: float
+    focal_length_mm: float
+    vertical_aperture_mm: float
+    lens: Optional["LensSystem"]
+
+    @abc.abstractmethod
+    def forward(self) -> np.ndarray: ...
+
+    @abc.abstractmethod
+    def view_matrix(self) -> np.ndarray: ...
+
+    @abc.abstractmethod
+    def state_signature(self) -> tuple: ...
+
+    def projection_matrix(self, aspect: float) -> np.ndarray:
+        return _perspective(self.fov, aspect, self.near, self.far)
+
+    def _common_signature(self) -> tuple:
+        """Camera-model slice of state_signature (lens + intrinsics).
+
+        Subclasses concatenate their controller state with this tuple so
+        the accumulation-reset path notices changes to either side.
+        """
+        return (
+            float(self.fov), float(self.near), float(self.far),
+            float(self.fstop), float(self.focus_distance),
+            float(self.focal_length_mm), float(self.vertical_aperture_mm),
+            self.lens.signature() if self.lens is not None else ("lens", "none"),
+        )
+
+
 @dataclass
-class OrbitCamera:
+class OrbitCamera(CameraBase):
     """Camera that rotates around a target point (default: centre of the SDF head).
 
     The head's y-extent is roughly [-0.94, +1.15] and its z-extent [-0.80, +0.97],
@@ -688,36 +632,32 @@ class OrbitCamera:
         self.distance = float(np.clip(self.distance * (1.0 - delta * 0.1), 0.5, 50.0))
 
     def pan(self, dx: float, dy: float) -> None:
-        forward = self.target - self.position
-        forward = forward / np.linalg.norm(forward)
+        f = self.target - self.position
+        f = f / np.linalg.norm(f)
         world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        right = np.cross(forward, world_up)
+        right = np.cross(f, world_up)
         right = right / np.linalg.norm(right)
-        up = np.cross(right, forward)
+        up = np.cross(right, f)
         scale = self.distance * 0.002
         self.target = self.target + (-right * dx + up * dy) * scale
 
-    def view_matrix(self) -> np.ndarray:
-        pos = self.position
-        f = self.target - pos
-        return _look_at(pos, f / np.linalg.norm(f))
+    def forward(self) -> np.ndarray:
+        f = self.target - self.position
+        return f / max(np.linalg.norm(f), 1e-6)
 
-    def projection_matrix(self, aspect: float) -> np.ndarray:
-        return _perspective(self.fov, aspect, self.near, self.far)
+    def view_matrix(self) -> np.ndarray:
+        return _look_at(self.position, self.forward())
 
     def state_signature(self) -> tuple:
         return (
             "orbit",
-            float(self.yaw), float(self.pitch), float(self.distance), float(self.fov),
+            float(self.yaw), float(self.pitch), float(self.distance),
             float(self.target[0]), float(self.target[1]), float(self.target[2]),
-            float(self.near), float(self.far),
-            float(self.fstop), float(self.focus_distance),
-            self.lens.signature() if self.lens is not None else ("lens", "none"),
-        )
+        ) + self._common_signature()
 
 
 @dataclass
-class FreeCamera:
+class FreeCamera(CameraBase):
     """FPS-style camera: WASD translates, mouse look rotates yaw/pitch."""
 
     position: np.ndarray = field(
@@ -769,18 +709,12 @@ class FreeCamera:
     def view_matrix(self) -> np.ndarray:
         return _look_at(self.position, self.forward())
 
-    def projection_matrix(self, aspect: float) -> np.ndarray:
-        return _perspective(self.fov, aspect, self.near, self.far)
-
     def state_signature(self) -> tuple:
         return (
             "free",
             float(self.position[0]), float(self.position[1]), float(self.position[2]),
-            float(self.yaw), float(self.pitch), float(self.fov),
-            float(self.near), float(self.far),
-            float(self.fstop), float(self.focus_distance),
-            self.lens.signature() if self.lens is not None else ("lens", "none"),
-        )
+            float(self.yaw), float(self.pitch),
+        ) + self._common_signature()
 
 
 class Renderer:
@@ -986,7 +920,20 @@ class Renderer:
         # skinParamsFromMtlx().
         self._mtlx_library: object | None = None
         self._mtlx_skin_material: object | None = None
-        self._procedural_params: dict[int, dict] = {}
+        # MaterialX nodegraph fragments built for this scene's materials.
+        # `_scene_graph_fragments` is the distinct fragment list (passed to
+        # ComputePipeline so it sizes descriptor bindings). `_material_graph_ids`
+        # maps material slot index → graphId (0 ⇒ no graph) for materialTypes
+        # upper-byte encoding. `_material_graph_overrides` carries per-material
+        # uniform overrides that pack_uniform_block packs into the per-graph
+        # SSBO at the material's slot.
+        self._scene_graph_fragments: list = []
+        self._material_graph_ids: dict[int, int] = {}
+        self._material_graph_overrides: dict[int, dict] = {}
+        # Tuple of target names the current ComputePipeline was built for.
+        # _gen_scene_materials triggers _rebuild_pipeline_for_graphs() when
+        # the new set differs.
+        self._pipeline_built_for_targets: tuple = ()
         # MaterialX field overrides keyed by uniform field name
         # (e.g. "layer_top_melanin"). Seeded from SkinParameters defaults;
         # all skin sliders now write here directly via mtlx.* paths.
@@ -1242,7 +1189,9 @@ class Renderer:
         self._upload_mesh(self._dummy_mesh)
         self._upload_detail_maps(None)
         self._per_material_furnace = [False] * self.material_capacity
-        self._procedural_params.clear()
+        self._scene_graph_fragments = []
+        self._material_graph_ids.clear()
+        self._material_graph_overrides.clear()
         self._mtlx_scene_materials.clear()
 
     def load_model_from_path(self, path: Path) -> int:
@@ -1497,20 +1446,42 @@ class Renderer:
     def _gen_scene_materials(self) -> None:
         """Run MaterialX gen for each non-skin scene material.
 
-        Populates _mtlx_scene_materials and _procedural_params. Called
-        at init and again whenever _usd_scene changes so dynamically
-        loaded models get their procedural materials (marble, etc.).
+        Populates `_mtlx_scene_materials`, `_scene_graph_fragments`,
+        `_material_graph_ids`, and `_material_graph_overrides`. Called at
+        init and again whenever `_usd_scene` changes so dynamically loaded
+        models get their MaterialX-driven materials (marble, wood, …).
+
+        Materials whose MaterialX target wraps a nodegraph driving
+        `base_color` (`generate_for_compute` returns a GraphFragment) get
+        a graphId ≥ 2; the renderer encodes that id in materialTypes and
+        the compute shader's evalSceneGraph dispatches to the gen-emitted
+        evaluator. Pure constant-input materials (Glass, Brass, …) fall
+        through to the existing flat / std_surface SSBO path with
+        graphId == 0.
         """
+        from skinny.materialx_runtime import (
+            GRAPH_ID_FIRST,
+            assign_graph_ids,
+        )
+
         lib = self._mtlx_library
         scene = self._usd_scene
         if lib is None or scene is None or not scene.materials:
             return
         self._mtlx_scene_materials.clear()
-        self._procedural_params.clear()
+        self._material_graph_ids.clear()
+        self._material_graph_overrides.clear()
         ok_std = 0
         ok_mtlx = 0
         fail = 0
         total_kb = 0.0
+
+        # First pass: gen each material, collect distinct GraphFragments.
+        # Fragment identity = target_name; multiple materials sharing a
+        # target reuse the same fragment + SSBO struct (the slot index
+        # carries per-material overrides).
+        fragments_by_target: dict[str, object] = {}
+        per_mat_target: dict[int, str] = {}
         for i, mat in enumerate(scene.materials):
             if i == 0:
                 continue
@@ -1529,22 +1500,57 @@ class Renderer:
                 fail += 1
                 continue
             self._mtlx_scene_materials[i] = cm
-            proc = _extract_procedural_params(cm)
-            if proc is not None:
-                self._procedural_params[i] = proc
+            target = getattr(cm, "target_name", None) or mat.mtlx_target_name
+            if target and target not in fragments_by_target:
+                try:
+                    gf = lib.generate_for_compute(target, write_to_disk=False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[skinny] mat[{i}] {mat.name!r}: graph-extract FAIL  "
+                          f"{type(e).__name__}: {e}")
+                    gf = None
+                if gf is not None:
+                    fragments_by_target[target] = gf
+            if target in fragments_by_target:
+                per_mat_target[i] = target
+
             if mat.mtlx_target_name:
                 ok_mtlx += 1
             else:
                 ok_std += 1
             total_kb += len(cm.pixel_source) / 1024.0
+
+        self._scene_graph_fragments = list(fragments_by_target.values())
+        id_map = assign_graph_ids(self._scene_graph_fragments)
+        for mat_idx, target in per_mat_target.items():
+            gid = id_map.get(target)
+            if gid is None:
+                continue
+            self._material_graph_ids[mat_idx] = gid
+            mat = scene.materials[mat_idx]
+            self._material_graph_overrides[mat_idx] = dict(
+                getattr(mat, "parameter_overrides", {}) or {}
+            )
+
         if ok_std or ok_mtlx or fail:
-            n_proc = len(self._procedural_params)
+            n_graphs = len(self._scene_graph_fragments)
+            n_graph_mats = len(self._material_graph_ids)
             print(
                 f"[skinny] MaterialX per-scene-material gen: "
                 f"{ok_std} std_surface, {ok_mtlx} mtlx-targeted, "
-                f"{fail} fail, {n_proc} procedural, "
+                f"{fail} fail, {n_graphs} graphs / {n_graph_mats} graph-bound mats, "
                 f"total {total_kb:.1f}KB slang"
             )
+
+        # Rebuild pipeline if the scene's MaterialX nodegraph set differs
+        # from what the live pipeline was compiled against. The first-boot
+        # path (no GPU yet — _init_gpu hasn't run) skips: __init__'s
+        # `_init_gpu()` will build with the populated fragment list.
+        new_targets = tuple(gf.target_name for gf in self._scene_graph_fragments)
+        if (
+            getattr(self, "pipeline", None) is not None
+            and new_targets != self._pipeline_built_for_targets
+        ):
+            self._rebuild_pipeline_for_graphs()
 
     def _apply_usd_lights(self, scene: Scene) -> None:
         """Seed the renderer's light + environment state from a USD scene.
@@ -1667,13 +1673,65 @@ class Renderer:
         self.light_radiance = color * self.light_intensity
         self._sync_default_light_prim()
 
-    def _init_gpu(self) -> None:
-        # Compute pipeline from Slang
+    def _rebuild_pipeline_for_graphs(self) -> None:
+        """Rebuild compute pipeline + descriptor pool/sets when scene graphs change.
+
+        The compute pipeline's descriptor set layout includes one storage
+        buffer per MaterialX nodegraph fragment at GRAPH_BINDING_BASE+idx,
+        and the aggregator's `evalSceneGraph` switch hard-codes the
+        fragment list. Both must be re-emitted + re-compiled when the
+        scene's graph set changes (USD scene loaded mid-session, scene
+        replaced, etc.).
+        """
+        vk.vkDeviceWaitIdle(self.ctx.device)
+        # Pool destroy frees descriptor sets implicitly.
+        vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
+        self.descriptor_pool = None
+        self.descriptor_sets = None
+        # ComputePipeline owns pipeline, layout, module — its destroy()
+        # tears all three down.
+        self.pipeline.destroy()
+        # Re-emit aggregator + per-graph SSBO bindings; recompile Slang.
         self.pipeline = ComputePipeline(
             self.ctx,
             self.shader_dir,
             entry_module="main_pass",
             entry_point="mainImage",
+            graph_fragments=list(self._scene_graph_fragments),
+        )
+        # Recreate descriptor pool, allocate fresh sets, write every
+        # binding's initial descriptor. Pool sizing reads
+        # `_scene_graph_fragments` so it scales with the new fragment count.
+        self._create_descriptors()
+        # Re-write graph SSBO descriptors against the freshly-allocated
+        # descriptor sets (they were skipped during pipeline-build's first
+        # call to _create_descriptors). Also refreshes their content.
+        self._upload_graph_param_buffers()
+        # And material-types so per-material graphId stays current.
+        self._upload_material_types()
+        self._pipeline_built_for_targets = tuple(
+            gf.target_name for gf in self._scene_graph_fragments
+        )
+        print(
+            f"[skinny] pipeline rebuilt for "
+            f"{len(self._scene_graph_fragments)} MaterialX graph(s)"
+        )
+
+    def _init_gpu(self) -> None:
+        # Compute pipeline from Slang. Scene MaterialX graphs (collected by
+        # `_gen_scene_materials` during `_init_materialx_runtime`) are passed
+        # so the aggregator + descriptor layout size correctly. Empty list
+        # at first-boot is fine — `_rebuild_pipeline_for_graphs` recompiles
+        # when a scene with graphs loads.
+        self.pipeline = ComputePipeline(
+            self.ctx,
+            self.shader_dir,
+            entry_module="main_pass",
+            entry_point="mainImage",
+            graph_fragments=list(self._scene_graph_fragments),
+        )
+        self._pipeline_built_for_targets = tuple(
+            gf.target_name for gf in self._scene_graph_fragments
         )
 
         # Uniform buffer — FrameConstants + SkinParams + light
@@ -1855,16 +1913,6 @@ class Renderer:
             b"\x00" * (self.material_capacity * STD_SURFACE_STRIDE)
         )
 
-        # ProceduralParams buffer (binding 20). One 96-byte record per
-        # material slot. type==0 means no procedural eval; non-zero
-        # triggers per-pixel noise evaluation in the shader.
-        self.procedural_params_buffer = StorageBuffer(
-            self.ctx, self.material_capacity * PROCEDURAL_PARAMS_STRIDE + 16
-        )
-        self.procedural_params_buffer.upload_sync(
-            b"\x00" * (self.material_capacity * PROCEDURAL_PARAMS_STRIDE)
-        )
-
         # BDPT light-tracer splat buffer (binding 21). 3 × uint32 per pixel
         # (Q22.10 fixed-point, atomic-add target). Cleared via fill_zero_sync
         # whenever the accumulation resets so the running mean stays correct.
@@ -2024,15 +2072,17 @@ class Renderer:
         # Storage buffers per frame: vertices, indices, BVH nodes, TLAS
         # instances, flat-material params, material type codes,
         # per-material skin UBO array, sphere lights, emissive triangles,
-        # StdSurfaceParams, ProceduralParams.
+        # StdSurfaceParams, plus one slot per MaterialX nodegraph SSBO
+        # (binding GRAPH_BINDING_BASE+i).
+        n_graph_slots = len(getattr(self, "_scene_graph_fragments", []) or [])
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 15 = vertices+indices+bvh+instances+flatMaterials+
+                # 14 fixed = vertices+indices+bvh+instances+flatMaterials+
                 #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
-                #      stdSurface+procedural+lightSplat+gizmoSegments+
+                #      stdSurface+lightSplat+gizmoSegments+
                 #      lensElements+lensPupilBounds.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * 15,
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (14 + n_graph_slots),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -2138,11 +2188,6 @@ class Renderer:
                 buffer=self.std_surface_buffer.buffer,
                 offset=0,
                 range=self.std_surface_buffer.size,
-            )
-            procedural_info = vk.VkDescriptorBufferInfo(
-                buffer=self.procedural_params_buffer.buffer,
-                offset=0,
-                range=self.procedural_params_buffer.size,
             )
             light_splat_info = vk.VkDescriptorBufferInfo(
                 buffer=self.light_splat_buffer.buffer,
@@ -2311,14 +2356,6 @@ class Renderer:
                 ),
                 vk.VkWriteDescriptorSet(
                     dstSet=ds,
-                    dstBinding=20,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[procedural_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
                     dstBinding=21,
                     dstArrayElement=0,
                     descriptorCount=1,
@@ -2412,14 +2449,10 @@ class Renderer:
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_aux_material_descriptors(self) -> None:
-        """Re-write descriptor bindings 19, 20 after buffer reallocation."""
+        """Re-write descriptor binding 19 after buffer reallocation."""
         ss_info = vk.VkDescriptorBufferInfo(
             buffer=self.std_surface_buffer.buffer, offset=0,
             range=self.std_surface_buffer.size,
-        )
-        pp_info = vk.VkDescriptorBufferInfo(
-            buffer=self.procedural_params_buffer.buffer, offset=0,
-            range=self.procedural_params_buffer.size,
         )
         for ds in self.descriptor_sets:
             writes = [
@@ -2428,12 +2461,6 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     pBufferInfo=[ss_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=20, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[pp_info],
                 ),
             ]
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
@@ -2742,10 +2769,6 @@ class Renderer:
             self.std_surface_buffer = StorageBuffer(
                 self.ctx, new_cap * STD_SURFACE_STRIDE + 16
             )
-            self.procedural_params_buffer.destroy()
-            self.procedural_params_buffer = StorageBuffer(
-                self.ctx, new_cap * PROCEDURAL_PARAMS_STRIDE + 16
-            )
             self._rebind_scene_descriptors()
             self._rebind_aux_material_descriptors()
         data = bytearray()
@@ -2802,17 +2825,98 @@ class Renderer:
         self.std_surface_buffer.upload_sync(
             bytes(ss_data[: self.material_capacity * STD_SURFACE_STRIDE])
         )
-        # Pack ProceduralParams for every material slot into binding 20.
-        proc_data = bytearray()
-        for i in range(self.material_capacity):
-            params = self._procedural_params.get(i)
-            proc_data += pack_procedural_params(params)
-        self.procedural_params_buffer.upload_sync(
-            bytes(proc_data[: self.material_capacity * PROCEDURAL_PARAMS_STRIDE])
-        )
+        # Per-graph MaterialX SSBOs (bindings GRAPH_BINDING_BASE+i). Each
+        # distinct GraphFragment in `_scene_graph_fragments` owns a
+        # StructuredBuffer<GraphParams_X> of length material_capacity, packed
+        # with that graph's overrides at slots whose material is bound to
+        # this graph and zero elsewhere.
+        self._upload_graph_param_buffers()
         # Refresh binding-14 descriptor writes so newly populated slots
         # are visible to the shader.
         self._update_texture_pool_descriptors()
+
+    def _upload_graph_param_buffers(self) -> None:
+        """Pack + upload per-graph parameter SSBOs.
+
+        Bindings start at `GRAPH_BINDING_BASE` (vk_compute.py). The buffers
+        live on `self._graph_param_buffers[target_name]` and are allocated
+        on first call; subsequent calls reuse and overwrite contents.
+        Material slot index matches the materialTypes[matId] slot — only
+        slots whose graphId matches the buffer's graph receive packed bytes.
+        """
+        from skinny.materialx_runtime import pack_uniform_block
+        from skinny.vk_compute import GRAPH_BINDING_BASE
+
+        if not getattr(self, "_graph_param_buffers", None):
+            self._graph_param_buffers = {}
+
+        # Drop buffers whose graph no longer appears in the active scene.
+        active = {gf.target_name for gf in self._scene_graph_fragments}
+        for stale in list(self._graph_param_buffers):
+            if stale not in active:
+                self._graph_param_buffers[stale].destroy()
+                del self._graph_param_buffers[stale]
+
+        pipeline_bindings = getattr(self.pipeline, "graph_bindings", {}) or {}
+        skipped: list[str] = []
+        for idx, gf in enumerate(self._scene_graph_fragments):
+            stride = max(
+                (f.offset + f.size for f in gf.uniform_block), default=0
+            )
+            stride = (stride + 3) & ~3
+            stride = max(stride, 4)  # avoid zero-sized SSBO
+            buf_size = self.material_capacity * stride + 16
+            existing = self._graph_param_buffers.get(gf.target_name)
+            if existing is None or existing.size < buf_size:
+                if existing is not None:
+                    existing.destroy()
+                self._graph_param_buffers[gf.target_name] = StorageBuffer(
+                    self.ctx, buf_size
+                )
+            data = bytearray(self.material_capacity * stride)
+            for mat_idx, gid in self._material_graph_ids.items():
+                if gid != idx + 2:  # matches assign_graph_ids: GRAPH_ID_FIRST=2
+                    continue
+                if mat_idx >= self.material_capacity:
+                    continue
+                overrides = self._material_graph_overrides.get(mat_idx, {})
+                packed = pack_uniform_block(gf.uniform_block, overrides)
+                data[mat_idx * stride : mat_idx * stride + len(packed)] = packed
+            self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
+
+            # Pipeline built without this fragment ⇒ descriptor layout has
+            # no slot at GRAPH_BINDING_BASE+idx. Skip the write to avoid a
+            # Vulkan validation error; the shader's evalSceneGraph hits the
+            # `default` magenta case for this material until the pipeline is
+            # rebuilt (TODO: mid-session pipeline rebuild).
+            if gf.target_name not in pipeline_bindings:
+                skipped.append(gf.target_name)
+                continue
+
+            binding = pipeline_bindings[gf.target_name]
+            info = vk.VkDescriptorBufferInfo(
+                buffer=self._graph_param_buffers[gf.target_name].buffer,
+                offset=0,
+                range=self._graph_param_buffers[gf.target_name].size,
+            )
+            for ds in self.descriptor_sets:
+                write = vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=binding,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[info],
+                )
+                vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
+
+        if skipped:
+            print(
+                f"[skinny] WARNING: pipeline built without these MaterialX "
+                f"graphs: {skipped}. They will render magenta until "
+                f"pipeline rebuild on next scene load lands. Restart with "
+                f"the scene loaded to render correctly for now."
+            )
 
     def _upload_material_types(self) -> None:
         """Pack per-material type+flags into binding 16.
@@ -2821,10 +2925,13 @@ class Renderer:
           bits  0-7 : material type code (skin=0, flat=1)
           bits  8-9 : scatter mode for skin slots (bit0=BSSRDF, bit1=volume)
           bit  10   : per-material furnace mode
-          bits 11-31: reserved.
+          bits 11-15: reserved.
+          bits 16-23: MaterialX graphId (0 = no graph; 2+ = index into
+                      `_scene_graph_fragments` + GRAPH_ID_FIRST). Read by
+                      shaders/bindings.slang::materialGraphId().
 
-        Re-uploaded whenever scatter mode or per-material furnace changes
-        (cheap — the buffer is material_capacity uints).
+        Re-uploaded whenever scatter mode, per-material furnace, or the
+        scene's graph binding changes.
         """
         scatter_idx = int(np.clip(self.scatter_index, 0, len(self._scatter_mode_bits) - 1))
         scatter_bits = int(self._scatter_mode_bits[scatter_idx]) & 0x3
@@ -2837,6 +2944,8 @@ class Renderer:
                 packed |= (scatter_bits & 0x3) << 8
             if self._per_material_furnace[i]:
                 packed |= 1 << 10
+            gid = self._material_graph_ids.get(i, 0)
+            packed |= (gid & 0xFF) << 16
             type_bytes += struct.pack("I", packed)
         self.material_types_buffer.upload_sync(bytes(type_bytes))
         self._last_scatter_index = scatter_idx
@@ -4727,7 +4836,8 @@ class Renderer:
 
         vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
         self.texture_pool.destroy()
-        self.procedural_params_buffer.destroy()
+        for _buf in getattr(self, "_graph_param_buffers", {}).values():
+            _buf.destroy()
         self.std_surface_buffer.destroy()
         self.emissive_tri_buffer.destroy()
         self.sphere_lights_buffer.destroy()

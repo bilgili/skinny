@@ -13,11 +13,14 @@
 
 import common;
 import bindings;
+import interfaces;
 import scene_trace;
 import environment;
 import integrators.path;
 import integrators.bdpt;
+import cameras.pinhole;
 import cameras.thick_lens;
+import generated_materials;
 
 // ── Tonemapping ─────────────────────────────────────────────────
 
@@ -50,61 +53,24 @@ float3 linearToSRGB(float3 linear)
     return pow(max(linear, float3(0.0)), float3(1.0 / 2.2));
 }
 
-// ── Entry point ─────────────────────────────────────────────────
+// ── Per-pixel frame body, monomorphized on the camera model ─────
 
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
+void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
 {
-    uint2 pixel = dispatchThreadID.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
-        return;
-
-    RNG rng = createRNG(pixel, fc.frameIndex);
-
-    // Vignette-debug mode: sample N lens rays at this pixel, count how
-    // many produce a non-zero throughput, and output the success rate
-    // as grayscale. Bypasses the integrator entirely so the cost is
-    // bounded. Skips when no lens is active (success rate ≡ 1).
-    if (fc.lensVignetteDebug != 0u && fc.numLensElements > 0u)
-    {
-        const uint N = 16u;
-        uint hits = 0u;
-        for (uint s = 0u; s < N; ++s)
-        {
-            float w;
-            generateLensRay(fc, pixel, rng, w);
-            if (w > 0.0) hits += 1u;
-        }
-        float rate = float(hits) / float(N);
-        float3 col = lerp(float3(0.6, 0.0, 0.0),    // red = vignetted
-                          float3(0.0, 0.9, 0.0),    // green = passing
-                          rate);
-        outputBuffer[pixel] = float4(col, 1.0);
-        return;
-    }
-
     float lensWeight;
-    Ray ray = generateCameraRayWithWeight(fc, pixel, rng, lensWeight);
+    Ray ray = cam.generateRay(pixel, rng, lensWeight);
     HitInfo hit = traceScene(fc, ray);
 
     float3 sample;
 
     bool useBdpt = (fc.integratorType == INTEGRATOR_BDPT)
                 && hit.hit
-                && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT)
-                // BDPT's `projectToCamera` uses pinhole `camera.proj` /
-                // `view`, so the s=1 light-tracer splat would land on
-                // pixels that don't correspond to the lens-traced eye
-                // ray. Fall back to the unidirectional path tracer
-                // when a thick lens is active. (Splat buffer stays
-                // zero in this case, so the unconditional composite
-                // below contributes nothing.)
-                && (fc.numLensElements == 0u);
+                && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT);
 
     if (useBdpt)
     {
-        BDPTIntegrator bdpt;
+        BDPTIntegrator<TC> bdpt;
+        bdpt.cam = cam;
         sample = bdpt.estimateRadiance(ray, hit, rng);
     }
     else if (hit.hit)
@@ -225,4 +191,52 @@ void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
     }
 
     outputBuffer[pixel] = float4(display, 1.0);
+}
+
+// ── Entry point ─────────────────────────────────────────────────
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
+{
+    uint2 pixel = dispatchThreadID.xy;
+    if (pixel.x >= fc.width || pixel.y >= fc.height)
+        return;
+
+    RNG rng = createRNG(pixel, fc.frameIndex);
+
+    // Vignette-debug mode: sample N lens rays at this pixel, count how
+    // many produce a non-zero throughput, and output the success rate
+    // as grayscale. Bypasses the integrator entirely so the cost is
+    // bounded. Skips when no lens is active (success rate ≡ 1).
+    if (fc.lensVignetteDebug != 0u && fc.numLensElements > 0u)
+    {
+        const uint N = 16u;
+        uint hits = 0u;
+        for (uint s = 0u; s < N; ++s)
+        {
+            float w;
+            generateLensRay(fc, pixel, rng, w);
+            if (w > 0.0) hits += 1u;
+        }
+        float rate = float(hits) / float(N);
+        float3 col = lerp(float3(0.6, 0.0, 0.0),    // red = vignetted
+                          float3(0.0, 0.9, 0.0),    // green = passing
+                          rate);
+        outputBuffer[pixel] = float4(col, 1.0);
+        return;
+    }
+
+    // Tag-switch on camera model. Concrete struct instantiated at the
+    // call site so estimators monomorphize against the chosen ICamera.
+    if (fc.numLensElements > 0u)
+    {
+        ThickLensCamera cam;
+        runFrame<ThickLensCamera>(cam, pixel, rng);
+    }
+    else
+    {
+        PinholeCamera cam;
+        runFrame<PinholeCamera>(cam, pixel, rng);
+    }
 }

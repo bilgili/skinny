@@ -15,7 +15,6 @@ uniform float3         lightRadiance;
 [[vk::binding(14)]] Sampler2D<float4> flatMaterialTextures[128];
 [[vk::binding(16)]] StructuredBuffer<uint> materialTypes;
 [[vk::binding(19)]] StructuredBuffer<StdSurfaceParams> stdSurfaceParams;
-[[vk::binding(20)]] StructuredBuffer<ProceduralParams> proceduralParams;
 // BDPT light-tracer splat buffer: per-pixel R, G, B as fixed-point uint
 // (Q22.10). Indexed as [pixel.y * width * 3 + pixel.x * 3 + channel].
 [[vk::binding(21)]] RWStructuredBuffer<uint> lightSplatBuffer;
@@ -28,6 +27,18 @@ static const uint MATERIAL_TYPE_FLAT         = 1u;
 static const uint MATERIAL_TYPE_DEBUG_NORMAL = 2u;
 
 static const uint MATERIAL_FURNACE_BIT = 10u;
+
+// MaterialX graph id lives in the upper byte of materialTypes[matId].
+// 0 ⇒ no graph (use the legacy flat / std_surface SSBO path). 2..255 ⇒
+// graph index assigned by materialx_runtime.assign_graph_ids; matches
+// `case Nu:` in generated_materials.slang::evalSceneGraph.
+static const uint MATERIAL_GRAPH_SHIFT = 16u;
+static const uint MATERIAL_GRAPH_MASK  = 0xffu;
+
+uint materialGraphId(uint matId)
+{
+    return (materialTypes[matId] >> MATERIAL_GRAPH_SHIFT) & MATERIAL_GRAPH_MASK;
+}
 
 uint effectiveFurnaceMode(uint materialId)
 {

@@ -1,13 +1,13 @@
 // Shared flat-material (StandardSurface) helpers — Schlick fresnel,
-// dielectric fresnel, procedural color, hit-data fetch. GGX direction
-// sampling lives in shaders/samplers/ggx.slang; the colored weight is
-// computed inside FlatMaterial.sample.
+// dielectric fresnel, MaterialX-graph dispatch, hit-data fetch. GGX
+// direction sampling lives in shaders/samplers/ggx.slang; the colored
+// weight is computed inside FlatMaterial.sample.
 
 import common;
 import bindings;
 import mtlx_closures;
 import mtlx_std_surface;
-import mtlx_noise;
+import generated_materials;
 
 float relativeLuminance(float3 c)
 {
@@ -160,40 +160,20 @@ FlatHitData fetchFlatHitData(HitInfo h)
     return out_;
 }
 
-float3 evalProceduralColor(ProceduralParams pp, float3 posObject)
-{
-    if (pp.type == PROC_TYPE_MARBLE_3D)
-    {
-        float add_xyz_out = dot(posObject, pp.add_xyz_in2);
-        float3 scale_pos_out = posObject * pp.scale_pos_in2;
-        float scale_xyz_out = add_xyz_out * pp.scale_xyz_in2;
-        float noise_out = 0.0;
-        mx_fractal3d_float(pp.noise_amplitude, pp.noise_octaves,
-                           pp.noise_lacunarity, pp.noise_diminish,
-                           scale_pos_out, noise_out);
-        float scale_noise_out = noise_out * pp.scale_noise_in2;
-        float sum_out = scale_xyz_out + scale_noise_out;
-        float sin_out = sin(sum_out);
-        float scale_out = sin_out * pp.scale_in2;
-        float bias_out = scale_out + pp.bias_in2;
-        float power_out = pow(max(bias_out, 0.0), pp.power_in2);
-        return lerp(pp.color_mix_bg, pp.color_mix_fg, clamp(power_out, 0.0, 1.0));
-    }
-    return float3(-1.0);
-}
-
-StdSurfaceParams loadStdSurfaceParams(uint matId, float3 posObject)
+StdSurfaceParams loadStdSurfaceParams(uint matId, float3 posObject,
+                                       float3 normal, float3 tangent)
 {
     StdSurfaceParams sp = stdSurfaceParams[matId];
-    ProceduralParams pp = proceduralParams[matId];
-    if (pp.type != PROC_TYPE_NONE)
+    uint graphId = materialGraphId(matId);
+    if (graphId >= 2u)
     {
-        float3 color = evalProceduralColor(pp, posObject);
-        if (color.x >= 0.0)
-        {
-            sp.base_color = color;
-            sp.subsurface_color = color;
-        }
+        // Per-hit MaterialX nodegraph evaluator emitted by
+        // MaterialLibrary.generate_for_compute() — replaces the legacy
+        // hard-coded Marble3D procedural path. Drives base_color (and
+        // subsurface_color for layered media).
+        float3 c = evalSceneGraph(graphId, matId, posObject, normal, tangent);
+        sp.base_color = c;
+        sp.subsurface_color = c;
     }
     return sp;
 }

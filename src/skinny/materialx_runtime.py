@@ -23,6 +23,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import shutil
 import struct
 import subprocess
@@ -501,6 +502,394 @@ class MaterialLibrary:
 
         return compiled
 
+    # ─── Compute-pipeline graph extraction ────────────────────────────
+
+    # Slang type for each MaterialX scalar/vector type. Booleans become
+    # uint (Slang `bool` has no defined buffer layout).
+    _SLANG_TYPES: dict[str, str] = {
+        "float":   "float",
+        "integer": "int",
+        "boolean": "uint",
+        "vector2": "float2",
+        "vector3": "float3",
+        "vector4": "float4",
+        "color3":  "float3",
+        "color4":  "float4",
+    }
+
+    def generate_for_compute(
+        self,
+        target_name: str,
+        *,
+        write_to_disk: bool = True,
+    ) -> "Optional[GraphFragment]":
+        """Generate a header-form Slang fragment for the compute pipeline.
+
+        Runs MaterialXGenSlang on `target_name` (a surfacematerial), then
+        extracts the nodegraph evaluation that drives the wrapping
+        standard_surface's `base_color` input. The extracted math is
+        wrapped as:
+
+            float3 evalGraph_<sanitized>(float3 P_in, float3 N_in,
+                                         float3 T_in,
+                                         in GraphParams_<sanitized> p);
+
+        plus a `struct GraphParams_<sanitized> { … }` whose fields match
+        the gen-reflected uniforms that the graph body references. The
+        result is the chunk the compute build's `generated_materials.slang`
+        will `#include`.
+
+        Relies on stable markers in MaterialXGenSlang output. Today's gen
+        emits, inside `fragmentMain`:
+
+            // Pixel shader outputs
+            float4 out1;
+
+            … graph evaluation …
+
+            surfaceshader <wrapper>_out = surfaceshader(float3(0.0),float3(0.0));
+            NG_standard_surface_surfaceshader_100(arg0, base_color_var, …);
+
+        Extraction takes the lines between `// Pixel shader outputs` and
+        the `surfaceshader ` declaration; the wrapping call's 2nd
+        positional argument names the return value.
+
+        Raises RuntimeError when markers don't appear (e.g. the target is
+        not a surfacematerial wrapping standard_surface).
+        """
+        cm = self.generate(target_name, write_to_disk=write_to_disk,
+                           compile_check=False)
+        sanitized = _sanitize_ident(target_name)
+        struct_name = f"GraphParams_{sanitized}"
+
+        body, return_var = _extract_graph_body(cm.pixel_source)
+
+        # Pure constant-input materials (e.g. plain Glass without a base_color
+        # nodegraph) emit no per-pixel math — the wrapping standard_surface
+        # receives base_color directly from a cbuffer uniform. In that case
+        # the return_var is a uniform from the full uniform_block and the
+        # body holds only geomprop normalisations. There's nothing for the
+        # compute pipeline to evaluate; the existing flat-material /
+        # std_surface SSBO path covers these. Return None so callers can
+        # skip them.
+        full_uniform_names = {u.name for u in cm.uniform_block}
+        if return_var in full_uniform_names:
+            return None
+
+        # Unsupported graph features:
+        #   - Texture/image nodes: the gen emits `NG_tiledimage_*` /
+        #     `NG_image_*` helper functions and references file uniforms +
+        #     framerange arrays we don't extract. Texture-bindless wiring
+        #     for arbitrary MaterialX graphs is a future milestone.
+        #   - Geomprop inputs other than position / normal / tangent /
+        #     positionWorld: signal `vd.i_*` channels we don't plumb.
+        # Both reject paths return None so the caller falls back to the
+        # flat / std_surface SSBO path (which still ignores the graph —
+        # the material renders with constants only).
+        if re.search(r"\bNG_[A-Za-z0-9_]+\s*\(", body):
+            return None
+        if re.search(r"\bvd\.i_[A-Za-z0-9_]+", body):
+            return None
+
+        # Identifier rewrites:
+        #   vd.* — fragment-shader vertex inputs supplied by the caller.
+        body = body.replace("vd.positionObject", "P_in")
+        body = body.replace("vd.normalWorld",    "N_in")
+        body = body.replace("vd.tangentWorld",   "T_in")
+        body = body.replace("vd.positionWorld",  "P_in")  # fallback
+
+        # Substitute each uniform name with `p.<name>` when it appears as
+        # a whole-word identifier. Walk uniforms longest-first so prefix
+        # collisions (`base` vs `base_color`) don't misfire.
+        used_uniforms: list[UniformField] = []
+        uniforms_sorted = sorted(cm.uniform_block, key=lambda u: -len(u.name))
+        for u in uniforms_sorted:
+            pat = re.compile(rf"\b{re.escape(u.name)}\b")
+            if pat.search(body):
+                body = pat.sub(f"p.{u.name}", body)
+                used_uniforms.append(u)
+        # Preserve original (offset-sorted) order for struct emission.
+        used_uniforms.sort(key=lambda u: u.offset)
+
+        struct_src = _emit_param_struct(struct_name, used_uniforms,
+                                        type_map=self._SLANG_TYPES)
+        func_src = (
+            f"float3 evalGraph_{sanitized}(float3 P_in, float3 N_in,\n"
+            f"                              float3 T_in,\n"
+            f"                              in {struct_name} p)\n"
+            f"{{\n"
+            f"{_indent(body, '    ')}\n"
+            f"    return {return_var};\n"
+            f"}}\n"
+        )
+        # MaterialXGenSlang emits calls to mx_sin / mx_cos / mx_inversesqrt /
+        # etc., which mtlx_noise.slang + mtlx_closures.slang expose as `#define`
+        # aliases for the HLSL/Slang built-ins. Slang's `import` does not
+        # propagate preprocessor macros, so we materialise the aliases at the
+        # top of every generated fragment. Guarded so multi-graph builds don't
+        # redefine.
+        header = (
+            f"// Auto-generated graph fragment for target '{target_name}'.\n"
+            f"// Source: MaterialXGenSlang via MaterialLibrary.generate_for_compute().\n"
+            f"// Edits will be overwritten on next scene load.\n\n"
+            f"#ifndef SKINNY_MX_FN_ALIASES\n"
+            f"#define SKINNY_MX_FN_ALIASES\n"
+            f"#define mx_sin sin\n"
+            f"#define mx_cos cos\n"
+            f"#define mx_tan tan\n"
+            f"#define mx_asin asin\n"
+            f"#define mx_acos acos\n"
+            f"#define mx_atan atan2\n"
+            f"#define mx_radians radians\n"
+            f"#define mx_inversesqrt rsqrt\n"
+            f"#define mx_float_bits_to_int asint\n"
+            f"#endif\n\n"
+        )
+        full_src = header + struct_src + "\n" + func_src
+
+        path: Optional[Path] = None
+        if write_to_disk:
+            self.build_dir.mkdir(parents=True, exist_ok=True)
+            path = self.build_dir / f"{target_name}_graph.slang"
+            path.write_text(full_src, encoding="utf-8")
+
+        return GraphFragment(
+            target_name=target_name,
+            sanitized_name=sanitized,
+            struct_name=struct_name,
+            func_name=f"evalGraph_{sanitized}",
+            slang_source=full_src,
+            uniform_block=used_uniforms,
+            source_path=path,
+        )
+
+
+# ─── GraphFragment + helpers ───────────────────────────────────────────
+
+
+@dataclass
+class GraphFragment:
+    """A self-contained Slang chunk for one MaterialX nodegraph.
+
+    Built by `MaterialLibrary.generate_for_compute()`. The compute build
+    concatenates each scene material's `slang_source` into
+    `shaders/generated_materials.slang`, then `main_pass.slang` calls
+    `func_name` to compute a hit's base_color before evalStdSurfaceBSDF.
+    """
+
+    target_name: str
+    sanitized_name: str
+    struct_name: str
+    func_name: str
+    slang_source: str
+    uniform_block: list[UniformField]
+    source_path: Optional[Path] = None
+
+
+# `struct` format chars per MaterialX type for scalar-layout packing.
+# All sub-elements are 4-byte (float/int/uint), so per-field formats
+# concatenate sizes from `_SCALAR_LAYOUT` above.
+_PACK_FORMAT: dict[str, str] = {
+    "float":   "<f",
+    "integer": "<i",
+    "boolean": "<I",       # 0/1
+    "vector2": "<2f",
+    "vector3": "<3f",
+    "vector4": "<4f",
+    "color3":  "<3f",
+    "color4":  "<4f",
+}
+
+
+def _coerce_scalar(value: Any, type_name: str) -> tuple:
+    """Coerce a Python / MaterialX value into a flat tuple of floats/ints
+    matching the type's component count. None or unparseable values
+    collapse to zeros."""
+    if value is None:
+        if type_name in ("float", "integer", "boolean"):
+            return (0,)
+        comps = {"vector2": 2, "vector3": 3, "vector4": 4,
+                 "color3": 3, "color4": 4}.get(type_name, 1)
+        return tuple([0.0] * comps)
+
+    if type_name == "boolean":
+        return (1 if bool(value) else 0,)
+    if type_name == "integer":
+        try:
+            return (int(value),)
+        except (TypeError, ValueError):
+            return (0,)
+    if type_name == "float":
+        try:
+            return (float(value),)
+        except (TypeError, ValueError):
+            return (0.0,)
+
+    # Composite types — accept Vector*/Color*/sequence/object-with-asTuple.
+    if hasattr(value, "asTuple"):
+        seq = value.asTuple()
+    elif hasattr(value, "__getitem__") and not isinstance(value, (str, bytes)):
+        try:
+            seq = [value[i] for i in range(_SCALAR_LAYOUT[type_name][1] // 4)]
+        except (TypeError, IndexError):
+            seq = []
+    else:
+        seq = []
+    comps = _SCALAR_LAYOUT.get(type_name, (4, 4))[1] // 4
+    out = []
+    for i in range(comps):
+        try:
+            out.append(float(seq[i]))
+        except (TypeError, ValueError, IndexError):
+            out.append(0.0)
+    return tuple(out)
+
+
+def pack_uniform_block(
+    fields: Iterable[UniformField],
+    overrides: Optional[dict[str, Any]] = None,
+) -> bytes:
+    """Pack a uniform_block into a scalar-layout byte buffer.
+
+    Each field is written at its `offset` using `_PACK_FORMAT[type_name]`.
+    Buffer size is the smallest 4-byte-rounded length covering every
+    field. `overrides` (when present) replaces the authored MaterialX
+    default for fields whose names match.
+
+    Output matches the Slang struct emitted by
+    `MaterialLibrary.generate_for_compute` under `-fvk-use-scalar-layout`,
+    so callers can vkMapMemory-blit the bytes directly into the
+    per-material graph SSBO slot.
+    """
+    overrides = overrides or {}
+    fields = list(fields)
+    total = max((f.offset + f.size for f in fields), default=0)
+    total = (total + 3) & ~3
+    buf = bytearray(total)
+    for f in fields:
+        fmt = _PACK_FORMAT.get(f.type_name)
+        if fmt is None:
+            raise RuntimeError(
+                f"pack_uniform_block: no pack format for type '{f.type_name}' "
+                f"(uniform '{f.name}')"
+            )
+        value = overrides.get(f.name, f.default)
+        components = _coerce_scalar(value, f.type_name)
+        struct.pack_into(fmt, buf, f.offset, *components)
+    return bytes(buf)
+
+
+def _sanitize_ident(name: str) -> str:
+    """Make a MaterialX element name safe for use as a Slang identifier."""
+    safe = re.sub(r"[^0-9A-Za-z_]", "_", name)
+    if safe and safe[0].isdigit():
+        safe = "_" + safe
+    return safe or "_anon"
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "\n".join(prefix + ln if ln else ln for ln in text.splitlines())
+
+
+# Captures (var, value) from `surfaceshader VAR = surfaceshader(...);`.
+_SURFACESHADER_DECL = re.compile(r"\bsurfaceshader\s+(\w+)\s*=\s*surfaceshader\s*\(")
+
+# Captures the wrapping NG_standard_surface_surfaceshader_<ver>(arg0, arg1, …) call.
+# arg1 (the second positional argument) names the base_color variable.
+_NG_STD_SURFACE_CALL = re.compile(
+    r"NG_standard_surface_surfaceshader_\d+\s*\(\s*"
+    r"[^,]+,\s*"          # arg0 = base weight
+    r"([^,]+)\s*,",       # arg1 = base_color (capture)
+    re.DOTALL,
+)
+
+
+def _extract_graph_body(pixel_source: str) -> tuple[str, str]:
+    """Return (body, return_var) extracted from MaterialXGenSlang's pixel emit.
+
+    Raises RuntimeError when expected markers aren't found.
+    """
+    # Locate fragmentMain's body.
+    frag_idx = pixel_source.find('[shader("fragment")]')
+    if frag_idx < 0:
+        raise RuntimeError("generate_for_compute: '[shader(\"fragment\")]' not found in pixel emit")
+    brace_idx = pixel_source.find("{", frag_idx)
+    if brace_idx < 0:
+        raise RuntimeError("generate_for_compute: fragmentMain opening brace not found")
+    # Find matching close brace by simple counting (no nested string literals
+    # exist in gen output).
+    depth = 0
+    end_idx = -1
+    for i in range(brace_idx, len(pixel_source)):
+        c = pixel_source[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end_idx = i
+                break
+    if end_idx < 0:
+        raise RuntimeError("generate_for_compute: fragmentMain closing brace not found")
+    body_full = pixel_source[brace_idx + 1 : end_idx]
+
+    marker = "// Pixel shader outputs"
+    m_idx = body_full.find(marker)
+    if m_idx < 0:
+        raise RuntimeError("generate_for_compute: '// Pixel shader outputs' marker not found")
+    after_marker = body_full[m_idx + len(marker):]
+    # Skip the next line ('float4 out1;') and any blank lines.
+    skip_eol = after_marker.find("\n")
+    after_marker = after_marker[skip_eol + 1:]
+    # Drop the `float4 out1;` line if present.
+    after_marker = re.sub(r"^\s*float4\s+out1\s*;\s*\n", "", after_marker, count=1)
+
+    # End of graph math = the `surfaceshader X = surfaceshader(…);` line.
+    decl_match = _SURFACESHADER_DECL.search(after_marker)
+    if not decl_match:
+        raise RuntimeError(
+            "generate_for_compute: 'surfaceshader <var> = surfaceshader(…)' marker not found — "
+            "graph extraction supports surfacematerial→standard_surface wrappers only"
+        )
+    graph_body = after_marker[: decl_match.start()].rstrip() + "\n"
+
+    # The wrapping call names base_color as its 2nd positional arg.
+    call_match = _NG_STD_SURFACE_CALL.search(after_marker, decl_match.end())
+    if not call_match:
+        raise RuntimeError(
+            "generate_for_compute: NG_standard_surface_surfaceshader call not found — "
+            "cannot determine which graph variable feeds base_color"
+        )
+    return_var = call_match.group(1).strip()
+
+    return graph_body, return_var
+
+
+def _emit_param_struct(
+    struct_name: str,
+    uniforms: Iterable[UniformField],
+    *,
+    type_map: dict[str, str],
+) -> str:
+    """Emit a Slang struct with one field per UniformField.
+
+    Caller pre-filters `uniforms` to only those referenced in the graph
+    body. Fields are emitted in offset order so the struct layout under
+    scalar-layout matches the Python packer.
+    """
+    lines = [f"struct {struct_name}", "{"]
+    for u in uniforms:
+        slang_t = type_map.get(u.type_name)
+        if slang_t is None:
+            raise RuntimeError(
+                f"generate_for_compute: no Slang type mapping for MaterialX type "
+                f"'{u.type_name}' (uniform '{u.name}')"
+            )
+        lines.append(f"    {slang_t} {u.name};  // offset {u.offset}")
+    lines.append("};")
+    lines.append("")
+    return "\n".join(lines)
+
 
 # ─── UsdPreviewSurface → standard_surface conversion ────────────────
 
@@ -585,6 +974,28 @@ def add_standard_surface_material(
 
 
 # ─── Convenience helpers ──────────────────────────────────────────────
+
+
+# Reserved graphId values in the compute pipeline's `materialTypes` SSBO.
+# Real MaterialX graphs occupy ids 2.. (one per distinct GraphFragment).
+GRAPH_ID_SKIN = 0
+GRAPH_ID_FLAT = 1
+GRAPH_ID_FIRST = 2
+
+
+def assign_graph_ids(
+    fragments: Iterable[GraphFragment],
+) -> dict[str, int]:
+    """Return `{target_name → graphId}` for the given fragment list.
+
+    The compute pipeline's evalSceneGraph() switches on graphId; this map
+    is what the renderer writes into materialTypes[matId] for materials
+    whose MaterialX target produced a GraphFragment.
+    """
+    return {
+        gf.target_name: GRAPH_ID_FIRST + idx
+        for idx, gf in enumerate(fragments)
+    }
 
 
 def generate_default_skin() -> CompiledMaterial:
