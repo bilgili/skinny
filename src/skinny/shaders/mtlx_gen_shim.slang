@@ -47,7 +47,12 @@ public struct SamplerTexture2D
 public float4 texture(SamplerTexture2D tex, float2 uv)
 {
     if (tex.slot == MTLX_GEN_TEX_SENTINEL) return float4(0.0);
-    return flatMaterialTextures[NonUniformResourceIndex(tex.slot)].Sample(uv);
+    // SampleLevel(0) instead of Sample(): plain `Sample` uses implicit
+    // ddx/ddy from quad neighbors, which in a compute shader needs the
+    // VK_KHR_compute_shader_derivatives extension. skinny's compute
+    // pipeline doesn't request it; path-tracer texture lookups don't
+    // have a meaningful pixel footprint anyway, so mip 0 is fine.
+    return flatMaterialTextures[NonUniformResourceIndex(tex.slot)].SampleLevel(uv, 0.0);
 }
 
 public float4 textureLod(SamplerTexture2D tex, float2 uv, float lod)
