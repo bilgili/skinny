@@ -572,7 +572,12 @@ def _load_mtlx_materials(
                             )
                             if avg is not None:
                                 flat_key = _STD_SURFACE_TO_FLAT.get(inp_name, inp_name)
+                                # Store under BOTH the flat alias (read by
+                                # pack_flat_material) and the canonical
+                                # std-surface name (read by
+                                # pack_std_surface_params).
                                 overrides[flat_key] = avg
+                                overrides[inp_name] = avg
                     continue
 
                 if inp.getNodeName():
@@ -583,7 +588,14 @@ def _load_mtlx_materials(
                     continue
                 value = _parse_mtlx_value_str(inp_type, val_str)
                 flat_key = _STD_SURFACE_TO_FLAT.get(inp_name, inp_name)
+                # Same dual-author pattern: flat_key for FlatMaterialParams,
+                # raw inp_name for StdSurfaceParams. Lets brass's
+                # metalness=1 / specular=0 / coat=1 reach both packs even
+                # though pack_flat_material understands UsdPreviewSurface
+                # names and pack_std_surface_params understands MaterialX
+                # standard_surface names.
                 overrides[flat_key] = value
+                overrides[inp_name] = value
 
             base = overrides.pop("base", None)
             if isinstance(base, (int, float)):

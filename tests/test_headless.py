@@ -343,6 +343,98 @@ class TestVideoEncoderJpeg:
         enc.close()
 
 
+# ── MaterialX graph demo scene ─────────────────────────────────────
+
+
+DEMO_SCENE = PROJECT_ROOT / "assets" / "three_materials_demo.usda"
+
+
+@needs_vulkan
+@pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
+class TestMaterialXGraphDemoRender:
+    """End-to-end smoke render for the marble / wood / brass scene.
+
+    Renders a few frames headless, then asserts each sphere region has
+    non-near-black pixels. Catches regressions where a graph dispatch
+    silently zeros out base_color / specular_color / coat_color.
+    """
+
+    # Sphere world-space x: -2.5 / 0 / +2.5; camera at (0, 1, 7) looking
+    # ~down 5°. With a 256-wide film and the demo's 35mm focal length the
+    # spheres land near these pixel centroids in screen space.
+    WIDTH = 256
+    HEIGHT = 256
+    SPHERE_CENTERS_PX = {
+        "marble": (60, 140),
+        "wood":   (128, 140),
+        "brass":  (196, 140),
+    }
+    REGION_HALF = 16    # sample a 33×33 patch around each centroid
+    MIN_RGB = 0.05      # require any pixel in the patch to exceed this
+
+    @pytest.fixture(scope="class")
+    def rendered(self):
+        from skinny.vk_context import VulkanContext
+        from skinny.renderer import Renderer
+        ctx = VulkanContext(window=None, width=self.WIDTH, height=self.HEIGHT)
+        renderer = Renderer(
+            vk_ctx=ctx,
+            shader_dir=SHADER_DIR,
+            hdr_dir=HDR_DIR,
+            tattoo_dir=TATTOO_DIR,
+            usd_scene_path=DEMO_SCENE,
+        )
+        # USD load is async; pump the streaming pipeline until at least
+        # the three spheres have materialized as instances. Hard cap at
+        # ~5 s so a hung loader doesn't block CI.
+        deadline = 200  # × 0.025 s = 5 s
+        while deadline > 0 and (
+            renderer._usd_scene is None
+            or len(renderer._usd_scene.instances) < 3
+        ):
+            renderer.update(0.025)
+            deadline -= 1
+        # A few extra frames so accumulation stabilises and the path
+        # tracer's first-bounce noise averages out.
+        frames: list[bytes] = []
+        for _ in range(8):
+            renderer.update(0.04)
+            frames.append(renderer.render_headless())
+        raw = frames[-1]
+        try:
+            yield renderer, raw
+        finally:
+            renderer.cleanup()
+            ctx.destroy()
+
+    def _sample_patch(self, raw: bytes, cx: int, cy: int) -> np.ndarray:
+        arr = np.frombuffer(raw, dtype=np.uint8).reshape(self.HEIGHT, self.WIDTH, 4)
+        x0 = max(0, cx - self.REGION_HALF)
+        x1 = min(self.WIDTH, cx + self.REGION_HALF + 1)
+        y0 = max(0, cy - self.REGION_HALF)
+        y1 = min(self.HEIGHT, cy + self.REGION_HALF + 1)
+        # Drop alpha, normalise to [0, 1].
+        return arr[y0:y1, x0:x1, :3].astype(np.float32) / 255.0
+
+    def test_scene_streamed(self, rendered):
+        renderer, _ = rendered
+        assert renderer._usd_scene is not None
+        assert len(renderer._usd_scene.instances) >= 3, \
+            f"expected 3 spheres, got {len(renderer._usd_scene.instances)}"
+
+    @pytest.mark.parametrize("sphere", ["marble", "wood", "brass"])
+    def test_sphere_renders_non_black(self, rendered, sphere):
+        _, raw = rendered
+        cx, cy = self.SPHERE_CENTERS_PX[sphere]
+        patch = self._sample_patch(raw, cx, cy)
+        peak = patch.max(axis=(0, 1))   # max per channel across patch
+        assert peak.max() > self.MIN_RGB, (
+            f"{sphere} sphere at ({cx}, {cy}) is near-black "
+            f"(peak={peak.tolist()}, min channel max={peak.max():.4f}); "
+            f"graph dispatch likely not producing visible colour"
+        )
+
+
 # ── Headless render → encode pipeline ──────────────────────────────
 
 

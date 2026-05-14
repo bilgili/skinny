@@ -23,6 +23,22 @@
 //   [8] Duff et al., "Building an Orthonormal Basis, Revisited", JCGT 2017.
 
 struct BSDF { float3 response; float3 throughput; };
+
+// Slangc 2026.1's positional `BSDF(r, t)` constructor produces a value
+// that mutates correctly when assigned to a local, BUT when that local
+// is passed via `inout` to a BSDF helper (mx_oren_nayar_diffuse_bsdf
+// etc.) the function's writes do not propagate back: caller's
+// `bsdf.response` stays zero. Field-by-field init via this helper works
+// around the issue. Replace every `BSDF X = BSDF(r, t);` with
+// `BSDF X = makeBSDF(r, t);` to keep the closure tree producing
+// non-zero output for graph-bound materials.
+BSDF makeBSDF(float3 response, float3 throughput)
+{
+    BSDF b;
+    b.response = response;
+    b.throughput = throughput;
+    return b;
+}
 #define EDF float3
 struct VDF { float3 response; float3 throughput; };
 struct surfaceshader { float3 color; float3 transparency; };
