@@ -109,6 +109,11 @@ class ControlPanel:
         self._material_outer: ttk.LabelFrame | None = None
         self._last_scene_id: int = -1
         self._scene_graph_window = None
+        self._bxdf_window = None
+        self._material_graph_window = None
+        # Set by app.main() so the BXDF visualizer's "Pick scene point"
+        # button can route a one-shot click through the InputHandler.
+        self._input_handler = None
         self._build_widgets()
 
     # ── Widget construction ─────────────────────────────────────────
@@ -136,6 +141,16 @@ class ControlPanel:
             command=self._on_open_scene_graph,
         )
         sg_btn.pack(fill="x", padx=2, pady=2)
+
+        ttk.Button(
+            left_col, text="BXDF Visualizer...",
+            command=self._on_open_bxdf_visualizer,
+        ).pack(fill="x", padx=2, pady=2)
+
+        ttk.Button(
+            left_col, text="Material Graph...",
+            command=self._on_open_material_graph,
+        ).pack(fill="x", padx=2, pady=2)
 
         # ── Left: Debug viewport toggle ──
         ttk.Button(
@@ -451,7 +466,12 @@ class ControlPanel:
             if scene is not None and scene.materials else []
         )
         for mat_id, mat in editable:
-            section = _CollapsibleSection(outer, title=mat.name, expanded=False)
+            # Prefer the MaterialX target name (Marble_3D, Tiled_Brass …)
+            # over the USD prim leaf when the material was loaded from a
+            # .mtlx document. Falls back to the prim name for plain USD
+            # std_surface materials.
+            label = mat.mtlx_target_name or mat.name
+            section = _CollapsibleSection(outer, title=label, expanded=False)
             section.pack(fill="x", padx=2, pady=2)
             body = section.body
 
@@ -466,6 +486,27 @@ class ControlPanel:
                 ("coat_roughness", 0.0,  1.0),
             ):
                 self._build_mat_slider_row(body, mat_id, mat, key, lo, hi)
+
+            # Dynamic MaterialX graph uniforms — only present when the
+            # material binds to a `surfacematerial` whose nodegraph drove
+            # at least one std_surface input. iter_graph_uniforms() filters
+            # filename + string types out (texture pool / framerange
+            # tokens don't map to widget controls).
+            graph_uniforms = self.renderer.iter_graph_uniforms(mat_id)
+            if graph_uniforms:
+                gsec = _CollapsibleSection(
+                    body, title="MaterialX Graph Inputs", expanded=False,
+                )
+                gsec.pack(fill="x", padx=2, pady=(4, 1))
+                gbody = gsec.body
+                for u in graph_uniforms:
+                    self._build_graph_uniform_row(gbody, mat_id, mat, u)
+                ttk.Button(
+                    gbody, text="Reset to defaults",
+                    command=lambda mid=mat_id, ulist=graph_uniforms:
+                        self._reset_graph_uniforms(mid, ulist),
+                ).pack(fill="x", pady=(2, 1))
+
             furnace_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(
                 body, text="Furnace", variable=furnace_var,
@@ -559,6 +600,190 @@ class ControlPanel:
             canvas.itemconfig(rect_id, fill=_rgb_floats_to_hex(rf, gf, bf))
         except tk.TclError:
             pass
+
+    # ── MaterialX graph uniform widgets ────────────────────────────
+
+    def _build_graph_uniform_row(
+        self, parent: "ttk.Frame", mat_id: int, mat, u
+    ) -> None:
+        """Author widget(s) for one graph UniformField.
+
+        Widget choice per `type_name`:
+          - `float`           → ttk.Scale, [0, max(default*2, 1)]
+          - `integer`         → ttk.Spinbox, [0, 32]
+          - `boolean`         → ttk.Checkbutton
+          - `color3`/`color4` → colour picker
+          - `vector2`/`3`/`4` → component-wise ttk.Scale stack, [0, 4]
+
+        Reads the current override from `mat.parameter_overrides[u.name]`
+        when present, else falls back to `u.default`.
+        """
+        current = mat.parameter_overrides.get(u.name, u.default)
+
+        if u.type_name == "boolean":
+            row = ttk.Frame(parent)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=u.name, width=18, anchor="w").pack(side="left")
+            var = tk.BooleanVar(value=bool(current) if current is not None else False)
+            ttk.Checkbutton(
+                row, variable=var,
+                command=lambda v=var, mid=mat_id, k=u.name:
+                    self._on_material_slider(mid, k, int(v.get()), None),
+            ).pack(side="left")
+            return
+
+        if u.type_name == "integer":
+            row = ttk.Frame(parent)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=u.name, width=18, anchor="w").pack(side="left")
+            try:
+                ival = int(current) if current is not None else 0
+            except (TypeError, ValueError):
+                ival = 0
+            var = tk.IntVar(value=ival)
+            spin = tk.Spinbox(
+                row, from_=0, to=32, textvariable=var, width=6,
+                command=lambda mid=mat_id, k=u.name, v=var:
+                    self._on_material_slider(mid, k, int(v.get()), None),
+            )
+            spin.pack(side="left")
+            return
+
+        if u.type_name == "float":
+            row = ttk.Frame(parent)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=u.name, width=18, anchor="w").pack(side="left")
+            try:
+                fval = float(current) if current is not None else 0.0
+            except (TypeError, ValueError):
+                fval = 0.0
+            # Heuristic upper bound: 2× default with floor at 1.0 covers
+            # typical [0, 1] params plus larger ones like noise_diminish=0.5
+            # or scale_pos_in2=6.
+            hi = max(fval * 2.0, 1.0)
+            var = tk.DoubleVar(value=fval)
+            scale = ttk.Scale(
+                row, from_=0.0, to=hi, variable=var, orient="horizontal",
+            )
+            scale.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            val_lbl = ttk.Label(row, width=7, anchor="e", text=f"{fval:.3f}")
+            val_lbl.pack(side="left")
+            scale.configure(
+                command=lambda v, mid=mat_id, k=u.name, lbl=val_lbl:
+                    self._on_material_slider(mid, k, float(v), lbl),
+            )
+            return
+
+        if u.type_name in ("color3", "color4"):
+            row = ttk.Frame(parent)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=u.name, width=18, anchor="w").pack(side="left")
+            r, g, b = self._color3_to_floats(current)
+            canvas = tk.Canvas(row, width=36, height=18, bd=1, relief="sunken",
+                               highlightthickness=0)
+            canvas.pack(side="left", padx=(0, 4))
+            rect_id = canvas.create_rectangle(
+                0, 0, 36, 18, fill=_rgb_floats_to_hex(r, g, b), outline="",
+            )
+            ttk.Button(
+                row, text="Pick...", width=8,
+                command=lambda c=canvas, rid=rect_id, mid=mat_id, k=u.name,
+                               cur=(r, g, b):
+                    self._on_pick_graph_color(c, rid, mid, k, cur),
+            ).pack(side="left")
+            return
+
+        if u.type_name in ("vector2", "vector3", "vector4"):
+            comps = {"vector2": 2, "vector3": 3, "vector4": 4}[u.type_name]
+            seq: list[float] = [0.0] * comps
+            if current is not None:
+                if hasattr(current, "asTuple"):
+                    t = current.asTuple()
+                else:
+                    t = current
+                for i in range(comps):
+                    try:
+                        seq[i] = float(t[i])
+                    except (TypeError, IndexError, ValueError):
+                        seq[i] = 0.0
+            row_outer = ttk.Frame(parent)
+            row_outer.pack(fill="x", pady=1)
+            ttk.Label(row_outer, text=u.name, width=18, anchor="w").pack(side="left")
+            inner = ttk.Frame(row_outer)
+            inner.pack(side="left", fill="x", expand=True)
+            vars_: list[tk.DoubleVar] = [tk.DoubleVar(value=v) for v in seq]
+            for i, var in enumerate(vars_):
+                comp_row = ttk.Frame(inner)
+                comp_row.pack(fill="x")
+                ttk.Label(comp_row, text="xyzw"[i], width=2).pack(side="left")
+                scl = ttk.Scale(
+                    comp_row, from_=0.0, to=4.0, variable=var,
+                    orient="horizontal",
+                )
+                scl.pack(side="left", fill="x", expand=True, padx=(0, 4))
+                lbl = ttk.Label(comp_row, width=7, anchor="e",
+                                text=f"{var.get():.3f}")
+                lbl.pack(side="left")
+                scl.configure(
+                    command=lambda _v, mid=mat_id, k=u.name, idx=i,
+                                    all_vars=vars_, lbl=lbl:
+                        self._on_graph_vector_slider(mid, k, idx, all_vars, lbl),
+                )
+
+    def _on_graph_vector_slider(
+        self, mat_id: int, key: str, idx: int,
+        vars_: list, lbl: "ttk.Label",
+    ) -> None:
+        if self._suppress_cb:
+            return
+        tup = tuple(float(v.get()) for v in vars_)
+        self.renderer.apply_material_override(mat_id, key, tup)
+        try:
+            lbl.configure(text=f"{tup[idx]:.3f}")
+        except tk.TclError:
+            pass
+
+    def _on_pick_graph_color(
+        self, canvas: "tk.Canvas", rect_id: int, mat_id: int,
+        key: str, current: tuple[float, float, float],
+    ) -> None:
+        init = (
+            max(0, min(255, int(round(current[0] * 255)))),
+            max(0, min(255, int(round(current[1] * 255)))),
+            max(0, min(255, int(round(current[2] * 255)))),
+        )
+        result = colorchooser.askcolor(
+            color="#%02x%02x%02x" % init, title=f"{key}"
+        )
+        if result is None or result[0] is None:
+            return
+        rr, gg, bb = result[0]
+        rf, gf, bf = rr / 255.0, gg / 255.0, bb / 255.0
+        self.renderer.apply_material_override(mat_id, key, (rf, gf, bf))
+        try:
+            canvas.itemconfig(rect_id, fill=_rgb_floats_to_hex(rf, gf, bf))
+        except tk.TclError:
+            pass
+
+    def _reset_graph_uniforms(self, mat_id: int, uniforms: list) -> None:
+        """Push each UniformField's `default` back through apply_material_override.
+
+        Tkinter widgets stay at their old positions until the panel
+        rebuilds — force one by destroying + rebuilding the material
+        section against the container.
+        """
+        for u in uniforms:
+            d = u.default
+            if d is None:
+                continue
+            if hasattr(d, "asTuple"):
+                d = d.asTuple()
+            elif hasattr(d, "__getitem__") and not isinstance(d, (str, bytes)):
+                d = tuple(d[i] for i in range(min(4, len(d)) if hasattr(d, "__len__") else 4))
+            self.renderer.apply_material_override(mat_id, u.name, d)
+        # Rebuild the material editor block so sliders pick up new values.
+        if self._material_container is not None:
+            self._build_material_widgets(self._material_container)
 
     @staticmethod
     def _color3_to_floats(value) -> tuple[float, float, float]:
@@ -751,6 +976,21 @@ class ControlPanel:
             return
         self._direction_popup = _DirectionPickerPopup(self)
 
+    def _on_open_bxdf_visualizer(self) -> None:
+        if self._bxdf_window is not None and self._bxdf_window.is_open():
+            self._bxdf_window.focus()
+            return
+        from skinny.bxdf_visualizer import BXDFVisualizer
+        self._bxdf_window = BXDFVisualizer(self)
+
+    def _on_open_material_graph(self) -> None:
+        if (self._material_graph_window is not None
+                and self._material_graph_window.is_open()):
+            self._material_graph_window.focus()
+            return
+        from skinny.material_graph_editor import MaterialGraphEditor
+        self._material_graph_window = MaterialGraphEditor(self)
+
     def _on_direction_popup_closed(self) -> None:
         self._direction_popup = None
 
@@ -907,6 +1147,18 @@ class ControlPanel:
                 self._scene_graph_window.tick()
             else:
                 self._scene_graph_window = None
+
+        if self._bxdf_window is not None:
+            if self._bxdf_window.is_open():
+                self._bxdf_window.tick()
+            else:
+                self._bxdf_window = None
+
+        if self._material_graph_window is not None:
+            if self._material_graph_window.is_open():
+                self._material_graph_window.tick()
+            else:
+                self._material_graph_window = None
 
         try:
             self.root.update()

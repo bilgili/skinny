@@ -516,6 +516,126 @@ def _build_capture_section(session: "SkinnySession") -> pn.viewable.Viewable:
     return pn.Column(fmt_select, download)
 
 
+def _build_graph_uniform_widget(
+    session: "SkinnySession", mat_id: int, mat, u
+) -> "pn.viewable.Viewable | None":
+    """Build one Panel widget for a MaterialX graph UniformField.
+
+    Returns None for types the panel does not author (filename + string
+    are pre-filtered by Renderer.iter_graph_uniforms; this only handles
+    scalar / vector / colour types). Slider end-points use a heuristic
+    upper bound of 2× the default (with a floor of 1) for floats and
+    [0, 32] for ints — enough range for typical noise / tiling
+    parameters without forcing a per-field UI metadata table.
+    """
+    cur = mat.parameter_overrides.get(u.name, u.default)
+
+    def _force_keyframe():
+        if session.encoder.is_h264:
+            session.encoder.force_keyframe()
+
+    if u.type_name == "boolean":
+        bval = bool(cur) if cur is not None else False
+        w = pn.widgets.Checkbox(name=u.name, value=bval)
+
+        def _on(event, mid=mat_id, k=u.name):
+            session.renderer.apply_material_override(mid, k, int(event.new))
+            _force_keyframe()
+
+        w.param.watch(_on, "value")
+        return w
+
+    if u.type_name == "integer":
+        try:
+            ival = int(cur) if cur is not None else 0
+        except (TypeError, ValueError):
+            ival = 0
+        w = pn.widgets.IntSlider(name=u.name, start=0, end=32, value=ival)
+
+        def _on(event, mid=mat_id, k=u.name):
+            session.renderer.apply_material_override(mid, k, int(event.new))
+            _force_keyframe()
+
+        w.param.watch(_on, "value")
+        return w
+
+    if u.type_name == "float":
+        try:
+            fval = float(cur) if cur is not None else 0.0
+        except (TypeError, ValueError):
+            fval = 0.0
+        hi = max(fval * 2.0, 1.0)
+        w = pn.widgets.FloatSlider(
+            name=u.name, start=0.0, end=hi, step=hi / 100.0, value=fval,
+        )
+
+        def _on(event, mid=mat_id, k=u.name):
+            session.renderer.apply_material_override(mid, k, float(event.new))
+            _force_keyframe()
+
+        w.param.watch(_on, "value")
+        return w
+
+    if u.type_name in ("color3", "color4"):
+        r, g, b = 0.8, 0.8, 0.8
+        if cur is not None:
+            try:
+                if hasattr(cur, "asTuple"):
+                    seq = cur.asTuple()
+                else:
+                    seq = cur
+                r, g, b = float(seq[0]), float(seq[1]), float(seq[2])
+            except (TypeError, IndexError, ValueError):
+                pass
+        hex_color = "#{:02x}{:02x}{:02x}".format(
+            max(0, min(255, int(round(r * 255)))),
+            max(0, min(255, int(round(g * 255)))),
+            max(0, min(255, int(round(b * 255)))),
+        )
+        w = pn.widgets.ColorPicker(name=u.name, value=hex_color)
+
+        def _on(event, mid=mat_id, k=u.name):
+            h = event.new.lstrip("#")
+            rf = int(h[0:2], 16) / 255.0
+            gf = int(h[2:4], 16) / 255.0
+            bf = int(h[4:6], 16) / 255.0
+            session.renderer.apply_material_override(mid, k, (rf, gf, bf))
+            _force_keyframe()
+
+        w.param.watch(_on, "value")
+        return w
+
+    if u.type_name in ("vector2", "vector3", "vector4"):
+        comps = {"vector2": 2, "vector3": 3, "vector4": 4}[u.type_name]
+        seq: list[float] = [0.0] * comps
+        if cur is not None:
+            try:
+                src = cur.asTuple() if hasattr(cur, "asTuple") else cur
+                for i in range(comps):
+                    seq[i] = float(src[i])
+            except (TypeError, IndexError, ValueError):
+                pass
+        sliders = []
+        labels = "xyzw"
+        for i in range(comps):
+            sw = pn.widgets.FloatSlider(
+                name=f"{u.name}.{labels[i]}", start=0.0, end=4.0,
+                step=0.01, value=seq[i],
+            )
+            sliders.append(sw)
+
+        def _on_any(event, mid=mat_id, k=u.name, ws=sliders):
+            tup = tuple(float(w.value) for w in ws)
+            session.renderer.apply_material_override(mid, k, tup)
+            _force_keyframe()
+
+        for sw in sliders:
+            sw.param.watch(_on_any, "value")
+        return pn.Column(*sliders)
+
+    return None
+
+
 def _build_model_loader_section(
     session: "SkinnySession",
     model_select_widget: pn.widgets.Select | None = None,
@@ -717,8 +837,52 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.Accordion:
             furnace_cb.param.watch(on_furnace, "value")
             mat_section_widgets.append(furnace_cb)
 
+            # MaterialX graph uniforms — dynamic widgets per driven input
+            # (noise_octaves, color_mix_fg, image_color_uvtiling, …).
+            # iter_graph_uniforms filters filename + string types out.
+            graph_uniforms = session.renderer.iter_graph_uniforms(mat_id)
+            if graph_uniforms:
+                gw_list = []
+                for u in graph_uniforms:
+                    w = _build_graph_uniform_widget(session, mat_id, mat, u)
+                    if w is not None:
+                        gw_list.append(w)
+
+                def _make_reset(mid, ulist):
+                    def _on_reset(_):
+                        for uu in ulist:
+                            d = uu.default
+                            if d is None:
+                                continue
+                            if hasattr(d, "asTuple"):
+                                d = d.asTuple()
+                            session.renderer.apply_material_override(
+                                mid, uu.name, d,
+                            )
+                        if session.encoder.is_h264:
+                            session.encoder.force_keyframe()
+                        # Force a panel rebuild so widgets reflect defaults.
+                        _last_scene_id[0] = id(None)
+                        _rebuild_material_col()
+                    return _on_reset
+
+                reset_btn = pn.widgets.Button(
+                    name="Reset to defaults", button_type="default",
+                )
+                reset_btn.on_click(_make_reset(mat_id, graph_uniforms))
+                gw_list.append(reset_btn)
+
+                mat_section_widgets.append(
+                    pn.Card(*gw_list, title="MaterialX Graph Inputs",
+                            collapsed=True)
+                )
+
+            # Prefer MaterialX target name (Marble_3D, Tiled_Brass) over
+            # USD prim leaf so users see the graph identity rather than
+            # the binding path.
+            label = mat.mtlx_target_name or mat.name
             mat_widgets.append(
-                (mat.name, pn.Column(*mat_section_widgets))
+                (label, pn.Column(*mat_section_widgets))
             )
 
         if mat_widgets:

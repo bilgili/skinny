@@ -46,6 +46,7 @@ from skinny.vk_context import VulkanContext
 from skinny.vk_compute import (
     BINDLESS_TEXTURE_CAPACITY,
     ComputePipeline,
+    HostStorageBuffer,
     HudOverlay,
     SampledImage,
     StorageBuffer,
@@ -932,9 +933,16 @@ class Renderer:
         self._material_graph_overrides: dict[int, dict] = {}
         # Signature (target_name, slang-content-hash) per fragment in the
         # currently-built pipeline. _gen_scene_materials compares against
-        # `_graph_set_signature()` to decide whether _rebuild_pipeline_for_graphs
-        # needs to run.
+        # `_graph_set_signature()` to decide whether
+        # `_build_pipeline_for_current_graphs` needs to run.
         self._pipeline_built_for_targets: tuple = ()
+        # Pipeline + descriptors are built lazily (see _init_gpu docstring),
+        # but seed the attributes now so the trigger check in
+        # `_gen_scene_materials` (which can fire from `_init_materialx_runtime`
+        # before `_init_gpu` runs) reads them safely.
+        self.pipeline = None
+        self.descriptor_pool = None
+        self.descriptor_sets = None
         # MaterialX field overrides keyed by uniform field name
         # (e.g. "layer_top_melanin"). Seeded from SkinParameters defaults;
         # all skin sliders now write here directly via mtlx.* paths.
@@ -1231,6 +1239,12 @@ class Renderer:
                         f"({src.positions.shape[0]} verts, "
                         f"{src.tri_idx.shape[0]} tris)"
                     )
+                    # OBJ loads don't traverse `_gen_scene_materials`, so
+                    # the lazy pipeline build never fires from the USD
+                    # poll. Build an empty-graph pipeline here so the
+                    # renderer has something to dispatch.
+                    if self.pipeline is None:
+                        self._build_pipeline_for_current_graphs()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[skinny] failed to load {path.name}: {exc}")
                     if self.models:
@@ -1547,20 +1561,19 @@ class Renderer:
                 f"total {total_kb:.1f}KB slang"
             )
 
-        # Rebuild pipeline if the scene's MaterialX nodegraph set differs
-        # from what the live pipeline was compiled against. The signature
+        # Build pipeline on first call (lazy — `_init_gpu` left it None to
+        # avoid a wasted compile against an empty fragment list at startup),
+        # or rebuild when the scene's MaterialX nodegraph set differs from
+        # what the live pipeline was compiled against. The signature
         # `_graph_set_signature()` pairs each target name with a stable
         # hash of the emitted Slang, so two scenes that use the same
         # target_name from different `.mtlx` documents (different node
         # wiring, different texture paths) still trigger a rebuild.
-        # First-boot path (no GPU yet — `_init_gpu` hasn't run) skips:
-        # `__init__`'s `_init_gpu()` will build with the populated
-        # fragment list.
         if (
-            getattr(self, "pipeline", None) is not None
-            and self._graph_set_signature() != self._pipeline_built_for_targets
+            self.pipeline is None
+            or self._graph_set_signature() != self._pipeline_built_for_targets
         ):
-            self._rebuild_pipeline_for_graphs()
+            self._build_pipeline_for_current_graphs()
 
     def _apply_usd_lights(self, scene: Scene) -> None:
         """Seed the renderer's light + environment state from a USD scene.
@@ -1698,30 +1711,41 @@ class Renderer:
             for gf in self._scene_graph_fragments
         )
 
-    def _rebuild_pipeline_for_graphs(self) -> None:
-        """Rebuild compute pipeline + descriptor pool/sets when scene graphs change.
+    def _build_pipeline_for_current_graphs(self) -> None:
+        """Build (or rebuild) the compute pipeline + descriptor pool/sets
+        against the current `_scene_graph_fragments`.
 
-        The compute pipeline's descriptor set layout includes one storage
-        buffer per MaterialX nodegraph fragment at GRAPH_BINDING_BASE+idx,
-        and the aggregator's `evalSceneGraph` switch hard-codes the
-        fragment list. Both must be re-emitted + re-compiled when the
-        scene's graph set changes (USD scene loaded mid-session, scene
-        replaced, etc.).
+        Handles both first-build (pipeline is None at startup; built lazily
+        once `_gen_scene_materials` has populated the fragment list from
+        a loaded scene) and rebuild (scene graph set changed mid-session).
+
+        The pipeline's descriptor-set layout includes one storage buffer
+        per MaterialX nodegraph fragment at GRAPH_BINDING_BASE+idx, and
+        the aggregator's `evalSceneGraph` switch hard-codes the fragment
+        list — both must be re-emitted + recompiled whenever the fragment
+        set changes.
+
+        If slangc fails (malformed extracted fragment, extractor
+        regression, …) we fall back to an empty-graph pipeline so the
+        rest of the scene still renders; affected materials show magenta
+        via evalSceneGraph's `default` case.
         """
-        vk.vkDeviceWaitIdle(self.ctx.device)
-        # Pool destroy frees descriptor sets implicitly.
-        vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
-        self.descriptor_pool = None
-        self.descriptor_sets = None
-        # ComputePipeline owns pipeline, layout, module — its destroy()
-        # tears all three down.
-        self.pipeline.destroy()
-        # Re-emit aggregator + per-graph SSBO bindings; recompile Slang.
-        # If slangc fails (malformed extracted fragment, extractor
-        # regression, ...) fall back to an empty-graph pipeline so the
-        # rest of the scene still renders. Affected materials show
-        # magenta from evalSceneGraph's `default` case.
-        # Snapshot the attempted signature BEFORE the rebuild — if slangc
+        is_rebuild = self.pipeline is not None
+        if is_rebuild:
+            vk.vkDeviceWaitIdle(self.ctx.device)
+            if self.descriptor_pool is not None:
+                # Pool destroy frees descriptor sets implicitly.
+                vk.vkDestroyDescriptorPool(
+                    self.ctx.device, self.descriptor_pool, None,
+                )
+                self.descriptor_pool = None
+                self.descriptor_sets = None
+            # ComputePipeline owns pipeline, layout, module — destroy()
+            # tears all three down.
+            self.pipeline.destroy()
+            self.pipeline = None
+
+        # Snapshot the attempted signature BEFORE the build — if slangc
         # fails we still want to record what we tried so the gate in
         # `_gen_scene_materials` doesn't trigger an infinite retry loop
         # for the same broken fragment set on every subsequent scene
@@ -1735,10 +1759,10 @@ class Renderer:
                 entry_point="mainImage",
                 graph_fragments=list(self._scene_graph_fragments),
             )
-            built_sig = attempted_sig
         except RuntimeError as e:
+            action = "rebuild" if is_rebuild else "build"
             print(
-                f"[skinny] WARNING: pipeline rebuild with "
+                f"[skinny] WARNING: pipeline {action} with "
                 f"{len(self._scene_graph_fragments)} MaterialX graph(s) "
                 f"failed:\n  {e}\n"
                 f"[skinny]   → falling back to empty-graph pipeline. "
@@ -1753,50 +1777,39 @@ class Renderer:
                 entry_point="mainImage",
                 graph_fragments=[],
             )
-            # Record the attempted (broken) signature so re-loading the
-            # same scene doesn't retry slangc on every poll. A scene that
-            # *changes* its graph set after the failure will produce a
-            # new signature and re-trigger the rebuild as usual.
-            built_sig = attempted_sig
-        # Recreate descriptor pool, allocate fresh sets, write every
-        # binding's initial descriptor. Pool sizing reads
-        # `_scene_graph_fragments` so it scales with the new fragment count.
+        # `built_sig` reflects what we *attempted*, not the post-fallback
+        # state — keeps the rebuild gate idempotent.
+        built_sig = attempted_sig
+
+        # Allocate descriptor pool + sets sized for the new fragment count;
+        # then push graph SSBOs, texture-pool slots, and per-material type
+        # codes against the freshly-allocated descriptor sets.
         self._create_descriptors()
-        # Re-write graph SSBO descriptors against the freshly-allocated
-        # descriptor sets (they were skipped during pipeline-build's first
-        # call to _create_descriptors). Also refreshes their content +
-        # may grow the bindless texture pool when a graph references a
-        # new image path.
         self._upload_graph_param_buffers()
-        # Push every populated texture-pool slot into binding 14 of the
-        # fresh descriptor sets so graph-driven texture samples have a
-        # valid descriptor — `_create_descriptors` leaves the partially-
-        # bound array empty by default.
         self._update_texture_pool_descriptors()
-        # And material-types so per-material graphId stays current.
         self._upload_material_types()
-        # `built_sig` reflects what the rebuild *attempted*, not the
-        # post-fallback state — keeps the rebuild gate idempotent.
         self._pipeline_built_for_targets = built_sig
-        print(
-            f"[skinny] pipeline rebuilt for "
-            f"{len(self._scene_graph_fragments)} MaterialX graph(s)"
-        )
+        if is_rebuild:
+            print(
+                f"[skinny] pipeline rebuilt for "
+                f"{len(self._scene_graph_fragments)} MaterialX graph(s)"
+            )
+
+    def _rebuild_pipeline_for_graphs(self) -> None:
+        """Back-compat shim; the unified builder handles both paths."""
+        self._build_pipeline_for_current_graphs()
 
     def _init_gpu(self) -> None:
-        # Compute pipeline from Slang. Scene MaterialX graphs (collected by
-        # `_gen_scene_materials` during `_init_materialx_runtime`) are passed
-        # so the aggregator + descriptor layout size correctly. Empty list
-        # at first-boot is fine — `_rebuild_pipeline_for_graphs` recompiles
-        # when a scene with graphs loads.
-        self.pipeline = ComputePipeline(
-            self.ctx,
-            self.shader_dir,
-            entry_module="main_pass",
-            entry_point="mainImage",
-            graph_fragments=list(self._scene_graph_fragments),
-        )
-        self._pipeline_built_for_targets = self._graph_set_signature()
+        # Pipeline + descriptor pool/sets are built lazily by
+        # `_build_pipeline_for_current_graphs`, triggered from
+        # `_gen_scene_materials` once a scene's MaterialX fragment set is
+        # known (USD metadata arrival via `_poll_usd_streaming`) or from
+        # the OBJ-load path with an empty fragment set. This avoids a
+        # wasted ~9 s slangc compile at startup against an empty fragment
+        # list that's immediately discarded when the scene loads.
+        self.pipeline = None
+        self.descriptor_pool = None
+        self.descriptor_sets = None
 
         # Uniform buffer — FrameConstants + SkinParams + light
         self.uniform_size = 512  # generous, std140 aligned
@@ -2073,8 +2086,18 @@ class Renderer:
         )
         self._readback = ReadbackBuffer(self.ctx, self.width, self.height)
 
-        # Descriptor pool and sets
-        self._create_descriptors()
+        # BXDF visualizer output (binding 30). Host-visible SSBO holding
+        # the picked HitInfo and (future) BXDF eval grid. Sized for a
+        # 128 × 64 float4 lobe grid + 32-slot header, plus headroom.
+        self.tool_buffer = HostStorageBuffer(self.ctx, 128 * 64 * 16 + 4096)
+        self._pick_armed: bool = False
+        self._pick_pixel: tuple[int, int] = (0, 0)
+        self._pick_frame_count: int = 0
+        self._pending_pick_callbacks: list = []
+
+        # Descriptor pool + sets are created lazily inside
+        # `_build_pipeline_for_current_graphs` because pool sizing depends
+        # on `_scene_graph_fragments`, which is empty here at startup.
 
         # Command buffers
         self.command_buffers = self.ctx.allocate_command_buffers(MAX_FRAMES_IN_FLIGHT)
@@ -2142,11 +2165,11 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 14 fixed = vertices+indices+bvh+instances+flatMaterials+
+                # 15 fixed = vertices+indices+bvh+instances+flatMaterials+
                 #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
                 #      stdSurface+lightSplat+gizmoSegments+
-                #      lensElements+lensPupilBounds.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (14 + n_graph_slots),
+                #      lensElements+lensPupilBounds+toolBuffer.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (15 + n_graph_slots),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -2462,6 +2485,17 @@ class Renderer:
                 descriptorCount=1,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 pImageInfo=[output_info],
+            ))
+            tool_info = vk.VkDescriptorBufferInfo(
+                buffer=self.tool_buffer.buffer, offset=0, range=self.tool_buffer.size,
+            )
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=ds,
+                dstBinding=30,
+                dstArrayElement=0,
+                descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[tool_info],
             ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
@@ -3043,6 +3077,36 @@ class Renderer:
         self.material_types_buffer.upload_sync(bytes(type_bytes))
         self._last_scatter_index = scatter_idx
 
+    def iter_graph_uniforms(self, material_id: int) -> list:
+        """Return the MaterialX graph uniforms driving `material_id`.
+
+        Each entry is a `materialx_runtime.UniformField` with `name`,
+        `type_name`, and `default` populated from the gen-reflected
+        graph fragment. Filtered to widget-friendly scalar / vector /
+        color types — filename + string uniforms (resolved through the
+        texture pool / framerange tokens) are skipped because the panel
+        UIs don't author them through ordinary slider controls.
+
+        Returns `[]` when the material has no graph (constant-input
+        Glass / Jade / etc., or any material with `_material_graph_ids[i]
+        < GRAPH_ID_FIRST`).
+        """
+        from skinny.materialx_runtime import GRAPH_ID_FIRST
+        gid = self._material_graph_ids.get(material_id, 0)
+        if gid < GRAPH_ID_FIRST:
+            return []
+        idx = gid - GRAPH_ID_FIRST
+        if idx < 0 or idx >= len(self._scene_graph_fragments):
+            return []
+        gf = self._scene_graph_fragments[idx]
+        # `filename` resolves to a bindless slot via TexturePool — not
+        # something the user authors through a generic widget. `string`
+        # is reserved for framerange tokens. Everything else (float /
+        # integer / boolean / vector2-4 / color3-4) maps onto a regular
+        # slider or color picker.
+        skip = {"filename", "string"}
+        return [u for u in gf.uniform_block if u.type_name not in skip]
+
     def apply_material_override(
         self, material_id: int, key: str, value: object
     ) -> None:
@@ -3262,6 +3326,216 @@ class Renderer:
     def gizmo_end_drag(self) -> None:
         self.gizmo.end_drag()
 
+    # ── BXDF visualizer scene pick ──────────────────────────────────
+
+    def request_scene_pick(
+        self, mouse_x: float, mouse_y: float, callback,
+    ) -> None:
+        """Capture the HitInfo of the pixel under (mouse_x, mouse_y).
+
+        Sets ``pickArmed`` in the next frame's UBO so main_pass writes the
+        hit into ``toolBuffer``. After at least one full frame completes
+        the result is forwarded to ``callback(dict | None)`` from
+        ``poll_pick_result`` (called every frame from ``render``). The
+        callback receives None when the ray missed the scene.
+        """
+        # GLFW pixel coordinates have origin at the upper-left, matching
+        # the shader's `dispatchThreadID.xy` mapping, so no Y flip needed.
+        px = max(0, min(int(mouse_x), self.width - 1))
+        py = max(0, min(int(mouse_y), self.height - 1))
+        self._pick_pixel = (px, py)
+        self._pick_armed = True
+        # Reset the frame counter so we wait a full pipeline length
+        # (MAX_FRAMES_IN_FLIGHT) before reading; the write may live in a
+        # frame still queued on the GPU.
+        self._pick_frame_count = 0
+        self._pending_pick_callbacks.append(callback)
+
+    def poll_pick_result(self) -> None:
+        """Drain any pending pick callbacks once their frame has retired."""
+        if not self._pending_pick_callbacks:
+            return
+        # Defer reads until at least one full frame has been submitted and
+        # waited on after arming, so the buffer write is visible.
+        self._pick_frame_count += 1
+        if self._pick_frame_count < MAX_FRAMES_IN_FLIGHT + 1:
+            return
+
+        # Pick output sits at toolBuffer slots 8..11 (byte offset 128);
+        # slots 0..7 are reserved for the BXDF eval header. Layout matches
+        # `main_pass.slang` pick write:
+        #   [8]  = float4(position.xyz, t)
+        #   [9]  = float4(normal.xyz, asfloat(materialId))
+        #   [10] = float4(tangent.xyz, hitFlag)
+        #   [11] = float4(uv.xy, hasTangent, _pad)
+        raw = self.tool_buffer.read(64, offset=128)
+        px = np.frombuffer(raw[0:12], dtype=np.float32)
+        t = float(np.frombuffer(raw[12:16], dtype=np.float32)[0])
+        n = np.frombuffer(raw[16:28], dtype=np.float32)
+        mat_bits = np.frombuffer(raw[28:32], dtype=np.uint32)[0]
+        tan = np.frombuffer(raw[32:44], dtype=np.float32)
+        hit_flag = float(np.frombuffer(raw[44:48], dtype=np.float32)[0])
+        uv = np.frombuffer(raw[48:56], dtype=np.float32)
+        has_tangent = float(np.frombuffer(raw[56:60], dtype=np.float32)[0])
+
+        if hit_flag > 0.5:
+            result = {
+                "position": np.array(px, dtype=np.float32).copy(),
+                "normal": np.array(n, dtype=np.float32).copy(),
+                "tangent": np.array(tan, dtype=np.float32).copy(),
+                "uv": np.array(uv, dtype=np.float32).copy(),
+                "t": t,
+                "material_id": int(mat_bits),
+                "has_tangent": has_tangent > 0.5,
+                "pixel": tuple(self._pick_pixel),
+            }
+        else:
+            result = None
+
+        callbacks = self._pending_pick_callbacks
+        self._pending_pick_callbacks = []
+        self._pick_armed = False
+        for cb in callbacks:
+            try:
+                cb(result)
+            except Exception as exc:
+                print(f"[skinny] pick callback raised: {exc}")
+
+    def request_bssrdf_eval(
+        self, params: dict, callback,
+    ) -> None:
+        """Dispatch a GPU BSSRDF (skin) lobe eval.
+
+        ``params`` mirrors ``request_bxdf_eval`` plus
+        ``entrance_position`` (vec3). The shader uses ``r = ||xo - xi||``
+        with ``mmPerUnit`` to evaluate the Burley diffusion profile.
+        Only meaningful for MATERIAL_TYPE_SKIN; non-skin materials read
+        back as zero.
+        """
+        params = dict(params)
+        params["_tool_mode"] = 3  # TOOL_MODE_BSSRDF
+        self.request_bxdf_eval(params, callback)
+
+    def request_bxdf_eval(
+        self, params: dict, callback,
+    ) -> None:
+        """Dispatch a GPU BXDF lobe eval at the picked shading frame.
+
+        ``params`` must contain:
+            material_id (int), position (vec3), normal (vec3),
+            tangent (vec3), uv (vec2), locked_dir (vec3, tangent space),
+            lock_mode (int 0=lock wi, 1=lock wo),
+            n_theta (int), n_phi (int).
+
+        Synchronous: writes the tool header, runs a one-shot compute
+        submit on the compute queue (sized to the grid only, not the
+        full screen), waits for completion, disarms, reads the grid,
+        and invokes ``callback`` before returning. The main render loop
+        is untouched — no viewport flicker, no wasted re-evals.
+        """
+        n_theta = int(params["n_theta"])
+        n_phi = int(params["n_phi"])
+        n_theta = max(1, min(n_theta, 128))
+        n_phi = max(1, min(n_phi, 128))
+        if n_theta * n_phi > 128 * 64:
+            raise ValueError(
+                f"BXDF grid {n_theta}×{n_phi} exceeds tool buffer capacity"
+            )
+
+        mat_id = int(params["material_id"])
+        P = np.asarray(params["position"], dtype=np.float32).reshape(3)
+        N = np.asarray(params["normal"], dtype=np.float32).reshape(3)
+        T = np.asarray(params["tangent"], dtype=np.float32).reshape(3)
+        UV = np.asarray(params["uv"], dtype=np.float32).reshape(2)
+        dLocked = np.asarray(params["locked_dir"], dtype=np.float32).reshape(3)
+        lock_mode = int(params["lock_mode"])
+
+        # Pack 8 × float4 (128 bytes) header. Mixed uint / float fields
+        # are written through the float4 view using `struct` so the
+        # shader can asuint() the uint slots and treat the rest as float.
+        # `_tool_mode` is an internal escape hatch used by
+        # `request_bssrdf_eval` to switch to TOOL_MODE_BSSRDF and stuff
+        # the entrance position into slot 7.
+        tool_mode = int(params.get("_tool_mode", 2))
+        entrance = params.get("entrance_position")
+        if entrance is not None:
+            xi = np.asarray(entrance, dtype=np.float32).reshape(3)
+        else:
+            xi = np.zeros(3, dtype=np.float32)
+        header = bytearray(128)
+        struct.pack_into(
+            "IIII", header, 0,
+            tool_mode,
+            lock_mode,
+            n_theta,
+            n_phi,
+        )
+        struct.pack_into("IIII", header, 16, mat_id, 0, 0, 0)
+        struct.pack_into("ffff", header, 32, float(dLocked[0]), float(dLocked[1]), float(dLocked[2]), 0.0)
+        struct.pack_into("ffff", header, 48, float(P[0]), float(P[1]), float(P[2]), 0.0)
+        struct.pack_into("ffff", header, 64, float(N[0]), float(N[1]), float(N[2]), 0.0)
+        struct.pack_into("ffff", header, 80, float(T[0]), float(T[1]), float(T[2]), 0.0)
+        struct.pack_into("ffff", header, 96, float(UV[0]), float(UV[1]), 0.0, 0.0)
+        struct.pack_into("ffff", header, 112, float(xi[0]), float(xi[1]), float(xi[2]), 0.0)
+        self.tool_buffer.write(bytes(header), offset=0)
+
+        # Zero the previous grid so partial reads don't show stale data.
+        grid_bytes = n_theta * n_phi * 16
+        self.tool_buffer.write(b"\x00" * grid_bytes, offset=256)
+
+        # One-shot synchronous dispatch on the compute queue. Reuses the
+        # main pipeline + descriptor_sets[0] (same layout, all scene
+        # bindings live). vkDeviceWaitIdle covers descriptor-in-use
+        # validation since the main render loop also runs on the
+        # compute queue.
+        vk.vkDeviceWaitIdle(self.ctx.device)
+
+        alloc_info = vk.VkCommandBufferAllocateInfo(
+            commandPool=self.ctx.command_pool,
+            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        )
+        cmd = vk.vkAllocateCommandBuffers(self.ctx.device, alloc_info)[0]
+        vk.vkBeginCommandBuffer(
+            cmd,
+            vk.VkCommandBufferBeginInfo(
+                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            ),
+        )
+        vk.vkCmdBindPipeline(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline,
+        )
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            self.pipeline.pipeline_layout, 0, 1, [self.descriptor_sets[0]],
+            0, None,
+        )
+        groups_x = (n_theta + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        groups_y = (n_phi + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1,
+            [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+            vk.VK_NULL_HANDLE,
+        )
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
+        # Disarm so the next normal frame's main_pass mainImage reads
+        # toolMode = 0 and renders normally.
+        self.tool_buffer.write(b"\x00" * 16, offset=0)
+
+        raw = self.tool_buffer.read(grid_bytes, offset=256)
+        grid = np.frombuffer(raw, dtype=np.float32).reshape(n_phi, n_theta, 4)
+        # Drop alpha channel; transpose to (n_theta, n_phi, 3) to match
+        # the visualizer's grid convention.
+        result = np.array(grid[..., :3].transpose(1, 0, 2), dtype=np.float32)
+        try:
+            callback(result)
+        except Exception as exc:
+            print(f"[skinny] bxdf eval callback raised: {exc}")
+
     def _refresh_gizmo_segments(self) -> None:
         view = self.camera.view_matrix()
         proj = self.camera.projection_matrix(self.width / max(self.height, 1))
@@ -3299,12 +3573,58 @@ class Renderer:
             return
         self._upload_gizmo_segments(segs)
 
+    def _aspect_constrain_pixels(
+        self,
+        start_px: tuple[float, float],
+        end_px: tuple[float, float],
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Snap a drag rect so its pixel aspect matches the window's.
+
+        Keeps the longest side (relative to window aspect) and the
+        start corner fixed; the short side is computed from the window
+        aspect. If the resulting rect would exceed the window from the
+        start corner, both sides are scaled down uniformly so the
+        aspect remains intact.
+        """
+        sx, sy = float(start_px[0]), float(start_px[1])
+        ex, ey = float(end_px[0]), float(end_px[1])
+        raw_w = abs(ex - sx)
+        raw_h = abs(ey - sy)
+        if raw_w == 0.0 and raw_h == 0.0:
+            return (sx, sy), (ex, ey)
+        W = max(self.width, 1)
+        H = max(self.height, 1)
+        aspect = W / H
+        sign_x = 1.0 if ex >= sx else -1.0
+        sign_y = 1.0 if ey >= sy else -1.0
+        if raw_w >= raw_h * aspect:
+            w, h = raw_w, raw_w / aspect
+        else:
+            w, h = raw_h * aspect, raw_h
+        max_w = (W - sx) if sign_x > 0 else sx
+        max_h = (H - sy) if sign_y > 0 else sy
+        scale = 1.0
+        if w > 0:
+            scale = min(scale, max_w / w)
+        if h > 0:
+            scale = min(scale, max_h / h)
+        scale = max(scale, 0.0)
+        w *= scale
+        h *= scale
+        return (sx, sy), (sx + sign_x * w, sy + sign_y * h)
+
     def set_zoom_drag_overlay(
         self, rect: Optional[tuple[float, float, float, float]],
     ) -> None:
         """Display (or clear) a yellow rectangle over the viewport while
         the user is picking a zoom region."""
-        self._zoom_drag_overlay = rect
+        if rect is None:
+            self._zoom_drag_overlay = None
+            return
+        (sx, sy), (ex, ey) = self._aspect_constrain_pixels(
+            (rect[0], rect[1]), (rect[2], rect[3])
+        )
+        self._zoom_drag_overlay = (sx, sy, ex, ey)
 
     def commit_zoom_rect(
         self,
@@ -3316,12 +3636,13 @@ class Renderer:
         single-pixel zoom by accident; degenerate inputs reset to
         full-frame.
         """
+        if abs(end_px[0] - start_px[0]) < 8 or abs(end_px[1] - start_px[1]) < 8:
+            return  # treat as a click, not a drag
+        start_px, end_px = self._aspect_constrain_pixels(start_px, end_px)
         x0 = min(start_px[0], end_px[0])
         x1 = max(start_px[0], end_px[0])
         y0 = min(start_px[1], end_px[1])
         y1 = max(start_px[1], end_px[1])
-        if x1 - x0 < 8 or y1 - y0 < 8:
-            return  # treat as a click, not a drag
         u0 = float(np.clip(x0 / max(self.width, 1), 0.0, 1.0))
         u1 = float(np.clip(x1 / max(self.width, 1), 0.0, 1.0))
         v0 = float(np.clip(y0 / max(self.height, 1), 0.0, 1.0))
@@ -4157,6 +4478,13 @@ class Renderer:
         data += struct.pack("ff", float(zr[0]), float(zr[1]))            # 8 bytes (zoomMin)
         data += struct.pack("ff", float(zr[2]), float(zr[3]))            # 8 bytes (zoomMax)
         data += struct.pack("I", 1 if getattr(self, "lens_vignette_debug", False) else 0)  # 4 bytes
+        # BXDF visualizer scene-pick. When pick is armed the main pass
+        # snapshots the HitInfo of the matching pixel into toolBuffer
+        # (binding 30); the CPU then disarms via `poll_pick_result`.
+        pick_px = getattr(self, "_pick_pixel", (0, 0))
+        pick_armed = 1 if getattr(self, "_pick_armed", False) else 0
+        data += struct.pack("II", int(pick_px[0]), int(pick_px[1]))  # 8 bytes
+        data += struct.pack("I", pick_armed)                          # 4 bytes
         # No padding here — scalar layout (`-fvk-use-scalar-layout`) aligns
         # the next field (float3 lightDirection) at 4 bytes, not 16.
 
@@ -4358,12 +4686,24 @@ class Renderer:
         self._refresh_gizmo_segments()
 
     def render(self) -> None:
+        # Pipeline is built lazily once a scene's MaterialX fragments are
+        # gen'd (USD metadata arrival, OBJ load). Until then the window
+        # has nothing to draw — skip the whole frame.
+        if self.pipeline is None or self.descriptor_sets is None:
+            return
         f = self.current_frame
 
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
         )
         vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
+
+        # Drain BXDF visualizer pick callback once its frame is fence-
+        # visible. Must run BEFORE _pack_uniforms below so disarming on
+        # a satisfied pick lands in this frame's UBO. BXDF / BSSRDF eval
+        # uses a synchronous out-of-band dispatch — no per-frame poll
+        # needed there.
+        self.poll_pick_result()
 
         image_index = self.ctx.vkAcquireNextImageKHR(
             self.ctx.device,
@@ -4560,6 +4900,11 @@ class Renderer:
         windowed session that just rebound binding 1 to a swapchain image
         in render() doesn't corrupt the screenshot.
         """
+        # Pipeline not built yet — caller asked for a screenshot before any
+        # scene/model was loaded. Return a fully-zeroed RGBA8 frame so the
+        # web/screenshot path stays well-defined.
+        if self.pipeline is None or self.descriptor_sets is None:
+            return b"\x00" * (self.width * self.height * 4)
         f = self.current_frame
 
         vk.vkWaitForFences(
@@ -4935,7 +5280,8 @@ class Renderer:
         for fence in self.in_flight_fences:
             vk.vkDestroyFence(self.ctx.device, fence, None)
 
-        vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
+        if self.descriptor_pool is not None:
+            vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
         self.texture_pool.destroy()
         for _buf in getattr(self, "_graph_param_buffers", {}).values():
             _buf.destroy()
@@ -4963,4 +5309,5 @@ class Renderer:
         self.gizmo_segments_buffer.destroy()
         self.lens_elements_buffer.destroy()
         self.lens_pupil_buffer.destroy()
-        self.pipeline.destroy()
+        if self.pipeline is not None:
+            self.pipeline.destroy()
