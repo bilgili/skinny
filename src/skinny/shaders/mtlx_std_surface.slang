@@ -132,7 +132,7 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
     // --- Closure tree evaluation ---
 
     // Coat
-    BSDF coat_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF coat_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_dielectric_bsdf(cd, coat, float3(1.0), coat_IOR,
                         coat_roughness_vector, false,
                         0.0, 1.5,
@@ -140,7 +140,7 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
                         0, 0, coat_bsdf);
 
     // Metal
-    BSDF metal_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF metal_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_conductor_bsdf(cd, metalness_fg_weight,
                        artistic_ior_ior, artistic_ior_extinction,
                        main_roughness, false,
@@ -148,7 +148,7 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
                        normal, main_tangent, 0, metal_bsdf);
 
     // Specular
-    BSDF specular_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF specular_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_dielectric_bsdf(cd, p.specular, specular_color, specular_IOR,
                         main_roughness, false,
                         p.thin_film_thickness, p.thin_film_IOR,
@@ -156,7 +156,7 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
                         0, 0, specular_bsdf);
 
     // Transmission
-    BSDF transmission_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF transmission_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_dielectric_bsdf(cd, p.transmission,
                         p.transmission_color, specular_IOR,
                         transmission_roughness, false,
@@ -165,18 +165,18 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
                         0, 1, transmission_bsdf);
 
     // Sheen
-    BSDF sheen_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF sheen_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_sheen_bsdf(cd, p.sheen, p.sheen_color, p.sheen_roughness,
                    normal, 0, sheen_bsdf);
 
     // Translucent (thin-walled subsurface path)
-    BSDF translucent_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF translucent_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_translucent_bsdf(cd, selected_subsurface_fg_weight,
                          coat_affected_subsurface_color,
                          normal, translucent_bsdf);
 
     // Subsurface scattering
-    BSDF subsurface_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF subsurface_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_subsurface_bsdf(cd, selected_subsurface_bg_weight,
                         coat_affected_subsurface_color,
                         subsurface_radius_scaled,
@@ -192,7 +192,7 @@ BSDF evalStdSurfaceBSDF(ClosureData cd, StdSurfaceParams p,
     mx_multiply_bsdf_float(cd, selected_subsurface, p.subsurface, subsurface_scaled);
 
     // Diffuse
-    BSDF diffuse_bsdf = BSDF(float3(0.0), float3(1.0));
+    BSDF diffuse_bsdf = makeBSDF(float3(0.0), float3(1.0));
     mx_oren_nayar_diffuse_bsdf(cd, subsurface_mix_bg_weight,
                                 coat_affected_diffuse_color,
                                 p.diffuse_roughness,
