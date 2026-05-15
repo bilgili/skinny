@@ -14,8 +14,8 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QDockWidget, QGroupBox, QHBoxLayout, QLabel,
-    QPushButton, QRadioButton, QSlider, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDockWidget, QGroupBox, QHBoxLayout,
+    QLabel, QPushButton, QRadioButton, QSlider, QVBoxLayout, QWidget,
 )
 
 from skinny.bxdf_math import eval_grid, render_lobe_image
