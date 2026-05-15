@@ -458,14 +458,6 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
     with ui.section("Capture"):
         _add_capture(ui, renderer, capture_fn=cb.capture_screenshot)
 
-    with ui.section("Load Model"):
-        ui.file_picker(
-            "Load model...", filters=MODEL_FILE_FILTERS,
-            on_pick=cb.load_model
-                if cb.load_model is not None
-                else (lambda path: renderer.load_model_from_path(path)),
-        )
-
     # IBL + Direct Light intentionally omitted from the sidebar — they
     # live in the scene-graph dock now (the user edits DomeLight /
     # DistantLight / SphereLight prims directly there).
@@ -480,21 +472,9 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
                     continue
                 _add_param(ui, renderer, p)
 
-    ui.dynamic_section(
-        "Materials",
-        rebuild_token=lambda: id(getattr(renderer, "_usd_scene", None)),
-        build=lambda sub_ui: build_material_subtree(sub_ui, renderer),
-    )
-
-    ui.dynamic_section(
-        "Scene Graph",
-        rebuild_token=lambda: id(getattr(renderer, "scene_graph", None)),
-        # Scene-graph tree widget is host-specific (QTreeWidget vs
-        # pn.widgets.Select); leave the body empty here and let backends
-        # fill it through their own helpers.
-        build=lambda sub_ui: None,
-    )
-
+    # Materials + Scene Graph sections used to be sidebar dynamic-section
+    # accordions. Removed — those live in dedicated docks (Material
+    # Graph + Scene Graph) opened from the View menu.
     # Window-opener buttons are not in the tree — Qt renders them as a
     # menu and Panel as a row of buttons, both via the AppCallbacks
     # fields directly.
