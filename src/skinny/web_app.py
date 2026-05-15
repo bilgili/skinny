@@ -381,36 +381,77 @@ class VideoPageHandler(RequestHandler):
 # ── Panel app builder ────────────────────────────────────────────────
 
 
-def _build_sidebar_widgets(session: "SkinnySession") -> pn.viewable.Viewable:
+def _build_sidebar_widgets(
+    session: "SkinnySession",
+    child_windows_col: pn.Column,
+) -> pn.viewable.Viewable:
     """Build the Panel sidebar from the shared widget-tree spec.
 
     All layout decisions live in :func:`skinny.ui.build_app_ui.build_main_ui`;
     this function only injects session-scoped callbacks (screenshot/load
-    under the session lock, child-window stubs).
+    under the session lock, child-window openers that push cards into
+    ``child_windows_col``).
     """
     from skinny.ui.build_app_ui import AppCallbacks, build_main_ui
     from skinny.ui.panel.backend import PanelTreeBuilder
+    from skinny.ui.panel.windows import (
+        build_bxdf_pane, build_debug_viewport_pane,
+        build_material_graph_pane, build_scene_graph_pane,
+    )
 
     def _capture(fmt: str) -> bytes:
-        # Reuse the existing session.screenshot helper which already wraps
-        # save_screenshot in the per-session render lock.
         return session.screenshot(fmt)
 
     def _load_model(path):
         with session._lock:
             session.renderer.load_model_from_path(path)
 
-    def _stub(name: str):
-        log.info("Web stub clicked: %s (Phase 7 will add a panel for this)", name)
+    # Track open panes by name so a second sidebar click brings the
+    # existing pane into view rather than spawning a duplicate.
+    open_panes: dict[str, pn.Card] = {}
+
+    def _toggle(name: str, builder):
+        def _open():
+            if name in open_panes:
+                # Already open — uncollapse (in case the user collapsed it).
+                open_panes[name].collapsed = False
+                return
+            def _on_close():
+                card = open_panes.pop(name, None)
+                if card is not None and card in child_windows_col:
+                    child_windows_col.remove(card)
+            card = builder(session, _on_close)
+            open_panes[name] = card
+            child_windows_col.append(card)
+        return _open
+
+    def _debug_view(which: str):
+        def _go():
+            # Ensure the debug pane is open, then call its view button.
+            _toggle("debug", build_debug_viewport_pane)()
+            card = open_panes.get("debug")
+            if card is None:
+                return
+            # Card layout: [close_button, Column(button_row, image, status)].
+            # First child of inner Column is the button Row containing the
+            # view buttons in fixed order: Top, Left, Back, Reset.
+            try:
+                btn_row = card.objects[1].objects[0]
+                idx = {"top": 0, "left": 1, "back": 2}.get(which)
+                if idx is not None:
+                    btn_row.objects[idx].clicks += 1
+            except (IndexError, AttributeError):
+                pass
+        return _go
 
     callbacks = AppCallbacks(
-        open_scene_graph=lambda: _stub("Scene Graph"),
-        open_material_graph=lambda: _stub("Material Graph"),
-        open_bxdf_visualizer=lambda: _stub("BXDF Visualizer"),
-        open_debug_viewport=lambda: _stub("Camera Debug View"),
-        debug_view_top=lambda: _stub("Top"),
-        debug_view_left=lambda: _stub("Left"),
-        debug_view_back=lambda: _stub("Back"),
+        open_scene_graph=_toggle("scene", build_scene_graph_pane),
+        open_material_graph=_toggle("material_graph", build_material_graph_pane),
+        open_bxdf_visualizer=_toggle("bxdf", build_bxdf_pane),
+        open_debug_viewport=_toggle("debug", build_debug_viewport_pane),
+        debug_view_top=_debug_view("top"),
+        debug_view_left=_debug_view("left"),
+        debug_view_back=_debug_view("back"),
         capture_screenshot=_capture,
         load_model=_load_model,
     )
@@ -418,8 +459,6 @@ def _build_sidebar_widgets(session: "SkinnySession") -> pn.viewable.Viewable:
     tree = build_main_ui(session.renderer, callbacks=callbacks)
     builder = PanelTreeBuilder(tree)
     builder.register_periodic()
-    # Stash the builder on the session so periodic-rebuild hooks added in
-    # Phase 5 can find it without threading another arg through.
     session._panel_builder = builder
     return builder.layout
 
@@ -469,9 +508,13 @@ def create_panel_app() -> pn.viewable.Viewable:
         pn.pane.Markdown("*Initializing renderer...*"),
         width=340, scroll=True,
     )
+    # Hosts child-window cards (scene graph, BXDF, material graph, debug
+    # viewport). Empty until the user clicks one of the sidebar buttons.
+    child_windows_col = pn.Column(width=520, scroll=True)
 
     layout = pn.Row(
         pn.Column(video_pane, info_bar, log_pane, sizing_mode="stretch_both"),
+        child_windows_col,
         sidebar_col,
         sizing_mode="stretch_both",
     )
@@ -495,7 +538,7 @@ def create_panel_app() -> pn.viewable.Viewable:
         if session.ready:
             _poll_active[0] = False
             sidebar_col.clear()
-            sidebar_col.append(_build_sidebar_widgets(session))
+            sidebar_col.append(_build_sidebar_widgets(session, child_windows_col))
 
             encoder_info = session.encoder.encoder_name
             hw_tag = " (HW)" if session.encoder.is_hardware else " (SW)"
