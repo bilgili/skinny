@@ -224,6 +224,8 @@ class SceneGraphDock(QDockWidget):
             layout.addWidget(lbl, stretch=1)
         elif prop.type_name == "lens_file" and prop.editable:
             self._add_lens_file(layout, node, prop)
+        elif prop.type_name == "texture_file" and prop.editable:
+            self._add_texture_file(layout, node, prop)
         else:
             layout.addWidget(QLabel(str(prop.value)), stretch=1)
         return row
@@ -418,6 +420,44 @@ class SceneGraphDock(QDockWidget):
         btn.clicked.connect(on_pick)
         layout.addWidget(btn)
 
+    def _add_texture_file(
+        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
+    ) -> None:
+        cur = str(prop.value or "")
+        label_text = Path(cur).name if cur else "(none)"
+        cur_label = QLabel(label_text)
+        cur_label.setStyleSheet("color: steelblue;")
+        layout.addWidget(cur_label, stretch=1)
+        btn = QPushButton("Load…")
+
+        def on_pick() -> None:
+            ref = node.renderer_ref
+            if ref is None or ref.kind != "light_env":
+                return
+            start_dir = ""
+            if cur:
+                start_dir = str(Path(cur).resolve().parent)
+            if not start_dir:
+                start_dir = str(
+                    Path(__file__).resolve().parents[4] / "hdrs",
+                )
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load HDR",
+                start_dir,
+                "HDR images (*.hdr *.exr *.pfm);;All files (*.*)",
+            )
+            if not path:
+                return
+            ok = False
+            if hasattr(self.renderer, "apply_dome_light_texture"):
+                ok = self.renderer.apply_dome_light_texture(ref.index, path)
+            if ok:
+                cur_label.setText(Path(path).name)
+                prop.value = path
+
+        btn.clicked.connect(on_pick)
+        layout.addWidget(btn)
+
     # ── Apply edits ───────────────────────────────────────────────
 
     def _apply_property(
@@ -430,8 +470,12 @@ class SceneGraphDock(QDockWidget):
                 return
         if ref.kind == "material":
             self.renderer.apply_material_override(ref.index, prop.name, value)
-        elif ref.kind in ("light_dir", "light_sphere"):
-            light_type = "dir" if ref.kind == "light_dir" else "sphere"
+        elif ref.kind in ("light_dir", "light_sphere", "light_env"):
+            light_type = {
+                "light_dir": "dir",
+                "light_sphere": "sphere",
+                "light_env": "env",
+            }[ref.kind]
             self.renderer.apply_light_override(light_type, ref.index, prop.name, value)
         elif ref.kind == "renderer_camera":
             self.renderer.apply_camera_param(prop.name, value)

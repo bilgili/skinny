@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
             "HDR images (*.hdr *.exr *.pfm);;All files (*.*)",
         )
         if path:
-            self.renderer.load_environment_from_path(Path(path))
+            self.renderer.apply_dome_light_texture(0, path)
 
     # ── State persistence ────────────────────────────────────────
 

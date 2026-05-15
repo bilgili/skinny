@@ -815,9 +815,33 @@ def _extract_sphere_light(
     position = world_mat[3, :3].astype(np.float32)  # row-vector convention
     radius_attr = sphere.GetRadiusAttr().Get(time)
     radius = float(radius_attr) if radius_attr is not None else 0.5
-    radiance = _light_color_radiance(UsdLux.LightAPI(prim))
+    light_api = UsdLux.LightAPI(prim)
+    radiance = _light_color_radiance(light_api)
+    # Stash the authored colour + intensity so the scene-graph editor
+    # can mutate either dimension without losing the other (radiance is
+    # the combined product, irreversible from a single edit).
+    color_attr = light_api.GetColorAttr()
+    color = (
+        np.asarray(color_attr.Get(), np.float32).reshape(3)
+        if color_attr and color_attr.HasAuthoredValue()
+        else np.ones(3, np.float32)
+    )
+    intensity_attr = light_api.GetIntensityAttr()
+    intensity = (
+        float(intensity_attr.Get())
+        if intensity_attr and intensity_attr.HasAuthoredValue()
+        else 1.0
+    )
+    exposure_attr = light_api.GetExposureAttr()
+    exposure = (
+        float(exposure_attr.Get())
+        if exposure_attr and exposure_attr.HasAuthoredValue()
+        else 0.0
+    )
+    intensity_eff = float(intensity) * (2.0 ** exposure)
     return LightSphere(
         position=position, radius=radius, radiance=radiance,
+        color=color, intensity=intensity_eff,
     )
 
 
