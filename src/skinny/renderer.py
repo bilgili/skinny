@@ -943,6 +943,15 @@ class Renderer:
         self.pipeline = None
         self.descriptor_pool = None
         self.descriptor_sets = None
+        # Material-graph editor preview pipeline / image / readback. All
+        # three are created on first call to `render_material_preview` and
+        # torn down + rebuilt whenever the main pipeline rebuilds (because
+        # the preview shares descriptor set 0 with the main pipeline's
+        # layout — see PreviewPipeline).
+        self._preview_pipeline = None
+        self._preview_image = None
+        self._preview_readback = None
+        self._preview_size = 0
         # MaterialX field overrides keyed by uniform field name
         # (e.g. "layer_top_melanin"). Seeded from SkinParameters defaults;
         # all skin sliders now write here directly via mtlx.* paths.
@@ -1744,6 +1753,13 @@ class Renderer:
             # tears all three down.
             self.pipeline.destroy()
             self.pipeline = None
+            # Preview pipeline shares the main pipeline's descriptor set
+            # layout, so a main-pipeline rebuild invalidates its set 0
+            # layout reference. Drop it; render_material_preview will
+            # re-create lazily on next call.
+            if self._preview_pipeline is not None:
+                self._preview_pipeline.destroy()
+                self._preview_pipeline = None
 
         # Snapshot the attempted signature BEFORE the build — if slangc
         # fails we still want to record what we tried so the gate in
@@ -3143,6 +3159,186 @@ class Renderer:
             self._per_material_furnace[material_id] = False
         self._upload_material_types()
         self._material_version += 1
+
+    # ── Material preview (Material Graph Editor) ────────────────────
+
+    def _ensure_preview_resources(self, size: int) -> bool:
+        """Lazy-create preview image / readback / pipeline. False = unavailable."""
+        from skinny.vk_compute import PreviewPipeline, StorageImage, ReadbackBuffer
+
+        if self.pipeline is None:
+            return False
+        if self._preview_size != size:
+            # Size changed (or first init) — tear down old image + readback
+            # and the pipeline (the pipeline holds a write to the image view).
+            if self._preview_pipeline is not None:
+                self._preview_pipeline.destroy()
+                self._preview_pipeline = None
+            if self._preview_readback is not None:
+                self._preview_readback.destroy()
+                self._preview_readback = None
+            if self._preview_image is not None:
+                self._preview_image.destroy()
+                self._preview_image = None
+            self._preview_size = size
+
+        if self._preview_image is None:
+            self._preview_image = StorageImage(
+                self.ctx, size, size, transfer_src=True,
+            )
+        if self._preview_readback is None:
+            # RGBA32F = 16 bytes per pixel.
+            self._preview_readback = ReadbackBuffer(
+                self.ctx, size, size, bytes_per_pixel=16,
+            )
+        if self._preview_pipeline is None:
+            try:
+                self._preview_pipeline = PreviewPipeline(
+                    self.ctx, self.shader_dir,
+                    self.pipeline.descriptor_set_layout,
+                    self._preview_image.view,
+                )
+            except RuntimeError as e:
+                print(f"[skinny] preview pipeline build failed: {e}")
+                self._preview_pipeline = None
+                return False
+        return True
+
+    def render_material_preview(
+        self,
+        material_id: int,
+        prim_kind: int,
+        *,
+        size: int = 256,
+        yaw: float = 0.6,
+        pitch: float = 0.4,
+        distance: float = 3.0,
+        fov_tan: float = 0.55,
+    ) -> "tuple[bytes, int] | None":
+        """Dispatch the preview compute shader for `material_id` on the
+        chosen primitive and return (rgba_float32_bytes, size).
+
+        Reuses the main descriptor set 0 (so all material SSBOs / texture
+        bindings / per-graph buffers are visible). Push constants carry
+        the per-call inputs. Synchronous: submits, waits idle, reads back.
+        Returns None when the renderer is not ready (no scene loaded, or
+        slangc failed on preview_pass.slang).
+        """
+        from skinny.vk_compute import PreviewPipeline
+
+        if not self._ensure_preview_resources(size):
+            return None
+        if self.descriptor_sets is None or not self.descriptor_sets:
+            return None
+        if self._usd_scene is None:
+            return None
+        if material_id <= 0 or material_id >= len(self._usd_scene.materials):
+            return None
+
+        graph_id = int(self._material_graph_ids.get(material_id, 0))
+
+        # Allocate a one-shot command buffer (same pattern as the existing
+        # screenshot path). We submit on the compute queue and wait idle.
+        alloc_info = vk.VkCommandBufferAllocateInfo(
+            commandPool=self.ctx.command_pool,
+            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        )
+        cmd = vk.vkAllocateCommandBuffers(self.ctx.device, alloc_info)[0]
+
+        begin_info = vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        )
+        vk.vkBeginCommandBuffer(cmd, begin_info)
+
+        pp = self._preview_pipeline
+        vk.vkCmdBindPipeline(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pp.pipeline,
+        )
+        # Bind set 0 (main material descriptors) + set 1 (preview output).
+        # Issued as two single-set calls because python-vulkan's cffi
+        # binding fails ("array item of unknown size void") when given a
+        # multi-element list — every other call site in this file uses a
+        # single-element list, matching that limitation.
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pp.pipeline_layout,
+            0, 1, [self.descriptor_sets[0]],
+            0, None,
+        )
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pp.pipeline_layout,
+            1, 1, [pp.descriptor_set],
+            0, None,
+        )
+        push_bytes = PreviewPipeline.pack_push(
+            material_id, graph_id, prim_kind, size,
+            yaw, pitch, distance, fov_tan,
+        )
+        # python-vulkan binds `const void* pValues` via cffi; pass a typed
+        # char buffer so cffi can size the array correctly.
+        import cffi as _cffi
+        _ffi = _cffi.FFI()
+        push_buf = _ffi.new("char[]", push_bytes)
+        vk.vkCmdPushConstants(
+            cmd, pp.pipeline_layout,
+            vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            0, len(push_bytes), push_buf,
+        )
+        groups = (size + 7) // 8
+        vk.vkCmdDispatch(cmd, groups, groups, 1)
+
+        # GENERAL → TRANSFER_SRC, copy, → GENERAL.
+        sub = vk.VkImageSubresourceRange(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel=0, levelCount=1,
+            baseArrayLayer=0, layerCount=1,
+        )
+        b_to_src = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image=self._preview_image.image,
+            subresourceRange=sub,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, None, 0, None, 1, [b_to_src],
+        )
+        self._preview_readback.record_copy_from(cmd, self._preview_image.image)
+        b_to_general = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            image=self._preview_image.image,
+            subresourceRange=sub,
+        )
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, None, 0, None, 1, [b_to_general],
+        )
+        vk.vkEndCommandBuffer(cmd)
+
+        submit = vk.VkSubmitInfo(
+            commandBufferCount=1, pCommandBuffers=[cmd],
+        )
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1, [submit], vk.VK_NULL_HANDLE,
+        )
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(
+            self.ctx.device, self.ctx.command_pool, 1, [cmd],
+        )
+        return self._preview_readback.read(), size
 
     def apply_light_override(
         self, light_type: str, light_index: int, key: str, value: object,

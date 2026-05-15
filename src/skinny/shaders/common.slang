@@ -173,6 +173,12 @@ struct FrameConstants
     uint   lensVignetteDebug;    // 1 = render the per-pixel lens-ray success rate as grayscale
                                  //     instead of the integrator's radiance (black corners ⇒
                                  //     vignetting, full white ⇒ all rays survive)
+    // BXDF visualizer scene-pick. When pickArmed != 0 the main pass writes
+    // the HitInfo of the pixel matching pickPixel into toolBuffer (binding
+    // 30). One-shot: the CPU clears pickArmed after a single read so the
+    // shader stops writing on subsequent frames.
+    uint2  pickPixel;
+    uint   pickArmed;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for
