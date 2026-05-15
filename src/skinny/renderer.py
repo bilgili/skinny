@@ -5103,6 +5103,11 @@ class Renderer:
             return b"\x00" * (self.width * self.height * 4)
         f = self.current_frame
 
+        # Drain BXDF visualiser scene-pick callbacks once their frame has
+        # retired. Matches render() so the Qt + web entry points get the
+        # same pick behaviour as the legacy GLFW path.
+        self.poll_pick_result()
+
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
         )
