@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
     def _open_scene_graph(self) -> None:
         if self._scene_graph_dock is None:
             self._scene_graph_dock = SceneGraphDock(self.renderer, parent=self)
-            self.addDockWidget(Qt.RightDockWidgetArea, self._scene_graph_dock)
+            self.addDockWidget(Qt.BottomDockWidgetArea, self._scene_graph_dock)
         self._scene_graph_dock.show()
         self._scene_graph_dock.raise_()
 
