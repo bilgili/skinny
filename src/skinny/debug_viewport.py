@@ -645,19 +645,36 @@ class DebugViewport:
     def __init__(
         self, vk_ctx: VulkanContext, shader_dir: Path,
         width: int = _DEFAULT_WIDTH, height: int = _DEFAULT_HEIGHT,
+        *, embedded: bool = False,
     ) -> None:
         self._vk_ctx = vk_ctx
         self._shader_dir = shader_dir
         self._width = int(width)
         self._height = int(height)
+        # ``embedded`` skips GLFW window + surface + swapchain and instead
+        # renders to a single offscreen color image; ``render_embedded()``
+        # copies that image into a host-visible staging buffer and returns
+        # raw RGBA8 bytes for a Qt blit.
+        self._embedded = bool(embedded)
 
         self._open = False
         self._window = None
         self._surface = None
         self._swapchain = None
-        self._swapchain_format = vk.VK_FORMAT_B8G8R8A8_UNORM
+        self._swapchain_format = (
+            vk.VK_FORMAT_R8G8B8A8_UNORM if self._embedded
+            else vk.VK_FORMAT_B8G8R8A8_UNORM
+        )
         self._swapchain_images: list = []
         self._swapchain_views: list = []
+        # Embedded-mode targets.
+        self._offscreen_image = None
+        self._offscreen_memory = None
+        self._offscreen_view = None
+        self._readback_buffer = None
+        self._readback_memory = None
+        self._readback_mapped = None
+        self._readback_size = 0
         self._depth_image = None
         self._depth_memory = None
         self._depth_view = None
@@ -726,7 +743,10 @@ class DebugViewport:
     def open(self) -> None:
         if self._open:
             return
-        if self._window is None:
+        if self._embedded:
+            if self._cmd_buffer is None:
+                self._build_embedded_resources()
+        elif self._window is None:
             self._build_window_and_resources()
         else:
             import glfw
@@ -736,16 +756,18 @@ class DebugViewport:
     def close(self) -> None:
         if not self._open:
             return
-        import glfw
-        if self._window is not None:
+        if not self._embedded and self._window is not None:
+            import glfw
             glfw.hide_window(self._window)
         self._open = False
 
     def update(self, dt: float) -> None:
         """Advance debug-cam free-fly translation. Called per frame regardless
         of open state to keep state fresh for the moment of toggle on.
+        Embedded mode: caller drives ``move_free_camera`` from Qt key
+        events instead — this poll is GLFW-only.
         """
-        if not self._open:
+        if not self._open or self._embedded:
             return
         if self.camera_mode != "free":
             return
@@ -761,9 +783,10 @@ class DebugViewport:
 
     def render(self, renderer) -> None:
         """Render one frame using state pulled from ``renderer`` (the main
-        compute Renderer). No-op when closed.
+        compute Renderer). No-op when closed. GLFW-windowed path only —
+        embedded mode uses ``render_embedded``.
         """
-        if not self._open or self._window is None:
+        if not self._open or self._embedded or self._window is None:
             return
         import glfw
         if glfw.window_should_close(self._window):
@@ -775,13 +798,50 @@ class DebugViewport:
 
         self._draw_frame(renderer)
 
-    def destroy(self) -> None:
-        """Tear down all Vulkan resources and the GLFW window."""
-        if self._window is None:
+    def render_embedded(self, renderer) -> bytes | None:
+        """Embedded mode: render one frame to the offscreen image, copy
+        into the host-visible staging buffer, return raw RGBA8 bytes.
+
+        Returns ``None`` when closed or before resources are built.
+        """
+        if not self._open or not self._embedded:
+            return None
+        if self._cmd_buffer is None:
+            return None
+        return self._draw_frame_embedded(renderer)
+
+    def resize_embedded(self, width: int, height: int) -> None:
+        """Embedded mode: rebuild offscreen target + depth + staging when
+        the host widget changes size.
+        """
+        if not self._embedded:
+            return
+        w = max(int(width), 1)
+        h = max(int(height), 1)
+        if (w, h) == (self._width, self._height):
+            return
+        self._width, self._height = w, h
+        if self._cmd_buffer is None:
             return
         ctx = self._vk_ctx
         vk.vkDeviceWaitIdle(ctx.device)
-        self._destroy_swapchain_objects()
+        self._destroy_offscreen_objects()
+        self._create_offscreen_target()
+        self._create_depth_buffer()
+        self._create_framebuffers()
+
+    def destroy(self) -> None:
+        """Tear down all Vulkan resources (and the GLFW window, if any)."""
+        if not self._embedded and self._window is None:
+            return
+        if self._embedded and self._cmd_buffer is None:
+            return
+        ctx = self._vk_ctx
+        vk.vkDeviceWaitIdle(ctx.device)
+        if self._embedded:
+            self._destroy_offscreen_objects()
+        else:
+            self._destroy_swapchain_objects()
         if self._pipeline_lines is not None:
             vk.vkDestroyPipeline(ctx.device, self._pipeline_lines, None)
         if self._pipeline_tris is not None:
@@ -819,20 +879,149 @@ class DebugViewport:
             vk.vkFreeMemory(ctx.device, self._ubo_memory, None)
         if self._image_available_sem is not None:
             vk.vkDestroySemaphore(ctx.device, self._image_available_sem, None)
+            self._image_available_sem = None
         if self._render_finished_sem is not None:
             vk.vkDestroySemaphore(ctx.device, self._render_finished_sem, None)
+            self._render_finished_sem = None
         if self._in_flight_fence is not None:
             vk.vkDestroyFence(ctx.device, self._in_flight_fence, None)
+            self._in_flight_fence = None
         if self._render_pass is not None:
             vk.vkDestroyRenderPass(ctx.device, self._render_pass, None)
+            self._render_pass = None
         if self._surface is not None:
             ctx._vkDestroySurfaceKHR(ctx.instance, self._surface, None)
+            self._surface = None
 
-        import glfw
-        glfw.destroy_window(self._window)
-        self._window = None
+        if not self._embedded and self._window is not None:
+            import glfw
+            glfw.destroy_window(self._window)
+            self._window = None
+        self._cmd_buffer = None
 
     # ── Window & resource setup ──────────────────────────────────
+
+    def _build_embedded_resources(self) -> None:
+        """Build all GPU resources for offscreen rendering. No GLFW, no
+        surface, no swapchain.
+        """
+        self._verify_embedded_graphics_capable()
+        self._create_offscreen_target()
+        self._create_render_pass()
+        self._create_depth_buffer()
+        self._create_framebuffers()
+        self._create_descriptor_layout_and_pool()
+        self._create_pipeline()
+        self._create_buffers()
+        self._allocate_command_buffer()
+        self._create_sync_primitives()
+        self._update_descriptor_set()
+
+    def _verify_embedded_graphics_capable(self) -> None:
+        """Embedded mode only needs the compute queue family to support
+        graphics (no present requirement). Most modern GPUs expose one
+        unified graphics+compute queue; only obscure compute-only setups
+        hit this path.
+        """
+        ctx = self._vk_ctx
+        family_idx = ctx.queue_family_indices["compute"]
+        families = vk.vkGetPhysicalDeviceQueueFamilyProperties(ctx.physical_device)
+        flags = families[family_idx].queueFlags
+        if not (flags & vk.VK_QUEUE_GRAPHICS_BIT):
+            raise RuntimeError(
+                "Compute queue family lacks VK_QUEUE_GRAPHICS_BIT — embedded "
+                "debug viewport needs a graphics-capable queue."
+            )
+
+    def _create_offscreen_target(self) -> None:
+        """Single offscreen color image + readback staging buffer.
+
+        The color image is sized to ``(self._width, self._height)`` with
+        format ``VK_FORMAT_R8G8B8A8_UNORM`` (matches Qt's
+        ``QImage::Format_RGBA8888``), usage ``COLOR_ATTACHMENT |
+        TRANSFER_SRC``, device-local. Staging buffer is host-visible
+        coherent, sized ``width * height * 4``.
+        """
+        ctx = self._vk_ctx
+        img_info = vk.VkImageCreateInfo(
+            imageType=vk.VK_IMAGE_TYPE_2D,
+            format=self._swapchain_format,
+            extent=vk.VkExtent3D(width=self._width, height=self._height, depth=1),
+            mipLevels=1,
+            arrayLayers=1,
+            samples=vk.VK_SAMPLE_COUNT_1_BIT,
+            tiling=vk.VK_IMAGE_TILING_OPTIMAL,
+            usage=(
+                vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                | vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+            ),
+            sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+            initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        )
+        self._offscreen_image = vk.vkCreateImage(ctx.device, img_info, None)
+        reqs = vk.vkGetImageMemoryRequirements(ctx.device, self._offscreen_image)
+        mem_props = vk.vkGetPhysicalDeviceMemoryProperties(ctx.physical_device)
+        mtype = _find_memory_type(
+            reqs.memoryTypeBits, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_props,
+        )
+        self._offscreen_memory = vk.vkAllocateMemory(
+            ctx.device,
+            vk.VkMemoryAllocateInfo(
+                allocationSize=reqs.size, memoryTypeIndex=mtype,
+            ),
+            None,
+        )
+        vk.vkBindImageMemory(
+            ctx.device, self._offscreen_image, self._offscreen_memory, 0,
+        )
+        view_info = vk.VkImageViewCreateInfo(
+            image=self._offscreen_image,
+            viewType=vk.VK_IMAGE_VIEW_TYPE_2D,
+            format=self._swapchain_format,
+            components=vk.VkComponentMapping(
+                r=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                g=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                b=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                a=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+            ),
+            subresourceRange=vk.VkImageSubresourceRange(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                baseMipLevel=0, levelCount=1,
+                baseArrayLayer=0, layerCount=1,
+            ),
+        )
+        self._offscreen_view = vk.vkCreateImageView(ctx.device, view_info, None)
+
+        # Staging buffer for image → host readback.
+        self._readback_size = self._width * self._height * 4
+        buf_info = vk.VkBufferCreateInfo(
+            size=self._readback_size,
+            usage=vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+        )
+        self._readback_buffer = vk.vkCreateBuffer(ctx.device, buf_info, None)
+        buf_reqs = vk.vkGetBufferMemoryRequirements(
+            ctx.device, self._readback_buffer,
+        )
+        buf_type = _find_memory_type(
+            buf_reqs.memoryTypeBits,
+            vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            mem_props,
+        )
+        self._readback_memory = vk.vkAllocateMemory(
+            ctx.device,
+            vk.VkMemoryAllocateInfo(
+                allocationSize=buf_reqs.size, memoryTypeIndex=buf_type,
+            ),
+            None,
+        )
+        vk.vkBindBufferMemory(
+            ctx.device, self._readback_buffer, self._readback_memory, 0,
+        )
+        self._readback_mapped = vk.vkMapMemory(
+            ctx.device, self._readback_memory, 0, self._readback_size, 0,
+        )
 
     def _build_window_and_resources(self) -> None:
         import glfw
@@ -1025,6 +1214,14 @@ class DebugViewport:
 
     def _create_render_pass(self) -> None:
         ctx = self._vk_ctx
+        # Embedded mode: render pass leaves the color image in
+        # TRANSFER_SRC so the subsequent ``vkCmdCopyImageToBuffer`` can
+        # read it without an extra barrier. Windowed mode hands the image
+        # to the presentation engine.
+        final_color_layout = (
+            vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL if self._embedded
+            else vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        )
         color_attachment = vk.VkAttachmentDescription(
             format=self._swapchain_format,
             samples=vk.VK_SAMPLE_COUNT_1_BIT,
@@ -1033,7 +1230,7 @@ class DebugViewport:
             stencilLoadOp=vk.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             stencilStoreOp=vk.VK_ATTACHMENT_STORE_OP_DONT_CARE,
             initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
-            finalLayout=vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            finalLayout=final_color_layout,
         )
         depth_attachment = vk.VkAttachmentDescription(
             format=_DEPTH_FORMAT,
@@ -1087,7 +1284,11 @@ class DebugViewport:
     def _create_framebuffers(self) -> None:
         ctx = self._vk_ctx
         self._framebuffers = []
-        for view in self._swapchain_views:
+        views = (
+            [self._offscreen_view] if self._embedded
+            else self._swapchain_views
+        )
+        for view in views:
             fb_info = vk.VkFramebufferCreateInfo(
                 renderPass=self._render_pass,
                 attachmentCount=2,
@@ -1380,8 +1581,9 @@ class DebugViewport:
     def _create_sync_primitives(self) -> None:
         ctx = self._vk_ctx
         sem_info = vk.VkSemaphoreCreateInfo()
-        self._image_available_sem = vk.vkCreateSemaphore(ctx.device, sem_info, None)
-        self._render_finished_sem = vk.vkCreateSemaphore(ctx.device, sem_info, None)
+        if not self._embedded:
+            self._image_available_sem = vk.vkCreateSemaphore(ctx.device, sem_info, None)
+            self._render_finished_sem = vk.vkCreateSemaphore(ctx.device, sem_info, None)
         fence_info = vk.VkFenceCreateInfo(flags=vk.VK_FENCE_CREATE_SIGNALED_BIT)
         self._in_flight_fence = vk.vkCreateFence(ctx.device, fence_info, None)
 
@@ -1503,6 +1705,156 @@ class DebugViewport:
             ctx.vkQueuePresentKHR(ctx.compute_queue, present_info)
         except (vk.VkErrorOutOfDateKhr, vk.VkSuboptimalKhr):
             self._needs_resize = True
+
+    def _draw_frame_embedded(self, renderer) -> bytes:
+        """Embedded: render → copy → return RGBA8 bytes. Synchronous."""
+        ctx = self._vk_ctx
+        vk.vkWaitForFences(
+            ctx.device, 1, [self._in_flight_fence], vk.VK_TRUE, 2_000_000_000,
+        )
+        vk.vkResetFences(ctx.device, 1, [self._in_flight_fence])
+
+        line_count, tri_count = self._build_geometry(renderer)
+        self._upload_camera_ubo()
+
+        cb = self._cmd_buffer
+        vk.vkResetCommandBuffer(cb, 0)
+        vk.vkBeginCommandBuffer(cb, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        ))
+        clear_color = vk.VkClearValue(
+            color=vk.VkClearColorValue(float32=[0.05, 0.05, 0.07, 1.0]),
+        )
+        clear_depth = vk.VkClearValue(
+            depthStencil=vk.VkClearDepthStencilValue(depth=1.0, stencil=0),
+        )
+        rp_begin = vk.VkRenderPassBeginInfo(
+            renderPass=self._render_pass,
+            framebuffer=self._framebuffers[0],
+            renderArea=vk.VkRect2D(
+                offset=vk.VkOffset2D(x=0, y=0),
+                extent=vk.VkExtent2D(width=self._width, height=self._height),
+            ),
+            clearValueCount=2,
+            pClearValues=[clear_color, clear_depth],
+        )
+        vk.vkCmdBeginRenderPass(cb, rp_begin, vk.VK_SUBPASS_CONTENTS_INLINE)
+
+        viewport = vk.VkViewport(
+            x=0.0, y=0.0,
+            width=float(self._width), height=float(self._height),
+            minDepth=0.0, maxDepth=1.0,
+        )
+        scissor = vk.VkRect2D(
+            offset=vk.VkOffset2D(x=0, y=0),
+            extent=vk.VkExtent2D(width=self._width, height=self._height),
+        )
+        vk.vkCmdSetViewport(cb, 0, 1, [viewport])
+        vk.vkCmdSetScissor(cb, 0, 1, [scissor])
+        vk.vkCmdBindDescriptorSets(
+            cb, vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            self._pipeline_layout, 0, 1, [self._descriptor_set], 0, None,
+        )
+        if line_count > 0:
+            vk.vkCmdBindPipeline(
+                cb, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self._pipeline_lines,
+            )
+            vk.vkCmdBindVertexBuffers(cb, 0, 1, [self._vbo], [0])
+            vk.vkCmdDraw(cb, line_count, 1, 0, 0)
+        if tri_count > 0:
+            vk.vkCmdBindPipeline(
+                cb, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self._pipeline_tris,
+            )
+            vk.vkCmdBindVertexBuffers(cb, 0, 1, [self._tri_vbo], [0])
+            vk.vkCmdDraw(cb, tri_count, 1, 0, 0)
+
+        vk.vkCmdEndRenderPass(cb)
+
+        # Image is now in TRANSFER_SRC_OPTIMAL (render pass final layout).
+        # Copy into the staging buffer for host readback.
+        region = vk.VkBufferImageCopy(
+            bufferOffset=0,
+            bufferRowLength=0, bufferImageHeight=0,
+            imageSubresource=vk.VkImageSubresourceLayers(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                mipLevel=0, baseArrayLayer=0, layerCount=1,
+            ),
+            imageOffset=vk.VkOffset3D(x=0, y=0, z=0),
+            imageExtent=vk.VkExtent3D(
+                width=self._width, height=self._height, depth=1,
+            ),
+        )
+        vk.vkCmdCopyImageToBuffer(
+            cb, self._offscreen_image,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            self._readback_buffer, 1, [region],
+        )
+
+        # Ensure host reads see the copy.
+        host_barrier = vk.VkBufferMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_HOST_READ_BIT,
+            srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+            dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+            buffer=self._readback_buffer,
+            offset=0, size=self._readback_size,
+        )
+        vk.vkCmdPipelineBarrier(
+            cb,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_HOST_BIT,
+            0, 0, None, 1, [host_barrier], 0, None,
+        )
+
+        vk.vkEndCommandBuffer(cb)
+
+        submit = vk.VkSubmitInfo(
+            commandBufferCount=1, pCommandBuffers=[cb],
+        )
+        vk.vkQueueSubmit(ctx.compute_queue, 1, [submit], self._in_flight_fence)
+        vk.vkWaitForFences(
+            ctx.device, 1, [self._in_flight_fence], vk.VK_TRUE, 2_000_000_000,
+        )
+
+        # Read pixels from the host-mapped staging buffer.
+        import cffi
+        ffi = cffi.FFI()
+        out = bytearray(self._readback_size)
+        ffi.memmove(out, self._readback_mapped, self._readback_size)
+        return bytes(out)
+
+    def _destroy_offscreen_objects(self) -> None:
+        ctx = self._vk_ctx
+        for fb in self._framebuffers:
+            vk.vkDestroyFramebuffer(ctx.device, fb, None)
+        self._framebuffers = []
+        if self._depth_view is not None:
+            vk.vkDestroyImageView(ctx.device, self._depth_view, None)
+            self._depth_view = None
+        if self._depth_image is not None:
+            vk.vkDestroyImage(ctx.device, self._depth_image, None)
+            self._depth_image = None
+        if self._depth_memory is not None:
+            vk.vkFreeMemory(ctx.device, self._depth_memory, None)
+            self._depth_memory = None
+        if self._offscreen_view is not None:
+            vk.vkDestroyImageView(ctx.device, self._offscreen_view, None)
+            self._offscreen_view = None
+        if self._offscreen_image is not None:
+            vk.vkDestroyImage(ctx.device, self._offscreen_image, None)
+            self._offscreen_image = None
+        if self._offscreen_memory is not None:
+            vk.vkFreeMemory(ctx.device, self._offscreen_memory, None)
+            self._offscreen_memory = None
+        if self._readback_memory is not None and self._readback_mapped is not None:
+            vk.vkUnmapMemory(ctx.device, self._readback_memory)
+            self._readback_mapped = None
+        if self._readback_buffer is not None:
+            vk.vkDestroyBuffer(ctx.device, self._readback_buffer, None)
+            self._readback_buffer = None
+        if self._readback_memory is not None:
+            vk.vkFreeMemory(ctx.device, self._readback_memory, None)
+            self._readback_memory = None
 
     # ── Geometry build & UBO upload ──────────────────────────────
 
@@ -1726,10 +2078,11 @@ class DebugViewport:
         return vert_count
 
     def _render_aspect_for(self, renderer) -> float:
-        ext = self._vk_ctx.swapchain_info.extent if self._vk_ctx.swapchain_info else None
-        if ext is None:
-            return float(self._vk_ctx.width) / max(1.0, float(self._vk_ctx.height))
-        return float(ext.width) / max(1.0, float(ext.height))
+        # Use the main renderer's render-target aspect (what the user
+        # sees in the central viewport) rather than the debug viewport's
+        # own surface — the frustum/lens overlays would otherwise show
+        # the wrong aspect when the debug dock isn't 16:9.
+        return float(renderer.width) / max(1.0, float(renderer.height))
 
     def _upload_camera_ubo(self) -> None:
         cam = self.orbit_camera if self.camera_mode == "orbit" else self.free_camera

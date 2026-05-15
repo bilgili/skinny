@@ -37,15 +37,28 @@ class VulkanContext:
         *,
         enable_validation: bool = True,
         gpu_preference: str | None = None,
+        with_surface_support: bool = False,
     ) -> None:
+        """Construct a Vulkan instance + device.
+
+        ``window=None`` runs in headless mode (no surface, no swapchain).
+        Set ``with_surface_support=True`` to still enable the platform
+        surface extensions + ``VK_KHR_swapchain`` so a sibling component
+        (e.g. ``DebugViewport``) can create its own GLFW window + surface
+        against this instance without recreating the device.
+        """
         self.width = width
         self.height = height
         self._enable_validation = enable_validation
         self._headless = window is None
+        # In headless-but-surface-capable mode we still skip the primary
+        # surface + swapchain but enable the extensions a secondary window
+        # needs.
+        self._enable_surface_exts = (not self._headless) or with_surface_support
 
         self.instance = self._create_instance(window)
 
-        if not self._headless:
+        if self._enable_surface_exts:
             self._load_surface_instance_functions()
 
         self.surface = None if self._headless else self._create_surface(window)
@@ -58,7 +71,7 @@ class VulkanContext:
         self.queue_family_indices = self._find_queue_families()
         self.device = self._create_device()
 
-        if not self._headless:
+        if self._enable_surface_exts:
             self._load_swapchain_device_functions()
 
         self.compute_queue = vk.vkGetDeviceQueue(
@@ -87,10 +100,17 @@ class VulkanContext:
             apiVersion=vk.VK_MAKE_VERSION(1, 3, 0),
         )
 
-        if self._headless:
+        if not self._enable_surface_exts:
             extensions = []
         else:
+            # GLFW exposes the platform-specific surface extensions
+            # (VK_KHR_surface + VK_KHR_win32_surface / VK_KHR_xcb_surface /
+            # VK_EXT_metal_surface). Calling this before any GLFW window
+            # is fine — glfw.init() is required, but the helper itself
+            # returns the static list.
             import glfw
+            if not glfw.init():
+                raise RuntimeError("Failed to init GLFW for surface extension query")
             extensions = glfw.get_required_instance_extensions()
 
         layers = self.VALIDATION_LAYERS if self._enable_validation else []
@@ -185,8 +205,8 @@ class VulkanContext:
         )
 
         device_extensions = (
-            [] if self._headless
-            else [vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME]
+            [vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME]
+            if self._enable_surface_exts else []
         )
 
         device_create_info = vk.VkDeviceCreateInfo(
