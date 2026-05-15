@@ -76,6 +76,8 @@ class BXDFDock(QDockWidget):
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
 
         self._material_id: int = -1
+        self._material_ids: list[int] = []
+        self._last_scene_id: int = -1
         self._pick_state: Optional[dict] = None
         self._entrance_state: Optional[dict] = None
         self._mode: str = "bxdf"
@@ -94,10 +96,11 @@ class BXDFDock(QDockWidget):
         self._last_material_hash: int = self._compute_material_hash()
 
         self._build_widgets()
+        # Populate material combo up front (may be empty until a scene loads).
+        self._refresh_material_combo()
 
-        # Watch for renderer-side material edits + scene-graph swaps so
-        # the lobe re-evaluates when the user moves a slider in the main
-        # sidebar.
+        # Watch for renderer-side material edits + scene swaps so the
+        # combo + lobe stay in sync with the main UI.
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(200)
         self._poll_timer.timeout.connect(self._poll_material_changes)
@@ -111,7 +114,19 @@ class BXDFDock(QDockWidget):
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(4)
 
-        self._material_label = QLabel("Material: (no pick)")
+        # Material picker: combo lists all scene materials by name so the
+        # user can evaluate any material without first picking a point on
+        # the rendered surface. Selection sets _material_id; the lobe still
+        # needs a pick to define the shading frame (P/N/T/UV) but at least
+        # the user can pre-select the material.
+        mat_row = QHBoxLayout()
+        mat_row.addWidget(QLabel("Material:"))
+        self._material_combo = QComboBox()
+        self._material_combo.currentIndexChanged.connect(self._on_material_combo)
+        mat_row.addWidget(self._material_combo, stretch=1)
+        outer.addLayout(mat_row)
+
+        self._material_label = QLabel("Material: (no selection)")
         outer.addWidget(self._material_label)
 
         # Mode.
@@ -268,12 +283,55 @@ class BXDFDock(QDockWidget):
             self._material_label.setText(f"Material: #{mat_id} — {name}")
         else:
             self._material_label.setText(f"Material: #{mat_id}")
+        # Sync the combo so a pick-driven selection is reflected there too.
+        if mat_id in self._material_ids:
+            combo_idx = self._material_ids.index(mat_id)
+            if self._material_combo.currentIndex() != combo_idx:
+                self._material_combo.blockSignals(True)
+                self._material_combo.setCurrentIndex(combo_idx)
+                self._material_combo.blockSignals(False)
 
     def _scene_materials(self) -> list:
-        scene = getattr(self.renderer, "scene", None)
+        # The Renderer exposes the active USD scene as ``_usd_scene``;
+        # ``scene`` is not always populated. Match the lookup used by the
+        # other Qt windows (material_graph_editor etc.).
+        scene = getattr(self.renderer, "_usd_scene", None)
+        if scene is None:
+            scene = getattr(self.renderer, "scene", None)
         if scene is None:
             return []
         return list(getattr(scene, "materials", []) or [])
+
+    def _refresh_material_combo(self) -> None:
+        """Rebuild combo from current scene materials. Skips index 0
+        (implicit skin material) to match the rest of the UI.
+        """
+        mats = self._scene_materials()
+        self._material_ids = []
+        labels: list[str] = []
+        for i, mat in enumerate(mats):
+            if i == 0:
+                continue
+            name = getattr(mat, "mtlx_target_name", None) or getattr(mat, "name", f"#{i}")
+            self._material_ids.append(i)
+            labels.append(f"#{i}  {name}")
+        prev = self._material_combo.blockSignals(True)
+        self._material_combo.clear()
+        if labels:
+            self._material_combo.addItems(labels)
+        else:
+            self._material_combo.addItem("(no materials)")
+        self._material_combo.blockSignals(prev)
+
+    def _on_material_combo(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._material_ids):
+            return
+        mat_id = self._material_ids[idx]
+        self._set_active_material(mat_id)
+        # If a scene point has already been picked, immediately re-eval
+        # with the new material; otherwise wait for a pick.
+        if self._pick_state is not None:
+            self._schedule_eval()
 
     # ── Eval scheduling ───────────────────────────────────────────
 
@@ -423,6 +481,12 @@ class BXDFDock(QDockWidget):
         return hash((version, payload))
 
     def _poll_material_changes(self) -> None:
+        # Repopulate combo when the active USD scene swaps (model load).
+        scene = getattr(self.renderer, "_usd_scene", None)
+        cur_scene_id = id(scene)
+        if cur_scene_id != self._last_scene_id:
+            self._last_scene_id = cur_scene_id
+            self._refresh_material_combo()
         h = self._compute_material_hash()
         if h == self._last_material_hash:
             return

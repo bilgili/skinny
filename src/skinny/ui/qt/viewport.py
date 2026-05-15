@@ -161,15 +161,42 @@ class RenderViewport(QWidget):
         self._pick_armed = True
         self._pick_cb = callback
 
+    def _widget_to_render_pixel(
+        self, wx: float, wy: float,
+    ) -> tuple[float, float] | None:
+        """Inverse of the letterboxed blit in paintEvent. Returns
+        ``(render_x, render_y)`` in pixel coords of the underlying frame,
+        or ``None`` when the click falls outside the rendered image.
+        """
+        if self._image is None:
+            return None
+        target = self.rect()
+        sw, sh = self._image.width(), self._image.height()
+        scale = min(target.width() / sw, target.height() / sh)
+        if scale <= 0:
+            return None
+        dw, dh = int(sw * scale), int(sh * scale)
+        x_off = (target.width() - dw) // 2
+        y_off = (target.height() - dh) // 2
+        rx = (wx - x_off) / scale
+        ry = (wy - y_off) / scale
+        if rx < 0 or ry < 0 or rx >= sw or ry >= sh:
+            return None
+        return rx, ry
+
     def mousePressEvent(self, event) -> None:
         pos = event.position()
         if event.button() == Qt.LeftButton and self._pick_armed:
+            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+            if mapped is None:
+                # Click outside the rendered image; ignore and stay armed.
+                return
             cb = self._pick_cb
             self._pick_armed = False
             self._pick_cb = None
             with self._render_lock:
                 self.renderer.request_scene_pick(
-                    float(pos.x()), float(pos.y()), cb,
+                    float(mapped[0]), float(mapped[1]), cb,
                 )
             self.setFocus(Qt.MouseFocusReason)
             return
