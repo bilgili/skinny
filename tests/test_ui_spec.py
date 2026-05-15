@@ -156,35 +156,27 @@ def test_top_level_section_order(stub_renderer):
     titles = [c.title for c in tree.children
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
-        "Resolution", "Capture", "Load Model",
+        "Resolution", "Capture",
         "Render", "Skin", "Detail",
-        "Materials", "Scene Graph",
     ]
 
 
 def test_dedicated_widgets_present(stub_renderer):
-    """ResolutionPicker, ScreenshotPicker, FilePicker — sidebar widgets
-    that don't map to a single ParamSpec.path.
+    """ResolutionPicker + ScreenshotPicker — sidebar widgets that don't
+    map to a single ParamSpec.path.
     """
     tree = build_main_ui(stub_renderer)
     kinds = {type(n).__name__ for n in spec.walk(tree)}
-    for required in ("ResolutionPicker", "ScreenshotPicker", "FilePicker"):
+    for required in ("ResolutionPicker", "ScreenshotPicker"):
         assert required in kinds, f"Missing {required} in tree"
 
 
-def test_dynamic_section_token_drives_rebuild(stub_renderer):
-    """Dynamic section's ``rebuild_token()`` controls when the body
-    rebuilds. Same scene id → no rebuild; new id → rebuild.
+def test_material_subtree_builds_per_material(stub_renderer):
+    """``build_material_subtree`` (used by the Material Graph dock and
+    the Panel pane) still produces one Section per editable material.
     """
-    tree = build_main_ui(stub_renderer)
-    dyn = next(
-        n for n in tree.children if isinstance(n, spec.DynamicSection)
-        and n.title == "Materials"
-    )
-    # Token is currently ``id(None)`` because _usd_scene is None.
-    assert dyn.rebuild_token() == id(None)
+    from skinny.ui.build_app_ui import build_material_subtree
 
-    # Swap in a scene with materials.
     class _Mat:
         def __init__(self, name):
             self.name = name
@@ -193,22 +185,17 @@ def test_dynamic_section_token_drives_rebuild(stub_renderer):
             self.texture_paths = {}
 
     class _Scene:
-        materials = [object(), _Mat("alpha")]
+        materials = [object(), _Mat("alpha"), _Mat("beta")]
 
     stub_renderer._usd_scene = _Scene()
     stub_renderer.apply_material_override = lambda mid, k, v: None
     stub_renderer.toggle_material_furnace = lambda mid, v: None
     stub_renderer.iter_graph_uniforms = lambda mid: []
 
-    assert dyn.rebuild_token() == id(stub_renderer._usd_scene)
-
-    # Run the build closure and verify it produces widgets.
     sub = spec.UIBuilder()
-    dyn.build(sub)
-    # Material "alpha" → one Section with color + 7 sliders + furnace checkbox.
+    build_material_subtree(sub, stub_renderer)
     sections = [n for n in sub.tree.children if isinstance(n, spec.Section)]
-    assert len(sections) == 1
-    assert sections[0].title == "alpha"
+    assert [s.title for s in sections] == ["alpha", "beta"]
 
 
 def test_window_openers_in_callbacks(stub_renderer):
