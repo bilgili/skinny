@@ -465,7 +465,23 @@ def _build_sidebar_widgets(
     builder = PanelTreeBuilder(tree)
     builder.register_periodic()
     session._panel_builder = builder
-    return builder.layout
+
+    # Window-opener buttons live outside the spec tree; render them above
+    # the accordion as a small row of buttons so the user can still open
+    # the four child panes without a menu bar.
+    def _mk_btn(label: str, opener):
+        b = pn.widgets.Button(name=label, button_type="default")
+        b.on_click(lambda _e, fn=opener: fn())
+        return b
+
+    window_row = pn.Row(
+        _mk_btn("Scene Graph",    callbacks.open_scene_graph),
+        _mk_btn("Material Graph", callbacks.open_material_graph),
+        _mk_btn("BXDF",           callbacks.open_bxdf_visualizer),
+        _mk_btn("Camera Debug",   callbacks.open_debug_viewport),
+        sizing_mode="stretch_width",
+    )
+    return pn.Column(window_row, builder.layout, sizing_mode="stretch_width")
 
 
 def create_panel_app() -> pn.viewable.Viewable:

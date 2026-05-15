@@ -127,7 +127,13 @@ def test_every_param_bound_exactly_once(stub_renderer):
     )
 
     expected = {p.path for p in build_all_params(stub_renderer)}
-    missing = expected - bound_set - _DEDICATED_WIDGET_PATHS
+    # IBL + Direct Light params live in the scene-graph dock now, not in
+    # the sidebar; their paths intentionally absent from the sidebar tree.
+    sidebar_excluded = _DEDICATED_WIDGET_PATHS | {
+        "env_index", "env_intensity",
+        "direct_light_index", "light_intensity",
+    }
+    missing = expected - bound_set - sidebar_excluded
     assert not missing, f"Params missing from UI tree: {sorted(missing)}"
 
     extra = bound_set - expected
@@ -151,20 +157,18 @@ def test_top_level_section_order(stub_renderer):
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
         "Resolution", "Capture", "Load Model",
-        "Render", "Skin", "Detail", "IBL", "Direct Light",
+        "Render", "Skin", "Detail",
         "Materials", "Scene Graph",
-        "Windows", "Debug Views",
     ]
 
 
 def test_dedicated_widgets_present(stub_renderer):
-    """Color picker for light, DirectionPicker for elev/az, ResolutionPicker,
-    ScreenshotPicker — must all exist in the tree.
+    """ResolutionPicker, ScreenshotPicker, FilePicker — sidebar widgets
+    that don't map to a single ParamSpec.path.
     """
     tree = build_main_ui(stub_renderer)
     kinds = {type(n).__name__ for n in spec.walk(tree)}
-    for required in ("Color", "DirectionPicker", "ResolutionPicker",
-                     "ScreenshotPicker", "FilePicker"):
+    for required in ("ResolutionPicker", "ScreenshotPicker", "FilePicker"):
         assert required in kinds, f"Missing {required} in tree"
 
 
@@ -207,31 +211,33 @@ def test_dynamic_section_token_drives_rebuild(stub_renderer):
     assert sections[0].title == "alpha"
 
 
-def test_callbacks_wired(stub_renderer):
-    """Buttons fire the host callbacks rather than no-ops."""
+def test_window_openers_in_callbacks(stub_renderer):
+    """Window-open callbacks are not rendered as sidebar buttons anymore;
+    they live on AppCallbacks for the backend to expose (menu in Qt,
+    button row in Panel). Confirm the dataclass still carries them.
+    """
     from skinny.ui.build_app_ui import AppCallbacks
 
     fired: list[str] = []
-
     cb = AppCallbacks(
         open_scene_graph=lambda: fired.append("sg"),
         open_material_graph=lambda: fired.append("mg"),
         open_bxdf_visualizer=lambda: fired.append("bxdf"),
         open_debug_viewport=lambda: fired.append("dbg"),
-        debug_view_top=lambda: fired.append("top"),
-        debug_view_left=lambda: fired.append("left"),
-        debug_view_back=lambda: fired.append("back"),
     )
+    cb.open_scene_graph()
+    cb.open_material_graph()
+    cb.open_bxdf_visualizer()
+    cb.open_debug_viewport()
+    assert fired == ["sg", "mg", "bxdf", "dbg"]
+
+    # Sidebar tree no longer contains Button nodes for these openers.
     tree = build_main_ui(stub_renderer, callbacks=cb)
-
-    buttons = [n for n in spec.walk(tree) if isinstance(n, spec.Button)]
-    by_label = {b.label: b for b in buttons}
-    by_label["Scene Graph..."].on_click()
-    by_label["Material Graph..."].on_click()
-    by_label["BXDF Visualizer..."].on_click()
-    by_label["Camera Debug View"].on_click()
-    by_label["Top"].on_click()
-    by_label["Left"].on_click()
-    by_label["Back"].on_click()
-
-    assert fired == ["sg", "mg", "bxdf", "dbg", "top", "left", "back"]
+    button_labels = {b.label for b in spec.walk(tree) if isinstance(b, spec.Button)}
+    for legacy in (
+        "Scene Graph...", "Material Graph...", "BXDF Visualizer...",
+        "Camera Debug View", "Top", "Left", "Back",
+    ):
+        assert legacy not in button_labels, (
+            f"{legacy!r} should be host-rendered, not in the tree"
+        )

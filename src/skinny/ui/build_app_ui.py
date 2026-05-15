@@ -70,20 +70,18 @@ _DEDICATED_WIDGET_PATHS: frozenset[str] = frozenset({
 class AppCallbacks:
     """Actions only the host (Qt app / Panel app) can implement.
 
-    All fields are no-op / default-renderer-call so a backend can build
-    the tree without wiring every secondary surface up first.
+    Window openers (``open_*``) are rendered as a menu in Qt and a row
+    of buttons in Panel — they no longer appear in the shared widget
+    tree because dock-vs-menu placement is backend-specific.
 
     ``capture_screenshot`` lets the web path acquire its session lock
-    around ``save_screenshot``. ``load_model`` exists so the web backend
-    can refresh its model combo widget after the load completes.
+    around ``save_screenshot``. ``load_model`` / ``load_hdr`` exist so
+    the web backend can serialise file loads under the same lock.
     """
     open_scene_graph: Callable[[], None] = field(default=lambda: None)
     open_material_graph: Callable[[], None] = field(default=lambda: None)
     open_bxdf_visualizer: Callable[[], None] = field(default=lambda: None)
     open_debug_viewport: Callable[[], None] = field(default=lambda: None)
-    debug_view_top: Callable[[], None] = field(default=lambda: None)
-    debug_view_left: Callable[[], None] = field(default=lambda: None)
-    debug_view_back: Callable[[], None] = field(default=lambda: None)
     capture_screenshot: Callable[[str], bytes] | None = None
     load_model: Callable[[Path], None] | None = None
     load_hdr: Callable[[Path], None] | None = None
@@ -468,26 +466,19 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
                 else (lambda path: renderer.load_model_from_path(path)),
         )
 
-    # Stable section order regardless of which dynamic groups are present.
-    section_order = ["Render", "Skin", "Detail", "IBL", "Direct Light"]
+    # IBL + Direct Light intentionally omitted from the sidebar — they
+    # live in the scene-graph dock now (the user edits DomeLight /
+    # DistantLight / SphereLight prims directly there).
+    section_order = ["Render", "Skin", "Detail"]
     for group in section_order:
         params_in_group = grouped.get(group)
         if not params_in_group:
             continue
         with ui.section(group, expanded=(group != "Skin")):
-            if group == "Direct Light":
-                _add_light_color(ui, renderer)
-                _add_light_direction(ui, renderer)
             for p in params_in_group:
                 if p.path in _DEDICATED_WIDGET_PATHS:
                     continue
                 _add_param(ui, renderer, p)
-            if group == "IBL":
-                ui.file_picker(
-                    "Load HDR…", filters=HDR_FILE_FILTERS,
-                    on_pick=cb.load_hdr if cb.load_hdr is not None
-                        else (lambda path: renderer.load_environment_from_path(path)),
-                )
 
     ui.dynamic_section(
         "Materials",
@@ -504,14 +495,8 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
         build=lambda sub_ui: None,
     )
 
-    with ui.section("Windows"):
-        ui.button("Scene Graph...",      on_click=cb.open_scene_graph)
-        ui.button("Material Graph...",   on_click=cb.open_material_graph)
-        ui.button("BXDF Visualizer...",  on_click=cb.open_bxdf_visualizer)
-        ui.button("Camera Debug View",   on_click=cb.open_debug_viewport)
-    with ui.section("Debug Views"):
-        ui.button("Top",  on_click=cb.debug_view_top)
-        ui.button("Left", on_click=cb.debug_view_left)
-        ui.button("Back", on_click=cb.debug_view_back)
+    # Window-opener buttons are not in the tree — Qt renders them as a
+    # menu and Panel as a row of buttons, both via the AppCallbacks
+    # fields directly.
 
     return ui.tree
