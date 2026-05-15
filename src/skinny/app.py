@@ -1,4 +1,11 @@
-"""Application entry point — creates a GLFW window with Vulkan surface and runs the render loop."""
+"""Headless GLFW debug entry — Vulkan surface + keyboard-driven render loop.
+
+This is the shader-debug / no-GUI path. The user-facing app is
+``skinny-gui`` (Qt) for desktop and ``skinny-web`` for the browser; both
+share the widget tree defined in ``skinny.ui.build_app_ui``. Keep this
+entry alive only for fast iteration on Vulkan + Slang code where the
+Qt event loop would get in the way.
+"""
 
 from __future__ import annotations
 
@@ -488,14 +495,6 @@ def main() -> None:
 
     input_handler = InputHandler(window, renderer)
 
-    from skinny.control_panel import ControlPanel
-    panel = ControlPanel(renderer, input_handler.params)
-    panel._input_handler = input_handler
-
-    tk_geom = saved.get("tk_window")
-    if isinstance(tk_geom, str):
-        panel.apply_geometry(tk_geom)
-
     prev_time = time.perf_counter()
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -505,29 +504,22 @@ def main() -> None:
         prev_time = now
 
         input_handler.update(dt)
-        panel.tick()
         renderer.update(dt)
         renderer.hud_text_lines = input_handler.build_hud_lines()
         renderer.render()
         debug_viewport.update(dt)
         debug_viewport.render(renderer)
 
-    # Snapshot state before tearing things down. Write failures are swallowed
-    # so a read-only home dir can't break shutdown.
     try:
         out: dict = {
             "vulkan_window": _window_pos_dict(window),
             "params": _snapshot_params(renderer, input_handler.params),
             "camera": _snapshot_camera(renderer),
         }
-        geom = panel.get_geometry()
-        if geom:
-            out["tk_window"] = geom
         save_settings(out)
     except OSError:
         pass
 
-    panel.destroy()
     debug_viewport.destroy()
     renderer.cleanup()
     vk_ctx.destroy()

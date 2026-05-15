@@ -28,6 +28,7 @@ dependencies = [
     # source with MATERIALX_BUILD_PYTHON=ON. Both the wheel and a from-source
     # build satisfy this constraint.
     "MaterialX>=1.39",
+    "PySide6>=6.7",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,7 @@ web = [
 
 [project.scripts]
 skinny = "skinny.app:main"
+skinny-gui = "skinny.ui.qt.app:main"
 skinny-web = "skinny.web_app:main"
 
 [tool.setuptools.packages.find]
