@@ -21,6 +21,11 @@ import integrators.bdpt;
 import cameras.pinhole;
 import cameras.thick_lens;
 import generated_materials;
+// FlatMaterial + loadFlatMaterial used by the BXDF visualizer tool branch.
+import materials.flat.flat_material;
+// Skin BSDF / BSSRDF helpers consumed by the BXDF visualizer for skin.
+import materials.skin.skin_shading;
+import materials.skin.skin_bssrdf;
 
 // ── Tonemapping ─────────────────────────────────────────────────
 
@@ -60,6 +65,20 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
     float lensWeight;
     Ray ray = cam.generateRay(pixel, rng, lensWeight);
     HitInfo hit = traceScene(fc, ray);
+
+    // BXDF visualizer pick. When the CPU has armed a pick and this pixel
+    // matches the requested one, snapshot the hit into toolBuffer. Cheap:
+    // one buffer write per frame at one pixel. Pick output sits at
+    // slots 8..11 (slots 0..7 are reserved for the BXDF eval header).
+    if (fc.pickArmed != 0u && pixel.x == fc.pickPixel.x && pixel.y == fc.pickPixel.y)
+    {
+        float matIdF = asfloat(hit.materialId);
+        float hitFlagF = hit.hit ? 1.0 : 0.0;
+        toolBuffer[8]  = float4(hit.position, hit.t);
+        toolBuffer[9]  = float4(hit.normal, matIdF);
+        toolBuffer[10] = float4(hit.tangent, hitFlagF);
+        toolBuffer[11] = float4(hit.uv, hit.hasTangent ? 1.0 : 0.0, 0.0);
+    }
 
     float3 sample;
 
@@ -195,11 +214,213 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
 
 // ── Entry point ─────────────────────────────────────────────────
 
+// ── BXDF visualizer eval ────────────────────────────────────────
+//
+// When `toolBuffer[0].x == TOOL_MODE_BXDF` the dispatch is hijacked: each
+// thread maps to one (theta, phi) cell, evaluates the picked material's
+// BSDF response in tangent space, and writes the result at slot
+// `16 + j*n_theta + i`. Threads outside the requested grid early-return.
+// The viewport image is *not* updated on tool frames — the CPU
+// disarms (sets toolMode back to 0) after one frame so subsequent
+// frames render normally.
+void bxdfEvalThread(uint2 cell)
+{
+    uint lockMode = asuint(toolBuffer[0].y);
+    uint nTheta   = asuint(toolBuffer[0].z);
+    uint nPhi     = asuint(toolBuffer[0].w);
+    if (cell.x >= nTheta || cell.y >= nPhi)
+        return;
+
+    uint matId = asuint(toolBuffer[1].x);
+    float3 dLocked = toolBuffer[2].xyz;
+    float3 P = toolBuffer[3].xyz;
+    float3 N = toolBuffer[4].xyz;
+    float3 T = toolBuffer[5].xyz;
+    float2 UV = toolBuffer[6].xy;
+
+    // Upper-hemisphere parameterisation. Theta ∈ (0, π/2), phi ∈ [0, 2π).
+    float theta = (float(cell.x) + 0.5) / float(nTheta) * (0.5 * PI);
+    float phi   = float(cell.y) / float(nPhi) * (2.0 * PI);
+    float st = sin(theta), ct = cos(theta);
+    float3 dSwept = float3(st * cos(phi), st * sin(phi), ct);
+
+    float3 wo, wi;
+    if (lockMode == 0u) { wi = dLocked; wo = dSwept; }
+    else                { wo = dLocked; wi = dSwept; }
+
+    // Synthetic HitInfo so the material loader can pull all the per-hit
+    // bindings (StdSurfaceParams, MaterialX graph params, textures)
+    // exactly the way the main bounce path does.
+    HitInfo h;
+    h.t              = 0.0;
+    h.backT          = -1.0;
+    h.position       = P;
+    h.positionObject = P;
+    h.normal         = N;
+    h.tangent        = T;
+    h.uv             = UV;
+    h.hit            = true;
+    h.hasTangent     = true;
+    h.materialId     = matId;
+
+    uint matType = materialTypes[matId] & 0xFFu;
+    float3 response = float3(0.0);
+    if (matType == MATERIAL_TYPE_FLAT)
+    {
+        FlatMaterial mat = loadFlatMaterial(h);
+        BSDFEval ev = mat.evaluate(wo, wi);
+        response = ev.response;
+    }
+    else if (matType == MATERIAL_TYPE_SKIN)
+    {
+        // Skin path renders via a self-integrating BSSRDF + surface
+        // GGX lobe in the main path. For the visualizer we re-pack a
+        // closed-form approximation: a Lambertian diffuse driven by
+        // the layer-weighted single-scatter albedo (skin colour) with
+        // Fresnel transmission at both interfaces, plus the same
+        // surface specular term `evaluateSkinSpecular` uses in the
+        // main path. Spatial BSSRDF diffusion (xi → xo distance) is
+        // intentionally suppressed here — that's the `BSSRDF` mode.
+        MtlxSkinParams mtlx = mtlxSkin[matId];
+        float4 noInk = float4(0.0, 0.0, 0.0, 0.0);
+        SkinLayerStack stack = buildSkinLayerStackFromMtlx(mtlx, noInk);
+
+        float3 sigmaT_e = stack.epi.sigmaA + stack.epi.sigmaS * (1.0 - stack.epi.g);
+        float3 sigmaT_d = stack.der.sigmaA + stack.der.sigmaS * (1.0 - stack.der.g);
+        float3 sigmaT_s = stack.sub.sigmaA + stack.sub.sigmaS * (1.0 - stack.sub.g);
+        float3 tau_e = sigmaT_e * stack.epi.thickness;
+        float3 tau_d = sigmaT_d * stack.der.thickness;
+        float3 tau_s = sigmaT_s * stack.sub.thickness;
+        float3 totalTau = max(tau_e + tau_d + tau_s, float3(1e-6));
+        float3 skinAlbedo = (tau_e * layerAlbedo(stack.epi)
+                           + tau_d * layerAlbedo(stack.der)
+                           + tau_s * layerAlbedo(stack.sub)) / totalTau;
+
+        float n_wo = max(wo.z, 0.0);
+        float n_wi = max(wi.z, 0.0);
+        if (n_wi > 0.0 && n_wo > 0.0)
+        {
+            float Fi = fresnelSchlick(n_wi, mtlx.layer_top_ior);
+            float Fo = fresnelSchlick(n_wo, mtlx.layer_top_ior);
+            float3 diff = skinAlbedo * (1.0 / PI)
+                        * (1.0 - Fi) * (1.0 - Fo);
+            float3 Nz = float3(0.0, 0.0, 1.0);
+            float3 spec = evaluateSkinSpecular(
+                Nz, wo, wi, mtlx.skin_bsdf_roughness, mtlx.skin_bsdf_ior
+            );
+            response = (diff + spec) * n_wi;
+        }
+    }
+
+    uint outIdx = 16u + cell.y * nTheta + cell.x;
+    toolBuffer[outIdx] = float4(response, 1.0);
+}
+
+// BSSRDF eval (skin only). Reads xi (entrance) from header slot 7 and the
+// exit / shading frame from slots 3..6 as in the BXDF path. Evaluates the
+// separable diffusion BSSRDF
+//   S(xi, wi → xo, wo) ≈ (1/π) · (1 − F(wi, η)) · R(r, d) · ρ · (1 − F(wo, η))
+// with R = Burley diffusion profile, ρ = layer-weighted single-scatter
+// albedo, η = layer_top_ior, r = ||xi − xo|| in world units. Each thread
+// sweeps one wo on the upper hemisphere; the surface specular lobe is
+// added so the visualisation shows both the diffuse subsurface response
+// and the specular highlight at the exit point.
+void bssrdfEvalThread(uint2 cell)
+{
+    uint lockMode = asuint(toolBuffer[0].y);
+    uint nTheta   = asuint(toolBuffer[0].z);
+    uint nPhi     = asuint(toolBuffer[0].w);
+    if (cell.x >= nTheta || cell.y >= nPhi)
+        return;
+
+    uint matId = asuint(toolBuffer[1].x);
+    if ((materialTypes[matId] & 0xFFu) != MATERIAL_TYPE_SKIN)
+    {
+        // BSSRDF is only meaningful for skin in this build; surface
+        // non-skin materials with black so the user notices.
+        uint outIdx = 16u + cell.y * nTheta + cell.x;
+        toolBuffer[outIdx] = float4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    float3 dLocked = toolBuffer[2].xyz;
+    float3 P  = toolBuffer[3].xyz;  // xo (exit, world)
+    float3 xi = toolBuffer[7].xyz;  // entrance (world)
+    // mmPerUnit folds the diffusion profile (which uses mm⁻¹ σ values)
+    // into world units; the renderer pushes scene mm_per_unit into fc.
+    float r_world = length(P - xi);
+    float r_mm = r_world * fc.mmPerUnit;
+
+    float theta = (float(cell.x) + 0.5) / float(nTheta) * (0.5 * PI);
+    float phi   = float(cell.y) / float(nPhi) * (2.0 * PI);
+    float st = sin(theta), ct = cos(theta);
+    float3 dSwept = float3(st * cos(phi), st * sin(phi), ct);
+
+    float3 wo, wi;
+    if (lockMode == 0u) { wi = dLocked; wo = dSwept; }
+    else                { wo = dLocked; wi = dSwept; }
+
+    MtlxSkinParams mtlx = mtlxSkin[matId];
+    float4 noInk = float4(0.0, 0.0, 0.0, 0.0);
+    SkinLayerStack stack = buildSkinLayerStackFromMtlx(mtlx, noInk);
+
+    float3 sigmaT_e = stack.epi.sigmaA + stack.epi.sigmaS * (1.0 - stack.epi.g);
+    float3 sigmaT_d = stack.der.sigmaA + stack.der.sigmaS * (1.0 - stack.der.g);
+    float3 sigmaT_s = stack.sub.sigmaA + stack.sub.sigmaS * (1.0 - stack.sub.g);
+    float3 tau_e = sigmaT_e * stack.epi.thickness;
+    float3 tau_d = sigmaT_d * stack.der.thickness;
+    float3 tau_s = sigmaT_s * stack.sub.thickness;
+    float3 totalTau = max(tau_e + tau_d + tau_s, float3(1e-6));
+    float3 skinAlbedo = (tau_e * layerAlbedo(stack.epi)
+                       + tau_d * layerAlbedo(stack.der)
+                       + tau_s * layerAlbedo(stack.sub)) / totalTau;
+
+    // Per-channel effective mean free path d = 1/σ_t. Use the dermis as
+    // the dominant diffusion medium (where most of the lateral spread
+    // happens); a fancier model would weight a multi-layer profile.
+    float3 d_dermis = 1.0 / max(sigmaT_d, float3(1e-6));
+    float3 R = burleyDiffusionProfile(max(r_mm, 1e-3), d_dermis);
+
+    float3 response = float3(0.0);
+    float n_wo = max(wo.z, 0.0);
+    float n_wi = max(wi.z, 0.0);
+    if (n_wi > 0.0 && n_wo > 0.0)
+    {
+        float Fi = fresnelSchlick(n_wi, mtlx.layer_top_ior);
+        float Fo = fresnelSchlick(n_wo, mtlx.layer_top_ior);
+        float3 diff = (1.0 - Fi) * (1.0 - Fo) * skinAlbedo * R / PI;
+        float3 Nz = float3(0.0, 0.0, 1.0);
+        float3 spec = evaluateSkinSpecular(
+            Nz, wo, wi, mtlx.skin_bsdf_roughness, mtlx.skin_bsdf_ior
+        );
+        response = (diff + spec) * n_wi;
+    }
+
+    uint outIdx = 16u + cell.y * nTheta + cell.x;
+    toolBuffer[outIdx] = float4(response, 1.0);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 {
     uint2 pixel = dispatchThreadID.xy;
+
+    // BXDF visualizer tool branch. When the host has armed an eval the
+    // dispatch grid threads compute one lobe cell each; the regular
+    // render path is skipped entirely for the frame.
+    uint toolMode = asuint(toolBuffer[0].x);
+    if (toolMode == TOOL_MODE_BXDF)
+    {
+        bxdfEvalThread(pixel);
+        return;
+    }
+    if (toolMode == TOOL_MODE_BSSRDF)
+    {
+        bssrdfEvalThread(pixel);
+        return;
+    }
+
     if (pixel.x >= fc.width || pixel.y >= fc.height)
         return;
 

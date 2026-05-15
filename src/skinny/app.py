@@ -114,6 +114,12 @@ class InputHandler:
         self._zoom_dragging = False
         self._zoom_start_px: tuple[float, float] = (0.0, 0.0)
 
+        # BXDF visualizer pick: armed by the visualizer's "Pick scene
+        # point" button. The next left-click captures the shading frame
+        # and forwards it to `_bxdf_pick_cb`.
+        self._bxdf_pick_armed: bool = False
+        self._bxdf_pick_cb = None
+
         glfw.set_cursor_pos_callback(window, self._on_mouse_move)
         glfw.set_mouse_button_callback(window, self._on_mouse_button)
         glfw.set_scroll_callback(window, self._on_scroll)
@@ -122,11 +128,28 @@ class InputHandler:
         self._print_help()
         self._print_param()
 
+    def arm_bxdf_pick(self, callback) -> None:
+        """Arm the next left-click in the viewport for a BXDF scene pick.
+
+        Called from the BXDF visualizer's "Pick scene point" button. The
+        click is consumed (not forwarded to the gizmo / camera), the
+        renderer captures the shading frame on the next frame, and the
+        result is delivered to ``callback(result_dict | None)``.
+        """
+        self._bxdf_pick_armed = True
+        self._bxdf_pick_cb = callback
+
     def _on_mouse_button(self, _win, button, action, _mods):
         if button == glfw.MOUSE_BUTTON_LEFT:
             self._left_down = action == glfw.PRESS
             if action == glfw.PRESS:
                 mx, my = glfw.get_cursor_pos(self.window)
+                if self._bxdf_pick_armed and self._bxdf_pick_cb is not None:
+                    cb = self._bxdf_pick_cb
+                    self._bxdf_pick_armed = False
+                    self._bxdf_pick_cb = None
+                    self.renderer.request_scene_pick(mx, my, cb)
+                    return
                 # Zoom-rect drag overrides the gizmo / camera entirely.
                 if self._zoom_arming:
                     self._zoom_dragging = True
@@ -467,6 +490,7 @@ def main() -> None:
 
     from skinny.control_panel import ControlPanel
     panel = ControlPanel(renderer, input_handler.params)
+    panel._input_handler = input_handler
 
     tk_geom = saved.get("tk_window")
     if isinstance(tk_geom, str):

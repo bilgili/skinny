@@ -558,6 +558,18 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # binding 30: BXDF visualizer output buffer (host-visible
+            # RWStructuredBuffer<float4>). Main pass writes the picked
+            # pixel's HitInfo into slots [0..3]. Future BXDF / BSSRDF eval
+            # writes lobe grids starting at slot 32. Bound for all
+            # pipelines that use this layout; unused by mainImage paths
+            # when pickArmed == 0.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=30,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
         ]
         # Bindings GRAPH_BINDING_BASE..(GRAPH_BINDING_BASE + N - 1): one
         # storage buffer per MaterialX nodegraph compiled into this pipeline.
@@ -862,6 +874,210 @@ class ReadbackBuffer:
     def destroy(self) -> None:
         vk.vkDestroyBuffer(self.ctx.device, self.buffer, None)
         vk.vkFreeMemory(self.ctx.device, self.memory, None)
+
+
+class PreviewPipeline:
+    """Secondary compute pipeline for the Material Graph Editor preview.
+
+    Shares descriptor set 0 with the main `ComputePipeline` (passed in by
+    the renderer) so all material data — bindings 0/4/13/14/15/16/19,
+    plus per-graph SSBOs starting at `GRAPH_BINDING_BASE` — is visible
+    without duplicating writes. Owns one extra set (set 1) carrying the
+    preview output `RWTexture2D` and a push-constants range carrying the
+    chosen material + primitive + camera.
+
+    Keep `_PUSH_FMT` in sync with `preview_pass.slang::PreviewPushConsts`.
+    """
+
+    _PUSH_FMT = "<IIIIffff"  # uint matId, graphId, primKind, size + float yaw, pitch, distance, fovTan
+    _PUSH_SIZE = 32
+
+    def __init__(
+        self,
+        ctx: VulkanContext,
+        shader_dir: Path,
+        main_descriptor_set_layout,
+        output_image_view,
+    ) -> None:
+        self.ctx = ctx
+        self.shader_dir = shader_dir
+        self.entry_module = "preview_pass"
+        self.entry_point = "previewMain"
+        self._main_set_layout = main_descriptor_set_layout
+        self._output_view = output_image_view
+
+        self._spirv_path = self._compile_slang()
+        self._shader_module = self._create_shader_module()
+        self.set1_layout = self._create_set1_layout()
+        self.pipeline_layout = self._create_pipeline_layout()
+        self.pipeline = self._create_pipeline()
+        self.descriptor_pool, self.descriptor_set = self._allocate_set1()
+
+    # ── Slang → SPIR-V ───────────────────────────────────────────
+
+    def _build_dir(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "build"
+
+    def _cache_key(self, src: Path, flags: tuple[str, ...]) -> str:
+        h = hashlib.blake2b(digest_size=16)
+        h.update(self.entry_point.encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(src).encode("utf-8"))
+        h.update(b"\0")
+        for flag in flags:
+            h.update(flag.encode("utf-8"))
+            h.update(b"\0")
+        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
+        roots = [self.shader_dir, mtlx_genslang]
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob("*.slang")):
+                h.update(str(path.relative_to(root)).encode("utf-8"))
+                h.update(b"\0")
+                h.update(path.read_bytes())
+                h.update(b"\0")
+        return h.hexdigest()
+
+    def _compile_slang(self) -> Path:
+        src = self.shader_dir / f"{self.entry_module}.slang"
+        out = self.shader_dir / f"{self.entry_module}.spv"
+        slangc = shutil.which("slangc")
+        if slangc is None:
+            raise RuntimeError("slangc not found on PATH — install the Slang compiler")
+        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
+        flags = (
+            "-target", "spirv",
+            "-entry", self.entry_point,
+            "-stage", "compute",
+            "-I", str(self.shader_dir),
+            "-I", str(mtlx_genslang),
+            "-D", "SKINNY_COMPUTE_PIPELINE=1",
+            "-fvk-use-scalar-layout",
+        )
+        cache_dir = self._build_dir() / ComputePipeline._CACHE_DIRNAME
+        key = self._cache_key(src, flags)
+        cached = cache_dir / f"{key}.spv"
+        if cached.exists():
+            shutil.copyfile(cached, out)
+            try:
+                cached.touch()
+            except OSError:
+                pass
+            return out
+        cmd = [slangc, str(src), *flags, "-o", str(out)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Slang compilation failed:\n{result.stderr}")
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(out, cached)
+        except OSError:
+            pass
+        return out
+
+    def _create_shader_module(self):
+        spirv_bytes = self._spirv_path.read_bytes()
+        create_info = vk.VkShaderModuleCreateInfo(
+            codeSize=len(spirv_bytes),
+            pCode=spirv_bytes,
+        )
+        return vk.vkCreateShaderModule(self.ctx.device, create_info, None)
+
+    # ── Set 1 layout / pool / set ────────────────────────────────
+
+    def _create_set1_layout(self):
+        binding = vk.VkDescriptorSetLayoutBinding(
+            binding=0,
+            descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            descriptorCount=1,
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+        )
+        info = vk.VkDescriptorSetLayoutCreateInfo(
+            bindingCount=1,
+            pBindings=[binding],
+        )
+        return vk.vkCreateDescriptorSetLayout(self.ctx.device, info, None)
+
+    def _allocate_set1(self):
+        pool_size = vk.VkDescriptorPoolSize(
+            type=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            descriptorCount=1,
+        )
+        pool_info = vk.VkDescriptorPoolCreateInfo(
+            maxSets=1,
+            poolSizeCount=1,
+            pPoolSizes=[pool_size],
+        )
+        pool = vk.vkCreateDescriptorPool(self.ctx.device, pool_info, None)
+        alloc_info = vk.VkDescriptorSetAllocateInfo(
+            descriptorPool=pool,
+            descriptorSetCount=1,
+            pSetLayouts=[self.set1_layout],
+        )
+        ds = vk.vkAllocateDescriptorSets(self.ctx.device, alloc_info)[0]
+
+        img_info = vk.VkDescriptorImageInfo(
+            sampler=vk.VK_NULL_HANDLE,
+            imageView=self._output_view,
+            imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+        )
+        write = vk.VkWriteDescriptorSet(
+            dstSet=ds,
+            dstBinding=0,
+            descriptorCount=1,
+            descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            pImageInfo=[img_info],
+        )
+        vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
+        return pool, ds
+
+    # ── Pipeline layout / pipeline ───────────────────────────────
+
+    def _create_pipeline_layout(self):
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            offset=0,
+            size=self._PUSH_SIZE,
+        )
+        info = vk.VkPipelineLayoutCreateInfo(
+            setLayoutCount=2,
+            pSetLayouts=[self._main_set_layout, self.set1_layout],
+            pushConstantRangeCount=1,
+            pPushConstantRanges=[push_range],
+        )
+        return vk.vkCreatePipelineLayout(self.ctx.device, info, None)
+
+    def _create_pipeline(self):
+        stage = vk.VkPipelineShaderStageCreateInfo(
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            module=self._shader_module,
+            pName="main",
+        )
+        info = vk.VkComputePipelineCreateInfo(
+            stage=stage,
+            layout=self.pipeline_layout,
+        )
+        pipelines = vk.vkCreateComputePipelines(
+            self.ctx.device, vk.VK_NULL_HANDLE, 1, [info], None,
+        )
+        return pipelines[0]
+
+    @staticmethod
+    def pack_push(matId: int, graphId: int, primKind: int, size: int,
+                  yaw: float, pitch: float, distance: float, fovTan: float) -> bytes:
+        return struct.pack(
+            PreviewPipeline._PUSH_FMT,
+            int(matId), int(graphId), int(primKind), int(size),
+            float(yaw), float(pitch), float(distance), float(fovTan),
+        )
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
+        vk.vkDestroyPipeline(self.ctx.device, self.pipeline, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self.pipeline_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self.set1_layout, None)
+        vk.vkDestroyShaderModule(self.ctx.device, self._shader_module, None)
 
 
 class HudOverlay:
@@ -1437,3 +1653,67 @@ class StorageBuffer:
         vk.vkFreeMemory(self.ctx.device, self.memory, None)
         vk.vkDestroyBuffer(self.ctx.device, self.staging_buffer, None)
         vk.vkFreeMemory(self.ctx.device, self.staging_memory, None)
+
+
+class HostStorageBuffer:
+    """Host-visible + coherent storage buffer usable directly as an SSBO.
+
+    Skips the device-local + staging round-trip of ``StorageBuffer`` — the
+    GPU writes (or reads) the same memory the CPU maps. Performance is
+    worse than a device-local buffer for hot-path traffic, but the BXDF
+    visualizer only writes a few dozen bytes per pick, so the simplicity
+    wins. Used at descriptor binding 30 (toolBuffer).
+    """
+
+    def __init__(self, ctx: VulkanContext, size_bytes: int) -> None:
+        self.ctx = ctx
+        self.size = max(int(size_bytes), 16)
+
+        buf_info = vk.VkBufferCreateInfo(
+            size=self.size,
+            usage=vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+        )
+        self.buffer = vk.vkCreateBuffer(ctx.device, buf_info, None)
+
+        reqs = vk.vkGetBufferMemoryRequirements(ctx.device, self.buffer)
+        mem_props = vk.vkGetPhysicalDeviceMemoryProperties(ctx.physical_device)
+        mem_type = UniformBuffer._find_memory_type(
+            reqs.memoryTypeBits,
+            vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            mem_props,
+        )
+        self._alloc_size = reqs.size
+        self.memory = vk.vkAllocateMemory(
+            ctx.device,
+            vk.VkMemoryAllocateInfo(allocationSize=reqs.size, memoryTypeIndex=mem_type),
+            None,
+        )
+        vk.vkBindBufferMemory(ctx.device, self.buffer, self.memory, 0)
+
+        # Persistent map. Host-coherent memory can stay mapped for the
+        # lifetime of the buffer (no flush required). vkMapMemory returns
+        # a _cffi_backend.buffer which supports slice indexing for
+        # read / write but not pointer arithmetic; we use slicing.
+        self._ptr = vk.vkMapMemory(ctx.device, self.memory, 0, self._alloc_size, 0)
+        # Zero on init so first reads don't see garbage.
+        self._ptr[0:self.size] = b"\x00" * self.size
+
+    def write(self, data: bytes, offset: int = 0) -> None:
+        if offset + len(data) > self.size:
+            raise ValueError(
+                f"HostStorageBuffer.write: {offset + len(data)}B > buffer {self.size}B"
+            )
+        self._ptr[offset:offset + len(data)] = bytes(data)
+
+    def read(self, length: int, offset: int = 0) -> bytes:
+        if offset + length > self.size:
+            raise ValueError(
+                f"HostStorageBuffer.read: {offset + length}B > buffer {self.size}B"
+            )
+        return bytes(self._ptr[offset:offset + length])
+
+    def destroy(self) -> None:
+        vk.vkUnmapMemory(self.ctx.device, self.memory)
+        vk.vkDestroyBuffer(self.ctx.device, self.buffer, None)
+        vk.vkFreeMemory(self.ctx.device, self.memory, None)
