@@ -17,10 +17,11 @@ from pathlib import Path
 
 import base64
 
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QApplication, QDockWidget, QMainWindow, QScrollArea, QWidget,
+    QAbstractSpinBox, QApplication, QComboBox, QDockWidget, QLineEdit,
+    QMainWindow, QScrollArea, QTextEdit, QWidget,
 )
 
 import numpy as np
@@ -150,6 +151,43 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             self._saved_settings = {}
         self._restore_session_state()
+
+        # Keys the viewport responds to (camera mode toggle, focus reset,
+        # HUD toggle, free-cam WASDQE). Forwarded from MainWindow when no
+        # text-editing widget is focused.
+        self._viewport_keys = {
+            Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E,
+            Qt.Key_C, Qt.Key_F, Qt.Key_F1, Qt.Key_Space,
+        }
+
+        # Hand initial focus to the render viewport so shortcuts work
+        # without a click first. Defer to the next event-loop tick so the
+        # widget is actually realised.
+        QTimer.singleShot(0, lambda: self.viewport.setFocus(Qt.OtherFocusReason))
+
+    # ── Key forwarding ────────────────────────────────────────────
+
+    def keyPressEvent(self, event) -> None:
+        if self._should_forward_key(event.key()):
+            self.viewport.keyPressEvent(event)
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if self._should_forward_key(event.key()):
+            self.viewport.keyReleaseEvent(event)
+            return
+        super().keyReleaseEvent(event)
+
+    def _should_forward_key(self, key: int) -> bool:
+        if key not in self._viewport_keys:
+            return False
+        # Don't steal letters from text-edit widgets. ComboBox eats
+        # alpha keys for type-ahead search; leave it alone too.
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox)):
+            return False
+        return True
 
     def _stub(self, name: str) -> None:
         self.statusBar().showMessage(f"{name}: not yet ported (Phase 7)", 3000)
