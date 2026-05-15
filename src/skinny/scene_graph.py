@@ -103,6 +103,15 @@ _LIGHT_FLOAT_RANGES: dict[str, tuple[float, float]] = {
     "height":    (0.01, 100.0),
 }
 
+# DomeLight intensity is multiplied with HDR radiance (already bright in
+# physical units), so the same 0-50 spread that suits analytic lights
+# clips the display almost immediately and feels nonlinear. Match the
+# legacy sidebar's "IBL intensity" range.
+_DOME_LIGHT_FLOAT_RANGES: dict[str, tuple[float, float]] = {
+    "intensity": (0.0, 3.0),
+    "exposure":  (-5.0, 15.0),
+}
+
 
 # ─── Builder ────────────────────────────────────────────────────────
 
@@ -132,9 +141,10 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
 
     light_dir_idx = 0
     light_sphere_idx = 0
+    light_env_idx = 0
 
     def _build_node(prim) -> SceneGraphNode:
-        nonlocal light_dir_idx, light_sphere_idx
+        nonlocal light_dir_idx, light_sphere_idx, light_env_idx
 
         path = str(prim.GetPath())
         name = prim.GetName() or path
@@ -158,7 +168,10 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
             _add_light_props(node, prim, time)
             light_sphere_idx += 1
         elif prim.IsA(UsdLux.DomeLight):
+            node.renderer_ref = RendererRef("light_env", light_env_idx)
             _add_light_props(node, prim, time)
+            _add_dome_light_props(node, prim, time)
+            light_env_idx += 1
         elif prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DiskLight):
             _add_light_props(node, prim, time)
         elif _is_shade_material(prim):
@@ -486,7 +499,7 @@ def _classify_shader_input(
 
 
 def _add_light_props(node: SceneGraphNode, prim, time) -> None:
-    from pxr import UsdLux
+    from pxr import Gf, UsdGeom, UsdLux
 
     light_api = UsdLux.LightAPI(prim)
     if not light_api:
@@ -504,18 +517,97 @@ def _add_light_props(node: SceneGraphNode, prim, time) -> None:
                 metadata={},
             ))
 
-    # Scalar light attributes
-    for attr_name, (lo, hi) in _LIGHT_FLOAT_RANGES.items():
+    # Scalar light attributes — DomeLight gets tighter ranges since its
+    # intensity is multiplied with HDR radiance and clips the display fast.
+    is_dome = prim.IsA(UsdLux.DomeLight)
+    ranges = _DOME_LIGHT_FLOAT_RANGES if is_dome else _LIGHT_FLOAT_RANGES
+    for attr_name, (lo, hi) in ranges.items():
         attr = prim.GetAttribute(f"inputs:{attr_name}")
         if attr and attr.HasAuthoredValue():
             val = attr.Get(time)
             if val is not None:
+                v = float(val)
+                # Authored value may exceed the default cap (caustics-grade
+                # KeyLights run at 10k+ intensities). Expand `hi` so the
+                # slider can both display the initial value and let the
+                # user drag past it without losing precision.
+                hi_eff = max(hi, v * 2.0) if v > hi else hi
                 node.properties.append(SceneGraphProperty(
                     name=attr_name, display_name=attr_name,
-                    type_name="float", value=float(val),
+                    type_name="float", value=v,
                     editable=node.renderer_ref is not None,
-                    metadata={"min": lo, "max": hi},
+                    metadata={"min": lo, "max": hi_eff},
                 ))
+
+    # DistantLight direction: expose elevation/azimuth derived from the
+    # prim's rotateXYZ op so users can aim the analytic sun light from
+    # the scene-graph dock. Routes through apply_light_override.
+    if prim.IsA(UsdLux.DistantLight):
+        elevation, azimuth = _distant_light_orientation(prim, time)
+        node.properties.append(SceneGraphProperty(
+            name="elevation", display_name="elevation",
+            type_name="float", value=float(elevation),
+            editable=node.renderer_ref is not None,
+            metadata={"min": -90.0, "max": 90.0, "unit": "degrees"},
+        ))
+        node.properties.append(SceneGraphProperty(
+            name="azimuth", display_name="azimuth",
+            type_name="float", value=float(azimuth),
+            editable=node.renderer_ref is not None,
+            metadata={"min": -180.0, "max": 180.0, "unit": "degrees"},
+        ))
+
+
+def _distant_light_orientation(prim, time) -> tuple[float, float]:
+    """Pull (elevation, azimuth) in degrees from a DistantLight's
+    rotateXYZ xform op. Mirror of ``_sync_default_light_prim``'s author
+    convention (rotX = -elevation, rotY = azimuth).
+    """
+    from pxr import UsdGeom
+    xformable = UsdGeom.Xformable(prim)
+    if not xformable:
+        return 0.0, 0.0
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+            rot = op.Get(time)
+            if rot is None:
+                return 0.0, 0.0
+            return float(-rot[0]), float(rot[1])
+    return 0.0, 0.0
+
+
+def _add_dome_light_props(node: SceneGraphNode, prim, time) -> None:
+    """Append the DomeLight's HDR texture path as an editable
+    ``texture_file`` property. The Qt scene-graph dock renders this with
+    a file picker that calls ``Renderer.apply_dome_light_texture``.
+    Also forces ``color`` read-only — DomeLight tinting is not routed
+    through the renderer (HDR texture × env_intensity drives the look).
+    """
+    from pxr import UsdLux
+
+    dome = UsdLux.DomeLight(prim)
+    if not dome:
+        return
+
+    for p in node.properties:
+        if p.name == "color":
+            p.editable = False
+
+    file_attr = dome.GetTextureFileAttr()
+    asset = file_attr.Get() if file_attr else None
+    asset_path = ""
+    if asset is not None:
+        asset_path = (
+            getattr(asset, "resolvedPath", None)
+            or getattr(asset, "path", None)
+            or ""
+        )
+
+    node.properties.append(SceneGraphProperty(
+        name="texture:file", display_name="texture",
+        type_name="texture_file", value=str(asset_path),
+        editable=True, metadata={},
+    ))
 
 
 def _add_enabled_prop(node: SceneGraphNode, prim, scene, time) -> None:
@@ -654,6 +746,86 @@ def _serialize_value(value: object) -> object:
 
 
 # ─── Lookup ─────────────────────────────────────────────────────────
+
+
+def inject_default_lights(root: SceneGraphNode, default_stage) -> None:
+    """Layer the synthetic ``/Skinny/DefaultLight`` / ``/Skinny/DefaultDome``
+    nodes onto ``root`` so the user can always see + tweak the renderer's
+    direct light and IBL — even when the loaded USD asset authors neither.
+
+    Idempotent: existing synthetic nodes are stripped and re-added so a
+    repeated call refreshes their values. Real USD-authored lights in
+    ``root`` are left alone; we only fill in the gaps (no direct light
+    in the asset ⇒ inject DefaultLight, no dome ⇒ inject DefaultDome).
+    """
+    if default_stage is None:
+        return
+    try:
+        from pxr import Usd, UsdLux
+    except Exception:
+        return
+
+    SYNTH_DIR = "/Skinny/DefaultLight"
+    SYNTH_DOME = "/Skinny/DefaultDome"
+
+    def has_kind(node: SceneGraphNode, ref_kind: str) -> bool:
+        if node.renderer_ref is not None and node.renderer_ref.kind == ref_kind:
+            return True
+        return any(has_kind(c, ref_kind) for c in node.children)
+
+    def strip_synth(node: SceneGraphNode) -> None:
+        node.children = [
+            c for c in node.children if c.path not in (SYNTH_DIR, SYNTH_DOME)
+        ]
+        for c in node.children:
+            strip_synth(c)
+
+    strip_synth(root)
+
+    needs_dir = not has_kind(root, "light_dir")
+    needs_dome = not has_kind(root, "light_env")
+    if not needs_dir and not needs_dome:
+        return
+
+    time = Usd.TimeCode.Default()
+    light_dir_idx = _max_ref_index(root, "light_dir") + 1
+    light_env_idx = _max_ref_index(root, "light_env") + 1
+
+    for prim in default_stage.Traverse():
+        if not prim.IsActive() or prim.IsAbstract():
+            continue
+        path = str(prim.GetPath())
+        if needs_dir and path == SYNTH_DIR and prim.IsA(UsdLux.DistantLight):
+            node = SceneGraphNode(
+                path=path, name=prim.GetName(),
+                type_name=prim.GetTypeName(),
+                renderer_ref=RendererRef("light_dir", light_dir_idx),
+            )
+            _add_light_props(node, prim, time)
+            root.children.append(node)
+            light_dir_idx += 1
+        elif needs_dome and path == SYNTH_DOME and prim.IsA(UsdLux.DomeLight):
+            node = SceneGraphNode(
+                path=path, name=prim.GetName(),
+                type_name=prim.GetTypeName(),
+                renderer_ref=RendererRef("light_env", light_env_idx),
+            )
+            _add_light_props(node, prim, time)
+            _add_dome_light_props(node, prim, time)
+            root.children.append(node)
+            light_env_idx += 1
+
+
+def _max_ref_index(node: SceneGraphNode, kind: str) -> int:
+    best = -1
+    if node.renderer_ref is not None and node.renderer_ref.kind == kind:
+        if node.renderer_ref.index > best:
+            best = node.renderer_ref.index
+    for c in node.children:
+        v = _max_ref_index(c, kind)
+        if v > best:
+            best = v
+    return best
 
 
 def inject_renderer_camera(

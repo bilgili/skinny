@@ -176,7 +176,8 @@
       "Bash(echo \"build exit=$? size=$\\(stat -c%s build/main_pass.spv || stat -f%z build/main_pass.spv\\)\")",
       "Bash(spirv-dis build/main_pass.spv)",
       "Bash(where slangc *)",
-      "Bash(xargs grep -l \"preview\\\\|viewport\\\\|debug\\\\|second\")"
+      "Bash(xargs grep -l \"preview\\\\|viewport\\\\|debug\\\\|second\")",
+      "Bash(git push *)"
     ]
   }
 }

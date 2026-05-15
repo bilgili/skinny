@@ -787,6 +787,10 @@ class Renderer:
         # scene graph editor.
         self._default_light_stage = None
         self._default_light_prim = None
+        self._default_dome_prim = None
+        # Set when a USD model is loaded so HDR edits can mutate the
+        # source DomeLight prim's ``inputs:texture:file`` attribute.
+        self._usd_stage = None
         self._init_default_light_stage()
         self._update_light()
 
@@ -821,6 +825,9 @@ class Renderer:
         # through the SSS estimator; this lets the user rebalance direct vs.
         # indirect contribution.
         self.env_intensity = 0.5
+        # Now that env state is final, mirror it into the default dome prim
+        # so the scene graph shows the current HDR + intensity.
+        self._sync_default_dome_prim()
 
         # Furnace / energy-conservation probe. In this mode the shader swaps
         # the head for a unit sphere, clamps the environment to white (L=1)
@@ -1195,6 +1202,7 @@ class Renderer:
         self._mesh_sources.clear()
         self.model_index = -1
         self._usd_scene = None
+        self._usd_stage = None
         self._scene_graph = None
         self._usd_model_index = -1
         self._usd_bake_done = None
@@ -1302,6 +1310,9 @@ class Renderer:
                 path, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
                 keep_stage=True,
             )
+            # Keep the stage around so scene-graph edits (DomeLight HDR
+            # path, etc.) can mutate USD prim attrs as the source of truth.
+            self._usd_stage = stage
             # Build scene graph here in the background thread while we
             # have exclusive access to the stage — avoids GIL conflicts
             # with GLFW poll_events on the main thread.
@@ -1653,9 +1664,9 @@ class Renderer:
 
     def _init_default_light_stage(self) -> None:
         """Create an anonymous in-memory stage with /Skinny/DefaultLight as a
-        UsdLuxDistantLight. The prim mirrors the renderer's elevation/
-        azimuth/intensity/color state so the scene graph editor treats it
-        identically to imported USD lights.
+        UsdLuxDistantLight and /Skinny/DefaultDome as a UsdLuxDomeLight.
+        Both prims mirror the renderer's current state so the scene graph
+        editor treats them identically to imported USD lights.
         """
         try:
             from pxr import Sdf, Usd, UsdGeom, UsdLux
@@ -1667,12 +1678,42 @@ class Renderer:
             UsdGeom.SetStageMetersPerUnit(stage, 1.0)
             xf = UsdGeom.Xform.Define(stage, "/Skinny")
             light = UsdLux.DistantLight.Define(stage, "/Skinny/DefaultLight")
+            dome = UsdLux.DomeLight.Define(stage, "/Skinny/DefaultDome")
             stage.SetDefaultPrim(xf.GetPrim())
             self._default_light_stage = stage
             self._default_light_prim = light.GetPrim()
+            self._default_dome_prim = dome.GetPrim()
         except Exception:
             self._default_light_stage = None
             self._default_light_prim = None
+            self._default_dome_prim = None
+
+    def _sync_default_dome_prim(self) -> None:
+        """Push current env state onto /Skinny/DefaultDome.
+
+        Writes the resolved HDR path of ``self.environments[self.env_index]``
+        into ``inputs:texture:file`` (empty asset for procedural envs) and
+        ``self.env_intensity`` into ``inputs:intensity``. Keeps the USD
+        prim as the source of truth surfaced in the scene graph.
+        """
+        prim = self._default_dome_prim
+        if prim is None:
+            return
+        try:
+            from pxr import Sdf, UsdLux
+            dome = UsdLux.DomeLight(prim)
+            env = (
+                self.environments[self.env_index]
+                if 0 <= self.env_index < len(self.environments)
+                else None
+            )
+            env_path = getattr(env, "path", None) if env is not None else None
+            asset_path = str(env_path) if env_path is not None else ""
+            dome.CreateTextureFileAttr().Set(Sdf.AssetPath(asset_path))
+            dome.CreateTextureFormatAttr().Set("latlong")
+            dome.CreateIntensityAttr().Set(float(self.env_intensity))
+        except Exception:
+            pass
 
     def _sync_default_light_prim(self) -> None:
         """Push current scalar light state onto the in-memory prim attrs."""
@@ -2692,6 +2733,10 @@ class Renderer:
             # Inject /Skinny/MainCamera *after* _apply_camera_override so the
             # node snapshot captures any authored thick lens.
             self._refresh_camera_node()
+            # Layer synthetic /Skinny/DefaultLight + /Skinny/DefaultDome onto
+            # the loaded graph so the user can still see the renderer-owned
+            # direct light + IBL when the USD asset omits them.
+            self._inject_default_lights_into_scene_graph()
             if scene.mm_per_unit != 120.0:
                 self.mm_per_unit = scene.mm_per_unit
             if scene.instances:
@@ -3364,50 +3409,75 @@ class Renderer:
         self, light_type: str, light_index: int, key: str, value: object,
     ) -> None:
         """Mutate a scene light parameter and re-upload."""
-        if self._usd_scene is None:
+        if light_type == "env":
+            if key == "intensity":
+                self.env_intensity = float(value)
+                prim = self._find_dome_light_prim(light_index)
+                if prim is not None:
+                    try:
+                        from pxr import UsdLux
+                        UsdLux.DomeLight(prim).CreateIntensityAttr().Set(
+                            float(value),
+                        )
+                    except Exception:
+                        pass
+                self._material_version += 1
             return
 
         if light_type == "dir":
-            lights = self._usd_scene.lights_dir
-            if light_index < 0 or light_index >= len(lights):
-                return
-            light = lights[light_index]
+            # Renderer state is the source of truth for the analytic
+            # direct light. Mirror the change onto the matching USD
+            # ``LightDir`` entry only when one actually exists (real USD
+            # asset light); synthesised ``/Skinny/DefaultLight`` has no
+            # entry and still must be editable.
+            has_usd_light = (
+                self._usd_scene is not None
+                and 0 <= light_index < len(self._usd_scene.lights_dir)
+            )
             if key == "color":
                 color = _light_value_to_vec3(value)
-                intensity = float(np.linalg.norm(light.radiance))
-                if intensity < 1e-6:
-                    intensity = 1.0
-                light.radiance = (color * intensity).astype(np.float32)
                 self.light_color_r = float(color[0])
                 self.light_color_g = float(color[1])
                 self.light_color_b = float(color[2])
+                if has_usd_light:
+                    intensity = self.light_intensity
+                    light = self._usd_scene.lights_dir[light_index]
+                    light.radiance = (color * intensity).astype(np.float32)
             elif key == "intensity":
-                color = light.radiance.copy()
-                norm = float(np.linalg.norm(color))
-                if norm > 1e-6:
-                    color = color / norm
-                light.radiance = (color * float(value)).astype(np.float32)
                 self.light_intensity = float(value)
+                if has_usd_light:
+                    color = np.array([
+                        self.light_color_r,
+                        self.light_color_g,
+                        self.light_color_b,
+                    ], np.float32)
+                    light = self._usd_scene.lights_dir[light_index]
+                    light.radiance = (color * float(value)).astype(np.float32)
+            elif key == "elevation":
+                self.light_elevation = float(value)
+            elif key == "azimuth":
+                self.light_azimuth = float(value)
             self._update_light()
             self._material_version += 1
+            return
 
-        elif light_type == "sphere":
+        if self._usd_scene is None:
+            return
+
+        if light_type == "sphere":
             lights = self._usd_scene.lights_sphere
             if light_index < 0 or light_index >= len(lights):
                 return
             light = lights[light_index]
             if key == "color":
                 color = _light_value_to_vec3(value)
-                intensity = float(np.linalg.norm(light.radiance))
-                if intensity < 1e-6:
-                    intensity = 1.0
-                light.radiance = (color * intensity).astype(np.float32)
+                light.color = color.astype(np.float32)
+                light.radiance = (color * float(light.intensity)).astype(np.float32)
             elif key == "intensity":
-                color = light.radiance.copy()
-                norm = float(np.linalg.norm(color))
-                if norm > 1e-6:
-                    color = color / norm
-                light.radiance = (color * float(value)).astype(np.float32)
+                light.intensity = float(value)
+                light.radiance = (
+                    np.asarray(light.color, np.float32) * float(value)
+                ).astype(np.float32)
             elif key == "radius":
                 light.radius = float(value)
             self._upload_sphere_lights(lights)
@@ -3435,17 +3505,25 @@ class Renderer:
 
     def apply_node_enabled(self, kind: str, index: int, enabled: bool) -> None:
         """Toggle a single scene node on/off and re-upload affected GPU buffers."""
+        enabled = bool(enabled)
+        # Renderer-owned toggles that don't need a loaded USD scene.
+        if kind == "light_dir":
+            scene = self._usd_scene
+            if scene is not None and 0 <= index < len(scene.lights_dir):
+                scene.lights_dir[index].enabled = enabled
+            else:
+                # Synthesised default direct light: drives the
+                # renderer-owned direct_light_index toggle (0=On, 1=Off).
+                self.direct_light_index = 0 if enabled else 1
+            self._material_version += 1
+            return
         if self._usd_scene is None:
             return
-        enabled = bool(enabled)
         scene = self._usd_scene
         if kind == "instance":
             if 0 <= index < len(scene.instances):
                 scene.instances[index].enabled = enabled
                 self._upload_usd_scene()
-        elif kind == "light_dir":
-            if 0 <= index < len(scene.lights_dir):
-                scene.lights_dir[index].enabled = enabled
         elif kind == "light_sphere":
             if 0 <= index < len(scene.lights_sphere):
                 scene.lights_sphere[index].enabled = enabled
@@ -3872,6 +3950,86 @@ class Renderer:
         self.zoom_rect = [0.0, 0.0, 1.0, 1.0]
         self._material_version += 1
 
+    def apply_dome_light_texture(self, env_index: int, path: str) -> bool:
+        """Swap the HDR texture for the DomeLight at ``env_index`` and
+        update both the env library slot and the source USD prim
+        attribute. Mirrors `apply_camera_lens_file`'s pattern.
+
+        Returns True on success.
+        """
+        from pathlib import Path as _Path
+        from skinny.environment import make_environment_from_path
+        p = _Path(path)
+        if not p.is_file():
+            print(f"[skinny] HDR load failed: {p} not found", flush=True)
+            return False
+        try:
+            env = make_environment_from_path(p)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[skinny] HDR load failed: {exc}", flush=True)
+            return False
+
+        if 0 <= env_index < len(self.environments):
+            self.environments[env_index] = env
+        else:
+            self.environments.append(env)
+            env_index = len(self.environments) - 1
+        self.env_index = env_index
+        # Invalidate the env-upload cache so the texture genuinely
+        # re-uploads. `_ensure_env_uploaded` keys on (env_index, furnace)
+        # and short-circuits on a hit — replacing the slot at the same
+        # index would otherwise leave the previous HDR on the GPU.
+        self._last_env_index = (-1, -1)
+
+        # Mirror the change onto the source USD DomeLight prim so the
+        # scene-graph view stays in sync with the actual env.
+        prim = self._find_dome_light_prim(env_index)
+        if prim is not None:
+            try:
+                from pxr import Sdf, UsdLux
+                dome = UsdLux.DomeLight(prim)
+                dome.CreateTextureFileAttr().Set(Sdf.AssetPath(str(p)))
+                dome.CreateTextureFormatAttr().Set("latlong")
+            except Exception:
+                pass
+
+        # Upload the new HDR straight away. `_ensure_env_uploaded` reads
+        # from `self.scene.environment`, which is rebuilt on the next
+        # `update()` tick — for this in-flight swap we have the bytes in
+        # hand, so upload them directly to avoid a one-frame lag.
+        try:
+            self.env_image.upload_sync(env.data)
+            self._last_env_index = (int(env_index), int(self.furnace_index))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[skinny] env upload failed for {p.name}: {exc}")
+        # Bump the scene-graph version so the dock repopulates with the
+        # new texture path on its next tick.
+        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
+        self._material_version += 1
+        return True
+
+    def _find_dome_light_prim(self, env_index: int):
+        """Return the ``env_index``-th UsdLuxDomeLight prim across the
+        active USD stages (loaded model stage first, then the synthesised
+        default stage). Returns None if not found.
+        """
+        try:
+            from pxr import UsdLux
+        except Exception:
+            return None
+        idx = 0
+        for stage in (self._usd_stage, self._default_light_stage):
+            if stage is None:
+                continue
+            for prim in stage.Traverse():
+                if not prim.IsActive() or prim.IsAbstract():
+                    continue
+                if prim.IsA(UsdLux.DomeLight):
+                    if idx == env_index:
+                        return prim
+                    idx += 1
+        return None
+
     def apply_camera_lens_file(self, path: str) -> bool:
         """Load a `.usda` lens definition and attach it to the active
         camera, replacing any current lens stack. The file may be a
@@ -3991,6 +4149,20 @@ class Renderer:
             return
         from skinny.scene_graph import inject_renderer_camera
         inject_renderer_camera(self._scene_graph, self.camera, self.camera_mode)
+
+    def _inject_default_lights_into_scene_graph(self) -> None:
+        """Append synthetic ``/Skinny/DefaultLight`` / ``/Skinny/DefaultDome``
+        nodes when the loaded scene graph lacks a direct light or dome.
+        Keeps the renderer's built-in light + IBL editable from the dock.
+        """
+        if self._scene_graph is None or self._default_light_stage is None:
+            return
+        # Refresh the default dome prim from current env state before we
+        # mirror it into the scene graph.
+        self._sync_default_dome_prim()
+        from skinny.scene_graph import inject_default_lights
+        inject_default_lights(self._scene_graph, self._default_light_stage)
+        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
         # Bump the version so scene_graph_window.tick() repopulates its tree
         # — the graph object itself is mutated in place, so an `id()`
         # comparison alone wouldn't trigger a redraw.
@@ -5530,5 +5702,15 @@ class Renderer:
         self.gizmo_segments_buffer.destroy()
         self.lens_elements_buffer.destroy()
         self.lens_pupil_buffer.destroy()
+        self.tool_buffer.destroy()
+        if getattr(self, "_preview_pipeline", None) is not None:
+            self._preview_pipeline.destroy()
+            self._preview_pipeline = None
+        if getattr(self, "_preview_readback", None) is not None:
+            self._preview_readback.destroy()
+            self._preview_readback = None
+        if getattr(self, "_preview_image", None) is not None:
+            self._preview_image.destroy()
+            self._preview_image = None
         if self.pipeline is not None:
             self.pipeline.destroy()

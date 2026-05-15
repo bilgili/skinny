@@ -29,6 +29,7 @@ class Environment:
     name: str
     _data: np.ndarray | None = field(default=None, repr=False)
     _loader: Callable[[], np.ndarray] | None = field(default=None, repr=False)
+    path: Path | None = None
 
     @property
     def data(self) -> np.ndarray:
@@ -261,7 +262,9 @@ def load_environments(hdr_dir: Path | None = None) -> list[Environment]:
     for ext in sorted(_HDR_EXTS):
         candidates.extend(hdr_dir.glob(f"*{ext}"))
     for path in sorted(candidates, key=lambda p: p.name.lower()):
-        envs.append(Environment(name=path.stem, _loader=_make_hdr_loader(path)))
+        envs.append(Environment(
+            name=path.stem, _loader=_make_hdr_loader(path), path=path,
+        ))
         print(f"[skinny] found HDR: {path.name} (lazy)")
 
     return envs
@@ -273,4 +276,4 @@ def make_environment_from_path(path: Path) -> Environment:
     Used by the runtime "Load HDR…" picker in the UI to add HDR files
     that live outside the default ``hdrs/`` directory.
     """
-    return Environment(name=path.stem, _loader=_make_hdr_loader(path))
+    return Environment(name=path.stem, _loader=_make_hdr_loader(path), path=path)

@@ -179,10 +179,17 @@ class LightSphere:
     radius: float
     radiance: np.ndarray  # (3,) float32, color × intensity in linear HDR
     enabled: bool = True
+    # Authored chromaticity + scalar intensity kept alongside the combined
+    # `radiance` so the scene-graph editor can adjust either independently
+    # without losing the other (radiance alone collapses the color/intensity
+    # split). ``radiance`` stays the source of truth at render time.
+    color: np.ndarray = field(default_factory=lambda: np.ones(3, np.float32))
+    intensity: float = 1.0
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, np.float32).reshape(3)
         self.radiance = np.asarray(self.radiance, np.float32).reshape(3)
+        self.color = np.asarray(self.color, np.float32).reshape(3)
 
 
 @dataclass
