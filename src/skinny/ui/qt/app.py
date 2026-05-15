@@ -15,17 +15,17 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QMainWindow, QScrollArea, QWidget,
 )
 
-from skinny.debug_viewport import DebugViewport
 from skinny.renderer import Renderer
 from skinny.ui.build_app_ui import AppCallbacks, build_main_ui
 from skinny.ui.qt.backend import QtTreeBuilder
 from skinny.ui.qt.viewport import RenderViewport
 from skinny.ui.qt.windows.bxdf import BXDFDock
+from skinny.ui.qt.windows.debug_viewport import DebugViewportDock
 from skinny.ui.qt.windows.material_graph import MaterialGraphDock
 from skinny.ui.qt.windows.scene_graph import SceneGraphDock
 from skinny.vk_context import VulkanContext
@@ -42,7 +42,9 @@ class MainWindow(QMainWindow):
         self.resize(1600, 900)
 
         # Renderer setup — synchronous on main thread (no per-user sessions
-        # to worry about in the desktop entry).
+        # to worry about in the desktop entry). Headless mode: no GLFW
+        # window, no surface, no swapchain. DebugViewport renders to an
+        # offscreen image and Qt blits it.
         self.ctx = VulkanContext(
             window=None, width=1280, height=720, gpu_preference=gpu_pref,
         )
@@ -62,12 +64,9 @@ class MainWindow(QMainWindow):
         self.viewport = RenderViewport(self.renderer, parent=self)
         self.setCentralWidget(self.viewport)
 
-        # Debug viewport: standalone GLFW window opened on demand. GLFW is
-        # initialised lazily on first open so users who never click the
-        # button pay nothing.
-        self._debug_viewport: DebugViewport | None = None
-        self._glfw_initialised: bool = False
-        self._debug_timer: QTimer | None = None
+        # Debug viewport: embedded dock built on first open. Renders into
+        # an offscreen Vulkan image and blits via QImage.
+        self._debug_dock: DebugViewportDock | None = None
 
         # Status bar.
         sb = self.statusBar()
@@ -131,80 +130,39 @@ class MainWindow(QMainWindow):
         self._material_graph_dock.show()
         self._material_graph_dock.raise_()
 
-    def _ensure_debug_viewport(self) -> DebugViewport:
-        """Lazy-init GLFW + DebugViewport on first request."""
-        if self._debug_viewport is not None:
-            return self._debug_viewport
-        if not self._glfw_initialised:
-            import glfw
-            if not glfw.init():
-                raise RuntimeError("Failed to init GLFW for debug viewport")
-            self._glfw_initialised = True
-        shader_dir = Path(__file__).resolve().parents[1].parent / "shaders"
-        self._debug_viewport = DebugViewport(
-            vk_ctx=self.ctx, shader_dir=shader_dir,
+    def _ensure_debug_dock(self) -> DebugViewportDock:
+        if self._debug_dock is not None:
+            return self._debug_dock
+        self._debug_dock = DebugViewportDock(
+            ctx=self.ctx, renderer=self.renderer,
+            main_lock=self.viewport._render_lock, parent=self,
         )
-        self._debug_viewport.attach_renderer(self.renderer)
-        self.renderer.debug_viewport = self._debug_viewport
-        # Drive update + render + glfw.poll_events on a Qt timer. 33ms (~30Hz)
-        # is enough for a debug overlay and keeps the render-thread Vulkan
-        # work uncontended for as much wall-clock as possible.
-        self._debug_timer = QTimer(self)
-        self._debug_timer.setInterval(33)
-        self._debug_timer.timeout.connect(self._debug_tick)
-        self._debug_timer.start()
-        return self._debug_viewport
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._debug_dock)
+        return self._debug_dock
 
     def _toggle_debug_viewport(self) -> None:
         try:
-            dv = self._ensure_debug_viewport()
+            dock = self._ensure_debug_dock()
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"Debug viewport unavailable: {exc}", 5000)
             return
-        dv.toggle()
+        if dock.isVisible():
+            dock.hide()
+        else:
+            dock.show()
+            dock.raise_()
 
     def _set_debug_view(self, which: str) -> None:
-        dv = self._debug_viewport
-        if dv is None:
-            return
-        if not dv.is_open:
-            dv.open()
-        if which == "top":
-            dv.view_top()
-        elif which == "left":
-            dv.view_left()
-        elif which == "back":
-            dv.view_back()
-
-    def _debug_tick(self) -> None:
-        dv = self._debug_viewport
-        if dv is None:
-            return
-        import glfw
-        glfw.poll_events()
-        if not dv.is_open:
-            return
-        # Acquire the main viewport's render lock so GPU work doesn't
-        # interleave with renderer.render_headless() on the render thread.
-        # The debug viewport reads renderer state (camera, mesh transforms)
-        # which the headless render also mutates under that same lock.
-        with self.viewport._render_lock:
-            dv.update(0.033)
-            dv.render(self.renderer)
+        dock = self._ensure_debug_dock()
+        if not dock.isVisible():
+            dock.show()
+        dock._view(which)
 
     def closeEvent(self, event) -> None:
-        if self._debug_timer is not None:
-            self._debug_timer.stop()
         self.viewport.shutdown()
-        if self._debug_viewport is not None:
+        if self._debug_dock is not None:
             try:
-                self._debug_viewport.destroy()
-            except Exception:
-                pass
-        if self._glfw_initialised:
-            try:
-                import glfw
-                glfw.terminate()
+                self._debug_dock.close()
             except Exception:
                 pass
         try:
