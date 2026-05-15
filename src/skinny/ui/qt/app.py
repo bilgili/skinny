@@ -60,9 +60,27 @@ class MainWindow(QMainWindow):
             use_usd_mtlx_plugin=use_usd_mtlx,
         )
 
-        # Central viewport.
+        # Render viewport: hosted in a dock so the user can detach / re-
+        # arrange it alongside the other tool docks. QMainWindow needs a
+        # central widget for the layout machinery; a 1px placeholder is
+        # enough since every visible surface (render + tool docks) is a
+        # QDockWidget.
+        self.setDockNestingEnabled(True)
+        self.setDockOptions(
+            QMainWindow.AllowNestedDocks
+            | QMainWindow.AllowTabbedDocks
+            | QMainWindow.AnimatedDocks,
+        )
+        placeholder = QWidget()
+        placeholder.setFixedSize(0, 0)
+        self.setCentralWidget(placeholder)
+
         self.viewport = RenderViewport(self.renderer, parent=self)
-        self.setCentralWidget(self.viewport)
+        render_dock = QDockWidget("Render", self)
+        render_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        render_dock.setWidget(self.viewport)
+        self.addDockWidget(Qt.RightDockWidgetArea, render_dock)
+        self._render_dock = render_dock
 
         # Debug viewport: embedded dock built on first open. Renders into
         # an offscreen Vulkan image and blits via QImage.
@@ -105,6 +123,13 @@ class MainWindow(QMainWindow):
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         dock.setWidget(scroll)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self._sidebar_dock = dock
+
+        # Bias the initial split: render gets the lion's share of width,
+        # controls sit at 360px.
+        self.resizeDocks(
+            [dock, self._render_dock], [380, 1200], Qt.Horizontal,
+        )
 
     def _stub(self, name: str) -> None:
         self.statusBar().showMessage(f"{name}: not yet ported (Phase 7)", 3000)
