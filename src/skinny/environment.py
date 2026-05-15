@@ -212,17 +212,43 @@ def _resize_equirect(img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(rgba[ys][:, xs].astype(np.float32))
 
 
+# File extensions we recognise as equirectangular HDR environments.
+# .hdr is decoded in-tree (Radiance RGBE); the rest are routed through
+# imageio[freeimage] which handles .exr / .pfm / etc.
+_HDR_EXTS = {".hdr", ".exr", ".pfm"}
+
+
+def _load_via_imageio(path: Path) -> np.ndarray:
+    """Decode any HDR format imageio[freeimage] can read into (H, W, 3)
+    float32 linear RGB.
+    """
+    import imageio.v3 as iio
+    arr = iio.imread(str(path))
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    if arr.shape[2] == 4:
+        arr = arr[..., :3]
+    return arr
+
+
 def _make_hdr_loader(path: Path) -> Callable[[], np.ndarray]:
     def loader() -> np.ndarray:
-        raw = _load_radiance_hdr(path)
+        ext = path.suffix.lower()
+        if ext == ".hdr":
+            raw = _load_radiance_hdr(path)
+        else:
+            raw = _load_via_imageio(path)
         return _resize_equirect(raw)
     return loader
 
 
 def load_environments(hdr_dir: Path | None = None) -> list[Environment]:
-    """Return built-in presets, then any `.hdr` files found in `hdr_dir`.
+    """Return built-in presets, then any HDR files found in ``hdr_dir``.
 
-    All environments are lazy — data is generated/loaded on first access.
+    Supports ``.hdr``, ``.exr``, ``.pfm``. All environments are lazy —
+    data is generated/loaded on first access.
     """
     envs: list[Environment] = [
         Environment(name=name, _loader=fn) for name, fn in BUILT_IN
@@ -231,8 +257,20 @@ def load_environments(hdr_dir: Path | None = None) -> list[Environment]:
     if hdr_dir is None or not hdr_dir.exists():
         return envs
 
-    for path in sorted(hdr_dir.glob("*.hdr")):
+    candidates: list[Path] = []
+    for ext in sorted(_HDR_EXTS):
+        candidates.extend(hdr_dir.glob(f"*{ext}"))
+    for path in sorted(candidates, key=lambda p: p.name.lower()):
         envs.append(Environment(name=path.stem, _loader=_make_hdr_loader(path)))
         print(f"[skinny] found HDR: {path.name} (lazy)")
 
     return envs
+
+
+def make_environment_from_path(path: Path) -> Environment:
+    """Build a single ``Environment`` from an arbitrary file path.
+
+    Used by the runtime "Load HDR…" picker in the UI to add HDR files
+    that live outside the default ``hdrs/`` directory.
+    """
+    return Environment(name=path.stem, _loader=_make_hdr_loader(path))

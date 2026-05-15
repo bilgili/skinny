@@ -45,6 +45,15 @@ MODEL_FILE_FILTERS: list[tuple[str, str]] = [
 ]
 
 
+HDR_FILE_FILTERS: list[tuple[str, str]] = [
+    ("HDR images",  "*.hdr *.exr *.pfm"),
+    ("Radiance HDR", "*.hdr"),
+    ("OpenEXR",      "*.exr"),
+    ("PFM",          "*.pfm"),
+    ("All files",    "*.*"),
+]
+
+
 # Light RGB and elev/az get dedicated widgets (color picker, direction
 # picker), so we hide their individual sliders from the generic param
 # loop. Same set the old Tk panel used (`control_panel._HIDDEN_PANEL_PATHS`).
@@ -77,6 +86,7 @@ class AppCallbacks:
     debug_view_back: Callable[[], None] = field(default=lambda: None)
     capture_screenshot: Callable[[str], bytes] | None = None
     load_model: Callable[[Path], None] | None = None
+    load_hdr: Callable[[Path], None] | None = None
 
 
 # ── Param grouping ─────────────────────────────────────────────────
@@ -472,6 +482,12 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
                 if p.path in _DEDICATED_WIDGET_PATHS:
                     continue
                 _add_param(ui, renderer, p)
+            if group == "IBL":
+                ui.file_picker(
+                    "Load HDR…", filters=HDR_FILE_FILTERS,
+                    on_pick=cb.load_hdr if cb.load_hdr is not None
+                        else (lambda path: renderer.load_environment_from_path(path)),
+                )
 
     ui.dynamic_section(
         "Materials",
