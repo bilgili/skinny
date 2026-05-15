@@ -53,6 +53,11 @@ class QtTreeBuilder:
         self.parent = parent
         self._pulls: list[Callable[[], None]] = []
         self._dyn: list[_DynSection] = []
+        # Title → QGroupBox map so callers can snapshot / restore section
+        # open-state across runs. Titles aren't strictly unique in the
+        # spec (nested sections), but the sidebar tree happens to use
+        # distinct names; collisions overwrite to the last-built box.
+        self._sections: dict[str, "QGroupBox"] = {}
 
         self._layout = QVBoxLayout(parent)
         self._layout.setContentsMargins(4, 4, 4, 4)
@@ -109,6 +114,31 @@ class QtTreeBuilder:
             for pull in dyn.pulls:
                 _safe_call(pull)
 
+    # ── Section-state snapshot (open/closed) ──────────────────────
+
+    def section_states(self) -> dict[str, bool]:
+        """Return ``{title: expanded}`` for every section the builder
+        knows about. Used by the host to persist accordion state across
+        sessions.
+        """
+        out: dict[str, bool] = {}
+        for title, box in self._sections.items():
+            try:
+                out[title] = bool(box.isChecked())
+            except RuntimeError:
+                continue
+        return out
+
+    def apply_section_states(self, states: dict[str, bool]) -> None:
+        for title, expanded in (states or {}).items():
+            box = self._sections.get(title)
+            if box is None:
+                continue
+            try:
+                box.setChecked(bool(expanded))
+            except RuntimeError:
+                continue
+
     # ── Layout primitives ─────────────────────────────────────────
 
     def _build_section(
@@ -131,6 +161,7 @@ class QtTreeBuilder:
         body.setVisible(node.expanded)
         box.toggled.connect(body.setVisible)
         layout.addWidget(box)
+        self._sections[node.title] = box
 
     def _build_dynamic_section(
         self, layout: QLayout, node: spec.DynamicSection,
@@ -149,6 +180,7 @@ class QtTreeBuilder:
         body.setVisible(node.expanded)
         box.toggled.connect(body.setVisible)
         layout.addWidget(box)
+        self._sections[node.title] = box
 
         dyn = _DynSection(
             node=node, body_widget=body, body_layout=body_layout,

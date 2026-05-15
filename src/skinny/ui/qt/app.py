@@ -322,6 +322,14 @@ class MainWindow(QMainWindow):
         if "debug_viewport" in open_docks:
             self._toggle_debug_viewport()
 
+        # Section open/closed state (sidebar QGroupBox checkboxes).
+        sec_states = data.get("section_states")
+        if isinstance(sec_states, dict):
+            try:
+                self._tree_builder.apply_section_states(sec_states)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Failed to apply section states: %s", exc)
+
         geom_b64 = data.get("qt_geometry")
         state_b64 = data.get("qt_dock_state")
         if isinstance(geom_b64, str):
@@ -358,6 +366,10 @@ class MainWindow(QMainWindow):
             if dock is not None and dock.isVisible():
                 open_docks.append(name)
         out["open_docks"] = open_docks
+        try:
+            out["section_states"] = self._tree_builder.section_states()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to snapshot section states: %s", exc)
         try:
             out["qt_geometry"] = base64.b64encode(
                 bytes(self.saveGeometry()),
