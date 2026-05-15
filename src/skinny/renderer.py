@@ -1212,6 +1212,26 @@ class Renderer:
         self._material_graph_overrides.clear()
         self._mtlx_scene_materials.clear()
 
+    def load_environment_from_path(self, path: Path) -> int:
+        """Load an HDR environment from an arbitrary path and select it.
+
+        Appends a new ``Environment`` to ``self.environments``, bumps
+        ``env_index`` to point at it, and triggers an upload on the next
+        frame via the standard ``_ensure_env_uploaded`` path. Returns the
+        new ``env_index``.
+
+        Supported formats: ``.hdr`` (Radiance), ``.exr``, ``.pfm``.
+        """
+        from skinny.environment import make_environment_from_path
+        env = make_environment_from_path(path)
+        self.environments.append(env)
+        self.env_index = len(self.environments) - 1
+        try:
+            self._ensure_env_uploaded()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[skinny] env upload failed for {path.name}: {exc}")
+        return self.env_index
+
     def load_model_from_path(self, path: Path) -> int:
         """Load a model file (USDA/USDC/USDZ/OBJ), replacing any previous model.
 

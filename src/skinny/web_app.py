@@ -406,6 +406,10 @@ def _build_sidebar_widgets(
         with session._lock:
             session.renderer.load_model_from_path(path)
 
+    def _load_hdr(path):
+        with session._lock:
+            session.renderer.load_environment_from_path(path)
+
     # Track open panes by name so a second sidebar click brings the
     # existing pane into view rather than spawning a duplicate.
     open_panes: dict[str, pn.Card] = {}
@@ -454,6 +458,7 @@ def _build_sidebar_widgets(
         debug_view_back=_debug_view("back"),
         capture_screenshot=_capture,
         load_model=_load_model,
+        load_hdr=_load_hdr,
     )
 
     tree = build_main_ui(session.renderer, callbacks=callbacks)
