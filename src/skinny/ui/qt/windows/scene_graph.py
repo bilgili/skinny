@@ -43,7 +43,10 @@ class SceneGraphDock(QDockWidget):
         # them from the camera each tick so external orbit/zoom shows up.
         self._pulls: list[Callable[[], None]] = []
 
-        splitter = QSplitter(Qt.Horizontal)
+        # Vertical splitter: tree above, property editor below. Matches
+        # the user's request to have the properties laid out below the
+        # tree rather than to the side.
+        splitter = QSplitter(Qt.Vertical)
         self.setWidget(splitter)
 
         # ── Tree ──
