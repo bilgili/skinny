@@ -13,8 +13,8 @@ authors = [
     { name = "a_bil" },
 ]
 dependencies = [
-    "numpy>=1.26",
-    "slangpy>=0.20",
+    "numpy>=2.4.5",
+    "slangpy>=0.41.0",
     "vulkan>=1.3",
     "glfw>=2.7",
     "Pillow>=10.0",
@@ -29,6 +29,8 @@ dependencies = [
     # build satisfy this constraint.
     "MaterialX>=1.39",
     "PySide6>=6.7",
+    "zstandard>=0.25.0",
+    "usd-core>=26.5"
 ]
 
 [project.optional-dependencies]
