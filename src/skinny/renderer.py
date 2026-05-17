@@ -2250,6 +2250,7 @@ class Renderer:
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
+            flags=0x00000002,  # VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
             maxSets=MAX_FRAMES_IN_FLIGHT,
             poolSizeCount=len(pool_sizes),
             pPoolSizes=pool_sizes,

@@ -188,7 +188,8 @@ def save_cached_mesh(
         dt_ms = (time.monotonic() - t0) * 1000
 
         blob_path = CACHE_DIR / f"{cache_key}.skmc"
-        tmp = blob_path.with_suffix(".skmc.tmp")
+        import threading
+        tmp = CACHE_DIR / f"{cache_key}.{threading.get_ident()}.skmc.tmp"
         tmp.write_bytes(compressed)
         os.replace(tmp, blob_path)
 

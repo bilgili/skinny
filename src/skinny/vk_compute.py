@@ -586,21 +586,25 @@ class ComputePipeline:
                 )
             )
 
-        # Per-binding flags — only binding 14 needs PARTIALLY_BOUND. Vulkan
-        # requires the array length to match `bindings`, so all other
-        # bindings get a zero flag.
-        binding_flags = [0] * len(bindings)
-        # Find binding 14's index (it's not always second-to-last after
-        # binding 15 was added) and set the PARTIALLY_BOUND flag there.
-        for i, b in enumerate(bindings):
+        # Only binding 14 (the bindless combined-image-sampler array) needs
+        # UPDATE_AFTER_BIND — that's what pushes the sampler count past
+        # MoltenVK's regular maxPerStageDescriptorSamplers limit (16).
+        # Each other descriptor type would require its own device feature
+        # flag enabled, so we leave them at 0.
+        binding_flags = []
+        for b in bindings:
             if b.binding == 14:
-                binding_flags[i] = vk.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-                break
+                flag = (vk.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+                        | vk.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT)
+            else:
+                flag = 0
+            binding_flags.append(flag)
         flags_info = vk.VkDescriptorSetLayoutBindingFlagsCreateInfo(
             bindingCount=len(binding_flags),
             pBindingFlags=binding_flags,
         )
         layout_info = vk.VkDescriptorSetLayoutCreateInfo(
+            flags=0x00000002,  # VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT
             pNext=flags_info,
             bindingCount=len(bindings),
             pBindings=bindings,
