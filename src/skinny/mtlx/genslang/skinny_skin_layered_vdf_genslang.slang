@@ -14,7 +14,7 @@
 // Phase E side-channels the per-layer state into the renderer's volume
 // pass.
 
-#include "lib/mx_closure_type.glsl"
+import mtlx_closures;
 
 void skinny_skin_layered_vdf(
     ClosureData closureData,

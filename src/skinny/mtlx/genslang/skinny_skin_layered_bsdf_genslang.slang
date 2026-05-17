@@ -16,7 +16,7 @@
 //   - Christensen & Burley "Approximate Reflectance Profiles" (Disney 2015)
 //   - Walter et al. "Microfacet Models for Refraction" (EGSR 2007)
 
-#include "lib/mx_closure_type.glsl"
+import mtlx_closures;
 
 // ─── Local helpers ─────────────────────────────────────────────────
 

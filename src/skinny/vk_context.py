@@ -87,15 +87,22 @@ class VulkanContext:
             apiVersion=vk.VK_MAKE_VERSION(1, 3, 0),
         )
 
+        import sys
         if self._headless:
             extensions = []
         else:
             import glfw
-            extensions = glfw.get_required_instance_extensions()
+            extensions = list(glfw.get_required_instance_extensions())
+
+        flags = 0
+        if sys.platform == "darwin":
+            extensions.append(vk.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+            flags |= vk.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 
         layers = self.VALIDATION_LAYERS if self._enable_validation else []
 
         create_info = vk.VkInstanceCreateInfo(
+            flags=flags,
             pApplicationInfo=app_info,
             enabledExtensionCount=len(extensions),
             ppEnabledExtensionNames=extensions,
@@ -182,12 +189,16 @@ class VulkanContext:
             descriptorBindingPartiallyBound=vk.VK_TRUE,
             shaderSampledImageArrayNonUniformIndexing=vk.VK_TRUE,
             scalarBlockLayout=vk.VK_TRUE,
+            descriptorBindingSampledImageUpdateAfterBind=vk.VK_TRUE,
         )
 
+        import sys
         device_extensions = (
             [] if self._headless
             else [vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME]
         )
+        if sys.platform == "darwin":
+            device_extensions.append(vk.VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)
 
         device_create_info = vk.VkDeviceCreateInfo(
             pNext=indexing_features,
