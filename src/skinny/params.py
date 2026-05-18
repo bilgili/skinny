@@ -61,7 +61,7 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Preset",            "preset_index",                "presets"),
     _disc("Environment",       "env_index",                   "environments"),
     _cont("IBL intensity",     "env_intensity",               0.05, 0.0,  3.0),
-    _cont("mm per unit",       "mm_per_unit",                 5.0,  1.0,  500.0),
+    _cont("mm per unit",       "mm_per_unit",                 5.0,  1.0,  1000.0),
     _disc("Direct light",      "direct_light_index",          "direct_light_modes"),
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Integrator",        "integrator_index",            "integrator_modes"),

@@ -95,7 +95,7 @@ def _classify(p: ParamSpec) -> str:
     ``web_app._group_params`` so Qt and web stay layout-identical.
     """
     path = p.path
-    if path == "preset_index" or path.startswith("mtlx."):
+    if path == "preset_index" or path.startswith("mtlx.") or path in ("tattoo_index", "tattoo_density", "scatter_index"):
         return "Skin"
     if path in ("env_index", "env_intensity"):
         return "IBL"

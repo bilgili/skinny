@@ -227,6 +227,14 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self._debug_dock)
         return self._debug_dock
 
+    def _show_render_viewport(self) -> None:
+        self._render_dock.show()
+        self._render_dock.raise_()
+
+    def _show_sidebar(self) -> None:
+        self._sidebar_dock.show()
+        self._sidebar_dock.raise_()
+
     def _toggle_debug_viewport(self) -> None:
         try:
             dock = self._ensure_debug_dock()
@@ -259,6 +267,8 @@ class MainWindow(QMainWindow):
 
         view_menu = bar.addMenu("&View")
         for label, slot in (
+            ("&Render",           self._show_render_viewport),
+            ("&Controls",         self._show_sidebar),
             ("&Scene Graph",      self._open_scene_graph),
             ("&Material Graph",   self._open_material_graph),
             ("&BXDF Visualizer",  self._open_bxdf),

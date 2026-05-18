@@ -844,10 +844,7 @@ class Renderer:
 
         # Scene-scale bridge between mm-valued skin params and world-unit
         # ray distances. 1 world unit = mm_per_unit millimetres. The SDF
-        # Loomis head is roughly unit-scale (~2 units tall), so with a ~240
-        # mm real head height the default is 120. Exposed as a slider so
-        # mesh heads of other sizes can be dialled in without editing code.
-        self.mm_per_unit = 120.0
+        self.mm_per_unit = 1000.0
 
         import queue as _queue
 
