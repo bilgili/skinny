@@ -42,13 +42,35 @@ HitInfo traceFurnaceSphere(Ray ray)
     return h;
 }
 
+// Flip the shading normal toward the viewer when a ray hits the back side
+// of a thin opaque surface (cloth, leaves, etc.). Without this the flat
+// BSDF's tangent-space wo.z is negative, max(wo.z, 1e-6) clamps NdotV to
+// 1e-6, and the GGX denominator VdotH / (NdotV * NdotH) explodes into
+// fireflies. Refractive materials (opacity < 1, or alpha-blended via an
+// opacity texture without a cutout threshold) need the original orientation
+// to drive entry/exit Fresnel, so they're skipped.
+HitInfo flipBackfaceForOpaque(HitInfo h, float3 rayDir)
+{
+    if (!h.hit) return h;
+    if (dot(h.normal, rayDir) <= 0.0) return h;
+    uint matType = materialTypes[h.materialId] & 0xFFu;
+    if (matType != MATERIAL_TYPE_FLAT) return h;
+    FlatMaterialParams p = flatMaterials[h.materialId];
+    bool refractive = (p.opacity < 1.0) ||
+                      (p.opacityTextureIdx != 0xFFFFFFFFu && p.opacityThreshold <= 0.0);
+    if (refractive) return h;
+    h.normal = -h.normal;
+    return h;
+}
+
 HitInfo traceScene(FrameConstants fc, Ray r)
 {
     if (fc.furnaceMode != 0u)
         return traceFurnaceSphere(r);
-    return (fc.useMesh != 0u)
+    HitInfo h = (fc.useMesh != 0u)
         ? marchHeadMesh(r, fc.numInstances)
         : marchHead(r);
+    return flipBackfaceForOpaque(h, r.direction);
 }
 
 bool isMaterialTransparent(uint materialId)
