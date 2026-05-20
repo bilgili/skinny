@@ -199,8 +199,8 @@ class SkinnySession:
             self.encoder.force_keyframe()
 
     def handle_control(self, action: str) -> None:
-        """Browser-side keyboard shortcuts (C / F / Space / F1) routed
-        through the same lock the camera / render path uses."""
+        """Browser-side keyboard shortcuts (C / F / Space / F1 / L / V / X)
+        routed through the same lock the camera / render path uses."""
         r = self.renderer
         with self._lock:
             if action == "toggle_camera" and hasattr(r, "toggle_camera_mode"):
@@ -209,6 +209,15 @@ class SkinnySession:
                 r.reset_camera()
             elif action == "toggle_hud":
                 r.show_hud = not getattr(r, "show_hud", True)
+            elif action == "toggle_focus_overlay":
+                r.show_focus_overlay = not getattr(r, "show_focus_overlay", False)
+            elif action == "toggle_lens_vignette":
+                r.lens_vignette_debug = not getattr(r, "lens_vignette_debug", False)
+                r._material_version += 1
+            elif action == "reset_zoom_rect" and hasattr(r, "reset_zoom_rect"):
+                r.reset_zoom_rect()
+                if hasattr(r, "set_zoom_drag_overlay"):
+                    r.set_zoom_drag_overlay(None)
         if self.encoder.is_h264:
             self.encoder.force_keyframe()
 

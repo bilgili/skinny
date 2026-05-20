@@ -94,6 +94,13 @@ class RenderViewport(QWidget):
         self._pick_armed: bool = False
         self._pick_cb = None
 
+        # Zoom-rect select. `Z` arms; next left-drag picks a rect (render-
+        # pixel space); release commits as the viewport sub-region. `X`
+        # resets to full frame.
+        self._zoom_arming: bool = False
+        self._zoom_dragging: bool = False
+        self._zoom_start_px: tuple[float, float] = (0.0, 0.0)
+
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
@@ -200,6 +207,17 @@ class RenderViewport(QWidget):
                 )
             self.setFocus(Qt.MouseFocusReason)
             return
+        if event.button() == Qt.LeftButton and self._zoom_arming:
+            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+            if mapped is not None:
+                self._zoom_dragging = True
+                self._zoom_start_px = (float(mapped[0]), float(mapped[1]))
+                with self._render_lock:
+                    self.renderer.set_zoom_drag_overlay(
+                        (mapped[0], mapped[1], mapped[0], mapped[1]),
+                    )
+            self.setFocus(Qt.MouseFocusReason)
+            return
         if event.button() == Qt.LeftButton:
             self._left = True
         elif event.button() == Qt.RightButton:
@@ -210,6 +228,18 @@ class RenderViewport(QWidget):
         self.setFocus(Qt.MouseFocusReason)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._zoom_dragging:
+            pos = event.position()
+            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+            with self._render_lock:
+                if mapped is not None:
+                    self.renderer.commit_zoom_rect(
+                        self._zoom_start_px, (float(mapped[0]), float(mapped[1])),
+                    )
+                self.renderer.set_zoom_drag_overlay(None)
+            self._zoom_dragging = False
+            self._zoom_arming = False
+            return
         if event.button() == Qt.LeftButton:
             self._left = False
         elif event.button() == Qt.RightButton:
@@ -218,6 +248,16 @@ class RenderViewport(QWidget):
             self._middle = False
 
     def mouseMoveEvent(self, event) -> None:
+        if self._zoom_dragging:
+            pos = event.position()
+            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+            if mapped is not None:
+                with self._render_lock:
+                    self.renderer.set_zoom_drag_overlay((
+                        self._zoom_start_px[0], self._zoom_start_px[1],
+                        float(mapped[0]), float(mapped[1]),
+                    ))
+            return
         if self._last_pos is None:
             self._last_pos = (event.position().x(), event.position().y())
             return
@@ -251,6 +291,28 @@ class RenderViewport(QWidget):
                 self._camera.reset()
         elif key == Qt.Key_F1 or key == Qt.Key_Space:
             self.renderer.show_hud = not self.renderer.show_hud
+        elif key == Qt.Key_L:
+            with self._render_lock:
+                self.renderer.show_focus_overlay = not self.renderer.show_focus_overlay
+            print(f"[Focus overlay: {'on' if self.renderer.show_focus_overlay else 'off'}]")
+        elif key == Qt.Key_V:
+            with self._render_lock:
+                self.renderer.lens_vignette_debug = not self.renderer.lens_vignette_debug
+                self.renderer._material_version += 1
+            print(
+                f"[Lens vignette debug: {'on' if self.renderer.lens_vignette_debug else 'off'}"
+                " — green=ray succeeds, red=clipped]"
+            )
+        elif key == Qt.Key_Z:
+            self._zoom_arming = True
+            print("[Zoom: drag a rectangle, release to apply]")
+        elif key == Qt.Key_X:
+            with self._render_lock:
+                self.renderer.reset_zoom_rect()
+                self.renderer.set_zoom_drag_overlay(None)
+            self._zoom_arming = False
+            self._zoom_dragging = False
+            print("[Zoom: reset]")
         else:
             super().keyPressEvent(event)
 

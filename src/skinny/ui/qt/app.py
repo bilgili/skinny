@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
         self._viewport_keys = {
             Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E,
             Qt.Key_C, Qt.Key_F, Qt.Key_F1, Qt.Key_Space,
+            Qt.Key_L, Qt.Key_V, Qt.Key_Z, Qt.Key_X,
         }
 
         # Hand initial focus to the render viewport so shortcuts work

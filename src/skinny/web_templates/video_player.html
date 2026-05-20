@@ -305,6 +305,7 @@
   var SHORTCUT_KEYS = {
     'w': 1, 'a': 1, 's': 1, 'd': 1, 'q': 1, 'e': 1,
     'c': 1, 'f': 1, ' ': 1, 'F1': 1,
+    'l': 1, 'v': 1, 'x': 1,
   };
 
   window.addEventListener('keydown', function(e) {
@@ -315,6 +316,9 @@
       if (k === 'c') sendControl('toggle_camera');
       else if (k === 'f') sendControl('reset_camera');
       else if (k === ' ' || k === 'F1') sendControl('toggle_hud');
+      else if (k === 'l') sendControl('toggle_focus_overlay');
+      else if (k === 'v') sendControl('toggle_lens_vignette');
+      else if (k === 'x') sendControl('reset_zoom_rect');
     }
     keysDown[k] = true;
     e.preventDefault();
