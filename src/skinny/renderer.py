@@ -726,6 +726,50 @@ class FreeCamera(CameraBase):
         ) + self._common_signature()
 
 
+def _write_exr(path: str, rgb: np.ndarray) -> None:
+    """Write float32 RGB to a scanline EXR via the Academy OpenEXR bindings."""
+    import OpenEXR
+
+    rgb = np.ascontiguousarray(rgb, dtype=np.float32)
+    header = {
+        "compression": OpenEXR.ZIP_COMPRESSION,
+        "type": OpenEXR.scanlineimage,
+    }
+    channels = {
+        "R": np.ascontiguousarray(rgb[..., 0]),
+        "G": np.ascontiguousarray(rgb[..., 1]),
+        "B": np.ascontiguousarray(rgb[..., 2]),
+    }
+    OpenEXR.File(header, channels).write(path)
+
+
+def _write_hdr_rgbe(path: str, rgb: np.ndarray) -> None:
+    """Write float32 RGB to a Radiance .hdr (RGBE) file. No external deps."""
+    rgb = np.maximum(rgb, 0.0).astype(np.float32, copy=False)
+    h, w, _ = rgb.shape
+    max_c = rgb.max(axis=2)
+    mantissa, exponent = np.frexp(max_c)
+    safe = max_c > 1e-32
+    scale = np.where(safe, mantissa * 256.0 / np.where(safe, max_c, 1.0), 0.0)
+    rgbe = np.zeros((h, w, 4), dtype=np.uint8)
+    for i in range(3):
+        rgbe[..., i] = np.clip(
+            np.round(rgb[..., i] * scale), 0.0, 255.0,
+        ).astype(np.uint8)
+    rgbe[..., 3] = np.where(
+        safe, np.clip(exponent + 128, 0, 255), 0,
+    ).astype(np.uint8)
+    header = (
+        b"#?RADIANCE\n"
+        b"FORMAT=32-bit_rle_rgbe\n"
+        b"\n"
+        + f"-Y {h} +X {w}\n".encode("ascii")
+    )
+    with open(path, "wb") as fh:
+        fh.write(header)
+        fh.write(rgbe.tobytes())
+
+
 class Renderer:
     """Sets up Vulkan resources and dispatches Slang compute shaders each frame."""
 
@@ -5734,18 +5778,18 @@ class Renderer:
         if fmt in ("exr", "hdr"):
             arr, samples = self.read_accumulation_hdr()
             rgb = (arr[..., :3] / float(samples)).astype(np.float32)
-            import imageio.v3 as iio
+            writer = _write_exr if fmt == "exr" else _write_hdr_rgbe
             ext = ".exr" if fmt == "exr" else ".hdr"
             if hasattr(path_or_file, "write"):
-                # FreeImage backend can't write directly to a file-like
-                # object; round-trip through a tempfile so EXR/HDR works
-                # for the web download path.
+                # OpenEXR.File.write() takes a path, not a file-like
+                # object — round-trip through a tempfile for the web
+                # download path. The RGBE writer takes a path too.
                 import os
                 import tempfile
                 fd, tmp_path = tempfile.mkstemp(suffix=ext)
                 os.close(fd)
                 try:
-                    iio.imwrite(tmp_path, rgb, extension=ext)
+                    writer(tmp_path, rgb)
                     with open(tmp_path, "rb") as fh:
                         path_or_file.write(fh.read())
                 finally:
@@ -5754,7 +5798,7 @@ class Renderer:
                     except OSError:
                         pass
             else:
-                iio.imwrite(str(path_or_file), rgb, extension=ext)
+                writer(str(path_or_file), rgb)
             return
 
         raise ValueError(f"Unsupported screenshot format: {fmt!r}")
