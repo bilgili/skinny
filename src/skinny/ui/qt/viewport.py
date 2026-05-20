@@ -193,6 +193,18 @@ class RenderViewport(QWidget):
 
     def mousePressEvent(self, event) -> None:
         pos = event.position()
+        if (
+            event.button() == Qt.LeftButton
+            and (event.modifiers() & Qt.ShiftModifier)
+        ):
+            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+            if mapped is not None:
+                with self._render_lock:
+                    self.renderer.autofocus_at_pixel(
+                        float(mapped[0]), float(mapped[1]),
+                    )
+            self.setFocus(Qt.MouseFocusReason)
+            return
         if event.button() == Qt.LeftButton and self._pick_armed:
             mapped = self._widget_to_render_pixel(pos.x(), pos.y())
             if mapped is None:

@@ -253,7 +253,32 @@
     }
   }
 
+  function sendAutofocus(rx, ry) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({type: 'autofocus', x: rx, y: ry}));
+    }
+  }
+
+  function clientToRenderPixel(e) {
+    var rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    var sx = canvas.width / rect.width;
+    var sy = canvas.height / rect.height;
+    var rx = (e.clientX - rect.left) * sx;
+    var ry = (e.clientY - rect.top) * sy;
+    if (rx < 0 || ry < 0 || rx >= canvas.width || ry >= canvas.height) {
+      return null;
+    }
+    return [rx, ry];
+  }
+
   canvas.addEventListener('mousedown', function(e) {
+    if (e.button === 0 && e.shiftKey) {
+      var p = clientToRenderPixel(e);
+      if (p !== null) sendAutofocus(p[0], p[1]);
+      e.preventDefault();
+      return;
+    }
     dragging = true;
     dragButton = e.button;
     lastX = e.clientX;

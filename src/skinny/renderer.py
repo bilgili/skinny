@@ -3845,6 +3845,32 @@ class Renderer:
             except Exception as exc:
                 print(f"[skinny] pick callback raised: {exc}")
 
+    # ── Autofocus (thick-lens camera) ───────────────────────────────
+
+    def autofocus_at_pixel(self, mouse_x: float, mouse_y: float) -> None:
+        """Set ``camera.focus_distance`` to the axial scene depth at the
+        pixel under (mouse_x, mouse_y). No-op when no lens is loaded or
+        the ray misses the scene. Result lands asynchronously after the
+        scene pick retires (``poll_pick_result``).
+        """
+        lens = getattr(self.camera, "lens", None)
+        if lens is None or not getattr(lens, "active_elements", None):
+            return
+        self.request_scene_pick(mouse_x, mouse_y, self._on_autofocus_hit)
+
+    def _on_autofocus_hit(self, result: dict | None) -> None:
+        if result is None:
+            return
+        if not hasattr(self.camera, "focus_distance"):
+            return
+        fwd = np.asarray(self.camera.forward(), dtype=np.float32)
+        hit = np.asarray(result["position"], dtype=np.float32)
+        pos = np.asarray(self.camera.position, dtype=np.float32)
+        d = float(np.dot(hit - pos, fwd))
+        d = max(d, 1e-3)
+        self.camera.focus_distance = d
+        self.accum_frame = 0
+
     def request_bssrdf_eval(
         self, params: dict, callback,
     ) -> None:

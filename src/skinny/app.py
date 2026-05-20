@@ -147,6 +147,14 @@ class InputHandler:
         self._bxdf_pick_cb = callback
 
     def _on_mouse_button(self, _win, button, action, _mods):
+        if (
+            button == glfw.MOUSE_BUTTON_LEFT
+            and action == glfw.PRESS
+            and (_mods & glfw.MOD_SHIFT)
+        ):
+            mx, my = glfw.get_cursor_pos(self.window)
+            self.renderer.autofocus_at_pixel(mx, my)
+            return
         if button == glfw.MOUSE_BUTTON_LEFT:
             self._left_down = action == glfw.PRESS
             if action == glfw.PRESS:

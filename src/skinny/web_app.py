@@ -198,6 +198,17 @@ class SkinnySession:
         if self.encoder.is_h264:
             self.encoder.force_keyframe()
 
+    def handle_autofocus(self, x: float, y: float) -> None:
+        """Browser-side Shift+Left-click autofocus. Render-space pixel
+        coords already mapped by the client. Routes through the same
+        lock the render path uses so the pick arms cleanly."""
+        r = self.renderer
+        with self._lock:
+            if hasattr(r, "autofocus_at_pixel"):
+                r.autofocus_at_pixel(x, y)
+        if self.encoder.is_h264:
+            self.encoder.force_keyframe()
+
     def handle_control(self, action: str) -> None:
         """Browser-side keyboard shortcuts (C / F / Space / F1 / L / V / X)
         routed through the same lock the camera / render path uses."""
@@ -385,6 +396,10 @@ class VideoStreamHandler(WebSocketHandler):
             self.session.handle_camera(data.get("action", ""), data)
         elif msg_type == "control":
             self.session.handle_control(data.get("action", ""))
+        elif msg_type == "autofocus":
+            self.session.handle_autofocus(
+                float(data.get("x", 0.0)), float(data.get("y", 0.0)),
+            )
 
     def on_close(self):
         self._streaming = False
