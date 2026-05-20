@@ -219,6 +219,37 @@ int randomWalk(
             ray.origin = h.position + ray.direction * 0.002;
             h = traceScene(fc, ray);
         }
+
+        // Eye walks see sphere-light geometry as emissive: if the bounce
+        // ray hits a sphere light before any mesh, deposit its radiance
+        // here and stop the walk. Light walks skip this — they're already
+        // building paths originating ON a light. Mirrors path.slang:217.
+        if (isEyeWalk && fc.numSphereLights > 0u)
+        {
+            float t_max = h.hit ? h.t : 1e30;
+            NearestSphereHit sph = intersectSphereLights(
+                ray, t_max, fc.numSphereLights);
+            if (sph.idx != 0xFFFFFFFFu)
+            {
+                SphereLight L = sphereLights[sph.idx];
+                // MIS against connectT1's NEE strategy. Delta bounces
+                // (pdfFwdOmega is the unit-omega sentinel = 1.0 set in
+                // the previous iteration) have no NEE counterpart, so
+                // we take the BSDF estimate at full weight.
+                float w_bsdf = 1.0;
+                BDPTVertex prev = path[idx - 1];
+                if (!prev.isDelta && pdfFwdOmega > 0.0)
+                {
+                    float area = 4.0 * PI * L.radius * L.radius;
+                    float pdf_light_sa = (sph.t * sph.t) /
+                        max(sph.cos_y * area, 1e-12);
+                    w_bsdf = powerHeuristic(pdfFwdOmega, pdf_light_sa);
+                }
+                escapedRadiance += throughput * L.radiance * w_bsdf;
+                break;
+            }
+        }
+
         if (!h.hit)
         {
             if (isEyeWalk)

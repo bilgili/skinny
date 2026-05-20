@@ -367,11 +367,32 @@ class PanelTreeBuilder:
         return pn.Column(elev, az)
 
     def _build_file_picker(self, node: spec.FilePicker) -> pn.viewable.Viewable:
-        glob = node.filters[0][1] if node.filters else "*"
+        # Panel's FileSelector takes a single fnmatch glob, so the Qt-style
+        # multi-glob "*.usda *.usdc *.usdz *.obj" matches nothing. Show all
+        # files and validate the extension at pick time instead.
+        allowed_exts: set[str] | None = set()
+        for _label, glob_str in node.filters:
+            for g in glob_str.split():
+                if g in ("*", "*.*"):
+                    allowed_exts = None
+                    break
+                if g.startswith("*"):
+                    ext = g[1:].lower()
+                    if ext:
+                        allowed_exts.add(ext)
+            if allowed_exts is None:
+                break
+
         start = str(node.start_dir) if node.start_dir else None
-        sel = pn.widgets.FileSelector(start, file_pattern=glob, only_files=True)
+        sel = pn.widgets.FileSelector(start, file_pattern="*", only_files=True)
         btn = pn.widgets.Button(name=node.label, button_type="primary")
         status = pn.pane.Alert("", alert_type="info", visible=False)
+
+        # FileSelector is inherently multi-select; trim to one item on change.
+        def _enforce_single(event) -> None:
+            if isinstance(event.new, list) and len(event.new) > 1:
+                sel.value = [event.new[-1]]
+        sel.param.watch(_enforce_single, "value")
 
         def on_click(_event) -> None:
             picked = sel.value
@@ -380,9 +401,16 @@ class PanelTreeBuilder:
                 status.alert_type = "warning"
                 status.visible = True
                 return
+            path = Path(picked[0])
+            if allowed_exts is not None and path.suffix.lower() not in allowed_exts:
+                exts = ", ".join(sorted(allowed_exts))
+                status.object = f"Unsupported file type {path.suffix} (allowed: {exts})"
+                status.alert_type = "warning"
+                status.visible = True
+                return
             try:
-                node.on_pick(Path(picked[0]))
-                status.object = f"Loaded {Path(picked[0]).name}"
+                node.on_pick(path)
+                status.object = f"Loaded {path.name}"
                 status.alert_type = "success"
             except Exception as exc:  # noqa: BLE001
                 status.object = f"Error: {exc}"

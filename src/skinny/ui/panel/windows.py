@@ -282,8 +282,22 @@ def build_bxdf_pane(
     (no scene-pick in the browser); shading frame is fixed to the
     tangent-space +Z normal so the user sees the analytic Lambert + GGX
     response of the material's ``parameter_overrides``.
+
+    Mouse drag on the canvas orbits (yaw/pitch); wheel zooms. Material /
+    angle changes re-run the eval; drag/zoom only re-rasterise the cached
+    grid.
     """
+    from bokeh.plotting import figure
+    from bokeh.models import ColumnDataSource
+    from bokeh.events import PanStart, Pan, MouseWheel
+
     renderer = session.renderer
+
+    LOBE_SIZE = 360
+    PITCH_LIMIT = math.pi * 0.49
+    ORBIT_GAIN = 0.012
+    ZOOM_STEP = 1.15
+    ZOOM_RANGE = (0.1, 8.0)
 
     material_combo = pn.widgets.Select(name="Material", options={})
     theta = pn.widgets.FloatSlider(name="theta", start=0.0, end=89.0, value=30.0)
@@ -291,10 +305,41 @@ def build_bxdf_pane(
     lock = pn.widgets.RadioButtonGroup(
         name="Lock", options=["wi", "wo"], value="wi",
     )
-    image_pane = pn.pane.PNG(None, width=360)
+    zoom_slider = pn.widgets.FloatSlider(
+        name="Zoom", start=ZOOM_RANGE[0], end=ZOOM_RANGE[1], step=0.05, value=1.0,
+    )
     status = pn.pane.Markdown("Select a material.")
 
-    state = {"yaw": math.radians(35.0), "pitch": math.radians(20.0)}
+    state: dict = {
+        "yaw": math.radians(35.0),
+        "pitch": math.radians(20.0),
+        "zoom": 1.0,
+        "dirs": None,
+        "f": None,
+        "drag_sx": None,
+        "drag_sy": None,
+    }
+
+    # Bokeh figure hosting the lobe image. Disable axes/grid/toolbar so it
+    # looks like a plain canvas; we just need its mouse events.
+    img_source = ColumnDataSource(
+        data=dict(image=[np.zeros((LOBE_SIZE, LOBE_SIZE), dtype=np.uint32)]),
+    )
+    fig = figure(
+        width=LOBE_SIZE, height=LOBE_SIZE,
+        x_range=(0, LOBE_SIZE), y_range=(0, LOBE_SIZE),
+        tools="", toolbar_location=None, min_border=0,
+        background_fill_color="#121218", outline_line_color=None,
+    )
+    fig.axis.visible = False
+    fig.grid.visible = False
+    fig.image_rgba("image", x=0, y=0, dw=LOBE_SIZE, dh=LOBE_SIZE, source=img_source)
+
+    def _pil_to_rgba32(img) -> np.ndarray:
+        arr = np.asarray(img.convert("RGBA"), dtype=np.uint8)
+        rgba = arr.view(np.uint32).reshape(arr.shape[:2])
+        # Bokeh's y axis runs bottom-up; flip so the image renders upright.
+        return np.flipud(rgba).copy()
 
     def _scene_materials() -> list:
         scene = getattr(renderer, "_usd_scene", None)
@@ -325,6 +370,17 @@ def build_bxdf_pane(
 
     pn.state.add_periodic_callback(poll, period=1000)
 
+    def _render_from_cache() -> None:
+        dirs = state["dirs"]
+        f = state["f"]
+        if dirs is None or f is None:
+            return
+        img = render_lobe_image(
+            dirs, f, state["yaw"], state["pitch"],
+            size=LOBE_SIZE, log_scale=True, zoom=state["zoom"],
+        )
+        img_source.data = dict(image=[_pil_to_rgba32(img)])
+
     def _eval_and_render() -> None:
         mat_id = material_combo.value
         if mat_id is None or mat_id < 0:
@@ -342,12 +398,9 @@ def build_bxdf_pane(
         )
         lock_mode = 0 if lock.value == "wi" else 1
         dirs, f = eval_grid(locked, lock_mode, 24, 48, params)
-        img = render_lobe_image(
-            dirs, f, state["yaw"], state["pitch"], size=360, log_scale=True,
-        )
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        image_pane.object = buf.getvalue()
+        state["dirs"] = dirs
+        state["f"] = f
+        _render_from_cache()
         name = getattr(mats[mat_id], "name", "?")
         max_f = float(f.max())
         status.object = f"#{mat_id} ({name}) — max f·cosθ = {max_f:.3f} [CPU analytic]"
@@ -355,13 +408,51 @@ def build_bxdf_pane(
     for w in (material_combo, theta, phi, lock):
         w.param.watch(lambda _e: _eval_and_render(), "value")
 
+    def _on_zoom(event) -> None:
+        state["zoom"] = float(event.new)
+        _render_from_cache()
+    zoom_slider.param.watch(_on_zoom, "value")
+
+    # ── Mouse: drag = orbit, wheel = zoom ──────────────────────────
+    def _on_pan_start(event) -> None:
+        state["drag_sx"] = event.sx
+        state["drag_sy"] = event.sy
+
+    def _on_pan(event) -> None:
+        if state["drag_sx"] is None:
+            return
+        dx = event.sx - state["drag_sx"]
+        dy = event.sy - state["drag_sy"]
+        state["drag_sx"] = event.sx
+        state["drag_sy"] = event.sy
+        state["yaw"] += dx * ORBIT_GAIN
+        state["pitch"] = max(
+            -PITCH_LIMIT, min(PITCH_LIMIT, state["pitch"] + dy * ORBIT_GAIN),
+        )
+        _render_from_cache()
+
+    def _on_wheel(event) -> None:
+        notches = 1 if event.delta > 0 else -1
+        factor = ZOOM_STEP ** notches
+        new_zoom = max(ZOOM_RANGE[0], min(ZOOM_RANGE[1], state["zoom"] * factor))
+        state["zoom"] = new_zoom
+        # Keep slider in sync without re-firing _on_zoom.
+        zoom_slider.param.update(value=new_zoom)
+
+    fig.on_event(PanStart, _on_pan_start)
+    fig.on_event(Pan, _on_pan)
+    fig.on_event(MouseWheel, _on_wheel)
+
     return _card(
         "BXDF Visualizer",
         pn.Column(
             material_combo,
             pn.Row(theta, phi),
             pn.Row(pn.pane.Markdown("**Lock:**"), lock),
-            image_pane, status,
+            fig,
+            zoom_slider,
+            pn.pane.Markdown("*Drag to orbit · Wheel to zoom*"),
+            status,
         ),
         on_close,
     )

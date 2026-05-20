@@ -82,6 +82,9 @@ class AppCallbacks:
     open_material_graph: Callable[[], None] = field(default=lambda: None)
     open_bxdf_visualizer: Callable[[], None] = field(default=lambda: None)
     open_debug_viewport: Callable[[], None] = field(default=lambda: None)
+    debug_view_top: Callable[[], None] = field(default=lambda: None)
+    debug_view_left: Callable[[], None] = field(default=lambda: None)
+    debug_view_back: Callable[[], None] = field(default=lambda: None)
     capture_screenshot: Callable[[str], bytes] | None = None
     load_model: Callable[[Path], None] | None = None
     load_hdr: Callable[[Path], None] | None = None
@@ -219,6 +222,22 @@ def _add_resolution(ui: UIBuilder, renderer) -> None:
         width_getter=lambda: int(renderer.width),
         height_getter=lambda: int(renderer.height),
         on_apply=_apply,
+    )
+
+
+def _add_scene_loader(ui: UIBuilder, renderer, load_model_fn=None) -> None:
+    """Scene file picker. ``load_model_fn(path)`` lets the host wrap the
+    call (e.g. acquire the per-session render lock in the web path).
+    Defaults to a direct ``Renderer.load_model_from_path``.
+    """
+    if load_model_fn is None:
+        def load_model_fn(path: Path) -> None:
+            renderer.load_model_from_path(path)
+
+    ui.file_picker(
+        "Load scene…",
+        filters=MODEL_FILE_FILTERS,
+        on_pick=lambda path: load_model_fn(Path(path)),
     )
 
 
@@ -453,24 +472,26 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
 
     grouped, _all_params = _group_params(renderer)
 
+    with ui.section("Scene"):
+        _add_scene_loader(ui, renderer, load_model_fn=cb.load_model)
     with ui.section("Resolution"):
         _add_resolution(ui, renderer)
     with ui.section("Capture"):
         _add_capture(ui, renderer, capture_fn=cb.capture_screenshot)
 
-    # IBL + Direct Light intentionally omitted from the sidebar — they
-    # live in the scene-graph dock now (the user edits DomeLight /
-    # DistantLight / SphereLight prims directly there).
-    section_order = ["Render", "Skin", "Detail"]
+    section_order = ["Render", "Skin", "Detail", "IBL", "Direct Light"]
     for group in section_order:
         params_in_group = grouped.get(group)
-        if not params_in_group:
+        if not params_in_group and group not in ("IBL", "Direct Light"):
             continue
         with ui.section(group, expanded=(group != "Skin")):
-            for p in params_in_group:
+            for p in (params_in_group or []):
                 if p.path in _DEDICATED_WIDGET_PATHS:
                     continue
                 _add_param(ui, renderer, p)
+            if group == "Direct Light":
+                _add_light_color(ui, renderer)
+                _add_light_direction(ui, renderer)
 
     # Materials + Scene Graph sections used to be sidebar dynamic-section
     # accordions. Removed — those live in dedicated docks (Material

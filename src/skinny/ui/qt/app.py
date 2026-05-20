@@ -17,11 +17,11 @@ from pathlib import Path
 
 import base64
 
-from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QComboBox, QDockWidget, QLineEdit,
-    QMainWindow, QScrollArea, QTextEdit, QWidget,
+    QAbstractButton, QAbstractSpinBox, QApplication, QComboBox, QDockWidget,
+    QLineEdit, QMainWindow, QScrollArea, QTextEdit, QWidget,
 )
 
 import numpy as np
@@ -165,7 +165,23 @@ class MainWindow(QMainWindow):
         # widget is actually realised.
         QTimer.singleShot(0, lambda: self.viewport.setFocus(Qt.OtherFocusReason))
 
+        # Intercept key events application-wide so shortcuts work even
+        # when a sidebar slider/button has keyboard focus. Sliders, dock
+        # title bars, etc. otherwise eat WASD/Space before our viewport's
+        # keyPressEvent ever fires.
+        QApplication.instance().installEventFilter(self)
+
     # ── Key forwarding ────────────────────────────────────────────
+
+    def eventFilter(self, obj, event) -> bool:
+        et = event.type()
+        if et == QEvent.KeyPress and self._should_forward_key(event.key()):
+            self.viewport.keyPressEvent(event)
+            return True
+        if et == QEvent.KeyRelease and self._should_forward_key(event.key()):
+            self.viewport.keyReleaseEvent(event)
+            return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:
         if self._should_forward_key(event.key()):
@@ -182,10 +198,12 @@ class MainWindow(QMainWindow):
     def _should_forward_key(self, key: int) -> bool:
         if key not in self._viewport_keys:
             return False
-        # Don't steal letters from text-edit widgets. ComboBox eats
-        # alpha keys for type-ahead search; leave it alone too.
+        # Don't steal keys from text-edit widgets, spin boxes, combo
+        # boxes (type-ahead search), or focused buttons (Space activates).
         focus = QApplication.focusWidget()
-        if isinstance(focus, (QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox)):
+        if isinstance(focus, (
+            QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox, QAbstractButton,
+        )):
             return False
         return True
 

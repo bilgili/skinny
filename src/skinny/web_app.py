@@ -172,12 +172,22 @@ class SkinnySession:
 
     def handle_camera(self, action: str, data: dict) -> None:
         cam = self.renderer.camera
+        mode = getattr(self.renderer, "camera_mode", "orbit")
+        dx = float(data.get("dx", 0))
+        dy = float(data.get("dy", 0))
         if action == "orbit":
-            cam.orbit(data.get("dx", 0), data.get("dy", 0))
+            # In free-look mode the active camera is FreeCamera; left-drag
+            # maps to look() instead of orbit().
+            if mode == "orbit" and hasattr(cam, "orbit"):
+                cam.orbit(dx, dy)
+            elif hasattr(cam, "look"):
+                cam.look(dx, dy)
         elif action == "pan":
-            cam.pan(data.get("dx", 0), data.get("dy", 0))
+            if hasattr(cam, "pan"):
+                cam.pan(dx, dy)
         elif action == "zoom":
-            cam.zoom(data.get("delta", 0))
+            if hasattr(cam, "zoom"):
+                cam.zoom(float(data.get("delta", 0)))
         elif action == "move" and hasattr(cam, "move"):
             cam.move(
                 float(data.get("forward", 0)),
@@ -185,6 +195,20 @@ class SkinnySession:
                 float(data.get("up", 0)),
                 float(data.get("dt", 0.016)),
             )
+        if self.encoder.is_h264:
+            self.encoder.force_keyframe()
+
+    def handle_control(self, action: str) -> None:
+        """Browser-side keyboard shortcuts (C / F / Space / F1) routed
+        through the same lock the camera / render path uses."""
+        r = self.renderer
+        with self._lock:
+            if action == "toggle_camera" and hasattr(r, "toggle_camera_mode"):
+                r.toggle_camera_mode()
+            elif action == "reset_camera" and hasattr(r, "reset_camera"):
+                r.reset_camera()
+            elif action == "toggle_hud":
+                r.show_hud = not getattr(r, "show_hud", True)
         if self.encoder.is_h264:
             self.encoder.force_keyframe()
 
@@ -350,6 +374,8 @@ class VideoStreamHandler(WebSocketHandler):
         msg_type = data.get("type")
         if msg_type == "camera":
             self.session.handle_camera(data.get("action", ""), data)
+        elif msg_type == "control":
+            self.session.handle_control(data.get("action", ""))
 
     def on_close(self):
         self._streaming = False

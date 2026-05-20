@@ -286,11 +286,45 @@
 
   canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
 
-  // --- Keyboard for free camera ---
+  // --- Keyboard shortcuts ---
+  // Listen on window (not canvas) so keys fire without a prior click.
+  // The iframe needs focus once after page load — focus it here and on
+  // pointer hover so users don't have to click in just for keys.
+  function focusFrame() { try { window.focus(); } catch (e) {} }
+  focusFrame();
+  canvas.addEventListener('mouseenter', focusFrame);
+  canvas.addEventListener('mousedown', focusFrame);
+
+  function sendControl(action) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({type: 'control', action: action}));
+    }
+  }
+
   var keysDown = {};
-  canvas.tabIndex = 0;
-  canvas.addEventListener('keydown', function(e) { keysDown[e.key.toLowerCase()] = true; });
-  canvas.addEventListener('keyup', function(e) { keysDown[e.key.toLowerCase()] = false; });
+  var SHORTCUT_KEYS = {
+    'w': 1, 'a': 1, 's': 1, 'd': 1, 'q': 1, 'e': 1,
+    'c': 1, 'f': 1, ' ': 1, 'F1': 1,
+  };
+
+  window.addEventListener('keydown', function(e) {
+    var k = (e.key.length === 1) ? e.key.toLowerCase() : e.key;
+    if (!SHORTCUT_KEYS[k]) return;
+    if (!keysDown[k]) {
+      // One-shot actions fire on the leading edge only; WASDQE stay held.
+      if (k === 'c') sendControl('toggle_camera');
+      else if (k === 'f') sendControl('reset_camera');
+      else if (k === ' ' || k === 'F1') sendControl('toggle_hud');
+    }
+    keysDown[k] = true;
+    e.preventDefault();
+  });
+  window.addEventListener('keyup', function(e) {
+    var k = (e.key.length === 1) ? e.key.toLowerCase() : e.key;
+    if (!SHORTCUT_KEYS[k]) return;
+    keysDown[k] = false;
+    e.preventDefault();
+  });
 
   function pollKeys() {
     var f = (keysDown['w'] ? 1 : 0) - (keysDown['s'] ? 1 : 0);
