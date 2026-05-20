@@ -69,10 +69,9 @@ float3 allLightsNEE<TM : IMaterial>(
 {
     float3 total = float3(0.0);
 
-    if (fc.useDirectLight != 0u)
+    for (uint d = 0u; d < fc.numDistantLights; d++)
     {
-        DirectionalLightImpl dirLight = loadDirectionalLightImpl(
-            lightDirection, lightRadiance);
+        DirectionalLightImpl dirLight = loadDirectionalLightImpl(distantLights[d]);
         total += neeLightEstimator(mat, dirLight, h, N, T, B, wo, fc, float2(0.0));
     }
 

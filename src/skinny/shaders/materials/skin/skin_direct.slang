@@ -65,9 +65,11 @@ float3 skinAllLightsEstimator(
 
     if (useDirect && !volumeOnly)
     {
-        DirectionalLightImpl dirLight = loadDirectionalLightImpl(
-            lightDirection, lightRadiance);
-        total += skinLightEstimator(dirLight, h, N, V, ctx, fc, float2(0.0));
+        for (uint d = 0u; d < fc.numDistantLights; d++)
+        {
+            DirectionalLightImpl dirLight = loadDirectionalLightImpl(distantLights[d]);
+            total += skinLightEstimator(dirLight, h, N, V, ctx, fc, float2(0.0));
+        }
     }
 
     if (volumeOnly)

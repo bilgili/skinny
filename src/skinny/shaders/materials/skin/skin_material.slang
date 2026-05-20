@@ -73,7 +73,7 @@ SkinShading buildSkinShading(HitInfo hit, FrameConstants fc, uint scatterBits)
 
     bool useBSSRDF = (scatterBits & 1u) != 0u;
     bool useVolume = (scatterBits & 2u) != 0u;
-    bool useDirect = fc.useDirectLight != 0;
+    bool useDirect = fc.numDistantLights > 0u;
     bool volumeOnly = useVolume && !useBSSRDF;
 
     bool combined      = useBSSRDF && useVolume;
@@ -194,8 +194,20 @@ struct SkinMaterial : IMaterial
 
 float3 evalSkinRadiance(HitInfo hit, Ray ray, inout RNG rng, uint scatterBits)
 {
+    // Volume + thin-translucency estimators were authored against a single
+    // analytic direct light; pass the first distant light's direction and
+    // radiance through, or zeros when none. The full multi-light loop for
+    // surface lighting happens inside `skinAllLightsEstimator`.
+    float3 primaryDir = float3(0.0);
+    float3 primaryRad = float3(0.0);
+    if (fc.numDistantLights > 0u)
+    {
+        DistantLight L0 = distantLights[0];
+        primaryDir = L0.direction;
+        primaryRad = L0.radiance;
+    }
     return evalSkinPath(hit, ray, rng, fc,
-        lightDirection, lightRadiance, scatterBits);
+        primaryDir, primaryRad, scatterBits);
 }
 
 SkinMaterial loadSkinMaterial(HitInfo h, Ray r, uint scatterBits)

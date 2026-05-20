@@ -5,8 +5,8 @@ import common;
 import mtlx_std_surface;
 
 uniform FrameConstants fc;
-uniform float3         lightDirection;
-uniform float3         lightRadiance;
+
+[[vk::binding(20)]] StructuredBuffer<DistantLight> distantLights;
 
 [[vk::binding(1)]]  RWTexture2D<float4> outputBuffer;
 [[vk::binding(2)]]  RWTexture2D<float4> accumBuffer;

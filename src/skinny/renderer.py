@@ -112,6 +112,14 @@ MATERIAL_TYPE_FLAT = 1  # UsdPreviewSurface-style standard surface — routes
 SPHERE_LIGHT_STRIDE = 32
 SPHERE_LIGHT_CAPACITY = 16
 
+# Distant-light record (binding 25): vec3 direction, float pad, vec3
+# radiance, float pad. 32 B / record. Matches the DistantLight struct in
+# shaders/common.slang. The buffer holds every UsdLux.DistantLight in the
+# scene so the integrators can iterate them all via DirectionalLightImpl
+# (ILight) rather than the legacy single-uniform path.
+DISTANT_LIGHT_STRIDE = 32
+DISTANT_LIGHT_CAPACITY = 16
+
 # Emissive-triangle record (binding 18): vec3 v0 + pad, vec3 v1 + pad,
 # vec3 v2 + pad, vec3 emission + float area. 64 B / record.
 EMISSIVE_TRI_STRIDE = 64
@@ -2043,6 +2051,19 @@ class Renderer:
         )
         self._num_sphere_lights: int = 0
 
+        # Distant-light buffer (binding 20). Filled from scene.lights_dir;
+        # fc.numDistantLights bounds the active range. Replaces the legacy
+        # single lightDirection/lightRadiance uniforms so the integrators
+        # can iterate every authored distant light via DirectionalLightImpl
+        # (ILight).
+        self.distant_lights_buffer = StorageBuffer(
+            self.ctx, DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE + 16
+        )
+        self.distant_lights_buffer.upload_sync(
+            b"\x00" * (DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE)
+        )
+        self._num_distant_lights: int = 0
+
         # Emissive-triangle buffer (binding 18). Built from scene instances
         # whose material has non-zero emissiveColor. The shader samples one
         # triangle per pixel per frame for next-event estimation.
@@ -2239,11 +2260,11 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 15 fixed = vertices+indices+bvh+instances+flatMaterials+
+                # 16 fixed = vertices+indices+bvh+instances+flatMaterials+
                 #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
                 #      stdSurface+lightSplat+gizmoSegments+
-                #      lensElements+lensPupilBounds+toolBuffer.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (15 + n_graph_slots),
+                #      lensElements+lensPupilBounds+distantLights+toolBuffer.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (16 + n_graph_slots),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -2370,6 +2391,11 @@ class Renderer:
                 buffer=self.lens_pupil_buffer.buffer,
                 offset=0,
                 range=self.lens_pupil_buffer.size,
+            )
+            distant_lights_info = vk.VkDescriptorBufferInfo(
+                buffer=self.distant_lights_buffer.buffer,
+                offset=0,
+                range=self.distant_lights_buffer.size,
             )
             writes = [
                 vk.VkWriteDescriptorSet(
@@ -2547,6 +2573,14 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     pBufferInfo=[lens_pupil_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=20,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[distant_lights_info],
                 ),
             ]
             output_info = vk.VkDescriptorImageInfo(
@@ -2832,6 +2866,7 @@ class Renderer:
         )
         self._upload_flat_materials(scene.materials)
         self._upload_sphere_lights(scene.lights_sphere)
+        self._upload_distant_lights(scene.lights_dir)
         self._upload_emissive_triangles(scene)
 
     def _upload_emissive_triangles(self, scene: Scene) -> None:
@@ -2892,8 +2927,21 @@ class Renderer:
     def _upload_sphere_lights(self, lights: list) -> None:
         """Pack each LightSphere into binding 17. Active count goes to
         FrameConstants.numSphereLights for the shader to bound its loop.
+
+        Zero-intensity lights are dropped — keeping them in the buffer
+        would burn an NEE / light-walk sample on a contribution that is
+        guaranteed to be black.
         """
-        enabled = [lt for lt in lights if getattr(lt, "enabled", True)]
+        def _has_power(lt) -> bool:
+            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
+                return False
+            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
+            return bool(np.any(rad > 0.0))
+
+        enabled = [
+            lt for lt in lights
+            if getattr(lt, "enabled", True) and _has_power(lt)
+        ]
         n = min(len(enabled), SPHERE_LIGHT_CAPACITY)
         data = bytearray()
         for i in range(SPHERE_LIGHT_CAPACITY):
@@ -2912,6 +2960,46 @@ class Renderer:
                 data += b"\x00" * SPHERE_LIGHT_STRIDE
         self.sphere_lights_buffer.upload_sync(bytes(data))
         self._num_sphere_lights = n
+
+    def _upload_distant_lights(self, lights: list) -> None:
+        """Pack each LightDir into binding 20. Active count goes to
+        FrameConstants.numDistantLights for the shader to bound its loop.
+
+        Honoured by every NEE path (path.allLightsNEE, bdpt.connectT1,
+        skin_direct.skinAllLightsEstimator) and the BDPT s≥1 light-walk
+        seed (bdpt.sampleLightOrigin).  ``self.direct_light_index`` is the
+        global On/Off switch — Off uploads zero records so the shader
+        skips the directional contribution entirely.
+        """
+        def _has_power(lt) -> bool:
+            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
+                return False
+            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
+            return bool(np.any(rad > 0.0))
+
+        if self.direct_light_index != 0:
+            enabled: list = []
+        else:
+            enabled = [
+                lt for lt in lights
+                if getattr(lt, "enabled", True) and _has_power(lt)
+            ]
+        n = min(len(enabled), DISTANT_LIGHT_CAPACITY)
+        data = bytearray()
+        for i in range(DISTANT_LIGHT_CAPACITY):
+            if i < n:
+                light = enabled[i]
+                d = np.asarray(light.direction, np.float32)
+                r = np.asarray(light.radiance, np.float32)
+                data += struct.pack(
+                    "fff f fff f",
+                    float(d[0]), float(d[1]), float(d[2]), 0.0,
+                    float(r[0]), float(r[1]), float(r[2]), 0.0,
+                )
+            else:
+                data += b"\x00" * DISTANT_LIGHT_STRIDE
+        self.distant_lights_buffer.upload_sync(bytes(data))
+        self._num_distant_lights = n
 
     def _upload_flat_materials(self, materials: list) -> None:
         """Pack each scene Material into the FLAT_MATERIAL_STRIDE record format
@@ -3456,6 +3544,14 @@ class Renderer:
             elif key == "azimuth":
                 self.light_azimuth = float(value)
             self._update_light()
+            # Reflect the edit into the distantLights SSBO immediately so
+            # the next frame sees the new direction / radiance without
+            # waiting for update()'s per-frame mirror.
+            if (
+                self._usd_scene is not None
+                and self._usd_scene.lights_dir
+            ):
+                self._upload_distant_lights(self._usd_scene.lights_dir)
             self._material_version += 1
             return
 
@@ -3509,9 +3605,11 @@ class Renderer:
             scene = self._usd_scene
             if scene is not None and 0 <= index < len(scene.lights_dir):
                 scene.lights_dir[index].enabled = enabled
+                self._upload_distant_lights(scene.lights_dir)
             else:
                 # Synthesised default direct light: drives the
                 # renderer-owned direct_light_index toggle (0=On, 1=Off).
+                # The buffer is re-uploaded by update()'s per-frame mirror.
                 self.direct_light_index = 0 if enabled else 1
             self._material_version += 1
             return
@@ -3549,12 +3647,14 @@ class Renderer:
         root = find_node_by_path(self._scene_graph, usd_path)
         if root is None:
             return
-        flags = {"instance": False, "light_sphere": False}
+        flags = {"instance": False, "light_sphere": False, "light_dir": False}
         self._walk_apply_enabled(root, bool(enabled), flags)
         if flags["instance"]:
             self._upload_usd_scene()
         if flags["light_sphere"]:
             self._upload_sphere_lights(self._usd_scene.lights_sphere)
+        if flags["light_dir"]:
+            self._upload_distant_lights(self._usd_scene.lights_dir)
         self._material_version += 1
 
     # ── Gizmo (Phase D) ─────────────────────────────────────────────
@@ -4256,6 +4356,7 @@ class Renderer:
                 flags["instance"] = True
             elif ref.kind == "light_dir" and 0 <= ref.index < len(scene.lights_dir):
                 scene.lights_dir[ref.index].enabled = enabled
+                flags["light_dir"] = True
             elif ref.kind == "light_sphere" and 0 <= ref.index < len(scene.lights_sphere):
                 scene.lights_sphere[ref.index].enabled = enabled
                 flags["light_sphere"] = True
@@ -4760,8 +4861,11 @@ class Renderer:
         data += struct.pack("I", self.accum_frame)           # 4 bytes
         data += struct.pack("f", self.time_elapsed)          # 4 bytes
         data += struct.pack("II", self.width, self.height)   # 8 bytes
-        use_direct = 1 if self.direct_light_index == 0 else 0
-        data += struct.pack("I", use_direct)                 # 4 bytes
+        # Active distant-light count (bounds every NEE loop in the
+        # integrators). Replaces the legacy useDirectLight boolean —
+        # `direct_light_index` is folded into `_upload_distant_lights`
+        # (uploads zero records when Off).
+        data += struct.pack("I", int(self._num_distant_lights))  # 4 bytes
         use_mesh = 1
         data += struct.pack("I", use_mesh)                   # 4 bytes
         # Pigment density: today's tattoo slider, surfaced via the scene's
@@ -4871,25 +4975,11 @@ class Renderer:
         pick_armed = 1 if getattr(self, "_pick_armed", False) else 0
         data += struct.pack("II", int(pick_px[0]), int(pick_px[1]))  # 8 bytes
         data += struct.pack("I", pick_armed)                          # 4 bytes
-        # No padding here — scalar layout (`-fvk-use-scalar-layout`) aligns
-        # the next field (float3 lightDirection) at 4 bytes, not 16.
 
-        # Light — pulled from the per-frame Scene so direct-light disable
-        # cleanly emits zero-radiance (the shader's
-        # `dot(lightRadiance, lightRadiance) > eps` gate then no-ops the
-        # analytic NEE). Multi-light scenes will iterate
-        # `self.scene.lights_dir` here once the shader is updated to
-        # consume a light array (Phase E).
-        primary = next(
-            (lt for lt in self.scene.lights_dir if lt.enabled), None,
-        )
-        if primary is not None:
-            data += primary.direction.tobytes()  # 12 bytes (float3, scalar-aligned)
-            data += primary.radiance.tobytes()   # 12 bytes (float3, scalar-aligned)
-        else:
-            data += np.zeros(3, dtype=np.float32).tobytes()
-            data += np.zeros(3, dtype=np.float32).tobytes()
-
+        # Directional lights are no longer in the UBO — they live in the
+        # `distantLights` SSBO at binding 20 (uploaded by
+        # _upload_distant_lights). The shader iterates `numDistantLights`
+        # entries via DirectionalLightImpl (ILight).
         return bytes(data)
 
     def _ensure_env_uploaded(self) -> None:
@@ -5033,6 +5123,17 @@ class Renderer:
         self.scene = self._build_scene_from_state()
         if self._scene_graph is None:
             self._ensure_default_scene_graph()
+
+        # Mirror the active distant-light list into the GPU SSBO at
+        # binding 20 every frame. Cheap (16 records × 32 B). When a USD
+        # scene is loaded every authored DistantLight is uploaded;
+        # otherwise the renderer's slider-driven synth default light goes
+        # in alone. fc.numDistantLights bounds the iterators in
+        # path/bdpt/skin_direct.
+        if self._usd_scene is not None and self._usd_scene.lights_dir:
+            self._upload_distant_lights(self._usd_scene.lights_dir)
+        else:
+            self._upload_distant_lights(self.scene.lights_dir)
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()
@@ -5679,6 +5780,7 @@ class Renderer:
         self.std_surface_buffer.destroy()
         self.emissive_tri_buffer.destroy()
         self.sphere_lights_buffer.destroy()
+        self.distant_lights_buffer.destroy()
         self.material_types_buffer.destroy()
         self.flat_material_buffer.destroy()
         self.instance_buffer.destroy()

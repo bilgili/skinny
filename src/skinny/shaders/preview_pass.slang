@@ -179,15 +179,23 @@ void previewMain(uint3 tid : SV_DispatchThreadID)
                                                    : float3(1, 0, 0);
 
         float3 V = -D;
-        // `lightDirection` in the shared UBO points TOWARD the light source
-        // (see materials/skin/skin_material.slang:129 and
-        // integrators/bdpt.slang:128 for the convention).
-        float3 L = normalize(lightDirection);
+        // Preview is a single-light thumbnail; use the first authored
+        // distant light when one exists, otherwise just rely on the IBL
+        // + key fill below.
+        float3 primaryDir = float3(0.0, 1.0, 0.0);
+        float3 primaryRad = float3(0.0);
+        if (fc.numDistantLights > 0u)
+        {
+            DistantLight L0 = distantLights[0];
+            primaryDir = L0.direction;
+            primaryRad = L0.radiance;
+        }
+        float3 L = normalize(primaryDir);
         ClosureData cd = makeClosureData(
             CLOSURE_TYPE_REFLECTION, L, V, N, P, 1.0);
         BSDF brdf = evalStdSurfaceBSDF(cd, sp, N, T);
         // bsdf.response already includes the NdotL cosine.
-        float3 direct = brdf.response * lightRadiance;
+        float3 direct = brdf.response * primaryRad;
 
         // Wrap-around key from camera direction so materials never go
         // pitch-black when the scene's analytical light points away from

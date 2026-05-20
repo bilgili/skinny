@@ -109,8 +109,8 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
 
     uint nSphere = fc.numSphereLights;
     uint nTri    = fc.numEmissiveTriangles;
-    bool hasDir  = (fc.useDirectLight != 0u);
-    uint nGroups = (hasDir ? 1u : 0u) + (nSphere > 0u ? 1u : 0u) + (nTri > 0u ? 1u : 0u);
+    uint nDir    = fc.numDistantLights;
+    uint nGroups = (nDir > 0u ? 1u : 0u) + (nSphere > 0u ? 1u : 0u) + (nTri > 0u ? 1u : 0u);
     if (nGroups == 0u) return r;
 
     float groupPdf = 1.0 / float(nGroups);
@@ -120,21 +120,28 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
     uint cursor = 0u;
     if (nSphere > 0u) { if (cursor == group) chosen = 0u; cursor++; }
     if (nTri    > 0u) { if (cursor == group) chosen = 1u; cursor++; }
-    if (hasDir)       { if (cursor == group) chosen = 2u; cursor++; }
+    if (nDir    > 0u) { if (cursor == group) chosen = 2u; cursor++; }
     if (chosen == 0xFFFFFFFFu) return r;
 
     if (chosen == 2u)
     {
-        float3 dir = normalize(lightDirection);
+        // Pick one distant light uniformly. Power-proportional weighting
+        // would converge faster but every NEE/connectT1 loop iterates
+        // *all* distant lights, so the BDPT sampleLightOrigin choice only
+        // matters for the s≥1 light-walk strategy.
+        uint idx = min(uint(rng.next() * float(nDir)), nDir - 1u);
+        DistantLight L = distantLights[idx];
+        float3 dir = normalize(L.direction);
+        float lightPickPdf = groupPdf / float(nDir);
         r.vertex.kind = BDPT_VK_LIGHT_DIR;
         r.vertex.N = -dir;
-        r.vertex.emission = lightRadiance;
-        r.vertex.throughput = lightRadiance;
-        r.vertex.pdfFwd = groupPdf;
+        r.vertex.emission = L.radiance;
+        r.vertex.throughput = L.radiance;
+        r.vertex.pdfFwd = lightPickPdf;
         r.vertex.isDelta = true;
         r.dirOut = dir;
-        r.beta = lightRadiance;
-        r.pdfPos = groupPdf;
+        r.beta = L.radiance;
+        r.pdfPos = lightPickPdf;
         r.pdfDir = 1.0;
         r.valid = true;
         return r;
@@ -482,13 +489,14 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
     float3 total = float3(0.0);
     float3 fz = z.albedo / PI;
 
-    if (fc.useDirectLight != 0u)
+    for (uint d = 0u; d < fc.numDistantLights; d++)
     {
-        float3 dir = normalize(lightDirection);
+        DistantLight L = distantLights[d];
+        float3 dir = normalize(L.direction);
         float NdotL = max(dot(z.N, dir), 0.0);
         if (NdotL > 0.0 && visibleDirectional(fc, z.position, z.N, dir))
         {
-            total += z.throughput * fz * NdotL * lightRadiance;
+            total += z.throughput * fz * NdotL * L.radiance;
         }
     }
 

@@ -558,6 +558,19 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # binding 20: UsdLux.DistantLight records. 32 B each
+            # (vec3 direction, float pad, vec3 radiance, float pad);
+            # capacity DISTANT_LIGHT_CAPACITY. fc.numDistantLights bounds
+            # the active range. Replaces the legacy lightDirection /
+            # lightRadiance UBO uniforms so multiple authored distant
+            # lights all contribute (iterated as DirectionalLightImpl).
+            # Picked from a free slot below GRAPH_BINDING_BASE (=25).
+            vk.VkDescriptorSetLayoutBinding(
+                binding=20,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
             # binding 30: BXDF visualizer output buffer (host-visible
             # RWStructuredBuffer<float4>). Main pass writes the picked
             # pixel's HitInfo into slots [0..3]. Future BXDF / BSSRDF eval

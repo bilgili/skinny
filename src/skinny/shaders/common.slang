@@ -104,6 +104,18 @@ struct EmissiveTriangle
     float  area;
 };
 
+// Distant (directional) light record. `direction` points TOWARD the light
+// (= -L for a surface normal n; same convention as the legacy uniform).
+// Mirrors UsdLux.DistantLight: radiance is color × intensity × 2^exposure.
+// Packed std430-aligned (vec3 + float pad) to match SphereLight cadence.
+struct DistantLight
+{
+    float3 direction;
+    float  pad0;
+    float3 radiance;
+    float  pad1;
+};
+
 struct SphereLight
 {
     float3 position;
@@ -138,7 +150,7 @@ struct FrameConstants
     float  time;
     uint   width;
     uint   height;
-    uint   useDirectLight;  // 0 = IBL only; 1 = IBL + direct analytical light
+    uint   numDistantLights;  // active count in distantLights buffer (binding 25); 0 = IBL only
     uint   useMesh;         // always 1 — triangle mesh pipeline (mesh_head.slang)
     float  tattooDensity;   // 0 = no ink; 1 = full pigment load at alpha-1 texels
     float  envIntensity;    // scalar on every sampleEnvironment() result

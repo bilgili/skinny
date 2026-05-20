@@ -36,3 +36,8 @@ DirectionalLightImpl loadDirectionalLightImpl(float3 direction, float3 radiance)
     l.rad = radiance;
     return l;
 }
+
+DirectionalLightImpl loadDirectionalLightImpl(DistantLight raw)
+{
+    return loadDirectionalLightImpl(raw.direction, raw.radiance);
+}
