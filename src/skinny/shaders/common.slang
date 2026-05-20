@@ -191,6 +191,15 @@ struct FrameConstants
     // shader stops writing on subsequent frames.
     uint2  pickPixel;
     uint   pickArmed;
+    // Display-side exposure (EV stops, applied as 2^EV multiplier in the
+    // main pass before tonemapping) and tonemap operator selector. These
+    // are post-process knobs: changing them does not reset accumulation.
+    //   0 = ACES filmic (Narkowicz fit)
+    //   1 = Reinhard (x / (1 + x))
+    //   2 = Hable / Uncharted 2 filmic
+    //   3 = Linear (clamp only)
+    float  exposure;
+    uint   tonemapMode;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

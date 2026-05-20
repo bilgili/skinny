@@ -65,6 +65,8 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Direct light",      "direct_light_index",          "direct_light_modes"),
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Integrator",        "integrator_index",            "integrator_modes"),
+    _disc("Tonemap",           "tonemap_index",               "tonemap_modes"),
+    _cont("Exposure (EV)",     "exposure",                    0.1, -10.0, 10.0),
     _disc("Furnace mode",      "furnace_index",               "furnace_modes"),
     _disc("Model",             "model_index",                 "models"),
     _disc("Detail maps",       "detail_maps_index",           "detail_maps_modes"),

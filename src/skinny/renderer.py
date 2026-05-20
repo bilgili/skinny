@@ -871,6 +871,14 @@ class Renderer:
         self.integrator_modes: list[str] = ["Path", "BDPT"]
         self.integrator_index = 0
 
+        # Display exposure (EV stops) and tonemap operator applied at the
+        # end of main_pass.slang after progressive accumulation. These are
+        # post-process knobs so they do not invalidate the accumulation
+        # buffer and are excluded from `_current_state_hash`.
+        self.tonemap_modes: list[str] = ["ACES", "Reinhard", "Hable", "Linear"]
+        self.tonemap_index = 0
+        self.exposure = 0.0
+
 
         # Scalar applied to every sampleEnvironment() lookup. With many HDR
         # environments the raw luminance swamps skin albedo once multiplied
@@ -5019,6 +5027,11 @@ class Renderer:
         pick_armed = 1 if getattr(self, "_pick_armed", False) else 0
         data += struct.pack("II", int(pick_px[0]), int(pick_px[1]))  # 8 bytes
         data += struct.pack("I", pick_armed)                          # 4 bytes
+        # Display exposure (EV stops, applied as 2^EV multiplier before
+        # tonemapping) and tonemap operator selector consumed by
+        # main_pass.slang::applyTonemap.
+        data += struct.pack("f", float(self.exposure))                # 4 bytes
+        data += struct.pack("I", int(self.tonemap_index))             # 4 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by

@@ -33,7 +33,8 @@ dependencies = [
     "zstandard>=0.25.0",
     "usd-core>=26.5",
     "panel>=1.8.10",
-    "holoviews>=1.22.1"
+    "holoviews>=1.22.1",
+    "OpenEXR>=3.4.11
 ]
 
 [project.optional-dependencies]
