@@ -256,9 +256,6 @@ class MainWindow(QMainWindow):
         open_action = QAction("&Open scene…", self)
         open_action.triggered.connect(self._on_menu_open_scene)
         file_menu.addAction(open_action)
-        load_hdr_action = QAction("Load &HDR…", self)
-        load_hdr_action.triggered.connect(self._on_menu_load_hdr)
-        file_menu.addAction(load_hdr_action)
         file_menu.addSeparator()
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut("Ctrl+Q")
@@ -286,15 +283,6 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.renderer.load_model_from_path(Path(path))
-
-    def _on_menu_load_hdr(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load HDR", "",
-            "HDR images (*.hdr *.exr *.pfm);;All files (*.*)",
-        )
-        if path:
-            self.renderer.apply_dome_light_texture(0, path)
 
     # ── State persistence ────────────────────────────────────────
 
