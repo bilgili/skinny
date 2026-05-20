@@ -313,6 +313,13 @@ Veach §10 BDPT with V1 simplifications for shader compile time:
 
 ## MaterialX Nodegraph Compute Pipeline
 
+> **Build prerequisite:** the Slang generator (`PyMaterialXGenSlang`) is **not**
+> in the PyPI MaterialX wheel — you must build MaterialX from source with
+> `-DMATERIALX_BUILD_PYTHON=ON -DMATERIALX_BUILD_GEN_SLANG=ON` and install the
+> resulting `python/` tree into your venv. The whole pipeline below depends on
+> it; see the *MaterialX from source* section in `README.md` for the full
+> recipe.
+
 Arbitrary MaterialX nodegraphs (e.g. marble, wood, brass — see
 `assets/three_materials_demo.usda`) are compiled to per-material Slang
 modules at scene-load time and again whenever a graph signature changes.

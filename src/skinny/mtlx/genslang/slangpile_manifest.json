@@ -1,9 +1,12 @@
 {
   "modules": [
     {
-      "name": "python_materials.example_freckles",
-      "file": "python_materials/example_freckles.slang",
-      "imports": []
+      "name": "python_materials.preview_surface_material",
+      "file": "python_materials/preview_surface_material.slang",
+      "imports": [
+        "common",
+        "interfaces"
+      ]
     }
   ]
 }

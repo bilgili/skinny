@@ -80,6 +80,9 @@ microfacet specular, and energy-conservation checks.
 - Python 3.11 or newer
 - Vulkan 1.2 capable GPU and current graphics driver
 - Slang compiler (`slangc`) on `PATH`
+- MaterialX **built from source** with the Slang code generator enabled — the
+  PyPI wheel does not ship `PyMaterialXGenSlang`. See
+  [MaterialX from source (required for the Slang backend)](#materialx-from-source-required-for-the-slang-backend).
 - GLFW-compatible desktop environment (only required for the `skinny`
   shader-debug entry; `skinny-gui` runs on Qt and `skinny-web` is headless)
 
@@ -136,6 +139,60 @@ Verify the Slang compiler:
 ```powershell
 slangc -version
 ```
+
+### MaterialX from source (required for the Slang backend)
+
+The MaterialX wheel published on PyPI (1.39.x) ships the GLSL, MDL, MSL, and
+OSL code generators, but **not** the Slang code generator. Skinny's MaterialX
+runtime (`materialx_runtime.py`) imports `PyMaterialXGenSlang` to compile both
+the `ND_skinny_layered_skin_stack` skin shader and arbitrary nodegraphs
+(`standard_surface`, marble, wood, brass, etc.) into Slang modules at runtime.
+Without the Slang generator the renderer fails at import time with
+`ImportError: cannot import name 'PyMaterialXGenSlang'`.
+
+Build and install MaterialX with Python bindings + Slang generator enabled:
+
+```bash
+# 1. Clone upstream MaterialX (>= 1.39)
+git clone --depth 1 https://github.com/AcademySoftwareFoundation/MaterialX.git
+cd MaterialX
+
+# 2. Configure with Python bindings and the Slang generator enabled.
+#    Point MATERIALX_PYTHON_EXECUTABLE at the same interpreter you will use
+#    to run skinny (your venv's python), so the bindings match its ABI.
+cmake -S . -B build \
+  -DMATERIALX_BUILD_PYTHON=ON \
+  -DMATERIALX_BUILD_GEN_SLANG=ON \
+  -DMATERIALX_PYTHON_EXECUTABLE="$(pwd)/../.venv/bin/python" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$(pwd)/install"
+
+# 3. Build and install
+cmake --build build --parallel
+cmake --install build
+
+# 4. Install the Python package into skinny's venv. The build emits a
+#    standard setup.py / pyproject under build/python (or install/python
+#    depending on the version) — install it in place, do NOT `pip install
+#    MaterialX` afterwards or the wheel will overwrite the source build.
+../.venv/bin/pip install ./install/python
+```
+
+Verify the Slang generator is available:
+
+```bash
+.venv/bin/python -c "from MaterialX import PyMaterialXGenSlang; print(PyMaterialXGenSlang.__file__)"
+```
+
+Notes:
+
+- On Windows use the same CMake invocation with the Visual Studio generator
+  (`cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ...`) and install
+  with `cmake --build build --config Release --target install`.
+- If you previously installed the PyPI wheel into the venv, uninstall it first
+  (`pip uninstall MaterialX`) before installing the from-source build.
+- Keep the MaterialX checkout around — re-installing the venv requires
+  re-running step 4 against the same `install/python` tree.
 
 ## Running
 
