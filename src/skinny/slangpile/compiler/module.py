@@ -191,7 +191,10 @@ class ModuleCompiler:
             header += f" : {defn.conforms_to}"
         lines = [header, "{"]
         for f in defn.fields:
-            lines.append(f"    {f.type.slang_name} {f.name};")
+            # Fields default to module-private under Slang's access control;
+            # mark them `public` so importing modules (e.g. the python
+            # material dispatcher) can read/write them.
+            lines.append(f"    public {f.type.slang_name} {f.name};")
         if defn.fields and defn.methods:
             lines.append("")
         for method in defn.methods:
@@ -458,6 +461,19 @@ class FunctionEmitter:
             if is_slang_type(resolved):
                 args = ", ".join(self.emit_expr(a) for a in expr.args)
                 return f"{resolved.slang_name}({args})"
+            # `sp.floor(...)` / `sp.normalize(...)` etc. — the `sp` alias is
+            # the slangpile module itself. Strip it when the attribute names
+            # a Slang built-in (floor, fmod, normalize, lerp, ...) so the
+            # emitted call resolves against Slang's stdlib instead of an
+            # undefined `sp` symbol. Same logic as `resolve_call_name`'s
+            # built-in branch but for the `module.func` form.
+            if (
+                isinstance(expr.func.value, ast.Name)
+                and expr.func.value.id == "sp"
+                and expr.func.attr in _SLANG_BUILTINS
+            ):
+                args = ", ".join(self.emit_expr(a) for a in expr.args)
+                return f"{expr.func.attr}({args})"
             obj = self.emit_expr(expr.func.value)
             method = expr.func.attr
             args = ", ".join(self.emit_expr(a) for a in expr.args)

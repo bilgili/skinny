@@ -106,6 +106,12 @@ MATERIAL_TYPE_SKIN = 0  # any mtlx_target_name pointing at the layered-skin
                          # path. Only active when explicitly authored.
 MATERIAL_TYPE_FLAT = 1  # UsdPreviewSurface-style standard surface — routes
                          # to evalFlatMaterial's bounded path tracer.
+MATERIAL_TYPE_PYTHON = 3  # Python-authored slangpile material (one of
+                          # `python_materials/*.py`) — routes through the
+                          # generated dispatcher in
+                          # `shaders/python_materials_dispatcher.slang`.
+                          # Python material index packed into upper byte of
+                          # `materialTypes[matId]` (MATERIAL_PYMAT_SHIFT).
 
 # Sphere-light record (binding 17): vec3 position, float radius, vec3
 # radiance, float pad. 32 B / record, naturally 16-byte aligned.
@@ -1296,6 +1302,58 @@ class Renderer:
         except Exception as exc:  # noqa: BLE001
             print(f"[skinny] env upload failed for {path.name}: {exc}")
         return self.env_index
+
+    def _refresh_material_python_ids(self) -> "dict[int, int]":
+        """Rebuild `_material_python_ids` from the live scene + current
+        `python_materials/` listing.
+
+        Called from `_upload_material_types` (every type upload) so a
+        material edit that adds/removes a Python material file flows
+        through without requiring a separate `_upload_flat_materials`
+        round-trip.
+        """
+        from skinny.vk_compute import python_material_ids as _ids_fn
+        ids = _ids_fn()
+        out: dict[int, int] = {}
+        scene = self._usd_scene if self._usd_scene is not None else self.scene
+        for i, mat in enumerate(scene.materials):
+            mod = getattr(mat, "python_module", None)
+            if mod and mod in ids:
+                out[i] = ids[mod]
+        self._material_python_ids = out
+        return out
+
+    def active_python_module(self) -> "str | None":
+        """First `python_module` hint declared by any current scene material.
+
+        Returns the module name (e.g. ``"python_materials.preview_surface_material"``)
+        or ``None`` when no scene material is bound to a Python-authored
+        slangpile material. Used by the Python Material Editor dock to
+        decide which source file to load.
+        """
+        modules = self.scene_python_modules()
+        return modules[0] if modules else None
+
+    def scene_python_modules(self) -> "list[str]":
+        """Deduped list of every `python_module` declared by scene materials,
+        preserving the scene's material order. Empty when no scene material
+        is bound to a Python-authored slangpile material.
+
+        Reads from `_usd_scene` (the authored material list from
+        `usd_loader._read_usd_stage`) when a USD scene is loaded. `self.scene`
+        is the per-frame render snapshot rebuilt by `_build_scene_from_state`
+        and only carries a placeholder material, so it's not the source of
+        truth for authored material metadata.
+        """
+        source = self._usd_scene if self._usd_scene is not None else self.scene
+        seen: set[str] = set()
+        out: list[str] = []
+        for mat in source.materials:
+            mod = getattr(mat, "python_module", None)
+            if mod and mod not in seen:
+                seen.add(mod)
+                out.append(mod)
+        return out
 
     def load_model_from_path(self, path: Path) -> int:
         """Load a model file (USDA/USDC/USDZ/OBJ), replacing any previous model.
@@ -3088,6 +3146,14 @@ class Renderer:
             )
             self._rebind_scene_descriptors()
             self._rebind_aux_material_descriptors()
+        # Python-material slots route through MATERIAL_TYPE_PYTHON, but
+        # `flatMaterials[matId]` still holds the UsdPreviewSurface inputs
+        # that the generated `_pyMatInputs_<id>` adapter reads. Pack flat
+        # data either way; only the type tag (and packed python_id) changes.
+        from skinny.vk_compute import python_material_ids as _py_mat_ids_fn
+        py_ids = _py_mat_ids_fn()
+        self._material_python_ids: dict[int, int] = {}
+
         data = bytearray()
         types: list[int] = []
         for i, mat in enumerate(materials):
@@ -3095,7 +3161,12 @@ class Renderer:
                 types.append(MATERIAL_TYPE_SKIN)
                 data += b"\x00" * FLAT_MATERIAL_STRIDE
                 continue
-            types.append(MATERIAL_TYPE_FLAT)
+            mod = getattr(mat, "python_module", None)
+            if mod and mod in py_ids:
+                types.append(MATERIAL_TYPE_PYTHON)
+                self._material_python_ids[i] = py_ids[mod]
+            else:
+                types.append(MATERIAL_TYPE_FLAT)
             indices: dict[str, int] = {
                 "diffuseColor":  TexturePool.SENTINEL,
                 "roughness":     TexturePool.SENTINEL,
@@ -3268,13 +3339,15 @@ class Renderer:
         """Pack per-material type+flags into binding 16.
 
         Encoding per slot (uint):
-          bits  0-7 : material type code (skin=0, flat=1)
+          bits  0-7 : material type code (skin=0, flat=1, python=3)
           bits  8-9 : scatter mode for skin slots (bit0=BSSRDF, bit1=volume)
           bit  10   : per-material furnace mode
           bits 11-15: reserved.
           bits 16-23: MaterialX graphId (0 = no graph; 2+ = index into
                       `_scene_graph_fragments` + GRAPH_ID_FIRST). Read by
                       shaders/bindings.slang::materialGraphId().
+          bits 24-31: Python material id when type == PYTHON. Read by
+                      shaders/bindings.slang::pythonMaterialId().
 
         Re-uploaded whenever scatter mode, per-material furnace, or the
         scene's graph binding changes.
@@ -3282,6 +3355,7 @@ class Renderer:
         scatter_idx = int(np.clip(self.scatter_index, 0, len(self._scatter_mode_bits) - 1))
         scatter_bits = int(self._scatter_mode_bits[scatter_idx]) & 0x3
         types = self._material_types
+        py_ids = self._refresh_material_python_ids()
         type_bytes = bytearray()
         for i in range(self.material_capacity):
             t = int(types[i]) if i < len(types) else MATERIAL_TYPE_FLAT
@@ -3292,6 +3366,8 @@ class Renderer:
                 packed |= 1 << 10
             gid = self._material_graph_ids.get(i, 0)
             packed |= (gid & 0xFF) << 16
+            if t == MATERIAL_TYPE_PYTHON:
+                packed |= (py_ids.get(i, 0) & 0xFF) << 24
             type_bytes += struct.pack("I", packed)
         self.material_types_buffer.upload_sync(bytes(type_bytes))
         self._last_scatter_index = scatter_idx

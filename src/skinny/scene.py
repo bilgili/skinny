@@ -71,6 +71,12 @@ class Material:
     # mtlx library.
     mtlx_target_name: Optional[str] = None
 
+    # Author hint pointing at a Python-authored slangpile material module,
+    # e.g. `customData = { string python_module = "python_materials.preview_surface_material" }`
+    # on a UsdShade.Material prim. The Python material editor reads this
+    # to know which source file to load for the active scene.
+    python_module: Optional[str] = None
+
 
 # ─── Geometry ─────────────────────────────────────────────────────────
 

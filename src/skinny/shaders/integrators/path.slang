@@ -14,6 +14,7 @@ import environment;
 import materials.flat.flat_material;
 import materials.skin.skin_material;
 import materials.debug_normal_material;
+import python_materials_dispatcher;
 import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
@@ -116,6 +117,32 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
         case MATERIAL_TYPE_FLAT:
         {
             FlatMaterial mat = loadFlatMaterial(h);
+
+            float3 N = mat.data.N;
+            float3 T, B;
+            if (h.hasTangent)
+            {
+                T = normalize(h.tangent - N * dot(h.tangent, N));
+                B = cross(N, T);
+            }
+            else
+            {
+                buildBasis(N, T, B);
+            }
+            float3 wo = worldToTangent(V, T, B, N);
+
+            br.directLight = allLightsNEE(mat, h, N, T, B, wo, rng);
+
+            BSDFSample bs = mat.sample(wo, rng);
+            if (bs.valid)
+                bs.wi = tangentToWorld(bs.wi, T, B, N);
+            br.bsdfSample = bs;
+            break;
+        }
+        case MATERIAL_TYPE_PYTHON:
+        {
+            uint pyId = pythonMaterialId(h.materialId);
+            PythonMaterial mat = loadPythonMaterial(h, pyId);
 
             float3 N = mat.data.N;
             float3 T, B;

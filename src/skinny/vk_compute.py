@@ -26,6 +26,100 @@ BINDLESS_TEXTURE_CAPACITY = 128
 GRAPH_BINDING_BASE = 25
 
 
+def _class_has_imaterial_conformance(cls_node) -> bool:
+    """True when the class is decorated `@sp.struct(conforms_to="IMaterial")`."""
+    import ast
+
+    for dec in cls_node.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        for kw in dec.keywords:
+            if kw.arg == "conforms_to" and isinstance(kw.value, ast.Constant) \
+                    and kw.value.value == "IMaterial":
+                return True
+    return False
+
+
+_PY_TYPE_TO_SLANG: dict[str, str] = {
+    "float32":    "float",
+    "float32x2":  "float2",
+    "float32x3":  "float3",
+    "float32x4":  "float4",
+    "int32":      "int",
+}
+
+
+def scan_python_materials() -> list[dict]:
+    """Walk `python_materials/*.py` and return one record per
+    `IMaterial`-conforming class.
+
+    Single source of truth for the python_id assignment shared between
+    `ComputePipeline._emit_python_dispatcher` (dispatcher switch order) and
+    the renderer's `materialTypes[matId]` packing. Order is the
+    `sorted(glob("*.py"))` of files containing such classes.
+
+    Each entry:
+        {
+            "module":          "python_materials.<stem>",
+            "struct":          IMaterial-conforming struct name,
+            "inputs_struct":   type annotation of its `params` field,
+            "inputs_fields":   [(name, slang_type_alias), ...],
+        }
+    """
+    import ast
+
+    materials_dir = Path(__file__).resolve().parent.parent.parent / "python_materials"
+    if not materials_dir.is_dir():
+        return []
+    py_files = [f for f in sorted(materials_dir.glob("*.py"))
+                if f.name != "__init__.py"]
+    out: list[dict] = []
+
+    for f in py_files:
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+        except SyntaxError:
+            continue
+        classes_by_name: dict[str, dict[str, str]] = {}
+        material_classes: list[tuple[str, str]] = []
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            annotations: dict[str, str] = {}
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    annotations[stmt.target.id] = ast.unparse(stmt.annotation)
+            classes_by_name[node.name] = annotations
+            if _class_has_imaterial_conformance(node):
+                params_anno = annotations.get("params")
+                if params_anno:
+                    material_classes.append((node.name, params_anno))
+
+        for cls_name, inputs_struct_anno in material_classes:
+            inputs_struct = inputs_struct_anno.split(".")[-1]
+            inputs_fields = []
+            for fname, ftype in classes_by_name.get(inputs_struct, {}).items():
+                tail = ftype.split(".")[-1]
+                if tail not in _PY_TYPE_TO_SLANG:
+                    continue
+                inputs_fields.append((fname, tail))
+            out.append({
+                "module": f"python_materials.{f.stem}",
+                "struct": cls_name,
+                "inputs_struct": inputs_struct,
+                "inputs_fields": inputs_fields,
+            })
+
+    return out
+
+
+def python_material_ids() -> dict[str, int]:
+    """Module-name → python_id mapping, sourced from `scan_python_materials`.
+    The dispatcher emits `case <id>u:` in the same order.
+    """
+    return {e["module"]: i for i, e in enumerate(scan_python_materials())}
+
+
 class ComputePipeline:
     """Wraps a single Vulkan compute pipeline compiled from a Slang entry point."""
 
@@ -52,6 +146,7 @@ class ComputePipeline:
         t0 = _time.perf_counter()
         print(f"[skinny] slangc → SPIR-V: {entry_module}.slang …", flush=True)
         self._emit_generated_materials()
+        self._emit_python_dispatcher()
         self._spirv_path = self._compile_slang()
         print(f"[skinny] slangc done in {_time.perf_counter() - t0:.2f}s "
               f"({self._spirv_path.stat().st_size // 1024} KB SPIR-V)", flush=True)
@@ -241,6 +336,176 @@ class ComputePipeline:
             gf.target_name: GRAPH_BINDING_BASE + idx
             for idx, gf in enumerate(self.graph_fragments)
         }
+
+    # ── Python material dispatcher emission ─────────────────────
+
+    # FlatHitData → inputs-struct field mapping. Each entry is the Slang
+    # expression that supplies the value when the inputs struct declares a
+    # field with that name. Unknown fields fall back to a zero-default per
+    # type. Single source of truth for the v1 adapter; later versions may
+    # add per-material params SSBOs to lift this constraint.
+    _PY_INPUT_FROM_FHD: dict[str, str] = {
+        "diffuseColor":  "h.mat.albedo",
+        "baseColor":     "h.mat.albedo",
+        "albedo":        "h.mat.albedo",
+        "color":         "h.mat.albedo",
+        "roughness":     "h.mat.roughness",
+        "metallic":      "h.mat.metallic",
+        "metalness":     "h.mat.metallic",
+        "specular":      "h.mat.specular",
+        "emissiveColor": "h.mat.emission",
+        "emission":      "h.mat.emission",
+        "opacity":       "h.mat.opacity",
+        "ior":           "h.mat.ior",
+        "normalScale":   "1.0",
+        "coat":          "h.mat.coat",
+        "coatRoughness": "h.mat.coatRoughness",
+        "coatColor":     "h.mat.coatColor",
+        "coatIOR":       "h.mat.coatIOR",
+    }
+
+    _PY_TYPE_ZERO: dict[str, str] = {
+        "float32":    "0.0",
+        "float32x2":  "float2(0.0)",
+        "float32x3":  "float3(0.0)",
+        "float32x4":  "float4(0.0)",
+        "int32":      "0",
+    }
+
+    _PY_TYPE_TO_SLANG: dict[str, str] = {
+        "float32":    "float",
+        "float32x2":  "float2",
+        "float32x3":  "float3",
+        "float32x4":  "float4",
+        "int32":      "int",
+    }
+
+    def _emit_python_dispatcher(self) -> None:
+        """Materialise `shaders/python_materials_dispatcher.slang`.
+
+        Builds dispatch helpers + a `PythonMaterial` wrapper conforming to
+        `IMaterial`. Always emitted (even with zero detected materials) so
+        `import python_materials_dispatcher` in `main_pass` / `path` stays
+        valid across reloads.
+
+        Python material IDs are the index in the sorted-file order; the
+        renderer mirrors this when packing `materialTypes[matId]`.
+        """
+        entries = scan_python_materials()
+
+        imports = [f"import {e['module']};" for e in entries]
+        adapters: list[str] = []
+        sample_cases: list[str] = []
+        eval_cases: list[str] = []
+        for idx, e in enumerate(entries):
+            assignments: list[str] = []
+            for fname, ftype in e["inputs_fields"]:
+                expr = self._PY_INPUT_FROM_FHD.get(
+                    fname, self._PY_TYPE_ZERO.get(ftype, "0.0"),
+                )
+                assignments.append(f"    ins.{fname} = {expr};")
+            adapter_body = "\n".join(assignments) if assignments else "    /* no mappable fields */"
+            adapters.append(
+                f"{e['inputs_struct']} _pyMatInputs_{idx}(FlatHitData h)\n"
+                f"{{\n"
+                f"    {e['inputs_struct']} ins;\n"
+                f"{adapter_body}\n"
+                f"    return ins;\n"
+                f"}}\n"
+            )
+            sample_cases.append(
+                f"        case {idx}u:\n"
+                f"        {{\n"
+                f"            {e['struct']} m;\n"
+                f"            m.params = _pyMatInputs_{idx}(fhd);\n"
+                f"            return m.sample(wo, rng);\n"
+                f"        }}\n"
+            )
+            eval_cases.append(
+                f"        case {idx}u:\n"
+                f"        {{\n"
+                f"            {e['struct']} m;\n"
+                f"            m.params = _pyMatInputs_{idx}(fhd);\n"
+                f"            return m.evaluate(wo, wi);\n"
+                f"        }}\n"
+            )
+
+        sample_default = (
+            "        default:\n"
+            "        {\n"
+            "            BSDFSample s;\n"
+            "            s.valid = false; s.transmitted = false; s.pdf = 0.0;\n"
+            "            s.emission = float3(0.0); s.wi = float3(0.0); s.weight = float3(0.0);\n"
+            "            return s;\n"
+            "        }\n"
+        )
+        eval_default = (
+            "        default:\n"
+            "        {\n"
+            "            BSDFEval e; e.response = float3(0.0); e.pdf = 0.0; return e;\n"
+            "        }\n"
+        )
+
+        dispatcher = (
+            "// Auto-generated. Do not edit — written by "
+            "ComputePipeline._emit_python_dispatcher().\n"
+            "// Bridges each python_materials/*.py IMaterial-conforming struct\n"
+            "// into a `PythonMaterial` wrapper consumed by the integrators.\n\n"
+            "import common;\n"
+            "import bindings;\n"
+            "import interfaces;\n"
+            "import materials.flat.flat_shading;\n"
+            + ("\n".join(imports) + "\n\n" if imports else "\n")
+            + "".join(adapters)
+            + "\n"
+            + "BSDFSample samplePythonMaterial(uint pyId, FlatHitData fhd, float3 wo, inout RNG rng)\n"
+            "{\n"
+            "    switch (pyId)\n"
+            "    {\n"
+            + "".join(sample_cases)
+            + sample_default
+            + "    }\n"
+            "}\n\n"
+            "BSDFEval evalPythonMaterial(uint pyId, FlatHitData fhd, float3 wo, float3 wi)\n"
+            "{\n"
+            "    switch (pyId)\n"
+            "    {\n"
+            + "".join(eval_cases)
+            + eval_default
+            + "    }\n"
+            "}\n\n"
+            "// IMaterial-conforming wrapper. Monomorphised by allLightsNEE so\n"
+            "// each Python material gets its own NEE code path with no\n"
+            "// indirect-call cost on the GPU.\n"
+            "struct PythonMaterial : IMaterial\n"
+            "{\n"
+            "    uint pyId;\n"
+            "    FlatHitData data;\n"
+            "    BSDFSample sample(float3 wo, inout RNG rng)\n"
+            "    {\n"
+            "        return samplePythonMaterial(pyId, data, wo, rng);\n"
+            "    }\n"
+            "    BSDFEval evaluate(float3 wo, float3 wi)\n"
+            "    {\n"
+            "        return evalPythonMaterial(pyId, data, wo, wi);\n"
+            "    }\n"
+            "}\n\n"
+            "PythonMaterial loadPythonMaterial(HitInfo h, uint pyId)\n"
+            "{\n"
+            "    PythonMaterial m;\n"
+            "    m.pyId = pyId;\n"
+            "    m.data = fetchFlatHitData(h);\n"
+            "    return m;\n"
+            "}\n"
+        )
+
+        (self.shader_dir / "python_materials_dispatcher.slang").write_text(
+            dispatcher, encoding="utf-8",
+        )
+
+        # Stash the assignment order so the renderer can mirror it when
+        # packing python material ids into `materialTypes[matId]`.
+        self.python_material_modules: list[str] = [e["module"] for e in entries]
 
     # SPIR-V cache: every pipeline build hashes its (entry point + Slang
     # source tree + flags) into `<build>/spv_cache/<hash>.spv`. Pipeline

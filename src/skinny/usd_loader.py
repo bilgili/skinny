@@ -313,11 +313,15 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
     # keyed by MaterialX input name (merged into parameter_overrides so
     # the renderer's mtlxSkin-array packer picks them up).
     mtlx_target_name: Optional[str] = None
+    python_module: Optional[str] = None
     cd = shade_mat.GetPrim().GetCustomData()
     if cd:
         hint = cd.get("skinnyMaterialX")
         if isinstance(hint, str) and hint:
             mtlx_target_name = hint
+        py_hint = cd.get("python_module")
+        if isinstance(py_hint, str) and py_hint:
+            python_module = py_hint
         skinny_overrides = cd.get("skinnyOverrides")
         # USD VtDictionary surfaces as a Python dict (or pxr.Vt.Dictionary).
         if hasattr(skinny_overrides, "items"):
@@ -329,6 +333,7 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
         parameter_overrides=overrides,
         texture_paths=textures,
         mtlx_target_name=mtlx_target_name,
+        python_module=python_module,
     )
 
 

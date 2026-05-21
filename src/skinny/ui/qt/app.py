@@ -21,7 +21,7 @@ from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractSpinBox, QApplication, QComboBox, QDockWidget,
-    QLineEdit, QMainWindow, QScrollArea, QTextEdit, QWidget,
+    QLineEdit, QMainWindow, QPlainTextEdit, QScrollArea, QTextEdit, QWidget,
 )
 
 import numpy as np
@@ -35,6 +35,7 @@ from skinny.ui.qt.viewport import RenderViewport
 from skinny.ui.qt.windows.bxdf import BXDFDock
 from skinny.ui.qt.windows.debug_viewport import DebugViewportDock
 from skinny.ui.qt.windows.material_graph import MaterialGraphDock
+from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
 from skinny.ui.qt.windows.scene_graph import SceneGraphDock
 from skinny.vk_context import VulkanContext
 
@@ -110,6 +111,7 @@ class MainWindow(QMainWindow):
         self._scene_graph_dock: SceneGraphDock | None = None
         self._bxdf_dock: BXDFDock | None = None
         self._material_graph_dock: MaterialGraphDock | None = None
+        self._python_material_dock: PythonMaterialEditorDock | None = None
 
         # Sidebar built from the shared spec tree.
         cb = AppCallbacks(
@@ -203,7 +205,8 @@ class MainWindow(QMainWindow):
         # boxes (type-ahead search), or focused buttons (Space activates).
         focus = QApplication.focusWidget()
         if isinstance(focus, (
-            QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox, QAbstractButton,
+            QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
+            QComboBox, QAbstractButton,
         )):
             return False
         return True
@@ -213,11 +216,22 @@ class MainWindow(QMainWindow):
 
     def _open_scene_graph(self) -> None:
         if self._scene_graph_dock is None:
-            self._scene_graph_dock = SceneGraphDock(self.renderer, parent=self)
+            self._scene_graph_dock = SceneGraphDock(
+                self.renderer, parent=self,
+                on_open_python_material=self._open_python_material_in_editor,
+            )
             self._scene_graph_dock.setObjectName("scene_graph")
             self.addDockWidget(Qt.BottomDockWidgetArea, self._scene_graph_dock)
         self._scene_graph_dock.show()
         self._scene_graph_dock.raise_()
+
+    def _open_python_material_in_editor(self, module_name: str) -> None:
+        """Open the editor dock (creating it if needed) and load
+        `module_name` into the buffer. Used by Scene Graph's double-click.
+        """
+        self._open_python_material_editor()
+        if self._python_material_dock is not None:
+            self._python_material_dock.set_active_module(module_name)
 
     def _open_bxdf(self) -> None:
         if self._bxdf_dock is None:
@@ -234,6 +248,19 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.BottomDockWidgetArea, self._material_graph_dock)
         self._material_graph_dock.show()
         self._material_graph_dock.raise_()
+
+    def _open_python_material_editor(self) -> None:
+        if self._python_material_dock is None:
+            self._python_material_dock = PythonMaterialEditorDock(
+                self.renderer, self.viewport._render_lock, parent=self,
+            )
+            self._python_material_dock.setObjectName("python_material_editor")
+            self.addDockWidget(
+                Qt.RightDockWidgetArea, self._python_material_dock,
+            )
+        self._python_material_dock.refresh_from_renderer()
+        self._python_material_dock.show()
+        self._python_material_dock.raise_()
 
     def _ensure_debug_dock(self) -> DebugViewportDock:
         if self._debug_dock is not None:
@@ -282,15 +309,19 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         view_menu = bar.addMenu("&View")
-        for label, slot in (
-            ("&Render",           self._show_render_viewport),
-            ("&Controls",         self._show_sidebar),
-            ("&Scene Graph",      self._open_scene_graph),
-            ("&Material Graph",   self._open_material_graph),
-            ("&BXDF Visualizer",  self._open_bxdf),
-            ("&Camera Debug View", self._toggle_debug_viewport),
+        for label, slot, shortcut in (
+            ("&Render",           self._show_render_viewport,    None),
+            ("&Controls",         self._show_sidebar,            None),
+            ("&Scene Graph",      self._open_scene_graph,        None),
+            ("&Material Graph",   self._open_material_graph,     None),
+            ("&Python Material Editor", self._open_python_material_editor,
+                                                                 "Ctrl+Shift+P"),
+            ("&BXDF Visualizer",  self._open_bxdf,               None),
+            ("&Camera Debug View", self._toggle_debug_viewport,  None),
         ):
             act = QAction(label, self)
+            if shortcut is not None:
+                act.setShortcut(shortcut)
             act.triggered.connect(slot)
             view_menu.addAction(act)
 
@@ -302,6 +333,8 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.renderer.load_model_from_path(Path(path))
+            if self._python_material_dock is not None:
+                self._python_material_dock.refresh_from_renderer()
 
     # ── State persistence ────────────────────────────────────────
 
@@ -334,6 +367,8 @@ class MainWindow(QMainWindow):
             self._open_scene_graph()
         if "material_graph" in open_docks:
             self._open_material_graph()
+        if "python_material_editor" in open_docks:
+            self._open_python_material_editor()
         if "bxdf" in open_docks:
             self._open_bxdf()
         if "debug_viewport" in open_docks:
@@ -377,6 +412,7 @@ class MainWindow(QMainWindow):
         for name, dock in (
             ("scene_graph", self._scene_graph_dock),
             ("material_graph", self._material_graph_dock),
+            ("python_material_editor", self._python_material_dock),
             ("bxdf", self._bxdf_dock),
             ("debug_viewport", self._debug_dock),
         ):

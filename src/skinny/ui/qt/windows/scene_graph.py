@@ -31,9 +31,15 @@ class SceneGraphDock(QDockWidget):
 
     TICK_MS = 200
 
-    def __init__(self, renderer, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, renderer,
+        parent: QWidget | None = None,
+        *,
+        on_open_python_material: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__("Scene Graph", parent)
         self.renderer = renderer
+        self._on_open_python_material = on_open_python_material
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
 
         self._last_graph_id: int = -1
@@ -55,6 +61,7 @@ class SceneGraphDock(QDockWidget):
         self.tree.setSelectionMode(QTreeWidget.SingleSelection)
         self.tree.setColumnWidth(0, 220)
         self.tree.itemSelectionChanged.connect(self._on_select)
+        self.tree.itemDoubleClicked.connect(self._on_double_click)
         splitter.addWidget(self.tree)
 
         # ── Properties ──
@@ -119,6 +126,37 @@ class SceneGraphDock(QDockWidget):
         return item
 
     # ── Selection / property build ────────────────────────────────
+
+    def _on_double_click(self, item: QTreeWidgetItem, _col: int) -> None:
+        """Double-click on a material node bound to a Python slangpile
+        module routes it to the Python Material Editor.
+        """
+        if self._on_open_python_material is None:
+            return
+        path = item.data(0, Qt.UserRole)
+        if not isinstance(path, str):
+            return
+        graph = self.renderer.scene_graph
+        if graph is None:
+            return
+        node = find_node_by_path(graph, path)
+        if node is None or node.renderer_ref is None:
+            return
+        if node.renderer_ref.kind != "material":
+            return
+        idx = node.renderer_ref.index
+        # Scene-graph `RendererRef.index` for materials is built from
+        # `_usd_scene.materials` (the authored list), not the per-frame
+        # `self.scene.materials` placeholder.
+        usd_scene = getattr(self.renderer, "_usd_scene", None)
+        source = usd_scene if usd_scene is not None else self.renderer.scene
+        materials = getattr(source, "materials", None) or []
+        if not 0 <= idx < len(materials):
+            return
+        mod = getattr(materials[idx], "python_module", None)
+        if not mod:
+            return
+        self._on_open_python_material(mod)
 
     def _on_select(self) -> None:
         items = self.tree.selectedItems()

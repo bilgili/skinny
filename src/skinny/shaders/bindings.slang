@@ -48,6 +48,7 @@ static const uint TOOL_MODE_BSSRDF = 3u;
 static const uint MATERIAL_TYPE_SKIN         = 0u;
 static const uint MATERIAL_TYPE_FLAT         = 1u;
 static const uint MATERIAL_TYPE_DEBUG_NORMAL = 2u;
+static const uint MATERIAL_TYPE_PYTHON       = 3u;
 
 static const uint MATERIAL_FURNACE_BIT = 10u;
 
@@ -58,9 +59,21 @@ static const uint MATERIAL_FURNACE_BIT = 10u;
 static const uint MATERIAL_GRAPH_SHIFT = 16u;
 static const uint MATERIAL_GRAPH_MASK  = 0xffu;
 
+// Python-material id (slangpile `python_materials/*.py` → `IMaterial`
+// struct). 0..255 ⇒ index into the dispatcher switch emitted by
+// `vk_compute._emit_python_dispatcher`. Only consulted when material
+// type == MATERIAL_TYPE_PYTHON.
+static const uint MATERIAL_PYMAT_SHIFT = 24u;
+static const uint MATERIAL_PYMAT_MASK  = 0xffu;
+
 uint materialGraphId(uint matId)
 {
     return (materialTypes[matId] >> MATERIAL_GRAPH_SHIFT) & MATERIAL_GRAPH_MASK;
+}
+
+uint pythonMaterialId(uint matId)
+{
+    return (materialTypes[matId] >> MATERIAL_PYMAT_SHIFT) & MATERIAL_PYMAT_MASK;
 }
 
 uint effectiveFurnaceMode(uint materialId)
