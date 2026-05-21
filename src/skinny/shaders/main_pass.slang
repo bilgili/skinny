@@ -309,7 +309,7 @@ void bxdfEvalThread(uint2 cell)
     if (matType == MATERIAL_TYPE_FLAT)
     {
         FlatMaterial mat = loadFlatMaterial(h);
-        BSDFEval ev = mat.evaluate(wo, wi);
+        BSDFSample ev = mat.evaluate(wo, wi);
         response = ev.response;
     }
     else if (matType == MATERIAL_TYPE_SKIN)

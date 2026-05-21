@@ -23,26 +23,26 @@ interface ISampler
 
 // ── Materials ───────────────────────────────────────────────────
 
+// Unified BSDF result for both sample() and evaluate().
+//   sample(wo) → fills wi, weight, pdf, emission, valid, transmitted.
+//                response is unused (callers use weight for throughput).
+//   evaluate(wo, wi) → fills response, pdf. Other fields default
+//                (valid=false, weight=0, emission=0, transmitted=false).
 struct BSDFSample
 {
-    float3 wi;            // sampled direction in tangent space (N=+Z)
-    float3 weight;        // BSDF * cos / pdf
-    float  pdf;           // solid-angle PDF for BSDF-path MIS
-    float3 emission;      // self-emission at this surface point
-    bool   valid;
-    bool   transmitted;   // refraction — caller offsets ray along −N
-};
-
-struct BSDFEval
-{
-    float3 response;      // f(wo, wi) * cos(theta_i)
-    float  pdf;           // solid-angle sampling PDF for this wi
+    float3 wi;            // sampled direction in tangent space (N=+Z) [sample]
+    float3 weight;        // BSDF * cos / pdf [sample]
+    float3 response;      // f(wo, wi) * cos(theta_i) [evaluate]
+    float  pdf;           // solid-angle PDF for this wi [both]
+    float3 emission;      // self-emission at this surface point [sample]
+    bool   valid;         // [sample]
+    bool   transmitted;   // refraction — caller offsets ray along −N [sample]
 };
 
 interface IMaterial
 {
     BSDFSample sample(float3 wo, inout RNG rng);
-    BSDFEval evaluate(float3 wo, float3 wi);
+    BSDFSample evaluate(float3 wo, float3 wi);
 }
 
 struct BounceResult

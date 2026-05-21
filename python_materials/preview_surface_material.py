@@ -52,7 +52,6 @@ cosineHemispherePdfTS = sp.extern(
 
 RNG = sp.extern_type("RNG")
 BSDFSample = sp.extern_type("BSDFSample")
-BSDFEval = sp.extern_type("BSDFEval")
 
 
 @sp.struct
@@ -99,9 +98,14 @@ class PreviewSurfaceMaterial:
         s.transmitted = False
         return s
 
-    def evaluate(self, wo: sp.float32x3, wi: sp.float32x3) -> BSDFEval:
-        e: BSDFEval
+    def evaluate(self, wo: sp.float32x3, wi: sp.float32x3) -> BSDFSample:
+        e: BSDFSample
         NdotL: sp.float32 = max(wi.z, 0.0)
         e.response = self.params.diffuseColor * (NdotL / PI)
         e.pdf = NdotL / PI
+        e.wi = sp.float32x3(0.0, 0.0, 0.0)
+        e.weight = sp.float32x3(0.0, 0.0, 0.0)
+        e.emission = sp.float32x3(0.0, 0.0, 0.0)
+        e.valid = False
+        e.transmitted = False
         return e

@@ -51,6 +51,7 @@ struct FlatMaterial : IMaterial
         s.emission    = data.mat.emission;
         s.wi          = float3(0.0);
         s.weight      = float3(0.0);
+        s.response    = float3(0.0);
 
         FlatHitMat m = data.mat;
         float NdotV  = max(wo.z, 1e-6);
@@ -172,9 +173,14 @@ struct FlatMaterial : IMaterial
         return s;
     }
 
-    BSDFEval evaluate(float3 wo, float3 wi)
+    BSDFSample evaluate(float3 wo, float3 wi)
     {
-        BSDFEval e;
+        BSDFSample e;
+        e.valid       = false;
+        e.transmitted = false;
+        e.wi          = float3(0.0);
+        e.weight      = float3(0.0);
+        e.emission    = float3(0.0);
         // Opacity gates the reflective/diffuse lobes — sample() routes
         // (1 - opacity) of evaluations to the delta transmission branch,
         // so the non-delta response must scale accordingly. Without this,

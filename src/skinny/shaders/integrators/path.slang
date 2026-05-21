@@ -42,7 +42,7 @@ float3 neeLightEstimator<TM : IMaterial, TL : ILight>(
         return float3(0.0);
 
     float3 wi = worldToTangent(dir, T, B, N);
-    BSDFEval bsdf = mat.evaluate(wo, wi);
+    BSDFSample bsdf = mat.evaluate(wo, wi);
 
     if (ls.pdfArea == 0.0)
     {

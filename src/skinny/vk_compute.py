@@ -436,13 +436,18 @@ class ComputePipeline:
             "            BSDFSample s;\n"
             "            s.valid = false; s.transmitted = false; s.pdf = 0.0;\n"
             "            s.emission = float3(0.0); s.wi = float3(0.0); s.weight = float3(0.0);\n"
+            "            s.response = float3(0.0);\n"
             "            return s;\n"
             "        }\n"
         )
         eval_default = (
             "        default:\n"
             "        {\n"
-            "            BSDFEval e; e.response = float3(0.0); e.pdf = 0.0; return e;\n"
+            "            BSDFSample e;\n"
+            "            e.valid = false; e.transmitted = false; e.pdf = 0.0;\n"
+            "            e.emission = float3(0.0); e.wi = float3(0.0); e.weight = float3(0.0);\n"
+            "            e.response = float3(0.0);\n"
+            "            return e;\n"
             "        }\n"
         )
 
@@ -466,7 +471,7 @@ class ComputePipeline:
             + sample_default
             + "    }\n"
             "}\n\n"
-            "BSDFEval evalPythonMaterial(uint pyId, FlatHitData fhd, float3 wo, float3 wi)\n"
+            "BSDFSample evalPythonMaterial(uint pyId, FlatHitData fhd, float3 wo, float3 wi)\n"
             "{\n"
             "    switch (pyId)\n"
             "    {\n"
@@ -485,7 +490,7 @@ class ComputePipeline:
             "    {\n"
             "        return samplePythonMaterial(pyId, data, wo, rng);\n"
             "    }\n"
-            "    BSDFEval evaluate(float3 wo, float3 wi)\n"
+            "    BSDFSample evaluate(float3 wo, float3 wi)\n"
             "    {\n"
             "        return evalPythonMaterial(pyId, data, wo, wi);\n"
             "    }\n"

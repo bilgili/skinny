@@ -178,28 +178,38 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event) -> bool:
         et = event.type()
-        if et == QEvent.KeyPress and self._should_forward_key(event.key()):
+        if et == QEvent.KeyPress and self._should_forward_key(
+            event.key(), event.modifiers(),
+        ):
             self.viewport.keyPressEvent(event)
             return True
-        if et == QEvent.KeyRelease and self._should_forward_key(event.key()):
+        if et == QEvent.KeyRelease and self._should_forward_key(
+            event.key(), event.modifiers(),
+        ):
             self.viewport.keyReleaseEvent(event)
             return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:
-        if self._should_forward_key(event.key()):
+        if self._should_forward_key(event.key(), event.modifiers()):
             self.viewport.keyPressEvent(event)
             return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:
-        if self._should_forward_key(event.key()):
+        if self._should_forward_key(event.key(), event.modifiers()):
             self.viewport.keyReleaseEvent(event)
             return
         super().keyReleaseEvent(event)
 
-    def _should_forward_key(self, key: int) -> bool:
+    def _should_forward_key(self, key: int, modifiers) -> bool:
         if key not in self._viewport_keys:
+            return False
+        # Reserve Ctrl/Cmd/Alt key combos for app-wide shortcuts (Compile,
+        # Undo, Redo, etc.) — they otherwise overlap viewport keys like Z.
+        if modifiers & (
+            Qt.ControlModifier | Qt.MetaModifier | Qt.AltModifier
+        ):
             return False
         # Don't steal keys from text-edit widgets, spin boxes, combo
         # boxes (type-ahead search), or focused buttons (Space activates).
