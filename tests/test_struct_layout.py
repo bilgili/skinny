@@ -23,7 +23,7 @@ class TestPythonPackingSizes:
     def test_flat_material_stride(self):
         from skinny.renderer import FLAT_MATERIAL_STRIDE
 
-        assert FLAT_MATERIAL_STRIDE == 96
+        assert FLAT_MATERIAL_STRIDE == 128
 
     def test_flat_material_pack_size(self):
         from skinny.renderer import pack_flat_material
@@ -31,7 +31,35 @@ class TestPythonPackingSizes:
 
         material = SimpleNamespace(parameter_overrides={})
         data = pack_flat_material(material)
-        assert len(data) == 96
+        assert len(data) == 128
+
+    def test_flat_material_cutout_packing(self):
+        """Cutout opacity config: threshold, opacity texture idx, and
+        channelMask opacity=a must land at the documented offsets.
+        Guards the data-flow side of the cutout-opacity fix (design doc:
+        docs/superpowers/specs/2026-05-24-cutout-opacity-fix-design.md).
+        """
+        from types import SimpleNamespace
+        from skinny.renderer import pack_flat_material, _encode_channel_mask
+
+        material = SimpleNamespace(
+            parameter_overrides={"opacityThreshold": 0.5},
+        )
+        channel_mask = _encode_channel_mask({"opacity": "a"})
+        data = pack_flat_material(
+            material,
+            opacity_texture_idx=7,
+            channel_mask=channel_mask,
+        )
+
+        assert len(data) == 128
+        # opacityTextureIdx at byte 76 (uint)
+        assert struct.unpack_from("I", data, 76)[0] == 7
+        # opacityThreshold at byte 92 (float)
+        assert abs(struct.unpack_from("f", data, 92)[0] - 0.5) < 1e-6
+        # channelMask at byte 108 (uint); opacity slot is bits 12..16
+        mask = struct.unpack_from("I", data, 108)[0]
+        assert ((mask >> 12) & 0xF) == 4  # "a" code
 
 
 @pytest.mark.gpu
