@@ -194,11 +194,12 @@ struct PathTracer : IIntegrator
         // Skip cutout-transparent surfaces before the bounce loop begins.
         // Offset along the ray direction (not -normal) so back-facing
         // double-sided quads are cleared correctly.
-        for (uint skip = 0u; skip < 16u && h.hit && isCutoutTransparent(h); skip++)
+        for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
         {
             r.origin = h.position + r.direction * 0.002;
             h = traceScene(fc, r);
         }
+
 
         for (uint bounce = 0u; bounce < MAX_BOUNCES; bounce++)
         {
@@ -264,7 +265,7 @@ struct PathTracer : IIntegrator
             }
             h = hNext;
 
-            for (uint skip = 0u; skip < 16u && h.hit && isCutoutTransparent(h); skip++)
+            for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
             {
                 r.origin = h.position + r.direction * 0.002;
                 h = traceScene(fc, r);

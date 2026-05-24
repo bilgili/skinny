@@ -105,7 +105,7 @@ bool visibleSegment(FrameConstants fc, float3 a, float3 b)
     shadow.direction = dir;
     float remaining = dist - 0.004;
 
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 32; i++)
     {
         HitInfo h = traceScene(fc, shadow);
         if (!h.hit || h.t > remaining)
@@ -124,7 +124,7 @@ bool visibleDirectional(FrameConstants fc, float3 origin, float3 N, float3 L)
     shadow.origin    = origin + N * 0.002;
     shadow.direction = L;
 
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 32; i++)
     {
         HitInfo h = traceScene(fc, shadow);
         if (!h.hit)

@@ -221,7 +221,7 @@ int randomWalk(
     {
         HitInfo h = traceScene(fc, ray);
         [loop]
-        for (uint skip = 0u; skip < 8u && h.hit && isCutoutTransparent(h); skip++)
+        for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
         {
             ray.origin = h.position + ray.direction * 0.002;
             h = traceScene(fc, ray);
@@ -643,6 +643,28 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         camVtx.isDelta = false;
         camVtx.onLight = false;
         eye[0] = camVtx;
+
+        // Skip cutout-transparent surfaces before constructing the first
+        // eye vertex. Without this, BDPT renders cutout-alpha texels as
+        // solid opaque (firstHit is the raw traceScene result from
+        // main_pass.slang, never cutout-resolved). Mirrors path.slang.
+        Ray r = ray;
+        for (uint skip = 0u; skip < 32u && firstHit.hit && isCutoutTransparent(firstHit); skip++)
+        {
+            r.origin = firstHit.position + r.direction * 0.002;
+            firstHit = traceScene(fc, r);
+        }
+        if (!firstHit.hit)
+        {
+            return sceneEnvRadiance(r.direction, fc.envIntensity,
+                                    effectiveFurnaceMode(firstHit.materialId));
+        }
+        if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+        {
+            // Non-flat first hit after skip — bail back to env (path
+            // tracer covers the skin/python material paths).
+            return float3(0.0);
+        }
 
         FlatMaterial fmat = loadFlatMaterial(firstHit);
         BDPTVertex z1;

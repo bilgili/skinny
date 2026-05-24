@@ -236,6 +236,14 @@ FlatMaterial loadFlatMaterial(HitInfo h)
         }
     }
 
+    // UsdPreviewSurface authors `diffuseColor` connected to a UsdUVTexture.
+    // pack_std_surface_params can't sample textures on the CPU, so it falls
+    // back to the constant default (0.8 grey) for textured materials.
+    // fetchFlatHitData already sampled the texture for the diffuse lobe;
+    // copy that color into the std_surface params so FlatMaterial.evaluate's
+    // BSDF response (used by NEE) matches the textured albedo sample() uses.
+    m.sp.base_color = m.data.mat.albedo;
+
     m.F0 = schlickF0(m.data.mat.albedo, m.data.mat.metallic,
                      m.data.mat.specular, m.data.mat.ior);
     return m;
