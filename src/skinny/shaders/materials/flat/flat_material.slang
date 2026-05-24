@@ -112,17 +112,16 @@ struct FlatMaterial : IMaterial
                 return s;
 
             float3 H     = normalize(wi + wo);
-            float  NdotL = max(wi.z, 1e-6);
-            float  NdotV2 = max(wo.z, 1e-6);
-            float  NdotH = max(H.z, 1e-6);
-            float  VdotH = max(dot(wo, H), 1e-6);
+            float  NdotL = wi.z;
+            float  VdotH = max(dot(wo, H), 0.0);
 
+            // VNDF importance sampling: BRDF×cosθ / pdf reduces to
+            // F · G₁(L) (separable Smith G₂). Bounded above by 1.
             float r    = (1.0 - m.coatIOR) / (1.0 + m.coatIOR);
             float F0c  = r * r;
             float F    = schlickFresnelColor(VdotH, float3(F0c)).r;
-            float G    = ggxSmithG1(NdotV2, m.coatRoughness)
-                       * ggxSmithG1(NdotL, m.coatRoughness);
-            float3 weight = m.coatColor * (F * G * VdotH / (NdotV2 * NdotH));
+            float G1L  = ggxSmithG1(NdotL, m.coatRoughness);
+            float3 weight = m.coatColor * (F * G1L);
             if (all(weight == float3(0.0)))
                 return s;
 
@@ -143,15 +142,20 @@ struct FlatMaterial : IMaterial
                 return s;
 
             float3 H     = normalize(wi + wo);
-            float  NdotL = max(wi.z, 1e-6);
-            float  NdotV2 = max(wo.z, 1e-6);
-            float  NdotH = max(H.z, 1e-6);
-            float  VdotH = max(dot(wo, H), 1e-6);
+            float  NdotL = wi.z;
+            float  VdotH = max(dot(wo, H), 0.0);
 
+            // VNDF importance sampling: BRDF×cosθ / pdf reduces to
+            // F · G₁(L) for separable Smith G₂. The classical
+            // D(H)-of-microfacet sampler this replaced left
+            // ``VdotH / (NdotV·NdotH)`` in the weight — a singular
+            // factor at grazing/near-horizon microfacets that
+            // tools/firefly_debug.py traced as the spec-lobe firefly
+            // source (mode 5 peak ≈ 4e4 per bounce, compounding to
+            // ~1e16 throughput over six bounces).
             float3 F = schlickFresnelColor(VdotH, F0);
-            float  G = ggxSmithG1(NdotV2, roughness)
-                     * ggxSmithG1(NdotL, roughness);
-            float3 specWeight = F * (G * VdotH / (NdotV2 * NdotH));
+            float  G1L = ggxSmithG1(NdotL, roughness);
+            float3 specWeight = F * G1L;
             if (all(specWeight == float3(0.0)))
                 return s;
             bounceWeight = specWeight / pSpec;
