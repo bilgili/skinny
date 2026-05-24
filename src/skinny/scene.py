@@ -30,6 +30,29 @@ from skinny.tattoos import Tattoo
 
 
 @dataclass
+class TextureBinding:
+    """USD UsdUVTexture node parameters resolved per shader input.
+
+    Captures the per-connection authoring data that affects sampling:
+    file path, scale/bias remap (encodes the OpenGL-vs-DirectX normal
+    convention and unorm→signed remap for non-color data), the channel
+    selector from `outputs:r|g|b|a|rgb`, sourceColorSpace ("sRGB" vs
+    "raw"), and per-texture wrap modes from `inputs:wrapS/wrapT`.
+
+    Defaults match the UsdPreviewSurface UsdUVTexture spec so callers
+    that only have a path can still construct a sensible binding.
+    """
+
+    path: Path
+    bias: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    scale: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    channel: str = "rgb"          # one of "rgb", "r", "g", "b", "a"
+    source_color_space: str = "auto"  # "sRGB", "raw", "auto"
+    wrap_s: str = "repeat"        # "repeat", "clamp", "mirror", "black"
+    wrap_t: str = "repeat"
+
+
+@dataclass
 class Material:
     """Material binding for one mesh instance.
 
@@ -62,6 +85,13 @@ class Material:
     # UsdUVTexture nodes connected to the surface shader's inputs;
     # Phase C-4 maps each entry to a slot in the bindless sampler array.
     texture_paths: dict[str, Path] = field(default_factory=dict)
+    # Per-input UsdUVTexture node settings (scale/bias/channel/wrap). Same
+    # keys as `texture_paths`; loaders populating one should populate both
+    # so the renderer can honour DirectX-style normal Y flips, alpha vs
+    # red channel selection for opacity/roughness, and per-texture wrap
+    # modes. Materials authored before this field existed continue to work
+    # — missing entries fall back to the UsdUVTexture defaults.
+    texture_bindings: dict[str, "TextureBinding"] = field(default_factory=dict)
     # When set, the renderer's per-scene-material gen path resolves this
     # name in the loaded MaterialLibrary (instead of authoring a fresh
     # standard_surface from `parameter_overrides`). Authors opt in via

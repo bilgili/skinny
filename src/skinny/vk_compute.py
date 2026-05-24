@@ -1582,12 +1582,16 @@ class SampledImage:
         height: int,
         format: int = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
         bytes_per_pixel: int = 16,
+        address_mode_u: int = vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        address_mode_v: int = vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
     ) -> None:
         self.ctx = ctx
         self.width = width
         self.height = height
         self.format = format
         self.bytes_per_pixel = bytes_per_pixel
+        self._address_mode_u = address_mode_u
+        self._address_mode_v = address_mode_v
         self._byte_count = width * height * bytes_per_pixel
 
         # Staging buffer
@@ -1663,13 +1667,16 @@ class SampledImage:
         )
         self.view = vk.vkCreateImageView(ctx.device, view_info, None)
 
-        # Linear sampler; wrap around phi (U) and clamp poles (V).
+        # Linear sampler. U/V address modes come from caller (per-texture
+        # `inputs:wrapS/wrapT` from USD) so a bindless slot used for a
+        # tiled brick map can REPEAT while a clamped foliage cutout uses
+        # CLAMP_TO_EDGE. W stays clamped — only 2D images live here.
         sampler_info = vk.VkSamplerCreateInfo(
             magFilter=vk.VK_FILTER_LINEAR,
             minFilter=vk.VK_FILTER_LINEAR,
             mipmapMode=vk.VK_SAMPLER_MIPMAP_MODE_LINEAR,
-            addressModeU=vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
-            addressModeV=vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            addressModeU=address_mode_u,
+            addressModeV=address_mode_v,
             addressModeW=vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             anisotropyEnable=vk.VK_FALSE,
             maxAnisotropy=1.0,

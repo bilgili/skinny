@@ -33,7 +33,26 @@ from typing import Any, Iterable, Optional
 
 import MaterialX as mx
 from MaterialX import PyMaterialXGenShader as mxgenshader
-from MaterialX import PyMaterialXGenSlang as mxslang
+try:
+    from MaterialX import PyMaterialXGenSlang as mxslang
+except ImportError as _mxslang_err:
+    # Building MaterialX without the Slang generator (the PyPI wheel does
+    # not ship it) means we can't run the skinny-MaterialX skin material
+    # path, but unrelated USD scenes (UsdPreviewSurface, no MaterialX
+    # targets) should still render. Anything that touches `mxslang` will
+    # raise RuntimeError at call time.
+    class _MissingMxSlang:
+        _err = _mxslang_err
+
+        def __getattr__(self, name):  # type: ignore[no-redef]
+            raise RuntimeError(
+                "MaterialX PyMaterialXGenSlang not available; build "
+                "MaterialX from source per CLAUDE.md to use skinny's "
+                f"MaterialX skin material path (attr {name!r}). "
+                f"Original error: {self._err}"
+            )
+
+    mxslang = _MissingMxSlang()  # type: ignore[assignment]
 
 
 # ─── Library locations ────────────────────────────────────────────────

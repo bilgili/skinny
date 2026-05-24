@@ -71,16 +71,49 @@ MAX_LENS_ELEMENTS = 32
 INSTANCE_STRIDE = 144
 
 # Per-material flat-shading record consumed by main_pass.slang's
-# non-skin BSDF dispatch. Layout (std430-compatible):
+# non-skin BSDF dispatch. Layout (scalar/std430-compatible):
 #    0: diffuseColor (vec3, 12) + roughness (float, packs into trailing 4)
 #   16: metallic + specular + opacity + diffuseTextureIdx
 #   32: roughnessTextureIdx + metallicTextureIdx + normalTextureIdx + emissiveTextureIdx
 #   48: emissiveColor (vec3, 12) + ior (float)
-#   64: coat + coatRoughness + coatIOR + pad0
-#   80: coatColor (vec3, 12) + pad1
-# 96 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 96
+#   64: coat + coatRoughness + coatIOR + opacityTextureIdx
+#   80: coatColor (vec3, 12) + opacityThreshold
+#   96: normalScale (vec3, 12) + channelMask (uint, packed channel selectors)
+#  112: normalBias  (vec3, 12) + _pad (4 B)
+# 128 B / record, naturally 16-byte aligned.
+FLAT_MATERIAL_STRIDE = 128
 FLAT_MATERIAL_CAPACITY_INIT = 16
+
+# Channel-selector codes packed into FlatMaterialParams.channelMask. Five
+# scalar texture inputs (diffuse, roughness, metallic, opacity, emissive)
+# carry a 4-bit channel index each — 20 bits total, leaving room for
+# future inputs without changing the buffer layout.
+_CHANNEL_CODE = {"rgb": 0, "r": 1, "g": 2, "b": 3, "a": 4}
+_CHANNEL_SHIFT = {
+    "diffuseColor":  0,
+    "roughness":     4,
+    "metallic":      8,
+    "opacity":      12,
+    "emissiveColor": 16,
+}
+
+
+def _encode_channel_mask(channels: dict[str, str]) -> int:
+    """Pack per-input channel selectors into the FlatMaterialParams uint.
+
+    Each entry maps an UsdPreviewSurface input name to a channel string
+    ("rgb"/"r"/"g"/"b"/"a"). Unknown channels fall back to "rgb" (0),
+    which makes the shader read whatever the input's natural fetch already
+    expected — i.e. zero is the "do nothing different" code.
+    """
+    mask = 0
+    for input_name, ch in channels.items():
+        shift = _CHANNEL_SHIFT.get(input_name)
+        if shift is None:
+            continue
+        code = _CHANNEL_CODE.get(ch, 0)
+        mask |= (code & 0xF) << shift
+    return mask & 0xFFFFFFFF
 
 
 def _hashable_value(v: object) -> object:
@@ -185,18 +218,39 @@ class TexturePool:
         self._by_path: dict[str, int] = {}
         self._next_slot = 0
 
-    def add_or_get(self, path: Path, *, linear: bool = False) -> int:
+    _WRAP_TO_VK = {
+        "repeat":  vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        "clamp":   vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        "mirror":  vk.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
+        "black":   vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        "useMetadata": vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    }
+
+    def add_or_get(
+        self,
+        path: Path,
+        *,
+        linear: bool = False,
+        wrap_s: str = "repeat",
+        wrap_t: str = "repeat",
+    ) -> int:
         """Decode the file at `path` and return the array slot it lives in.
 
-        Subsequent calls with the same (path, linear) pair return the cached
-        slot. Returns SENTINEL when the file can't be loaded (missing/corrupt).
+        Subsequent calls with the same (path, linear, wrap_s, wrap_t) tuple
+        return the cached slot. Returns SENTINEL when the file can't be
+        loaded (missing/corrupt).
 
         `linear=True` uploads as VK_FORMAT_R8G8B8A8_UNORM (no gamma decode) —
         use for normal, roughness, metallic, and other non-colour data textures.
+        `wrap_s` / `wrap_t` come from USD's per-texture
+        `inputs:wrapS` / `inputs:wrapT`. Two materials referencing the same
+        file with different wrap modes get distinct slots (each owns its
+        own sampler).
         """
         key = str(path.resolve()) if path.is_absolute() else str(path)
         if linear:
             key += ":linear"
+        key += f":{wrap_s}/{wrap_t}"
         cached = self._by_path.get(key)
         if cached is not None:
             return cached
@@ -208,10 +262,14 @@ class TexturePool:
             return self.SENTINEL
         w, h = img.size
         fmt = vk.VK_FORMAT_R8G8B8A8_UNORM if linear else vk.VK_FORMAT_R8G8B8A8_SRGB
+        addr_u = self._WRAP_TO_VK.get(wrap_s, vk.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+        addr_v = self._WRAP_TO_VK.get(wrap_t, vk.VK_SAMPLER_ADDRESS_MODE_REPEAT)
         slot = SampledImage(
             self.ctx, w, h,
             format=fmt,
             bytes_per_pixel=4,
+            address_mode_u=addr_u,
+            address_mode_v=addr_v,
         )
         slot.upload_sync(img.tobytes())
         idx = self._next_slot
@@ -239,10 +297,14 @@ def pack_flat_material(
     normal_texture_idx: int = 0xFFFFFFFF,
     emissive_texture_idx: int = 0xFFFFFFFF,
     opacity_texture_idx: int = 0xFFFFFFFF,
+    *,
+    normal_scale: tuple[float, float, float] = (2.0, 2.0, 2.0),
+    normal_bias: tuple[float, float, float] = (-1.0, -1.0, -1.0),
+    channel_mask: int = 0,
 ) -> bytes:
-    """Pack a Material's overrides into 96 bytes (FlatMaterialParams).
+    """Pack a Material's overrides into 128 bytes (FlatMaterialParams).
 
-    Layout (std430-compatible):
+    Layout (scalar/std430 compatible — `float3` packs at 4-byte alignment):
        0: diffuseColor.r/g/b      (vec3 → 12 B)
       12: roughness               (float)
       16: metallic                (float)
@@ -261,6 +323,10 @@ def pack_flat_material(
       76: opacityTextureIdx       (uint; sentinel = use constant)
       80: coatColor.r/g/b         (vec3 → 12 B)
       92: opacityThreshold        (float; cutout alpha threshold)
+      96: normalScale.x/y/z       (vec3 → 12 B; UsdUVTexture inputs:scale.xyz)
+     108: channelMask             (uint; packed per-input channel selectors)
+     112: normalBias.x/y/z        (vec3 → 12 B; UsdUVTexture inputs:bias.xyz)
+     124: _pad                    (uint; reserved)
     """
     overrides = material.parameter_overrides
     diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
@@ -277,7 +343,7 @@ def pack_flat_material(
     coat_color = _override_color3(overrides, "coat_color", (1.0, 1.0, 1.0))
     opacity_threshold = _override_float(overrides, "opacityThreshold", 0.0)
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f",
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -291,6 +357,10 @@ def pack_flat_material(
         int(opacity_texture_idx) & 0xFFFFFFFF,
         coat_color[0], coat_color[1], coat_color[2],
         opacity_threshold,
+        float(normal_scale[0]), float(normal_scale[1]), float(normal_scale[2]),
+        int(channel_mask) & 0xFFFFFFFF,
+        float(normal_bias[0]), float(normal_bias[1]), float(normal_bias[2]),
+        0,
     )
 
 
@@ -1629,15 +1699,26 @@ class Renderer:
         through to the existing flat / std_surface SSBO path with
         graphId == 0.
         """
+        lib = self._mtlx_library
+        scene = self._usd_scene
+        if scene is None or not scene.materials:
+            return
+
+        # MaterialX runtime missing → skip graph generation but still
+        # rebuild the pipeline so the FLAT-material path can render USD
+        # scenes without the gen-slang dependency.
+        if lib is None:
+            if (
+                self.pipeline is None
+                or self._graph_set_signature() != self._pipeline_built_for_targets
+            ):
+                self._build_pipeline_for_current_graphs()
+            return
+
         from skinny.materialx_runtime import (
             GRAPH_ID_FIRST,
             assign_graph_ids,
         )
-
-        lib = self._mtlx_library
-        scene = self._usd_scene
-        if lib is None or scene is None or not scene.materials:
-            return
         self._mtlx_scene_materials.clear()
         self._material_graph_ids.clear()
         self._material_graph_overrides.clear()
@@ -3176,12 +3257,61 @@ class Renderer:
                 "opacity":       TexturePool.SENTINEL,
             }
             _LINEAR_INPUTS = {"roughness", "metallic", "normal"}
+            # Default channel selectors mirror the UsdPreviewSurface fetch
+            # convention: scalars from `.r`, alpha from `.a`, colour from
+            # rgb. A USD-authored `outputs:<chan>` overrides this per-slot.
+            _DEFAULT_CHANNELS = {
+                "diffuseColor":  "rgb",
+                "roughness":     "r",
+                "metallic":      "r",
+                "opacity":       "a",
+                "emissiveColor": "rgb",
+            }
+            tex_bindings = getattr(mat, "texture_bindings", None) or {}
+            channels: dict[str, str] = {}
             for input_name in indices:
                 tex_path = mat.texture_paths.get(input_name)
-                if tex_path is not None:
-                    indices[input_name] = self.texture_pool.add_or_get(
-                        tex_path, linear=input_name in _LINEAR_INPUTS,
-                    )
+                if tex_path is None:
+                    continue
+                binding = tex_bindings.get(input_name)
+                wrap_s = binding.wrap_s if binding is not None else "repeat"
+                wrap_t = binding.wrap_t if binding is not None else "repeat"
+                indices[input_name] = self.texture_pool.add_or_get(
+                    tex_path,
+                    linear=input_name in _LINEAR_INPUTS,
+                    wrap_s=wrap_s, wrap_t=wrap_t,
+                )
+                if input_name in _DEFAULT_CHANNELS:
+                    if binding is not None:
+                        channels[input_name] = binding.channel
+                    else:
+                        channels[input_name] = _DEFAULT_CHANNELS[input_name]
+
+            # Normal-map scale/bias. UsdPreviewSurface authors per-channel
+            # remap on the UsdUVTexture node; the default OpenGL convention
+            # is scale=(2,2,2,_), bias=(-1,-1,-1,_) which maps unorm [0,1]
+            # back to signed [-1,1]. DirectX-style normal maps author
+            # scale.y=-2/bias.y=+1 to flip Y. When no binding is present
+            # (MaterialX fallback path or non-USD materials) we apply the
+            # OpenGL default so the shader's unchanged behaviour matches
+            # the previous hardcoded `*2-1`.
+            normal_binding = tex_bindings.get("normal")
+            if normal_binding is not None:
+                n_scale = (
+                    float(normal_binding.scale[0]),
+                    float(normal_binding.scale[1]),
+                    float(normal_binding.scale[2]),
+                )
+                n_bias = (
+                    float(normal_binding.bias[0]),
+                    float(normal_binding.bias[1]),
+                    float(normal_binding.bias[2]),
+                )
+            else:
+                n_scale = (2.0, 2.0, 2.0)
+                n_bias = (-1.0, -1.0, -1.0)
+
+            channel_mask = _encode_channel_mask(channels)
             data += pack_flat_material(
                 mat,
                 diffuse_texture_idx=indices["diffuseColor"],
@@ -3190,6 +3320,9 @@ class Renderer:
                 normal_texture_idx=indices["normal"],
                 emissive_texture_idx=indices["emissiveColor"],
                 opacity_texture_idx=indices["opacity"],
+                normal_scale=n_scale,
+                normal_bias=n_bias,
+                channel_mask=channel_mask,
             )
         if not data:
             data += b"\x00" * FLAT_MATERIAL_STRIDE

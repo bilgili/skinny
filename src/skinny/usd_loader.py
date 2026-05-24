@@ -42,6 +42,7 @@ from skinny.scene import (
     Material,
     MeshInstance,
     Scene,
+    TextureBinding,
 )
 
 try:
@@ -135,7 +136,12 @@ def _read_mesh_attrs(prim: Usd.Prim, time: Usd.TimeCode) -> Optional[MeshSource]
     uvs: np.ndarray = np.zeros((positions.shape[0], 2), dtype=np.float32)
     if st_pv:
         st_interp = st_pv.GetInterpolation()
-        st_vals = st_pv.Get(time)
+        # USD primvars can be authored as (values + indices); the value array
+        # then has fewer entries than the consumer expects. `ComputeFlattened`
+        # de-indexes so we always see one value per vertex / face-vertex slot.
+        st_vals = st_pv.ComputeFlattened(time)
+        if st_vals is None:
+            st_vals = st_pv.Get(time)
         if (st_interp == UsdGeom.Tokens.vertex
             and st_vals is not None
             and len(st_vals) == positions.shape[0]):
@@ -207,14 +213,72 @@ def _smooth_normals(positions: np.ndarray, tri_idx: np.ndarray) -> np.ndarray:
 # ─── Transform extraction ─────────────────────────────────────────────
 
 
-def _resolve_texture_input(input_obj: UsdShade.Input) -> Optional[Path]:
-    """Walk a connected shader input back to a UsdUVTexture's `file` asset.
+_VALID_CHANNELS = {"rgb", "r", "g", "b", "a"}
+_VALID_WRAP_MODES = {"repeat", "clamp", "mirror", "black", "useMetadata"}
 
-    Returns the resolved absolute path or None when the input either isn't
-    connected to a texture-loading node or the file path can't be resolved.
-    Recognises UsdUVTexture (the UsdPreviewSurface common case) and a
-    generic shader with a `file` asset input (covers MaterialX `<image>`
-    nodes in the typical wiring).
+
+def _normalize_channel(name: str) -> str:
+    """Map a UsdUVTexture `outputs:<name>` connection name to our canonical
+    channel string. UsdShade exposes a vector output as `rgb` and scalars
+    as `r/g/b/a`; MaterialX-style `xyz` collapses to `rgb`."""
+    if not name:
+        return "rgb"
+    lower = name.lower()
+    if lower in _VALID_CHANNELS:
+        return lower
+    if lower in ("xyz", "rgba"):
+        return "rgb"
+    if lower in ("x",): return "r"
+    if lower in ("y",): return "g"
+    if lower in ("z",): return "b"
+    if lower in ("w",): return "a"
+    return "rgb"
+
+
+def _normalize_wrap(name: str) -> str:
+    if not name:
+        return "repeat"
+    if name in _VALID_WRAP_MODES:
+        return name
+    # USD also recognises `mirror` / `black`; default unknown values to repeat.
+    return "repeat"
+
+
+def _read_vec4_input(shader: UsdShade.Shader, name: str,
+                     default: tuple[float, float, float, float]
+                     ) -> tuple[float, float, float, float]:
+    """Read a float4 (or float3 promoted) shader input as a 4-tuple. USD's
+    UsdUVTexture authors `bias` / `scale` as float4 — we tolerate float3
+    by appending the default's w component."""
+    inp = shader.GetInput(name)
+    if inp is None:
+        return default
+    v = inp.Get()
+    if v is None:
+        return default
+    try:
+        if len(v) >= 4:
+            return float(v[0]), float(v[1]), float(v[2]), float(v[3])
+        if len(v) == 3:
+            return float(v[0]), float(v[1]), float(v[2]), default[3]
+        if len(v) == 2:
+            return float(v[0]), float(v[1]), default[2], default[3]
+        if len(v) == 1:
+            return float(v[0]), default[1], default[2], default[3]
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def _resolve_texture_binding(input_obj: UsdShade.Input) -> Optional[TextureBinding]:
+    """Walk a connected shader input back to a UsdUVTexture and capture all
+    sampler-relevant parameters: file path, scale/bias remap, channel
+    selector (from `outputs:<name>`), `sourceColorSpace`, and per-axis
+    wrap modes.
+
+    Returns None when the input is unconnected or the source shader has no
+    resolvable `file` asset. Defaults align with the UsdUVTexture spec so
+    older authoring (or MaterialX `<image>` fallbacks) keeps working.
     """
     if not input_obj.HasConnectedSource():
         return None
@@ -222,7 +286,7 @@ def _resolve_texture_input(input_obj: UsdShade.Input) -> Optional[Path]:
     src_info = input_obj.GetConnectedSource()
     if not src_info:
         return None
-    src_api, _src_name, _src_type = src_info
+    src_api, src_output_name, _src_type = src_info
     src_prim = src_api.GetPrim()
     if not src_prim:
         return None
@@ -238,15 +302,43 @@ def _resolve_texture_input(input_obj: UsdShade.Input) -> Optional[Path]:
     asset = file_input.Get()
     if asset is None:
         return None
-    # SdfAssetPath: prefer .resolvedPath when the asset resolver succeeded;
-    # fall back to the authored path so callers at least see what was asked
-    # for. Both cases produce a Path; existence is the caller's problem.
     asset_path = (
         getattr(asset, "resolvedPath", None) or getattr(asset, "path", None) or str(asset)
     )
     if not asset_path:
         return None
-    return Path(asset_path)
+
+    bias = _read_vec4_input(src_shader, "bias", (0.0, 0.0, 0.0, 0.0))
+    scale = _read_vec4_input(src_shader, "scale", (1.0, 1.0, 1.0, 1.0))
+
+    # sourceColorSpace is authored as a token on UsdUVTexture. Anything
+    # outside the standard set ("sRGB" / "raw") is treated as "auto".
+    cs_input = src_shader.GetInput("sourceColorSpace")
+    cs_val = cs_input.Get() if cs_input is not None else None
+    if cs_val in ("sRGB", "raw", "auto"):
+        color_space = str(cs_val)
+    else:
+        color_space = "auto"
+
+    def _wrap_attr(name: str) -> str:
+        a = src_shader.GetInput(name)
+        return _normalize_wrap(str(a.Get())) if (a is not None and a.Get() is not None) else "repeat"
+
+    return TextureBinding(
+        path=Path(asset_path),
+        bias=bias,
+        scale=scale,
+        channel=_normalize_channel(str(src_output_name) if src_output_name else "rgb"),
+        source_color_space=color_space,
+        wrap_s=_wrap_attr("wrapS"),
+        wrap_t=_wrap_attr("wrapT"),
+    )
+
+
+def _resolve_texture_input(input_obj: UsdShade.Input) -> Optional[Path]:
+    """Back-compat wrapper: returns just the resolved file path."""
+    binding = _resolve_texture_binding(input_obj)
+    return binding.path if binding is not None else None
 
 
 def _extract_material(shade_mat: UsdShade.Material) -> Material:
@@ -275,6 +367,7 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
 
     overrides: dict[str, object] = {}
     textures: dict[str, Path] = {}
+    bindings: dict[str, TextureBinding] = {}
     if surface_output and surface_output.HasConnectedSource():
         # GetConnectedSource() returns (source, sourceName, sourceType) or
         # None on older PyUSD; ComputeSurfaceSource is the modern
@@ -290,9 +383,10 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
             shader = UsdShade.Shader(connected_shader)
             for inp in shader.GetInputs():
                 if inp.HasConnectedSource():
-                    tex_path = _resolve_texture_input(inp)
-                    if tex_path is not None:
-                        textures[inp.GetBaseName()] = tex_path
+                    binding = _resolve_texture_binding(inp)
+                    if binding is not None:
+                        textures[inp.GetBaseName()] = binding.path
+                        bindings[inp.GetBaseName()] = binding
                     continue
                 value = inp.Get()
                 if value is None:
@@ -332,6 +426,7 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
         name=name,
         parameter_overrides=overrides,
         texture_paths=textures,
+        texture_bindings=bindings,
         mtlx_target_name=mtlx_target_name,
         python_module=python_module,
     )

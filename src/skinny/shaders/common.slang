@@ -32,7 +32,7 @@ struct HitInfo
 
 // Per-material flat-shading record. Used by main_pass.slang when a hit's
 // materialTypes[id] == MATERIAL_TYPE_FLAT. Layout matches
-// renderer.pack_flat_material exactly: 96 B / record, std430-compatible.
+// renderer.pack_flat_material exactly: 128 B / record, scalar-layout.
 struct FlatMaterialParams
 {
     float3 diffuseColor;          // 0..12
@@ -53,6 +53,19 @@ struct FlatMaterialParams
     uint   opacityTextureIdx;     // 76..80; sentinel = use constant
     float3 coatColor;             // 80..92
     float  opacityThreshold;      // 92..96; cutout alpha threshold
+    // UsdUVTexture `inputs:scale.xyz` / `inputs:bias.xyz` from the normal
+    // map node. OpenGL convention is (2,2,2)/(-1,-1,-1); DirectX-style
+    // maps author scale.y=-2 + bias.y=+1 to flip Y. Renderer fills in the
+    // OpenGL defaults when no USD binding is present.
+    float3 normalScale;           // 96..108
+    // Packed per-input channel selector. 4 bits per input encoding
+    // {0=rgb, 1=r, 2=g, 3=b, 4=a}. Bit positions match renderer's
+    // _CHANNEL_SHIFT: diffuse(0), roughness(4), metallic(8), opacity(12),
+    // emissive(16). Zero (the default) keeps the legacy per-input
+    // hard-coded channel fetch.
+    uint   channelMask;           // 108..112
+    float3 normalBias;            // 112..124
+    uint   _pad0;                 // 124..128
 };
 
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang
