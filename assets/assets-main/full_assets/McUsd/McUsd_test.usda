@@ -1,0 +1,404 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            string boundCamera = "/McUsd/Camera"
+        }
+        dictionary renderSettings = {
+            bool "rtx:raytracing:fractionalCutoutOpacity" = 1
+            token "rtx:rendermode" = "PathTracing"
+            float3 "rtx:sceneDb:ambientLightColor" = (0, 0, 0)
+        }
+    }
+    defaultPrim = "McUsd"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "McUsd"
+{
+    def Camera "Camera" (
+        hide_in_stage_window = false
+        no_delete = false
+    )
+    {
+        float4[] clippingPlanes = []
+        float2 clippingRange = (0.01, 1000)
+        float focalLength = 18.147562
+        float focusDistance = 0
+        float fStop = 0
+        float horizontalAperture = 20.955
+        float horizontalApertureOffset = 0
+        custom vector3d omni:kit:centerOfInterest = (0, 0, -10)
+        token projection = "perspective"
+        uniform token purpose = "default"
+        double shutter:close = 0
+        double shutter:open = 0
+        uniform token stereoRole = "mono"
+        float verticalAperture = 15.2908
+        float verticalApertureOffset = 0
+        token visibility = "inherited"
+        float3 xformOp:rotateZXY = (-30, 45, 0)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (5.0, 4.0, 5.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZXY", "xformOp:scale"]
+    }
+
+    def Xform "Lights"
+    {
+        def DistantLight "Sun" (
+            prepend apiSchemas = ["ShapingAPI"]
+            kind = "model"
+        )
+        {
+            float inputs:angle = 1
+            float inputs:intensity = 5
+            color3f inputs:color = (1.0, 1.0, 1.0)
+            double3 xformOp:rotateZXY = (235, 325, 0)
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZXY"]
+        }
+    }
+
+    def Xform "Geom"
+    {
+        def Mesh "sunflower_back" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            bool doubleSided = 1
+            float3[] extent = [(2.536144, 2.054085, 2.064179), (2.878164, 2.993778, 3.064179)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            rel material:binding = </McUsd/Looks/sunflower_back>
+            point3f[] points = [(2.53614, 2.99378, 3.06418), (2.53614, 2.99378, 2.06418), (2.87816, 2.05409, 2.06418), (2.87816, 2.05409, 3.06418)]
+            normal3f[] primvars:normals = [(-0.939693, -0.34202, 0)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:normals:indices = [0, 0, 0, 0]
+            texCoord2f[] primvars:st = [(1, 1), (0, 1), (0, 0), (1, 0)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:st:indices = [0, 1, 2, 3]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "sunflower_front" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            bool doubleSided = 1
+            float3[] extent = [(2.542019, 2.056223, 2.064179), (2.884039, 2.995915, 3.064179)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            rel material:binding = </McUsd/Looks/sunflower_front>
+            point3f[] points = [(2.54202, 2.99592, 2.06418), (2.54202, 2.99592, 3.06418), (2.88404, 2.05622, 3.06418), (2.88404, 2.05622, 2.06418)]
+            normal3f[] primvars:normals = [(0.939693, 0.34202, 0)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:normals:indices = [0, 0, 0, 0]
+            texCoord2f[] primvars:st = [(1, 1), (0, 1), (0, 0), (1, 0)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:st:indices = [0, 1, 2, 3]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "sunflower_bottom" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            bool doubleSided = 1
+            float3[] extent = [(2.144466, 1, 2.098555), (3.050716, 2, 3.004805)]
+            int[] faceVertexCounts = [4, 4]
+            int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
+            rel material:binding = </McUsd/Looks/sunflower_bottom>
+            point3f[] points = [(2.14447, 1, 2.09855), (3.05072, 1, 3.0048), (3.05072, 2, 3.0048), (2.14447, 2, 2.09855), (2.14447, 1, 3.0048), (3.05072, 1, 2.09855), (3.05072, 2, 2.09855), (2.14447, 2, 3.0048)]
+            normal3f[] primvars:normals = [(-0.707107, 0, 0.707107), (0.707107, 0, 0.707107)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:normals:indices = [0, 0, 0, 0, 1, 1, 1, 1]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:st:indices = [0, 1, 2, 3, 0, 1, 2, 3]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "sunflower_top" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            bool doubleSided = 1
+            float3[] extent = [(2.144466, 2, 2.098555), (3.050716, 3, 3.004805)]
+            int[] faceVertexCounts = [4, 4]
+            int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
+            rel material:binding = </McUsd/Looks/sunflower_top>
+            point3f[] points = [(2.14447, 2, 2.09855), (3.05072, 2, 3.0048), (3.05072, 3, 3.0048), (2.14447, 3, 2.09855), (2.14447, 2, 3.0048), (3.05072, 2, 2.09855), (3.05072, 3, 2.09855), (2.14447, 3, 3.0048)]
+            normal3f[] primvars:normals = [(-0.707107, 0, 0.707107), (0.707107, 0, 0.707107)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:normals:indices = [0, 0, 0, 0, 1, 1, 1, 1]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+                interpolation = "faceVarying"
+            )
+            int[] primvars:st:indices = [0, 1, 2, 3, 0, 1, 2, 3]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Looks"
+    {
+        def Material "sunflower_back"
+        {
+            token outputs:surface.connect = </McUsd/Looks/sunflower_back/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.54902, 0.741176, 0.341176)
+                color3f inputs:diffuseColor.connect = </McUsd/Looks/sunflower_back/diffuse_texture.outputs:rgb>
+                float inputs:metallic = 0
+                float3 inputs:normal.connect = </McUsd/Looks/sunflower_back/normal_texture.outputs:rgb>
+                float inputs:opacity.connect = </McUsd/Looks/sunflower_back/diffuse_texture.outputs:a>
+                float inputs:opacityThreshold = 0.5
+                float inputs:roughness.connect = </McUsd/Looks/sunflower_back/roughness_texture.outputs:r>
+                int inputs:useSpecularWorkflow = 0
+                token outputs:surface
+            }
+
+            def Shader "uv_reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                float2 inputs:fallback = (0, 0)
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "roughness_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_back_r.png@
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_back/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:r
+            }
+
+            def Shader "normal_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                float4 inputs:bias = (-1, 1, -1, -1)
+                asset inputs:file = @./McUsd_materials/tex/sunflower_back_n.png@
+                float4 inputs:scale = (2, -2, 2, 2)
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_back/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float3 outputs:rgb
+            }
+
+            def Shader "diffuse_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_back.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_back/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:a
+                float3 outputs:rgb
+            }
+        }
+
+        def Material "sunflower_front"
+        {
+            token outputs:surface.connect = </McUsd/Looks/sunflower_front/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.54902, 0.741176, 0.341176)
+                color3f inputs:diffuseColor.connect = </McUsd/Looks/sunflower_front/diffuse_texture.outputs:rgb>
+                float inputs:metallic = 0
+                float3 inputs:normal.connect = </McUsd/Looks/sunflower_front/normal_texture.outputs:rgb>
+                float inputs:opacity.connect = </McUsd/Looks/sunflower_front/diffuse_texture.outputs:a>
+                float inputs:opacityThreshold = 0.5
+                float inputs:roughness.connect = </McUsd/Looks/sunflower_front/roughness_texture.outputs:r>
+                int inputs:useSpecularWorkflow = 0
+                token outputs:surface
+            }
+
+            def Shader "uv_reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                float2 inputs:fallback = (0, 0)
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "roughness_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_front_r.png@
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_front/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:r
+            }
+
+            def Shader "normal_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                float4 inputs:bias = (-1, 1, -1, -1)
+                asset inputs:file = @./McUsd_materials/tex/sunflower_front_n.png@
+                float4 inputs:scale = (2, -2, 2, 2)
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_front/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float3 outputs:rgb
+            }
+
+            def Shader "diffuse_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_front.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_front/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:a
+                float3 outputs:rgb
+            }
+        }
+
+        def Material "sunflower_bottom"
+        {
+            token outputs:surface.connect = </McUsd/Looks/sunflower_bottom/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.54902, 0.741176, 0.341176)
+                color3f inputs:diffuseColor.connect = </McUsd/Looks/sunflower_bottom/diffuse_texture.outputs:rgb>
+                float inputs:metallic = 0
+                float3 inputs:normal.connect = </McUsd/Looks/sunflower_bottom/normal_texture.outputs:rgb>
+                float inputs:opacity.connect = </McUsd/Looks/sunflower_bottom/diffuse_texture.outputs:a>
+                float inputs:opacityThreshold = 0.5
+                float inputs:roughness.connect = </McUsd/Looks/sunflower_bottom/roughness_texture.outputs:r>
+                int inputs:useSpecularWorkflow = 0
+                token outputs:surface
+            }
+
+            def Shader "uv_reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                float2 inputs:fallback = (0, 0)
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "roughness_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_bottom_r.png@
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_bottom/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:r
+            }
+
+            def Shader "normal_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                float4 inputs:bias = (-1, 1, -1, -1)
+                asset inputs:file = @./McUsd_materials/tex/sunflower_bottom_n.png@
+                float4 inputs:scale = (2, -2, 2, 2)
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_bottom/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float3 outputs:rgb
+            }
+
+            def Shader "diffuse_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_bottom.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_bottom/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:a
+                float3 outputs:rgb
+            }
+        }
+
+        def Material "sunflower_top"
+        {
+            token outputs:surface.connect = </McUsd/Looks/sunflower_top/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.54902, 0.741176, 0.341176)
+                color3f inputs:diffuseColor.connect = </McUsd/Looks/sunflower_top/diffuse_texture.outputs:rgb>
+                float inputs:metallic = 0
+                float3 inputs:normal.connect = </McUsd/Looks/sunflower_top/normal_texture.outputs:rgb>
+                float inputs:opacity.connect = </McUsd/Looks/sunflower_top/diffuse_texture.outputs:a>
+                float inputs:opacityThreshold = 0.5
+                float inputs:roughness.connect = </McUsd/Looks/sunflower_top/roughness_texture.outputs:r>
+                int inputs:useSpecularWorkflow = 0
+                token outputs:surface
+            }
+
+            def Shader "uv_reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                float2 inputs:fallback = (0, 0)
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "roughness_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_top_r.png@
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_top/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:r
+            }
+
+            def Shader "normal_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                float4 inputs:bias = (-1, 1, -1, -1)
+                asset inputs:file = @./McUsd_materials/tex/sunflower_top_n.png@
+                float4 inputs:scale = (2, -2, 2, 2)
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_top/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float3 outputs:rgb
+            }
+
+            def Shader "diffuse_texture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./McUsd_materials/tex/sunflower_top.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </McUsd/Looks/sunflower_top/uv_reader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float outputs:a
+                float3 outputs:rgb
+            }
+        }
+    }
+}
