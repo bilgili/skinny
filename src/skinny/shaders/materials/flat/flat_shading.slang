@@ -60,6 +60,28 @@ struct FlatHitData
     float3 N;
 };
 
+// Pull one scalar channel out of an RGBA sample using the FlatMaterialParams
+// channel-selector code (0=rgb→.r, 1=r, 2=g, 3=b, 4=a). The "rgb" code
+// returns .r so a caller asking for "the scalar value" still gets the red
+// channel — which matches what UsdPreviewSurface does when a float input is
+// connected to a vec3 output without an explicit `outputs:r` selector.
+float pickChannel(float4 sample, uint code)
+{
+    if (code == 4u) return sample.a;
+    if (code == 3u) return sample.b;
+    if (code == 2u) return sample.g;
+    return sample.r;
+}
+
+// Extract a 4-bit channel selector for the given input from
+// FlatMaterialParams.channelMask. Defaults defined in renderer.py map
+// each input to its conventional output channel (.a for opacity, .r for
+// roughness/metallic).
+uint channelFor(uint mask, uint shift)
+{
+    return (mask >> shift) & 0xFu;
+}
+
 bool isCutoutTransparent(HitInfo h)
 {
     uint matType = materialTypes[h.materialId] & 0xFFu;
@@ -68,8 +90,11 @@ bool isCutoutTransparent(HitInfo h)
     if (p.opacityThreshold <= 0.0) return false;
     float alpha = 1.0;
     if (p.opacityTextureIdx != 0xFFFFFFFFu)
-        alpha = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
-                    .SampleLevel(h.uv, 0.0).a;
+    {
+        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
+                       .SampleLevel(h.uv, 0.0);
+        alpha = pickChannel(s, channelFor(p.channelMask, 12u));
+    }
     return alpha < p.opacityThreshold;
 }
 
@@ -98,38 +123,56 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.albedo = p.diffuseColor;
     if (p.diffuseTextureIdx != 0xFFFFFFFFu)
     {
-        out_.mat.albedo = flatMaterialTextures[NonUniformResourceIndex(p.diffuseTextureIdx)]
-                              .SampleLevel(h.uv, 0.0).rgb;
+        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.diffuseTextureIdx)]
+                       .SampleLevel(h.uv, 0.0);
+        uint cc = channelFor(p.channelMask, 0u);
+        // For diffuse the rgb (code 0) path keeps the vector fetch;
+        // explicit scalar channels broadcast to a grey triplet so
+        // `outputs:r` returns (r,r,r).
+        out_.mat.albedo = (cc == 0u) ? s.rgb : float3(pickChannel(s, cc));
     }
 
     out_.mat.roughness = clamp(p.roughness, 0.04, 1.0);
     if (p.roughnessTextureIdx != 0xFFFFFFFFu)
     {
-        float r = flatMaterialTextures[NonUniformResourceIndex(p.roughnessTextureIdx)]
-                      .SampleLevel(h.uv, 0.0).r;
+        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.roughnessTextureIdx)]
+                       .SampleLevel(h.uv, 0.0);
+        float r = pickChannel(s, channelFor(p.channelMask, 4u));
         out_.mat.roughness = clamp(r, 0.04, 1.0);
     }
 
     out_.mat.metallic = clamp(p.metallic, 0.0, 1.0);
     if (p.metallicTextureIdx != 0xFFFFFFFFu)
     {
-        float m = flatMaterialTextures[NonUniformResourceIndex(p.metallicTextureIdx)]
-                      .SampleLevel(h.uv, 0.0).r;
+        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.metallicTextureIdx)]
+                       .SampleLevel(h.uv, 0.0);
+        float m = pickChannel(s, channelFor(p.channelMask, 8u));
         out_.mat.metallic = clamp(m, 0.0, 1.0);
     }
 
     out_.mat.specular = clamp(p.specular, 0.0, 1.0);
     out_.mat.ior = max(p.ior, 1.0);
+    // Two opacity modes:
+    //   Cutout (opacity texture + threshold > 0): the path/bdpt integrators
+    //     already drop `alpha < threshold` hits via isCutoutTransparent, so
+    //     any hit that reaches here has alpha >= threshold and the BSDF
+    //     must see opacity = 1.0. Skip the texture fetch — it cannot
+    //     influence the result.
+    //   Alpha-blend (opacity texture, threshold == 0, OR constant opacity):
+    //     sample the texture (or use the constant) and let FlatMaterial.sample
+    //     route (1 - opacity) of evaluations through delta transmission /
+    //     dielectric refraction.
     out_.mat.opacity = clamp(p.opacity, 0.0, 1.0);
-    if (p.opacityTextureIdx != 0xFFFFFFFFu)
+    bool cutoutMode = (p.opacityTextureIdx != 0xFFFFFFFFu) && (p.opacityThreshold > 0.0);
+    if (p.opacityTextureIdx != 0xFFFFFFFFu && !cutoutMode)
     {
-        float a = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
-                      .SampleLevel(h.uv, 0.0).a;
-        out_.mat.opacity = a;
+        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
+                       .SampleLevel(h.uv, 0.0);
+        out_.mat.opacity = pickChannel(s, channelFor(p.channelMask, 12u));
     }
-    if (p.opacityThreshold > 0.0 && out_.mat.opacity < p.opacityThreshold)
+    else if (cutoutMode)
     {
-        out_.mat.opacity = 0.0;
+        out_.mat.opacity = 1.0;
     }
     out_.mat.coat = clamp(p.coat, 0.0, 1.0);
     out_.mat.coatRoughness = clamp(p.coatRoughness, 0.04, 1.0);
@@ -139,8 +182,10 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.emission = p.emissiveColor;
     if (p.emissiveTextureIdx != 0xFFFFFFFFu)
     {
-        float3 emTex = flatMaterialTextures[NonUniformResourceIndex(p.emissiveTextureIdx)]
-                           .SampleLevel(h.uv, 0.0).rgb;
+        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.emissiveTextureIdx)]
+                       .SampleLevel(h.uv, 0.0);
+        uint cc = channelFor(p.channelMask, 16u);
+        float3 emTex = (cc == 0u) ? s.rgb : float3(pickChannel(s, cc));
         if (all(out_.mat.emission == float3(0.0)))
             out_.mat.emission = emTex;
         else
@@ -150,12 +195,20 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.N = h.normal;
     if (p.normalTextureIdx != 0xFFFFFFFFu && h.hasTangent)
     {
+        // UsdUVTexture per-channel remap: tangentN = sample * scale + bias.
+        // For OpenGL normal maps that's (2,2,2)*s + (-1,-1,-1) → [-1,1].
+        // DirectX-style maps come in as scale.y=-2, bias.y=+1 which sign-
+        // flips the green channel before reconstructing the tangent
+        // vector. Z is rebuilt from XY so per-channel scale errors on B
+        // don't leak into the surface normal direction.
         float3 sampled = flatMaterialTextures[NonUniformResourceIndex(p.normalTextureIdx)]
-                            .SampleLevel(h.uv, 0.0).xyz * 2.0 - 1.0;
+                            .SampleLevel(h.uv, 0.0).xyz;
+        float3 tn = sampled * p.normalScale + p.normalBias;
+        tn.z = sqrt(max(1.0 - dot(tn.xy, tn.xy), 0.0));
         float3 N = h.normal;
         float3 T = normalize(h.tangent - N * dot(h.tangent, N));
         float3 B = cross(N, T);
-        out_.N = normalize(T * sampled.x + B * sampled.y + N * sampled.z);
+        out_.N = normalize(T * tn.x + B * tn.y + N * tn.z);
     }
     return out_;
 }
