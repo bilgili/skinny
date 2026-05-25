@@ -199,6 +199,56 @@ def _load_radiance_hdr(path: Path) -> np.ndarray:
     return mantissa * scale[..., None]
 
 
+def build_env_distribution(env_rgba: np.ndarray) -> tuple[bytes, bytes]:
+    """Build a 2D piecewise-constant sampling distribution over an equirect
+    environment, for importance sampling in the path tracer.
+
+    Returns ``(marginal_cdf_bytes, conditional_cdf_bytes)`` as float32:
+      - marginal CDF over rows (v): ``ENV_HEIGHT + 1`` entries, 0..1.
+      - conditional CDF over columns (u) per row: ``ENV_HEIGHT * (ENV_WIDTH+1)``
+        entries, row-major, each row 0..1.
+
+    The per-cell weight is sin(theta)-corrected luminance (equirect rows near
+    the poles subtend less solid angle). The shader recovers the image-space
+    pdf from finite differences of these CDFs — no separate func/integral
+    buffer is needed — and converts to a solid-angle pdf for MIS.
+    """
+    rgba = _resize_equirect(env_rgba)
+    lum = (0.2126 * rgba[..., 0] + 0.7152 * rgba[..., 1]
+           + 0.0722 * rgba[..., 2]).astype(np.float64)
+
+    # sin(theta) weight per row; theta = (v + 0.5)/H * pi.
+    v = np.arange(ENV_HEIGHT, dtype=np.float64)
+    sin_theta = np.sin((v + 0.5) / ENV_HEIGHT * np.pi)
+    func = lum * sin_theta[:, None]          # (H, W)
+
+    # Conditional CDF per row (over u). Guard fully-black rows with a uniform
+    # distribution so sampling stays well-defined.
+    row_sum = func.sum(axis=1)               # (H,)
+    safe = row_sum > 0.0
+    cond_cdf = np.zeros((ENV_HEIGHT, ENV_WIDTH + 1), dtype=np.float64)
+    cum = np.cumsum(func, axis=1)            # (H, W)
+    cond_cdf[:, 1:] = cum
+    cond_cdf[safe] /= row_sum[safe, None]
+    # Uniform fallback for black rows: 0, 1/W, 2/W, ..., 1.
+    if (~safe).any():
+        uniform = np.linspace(0.0, 1.0, ENV_WIDTH + 1, dtype=np.float64)
+        cond_cdf[~safe] = uniform
+    cond_cdf[:, ENV_WIDTH] = 1.0             # exact endpoint
+
+    # Marginal CDF over rows, weighted by each row's total func.
+    total = row_sum.sum()
+    marg_cdf = np.zeros(ENV_HEIGHT + 1, dtype=np.float64)
+    if total > 0.0:
+        marg_cdf[1:] = np.cumsum(row_sum) / total
+    else:
+        marg_cdf = np.linspace(0.0, 1.0, ENV_HEIGHT + 1, dtype=np.float64)
+    marg_cdf[ENV_HEIGHT] = 1.0
+
+    return (marg_cdf.astype(np.float32).tobytes(),
+            cond_cdf.astype(np.float32).tobytes())
+
+
 def _resize_equirect(img: np.ndarray) -> np.ndarray:
     """Nearest-neighbour resize to ENV_HEIGHT × ENV_WIDTH RGBA float32."""
     if img.ndim == 2:

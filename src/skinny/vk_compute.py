@@ -853,6 +853,24 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # bindings 31/32: environment importance-sampling distribution.
+            # 31 = marginal CDF over rows (float[ENV_H+1]); 32 = conditional
+            # CDF over columns per row (float[ENV_H*(ENV_W+1)]). Built by
+            # environment.build_env_distribution, consumed by environment.slang
+            # sampleEnvDir/envPdf for env NEE + MIS. Above the graph range
+            # (25..29) and the tool buffer (30).
+            vk.VkDescriptorSetLayoutBinding(
+                binding=31,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            vk.VkDescriptorSetLayoutBinding(
+                binding=32,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
         ]
         # Bindings GRAPH_BINDING_BASE..(GRAPH_BINDING_BASE + N - 1): one
         # storage buffer per MaterialX nodegraph compiled into this pipeline.

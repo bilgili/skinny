@@ -27,3 +27,86 @@ float3 sceneEnvRadiance(float3 dir, float intensity, uint furnaceMode)
     if (furnaceMode != 0u) return float3(1.0);
     return sampleEnvironment(dir, intensity);
 }
+
+// ── Environment importance sampling ─────────────────────────────────
+// 2D piecewise-constant distribution over the equirect map, built CPU-side
+// in environment.build_env_distribution() and uploaded at bindings 31/32.
+// Sampling proportional to sin(theta)-weighted luminance lets next-event
+// estimation find the bright sun/sky directly instead of relying on the BSDF
+// happening to bounce a ray onto it — the fix for specular env fireflies.
+static const int ENV_DIST_W = 1024;   // must equal ENV_WIDTH  (environment.py)
+static const int ENV_DIST_H = 512;    // must equal ENV_HEIGHT (environment.py)
+
+[[vk::binding(31)]] StructuredBuffer<float> envMarginalCdf;  // ENV_DIST_H+1
+[[vk::binding(32)]] StructuredBuffer<float> envCondCdf;      // H*(W+1), row-major
+
+struct EnvSample
+{
+    float3 dir;        // world-space sampled direction
+    float3 radiance;   // L(dir) * intensity
+    float  pdf;        // solid-angle pdf (0 ⇒ invalid / no distribution)
+};
+
+// Largest cell index i in [0, n-1] with cdf[i] <= u (cdf has n+1 entries at
+// `base`). Returns i; `frac` is the in-cell position for stratified continuity.
+int envSearchCdf(StructuredBuffer<float> cdf, int base, int n, float u, out float frac)
+{
+    int lo = 0;
+    int hi = n - 1;
+    [loop] while (lo < hi)
+    {
+        int mid = (lo + hi + 1) >> 1;
+        if (cdf[base + mid] <= u) lo = mid; else hi = mid - 1;
+    }
+    float c0 = cdf[base + lo];
+    float c1 = cdf[base + lo + 1];
+    frac = (c1 > c0) ? saturate((u - c0) / (c1 - c0)) : 0.5;
+    return lo;
+}
+
+float envImagePdf(int iu, int iv)
+{
+    float mPdf = (envMarginalCdf[iv + 1] - envMarginalCdf[iv]) * float(ENV_DIST_H);
+    int   cb   = iv * (ENV_DIST_W + 1);
+    float cPdf = (envCondCdf[cb + iu + 1] - envCondCdf[cb + iu]) * float(ENV_DIST_W);
+    return mPdf * cPdf;
+}
+
+// Solid-angle pdf of sampling `dir` under the env distribution. Used to
+// MIS-weight the BSDF-sampled env-miss contribution against env NEE.
+float envPdf(float3 dir)
+{
+    float2 uv = directionToEquirectUV(dir);
+    int iu = clamp(int(uv.x * float(ENV_DIST_W)), 0, ENV_DIST_W - 1);
+    int iv = clamp(int(uv.y * float(ENV_DIST_H)), 0, ENV_DIST_H - 1);
+    float st = sin((float(iv) + 0.5) / float(ENV_DIST_H) * PI);
+    if (st <= 1e-6) return 0.0;
+    return envImagePdf(iu, iv) / (2.0 * PI * PI * st);
+}
+
+// Importance-sample a direction from the environment distribution.
+EnvSample sampleEnvDir(float2 u, float intensity)
+{
+    EnvSample es;
+    es.dir = float3(0.0, 1.0, 0.0);
+    es.radiance = float3(0.0);
+    es.pdf = 0.0;
+
+    float fv;
+    int iv = envSearchCdf(envMarginalCdf, 0, ENV_DIST_H, u.x, fv);
+    int cb = iv * (ENV_DIST_W + 1);
+    float fu;
+    int iu = envSearchCdf(envCondCdf, cb, ENV_DIST_W, u.y, fu);
+
+    float uImg = (float(iu) + fu) / float(ENV_DIST_W);
+    float vImg = (float(iv) + fv) / float(ENV_DIST_H);
+    float phi   = (uImg - 0.5) * 2.0 * PI;
+    float theta = vImg * PI;
+    float st = sin(theta);
+
+    es.dir = float3(st * sin(phi), cos(theta), st * cos(phi));
+    if (st <= 1e-6) return es;          // pole: degenerate solid angle
+    es.pdf = envImagePdf(iu, iv) / (2.0 * PI * PI * st);
+    es.radiance = sampleEnvironment(es.dir, intensity);
+    return es;
+}

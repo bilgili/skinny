@@ -2123,6 +2123,12 @@ class Renderer:
         # HDR environment texture (RGBA32F, equirectangular).
         from skinny.environment import ENV_HEIGHT, ENV_WIDTH
         self.env_image = SampledImage(self.ctx, ENV_WIDTH, ENV_HEIGHT)
+        # Environment importance-sampling CDFs (bindings 31/32). Sized for the
+        # full equirect resolution; uploaded by _ensure_env_uploaded whenever
+        # the env changes. Drives env NEE + MIS in path.slang.
+        self.env_marginal_buffer = StorageBuffer(self.ctx, (ENV_HEIGHT + 1) * 4)
+        self.env_cond_buffer = StorageBuffer(
+            self.ctx, ENV_HEIGHT * (ENV_WIDTH + 1) * 4)
         self._ensure_env_uploaded()
 
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
@@ -2451,11 +2457,12 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 16 fixed = vertices+indices+bvh+instances+flatMaterials+
+                # 18 fixed = vertices+indices+bvh+instances+flatMaterials+
                 #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
                 #      stdSurface+lightSplat+gizmoSegments+
-                #      lensElements+lensPupilBounds+distantLights+toolBuffer.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (16 + n_graph_slots),
+                #      lensElements+lensPupilBounds+distantLights+toolBuffer+
+                #      envMarginalCdf+envCondCdf.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (18 + n_graph_slots),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -2796,6 +2803,30 @@ class Renderer:
                 descriptorCount=1,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 pBufferInfo=[tool_info],
+            ))
+            env_marg_info = vk.VkDescriptorBufferInfo(
+                buffer=self.env_marginal_buffer.buffer, offset=0,
+                range=self.env_marginal_buffer.size,
+            )
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=ds,
+                dstBinding=31,
+                dstArrayElement=0,
+                descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[env_marg_info],
+            ))
+            env_cond_info = vk.VkDescriptorBufferInfo(
+                buffer=self.env_cond_buffer.buffer, offset=0,
+                range=self.env_cond_buffer.size,
+            )
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=ds,
+                dstBinding=32,
+                dstArrayElement=0,
+                descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[env_cond_info],
             ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
@@ -5296,6 +5327,12 @@ class Renderer:
         else:
             env_hdr_data = env_hdr.data
         self.env_image.upload_sync(env_hdr_data)
+        # Rebuild + upload the importance-sampling distribution to match the
+        # newly-uploaded env texture, so env NEE samples the right directions.
+        from skinny.environment import build_env_distribution
+        marg, cond = build_env_distribution(env_hdr_data)
+        self.env_marginal_buffer.upload_sync(marg)
+        self.env_cond_buffer.upload_sync(cond)
         self._last_env_index = cache_key
 
     @property

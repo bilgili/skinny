@@ -91,6 +91,26 @@ float3 allLightsNEE<TM : IMaterial>(
         total += neeLightEstimator(mat, el, h, N, T, B, wo, fc, rng.next2());
     }
 
+    // Environment NEE. Importance-sample the env distribution and combine
+    // with the BSDF-sampled env-miss contribution via the power heuristic.
+    // Skipped under furnace mode: the env is constant white there, so it has
+    // no high-variance features and the BSDF-miss path alone suffices.
+    if (effectiveFurnaceMode(h.materialId) == 0u)
+    {
+        EnvSample es = sampleEnvDir(rng.next2(), fc.envIntensity);
+        if (es.pdf > 0.0 && dot(N, es.dir) > 0.0 &&
+            visibleDirectional(fc, h.position, N, es.dir))
+        {
+            float3 wi = worldToTangent(es.dir, T, B, N);
+            BSDFSample b = mat.evaluate(wo, wi);
+            if (b.pdf > 0.0)            // delta lobes have no NEE counterpart
+            {
+                float w = powerHeuristic(es.pdf, b.pdf);
+                total += b.response * es.radiance / es.pdf * w;
+            }
+        }
+    }
+
     return total;
 }
 
@@ -191,6 +211,11 @@ struct PathTracer : IIntegrator
         HitInfo h         = firstHit;
         Ray r             = ray;
 
+        // BSDF pdf of the bounce that spawned the current ray, for MIS against
+        // env NEE on a miss. -1 ⇒ no env-NEE counterpart (primary ray, delta
+        // lobe, transmitted, or furnace) ⇒ take the env at full weight.
+        float misBsdfPdf = -1.0;
+
         // Skip cutout-transparent surfaces before the bounce loop begins.
         // Offset along the ray direction (not -normal) so back-facing
         // double-sided quads are cleared correctly.
@@ -205,9 +230,13 @@ struct PathTracer : IIntegrator
         {
             if (!h.hit)
             {
-                radiance += throughput * sceneEnvRadiance(
+                float3 envR = sceneEnvRadiance(
                     r.direction, fc.envIntensity,
                     effectiveFurnaceMode(h.materialId));
+                float w = 1.0;
+                if (misBsdfPdf > 0.0)      // env NEE also sampled this ⇒ MIS
+                    w = powerHeuristic(misBsdfPdf, envPdf(r.direction));
+                radiance += throughput * envR * w;
                 break;
             }
 
@@ -234,6 +263,15 @@ struct PathTracer : IIntegrator
                     break;
                 throughput /= p;
             }
+
+            // Will the env-miss at the next bounce have an env-NEE partner to
+            // MIS against? Only when this surface ran env NEE (not furnace),
+            // the lobe is non-delta (pdf > 0), and the ray reflected (not
+            // transmitted — env NEE only samples the upper hemisphere).
+            bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
+            misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted
+                          && br.bsdfSample.pdf > 0.0)
+                       ? br.bsdfSample.pdf : -1.0;
 
             float3 spawnOffset = br.bsdfSample.transmitted
                 ? -h.normal * 0.002
