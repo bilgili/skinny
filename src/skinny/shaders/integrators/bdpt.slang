@@ -18,8 +18,10 @@
 //     is the path that produces caustic spots on diffuse floors (pure-spec
 //     connections via the t≥2 generic path are zero on co-planar surfaces).
 //   - Directional light only via t=1 NEE (delta — no light walk).
-//   - Env (IBL) contribution: BSDF-strategy only, accumulated when an
-//     eye-walk ray escapes the scene. No env-NEE — matches PathTracer.
+//   - Env (IBL): eye-walk env NEE (importance-sample the env distribution) +
+//     the BSDF-sampled escape ray, combined via the power heuristic — matching
+//     PathTracer. Env NEE is the variance fix for bright-sun HDRIs, where the
+//     BSDF-only escape ray alone left BDPT dark + firefly-noisy vs PathTracer.
 
 import common;
 import bindings;
@@ -140,6 +142,32 @@ BSDFSample bdptEval(BdptSurface s, float3 N, float3 woWorld, float3 wiWorld)
     float3 wo = worldToTangent(woWorld, s.T, s.B, N);
     float3 wi = worldToTangent(wiWorld, s.T, s.B, N);
     return s.mat.evaluate(wo, wi);
+}
+
+// ── Environment next-event estimation ───────────────────────────
+//
+// Mirror of path.allLightsNEE's env block. The eye walk's only IBL strategy
+// was a BSDF-sampled escape ray at full weight; for a high-dynamic-range env
+// (bright sun) that has enormous variance — most glossy-surface samples miss
+// the sun, the rest fire as fireflies — so BDPT read far dimmer/noisier than
+// the path tracer at equal samples. Importance-sampling the env distribution
+// here (and MIS-weighting the escape ray, see randomWalk) restores parity.
+// Evaluates the real std_surface BSDF (wo_ts = tangent-space view dir) so the
+// metallic/coat response matches connectT1 NEE. Returns radiance per unit of
+// arriving throughput; the caller scales by the vertex's incoming throughput.
+// Skipped under furnace mode (constant-white env has no features to sample).
+float3 bdptEnvNEE(FlatMaterial mat, float3 P, float3 N, float3 T, float3 B,
+                  float3 wo_ts, uint matId, inout RNG rng)
+{
+    if (effectiveFurnaceMode(matId) != 0u) return float3(0.0);
+    EnvSample es = sampleEnvDir(rng.next2(), fc.envIntensity);
+    if (es.pdf <= 0.0 || dot(N, es.dir) <= 0.0) return float3(0.0);
+    if (!visibleDirectional(fc, P, N, es.dir)) return float3(0.0);
+    float3 wi_ts = worldToTangent(es.dir, T, B, N);
+    BSDFSample b = mat.evaluate(wo_ts, wi_ts);
+    if (b.pdf <= 0.0) return float3(0.0);     // delta lobes have no NEE partner
+    float w = powerHeuristic(es.pdf, b.pdf);
+    return b.response * es.radiance / es.pdf * w;
 }
 
 // ── Light-side endpoint sampling ────────────────────────────────
@@ -282,10 +310,15 @@ int randomWalk(
     float pdfDirOmegaIn,
     inout RNG rng,
     bool isEyeWalk,
-    inout float3 escapedRadiance)
+    inout float3 escapedRadiance,
+    float misBsdfPdfIn)
 {
     int idx = startIdx;
     float pdfFwdOmega = pdfDirOmegaIn;
+    // BSDF-strategy pdf of the bounce that spawned `ray`, for MIS against env
+    // NEE when the ray escapes. -1 ⇒ no env-NEE counterpart (delta/transmitted/
+    // furnace) ⇒ take the escaped env at full weight. Mirrors path.slang.
+    float misBsdfPdf = misBsdfPdfIn;
 
     [loop]
     while (idx < int(BDPT_MAX_VERTS))
@@ -332,9 +365,16 @@ int randomWalk(
         {
             if (isEyeWalk)
             {
+                // MIS against env NEE: when the spawning bounce was non-delta
+                // and env-active, env NEE also sampled this direction — combine
+                // via the power heuristic. Delta/transmitted/furnace bounces
+                // (misBsdfPdf < 0) have no NEE partner ⇒ full weight.
+                float w = 1.0;
+                if (misBsdfPdf > 0.0)
+                    w = powerHeuristic(misBsdfPdf, envPdf(ray.direction));
                 escapedRadiance += throughput * sceneEnvRadiance(
                     ray.direction, fc.envIntensity,
-                    effectiveFurnaceMode(h.materialId));
+                    effectiveFurnaceMode(h.materialId)) * w;
             }
             break;
         }
@@ -381,6 +421,14 @@ int randomWalk(
             buildBasis(v.N, T, B);
         }
         wo_ts = worldToTangent(-ray.direction, T, B, v.N);
+
+        // Environment NEE at this eye vertex. `throughput` is the radiance
+        // arriving at v (not yet scaled by this vertex's bounce weight), which
+        // is the correct prefix for a direct env connection.
+        if (isEyeWalk)
+            escapedRadiance += throughput *
+                bdptEnvNEE(mat, v.position, v.N, T, B, wo_ts, v.matId, rng);
+
         BSDFSample bs = mat.sample(wo_ts, rng);
         if (!bs.valid) break;
         float3 wi_world = tangentToWorld(bs.wi, T, B, v.N);
@@ -436,6 +484,12 @@ int randomWalk(
         // Carry a unit-omega sentinel through delta segments so the next
         // vertex's area-measure pdfFwd remains finite (= cos/d²).
         pdfFwdOmega = deltaBounce ? 1.0 : bs.pdf;
+        // Will the next bounce's env-miss have an env-NEE partner to MIS
+        // against? Only when this bounce is non-delta, reflected (env NEE
+        // samples the upper hemisphere only), and env-active. Mirrors path.slang.
+        misBsdfPdf = (isEyeWalk && !deltaBounce && !bs.transmitted
+                      && effectiveFurnaceMode(v.matId) == 0u)
+                   ? bs.pdf : -1.0;
     }
     return idx;
 }
@@ -823,8 +877,12 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
             buildBasis(z1.N, T, B);
         }
         float3 wo_ts = worldToTangent(-ray.direction, T, B, z1.N);
+
+        // Environment NEE at the first eye vertex z1 (throughput = 1).
+        float3 escapedRadiance = bdptEnvNEE(
+            fmat, z1.position, z1.N, T, B, wo_ts, firstHit.materialId, rng);
+
         BSDFSample bs = fmat.sample(wo_ts, rng);
-        float3 escapedRadiance = float3(0.0);
         if (bs.valid)
         {
             if (bs.pdf <= 0.0)
@@ -836,8 +894,13 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
             r2.origin = z1.position + spawnOffset;
             r2.direction = wi_world;
             float pdfFwdOmega = (bs.pdf > 0.0) ? bs.pdf : 1.0;
+            // Initial env-miss MIS partner: z1's bounce pdf, when non-delta,
+            // reflected, and env-active.
+            float misBsdfPdfIn = (bs.pdf > 0.0 && !bs.transmitted
+                && effectiveFurnaceMode(firstHit.materialId) == 0u)
+                ? bs.pdf : -1.0;
             eyeLen = randomWalk(eye, 2, r2, throughput, pdfFwdOmega, rng,
-                                true, escapedRadiance);
+                                true, escapedRadiance, misBsdfPdfIn);
         }
 
         // Light subpath.
@@ -856,7 +919,7 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
                 rL.direction = lo.dirOut;
                 float3 unusedEscape = float3(0.0);
                 lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
-                                      false, unusedEscape);
+                                      false, unusedEscape, -1.0);
             }
         }
 
