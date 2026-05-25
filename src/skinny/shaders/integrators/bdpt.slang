@@ -2,13 +2,15 @@
 //
 // V1 simplifications (kept tractable for shader compile time):
 //   - FlatMaterial first-hit only; non-flat hits fall through to PathTracer.
-//   - Connections (s ≥ 1, t ≥ 1) use Lambertian BSDF approximation:
-//     f(z, y) ≈ albedo(z) / π,  pdf(ω) ≈ cos(θ) / π.
-//     Walks still use the full FlatMaterial.sample() for correct
-//     importance-sampled bounces; only the connection / reverse-pdf
-//     evaluations use the diffuse approximation. Pure-spec connections
-//     are therefore weaker than full BDPT but the estimator stays
-//     unbiased (MIS reweights against the BSDF-sampled t = 0 strategy).
+//   - Connections (s ≥ 1, t ≥ 1) and NEE evaluate the full std_surface BSDF.
+//     Each surface vertex caches the fields needed to rebuild its FlatMaterial
+//     (bdptSurface → loadFlatMaterial) so connectGeneric / connectT1 / the
+//     light-tracer splat call FlatMaterial.evaluate() — matching PathTracer
+//     NEE. Metals and coated surfaces (e.g. brass, whose colour lives in
+//     coat_color over a white metallic base) therefore reflect correctly.
+//     Reverse-pdf terms use the real BSDF pdf too; the only Lambertian
+//     fallback left is the reverse pdf across a delta bounce (MIS weight
+//     only — the estimator stays unbiased regardless).
 //   - Subpaths capped at 4 vertices each (eye + light) — fewer (s, t)
 //     pairs keeps the SPIR-V small enough for fast driver compile.
 //   - Light tracer (s = 1) IS implemented: every non-delta light vertex is
@@ -47,12 +49,24 @@ struct BDPTVertex
     float3 position;
     float3 N;
     float3 throughput;    // β accumulated up to and including this vertex
-    float3 albedo;        // cached diffuse coefficient for Lambertian connection eval
     float3 emission;      // Le at this vertex (zero if not emissive)
     float  pdfFwd;        // area-measure pdf of arriving here from origin side
     float  pdfRev;        // area-measure pdf of arriving here from far side
     bool   isDelta;
     bool   onLight;
+
+    // Material-reload fields — enough to rebuild the exact FlatMaterial at
+    // connection time via loadFlatMaterial(). Connections evaluate the real
+    // std_surface BSDF (matching PathTracer NEE) instead of a Lambertian
+    // albedo/π approximation, so metals/coats (e.g. brass, whose colour lives
+    // in coat_color while base_color is white) reflect correctly. Only valid
+    // for kind == BDPT_VK_SURFACE; light/camera vertices leave them defaulted.
+    uint   matId;
+    float2 uv;
+    float3 posObject;     // object-space hit (solid-texture graphs read this)
+    float3 geoN;          // geometric normal pre normal-map (BSDF reload base)
+    float3 tangent;       // surface tangent (+U)
+    bool   hasTangent;
 };
 
 // Convert solid-angle pdf at `from` for direction toward `to` to area-measure
@@ -76,6 +90,58 @@ float lambertSApdf(BDPTVertex v, float3 wWorld)
     return c / PI;
 }
 
+// ── Real-BSDF connection support ────────────────────────────────
+//
+// Reconstruct the exact FlatMaterial a surface vertex was created with, plus
+// its tangent frame, so connections / NEE can evaluate the full std_surface
+// BSDF rather than the Lambertian albedo/π approximation. loadFlatMaterial
+// re-runs the MaterialX graph + texture fetches; connections are few per
+// pixel so the cost is acceptable for an offline-quality integrator.
+struct BdptSurface
+{
+    FlatMaterial mat;
+    float3 T;
+    float3 B;
+};
+
+BdptSurface bdptSurface(BDPTVertex v)
+{
+    HitInfo h;
+    h.t              = 0.0;
+    h.backT          = -1.0;
+    h.position       = v.position;
+    h.positionObject = v.posObject;
+    h.normal         = v.geoN;
+    h.tangent        = v.tangent;
+    h.uv             = v.uv;
+    h.hit            = true;
+    h.hasTangent     = v.hasTangent;
+    h.materialId     = v.matId;
+
+    BdptSurface s;
+    s.mat = loadFlatMaterial(h);
+    if (v.hasTangent)
+    {
+        s.T = normalize(v.tangent - v.N * dot(v.tangent, v.N));
+        s.B = cross(v.N, s.T);
+    }
+    else
+    {
+        buildBasis(v.N, s.T, s.B);
+    }
+    return s;
+}
+
+// Evaluate the std_surface BSDF at a reconstructed surface vertex for a view
+// direction woWorld (toward the origin-side neighbour) and a connection
+// direction wiWorld. Returns response = f·cosθ_i and the solid-angle pdf.
+BSDFSample bdptEval(BdptSurface s, float3 N, float3 woWorld, float3 wiWorld)
+{
+    float3 wo = worldToTangent(woWorld, s.T, s.B, N);
+    float3 wi = worldToTangent(wiWorld, s.T, s.B, N);
+    return s.mat.evaluate(wo, wi);
+}
+
 // ── Light-side endpoint sampling ────────────────────────────────
 
 struct LightOriginSample
@@ -96,12 +162,17 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
     r.vertex.position = float3(0.0);
     r.vertex.N = float3(0.0, 1.0, 0.0);
     r.vertex.throughput = float3(0.0);
-    r.vertex.albedo = float3(0.0);
     r.vertex.emission = float3(0.0);
     r.vertex.pdfFwd = 0.0;
     r.vertex.pdfRev = 0.0;
     r.vertex.isDelta = false;
     r.vertex.onLight = true;
+    r.vertex.matId = 0u;
+    r.vertex.uv = float2(0.0);
+    r.vertex.posObject = float3(0.0);
+    r.vertex.geoN = float3(0.0, 1.0, 0.0);
+    r.vertex.tangent = float3(1.0, 0.0, 0.0);
+    r.vertex.hasTangent = false;
     r.dirOut = float3(0.0, 1.0, 0.0);
     r.beta = float3(0.0);
     r.pdfPos = 0.0;
@@ -277,30 +348,22 @@ int randomWalk(
         v.position = h.position;
         v.N = fd.N;
         v.throughput = throughput;
-        v.albedo = fd.mat.albedo;
         v.emission = fd.mat.emission;
         v.pdfFwd = 0.0;
         v.pdfRev = 0.0;
         v.isDelta = false;
         v.onLight = any(fd.mat.emission > float3(0.0));
+        v.matId = h.materialId;
+        v.uv = h.uv;
+        v.posObject = h.positionObject;
+        v.geoN = h.normal;
+        v.tangent = h.tangent;
+        v.hasTangent = h.hasTangent;
 
         BDPTVertex prev = path[idx - 1];
         v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
 
-        // Update prev.pdfRev using Lambertian approximation for the
-        // backward direction at v.
-        if (prev.kind != BDPT_VK_CAMERA && !prev.isDelta)
-        {
-            float3 toPrev = prev.position - v.position;
-            float toPrevLen2 = dot(toPrev, toPrev);
-            if (toPrevLen2 > 1e-20)
-            {
-                float3 toPrevDir = toPrev / sqrt(toPrevLen2);
-                float pdfRevOmega = lambertSApdf(v, toPrevDir);
-                path[idx - 1].pdfRev = convertSAtoArea(pdfRevOmega, v.position, prev);
-            }
-        }
-
+        int prevIdx = idx - 1;
         path[idx] = v;
         idx++;
         if (idx >= int(BDPT_MAX_VERTS)) break;
@@ -329,6 +392,34 @@ int randomWalk(
             // connections skip BSDF eval at it. Next vertex stays normal.
             path[idx - 1].isDelta = true;
         }
+
+        // prev.pdfRev: area-pdf of reaching prev from v along the reversed
+        // path. Uses the real std_surface BSDF pdf at v with the continuation
+        // direction (v→next, = wi_world) as the view side. Delta bounces have
+        // no finite scatter pdf — fall back to the Lambertian surrogate (MIS
+        // weight only; the estimator stays unbiased either way).
+        if (prev.kind != BDPT_VK_CAMERA && !prev.isDelta)
+        {
+            float3 toPrev = prev.position - v.position;
+            float toPrevLen2 = dot(toPrev, toPrev);
+            if (toPrevLen2 > 1e-20)
+            {
+                float3 toPrevDir = toPrev / sqrt(toPrevLen2);
+                float pdfRevOmega;
+                if (deltaBounce)
+                {
+                    pdfRevOmega = lambertSApdf(v, toPrevDir);
+                }
+                else
+                {
+                    float3 woRev = worldToTangent(wi_world, T, B, v.N);
+                    float3 wiRev = worldToTangent(toPrevDir, T, B, v.N);
+                    pdfRevOmega = mat.evaluate(woRev, wiRev).pdf;
+                }
+                path[prevIdx].pdfRev = convertSAtoArea(pdfRevOmega, v.position, prev);
+            }
+        }
+
         throughput *= bs.weight;
 
         if (idx >= 2)
@@ -438,18 +529,48 @@ ConnectResult connectGeneric(
     if (cosZ <= 0.0 || cosY <= 0.0) return r;
     if (!visibleSegment(fc, z.position, y.position)) return r;
 
-    float G = cosZ * cosY / d2;
-    float3 fz = z.albedo / PI;
-    float3 fy;
+    // Eye-side endpoint: evaluate the real std_surface BSDF at z for the
+    // connection direction (z→y), viewed from its origin-side neighbour.
+    // response_z = f_z·cosZ already folds in the cosine, so the geometry
+    // term drops to 1/d² (the cosZ/cosY of G live inside the responses).
+    BdptSurface zs = bdptSurface(z);
+    float3 woZ = normalize(eye[s - 2].position - z.position);
+    BSDFSample ez = bdptEval(zs, z.N, woZ, dir);
+    float3 respZ = ez.response;
+    float  pdf_z_sa = ez.pdf;           // pdf at z for dir z→y
+
+    // Light-side endpoint: real BSDF when y is a surface, else a cosine-
+    // weighted diffuse-emitter lobe (f = 1/π) for the light-origin vertex.
+    float3 respY;
+    float  pdf_y_sa;                    // pdf at y for dir y→z
     if (y.kind == BDPT_VK_SURFACE)
-        fy = y.albedo / PI;
+    {
+        BdptSurface ys = bdptSurface(y);
+        float3 woY = normalize(lit[t - 2].position - y.position);
+        BSDFSample ey = bdptEval(ys, y.N, woY, -dir);
+        respY = ey.response;
+        pdf_y_sa = ey.pdf;
+
+        if (t >= 2)
+        {
+            float3 toPrev = lit[t - 2].position - y.position;
+            float l2 = dot(toPrev, toPrev);
+            if (l2 > 1e-20)
+            {
+                float3 dp = toPrev / sqrt(l2);
+                float pr = bdptEval(ys, y.N, -dir, dp).pdf;
+                r.pdf_ytm2_rev = convertSAtoArea(pr, y.position, lit[t - 2]);
+            }
+        }
+    }
     else
-        fy = float3(1.0 / PI);
+    {
+        respY = float3(cosY / PI);
+        pdf_y_sa = cosY / PI;
+    }
 
-    r.contribution = z.throughput * fz * G * fy * y.throughput;
+    r.contribution = z.throughput * respZ * respY / d2 * y.throughput;
 
-    float pdf_z_sa = cosZ / PI;
-    float pdf_y_sa = cosY / PI;
     r.pdf_zsm1_rev = convertSAtoArea(pdf_y_sa, y.position, z);
     r.pdf_ytm1_rev = convertSAtoArea(pdf_z_sa, z.position, y);
 
@@ -460,19 +581,8 @@ ConnectResult connectGeneric(
         if (l2 > 1e-20)
         {
             float3 dp = toPrev / sqrt(l2);
-            r.pdf_zsm2_rev = convertSAtoArea(lambertSApdf(z, dp),
-                                             z.position, eye[s - 2]);
-        }
-    }
-    if (t >= 2)
-    {
-        float3 toPrev = lit[t - 2].position - y.position;
-        float l2 = dot(toPrev, toPrev);
-        if (l2 > 1e-20)
-        {
-            float3 dp = toPrev / sqrt(l2);
-            r.pdf_ytm2_rev = convertSAtoArea(lambertSApdf(y, dp),
-                                             y.position, lit[t - 2]);
+            float pr = bdptEval(zs, z.N, dir, dp).pdf;
+            r.pdf_zsm2_rev = convertSAtoArea(pr, z.position, eye[s - 2]);
         }
     }
     r.nonzero = any(r.contribution > float3(0.0));
@@ -480,14 +590,17 @@ ConnectResult connectGeneric(
 }
 
 // t = 1 NEE: connect eye[s-1] to a freshly sampled light point.
-// Standard NEE with power heuristic against the BSDF strategy.
+// Standard NEE with power heuristic against the BSDF strategy. Evaluates the
+// real std_surface BSDF at z (matching path.slang neeLightEstimator) so the
+// metallic/coat response is correct rather than a Lambertian albedo/π.
 float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
 {
     BDPTVertex z = eye[s - 1];
     if (z.isDelta || z.kind != BDPT_VK_SURFACE) return float3(0.0);
 
     float3 total = float3(0.0);
-    float3 fz = z.albedo / PI;
+    BdptSurface zs = bdptSurface(z);
+    float3 woWorld = normalize(eye[s - 2].position - z.position);
 
     for (uint d = 0u; d < fc.numDistantLights; d++)
     {
@@ -496,7 +609,8 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
         float NdotL = max(dot(z.N, dir), 0.0);
         if (NdotL > 0.0 && visibleDirectional(fc, z.position, z.N, dir))
         {
-            total += z.throughput * fz * NdotL * L.radiance;
+            float3 resp = bdptEval(zs, z.N, woWorld, dir).response;
+            total += z.throughput * resp * L.radiance;
         }
     }
 
@@ -517,10 +631,11 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
         if (cosLight <= 0.0) continue;
         if (!visibleSegment(fc, z.position, ls.point)) continue;
 
+        BSDFSample b = bdptEval(zs, z.N, woWorld, dir);
         float invPdfOmega = cosLight / (d2 * ls.pdfArea);
         float pdfLightSA = d2 * ls.pdfArea / max(cosLight, 1e-12);
-        float wNEE = powerHeuristic(pdfLightSA, NdotL / PI);
-        total += z.throughput * fz * NdotL * ls.radiance * invPdfOmega * wNEE;
+        float wNEE = powerHeuristic(pdfLightSA, b.pdf);
+        total += z.throughput * b.response * ls.radiance * invPdfOmega * wNEE;
     }
 
     if (fc.numEmissiveTriangles > 0u)
@@ -543,10 +658,11 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
                 if (NdotL > 0.0 && cosLight > 0.0
                     && visibleSegment(fc, z.position, ls.point))
                 {
+                    BSDFSample b = bdptEval(zs, z.N, woWorld, dir);
                     float invPdfOmega = cosLight / (d2 * ls.pdfArea);
                     float pdfLightSA = d2 * ls.pdfArea / max(cosLight, 1e-12);
-                    float wNEE = powerHeuristic(pdfLightSA, NdotL / PI);
-                    total += z.throughput * fz * NdotL * ls.radiance * invPdfOmega * wNEE;
+                    float wNEE = powerHeuristic(pdfLightSA, b.pdf);
+                    total += z.throughput * b.response * ls.radiance * invPdfOmega * wNEE;
                 }
             }
         }
@@ -576,7 +692,7 @@ void atomicSplatRadiance(int2 pixel, float3 radiance)
 // connected to a non-delta light-walk surface vertex. The camera model
 // (`PinholeCamera` or `ThickLensCamera`) is supplied as a generic
 // parameter so dispatch is monomorphized at compile time.
-void splatLightVertex<TC : ICamera>(BDPTVertex y, inout RNG rng, TC cam)
+void splatLightVertex<TC : ICamera>(BDPTVertex y, float3 prevPos, inout RNG rng, TC cam)
 {
     if (y.isDelta || y.kind != BDPT_VK_SURFACE) return;
     int2 pixel;
@@ -605,9 +721,13 @@ void splatLightVertex<TC : ICamera>(BDPTVertex y, inout RNG rng, TC cam)
 
     // Per-splat raw contribution (pbrt-v3 convention). main_pass.slang
     // composites by dividing the cumulative splatBuffer by frame count, which
-    // averages the per-iteration light-path estimator across frames.
-    float3 fy = y.albedo / PI;
-    float3 contrib = y.throughput * fy * cosY / (distCam * distCam) * We;
+    // averages the per-iteration light-path estimator across frames. The real
+    // std_surface BSDF at y replaces the Lambertian albedo/π; response already
+    // folds in cosY, so the geometry term drops to 1/distCam².
+    BdptSurface ys = bdptSurface(y);
+    float3 woWorld = normalize(prevPos - y.position);
+    float3 respY = bdptEval(ys, y.N, woWorld, toCam).response;
+    float3 contrib = y.throughput * respY / (distCam * distCam) * We;
     atomicSplatRadiance(pixel, contrib);
 }
 
@@ -617,7 +737,7 @@ void splatLightWalk<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS],
     [loop]
     for (int i = 1; i < lightLen; i++)
     {
-        splatLightVertex<TC>(lightPath[i], rng, cam);
+        splatLightVertex<TC>(lightPath[i], lightPath[i - 1].position, rng, cam);
     }
 }
 
@@ -636,12 +756,17 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         camVtx.position = ray.origin;
         camVtx.N = -ray.direction;
         camVtx.throughput = float3(1.0);
-        camVtx.albedo = float3(0.0);
         camVtx.emission = float3(0.0);
         camVtx.pdfFwd = 1.0;
         camVtx.pdfRev = 0.0;
         camVtx.isDelta = false;
         camVtx.onLight = false;
+        camVtx.matId = 0u;
+        camVtx.uv = float2(0.0);
+        camVtx.posObject = float3(0.0);
+        camVtx.geoN = -ray.direction;
+        camVtx.tangent = float3(1.0, 0.0, 0.0);
+        camVtx.hasTangent = false;
         eye[0] = camVtx;
 
         // Skip cutout-transparent surfaces before constructing the first
@@ -672,12 +797,17 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         z1.position = firstHit.position;
         z1.N = fmat.data.N;
         z1.throughput = float3(1.0);
-        z1.albedo = fmat.data.mat.albedo;
         z1.emission = fmat.data.mat.emission;
         z1.pdfFwd = 1.0;
         z1.pdfRev = 0.0;
         z1.isDelta = false;
         z1.onLight = any(fmat.data.mat.emission > float3(0.0));
+        z1.matId = firstHit.materialId;
+        z1.uv = firstHit.uv;
+        z1.posObject = firstHit.positionObject;
+        z1.geoN = firstHit.normal;
+        z1.tangent = firstHit.tangent;
+        z1.hasTangent = firstHit.hasTangent;
         eye[1] = z1;
         int eyeLen = 2;
 
