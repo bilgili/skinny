@@ -341,6 +341,38 @@ def _resolve_texture_input(input_obj: UsdShade.Input) -> Optional[Path]:
     return binding.path if binding is not None else None
 
 
+def _resolve_connected_value(inp: UsdShade.Input) -> object:
+    """Resolve the constant a connected shader input ultimately produces.
+
+    Returns None when the connection has no authored constant upstream
+    (e.g. a procedural node graph output), so the caller falls back to the
+    shader's default for that input.
+    """
+    try:
+        producers = inp.GetValueProducingAttributes()
+    except Exception:
+        producers = []
+    for attr in producers:
+        v = attr.Get()
+        if v is not None:
+            return v
+    return None
+
+
+def _store_shader_override(overrides: dict, name: str, value: object) -> None:
+    """Record a shader-input value under its raw (MaterialX) name and, when
+    one exists, its FlatMaterialParams/UsdPreviewSurface alias.
+
+    The dual-author pattern matches `_load_mtlx_materials`: `pack_flat_material`
+    reads UsdPreviewSurface names (`diffuseColor`/`roughness`/…) while
+    `pack_std_surface_params` reads the canonical standard_surface names.
+    """
+    overrides[name] = value
+    flat_key = _STD_SURFACE_TO_FLAT.get(name)
+    if flat_key:
+        overrides[flat_key] = value
+
+
 def _extract_material(shade_mat: UsdShade.Material) -> Material:
     """Build a skinny Material from a bound UsdShade.Material.
 
@@ -382,16 +414,25 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
         if connected_shader:
             shader = UsdShade.Shader(connected_shader)
             for inp in shader.GetInputs():
+                base = inp.GetBaseName()
                 if inp.HasConnectedSource():
                     binding = _resolve_texture_binding(inp)
                     if binding is not None:
-                        textures[inp.GetBaseName()] = binding.path
-                        bindings[inp.GetBaseName()] = binding
-                    continue
-                value = inp.Get()
+                        textures[base] = binding.path
+                        bindings[base] = binding
+                        continue
+                    # Non-texture connection: the shader input is wired up to
+                    # a Material-level interface input that carries the
+                    # authored constant. This is the OpenPBR /
+                    # standard_surface convention the materialxusd exporter
+                    # emits — every input `.connect`s to the Material, so
+                    # `inp.Get()` is None and the value lives upstream.
+                    value = _resolve_connected_value(inp)
+                else:
+                    value = inp.Get()
                 if value is None:
                     continue
-                overrides[inp.GetBaseName()] = value
+                _store_shader_override(overrides, base, value)
 
     # Author-controlled hint for routing this material through skinny's
     # MaterialX library instead of the auto-generated standard_surface.
