@@ -507,6 +507,23 @@ Edits flow back through `MaterialLibrary` and trigger a graph rebuild
 
 ---
 
+## Headless Render API (`skinny.headless`)
+
+`skinny.headless` is the public offscreen-render interface, driving
+`Renderer.set_usd_scene()` + `usd_loader.load_scene_from_stage()` directly
+with no window or event loop. Key symbols:
+
+- `HeadlessRenderer(w, h)` — context-manager that owns `VulkanContext` +
+  `Renderer`; pipeline compiles once, then `render_to_array(stage)` /
+  `render_scene(stage, path)` / `render_animation(stage, outdir)` can be
+  called repeatedly with a mutated `Usd.Stage` per frame.
+- Module-level `render_scene` / `render_to_array` / `render_animation` —
+  convenience wrappers that open and close the GPU context for one-shot calls.
+- `skinny-render` CLI entry point wraps the same API; `--animate` renders a
+  frame sequence over USD timecodes.
+
+---
+
 ## Web Application Architecture
 
 ### Overview

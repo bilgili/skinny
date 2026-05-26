@@ -52,6 +52,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   window
 - Updated on-screen HUD and `H` help text to list the full key set
 
+### Tooling
+
+- Headless render API (`skinny.headless`) and `skinny-render` CLI for offscreen
+  USD rendering — accepts a file path or a live `Usd.Stage` mutated per frame;
+  saves PNG/JPEG/BMP/EXR/HDR or returns a numpy array; supports USD-time and an
+  animation loop. `examples/render_image.py` and `examples/render_turntable.py`
+  are thin wrappers over the new API.
+
 ## [0.1.0] - 2026-05-02
 
 First release. Skinny is a physically based renderer built on a Vulkan compute

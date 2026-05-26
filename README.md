@@ -267,6 +267,28 @@ server-side and decoded via WebCodecs in the browser.
 Keyboard-driven loop with no Qt overhead. Useful for fast iteration on Vulkan
 or Slang code where the Qt event loop gets in the way.
 
+### Headless rendering (`skinny-render`)
+
+Render a USD scene to a file (or frame sequence) with no window:
+
+```bash
+# Single image — path tracer, 256 samples, PNG
+skinny-render assets/cornell_box_sphere.usda -o out/cornell.png \
+    --width 1920 --height 1080 --samples 256
+
+# Animation over USD timecodes → PNG frame sequence
+skinny-render assets/animated_scene.usda --animate \
+    --frames 1:96:1 --outdir out/frames --samples 64 --ext png
+```
+
+`skinny.headless.HeadlessRenderer` holds the GPU context across calls so you
+can open a `Usd.Stage`, mutate it per frame (move prims, change camera xforms,
+set USD time), and call `r.render_to_array(stage)` or `r.render_scene(stage,
+path)` for each frame — the pipeline is compiled only once.
+
+See `examples/` for minimal demo scripts and `Architecture.md` for
+`skinny.headless` internals.
+
 ### Mesh heads (legacy)
 
 Place `.obj` files (with optional normal/roughness/displacement maps) in
