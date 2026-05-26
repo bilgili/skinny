@@ -191,3 +191,46 @@ class TestResetReframes:
         Renderer.reset_camera(stub)
         assert stub._framed is None
         assert stub.camera_mode == "orbit"
+
+
+@needs_renderer
+class TestDistanceCap:
+    def test_cap_floor_and_scaling(self):
+        from skinny.renderer import _orbit_distance_cap
+        assert _orbit_distance_cap(2.0) == 50.0      # small scene → 50 floor
+        assert _orbit_distance_cap(12.5) == 50.0     # boundary: 4×12.5 == 50
+        assert _orbit_distance_cap(20.0) == 80.0     # large scene → 4×longest
+
+    def test_frame_mesh_sets_cap(self):
+        import types
+        from skinny.renderer import Renderer, OrbitCamera
+        stub = types.SimpleNamespace(orbit_camera=OrbitCamera())
+        # A 40-unit-tall mesh: longest dim 40 → cap = max(50, 160) = 160.
+        positions = np.array(
+            [[-1, 0, -1], [1, 0, 1], [-1, 40, -1], [1, 40, 1]], dtype=np.float32
+        )
+        source = types.SimpleNamespace(positions=positions)
+        Renderer._frame_camera_to_mesh(stub, source)
+        assert stub.orbit_camera.max_distance == 160.0
+        assert stub.orbit_camera.distance <= 160.0
+
+    def test_zoom_respects_dynamic_cap(self):
+        from skinny.renderer import OrbitCamera
+        cam = OrbitCamera()
+        cam.max_distance = 200.0
+        cam.distance = 199.0
+        for _ in range(50):       # many zoom-out steps
+            cam.zoom(-1.0)
+        assert cam.distance <= 200.0
+        assert cam.distance > 50.0  # not pinned to the old 50 cap
+
+    def test_scene_graph_slider_uses_max_distance(self):
+        from skinny.renderer import OrbitCamera
+        from skinny.scene_graph import SceneGraphNode, inject_renderer_camera
+        cam = OrbitCamera()
+        cam.max_distance = 160.0
+        root = SceneGraphNode(path="/", name="root", type_name="Scope")
+        inject_renderer_camera(root, cam, "orbit")
+        synth = next(c for c in root.children if c.path == "/Skinny/MainCamera")
+        dist = next(p for p in synth.properties if p.name == "distance")
+        assert dist.metadata["max"] == 160.0

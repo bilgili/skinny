@@ -617,6 +617,15 @@ def _hero_yaw_pitch() -> tuple[float, float]:
     return float(np.radians(30.0)), float(np.radians(15.0))
 
 
+def _orbit_distance_cap(longest_dim: float) -> float:
+    """Max orbit distance for a scene whose longest AABB edge is ``longest_dim``.
+
+    At least 4× the longest dimension so large scenes can be framed and
+    zoomed out, never below the legacy 50-unit floor for small scenes.
+    """
+    return float(max(50.0, 4.0 * longest_dim))
+
+
 class CameraBase(abc.ABC):
     """PBRT CameraBase analogue — abstract camera-model surface.
 
@@ -694,6 +703,10 @@ class OrbitCamera(CameraBase):
     focal_length_mm: float = 50.0  # used with fstop to drive iris diameter
     vertical_aperture_mm: float = 24.0  # sensor height in mm; used by the lens path
     lens: Optional["LensSystem"] = None  # PBRT-style thick lens; None ⇒ pinhole
+    # Upper clamp for `distance` (wheel zoom, UI slider, auto-frame). Scales
+    # with scene size — the renderer raises it to ≥4× the longest scene
+    # dimension when a model loads so large scenes can be framed/zoomed out.
+    max_distance: float = 50.0
 
     @property
     def position(self) -> np.ndarray:
@@ -719,7 +732,9 @@ class OrbitCamera(CameraBase):
         self.pitch = float(np.clip(self.pitch, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
 
     def zoom(self, delta: float) -> None:
-        self.distance = float(np.clip(self.distance * (1.0 - delta * 0.1), 0.5, 50.0))
+        self.distance = float(
+            np.clip(self.distance * (1.0 - delta * 0.1), 0.5, self.max_distance)
+        )
 
     def pan(self, dx: float, dy: float) -> None:
         f = self.target - self.position
@@ -1252,14 +1267,16 @@ class Renderer:
             return
         center = ((amin + amax) * 0.5).astype(np.float32)
 
+        cap = _orbit_distance_cap(float(np.max(diag)))
         fov_v_rad = np.radians(self.orbit_camera.fov)
         margin = 1.4
         distance = radius / np.tan(fov_v_rad * 0.5) * margin
         # Respect OrbitCamera.zoom's clamp range so user wheel-zoom stays
         # consistent with the seeded value.
-        distance = float(np.clip(distance, 0.5, 50.0))
+        distance = float(np.clip(distance, 0.5, cap))
 
         yaw, pitch = _hero_yaw_pitch()
+        self.orbit_camera.max_distance = cap
         self.orbit_camera.target = center
         self.orbit_camera.distance = distance
         self.orbit_camera.yaw = yaw
@@ -1275,18 +1292,24 @@ class Renderer:
         ov = scene.camera_override
         if ov is None:
             return
+        # Distance cap scales with scene size so a large authored scene's
+        # focus distance isn't clamped down to the 50-unit floor.
+        bounds = scene.world_bounds()
+        cap = (
+            _orbit_distance_cap(float(np.max(bounds[1] - bounds[0])))
+            if bounds is not None else 50.0
+        )
         # Pick a focus distance: authored value if present, else aim at
         # bounds centre, else fall back to a 5-unit default.
         d = ov.focus_distance
         if d is None or d <= 1e-6:
-            bounds = scene.world_bounds()
             if bounds is not None:
                 amin, amax = bounds
                 center = (amin + amax) * 0.5
                 d = float(np.linalg.norm(center.astype(np.float32) - ov.position))
             if not d:
                 d = 5.0
-        d = float(np.clip(d, 0.5, 50.0))
+        d = float(np.clip(d, 0.5, cap))
 
         target = (ov.position + ov.forward * d).astype(np.float32)
 
@@ -1303,6 +1326,7 @@ class Renderer:
                             max(ov.focal_length_mm, 1e-3))
         ))
 
+        self.orbit_camera.max_distance = cap
         self.orbit_camera.target = target
         self.orbit_camera.distance = d
         self.orbit_camera.yaw = yaw
@@ -1329,12 +1353,14 @@ class Renderer:
             return
         center = ((amin + amax) * 0.5).astype(np.float32)
 
+        cap = _orbit_distance_cap(float(np.max(diag)))
         fov_v_rad = np.radians(self.orbit_camera.fov)
         margin = 1.4
         distance = radius / np.tan(fov_v_rad * 0.5) * margin
-        distance = float(np.clip(distance, 0.5, 50.0))
+        distance = float(np.clip(distance, 0.5, cap))
 
         yaw, pitch = _hero_yaw_pitch()
+        self.orbit_camera.max_distance = cap
         self.orbit_camera.target = center
         self.orbit_camera.distance = distance
         self.orbit_camera.yaw = yaw
@@ -4687,7 +4713,7 @@ class Renderer:
             cam.pitch = float(np.clip(v, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
         elif self.camera_mode == "orbit":
             if key == "distance":
-                cam.distance = float(np.clip(v, 0.5, 50.0))
+                cam.distance = float(np.clip(v, 0.5, cam.max_distance))
             elif key in ("target_x", "target_y", "target_z"):
                 axis = "xyz".index(key[-1])
                 cam.target[axis] = v

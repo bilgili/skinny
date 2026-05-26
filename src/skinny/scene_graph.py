@@ -921,7 +921,8 @@ def inject_renderer_camera(
         node.properties.append(SceneGraphProperty(
             name="distance", display_name="distance",
             type_name="float", value=float(camera.distance),
-            editable=True, metadata={"min": 0.5, "max": 50.0},
+            editable=True,
+            metadata={"min": 0.5, "max": float(getattr(camera, "max_distance", 50.0))},
         ))
         target = (
             float(camera.target[0]),
