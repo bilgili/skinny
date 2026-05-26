@@ -8,6 +8,8 @@ across calls via `HeadlessRenderer`.
 
 from __future__ import annotations
 
+import argparse
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
@@ -272,3 +274,71 @@ def render_animation(source: Source, outdir, *, width: int = 1024,
                      **kw) -> list:
     with HeadlessRenderer(width, height, gpu=gpu) as r:
         return r.render_animation(source, outdir, **kw)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="skinny-render",
+        description="Render a USD scene offscreen to an image (or a frame "
+                    "sequence with --animate).",
+    )
+    p.add_argument("source", help="USD scene (.usd/.usda/.usdc/.usdz)")
+    p.add_argument("-o", "--output", default="render.png",
+                   help="output image path (single-frame mode)")
+    p.add_argument("--outdir", default="frames",
+                   help="output directory (animation mode)")
+    p.add_argument("--animate", action="store_true",
+                   help="render a frame sequence over the stage's timecodes")
+    p.add_argument("--frames", default=None,
+                   help="frame range START:END[:STEP] (animation mode)")
+    p.add_argument("--fps", type=float, default=None,
+                   help="frames per second (sequence pacing metadata)")
+    p.add_argument("--time", type=float, default=None,
+                   help="single-frame USD timecode")
+    p.add_argument("--width", type=int, default=1024)
+    p.add_argument("--height", type=int, default=1024)
+    p.add_argument("--samples", type=int, default=64)
+    p.add_argument("--integrator", choices=["path", "bdpt"], default="path")
+    p.add_argument("--tonemap", choices=["aces", "reinhard", "hable", "linear"],
+                   default="aces")
+    p.add_argument("--exposure", type=float, default=0.0)
+    p.add_argument("--env-intensity", type=float, default=None, dest="env_intensity")
+    p.add_argument("--no-direct", action="store_true",
+                   help="disable the analytic direct light (IBL only)")
+    p.add_argument("--format", default=None, dest="fmt",
+                   help="override output format (png/jpeg/bmp/exr/hdr)")
+    p.add_argument("--ext", default="png",
+                   help="frame image extension (animation mode)")
+    p.add_argument("--gpu", default=None,
+                   help="GPU preference (e.g. intel/nvidia/amd/discrete/auto)")
+    return p
+
+
+def main(argv: Optional[list] = None) -> int:
+    ns = _build_parser().parse_args(argv)
+    opts = dict(
+        samples=ns.samples, integrator=ns.integrator, tonemap=ns.tonemap,
+        exposure=ns.exposure, env_intensity=ns.env_intensity,
+        direct_light=not ns.no_direct,
+    )
+    try:
+        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu) as r:
+            if ns.animate:
+                frames = _parse_frames(ns.frames) if ns.frames else None
+                paths = r.render_animation(
+                    ns.source, ns.outdir, frames=frames, fps=ns.fps,
+                    ext=ns.ext, **opts,
+                )
+                print(f"[skinny-render] wrote {len(paths)} frame(s) to {ns.outdir}/")
+            else:
+                r.render_scene(ns.source, ns.output, time=ns.time,
+                               format=ns.fmt, **opts)
+                print(f"[skinny-render] wrote {ns.output}")
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"[skinny-render] error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

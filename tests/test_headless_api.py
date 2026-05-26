@@ -206,3 +206,39 @@ class TestAnimation:
         assert len(paths) == 3
         assert all(p.exists() for p in paths)
         assert all(p.read_bytes()[:4] == b"\x89PNG" for p in paths)
+
+
+class TestCli:
+    def test_parser_single(self):
+        from skinny.headless import _build_parser
+        ns = _build_parser().parse_args(
+            ["scene.usda", "-o", "out.png", "--samples", "32"]
+        )
+        assert ns.source == "scene.usda"
+        assert ns.output == "out.png"
+        assert ns.samples == 32
+        assert not ns.animate
+
+    def test_parser_animate(self):
+        from skinny.headless import _build_parser
+        ns = _build_parser().parse_args(
+            ["shot.usda", "--outdir", "frames", "--animate",
+             "--frames", "1:48:2", "--fps", "24"]
+        )
+        assert ns.animate
+        assert ns.outdir == "frames"
+        assert ns.frames == "1:48:2"
+        assert ns.fps == 24.0
+
+    def test_parser_render_opts(self):
+        from skinny.headless import _build_parser
+        ns = _build_parser().parse_args(
+            ["s.usda", "-o", "o.exr", "--integrator", "bdpt",
+             "--tonemap", "hable", "--exposure", "0.5", "--no-direct",
+             "--width", "800", "--height", "600"]
+        )
+        assert ns.integrator == "bdpt"
+        assert ns.tonemap == "hable"
+        assert ns.exposure == 0.5
+        assert ns.no_direct is True
+        assert ns.width == 800 and ns.height == 600

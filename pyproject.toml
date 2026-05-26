@@ -57,6 +57,7 @@ web = [
 skinny = "skinny.app:main"
 skinny-gui = "skinny.ui.qt.app:main"
 skinny-web = "skinny.web_app:main"
+skinny-render = "skinny.headless:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
