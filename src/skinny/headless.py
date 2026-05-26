@@ -67,6 +67,29 @@ def _fmt_for_output(output: Path, override: Optional[str]) -> str:
     return fmt
 
 
+def _parse_frames(spec: str) -> tuple[float, float, float]:
+    """Parse 'START:END' or 'START:END:STEP' into (start, end, step)."""
+    parts = spec.split(":")
+    if len(parts) not in (2, 3):
+        raise ValueError(f"invalid --frames {spec!r}; expected START:END[:STEP]")
+    start, end = float(parts[0]), float(parts[1])
+    step = float(parts[2]) if len(parts) == 3 else 1.0
+    if step <= 0:
+        raise ValueError("--frames STEP must be > 0")
+    return start, end, step
+
+
+def _frame_times(rng: tuple[float, float, float]) -> list[float]:
+    """Inclusive list of timecodes from (start, end, step)."""
+    start, end, step = rng
+    out: list[float] = []
+    t = start
+    while t <= end + step * 1e-6:
+        out.append(round(t, 6))
+        t += step
+    return out
+
+
 def _to_timecode(time: object):
     from pxr import Usd
     if time is None:
@@ -181,6 +204,43 @@ class HeadlessRenderer:
         self.renderer.save_screenshot(str(out), fmt)
 
 
+    def render_animation(self, source: Source, outdir, *, samples: int = 64,
+                         frames: Optional[tuple] = None, fps: Optional[float] = None,
+                         ext: str = "png", **opts) -> list:
+        """Render a frame sequence over a stage's timecodes.
+
+        `frames` is (start, end[, step]); defaults to the stage's
+        start/end timecode with step 1. `fps`/`ext` control naming/pacing
+        metadata only. Returns the list of written Paths.
+        """
+        from pxr import Usd
+
+        stage = source if isinstance(source, Usd.Stage) else Usd.Stage.Open(str(source))
+        if stage is None:
+            raise FileNotFoundError(f"could not open USD stage: {source}")
+
+        if frames is None:
+            rng = (float(stage.GetStartTimeCode()), float(stage.GetEndTimeCode()), 1.0)
+        elif len(frames) == 2:
+            rng = (float(frames[0]), float(frames[1]), 1.0)
+        else:
+            rng = (float(frames[0]), float(frames[1]), float(frames[2]))
+
+        times = _frame_times(rng)
+        outdir = Path(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+        pad = max(4, len(str(len(times) - 1)))
+        fmt = _fmt_for_output(Path("x." + ext), None)
+
+        written = []
+        for i, t in enumerate(times):
+            out = outdir / f"frame_{i:0{pad}d}.{ext}"
+            self.render_scene(stage, out, samples=samples, time=t,
+                              format=fmt, **opts)
+            written.append(out)
+        return written
+
+
 def render_to_array(source: Source, *, width: int = 1024, height: int = 1024,
                     gpu: Optional[str] = None, **kw) -> np.ndarray:
     with HeadlessRenderer(width, height, gpu=gpu) as r:
@@ -191,3 +251,10 @@ def render_scene(source: Source, output, *, width: int = 1024,
                  height: int = 1024, gpu: Optional[str] = None, **kw) -> None:
     with HeadlessRenderer(width, height, gpu=gpu) as r:
         r.render_scene(source, output, **kw)
+
+
+def render_animation(source: Source, outdir, *, width: int = 1024,
+                     height: int = 1024, gpu: Optional[str] = None,
+                     **kw) -> list:
+    with HeadlessRenderer(width, height, gpu=gpu) as r:
+        return r.render_animation(source, outdir, **kw)

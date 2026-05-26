@@ -168,3 +168,40 @@ class TestHeadlessRender:
             xform_api.SetTranslate(Gf.Vec3d(1.0, 1.0, 0.0))
             b = r.render_to_array(stage, samples=8)
         assert np.abs(a.astype(int) - b.astype(int)).mean() > 1.0
+
+
+class TestFrameRange:
+    def test_parse_start_end(self):
+        from skinny.headless import _parse_frames
+        assert _parse_frames("1:10") == (1.0, 10.0, 1.0)
+
+    def test_parse_start_end_step(self):
+        from skinny.headless import _parse_frames
+        assert _parse_frames("0:48:2") == (0.0, 48.0, 2.0)
+
+    def test_parse_bad_raises(self):
+        from skinny.headless import _parse_frames
+        with pytest.raises(ValueError, match="frames"):
+            _parse_frames("5")
+
+    def test_frame_times_inclusive(self):
+        from skinny.headless import _frame_times
+        assert _frame_times((1.0, 4.0, 1.0)) == [1.0, 2.0, 3.0, 4.0]
+
+    def test_frame_times_step(self):
+        from skinny.headless import _frame_times
+        assert _frame_times((0.0, 10.0, 5.0)) == [0.0, 5.0, 10.0]
+
+
+@needs_vulkan
+@needs_usd
+@pytest.mark.gpu
+class TestAnimation:
+    def test_animation_writes_frames(self, tmp_path):
+        from skinny.headless import HeadlessRenderer
+        with HeadlessRenderer(64, 64) as r:
+            paths = r.render_animation(
+                SCENE, tmp_path, samples=4, frames=(0, 2, 1),
+            )
+        assert len(paths) == 3
+        assert all(p.exists() for p in paths)
