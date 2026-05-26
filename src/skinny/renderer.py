@@ -3091,6 +3091,36 @@ class Renderer:
         self._upload_distant_lights(scene.lights_dir)
         self._upload_emissive_triangles(scene)
 
+    def set_usd_scene(self, scene: "Scene") -> None:
+        """Make `scene` the active USD scene synchronously and upload it.
+
+        Composes the same finalize steps the async streaming path runs, but
+        blocking and re-callable. Safe to call every frame with a freshly
+        loaded scene (e.g. from a caller-mutated Usd.Stage): geometry,
+        materials, and lights are re-uploaded each call; light/env sliders
+        and orbit framing are seeded once. An authored (possibly animated)
+        camera is re-applied every call.
+
+        Used by the headless render API; not part of the live UI path.
+        """
+        first = self._usd_scene is None
+
+        # Enter the USD-active state so update()/render treat this scene as
+        # the subject instead of the default analytic head.
+        if self._usd_model_index < 0:
+            self.models.append("USD: (headless)")
+            self._usd_model_index = len(self.models) - 1
+        self.model_index = self._usd_model_index
+
+        self._usd_scene = scene
+        self._gen_scene_materials()           # guarded: rebuilds pipeline only on graph-set change
+        if first:
+            self._apply_usd_lights(scene)     # once: appends env + seeds sliders
+            self._frame_camera_to_scene(scene)
+        elif scene.camera_override is not None:
+            self._frame_camera_to_scene(scene)  # animated authored camera
+        self._upload_usd_scene()              # every call: geometry + materials + lights
+
     def _upload_emissive_triangles(self, scene: Scene) -> None:
         """Build the emissive triangle buffer (binding 18) from scene instances.
 
