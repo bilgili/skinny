@@ -3072,6 +3072,12 @@ class Renderer:
 
         if self._usd_bake_done.is_set() and self._usd_instance_queue.empty():
             self._usd_bake_done = None
+            # Re-frame now that all geometry exists. The metadata-phase frame
+            # ran before any instance streamed in, so world_bounds() was None
+            # and it early-returned, leaving the camera at its defaults.
+            if self._is_usd_active():
+                self._frame_camera_to_scene(self._usd_scene)
+                self._refresh_camera_node()
             print(
                 f"[skinny] USD streaming complete — "
                 f"{len(self._usd_scene.instances)} instance(s)"

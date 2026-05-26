@@ -234,3 +234,48 @@ class TestDistanceCap:
         synth = next(c for c in root.children if c.path == "/Skinny/MainCamera")
         dist = next(p for p in synth.properties if p.name == "distance")
         assert dist.metadata["max"] == 160.0
+
+
+@needs_renderer
+class TestStreamingReframe:
+    """The async USD streaming poll must re-frame the camera after geometry
+    streams in — the metadata-phase frame runs before instances exist, so it
+    early-returns on empty bounds and the camera keeps its defaults."""
+
+    def _stub(self, scene):
+        import queue
+        import threading
+        import types
+        bake_done = threading.Event()
+        bake_done.set()
+        iq = queue.Queue()
+        stub = types.SimpleNamespace(
+            _usd_bake_done=bake_done,
+            _usd_metadata_queue=queue.Queue(),   # empty; Phase 1 skipped (scene set)
+            _usd_instance_queue=iq,
+            _usd_scene=scene,
+            _scene_graph=None,
+            _usd_model_index=0,
+            models=["USD: x"],
+            _usd_uploaded_count=0,
+            framed=[],
+            refreshed=[],
+        )
+        stub._is_usd_active = lambda: True
+        stub._upload_usd_scene = lambda: None
+        stub._frame_camera_to_scene = lambda s: stub.framed.append(s)
+        stub._refresh_camera_node = lambda: stub.refreshed.append(True)
+        return stub, iq
+
+    def test_reframe_on_streaming_complete(self):
+        import types
+        from skinny.renderer import Renderer
+        from skinny.scene import Scene
+        scene = Scene()
+        stub, iq = self._stub(scene)
+        iq.put(types.SimpleNamespace(name="m0", enabled=True))
+        iq.put(types.SimpleNamespace(name="m1", enabled=True))
+        Renderer._poll_usd_streaming(stub)
+        assert len(scene.instances) == 2, "instances should be drained into the scene"
+        assert stub.framed == [scene], "must re-frame with the populated scene"
+        assert stub.refreshed == [True], "must refresh the camera node after re-framing"
