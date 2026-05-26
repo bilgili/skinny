@@ -31,40 +31,25 @@ def main() -> int:
             scene_cam = prim
             break
 
-    pad = len(str(args.frames - 1))
+    pad = max(4, len(str(args.frames - 1)))
 
     with HeadlessRenderer(args.width, args.height) as r:
         if scene_cam is not None:
             # Rotate the existing camera around Y by reading its base transform
-            # and multiplying by a Y-rotation for each frame.
+            # once, then each frame clearing the op stack and writing a single
+            # clean transform op.  This is robust regardless of how the camera
+            # was originally authored (TypeTransform, separate translate/rotateY
+            # ops, DCC exports, etc.).
             xf = UsdGeom.Xformable(scene_cam)
-            ops = xf.GetOrderedXformOps()
-            if ops and ops[0].GetOpType() == UsdGeom.XformOp.TypeTransform:
-                base_mat = ops[0].Get()
-            else:
-                base_mat = Gf.Matrix4d(1.0)
-            # Pivot = scene origin
-            pivot = Gf.Vec3d(0.0, 0.0, 0.0)
-            # Build the rotate-around-Y helper
-            rot_op = ops[0] if (ops and ops[0].GetOpType() == UsdGeom.XformOp.TypeTransform) \
-                else xf.AddTransformOp()
+            base_mat = xf.GetLocalTransformation(Usd.TimeCode.Default())
             for i in range(args.frames):
                 angle_deg = 360.0 * i / args.frames
-                angle_rad = math.radians(angle_deg)
-                c, s = math.cos(angle_rad), math.sin(angle_rad)
-                ry = Gf.Matrix4d(
-                    c,  0.0, -s,  0.0,
-                    0.0, 1.0,  0.0, 0.0,
-                    s,  0.0,  c,  0.0,
-                    0.0, 0.0,  0.0, 1.0,
+                ry = Gf.Matrix4d().SetRotate(
+                    Gf.Rotation(Gf.Vec3d(0, 1, 0), angle_deg)
                 )
-                # Translate to pivot, rotate, translate back, then apply base.
-                t_fwd = Gf.Matrix4d(1.0)
-                t_fwd.SetTranslateOnly(-pivot)
-                t_bck = Gf.Matrix4d(1.0)
-                t_bck.SetTranslateOnly(pivot)
-                new_mat = base_mat * t_fwd * ry * t_bck
-                rot_op.Set(new_mat)
+                xf.ClearXformOpOrder()
+                op = xf.AddTransformOp()
+                op.Set(base_mat * ry)
                 arr = r.render_to_array(stage, samples=args.samples)
                 out = outdir / f"frame_{i:0{pad}d}.png"
                 Image.fromarray(arr, "RGBA").save(out)
