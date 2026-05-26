@@ -205,3 +205,4 @@ class TestAnimation:
             )
         assert len(paths) == 3
         assert all(p.exists() for p in paths)
+        assert all(p.read_bytes()[:4] == b"\x89PNG" for p in paths)

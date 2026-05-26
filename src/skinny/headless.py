@@ -210,12 +210,26 @@ class HeadlessRenderer:
         """Render a frame sequence over a stage's timecodes.
 
         `frames` is (start, end[, step]); defaults to the stage's
-        start/end timecode with step 1. `fps`/`ext` control naming/pacing
-        metadata only. Returns the list of written Paths.
+        start/end timecode with step 1. `ext` selects the image format
+        for all frames. `fps` is accepted for CLI/forward-compat symmetry
+        but is not currently used (no playback or metadata is written).
+        Returns the list of written Paths.
         """
+        if "time" in opts or "format" in opts:
+            raise ValueError(
+                "render_animation controls 'time' (per frame) and 'format' "
+                "(via 'ext'); pass 'frames' and 'ext' instead"
+            )
+
         from pxr import Usd
 
-        stage = source if isinstance(source, Usd.Stage) else Usd.Stage.Open(str(source))
+        if isinstance(source, Usd.Stage):
+            stage = source
+        else:
+            path = Path(source)
+            if not path.exists():
+                raise FileNotFoundError(f"scene not found: {path}")
+            stage = Usd.Stage.Open(str(path))
         if stage is None:
             raise FileNotFoundError(f"could not open USD stage: {source}")
 
