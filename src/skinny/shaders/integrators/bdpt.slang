@@ -35,8 +35,17 @@ import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
 
-static const uint BDPT_MAX_DEPTH = 4u;
-static const uint BDPT_MAX_VERTS = BDPT_MAX_DEPTH + 1u;   // 5
+// Must match path.slang's MAX_BOUNCES. The eye subpath can hold up to
+// BDPT_MAX_DEPTH surface vertices, so this caps how many bounces the camera
+// walk explores. When it was lower than MAX_BOUNCES, delta-transmissive
+// materials (glass, oil) came out dimmer than the path tracer: solid
+// dielectrics need enter+exit refraction plus internal/secondary bounces to
+// carry the transmitted radiance to the environment, and the shorter BDPT
+// walk truncated those longer paths. At parity BDPT matches the path tracer
+// exactly for these scenes. (Costs more per-thread vertex storage — keep in
+// sync with MAX_BOUNCES rather than raising blindly.)
+static const uint BDPT_MAX_DEPTH = 6u;
+static const uint BDPT_MAX_VERTS = BDPT_MAX_DEPTH + 1u;   // 7
 
 // ── Vertex ──────────────────────────────────────────────────────
 

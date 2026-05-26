@@ -33,6 +33,68 @@ class TestPythonPackingSizes:
         data = pack_flat_material(material)
         assert len(data) == 128
 
+    def test_openpbr_names_map_to_std_surface(self):
+        """OpenPBR shader-input names (`transmission_weight`, `base_metalness`,
+        `specular_ior`, …) must reach the standard_surface packer, which reads
+        Autodesk names (`transmission`, `metalness`, `specular_IOR`). The
+        materialxusd exporter authors OpenPBR names; without the alias map
+        every weight silently falls back to its default (transmission→0 ⇒
+        opaque glass, base_metalness→0 ⇒ metals render as dielectric).
+        """
+        from types import SimpleNamespace
+        from skinny.renderer import pack_std_surface_params
+        from skinny.usd_loader import _store_shader_override
+
+        overrides: dict[str, object] = {}
+        # Mimic what _extract_material records for the Glass_OPBR material.
+        _store_shader_override(overrides, "transmission_weight", 1.0)
+        _store_shader_override(overrides, "base_metalness", 0.0)
+        _store_shader_override(overrides, "base_color", (1.0, 1.0, 1.0))
+        _store_shader_override(overrides, "specular_ior", 1.52)
+
+        data = pack_std_surface_params(SimpleNamespace(parameter_overrides=overrides))
+        transmission = struct.unpack_from("f", data, 56)[0]
+        metalness = struct.unpack_from("f", data, 20)[0]
+        specular_ior = struct.unpack_from("f", data, 44)[0]
+
+        assert abs(transmission - 1.0) < 1e-6, "transmission_weight must map to transmission"
+        assert abs(metalness - 0.0) < 1e-6
+        assert abs(specular_ior - 1.52) < 1e-4, "specular_ior must map to specular_IOR"
+
+    def test_transmission_lowers_opacity(self):
+        """A transmissive standard_surface/OpenPBR material must lower `opacity`
+        so the flat path's refraction branch (`if (m.opacity < 1.0)`) fires.
+        Without this the surface stays opaque regardless of `transmission`
+        (glass/oil rendered solid). Guards the native-USD parse path, which —
+        unlike the .mtlx fallback — previously never bridged the two.
+        """
+        from skinny.usd_loader import (
+            _store_shader_override,
+            _derive_opacity_from_transmission,
+        )
+
+        # OpenPBR glass: transmission_weight=1 → transmission=1 → opacity=0.
+        o: dict[str, object] = {}
+        _store_shader_override(o, "transmission_weight", 1.0)
+        _derive_opacity_from_transmission(o)
+        assert abs(float(o["opacity"]) - 0.0) < 1e-6
+
+        # Partial transmission halves opacity.
+        o2: dict[str, object] = {}
+        _store_shader_override(o2, "transmission_weight", 0.25)
+        _derive_opacity_from_transmission(o2)
+        assert abs(float(o2["opacity"]) - 0.75) < 1e-6
+
+        # Opaque material is untouched (no opacity key invented).
+        o3: dict[str, object] = {"transmission": 0.0}
+        _derive_opacity_from_transmission(o3)
+        assert "opacity" not in o3
+
+        # An explicitly authored opacity wins over the derived value.
+        o4: dict[str, object] = {"transmission": 1.0, "opacity": 0.3}
+        _derive_opacity_from_transmission(o4)
+        assert abs(float(o4["opacity"]) - 0.3) < 1e-6
+
     def test_flat_material_cutout_packing(self):
         """Cutout opacity config: threshold, opacity texture idx, and
         channelMask opacity=a must land at the documented offsets.

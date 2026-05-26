@@ -366,11 +366,36 @@ def _store_shader_override(overrides: dict, name: str, value: object) -> None:
     The dual-author pattern matches `_load_mtlx_materials`: `pack_flat_material`
     reads UsdPreviewSurface names (`diffuseColor`/`roughness`/…) while
     `pack_std_surface_params` reads the canonical standard_surface names.
+
+    OpenPBR inputs are first folded onto their standard_surface equivalent
+    (`transmission_weight`→`transmission`, …) so the downstream packers — which
+    only understand standard_surface — see the authored value instead of a
+    default.
     """
     overrides[name] = value
-    flat_key = _STD_SURFACE_TO_FLAT.get(name)
+    std_name = _OPENPBR_TO_STD_SURFACE.get(name, name)
+    if std_name != name:
+        overrides[std_name] = value
+    flat_key = _STD_SURFACE_TO_FLAT.get(std_name)
     if flat_key:
         overrides[flat_key] = value
+
+
+def _derive_opacity_from_transmission(overrides: dict) -> None:
+    """Lower `opacity` to `1 - transmission` when a material is transmissive.
+
+    The flat/std-surface render path only refracts through surfaces whose
+    `opacity < 1` (flat_material.slang). standard_surface / OpenPBR express
+    glass via a `transmission` weight instead, so without this bridge the
+    surface stays opaque. No-op when `transmission` is absent/zero or when an
+    explicit `opacity` was already authored.
+    """
+    t = overrides.get("transmission")
+    if not isinstance(t, (int, float)) or isinstance(t, bool):
+        return
+    if float(t) <= 0.0 or "opacity" in overrides:
+        return
+    overrides["opacity"] = max(0.0, 1.0 - float(t))
 
 
 def _extract_material(shade_mat: UsdShade.Material) -> Material:
@@ -463,6 +488,15 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
             for k, v in skinny_overrides.items():
                 overrides[str(k)] = v
 
+    # Bridge transmission → opacity so the flat path's delta-dielectric
+    # refraction branch (flat_material.slang: `if (m.opacity < 1.0)`) actually
+    # fires. The renderer's only refraction mechanism is opacity-gated; a
+    # standard_surface/OpenPBR `transmission` weight that never lowers opacity
+    # leaves the surface fully opaque (glass/oil rendered solid white). Mirrors
+    # the .mtlx fallback loader (`_load_mtlx_materials`). Skip when opacity is
+    # already authored (e.g. OpenPBR `geometry_opacity` cutout alpha).
+    _derive_opacity_from_transmission(overrides)
+
     return Material(
         name=name,
         parameter_overrides=overrides,
@@ -482,6 +516,40 @@ _STD_SURFACE_TO_FLAT: dict[str, str] = {
     "metalness": "metallic",
     "specular": "specular",
     "specular_IOR": "ior",
+}
+
+# OpenPBR surface shader-input names → Autodesk standard_surface names.
+# The materialxusd exporter emits OpenPBR (`open_pbr_surface`) materials whose
+# inputs carry `_weight`/`_metalness`/`_ior` suffixes (`transmission_weight`,
+# `base_metalness`, `specular_ior`, …). skinny's only uber-closure is
+# `mtlx_std_surface.slang`, whose packer (`pack_std_surface_params`) reads the
+# standard_surface names. Without this translation every OpenPBR weight falls
+# back to its default — `transmission`→0 makes glass opaque, `metalness`→0
+# makes metals render as plastic. color/roughness inputs that share a name
+# (base_color, specular_color, specular_roughness, transmission_color,
+# coat_color, coat_roughness, emission_color, subsurface_color, …) need no
+# entry. `emission_luminance` is intentionally omitted: OpenPBR authors it in
+# nits, not as standard_surface's 0..1 `emission` weight, so a 1:1 alias would
+# blow out emissive materials.
+_OPENPBR_TO_STD_SURFACE: dict[str, str] = {
+    "base_weight": "base",
+    "base_metalness": "metalness",
+    "base_diffuse_roughness": "diffuse_roughness",
+    "specular_weight": "specular",
+    "specular_ior": "specular_IOR",
+    "specular_roughness_anisotropy": "specular_anisotropy",
+    "transmission_weight": "transmission",
+    "transmission_dispersion_scale": "transmission_dispersion",
+    "subsurface_weight": "subsurface",
+    "subsurface_scatter_anisotropy": "subsurface_anisotropy",
+    "coat_weight": "coat",
+    "coat_ior": "coat_IOR",
+    "coat_roughness_anisotropy": "coat_anisotropy",
+    "fuzz_weight": "sheen",
+    "fuzz_color": "sheen_color",
+    "fuzz_roughness": "sheen_roughness",
+    "thin_film_ior": "thin_film_IOR",
+    "geometry_thin_walled": "thin_walled",
 }
 
 
