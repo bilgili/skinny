@@ -1353,32 +1353,22 @@ def _world_transform(prim: Usd.Prim, time: Usd.TimeCode) -> np.ndarray:
 _USD_POOL_SIZE = 4
 
 
-def _read_usd_stage(
-    stage_path: Path,
+def _read_open_stage(
+    stage: "Usd.Stage",
     *,
     time: Optional[Usd.TimeCode] = None,
     use_usd_mtlx_plugin: bool = False,
     keep_stage: bool = False,
+    source_label: Optional[str] = None,
 ) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]], Optional["Usd.Stage"]]:
-    """Serial USD stage read: materials, lights, camera, and raw prim data.
-
-    Returns ``(partial_scene, prim_data, stage_or_none)`` where
-    *partial_scene* has all metadata (materials, lights, camera,
-    mm_per_unit) populated and an ``instances`` list containing only
-    emissive-light instances. The mesh prim data is returned separately
-    for the caller to bake (blocking or background). When
-    ``keep_stage=True`` the open ``Usd.Stage`` handle is returned as the
-    third element so the caller can build a scene graph tree from it.
-    """
-    stage = Usd.Stage.Open(str(stage_path))
-    if stage is None:
-        raise FileNotFoundError(f"could not open USD stage: {stage_path}")
-
+    """Serial read of an already-open USD stage. See `_read_usd_stage`."""
+    label = source_label or (stage.GetRootLayer().identifier or "<anonymous stage>")
     eval_time = time if time is not None else Usd.TimeCode.Default()
 
     mtlx_materials: dict[str, Material] = {}
     if not use_usd_mtlx_plugin:
-        stage_dir = Path(stage.GetRootLayer().realPath).parent
+        real = stage.GetRootLayer().realPath
+        stage_dir = Path(real).parent if real else Path.cwd()
         mtlx_materials = _load_mtlx_materials(stage, stage_dir)
 
     materials: list[Material] = [Material(name="default")]
@@ -1404,7 +1394,7 @@ def _read_usd_stage(
 
     if not prim_data:
         raise ValueError(
-            f"USD stage at {stage_path} contains no usable UsdGeom.Mesh prims"
+            f"USD stage {label} contains no usable UsdGeom.Mesh prims"
         )
 
     lights_dir, lights_sphere, environment, emissive_instances = _extract_lights(
@@ -1425,6 +1415,26 @@ def _read_usd_stage(
         mm_per_unit=mm_per_unit,
     )
     return partial_scene, prim_data, (stage if keep_stage else None)
+
+
+def _read_usd_stage(
+    stage_path: Path,
+    *,
+    time: Optional[Usd.TimeCode] = None,
+    use_usd_mtlx_plugin: bool = False,
+    keep_stage: bool = False,
+) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]], Optional["Usd.Stage"]]:
+    """Open a USD stage from disk, then read it. See `_read_open_stage`."""
+    stage = Usd.Stage.Open(str(stage_path))
+    if stage is None:
+        raise FileNotFoundError(f"could not open USD stage: {stage_path}")
+    return _read_open_stage(
+        stage,
+        time=time,
+        use_usd_mtlx_plugin=use_usd_mtlx_plugin,
+        keep_stage=keep_stage,
+        source_label=str(stage_path),
+    )
 
 
 def bake_usd_prim(
@@ -1469,6 +1479,34 @@ def load_scene_from_usd(
         stage_path, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
     )
 
+    cache_index = load_cache_index()
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=_USD_POOL_SIZE) as pool:
+        instances = list(pool.map(
+            lambda pd: bake_usd_prim(pd[0], pd[1], pd[2], cache_index),
+            prim_data,
+        ))
+
+    scene.instances.extend(instances)
+    return scene
+
+
+def load_scene_from_stage(
+    stage: "Usd.Stage",
+    *,
+    time: Optional[Usd.TimeCode] = None,
+    use_usd_mtlx_plugin: bool = False,
+) -> Scene:
+    """Read an already-open USD stage and return a fully-baked `Scene`.
+
+    Same as `load_scene_from_usd` but takes a `Usd.Stage` the caller owns
+    (e.g. one they mutate between frames). Blocking; bakes meshes in parallel.
+    """
+    scene, prim_data, _ = _read_open_stage(
+        stage, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
+    )
     cache_index = load_cache_index()
 
     from concurrent.futures import ThreadPoolExecutor
