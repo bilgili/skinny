@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -81,3 +82,88 @@ class TestSetUsdScene:
         finally:
             renderer.cleanup()
             ctx.destroy()
+
+
+class TestRenderOptions:
+    def test_resolve_defaults(self):
+        from skinny.headless import RenderOptions
+        opts = RenderOptions()
+        assert opts.samples == 64
+        assert opts.integrator_index == 0   # path
+        assert opts.tonemap_index == 0       # aces
+
+    def test_integrator_bdpt(self):
+        from skinny.headless import RenderOptions
+        assert RenderOptions(integrator="bdpt").integrator_index == 1
+
+    def test_tonemap_hable(self):
+        from skinny.headless import RenderOptions
+        assert RenderOptions(tonemap="hable").tonemap_index == 2
+
+    def test_bad_integrator_raises(self):
+        from skinny.headless import RenderOptions
+        with pytest.raises(ValueError, match="integrator"):
+            RenderOptions(integrator="nope")
+
+    def test_bad_tonemap_raises(self):
+        from skinny.headless import RenderOptions
+        with pytest.raises(ValueError, match="tonemap"):
+            RenderOptions(tonemap="nope")
+
+
+def test_fmt_for_output():
+    from skinny.headless import _fmt_for_output
+    assert _fmt_for_output(Path("a.png"), None) == "png"
+    assert _fmt_for_output(Path("a.JPG"), None) == "jpeg"
+    assert _fmt_for_output(Path("a.png"), "exr") == "exr"
+    with pytest.raises(ValueError, match="format"):
+        _fmt_for_output(Path("a.gif"), None)
+
+
+@needs_vulkan
+@needs_usd
+@pytest.mark.gpu
+class TestHeadlessRender:
+    def test_render_to_array_shape_nonblack(self):
+        from skinny.headless import HeadlessRenderer
+        with HeadlessRenderer(128, 128) as r:
+            arr = r.render_to_array(SCENE, samples=8)
+        assert arr.shape == (128, 128, 4)
+        assert arr.dtype.name == "uint8"
+        assert int(arr[..., :3].max()) > 0
+
+    def test_render_scene_writes_png(self, tmp_path):
+        from skinny.headless import HeadlessRenderer
+        out = tmp_path / "frame.png"
+        with HeadlessRenderer(128, 128) as r:
+            r.render_scene(SCENE, out, samples=8)
+        assert out.exists()
+        assert out.read_bytes()[:4] == b"\x89PNG"
+
+    def test_render_scene_writes_exr(self, tmp_path):
+        from skinny.headless import HeadlessRenderer
+        out = tmp_path / "frame.exr"
+        with HeadlessRenderer(96, 96) as r:
+            r.render_scene(SCENE, out, samples=4)
+        assert out.exists()
+        assert out.read_bytes()[:4] == b"\x76\x2f\x31\x01"  # OpenEXR magic
+
+    def test_stage_mutation_changes_output(self):
+        from pxr import Gf, Usd, UsdGeom
+        from skinny.headless import HeadlessRenderer
+        stage = Usd.Stage.Open(str(SCENE))
+        # Pick the first Xformable mesh prim in the scene to translate.
+        target = None
+        for prim in stage.Traverse():
+            if prim.IsA(UsdGeom.Mesh) and UsdGeom.Xformable(prim):
+                target = UsdGeom.Xformable(prim)
+                break
+        assert target is not None, "no Xformable mesh prim found"
+        # Use XformCommonAPI for robustness — works even if xformOps already exist.
+        xform_api = UsdGeom.XformCommonAPI(target.GetPrim())
+        with HeadlessRenderer(96, 96) as r:
+            xform_api.SetTranslate(Gf.Vec3d(0.0, 0.0, 0.0))
+            a = r.render_to_array(stage, samples=8)
+            xform_api.SetTranslate(Gf.Vec3d(1.0, 1.0, 0.0))
+            b = r.render_to_array(stage, samples=8)
+        assert np.abs(a.astype(int) - b.astype(int)).mean() > 1.0
