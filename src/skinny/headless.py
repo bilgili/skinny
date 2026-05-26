@@ -111,13 +111,17 @@ class HeadlessRenderer:
         from skinny.renderer import Renderer
         from skinny.vk_context import VulkanContext
 
-        self.ctx = VulkanContext(window=None, width=width, height=height)
-        self.renderer = Renderer(
-            vk_ctx=self.ctx,
-            shader_dir=Path(skinny.__file__).resolve().parent / "shaders",
-            hdr_dir=_repo_root() / "hdrs",
-            tattoo_dir=_repo_root() / "tattoos",
-        )
+        self.ctx = VulkanContext(window=None, width=width, height=height, gpu_preference=gpu)
+        try:
+            self.renderer = Renderer(
+                vk_ctx=self.ctx,
+                shader_dir=Path(skinny.__file__).resolve().parent / "shaders",
+                hdr_dir=_repo_root() / "hdrs",
+                tattoo_dir=_repo_root() / "tattoos",
+            )
+        except Exception:
+            self.ctx.destroy()
+            raise
 
     def __enter__(self) -> "HeadlessRenderer":
         return self
@@ -178,12 +182,12 @@ class HeadlessRenderer:
 
 
 def render_to_array(source: Source, *, width: int = 1024, height: int = 1024,
-                    **kw) -> np.ndarray:
-    with HeadlessRenderer(width, height) as r:
+                    gpu: Optional[str] = None, **kw) -> np.ndarray:
+    with HeadlessRenderer(width, height, gpu=gpu) as r:
         return r.render_to_array(source, **kw)
 
 
 def render_scene(source: Source, output, *, width: int = 1024,
-                 height: int = 1024, **kw) -> None:
-    with HeadlessRenderer(width, height) as r:
+                 height: int = 1024, gpu: Optional[str] = None, **kw) -> None:
+    with HeadlessRenderer(width, height, gpu=gpu) as r:
         r.render_scene(source, output, **kw)

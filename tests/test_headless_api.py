@@ -116,6 +116,7 @@ def test_fmt_for_output():
     assert _fmt_for_output(Path("a.png"), None) == "png"
     assert _fmt_for_output(Path("a.JPG"), None) == "jpeg"
     assert _fmt_for_output(Path("a.png"), "exr") == "exr"
+    assert _fmt_for_output(Path("a.png"), "jpg") == "jpeg"
     with pytest.raises(ValueError, match="format"):
         _fmt_for_output(Path("a.gif"), None)
 
