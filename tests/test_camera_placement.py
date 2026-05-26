@@ -82,3 +82,27 @@ class TestUpAxisCorrectionOnLoad:
         amin, amax = scene.world_bounds()
         ext = amax - amin
         assert ext[1] > 3.0 and ext[2] < 1.5, f"Y-up scene should be untouched, got {ext}"
+
+
+@needs_usd
+class TestCameraOverrideCorrection:
+    def test_z_up_camera_forward_corrected(self):
+        from pxr import Usd, UsdGeom, Gf
+        from skinny.usd_loader import _read_open_stage
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        # Mesh so the stage has geometry (loader requires usable geometry).
+        mesh = UsdGeom.Mesh.Define(stage, "/m")
+        mesh.GetPointsAttr().Set([(0, 0, 0), (1, 0, 0), (0, 0, 1)])
+        mesh.GetFaceVertexCountsAttr().Set([3])
+        mesh.GetFaceVertexIndicesAttr().Set([0, 1, 2])
+        # Camera with identity xform: USD forward is local -Z = world (0,0,-1)
+        # in a Z-up stage. After correction it rotates by Rᵀ to (0,-1,0).
+        UsdGeom.Camera.Define(stage, "/cam")
+        partial_scene, _prim_data, _ = _read_open_stage(stage)
+        ov = partial_scene.camera_override
+        assert ov is not None
+        # A Z-up camera with identity xform looks down local -Z = world (0,0,-1).
+        # Correction maps it by Rᵀ: (0,0,-1) @ Rᵀ = -Rᵀ[2] = (0,-1,0).
+        np.testing.assert_allclose(ov.forward,
+                                   np.array([0, -1, 0], np.float32), atol=1e-5)
