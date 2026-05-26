@@ -1375,7 +1375,10 @@ def _read_open_stage(
     material_index: dict[str, int] = {}
 
     prim_data: list[tuple[MeshSource, np.ndarray, int]] = []
-    for prim in stage.Traverse():
+    # TraverseInstanceProxies so meshes inside instanceable references
+    # (USD prototypes) are visited; the default predicate stops at the
+    # instance boundary and would yield zero meshes for such scenes.
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
         if not prim.IsA(UsdGeom.Mesh):
             continue
         if not prim.IsActive() or prim.IsAbstract():
