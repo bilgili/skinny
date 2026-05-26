@@ -1369,6 +1369,41 @@ def _up_axis_rt(up_axis: str) -> "Optional[np.ndarray]":
     )
 
 
+def _apply_up_axis_correction(
+    prim_data: "list[tuple[MeshSource, np.ndarray, int]]",
+    scene: Scene,
+    up_axis: str,
+) -> "list[tuple[MeshSource, np.ndarray, int]]":
+    """Rotate a Z-up stage's geometry, lights, and camera to scene +Y.
+
+    Returns prim_data with corrected transforms (mesh instances are baked
+    from it after this returns). Lights, emissive instances, and the camera
+    override already live on ``scene`` and are mutated in place. Y-up stages
+    are returned untouched.
+    """
+    rt = _up_axis_rt(up_axis)
+    if rt is None:
+        return prim_data
+
+    rt4 = np.eye(4, dtype=np.float32)
+    rt4[:3, :3] = rt
+
+    prim_data = [
+        (src, (xf @ rt4).astype(np.float32), mat) for (src, xf, mat) in prim_data
+    ]
+    for inst in scene.instances:  # emissive-light instances
+        inst.transform = (inst.transform @ rt4).astype(np.float32)
+    for ls in scene.lights_sphere:
+        ls.position = (ls.position @ rt).astype(np.float32)
+    for ld in scene.lights_dir:
+        ld.direction = (ld.direction @ rt).astype(np.float32)
+    ov = scene.camera_override
+    if ov is not None:
+        ov.position = (ov.position @ rt).astype(np.float32)
+        ov.forward = (ov.forward @ rt).astype(np.float32)
+    return prim_data
+
+
 # ─── Public entry point ───────────────────────────────────────────────
 
 _USD_POOL_SIZE = 4
@@ -1442,6 +1477,8 @@ def _read_open_stage(
         camera_override=camera_override,
         mm_per_unit=mm_per_unit,
     )
+    up_axis = str(UsdGeom.GetStageUpAxis(stage))
+    prim_data = _apply_up_axis_correction(prim_data, partial_scene, up_axis)
     return partial_scene, prim_data, (stage if keep_stage else None)
 
 
