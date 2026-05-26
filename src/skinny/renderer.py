@@ -3095,13 +3095,25 @@ class Renderer:
         """Make `scene` the active USD scene synchronously and upload it.
 
         Composes the same finalize steps the async streaming path runs, but
-        blocking and re-callable. Safe to call every frame with a freshly
-        loaded scene (e.g. from a caller-mutated Usd.Stage): geometry,
-        materials, and lights are re-uploaded each call; light/env sliders
-        and orbit framing are seeded once. An authored (possibly animated)
-        camera is re-applied every call.
+        blocking and re-callable. Intended for the headless render API: load
+        a scene (e.g. from a caller-mutated Usd.Stage at time T), call this,
+        then `update()` + `render_headless()`.
 
-        Used by the headless render API; not part of the live UI path.
+        Per call, geometry, flat materials, and lights are re-uploaded, so a
+        mutated stage's moved transforms / deforming meshes / animated lights
+        update. Light + environment sliders are seeded once (from the first
+        scene only — `_apply_usd_lights` appends an env entry, so it must not
+        run per call). An authored `camera_override` is re-applied every call
+        (animated cameras track); with no authored camera the orbit framing is
+        set once and does not follow a moving scene.
+
+        Limitations (headless / non-interactive use): the scene-graph tree
+        (`self.scene_graph`) is not built here, so scene-graph inspection APIs
+        are unavailable after this call. Call `update()` before
+        `render_headless()` so the accumulation buffer resets for the new
+        scene.
+
+        Not part of the live UI path.
         """
         first = self._usd_scene is None
 
