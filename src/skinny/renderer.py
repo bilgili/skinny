@@ -612,6 +612,11 @@ def _look_at(pos: np.ndarray, forward: np.ndarray) -> np.ndarray:
     return view
 
 
+def _hero_yaw_pitch() -> tuple[float, float]:
+    """Default 3/4 hero-view orbit angles (radians): yaw 30°, pitch 15°."""
+    return float(np.radians(30.0)), float(np.radians(15.0))
+
+
 class CameraBase(abc.ABC):
     """PBRT CameraBase analogue — abstract camera-model surface.
 
@@ -1250,10 +1255,11 @@ class Renderer:
         # consistent with the seeded value.
         distance = float(np.clip(distance, 0.5, 50.0))
 
+        yaw, pitch = _hero_yaw_pitch()
         self.orbit_camera.target = center
         self.orbit_camera.distance = distance
-        self.orbit_camera.yaw = 0.0
-        self.orbit_camera.pitch = 0.0
+        self.orbit_camera.yaw = yaw
+        self.orbit_camera.pitch = pitch
 
     def _apply_camera_override(self, scene: Scene) -> None:
         """Convert scene.camera_override → OrbitCamera (target, distance,
@@ -1324,10 +1330,11 @@ class Renderer:
         distance = radius / np.tan(fov_v_rad * 0.5) * margin
         distance = float(np.clip(distance, 0.5, 50.0))
 
+        yaw, pitch = _hero_yaw_pitch()
         self.orbit_camera.target = center
         self.orbit_camera.distance = distance
-        self.orbit_camera.yaw = 0.0
-        self.orbit_camera.pitch = 0.0
+        self.orbit_camera.yaw = yaw
+        self.orbit_camera.pitch = pitch
 
     def _clear_model_state(self) -> None:
         """Reset all model/scene state so a fresh load starts clean."""

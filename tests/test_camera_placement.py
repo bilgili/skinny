@@ -106,3 +106,19 @@ class TestCameraOverrideCorrection:
         # Correction maps it by Rᵀ: (0,0,-1) @ Rᵀ = -Rᵀ[2] = (0,-1,0).
         np.testing.assert_allclose(ov.forward,
                                    np.array([0, -1, 0], np.float32), atol=1e-5)
+
+
+class TestHeroOrientation:
+    def test_hero_angles_applied(self):
+        from skinny.renderer import OrbitCamera, _hero_yaw_pitch
+        yaw, pitch = _hero_yaw_pitch()
+        np.testing.assert_allclose(yaw, np.radians(30.0), atol=1e-6)
+        np.testing.assert_allclose(pitch, np.radians(15.0), atol=1e-6)
+        # Camera sits above and to the side of the target, looking down.
+        cam = OrbitCamera()
+        cam.target = np.array([0.0, 0.0, 0.0], np.float32)
+        cam.distance = 5.0
+        cam.yaw, cam.pitch = yaw, pitch
+        pos = cam.position
+        assert pos[1] > 0.0, "camera should be elevated (pitch>0)"
+        assert pos[0] > 0.0, "camera should be turned to +X side (yaw>0)"
