@@ -10,6 +10,11 @@ first-class skin support -- but the core pipeline handles arbitrary MaterialX
 materials, OpenUSD scenes, ray-traced geometry, image-based lighting,
 microfacet specular, and energy-conservation checks.
 
+Skin-specific rendering (three-layer optics, scattering modes, MaterialX skin
+nodedefs, head geometry, presets, tattoos) is documented separately in
+[SkinRendering.md](SkinRendering.md). Renderer internals are in
+[Architecture.md](Architecture.md).
+
 ## Gallery
 
 <p align="center">
@@ -17,15 +22,16 @@ microfacet specular, and energy-conservation checks.
   <img src="docs/GUI2.png" alt="Skinny GUI — alternate dock layout" width="32%">
   <img src="docs/skinny.png" alt="Skinny render output — layered skin under HDR environment lighting" width="32%">
 </p>
+<p align="center">
+  <img src="docs/skinny_lens.png" alt="Skinny render output — realistic thick-lens camera depth of field" width="48%">
+</p>
 
 ## Features
 
-- **Three-layer skin optics** -- epidermis (melanin), dermis (hemoglobin + ink),
-  subcutaneous fat, each with independent absorption, scattering, thickness, and
-  anisotropy
-- **MaterialX material pipeline** -- custom `ND_skinny_skin_*` layer nodedefs
-  plus a `ND_skinny_layered_skin_stack` combiner, code-generated to Slang via
-  `MaterialXGenSlang`
+- **Layered skin rendering** -- three-layer biological optics (epidermis /
+  dermis / subcutaneous), custom MaterialX skin nodedefs, scattering modes,
+  Fitzpatrick presets, detail/pores, and tattoos. See
+  [SkinRendering.md](SkinRendering.md)
 - **MaterialX nodegraph compute** -- arbitrary MaterialX nodegraphs (marble,
   wood, brass, custom standard_surface authoring) compiled per-material to
   Slang modules through `MaterialXGenSlang` plus a bindless `SamplerTexture2D`
@@ -34,15 +40,23 @@ microfacet specular, and energy-conservation checks.
 - **OpenUSD scene loading** -- meshes, transforms, `UsdShade.Material` bindings,
   lights (`DomeLight`, `DistantLight`, `SphereLight`, `RectLight`), and
   per-prim material assignment
-- **Flat material support** -- USD prims bound to `UsdPreviewSurface` or
-  MaterialX `standard_surface` render alongside skin materials in the same scene,
-  with opacity / refraction, clear coat, and cutout alpha masking
+- **Flat material support** -- USD prims bound to `UsdPreviewSurface`, MaterialX
+  `standard_surface`, or `OpenPBR` render alongside skin materials in the same
+  scene, with opacity / refraction, clear coat, and cutout-vs-alpha-blend
+  masking. UsdPreviewSurface textures honour per-input channel selection,
+  normal-map scale/bias (OpenGL vs DirectX Y), and wrap modes
+- **Python-authored materials** -- SlangPile `python_materials/*.py` compile to
+  GPU `IMaterial` structs, dispatched as material type 3; editable live in the
+  Qt material editor
 - **MIS path tracing** -- unified bounce loop with per-bounce NEE, Russian
   roulette, and sphere-light MIS; materials provide BSDF sample/evaluate
+- **Environment importance sampling** -- equirect HDR sampled by a
+  sin θ-weighted 2D distribution for env NEE + MIS, with VNDF GGX specular
+  sampling, killing specular environment fireflies
 - **Bidirectional path tracing** -- BDPT integrator with light-tracer splatting
-  for caustics on flat materials; Veach §10 MIS weighting
-- **Scattering modes** -- BSSRDF + Volume, BSSRDF only, Volume only, or Off,
-  selectable per scene
+  for caustics on flat materials; connections evaluate the real
+  `standard_surface` BSDF, env importance sampling matched to the path tracer;
+  Veach §10 MIS weighting
 - **Furnace mode** -- unit-sphere + white-environment energy conservation test;
   violations tinted pink; supports per-material furnace probes
 - **Realistic lens camera** -- pinhole + PBRT-v3 thick-lens stack
@@ -54,12 +68,11 @@ microfacet specular, and energy-conservation checks.
   grid, and a camera-body glyph
 - **Rotate gizmo** -- screen-space ring gizmo (`gizmo.py`) for selected mesh
   instance; line list composited by `main_pass.slang`
+- **Exposure + tonemapping** -- EV-stop exposure and selectable tonemap
+  operator (ACES filmic / Reinhard / Hable / linear) as post-process knobs that
+  don't reset accumulation; HDR/EXR screenshot export
 - **BVH caching** -- zstd-compressed mesh/BVH data cached to disk
   (`~/.skinny/mesh_cache/`) for fast reload
-- **Fitzpatrick I--VI presets** -- male/female variants covering the clinical
-  skin-colour axis
-- **Detail layer** -- statistical pores and vellus hair sheen
-- **Tattoo support** -- alpha-driven ink density in the dermis layer
 - **Qt desktop UI** -- single-window `skinny-gui` (PySide6) with render
   viewport docked alongside collapsible sidebar, BXDF visualiser, MaterialX
   graph editor, scene graph inspector, and debug viewport docks; sidebar
@@ -300,15 +313,8 @@ formats.
 
 ### Head Models
 
-The analytic fallback is an SDF head based on Loomis-style proportions.
-Additional mesh heads are discovered from `heads/`:
-
-- Each subdirectory containing an `.obj` becomes one model
-- Loose top-level `.obj` files are also loaded
-- Texture maps are matched by filename keyword:
-  `normal`/`nrm`/`nor`, `rough`/`roughness`, `displacement`/`disp`/`height`/`bump`
-
-Displacement can be baked into the mesh after midpoint subdivision.
+Head geometry (analytic SDF head + discovered `heads/*.obj` mesh heads with
+detail maps) is documented in [SkinRendering.md](SkinRendering.md).
 
 ### USD Scenes
 
@@ -327,21 +333,7 @@ Example scenes ship in `assets/`:
 | `test_scene.usda` | Multi-material test scene |
 | `three_materials_demo.usda` | Marble + wood + brass MaterialX nodegraphs |
 
-### Tattoos
-
-Tattoo images in `tattoos/`. Alpha drives ink density; RGB drives pigment
-colour contribution in the dermis.
-
 ## Rendering Modes
-
-### Scattering
-
-| Mode | Description |
-|------|-------------|
-| BSSRDF + Volume | Both subsurface estimators active |
-| BSSRDF only | Smooth layered diffuse response |
-| Volume only | Delta-tracked transport through layered medium |
-| Off | Surface-only shading |
 
 ### Sampling
 
@@ -350,35 +342,13 @@ Two integrators selectable at runtime:
 | Strategy | Description |
 |----------|-------------|
 | Path tracing | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
-| BDPT | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, Lambertian connection approximation |
+| BDPT | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
 
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding
 energy conservation tolerance are tinted pink. Supports global and
 per-material furnace probes.
-
-## MaterialX Skin Model
-
-Skinny defines custom MaterialX nodedefs in `src/skinny/mtlx/`:
-
-### Layer nodedefs (each produces a `scatteringlayer`)
-
-- **`ND_skinny_skin_epidermis`** -- melanin absorption + scattering
-- **`ND_skinny_skin_dermis`** -- hemoglobin + blood oxygenation + optional ink
-- **`ND_skinny_skin_subcut`** -- fixed-physics fat layer
-- **`ND_skinny_scattering_layer`** -- generic escape hatch for non-skin media
-
-### Stack nodedef
-
-- **`ND_skinny_layered_skin_stack`** -- combines three layers into
-  `surfaceshader` + `volumeshader` outputs with GGX specular, detail
-  (pores/hair), and per-layer volume transport
-
-### Slang implementations
-
-Function-form Slang implementations live in `src/skinny/mtlx/genslang/` and are
-referenced by `<implementation target="genslang">` tags in the nodedef files.
 
 ## Implementation Map
 
@@ -457,10 +427,7 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 | `interfaces.slang` | `ISampler`, `IMaterial`, `ILight`, `IIntegrator` |
 | `scene_trace.slang` | TLAS/BLAS ray traversal |
 | `scene_lights.slang` | Light sampling (distant, sphere, rect, emissive tri) |
-| `mesh_head.slang` | BVH traversal and ray/triangle intersection |
-| `sdf_head.slang` | Analytic SDF head |
 | `environment.slang` | Environment lookup and furnace fallback |
-| `volume_render.slang` | Delta-tracked volume transport through layered medium |
 | `mtlx_std_surface.slang` | MaterialX `standard_surface` approximation |
 | `mtlx_closures.slang` | MaterialX closure helpers |
 | `mtlx_noise.slang` | MaterialX noise functions |
@@ -468,16 +435,6 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 | `debug_line.slang` | Vertex/fragment pipeline for the debug viewport line list |
 | `cameras/pinhole.slang` | Pinhole camera ray gen |
 | `cameras/thick_lens.slang` | PBRT-v3 thick-lens ray gen |
-| `materials/skin/skin_material.slang` | Skin shading entry point (specular + BSSRDF + volume dispatch) |
-| `materials/skin/skin_bssrdf.slang` | Layered skin optics, BSSRDF, GGX specular |
-| `materials/skin/skin_shading.slang` | Skin data loading, detail maps, tattoo |
-| `materials/skin/skin_direct.slang` | §1 direct + area + emissive light estimator |
-| `materials/skin/skin_ibl_specular.slang` | §2 IBL specular estimator |
-| `materials/skin/skin_ibl_diffuse.slang` | §3 IBL diffuse estimator |
-| `materials/skin/skin_volume.slang` | §4 volume march estimator |
-| `materials/skin/skin_transmission.slang` | §5 thin-geometry translucency |
-| `materials/skin/skin_hair_sheen.slang` | §6 vellus hair sheen |
-| `materials/skin/detail.slang` | Statistical pores and vellus hair sheen helpers |
 | `materials/flat/flat_material.slang` | Flat (non-skin) BSDF: sample/evaluate via `IMaterial` |
 | `materials/flat/flat_shading.slang` | Flat-material data loading, GGX helpers, procedural color |
 | `materials/debug_normal_material.slang` | Normal visualisation `IMaterial` |
@@ -489,23 +446,16 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 
 | Area | Files | Reference |
 |------|-------|-----------|
-| Subsurface transport | `materials/skin/skin_bssrdf.slang` | Jensen, Marschner, Levoy, Hanrahan, "A Practical Model for Subsurface Light Transport", SIGGRAPH 2001 |
-| Quantized diffusion | `materials/skin/skin_bssrdf.slang` | d'Eon and Irving, "A Quantized-Diffusion Model for Rendering Translucent Materials", SIGGRAPH/TOG 2011 |
-| Normalized diffusion | `materials/skin/skin_bssrdf.slang` | Christensen and Burley, "Approximate Reflectance Profiles for Efficient Subsurface Scattering", Disney/SIGGRAPH 2015 |
-| Human skin optics | `materials/skin/skin_bssrdf.slang`, `presets.py` | Donner and Jensen, "A Spectral BSSRDF for Shading Human Skin", EGSR 2006 |
-| Real-time skin pipeline | `renderer.py`, `mesh_head.slang`, `sdf_head.slang` | d'Eon and Luebke, "Advanced Techniques for Realistic Real-Time Skin Rendering", GPU Gems 3 Ch. 14, 2007 |
-| MIS | `samplers/mis_combine.slang`, `integrators/bdpt.slang`, `volume_render.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
+| MIS | `samplers/mis_combine.slang`, `integrators/bdpt.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
 | Bidirectional path tracing | `integrators/bdpt.slang` | Veach and Guibas, "Bidirectional Estimators for Light Transport", 1995 |
 | Bidirectional path tracing | `integrators/bdpt.slang` | Lafortune and Willems, "Bi-Directional Path Tracing", 1993 |
-| GGX microfacet | `materials/skin/skin_bssrdf.slang` | Walter, Marschner, Li, Torrance, "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007 |
-| Fresnel approximation | `materials/skin/skin_bssrdf.slang`, `materials/skin/detail.slang` | Schlick, "An Inexpensive BRDF Model for Physically-Based Rendering", 1994 |
-| Henyey-Greenstein phase | `volume_render.slang` | Henyey and Greenstein, "Diffuse Radiation in the Galaxy", 1941 |
-| Delta/Woodcock tracking | `volume_render.slang` | Woodcock et al., "Techniques Used in the GEM Code for Monte Carlo Neutronics Calculations", 1965 |
-| Ray/triangle intersection | `mesh_head.slang` | Moeller and Trumbore, "Fast, Minimum Storage Ray/Triangle Intersection", 1997 |
+| GGX microfacet | `materials/flat/flat_shading.slang` | Walter, Marschner, Li, Torrance, "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007 |
+| Fresnel approximation | `materials/flat/flat_shading.slang` | Schlick, "An Inexpensive BRDF Model for Physically-Based Rendering", 1994 |
 | Realistic camera | `lens_optics.py`, `shaders/cameras/thick_lens.slang` | Pharr, Jakob, Humphreys, *Physically Based Rendering 3e*, Ch. 6 |
 
-Supporting techniques (ACES tone mapping, PCG hashing, median-split BVH,
-Worley noise, Box-Muller sampling, Loomis-style head proportions) are standard
+Skin-, subsurface-, volume-, and head-geometry references live in
+[SkinRendering.md](SkinRendering.md). Supporting techniques (ACES tone mapping,
+PCG hashing, median-split BVH, Worley noise, Box-Muller sampling) are standard
 implementation building blocks.
 
 ## Testing

@@ -7,8 +7,41 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Rendering
+
+- Environment importance sampling: equirect HDR sampled by a sin θ-weighted
+  2D piecewise-constant distribution (CDF buffers at bindings 31/32) for env
+  next-event estimation + MIS — both the path tracer and BDPT consume it
+- GGX specular now uses visible-normal (VNDF) importance sampling
+  (Heitz 2018/2023); the BRDF×cos/pdf weight reduces to F·G₁, eliminating
+  grazing-angle specular fireflies
+- BDPT connections evaluate the real `standard_surface` BSDF instead of a
+  Lambertian approximation, and use the same env importance sampling as the
+  path tracer so the two integrators converge to the same image
+- Exposure (EV stops) and a selectable tonemap operator (ACES filmic /
+  Reinhard / Hable / linear) as post-process knobs that do not reset
+  accumulation
+
+### Materials
+
+- OpenPBR material support in the USD loader, including resolution of
+  connected shader inputs to their authored constant
+- UsdPreviewSurface texture bindings: per-input channel selection, normal-map
+  `scale`/`bias` (OpenGL vs DirectX Y convention), wrap modes, and source
+  colour space, carried on a new `TextureBinding` (`scene.py`)
+- `FlatMaterialParams` grew 96 B → 128 B to carry `normalScale`, `normalBias`,
+  and a packed `channelMask`
+- Cutout vs alpha-blend opacity split in `fetchFlatHitData` to match
+  UsdPreviewSurface `opacityThreshold` semantics
+- Python-authored materials: SlangPile `python_materials/*.py` compile to GPU
+  `IMaterial` structs dispatched as material type 3 (id in bits 24–31 of
+  `materialTypes`), editable live in the Qt material editor
+- Removed the dedicated `ProceduralParams` buffer (was binding 20); binding 20
+  is now `DistantLight`
+
 ### UI and interaction
 
+- Live Python material editing in the Qt material editor
 - Camera debug viewport (`F2`) with frustum, lens rings, focus plane, DOF
   planes, render-area outline, ground grid, mesh wireframes, AABBs, and
   camera-body glyph

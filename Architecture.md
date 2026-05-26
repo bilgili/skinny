@@ -7,6 +7,11 @@ standard_surface closure tree plus arbitrary MaterialX nodegraphs compiled
 to per-material Slang modules — all driven from one
 `[numthreads(8,8,1)]` compute dispatch.
 
+The skin-specific subsystems (three-layer biological model, §1–§6 estimator
+chain, volume transport, head geometry, and MaterialX skin codegen) are
+documented in [SkinRendering.md](SkinRendering.md). This file covers the generic
+renderer architecture.
+
 ---
 
 ## High-Level Pipeline
@@ -104,7 +109,7 @@ mainImage()                                          main_pass.slang
   ├─ NaN / inf / negative guard
   ├─ progressive accumulation (running mean)
   ├─ + BDPT light-splat mean (Q22.10 → float)
-  ├─ ACES filmic tonemap → sRGB gamma
+  ├─ exposure (2^EV) → tonemap (ACES / Reinhard / Hable / linear) → sRGB gamma
   ├─ per-material furnace energy-violation overlay (pink)
   ├─ rotate-gizmo line composite (binding 22)
   └─ HUD alpha composite → outputBuffer
@@ -149,7 +154,7 @@ estimators — compile-time monomorphised, zero runtime cost.
 
 | Implementation | File | Purpose |
 |---|---|---|
-| `GGXSampler` | `samplers/ggx.slang` | Microfacet specular importance sampling |
+| `GGXSampler` | `samplers/ggx.slang` | Microfacet specular importance sampling — GGX **visible** normals (VNDF, Heitz 2018/2023); weight reduces to F·G₁, killing the grazing-angle spec fireflies of classical D(H) sampling |
 | `LambertSampler` | `samplers/lambert.slang` | Cosine-hemisphere diffuse sampling |
 | `UniformSphereSampler` | `samplers/uniform_sphere.slang` | MIS companion sampler |
 | `HenyeyGreensteinSampler` | `samplers/henyey_greenstein.slang` | Phase-function importance sampling |
@@ -178,12 +183,16 @@ Skin uses its own 6-estimator chain and returns full radiance via
 | `SkinMaterial` | `materials/skin/skin_material.slang` | 0 (default) — self-integrating, returns full radiance |
 | `FlatMaterial` | `materials/flat/flat_material.slang` | 1 — opacity/refraction, coat, spec/diff MIS, optional MaterialX graph eval |
 | `DebugNormalMaterial` | `materials/debug_normal_material.slang` | 2 — normal visualisation |
+| Python material | `mtlx/genslang/python_materials/*.py` → generated dispatch | 3 — SlangPile-authored `IMaterial`, id in bits 24–31, switch-dispatched by `vk_compute._emit_python_dispatcher` |
 
 Material type encoding in `materialTypes[id]` (binding 16):
-- bits 0–7: type code
+- bits 0–7: type code (0 skin, 1 flat, 2 debug-normal, 3 python)
 - bits 8–9: scatter mode for skin (bit 0 = BSSRDF, bit 1 = volume)
 - bit 10: per-material furnace mode (energy-conservation probe)
-- bits 11–31: MaterialX graph slot (or sentinel 0)
+- bits 16–23: MaterialX graph slot (`MATERIAL_GRAPH_SHIFT`; 0 = none)
+- bits 24–31: Python-material id (`MATERIAL_PYMAT_SHIFT`; index into the
+  `vk_compute._emit_python_dispatcher` switch, consulted only when
+  type == python)
 
 ### ILight
 
@@ -216,7 +225,9 @@ Two implementations, selected by `fc.integratorType`:
   `evaluateBounce()` returns `BounceResult` (direct light + full radiance
   + BSDF sample with world-space direction).
 - **`BDPTIntegrator`** — bidirectional path tracer (Veach §10).
-  4-vertex eye + light subpaths, Lambertian connection approximation,
+  4-vertex eye + light subpaths, connections that evaluate the real
+  `standard_surface` BSDF (`FlatMaterial.evaluate`), environment
+  importance sampling matched to the path tracer's env NEE, and
   light-tracer splatting (s=1) for caustics via atomic adds to
   `lightSplatBuffer` (binding 21, Q22.10 fixed-point). Flat materials
   only; skin hits fall through to PathTracer.
@@ -236,70 +247,55 @@ Two implementations, selected by `fc.integratorType`:
 
 ---
 
-## Skin Material Pipeline
+## Material & Integrator Pipeline
 
-### Three-Layer Biological Model (`materials/skin/skin_bssrdf.slang`)
-
-```
-         ┌──────────────────────┐
-         │   Epidermis          │  melanin absorption (Donner & Jensen 2006)
-         │   thickness, σs, g   │
-         ├──────────────────────┤
-         │   Dermis             │  hemoglobin absorption (oxy/deoxy)
-         │   + tattoo pigment   │  optional ink overlay
-         ├──────────────────────┤
-         │   Subcutaneous       │  fixed-optics fat layer
-         │   σa, σs, g          │
-         └──────────────────────┘
-```
-
-`SkinLayerStack` (3 × `SkinLayer`) built from `MtlxSkinParams` (164 bytes, 27
-fields). Each layer has: σa, σs, thickness, g (anisotropy), IOR.
-
-Key functions:
-- `melaninAbsorption(melanin)` — wavelength-dependent absorption
-- `hemoglobinAbsorption(hemoglobin, oxygenation)` — oxy/deoxy spectral mix
-- `evaluateSubsurfaceScattering()` — Christensen-Burley diffusion BSSRDF
-- `evaluateSkinSpecular()` — GGX specular with Schlick fresnel
-
-### Skin Material Orchestrator (`materials/skin/skin_material.slang`)
-
-Chains 6 estimator terms in fixed RNG order:
-
-| Term | Estimator | File |
-|------|-----------|------|
-| §1 | Direct + area + emissive lights | `materials/skin/skin_direct.slang` |
-| §2 | IBL specular (GGX sampling) | `materials/skin/skin_ibl_specular.slang` |
-| §3 | IBL diffuse via BSSRDF | `materials/skin/skin_ibl_diffuse.slang` |
-| §4 | Volume march (delta tracking) | `materials/skin/skin_volume.slang` |
-| §5 | Thin-geometry translucency | `materials/skin/skin_transmission.slang` |
-| §6 | Vellus hair sheen | `materials/skin/skin_hair_sheen.slang` |
-
-`buildSkinShading()` (in `materials/skin/skin_shading.slang`) handles detail
-maps (normal, roughness, displacement from bindings 9–11), tattoo ink
-(binding 8), and pore perturbation (Worley noise from `detail.slang`).
+The skin material (`SkinMaterial`, type code 0) is self-integrating: a
+six-estimator chain over a three-layer biological optics model. Its internals —
+the layer model, the §1–§6 estimator order, volume transport, and the MaterialX
+skin codegen — are documented in [SkinRendering.md](SkinRendering.md). The flat
+material and the bidirectional integrator below are general-purpose.
 
 ### Flat Material BSDF (`materials/flat/flat_material.slang`)
 
 Implements `IMaterial` interface — provides `sample()` / `evaluate()` in
 tangent space. Bounce loop and NEE are in `PathTracer`. BSDF layers:
 
-- Opacity / refraction (Fresnel-weighted reflect/refract split)
+- Opacity / refraction (Fresnel-weighted reflect/refract split). Cutout vs
+  alpha-blend opacity are split: cutout discards below `opacityThreshold`,
+  alpha-blend attenuates — matching UsdPreviewSurface `opacityThreshold`
+  semantics
 - Clear coat (GGX, coat color tinting)
-- Specular / diffuse MIS split (Schlick F0, luminance-weighted probability)
+- Specular / diffuse MIS split (Schlick F0, luminance-weighted probability) —
+  GGX specular uses VNDF sampling (`samplers/ggx.slang`)
 - Cutout alpha masking via `isCutoutTransparent()` (in `flat_shading.slang`)
+- **UsdPreviewSurface textures** — per-input channel selection (`channelMask`),
+  normal-map `scale`/`bias` (`normalScale`/`normalBias`, for OpenGL vs DirectX
+  Y convention), and wrap modes flow from each material's `TextureBinding`
+  (binding 14 bindless textures)
 - **MaterialX graph evaluation** when `materialTypes[id]` packs a graph
   slot — `evalSceneGraph(materialId, hit, ...)` (generated module) returns
   `StdSurfaceParams` overrides (base_color, roughness, metallic, etc.) before
   the BSDF math runs
+
+### Python Material (`materials` type code 3)
+
+SlangPile-authored materials (`mtlx/genslang/python_materials/*.py`) compile to
+`IMaterial` structs. Their per-material id is packed into bits 24–31 of
+`materialTypes[id]`; `vk_compute._emit_python_dispatcher` generates a
+switch that routes `pythonMaterialId(matId)` to the right struct. Edited live
+through the Qt material editor.
 
 ### Bidirectional Path Tracer (`integrators/bdpt.slang`)
 
 Veach §10 BDPT with V1 simplifications for shader compile time:
 
 - **Subpaths**: eye walk + light walk, each capped at 4 vertices
-- **Connections**: (s ≥ 1, t ≥ 1) use Lambertian BSDF approximation
-  (f ≈ albedo/π); full `FlatMaterial.sample()` used for walk bounces
+- **Connections**: (s ≥ 1, t ≥ 1) evaluate the real `standard_surface`
+  BSDF via `FlatMaterial.evaluate()` (not the earlier Lambertian f ≈
+  albedo/π approximation); `FlatMaterial.sample()` drives walk bounces
+- **Environment**: env-miss and s=0 contributions use the same
+  importance-sampled environment distribution + MIS as the path tracer,
+  so BDPT and path-traced IBL converge to the same image
 - **Light tracer** (s = 1): non-delta light vertices projected onto camera,
   atomic-added to `lightSplatBuffer` (binding 21, Q22.10 fixed-point per
   R/G/B channel). `main_pass.slang` composites the running mean after
@@ -366,36 +362,47 @@ the uniform block, and the `pack_material_values()` byte serialiser.
 
 ---
 
-## Volume Rendering (`volume_render.slang`)
+## Environment Importance Sampling (`environment.slang`)
 
-Delta-tracking (Woodcock tracking) through heterogeneous skin:
+A 2D piecewise-constant distribution over the equirect environment map drives
+next-event estimation toward bright sky/sun directions instead of relying on a
+BSDF ray happening to land on them — the fix for specular environment
+fireflies. The distribution is built CPU-side in
+`environment.build_env_distribution()` (sin θ-weighted luminance) and uploaded
+as two CDF buffers:
 
-- `layerAtDepth(depth, stack)` — depth-stratified σa/σs/g lookup
-- Henyey-Greenstein phase function + importance sampler
-- `MAX_VOLUME_STEPS = 128`, `VOLUME_DEFAULT_BOUNCES = 8`
-- `mmPerUnit` converts between mm-valued optical coefficients and world-unit
-  ray distances (FrameConstants offset +156)
+- binding 31 — `envMarginalCdf` (row marginal, `ENV_H + 1` floats)
+- binding 32 — `envCondCdf` (per-row conditional, `H × (W + 1)` floats)
+
+`sampleEnvDir(u, intensity)` importance-samples a direction + solid-angle PDF;
+`envPdf(dir)` returns the PDF of an arbitrary direction so BSDF-sampled
+env-miss hits can be MIS-weighted against env NEE. `ENV_DIST_W = 1024`,
+`ENV_DIST_H = 512` must match `ENV_WIDTH`/`ENV_HEIGHT` in `environment.py`.
+Both the path tracer and BDPT consume this distribution so their IBL
+converges to the same image.
+
+---
+
+## Display: Exposure, Tonemap, and Tool Readback
+
+`main_pass.slang` post-processes the accumulated linear-HDR image:
+
+- **Exposure** — `fc.exposure` (EV stops, applied as `2^EV`) before tonemapping.
+- **Tonemap operator** — `fc.tonemapMode`: 0 = ACES filmic (Narkowicz),
+  1 = Reinhard, 2 = Hable/Uncharted 2, 3 = Linear clamp. Exposure and tonemap
+  are post-process knobs — changing them does **not** reset accumulation.
+- **Tool readback** (binding 30, `toolBuffer`) — one-shot probes that write
+  per-pixel data back to the CPU: scene pick (`fc.pickArmed` + `fc.pickPixel`
+  → `HitInfo`), the BXDF visualiser (`TOOL_MODE_BXDF`), and a BSSRDF probe
+  (`TOOL_MODE_BSSRDF`). The CPU clears the arm flag after a single read.
 
 ---
 
 ## Scene System
 
-### SDF Head (`sdf_head.slang`)
-
-Loomis-proportioned head from SDF primitives (sphere, ellipsoid, capsule,
-round box) combined with smooth boolean operators. Sphere-traced with
-gradient-based normals. Approximate bounds: x ∈ [-0.85, +0.85],
-y ∈ [-0.97, +1.05], z ∈ [-0.90, +1.00].
-
-### Mesh Head (`mesh_head.slang`)
-
-Two-level acceleration structure:
-- **TLAS**: loop over `Instance` records (144 B each: two 4×4 matrices +
-  BLAS offsets + materialId)
-- **BLAS**: SAH BVH per mesh, `BVH_LEAF_SIZE = 4` triangles per leaf
-- **MeshVertex**: 32 B (float3 pos + u + float3 nrm + v)
-- **BvhNode**: 32 B (AABB + left/count + right/first)
-- Ray-triangle: Möller-Trumbore. Ray-AABB: slab test.
+Head geometry — the analytic SDF head (`sdf_head.slang`) and the two-level
+mesh BVH (`mesh_head.slang`, TLAS/BLAS) that `traceScene()` dispatches to — is
+documented in [SkinRendering.md](SkinRendering.md).
 
 ### Scene Dispatch (`scene_trace.slang`)
 
@@ -417,10 +424,22 @@ Transparency helpers (defined in `materials/flat/flat_shading.slang`):
 
 Walks USD stage for `UsdGeom.Mesh`, `UsdLux` lights (DistantLight,
 SphereLight, DomeLight, RectLight), `UsdGeom.Camera`, `UsdShade.Material`
-bindings with UsdPreviewSurface and MaterialX overrides. Converts
-`metersPerUnit` → `mm_per_unit`. CW-wound triangles (e.g.
+bindings with UsdPreviewSurface, MaterialX, and **OpenPBR** overrides.
+Connected shader inputs are resolved to their authored constant when a node
+graph drives them (the OpenPBR / `standard_surface` connection case), so
+single-value parameters survive even when authored through a connection.
+Converts `metersPerUnit` → `mm_per_unit`. CW-wound triangles (e.g.
 `three_materials_demo.usda` quads) are flipped on import so normals are
 consistent.
+
+`UsdUVTexture` reads populate a `TextureBinding` (`scene.py`) per material
+input — file path plus `inputs:scale`/`inputs:bias` (e.g. DirectX normal maps
+author `scale.y = -2`, `bias.y = +1` to flip Y), channel selector
+(`rgb`/`r`/`g`/`b`/`a`), `sourceColorSpace`, and `wrapS`/`wrapT`. The renderer
+packs scale/bias into `FlatMaterialParams.normalScale`/`normalBias` and the
+per-input channel selectors into `channelMask` (4 bits per input), so the
+shader fetches the correct channel and applies the right normal-map convention
+without per-texture branches.
 
 ### Scene Graph Inspector (`scene_graph.py`, `ui/qt/windows/scene_graph.py`)
 
@@ -629,56 +648,28 @@ incrementally moved over.
 | 10 | Sampler2D | Roughness detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 11 | Sampler2D | Displacement detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 12 | StructuredBuffer | TLAS instances (144 B each) | `mesh_head.slang` |
-| 13 | StructuredBuffer | FlatMaterialParams (96 B each) | `bindings.slang` |
+| 13 | StructuredBuffer | FlatMaterialParams (128 B each, scalar layout) | `bindings.slang` |
 | 14 | Sampler2D[128] | Bindless material textures (PARTIALLY_BOUND) | `bindings.slang` |
 | 15 | StructuredBuffer | MtlxSkinParams (164 B each, scalar layout) | `materials/skin/skin_shading.slang` |
-| 16 | StructuredBuffer | Material type codes + graph slot (uint32 each) | `bindings.slang` |
+| 16 | StructuredBuffer | Material type code + scatter + furnace + graph slot + python id (uint32 each) | `bindings.slang` |
 | 17 | StructuredBuffer | SphereLight (32 B each) | `scene_lights.slang` |
 | 18 | StructuredBuffer | EmissiveTriangle (64 B each) | `scene_lights.slang` |
 | 19 | StructuredBuffer | StdSurfaceParams (256 B each) | `bindings.slang` |
-| 20 | StructuredBuffer | ProceduralParams (96 B each) | `bindings.slang` |
+| 20 | StructuredBuffer | DistantLight (analytic distant lights) | `scene_lights.slang` |
 | 21 | RWStructuredBuffer | BDPT light-splat buffer (Q22.10 uint per R/G/B) | `bindings.slang` |
 | 22 | StructuredBuffer | Rotate-gizmo line segments | `gizmo.py` |
+| 23 | StructuredBuffer | Lens elements (thick-lens stack, float4) | `cameras/thick_lens.slang` |
+| 24 | StructuredBuffer | Per-radius exit-pupil bounds (float4) | `cameras/thick_lens.slang` |
+| 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe | `bindings.slang` |
+| 31 | StructuredBuffer | Env importance-sampling marginal CDF (ENV_H+1 floats) | `environment.slang` |
+| 32 | StructuredBuffer | Env importance-sampling conditional CDF (H×(W+1) floats) | `environment.slang` |
 
 Light uniforms (part of UBO, not separate bindings):
 - `lightDirection` (float3) — analytic directional light toward-light vector
 - `lightRadiance` (float3) — analytic directional light colour × intensity
 
----
-
-## MaterialX Skin Integration
-
-```
-skinny_defs.mtlx                     6 custom nodedefs
-        │                            (epidermis, dermis, subcut,
-        ▼                             scattering_layer, layered_bsdf,
-skinny_skin_default.mtlx              layered_vdf)
-        │
-        ▼
-MaterialXGenSlang                    Code generation
-        │
-        ▼
-mtlx/genslang/*.slang                6 generated Slang implementations
-        │
-        ▼
-skinny_genslang_impl.mtlx           Binds nodedefs → Slang source
-```
-
-`MaterialLibrary` (`materialx_runtime.py`):
-- Loads stdlib + skinny custom libraries
-- Runs `MaterialXGenSlang` to produce Slang source from material graph
-- Reflects uniform block → `MtlxSkinParams` struct (164 B, 27 fields)
-- `pack_material_values()` serialises param overrides to GPU-ready bytes
-- Caches `CompiledMaterial` so `generate_for_compute` reuses the last
-  compile when uniforms change without graph topology changes
-
-Generated genslang files:
-- `skinny_skin_epidermis_genslang.slang`
-- `skinny_skin_dermis_genslang.slang`
-- `skinny_skin_subcut_genslang.slang`
-- `skinny_scattering_layer_genslang.slang`
-- `skinny_skin_layered_bsdf_genslang.slang`
-- `skinny_skin_layered_vdf_genslang.slang`
+`ProceduralParams` (formerly binding 20) was removed; procedural flat colour is
+now derived inside `flat_shading.slang` without a dedicated buffer.
 
 ---
 
@@ -794,7 +785,7 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | accumFrame |
 | ... | float | time |
 | ... | uint | width, height |
-| ... | uint | useDirectLight |
+| ... | uint | numDistantLights (active count in binding 20; 0 = IBL only) |
 | ... | uint | useMesh |
 | ... | float | tattooDensity |
 | ... | float | envIntensity |
@@ -807,7 +798,14 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | numSphereLights |
 | ... | uint | numEmissiveTriangles |
 | ... | uint | integratorType (0 = path, 1 = BDPT) |
-| ... | uint | cameraType (0 = pinhole, 1 = thick lens) |
+| ... | (lens) | numLensElements (0 = pinhole, else thick-lens), film/aperture/pupil + focus-overlay + zoom-rect + vignette-debug fields |
+| ... | uint2 | pickPixel; uint pickArmed (one-shot scene pick → toolBuffer) |
+| ... | float | exposure (EV stops, 2^EV) |
+| ... | uint | tonemapMode (0 ACES, 1 Reinhard, 2 Hable, 3 linear) |
+
+`cameraType` was removed — camera selection is implied by `numLensElements`
+(0 ⇒ pinhole). `exposure` and `tonemapMode` are post-process knobs and do not
+reset accumulation.
 
 ---
 
