@@ -28,7 +28,7 @@ from pxr import Usd, UsdGeom
 from skinny.headless import HeadlessRenderer
 
 stage = Usd.Stage.Open("assets/cornell_box_sphere.usda")
-xf = UsdGeom.Xformable(stage.GetPrimAtPath("/Cornell/Sphere"))
+xf = UsdGeom.Xformable(stage.GetPrimAtPath("/Cornell/GlassSphere/Sphere"))
 with HeadlessRenderer(800, 800) as r:
     for i in range(24):
         xf.ClearXformOpOrder()
