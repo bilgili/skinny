@@ -28,6 +28,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
 from skinny.environment import ENV_HEIGHT, ENV_WIDTH, _load_radiance_hdr, _resize_equirect
 from skinny.mesh import Mesh, MeshSource, bake_mesh, compute_source_hash
+from skinny.usd_gprims import tessellate_gprim
 from skinny.mesh_cache import (
     load_cache_index,
     lookup_cached_mesh,
@@ -1379,12 +1380,16 @@ def _read_open_stage(
     # (USD prototypes) are visited; the default predicate stops at the
     # instance boundary and would yield zero meshes for such scenes.
     for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
-        if not prim.IsA(UsdGeom.Mesh):
-            continue
         if not prim.IsActive() or prim.IsAbstract():
             continue
 
-        source = _read_mesh_attrs(prim, eval_time)
+        if prim.IsA(UsdGeom.Mesh):
+            source = _read_mesh_attrs(prim, eval_time)
+        else:
+            # Analytic gprims (Sphere/Cube/Cylinder/Cone/Capsule/Plane) carry
+            # no point data; tessellate them into a mesh. Returns None for any
+            # other prim type, which we skip.
+            source = tessellate_gprim(prim, eval_time)
         if source is None:
             continue
 
@@ -1397,7 +1402,7 @@ def _read_open_stage(
 
     if not prim_data:
         raise ValueError(
-            f"USD stage {label} contains no usable UsdGeom.Mesh prims"
+            f"USD stage {label} contains no usable mesh or gprim geometry"
         )
 
     lights_dir, lights_sphere, environment, emissive_instances = _extract_lights(
