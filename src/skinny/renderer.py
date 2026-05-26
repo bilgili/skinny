@@ -1123,8 +1123,12 @@ class Renderer:
         self.orbit_camera = OrbitCamera()
         self.free_camera = FreeCamera()
         self.camera_mode = "orbit"
-        if self._usd_scene is not None and self._usd_scene.camera_override is not None:
-            self._apply_camera_override(self._usd_scene)
+        if self._usd_scene is not None:
+            # Re-frame the loaded scene; honors an authored camera override
+            # internally and otherwise applies the hero-angle auto-frame.
+            self._frame_camera_to_scene(self._usd_scene)
+        elif self._mesh_sources:
+            self._frame_camera_to_mesh(self._mesh_sources[0])
         self._refresh_camera_node()
 
     def toggle_camera_mode(self) -> None:

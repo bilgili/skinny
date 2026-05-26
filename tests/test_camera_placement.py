@@ -122,3 +122,54 @@ class TestHeroOrientation:
         pos = cam.position
         assert pos[1] > 0.0, "camera should be elevated (pitch>0)"
         assert pos[0] > 0.0, "camera should be turned to +X side (yaw>0)"
+
+
+class TestResetReframes:
+    class _Stub:
+        """Minimal stand-in exposing only what reset_camera reads/writes."""
+        def __init__(self):
+            from skinny.renderer import OrbitCamera, FreeCamera
+            self.orbit_camera = OrbitCamera()
+            self.free_camera = FreeCamera()
+            self.camera_mode = "free"
+            self._usd_scene = None
+            self._mesh_sources = []
+            self._framed = None
+            self._refreshed = False
+
+        def _frame_camera_to_scene(self, scene):
+            self._framed = ("scene", scene)
+
+        def _frame_camera_to_mesh(self, src):
+            self._framed = ("mesh", src)
+
+        def _apply_camera_override(self, scene):
+            pass
+
+        def _refresh_camera_node(self):
+            self._refreshed = True
+
+    def test_reset_frames_usd_scene(self):
+        from skinny.renderer import Renderer
+        stub = self._Stub()
+        stub._usd_scene = object()
+        Renderer.reset_camera(stub)
+        assert stub._framed == ("scene", stub._usd_scene)
+        assert stub.camera_mode == "orbit"
+        assert stub._refreshed
+
+    def test_reset_frames_obj_mesh(self):
+        from skinny.renderer import Renderer
+        stub = self._Stub()
+        src = object()
+        stub._mesh_sources = [src]
+        Renderer.reset_camera(stub)
+        assert stub._framed == ("mesh", src)
+        assert stub.camera_mode == "orbit"
+
+    def test_reset_default_when_nothing_loaded(self):
+        from skinny.renderer import Renderer
+        stub = self._Stub()
+        Renderer.reset_camera(stub)
+        assert stub._framed is None
+        assert stub.camera_mode == "orbit"
