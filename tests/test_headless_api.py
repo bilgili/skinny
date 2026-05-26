@@ -18,7 +18,10 @@ def _have_usd() -> bool:
         return False
 
 
-needs_usd = pytest.mark.skipif(not _have_usd(), reason="OpenUSD (pxr) not installed")
+needs_usd = pytest.mark.skipif(
+    not _have_usd() or not SCENE.exists(),
+    reason="OpenUSD (pxr) not installed or cornell_box_sphere.usda missing",
+)
 
 
 @needs_usd
