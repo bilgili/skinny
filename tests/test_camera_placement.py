@@ -17,6 +17,22 @@ def _have_usd() -> bool:
 needs_usd = pytest.mark.skipif(not _have_usd(), reason="OpenUSD (pxr) not installed")
 
 
+def _have_renderer() -> bool:
+    # skinny.renderer imports `vulkan` at module scope, which raises without
+    # the Vulkan SDK on the dynamic-library path. These camera-logic tests are
+    # pure CPU but can't import the module without it.
+    try:
+        import skinny.renderer  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+needs_renderer = pytest.mark.skipif(
+    not _have_renderer(), reason="skinny.renderer import unavailable (no Vulkan SDK)"
+)
+
+
 class TestUpAxisRotation:
     def test_y_up_returns_none(self):
         from skinny.usd_loader import _up_axis_rt
@@ -87,7 +103,7 @@ class TestUpAxisCorrectionOnLoad:
 @needs_usd
 class TestCameraOverrideCorrection:
     def test_z_up_camera_forward_corrected(self):
-        from pxr import Usd, UsdGeom, Gf
+        from pxr import Usd, UsdGeom
         from skinny.usd_loader import _read_open_stage
         stage = Usd.Stage.CreateInMemory()
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
@@ -108,6 +124,7 @@ class TestCameraOverrideCorrection:
                                    np.array([0, -1, 0], np.float32), atol=1e-5)
 
 
+@needs_renderer
 class TestHeroOrientation:
     def test_hero_angles_applied(self):
         from skinny.renderer import OrbitCamera, _hero_yaw_pitch
@@ -124,6 +141,7 @@ class TestHeroOrientation:
         assert pos[0] > 0.0, "camera should be turned to +X side (yaw>0)"
 
 
+@needs_renderer
 class TestResetReframes:
     class _Stub:
         """Minimal stand-in exposing only what reset_camera reads/writes."""
