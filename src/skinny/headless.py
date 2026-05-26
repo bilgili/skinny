@@ -334,7 +334,7 @@ def main(argv: Optional[list] = None) -> int:
                 r.render_scene(ns.source, ns.output, time=ns.time,
                                format=ns.fmt, **opts)
                 print(f"[skinny-render] wrote {ns.output}")
-    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, ImportError) as exc:
         print(f"[skinny-render] error: {exc}", file=sys.stderr)
         return 1
     return 0

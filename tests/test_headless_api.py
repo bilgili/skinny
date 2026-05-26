@@ -242,3 +242,15 @@ class TestCli:
         assert ns.exposure == 0.5
         assert ns.no_direct is True
         assert ns.width == 800 and ns.height == 600
+
+    def test_parser_dest_remap(self):
+        from skinny.headless import _build_parser
+        ns = _build_parser().parse_args(
+            ["s.usda", "--env-intensity", "2.0", "--format", "exr",
+             "--ext", "jpeg", "--gpu", "nvidia", "--time", "5.0"]
+        )
+        assert ns.env_intensity == 2.0
+        assert ns.fmt == "exr"
+        assert ns.ext == "jpeg"
+        assert ns.gpu == "nvidia"
+        assert ns.time == 5.0
