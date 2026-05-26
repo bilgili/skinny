@@ -1349,6 +1349,26 @@ def _world_transform(prim: Usd.Prim, time: Usd.TimeCode) -> np.ndarray:
     return arr
 
 
+def _up_axis_rt(up_axis: str) -> "Optional[np.ndarray]":
+    """Stored-form (transpose) rotation that maps a stage's up axis to +Y.
+
+    Returns ``None`` for a Y-up stage (no correction needed). For a Z-up
+    stage returns ``Rᵀ`` for the −90°-about-X rotation, ready to
+    right-multiply this codebase's row-vector/stored transforms:
+    ``M_new = M_stored @ rt`` and ``v_new = v_row @ rt``.
+
+    Rᵀ maps +Z→+Y and +Y→−Z.
+    """
+    if up_axis != "Z":
+        return None
+    return np.array(
+        [[1.0, 0.0, 0.0],
+         [0.0, 0.0, -1.0],
+         [0.0, 1.0, 0.0]],
+        dtype=np.float32,
+    )
+
+
 # ─── Public entry point ───────────────────────────────────────────────
 
 _USD_POOL_SIZE = 4
