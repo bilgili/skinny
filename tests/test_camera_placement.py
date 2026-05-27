@@ -214,15 +214,34 @@ class TestDistanceCap:
         assert stub.orbit_camera.max_distance == 400.0
         assert stub.orbit_camera.distance <= 400.0
 
-    def test_zoom_respects_dynamic_cap(self):
+    def test_set_distance_grows_max(self):
+        from skinny.renderer import OrbitCamera
+        cam = OrbitCamera()                  # max_distance defaults to 50
+        cam.set_distance(120.0)
+        assert cam.distance == 120.0
+        assert cam.max_distance == 120.0     # grew to fit the larger value
+        cam.set_distance(10.0)               # within ceiling → does not shrink
+        assert cam.distance == 10.0
+        assert cam.max_distance == 120.0
+
+    def test_set_distance_clamps_floor_and_guard(self):
+        from skinny.renderer import OrbitCamera
+        cam = OrbitCamera()
+        cam.set_distance(-5.0)
+        assert cam.distance == 0.5           # lower floor
+        cam.set_distance(1e12)
+        assert cam.distance == 1e9           # upper degeneracy guard
+        assert cam.max_distance == 1e9
+
+    def test_zoom_grows_past_ceiling(self):
         from skinny.renderer import OrbitCamera
         cam = OrbitCamera()
         cam.max_distance = 200.0
         cam.distance = 199.0
-        for _ in range(50):       # many zoom-out steps
+        for _ in range(50):                  # zoom-out: distance *= 1.1 each step
             cam.zoom(-1.0)
-        assert cam.distance <= 200.0
-        assert cam.distance > 50.0  # not pinned to the old 50 cap
+        assert cam.distance > 200.0          # grew past the old ceiling
+        assert cam.max_distance == cam.distance
 
     def test_scene_graph_slider_uses_max_distance(self):
         from skinny.renderer import OrbitCamera

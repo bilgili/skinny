@@ -734,10 +734,23 @@ class OrbitCamera(CameraBase):
         self.pitch += dy * 0.005
         self.pitch = float(np.clip(self.pitch, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
 
+    def set_distance(self, value: float) -> None:
+        """Set the orbit distance to any value ≥ 0.5, growing ``max_distance``
+        to fit.
+
+        ``max_distance`` is the current ceiling (slider range + wheel-zoom
+        limit). Writing a larger distance raises it so the UI stays consistent;
+        it never shrinks here — only a re-frame/model-load resets it. The 1e9
+        cap is a degeneracy guard (avoids inf/NaN and int-slider precision
+        loss), effectively unbounded for real scenes.
+        """
+        v = float(np.clip(value, 0.5, 1e9))
+        if v > self.max_distance:
+            self.max_distance = v
+        self.distance = v
+
     def zoom(self, delta: float) -> None:
-        self.distance = float(
-            np.clip(self.distance * (1.0 - delta * 0.1), 0.5, self.max_distance)
-        )
+        self.set_distance(self.distance * (1.0 - delta * 0.1))
 
     def pan(self, dx: float, dy: float) -> None:
         f = self.target - self.position
