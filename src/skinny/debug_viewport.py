@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 import vulkan as vk
 
-from skinny.renderer import FreeCamera, OrbitCamera, _look_at, _perspective
+from skinny.renderer import FreeCamera, OrbitCamera, _orbit_distance_cap
 from skinny.vk_context import VulkanContext
 
 
@@ -2285,11 +2285,15 @@ class DebugViewport:
             centre = (wmin + wmax) * 0.5
             extent = float(np.linalg.norm(wmax - wmin))
             cam.target = centre.astype(np.float32)
-            # Frame the bounding sphere given the orbit FOV.
+            # Frame the bounding sphere given the orbit FOV. The cap scales
+            # with scene size (matching the render camera) so large scenes can
+            # be framed; set max_distance so wheel-zoom stays consistent.
             half_fov = float(np.radians(cam.fov)) * 0.5
             radius = max(extent * 0.5, 0.5)
+            cap = _orbit_distance_cap(float(np.max(wmax - wmin)))
+            cam.max_distance = cap
             cam.distance = float(np.clip(
-                radius / max(np.tan(half_fov), 1e-3) * 1.4, 0.5, 50.0,
+                radius / max(np.tan(half_fov), 1e-3) * 1.4, 0.5, cap,
             ))
 
     def _scene_bounds_or_none(self):
