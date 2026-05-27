@@ -147,17 +147,34 @@ def _build_scene_prop_widget(
     if prop.type_name == "float" and prop.editable:
         lo = float(prop.metadata.get("min", 0.0))
         hi = float(prop.metadata.get("max", 1.0))
+        step = (hi - lo) / 100.0 if hi > lo else 0.01
+
+        if prop.metadata.get("growable"):
+            w = pn.widgets.EditableFloatSlider(
+                name=prop.display_name, start=lo, end=hi,
+                fixed_start=lo, fixed_end=1e9, step=step,
+                value=float(prop.value),
+            )
+
+            def on_change(event, p=prop, r=ref, sl=w):
+                with session._lock:
+                    _apply_prop_value(renderer, r, p, float(event.new))
+                if float(event.new) > sl.end:
+                    sl.end = float(event.new)
+
+            w.param.watch(on_change, "value")
+            return w
+
         w = pn.widgets.FloatSlider(
             name=prop.display_name, start=lo, end=hi,
-            step=(hi - lo) / 100.0 if hi > lo else 0.01,
-            value=float(prop.value),
+            step=step, value=float(prop.value),
         )
 
-        def on_change(event, p=prop, r=ref):
+        def on_change_plain(event, p=prop, r=ref):
             with session._lock:
                 _apply_prop_value(renderer, r, p, float(event.new))
 
-        w.param.watch(on_change, "value")
+        w.param.watch(on_change_plain, "value")
         return w
 
     if prop.type_name == "color3f" and prop.editable:
