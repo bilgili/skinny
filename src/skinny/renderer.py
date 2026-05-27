@@ -1178,7 +1178,7 @@ class Renderer:
             offset = pos - head_centre
             dist = float(max(np.linalg.norm(offset), 0.5))
             self.orbit_camera.target = head_centre
-            self.orbit_camera.distance = dist
+            self.orbit_camera.set_distance(dist)
             self.orbit_camera.pitch = float(np.arcsin(offset[1] / dist))
             self.orbit_camera.yaw = float(np.arctan2(offset[0], offset[2]))
             self.camera_mode = "orbit"
