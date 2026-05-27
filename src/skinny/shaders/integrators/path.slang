@@ -230,7 +230,7 @@ struct PathTracer : IIntegrator
         {
             if (!h.hit)
             {
-                float3 envR = sceneEnvRadiance(
+                float3 envR = sceneEnvRadianceCell(
                     r.direction, fc.envIntensity,
                     effectiveFurnaceMode(h.materialId));
                 float w = 1.0;

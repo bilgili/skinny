@@ -40,6 +40,30 @@ static const int ENV_DIST_H = 512;    // must equal ENV_HEIGHT (environment.py)
 [[vk::binding(31)]] StructuredBuffer<float> envMarginalCdf;  // ENV_DIST_H+1
 [[vk::binding(32)]] StructuredBuffer<float> envCondCdf;      // H*(W+1), row-major
 
+// Piecewise-constant env radiance, consistent with the importance-sampling
+// distribution. The CDF is built per cell (nearest-resized luminance), but the
+// regular lookup filters bilinearly — so a direction one texel off the sun
+// reads bright yet carries a low env pdf, and MIS fails to down-weight it
+// (a firefly). Sampling at the texel CENTRE returns the exact cell value the
+// CDF was built from, so L(dir) and envPdf(dir) agree and MIS is correct.
+// Used only by the light-transport paths; the directly-visible background
+// keeps the smooth bilinear lookup.
+float3 sampleEnvironmentCell(float3 dir, float intensity)
+{
+    float2 uv = directionToEquirectUV(dir);
+    int iu = clamp(int(uv.x * float(ENV_DIST_W)), 0, ENV_DIST_W - 1);
+    int iv = clamp(int(uv.y * float(ENV_DIST_H)), 0, ENV_DIST_H - 1);
+    float2 c = float2((float(iu) + 0.5) / float(ENV_DIST_W),
+                      (float(iv) + 0.5) / float(ENV_DIST_H));
+    return envMap.SampleLevel(c, 0.0).rgb * intensity;
+}
+
+float3 sceneEnvRadianceCell(float3 dir, float intensity, uint furnaceMode)
+{
+    if (furnaceMode != 0u) return float3(1.0);
+    return sampleEnvironmentCell(dir, intensity);
+}
+
 struct EnvSample
 {
     float3 dir;        // world-space sampled direction
@@ -79,7 +103,10 @@ float envPdf(float3 dir)
     float2 uv = directionToEquirectUV(dir);
     int iu = clamp(int(uv.x * float(ENV_DIST_W)), 0, ENV_DIST_W - 1);
     int iv = clamp(int(uv.y * float(ENV_DIST_H)), 0, ENV_DIST_H - 1);
-    float st = sin((float(iv) + 0.5) / float(ENV_DIST_H) * PI);
+    // Use the direction's own theta (not the cell-centre) so this density
+    // matches the one sampleEnvDir reports for the same direction; otherwise
+    // the two MIS pdfs disagree and the power heuristic mis-weights.
+    float st = sin(uv.y * PI);
     if (st <= 1e-6) return 0.0;
     return envImagePdf(iu, iv) / (2.0 * PI * PI * st);
 }
@@ -107,6 +134,6 @@ EnvSample sampleEnvDir(float2 u, float intensity)
     es.dir = float3(st * sin(phi), cos(theta), st * cos(phi));
     if (st <= 1e-6) return es;          // pole: degenerate solid angle
     es.pdf = envImagePdf(iu, iv) / (2.0 * PI * PI * st);
-    es.radiance = sampleEnvironment(es.dir, intensity);
+    es.radiance = sampleEnvironmentCell(es.dir, intensity);
     return es;
 }
