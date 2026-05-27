@@ -75,7 +75,8 @@ def _apply_saved_camera(renderer, saved_cam) -> None:
         o.pitch = float(np.clip(
             _flt(orbit_raw.get("pitch"), o.pitch), -np.pi / 2 + 0.01, np.pi / 2 - 0.01
         ))
-        o.distance = float(np.clip(_flt(orbit_raw.get("distance"), o.distance), 0.5, 50.0))
+        o.distance = max(0.5, _flt(orbit_raw.get("distance"), o.distance))
+        o.max_distance = max(o.max_distance, o.distance)
         o.fov = float(np.clip(_flt(orbit_raw.get("fov"), o.fov), 1.0, 170.0))
         o.target = _vec3(orbit_raw.get("target"), o.target)
 

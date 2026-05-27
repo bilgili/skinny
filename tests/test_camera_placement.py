@@ -265,6 +265,15 @@ class TestDistanceCap:
         assert cam.distance == 333.0
         assert cam.max_distance == 333.0     # grew via set_distance
 
+    def test_restore_honors_large_distance(self):
+        import types
+        from skinny.renderer import OrbitCamera
+        from skinny.app import _apply_saved_camera
+        stub = types.SimpleNamespace(orbit_camera=OrbitCamera(), free_camera=None)
+        _apply_saved_camera(stub, {"orbit": {"distance": 250.0}})
+        assert stub.orbit_camera.distance == 250.0
+        assert stub.orbit_camera.max_distance >= 250.0
+
 
 @needs_renderer
 class TestStreamingReframe:
