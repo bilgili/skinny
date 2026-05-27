@@ -1,0 +1,37 @@
+schema: spec-driven
+context: |
+  skinny is a physically-based skin renderer: layered skin optics (BSSRDF, GGX
+  specular), path + bidirectional path tracing, MaterialX materials, USD scene
+  loading, progressive accumulation. Interactive GLFW app with Vulkan and Metal
+  backends.
+
+  Tech stack: Python 3.11+ (src/ layout, package `skinny`); Slang shaders
+  compiled to SPIR-V via slangc (`main_pass.slang` is the compute entry); Vulkan
+  backend in vk_context.py / vk_compute.py; Metal backend in metal_backend.py
+  (SlangPy/RHI); MaterialX >=1.39 built from source with PyMaterialXGenSlang (the
+  PyPI wheel lacks it); USD via usd_loader.py; ImGui/Qt UI under ui/.
+
+  Key directories: src/skinny/ (app.py entry, renderer.py orchestration);
+  src/skinny/shaders/ (materials/, integrators/, lights/, samplers/, cameras/);
+  tests/ (pytest by subsystem; harnesses/ Slang shaders, kernels/ reference
+  kernels); hdrs/ (HDR environments), heads/ (OBJ models + textures), assets/,
+  tattoos/.
+
+  Commands: setup `python -m venv .venv && .venv/bin/pip install -e ".[dev]"`;
+  run `.venv/bin/skinny` (force backend `--backend metal|vulkan`); lint
+  `.venv/bin/ruff check src/`; test `.venv/bin/pytest`; compile shader `slangc
+  src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage
+  compute -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders`. Headless
+  renders use the repo-root Python 3.13 venv (./bin/python3.13) with VULKAN_SDK +
+  DYLD_LIBRARY_PATH set (see CLAUDE.md, tests/test_headless.py).
+
+  Conventions: Ruff, 100-char lines; snake_case funcs/vars/modules, PascalCase
+  classes, UPPERCASE true constants. SkinParameters.pack() std140 bytes must
+  match the SkinParams Slang struct exactly. Any shader change requires
+  recompiling main_pass.spv with slangc. Keep Slang modular; share utilities via
+  common.slang. Default backend: Metal on macOS (auto-falls back to Vulkan);
+  SKINNY_BACKEND env overrides.
+
+  Authoritative reference docs: Architecture.md (module map + descriptor binding
+  map), SkinRendering.md (skin estimator chain sections 1-6), CLAUDE.md and
+  AGENTS.md (contributor/agent guidance), CHANGELOG.md, README.md.
