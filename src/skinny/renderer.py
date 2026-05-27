@@ -618,12 +618,15 @@ def _hero_yaw_pitch() -> tuple[float, float]:
 
 
 def _orbit_distance_cap(longest_dim: float) -> float:
-    """Max orbit distance for a scene whose longest AABB edge is ``longest_dim``.
+    """Initial max orbit distance for a scene whose longest AABB edge is
+    ``longest_dim``.
 
-    At least 4× the longest dimension so large scenes can be framed and
-    zoomed out, never below the legacy 50-unit floor for small scenes.
+    At least 10× the longest dimension so large scenes can be framed and
+    zoomed out, never below the legacy 50-unit floor for small scenes. This is
+    the *initial* ceiling only — ``OrbitCamera.set_distance`` raises
+    ``max_distance`` past this when the user types or zooms further out.
     """
-    return float(max(50.0, 4.0 * longest_dim))
+    return float(max(50.0, 10.0 * longest_dim))
 
 
 class CameraBase(abc.ABC):

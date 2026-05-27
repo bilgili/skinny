@@ -197,22 +197,22 @@ class TestResetReframes:
 class TestDistanceCap:
     def test_cap_floor_and_scaling(self):
         from skinny.renderer import _orbit_distance_cap
-        assert _orbit_distance_cap(2.0) == 50.0      # small scene → 50 floor
-        assert _orbit_distance_cap(12.5) == 50.0     # boundary: 4×12.5 == 50
-        assert _orbit_distance_cap(20.0) == 80.0     # large scene → 4×longest
+        assert _orbit_distance_cap(2.0) == 50.0       # small scene → 50 floor
+        assert _orbit_distance_cap(5.0) == 50.0       # boundary: 10×5 == 50
+        assert _orbit_distance_cap(20.0) == 200.0     # large scene → 10×longest
 
     def test_frame_mesh_sets_cap(self):
         import types
         from skinny.renderer import Renderer, OrbitCamera
         stub = types.SimpleNamespace(orbit_camera=OrbitCamera())
-        # A 40-unit-tall mesh: longest dim 40 → cap = max(50, 160) = 160.
+        # A 40-unit-tall mesh: longest dim 40 → cap = max(50, 400) = 400.
         positions = np.array(
             [[-1, 0, -1], [1, 0, 1], [-1, 40, -1], [1, 40, 1]], dtype=np.float32
         )
         source = types.SimpleNamespace(positions=positions)
         Renderer._frame_camera_to_mesh(stub, source)
-        assert stub.orbit_camera.max_distance == 160.0
-        assert stub.orbit_camera.distance <= 160.0
+        assert stub.orbit_camera.max_distance == 400.0
+        assert stub.orbit_camera.distance <= 400.0
 
     def test_zoom_respects_dynamic_cap(self):
         from skinny.renderer import OrbitCamera
