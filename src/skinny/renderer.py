@@ -4735,7 +4735,7 @@ class Renderer:
             cam.pitch = float(np.clip(v, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
         elif self.camera_mode == "orbit":
             if key == "distance":
-                cam.distance = float(np.clip(v, 0.5, cam.max_distance))
+                cam.set_distance(v)
             elif key in ("target_x", "target_y", "target_z"):
                 axis = "xyz".index(key[-1])
                 cam.target[axis] = v

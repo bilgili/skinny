@@ -254,6 +254,17 @@ class TestDistanceCap:
         dist = next(p for p in synth.properties if p.name == "distance")
         assert dist.metadata["max"] == 160.0
 
+    def test_apply_camera_param_distance_grows(self):
+        import types
+        from skinny.renderer import Renderer, OrbitCamera
+        cam = OrbitCamera()                  # max_distance defaults to 50
+        stub = types.SimpleNamespace(
+            camera=cam, camera_mode="orbit", _material_version=0,
+        )
+        Renderer.apply_camera_param(stub, "distance", 333.0)
+        assert cam.distance == 333.0
+        assert cam.max_distance == 333.0     # grew via set_distance
+
 
 @needs_renderer
 class TestStreamingReframe:
