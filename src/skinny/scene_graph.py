@@ -922,7 +922,11 @@ def inject_renderer_camera(
             name="distance", display_name="distance",
             type_name="float", value=float(camera.distance),
             editable=True,
-            metadata={"min": 0.5, "max": float(getattr(camera, "max_distance", 50.0))},
+            metadata={
+                "min": 0.5,
+                "max": float(getattr(camera, "max_distance", 50.0)),
+                "growable": True,
+            },
         ))
         target = (
             float(camera.target[0]),

@@ -253,6 +253,7 @@ class TestDistanceCap:
         synth = next(c for c in root.children if c.path == "/Skinny/MainCamera")
         dist = next(p for p in synth.properties if p.name == "distance")
         assert dist.metadata["max"] == 160.0
+        assert dist.metadata.get("growable") is True
 
     def test_apply_camera_param_distance_grows(self):
         import types
