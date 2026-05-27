@@ -313,18 +313,22 @@ class SceneGraphDock(QDockWidget):
         lo = float(prop.metadata.get("min", 0.0))
         hi = float(prop.metadata.get("max", 1.0))
         cur = float(prop.value)
+        growable = bool(prop.metadata.get("growable"))
 
         slider = QSlider(Qt.Horizontal)
         slider.setRange(0, 1000)
         spin = QDoubleSpinBox()
-        spin.setRange(lo, hi)
+        spin.setRange(lo, 1e9 if growable else hi)
         spin.setDecimals(3)
-        span = max(hi - lo, 1e-9)
+        # Mutable mapping bounds so a growable range can be rescaled in place
+        # without rebuilding the widget (preserves the slider grab mid-drag).
+        rng = {"hi": hi, "span": max(hi - lo, 1e-9)}
 
         def to_int(v: float) -> int:
-            return int(round((v - lo) / span * 1000.0))
+            return int(round((v - lo) / rng["span"] * 1000.0))
+
         def from_int(i: int) -> float:
-            return lo + (i / 1000.0) * span
+            return lo + (i / 1000.0) * rng["span"]
 
         with QSignalBlocker(slider), QSignalBlocker(spin):
             slider.setValue(to_int(cur))
@@ -345,9 +349,17 @@ class SceneGraphDock(QDockWidget):
 
         if node.renderer_ref is not None and node.renderer_ref.kind == "renderer_camera":
             def pull() -> None:
-                live = _read_camera_param(self.renderer.camera, prop.name)
+                cam = self.renderer.camera
+                live = _read_camera_param(cam, prop.name)
                 if live is None:
                     return
+                if growable:
+                    live_max = float(getattr(cam, "max_distance", rng["hi"]))
+                    if abs(live_max - rng["hi"]) > 1e-4:
+                        rng["hi"] = live_max
+                        rng["span"] = max(live_max - lo, 1e-9)
+                        with QSignalBlocker(slider):
+                            slider.setValue(to_int(float(live)))
                 if abs(spin.value() - float(live)) > 1e-4:
                     with QSignalBlocker(slider), QSignalBlocker(spin):
                         spin.setValue(float(live))
