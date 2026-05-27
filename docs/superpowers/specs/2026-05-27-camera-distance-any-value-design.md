@@ -82,6 +82,9 @@ So a persisted large distance survives instead of being clamped to 50.
 
 ### 3. Qt field widget (`src/skinny/ui/qt/windows/scene_graph.py`, `_add_float`)
 
+Gated on `prop.metadata.get("growable")` (see §5) so only the distance property
+is affected; other float properties keep their fixed metadata `[min, max]` range.
+
 - Spinbox: `spin.setRange(lo, 1e9)` so any numeric value is typeable.
 - Slider: keep mapping `[lo, max_distance]`. Make `hi` / `span` mutable
   (close over a small holder rather than fixed locals).
@@ -89,12 +92,10 @@ So a persisted large distance survives instead of being clamped to 50.
   differs from the captured `hi`, rescale the slider mapping (`hi`, `span`,
   `to_int`/`from_int`) in place so the thumb tracks the grown range. No widget
   rebuild — preserves the slider grab during drag-to-grow.
-- This behaviour is specific to the camera-distance property; other float
-  properties keep their fixed metadata `[min, max]` range.
 
 ### 4. Panel field widget (`src/skinny/ui/panel/windows.py`)
 
-- For the camera-distance float property, use `pn.widgets.EditableFloatSlider`
+- For the `growable` float property (see §5), use `pn.widgets.EditableFloatSlider`
   instead of `FloatSlider`: soft `end = max_distance`, `fixed_start = 0.5`,
   `fixed_end = 1e9`. Typing past the soft `end` is allowed up to `fixed_end`.
 - In the change watcher, when the applied value exceeds `end`, set `w.end = value`
@@ -103,9 +104,11 @@ So a persisted large distance survives instead of being clamped to 50.
 
 ### 5. Scene-graph model (`src/skinny/scene_graph.py`, line ~925)
 
-No change. The distance property's `metadata["max"]` already reads
-`getattr(camera, "max_distance", 50.0)` at build time; stale-at-build is fine
-because the live widgets rescale themselves from the camera each tick.
+Add `"growable": True` to the distance property's `metadata` (alongside the
+existing `min`/`max`). This one flag gates the free-entry + auto-grow behaviour
+in both field widgets (§3, §4), decoupling them from the property name. The
+`metadata["max"]` still reads `getattr(camera, "max_distance", 50.0)` at build
+time; stale-at-build is fine because the live widgets rescale from the camera.
 
 ## Non-issues verified
 
