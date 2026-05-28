@@ -18,14 +18,14 @@
 
 ## 4. GPU skinning pass
 
-- [ ] 4.1 Add `shaders/skin.slang` compute: rest pos/normal + influences + joint matrices → world-space deformed pos/normal into the BLAS vertex-buffer slot; skin normals in-shader (upper-3×3)
+- [x] 4.1 shaders/skin.slang compute written (LBS rest pos/normal + influences + joint matrices → deformed vertex; mul(M,v) matches the numpy upload convention); compiles to SPIR-V via slangc
 - [ ] 4.2 New `ComputePipeline` for skinning with its own descriptor set (rest verts, influences, joint matrices, RW vertex_buffer); compile to SPIR-V via slangc
 - [x] 4.3 Interim CPU skinning: per frame, CPU LBS (validated lbs_points) → rebuild each skinned BLAS via bake_mesh → re-upload. Proves skinning/space against a known-good tree
 - [x] 4.4 Headless A/B: ElephantWithMonochord deforms between t=1 and t=1500 (tests/test_headless_skel.py)
 
 ## 5. GPU BVH refit pass
 
-- [ ] 5.1 Add `shaders/bvh_refit.slang`: parallel leaf-AABB recompute from deformed triangles + serial reverse-array-order inner-node union; bind `bvh_buffer` + `vertex_buffer` RW
+- [x] 5.1 shaders/bvh_refit.slang written (single-thread reverse-order refit: leaf AABB from deformed tris, inner = union of children); compiles to SPIR-V
 - [ ] 5.2 New `ComputePipeline` for refit with its own descriptor set
 - [ ] 5.3 Order the frame as skin → refit → main_pass with GPU memory barriers; remove the interim CPU rebuild
 - [ ] 5.4 Verify refitted AABBs contain deformed geometry and the render shows no holes/stretch-through
