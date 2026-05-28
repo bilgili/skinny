@@ -14,7 +14,7 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox, QFileDialog,
+    QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox,
     QHBoxLayout, QLabel, QPushButton, QScrollArea, QSlider, QSplitter,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 from skinny.scene_graph import (
     SceneGraphNode, SceneGraphProperty, find_node_by_path, type_icon,
 )
+from skinny.settings import get_last_dir, record_last_dir
+from skinny.ui.qt.dialogs import get_open_file_name
 
 
 class SceneGraphDock(QDockWidget):
@@ -452,9 +454,9 @@ class SceneGraphDock(QDockWidget):
         btn = QPushButton("Load…")
 
         def on_pick() -> None:
-            path, _ = QFileDialog.getOpenFileName(
+            path = get_open_file_name(
                 self, "Load lens (.usda)",
-                str(Path(__file__).resolve().parents[4] / "lenses"),
+                get_last_dir("lens"),
                 "USDA lens (*.usda);;All files (*.*)",
             )
             if not path:
@@ -463,6 +465,7 @@ class SceneGraphDock(QDockWidget):
             if hasattr(self.renderer, "apply_camera_lens_file"):
                 ok = self.renderer.apply_camera_lens_file(path)
             if ok:
+                record_last_dir("lens", Path(path).parent)
                 name = Path(path).name
                 cur_label.setText(name)
                 prop.value = name
@@ -484,16 +487,9 @@ class SceneGraphDock(QDockWidget):
             ref = node.renderer_ref
             if ref is None or ref.kind != "light_env":
                 return
-            start_dir = ""
-            if cur:
-                start_dir = str(Path(cur).resolve().parent)
-            if not start_dir:
-                start_dir = str(
-                    Path(__file__).resolve().parents[4] / "hdrs",
-                )
-            path, _ = QFileDialog.getOpenFileName(
+            path = get_open_file_name(
                 self, "Load HDR",
-                start_dir,
+                get_last_dir("ibl"),
                 "HDR images (*.hdr *.exr *.pfm);;All files (*.*)",
             )
             if not path:
@@ -502,6 +498,7 @@ class SceneGraphDock(QDockWidget):
             if hasattr(self.renderer, "apply_dome_light_texture"):
                 ok = self.renderer.apply_dome_light_texture(ref.index, path)
             if ok:
+                record_last_dir("ibl", Path(path).parent)
                 cur_label.setText(Path(path).name)
                 prop.value = path
 

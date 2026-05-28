@@ -28,7 +28,14 @@ import numpy as np
 
 from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
 from skinny.renderer import Renderer
-from skinny.settings import ensure_dirs, load_settings, save_settings
+from skinny.settings import (
+    ensure_dirs,
+    get_last_dir,
+    last_dirs_snapshot,
+    load_settings,
+    record_last_dir,
+    save_settings,
+)
 from skinny.ui.build_app_ui import AppCallbacks, build_main_ui
 from skinny.ui.qt.backend import QtTreeBuilder
 from skinny.ui.qt.viewport import RenderViewport
@@ -336,12 +343,13 @@ class MainWindow(QMainWindow):
             view_menu.addAction(act)
 
     def _on_menu_open_scene(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open scene", "",
+        from skinny.ui.qt.dialogs import get_open_file_name
+        path = get_open_file_name(
+            self, "Open scene", get_last_dir("model"),
             "USD scenes (*.usda *.usdc *.usdz);;OBJ (*.obj);;All files (*.*)",
         )
         if path:
+            record_last_dir("model", Path(path).parent)
             self.renderer.load_model_from_path(Path(path))
             if self._python_material_dock is not None:
                 self._python_material_dock.refresh_from_renderer()
@@ -429,6 +437,7 @@ class MainWindow(QMainWindow):
             if dock is not None and dock.isVisible():
                 open_docks.append(name)
         out["open_docks"] = open_docks
+        out["last_dirs"] = last_dirs_snapshot()
         try:
             out["section_states"] = self._tree_builder.section_states()
         except Exception as exc:  # noqa: BLE001

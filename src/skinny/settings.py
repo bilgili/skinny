@@ -28,6 +28,15 @@ PRESETS_DIR = SETTINGS_DIR / "presets"
 MESH_CACHE_DIR = SETTINGS_DIR / "mesh_cache"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
+# Default starting directories for file-open dialogs, per loader category.
+# Anchored at the repository root (this file lives at src/skinny/settings.py).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LAST_DIR_DEFAULTS: dict[str, Path] = {
+    "model": REPO_ROOT / "assets",
+    "ibl": REPO_ROOT / "hdrs",
+    "lens": REPO_ROOT / "lenses",
+}
+
 
 def ensure_dirs() -> None:
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,6 +63,57 @@ def save_settings(data: dict[str, Any]) -> None:
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, sort_keys=True)
     os.replace(tmp, SETTINGS_FILE)
+
+
+# ── last-used directories per file-loader category ──────────────────
+
+_last_dirs_cache: dict[str, str] | None = None
+
+
+def _last_dirs() -> dict[str, str]:
+    """In-memory category→dir cache, lazily seeded from settings.json."""
+    global _last_dirs_cache
+    if _last_dirs_cache is None:
+        raw = load_settings().get("last_dirs")
+        _last_dirs_cache = (
+            {str(k): str(v) for k, v in raw.items() if isinstance(v, str)}
+            if isinstance(raw, dict)
+            else {}
+        )
+    return _last_dirs_cache
+
+
+def get_last_dir(category: str) -> str:
+    """Remembered directory for ``category`` if it still exists on disk, else
+    the category default if it exists, else ``""``. Call at dialog-open time.
+    """
+    remembered = _last_dirs().get(category)
+    if remembered and Path(remembered).is_dir():
+        return remembered
+    default = LAST_DIR_DEFAULTS.get(category)
+    if default is not None and default.is_dir():
+        return str(default)
+    return ""
+
+
+def record_last_dir(category: str, directory: str | Path) -> None:
+    """Remember ``directory`` for ``category`` and write it through to disk,
+    preserving every other settings key.
+    """
+    directory = str(directory)
+    _last_dirs()[category] = directory
+    data = load_settings()
+    last = data.get("last_dirs")
+    if not isinstance(last, dict):
+        last = {}
+    last[category] = directory
+    data["last_dirs"] = last
+    save_settings(data)
+
+
+def last_dirs_snapshot() -> dict[str, str]:
+    """Current category→dir map, for inclusion in a full settings snapshot."""
+    return dict(_last_dirs())
 
 
 # ── user presets ────────────────────────────────────────────────────

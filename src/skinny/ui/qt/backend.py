@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
     QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from skinny.settings import get_last_dir, record_last_dir
 from skinny.ui import spec
+from skinny.ui.qt.dialogs import get_open_file_name
 from skinny.ui.qt.direction_picker import build_direction_widget
 
 
@@ -440,9 +442,14 @@ class QtTreeBuilder:
 
         def on_click() -> None:
             filt = ";;".join(f"{label} ({glob})" for label, glob in node.filters)
-            start = str(node.start_dir) if node.start_dir else ""
-            path, _ = QFileDialog.getOpenFileName(self.parent, node.label, start, filt)
+            if node.category:
+                start = get_last_dir(node.category)
+            else:
+                start = str(node.start_dir) if node.start_dir else ""
+            path = get_open_file_name(self.parent, node.label, start, filt)
             if path:
+                if node.category:
+                    record_last_dir(node.category, Path(path).parent)
                 node.on_pick(Path(path))
 
         btn.clicked.connect(on_click)

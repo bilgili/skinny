@@ -129,11 +129,17 @@ class Button(Node):
 class FilePicker(Node):
     """Opens an OS file dialog. ``filters`` is a list of ``(label, glob)``
     pairs (e.g. ``[("USD", "*.usda *.usdc *.usdz"), ("OBJ", "*.obj")]``).
+
+    When ``category`` is set, the backend resolves the dialog's start directory
+    from the last-used-directory registry (``settings.get_last_dir``) at open
+    time and records the chosen file's parent on a successful pick. When
+    ``category`` is ``None``, ``start_dir`` is honoured and nothing is recorded.
     """
     label: str
     filters: list[tuple[str, str]]
     on_pick: Callable[[Path], None]
     start_dir: Path | None = None
+    category: str | None = None
 
 
 @dataclass
@@ -287,8 +293,9 @@ class UIBuilder:
     def file_picker(
         self, label: str, filters: list[tuple[str, str]],
         on_pick: Callable[[Path], None], start_dir: Path | None = None,
+        category: str | None = None,
     ) -> FilePicker:
-        return self._append(FilePicker(label, filters, on_pick, start_dir))  # type: ignore[return-value]
+        return self._append(FilePicker(label, filters, on_pick, start_dir, category))  # type: ignore[return-value]
 
     def resolution_picker(
         self, presets: list[tuple[str, int, int]],

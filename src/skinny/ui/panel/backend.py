@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import panel as pn
 
+from skinny.settings import get_last_dir, record_last_dir
 from skinny.ui import spec
 
 
@@ -383,7 +384,10 @@ class PanelTreeBuilder:
             if allowed_exts is None:
                 break
 
-        start = str(node.start_dir) if node.start_dir else None
+        if node.category:
+            start = get_last_dir(node.category) or None
+        else:
+            start = str(node.start_dir) if node.start_dir else None
         sel = pn.widgets.FileSelector(start, file_pattern="*", only_files=True)
         btn = pn.widgets.Button(name=node.label, button_type="primary")
         status = pn.pane.Alert("", alert_type="info", visible=False)
@@ -410,6 +414,8 @@ class PanelTreeBuilder:
                 return
             try:
                 node.on_pick(path)
+                if node.category:
+                    record_last_dir(node.category, path.parent)
                 status.object = f"Loaded {path.name}"
                 status.alert_type = "success"
             except Exception as exc:  # noqa: BLE001
