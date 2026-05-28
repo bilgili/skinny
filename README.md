@@ -40,6 +40,18 @@ nodedefs, head geometry, presets, tattoos) is documented separately in
 - **OpenUSD scene loading** -- meshes, transforms, `UsdShade.Material` bindings,
   lights (`DomeLight`, `DistantLight`, `SphereLight`, `RectLight`), and
   per-prim material assignment
+- **USD animation playback** -- time-sampled transform / camera / light tracks
+  play in the viewport via a built-in transport (play/pause, scrubber, fps);
+  cheap per-frame re-eval (TLAS/​light re-upload, no rebake) with a `usd` camera
+  mode that follows an animated USD camera
+- **UsdSkel skeletal skinning** -- skinned meshes deform per frame by linear
+  blend skinning; on Vulkan a GPU skinning compute pass + GPU BVH refit keep the
+  path tracer correct over deformed geometry with no readback (CPU fallback
+  elsewhere)
+- **USD-driven scene controls** -- a stage declares its own control panel via
+  `skinny:ui:*` prims (slider / toggle / combo / color); each control binds to a
+  renderer parameter, a material input, or a USD attribute and appears in a
+  "Scene Controls" section across the Qt, web, and debug front-ends
 - **Flat material support** -- USD prims bound to `UsdPreviewSurface`, MaterialX
   `standard_surface`, or `OpenPBR` render alongside skin materials in the same
   scene, with opacity / refraction, clear coat, and cutout-vs-alpha-blend

@@ -39,8 +39,37 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Removed the dedicated `ProceduralParams` buffer (was binding 20); binding 20
   is now `DistantLight`
 
+### Animation
+
+- USD animation playback: a `PlaybackClock` maps wall-clock time onto the
+  stage's authored time range and re-evaluates *cheap* time-sampled prims each
+  frame — transform tracks, camera, and lights — by re-uploading only the TLAS
+  instance records / light buffers (no mesh rebake). A load-time animated-prim
+  index keeps per-frame cost proportional to the animated set. `current_time_code`
+  feeds the accumulation hash, so playback renders at 1 spp and converges when
+  paused (`playback.py`, `usd_loader.build_animation_index`)
+- A `usd` camera mode follows an animated USD camera; the user can switch back to
+  Orbit/Free at any time
+- UsdSkel skeletal animation: skinned meshes deform per frame via linear blend
+  skinning. CPU computes per-joint matrices (pxr, validated against
+  `UsdSkelSkinningQuery.ComputeSkinnedPoints`); a GPU compute pass
+  (`shaders/skin.slang`) blends rest vertices into the shared vertex buffer and a
+  GPU BVH refit (`shaders/bvh_refit.slang`) keeps the path tracer correct over
+  the deformed geometry — no readback. Standalone Vulkan pipelines
+  (`vk_skinning.py`) with their own descriptor sets leave `main_pass` untouched;
+  a CPU skinning path is the fallback on non-Vulkan backends
+
 ### UI and interaction
 
+- Built-in animation transport (play/pause, normalized time scrubber, fps) in the
+  shared control tree, shown only when the loaded stage has animation
+- USD-driven Scene Controls: a stage can declare its own control panel via
+  `skinny:ui:*` prims (slider/toggle/combo/color). Each control's prefix-typed
+  target binds to a renderer parameter (`renderer:`/`mtlx:`), a material input
+  (`material:`), or a USD attribute (`usd:`); editing a `usd:` control writes the
+  stage and refreshes the live light/transform/camera state. Controls appear in a
+  "Scene Controls" section across the Qt, web, and debug front-ends
+  (`usd_loader.extract_ui_controls` + `resolve_control_binding`)
 - Live Python material editing in the Qt material editor
 - Camera debug viewport (`F2`) with frustum, lens rings, focus plane, DOF
   planes, render-area outline, ground grid, mesh wireframes, AABBs, and
@@ -59,6 +88,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   saves PNG/JPEG/BMP/EXR/HDR or returns a numpy array; supports USD-time and an
   animation loop. `examples/render_image.py` and `examples/render_turntable.py`
   are thin wrappers over the new API.
+
+### Fixes
+
+- Windowed Vulkan swapchain is now created at the surface's `currentExtent`
+  instead of the window point-size. On MoltenVK/Retina the two differ (backing
+  pixels), which made `vkAcquireNextImageKHR` return `VK_SUBOPTIMAL_KHR` and the
+  windowed app crash on the first frame; the offscreen→swapchain blit already
+  scales, so decoupled render resolution is unaffected (`vk_context.py`)
 
 ## [0.1.0] - 2026-05-02
 

@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    upAxis = "Y"
+    metersPerUnit = 1
+    doc = "Demo scene for usd-driven Scene Controls (skinny:ui:* prims)."
+)
+
+def Sphere "Ball"
+{
+    double radius = 1.5
+}
+
+def SphereLight "KeyLight"
+{
+    float inputs:intensity = 120
+    float inputs:radius = 1
+    color3f inputs:color = (1, 0.85, 0.7)
+    double3 xformOp:translate = (4, 4, 4)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+
+# Author-declared control panel. Each child prim with skinny:ui:type becomes a
+# widget in the "Scene Controls" panel (Qt / web / debug). order sets layout.
+def Scope "SkinnyControls"
+{
+    def Scope "IBLIntensity"
+    {
+        custom token  skinny:ui:type   = "slider"
+        custom string skinny:ui:label  = "IBL Intensity"
+        custom string skinny:ui:target = "renderer:env_intensity"
+        custom float  skinny:ui:min     = 0
+        custom float  skinny:ui:max     = 4
+        custom float  skinny:ui:default = 1.0
+        custom int    skinny:ui:order   = 0
+    }
+
+    def Scope "Exposure"
+    {
+        custom token  skinny:ui:type   = "slider"
+        custom string skinny:ui:label  = "Exposure (EV)"
+        custom string skinny:ui:target = "renderer:exposure"
+        custom float  skinny:ui:min     = -6
+        custom float  skinny:ui:max     = 6
+        custom float  skinny:ui:default = 0
+        custom int    skinny:ui:order   = 1
+    }
+
+    def Scope "KeyLightIntensity"
+    {
+        custom token  skinny:ui:type   = "slider"
+        custom string skinny:ui:label  = "Key Light"
+        custom string skinny:ui:target = "usd:/KeyLight.inputs:intensity"
+        custom float  skinny:ui:min     = 0
+        custom float  skinny:ui:max     = 500
+        custom int    skinny:ui:order   = 2
+    }
+
+    def Scope "Integrator"
+    {
+        custom token    skinny:ui:type    = "combo"
+        custom string   skinny:ui:label   = "Integrator"
+        custom string   skinny:ui:target  = "renderer:integrator_index"
+        custom token[]  skinny:ui:choices = ["Path", "BDPT"]
+        custom int      skinny:ui:order    = 3
+    }
+}

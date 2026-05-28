@@ -441,6 +441,57 @@ per-input channel selectors into `channelMask` (4 bits per input), so the
 shader fetches the correct channel and applies the right normal-map convention
 without per-texture branches.
 
+### USD Animation Playback (`playback.py`, `usd_loader.py`, `renderer.py`)
+
+At load, `build_animation_index(stage)` scans for time-varying prims — transform
+tracks (incl. ancestor-driven), animated lights, an animated camera — and
+skinned meshes. `build_playback_clock(stage, index)` reads the stage's
+`startTimeCode`/`endTimeCode`/`timeCodesPerSecond` into a `PlaybackClock` (pure
+time logic: advance, loop, normalized scrub). The renderer keeps the stage alive
+(`_usd_stage`) so prims can be re-evaluated at runtime.
+
+Each frame, `Renderer.update(dt)` advances the clock and `_apply_animation_frame`
+re-evaluates only the indexed prims at `current_time_code`: animated transforms
+recompute the world matrix (`_world_transform`) and re-upload only those TLAS
+`instance_buffer` records (no mesh rebake / BVH rebuild); animated lights are
+re-extracted; an animated USD camera feeds a follower used in `camera_mode ==
+"usd"`. `current_time_code` is folded into `_current_state_hash`, so playback
+resets accumulation (1 spp in motion, converges when paused). A built-in
+transport (play/pause, normalized scrubber, fps) lives in the shared spec tree,
+shown only when the stage has animation.
+
+### UsdSkel Skeletal Skinning (`usd_loader.py`, `vk_skinning.py`, `shaders/skin.slang`, `shaders/bvh_refit.slang`)
+
+`extract_skeletal_bindings(stage)` returns a `SkeletalScene` (retaining the cache
++ stage) with one `SkinnedMeshBinding` per skinned mesh: rest points/normals,
+`jointIndices`/`jointWeights`, influences, and the skel/skinning queries.
+`compute_joint_matrices(binding, time)` builds per-joint matrices (mapper remap +
+geomBindTransform fold), validated against pxr `ComputeSkinnedPoints`; deformed
+points live in the authored-points space, so the loader's existing TLAS transform
+places them (no identity-TLAS).
+
+On Vulkan, `SkinningPasses` (`vk_skinning.py`) owns two standalone compute
+pipelines with their **own descriptor sets** (the main 0–32 binding map is
+untouched): `skin.slang` linear-blend-skins rest vertices into the shared vertex
+buffer; `bvh_refit.slang` refits each skinned mesh's BVH in place (parallel leaf
+AABBs are folded into a single-thread reverse-array-order pass — valid because the
+depth-first build emits parents before children). They run as one isolated
+submit (skin → barrier → refit) before the frame render — no edit to the shared
+render recording, no GPU→CPU readback. Non-Vulkan backends fall back to CPU
+skinning + BLAS rebuild.
+
+### USD-Driven Scene Controls (`usd_loader.py`, `ui/build_app_ui.py`)
+
+`extract_ui_controls(stage)` parses any prim with an authored `skinny:ui:type`
+into a `ControlSpec` (type, prefix-typed `target`, label, range, choices,
+default, order). `resolve_control_binding(renderer, spec)` maps the target prefix
+to live get/set closures: `renderer:`/`mtlx:` → `_get_nested`/`_set_nested`;
+`material:<name>:<input>` → `apply_material_override`; `usd:<prim>.<attr>` →
+attribute `Get`/`Set` + a live-state refresh (lights/transforms/camera). A
+data-driven "Scene Controls" `DynamicSection` in `build_main_ui` renders one
+widget per control across all front-ends, shown only when the stage declares
+controls. Authored `skinny:ui:default` values apply at load.
+
 ### Scene Graph Inspector (`scene_graph.py`, `ui/qt/windows/scene_graph.py`)
 
 Preserves the USD prim hierarchy as a browsable tree with typed,
