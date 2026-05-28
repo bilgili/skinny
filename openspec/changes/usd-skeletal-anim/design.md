@@ -52,19 +52,23 @@ the O(vertices) work parallel.
   joint-resolution + bind-inverse math to a shader; high risk, no benefit at
   these joint counts. Rejected.
 
-### D2: Skinning writes world-space verts; skinned instances use identity TLAS
-The skinning shader outputs **world-space** deformed positions/normals into the
-mesh's BLAS `vertex_buffer` slot, and the skinned instance's `instance_buffer`
-transform is identity. The up-axis + SkelRoot world placement are folded into the
-CPU joint matrices (D1). This sidesteps bind-transform/skel-space confusion in
-the BVH (which then operates purely in world space) and matches how a deforming
-BLAS naturally lives in one space.
+### D2: Skinning writes deformed verts in the authored-points space; the loader's TLAS transform is kept
+**Revised during implementation.** Empirically, pxr's `ComputeSkinnedPoints`
+returns deformed points in the **same space as the mesh's authored rest points**
+(here geomBindTransform is identity), and my `lbs_points` reproduces it exactly.
+So the skinning pass writes deformed positions/normals in that authored-points
+space into the BLAS, and the skinned instance **keeps the TLAS transform the
+loader already assigned** — which carries the prim placement and the up-axis
+correction. No identity-TLAS, no world/up-axis folding into the joint matrices.
+The BVH is built/refit in that same space; the existing instance transform
+places everything at trace time, exactly as it does for the bind-pose load.
 
-- *Alternative (skel-space verts + per-instance transform)*: keeps verts in a
-  canonical space but pushes the SkelRoot/up-axis transform onto the TLAS, and
-  the BVH would then bound skel-space geometry transformed at trace time — the
-  existing single-space BLAS/TLAS model doesn't support per-frame TLAS-space BVH
-  bounds cleanly. Rejected for simplicity.
+- *Original plan (world-space verts + identity TLAS, world folded into joint
+  matrices)*: rejected after verifying the simpler reuse is correct for this
+  asset and far lower risk. (For assets where skeleton space ≠ authored-points
+  space — geomBind ≠ identity with a distinct skel placement — a per-skeleton
+  skel→world transform on the instance would be needed; noted as a future
+  generalization.)
 
 ### D3: GPU BVH refit reusing bind-pose topology
 The bind-pose BVH is built once (existing Python builder). Refit runs two GPU

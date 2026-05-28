@@ -26,9 +26,11 @@ existing playback transport is surfaced.
 
 ### Requirement: Bind-pose bake for skinned meshes
 
-Each skinned mesh SHALL be baked at load into its bind-pose, world-space geometry
-as its BLAS, and the corresponding TLAS instance transform SHALL be identity, so
-that a stage which is never played still renders the mesh correctly in bind pose.
+Each skinned mesh SHALL be baked at load into its authored bind-pose geometry as
+its BLAS and SHALL retain the placement transform the loader assigns (prim world
+transform with up-axis correction), so that a stage which is never played still
+renders the mesh correctly in bind pose. Per-frame deformed points are produced
+in that same authored-points space, so the placement transform applies unchanged.
 
 #### Scenario: Unplayed skinned scene renders bind pose
 
@@ -57,9 +59,9 @@ buffer for the skinning pass.
 
 The renderer SHALL run a GPU compute pass that linear-blend-skins each skinned
 mesh's rest positions and normals by its per-vertex influences and the joint
-matrices, writing world-space deformed positions and normals into that mesh's
-BLAS region of the vertex buffer. The pass SHALL NOT require a GPU-to-CPU readback
-and SHALL NOT rebake mesh topology.
+matrices, writing the deformed positions and normals (in the authored-points
+space) into that mesh's BLAS region of the vertex buffer. The pass SHALL NOT
+require a GPU-to-CPU readback and SHALL NOT rebake mesh topology.
 
 #### Scenario: Vertices deform on the GPU
 

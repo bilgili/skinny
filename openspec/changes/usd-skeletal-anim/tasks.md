@@ -6,9 +6,9 @@
 
 ## 2. Bind-pose bake + skinned-instance state
 
-- [ ] 2.1 Bake each skinned mesh's bind-pose, world-space geometry as its BLAS; set its TLAS instance transform to identity (up-axis folded into the joint matrices later)
-- [ ] 2.2 Track skinned instances on the renderer (rest-vertex + influence GPU buffers built once; map skinned instance → its BLAS vertex/bvh ranges + skeleton)
-- [ ] 2.3 Confirm an unplayed skinned scene renders correct bind pose (headless)
+- [x] 2.1 Skinned meshes bake at authored bind pose via the normal loader path and keep the loader's TLAS transform (revised: deformed points share authored-points space → no identity-TLAS / world-fold; see design D2)
+- [x] 2.2 Track skinned instances on the renderer: hold the `SkeletalScene` (keeps cache+stage alive); match instances to bindings by prim path (GPU rest/influence buffers deferred to Group 4)
+- [x] 2.3 Confirm an unplayed skinned scene renders correct bind pose (loader bakes authored points; headless)
 
 ## 3. CPU joint matrices
 
@@ -20,8 +20,8 @@
 
 - [ ] 4.1 Add `shaders/skin.slang` compute: rest pos/normal + influences + joint matrices → world-space deformed pos/normal into the BLAS vertex-buffer slot; skin normals in-shader (upper-3×3)
 - [ ] 4.2 New `ComputePipeline` for skinning with its own descriptor set (rest verts, influences, joint matrices, RW vertex_buffer); compile to SPIR-V via slangc
-- [ ] 4.3 Interim BVH = temporary CPU rebuild from skinned verts (readback) to validate skinning/space correctness against a known-good tree
-- [ ] 4.4 Headless A/B: skinned mesh deforms between two time codes (silhouette/centroid changes) with the interim CPU BVH
+- [x] 4.3 Interim CPU skinning: per frame, CPU LBS (validated lbs_points) → rebuild each skinned BLAS via bake_mesh → re-upload. Proves skinning/space against a known-good tree
+- [x] 4.4 Headless A/B: ElephantWithMonochord deforms between t=1 and t=1500 (tests/test_headless_skel.py)
 
 ## 5. GPU BVH refit pass
 
@@ -32,12 +32,12 @@
 
 ## 6. Playback integration
 
-- [ ] 6.1 Add the skeletal branch to `_apply_animation_frame` (upload joint matrices + enqueue skin/refit when time changed)
-- [ ] 6.2 Confirm the existing transport drives skinned playback and `current_time_code` resets accumulation (playing = fresh frames, paused converges)
+- [x] 6.1 Skeletal branch added to _apply_animation_frame (_apply_skeletal_frame; CPU interim — GPU dispatch swaps in at Group 4/5)
+- [x] 6.2 Existing transport drives skinned playback; current_time_code already resets accumulation (paused converges)
 
 ## 7. Verification
 
 - [ ] 7.1 `ruff check src/` introduces no new errors; new files clean; `pytest -m "not gpu"` green
-- [ ] 7.2 Headless A/B test committed (skinned ElephantWithMonochord deforms across time codes), run in the built 3.13 venv
+- [x] 7.2 Headless A/B test committed (tests/test_headless_skel.py), green in the built 3.13 venv
 - [ ] 7.3 Manual (Vulkan): load `SoC-ElephantWithMonochord.usdc`, play/scrub, confirm the elephant animates and paused frames converge
 - [ ] 7.4 Metal: attempt parity; if the backend's known compute/descriptor issues obstruct, document and defer (Vulkan authoritative)

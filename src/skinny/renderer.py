@@ -926,6 +926,7 @@ class Renderer:
         # holds the USD camera evaluated at the current time when camera_mode == "usd".
         self.clock = PlaybackClock()
         self._anim_index = None
+        self._skeletal = None  # usd_loader.SkeletalScene when a skinned USD loads
         self._usd_camera_override = None
         self._last_eval_time_code: float | None = None
         # Z-up→Y-up correction (3x3 or None) matching what _apply_up_axis_correction
@@ -1600,16 +1601,23 @@ class Renderer:
             if stage is not None:
                 try:
                     from pxr import UsdGeom as _UsdGeom
-                    from skinny.usd_loader import _up_axis_rt
+                    from skinny.usd_loader import (
+                        _up_axis_rt,
+                        extract_skeletal_bindings,
+                    )
                     index = build_animation_index(stage)
                     self._anim_index = index
                     self.clock = build_playback_clock(stage, index)
                     self._usd_up_axis_rt = _up_axis_rt(
                         str(_UsdGeom.GetStageUpAxis(stage))
                     )
+                    # SkeletalScene retains the stage + cache so its skinning
+                    # queries stay valid for per-frame ComputeSkinningTransforms.
+                    self._skeletal = extract_skeletal_bindings(stage)
                     self._last_eval_time_code = None
                 except Exception as exc:  # noqa: BLE001
                     self._anim_index = None
+                    self._skeletal = None
                     self.clock = PlaybackClock()
                     print(f"[skinny] animation index build failed: {exc}")
             # Build scene graph here in the background thread while we
@@ -3337,7 +3345,58 @@ class Renderer:
             if ov is not None:
                 self._override_to_orbit(self.usd_camera, ov, scene)
 
+        # 4. Skeletal (UsdSkel) skinning. Interim CPU path: deform points on the
+        # CPU, rebuild each skinned BLAS, re-upload. GPU skinning + BVH refit
+        # replace this in a later step.
+        if index.skinned_mesh_paths:
+            self._apply_skeletal_frame(tc)
+
         self._last_eval_time_code = tc
+
+    def _apply_skeletal_frame(self, time: float) -> None:
+        """CPU linear-blend-skin every skinned instance at `time` and re-upload.
+
+        Deformed points are produced in the same space as the authored rest
+        points (geomBind-relative), so the instance's existing TLAS transform
+        — already carrying the prim placement + up-axis correction — positions
+        them correctly without any per-frame transform change.
+        """
+        skel = self._skeletal
+        scene = self._usd_scene
+        if skel is None or not skel.has_skinning or scene is None or not scene.instances:
+            return
+        from dataclasses import replace as _replace
+        from skinny.mesh import bake_mesh
+        from skinny.usd_loader import (
+            _smooth_normals,
+            compute_joint_matrices,
+            lbs_points,
+        )
+
+        by_path = {b.prim_path: b for b in skel.meshes}
+        changed = False
+        for inst in scene.instances:
+            binding = by_path.get(inst.name)
+            if binding is None or inst.source is None:
+                continue
+            mats = compute_joint_matrices(binding, time)
+            deformed = lbs_points(
+                binding.rest_points, binding.joint_indices,
+                binding.joint_weights, mats,
+            )
+            src = inst.source
+            deformed_src = _replace(
+                src,
+                positions=deformed.astype(np.float32),
+                normals=_smooth_normals(deformed, src.tri_idx),
+            )
+            inst.mesh = bake_mesh(
+                deformed_src, displacement_bytes=None,
+                displacement_res=0, displacement_scale_world=0.0,
+            )
+            changed = True
+        if changed:
+            self._upload_usd_scene()
 
     def set_usd_scene(self, scene: "Scene") -> None:
         """Make `scene` the active USD scene synchronously and upload it.
