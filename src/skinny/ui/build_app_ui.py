@@ -209,6 +209,55 @@ def _set_light_angle(renderer, attr: str, value: float) -> None:
         renderer._update_light()
 
 
+# ── Animation transport ────────────────────────────────────────────
+
+
+def _add_animation_controls(ui: UIBuilder, renderer) -> None:
+    """Play/pause, normalized time scrubber, fps, and camera-mode combo.
+
+    The time scrubber is normalized 0-1 and maps onto the stage's authored
+    time range, so the widget bounds never depend on the (async-discovered)
+    range. The camera combo offers ``USD`` only when the scene exposes a
+    camera to follow.
+    """
+    ui.checkbox(
+        "Play",
+        getter=lambda: bool(renderer.clock.playing),
+        setter=lambda v: setattr(renderer.clock, "playing", bool(v)),
+    )
+    ui.slider(
+        "Time",
+        getter=lambda: float(renderer.clock.normalized),
+        setter=lambda v: renderer.clock.set_normalized(float(v)),
+        lo=0.0, hi=1.0, step=0.001,
+    )
+    ui.int_spin(
+        "FPS",
+        getter=lambda: int(round(renderer.clock.playback_fps)),
+        setter=lambda v: setattr(renderer.clock, "playback_fps", float(v)),
+        lo=1, hi=240,
+    )
+
+    def _cam_keys() -> list[str]:
+        return ["orbit", "free"] + (["usd"] if renderer.has_usd_camera else [])
+
+    def _cam_labels() -> list[str]:
+        return ["Orbit", "Free"] + (["USD"] if renderer.has_usd_camera else [])
+
+    def _cam_get() -> int:
+        try:
+            return _cam_keys().index(renderer.camera_mode)
+        except ValueError:
+            return 0
+
+    def _cam_set(idx: int) -> None:
+        keys = _cam_keys()
+        if 0 <= idx < len(keys):
+            renderer.camera_mode = keys[idx]
+
+    ui.combo("Camera", getter=_cam_get, setter=_cam_set, choices=_cam_labels)
+
+
 # ── Resolution + capture ───────────────────────────────────────────
 
 
@@ -238,6 +287,7 @@ def _add_scene_loader(ui: UIBuilder, renderer, load_model_fn=None) -> None:
         "Load scene…",
         filters=MODEL_FILE_FILTERS,
         on_pick=lambda path: load_model_fn(Path(path)),
+        category="model",
     )
 
 
@@ -478,6 +528,21 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
         _add_resolution(ui, renderer)
     with ui.section("Capture"):
         _add_capture(ui, renderer, capture_fn=cb.capture_screenshot)
+
+    # Animation transport — only populated when the loaded USD stage has
+    # authored animation. DynamicSection so it appears after the async load
+    # flips has_animation (token folds in scene id + the flag).
+    ui.dynamic_section(
+        "Animation",
+        rebuild_token=lambda: (
+            id(getattr(renderer, "_usd_scene", None)),
+            bool(getattr(renderer.clock, "has_animation", False)),
+        ),
+        build=lambda b: (
+            _add_animation_controls(b, renderer)
+            if getattr(renderer.clock, "has_animation", False) else None
+        ),
+    )
 
     section_order = ["Render", "Skin", "Detail", "IBL", "Direct Light"]
     for group in section_order:

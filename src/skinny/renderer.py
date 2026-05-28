@@ -16,7 +16,7 @@ import vulkan as vk
 from PIL import Image, ImageDraw, ImageFont
 
 from skinny.environment import Environment, load_environments
-from skinny.scene import LensSystem, Scene, build_default_scene
+from skinny.scene import CameraOverride, LensSystem, Scene, build_default_scene
 from skinny.head_textures import (
     DETAIL_TEX_RES,
     blank_displacement_bytes,
@@ -39,6 +39,7 @@ from skinny.mesh_cache import (
     make_cache_key,
     save_cached_mesh,
 )
+from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
 from skinny.tattoos import TATTOO_HEIGHT, TATTOO_WIDTH, Tattoo, blank_tattoo_data, load_tattoos
@@ -912,10 +913,27 @@ class Renderer:
         # around it; press 'C' to switch to free-fly (WASD + mouse look).
         self.orbit_camera = OrbitCamera()
         self.free_camera = FreeCamera()
+        # Follower fed by the animated USD camera when camera_mode == "usd".
+        self.usd_camera = OrbitCamera()
         self.camera_mode: str = "orbit"
 
         self.frame_index = 0
         self.time_elapsed = 0.0
+
+        # USD animation playback. The clock stays inert (has_animation=False)
+        # until a USD scene with authored animation loads, at which point
+        # _load_usd_model replaces it and populates _anim_index. _usd_camera_override
+        # holds the USD camera evaluated at the current time when camera_mode == "usd".
+        self.clock = PlaybackClock()
+        self._anim_index = None
+        self._usd_camera_override = None
+        self._last_eval_time_code: float | None = None
+        # Z-up→Y-up correction (3x3 or None) matching what _apply_up_axis_correction
+        # bakes into instance transforms at load, re-applied during per-frame re-eval.
+        self._usd_up_axis_rt = None
+        # (enabled_idx, blas_offsets, material_ids) cached by _upload_usd_scene
+        # so animation re-uploads only the small instance buffer.
+        self._usd_instance_layout = None
 
         # HDR environment library — built-in presets + any .hdr files found
         # in hdr_dir. Switching is driven by `env_index`.
@@ -1142,7 +1160,15 @@ class Renderer:
 
     @property
     def camera(self):
+        if self.camera_mode == "usd":
+            return self.usd_camera
         return self.orbit_camera if self.camera_mode == "orbit" else self.free_camera
+
+    @property
+    def has_usd_camera(self) -> bool:
+        """True when the loaded USD scene exposes a camera to follow."""
+        scene = self._usd_scene
+        return scene is not None and scene.camera_override is not None
 
     def reset_camera(self) -> None:
         """Snap both cameras back to a known-good frame on the head.
@@ -1308,6 +1334,24 @@ class Renderer:
         ov = scene.camera_override
         if ov is None:
             return
+        self._override_to_orbit(self.orbit_camera, ov, scene)
+        d = float(self.orbit_camera.focus_distance)
+        self.free_camera.focal_length_mm = float(ov.focal_length_mm)
+        self.free_camera.vertical_aperture_mm = float(ov.vertical_aperture_mm)
+        self.free_camera.fstop = float(ov.fstop)
+        self.free_camera.focus_distance = float(d)
+        self.free_camera.lens = ov.lens
+
+    def _override_to_orbit(
+        self, cam: "OrbitCamera", ov: "CameraOverride", scene: "Scene"
+    ) -> None:
+        """Set an OrbitCamera's params from a CameraOverride.
+
+        Reproduces the authored eye position + look direction exactly
+        (orbit position == ov.position) and derives vertical FOV from focal
+        length + aperture. Used for both the load-time camera framing and the
+        per-frame USD camera follower in `camera_mode == "usd"`.
+        """
         # Distance cap scales with scene size so a large authored scene's
         # focus distance isn't clamped down to the 50-unit floor.
         bounds = scene.world_bounds()
@@ -1342,22 +1386,17 @@ class Renderer:
                             max(ov.focal_length_mm, 1e-3))
         ))
 
-        self.orbit_camera.max_distance = cap
-        self.orbit_camera.target = target
-        self.orbit_camera.distance = d
-        self.orbit_camera.yaw = yaw
-        self.orbit_camera.pitch = pitch
-        self.orbit_camera.fov = fov_v_deg
-        self.orbit_camera.focal_length_mm = float(ov.focal_length_mm)
-        self.orbit_camera.vertical_aperture_mm = float(ov.vertical_aperture_mm)
-        self.orbit_camera.fstop = float(ov.fstop)
-        self.orbit_camera.focus_distance = float(d)
-        self.orbit_camera.lens = ov.lens
-        self.free_camera.focal_length_mm = float(ov.focal_length_mm)
-        self.free_camera.vertical_aperture_mm = float(ov.vertical_aperture_mm)
-        self.free_camera.fstop = float(ov.fstop)
-        self.free_camera.focus_distance = float(d)
-        self.free_camera.lens = ov.lens
+        cam.max_distance = cap
+        cam.target = target
+        cam.distance = d
+        cam.yaw = yaw
+        cam.pitch = pitch
+        cam.fov = fov_v_deg
+        cam.focal_length_mm = float(ov.focal_length_mm)
+        cam.vertical_aperture_mm = float(ov.vertical_aperture_mm)
+        cam.fstop = float(ov.fstop)
+        cam.focus_distance = float(d)
+        cam.lens = ov.lens
 
     def _frame_camera_to_mesh(self, source: MeshSource) -> None:
         """Auto-fit orbit camera to a MeshSource's bounding box."""
@@ -1543,7 +1582,12 @@ class Renderer:
 
         def _bg_usd_stream() -> None:
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            from skinny.usd_loader import _read_usd_stage, bake_usd_prim
+            from skinny.usd_loader import (
+                _read_usd_stage,
+                bake_usd_prim,
+                build_animation_index,
+                build_playback_clock,
+            )
             scene, prim_data, stage = _read_usd_stage(
                 path, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
                 keep_stage=True,
@@ -1551,6 +1595,23 @@ class Renderer:
             # Keep the stage around so scene-graph edits (DomeLight HDR
             # path, etc.) can mutate USD prim attrs as the source of truth.
             self._usd_stage = stage
+            # Build the playback clock + animated-prim index from the stage.
+            # Single ref assignments, read on the main thread in update().
+            if stage is not None:
+                try:
+                    from pxr import UsdGeom as _UsdGeom
+                    from skinny.usd_loader import _up_axis_rt
+                    index = build_animation_index(stage)
+                    self._anim_index = index
+                    self.clock = build_playback_clock(stage, index)
+                    self._usd_up_axis_rt = _up_axis_rt(
+                        str(_UsdGeom.GetStageUpAxis(stage))
+                    )
+                    self._last_eval_time_code = None
+                except Exception as exc:  # noqa: BLE001
+                    self._anim_index = None
+                    self.clock = PlaybackClock()
+                    print(f"[skinny] animation index build failed: {exc}")
             # Build scene graph here in the background thread while we
             # have exclusive access to the stage — avoids GIL conflicts
             # with GLFW poll_events on the main thread.
@@ -3037,6 +3098,10 @@ class Renderer:
             self._gen_scene_materials()
             self._apply_usd_lights(scene)
             self._frame_camera_to_scene(scene)
+            # Seed the USD camera follower from the default-time camera so the
+            # user can switch to usd mode before pressing play.
+            if scene.camera_override is not None:
+                self._override_to_orbit(self.usd_camera, scene.camera_override, scene)
             # Inject /Skinny/MainCamera *after* _apply_camera_override so the
             # node snapshot captures any authored thick lens.
             self._refresh_camera_node()
@@ -3145,10 +3210,134 @@ class Renderer:
             material_ids=material_ids,
             blas_offsets=enabled_offsets,
         )
+        # Cache the TLAS layout so the animation path can re-upload just the
+        # instance transforms (cheap) without re-concatenating geometry.
+        self._usd_instance_layout = (enabled_idx, enabled_offsets, material_ids)
         self._upload_flat_materials(scene.materials)
         self._upload_sphere_lights(scene.lights_sphere)
         self._upload_distant_lights(scene.lights_dir)
         self._upload_emissive_triangles(scene)
+
+    def _reupload_instance_transforms(self) -> None:
+        """Re-upload only the TLAS instance records using the cached layout.
+
+        Cheap: rebuilds the small instance buffer from current
+        `_usd_scene.instances[*].transform` without re-concatenating geometry
+        or rebuilding any BVH. Falls back to a full upload if no layout was
+        cached yet (e.g. instance set changed).
+        """
+        layout = self._usd_instance_layout
+        scene = self._usd_scene
+        if layout is None or scene is None or not scene.instances:
+            return
+        enabled_idx, enabled_offsets, material_ids = layout
+        try:
+            transforms = [scene.instances[i].transform for i in enabled_idx]
+        except IndexError:
+            # Instance set changed under us; full upload rebuilds the layout.
+            self._upload_usd_scene()
+            return
+        self._upload_instances(
+            transforms, material_ids=material_ids, blas_offsets=enabled_offsets,
+        )
+
+    def _reextract_animated_lights(self, stage, time, rt) -> None:
+        """Rebuild distant + sphere lights from the stage at `time`.
+
+        Re-extracts every distant/sphere light (cheap; a handful of prims) so
+        animated intensity/colour/direction track playback. The stage is the
+        source of truth — scene-graph editor edits are written back to it — so
+        a full re-extract stays consistent with manual edits. Dome/env and
+        emissive rect/disk animation are out of scope for this change.
+        """
+        from pxr import UsdLux
+        from skinny.usd_loader import _extract_distant_light, _extract_sphere_light
+        scene = self._usd_scene
+        if scene is None:
+            return
+        new_dir = []
+        new_sphere = []
+        for prim in stage.Traverse():
+            if not prim.IsActive() or prim.IsAbstract():
+                continue
+            if prim.IsA(UsdLux.DistantLight):
+                ld = _extract_distant_light(prim, time)
+                if ld is not None:
+                    if rt is not None:
+                        ld.direction = (ld.direction @ rt).astype(np.float32)
+                    new_dir.append(ld)
+            elif prim.IsA(UsdLux.SphereLight):
+                ls = _extract_sphere_light(prim, time)
+                if ls is not None:
+                    if rt is not None:
+                        ls.position = (ls.position @ rt).astype(np.float32)
+                    new_sphere.append(ls)
+        scene.lights_dir = new_dir
+        scene.lights_sphere = new_sphere
+        # Distant SSBO re-uploads every frame in update(); sphere does not.
+        self._upload_sphere_lights(new_sphere)
+
+    def _apply_animation_frame(self) -> None:
+        """Re-evaluate animated USD prims at the clock's current time code.
+
+        Cheap path: instance transforms (TLAS re-upload), distant/sphere
+        lights, and the USD camera follower. No mesh rebake or BVH rebuild.
+        No-op unless a USD scene with authored animation is loaded and the
+        time code advanced since the last evaluation.
+        """
+        stage = self._usd_stage
+        index = self._anim_index
+        scene = self._usd_scene
+        if stage is None or index is None or scene is None:
+            return
+        if not self.clock.has_animation:
+            return
+        tc = float(self.clock.current_time_code)
+        if self._last_eval_time_code is not None and tc == self._last_eval_time_code:
+            return
+
+        from pxr import Usd
+        from skinny.usd_loader import _extract_camera, _world_transform
+        time = Usd.TimeCode(tc)
+        rt = self._usd_up_axis_rt
+        rt4 = None
+        if rt is not None:
+            rt4 = np.eye(4, dtype=np.float32)
+            rt4[:3, :3] = rt
+
+        # 1. Animated transforms → re-upload instance records.
+        if index.xform_paths and scene.instances:
+            xset = set(index.xform_paths)
+            moved = False
+            for inst in scene.instances:
+                if inst.name in xset:
+                    prim = stage.GetPrimAtPath(inst.name)
+                    if prim and prim.IsValid():
+                        m = _world_transform(prim, time)
+                        inst.transform = (
+                            (m @ rt4).astype(np.float32) if rt4 is not None else m
+                        )
+                        moved = True
+            if moved:
+                self._reupload_instance_transforms()
+
+        # 2. Animated lights → re-extract distant + sphere.
+        if index.light_paths:
+            self._reextract_animated_lights(stage, time, rt)
+
+        # 3. USD camera follower. Keep usd_camera tracking the latest evaluated
+        # time so switching into usd mode is instant; the camera property only
+        # returns it when camera_mode == "usd".
+        if index.camera_animated:
+            ov = _extract_camera(stage, time)
+            if ov is not None and rt is not None:
+                ov.position = (ov.position @ rt).astype(np.float32)
+                ov.forward = (ov.forward @ rt).astype(np.float32)
+            self._usd_camera_override = ov
+            if ov is not None:
+                self._override_to_orbit(self.usd_camera, ov, scene)
+
+        self._last_eval_time_code = tc
 
     def set_usd_scene(self, scene: "Scene") -> None:
         """Make `scene` the active USD scene synchronously and upload it.
@@ -5526,6 +5715,9 @@ class Renderer:
             float(self.displacement_scale_mm),
             int(self.preset_index),
             int(self._material_version),
+            # USD playback time — while playing this changes every frame so
+            # accumulation resets (1 spp in motion); stable when paused.
+            float(self.clock.current_time_code),
             # E-4: user-direct MaterialX field overrides — sort for stable hash
             tuple(sorted(
                 (k, _hashable_value(v)) for k, v in self.mtlx_overrides.items()
@@ -5542,6 +5734,12 @@ class Renderer:
             self._fps_smooth = (
                 inst_fps if self._fps_smooth == 0 else self._fps_smooth * 0.9 + inst_fps * 0.1
             )
+
+        # Advance USD playback and re-evaluate animated prims before any
+        # light/scene upload below reads from _usd_scene. No-op when paused or
+        # when the loaded stage has no animation.
+        self.clock.advance(dt)
+        self._apply_animation_frame()
 
         # Recompute light direction + radiance from current slider state so
         # _build_scene_from_state picks up intensity / colour / angle changes.

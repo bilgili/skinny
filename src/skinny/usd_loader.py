@@ -17,6 +17,7 @@ an explicit material binding share it.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +25,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel
 
 from skinny.environment import ENV_HEIGHT, ENV_WIDTH, _load_radiance_hdr, _resize_equirect
 from skinny.mesh import Mesh, MeshSource, bake_mesh, compute_source_hash
@@ -1500,6 +1501,291 @@ def _read_usd_stage(
         keep_stage=keep_stage,
         source_label=str(stage_path),
     )
+
+
+_USD_LIGHT_TYPES = (
+    UsdLux.DistantLight, UsdLux.SphereLight, UsdLux.DomeLight,
+    UsdLux.RectLight, UsdLux.DiskLight,
+)
+
+
+@dataclass
+class AnimationIndex:
+    """Which prims carry authored animation, recorded once at load.
+
+    Paths are full Sdf paths (str). The renderer intersects these with its
+    baked instances by path to know which TLAS records / light buffers to
+    re-evaluate per frame, so per-frame cost scales with the animated set.
+    """
+
+    xform_paths: list[str] = field(default_factory=list)
+    light_paths: list[str] = field(default_factory=list)
+    camera_animated: bool = False
+    skinned_mesh_paths: list[str] = field(default_factory=list)
+
+    @property
+    def has_animation(self) -> bool:
+        return bool(
+            self.xform_paths or self.light_paths or self.camera_animated
+            or self.skinned_mesh_paths
+        )
+
+
+def _attr_time_varying(prim: "Usd.Prim") -> bool:
+    """True if any authored attribute on the prim has >1 time sample."""
+    for attr in prim.GetAuthoredAttributes():
+        if attr.GetNumTimeSamples() > 1:
+            return True
+    return False
+
+
+def build_animation_index(stage: "Usd.Stage") -> AnimationIndex:
+    """Scan the stage for prims with authored animation relevant to playback.
+
+    Records geometry prims (UsdGeom.Gprim) whose *world* transform varies over
+    time — including those animated only through an ancestor — plus lights and
+    the camera whose transform or authored attributes vary. Pure read; safe to
+    call on the background load thread.
+    """
+    index = AnimationIndex()
+
+    # Local-xform time-variability for every xformable prim, so the ancestor
+    # walk below is O(depth) instead of recomputing per prim.
+    local_varies: dict[object, bool] = {}
+    for prim in stage.Traverse():
+        xf = UsdGeom.Xformable(prim)
+        if xf:
+            local_varies[prim.GetPath()] = bool(xf.TransformMightBeTimeVarying())
+
+    def _world_xform_varies(prim: "Usd.Prim") -> bool:
+        p = prim
+        while p and not p.GetPath().IsAbsoluteRootPath():
+            if local_varies.get(p.GetPath(), False):
+                return True
+            p = p.GetParent()
+        return False
+
+    for prim in stage.Traverse():
+        if not prim.IsActive() or prim.IsAbstract():
+            continue
+        path = str(prim.GetPath())
+        if any(prim.IsA(t) for t in _USD_LIGHT_TYPES):
+            if _world_xform_varies(prim) or _attr_time_varying(prim):
+                index.light_paths.append(path)
+        elif prim.IsA(UsdGeom.Camera):
+            if _world_xform_varies(prim) or _attr_time_varying(prim):
+                index.camera_animated = True
+        elif prim.IsA(UsdGeom.Gprim):
+            if _world_xform_varies(prim):
+                index.xform_paths.append(path)
+
+    # Skeletal: a skinned mesh animates via UsdSkel even with a static xform.
+    try:
+        skel = extract_skeletal_bindings(stage)
+        index.skinned_mesh_paths = [m.prim_path for m in skel.meshes]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("skeletal scan failed: %s", exc)
+    return index
+
+
+def build_playback_clock(
+    stage: "Usd.Stage",
+    index: AnimationIndex,
+    default_fps: float = 24.0,
+) -> "PlaybackClock":
+    """Build a `PlaybackClock` from stage time metadata + an animation index."""
+    from skinny.playback import PlaybackClock
+
+    start = float(stage.GetStartTimeCode())
+    end = float(stage.GetEndTimeCode())
+    tcps = float(stage.GetTimeCodesPerSecond())
+    fps = tcps if tcps > 0.0 else float(default_fps)
+    return PlaybackClock(
+        start_time_code=start,
+        end_time_code=end,
+        time_codes_per_second=tcps,
+        playback_fps=fps,
+        has_animation=index.has_animation,
+        current_time_code=start,
+    )
+
+
+@dataclass
+class SkinnedMeshBinding:
+    """Per-skinned-mesh data for GPU linear-blend skinning.
+
+    `joint_indices`/`joint_weights` are (N, influences) in the mesh's *local*
+    joint order (the skinning query's mapper relates that to the skeleton's
+    joint order). `skel_query`/`skinning_query` are retained so the renderer can
+    evaluate `ComputeSkinningTransforms` per frame; they stay valid while the
+    stage (and the owning `SkeletalScene.cache`) is alive.
+    """
+
+    prim_path: str
+    rest_points: np.ndarray      # (N, 3) f32, bind-pose mesh-local
+    rest_normals: np.ndarray     # (N, 3) f32
+    joint_indices: np.ndarray    # (N, influences) i32, mesh-local order
+    joint_weights: np.ndarray    # (N, influences) f32
+    influences: int
+    skel_query: object           # UsdSkel.SkeletonQuery
+    skinning_query: object       # UsdSkel.SkinningQuery
+
+
+@dataclass
+class SkeletalScene:
+    """All UsdSkel skinned meshes in a stage, plus the owning cache + stage.
+
+    The `cache` and `stage` references MUST stay alive for the per-mesh
+    `skel_query`/`skinning_query` to remain valid (pxr invalidates skinning
+    queries once their cache/stage is dropped). The renderer holds this object
+    for the lifetime of the loaded USD scene.
+    """
+
+    cache: object                # UsdSkel.Cache
+    stage: object = None         # Usd.Stage — kept alive alongside the cache
+    meshes: list[SkinnedMeshBinding] = field(default_factory=list)
+
+    @property
+    def has_skinning(self) -> bool:
+        return bool(self.meshes)
+
+
+def _skinned_mesh_binding(tq, sq) -> "Optional[SkinnedMeshBinding]":
+    """Build a SkinnedMeshBinding from a UsdSkel skinning query + skel query.
+
+    Returns None for malformed or unsupported (faceVarying / rigid) targets so
+    the caller skips them (they still bake as static bind-pose geometry).
+    """
+    m = tq.GetPrim()
+    mesh = UsdGeom.Mesh(m)
+    pts = mesh.GetPointsAttr().Get()
+    if pts is None or len(pts) == 0:
+        return None
+    rest_points = np.asarray(pts, dtype=np.float32)
+    n = rest_points.shape[0]
+
+    infl = int(tq.GetNumInfluencesPerComponent())
+    ji_raw = tq.GetJointIndicesPrimvar().Get()
+    jw_raw = tq.GetJointWeightsPrimvar().Get()
+    if ji_raw is None or jw_raw is None:
+        return None
+    ji = np.asarray(ji_raw, dtype=np.int32)
+    jw = np.asarray(jw_raw, dtype=np.float32)
+    # Per-vertex influences expected: N * influences. Rigid (constant) weights
+    # would be just `influences` long — unsupported here; skip (static bake).
+    if ji.size != n * infl or jw.size != n * infl:
+        log.warning(
+            "skinned mesh %s has non per-vertex influences (%d for %d verts × %d); "
+            "skipping skinning", m.GetPath(), ji.size, n, infl,
+        )
+        return None
+    ji = ji.reshape(n, infl)
+    jw = jw.reshape(n, infl)
+
+    nrm = mesh.GetNormalsAttr().Get()
+    if (nrm is not None and mesh.GetNormalsInterpolation() == UsdGeom.Tokens.vertex
+            and len(nrm) == n):
+        rest_normals = np.asarray(nrm, dtype=np.float32)
+    else:
+        fvc = mesh.GetFaceVertexCountsAttr().Get()
+        fvi = mesh.GetFaceVertexIndicesAttr().Get()
+        tri_idx = _triangulate(np.asarray(fvc, np.int32), np.asarray(fvi, np.int32))
+        rest_normals = _smooth_normals(rest_points, tri_idx)
+
+    return SkinnedMeshBinding(
+        prim_path=str(m.GetPath()),
+        rest_points=rest_points,
+        rest_normals=rest_normals,
+        joint_indices=ji,
+        joint_weights=jw,
+        influences=infl,
+        skel_query=sq,
+        skinning_query=tq,
+    )
+
+
+def compute_joint_matrices(
+    binding: "SkinnedMeshBinding",
+    time: float,
+    skel_to_world: "Optional[np.ndarray]" = None,
+    up_axis_rt4: "Optional[np.ndarray]" = None,
+) -> np.ndarray:
+    """Per-joint skinning matrices for a skinned mesh at `time`.
+
+    Returns an (J_local, 4, 4) float32 array in skinny's row-vector "stored"
+    convention (a deformed point is `[p, 1] @ M`), in the mesh's *local* joint
+    order so `binding.joint_indices` index directly. The geomBindTransform is
+    folded in. `skel_to_world` and `up_axis_rt4` (both 4x4 stored) optionally
+    place the result in world space.
+
+    Validated to reproduce `UsdSkelSkinningQuery.ComputeSkinnedPoints` (skel
+    space) under linear blend skinning — see tests/test_usd_skel.py.
+    """
+    sq = binding.skel_query
+    tq = binding.skinning_query
+    xf = sq.ComputeSkinningTransforms(Usd.TimeCode(float(time)))
+    mapper = tq.GetJointMapper()
+    if mapper is not None:
+        xf = mapper.Remap(xf)
+    mats = np.array([np.array(m, dtype=np.float32) for m in xf])  # (J,4,4)
+    gbt = np.array(tq.GetGeomBindTransform(Usd.TimeCode.Default()), dtype=np.float32)
+    # Fold geomBind on the left of points: (p @ G) @ xf  ==  p @ (G @ xf).
+    mats = np.einsum("ij,njk->nik", gbt, mats)
+    if skel_to_world is not None:
+        mats = np.einsum("nij,jk->nik", mats, np.asarray(skel_to_world, np.float32))
+    if up_axis_rt4 is not None:
+        mats = np.einsum("nij,jk->nik", mats, np.asarray(up_axis_rt4, np.float32))
+    return mats.astype(np.float32)
+
+
+def lbs_points(
+    rest_points: np.ndarray,
+    joint_indices: np.ndarray,
+    joint_weights: np.ndarray,
+    matrices: np.ndarray,
+) -> np.ndarray:
+    """Linear blend skinning of rest points by per-joint `matrices`.
+
+    `matrices` are row-vector "stored" 4x4s (deformed = `[p,1] @ M`); indices
+    are mesh-local. Returns (N, 3) float32 deformed positions.
+    """
+    n = rest_points.shape[0]
+    ph = np.concatenate([rest_points, np.ones((n, 1), np.float32)], axis=1)
+    out = np.zeros((n, 3), np.float32)
+    for k in range(joint_indices.shape[1]):
+        mk = matrices[joint_indices[:, k]]              # (N, 4, 4)
+        out += joint_weights[:, k, None] * np.einsum("ni,nij->nj", ph, mk)[:, :3]
+    return out.astype(np.float32)
+
+
+def extract_skeletal_bindings(stage: "Usd.Stage") -> SkeletalScene:
+    """Discover all UsdSkel skinned meshes in the stage.
+
+    Walks SkelRoots, populates a UsdSkel cache, and returns one
+    SkinnedMeshBinding per (supported) skinning target. The returned
+    `SkeletalScene.cache` must be kept alive for the queries to remain valid.
+    """
+    cache = UsdSkel.Cache()
+    scene = SkeletalScene(cache=cache, stage=stage)
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdSkel.Root):
+            continue
+        root = UsdSkel.Root(prim)
+        cache.Populate(root, Usd.TraverseInstanceProxies())
+        try:
+            bindings = cache.ComputeSkelBindings(root, Usd.TraverseInstanceProxies())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("skel binding compute failed for %s: %s", prim.GetPath(), exc)
+            continue
+        for b in bindings:
+            sq = cache.GetSkelQuery(b.GetSkeleton())
+            if sq is None:
+                continue
+            for tq in b.GetSkinningTargets():
+                mb = _skinned_mesh_binding(tq, sq)
+                if mb is not None:
+                    scene.meshes.append(mb)
+    return scene
 
 
 def bake_usd_prim(

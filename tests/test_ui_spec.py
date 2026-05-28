@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from skinny.params import STATIC_PARAMS, build_all_params
+from skinny.params import build_all_params
 from skinny.ui import spec
 from skinny.ui.build_app_ui import (
     _DEDICATED_WIDGET_PATHS, build_main_ui,
@@ -156,8 +156,8 @@ def test_top_level_section_order(stub_renderer):
     titles = [c.title for c in tree.children
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
-        "Resolution", "Capture",
-        "Render", "Skin", "Detail",
+        "Scene", "Resolution", "Capture", "Animation",
+        "Render", "Skin", "Detail", "IBL", "Direct Light",
     ]
 
 
@@ -169,6 +169,46 @@ def test_dedicated_widgets_present(stub_renderer):
     kinds = {type(n).__name__ for n in spec.walk(tree)}
     for required in ("ResolutionPicker", "ScreenshotPicker"):
         assert required in kinds, f"Missing {required} in tree"
+
+
+def _find_dynamic_section(tree, title):
+    for n in spec.walk(tree):
+        if isinstance(n, spec.DynamicSection) and n.title == title:
+            return n
+    return None
+
+
+def test_animation_section_hidden_without_animation(stub_renderer):
+    """The Animation section builds no controls for a static scene."""
+    from skinny.playback import PlaybackClock
+    stub_renderer.clock = PlaybackClock(has_animation=False)
+    stub_renderer.has_usd_camera = False
+    tree = build_main_ui(stub_renderer)
+    dyn = _find_dynamic_section(tree, "Animation")
+    assert dyn is not None
+    sub = spec.UIBuilder()
+    dyn.build(sub)
+    assert sub.tree.children == []
+
+
+def test_animation_section_controls_present(stub_renderer):
+    """With animation + a USD camera, the transport controls appear."""
+    from skinny.playback import PlaybackClock
+    stub_renderer.clock = PlaybackClock(
+        start_time_code=0.0, end_time_code=48.0, has_animation=True,
+    )
+    stub_renderer.has_usd_camera = True
+    stub_renderer.camera_mode = "orbit"
+    tree = build_main_ui(stub_renderer)
+    dyn = _find_dynamic_section(tree, "Animation")
+    assert dyn is not None
+    sub = spec.UIBuilder()
+    dyn.build(sub)
+    kinds = {type(n).__name__ for n in spec.walk(sub.tree)}
+    assert {"Checkbox", "Slider", "IntSpin", "Combo"} <= kinds
+    # Camera combo exposes the USD option when a USD camera exists.
+    combo = next(n for n in spec.walk(sub.tree) if isinstance(n, spec.Combo))
+    assert "USD" in combo.choices()
 
 
 def test_material_subtree_builds_per_material(stub_renderer):
