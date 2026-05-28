@@ -927,6 +927,7 @@ class Renderer:
         self.clock = PlaybackClock()
         self._anim_index = None
         self._skeletal = None  # usd_loader.SkeletalScene when a skinned USD loads
+        self._skinning_passes = None  # vk_skinning.SkinningPasses (Vulkan only)
         self._usd_camera_override = None
         self._last_eval_time_code: float | None = None
         # Z-up→Y-up correction (3x3 or None) matching what _apply_up_axis_correction
@@ -3167,6 +3168,11 @@ class Renderer:
             if self._is_usd_active():
                 self._frame_camera_to_scene(self._usd_scene)
                 self._refresh_camera_node()
+            # Build GPU skinning passes now that all skinned BLASes are baked
+            # + uploaded (so their rest bytes + buffer offsets are final).
+            _idx = getattr(self, "_anim_index", None)
+            if _idx is not None and _idx.skinned_mesh_paths:
+                self._build_skinning_passes()
             print(
                 f"[skinny] USD streaming complete — "
                 f"{len(self._usd_scene.instances)} instance(s)"
@@ -3365,13 +3371,20 @@ class Renderer:
         scene = self._usd_scene
         if skel is None or not skel.has_skinning or scene is None or not scene.instances:
             return
+        from skinny.usd_loader import compute_joint_matrices
+
+        # GPU path: upload per-mesh joint matrices, dispatch skin + BVH refit.
+        if self._skinning_passes is not None:
+            for mg in self._skinning_passes.meshes:
+                mg.upload_joint_matrices(compute_joint_matrices(mg.binding, time))
+            self._skinning_passes.dispatch(do_refit=True)
+            return
+
+        # CPU fallback (Metal / no GPU passes): deform on the CPU, rebuild each
+        # skinned BLAS, re-upload.
         from dataclasses import replace as _replace
         from skinny.mesh import bake_mesh
-        from skinny.usd_loader import (
-            _smooth_normals,
-            compute_joint_matrices,
-            lbs_points,
-        )
+        from skinny.usd_loader import _smooth_normals, lbs_points
 
         by_path = {b.prim_path: b for b in skel.meshes}
         changed = False
@@ -3397,6 +3410,51 @@ class Renderer:
             changed = True
         if changed:
             self._upload_usd_scene()
+
+    def _build_skinning_passes(self) -> None:
+        """Build GPU skinning + refit passes for the loaded skinned scene.
+
+        Vulkan only (uses the compute queue directly); on other backends this
+        is a no-op and the CPU skinning fallback runs instead. Captures each
+        skinned instance's rest-pose BLAS bytes + its offsets in the shared
+        concatenated buffers (from `_usd_instance_layout`).
+        """
+        if not hasattr(self.ctx, "compute_queue"):
+            return  # non-Vulkan backend → CPU fallback
+        skel = self._skeletal
+        scene = self._usd_scene
+        layout = self._usd_instance_layout
+        if skel is None or not skel.has_skinning or scene is None or layout is None:
+            return
+        enabled_idx, enabled_offsets, _mids = layout
+        off_by_inst = {ii: enabled_offsets[k] for k, ii in enumerate(enabled_idx)}
+        by_path = {b.prim_path: b for b in skel.meshes}
+        try:
+            from skinny.vk_skinning import SkinningPasses, _SkinnedMeshGPU
+            mesh_gpus = []
+            for i, inst in enumerate(scene.instances):
+                binding = by_path.get(inst.name)
+                if binding is None or i not in off_by_inst:
+                    continue
+                node_off, tri_off, vert_off = off_by_inst[i]
+                mesh_gpus.append(_SkinnedMeshGPU(
+                    self.ctx, binding,
+                    rest_vertex_bytes=inst.mesh.vertex_bytes,
+                    vertex_offset=vert_off, node_offset=node_off,
+                    node_count=inst.mesh.num_nodes, index_offset=tri_off * 3,
+                ))
+            if not mesh_gpus:
+                return
+            if self._skinning_passes is None:
+                self._skinning_passes = SkinningPasses(
+                    self.ctx, self.shader_dir,
+                    self.vertex_buffer, self.index_buffer, self.bvh_buffer,
+                )
+            self._skinning_passes.prepare(mesh_gpus)
+            print(f"[skinny] GPU skinning ready — {len(mesh_gpus)} skinned mesh(es)")
+        except Exception as exc:  # noqa: BLE001
+            self._skinning_passes = None
+            print(f"[skinny] GPU skinning unavailable ({exc}); using CPU skinning")
 
     def set_usd_scene(self, scene: "Scene") -> None:
         """Make `scene` the active USD scene synchronously and upload it.

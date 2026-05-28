@@ -78,6 +78,9 @@ class TestHeadlessSkeletal:
         assert renderer.clock.has_animation
         assert len(renderer._anim_index.skinned_mesh_paths) == 2
         assert renderer._skeletal is not None and renderer._skeletal.has_skinning
+        # GPU skinning + refit passes built on Vulkan (CPU fallback otherwise).
+        assert renderer._skinning_passes is not None
+        assert len(renderer._skinning_passes.meshes) == 2
 
     def test_mesh_deforms_between_time_codes(self, renderer):
         a = self._render_at(renderer, 1.0)

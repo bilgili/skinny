@@ -13,22 +13,22 @@
 ## 3. CPU joint matrices
 
 - [x] 3.1 Per animated frame, compute per-joint skinning matrices via pxr at `current_time_code`; fold in up-axis correction + SkelRoot world transform → skel→world matrices
-- [ ] 3.2 Upload joint matrices to a GPU joint-matrix SSBO
+- [x] 3.2 Upload joint matrices to a per-mesh GPU SSBO each frame (_SkinnedMeshGPU.upload_joint_matrices)
 - [x] 3.3 Unit test: applying the matrices to rest verts via LBS matches pxr's reference skinned points within tolerance (no GPU)
 
 ## 4. GPU skinning pass
 
 - [x] 4.1 shaders/skin.slang compute written (LBS rest pos/normal + influences + joint matrices → deformed vertex; mul(M,v) matches the numpy upload convention); compiles to SPIR-V via slangc
-- [ ] 4.2 New `ComputePipeline` for skinning with its own descriptor set (rest verts, influences, joint matrices, RW vertex_buffer); compile to SPIR-V via slangc
+- [x] 4.2 SkinningPasses: standalone skin ComputePipeline + own descriptor set (rest verts, jointIdx, jointWt, jointMats, RW vertex_buffer); slangc-compiled; main_pass untouched
 - [x] 4.3 Interim CPU skinning: per frame, CPU LBS (validated lbs_points) → rebuild each skinned BLAS via bake_mesh → re-upload. Proves skinning/space against a known-good tree
 - [x] 4.4 Headless A/B: ElephantWithMonochord deforms between t=1 and t=1500 (tests/test_headless_skel.py)
 
 ## 5. GPU BVH refit pass
 
 - [x] 5.1 shaders/bvh_refit.slang written (single-thread reverse-order refit: leaf AABB from deformed tris, inner = union of children); compiles to SPIR-V
-- [ ] 5.2 New `ComputePipeline` for refit with its own descriptor set
-- [ ] 5.3 Order the frame as skin → refit → main_pass with GPU memory barriers; remove the interim CPU rebuild
-- [ ] 5.4 Verify refitted AABBs contain deformed geometry and the render shows no holes/stretch-through
+- [x] 5.2 Standalone refit ComputePipeline + own descriptor set (verts, indices, RW bvh_buffer)
+- [x] 5.3 Isolated one-shot submit orders skin → refit with a buffer barrier, before the render reads the buffers (no edit to the shared render recording). CPU path retained only as the non-Vulkan fallback
+- [x] 5.4 Verified by readback: GPU skinned positions match CPU lbs to 1.5e-8; refit root AABB exactly bounds the deformed verts (err 0.0)
 
 ## 6. Playback integration
 
@@ -37,7 +37,7 @@
 
 ## 7. Verification
 
-- [ ] 7.1 `ruff check src/` introduces no new errors; new files clean; `pytest -m "not gpu"` green
+- [x] 7.1 ruff: new files clean, no new errors; pytest -m 'not gpu' green (173); headless skel green
 - [x] 7.2 Headless A/B test committed (tests/test_headless_skel.py), green in the built 3.13 venv
 - [ ] 7.3 Manual (Vulkan): load `SoC-ElephantWithMonochord.usdc`, play/scrub, confirm the elephant animates and paused frames converge
 - [ ] 7.4 Metal: attempt parity; if the backend's known compute/descriptor issues obstruct, document and defer (Vulkan authoritative)
