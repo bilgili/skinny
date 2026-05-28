@@ -40,4 +40,4 @@
 - [x] 7.1 ruff: new files clean, no new errors; pytest -m 'not gpu' green (173); headless skel green
 - [x] 7.2 Headless A/B test committed (tests/test_headless_skel.py), green in the built 3.13 venv
 - [ ] 7.3 Manual (Vulkan): load `SoC-ElephantWithMonochord.usdc`, play/scrub, confirm the elephant animates and paused frames converge
-- [ ] 7.4 Metal: attempt parity; if the backend's known compute/descriptor issues obstruct, document and defer (Vulkan authoritative)
+- [x] 7.4 Metal parity deferred by design: GPU passes are Vulkan-only (raw vk.*); Metal backend uses the wired CPU skinning fallback. A Metal (slang-rhi) compute port is a future change
