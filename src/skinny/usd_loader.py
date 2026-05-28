@@ -1788,6 +1788,156 @@ def extract_skeletal_bindings(stage: "Usd.Stage") -> SkeletalScene:
     return scene
 
 
+_UI_CONTROL_TYPES = ("slider", "toggle", "combo", "color")
+
+
+@dataclass
+class ControlSpec:
+    """One USD-declared UI control (a prim with `skinny:ui:*` attributes).
+
+    `target` is a prefix-typed binding string resolved by the renderer:
+    `renderer:<path>`, `mtlx:<field>`, `material:<name>:<input>`, or
+    `usd:<primPath>.<attr>`.
+    """
+
+    name: str
+    label: str
+    type: str
+    target: str
+    lo: float = 0.0
+    hi: float = 1.0
+    step: float = 0.0
+    choices: list[str] = field(default_factory=list)
+    default: object = None
+    order: int = 0
+
+
+def _ui_attr(prim, name):
+    a = prim.GetAttribute(f"skinny:ui:{name}")
+    if a and a.IsValid() and a.HasAuthoredValue():
+        return a.Get()
+    return None
+
+
+def extract_ui_controls(stage: "Usd.Stage") -> list[ControlSpec]:
+    """Discover `skinny:ui:*` control prims and parse them into ControlSpecs.
+
+    A control is any prim with an authored `skinny:ui:type`. Malformed
+    declarations (unknown type, missing target) are skipped with a warning.
+    Sorted by an authored `skinny:ui:order` then prim path.
+    """
+    out: list[ControlSpec] = []
+    for prim in stage.Traverse():
+        if not prim.IsActive() or prim.IsAbstract():
+            continue
+        ctype = _ui_attr(prim, "type")
+        if ctype is None:
+            continue
+        ctype = str(ctype)
+        path = str(prim.GetPath())
+        if ctype not in _UI_CONTROL_TYPES:
+            log.warning("skinny:ui control %s has unknown type %r; skipping",
+                        path, ctype)
+            continue
+        target = _ui_attr(prim, "target")
+        if not target:
+            log.warning("skinny:ui control %s has no target; skipping", path)
+            continue
+        label = _ui_attr(prim, "label")
+        choices = _ui_attr(prim, "choices")
+        lo = _ui_attr(prim, "min")
+        hi = _ui_attr(prim, "max")
+        step = _ui_attr(prim, "step")
+        order = _ui_attr(prim, "order")
+        out.append(ControlSpec(
+            name=prim.GetName(),
+            label=str(label) if label else prim.GetName(),
+            type=ctype,
+            target=str(target),
+            lo=float(lo) if lo is not None else 0.0,
+            hi=float(hi) if hi is not None else 1.0,
+            step=float(step) if step is not None else 0.0,
+            choices=[str(c) for c in choices] if choices else [],
+            default=_ui_attr(prim, "default"),
+            order=int(order) if order is not None else 0,
+        ))
+    out.sort(key=lambda c: (c.order, c.name))
+    return out
+
+
+def _inert_binding(reason: str):
+    log.warning("skinny:ui control inert: %s", reason)
+    return (lambda: None, lambda _v: None)
+
+
+def resolve_control_binding(renderer, spec: "ControlSpec"):
+    """Resolve a ControlSpec.target into (getter, setter) closures.
+
+    Reuses the renderer's existing live-edit machinery. Unresolvable targets
+    return inert closures + a warning rather than raising, so a bad declaration
+    leaves the widget present-but-dead instead of breaking the panel.
+    """
+    from skinny.params import _get_nested, _set_nested
+
+    kind, _, rest = spec.target.partition(":")
+
+    if kind == "renderer":
+        return (lambda: _get_nested(renderer, rest),
+                lambda v: _set_nested(renderer, rest, v))
+
+    if kind == "mtlx":
+        path = "mtlx." + rest
+        return (lambda: _get_nested(renderer, path),
+                lambda v: _set_nested(renderer, path, v))
+
+    if kind == "material":
+        mat_name, _, inp = rest.partition(":")
+        if not inp:
+            return _inert_binding(f"material target {rest!r} missing input")
+        scene = getattr(renderer, "_usd_scene", None)
+        mats = getattr(scene, "materials", None) or []
+        mat_id = next(
+            (i for i, m in enumerate(mats)
+             if getattr(m, "name", None) == mat_name
+             or getattr(m, "mtlx_target_name", None) == mat_name),
+            None,
+        )
+        if mat_id is None:
+            return _inert_binding(f"material {mat_name!r} not found")
+
+        def _get(mid=mat_id, k=inp):
+            m = renderer._usd_scene.materials[mid]
+            return m.parameter_overrides.get(k)
+
+        def _set(v, mid=mat_id, k=inp):
+            renderer.apply_material_override(mid, k, v)
+
+        return (_get, _set)
+
+    if kind == "usd":
+        prim_path, _, attr_name = rest.rpartition(".")
+        stage = getattr(renderer, "_usd_stage", None)
+        if stage is None or not prim_path or not attr_name:
+            return _inert_binding(f"usd target {rest!r} unresolvable")
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return _inert_binding(f"usd prim {prim_path!r} not found")
+        attr = prim.GetAttribute(attr_name)
+        if not attr or not attr.IsValid():
+            return _inert_binding(f"usd attr {attr_name!r} not found on {prim_path}")
+
+        def _get(a=attr):
+            return a.Get()
+
+        def _set(v, a=attr):
+            a.Set(v)
+            renderer._usd_live_dirty = True
+
+        return (_get, _set)
+
+    return _inert_binding(f"unknown target prefix in {spec.target!r}")
+
+
 def bake_usd_prim(
     source: MeshSource,
     transform: np.ndarray,

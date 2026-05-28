@@ -258,6 +258,49 @@ def _add_animation_controls(ui: UIBuilder, renderer) -> None:
     ui.combo("Camera", getter=_cam_get, setter=_cam_set, choices=_cam_labels)
 
 
+# ── USD-declared scene controls ────────────────────────────────────
+
+
+def _add_scene_controls(ui: UIBuilder, renderer) -> None:
+    """Build a widget per USD-declared control (skinny:ui:* prims).
+
+    Each control's prefix-typed target resolves to live get/set closures via
+    `usd_loader.resolve_control_binding`; the control's `type` selects the
+    widget. Unresolvable targets yield inert (None) closures — handled here so
+    the widget still renders.
+    """
+    from skinny.usd_loader import resolve_control_binding
+
+    for spec in getattr(renderer, "_usd_controls", []):
+        getter, setter = resolve_control_binding(renderer, spec)
+        if spec.type == "slider":
+            ui.slider(
+                spec.label,
+                getter=lambda g=getter: float(g() or 0.0),
+                setter=lambda v, s=setter: s(float(v)),
+                lo=spec.lo, hi=spec.hi, step=spec.step,
+            )
+        elif spec.type == "toggle":
+            ui.checkbox(
+                spec.label,
+                getter=lambda g=getter: bool(g()),
+                setter=lambda v, s=setter: s(bool(v)),
+            )
+        elif spec.type == "combo":
+            ui.combo(
+                spec.label,
+                getter=lambda g=getter: int(g() or 0),
+                setter=lambda v, s=setter: s(int(v)),
+                choices=lambda c=spec.choices: list(c),
+            )
+        elif spec.type == "color":
+            ui.color(
+                spec.label,
+                getter=lambda g=getter: _coerce_color3(g()),
+                setter=lambda v, s=setter: s(tuple(float(x) for x in v)),
+            )
+
+
 # ── Resolution + capture ───────────────────────────────────────────
 
 
@@ -541,6 +584,19 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
         build=lambda b: (
             _add_animation_controls(b, renderer)
             if getattr(renderer.clock, "has_animation", False) else None
+        ),
+    )
+
+    # Scene Controls — author-declared skinny:ui:* controls for the loaded USD.
+    ui.dynamic_section(
+        "Scene Controls",
+        rebuild_token=lambda: (
+            id(getattr(renderer, "_usd_scene", None)),
+            len(getattr(renderer, "_usd_controls", [])),
+        ),
+        build=lambda b: (
+            _add_scene_controls(b, renderer)
+            if getattr(renderer, "_usd_controls", []) else None
         ),
     )
 

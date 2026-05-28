@@ -156,7 +156,7 @@ def test_top_level_section_order(stub_renderer):
     titles = [c.title for c in tree.children
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
-        "Scene", "Resolution", "Capture", "Animation",
+        "Scene", "Resolution", "Capture", "Animation", "Scene Controls",
         "Render", "Skin", "Detail", "IBL", "Direct Light",
     ]
 
@@ -209,6 +209,33 @@ def test_animation_section_controls_present(stub_renderer):
     # Camera combo exposes the USD option when a USD camera exists.
     combo = next(n for n in spec.walk(sub.tree) if isinstance(n, spec.Combo))
     assert "USD" in combo.choices()
+
+
+def test_scene_controls_hidden_without_declarations(stub_renderer):
+    stub_renderer._usd_controls = []
+    tree = build_main_ui(stub_renderer)
+    dyn = _find_dynamic_section(tree, "Scene Controls")
+    assert dyn is not None
+    sub = spec.UIBuilder()
+    dyn.build(sub)
+    assert sub.tree.children == []
+
+
+def test_scene_controls_build_widgets(stub_renderer):
+    from skinny.usd_loader import ControlSpec
+    stub_renderer._usd_scene = None
+    stub_renderer._usd_controls = [
+        ControlSpec(name="ibl", label="IBL", type="slider",
+                    target="renderer:env_intensity", lo=0.0, hi=3.0),
+        ControlSpec(name="env", label="Env", type="combo",
+                    target="renderer:env_index", choices=["a", "b"]),
+    ]
+    tree = build_main_ui(stub_renderer)
+    dyn = _find_dynamic_section(tree, "Scene Controls")
+    sub = spec.UIBuilder()
+    dyn.build(sub)
+    kinds = {type(n).__name__ for n in spec.walk(sub.tree)}
+    assert {"Slider", "Combo"} <= kinds
 
 
 def test_material_subtree_builds_per_material(stub_renderer):

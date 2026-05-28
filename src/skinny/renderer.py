@@ -930,6 +930,11 @@ class Renderer:
         self._skinning_passes = None  # vk_skinning.SkinningPasses (Vulkan only)
         self._usd_camera_override = None
         self._last_eval_time_code: float | None = None
+        # USD-declared UI controls (skinny:ui:* prims). _usd_live_dirty is set
+        # when a `usd:` control writes a stage attribute, prompting update() to
+        # refresh the live-applicable scene state (lights/transforms/camera).
+        self._usd_controls = []
+        self._usd_live_dirty = False
         # Z-up→Y-up correction (3x3 or None) matching what _apply_up_axis_correction
         # bakes into instance transforms at load, re-applied during per-frame re-eval.
         self._usd_up_axis_rt = None
@@ -1605,6 +1610,7 @@ class Renderer:
                     from skinny.usd_loader import (
                         _up_axis_rt,
                         extract_skeletal_bindings,
+                        extract_ui_controls,
                     )
                     index = build_animation_index(stage)
                     self._anim_index = index
@@ -1615,10 +1621,12 @@ class Renderer:
                     # SkeletalScene retains the stage + cache so its skinning
                     # queries stay valid for per-frame ComputeSkinningTransforms.
                     self._skeletal = extract_skeletal_bindings(stage)
+                    self._usd_controls = extract_ui_controls(stage)
                     self._last_eval_time_code = None
                 except Exception as exc:  # noqa: BLE001
                     self._anim_index = None
                     self._skeletal = None
+                    self._usd_controls = []
                     self.clock = PlaybackClock()
                     print(f"[skinny] animation index build failed: {exc}")
             # Build scene graph here in the background thread while we
@@ -3111,6 +3119,10 @@ class Renderer:
             # user can switch to usd mode before pressing play.
             if scene.camera_override is not None:
                 self._override_to_orbit(self.usd_camera, scene.camera_override, scene)
+            # Apply authored skinny:ui:default values now that the scene +
+            # materials exist (material/usd targets need them).
+            if self._usd_controls:
+                self._apply_control_defaults()
             # Inject /Skinny/MainCamera *after* _apply_camera_override so the
             # node snapshot captures any authored thick lens.
             self._refresh_camera_node()
@@ -3455,6 +3467,58 @@ class Renderer:
         except Exception as exc:  # noqa: BLE001
             self._skinning_passes = None
             print(f"[skinny] GPU skinning unavailable ({exc}); using CPU skinning")
+
+    def _apply_control_defaults(self) -> None:
+        """Apply authored `skinny:ui:default` values to their targets at load."""
+        from skinny.usd_loader import resolve_control_binding
+        for spec in self._usd_controls:
+            if spec.default is None:
+                continue
+            try:
+                _get, setter = resolve_control_binding(self, spec)
+                setter(spec.default)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[skinny] control default failed for {spec.target}: {exc}")
+
+    def _refresh_usd_live_state(self) -> None:
+        """Re-read live-applicable scene state from the stage after a `usd:`
+        control edited an attribute. Covers lights, instance transforms, and the
+        camera (the cheap set); other attributes apply on reload.
+        """
+        stage = self._usd_stage
+        scene = self._usd_scene
+        if stage is None or scene is None:
+            return
+        from pxr import Usd
+        from skinny.usd_loader import _extract_camera, _world_transform
+        t = Usd.TimeCode.Default()
+        rt = self._usd_up_axis_rt
+        rt4 = None
+        if rt is not None:
+            rt4 = np.eye(4, dtype=np.float32)
+            rt4[:3, :3] = rt
+
+        self._reextract_animated_lights(stage, t, rt)
+
+        if scene.instances:
+            for inst in scene.instances:
+                prim = stage.GetPrimAtPath(inst.name)
+                if prim and prim.IsValid():
+                    m = _world_transform(prim, t)
+                    inst.transform = (
+                        (m @ rt4).astype(np.float32) if rt4 is not None else m
+                    )
+            self._reupload_instance_transforms()
+
+        ov = _extract_camera(stage, t)
+        if ov is not None:
+            if rt is not None:
+                ov.position = (ov.position @ rt).astype(np.float32)
+                ov.forward = (ov.forward @ rt).astype(np.float32)
+            self._usd_camera_override = ov
+
+        # Force an accumulation reset (raw USD edits aren't in the state hash).
+        self._material_version += 1
 
     def set_usd_scene(self, scene: "Scene") -> None:
         """Make `scene` the active USD scene synchronously and upload it.
@@ -5857,6 +5921,11 @@ class Renderer:
         # when the loaded stage has no animation.
         self.clock.advance(dt)
         self._apply_animation_frame()
+
+        # A `usd:` control edited a stage attribute → re-read live state.
+        if self._usd_live_dirty:
+            self._refresh_usd_live_state()
+            self._usd_live_dirty = False
 
         # Recompute light direction + radiance from current slider state so
         # _build_scene_from_state picks up intensity / colour / angle changes.
