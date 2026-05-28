@@ -234,7 +234,21 @@ class VulkanContext:
         if vk.VK_PRESENT_MODE_MAILBOX_KHR in present_modes:
             chosen_mode = vk.VK_PRESENT_MODE_MAILBOX_KHR
 
-        extent = vk.VkExtent2D(width=self.width, height=self.height)
+        # Prefer the surface's required extent. On MoltenVK/Retina the surface
+        # currentExtent is the backing-pixel size, which differs from the window
+        # point size we pass in; creating at our size yields VK_SUBOPTIMAL_KHR
+        # on acquire. 0xFFFFFFFF means the surface lets us choose, so clamp our
+        # requested size to the allowed range in that case.
+        cur = capabilities.currentExtent
+        if cur.width != 0xFFFFFFFF and cur.height != 0xFFFFFFFF:
+            extent = vk.VkExtent2D(width=cur.width, height=cur.height)
+        else:
+            extent = vk.VkExtent2D(
+                width=max(capabilities.minImageExtent.width,
+                          min(capabilities.maxImageExtent.width, self.width)),
+                height=max(capabilities.minImageExtent.height,
+                           min(capabilities.maxImageExtent.height, self.height)),
+            )
         image_count = capabilities.minImageCount + 1
         if capabilities.maxImageCount > 0:
             image_count = min(image_count, capabilities.maxImageCount)
