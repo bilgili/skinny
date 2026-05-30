@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox,
-    QHBoxLayout, QLabel, QPushButton, QScrollArea, QSlider, QSplitter,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSplitter,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -24,6 +24,11 @@ from skinny.scene_graph import (
 )
 from skinny.settings import get_last_dir, record_last_dir
 from skinny.ui.qt.dialogs import get_open_file_name
+from skinny.ui.scene_edit_actions import (
+    add_parent_for_node, is_deletable, trs_to_matrix,
+)
+
+_USD_PICKER_FILTER = "USD (*.usda *.usdc *.usdz);;All files (*)"
 
 
 class SceneGraphDock(QDockWidget):
@@ -51,11 +56,32 @@ class SceneGraphDock(QDockWidget):
         # them from the camera each tick so external orbit/zoom shows up.
         self._pulls: list[Callable[[], None]] = []
 
-        # Vertical splitter: tree above, property editor below. Matches
-        # the user's request to have the properties laid out below the
-        # tree rather than to the side.
+        # Container: an editing toolbar across the top, then a vertical
+        # splitter (tree above, property editor below).
+        container = QWidget()
+        root_layout = QVBoxLayout(container)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        self.setWidget(container)
+
+        # ── Editing toolbar ──
+        toolbar = QWidget()
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(4, 4, 4, 2)
+        tb_layout.setSpacing(4)
+        self._add_btn = QPushButton("Add model…")
+        self._add_btn.setToolTip("Reference a USD file under the selected group (or /World)")
+        self._add_btn.clicked.connect(self._on_add_model)
+        self._save_btn = QPushButton("Save edits…")
+        self._save_btn.setToolTip("Write the runtime edits to a USD layer")
+        self._save_btn.clicked.connect(self._on_save_edits)
+        tb_layout.addWidget(self._add_btn)
+        tb_layout.addWidget(self._save_btn)
+        tb_layout.addStretch(1)
+        root_layout.addWidget(toolbar)
+
         splitter = QSplitter(Qt.Vertical)
-        self.setWidget(splitter)
+        root_layout.addWidget(splitter, 1)
 
         # ── Tree ──
         self.tree = QTreeWidget()
@@ -64,6 +90,11 @@ class SceneGraphDock(QDockWidget):
         self.tree.setColumnWidth(0, 220)
         self.tree.itemSelectionChanged.connect(self._on_select)
         self.tree.itemDoubleClicked.connect(self._on_double_click)
+        # Right-click "Delete", and the Delete key, remove the selected node.
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        del_shortcut = QShortcut(QKeySequence.StandardKey.Delete, self.tree)
+        del_shortcut.activated.connect(self._on_delete_selected)
         splitter.addWidget(self.tree)
 
         # ── Properties ──
@@ -184,6 +215,81 @@ class SceneGraphDock(QDockWidget):
             else:
                 self.renderer.set_gizmo_target(-1)
         self._build_properties(node)
+
+    # ── Editing actions (add / delete / save) ─────────────────────
+
+    def _selected_node(self) -> SceneGraphNode | None:
+        items = self.tree.selectedItems()
+        graph = self.renderer.scene_graph
+        if not items or graph is None:
+            return None
+        path = items[0].data(0, Qt.UserRole)
+        return find_node_by_path(graph, path) if isinstance(path, str) else None
+
+    def _status(self, msg: str) -> None:
+        """Surface a transient, non-modal message (status bar if available)."""
+        print(f"[skinny] {msg}")
+        try:
+            self.window().statusBar().showMessage(msg, 4000)
+        except Exception:  # noqa: BLE001 — no status bar in this host
+            pass
+
+    def _on_add_model(self) -> None:
+        r = self.renderer
+        if getattr(r, "_usd_stage", None) is None:
+            self._status("Load a USD scene before adding a model.")
+            return
+        start = str(get_last_dir("model") or "")
+        path = get_open_file_name(self, "Add model", start, _USD_PICKER_FILTER)
+        if not path:
+            return
+        record_last_dir("model", Path(path).parent)
+        parent = add_parent_for_node(self._selected_node())
+        try:
+            new_path = r.add_model(path, parent_prim_path=parent)
+        except (ValueError, RuntimeError) as exc:
+            self._status(f"Add model failed: {exc}")
+            return
+        self._status(f"Added {new_path}")
+
+    def _on_save_edits(self) -> None:
+        r = self.renderer
+        if getattr(r, "_usd_edit_layer", None) is None:
+            self._status("No edits to save (no USD scene loaded).")
+            return
+        try:
+            written = r.save_edits()
+        except (ValueError, RuntimeError) as exc:
+            self._status(f"Save edits failed: {exc}")
+            return
+        self._status(f"Saved edits to {written}")
+
+    def _on_tree_context_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        item.setSelected(True)
+        node = self._selected_node()
+        if not is_deletable(node):
+            return
+        menu = QMenu(self.tree)
+        act = menu.addAction("Delete")
+        act.triggered.connect(self._on_delete_selected)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _on_delete_selected(self) -> None:
+        node = self._selected_node()
+        if node is None:
+            return
+        if not is_deletable(node):
+            self._status(f"{node.path} cannot be deleted.")
+            return
+        try:
+            self.renderer.remove_node(node.path)
+        except (ValueError, RuntimeError) as exc:
+            self._status(f"Delete failed: {exc}")
+            return
+        self._status(f"Deleted {node.path}")
 
     def _build_properties(self, node: SceneGraphNode) -> None:
         # Tear down old widgets + pulls.
@@ -559,7 +665,12 @@ class SceneGraphDock(QDockWidget):
                 rotate = values if p is prop else p.value
             elif p.name == "scale":
                 scale = values if p is prop else p.value
-        self.renderer.apply_instance_transform(node.path, translate, rotate, scale)
+        # Author to the stage (edit layer) so the move persists and is captured
+        # by "Save edits"; falls back to the runtime path if no stage is loaded.
+        if getattr(self.renderer, "_usd_stage", None) is not None:
+            self.renderer.set_transform(node.path, trs_to_matrix(translate, rotate, scale))
+        else:
+            self.renderer.apply_instance_transform(node.path, translate, rotate, scale)
 
     def _find_shader_material_ref(self, node: SceneGraphNode):
         graph = self.renderer.scene_graph
@@ -577,6 +688,10 @@ class SceneGraphDock(QDockWidget):
     # ── Per-tick refresh ──────────────────────────────────────────
 
     def _tick(self) -> None:
+        # Toolbar enablement tracks loaded-scene / edit-layer state.
+        self._add_btn.setEnabled(getattr(self.renderer, "_usd_stage", None) is not None)
+        self._save_btn.setEnabled(getattr(self.renderer, "_usd_edit_layer", None) is not None)
+
         graph = self.renderer.scene_graph
         version = getattr(self.renderer, "_scene_graph_version", 0)
         if graph is not None and (
@@ -585,6 +700,14 @@ class SceneGraphDock(QDockWidget):
         ):
             self._populate_tree()
             self._last_graph_version = version
+            # The selected node may have been removed by an edit; clear the
+            # stale property panel so it doesn't reference a gone prim.
+            if self._selected_path is not None and find_node_by_path(
+                graph, self._selected_path
+            ) is None:
+                self._selected_path = None
+                self._clear_props()
+                self._pulls.clear()
         for pull in self._pulls:
             try:
                 pull()
