@@ -458,6 +458,17 @@ no re-bake). `MeshInstance.prim_path` + the `_prim_to_instances` index key all
 edits by USD prim path; edits reset progressive accumulation via
 `_material_version`. Headless callers pass `stage=` to `set_usd_scene`.
 
+The geometry resync also re-reads lights + camera (so deleting a light/camera
+prim drops it; `LightDir`/`LightSphere` carry `prim_path` to preserve runtime
+`enabled` toggles across the re-read) and rebuilds the derived scene graph
+(`build_scene_graph` + default-light injection) while bumping
+`_scene_graph_version`, so the scene-graph panels repaint. Both front-ends drive
+this from their scene-graph view — the Qt dock (`ui/qt/windows/scene_graph.py`)
+and Panel card (`ui/panel/windows.py`) expose Add model / Delete node / Save
+edits and route per-node TRS edits through `set_transform`. The decision logic
+(add-parent resolution, deletability, TRS→matrix) lives in pure helpers
+(`ui/scene_edit_actions.py`) shared by both and unit-tested without a display.
+
 ### USD Animation Playback (`playback.py`, `usd_loader.py`, `renderer.py`)
 
 At load, `build_animation_index(stage)` scans for time-varying prims — transform

@@ -68,6 +68,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authored to an in-memory edit sublayer so the original file is never modified
   until `save_edits()`. `MeshInstance` now carries its `prim_path`, and
   `apply_instance_transform` / `apply_node_enabled` are keyed by prim path
+- Scene-graph panels are now live editors in both front-ends (Qt dock + Panel
+  card): an "Add model" picker (references a USD file under the selected group
+  or `/World`), a "Delete node" action (context-menu + `Delete` key in Qt;
+  button in Panel; guarded against synthesized `/Skinny/*` nodes), a "Save edits"
+  button, and per-node transform edits that author to the stage (persisted by
+  "Save edits"). Add/remove now rebuild the scene graph and re-read lights +
+  cameras, so deleting a light or camera drops it and the panels refresh; lights
+  carry a `prim_path` so a runtime enable-toggle survives an unrelated edit
 
 ### UI and interaction
 

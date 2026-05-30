@@ -199,6 +199,10 @@ class LightDir:
     direction: np.ndarray  # (3,) float32, expected unit length
     radiance: np.ndarray   # (3,) float32, color × intensity in linear HDR
     enabled: bool = True
+    # Originating USD prim path (e.g. "/World/Sun"). Stable identity used to
+    # preserve the runtime `enabled` flag when lights are re-read from the stage
+    # during a scene-graph edit. Empty for synthesized/non-USD lights.
+    prim_path: str = ""
 
     def __post_init__(self) -> None:
         self.direction = np.asarray(self.direction, np.float32).reshape(3)
@@ -225,6 +229,8 @@ class LightSphere:
     # split). ``radiance`` stays the source of truth at render time.
     color: np.ndarray = field(default_factory=lambda: np.ones(3, np.float32))
     intensity: float = 1.0
+    # Originating USD prim path; see LightDir.prim_path.
+    prim_path: str = ""
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, np.float32).reshape(3)

@@ -962,7 +962,7 @@ def _extract_distant_light(
     light_dir /= norm
 
     radiance = _light_color_radiance(UsdLux.LightAPI(prim))
-    return LightDir(direction=light_dir, radiance=radiance)
+    return LightDir(direction=light_dir, radiance=radiance, prim_path=str(prim.GetPath()))
 
 
 def _extract_dome_light(
@@ -1052,7 +1052,7 @@ def _extract_sphere_light(
     intensity_eff = float(intensity) * (2.0 ** exposure)
     return LightSphere(
         position=position, radius=radius, radiance=radiance,
-        color=color, intensity=intensity_eff,
+        color=color, intensity=intensity_eff, prim_path=str(prim.GetPath()),
     )
 
 

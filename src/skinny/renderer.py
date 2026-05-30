@@ -1124,6 +1124,9 @@ class Renderer:
         # via _usd_instance_queue.
         self._usd_scene: Scene | None = None
         self._scene_graph: object | None = None
+        # Bumped whenever the scene graph is (re)built so the UI panels, which
+        # poll it, repaint. Always defined so observers can read it pre-edit.
+        self._scene_graph_version = 0
 
         # Load the MaterialX library and generate Slang for the canonical
         # skin material. The CompiledMaterial drives the per-material
@@ -3628,35 +3631,64 @@ class Renderer:
     # ── Runtime scene-graph editing (usd-scene-editing) ─────────────────
 
     def _resync_geometry_from_stage(self) -> None:
-        """Re-read the authoritative stage into the flat scene + GPU buffers.
+        """Re-read the authoritative stage into the flat scene, GPU buffers, and
+        derived scene graph.
 
-        Used after add/remove edits. Re-reads instances + materials via
-        ``load_scene_from_stage``; meshes are cached by content hash, so
-        unchanged prims are not re-baked. Runtime ``enabled`` flags (not
-        authored to the stage) are carried across by prim path. Lights,
-        environment, camera, and ``mm_per_unit`` are left as live session state.
+        Used after add/remove edits. Re-reads instances + materials + lights +
+        camera via ``load_scene_from_stage``; meshes are cached by content hash,
+        so unchanged prims are not re-baked. Runtime ``enabled`` flags (not
+        authored to the stage) are carried across by prim path for both
+        instances and lights, so an unrelated edit does not lose a user toggle.
+        Environment is left as live session state. Finally rebuilds the derived
+        scene graph (with synthesized default lights re-injected) and bumps the
+        version so the UI panels repaint, and so a deleted light/camera prim
+        drops out of the render.
         """
         stage = self._usd_stage
         scene = self._usd_scene
         if stage is None or scene is None:
             return
         from skinny.usd_loader import load_scene_from_stage
-        prev_enabled = {
+        prev_inst_enabled = {
             inst.prim_path: inst.enabled
             for inst in scene.instances if inst.prim_path
+        }
+        prev_light_enabled = {
+            lt.prim_path: lt.enabled
+            for lt in (*scene.lights_dir, *scene.lights_sphere) if lt.prim_path
         }
         new_scene = load_scene_from_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
         )
         for inst in new_scene.instances:
-            if inst.prim_path in prev_enabled:
-                inst.enabled = prev_enabled[inst.prim_path]
-        # Swap instances + materials together so material_ids stay consistent.
+            if inst.prim_path in prev_inst_enabled:
+                inst.enabled = prev_inst_enabled[inst.prim_path]
+        for lt in (*new_scene.lights_dir, *new_scene.lights_sphere):
+            if lt.prim_path in prev_light_enabled:
+                lt.enabled = prev_light_enabled[lt.prim_path]
+        # Swap instances + materials together so material_ids stay consistent;
+        # take the re-read lights + camera too so deleting one drops it. The
+        # environment (HDR library selection) stays as live session state.
         scene.instances = new_scene.instances
         scene.materials = new_scene.materials
+        scene.lights_dir = new_scene.lights_dir
+        scene.lights_sphere = new_scene.lights_sphere
+        scene.camera_override = new_scene.camera_override
         self._gen_scene_materials()
-        self._upload_usd_scene()
+        self._upload_usd_scene()  # also uploads distant + sphere lights
         self._material_version += 1
+        # Rebuild the derived scene graph so the UI panels (which poll a version
+        # counter / object id) repaint to reflect the edit.
+        try:
+            from skinny.scene_graph import build_scene_graph
+            self._scene_graph = build_scene_graph(stage, scene)
+            self._inject_default_lights_into_scene_graph()
+            self._refresh_camera_node()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[skinny] scene graph rebuild after edit failed: {exc}")
+        # Bump explicitly: _inject_default_lights_into_scene_graph early-returns
+        # (without bumping) when there is no default-light stage, e.g. headless.
+        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
 
     def _instance_indices_under_path(self, prim_path: str) -> list[int]:
         """Indices of every instance at or below ``prim_path`` (subtree match).

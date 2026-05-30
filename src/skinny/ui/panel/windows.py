@@ -53,9 +53,15 @@ def build_scene_graph_pane(
     """Tree-view + property editor for the active USD scene graph."""
     from skinny.scene_graph import find_node_by_path, type_icon
 
+    from pathlib import Path as _Path
+
+    from skinny.settings import get_last_dir, record_last_dir
+    from skinny.ui.scene_edit_actions import add_parent_for_node, is_deletable
+
     renderer = session.renderer
     selector = pn.widgets.Select(name="Node", options={}, size=16)
     props_col = pn.Column()
+    state = {"node": None}  # currently-selected SceneGraphNode
 
     def _repopulate() -> None:
         graph = renderer.scene_graph
@@ -73,15 +79,83 @@ def build_scene_graph_pane(
 
     _repopulate()
 
+    # ── Editing controls (mirror the Qt dock; shared decision helpers) ──
+    start_dir = str(get_last_dir("model") or "") or None
+    file_sel = pn.widgets.FileSelector(start_dir, file_pattern="*", only_files=True)
+    add_btn = pn.widgets.Button(name="Add model", button_type="primary")
+    del_btn = pn.widgets.Button(name="Delete node", button_type="danger", disabled=True)
+    save_btn = pn.widgets.Button(name="Save edits", button_type="default")
+    status = pn.pane.Alert("", alert_type="info", visible=False)
+
+    def _set_status(msg: str, kind: str = "info") -> None:
+        status.object = msg
+        status.alert_type = kind
+        status.visible = True
+
+    def _on_add(_event) -> None:
+        picked = file_sel.value
+        if not picked:
+            _set_status("No file selected", "warning")
+            return
+        path = _Path(picked[0])
+        if path.suffix.lower() not in (".usda", ".usdc", ".usdz"):
+            _set_status(f"Unsupported type {path.suffix}; USD only", "warning")
+            return
+        if getattr(renderer, "_usd_stage", None) is None:
+            _set_status("Load a USD scene before adding a model.", "warning")
+            return
+        parent = add_parent_for_node(state["node"])
+        with session._lock:
+            try:
+                new_path = renderer.add_model(str(path), parent_prim_path=parent)
+            except (ValueError, RuntimeError) as exc:
+                _set_status(f"Add failed: {exc}", "danger")
+                return
+        record_last_dir("model", path.parent)
+        _set_status(f"Added {new_path}", "success")
+
+    def _on_delete(_event) -> None:
+        node = state["node"]
+        if not is_deletable(node):
+            _set_status("This node cannot be deleted.", "warning")
+            return
+        with session._lock:
+            try:
+                renderer.remove_node(node.path)
+            except (ValueError, RuntimeError) as exc:
+                _set_status(f"Delete failed: {exc}", "danger")
+                return
+        _set_status(f"Deleted {node.path}", "success")
+
+    def _on_save(_event) -> None:
+        if getattr(renderer, "_usd_edit_layer", None) is None:
+            _set_status("No edits to save (no USD scene loaded).", "warning")
+            return
+        with session._lock:
+            try:
+                written = renderer.save_edits()
+            except (ValueError, RuntimeError) as exc:
+                _set_status(f"Save failed: {exc}", "danger")
+                return
+        _set_status(f"Saved edits to {written}", "success")
+
+    add_btn.on_click(_on_add)
+    del_btn.on_click(_on_delete)
+    save_btn.on_click(_on_save)
+
     def on_select(event) -> None:
         path = event.new
         props_col.clear()
+        state["node"] = None
+        del_btn.disabled = True
         graph = renderer.scene_graph
         if not path or graph is None:
             return
         node = find_node_by_path(graph, path)
         if node is None:
             return
+        state["node"] = node
+        del_btn.disabled = not is_deletable(node)
         props_col.append(pn.pane.Markdown(
             f"**{node.name}** `{node.type_name}`\n\n`{node.path}`"
         ))
@@ -95,20 +169,41 @@ def build_scene_graph_pane(
 
     selector.param.watch(on_select, "value")
 
-    # Repoll for scene swap.
+    # Repoll for scene swap / edit (id changes on rebuild; version is a backstop).
     _last_id = [-1]
+    _last_ver = [-1]
 
     def poll() -> None:
         cur = id(renderer.scene_graph)
-        if cur != _last_id[0]:
+        ver = getattr(renderer, "_scene_graph_version", 0)
+        if cur != _last_id[0] or ver != _last_ver[0]:
             _last_id[0] = cur
+            _last_ver[0] = ver
             _repopulate()
+            # Drop a stale selection whose node the edit removed.
+            if state["node"] is not None and find_node_by_path(
+                renderer.scene_graph, state["node"].path
+            ) is None:
+                state["node"] = None
+                del_btn.disabled = True
+                props_col.clear()
+        save_btn.disabled = getattr(renderer, "_usd_edit_layer", None) is None
 
     pn.state.add_periodic_callback(poll, period=1000)
 
+    controls = pn.Column(
+        pn.Row(add_btn, del_btn, save_btn),
+        pn.Card(file_sel, title="Add model — pick a USD file", collapsed=True),
+        status,
+        sizing_mode="stretch_width",
+    )
     return _card(
         "Scene Graph",
-        pn.Row(selector, props_col, sizing_mode="stretch_width"),
+        pn.Column(
+            controls,
+            pn.Row(selector, props_col, sizing_mode="stretch_width"),
+            sizing_mode="stretch_width",
+        ),
         on_close,
     )
 
@@ -271,7 +366,13 @@ def _apply_vec3_value(renderer, ref, node, prop, values) -> None:
             rotate = values if p is prop else p.value
         elif p.name == "scale":
             scale = values if p is prop else p.value
-    renderer.apply_instance_transform(node.path, translate, rotate, scale)
+    # Author to the stage (edit layer) so the move persists and is captured by
+    # "Save edits"; fall back to the runtime path if no stage is loaded.
+    if getattr(renderer, "_usd_stage", None) is not None:
+        from skinny.ui.scene_edit_actions import trs_to_matrix
+        renderer.set_transform(node.path, trs_to_matrix(translate, rotate, scale))
+    else:
+        renderer.apply_instance_transform(node.path, translate, rotate, scale)
 
 
 def _find_material_ancestor(renderer, node):
