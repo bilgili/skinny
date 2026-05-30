@@ -1099,7 +1099,7 @@ def _area_light_to_instance(
     transform = _world_transform(prim, time)
     return MeshInstance(
         mesh=mesh, transform=transform, material_id=material_id,
-        name=source.name, source=source,
+        name=source.name, source=source, prim_path=str(prim.GetPath()),
     )
 
 
@@ -1963,6 +1963,7 @@ def bake_usd_prim(
         material_id=material_id,
         name=source.name,
         source=source,
+        prim_path=source.name,
     )
 
 

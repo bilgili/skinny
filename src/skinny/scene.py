@@ -130,6 +130,10 @@ class MeshInstance:
     )
     material_id: int = 0
     name: str = ""
+    # Full USD prim path this instance was baked from (e.g. "/World/Head").
+    # Stable identity used by the runtime scene-graph editing API to target
+    # add/remove/transform operations. Empty for non-USD (OBJ/SDF) instances.
+    prim_path: str = ""
     # CPU-side triangle source kept around so the renderer can enumerate
     # emissive triangles for area-light NEE without re-parsing the GPU
     # vertex buffer. Optional because non-USD instances (legacy SDF/OBJ)

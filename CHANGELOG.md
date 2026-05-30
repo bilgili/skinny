@@ -59,6 +59,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`vk_skinning.py`) with their own descriptor sets leave `main_pass` untouched;
   a CPU skinning path is the fallback on non-Vulkan backends
 
+### Scene editing
+
+- Runtime scene-graph editing API on `Renderer`: `add_model()` (reference a USD
+  file under a parent prim), `remove_node()` (non-destructive deactivation),
+  `set_transform()` (fast transform-only resync), `save_edits()`, and
+  `list_nodes()`. The loaded `Usd.Stage` is the source of truth; edits are
+  authored to an in-memory edit sublayer so the original file is never modified
+  until `save_edits()`. `MeshInstance` now carries its `prim_path`, and
+  `apply_instance_transform` / `apply_node_enabled` are keyed by prim path
+
 ### UI and interaction
 
 - Built-in animation transport (play/pause, normalized time scrubber, fps) in the

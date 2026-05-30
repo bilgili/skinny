@@ -941,6 +941,15 @@ class Renderer:
         # (enabled_idx, blas_offsets, material_ids) cached by _upload_usd_scene
         # so animation re-uploads only the small instance buffer.
         self._usd_instance_layout = None
+        # USD prim path → indices into `_usd_scene.instances`. Rebuilt on every
+        # geometry upload; the runtime scene-graph editing API resolves
+        # add/remove/transform targets through it.
+        self._prim_to_instances: dict[str, list[int]] = {}
+        # Non-destructive in-memory edit sublayer (Sdf.Layer) + its default
+        # on-disk save path. Attached on USD load so runtime scene-graph edits
+        # never touch the original file; persisted only via save_edits().
+        self._usd_edit_layer = None
+        self._edit_layer_default_path: str | None = None
 
         # HDR environment library — built-in presets + any .hdr files found
         # in hdr_dir. Switching is driven by `env_index`.
@@ -1435,6 +1444,9 @@ class Renderer:
         self.model_index = -1
         self._usd_scene = None
         self._usd_stage = None
+        self._usd_edit_layer = None
+        self._edit_layer_default_path = None
+        self._prim_to_instances = {}
         self._scene_graph = None
         self._usd_model_index = -1
         self._usd_bake_done = None
@@ -1602,6 +1614,9 @@ class Renderer:
             # Keep the stage around so scene-graph edits (DomeLight HDR
             # path, etc.) can mutate USD prim attrs as the source of truth.
             self._usd_stage = stage
+            # Attach the non-destructive edit sublayer so the runtime
+            # scene-graph editing API authors there, never the original file.
+            self._attach_edit_layer()
             # Build the playback clock + animated-prim index from the stage.
             # Single ref assignments, read on the main thread in update().
             if stage is not None:
@@ -3220,7 +3235,15 @@ class Renderer:
         """
         scene = self._usd_scene
         if scene is None or not scene.instances:
+            self._prim_to_instances = {}
             return
+        # Rebuild the prim-path → instance-index map for the editing API. One
+        # prim may expand to several instances (e.g. multi-material meshes).
+        prim_index: dict[str, list[int]] = {}
+        for i, inst in enumerate(scene.instances):
+            if inst.prim_path:
+                prim_index.setdefault(inst.prim_path, []).append(i)
+        self._prim_to_instances = prim_index
         meshes = [inst.mesh for inst in scene.instances]
         offsets = self._upload_meshes_concatenated(meshes)
         # TLAS records only for enabled instances. Disabled instances keep
@@ -3520,7 +3543,41 @@ class Renderer:
         # Force an accumulation reset (raw USD edits aren't in the state hash).
         self._material_version += 1
 
-    def set_usd_scene(self, scene: "Scene") -> None:
+    def _default_edit_path(self, root_layer) -> "str | None":
+        """Default on-disk save target for the edit layer: sibling
+        ``<scene>.edits.usda`` next to the stage's root file, or None for an
+        anonymous/in-memory root that has no real path."""
+        rp = getattr(root_layer, "realPath", "") or ""
+        if not rp:
+            return None
+        from pathlib import Path
+        p = Path(rp)
+        return str(p.parent / f"{p.stem}.edits.usda")
+
+    def _attach_edit_layer(self) -> None:
+        """Attach a non-destructive edit sublayer to ``self._usd_stage``.
+
+        Creates an in-memory (anonymous) ``Sdf.Layer``, inserts it as the
+        strongest sublayer of the root layer, and makes it the stage edit
+        target. Runtime scene-graph edits author here, so the original file is
+        never modified; ``save_edits()`` persists this layer on request. No-op
+        if no stage is loaded or an edit layer is already attached.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is not None:
+            return
+        from pxr import Sdf, Usd
+        edit_layer = Sdf.Layer.CreateAnonymous("skinny_edits.usda")
+        root = stage.GetRootLayer()
+        # subLayerPaths[0] is the STRONGEST sublayer in USD's local layer stack.
+        # Inserting in memory dirties the root layer object but never writes it.
+        if edit_layer.identifier not in root.subLayerPaths:
+            root.subLayerPaths.insert(0, edit_layer.identifier)
+        stage.SetEditTarget(Usd.EditTarget(edit_layer))
+        self._usd_edit_layer = edit_layer
+        self._edit_layer_default_path = self._default_edit_path(root)
+
+    def set_usd_scene(self, scene: "Scene", stage=None) -> None:
         """Make `scene` the active USD scene synchronously and upload it.
 
         Composes the same finalize steps the async streaming path runs, but
@@ -3554,6 +3611,12 @@ class Renderer:
         self.model_index = self._usd_model_index
 
         self._usd_scene = scene
+        # When the caller owns a stage (headless editing entry, design D9), take
+        # ownership and attach the non-destructive edit layer so the runtime
+        # scene-graph editing API (add_model/remove_node/set_transform) works.
+        if stage is not None:
+            self._usd_stage = stage
+            self._attach_edit_layer()
         self._gen_scene_materials()           # guarded: rebuilds pipeline only on graph-set change
         if first:
             self._apply_usd_lights(scene)     # once: appends env + seeds sliders
@@ -3561,6 +3624,222 @@ class Renderer:
         elif scene.camera_override is not None:
             self._frame_camera_to_scene(scene)  # animated authored camera
         self._upload_usd_scene()              # every call: geometry + materials + lights
+
+    # ── Runtime scene-graph editing (usd-scene-editing) ─────────────────
+
+    def _resync_geometry_from_stage(self) -> None:
+        """Re-read the authoritative stage into the flat scene + GPU buffers.
+
+        Used after add/remove edits. Re-reads instances + materials via
+        ``load_scene_from_stage``; meshes are cached by content hash, so
+        unchanged prims are not re-baked. Runtime ``enabled`` flags (not
+        authored to the stage) are carried across by prim path. Lights,
+        environment, camera, and ``mm_per_unit`` are left as live session state.
+        """
+        stage = self._usd_stage
+        scene = self._usd_scene
+        if stage is None or scene is None:
+            return
+        from skinny.usd_loader import load_scene_from_stage
+        prev_enabled = {
+            inst.prim_path: inst.enabled
+            for inst in scene.instances if inst.prim_path
+        }
+        new_scene = load_scene_from_stage(
+            stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
+        )
+        for inst in new_scene.instances:
+            if inst.prim_path in prev_enabled:
+                inst.enabled = prev_enabled[inst.prim_path]
+        # Swap instances + materials together so material_ids stay consistent.
+        scene.instances = new_scene.instances
+        scene.materials = new_scene.materials
+        self._gen_scene_materials()
+        self._upload_usd_scene()
+        self._material_version += 1
+
+    def _instance_indices_under_path(self, prim_path: str) -> list[int]:
+        """Indices of every instance at or below ``prim_path`` (subtree match).
+
+        Authoring a transform on an ancestor Xform changes the world transform
+        of its descendant meshes, so transform resync must match the subtree.
+        """
+        scene = self._usd_scene
+        if scene is None:
+            return []
+        pref = prim_path.rstrip("/")
+        out: list[int] = []
+        for i, inst in enumerate(scene.instances):
+            pp = inst.prim_path
+            if pp and (pp == pref or pp.startswith(pref + "/")):
+                out.append(i)
+        return out
+
+    def _resync_instance_transforms(self, prim_path: str) -> None:
+        """Recompute world transforms for instances under ``prim_path`` from the
+        stage and re-upload only the TLAS records (no geometry re-bake)."""
+        scene = self._usd_scene
+        stage = self._usd_stage
+        if scene is None or stage is None:
+            return
+        indices = self._instance_indices_under_path(prim_path)
+        if not indices:
+            return
+        from pxr import Usd
+        from skinny.usd_loader import _world_transform
+        rt4 = None
+        rt = self._usd_up_axis_rt
+        if rt is not None:
+            rt4 = np.eye(4, dtype=np.float32)
+            rt4[:3, :3] = rt
+        for i in indices:
+            iprim = stage.GetPrimAtPath(scene.instances[i].prim_path)
+            if not iprim or not iprim.IsValid():
+                continue
+            m = _world_transform(iprim, Usd.TimeCode.Default())
+            scene.instances[i].transform = (
+                (m @ rt4).astype(np.float32) if rt4 is not None else m
+            )
+        self._reupload_instance_transforms()
+
+    def _author_local_transform(self, xformable, matrix) -> None:
+        """Author ``matrix`` (numpy 4x4, USD row-major convention) as the prim's
+        single ``xformOp:transform`` in the active edit target."""
+        from pxr import Gf
+        arr = np.asarray(matrix, dtype=float).reshape(16)
+        gm = Gf.Matrix4d(*[float(x) for x in arr])
+        xformable.ClearXformOpOrder()
+        xformable.AddTransformOp().Set(gm)
+
+    def _unique_prim_path(self, base: str) -> str:
+        """``base`` if free, else ``base_1``, ``base_2``, … (avoids prim clash)."""
+        stage = self._usd_stage
+        candidate = base
+        i = 1
+        while stage.GetPrimAtPath(candidate).IsValid():
+            candidate = f"{base}_{i}"
+            i += 1
+        return candidate
+
+    def add_model(
+        self,
+        usd_path,
+        parent_prim_path: str = "/World",
+        name: "str | None" = None,
+        transform=None,
+    ) -> str:
+        """Add a USD model to the live stage by reference and return its prim path.
+
+        Defines an ``Xform`` under ``parent_prim_path`` in the edit layer, adds a
+        reference to ``usd_path``, authors ``transform`` (identity when omitted),
+        then re-reads the stage so the new geometry uploads. Accepts USD only.
+
+        Raises ``ValueError`` for a missing/invalid path (no stage mutation) and
+        rolls back the authored prim if the re-read fails.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("add_model requires a loaded USD stage")
+        from pathlib import Path as _Path
+        p = _Path(str(usd_path))
+        if p.suffix.lower() == ".obj":
+            raise ValueError(
+                "add_model accepts USD references only; OBJ adds are deferred"
+            )
+        if not p.exists():
+            raise ValueError(f"add_model: file not found: {usd_path}")
+        from pxr import Sdf, Tf, Usd, UsdGeom
+        if Sdf.Layer.FindOrOpen(str(p)) is None:
+            raise ValueError(f"add_model: not a valid USD file: {usd_path}")
+        leaf = name or Tf.MakeValidIdentifier(p.stem)
+        parent = parent_prim_path.rstrip("/")
+        prim_path = self._unique_prim_path(f"{parent}/{leaf}")
+        created = False
+        try:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if parent and not stage.GetPrimAtPath(parent).IsValid():
+                    UsdGeom.Xform.Define(stage, parent)
+                xform = UsdGeom.Xform.Define(stage, prim_path)
+                created = True
+                xform.GetPrim().GetReferences().AddReference(str(p))
+                if transform is not None:
+                    self._author_local_transform(xform, transform)
+            self._resync_geometry_from_stage()
+        except Exception:
+            if created:
+                with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                    stage.RemovePrim(prim_path)
+            raise
+        return prim_path
+
+    def remove_node(self, prim_path: str) -> None:
+        """Remove a node by deactivating its prim (non-destructive) and re-reading.
+
+        Raises ``ValueError`` if ``prim_path`` is not on the stage.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("remove_node requires a loaded USD stage")
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            raise ValueError(f"remove_node: prim not found: {prim_path}")
+        from pxr import Usd
+        with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+            prim.SetActive(False)
+        self._resync_geometry_from_stage()
+
+    def set_transform(self, prim_path: str, matrix) -> None:
+        """Author a prim's local transform and fast-resync its instances.
+
+        ``matrix`` is a 4x4 (numpy/array-like) in USD row-major convention.
+        Raises ``ValueError`` if ``prim_path`` is not on the stage.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("set_transform requires a loaded USD stage")
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            raise ValueError(f"set_transform: prim not found: {prim_path}")
+        from pxr import Usd, UsdGeom
+        with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+            self._author_local_transform(UsdGeom.Xformable(prim), matrix)
+        self._resync_instance_transforms(prim_path)
+        self._material_version += 1
+
+    def save_edits(self, path: "str | None" = None) -> str:
+        """Persist the edit layer to disk and return the written path.
+
+        Defaults to the sibling ``<scene>.edits.usda`` next to the loaded file.
+        """
+        if self._usd_edit_layer is None:
+            raise RuntimeError("save_edits: no edit layer attached")
+        target = path or self._edit_layer_default_path
+        if target is None:
+            raise ValueError(
+                "save_edits: no path given and no default (in-memory stage)"
+            )
+        self._usd_edit_layer.Export(str(target))
+        return str(target)
+
+    def list_nodes(self) -> "list[dict]":
+        """Editable prims of the stage as ``{path, type, active}`` dicts.
+
+        Includes inactive prims (e.g. nodes removed via ``remove_node``) so the
+        full editable graph is visible to scripts and a future scene-graph UI.
+        """
+        stage = self._usd_stage
+        if stage is None:
+            return []
+        out: list[dict] = []
+        for prim in stage.TraverseAll():
+            if prim.IsPseudoRoot():
+                continue
+            out.append({
+                "path": str(prim.GetPath()),
+                "type": str(prim.GetTypeName()),
+                "active": bool(prim.IsActive()),
+            })
+        return out
 
     def _upload_emissive_triangles(self, scene: Scene) -> None:
         """Build the emissive triangle buffer (binding 18) from scene instances.
@@ -4340,45 +4619,91 @@ class Renderer:
             self._upload_sphere_lights(lights)
             self._material_version += 1
 
+    def _resolve_renderer_ref(self, prim_path: str):
+        """Map a USD prim path to its ``RendererRef(kind, index)`` via the scene
+        graph node tree.
+
+        Returns ``None`` when no scene graph is built (e.g. the headless
+        ``set_usd_scene`` path) or the path carries no renderer binding.
+        """
+        sg = self._scene_graph
+        if sg is None:
+            return None
+        from skinny.scene_graph import find_node_by_path
+        node = find_node_by_path(sg, prim_path)
+        return node.renderer_ref if node is not None else None
+
+    def _instance_indices_for_path(self, prim_path: str) -> list[int]:
+        """Indices into ``_usd_scene.instances`` baked from ``prim_path``.
+
+        Uses the prim-path index (works headless); falls back to the scene
+        graph's instance ref when the index has no entry.
+        """
+        idxs = self._prim_to_instances.get(prim_path)
+        if idxs:
+            return list(idxs)
+        ref = self._resolve_renderer_ref(prim_path)
+        if ref is not None and ref.kind == "instance" and self._usd_scene is not None:
+            if 0 <= ref.index < len(self._usd_scene.instances):
+                return [ref.index]
+        return []
+
     def apply_instance_transform(
         self,
-        instance_index: int,
+        prim_path: str,
         translate: tuple[float, float, float],
         rotate_deg: tuple[float, float, float],
         scale: tuple[float, float, float],
     ) -> None:
-        """Recompose TRS into a 4x4 and re-upload the scene."""
+        """Recompose TRS into a 4x4 and re-upload the scene.
+
+        Prim-path keyed: targets every instance baked from ``prim_path`` (a
+        single prim may expand to several instances).
+        """
         if self._usd_scene is None:
             return
-        instances = self._usd_scene.instances
-        if instance_index < 0 or instance_index >= len(instances):
+        indices = self._instance_indices_for_path(prim_path)
+        if not indices:
             return
         from skinny.scene_graph import compose_trs_matrix
-        instances[instance_index].transform = compose_trs_matrix(
-            translate, rotate_deg, scale,
-        )
+        m = compose_trs_matrix(translate, rotate_deg, scale)
+        for i in indices:
+            self._usd_scene.instances[i].transform = m
         self._upload_usd_scene()
         self._material_version += 1
 
-    def apply_node_enabled(self, kind: str, index: int, enabled: bool) -> None:
-        """Toggle a single scene node on/off and re-upload affected GPU buffers."""
+    def apply_node_enabled(self, prim_path: str, enabled: bool) -> None:
+        """Toggle a single scene node on/off by prim path and re-upload buffers."""
         enabled = bool(enabled)
-        # Renderer-owned toggles that don't need a loaded USD scene.
+        # Instances resolve through the prim-path index so this works headless
+        # (no scene graph). One prim may map to several instances.
+        inst_idxs = self._prim_to_instances.get(prim_path)
+        if inst_idxs:
+            if self._usd_scene is None:
+                return
+            for i in inst_idxs:
+                self._usd_scene.instances[i].enabled = enabled
+            self._upload_usd_scene()
+            self._material_version += 1
+            return
+        # Lights / camera / environment resolve via the scene-graph node ref.
+        ref = self._resolve_renderer_ref(prim_path)
+        kind = ref.kind if ref is not None else None
+        index = ref.index if ref is not None else -1
+        scene = self._usd_scene
         if kind == "light_dir":
-            scene = self._usd_scene
             if scene is not None and 0 <= index < len(scene.lights_dir):
                 scene.lights_dir[index].enabled = enabled
                 self._upload_distant_lights(scene.lights_dir)
             else:
-                # Synthesised default direct light: drives the
-                # renderer-owned direct_light_index toggle (0=On, 1=Off).
-                # The buffer is re-uploaded by update()'s per-frame mirror.
+                # Synthesised default direct light: drives the renderer-owned
+                # direct_light_index toggle (0=On, 1=Off). The buffer is
+                # re-uploaded by update()'s per-frame mirror.
                 self.direct_light_index = 0 if enabled else 1
             self._material_version += 1
             return
-        if self._usd_scene is None:
+        if scene is None:
             return
-        scene = self._usd_scene
         if kind == "instance":
             if 0 <= index < len(scene.instances):
                 scene.instances[index].enabled = enabled
@@ -4387,7 +4712,7 @@ class Renderer:
             if 0 <= index < len(scene.lights_sphere):
                 scene.lights_sphere[index].enabled = enabled
                 self._upload_sphere_lights(scene.lights_sphere)
-        elif kind == "environment":
+        elif kind in ("environment", "light_env"):
             if scene.environment is not None:
                 scene.environment.enabled = enabled
         elif kind == "camera":
@@ -4475,7 +4800,11 @@ class Renderer:
             return False
         t, r, s = result
         idx = self.gizmo.target_index
-        self.apply_instance_transform(idx, t, r, s)
+        if self._usd_scene is None or not (0 <= idx < len(self._usd_scene.instances)):
+            return False
+        self.apply_instance_transform(
+            self._usd_scene.instances[idx].prim_path, t, r, s,
+        )
         return True
 
     def gizmo_end_drag(self) -> None:
