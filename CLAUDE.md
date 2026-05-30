@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow
+
+Always work in a dedicated git worktree for new features and bug fixes. Create
+a worktree off `main` for each piece of work instead of editing the primary
+checkout directly, then open a PR / merge from there. This keeps the main
+working directory clean and lets multiple changes proceed in isolation.
+
 ## Commands
 
 **Setup (from repo root):**
