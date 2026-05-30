@@ -291,7 +291,7 @@ class SceneGraphDock(QDockWidget):
             if ref.kind == "renderer_camera":
                 self.renderer.apply_camera_param(prop.name, value)
                 return
-            self.renderer.apply_node_enabled(ref.kind, ref.index, value)
+            self.renderer.apply_node_enabled(node.path, value)
 
         cb.toggled.connect(on_toggle)
         layout.addWidget(cb)
@@ -559,7 +559,7 @@ class SceneGraphDock(QDockWidget):
                 rotate = values if p is prop else p.value
             elif p.name == "scale":
                 scale = values if p is prop else p.value
-        self.renderer.apply_instance_transform(ref.index, translate, rotate, scale)
+        self.renderer.apply_instance_transform(node.path, translate, rotate, scale)
 
     def _find_shader_material_ref(self, node: SceneGraphNode):
         graph = self.renderer.scene_graph

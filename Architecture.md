@@ -441,6 +441,23 @@ per-input channel selectors into `channelMask` (4 bits per input), so the
 shader fetches the correct channel and applies the right normal-map convention
 without per-texture branches.
 
+### Runtime Scene-Graph Editing (`renderer.py`)
+
+The loaded `Usd.Stage` is the authoritative scene model; the flat `Scene` +
+GPU buffers are a derived cache. `Renderer._attach_edit_layer()` inserts an
+in-memory anonymous `Sdf.Layer` as the strongest sublayer and sets it as the
+edit target, so every runtime edit is authored there and the original file is
+never written until `save_edits()`. The editing API — `add_model()` (define an
+`Xform` + `AddReference`), `remove_node()` (`SetActive(False)`),
+`set_transform()` (author `xformOp:transform`), `save_edits()`, `list_nodes()` —
+authors inside a scoped `Usd.EditContext`. Add/remove trigger a geometry resync
+(`_resync_geometry_from_stage`: re-read via `load_scene_from_stage`, mesh cache
+keeps unchanged prims free, runtime `enabled` flags carried by prim path);
+`set_transform` uses a transform-only fast path (`_reupload_instance_transforms`,
+no re-bake). `MeshInstance.prim_path` + the `_prim_to_instances` index key all
+edits by USD prim path; edits reset progressive accumulation via
+`_material_version`. Headless callers pass `stage=` to `set_usd_scene`.
+
 ### USD Animation Playback (`playback.py`, `usd_loader.py`, `renderer.py`)
 
 At load, `build_animation_index(stage)` scans for time-varying prims — transform

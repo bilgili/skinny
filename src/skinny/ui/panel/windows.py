@@ -139,7 +139,7 @@ def _build_scene_prop_widget(
                     if r.kind == "renderer_camera":
                         renderer.apply_camera_param(p.name, value)
                     else:
-                        renderer.apply_node_enabled(r.kind, r.index, value)
+                        renderer.apply_node_enabled(n.path, value)
 
         w.param.watch(on_bool, "value")
         return w
@@ -271,7 +271,7 @@ def _apply_vec3_value(renderer, ref, node, prop, values) -> None:
             rotate = values if p is prop else p.value
         elif p.name == "scale":
             scale = values if p is prop else p.value
-    renderer.apply_instance_transform(ref.index, translate, rotate, scale)
+    renderer.apply_instance_transform(node.path, translate, rotate, scale)
 
 
 def _find_material_ancestor(renderer, node):
