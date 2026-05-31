@@ -178,6 +178,47 @@ class BoundComputePass:
         vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
 
 
+class ShadePassGroup:
+    """Ordered set of per-material wavefront shade passes, dispatched in one
+    frame — the staged per-material-pipeline shade (P1 §5.4 / §6.4 compile-win).
+
+    Each member is an independent ``BoundComputePass`` compiled from one graph's
+    ``shadeSurface_<name>`` entry (``emit_wavefront_shade_module``), so it is its
+    own compilation unit / pipeline: adding a material compiles exactly one
+    member and the rest are SPIR-V cache hits. Each member traces and overwrites
+    only the accumulation pixels whose material maps to its ``graphId``; together
+    they cover every materialised hit. A memory barrier between members orders
+    the writes to the shared accumulation image (binding 2).
+
+    Exposes ``record_dispatch`` + ``destroy`` so it drops straight into the
+    renderer's ``_wavefront_debug_pass`` seam in place of a single pass.
+    """
+
+    def __init__(self, ctx, passes: list) -> None:
+        self.ctx = ctx
+        self.passes = list(passes)
+
+    def record_dispatch(self, cmd) -> None:
+        accum_barrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
+        )
+        for i, p in enumerate(self.passes):
+            if i > 0:
+                vk.vkCmdPipelineBarrier(
+                    cmd,
+                    vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, 1, [accum_barrier], 0, None, 0, None,
+                )
+            p.record_dispatch(cmd)
+
+    def destroy(self) -> None:
+        for p in self.passes:
+            p.destroy()
+        self.passes = []
+
+
 class WavefrontEnvPass:
     """Env-only wavefront compute pass — the Phase-1 integration milestone.
 

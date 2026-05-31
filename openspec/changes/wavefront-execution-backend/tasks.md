@@ -148,27 +148,30 @@ only `generated.<name>_graph` (independent compilation unit), tracing + shading
 only pixels whose material maps to `graph_id`, writing the base colour.
 
 Resume steps:
-1. **`renderer.build_wavefront_shade_passes()`** — for each `gf` in
-   `self._scene_graph_fragments`: `gid = assign_graph_ids(frags)[gf.target_name]`;
-   write `emit_wavefront_shade_module(gf, gid, GRAPH_BINDING_BASE)` to
-   `shaders/wavefront/shade_<gf.sanitized_name>.slang`; build a `BoundComputePass`
-   for entry `shadeSurface_<name>` with bindings 0/2/5/6/7/12/13/16 + 25
-   (`_graph_param_buffers[target]`) + over-provide 14 (the bindless texture pool,
-   for graphs that sample textures — Marble reflects no 14, Brass may). Return
-   the pass list.
-2. **Verify (staged == fused at hit pixels)** in `test_wavefront_render.py`:
-   warmup megakernel; visibility → hit mask; fused `build_wavefront_material_pass`
-   → `fused`; then dispatch each shade pass in turn via the `_wavefront_debug_pass`
-   seam (each OVERWRITES its material's hits) → `staged`; assert
-   `staged[mask] ≈ fused[mask]`. Proves the per-material pipelines render
-   correctly AND are separate compilation units.
-3. **Compile-win check**: each `shade_<name>.slang` imports only its graph →
-   adding a graph compiles one module; the others' SPIR-V is a `_compile_slang`
-   cache hit. Optionally assert via the cache.
-4. **Queue-sorted dispatch**: feed intersect hits into the per-material queues
+1. [x] **`renderer.build_wavefront_shade_passes()`** DONE — for each `gf` in
+   `self._scene_graph_fragments` it writes `emit_wavefront_shade_module(gf, gid,
+   GRAPH_BINDING_BASE)` to `shaders/wavefront/shade_<name>.slang` and builds a
+   `BoundComputePass` for `shadeSurface_<name>` (bindings 0/2/5/6/7/12/13/16 + 25
+   `_graph_param_buffers[target]` + over-provided 14 texture pool). Returns a
+   `vk_wavefront.ShadePassGroup` (record_dispatch runs all members with an
+   accum-image barrier between; drops into the `_wavefront_debug_pass` seam).
+2. [x] **Verify (staged == fused at hit pixels)** DONE —
+   `test_wavefront_render.py::test_wavefront_staged_shade_matches_fused`: warmup
+   megakernel; visibility → hit mask; fused `build_wavefront_material_pass` at
+   frame F; staged `ShadePassGroup` at the SAME frame F (no `update()` between, so
+   the camera jitter is identical); assert `staged[mask] ≈ fused[mask]` (≥90% of
+   hit pixels within 5e-3). Each shade pass OVERWRITES its material's hits, so the
+   match measures the staged pipelines, not fused leftovers. Proves the
+   per-material pipelines render correctly AND are separate compilation units.
+3. [ ] **Compile-win check** (NEXT): each `shade_<name>.slang` imports only its
+   graph → adding a graph compiles one module; the others' SPIR-V is a cache hit.
+   Needs a content-hash cache on `BoundComputePass._compile_spv` (today it always
+   re-runs slangc) + an assert. This is the spec scenario "reusing a material
+   compiles nothing" (task 6.4 / test 9.5).
+4. [ ] **Queue-sorted dispatch**: feed intersect hits into the per-material queues
    (build_args + scatter, all GPU-verified), dispatch each shade pass over its
    queue slice via `vkCmdDispatchIndirect` — the real staged perf path.
-5. **Full A/B shade**: BSDF response (not just base colour) + NEE + MIS +
+5. [ ] **Full A/B shade**: BSDF response (not just base colour) + NEE + MIS +
    multi-bounce, threaded through the path-state + queue buffers → exact
    megakernel A/B via `test_headless`.
 

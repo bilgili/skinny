@@ -1419,6 +1419,67 @@ class Renderer:
             "wavefrontMaterial", specs, self.width, self.height,
         )
 
+    def build_wavefront_shade_passes(self):
+        """Build one per-material wavefront shade pass per scene graph fragment —
+        the staged per-material-pipeline shade (the compile-win). For each
+        `GraphFragment` this writes `shaders/wavefront/shade_<name>.slang` from
+        `emit_wavefront_shade_module` (which imports ONLY that graph's
+        `generated.<name>_graph` module, making it an independent compilation
+        unit) and compiles a `BoundComputePass` for its `shadeSurface_<name>`
+        entry. Each pass traces, shades only the pixels whose material maps to
+        its graphId, and overwrites the base colour; together they cover every
+        materialised hit — the fused `wavefront_material` pass, partitioned into
+        one pipeline per material.
+
+        Bindings: the traceScene set (0/2/5/6/7/12/13/16), this graph's param
+        SSBO at GRAPH_BINDING_BASE, and the 128-slot bindless texture pool at 14
+        (over-provided — graphs that sample no textures reflect no 14, which the
+        superset layout tolerates). Returns a `ShadePassGroup`; plug it into the
+        `_wavefront_debug_pass` seam. Rebuild after a scene/geometry reload.
+        """
+        from skinny.materialx_runtime import assign_graph_ids
+        from skinny.vk_compute import (
+            BINDLESS_TEXTURE_CAPACITY,
+            GRAPH_BINDING_BASE,
+            emit_wavefront_shade_module,
+        )
+        from skinny.vk_wavefront import BoundComputePass, ShadePassGroup
+
+        sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        id_map = assign_graph_ids(self._scene_graph_fragments)
+        wf_dir = self.shader_dir / "wavefront"
+        slots = [(idx, s.sampler, s.view) for idx, s in self.texture_pool.filled_slots()]
+        passes = []
+        for gf in self._scene_graph_fragments:
+            name = gf.sanitized_name
+            src = emit_wavefront_shade_module(gf, id_map[gf.target_name], GRAPH_BINDING_BASE)
+            (wf_dir / f"shade_{name}.slang").write_text(src, encoding="utf-8")
+            specs = [
+                {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
+                {"binding": 2, "type": vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                 "view": self.accum_image.view, "layout": vk.VK_IMAGE_LAYOUT_GENERAL},
+                {"binding": 5, "type": sb, "buffer": self.vertex_buffer.buffer, "range": self.vertex_buffer.size},
+                {"binding": 6, "type": sb, "buffer": self.index_buffer.buffer, "range": self.index_buffer.size},
+                {"binding": 7, "type": sb, "buffer": self.bvh_buffer.buffer, "range": self.bvh_buffer.size},
+                {"binding": 12, "type": sb, "buffer": self.instance_buffer.buffer, "range": self.instance_buffer.size},
+                {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
+                {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
+            ]
+            buf = self._graph_param_buffers.get(gf.target_name)
+            if buf is not None:
+                specs.append({"binding": GRAPH_BINDING_BASE, "type": sb,
+                              "buffer": buf.buffer, "range": buf.size})
+            specs.append({
+                "binding": 14, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                "array_count": BINDLESS_TEXTURE_CAPACITY, "slots": slots,
+            })
+            passes.append(BoundComputePass(
+                self.ctx, self.shader_dir, f"wavefront/shade_{name}",
+                f"shadeSurface_{name}", specs, self.width, self.height,
+            ))
+        return ShadePassGroup(self.ctx, passes)
+
     def read_accumulation(self) -> "np.ndarray":
         """Copy the linear-HDR accumulation image to host as an (H, W, 4)
         float32 array. For A/B comparison that must not depend on tonemapping

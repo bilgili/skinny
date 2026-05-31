@@ -300,3 +300,82 @@ def test_wavefront_material_albedo_per_material():
     finally:
         renderer.cleanup()
         ctx.destroy()
+
+
+def test_wavefront_staged_shade_matches_fused():
+    """Staged per-material shade pipelines == the fused material pass at hit
+    pixels (the per-material-pipeline compile-win, §7c step 2).
+
+    The fused `wavefront_material` pass evaluates every material in one kernel
+    via the megakernel-shared `evalSceneGraphBaseColor` switch. The staged group
+    is one `shadeSurface_<name>` pipeline per graph, each an independent
+    compilation unit (imports only `generated.<name>_graph`); each overwrites
+    only its own material's hit pixels. Rendering both at the *same*
+    accumulation frame (identical camera jitter) and asserting the staged image
+    reproduces the fused image at the hit mask proves the per-material pipelines
+    render the same surface as the combined kernel — adding a material compiles
+    one of these, not the whole switch.
+    """
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+    )
+    fused = staged_group = None
+    try:
+        deadline = 200
+        while deadline > 0 and (
+            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+        ):
+            renderer.update(0.025)
+            deadline -= 1
+        assert renderer.pipeline is not None
+        for _ in range(4):
+            renderer.update(0.04)
+            renderer.render_headless()
+
+        # Locate the geometry (visibility hit mask).
+        vis = renderer.build_wavefront_trace_pass(
+            "wavefront/wavefront_visibility", "wavefrontVisibility")
+        renderer._wavefront_debug_pass = vis
+        renderer.set_execution_mode(1)  # EXECUTION_WAVEFRONT
+        renderer.update(0.04)
+        renderer.render_headless()
+        mask = renderer.read_accumulation()[:, :, 0] > 0.5
+        vis.destroy()
+        renderer._wavefront_debug_pass = None
+        assert int(mask.sum()) > 50, "no geometry to shade"
+
+        # Fused reference at frame F.
+        fused_pass = renderer.build_wavefront_material_pass()
+        renderer._wavefront_debug_pass = fused_pass
+        renderer.update(0.04)            # advances to frame F, packs jitter F
+        renderer.render_headless()
+        fused = renderer.read_accumulation()[:, :, :3].copy()
+        fused_pass.destroy()
+
+        # Staged per-material pipelines at the SAME frame F (no update() ⇒ the
+        # uniform buffer still holds jitter F, so the camera rays are identical).
+        staged_group = renderer.build_wavefront_shade_passes()
+        assert len(staged_group.passes) >= 2, "expected one shade pipeline per graph"
+        renderer._wavefront_debug_pass = staged_group
+        renderer.render_headless()
+        staged = renderer.read_accumulation()[:, :, :3].copy()
+
+        # At hit pixels the staged group overwrote each material's pixels with a
+        # freshly-computed base colour; it must reproduce the fused kernel.
+        diff = np.abs(staged[mask] - fused[mask]).max(axis=1)
+        match_frac = float((diff <= 5e-3).mean())
+        assert match_frac >= 0.9, (
+            f"only {match_frac:.0%} of hit pixels match the fused kernel "
+            f"(max diff {float(diff.max()):.4f})"
+        )
+    finally:
+        if staged_group is not None:
+            renderer._wavefront_debug_pass = None
+            staged_group.destroy()
+        renderer.cleanup()
+        ctx.destroy()
