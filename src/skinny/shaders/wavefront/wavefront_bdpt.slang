@@ -31,6 +31,7 @@ import materials.flat.flat_shading;    // isCutoutTransparent
 import integrators.bdpt;  // BDPTVertex, randomWalk, sampleLightOrigin,
                           // connectT1, connectGeneric, misWeight, ConnectResult,
                           // bdptEnvNEE, splatLightWalk, BDPT_MAX_VERTS, BDPT_VK_*
+import wavefront.wf_display;  // wfWriteDisplay (tonemap → output image)
 
 struct WfBdptAux
 {
@@ -290,4 +291,5 @@ void wfBdptResolve(uint3 tid: SV_DispatchThreadID)
         accum = (prev * float(n) + sample) / float(n + 1u);
     }
     accumBuffer[pixel] = float4(accum, 1.0);
+    wfWriteDisplay(pixel, accum);   // tonemap → offscreen/swapchain output
 }

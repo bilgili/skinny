@@ -32,6 +32,7 @@ import scene_lights;      // NearestSphereHit, intersectSphereLights
 import lights.sphere_light;            // SphereLight
 import materials.flat.flat_shading;    // isCutoutTransparent
 import wavefront.wavefront_state;      // WavefrontPathState, PATH_FLAG_*
+import wavefront.wf_display;           // wfWriteDisplay (tonemap → output image)
 
 // Match integrators/path.slang::MAX_BOUNCES (the CPU loop dispatches this many
 // wfPathBounce passes; keep the two in lockstep).
@@ -219,4 +220,5 @@ void wfPathResolve(uint3 tid: SV_DispatchThreadID)
         accum = (prev * float(n) + sample) / float(n + 1u);
     }
     accumBuffer[pixel] = float4(accum, 1.0);
+    wfWriteDisplay(pixel, accum);   // tonemap → offscreen/swapchain output
 }
