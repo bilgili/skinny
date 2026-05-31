@@ -1061,6 +1061,10 @@ class Renderer:
         # constructed on first wavefront-mode dispatch. None until then / on
         # non-Vulkan backends.
         self._wavefront_env_pass = None
+        # Test/debug override: when set, the wavefront gate dispatches this pass
+        # instead of the env pass (used to verify intermediate stage kernels —
+        # e.g. primary visibility — against the live scene).
+        self._wavefront_debug_pass = None
 
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
@@ -1329,6 +1333,34 @@ class Renderer:
         if self._wavefront_env_pass is not None:
             self._wavefront_env_pass.destroy()
             self._wavefront_env_pass = None
+        if self._wavefront_debug_pass is not None:
+            self._wavefront_debug_pass.destroy()
+            self._wavefront_debug_pass = None
+
+    def build_wavefront_visibility_pass(self):
+        """Build the primary-visibility wavefront pass (intersect step): camera
+        ray → BVH traversal → hit mask in the accumulation image. Binds the
+        renderer's shared geometry/BVH/instance/material buffers at the binding
+        numbers traceScene reflects (0/2/5/6/7/12/13/16). Call after geometry is
+        loaded (the vertex/index/BVH buffers reallocate on scene reload)."""
+        from skinny.vk_wavefront import BoundComputePass
+        sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        specs = [
+            {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
+            {"binding": 2, "type": vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             "view": self.accum_image.view, "layout": vk.VK_IMAGE_LAYOUT_GENERAL},
+            {"binding": 5, "type": sb, "buffer": self.vertex_buffer.buffer, "range": self.vertex_buffer.size},
+            {"binding": 6, "type": sb, "buffer": self.index_buffer.buffer, "range": self.index_buffer.size},
+            {"binding": 7, "type": sb, "buffer": self.bvh_buffer.buffer, "range": self.bvh_buffer.size},
+            {"binding": 12, "type": sb, "buffer": self.instance_buffer.buffer, "range": self.instance_buffer.size},
+            {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
+            {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
+        ]
+        return BoundComputePass(
+            self.ctx, self.shader_dir, "wavefront/wavefront_visibility",
+            "wavefrontVisibility", specs, self.width, self.height,
+        )
 
     def read_accumulation(self) -> "np.ndarray":
         """Copy the linear-HDR accumulation image to host as an (H, W, 4)
@@ -6787,7 +6819,8 @@ class Renderer:
         # Execution-mode gate (Phase-1 env-only milestone): wavefront writes the
         # accumulation image via its own pass; megakernel is the default path.
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            self._ensure_wavefront_env_pass().record_dispatch(cmd)
+            pass_ = self._wavefront_debug_pass or self._ensure_wavefront_env_pass()
+            pass_.record_dispatch(cmd)
         else:
             vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
             vk.vkCmdBindDescriptorSets(

@@ -51,6 +51,18 @@
 > output write so windowed wavefront displays (accum-only today). Then the full
 > staged generate→intersect→logic→shade pipeline supersedes this env kernel.
 
+> INTERSECT VERIFIED (primary-ray, fused). `shaders/wavefront/wavefront_visibility.slang`
+> (`wavefrontVisibility`) generates the camera ray and traverses the shared BVH
+> via `traceScene`, writing a hit mask. `vk_wavefront.BoundComputePass` (general
+> spec-driven pass, reusable for every stage kernel) + `renderer.build_wavefront_
+> visibility_pass()` bind the geometry/BVH/instance/material buffers at the
+> reflected bindings (0/2/5/6/7/12/13/16). A/B-verified against the demo scene's
+> known geometry (`test_wavefront_render.py`): hits are centred on the spheres,
+> corners miss, hit fraction sane. Proves wavefront BVH traversal matches the
+> megakernel's hit/miss boundary. REMAINING for the staged pipeline: write hits
+> into the path-state + per-material queues (vs. the fused mask) and the
+> logic/shade stages.
+
 ## 5. Phase 1 — Wavefront path: stage kernels
 
 - [ ] 5.1 `wavefront/generate.slang`: seed camera rays for the current stream into the ray queue.

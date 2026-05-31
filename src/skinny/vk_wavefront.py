@@ -43,6 +43,118 @@ def _compile_spv(shader_dir: Path, module: str, entry: str) -> Path:
     return out
 
 
+class BoundComputePass:
+    """General single-dispatch compute pass over the framebuffer.
+
+    Compiles `shaders/<module>.slang::<entry>`, builds a descriptor set layout +
+    set from an explicit binding spec, and dispatches one thread per pixel. The
+    spec lets a wavefront stage kernel bind any mix of the renderer's shared
+    resources (UBO / storage image / combined sampler / storage buffer) at the
+    binding numbers slangc reflects for it.
+
+    Each spec entry is a dict with `binding`, `type` (a vk descriptor type), and
+    the matching resource fields:
+      - UNIFORM_BUFFER / STORAGE_BUFFER: `buffer` (VkBuffer), `range` (int)
+      - STORAGE_IMAGE: `view` (VkImageView), `layout` (VkImageLayout)
+      - COMBINED_IMAGE_SAMPLER: `sampler`, `view`, `layout`
+    """
+
+    def __init__(self, ctx, shader_dir: Path, module: str, entry: str,
+                 specs: list, width: int, height: int, group: int = 8):
+        self.ctx = ctx
+        self.width = int(width)
+        self.height = int(height)
+        self._group = group
+
+        spv = _compile_spv(shader_dir, module, entry)
+        code = spv.read_bytes()
+        self._module = vk.vkCreateShaderModule(
+            ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None
+        )
+
+        layout_bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=s["binding"], descriptorType=s["type"],
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            )
+            for s in specs
+        ]
+        self._set_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device,
+            vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=len(layout_bindings), pBindings=layout_bindings),
+            None,
+        )
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device,
+            vk.VkPipelineLayoutCreateInfo(setLayoutCount=1, pSetLayouts=[self._set_layout]),
+            None,
+        )
+        stage = vk.VkPipelineShaderStageCreateInfo(
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=self._module, pName="main")
+        self._pipeline = vk.vkCreateComputePipelines(
+            ctx.device, vk.VK_NULL_HANDLE, 1,
+            [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None,
+        )[0]
+
+        # Pool sized by counting each descriptor type.
+        type_counts: dict = {}
+        for s in specs:
+            type_counts[s["type"]] = type_counts.get(s["type"], 0) + 1
+        pool_sizes = [vk.VkDescriptorPoolSize(type=t, descriptorCount=c)
+                      for t, c in type_counts.items()]
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device,
+            vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=len(pool_sizes), pPoolSizes=pool_sizes),
+            None,
+        )
+        self._set = vk.vkAllocateDescriptorSets(
+            ctx.device,
+            vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1, pSetLayouts=[self._set_layout]),
+        )[0]
+
+        writes = []
+        for s in specs:
+            t = s["type"]
+            if t in (vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER):
+                info = vk.VkDescriptorBufferInfo(buffer=s["buffer"], offset=0, range=s["range"])
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=self._set, dstBinding=s["binding"], dstArrayElement=0,
+                    descriptorCount=1, descriptorType=t, pBufferInfo=[info]))
+            elif t == vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                info = vk.VkDescriptorImageInfo(imageView=s["view"], imageLayout=s["layout"])
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=self._set, dstBinding=s["binding"], dstArrayElement=0,
+                    descriptorCount=1, descriptorType=t, pImageInfo=[info]))
+            elif t == vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                info = vk.VkDescriptorImageInfo(
+                    sampler=s["sampler"], imageView=s["view"], imageLayout=s["layout"])
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=self._set, dstBinding=s["binding"], dstArrayElement=0,
+                    descriptorCount=1, descriptorType=t, pImageInfo=[info]))
+            else:
+                raise ValueError(f"unsupported descriptor type {t}")
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
+
+    def record_dispatch(self, cmd) -> None:
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 1, [self._set], 0, None)
+        gx = (self.width + self._group - 1) // self._group
+        gy = (self.height + self._group - 1) // self._group
+        vk.vkCmdDispatch(cmd, gx, gy, 1)
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        vk.vkDestroyPipeline(self.ctx.device, self._pipeline, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
+        vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
+
+
 class WavefrontEnvPass:
     """Env-only wavefront compute pass — the Phase-1 integration milestone.
 
