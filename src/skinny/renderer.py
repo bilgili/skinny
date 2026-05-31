@@ -99,6 +99,21 @@ _CHANNEL_SHIFT = {
 }
 
 
+def _instance_local_basis(transform: np.ndarray) -> np.ndarray:
+    """World-space directions of an instance's local X/Y/Z axes — the
+    normalized rows of the row-vector-convention transform's upper 3x3.
+    Used by the local-space transform gizmo. Falls back to the matching world
+    axis for any degenerate (zero-length) row."""
+    m = np.asarray(transform, dtype=np.float64)
+    basis = np.eye(3, dtype=np.float64)
+    for i in range(3):
+        row = m[i, :3]
+        n = float(np.linalg.norm(row))
+        if n > 1e-9:
+            basis[i] = row / n
+    return basis
+
+
 def _encode_channel_mask(channels: dict[str, str]) -> int:
     """Pack per-input channel selectors into the FlatMaterialParams uint.
 
@@ -2444,7 +2459,7 @@ class Renderer:
         # colour, float half-width). Repacked every frame from
         # ``self.gizmo`` when the user has selected an instance.
         from skinny.gizmo import (
-            GIZMO_SEGMENT_CAPACITY, GIZMO_SEGMENT_STRIDE, RotateGizmo,
+            GIZMO_SEGMENT_CAPACITY, GIZMO_SEGMENT_STRIDE, TransformGizmo,
         )
         self.gizmo_segment_capacity = GIZMO_SEGMENT_CAPACITY
         self.gizmo_segment_stride = GIZMO_SEGMENT_STRIDE
@@ -2455,7 +2470,7 @@ class Renderer:
         self.gizmo_segments_buffer.upload_sync(
             b"\x00" * (self.gizmo_segment_capacity * self.gizmo_segment_stride)
         )
-        self.gizmo = RotateGizmo()
+        self.gizmo = TransformGizmo()
         self._num_gizmo_segments: int = 0
         self.show_focus_overlay: bool = False
         self.lens_vignette_debug: bool = False
@@ -4793,7 +4808,14 @@ class Renderer:
         # convention transform). Good enough for now; mesh centroid would
         # be marginally nicer for off-origin geometry.
         pivot = np.array(inst.transform[3, :3], dtype=np.float32)
-        self.gizmo.set_target(instance_index, pivot)
+        self.gizmo.set_target(
+            instance_index, pivot, _instance_local_basis(inst.transform),
+        )
+
+    def gizmo_cycle_mode(self):
+        """Advance the gizmo to the next mode (space-key cycle). No-op while a
+        drag is in progress. Returns the new ``GizmoMode``."""
+        return self.gizmo.cycle_mode()
 
     def gizmo_hit_test(self, mouse_x: float, mouse_y: float) -> str | None:
         if not self.gizmo.has_target:
@@ -5082,16 +5104,19 @@ class Renderer:
         view = self.camera.view_matrix()
         proj = self.camera.projection_matrix(self.width / max(self.height, 1))
 
-        # Refresh pivot from the live instance transform so dragging
-        # follows the geometry.
-        if self.gizmo.has_target and self._usd_scene is not None:
+        # Refresh pivot (and the local basis) from the live instance transform
+        # so the idle gizmo follows the geometry. Skipped mid-drag — begin_drag
+        # froze both, and a live read would feed back into the manipulation.
+        if (
+            self.gizmo.has_target
+            and self._usd_scene is not None
+            and not self.gizmo.is_dragging
+        ):
             idx = self.gizmo.target_index
             if 0 <= idx < len(self._usd_scene.instances):
-                pivot = np.array(
-                    self._usd_scene.instances[idx].transform[3, :3],
-                    dtype=np.float32,
-                )
-                self.gizmo.pivot_world = pivot
+                xf = self._usd_scene.instances[idx].transform
+                self.gizmo.pivot_world = np.array(xf[3, :3], dtype=np.float32)
+                self.gizmo.target_basis = _instance_local_basis(xf)
 
         segs: list = []
         if self.gizmo.has_target:

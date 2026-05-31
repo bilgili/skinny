@@ -342,8 +342,12 @@ class RenderViewport(QWidget):
         elif key == Qt.Key_F:
             with self._render_lock:
                 self._camera.reset()
-        elif key == Qt.Key_F1 or key == Qt.Key_Space:
+        elif key == Qt.Key_F1:
             self.renderer.show_hud = not self.renderer.show_hud
+        elif key == Qt.Key_Space:
+            with self._render_lock:
+                mode = self.renderer.gizmo_cycle_mode()
+            print(f"[Gizmo mode: {mode.name}]")
         elif key == Qt.Key_L:
             with self._render_lock:
                 self.renderer.show_focus_overlay = not self.renderer.show_focus_overlay

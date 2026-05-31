@@ -79,6 +79,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### UI and interaction
 
+- Transform gizmo: the viewport manipulator now has four modes — rotate and
+  translate, each in world or local space — cycled with `Space`
+  (rotate-world → rotate-local → translate-world → translate-local). A `W`/`L`
+  glyph above the pivot hints the coordinate space; rings vs arrows hint the
+  type. The active mode persists in `~/.skinny/settings.json`. **`Space` no
+  longer toggles the HUD — use `F1`.** Rotation drag is now a true axis-angle
+  rotation about the (world or local) ring axis rather than a per-Euler-axis
+  add, so world-axis rotation behaves slightly differently (more correct)
 - Built-in animation transport (play/pause, normalized time scrubber, fps) in the
   shared control tree, shown only when the loaded stage has animation
 - USD-driven Scene Controls: a stage can declare its own control panel via
