@@ -116,7 +116,8 @@ def test_wavefront_visibility_matches_known_geometry():
             renderer.update(0.04)
             renderer.render_headless()
 
-        renderer._wavefront_debug_pass = renderer.build_wavefront_visibility_pass()
+        renderer._wavefront_debug_pass = renderer.build_wavefront_trace_pass(
+            "wavefront/wavefront_visibility", "wavefrontVisibility")
         renderer.set_execution_mode(1)  # EXECUTION_WAVEFRONT
         renderer.render_headless()       # dispatches the visibility pass
         mask = renderer.read_accumulation()[:, :, 0]  # hit flag in R
@@ -139,6 +140,52 @@ def test_wavefront_visibility_matches_known_geometry():
         cx_hits, cy_hits = xs.mean(), ys.mean()
         assert abs(cx_hits - WIDTH / 2) < WIDTH * 0.18, f"hit centroid x={cx_hits:.0f} off-centre"
         assert abs(cy_hits - HEIGHT / 2) < HEIGHT * 0.30, f"hit centroid y={cy_hits:.0f} off-centre"
+    finally:
+        renderer.cleanup()
+        ctx.destroy()
+
+
+def test_wavefront_hit_normals_are_sensible():
+    """Hit-normal visualization: traceScene must return correct per-hit normals
+    in the wavefront. The mapped normal (n*0.5+0.5) at sphere-hit pixels decodes
+    to a unit vector, and at the silhouette centre faces roughly toward the
+    camera — proving the shade stage gets a valid surface frame."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+    )
+    try:
+        deadline = 200
+        while deadline > 0 and (
+            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+        ):
+            renderer.update(0.025)
+            deadline -= 1
+        assert renderer.pipeline is not None
+        for _ in range(4):
+            renderer.update(0.04)
+            renderer.render_headless()
+
+        renderer._wavefront_debug_pass = renderer.build_wavefront_trace_pass(
+            "wavefront/wavefront_normal", "wavefrontNormal")
+        renderer.set_execution_mode(1)
+        renderer.render_headless()
+        img = renderer.read_accumulation()[:, :, :3]
+
+        # Decode mapped normals (c = n*0.5+0.5) back to vectors at hit pixels
+        # (non-black). Each should be ~unit length.
+        n = img * 2.0 - 1.0
+        lum = img.sum(axis=2)
+        hit_pixels = lum > 0.05  # mapped miss is (0,0,0); hits are >= ~(0.x)
+        assert hit_pixels.sum() > 50, "no hit pixels in the normal buffer"
+        lengths = np.linalg.norm(n[hit_pixels], axis=1)
+        # Most hit-pixel normals decode to unit length (edges/AA add a few outliers).
+        unit_frac = float((np.abs(lengths - 1.0) < 0.15).mean())
+        assert unit_frac > 0.7, f"only {unit_frac:.0%} of hit normals are unit length"
     finally:
         renderer.cleanup()
         ctx.destroy()

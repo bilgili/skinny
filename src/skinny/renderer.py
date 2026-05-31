@@ -1337,12 +1337,13 @@ class Renderer:
             self._wavefront_debug_pass.destroy()
             self._wavefront_debug_pass = None
 
-    def build_wavefront_visibility_pass(self):
-        """Build the primary-visibility wavefront pass (intersect step): camera
-        ray → BVH traversal → hit mask in the accumulation image. Binds the
+    def build_wavefront_trace_pass(self, module: str, entry: str):
+        """Build a wavefront pass whose kernel calls `traceScene`. Binds the
         renderer's shared geometry/BVH/instance/material buffers at the binding
-        numbers traceScene reflects (0/2/5/6/7/12/13/16). Call after geometry is
-        loaded (the vertex/index/BVH buffers reallocate on scene reload)."""
+        numbers traceScene reflects (0/2/5/6/7/12/13/16; 13/16 from the
+        alpha-cutout path). Used by the primary-visibility and hit-normal
+        kernels. Call after geometry is loaded — the vertex/index/BVH buffers
+        reallocate on scene reload, so rebuild the pass after a reload."""
         from skinny.vk_wavefront import BoundComputePass
         sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         specs = [
@@ -1358,8 +1359,7 @@ class Renderer:
             {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
         ]
         return BoundComputePass(
-            self.ctx, self.shader_dir, "wavefront/wavefront_visibility",
-            "wavefrontVisibility", specs, self.width, self.height,
+            self.ctx, self.shader_dir, module, entry, specs, self.width, self.height,
         )
 
     def read_accumulation(self) -> "np.ndarray":

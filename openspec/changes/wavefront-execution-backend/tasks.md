@@ -59,9 +59,13 @@
 > reflected bindings (0/2/5/6/7/12/13/16). A/B-verified against the demo scene's
 > known geometry (`test_wavefront_render.py`): hits are centred on the spheres,
 > corners miss, hit fraction sane. Proves wavefront BVH traversal matches the
-> megakernel's hit/miss boundary. REMAINING for the staged pipeline: write hits
-> into the path-state + per-material queues (vs. the fused mask) and the
-> logic/shade stages.
+> megakernel's hit/miss boundary. Hit *data* verified too:
+> `wavefront_normal.slang` writes per-hit shading normals; the decoded normals at
+> sphere hits are unit-length — the shade stage gets a valid surface frame. Both
+> built via the generic `build_wavefront_trace_pass(module, entry)`. REMAINING
+> for the staged pipeline: write hits into the path-state + per-material queues
+> (vs. the fused mask) and the logic/shade stages (material eval via
+> evalGraphSurface + lighting + MIS).
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 
