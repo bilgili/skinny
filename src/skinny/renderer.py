@@ -1453,17 +1453,36 @@ class Renderer:
             GRAPH_BINDING_BASE,
             emit_wavefront_shade_module,
         )
-        from skinny.vk_wavefront import BoundComputePass, ShadePassGroup
+        from skinny.vk_wavefront import (
+            BoundComputePass,
+            ShadePassGroup,
+            compile_shade_module_cached,
+            shared_shader_hash,
+        )
 
         sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         id_map = assign_graph_ids(self._scene_graph_fragments)
         wf_dir = self.shader_dir / "wavefront"
+        gen_dir = self.shader_dir / "generated"
+        shared_hash = shared_shader_hash(self.shader_dir)
         slots = [(idx, s.sampler, s.view) for idx, s in self.texture_pool.filled_slots()]
         passes = []
+        compiles: list[tuple[str, bool]] = []  # (graph_name, was_cached)
+        keys: dict[str, str] = {}
         for gf in self._scene_graph_fragments:
             name = gf.sanitized_name
             src = emit_wavefront_shade_module(gf, id_map[gf.target_name], GRAPH_BINDING_BASE)
             (wf_dir / f"shade_{name}.slang").write_text(src, encoding="utf-8")
+            # The module imports only this graph's generated module — fold its
+            # bytes into the cache key so each material caches independently.
+            graph_file = gen_dir / f"{name}_graph.slang"
+            dep = [graph_file.read_bytes()] if graph_file.exists() else []
+            spv, cached, key = compile_shade_module_cached(
+                self.shader_dir, f"wavefront/shade_{name}",
+                f"shadeSurface_{name}", dep, shared_hash,
+            )
+            compiles.append((name, cached))
+            keys[name] = key
             specs = [
                 {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                  "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
@@ -1487,8 +1506,17 @@ class Renderer:
             passes.append(BoundComputePass(
                 self.ctx, self.shader_dir, f"wavefront/shade_{name}",
                 f"shadeSurface_{name}", specs, self.width, self.height,
+                spv_path=spv,
             ))
-        return ShadePassGroup(self.ctx, passes)
+        group = ShadePassGroup(self.ctx, passes)
+        # Compile-win bookkeeping: which materials hit the SPIR-V cache (compiled
+        # nothing) vs missed (compiled one kernel). Adding a material misses only
+        # its own key; resident materials are cache hits.
+        from skinny.vk_wavefront import _SHADE_CACHE_DIRNAME, _build_dir
+        group.shade_compiles = compiles
+        group.shade_keys = keys
+        group.cache_dir = _build_dir() / _SHADE_CACHE_DIRNAME
+        return group
 
     def read_accumulation(self) -> "np.ndarray":
         """Copy the linear-HDR accumulation image to host as an (H, W, 4)

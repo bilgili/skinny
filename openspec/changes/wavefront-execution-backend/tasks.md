@@ -109,7 +109,7 @@
 - [~] 6.1 `vk_wavefront.py WavefrontPasses` created (owns the stage buffers; verified on a real device). REMAINING: own the stage compute pipelines + the bounce-loop `dispatch()` (intersect → logic → shade ×N until queues drain or max depth), modeled on `SkinningPasses.dispatch()`.
 - [ ] 6.2 Implement stream refill / compaction of terminated lanes to keep occupancy high; advance through all pixels/samples for the frame. (Compaction primitive DONE + GPU-verified: `shaders/wavefront/compaction.slang` `compactAlive`, `test_wavefront_compaction.py` — remaining is calling it from the bounce loop in `WavefrontPasses`.)
 - [ ] 6.3 Wire the renderer per-frame path to dispatch wavefront vs the megakernel `vkCmdDispatch` based on the execution mode.
-- [ ] 6.4 Make adding a new material in wavefront compile only its shade/eval pipeline and register it (no megakernel rebuild); reuse existing materials' pipelines.
+- [~] 6.4 Per-material shade compile-win DONE + GPU-verified: `build_wavefront_shade_passes` compiles each graph's `shadeSurface_<name>` via `vk_wavefront.compile_shade_module_cached` — a per-module content-hash SPIR-V cache keyed by (this module's source + its one generated-graph dep + the shared shader tree), so adding a material misses only its own key and resident materials are cache hits (`test_wavefront_shade_cache::test_shade_pipelines_cache_per_material`: rebuild compiles nothing; evicting one module recompiles exactly that one). REMAINING: skip the *megakernel* pipeline rebuild on a wavefront-mode add — the megakernel is still maintained as the shared graph-binding/param source + the bdpt fallback, so a wavefront add currently still re-emits it. Decoupling that is part of the wavefront-supersedes-megakernel work (gated on 6.3 + the bdpt fallback removal, 8.3).
 
 ## 7. Phase 2 — Geometry suballocator (mode-independent)
 
@@ -163,11 +163,15 @@ Resume steps:
    hit pixels within 5e-3). Each shade pass OVERWRITES its material's hits, so the
    match measures the staged pipelines, not fused leftovers. Proves the
    per-material pipelines render correctly AND are separate compilation units.
-3. [ ] **Compile-win check** (NEXT): each `shade_<name>.slang` imports only its
-   graph → adding a graph compiles one module; the others' SPIR-V is a cache hit.
-   Needs a content-hash cache on `BoundComputePass._compile_spv` (today it always
-   re-runs slangc) + an assert. This is the spec scenario "reusing a material
-   compiles nothing" (task 6.4 / test 9.5).
+3. [x] **Compile-win check** DONE — `vk_wavefront.compile_shade_module_cached`
+   gives each `shade_<name>.slang` a per-module content-hash SPIR-V cache (key =
+   module source + its one generated-graph dep + the shared shader tree, via
+   `shared_shader_hash`). Adding a graph misses only its own key; resident graphs
+   are cache hits. `build_wavefront_shade_passes` records `shade_compiles`
+   (per-material hit/miss) + `shade_keys`; `test_wavefront_shade_cache` asserts
+   rebuild compiles nothing and evicting one module recompiles exactly that one
+   (task 6.4 / test 9.5). NOTE: still maintains the megakernel pipeline (6.4
+   remaining note).
 4. [ ] **Queue-sorted dispatch**: feed intersect hits into the per-material queues
    (build_args + scatter, all GPU-verified), dispatch each shade pass over its
    queue slice via `vkCmdDispatchIndirect` — the real staged perf path.
@@ -200,6 +204,6 @@ Carry-over facts (avoid re-investigating):
 - [ ] 9.2 Headless A/B parity: megakernel vs wavefront for `bdpt` (after Phase 3).
 - [ ] 9.3 Indirect-dispatch correctness: indirect vs conservative direct-dispatch fallback produce equivalent images.
 - [x] 9.4 Suballocator unit tests: `test_slab_allocator.py` (11, GPU-free) — stable offsets across unrelated add/remove, free-list best-fit reuse, append-only growth preserves offsets, compaction packs + reports moves. `test_suballocator_gpu.py` (3, GPU) — remove keeps survivor offsets + re-uploads nothing; add keeps resident offsets stable; compaction leaves rendered output within the re-render noise floor.
-- [~] 9.5 Incremental-add — GEOMETRY half DONE: `test_suballocator_gpu` proves an add re-uploads only the new slab (resident offsets stable, survivors not re-written) and a remove frees without re-uploading survivors. REMAINING (wavefront material half): assert adding a model with a *new material* compiles exactly one shade pipeline and reusing materials compiles none — needs the §7c step-3 shade-pipeline compile cache (task 6.4).
+- [x] 9.5 Incremental-add — both halves verified. GEOMETRY: `test_suballocator_gpu` proves an add re-uploads only the new slab (resident offsets stable, survivors not re-written) and a remove frees without re-uploading survivors. MATERIAL: `test_wavefront_shade_cache` proves rebuilding the same material set compiles nothing and a previously-unseen material (simulated by evicting its cache entry — the deterministic equivalent of a new graph, free of the megakernel-rebuild noise) compiles exactly one shade pipeline while resident materials stay cache hits.
 - [ ] 9.6 Front-end parity test: each render-surface front-end reaches the execution-mode toggle; Metal pins to megakernel.
 - [ ] 9.7 Run `.venv/bin/ruff check src/` and `.venv/bin/pytest`; recompile any changed SPIR-V with `slangc`; confirm `main_pass.slang` (megakernel) output is unchanged.

@@ -14,6 +14,7 @@ wired to the renderer's shared scene bindings.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +25,13 @@ from skinny.vk_compute import StorageBuffer
 from skinny.wavefront_layout import queue_buffer_sizes
 
 
+def _slang_flags(shader_dir: Path, entry: str) -> tuple[str, ...]:
+    return (
+        "-target", "spirv", "-entry", entry, "-stage", "compute",
+        "-I", str(shader_dir), "-fvk-use-scalar-layout",
+    )
+
+
 def _compile_spv(shader_dir: Path, module: str, entry: str) -> Path:
     """Compile shaders/<module>.slang → .spv (scalar layout). Mirrors
     vk_skinning._compile so the wavefront stage kernels build the same way."""
@@ -32,15 +40,93 @@ def _compile_spv(shader_dir: Path, module: str, entry: str) -> Path:
     slangc = shutil.which("slangc")
     if slangc is None:
         raise RuntimeError("slangc not found on PATH — install the Slang compiler")
-    cmd = [
-        slangc, str(src), "-target", "spirv", "-entry", entry,
-        "-stage", "compute", "-I", str(shader_dir),
-        "-fvk-use-scalar-layout", "-o", str(out),
-    ]
+    cmd = [slangc, str(src), *_slang_flags(shader_dir, entry), "-o", str(out)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Slang compilation failed ({module}):\n{result.stderr}")
     return out
+
+
+_SHADE_CACHE_DIRNAME = "spv_cache"
+
+
+def _build_dir() -> Path:
+    """Where the SPIR-V cache lives (shared with vk_compute.ComputePipeline)."""
+    return Path(__file__).resolve().parents[2] / "build"
+
+
+def shared_shader_hash(shader_dir: Path) -> bytes:
+    """Content hash of the *stable* shader tree — every `.slang` under
+    shader_dir EXCEPT the per-scene `generated/` modules and the per-graph
+    `wavefront/shade_*` modules. Folded into each per-material cache key so a
+    renderer-code change invalidates the cache, while adding/removing a graph
+    (which only touches the excluded files) does not."""
+    h = hashlib.blake2b(digest_size=16)
+    for path in sorted(shader_dir.rglob("*.slang")):
+        rel = path.relative_to(shader_dir)
+        if rel.parts and rel.parts[0] == "generated":
+            continue
+        if (len(rel.parts) >= 2 and rel.parts[0] == "wavefront"
+                and rel.name.startswith("shade_")):
+            continue
+        h.update(str(rel).encode("utf-8"))
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    return h.digest()
+
+
+def compile_shade_module_cached(
+    shader_dir: Path, module: str, entry: str,
+    dep_sources: list[bytes], shared_hash: bytes,
+) -> tuple[Path, bool, str]:
+    """Compile a per-material shade module with a content-hash SPIR-V cache —
+    the per-material-pipeline compile-win. Returns (spv_path, was_cached, key).
+
+    The key hashes the entry + flags + this module's own source + its generated
+    graph dependency(ies) + the shared shader tree. Because it excludes every
+    *other* graph's source, adding a new material misses only that material's
+    key: resident materials' SPIR-V is copied from cache and slangc is not run
+    for them. Mirrors `ComputePipeline._compile_slang`'s on-disk LRU cache but
+    at per-module (not whole-kernel) granularity."""
+    src = shader_dir / f"{module}.slang"
+    out = shader_dir / f"{module}.spv"
+    slangc = shutil.which("slangc")
+    if slangc is None:
+        raise RuntimeError("slangc not found on PATH — install the Slang compiler")
+    flags = _slang_flags(shader_dir, entry)
+
+    h = hashlib.blake2b(digest_size=16)
+    h.update(entry.encode("utf-8"))
+    h.update(b"\0")
+    for f in flags:
+        h.update(f.encode("utf-8"))
+        h.update(b"\0")
+    h.update(src.read_bytes())
+    h.update(b"\0")
+    for dep in dep_sources:
+        h.update(dep)
+        h.update(b"\0")
+    h.update(shared_hash)
+    key = h.hexdigest()
+
+    cache_dir = _build_dir() / _SHADE_CACHE_DIRNAME
+    cached = cache_dir / f"{key}.spv"
+    if cached.exists():
+        shutil.copyfile(cached, out)
+        try:
+            cached.touch()  # LRU bump
+        except OSError:
+            pass
+        return out, True, key
+
+    cmd = [slangc, str(src), *flags, "-o", str(out)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Slang compilation failed ({module}):\n{result.stderr}")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(out, cache_dir / f"{key}.spv")
+    return out, False, key
 
 
 class BoundComputePass:
@@ -60,13 +146,17 @@ class BoundComputePass:
     """
 
     def __init__(self, ctx, shader_dir: Path, module: str, entry: str,
-                 specs: list, width: int, height: int, group: int = 8):
+                 specs: list, width: int, height: int, group: int = 8,
+                 spv_path: "Path | None" = None):
         self.ctx = ctx
         self.width = int(width)
         self.height = int(height)
         self._group = group
 
-        spv = _compile_spv(shader_dir, module, entry)
+        # Reuse a caller-supplied (cached) SPIR-V when given — the shade-module
+        # compile-win path compiles via compile_shade_module_cached and passes
+        # the result here, so resident materials skip slangc entirely.
+        spv = spv_path if spv_path is not None else _compile_spv(shader_dir, module, entry)
         code = spv.read_bytes()
         self._module = vk.vkCreateShaderModule(
             ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None
