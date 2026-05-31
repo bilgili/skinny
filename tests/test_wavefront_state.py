@@ -14,9 +14,11 @@ from pathlib import Path
 
 from skinny.wavefront_layout import (
     FIELDS,
+    INDIRECT_ARGS_STRIDE,
     PATH_STATE_STRIDE,
     SLANG_SCALAR_SIZES,
     path_state_size,
+    queue_buffer_sizes,
 )
 
 _STATE_SLANG = (
@@ -68,3 +70,37 @@ def test_slang_struct_size_sums_to_stride():
     slang_fields = _parse_struct_fields(src, "WavefrontPathState")
     total = sum(SLANG_SCALAR_SIZES[t] for t, _ in slang_fields)
     assert total == PATH_STATE_STRIDE
+
+
+# ── queue buffer sizing (P1 §P1-B / §P1-C) ─────────────────────────
+
+
+def test_path_state_buffer_scales_with_stream_size():
+    s = queue_buffer_sizes(stream_size=1024, num_materials=4)
+    assert s["path_state"] == 1024 * PATH_STATE_STRIDE
+    assert s["ray_queue"] == 1024 * 4
+    assert s["material_queue"] == 1024 * 4
+
+
+def test_per_material_buffers_scale_with_material_count():
+    s = queue_buffer_sizes(stream_size=512, num_materials=7)
+    assert s["material_count"] == 7 * 4
+    assert s["material_offset"] == 7 * 4
+    assert s["indirect_args"] == 7 * INDIRECT_ARGS_STRIDE
+
+
+def test_indirect_args_stride_is_three_uints():
+    assert INDIRECT_ARGS_STRIDE == 12
+
+
+def test_ray_count_is_single_uint():
+    s = queue_buffer_sizes(stream_size=256, num_materials=2)
+    assert s["ray_count"] == 4
+
+
+def test_zero_materials_yields_empty_per_material_buffers():
+    s = queue_buffer_sizes(stream_size=256, num_materials=0)
+    assert s["material_count"] == 0
+    assert s["indirect_args"] == 0
+    # the stream-sized buffers are independent of material count
+    assert s["path_state"] == 256 * PATH_STATE_STRIDE

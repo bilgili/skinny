@@ -48,3 +48,30 @@ PATH_STATE_STRIDE = path_state_size()  # 68 B
 # `flags` bit positions (mirror the static consts in wavefront_state.slang).
 PATH_FLAG_ALIVE = 1 << 0     # lane still bouncing
 PATH_FLAG_SPECULAR = 1 << 1  # last bounce was specular → skip NEE-MIS
+
+
+# ── Queue / dispatch buffer sizing (P1 §P1-B, §P1-C) ───────────────
+
+_UINT = 4
+# One VkDispatchIndirectCommand per material: (x, y, z) group counts.
+INDIRECT_ARGS_STRIDE = 3 * _UINT  # 12 B
+
+
+def queue_buffer_sizes(stream_size: int, num_materials: int) -> dict[str, int]:
+    """Byte sizes for the wavefront stage buffers, the single source of truth
+    the `WavefrontPasses` allocator (vk_wavefront.py) sizes against.
+
+    Stream-sized buffers scale with the lane count; per-material buffers scale
+    with the active material count. The hit buffer is intentionally absent —
+    its stride follows `HitData` (common.slang) and is pinned alongside the
+    intersect stage that produces it.
+    """
+    return {
+        "path_state":      stream_size * PATH_STATE_STRIDE,
+        "ray_queue":       stream_size * _UINT,
+        "material_queue":  stream_size * _UINT,
+        "ray_count":       _UINT,
+        "material_count":  num_materials * _UINT,
+        "material_offset": num_materials * _UINT,
+        "indirect_args":   num_materials * INDIRECT_ARGS_STRIDE,
+    }

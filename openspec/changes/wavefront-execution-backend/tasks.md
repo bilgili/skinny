@@ -31,7 +31,7 @@
 > counting sort), §P1-C (indirect args). Implement on GPU with live iteration.
 
 - [x] 4.1 Added `WavefrontPathState` (`shaders/wavefront/wavefront_state.slang`, 68 B scalar layout per §P1-A) + the GPU-free Python mirror `wavefront_layout.py`. `test_wavefront_state.py` derives the stride from the Slang struct fields and cross-checks the Python layout (field order + size); struct compiles clean under slangpy. Buffer is sized `stream_size * PATH_STATE_STRIDE` by the allocator (4.2).
-- [ ] 4.2 Define the ray queue + counter, hit buffer, and per-material counting-sort buffers (`materialCount`/`materialOffset`/`materialQueue`) per §P1-B.
+- [~] 4.2 Sizing math done (GPU-free): `wavefront_layout.queue_buffer_sizes(stream_size, num_materials)` is the single source of truth for path_state/ray_queue/material_queue/ray_count/material_count/material_offset/indirect_args byte sizes (`test_wavefront_state.py`). REMAINING: allocate them as Vulkan StorageBuffers in `vk_wavefront.py WavefrontPasses`, and pin the hit buffer (HitData stride) alongside the intersect stage — needs the live GPU dispatch loop.
 - [ ] 4.3 Add the build-indirect-args kernel (prefix-sum counts → offsets + per-material dispatch dims) per §P1-C; land the direct-dispatch fallback (3.3) first.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
