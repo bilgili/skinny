@@ -39,23 +39,36 @@ struct WfBdptAux
     int    lightLen;
     uint   rngState;     // rng cursor after the walk + splat (resumed in connect)
     float  lensWeight;   // realistic-camera weight applied to the eye-side L
+    uint   pixel;        // global pixel lane for this slot (SENTINEL = out-of-frame)
     float3 escaped;      // escaped env/emissive radiance gathered during the walk
     float3 radiance;     // final eye-side L (written by connect, read by resolve)
 };
+
+// Tiled streaming: the eye/light/aux buffers hold a fixed-size stream (slot
+// index = tid.x), not one entry per pixel. The CPU loops `streamBase` over the
+// frame; slot i maps to pixel `streamBase + i`, and connect/resolve recover the
+// pixel from the stored `aux.pixel`. Out-of-frame tail slots are flagged dead.
+static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
+struct WfTilePC { uint streamBase; };
+[[vk::push_constant]] ConstantBuffer<WfTilePC> wfTile;
 
 [[vk::binding(0, 1)]] RWStructuredBuffer<BDPTVertex> wfEye;     // stream × BDPT_MAX_VERTS
 [[vk::binding(1, 1)]] RWStructuredBuffer<BDPTVertex> wfLight;   // stream × BDPT_MAX_VERTS
 [[vk::binding(2, 1)]] RWStructuredBuffer<WfBdptAux>  wfAux;     // stream
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
 {
-    uint2 pixel = tid.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
+    uint slot = tid.x;                          // stream slot
+    uint base = slot * BDPT_MAX_VERTS;
+    uint lane = wfTile.streamBase + slot;        // global pixel lane
+    if (lane >= fc.width * fc.height)
+    {
+        wfAux[slot].pixel = WF_PIXEL_SENTINEL;   // out-of-frame tail → skip later
         return;
-    uint lane = pixel.y * fc.width + pixel.x;
-    uint base = lane * BDPT_MAX_VERTS;
+    }
+    uint2 pixel = uint2(lane % fc.width, lane / fc.width);
 
     RNG rng = createRNG(pixel, fc.frameIndex);
     PinholeCamera cam;
@@ -66,6 +79,7 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     aux.eyeLen = 0;
     aux.lightLen = 0;
     aux.lensWeight = lensWeight;
+    aux.pixel = lane;
     aux.escaped = float3(0.0);
     aux.radiance = float3(0.0);
 
@@ -100,7 +114,7 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
         aux.escaped = sceneEnvRadiance(r.direction, fc.envIntensity,
                                        effectiveFurnaceMode(firstHit.materialId));
         aux.rngState = rng.state;
-        wfAux[lane] = aux;
+        wfAux[slot] = aux;
         return;
     }
     if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
@@ -108,7 +122,7 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
         // Non-flat first hit — bdpt bails to black here (the megakernel path
         // tracer covers skin/python). Matches estimateRadiance.
         aux.rngState = rng.state;
-        wfAux[lane] = aux;
+        wfAux[slot] = aux;
         return;
     }
 
@@ -197,20 +211,18 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     aux.lightLen = lightLen;
     aux.escaped = escapedRadiance;
     aux.rngState = rng.state;   // connect resumes from here
-    wfAux[lane] = aux;
+    wfAux[slot] = aux;
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfBdptConnect(uint3 tid: SV_DispatchThreadID)
 {
-    uint2 pixel = tid.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
+    uint slot = tid.x;
+    WfBdptAux aux = wfAux[slot];
+    if (aux.pixel == WF_PIXEL_SENTINEL)         // out-of-frame tail slot
         return;
-    uint lane = pixel.y * fc.width + pixel.x;
-    uint base = lane * BDPT_MAX_VERTS;
-
-    WfBdptAux aux = wfAux[lane];
+    uint base = slot * BDPT_MAX_VERTS;
     int eyeLen = aux.eyeLen;
     int lightLen = aux.lightLen;
 
@@ -258,19 +270,20 @@ void wfBdptConnect(uint3 tid: SV_DispatchThreadID)
     }
 
     aux.radiance = L * aux.lensWeight;
-    wfAux[lane] = aux;
+    wfAux[slot] = aux;
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfBdptResolve(uint3 tid: SV_DispatchThreadID)
 {
-    uint2 pixel = tid.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
+    uint slot = tid.x;
+    uint px = wfAux[slot].pixel;
+    if (px == WF_PIXEL_SENTINEL)                // out-of-frame tail slot
         return;
-    uint lane = pixel.y * fc.width + pixel.x;
+    uint2 pixel = uint2(px % fc.width, px / fc.width);
 
-    float3 sample = wfAux[lane].radiance;
+    float3 sample = wfAux[slot].radiance;
     bool3 bad = isnan(sample) | isinf(sample);
     sample = select(bad, float3(0.0), sample);
     sample = max(sample, float3(0.0));

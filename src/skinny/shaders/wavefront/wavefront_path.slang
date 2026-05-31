@@ -38,7 +38,21 @@ import wavefront.wf_display;           // wfWriteDisplay (tonemap → output ima
 // wfPathBounce passes; keep the two in lockstep).
 static const uint WF_MAX_BOUNCES = 6u;
 
+// Tiled streaming (§P1-E): the path-state buffer holds a fixed-size stream, not
+// one slot per pixel. The CPU loops `streamBase` over the frame in stream-size
+// tiles; lane `i` (the slot) maps to pixel `streamBase + i`. Slots whose global
+// lane falls past the frame are marked dead with a sentinel pixelIndex so the
+// bounce/resolve passes skip them without needing the base. Only generate reads
+// the base (the per-tile push constant); bounce/resolve work by slot + the
+// stored pixelIndex.
+static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
+
+struct WfTilePC { uint streamBase; };
+[[vk::push_constant]] ConstantBuffer<WfTilePC> wfTile;
+
 [[vk::binding(0, 1)]] RWStructuredBuffer<WavefrontPathState> wfState;
+
+uint2 wfDecodePixel(uint lane) { return uint2(lane % fc.width, lane / fc.width); }
 
 // Write the lane's accumulated radiance + clear ALIVE; persist the rng cursor.
 void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
@@ -50,13 +64,19 @@ void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
 {
-    uint2 pixel = tid.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
+    uint i = tid.x;                            // slot in the fixed-size stream
+    uint lane = wfTile.streamBase + i;          // global pixel lane this tile
+    if (lane >= fc.width * fc.height)
+    {
+        // Out-of-frame slot (last tile tail): mark dead so resolve skips it.
+        wfState[i].pixelIndex = WF_PIXEL_SENTINEL;
+        wfState[i].flags = 0u;
         return;
-    uint i = pixel.y * fc.width + pixel.x;
+    }
+    uint2 pixel = wfDecodePixel(lane);
 
     RNG rng = createRNG(pixel, fc.frameIndex);
     PinholeCamera cam;
@@ -71,7 +91,7 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
     // lensWeight` (1.0 for pinhole).
     s.throughput = float3(lensWeight);
     s.radiance   = float3(0.0);
-    s.pixelIndex = i;
+    s.pixelIndex = lane;
     s.rngState   = rng.state;
     s.depth      = 0u;
     s.flags      = PATH_FLAG_ALIVE;
@@ -80,16 +100,12 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfPathBounce(uint3 tid: SV_DispatchThreadID)
 {
-    uint2 pixel = tid.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
-        return;
-    uint i = pixel.y * fc.width + pixel.x;
-
+    uint i = tid.x;                            // stream slot
     WavefrontPathState s = wfState[i];
-    if (!pathAlive(s))
+    if (!pathAlive(s))                          // dead / out-of-frame slots skip
         return;
 
     RNG rng; rng.state = s.rngState;
@@ -195,13 +211,14 @@ void wfPathBounce(uint3 tid: SV_DispatchThreadID)
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfPathResolve(uint3 tid: SV_DispatchThreadID)
 {
-    uint2 pixel = tid.xy;
-    if (pixel.x >= fc.width || pixel.y >= fc.height)
+    uint i = tid.x;                            // stream slot
+    uint pixelIndex = wfState[i].pixelIndex;
+    if (pixelIndex == WF_PIXEL_SENTINEL)        // out-of-frame slot
         return;
-    uint i = pixel.y * fc.width + pixel.x;
+    uint2 pixel = wfDecodePixel(pixelIndex);
 
     float3 sample = wfState[i].radiance;
     // Same sanitisation as main_pass.slang: kill NaN/Inf, clamp negatives.

@@ -476,14 +476,16 @@ class WavefrontPathPass:
     frame command buffer in place of the megakernel dispatch.
     """
 
-    _GROUP = 8  # matches [numthreads(8, 8, 1)] in wavefront_path.slang
+    _GROUP = 64  # matches [numthreads(64, 1, 1)] in wavefront_path.slang
     MAX_BOUNCES = 6  # lockstep with WF_MAX_BOUNCES in the shader
+    STREAM_CAP = 1 << 20  # max lanes per stream — bounds path-state VRAM (~68 MB)
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
-                 state_buffer, state_range: int, width: int, height: int) -> None:
+                 state_buffer, state_range: int, stream_size: int,
+                 num_pixels: int) -> None:
         self.ctx = ctx
-        self.width = int(width)
-        self.height = int(height)
+        self.stream_size = int(stream_size)   # slots in the path-state buffer
+        self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
 
         modules = {}
         for entry, out_name in (
@@ -505,10 +507,14 @@ class WavefrontPathPass:
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
                 bindingCount=1, pBindings=[state_binding]), None)
 
-        # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state].
+        # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state] +
+        # a 4-byte push constant (the per-tile stream base, read by generate).
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
         self._pipe_layout = vk.vkCreatePipelineLayout(
             ctx.device, vk.VkPipelineLayoutCreateInfo(
-                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._state_layout]), None)
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._state_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
 
         self._pipelines = {}
         for entry, mod in modules.items():
@@ -539,13 +545,23 @@ class WavefrontPathPass:
             0, 2, [scene_set, self._state_set], 0, None)
 
     def _dispatch(self, cmd) -> None:
-        gx = (self.width + self._GROUP - 1) // self._GROUP
-        gy = (self.height + self._GROUP - 1) // self._GROUP
-        vk.vkCmdDispatch(cmd, gx, gy, 1)
+        groups = (self.stream_size + self._GROUP - 1) // self._GROUP
+        vk.vkCmdDispatch(cmd, groups, 1, 1)
+
+    def _push_base(self, cmd, stream_base) -> None:
+        import struct
+
+        import cffi
+        buf = cffi.FFI().new("char[]", struct.pack("I", int(stream_base)))
+        vk.vkCmdPushConstants(
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
 
     def record_dispatch(self, cmd, scene_set) -> None:
-        """Record generate → bounce ×MAX → resolve. `scene_set` is the
-        renderer's per-frame megakernel descriptor set (set 0)."""
+        """Record the tiled bounce loop. The frame's pixels are processed in
+        fixed-size streams (`stream_size` slots); for each tile, push its
+        `streamBase` then generate → bounce ×MAX → resolve. `scene_set` is the
+        renderer's per-frame megakernel descriptor set (set 0). Path-state VRAM
+        is bounded by `stream_size`, not the pixel count."""
         barrier = vk.VkMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
             dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
@@ -555,15 +571,23 @@ class WavefrontPathPass:
                 cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [barrier], 0, None, 0, None)
 
-        self._bind(cmd, "wfPathGenerate", scene_set)
-        self._dispatch(cmd)
-        for _ in range(self.MAX_BOUNCES):
-            mem_barrier()
-            self._bind(cmd, "wfPathBounce", scene_set)
+        stream_base = 0
+        first = True
+        while stream_base < self.num_pixels:
+            if not first:
+                mem_barrier()  # previous tile's resolve before this tile reuses wfState
+            first = False
+            self._push_base(cmd, stream_base)
+            self._bind(cmd, "wfPathGenerate", scene_set)
             self._dispatch(cmd)
-        mem_barrier()
-        self._bind(cmd, "wfPathResolve", scene_set)
-        self._dispatch(cmd)
+            for _ in range(self.MAX_BOUNCES):
+                mem_barrier()
+                self._bind(cmd, "wfPathBounce", scene_set)
+                self._dispatch(cmd)
+            mem_barrier()
+            self._bind(cmd, "wfPathResolve", scene_set)
+            self._dispatch(cmd)
+            stream_base += self.stream_size
 
     def destroy(self) -> None:
         vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
@@ -683,17 +707,20 @@ class WavefrontBdptPass:
     integrators/bdpt.slang, so the accumulated image matches the megakernel
     bdpt. Matches its scope: flat first-hit, pinhole camera."""
 
-    _GROUP = 8
+    _GROUP = 64           # matches [numthreads(64, 1, 1)] in wavefront_bdpt.slang
     BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # ≥ sizeof(BDPTVertex) (≈120 B scalar) — headroom
-    AUX_STRIDE = 64       # ≥ sizeof(WfBdptAux) (≈40 B scalar)
+    AUX_STRIDE = 64       # ≥ sizeof(WfBdptAux) (≈44 B scalar)
+    # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices
+    # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
+    STREAM_CAP = 1 << 18
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
-                 width: int, height: int) -> None:
+                 stream_size: int, num_pixels: int) -> None:
         self.ctx = ctx
-        self.width = int(width)
-        self.height = int(height)
+        self.stream_size = int(stream_size)
+        self.num_pixels = int(num_pixels)
 
         modules = {}
         for entry, out_name in (
@@ -717,9 +744,12 @@ class WavefrontBdptPass:
         self._set_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
                 bindingCount=3, pBindings=bindings), None)
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)  # streamBase
         self._pipe_layout = vk.vkCreatePipelineLayout(
             ctx.device, vk.VkPipelineLayoutCreateInfo(
-                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout]), None)
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
 
         self._pipelines = {}
         for entry, mod in modules.items():
@@ -752,11 +782,21 @@ class WavefrontBdptPass:
         vk.vkCmdBindDescriptorSets(
             cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
             0, 2, [scene_set, self._set], 0, None)
-        gx = (self.width + self._GROUP - 1) // self._GROUP
-        gy = (self.height + self._GROUP - 1) // self._GROUP
-        vk.vkCmdDispatch(cmd, gx, gy, 1)
+        groups = (self.stream_size + self._GROUP - 1) // self._GROUP
+        vk.vkCmdDispatch(cmd, groups, 1, 1)
+
+    def _push_base(self, cmd, stream_base) -> None:
+        import struct
+
+        import cffi
+        buf = cffi.FFI().new("char[]", struct.pack("I", int(stream_base)))
+        vk.vkCmdPushConstants(
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
 
     def record_dispatch(self, cmd, scene_set) -> None:
+        """Tiled walk → connect → resolve. The frame's pixels are processed in
+        fixed-size streams; the eye/light/aux subpath buffers are bounded by
+        `stream_size`, not the pixel count."""
         barrier = vk.VkMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
             dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
@@ -766,11 +806,19 @@ class WavefrontBdptPass:
                 cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [barrier], 0, None, 0, None)
 
-        self._stage(cmd, "wfBdptWalk", scene_set)
-        mem_barrier()
-        self._stage(cmd, "wfBdptConnect", scene_set)
-        mem_barrier()
-        self._stage(cmd, "wfBdptResolve", scene_set)
+        stream_base = 0
+        first = True
+        while stream_base < self.num_pixels:
+            if not first:
+                mem_barrier()  # prior tile's resolve before this tile reuses the buffers
+            first = False
+            self._push_base(cmd, stream_base)
+            self._stage(cmd, "wfBdptWalk", scene_set)
+            mem_barrier()
+            self._stage(cmd, "wfBdptConnect", scene_set)
+            mem_barrier()
+            self._stage(cmd, "wfBdptResolve", scene_set)
+            stream_base += self.stream_size
 
     def destroy(self) -> None:
         vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)

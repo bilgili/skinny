@@ -1378,12 +1378,18 @@ class Renderer:
         self._destroy_wavefront_path_pass()
         from skinny.vk_wavefront import WavefrontPathPass
         from skinny.wavefront_layout import PATH_STATE_STRIDE
-        n = self.width * self.height
-        self._wf_path_state_buf = StorageBuffer(self.ctx, n * PATH_STATE_STRIDE)
+        # Tiled streaming: the path-state buffer holds a fixed-size stream
+        # (capped at STREAM_CAP), not one slot per pixel — so VRAM does not grow
+        # with resolution. The frame is processed in ceil(num_pixels/stream)
+        # tiles. Allow a renderer override (`_wf_stream_cap`) for tests.
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wf_path_state_buf = StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
         self._wavefront_path_pass = WavefrontPathPass(
             self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
             self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
-            self.width, self.height,
+            stream_size, num_pixels,
         )
         self._wf_path_pass_dims = (self.width, self.height)
         return self._wavefront_path_pass
@@ -1410,9 +1416,15 @@ class Renderer:
             return self._wavefront_bdpt_pass
         self._destroy_wavefront_bdpt_pass()
         from skinny.vk_wavefront import WavefrontBdptPass
-        n = self.width * self.height
-        vert_bytes = n * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
-        aux_bytes = n * WavefrontBdptPass.AUX_STRIDE
+        # Tiled streaming: subpath-vertex + aux buffers hold a fixed-size stream
+        # (capped), not one entry per pixel, so VRAM doesn't scale with
+        # resolution (each lane owns 2×BDPT_MAX_VERTS vertices). `_wf_stream_cap`
+        # overrides the cap for tests.
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
+        aux_bytes = stream_size * WavefrontBdptPass.AUX_STRIDE
         self._wf_bdpt_eye_buf = StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_light_buf = StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_aux_buf = StorageBuffer(self.ctx, aux_bytes)
@@ -1420,7 +1432,7 @@ class Renderer:
             self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
             self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
             self._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
-            self.width, self.height,
+            stream_size, num_pixels,
         )
         self._wf_bdpt_pass_dims = (self.width, self.height)
         return self._wavefront_bdpt_pass
