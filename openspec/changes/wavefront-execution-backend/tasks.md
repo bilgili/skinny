@@ -66,6 +66,24 @@
 - [ ] 7.4 Add opt-in compaction that moves slabs and rewrites every referencing instance/TLAS offset; safe to skip.
 - [ ] 7.5 Confirm both execution modes read the suballocated buffers correctly.
 
+## 7b. Renderer integration map (for the env-only milestone wiring)
+
+Captured this session so the descriptor/render-loop wiring is turn-key (not
+re-derivable without reading renderer.py). Megakernel dispatch + descriptor refs:
+
+- `render()` records the frame: `renderer.py:6488` cmd; `:6512` `vkCmdBindPipeline(... self.pipeline.pipeline)`; `:6513` `vkCmdBindDescriptorSets(... self.pipeline.pipeline_layout, 0, 1, [self.descriptor_sets[f]], ...)`; `:6522` `vkCmdDispatch(cmd, groups_x, groups_y, 1)` (groups = ceil(dim/WORKGROUP_SIZE)); `:6626` submit with `in_flight_fences[f]`. Accum cross-frame barrier `:6497-6506`.
+- Main pipeline: `self.pipeline` (ComputePipeline), built `renderer.py:2249-2255` (entry_module="main_pass", entry_point="mainImage"). Per-frame descriptor sets: `self.descriptor_sets` (`:2705`).
+- Shared bindings (set 0): **0** = `fc` FrameConstants UBO (`self.uniform_buffers[f]`, written `:2820`); **1** = output image; **2** = `accumBuffer` `RWTexture2D<rgba32f>` = `self.accum_image` (StorageImage, GENERAL layout, written `:2828`); **4** = `envMap` combined sampler = `self.env_image` (SampledImage, written `:2844`); **31/32** = env CDFs.
+- `accum_frame` feeds the shader via FrameConstants (packed `:6093`); accumulation is read-modify-write of binding 2 (main_pass.slang:157-169) — `wavefront_env.slang` mirrors it.
+- Single integrated megakernel (no separate tonemap pass); offscreen→swapchain blit `:6571-6579`.
+
+Wiring steps (the env-only milestone remainder):
+1. WavefrontPasses builds the `wavefrontEnv` pipeline (compile `wavefront/wavefront_env.slang` → SPIR-V → `vkCreateComputePipelines`, vk_skinning style) + its own descriptor-set-layout (reflected: 0/2/4) + a descriptor set written with `self.uniform_buffers[f]`, `self.accum_image`, `self.env_image`.
+2. `WavefrontPasses.dispatch(cmd, frame)` records bind+`vkCmdDispatch(ceil(w/8), ceil(h/8), 1)`.
+3. In `render()`, gate: `effective_execution_mode_index == EXECUTION_WAVEFRONT` → dispatch WavefrontPasses instead of `self.pipeline` (reuse the same accum barrier + blit).
+4. Build WavefrontPasses only on Vulkan; rebuild its per-frame descriptor sets when accum/env/uniform resources are (re)created.
+5. A/B: headless render a geometry-free scene in both modes; compare the accumulation image (linear HDR) within tolerance.
+
 ## 8. Phase 3 — Wavefront bdpt (limited scope)
 
 - [ ] 8.1 Camera-subpath and light-subpath wavefront walks that store vertices (pos, normal, throughput, fwd/rev pdf, matId) up to max depth, bounded by stream size × maxdepth × 2.
