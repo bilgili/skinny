@@ -137,6 +137,54 @@ Wiring steps (the env-only milestone remainder):
 4. Build WavefrontPasses only on Vulkan; rebuild its per-frame descriptor sets when accum/env/uniform resources are (re)created.
 5. A/B: headless render a geometry-free scene in both modes; compare the accumulation image (linear HDR) within tolerance.
 
+## 7c. RESUME HERE — staged per-material shade pipelines (the compile-win)
+
+Per-material *evaluation* already works (fused `wavefront_material`). What
+remains is making each material its OWN compiled pipeline (add material =
+compile one kernel, not the megakernel switch — the original motivation).
+`vk_compute.emit_wavefront_shade_module(gf, graph_id, binding)` is done +
+compile-verified: it emits a per-graph entry `shadeSurface_<name>` importing
+only `generated.<name>_graph` (independent compilation unit), tracing + shading
+only pixels whose material maps to `graph_id`, writing the base colour.
+
+Resume steps:
+1. **`renderer.build_wavefront_shade_passes()`** — for each `gf` in
+   `self._scene_graph_fragments`: `gid = assign_graph_ids(frags)[gf.target_name]`;
+   write `emit_wavefront_shade_module(gf, gid, GRAPH_BINDING_BASE)` to
+   `shaders/wavefront/shade_<gf.sanitized_name>.slang`; build a `BoundComputePass`
+   for entry `shadeSurface_<name>` with bindings 0/2/5/6/7/12/13/16 + 25
+   (`_graph_param_buffers[target]`) + over-provide 14 (the bindless texture pool,
+   for graphs that sample textures — Marble reflects no 14, Brass may). Return
+   the pass list.
+2. **Verify (staged == fused at hit pixels)** in `test_wavefront_render.py`:
+   warmup megakernel; visibility → hit mask; fused `build_wavefront_material_pass`
+   → `fused`; then dispatch each shade pass in turn via the `_wavefront_debug_pass`
+   seam (each OVERWRITES its material's hits) → `staged`; assert
+   `staged[mask] ≈ fused[mask]`. Proves the per-material pipelines render
+   correctly AND are separate compilation units.
+3. **Compile-win check**: each `shade_<name>.slang` imports only its graph →
+   adding a graph compiles one module; the others' SPIR-V is a `_compile_slang`
+   cache hit. Optionally assert via the cache.
+4. **Queue-sorted dispatch**: feed intersect hits into the per-material queues
+   (build_args + scatter, all GPU-verified), dispatch each shade pass over its
+   queue slice via `vkCmdDispatchIndirect` — the real staged perf path.
+5. **Full A/B shade**: BSDF response (not just base colour) + NEE + MIS +
+   multi-bounce, threaded through the path-state + queue buffers → exact
+   megakernel A/B via `test_headless`.
+
+Carry-over facts (avoid re-investigating):
+- GPU tests: `export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS;
+  export DYLD_LIBRARY_PATH=$VULKAN_SDK/lib; ./bin/python3.13 -m pytest …`
+- A/B seam: set `renderer._wavefront_debug_pass = <pass>`,
+  `renderer.set_execution_mode(1)`, `render_headless()`, then
+  `renderer.read_accumulation()` (linear HDR). Pass destroyed in `cleanup()`.
+- slangpy buffer dispatch: pass NDBuffer `.storage` for StructuredBuffer params
+  (see `tests/helpers.dispatch_uint_kernel`).
+- `assign_graph_ids(frags) → {target → graphId}`; `_graph_param_buffers[target]`
+  (StorageBuffer); `pipeline.graph_bindings[target]` (binding number).
+- `BoundComputePass` bindless: a `{"array_count", "slots"}` spec drives the
+  PARTIALLY_BOUND descriptor-indexing path (binding 14 texture pool).
+
 ## 8. Phase 3 — Wavefront bdpt (limited scope)
 
 - [ ] 8.1 Camera-subpath and light-subpath wavefront walks that store vertices (pos, normal, throughput, fwd/rev pdf, matId) up to max depth, bounded by stream size × maxdepth × 2.

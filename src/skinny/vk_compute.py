@@ -299,6 +299,52 @@ def emit_wavefront_material_modules(graph_fragments) -> str:
     return "".join(parts)
 
 
+def emit_wavefront_shade_module(graph_fragment, graph_id: int, binding: int) -> str:
+    """Per-material wavefront shade entry for ONE graph — the staged compile
+    partition. Imports only this graph's module (generated.<name>_graph), so
+    adding a material compiles one small kernel and leaves every other shade
+    pipeline's SPIR-V untouched (vs. the megakernel switch, which recompiles on
+    any graph-set change). The entry traces, shades only pixels whose material
+    maps to `graph_id` (overlaying the graph's outputs on a seeded
+    StdSurfaceParams), and writes the base colour; other pixels are left for the
+    other materials' passes.
+    """
+    gf = graph_fragment
+    name = gf.sanitized_name
+    assignments = "\n".join(f"    sp.{i} = g.{i};" for i, _ in gf.outputs)
+    return (
+        "// Auto-generated per-material wavefront shade entry — imports only this\n"
+        "// graph, so it is an independent compilation unit (the compile-win).\n"
+        "import common;\n"
+        "import bindings;\n"
+        "import scene_trace;\n"
+        "import cameras.pinhole;\n"
+        "import mtlx_std_surface;\n"
+        f"import generated.{name}_graph;\n\n"
+        f"[[vk::binding({binding})]] StructuredBuffer<{gf.struct_name}> wfGraphParams_{name};\n\n"
+        '[shader("compute")]\n'
+        "[numthreads(8, 8, 1)]\n"
+        f"void shadeSurface_{name}(uint3 tid: SV_DispatchThreadID)\n"
+        "{\n"
+        "    uint2 pixel = tid.xy;\n"
+        "    if (pixel.x >= fc.width || pixel.y >= fc.height) return;\n"
+        "    RNG rng = createRNG(pixel, fc.frameIndex);\n"
+        "    PinholeCamera cam; float lensWeight;\n"
+        "    Ray ray = cam.generateRay(pixel, rng, lensWeight);\n"
+        "    HitInfo hit = traceScene(fc, ray);\n"
+        "    if (!hit.hit) return;\n"
+        f"    if (materialGraphId(hit.materialId) != {graph_id}u) return;\n"
+        f"    {gf.outputs_struct} g = {gf.func_name}(hit.positionObject, "
+        "normalize(hit.normal), hit.tangent, hit.uv, "
+        f"wfGraphParams_{name}[hit.materialId]);\n"
+        "    StdSurfaceParams sp = (StdSurfaceParams)0;\n"
+        "    sp.base_color = float3(0.5);\n"
+        f"{assignments}\n"
+        "    accumBuffer[pixel] = float4(sp.base_color, 1.0);\n"
+        "}\n"
+    )
+
+
 class ComputePipeline:
     """Wraps a single Vulkan compute pipeline compiled from a Slang entry point."""
 
