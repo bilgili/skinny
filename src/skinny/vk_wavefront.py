@@ -575,6 +575,105 @@ class WavefrontPathPass:
             vk.vkDestroyShaderModule(self.ctx.device, m, None)
 
 
+class IndirectPaintPass:
+    """Per-material-queue dispatch over `wavefront/indirect_paint.slang`, the
+    carrier for verifying the wavefront indirect-dispatch path (tasks 3.2 / 3.3
+    / 9.3). Binds a counting-sort `materialQueue` + a per-lane `paintOut`; for
+    each material slot it pushes (sliceBase, sliceCount, value) and dispatches
+    the slot's lanes either indirectly (`vkCmdDispatchIndirect` over a
+    build_args-shaped buffer) or via a conservative direct dispatch (worst-case
+    groups + the kernel's empty-lane early-out). The two must produce identical
+    output."""
+
+    _GROUP = 64  # matches [numthreads(64, 1, 1)] in indirect_paint.slang
+
+    def __init__(self, ctx, shader_dir: Path, queue_buf, queue_range: int,
+                 out_buf, out_range: int) -> None:
+        self.ctx = ctx
+        spv = _compile_spv(shader_dir, "wavefront/indirect_paint", "wfIndirectPaint")
+        code = spv.read_bytes()
+        self._module = vk.vkCreateShaderModule(
+            ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+
+        bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+            for b in (0, 1)
+        ]
+        self._set_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=2, pBindings=bindings), None)
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=12)
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=1, pSetLayouts=[self._set_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
+        stage = vk.VkPipelineShaderStageCreateInfo(
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=self._module, pName="main")
+        self._pipeline = vk.vkCreateComputePipelines(
+            ctx.device, vk.VK_NULL_HANDLE, 1,
+            [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device, vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[vk.VkDescriptorPoolSize(
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=2)]), None)
+        self._set = vk.vkAllocateDescriptorSets(
+            ctx.device, vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1,
+                pSetLayouts=[self._set_layout]))[0]
+        writes = []
+        for b, (buf, rng) in enumerate(((queue_buf, queue_range), (out_buf, out_range))):
+            info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=self._set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
+
+    def _push(self, cmd, base, count, value):
+        import struct
+
+        import cffi
+        data = struct.pack("3I", int(base), int(count), int(value))
+        # python-vulkan binds `const void* pValues` via cffi — pass a sized char[].
+        buf = cffi.FFI().new("char[]", data)
+        vk.vkCmdPushConstants(
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, buf)
+
+    def record_indirect(self, cmd, slots, indirect_buf) -> None:
+        """One indirect dispatch per material slot; group count read from
+        `indirect_buf` at slot*12 (the VkDispatchIndirectCommand build_args
+        writes). `slots` is a list of (sliceBase, sliceCount, value)."""
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 1, [self._set], 0, None)
+        for slot, (base, count, value) in enumerate(slots):
+            self._push(cmd, base, count, value)
+            vk.vkCmdDispatchIndirect(cmd, indirect_buf, slot * 12)
+
+    def record_direct(self, cmd, slots, worst_groups) -> None:
+        """Conservative fallback: dispatch worst-case `worst_groups` for every
+        slot; the kernel's `tid.x >= sliceCount` early-out skips empty lanes."""
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 1, [self._set], 0, None)
+        for base, count, value in slots:
+            self._push(cmd, base, count, value)
+            vk.vkCmdDispatch(cmd, int(worst_groups), 1, 1)
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        vk.vkDestroyPipeline(self.ctx.device, self._pipeline, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
+        vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
+
+
 class WavefrontBdptPass:
     """Staged wavefront bidirectional path tracer (Phase 3). Three pipelines
     from ``wavefront/wavefront_bdpt.slang`` (walk / connect / resolve) over

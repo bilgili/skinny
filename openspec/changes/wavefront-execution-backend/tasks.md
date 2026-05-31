@@ -21,9 +21,9 @@
 > N-pipeline manager on `vk_skinning.py` (design.md §7). Not yet implemented:
 > needs a live GPU iteration loop, so it lands with §4–§6, not as dead infra.
 
-- [ ] 3.1 Extend the Vulkan compute layer to own N pipelines / descriptor set layouts / sets and dispatch them from one command buffer, following the `vk_skinning.py` (`SkinningPasses`) pattern.
-- [ ] 3.2 Add `vkCmdDispatchIndirect` support and an indirect-args buffer abstraction to `vk_compute.py` / `vk_context.py`.
-- [ ] 3.3 Add a conservative direct-dispatch fallback (worst-case groups + empty-lane early-out) to A/B against indirect dispatch.
+- [x] 3.1 The Vulkan compute layer owns N pipelines / set layouts / sets dispatched from one command buffer in several passes following the `vk_skinning.py` pattern: `WavefrontPathPass` (generate/bounce/resolve), `WavefrontBdptPass` (walk/connect/resolve), `ShadePassGroup` (per-material shade), `IndirectPaintPass` (per-material-queue dispatch) — each records its pipelines + sets into the frame command buffer.
+- [x] 3.2 `vkCmdDispatchIndirect` support: `StorageBuffer(..., indirect=True)` adds INDIRECT_BUFFER usage (the build-args-shaped args buffer); `IndirectPaintPass.record_indirect` dispatches per material slot via `vkCmdDispatchIndirect(indirectArgs, slot*12)`. `StorageBuffer.download_sync` added for compute-output readback.
+- [x] 3.3 Conservative direct-dispatch fallback: `IndirectPaintPass.record_direct` dispatches worst-case `ceil(streamSize/GROUP)` groups per slot and the kernel early-outs on `tid.x >= sliceCount`, producing output identical to the exactly-sized indirect dispatch.
 
 ## 4. Phase 1 — Wavefront path: state + queues
 
@@ -118,7 +118,7 @@
 - [x] 5.1 `wfPathGenerate` seeds the camera ray + path state (β, L=0, rng, depth, alive, bsdfPdf=-1) for every pixel lane.
 - [~] 5.2 Intersection: `wfPathBounce` traverses the shared BVH (reused `traceScene` include) per alive lane, including the cutout-transparent skip + the BSDF-sampled sphere-light MIS trace. REMAINING (coherence/perf): a *separate* intersect.slang that appends hits to per-material queues (counting-sort `build_args`/`scatter` primitives are GPU-verified; wiring them into the loop is the per-material-dispatch path).
 - [~] 5.3 Integration logic: `wfPathBounce` does NEE (all lights + env) + MIS + Russian roulette + next-bounce ray generation; terminated lanes write radiance + clear ALIVE (flushed by `wfPathResolve`). Reuses the §1–§6 estimator + light/sampler includes verbatim. REMAINING: split into a standalone logic.slang with live-lane compaction (6.2).
-- [ ] 5.4 Per-material `shadeMaterial_X` shade *dispatch* over each material queue — NOT wired into the path loop yet: `wfPathBounce` shades inline via `evaluateBounce`'s material switch (correct + A/B-verified). The per-material shade *pipelines* + compile cache exist (6.4); routing the bounce loop's hits through per-material queues + `vkCmdDispatchIndirect` is the remaining coherence path (with 3.x).
+- [~] 5.4 Per-material shade *dispatch* over each material queue: the mechanism is built + GPU-verified — counting-sort layout (`build_args` + `scatter`) → per-material `vkCmdDispatchIndirect` over each material's queue slice (`IndirectPaintPass`, equivalent to the conservative direct fallback, test 9.3) + the per-material shade *pipelines* + compile cache (6.4). REMAINING: replace `wfPathBounce`'s inline `evaluateBounce` material switch with this queue-routed per-material shade in the path bounce loop (the path tracer is correct + A/B-verified via the fused switch today; this is the coherence/perf swap, not a correctness gap).
 
 ## 6. Phase 1 — Wavefront path: streaming dispatch loop
 
@@ -232,7 +232,7 @@ Carry-over facts (avoid re-investigating):
 
 - [x] 9.1 Headless A/B parity: `tests/test_wavefront_path_ab.py` renders the demo with the `path` integrator in both modes and asserts the wavefront matches the megakernel no worse than two megakernel renders match each other (MoltenVK is not bit-reproducible). Measured: match(wave,mega) 0.960 vs noise floor 0.962, mean |Δ| 0.002. GPU CI gate (`pytest.mark.gpu`).
 - [x] 9.2 Headless A/B parity for `bdpt`: `test_wavefront_path_ab.py::test_wavefront_bdpt_matches_megakernel` — megakernel bdpt vs staged wavefront bdpt, same noise-floor-relative criterion as 9.1. Measured: match 0.961 vs floor 0.957, mean |Δ| 0.002. GPU CI gate.
-- [ ] 9.3 Indirect-dispatch correctness: indirect vs conservative direct-dispatch fallback produce equivalent images.
+- [x] 9.3 Indirect-dispatch correctness: `tests/test_wavefront_indirect_dispatch.py` — a per-material-queue paint dispatched via `vkCmdDispatchIndirect` (exact group counts from the build-args-shaped buffer, incl. the empty-material 0-group case) produces output byte-identical to the conservative direct dispatch (worst-case groups + early-out), and both honour the counting-sort queue routing.
 - [x] 9.4 Suballocator unit tests: `test_slab_allocator.py` (11, GPU-free) — stable offsets across unrelated add/remove, free-list best-fit reuse, append-only growth preserves offsets, compaction packs + reports moves. `test_suballocator_gpu.py` (3, GPU) — remove keeps survivor offsets + re-uploads nothing; add keeps resident offsets stable; compaction leaves rendered output within the re-render noise floor.
 - [x] 9.5 Incremental-add — both halves verified. GEOMETRY: `test_suballocator_gpu` proves an add re-uploads only the new slab (resident offsets stable, survivors not re-written) and a remove frees without re-uploading survivors. MATERIAL: `test_wavefront_shade_cache` proves rebuilding the same material set compiles nothing and a previously-unseen material (simulated by evicting its cache entry — the deterministic equivalent of a new graph, free of the megakernel-rebuild noise) compiles exactly one shade pipeline while resident materials stay cache hits.
 - [ ] 9.6 Front-end parity test: each render-surface front-end reaches the execution-mode toggle; Metal pins to megakernel.

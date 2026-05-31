@@ -1960,14 +1960,18 @@ class StorageBuffer:
     buffer alongside the device-local one; a one-shot command does the copy.
     """
 
-    def __init__(self, ctx: VulkanContext, size_bytes: int) -> None:
+    def __init__(self, ctx: VulkanContext, size_bytes: int, *, indirect: bool = False) -> None:
         self.ctx = ctx
         self.size = max(int(size_bytes), 16)  # GPU drivers dislike zero-sized buffers
+        # `indirect` adds INDIRECT_BUFFER usage so a build-args kernel can write
+        # VkDispatchIndirectCommand triples this buffer holds and the renderer
+        # can feed it to vkCmdDispatchIndirect (the wavefront per-material shade).
+        self._indirect = bool(indirect)
 
-        # Host-visible staging
+        # Host-visible staging (SRC for uploads, DST for download_sync readback).
         stg_info = vk.VkBufferCreateInfo(
             size=self.size,
-            usage=vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            usage=vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
         )
         self.staging_buffer = vk.vkCreateBuffer(ctx.device, stg_info, None)
@@ -1989,9 +1993,14 @@ class StorageBuffer:
         vk.vkBindBufferMemory(ctx.device, self.staging_buffer, self.staging_memory, 0)
 
         # Device-local storage buffer
+        device_usage = (vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                        | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                        | vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+        if self._indirect:
+            device_usage |= vk.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
         buf_info = vk.VkBufferCreateInfo(
             size=self.size,
-            usage=vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            usage=device_usage,
             sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
         )
         self.buffer = vk.vkCreateBuffer(ctx.device, buf_info, None)
@@ -2087,6 +2096,32 @@ class StorageBuffer:
         )
         vk.vkQueueWaitIdle(self.ctx.compute_queue)
         vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
+    def download_sync(self, byte_count: int) -> bytes:
+        """Copy the first ``byte_count`` bytes of the device-local buffer back to
+        host (device → staging → map). For tests / readback of compute output."""
+        n = min(int(byte_count), self.size)
+        cmd = vk.vkAllocateCommandBuffers(
+            self.ctx.device, vk.VkCommandBufferAllocateInfo(
+                commandPool=self.ctx.command_pool,
+                level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY, commandBufferCount=1))[0]
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+        vk.vkCmdCopyBuffer(cmd, self.buffer, self.staging_buffer, 1,
+                           [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=n)])
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(self.ctx.compute_queue, 1,
+                         [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+                         vk.VK_NULL_HANDLE)
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+        ptr = vk.vkMapMemory(self.ctx.device, self.staging_memory, 0, self._staging_size, 0)
+        import cffi
+        ffi = cffi.FFI()
+        buf = ffi.new(f"char[{n}]")
+        ffi.memmove(buf, ptr, n)
+        vk.vkUnmapMemory(self.ctx.device, self.staging_memory)
+        return bytes(ffi.buffer(buf, n))
 
     def fill_zero_sync(self) -> None:
         """Zero the device-local buffer via vkCmdFillBuffer."""
