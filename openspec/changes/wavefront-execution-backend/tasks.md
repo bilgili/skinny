@@ -31,7 +31,7 @@
 > counting sort), §P1-C (indirect args). Implement on GPU with live iteration.
 
 - [x] 4.1 Added `WavefrontPathState` (`shaders/wavefront/wavefront_state.slang`, 68 B scalar layout per §P1-A) + the GPU-free Python mirror `wavefront_layout.py`. `test_wavefront_state.py` derives the stride from the Slang struct fields and cross-checks the Python layout (field order + size); struct compiles clean under slangpy. Buffer is sized `stream_size * PATH_STATE_STRIDE` by the allocator (4.2).
-- [~] 4.2 Sizing math (GPU-free): `wavefront_layout.queue_buffer_sizes(...)` is the single source of truth for the stage buffer byte sizes (`test_wavefront_state.py`). Counting-sort scatter DONE + GPU-verified: `shaders/wavefront/scatter.slang` (`scatterByMaterial`, atomic write cursors) groups lanes into per-material slices (`test_wavefront_scatter.py`, real dispatch+readback). REMAINING: allocate the buffers as Vulkan StorageBuffers in `vk_wavefront.py WavefrontPasses`, and pin the hit buffer (HitData stride) alongside the intersect stage.
+- [~] 4.2 Sizing math (GPU-free): `wavefront_layout.queue_buffer_sizes(...)` is the single source of truth for the stage buffer byte sizes (`test_wavefront_state.py`). Counting-sort scatter DONE + GPU-verified: `shaders/wavefront/scatter.slang` (`scatterByMaterial`, atomic write cursors) groups lanes into per-material slices (`test_wavefront_scatter.py`, real dispatch+readback). Vulkan allocation DONE: `vk_wavefront.py WavefrontPasses` allocates the stage StorageBuffers via `queue_buffer_sizes`, verified on a real headless device (`test_wavefront_passes.py` — allocate/rescale/idempotent-destroy). REMAINING: pin the hit buffer (HitData stride) alongside the intersect stage.
 - [x] 4.3 Added `shaders/wavefront/build_args.slang`: `buildArgs` compute kernel (exclusive prefix-sum counts → `materialOffset`, + one indirect (x,y,z) per material via the shared `wfIndirectGroupCount` ceil-div). Ceil-div GPU-verified across edge cases (`test_wavefront_buildargs.py`, shared definition — no formula drift); entry compiles. Full-buffer dispatch verification lands when `WavefrontPasses` binds real buffers.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
@@ -43,7 +43,7 @@
 
 ## 6. Phase 1 — Wavefront path: streaming dispatch loop
 
-- [ ] 6.1 Add `vk_wavefront.py` (`WavefrontPasses`) owning the stage pipelines and the bounce loop (intersect → logic → shade ×N until queues drain or max depth), modeled on `SkinningPasses.dispatch()`.
+- [~] 6.1 `vk_wavefront.py WavefrontPasses` created (owns the stage buffers; verified on a real device). REMAINING: own the stage compute pipelines + the bounce-loop `dispatch()` (intersect → logic → shade ×N until queues drain or max depth), modeled on `SkinningPasses.dispatch()`.
 - [ ] 6.2 Implement stream refill / compaction of terminated lanes to keep occupancy high; advance through all pixels/samples for the frame. (Compaction primitive DONE + GPU-verified: `shaders/wavefront/compaction.slang` `compactAlive`, `test_wavefront_compaction.py` — remaining is calling it from the bounce loop in `WavefrontPasses`.)
 - [ ] 6.3 Wire the renderer per-frame path to dispatch wavefront vs the megakernel `vkCmdDispatch` based on the execution mode.
 - [ ] 6.4 Make adding a new material in wavefront compile only its shade/eval pipeline and register it (no megakernel rebuild); reuse existing materials' pipelines.
