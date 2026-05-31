@@ -75,6 +75,20 @@
 > with the hit normal. REMAINING for a megakernel-A/B shade: real material
 > albedo (evalGraphSurface + graph-param SSBOs / bindless textures), MIS, and
 > multi-bounce — threaded through the path-state + queue buffers.
+>
+> SHADE — material eval scaffolded + blocker identified. `wavefront_material.slang`
+> (`wavefrontMaterial`) evaluates the hit material's base colour via the shared
+> `evalSceneGraphBaseColor` (per-scene generated_materials) and compiles clean.
+> Its reflected bindings are 0/2/4/5/6/7/12/13/16 + graph-param SSBOs (25+, e.g.
+> graphParams at 26) + **binding 14, the bindless texture array (128
+> combined-image-samplers, PARTIALLY_BOUND descriptor indexing)**. That last is
+> the blocker: `BoundComputePass` only does descriptorCount=1 — it needs
+> descriptor-indexing support (per-binding descriptorCount + a
+> VkDescriptorSetLayoutBindingFlagsCreateInfo with PARTIALLY_BOUND for 14, pool
+> sized 128, and per-filled-slot writes mirroring `_update_texture_pool_descriptors`).
+> NEXT: add bindless support to BoundComputePass + a builder binding the graph
+> param buffers (`_graph_param_buffers`/`graph_bindings`) and the texture pool,
+> then verify the spheres render in distinct material colours.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 
