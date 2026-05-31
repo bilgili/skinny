@@ -210,14 +210,28 @@ Carry-over facts (avoid re-investigating):
 
 ## 8. Phase 3 — Wavefront bdpt (limited scope)
 
-- [ ] 8.1 Camera-subpath and light-subpath wavefront walks that store vertices (pos, normal, throughput, fwd/rev pdf, matId) up to max depth, bounded by stream size × maxdepth × 2.
-- [ ] 8.2 Connection+shadow stage: connect prefix pairs with a visibility ray, `evalBSDF_X` at both endpoints, geometry term, and the MIS recurrence; match the current flat-first-hit bdpt scope.
-- [ ] 8.3 Remove the `bdpt`+`wavefront` → megakernel fallback once parity holds; update the capability-matrix gate.
+> STAGED WAVEFRONT BDPT DONE + A/B-VERIFIED. `shaders/wavefront/
+> wavefront_bdpt.slang` (`wfBdptWalk` / `wfBdptConnect` / `wfBdptResolve`) tears
+> the megakernel `BDPTIntegrator.estimateRadiance` into compute dispatches that
+> store the camera + light subpath vertices in VRAM between stages.
+> `vk_wavefront.WavefrontBdptPass` owns the per-lane eye/light `BDPTVertex`
+> buffers + aux buffer and the walk→connect→resolve loop; set 0 reuses the
+> megakernel scene set (incl. lightSplatBuffer for the s=1 splat), set 1 holds
+> the subpath/aux buffers. Correctness by reuse: `randomWalk`,
+> `sampleLightOrigin`, `connectT1`, `connectGeneric`, `misWeight`,
+> `splatLightWalk`, `bdptEnvNEE` are imported verbatim from integrators/bdpt.slang
+> — the rng cursor is carried across the walk→connect split so the sequence
+> matches. A/B (`test_wavefront_bdpt_matches_megakernel`): match 0.961 vs the
+> megakernel-vs-itself floor 0.957, mean |Δ| 0.002.
+
+- [x] 8.1 `wfBdptWalk` builds the eye subpath (z1 + `randomWalk`) and the light subpath (`sampleLightOrigin` + `randomWalk`) per lane and stores both `BDPTVertex` arrays (+ lengths, escaped radiance, lensWeight, rng cursor) to VRAM — bounded by stream × BDPT_MAX_VERTS × 2 (the demo's directional light yields a 1-vertex light subpath, so connections are NEE-dominated, as in the megakernel).
+- [x] 8.2 `wfBdptConnect` reloads both subpaths and runs the connection strategies verbatim — t=0 emissive eye hits, t=1 NEE (`connectT1`, visibility + real-BSDF eval), t≥2 generic connections (`connectGeneric` + the `misWeight` recurrence with the rev-pdf terms). The s=1 light-tracer splat runs in `wfBdptWalk` (`splatLightWalk`). Matches the flat-first-hit bdpt scope (pinhole camera).
+- [x] 8.3 `bdpt`+`wavefront` fallback removed: `WAVEFRONT_BDPT_SUPPORTED = True`, so `effective_execution_mode` keeps wavefront for bdpt and the render gate dispatches `WavefrontBdptPass` (integrator==1) vs the path pass. `test_execution_mode` still covers the gate logic for both flag values.
 
 ## 9. Tests + verification
 
 - [x] 9.1 Headless A/B parity: `tests/test_wavefront_path_ab.py` renders the demo with the `path` integrator in both modes and asserts the wavefront matches the megakernel no worse than two megakernel renders match each other (MoltenVK is not bit-reproducible). Measured: match(wave,mega) 0.960 vs noise floor 0.962, mean |Δ| 0.002. GPU CI gate (`pytest.mark.gpu`).
-- [ ] 9.2 Headless A/B parity: megakernel vs wavefront for `bdpt` (after Phase 3).
+- [x] 9.2 Headless A/B parity for `bdpt`: `test_wavefront_path_ab.py::test_wavefront_bdpt_matches_megakernel` — megakernel bdpt vs staged wavefront bdpt, same noise-floor-relative criterion as 9.1. Measured: match 0.961 vs floor 0.957, mean |Δ| 0.002. GPU CI gate.
 - [ ] 9.3 Indirect-dispatch correctness: indirect vs conservative direct-dispatch fallback produce equivalent images.
 - [x] 9.4 Suballocator unit tests: `test_slab_allocator.py` (11, GPU-free) — stable offsets across unrelated add/remove, free-list best-fit reuse, append-only growth preserves offsets, compaction packs + reports moves. `test_suballocator_gpu.py` (3, GPU) — remove keeps survivor offsets + re-uploads nothing; add keeps resident offsets stable; compaction leaves rendered output within the re-render noise floor.
 - [x] 9.5 Incremental-add — both halves verified. GEOMETRY: `test_suballocator_gpu` proves an add re-uploads only the new slab (resident offsets stable, survivors not re-written) and a remove frees without re-uploading survivors. MATERIAL: `test_wavefront_shade_cache` proves rebuilding the same material set compiles nothing and a previously-unseen material (simulated by evicting its cache entry — the deterministic equivalent of a new graph, free of the megakernel-rebuild noise) compiles exactly one shade pipeline while resident materials stay cache hits.

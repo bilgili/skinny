@@ -575,6 +575,114 @@ class WavefrontPathPass:
             vk.vkDestroyShaderModule(self.ctx.device, m, None)
 
 
+class WavefrontBdptPass:
+    """Staged wavefront bidirectional path tracer (Phase 3). Three pipelines
+    from ``wavefront/wavefront_bdpt.slang`` (walk / connect / resolve) over
+    per-lane eye + light subpath-vertex buffers + an aux buffer. Set 0 is the
+    megakernel scene descriptor set (incl. lightSplatBuffer); set 1 holds the
+    subpath/aux buffers. The estimator is reused verbatim from
+    integrators/bdpt.slang, so the accumulated image matches the megakernel
+    bdpt. Matches its scope: flat first-hit, pinhole camera."""
+
+    _GROUP = 8
+    BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
+    VERTEX_STRIDE = 128   # ≥ sizeof(BDPTVertex) (≈120 B scalar) — headroom
+    AUX_STRIDE = 64       # ≥ sizeof(WfBdptAux) (≈40 B scalar)
+
+    def __init__(self, ctx, shader_dir: Path, scene_set_layout,
+                 eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
+                 width: int, height: int) -> None:
+        self.ctx = ctx
+        self.width = int(width)
+        self.height = int(height)
+
+        modules = {}
+        for entry, out_name in (
+            ("wfBdptWalk", "wavefront/_wfbdpt_walk"),
+            ("wfBdptConnect", "wavefront/_wfbdpt_connect"),
+            ("wfBdptResolve", "wavefront/_wfbdpt_resolve"),
+        ):
+            spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name)
+            code = spv.read_bytes()
+            modules[entry] = vk.vkCreateShaderModule(
+                ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+        self._modules = modules
+
+        # Set 1: eye (0), light (1), aux (2) storage buffers.
+        bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+            for b in (0, 1, 2)
+        ]
+        self._set_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=3, pBindings=bindings), None)
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout]), None)
+
+        self._pipelines = {}
+        for entry, mod in modules.items():
+            stage = vk.VkPipelineShaderStageCreateInfo(
+                stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=mod, pName="main")
+            self._pipelines[entry] = vk.vkCreateComputePipelines(
+                ctx.device, vk.VK_NULL_HANDLE, 1,
+                [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device, vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[vk.VkDescriptorPoolSize(
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=3)]), None)
+        self._set = vk.vkAllocateDescriptorSets(
+            ctx.device, vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1,
+                pSetLayouts=[self._set_layout]))[0]
+        writes = []
+        for b, (buf, rng) in enumerate(
+                ((eye_buf, vert_range), (light_buf, vert_range), (aux_buf, aux_range))):
+            info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=self._set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
+
+    def _stage(self, cmd, entry, scene_set) -> None:
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 2, [scene_set, self._set], 0, None)
+        gx = (self.width + self._GROUP - 1) // self._GROUP
+        gy = (self.height + self._GROUP - 1) // self._GROUP
+        vk.vkCmdDispatch(cmd, gx, gy, 1)
+
+    def record_dispatch(self, cmd, scene_set) -> None:
+        barrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+
+        def mem_barrier():
+            vk.vkCmdPipelineBarrier(
+                cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [barrier], 0, None, 0, None)
+
+        self._stage(cmd, "wfBdptWalk", scene_set)
+        mem_barrier()
+        self._stage(cmd, "wfBdptConnect", scene_set)
+        mem_barrier()
+        self._stage(cmd, "wfBdptResolve", scene_set)
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        for p in self._pipelines.values():
+            vk.vkDestroyPipeline(self.ctx.device, p, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
+        for m in self._modules.values():
+            vk.vkDestroyShaderModule(self.ctx.device, m, None)
+
+
 class WavefrontPasses:
     """Owns the wavefront stage buffers for a given stream size + material count.
 

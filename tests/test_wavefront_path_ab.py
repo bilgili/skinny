@@ -82,3 +82,56 @@ def test_wavefront_path_matches_megakernel():
     finally:
         renderer.cleanup()
         ctx.destroy()
+
+
+def test_wavefront_bdpt_matches_megakernel():
+    """A/B parity for the bidirectional integrator (task 9.2): megakernel bdpt
+    vs the staged wavefront bdpt (subpath walks + connection stage). Same
+    noise-floor-relative criterion as the path A/B."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+    )
+    try:
+        deadline = 200
+        while deadline > 0 and (
+            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+        ):
+            renderer.update(0.025)
+            deadline -= 1
+        assert renderer.pipeline is not None
+        renderer.integrator_index = 1  # bdpt
+        assert renderer.WAVEFRONT_BDPT_SUPPORTED, "wavefront bdpt gated off"
+
+        def render_mode(mode, frames=WARMUP):
+            renderer.set_execution_mode(mode)
+            renderer._material_version += 1
+            for _ in range(frames):
+                renderer.update(0.04)
+                renderer.render_headless()
+            return renderer.read_accumulation()[:, :, :3].copy()
+
+        mega1 = render_mode(0)
+        mega2 = render_mode(0)
+        wave = render_mode(1)
+
+        assert renderer.effective_execution_mode_index == 1, (
+            "wavefront not active for bdpt (capability gate fell back)"
+        )
+        assert np.all(np.isfinite(wave))
+        assert float(wave.max()) > 1e-2, "wavefront bdpt render is black"
+
+        noise_floor = _match(mega1, mega2)
+        match_wave = _match(wave, mega1)
+        assert noise_floor > 0.5, f"renderer too unstable to test ({noise_floor:.2f})"
+        assert match_wave >= noise_floor - 0.06, (
+            f"wavefront bdpt diverges from the megakernel "
+            f"(match {match_wave:.3f} vs floor {noise_floor:.3f})"
+        )
+    finally:
+        renderer.cleanup()
+        ctx.destroy()

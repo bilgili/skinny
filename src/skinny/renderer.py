@@ -908,11 +908,11 @@ def _write_hdr_rgbe(path: str, rgb: np.ndarray) -> None:
 class Renderer:
     """Sets up Vulkan resources and dispatches Slang compute shaders each frame."""
 
-    # The wavefront backend does not yet implement the bidirectional
-    # integrator. While False, selecting Wavefront + BDPT renders with the
-    # megakernel BDPT (see effective_execution_mode_index). Flipped to True
-    # when the wavefront bidirectional path lands (Phase 3).
-    WAVEFRONT_BDPT_SUPPORTED = False
+    # Wavefront bidirectional integrator (Phase 3). True now that the staged
+    # wavefront bdpt (WavefrontBdptPass) reaches A/B parity with the megakernel
+    # bdpt: selecting Wavefront + BDPT routes to the staged subpath-walk +
+    # connection pipeline instead of falling back to the megakernel.
+    WAVEFRONT_BDPT_SUPPORTED = True
 
     def __init__(
         self,
@@ -1071,6 +1071,13 @@ class Renderer:
         self._wavefront_path_pass = None
         self._wf_path_state_buf = None
         self._wf_path_pass_dims = None
+        # Staged wavefront bdpt (Phase 3): subpath-vertex + aux buffers + pass,
+        # same lazy lifecycle as the path pass.
+        self._wavefront_bdpt_pass = None
+        self._wf_bdpt_eye_buf = None
+        self._wf_bdpt_light_buf = None
+        self._wf_bdpt_aux_buf = None
+        self._wf_bdpt_pass_dims = None
 
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
@@ -1353,6 +1360,7 @@ class Renderer:
             self._wavefront_debug_pass.destroy()
             self._wavefront_debug_pass = None
         self._destroy_wavefront_path_pass()
+        self._destroy_wavefront_bdpt_pass()
 
     def _ensure_wavefront_path_pass(self):
         """Build (once) the staged wavefront path tracer — the real per-frame
@@ -1388,6 +1396,45 @@ class Renderer:
             self._wf_path_state_buf.destroy()
             self._wf_path_state_buf = None
         self._wf_path_pass_dims = None
+
+    def _ensure_wavefront_bdpt_pass(self):
+        """Build (once) the staged wavefront bdpt pass. Returns it, or None on a
+        non-Vulkan backend or before the megakernel pipeline exists. Allocates
+        the per-lane eye/light subpath-vertex buffers + aux buffer."""
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self.pipeline is None or self.descriptor_sets is None:
+            return None
+        if (self._wavefront_bdpt_pass is not None
+                and self._wf_bdpt_pass_dims == (self.width, self.height)):
+            return self._wavefront_bdpt_pass
+        self._destroy_wavefront_bdpt_pass()
+        from skinny.vk_wavefront import WavefrontBdptPass
+        n = self.width * self.height
+        vert_bytes = n * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
+        aux_bytes = n * WavefrontBdptPass.AUX_STRIDE
+        self._wf_bdpt_eye_buf = StorageBuffer(self.ctx, vert_bytes)
+        self._wf_bdpt_light_buf = StorageBuffer(self.ctx, vert_bytes)
+        self._wf_bdpt_aux_buf = StorageBuffer(self.ctx, aux_bytes)
+        self._wavefront_bdpt_pass = WavefrontBdptPass(
+            self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
+            self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
+            self._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
+            self.width, self.height,
+        )
+        self._wf_bdpt_pass_dims = (self.width, self.height)
+        return self._wavefront_bdpt_pass
+
+    def _destroy_wavefront_bdpt_pass(self) -> None:
+        if self._wavefront_bdpt_pass is not None:
+            self._wavefront_bdpt_pass.destroy()
+            self._wavefront_bdpt_pass = None
+        for attr in ("_wf_bdpt_eye_buf", "_wf_bdpt_light_buf", "_wf_bdpt_aux_buf"):
+            buf = getattr(self, attr, None)
+            if buf is not None:
+                buf.destroy()
+                setattr(self, attr, None)
+        self._wf_bdpt_pass_dims = None
 
     def build_wavefront_trace_pass(self, module: str, entry: str,
                                    include_env: bool = False,
@@ -7136,9 +7183,13 @@ class Renderer:
             if self._wavefront_debug_pass is not None:
                 self._wavefront_debug_pass.record_dispatch(cmd)
             else:
-                path_pass = self._ensure_wavefront_path_pass()
-                if path_pass is not None:
-                    path_pass.record_dispatch(cmd, self.descriptor_sets[f])
+                # BDPT → staged wavefront bdpt; otherwise the path tracer.
+                if self.integrator_index == 1:
+                    staged = self._ensure_wavefront_bdpt_pass()
+                else:
+                    staged = self._ensure_wavefront_path_pass()
+                if staged is not None:
+                    staged.record_dispatch(cmd, self.descriptor_sets[f])
                 else:
                     self._ensure_wavefront_env_pass().record_dispatch(cmd)
         else:
