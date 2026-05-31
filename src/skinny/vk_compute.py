@@ -120,6 +120,185 @@ def python_material_ids() -> dict[str, int]:
     return {e["module"]: i for i, e in enumerate(scan_python_materials())}
 
 
+def emit_megakernel_aggregator(graph_fragments, graph_binding_base: int) -> str:
+    """Build the `generated_materials.slang` aggregator text for the megakernel.
+
+    Stitches every scene MaterialX nodegraph into one `evalSceneGraph` switch
+    plus the `evalSceneGraphBaseColor` override switch, with one SSBO binding,
+    param helper, and apply helper per graph. Pure: no file I/O, no Vulkan —
+    the megakernel half of the two-emitter split. The wavefront half is
+    `emit_wavefront_material_modules`; both consume the same GraphFragment list.
+    """
+    imports: list[str] = []
+    ssbo_decls: list[str] = []
+    param_helpers: list[str] = []
+    apply_helpers: list[str] = []
+    cases: list[str] = []
+    for idx, gf in enumerate(graph_fragments):
+        module_name = f"{gf.sanitized_name}_graph"
+        imports.append(f"import generated.{module_name};")
+        binding = graph_binding_base + idx
+        ssbo_decls.append(
+            f"[[vk::binding({binding}, 0)]]\n"
+            f"StructuredBuffer<{gf.struct_name}> graphParams_{gf.sanitized_name};\n"
+        )
+        param_helpers.append(
+            f"{gf.struct_name} _graphParams_{gf.sanitized_name}(uint matId)\n"
+            f"{{\n"
+            f"    return graphParams_{gf.sanitized_name}[matId];\n"
+            f"}}\n"
+        )
+
+        # Per-graph apply: copy each output field onto the matching
+        # StdSurfaceParams slot. Built from the fragment's `outputs`
+        # metadata so multi-output graphs (brass = specular_roughness +
+        # coat_color + coat_roughness) drive several inputs at once.
+        assignments = "\n".join(
+            f"    sp.{input_name} = g.{input_name};"
+            for input_name, _ in gf.outputs
+        )
+        apply_helpers.append(
+            f"void applyGraphOutputs_{gf.sanitized_name}("
+            f"inout StdSurfaceParams sp, in {gf.outputs_struct} g)\n"
+            f"{{\n"
+            f"{assignments}\n"
+            f"}}\n"
+        )
+
+        cases.append(
+            f"        case {idx + 2}u:  // graphId 0=skin, 1=flat reserved\n"
+            f"        {{\n"
+            f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
+            f"_graphParams_{gf.sanitized_name}(matId));\n"
+            f"            applyGraphOutputs_{gf.sanitized_name}(sp, g);\n"
+            f"            return;\n"
+            f"        }}\n"
+        )
+
+    # Per-hit base_color override path (FlatMaterial.albedo). Only
+    # graphs whose outputs include `base_color` participate; for
+    # graphs that drive other inputs (brass: specular_roughness +
+    # coat_*) the caller must NOT override albedo, so the case
+    # simply returns false and the caller keeps the SSBO constant.
+    base_color_cases = ""
+    for idx, gf in enumerate(graph_fragments):
+        has_base = any(i == "base_color" for i, _ in gf.outputs)
+        if not has_base:
+            continue
+        base_color_cases += (
+            f"        case {idx + 2}u:\n"
+            f"        {{\n"
+            f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
+            f"_graphParams_{gf.sanitized_name}(matId));\n"
+            f"            outColor = g.base_color;\n"
+            f"            return true;\n"
+            f"        }}\n"
+        )
+
+    switch_body = "".join(cases) if cases else ""
+
+    return (
+        "// Auto-generated. Do not edit — written by "
+        "ComputePipeline._emit_generated_materials().\n"
+        "// Imports each scene MaterialX nodegraph as a Slang module.\n"
+        "// Per-graph modules expose only `evalGraph_<target>` + the\n"
+        "// matching `GraphParams_<target>` / `GraphOutputs_<target>`\n"
+        "// structs; their `internal` helpers stay module-private, so\n"
+        "// duplicate symbol names across graphs do not collide.\n\n"
+        "import mtlx_std_surface;  // StdSurfaceParams\n\n"
+        + "\n".join(imports)
+        + ("\n\n" if imports else "\n")
+        + "\n".join(ssbo_decls)
+        + ("\n" if ssbo_decls else "")
+        + "\n".join(param_helpers)
+        + ("\n" if param_helpers else "")
+        + "\n".join(apply_helpers)
+        + ("\n" if apply_helpers else "")
+        + "// Evaluate the per-hit nodegraph and overlay each driven\n"
+        "// std_surface input on `sp`. graphId 0 / 1 reserved (skin /\n"
+        "// flat) — callers gate the call by `materialGraphId(mid) >= 2`.\n"
+        "void evalSceneGraph(uint graphId, uint matId,\n"
+        "                    float3 P, float3 N, float3 T, float2 UV,\n"
+        "                    inout StdSurfaceParams sp)\n"
+        "{\n"
+        "    switch (graphId)\n"
+        "    {\n"
+        f"{switch_body}"
+        "        default:\n"
+        "            sp.base_color = float3(1.0, 0.0, 1.0);\n"
+        "            return;\n"
+        "    }\n"
+        "}\n\n"
+        "// Returns true and fills `outColor` only when the active graph\n"
+        "// drives std_surface.base_color (marble, wood). Graphs that\n"
+        "// drive only other inputs (brass: specular_roughness + coat_*)\n"
+        "// return false; the caller keeps the SSBO-uploaded constant\n"
+        "// for FlatMaterial.albedo.\n"
+        "bool evalSceneGraphBaseColor(uint graphId, uint matId,\n"
+        "                              float3 P, float3 N, float3 T, float2 UV,\n"
+        "                              out float3 outColor)\n"
+        "{\n"
+        "    outColor = float3(0.0);\n"
+        "    switch (graphId)\n"
+        "    {\n"
+        f"{base_color_cases}"
+        "        default:\n"
+        "            return false;\n"
+        "    }\n"
+        "}\n"
+    )
+
+
+def emit_wavefront_material_modules(graph_fragments) -> str:
+    """Build the wavefront half of the two-emitter split.
+
+    From the SAME GraphFragment list, emit one self-contained
+    `evalGraphSurface_<target>(P, N, T, UV, params, inout sp)` per graph: a
+    wavefront shade kernel fetches a hit's graph params from its own buffer and
+    calls this to overlay the graph outputs onto the seeded StdSurfaceParams.
+    Unlike the megakernel switch, there is no compiled-in `graphId` dispatch —
+    the runtime picks the per-material pipeline, so adding a material compiles
+    just its module.
+
+    P0 scope: the reusable per-material surface evaluation. The
+    `[shader("compute")]` shade entry-point wrapper and the `evalBSDF_<target>`
+    connection-event entry are deferred to Phase 1, where the wavefront
+    path-state struct and descriptor layout they operate on are designed.
+    """
+    parts: list[str] = [
+        "// Auto-generated. Do not edit — written by the wavefront emitter\n"
+        "// (vk_compute.emit_wavefront_material_modules). Per-material surface\n"
+        "// evaluation shared with the megakernel via the same GraphFragment.\n\n"
+        "import mtlx_std_surface;  // StdSurfaceParams\n",
+    ]
+    for gf in graph_fragments:
+        module_name = f"{gf.sanitized_name}_graph"
+        assignments = "\n".join(
+            f"    sp.{input_name} = g.{input_name};"
+            for input_name, _ in gf.outputs
+        )
+        parts.append(
+            f"\nimport generated.{module_name};\n\n"
+            f"void applyGraphOutputs_{gf.sanitized_name}("
+            f"inout StdSurfaceParams sp, in {gf.outputs_struct} g)\n"
+            f"{{\n"
+            f"{assignments}\n"
+            f"}}\n\n"
+            f"// Overlay graph {gf.target_name}'s outputs onto a seeded\n"
+            f"// StdSurfaceParams. Called by the per-material wavefront shade\n"
+            f"// kernel after it seeds `sp` from the hit's flat constants.\n"
+            f"void evalGraphSurface_{gf.sanitized_name}("
+            f"float3 P, float3 N, float3 T, float2 UV,\n"
+            f"                            in {gf.struct_name} params,\n"
+            f"                            inout StdSurfaceParams sp)\n"
+            f"{{\n"
+            f"    {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, params);\n"
+            f"    applyGraphOutputs_{gf.sanitized_name}(sp, g);\n"
+            f"}}\n"
+        )
+    return "".join(parts)
+
+
 class ComputePipeline:
     """Wraps a single Vulkan compute pipeline compiled from a Slang entry point."""
 
@@ -206,126 +385,16 @@ class ComputePipeline:
         for old in gen_dir.glob("*_graph.slang"):
             old.unlink()
 
-        imports: list[str] = []
-        ssbo_decls: list[str] = []
-        param_helpers: list[str] = []
-        apply_helpers: list[str] = []
-        cases: list[str] = []
-        for idx, gf in enumerate(self.graph_fragments):
+        # Per-graph module files (shared by both emitters): slangc's
+        # `-I shaders/` include path resolves `generated.<module>`.
+        for gf in self.graph_fragments:
             module_name = f"{gf.sanitized_name}_graph"
-            fname = f"{module_name}.slang"
-            (gen_dir / fname).write_text(gf.slang_source, encoding="utf-8")
-            imports.append(f"import generated.{module_name};")
-            binding = GRAPH_BINDING_BASE + idx
-            ssbo_decls.append(
-                f"[[vk::binding({binding}, 0)]]\n"
-                f"StructuredBuffer<{gf.struct_name}> graphParams_{gf.sanitized_name};\n"
-            )
-            param_helpers.append(
-                f"{gf.struct_name} _graphParams_{gf.sanitized_name}(uint matId)\n"
-                f"{{\n"
-                f"    return graphParams_{gf.sanitized_name}[matId];\n"
-                f"}}\n"
+            (gen_dir / f"{module_name}.slang").write_text(
+                gf.slang_source, encoding="utf-8"
             )
 
-            # Per-graph apply: copy each output field onto the matching
-            # StdSurfaceParams slot. Built from the fragment's `outputs`
-            # metadata so multi-output graphs (brass = specular_roughness +
-            # coat_color + coat_roughness) drive several inputs at once.
-            assignments = "\n".join(
-                f"    sp.{input_name} = g.{input_name};"
-                for input_name, _ in gf.outputs
-            )
-            apply_helpers.append(
-                f"void applyGraphOutputs_{gf.sanitized_name}("
-                f"inout StdSurfaceParams sp, in {gf.outputs_struct} g)\n"
-                f"{{\n"
-                f"{assignments}\n"
-                f"}}\n"
-            )
-
-            cases.append(
-                f"        case {idx + 2}u:  // graphId 0=skin, 1=flat reserved\n"
-                f"        {{\n"
-                f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
-                f"_graphParams_{gf.sanitized_name}(matId));\n"
-                f"            applyGraphOutputs_{gf.sanitized_name}(sp, g);\n"
-                f"            return;\n"
-                f"        }}\n"
-            )
-
-        # Per-hit base_color override path (FlatMaterial.albedo). Only
-        # graphs whose outputs include `base_color` participate; for
-        # graphs that drive other inputs (brass: specular_roughness +
-        # coat_*) the caller must NOT override albedo, so the case
-        # simply returns false and the caller keeps the SSBO constant.
-        base_color_cases = ""
-        for idx, gf in enumerate(self.graph_fragments):
-            has_base = any(i == "base_color" for i, _ in gf.outputs)
-            if not has_base:
-                continue
-            base_color_cases += (
-                f"        case {idx + 2}u:\n"
-                f"        {{\n"
-                f"            {gf.outputs_struct} g = {gf.func_name}(P, N, T, UV, "
-                f"_graphParams_{gf.sanitized_name}(matId));\n"
-                f"            outColor = g.base_color;\n"
-                f"            return true;\n"
-                f"        }}\n"
-            )
-
-        switch_body = "".join(cases) if cases else ""
-
-        aggregator = (
-            "// Auto-generated. Do not edit — written by "
-            "ComputePipeline._emit_generated_materials().\n"
-            "// Imports each scene MaterialX nodegraph as a Slang module.\n"
-            "// Per-graph modules expose only `evalGraph_<target>` + the\n"
-            "// matching `GraphParams_<target>` / `GraphOutputs_<target>`\n"
-            "// structs; their `internal` helpers stay module-private, so\n"
-            "// duplicate symbol names across graphs do not collide.\n\n"
-            "import mtlx_std_surface;  // StdSurfaceParams\n\n"
-            + "\n".join(imports)
-            + ("\n\n" if imports else "\n")
-            + "\n".join(ssbo_decls)
-            + ("\n" if ssbo_decls else "")
-            + "\n".join(param_helpers)
-            + ("\n" if param_helpers else "")
-            + "\n".join(apply_helpers)
-            + ("\n" if apply_helpers else "")
-            + "// Evaluate the per-hit nodegraph and overlay each driven\n"
-            "// std_surface input on `sp`. graphId 0 / 1 reserved (skin /\n"
-            "// flat) — callers gate the call by `materialGraphId(mid) >= 2`.\n"
-            "void evalSceneGraph(uint graphId, uint matId,\n"
-            "                    float3 P, float3 N, float3 T, float2 UV,\n"
-            "                    inout StdSurfaceParams sp)\n"
-            "{\n"
-            "    switch (graphId)\n"
-            "    {\n"
-            f"{switch_body}"
-            "        default:\n"
-            "            sp.base_color = float3(1.0, 0.0, 1.0);\n"
-            "            return;\n"
-            "    }\n"
-            "}\n\n"
-            "// Returns true and fills `outColor` only when the active graph\n"
-            "// drives std_surface.base_color (marble, wood). Graphs that\n"
-            "// drive only other inputs (brass: specular_roughness + coat_*)\n"
-            "// return false; the caller keeps the SSBO-uploaded constant\n"
-            "// for FlatMaterial.albedo.\n"
-            "bool evalSceneGraphBaseColor(uint graphId, uint matId,\n"
-            "                              float3 P, float3 N, float3 T, float2 UV,\n"
-            "                              out float3 outColor)\n"
-            "{\n"
-            "    outColor = float3(0.0);\n"
-            "    switch (graphId)\n"
-            "    {\n"
-            f"{base_color_cases}"
-            "        default:\n"
-            "            return false;\n"
-            "    }\n"
-            "}\n"
-        )
+        # Megakernel aggregator: one switch over all graphs.
+        aggregator = emit_megakernel_aggregator(self.graph_fragments, GRAPH_BINDING_BASE)
         (self.shader_dir / "generated_materials.slang").write_text(
             aggregator, encoding="utf-8"
         )

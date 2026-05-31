@@ -39,6 +39,12 @@ from skinny.mesh_cache import (
     make_cache_key,
     save_cached_mesh,
 )
+from skinny.params import (
+    EXECUTION_MEGAKERNEL,
+    clamp_mode_index,
+    effective_execution_mode,
+    next_mode_index,
+)
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
@@ -901,6 +907,12 @@ def _write_hdr_rgbe(path: str, rgb: np.ndarray) -> None:
 class Renderer:
     """Sets up Vulkan resources and dispatches Slang compute shaders each frame."""
 
+    # The wavefront backend does not yet implement the bidirectional
+    # integrator. While False, selecting Wavefront + BDPT renders with the
+    # megakernel BDPT (see effective_execution_mode_index). Flipped to True
+    # when the wavefront bidirectional path lands (Phase 3).
+    WAVEFRONT_BDPT_SUPPORTED = False
+
     def __init__(
         self,
         vk_ctx: VulkanContext,
@@ -1031,6 +1043,19 @@ class Renderer:
         # fall through to the path tracer in main_pass.slang.
         self.integrator_modes: list[str] = ["Path", "BDPT"]
         self.integrator_index = 0
+
+        # Execution backend selector, orthogonal to the integrator. Megakernel
+        # (index 0) is the single main_pass.slang compute dispatch — current
+        # behaviour and the default. Wavefront (index 1) is the staged
+        # per-material backend and is Vulkan only; on non-Vulkan backends only
+        # megakernel is offered so the selection is pinned there (mirrors the
+        # Vulkan-only GPU skinning / BVH-refit passes). Switching the selected
+        # mode resets accumulation via _current_state_hash.
+        _wavefront_capable = hasattr(self.ctx, "compute_queue")
+        self.execution_modes: list[str] = (
+            ["Megakernel", "Wavefront"] if _wavefront_capable else ["Megakernel"]
+        )
+        self.execution_mode_index = EXECUTION_MEGAKERNEL
 
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
@@ -1243,6 +1268,38 @@ class Renderer:
             self.orbit_camera.yaw = float(np.arctan2(offset[0], offset[2]))
             self.camera_mode = "orbit"
         self._refresh_camera_node()
+
+    # ── Execution backend (megakernel | wavefront) ──────────────────
+
+    def set_execution_mode(self, index: int) -> None:
+        """Select the execution backend by index, clamped to the available
+        modes. On non-Vulkan backends only megakernel is available, so any
+        request collapses to megakernel."""
+        self.execution_mode_index = clamp_mode_index(index, len(self.execution_modes))
+
+    def cycle_execution_mode(self) -> None:
+        """Advance to the next available execution mode, wrapping. A no-op
+        when only one mode is available (the Metal pin)."""
+        self.execution_mode_index = next_mode_index(
+            self.execution_mode_index, len(self.execution_modes)
+        )
+
+    @property
+    def effective_execution_mode_index(self) -> int:
+        """Execution mode actually used to render this frame, after capability
+        gating. Wavefront + BDPT falls back to megakernel until the wavefront
+        bidirectional path lands."""
+        return effective_execution_mode(
+            self.execution_mode_index,
+            self.integrator_index,
+            self.WAVEFRONT_BDPT_SUPPORTED,
+        )
+
+    @property
+    def execution_mode_fallback_active(self) -> bool:
+        """True when the capability gate is overriding the selected execution
+        mode (front-ends surface this to the user)."""
+        return self.effective_execution_mode_index != self.execution_mode_index
 
     def refresh_user_presets(self) -> None:
         """Re-scan ~/.skinny/presets/ and rebuild the preset list.
@@ -6274,6 +6331,7 @@ class Renderer:
             float(self.tattoo_density),
             int(self.scatter_index),
             int(self.integrator_index),
+            int(self.execution_mode_index),
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),

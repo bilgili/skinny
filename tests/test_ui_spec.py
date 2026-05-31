@@ -41,6 +41,7 @@ class _StubRenderer:
         self.direct_light_modes  = _named("On", "Off")
         self.scatter_modes       = _named("BSSRDF", "Volume")
         self.integrator_modes    = _named("Path", "Direct")
+        self.execution_modes     = _named("Megakernel", "Wavefront")
         self.furnace_modes       = _named("Off", "On")
         self.models              = _named("(none)")
         self.detail_maps_modes   = _named("Off", "On")
@@ -52,6 +53,7 @@ class _StubRenderer:
         self.direct_light_index = 0
         self.scatter_index = 0
         self.integrator_index = 0
+        self.execution_mode_index = 0
         self.furnace_index = 0
         self.model_index = 0
         self.detail_maps_index = 0

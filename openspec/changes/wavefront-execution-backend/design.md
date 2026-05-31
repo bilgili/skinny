@@ -1,0 +1,197 @@
+## Context
+
+The renderer is a megakernel. `main_pass.slang`'s `mainImage` compute entry
+generates a camera ray, traverses the BVH, evaluates the hit material via
+`evalSceneGraph(graphId, ...)` — a `switch` over all material graphs stitched
+into the auto-generated `generated_materials.slang` — then bounces in-kernel
+until the path terminates, all in registers. The integrator is a *runtime branch*
+inside this one kernel: `fc.integratorType` (0 = path, 1 = bdpt) selects
+`PathTracer` vs `BDPTIntegrator` per pixel (`main_pass.slang:125`). One compute
+pipeline, one `vkCmdDispatch` per frame (`renderer.py:6466`).
+
+Material graphs are generated per-graph as self-contained Slang
+(`GraphFragment`, `materialx_runtime.py`); `_emit_generated_materials`
+(`vk_compute.py:189`) stitches them into the switch. Adding a graph changes
+`_graph_set_signature()` (`renderer.py:2129`) and triggers
+`_build_pipeline_for_current_graphs()` — a full `slangc` recompile + pipeline
+recreate. `_compile_slang` (`vk_compute.py:556`) caches SPIR-V by
+blake2b(source+flags), but any new graph is a new superset → cache miss.
+
+Geometry is monolithic: all meshes concatenated into one shared vertex/index/BVH
+buffer (`_upload_meshes_concatenated`, `renderer.py:5572`); per-instance TLAS
+records carry per-BLAS offsets (node/tri/vert, `INSTANCE_STRIDE=144`). Any
+add/remove re-concatenates and re-uploads the whole set.
+
+Multi-pipeline management already exists as precedent: `vk_skinning.py`
+(`SkinningPasses`) owns two independent compute pipelines (skin + BVH refit), each
+with its own shader module, descriptor set layout, and per-mesh descriptor sets,
+dispatched in their own command buffer before the frame render. There is no
+indirect dispatch anywhere yet.
+
+This change adds a switchable wavefront execution backend (path + bdpt), a
+per-material pipeline structure that makes adding a material a one-kernel compile,
+and a geometry suballocator that makes add/remove touch only the changed mesh.
+
+## Goals / Non-Goals
+
+**Goals:**
+- An execution-mode axis (`megakernel` | `wavefront`) orthogonal to the integrator
+  axis, switchable at runtime, persisted, with front-end parity and accumulation
+  reset on switch.
+- Wavefront backend covering both `path` and `bdpt`.
+- Adding a material under wavefront compiles exactly one small shade/eval kernel —
+  never the megakernel.
+- Incremental geometry add/remove: touch only the changed mesh's slab, stable
+  offsets, no whole-scene re-upload.
+- Tiled / streaming wavefront so path-state memory is bounded, not O(pixels).
+- Mega-vs-wavefront image parity, verified headlessly per integrator.
+- Reuse one material/integrator code body across both modes (shared Slang
+  includes), so "switchable" is two emitters over one source, not two renderers.
+
+**Non-Goals:**
+- Removing the megakernel. It stays and is the default; it wins on simple scenes
+  and is the only Metal path.
+- General bidirectional bdpt. Wavefront bdpt matches the current "flat first-hit
+  only" scope (`main_pass.slang:127`), not all-strategy bdpt.
+- GPU-side material radix sort. Wavefront starts with atomic per-material append
+  queues; a sort/compaction pass is a future optimization.
+- Wavefront on Metal. Vulkan-first, like the GPU skinning/refit pipelines; Metal
+  is pinned to megakernel.
+- Reworking the integrators' math (MIS, light sampling, RR, BSSRDF). The same
+  estimator code is relocated across dispatches, not rewritten.
+
+## Decisions
+
+**1. Execution mode is a new axis, not a third integrator.**
+The integrator is *what* (algorithm: path/bdpt); execution mode is *how*
+(megakernel vs wavefront). They are orthogonal. Add `self.execution_mode` to the
+renderer, select it like `backend`, include it in `_current_state_hash()` (switch
+resets accumulation), persist `execution_mode` in `settings.json`, and expose it
+in `ALL_PARAMS` + GLFW + Qt + debug viewport. *Alternative:* fold wavefront in as
+`integratorType == 2`. Rejected — wavefront is multi-dispatch with persistent VRAM
+state; it is not expressible as a per-pixel branch inside the megakernel.
+
+**2. Capability matrix gates the UI.**
+
+```
+            megakernel   wavefront
+  path          ✓            ✓   (Phase 1)
+  bdpt          ✓            ✓   (Phase 3)
+```
+
+Until Phase 3 lands, selecting `bdpt` + `wavefront` falls back to megakernel-bdpt
+(and the UI surfaces that), rather than rendering wrong. On Metal, wavefront is
+unavailable and the toggle is disabled/pinned to megakernel.
+
+**3. Shared front-end; two codegen emitters over one `GraphFragment` source.**
+Both modes share BVH + geometry buffers, TLAS/instances, lights, env CDF, camera,
+accumulation image, and uniforms. The per-graph `GraphFragment` Slang is the
+shared material source. `_emit_generated_materials` grows a second emitter:
+- *megakernel emitter* (current): stitch fragments into the `evalSceneGraph`
+  switch, one SPIR-V.
+- *wavefront emitter* (new): wrap each fragment in its own compute entry
+  `shadeMaterial_X` **and** an `evalBSDF_X` function (BSDF value, not sampling)
+  for bdpt connection events. One module/pipeline per graph.
+*Alternative:* duplicate material logic per mode. Rejected — the emitters must
+draw from the same fragment so material features stay at parity for free.
+
+**4. Wavefront path pipeline = staged dispatches over GPU path state + queues.**
+Stages, each its own compute pipeline (managed by a new `vk_wavefront.py`
+`WavefrontPasses`, modeled on `SkinningPasses`):
+- *generate*: seed camera rays for the current path stream → ray queue.
+- *intersect*: traverse the shared BVH for queued rays (reuse the megakernel's
+  traversal include) → hit buffer; append each hit to its material's queue.
+- *logic*: per hit, light sampling + MIS + Russian roulette + next-bounce ray
+  generation; terminated lanes write radiance to the accumulation image and free
+  their slot.
+- *shade ×N*: one dispatch per material over that material's queue, evaluating
+  `shadeMaterial_X` (BSDF sample + throughput update). This is the per-material
+  pipeline set.
+Path state is SoA in VRAM (~80 B/path: ray O/D, throughput, radiance, rng, depth,
+pixelIdx, MIS pdf, flags). The bounce loop iterates intersect→logic→shade until
+queues drain or max depth, then advances the stream.
+
+**5. Tiled / streaming, fixed-size path streams with refill.**
+Process a fixed number of paths at a time (a stream, e.g. `1<<20`) rather than one
+slot per pixel (~160 MB at 1080p). As lanes terminate, refill the stream from the
+remaining pixels/samples (stream compaction) to keep occupancy high. This bounds
+VRAM and fits progressive accumulation naturally (one sample/pixel/frame, tiled
+internally). *Alternative:* full-frame path-state buffers. Rejected — memory risk
+on high resolution / shared GPUs.
+
+**6. Atomic per-material append queues first; indirect dispatch sizes them.**
+During intersect/logic, append each surviving hit to its material's queue via an
+atomic counter (matId → queue). Each shade dispatch is sized to its queue count
+via `vkCmdDispatchIndirect`, fed by a tiny *build-indirect-args* kernel that turns
+queue counts into dispatch dims. *Alternative:* GPU radix sort + contiguous
+slices (best coherence). Deferred — atomic queues are simpler and correct; sort is
+a later optimization. De-risk indirect dispatch by first landing a conservative
+direct-dispatch fallback (worst-case groups + early-out on empty lanes) and
+A/B-ing the two.
+
+**7. Vulkan compute layer grows multi-pipeline + indirect dispatch.**
+`vk_compute.py` gains the ability to own N pipelines/descriptor sets and to record
+`vkCmdDispatchIndirect`, following the `vk_skinning.py` pattern (separate modules,
+layouts, sets, own command buffer). The wavefront passes run before/with the
+frame render like skinning does.
+
+**8. bdpt wavefront = two subpath walks + a connection stage, limited scope.**
+Phase 3. Build a camera subpath wavefront and a light subpath wavefront, each a
+generate→intersect→shade walk that **stores its vertices** (pos, normal,
+throughput, fwd/rev pdf, matId) up to max depth. A connection+shadow stage
+connects prefix pairs: visibility ray + `evalBSDF_X` at both endpoints + geometry
+term + MIS recurrence. Vertex storage is bounded by `stream_size × maxdepth × 2`,
+not pixels (consistent with Decision 5). Match the current flat-first-hit bdpt
+scope, not general bdpt. *Alternative:* general all-strategy bdpt. Rejected for
+this change — far larger; current megakernel bdpt is already limited.
+
+**9. Geometry suballocator with stable offsets + free-list (mode-independent).**
+Replace `_upload_meshes_concatenated` with a slab allocator over the shared
+vertex/index/BVH buffers: each baked mesh gets a slab whose offsets are **stable**
+for its lifetime, so the BLAS offsets in TLAS instance records stay valid without
+reindexing. Add = bake (content-hash cached) + write one slab + add instance
+record(s). Remove = free the slab (free-list) + drop instance record(s); no
+re-concatenation. `_ensure_mesh_buffer_capacity` becomes a slab-aware grow (grow
+preserves existing slab layout, so offsets survive). Fragmentation is handled by
+the free-list with best-fit reuse and an occasional opt-in **compaction** that
+moves slabs and rewrites the affected TLAS offsets. Both backends read these
+buffers, so the suballocator is shared. *Alternative:* keep monolithic concat.
+Rejected — it is the whole of cost (2).
+
+**10. Headless A/B parity is the safety net for "switchable".**
+Two execution modes plus two emitters risk drift. Gate with the existing
+`tests/test_headless.py` harness: render the same scene in megakernel and
+wavefront for each supported integrator and assert image equivalence within
+tolerance. This makes the maintenance tax bounded and visible.
+
+## Risks / Trade-offs
+
+- **bdpt-in-wavefront is the hard core.** Variable-length subpath vertex storage,
+  the connection MIS recurrence split across dispatches, and the dual-context use
+  of per-material kernels (shade *and* connection eval) are the biggest risk. →
+  Phase it last; match the limited flat-first-hit scope; fall back to
+  megakernel-bdpt until it reaches A/B parity.
+- **The path loop must be torn apart.** The megakernel's in-register
+  generate→trace→shade→bounce loop becomes dispatches round-tripping path state
+  through VRAM — more bandwidth, and MIS/light-sampling logic relocates into the
+  logic stage. → Reuse the same estimator includes so it is relocation, not a
+  rewrite; verify with A/B.
+- **Memory under tiling.** Path state (~80 B/path) and bdpt vertex storage
+  (×maxdepth ×2) are bounded by stream size, but a too-large stream still spikes
+  VRAM. → Make stream size configurable with a conservative default; document the
+  memory model.
+- **Indirect dispatch is new to the codebase.** → Land the conservative
+  direct-dispatch fallback first and A/B it against indirect.
+- **Maintenance tax of two modes + two emitters.** → A/B parity CI gate
+  (Decision 10); keep wavefront opt-in (megakernel default).
+- **Metal gap.** Wavefront is Vulkan-only initially, so Metal users do not get the
+  add-material-fast win for new graphs. → Acceptable and consistent with the
+  Vulkan-only skinning/refit precedent; documented in the capability matrix.
+- **Suballocator fragmentation / compaction correctness.** Moving slabs must
+  rewrite every referencing TLAS offset atomically. → Compaction is opt-in and
+  guarded by a unit test asserting offsets and rendered output are unchanged
+  across a compaction.
+- **Cost (2) and the wavefront work are orthogonal.** The suballocator is what
+  actually makes geometry add/remove instant; wavefront only fixes the shader
+  recompile. Both are bundled here so "add model = near-instant" is delivered
+  end-to-end, but they are independent and can land/verify separately.
