@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.helpers import dispatch_uint_kernel
+
 pytestmark = pytest.mark.gpu
 
 _HARNESS = """
@@ -25,6 +27,11 @@ uint test_groups(uint laneCount, uint groupSize)
 @pytest.fixture(scope="module")
 def buildargs(load_source):
     return load_source("test_wf_buildargs", _HARNESS)
+
+
+@pytest.fixture(scope="module")
+def build_args_module(load_shader):
+    return load_shader("wavefront/build_args.slang")
 
 
 def test_zero_lanes_zero_groups(buildargs):
@@ -43,3 +50,33 @@ def test_exact_multiple_is_not_rounded_up(buildargs):
 def test_partial_rounds_up(buildargs):
     assert int(buildargs.test_groups(65, 64)) == 2
     assert int(buildargs.test_groups(200, 64)) == 4  # ceil(200/64) = 4
+
+
+# ── end-to-end kernel dispatch (full scan + indirect args) ─────────
+
+
+def test_buildargs_kernel_scan_and_args(device, build_args_module):
+    counts = [3, 0, 5, 1]
+    out = dispatch_uint_kernel(
+        device, build_args_module.buildArgs, [1, 1, 1],
+        inputs={"materialCount": counts},
+        outputs={"materialOffset": 4, "indirectArgs": 12},
+        scalars={"numMaterials": 4, "groupSize": 64},
+    )
+    # Exclusive prefix sum.
+    assert out["materialOffset"].tolist() == [0, 3, 3, 8]
+    # One (x,y,z) per material; x = ceil(count/64), empty material → 0 groups.
+    assert out["indirectArgs"].tolist() == [1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+
+
+def test_buildargs_offsets_pack_tightly_for_large_counts(device, build_args_module):
+    counts = [100, 200, 64]
+    out = dispatch_uint_kernel(
+        device, build_args_module.buildArgs, [1, 1, 1],
+        inputs={"materialCount": counts},
+        outputs={"materialOffset": 3, "indirectArgs": 9},
+        scalars={"numMaterials": 3, "groupSize": 64},
+    )
+    assert out["materialOffset"].tolist() == [0, 100, 300]
+    # ceil(100/64)=2, ceil(200/64)=4, ceil(64/64)=1
+    assert out["indirectArgs"].tolist()[0::3] == [2, 4, 1]

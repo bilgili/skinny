@@ -33,3 +33,33 @@ def vec3_dot(a, b):
 
 def vec3_length(v):
     return math.sqrt(vec3_dot(v, v))
+
+
+def dispatch_uint_kernel(device, func, thread_count, *, inputs, outputs, scalars=None):
+    """Dispatch a slangpy compute entry with uint StructuredBuffer I/O and read
+    back the outputs.
+
+    ``func`` is a ``slangpy`` Function (e.g. ``module.buildArgs``). ``inputs``
+    maps param name → 1-D uint array (uploaded as a StructuredBuffer<uint>);
+    ``outputs`` maps param name → element count (allocated zeroed); ``scalars``
+    maps param name → int uniform. ``uniform`` resource params want the raw
+    buffer, so we pass ``NDBuffer.storage``. Returns {out_name: np.ndarray}.
+    """
+    import numpy as np
+    import slangpy as spy
+
+    kwargs: dict = {}
+    out_bufs: dict = {}
+    for name, arr in inputs.items():
+        buf = spy.NDBuffer.from_numpy(device, np.asarray(arr, dtype=np.uint32))
+        kwargs[name] = buf.storage
+    for name, count in outputs.items():
+        buf = spy.NDBuffer.from_numpy(device, np.zeros(int(count), dtype=np.uint32))
+        out_bufs[name] = buf
+        kwargs[name] = buf.storage
+    for name, value in (scalars or {}).items():
+        kwargs[name] = value
+
+    func.dispatch(thread_count, **kwargs)
+    device.wait()
+    return {name: buf.to_numpy() for name, buf in out_bufs.items()}
