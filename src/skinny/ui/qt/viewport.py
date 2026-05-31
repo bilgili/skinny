@@ -16,6 +16,7 @@ from PySide6.QtGui import QImage, QPainter, QWheelEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from skinny.ui.qt.camera_input import CameraDispatcher
+from skinny.ui.gizmo_input import GizmoMouseController
 
 
 class _RenderWorker(QObject):
@@ -84,6 +85,11 @@ class RenderViewport(QWidget):
         self._image_buffer: bytes | None = None
 
         self._camera = CameraDispatcher(renderer)
+
+        # Rotate-gizmo interaction. The controller arbitrates gizmo-vs-camera on
+        # press and owns the drag lifecycle; this widget only maps coordinates
+        # and holds the render lock around its renderer calls.
+        self._gizmo = GizmoMouseController()
 
         self._left = self._right = self._middle = False
         self._last_pos: tuple[float, float] | None = None
@@ -193,11 +199,29 @@ class RenderViewport(QWidget):
 
     def mousePressEvent(self, event) -> None:
         pos = event.position()
-        if (
-            event.button() == Qt.LeftButton
-            and (event.modifiers() & Qt.ShiftModifier)
-        ):
-            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+        if event.button() != Qt.LeftButton:
+            if event.button() == Qt.RightButton:
+                self._right = True
+            elif event.button() == Qt.MiddleButton:
+                self._middle = True
+            self._last_pos = (pos.x(), pos.y())
+            self.setFocus(Qt.MouseFocusReason)
+            return
+
+        # Left press: one precedence ladder — shift-autofocus → scene-pick →
+        # zoom-rect → gizmo → camera — resolved by the gizmo controller so the
+        # gizmo is grabbable and never shadowed by the camera (or vice versa).
+        mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+        shift = bool(event.modifiers() & Qt.ShiftModifier)
+        with self._render_lock:
+            action = self._gizmo.on_press(
+                self.renderer, mapped,
+                shift=shift,
+                pick_armed=self._pick_armed,
+                zoom_arming=self._zoom_arming,
+            )
+
+        if action == "autofocus":
             if mapped is not None:
                 with self._render_lock:
                     self.renderer.autofocus_at_pixel(
@@ -205,8 +229,7 @@ class RenderViewport(QWidget):
                     )
             self.setFocus(Qt.MouseFocusReason)
             return
-        if event.button() == Qt.LeftButton and self._pick_armed:
-            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+        if action == "pick":
             if mapped is None:
                 # Click outside the rendered image; ignore and stay armed.
                 return
@@ -219,8 +242,7 @@ class RenderViewport(QWidget):
                 )
             self.setFocus(Qt.MouseFocusReason)
             return
-        if event.button() == Qt.LeftButton and self._zoom_arming:
-            mapped = self._widget_to_render_pixel(pos.x(), pos.y())
+        if action == "zoom":
             if mapped is not None:
                 self._zoom_dragging = True
                 self._zoom_start_px = (float(mapped[0]), float(mapped[1]))
@@ -230,12 +252,14 @@ class RenderViewport(QWidget):
                     )
             self.setFocus(Qt.MouseFocusReason)
             return
-        if event.button() == Qt.LeftButton:
-            self._left = True
-        elif event.button() == Qt.RightButton:
-            self._right = True
-        elif event.button() == Qt.MiddleButton:
-            self._middle = True
+        if action == "gizmo":
+            # Drag is live (controller began it). Do not arm the camera.
+            self._last_pos = (pos.x(), pos.y())
+            self.setFocus(Qt.MouseFocusReason)
+            return
+
+        # action == "camera"
+        self._left = True
         self._last_pos = (pos.x(), pos.y())
         self.setFocus(Qt.MouseFocusReason)
 
@@ -253,6 +277,10 @@ class RenderViewport(QWidget):
             self._zoom_arming = False
             return
         if event.button() == Qt.LeftButton:
+            with self._render_lock:
+                ended = self._gizmo.on_release(self.renderer)
+            if ended:
+                return
             self._left = False
         elif event.button() == Qt.RightButton:
             self._right = False
@@ -270,10 +298,23 @@ class RenderViewport(QWidget):
                         float(mapped[0]), float(mapped[1]),
                     ))
             return
-        if self._last_pos is None:
-            self._last_pos = (event.position().x(), event.position().y())
-            return
+
         x, y = event.position().x(), event.position().y()
+        # Gizmo drag (consumes the move) or, when idle, ring hover highlight.
+        mapped = self._widget_to_render_pixel(x, y)
+        any_button = self._left or self._right or self._middle
+        with self._render_lock:
+            consumed = self._gizmo.on_move(
+                self.renderer, mapped,
+                any_button_down=any_button, zoom_dragging=False,
+            )
+        if consumed:
+            self._last_pos = (x, y)
+            return
+
+        if self._last_pos is None:
+            self._last_pos = (x, y)
+            return
         dx = x - self._last_pos[0]
         dy = y - self._last_pos[1]
         self._last_pos = (x, y)
