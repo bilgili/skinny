@@ -189,3 +189,61 @@ def test_wavefront_hit_normals_are_sensible():
     finally:
         renderer.cleanup()
         ctx.destroy()
+
+
+def test_wavefront_diffuse_shades_geometry():
+    """Direct-lit diffuse wavefront shade: the geometry must come out shaded
+    (a normal-dependent gradient over the spheres) and distinct from the
+    environment background — proving the wavefront lights a surface with the hit
+    normal + the scene's directional light. Not an A/B vs the megakernel (fixed
+    albedo, single bounce) — a 'physically sensible lit surface' check."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+    )
+    try:
+        deadline = 200
+        while deadline > 0 and (
+            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+        ):
+            renderer.update(0.025)
+            deadline -= 1
+        assert renderer.pipeline is not None
+        for _ in range(4):
+            renderer.update(0.04)
+            renderer.render_headless()
+
+        # Hit mask (locates the geometry).
+        vis = renderer.build_wavefront_trace_pass(
+            "wavefront/wavefront_visibility", "wavefrontVisibility")
+        renderer._wavefront_debug_pass = vis
+        renderer.set_execution_mode(1)
+        renderer.render_headless()
+        mask = renderer.read_accumulation()[:, :, 0] > 0.5
+        vis.destroy()
+
+        # Diffuse shade.
+        diff = renderer.build_wavefront_trace_pass(
+            "wavefront/wavefront_diffuse", "wavefrontDiffuse",
+            include_env=True, include_lights=True)
+        renderer._wavefront_debug_pass = diff
+        renderer.render_headless()
+        img = renderer.read_accumulation()[:, :, :3]
+
+        assert np.all(np.isfinite(img))
+        assert int(mask.sum()) > 50, "no geometry to shade"
+        lum = img.sum(axis=2)
+        # The shaded geometry varies across the surface (N·L + normal-sampled
+        # ambient) rather than being a flat fill.
+        assert float(lum[mask].std()) > 0.01, "shaded geometry is flat (no N-dependence)"
+        # Geometry shading is distinct from the environment background.
+        assert abs(float(lum[mask].mean()) - float(lum[~mask].mean())) > 1e-3, (
+            "shaded geometry indistinguishable from background"
+        )
+    finally:
+        renderer.cleanup()
+        ctx.destroy()

@@ -66,6 +66,15 @@
 > for the staged pipeline: write hits into the path-state + per-material queues
 > (vs. the fused mask) and the logic/shade stages (material eval via
 > evalGraphSurface + lighting + MIS).
+>
+> SHADE — lighting step DONE: `wavefront_diffuse.slang` (`wavefrontDiffuse`)
+> lights the hit with a fixed albedo under the scene's directional light
+> (binding 20) + a normal-sampled env ambient; env on miss. Verified: the
+> geometry comes out shaded (normal-dependent gradient) and distinct from the
+> background (`test_wavefront_render.py`). Proves the wavefront lights a surface
+> with the hit normal. REMAINING for a megakernel-A/B shade: real material
+> albedo (evalGraphSurface + graph-param SSBOs / bindless textures), MIS, and
+> multi-bounce — threaded through the path-state + queue buffers.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 

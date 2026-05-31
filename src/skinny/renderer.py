@@ -1337,13 +1337,17 @@ class Renderer:
             self._wavefront_debug_pass.destroy()
             self._wavefront_debug_pass = None
 
-    def build_wavefront_trace_pass(self, module: str, entry: str):
+    def build_wavefront_trace_pass(self, module: str, entry: str,
+                                   include_env: bool = False,
+                                   include_lights: bool = False):
         """Build a wavefront pass whose kernel calls `traceScene`. Binds the
         renderer's shared geometry/BVH/instance/material buffers at the binding
         numbers traceScene reflects (0/2/5/6/7/12/13/16; 13/16 from the
-        alpha-cutout path). Used by the primary-visibility and hit-normal
-        kernels. Call after geometry is loaded — the vertex/index/BVH buffers
-        reallocate on scene reload, so rebuild the pass after a reload."""
+        alpha-cutout path). `include_env` adds the env map (4); `include_lights`
+        adds the distant-light buffer (20) — used by the diffuse shade kernel.
+        The spec must match exactly what the kernel's SPIR-V reflects. Call
+        after geometry is loaded (vertex/index/BVH buffers reallocate on scene
+        reload, so rebuild the pass after a reload)."""
         from skinny.vk_wavefront import BoundComputePass
         sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         specs = [
@@ -1358,6 +1362,18 @@ class Renderer:
             {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
             {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
         ]
+        if include_env:
+            specs.append({
+                "binding": 4, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                "sampler": self.env_image.sampler, "view": self.env_image.view,
+                "layout": vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            })
+        if include_lights:
+            specs.append({
+                "binding": 20, "type": sb,
+                "buffer": self.distant_lights_buffer.buffer,
+                "range": self.distant_lights_buffer.size,
+            })
         return BoundComputePass(
             self.ctx, self.shader_dir, module, entry, specs, self.width, self.height,
         )
