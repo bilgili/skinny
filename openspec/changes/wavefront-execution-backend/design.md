@@ -195,3 +195,90 @@ tolerance. This makes the maintenance tax bounded and visible.
   actually makes geometry add/remove instant; wavefront only fixes the shader
   recompile. Both are bundled here so "add model = near-instant" is delivered
   end-to-end, but they are independent and can land/verify separately.
+
+## Phase 1 — Detailed design (wavefront path tracer)
+
+Pins the field-level contracts so §4–§6 (and the task-3 infra) are implementable
+without guessing. All buffers use the project's scalar layout
+(`-fvk-use-scalar-layout`: `float3` = 12 B, 4-byte aligned).
+
+**P1-A. Path-state record — AoS first.** A `WavefrontPathState` StructuredBuffer,
+one element per lane in the active stream. Fields (scalar layout):
+
+| field | type | bytes | purpose |
+|-------|------|-------|---------|
+| `rayOrigin` | float3 | 0..12 | current bounce ray origin |
+| `rayDir` | float3 | 12..24 | current bounce ray direction |
+| `throughput` | float3 | 24..36 | path throughput β |
+| `radiance` | float3 | 36..48 | accumulated L for this path's pixel |
+| `pixelIndex` | uint | 48..52 | flattened target pixel (accumulation) |
+| `rngState` | uint | 52..56 | PCG-32 state (matches `common.slang` `Rng.state`) |
+| `depth` | uint | 56..60 | current bounce count |
+| `flags` | uint | 60..64 | bit0 alive, bit1 specularBounce (skip NEE-MIS) |
+| `bsdfPdf` | float | 64..68 | pdf of last BSDF sample (MIS vs NEE) |
+
+Stride 68 B (alignment 4). *Deviation from Decision 5's "SoA":* start AoS — simpler
+to get correct and matches the existing `pack()` discipline; convert hot fields to
+SoA only if profiling shows the shade/intersect stages bandwidth-bound. The size is
+locked by a `test_struct_layout`-style test against the Slang struct.
+
+**P1-B. Queues + counting-sort by material.**
+- `rayQueue`: `uint` index buffer (size = streamSize) + `rayCount` counter — lanes
+  to intersect this bounce.
+- `hitBuffer`: one `HitData` per lane (intersect output, `common.slang` struct).
+- Material sort (counting sort, not a comparison sort): intersect atomically
+  increments `materialCount[mid]` per hit; a `build_args` kernel prefix-sums
+  `materialCount` → `materialOffset` and fills the indirect-args; a scatter writes
+  each surviving lane into `materialQueue[materialOffset[mid] + local]`. *MVP
+  fallback if the scatter is fiddly:* each `shade_<mid>` masks the hitBuffer by
+  materialId (wastes lanes; `log()` the choice). Target is the counting sort.
+
+**P1-C. Indirect dispatch (un-defers task 3.2).** `indirectArgs`: `numMaterials ×
+(uint x,y,z)`. `build_args` sets `x = ceil(materialCount[mid] / GROUP)`, `y=z=1`.
+Each `shade_<mid>` is `vkCmdDispatchIndirect(indirectArgs, offset = mid*12)`. Land
+the conservative direct-dispatch fallback (3.3) first — dispatch worst-case
+`ceil(streamSize/GROUP)` groups with an early-out on `local >= materialCount[mid]` —
+then A/B it against indirect.
+
+**P1-D. Stage kernel I/O contracts.**
+- `generate(streamBase)` → for lane `i`: pixel = `pixelForLane(streamBase+i)`,
+  seed state (camera ray via existing `cameras/{pinhole,thick_lens}`, β=1, L=0,
+  `rngState = seed(pixel, frame)`, depth=0, alive); append `i` to `rayQueue`.
+- `intersect` → traverse the shared BVH (reuse the `mesh_head` traversal include)
+  per `rayQueue` lane → `hitBuffer[i]`. Miss: `radiance += β · env`, clear alive.
+  Hit: bump `materialCount[hit.materialId]`.
+- `shade_<mid>` (**per-material — this pins the deferred task 2.2 entry**): seed a
+  `StdSurfaceParams` from the flat constants, overlay the graph via the 2.2
+  emitter's `evalGraphSurface_<mid>(P,N,T,UV, params, inout sp)`, build the BSDF,
+  then (a) NEE: sample a light (`lights/*`), eval BSDF, MIS-combine into `radiance`;
+  (b) sample the BSDF for continuation → update `rayDir`, `throughput`, `bsdfPdf`,
+  set specular flag; `depth++`.
+- `logic` → Russian roulette on `throughput`; flush terminated lanes' `radiance`
+  to the accumulation image at `pixelIndex`; compact survivors back into `rayQueue`
+  for the next bounce.
+
+**P1-E. Per-frame bounce loop (one sample/pixel, tiled).**
+```
+for streamBase in 0, streamSize, 2·streamSize, … < numPixels:   # P1 streaming
+    generate(streamBase)
+    for depth in 0 .. maxDepth-1:
+        intersect                       # rayQueue → hits + material counts
+        build_args                      # prefix-sum counts → offsets + indirect dims
+        for mid in materials: shade_mid # indirect-dispatched, per-material
+        logic                           # RR · flush terminated L · compact survivors
+        if rayCount == 0: break
+    # accumulation step folds this stream's per-pixel radiance into the running mean
+```
+
+**P1-F. Descriptor layout (un-defers task 3.1).** A new `vk_wavefront.py`
+`WavefrontPasses` owns the stage pipelines + these buffers: `WavefrontPathState`,
+`rayQueue`+counter, `hitBuffer`, `materialQueue`+`materialCount`+`materialOffset`,
+`indirectArgs`; plus read access to the shared geometry/BVH/instances/lights/env/
+uniform bindings (same as the megakernel) and write to the accumulation image. Each
+stage pipeline binds the subset it needs — modelled on `SkinningPasses`. With these
+buffers fixed, task 3's N-pipeline + indirect-dispatch infra is now concrete.
+
+**P1-G. bdpt addendum (P3, out of P1 scope).** Adds a `lightPathState` vertex buffer
++ a connection+shadow stage; the connection endpoints reuse `shade_<mid>`'s BSDF
+evaluation as the deferred `evalBSDF_<mid>` entry. Pinned here only to confirm the
+P1 path-state and per-material-kernel shapes don't preclude it.

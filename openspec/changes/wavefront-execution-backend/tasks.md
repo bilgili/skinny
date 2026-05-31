@@ -14,12 +14,12 @@
 
 ## 3. Phase 0 — Vulkan multi-pipeline + indirect dispatch infra
 
-> DEFERRED to the start of Phase 1. The descriptor-set layouts, indirect-args
-> buffer shapes, and per-stage pipeline signatures here are determined by the
-> wavefront path-state struct + queue design (Phase 1, §4–§6), which does not
-> exist yet. Building this infra now would guess those interfaces and produce
-> untested Vulkan plumbing with no consumer. The `vk_skinning.py` multi-pipeline
-> precedent is documented in design.md §7 and stands ready to model from.
+> DESIGN-UNBLOCKED (do at the start of the Phase 1 GPU session). The interfaces
+> these need — path-state struct, queue/counting-sort buffers, indirect-args
+> shape, per-stage descriptor layout — are now pinned in **design.md §P1-A..§P1-F**
+> (3.1 ↔ §P1-F, 3.2 ↔ §P1-C, 3.3 ↔ §P1-C direct-dispatch fallback). Model the
+> N-pipeline manager on `vk_skinning.py` (design.md §7). Not yet implemented:
+> needs a live GPU iteration loop, so it lands with §4–§6, not as dead infra.
 
 - [ ] 3.1 Extend the Vulkan compute layer to own N pipelines / descriptor set layouts / sets and dispatch them from one command buffer, following the `vk_skinning.py` (`SkinningPasses`) pattern.
 - [ ] 3.2 Add `vkCmdDispatchIndirect` support and an indirect-args buffer abstraction to `vk_compute.py` / `vk_context.py`.
@@ -27,9 +27,12 @@
 
 ## 4. Phase 1 — Wavefront path: state + queues
 
-- [ ] 4.1 Define the SoA path-state buffers (ray O/D, throughput, radiance, rng, depth, pixelIdx, MIS pdf, flags) sized to a configurable stream size.
-- [ ] 4.2 Define the ray queue(s) and per-material append queues with atomic counters (matId → queue).
-- [ ] 4.3 Add the build-indirect-args kernel that turns queue counts into shade-dispatch dimensions.
+> Contracts pinned in design.md §P1-A (path-state, AoS-first), §P1-B (queues +
+> counting sort), §P1-C (indirect args). Implement on GPU with live iteration.
+
+- [ ] 4.1 Add the `WavefrontPathState` struct (Slang + Python layout, scalar layout, stride 68 B per §P1-A) sized to a configurable stream size; lock the size with a `test_struct_layout`-style test.
+- [ ] 4.2 Define the ray queue + counter, hit buffer, and per-material counting-sort buffers (`materialCount`/`materialOffset`/`materialQueue`) per §P1-B.
+- [ ] 4.3 Add the build-indirect-args kernel (prefix-sum counts → offsets + per-material dispatch dims) per §P1-C; land the direct-dispatch fallback (3.3) first.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 
