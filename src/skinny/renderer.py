@@ -1378,6 +1378,47 @@ class Renderer:
             self.ctx, self.shader_dir, module, entry, specs, self.width, self.height,
         )
 
+    def build_wavefront_material_pass(self):
+        """Build the per-material albedo wavefront pass (`wavefront_material`):
+        camera ray → BVH → evalSceneGraphBaseColor → material base colour.
+        Binds the traceScene set + env (4) + every per-graph param SSBO (25+,
+        from `pipeline.graph_bindings`) + the bindless texture array (14, from
+        the texture pool). Over-providing graph bindings the kernel may not
+        reference is fine — the SPIR-V uses a subset of the layout."""
+        from skinny.vk_compute import BINDLESS_TEXTURE_CAPACITY
+        from skinny.vk_wavefront import BoundComputePass
+        sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        specs = [
+            {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
+            {"binding": 2, "type": vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             "view": self.accum_image.view, "layout": vk.VK_IMAGE_LAYOUT_GENERAL},
+            {"binding": 4, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+             "sampler": self.env_image.sampler, "view": self.env_image.view,
+             "layout": vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {"binding": 5, "type": sb, "buffer": self.vertex_buffer.buffer, "range": self.vertex_buffer.size},
+            {"binding": 6, "type": sb, "buffer": self.index_buffer.buffer, "range": self.index_buffer.size},
+            {"binding": 7, "type": sb, "buffer": self.bvh_buffer.buffer, "range": self.bvh_buffer.size},
+            {"binding": 12, "type": sb, "buffer": self.instance_buffer.buffer, "range": self.instance_buffer.size},
+            {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
+            {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
+        ]
+        graph_bindings = getattr(self.pipeline, "graph_bindings", {}) or {}
+        for target, binding in graph_bindings.items():
+            buf = self._graph_param_buffers.get(target)
+            if buf is not None:
+                specs.append({"binding": binding, "type": sb,
+                              "buffer": buf.buffer, "range": buf.size})
+        slots = [(idx, s.sampler, s.view) for idx, s in self.texture_pool.filled_slots()]
+        specs.append({
+            "binding": 14, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            "array_count": BINDLESS_TEXTURE_CAPACITY, "slots": slots,
+        })
+        return BoundComputePass(
+            self.ctx, self.shader_dir, "wavefront/wavefront_material",
+            "wavefrontMaterial", specs, self.width, self.height,
+        )
+
     def read_accumulation(self) -> "np.ndarray":
         """Copy the linear-HDR accumulation image to host as an (H, W, 4)
         float32 array. For A/B comparison that must not depend on tonemapping

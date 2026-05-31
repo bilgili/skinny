@@ -247,3 +247,56 @@ def test_wavefront_diffuse_shades_geometry():
     finally:
         renderer.cleanup()
         ctx.destroy()
+
+
+def test_wavefront_material_albedo_per_material():
+    """Per-material albedo via evalSceneGraphBaseColor over the bindless
+    material set (graph-param SSBOs + the 128-slot texture array). The geometry
+    must come out in material-driven colours that VARY across the surface set,
+    not a single flat fill — proving the wavefront drives per-material
+    evaluation through the descriptor-indexing path."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+    )
+    try:
+        deadline = 200
+        while deadline > 0 and (
+            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+        ):
+            renderer.update(0.025)
+            deadline -= 1
+        assert renderer.pipeline is not None
+        for _ in range(4):
+            renderer.update(0.04)
+            renderer.render_headless()
+
+        vis = renderer.build_wavefront_trace_pass(
+            "wavefront/wavefront_visibility", "wavefrontVisibility")
+        renderer._wavefront_debug_pass = vis
+        renderer.set_execution_mode(1)
+        renderer.render_headless()
+        mask = renderer.read_accumulation()[:, :, 0] > 0.5
+        vis.destroy()
+
+        mat = renderer.build_wavefront_material_pass()
+        renderer._wavefront_debug_pass = mat
+        renderer.render_headless()
+        img = renderer.read_accumulation()[:, :, :3]
+
+        assert np.all(np.isfinite(img))
+        assert int(mask.sum()) > 50, "no geometry"
+        colors = img[mask]
+        # Material evaluation produces colour variation across the geometry
+        # (distinct material base colours), not one flat albedo.
+        per_channel_std = colors.std(axis=0)
+        assert float(per_channel_std.max()) > 0.03, (
+            f"material colours are flat (per-channel std {per_channel_std})"
+        )
+    finally:
+        renderer.cleanup()
+        ctx.destroy()

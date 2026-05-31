@@ -86,9 +86,16 @@
 > descriptor-indexing support (per-binding descriptorCount + a
 > VkDescriptorSetLayoutBindingFlagsCreateInfo with PARTIALLY_BOUND for 14, pool
 > sized 128, and per-filled-slot writes mirroring `_update_texture_pool_descriptors`).
-> NEXT: add bindless support to BoundComputePass + a builder binding the graph
-> param buffers (`_graph_param_buffers`/`graph_bindings`) and the texture pool,
-> then verify the spheres render in distinct material colours.
+> DONE: `BoundComputePass` now supports bindless descriptor arrays (per-binding
+> descriptorCount + UPDATE_AFTER_BIND|PARTIALLY_BOUND flags + per-filled-slot
+> writes, mirroring the megakernel). `renderer.build_wavefront_material_pass()`
+> binds the traceScene set + env + every per-graph param SSBO + the 128-slot
+> texture pool. `test_wavefront_render.py` confirms the geometry renders in
+> material-driven colours that vary across the surface set (per-channel std >
+> 0.03) — the wavefront drives per-material evaluation. This is the original
+> per-material-partition motivation, running in the wavefront. REMAINING for a
+> megakernel-A/B shade: full BSDF response (not just base colour) + lighting +
+> MIS + multi-bounce, threaded through the path-state + queue buffers.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 

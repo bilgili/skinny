@@ -72,19 +72,31 @@ class BoundComputePass:
             ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None
         )
 
+        # An "array_count" spec is a bindless descriptor array (e.g. the
+        # 128-slot texture pool at binding 14). It needs UPDATE_AFTER_BIND +
+        # PARTIALLY_BOUND descriptor indexing, mirroring the megakernel layout.
+        has_array = any("array_count" in s for s in specs)
         layout_bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=s["binding"], descriptorType=s["type"],
-                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                descriptorCount=s.get("array_count", 1),
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             )
             for s in specs
         ]
+        layout_kwargs = dict(bindingCount=len(layout_bindings), pBindings=layout_bindings)
+        if has_array:
+            binding_flags = [
+                (vk.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+                 | vk.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT)
+                if "array_count" in s else 0
+                for s in specs
+            ]
+            layout_kwargs["pNext"] = vk.VkDescriptorSetLayoutBindingFlagsCreateInfo(
+                bindingCount=len(binding_flags), pBindingFlags=binding_flags)
+            layout_kwargs["flags"] = 0x00000002  # UPDATE_AFTER_BIND_POOL
         self._set_layout = vk.vkCreateDescriptorSetLayout(
-            ctx.device,
-            vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=len(layout_bindings), pBindings=layout_bindings),
-            None,
-        )
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(**layout_kwargs), None)
         self._pipe_layout = vk.vkCreatePipelineLayout(
             ctx.device,
             vk.VkPipelineLayoutCreateInfo(setLayoutCount=1, pSetLayouts=[self._set_layout]),
@@ -97,18 +109,18 @@ class BoundComputePass:
             [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None,
         )[0]
 
-        # Pool sized by counting each descriptor type.
+        # Pool sized by counting each descriptor type (array specs count their
+        # full capacity).
         type_counts: dict = {}
         for s in specs:
-            type_counts[s["type"]] = type_counts.get(s["type"], 0) + 1
+            type_counts[s["type"]] = type_counts.get(s["type"], 0) + s.get("array_count", 1)
         pool_sizes = [vk.VkDescriptorPoolSize(type=t, descriptorCount=c)
                       for t, c in type_counts.items()]
+        pool_kwargs = dict(maxSets=1, poolSizeCount=len(pool_sizes), pPoolSizes=pool_sizes)
+        if has_array:
+            pool_kwargs["flags"] = 0x00000002  # UPDATE_AFTER_BIND_POOL
         self._pool = vk.vkCreateDescriptorPool(
-            ctx.device,
-            vk.VkDescriptorPoolCreateInfo(
-                maxSets=1, poolSizeCount=len(pool_sizes), pPoolSizes=pool_sizes),
-            None,
-        )
+            ctx.device, vk.VkDescriptorPoolCreateInfo(**pool_kwargs), None)
         self._set = vk.vkAllocateDescriptorSets(
             ctx.device,
             vk.VkDescriptorSetAllocateInfo(
@@ -118,6 +130,17 @@ class BoundComputePass:
         writes = []
         for s in specs:
             t = s["type"]
+            if "array_count" in s:
+                # Bindless array — write only the filled slots (PARTIALLY_BOUND
+                # leaves the rest invalid; the shader gates reads by sentinel).
+                for idx, sampler, view in s["slots"]:
+                    info = vk.VkDescriptorImageInfo(
+                        sampler=sampler, imageView=view,
+                        imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    writes.append(vk.VkWriteDescriptorSet(
+                        dstSet=self._set, dstBinding=s["binding"], dstArrayElement=idx,
+                        descriptorCount=1, descriptorType=t, pImageInfo=[info]))
+                continue
             if t in (vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER):
                 info = vk.VkDescriptorBufferInfo(buffer=s["buffer"], offset=0, range=s["range"])
                 writes.append(vk.VkWriteDescriptorSet(
