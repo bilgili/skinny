@@ -1119,6 +1119,16 @@ class Renderer:
             self._load_usd_model(usd_scene_path)
 
         self._mesh_cache_index: dict = load_cache_index()
+        # Geometry suballocator: per-mesh slabs over the shared vertex/index/BVH
+        # buffers (stable offsets + free-list), so a USD add/remove touches only
+        # the changed mesh instead of re-concatenating the whole scene. Keyed by
+        # (prim_path, sub-index); content changes are detected via _slab_content_fp.
+        # The legacy single-mesh OBJ path bypasses this and resets it (the OBJ
+        # upload clobbers offset 0). Mode-independent — both backends read the
+        # suballocated buffers.
+        from skinny.slab_allocator import SlabAllocator
+        self._slab_alloc = SlabAllocator()
+        self._slab_content_fp: dict = {}
         # Rebake-tracking: each (source, displacement-scale) combination
         # produces a different GPU mesh, so we remember what we last baked and
         # rebuild when any input changes. -1 and NaN sentinels force an initial
@@ -3516,6 +3526,12 @@ class Renderer:
         )
 
     def _upload_mesh(self, mesh: Mesh) -> None:
+        # Legacy single-mesh OBJ path: writes one BLAS at offset 0, clobbering
+        # any suballocated slab layout. Reset the slab allocator so a later USD
+        # resync rebuilds from scratch instead of trusting stale offsets.
+        from skinny.slab_allocator import SlabAllocator
+        self._slab_alloc = SlabAllocator()
+        self._slab_content_fp = {}
         self._ensure_mesh_buffer_capacity(
             mesh.num_vertices, mesh.num_triangles, mesh.num_nodes,
         )
@@ -3543,8 +3559,7 @@ class Renderer:
             if inst.prim_path:
                 prim_index.setdefault(inst.prim_path, []).append(i)
         self._prim_to_instances = prim_index
-        meshes = [inst.mesh for inst in scene.instances]
-        offsets = self._upload_meshes_concatenated(meshes)
+        offsets = self._upload_meshes_suballocated(scene.instances)
         # TLAS records only for enabled instances. Disabled instances keep
         # their BLAS data resident (cheap) but never get walked by rays.
         enabled_idx = [
@@ -5850,39 +5865,147 @@ class Renderer:
         if writes:
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
-    def _upload_meshes_concatenated(
-        self, meshes: list[Mesh]
+    # Shared-buffer element strides (bytes). Must match the packers in mesh.py
+    # and the grow math in _ensure_mesh_buffer_capacity.
+    _SLAB_V_STRIDE = 32  # vertex
+    _SLAB_T_STRIDE = 12  # triangle (3 × uint32 index)
+    _SLAB_N_STRIDE = 32  # BVH node
+
+    def _mesh_fingerprint(self, mesh: Mesh) -> str:
+        """Stable content fingerprint of a baked mesh (cached on the object).
+        Detects when a resident slab's geometry changed (e.g. a displacement
+        rebake) so it is re-uploaded rather than silently reused."""
+        fp = getattr(mesh, "_slab_fp", None)
+        if fp is None:
+            import hashlib
+            h = hashlib.blake2b(digest_size=16)
+            h.update(mesh.vertex_bytes)
+            h.update(mesh.index_bytes)
+            h.update(mesh.bvh_bytes)
+            fp = h.hexdigest()
+            try:
+                mesh._slab_fp = fp  # dataclass is mutable; cache to skip rehash
+            except Exception:  # noqa: BLE001 — frozen/slotted variant: just recompute
+                pass
+        return fp
+
+    def _upload_meshes_suballocated(
+        self, instances: "list"
     ) -> list[tuple[int, int, int]]:
-        """Pack multiple meshes back-to-back into the unified GPU buffers.
+        """Slab-allocate every instance mesh in the shared vertex/index/BVH
+        buffers and return one (node_offset, triangle_offset, vertex_offset)
+        per instance — the triple each shader Instance record holds.
 
-        Returns one (node_offset, triangle_offset, vertex_offset) per mesh
-        — the same triple the shader's Instance record holds. The shader
-        adds these offsets to the BLAS-local indices stored in each mesh's
-        BVH / index / vertex bytes.
-
-        Used by the USD path; the legacy single-mesh OBJ rebake stays on
-        `_upload_mesh` since it always lives at offsets (0, 0, 0).
+        Replaces the whole-scene concatenation: each instance keeps a slab with
+        **stable** offsets keyed by (prim_path, sub-index), so an add/remove
+        touches only the changed mesh. Departed meshes are freed to the
+        free-list (reused by later adds); resident, content-unchanged meshes are
+        not re-uploaded; content changes (rebake) free + re-allocate. Buffers
+        grow in place (existing slab offsets preserved), so TLAS BLAS offsets
+        stay valid without reindexing. Mode-independent — both execution modes
+        read these buffers.
         """
-        v_chunks: list[bytes] = []
-        i_chunks: list[bytes] = []
-        b_chunks: list[bytes] = []
+        alloc = self._slab_alloc
+        from skinny.slab_allocator import Counts
+
+        # Stable per-instance key: (prim_path, sub-index among same path). The
+        # loader yields a prim's sub-meshes in a deterministic order, so the
+        # key survives a resync for unchanged geometry. Anonymous instances fall
+        # back to their position (re-uploaded if the set shifts — no regression
+        # over the old concat-everything path).
+        keys: list = []
+        seen_path: dict[str, int] = {}
+        for i, inst in enumerate(instances):
+            pp = getattr(inst, "prim_path", None) or getattr(inst, "name", None)
+            if pp:
+                sub = seen_path.get(pp, 0)
+                seen_path[pp] = sub + 1
+                keys.append((pp, sub))
+            else:
+                keys.append(("__anon__", i))
+
+        # Content-change check: a resident key whose mesh bytes changed must be
+        # freed so it re-allocates (and re-uploads) fresh.
+        fps = [self._mesh_fingerprint(inst.mesh) for inst in instances]
+        for key, fp in zip(keys, fps):
+            if alloc.is_resident(key) and self._slab_content_fp.get(key) != fp:
+                alloc.free(key)
+                self._slab_content_fp.pop(key, None)
+
+        # Drop meshes that left the scene (free-list reclaims their regions).
+        for gone in alloc.retain_only(keys):
+            self._slab_content_fp.pop(gone, None)
+
+        # Allocate slabs (resident → reuse; else free-list best-fit or append).
         offsets: list[tuple[int, int, int]] = []
-        v_off = 0
-        t_off = 0
-        n_off = 0
-        for mesh in meshes:
-            offsets.append((n_off, t_off, v_off))
-            v_chunks.append(mesh.vertex_bytes)
-            i_chunks.append(mesh.index_bytes)
-            b_chunks.append(mesh.bvh_bytes)
-            v_off += mesh.num_vertices
-            t_off += mesh.num_triangles
-            n_off += mesh.num_nodes
-        self._ensure_mesh_buffer_capacity(v_off, t_off, n_off)
-        self.vertex_buffer.upload_sync(b"".join(v_chunks))
-        self.index_buffer.upload_sync(b"".join(i_chunks))
-        self.bvh_buffer.upload_sync(b"".join(b_chunks))
+        plan: list[tuple] = []  # (off, is_new, vbytes, ibytes, bbytes)
+        for key, fp, inst in zip(keys, fps, instances):
+            mesh = inst.mesh
+            res = alloc.allocate(key, Counts(mesh.num_vertices,
+                                             mesh.num_triangles,
+                                             mesh.num_nodes))
+            off = res.offsets  # (v, t, n)
+            offsets.append((off.n, off.t, off.v))  # shader order: node, tri, vert
+            self._slab_content_fp[key] = fp
+            plan.append((off, res.is_new,
+                         mesh.vertex_bytes, mesh.index_bytes, mesh.bvh_bytes))
+
+        # Grow the backing buffers if the high-water mark outran them. Growth
+        # preserves slab offsets, so a grown buffer is repopulated from every
+        # resident slab; non-grown buffers keep their data and take only new
+        # slabs. _ensure_mesh_buffer_capacity rebinds descriptors + re-seeds the
+        # dummy mesh, which the slab writes below then overwrite at real offsets.
+        hw = alloc.high_water
+        v_size_before = self.vertex_buffer.size
+        i_size_before = self.index_buffer.size
+        b_size_before = self.bvh_buffer.size
+        self._ensure_mesh_buffer_capacity(hw.v, hw.t, hw.n)
+        grew_v = self.vertex_buffer.size != v_size_before
+        grew_i = self.index_buffer.size != i_size_before
+        grew_n = self.bvh_buffer.size != b_size_before
+
+        for off, is_new, vb, ib, bb in plan:
+            if grew_v or is_new:
+                self.vertex_buffer.upload_range(vb, off.v * self._SLAB_V_STRIDE)
+            if grew_i or is_new:
+                self.index_buffer.upload_range(ib, off.t * self._SLAB_T_STRIDE)
+            if grew_n or is_new:
+                self.bvh_buffer.upload_range(bb, off.n * self._SLAB_N_STRIDE)
         return offsets
+
+    def compact_geometry(self) -> int:
+        """Defragment the shared geometry buffers: pack live slabs contiguously,
+        move their GPU bytes, and rewrite every referencing TLAS BLAS offset so
+        the rendered image is unchanged. Opt-in (fragmentation is otherwise
+        tolerated via the free-list). Returns the number of slabs relocated.
+
+        Safe to skip; safe to call repeatedly (a no-op when already packed)."""
+        scene = self._usd_scene
+        if scene is None or not scene.instances:
+            return 0
+        moves = self._slab_alloc.compact()
+        if not moves:
+            return 0
+        # Re-upload every live slab's bytes at its new offset. Build a key→mesh
+        # map from the current instances (the live set == current instances).
+        seen_path: dict[str, int] = {}
+        key_mesh: dict = {}
+        for inst in scene.instances:
+            pp = getattr(inst, "prim_path", None) or getattr(inst, "name", None)
+            if pp:
+                sub = seen_path.get(pp, 0)
+                seen_path[pp] = sub + 1
+                key_mesh[(pp, sub)] = inst.mesh
+        for key, _old, new, _counts in moves:
+            mesh = key_mesh.get(key)
+            if mesh is None:
+                continue
+            self.vertex_buffer.upload_range(mesh.vertex_bytes, new.v * self._SLAB_V_STRIDE)
+            self.index_buffer.upload_range(mesh.index_bytes, new.t * self._SLAB_T_STRIDE)
+            self.bvh_buffer.upload_range(mesh.bvh_bytes, new.n * self._SLAB_N_STRIDE)
+        # Rewrite TLAS instance records with the post-compaction offsets.
+        self._upload_usd_scene()
+        return len(moves)
 
     def _upload_instances(
         self,

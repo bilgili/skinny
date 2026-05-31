@@ -113,11 +113,11 @@
 
 ## 7. Phase 2 — Geometry suballocator (mode-independent)
 
-- [ ] 7.1 Replace `_upload_meshes_concatenated` / `_ensure_mesh_buffer_capacity` with a slab allocator over the shared vertex/index/BVH buffers: per-mesh slabs, stable offsets, grow preserves layout.
-- [ ] 7.2 Add a free-list with best-fit reuse; `remove_node` frees the slab and drops instance record(s) with no re-upload.
-- [ ] 7.3 Make `add_model` / `_resync_geometry_from_stage` incremental: bake (content-hash cached) + write one slab + add instance record(s); resident meshes untouched.
-- [ ] 7.4 Add opt-in compaction that moves slabs and rewrites every referencing instance/TLAS offset; safe to skip.
-- [ ] 7.5 Confirm both execution modes read the suballocated buffers correctly.
+- [x] 7.1 `slab_allocator.SlabAllocator` (GPU-free) owns per-mesh slabs over the shared vertex/index/BVH element spaces, keyed by (prim_path, sub-index); offsets are stable for a slab's lifetime. `renderer._upload_meshes_suballocated` replaces `_upload_meshes_concatenated`, sizing buffers via the slab high-water and re-uploading per-slab through the new `StorageBuffer.upload_range`. Grow appends only (`_ensure_mesh_buffer_capacity` reused), so existing offsets never shift. `StorageBuffer.upload_range(data, dst_offset)` writes one slab without touching neighbours.
+- [x] 7.2 Free-list with best-fit reuse (no-split, coupled three-space fit) in `SlabAllocator`; `remove_node`'s resync calls `retain_only(current_keys)` → departed meshes are freed and reused by later adds, with zero re-upload of survivors (GPU-verified: `test_suballocator_gpu::test_remove_keeps_survivor_offsets_and_skips_reupload`).
+- [x] 7.3 `_upload_meshes_suballocated` makes add/`_resync_geometry_from_stage` incremental: content-fingerprint key (cached on the Mesh) → resident, unchanged meshes are not re-uploaded; only new/changed slabs write; resident offsets unchanged (GPU-verified: `test_add_keeps_resident_offsets_stable`). Bake stays content-hash cached upstream.
+- [x] 7.4 `renderer.compact_geometry()` — opt-in: `SlabAllocator.compact()` packs live slabs, the renderer moves their bytes via `upload_range` and `_upload_usd_scene` rewrites every TLAS BLAS offset; safe to skip (free-list tolerates fragmentation) and idempotent. Rendered output unchanged within the renderer's own re-render noise floor (GPU-verified: `test_compaction_preserves_rendered_output`).
+- [x] 7.5 Both modes read the suballocated buffers: the megakernel demo render and every wavefront pass (visibility/material/staged-shade) bind the same vertex/index/BVH buffers and stay green after the suballocator swap (`test_headless` + `test_wavefront_render`).
 
 ## 7b. Renderer integration map (for the env-only milestone wiring)
 
@@ -199,7 +199,7 @@ Carry-over facts (avoid re-investigating):
 - [ ] 9.1 Headless A/B parity (extend `tests/test_headless.py`): megakernel vs wavefront for the `path` integrator within tolerance; add as a CI gate.
 - [ ] 9.2 Headless A/B parity: megakernel vs wavefront for `bdpt` (after Phase 3).
 - [ ] 9.3 Indirect-dispatch correctness: indirect vs conservative direct-dispatch fallback produce equivalent images.
-- [ ] 9.4 Suballocator unit tests: offsets stable across unrelated add/remove; free-list reuse; grow preserves layout; compaction leaves rendered output unchanged.
-- [ ] 9.5 Incremental-add test: adding a model with a new material in wavefront compiles exactly one shade pipeline and re-uploads only the new slab; adding a model that reuses materials compiles none.
+- [x] 9.4 Suballocator unit tests: `test_slab_allocator.py` (11, GPU-free) — stable offsets across unrelated add/remove, free-list best-fit reuse, append-only growth preserves offsets, compaction packs + reports moves. `test_suballocator_gpu.py` (3, GPU) — remove keeps survivor offsets + re-uploads nothing; add keeps resident offsets stable; compaction leaves rendered output within the re-render noise floor.
+- [~] 9.5 Incremental-add — GEOMETRY half DONE: `test_suballocator_gpu` proves an add re-uploads only the new slab (resident offsets stable, survivors not re-written) and a remove frees without re-uploading survivors. REMAINING (wavefront material half): assert adding a model with a *new material* compiles exactly one shade pipeline and reusing materials compiles none — needs the §7c step-3 shade-pipeline compile cache (task 6.4).
 - [ ] 9.6 Front-end parity test: each render-surface front-end reaches the execution-mode toggle; Metal pins to megakernel.
 - [ ] 9.7 Run `.venv/bin/ruff check src/` and `.venv/bin/pytest`; recompile any changed SPIR-V with `slangc`; confirm `main_pass.slang` (megakernel) output is unchanged.

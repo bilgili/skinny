@@ -2047,6 +2047,47 @@ class StorageBuffer:
         vk.vkQueueWaitIdle(self.ctx.compute_queue)
         vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
 
+    def upload_range(self, data: bytes, dst_offset: int) -> None:
+        """Copy ``data`` into the device-local buffer at byte ``dst_offset`` via a
+        one-shot transfer, leaving the rest of the buffer untouched. Used by the
+        slab allocator to write a single mesh's slab without re-uploading
+        neighbouring slabs."""
+        if not data:
+            return
+        if dst_offset + len(data) > self.size:
+            raise ValueError(
+                f"StorageBuffer upload_range: {dst_offset}+{len(data)}B "
+                f"> buffer {self.size}B"
+            )
+        ptr = vk.vkMapMemory(self.ctx.device, self.staging_memory, 0, self._staging_size, 0)
+        import cffi
+        ffi = cffi.FFI()
+        ffi.memmove(ptr, data, len(data))
+        vk.vkUnmapMemory(self.ctx.device, self.staging_memory)
+
+        alloc_info = vk.VkCommandBufferAllocateInfo(
+            commandPool=self.ctx.command_pool,
+            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        )
+        cmd = vk.vkAllocateCommandBuffers(self.ctx.device, alloc_info)[0]
+        vk.vkBeginCommandBuffer(
+            cmd,
+            vk.VkCommandBufferBeginInfo(
+                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            ),
+        )
+        region = vk.VkBufferCopy(srcOffset=0, dstOffset=int(dst_offset), size=len(data))
+        vk.vkCmdCopyBuffer(cmd, self.staging_buffer, self.buffer, 1, [region])
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1,
+            [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+            vk.VK_NULL_HANDLE,
+        )
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
     def fill_zero_sync(self) -> None:
         """Zero the device-local buffer via vkCmdFillBuffer."""
         alloc_info = vk.VkCommandBufferAllocateInfo(
