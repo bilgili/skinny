@@ -41,6 +41,7 @@ from skinny.mesh_cache import (
 )
 from skinny.params import (
     EXECUTION_MEGAKERNEL,
+    EXECUTION_WAVEFRONT,
     clamp_mode_index,
     effective_execution_mode,
     next_mode_index,
@@ -1056,6 +1057,10 @@ class Renderer:
             ["Megakernel", "Wavefront"] if _wavefront_capable else ["Megakernel"]
         )
         self.execution_mode_index = EXECUTION_MEGAKERNEL
+        # Lazily built env-only wavefront pass (Phase-1 integration milestone),
+        # constructed on first wavefront-mode dispatch. None until then / on
+        # non-Vulkan backends.
+        self._wavefront_env_pass = None
 
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
@@ -1300,6 +1305,75 @@ class Renderer:
         """True when the capability gate is overriding the selected execution
         mode (front-ends surface this to the user)."""
         return self.effective_execution_mode_index != self.execution_mode_index
+
+    def _ensure_wavefront_env_pass(self):
+        """Build (once) the env-only wavefront pass. Returns it, or None on a
+        non-Vulkan backend. Phase-1 integration milestone — superseded by the
+        staged pipeline."""
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self._wavefront_env_pass is None:
+            from skinny.vk_wavefront import WavefrontEnvPass
+            self._wavefront_env_pass = WavefrontEnvPass(
+                self.ctx, self.shader_dir,
+                uniform_buffer=self.uniform_buffer.buffer,
+                uniform_size=self.uniform_size,
+                accum_view=self.accum_image.view,
+                env_view=self.env_image.view,
+                env_sampler=self.env_image.sampler,
+                width=self.width, height=self.height,
+            )
+        return self._wavefront_env_pass
+
+    def _destroy_wavefront_env_pass(self) -> None:
+        if self._wavefront_env_pass is not None:
+            self._wavefront_env_pass.destroy()
+            self._wavefront_env_pass = None
+
+    def read_accumulation(self) -> "np.ndarray":
+        """Copy the linear-HDR accumulation image to host as an (H, W, 4)
+        float32 array. For A/B comparison that must not depend on tonemapping
+        (see CLAUDE.md headless notes)."""
+        import numpy as np
+
+        from skinny.vk_compute import ReadbackBuffer
+        w, h = self.width, self.height
+        readback = ReadbackBuffer(self.ctx, w, h, bytes_per_pixel=16)  # RGBA32F
+        f = self.current_frame
+        vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
+        cmd = self.command_buffers[f]
+        vk.vkResetCommandBuffer(cmd, 0)
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+        rng = vk.VkImageSubresourceRange(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)
+        to_src = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image=self.accum_image.image, subresourceRange=rng)
+        vk.vkCmdPipelineBarrier(cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, None, 0, None, 1, [to_src])
+        readback.record_copy_from(cmd, self.accum_image.image)
+        to_gen = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            image=self.accum_image.image, subresourceRange=rng)
+        vk.vkCmdPipelineBarrier(cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, None, 0, None, 1, [to_gen])
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
+        vk.vkQueueSubmit(self.ctx.compute_queue, 1,
+                         [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+                         self.in_flight_fences[f])
+        vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
+        data = readback.read()
+        readback.destroy()
+        return np.frombuffer(data, dtype=np.float32).reshape(h, w, 4)
 
     def refresh_user_presets(self) -> None:
         """Re-scan ~/.skinny/presets/ and rebuild the preset list.
@@ -6710,18 +6784,22 @@ class Renderer:
         # artefacts in the rendered frame after a resize.
         self.hud_overlay.record_copy(cmd)
 
-        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
-        vk.vkCmdBindDescriptorSets(
-            cmd,
-            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-            self.pipeline.pipeline_layout,
-            0, 1, [self.descriptor_sets[f]],
-            0, None,
-        )
-
-        groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-        groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-        vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+        # Execution-mode gate (Phase-1 env-only milestone): wavefront writes the
+        # accumulation image via its own pass; megakernel is the default path.
+        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+            self._ensure_wavefront_env_pass().record_dispatch(cmd)
+        else:
+            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
+            vk.vkCmdBindDescriptorSets(
+                cmd,
+                vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+                self.pipeline.pipeline_layout,
+                0, 1, [self.descriptor_sets[f]],
+                0, None,
+            )
+            groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+            groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+            vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
 
         # Transition offscreen output: GENERAL → TRANSFER_SRC for readback
         barrier_to_src = vk.VkImageMemoryBarrier(
@@ -7025,6 +7103,7 @@ class Renderer:
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
 
+        self._destroy_wavefront_env_pass()
         for sem in self.image_available + self.render_finished:
             vk.vkDestroySemaphore(self.ctx.device, sem, None)
         for fence in self.in_flight_fences:

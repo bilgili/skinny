@@ -34,15 +34,22 @@
 - [~] 4.2 Sizing math (GPU-free): `wavefront_layout.queue_buffer_sizes(...)` is the single source of truth for the stage buffer byte sizes (`test_wavefront_state.py`). Counting-sort scatter DONE + GPU-verified: `shaders/wavefront/scatter.slang` (`scatterByMaterial`, atomic write cursors) groups lanes into per-material slices (`test_wavefront_scatter.py`, real dispatch+readback). Vulkan allocation DONE: `vk_wavefront.py WavefrontPasses` allocates the stage StorageBuffers via `queue_buffer_sizes`, verified on a real headless device (`test_wavefront_passes.py` — allocate/rescale/idempotent-destroy). REMAINING: pin the hit buffer (HitData stride) alongside the intersect stage.
 - [x] 4.3 Added `shaders/wavefront/build_args.slang`: `buildArgs` compute kernel (exclusive prefix-sum counts → `materialOffset`, + one indirect (x,y,z) per material via the shared `wfIndirectGroupCount` ceil-div). Ceil-div GPU-verified across edge cases (`test_wavefront_buildargs.py`, shared definition — no formula drift); entry compiles. Full-buffer dispatch verification lands when `WavefrontPasses` binds real buffers.
 
-> Milestone stepping-stone DONE: `shaders/wavefront/wavefront_env.slang`
-> (`wavefrontEnv`) — env-only kernel that fuses generate+miss+accumulate,
-> reproducing main_pass.slang's env path + progressive accumulation exactly for
-> a wavefront-vs-megakernel A/B over a geometry-free scene. Compiles clean
-> (all shared bindings resolve). REMAINING for the milestone: build its pipeline
-> + descriptor set in WavefrontPasses (bind fc/accumBuffer/envMap from the
-> renderer's resources) and gate the dispatch in `render()` on execution_mode —
-> the descriptor/render-loop surgery, best done with live headless A/B
-> iteration. Integration map captured in this session's investigation.
+> ENV-ONLY MILESTONE DONE + A/B-VERIFIED. `shaders/wavefront/wavefront_env.slang`
+> (`wavefrontEnv`) generates the camera ray and writes env radiance into the
+> accumulation image, reproducing main_pass.slang's env path. `WavefrontEnvPass`
+> (`vk_wavefront.py`) builds its pipeline + descriptor set (binds fc/accumBuffer/
+> envMap from the renderer's resources, bindings 0/2/4 per slangc reflection).
+> `render_headless()` gates the dispatch on `effective_execution_mode_index`;
+> `read_accumulation()` reads the linear-HDR accum image for A/B.
+> `test_wavefront_render.py` renders the demo scene in both modes and confirms
+> a substantial fraction of pixels (the background) match the megakernel's env
+> in linear HDR. Megakernel regression (TestMaterialXGraphDemoRender) still
+> passes; no resource leaks; env pass destroyed in cleanup(). This proves the
+> integration: the execution-mode flag routes to a distinct GPU dispatch that
+> reads the shared bindings and writes the accumulation image correctly.
+> REMAINING: gate the windowed `render()` path too (headless done) + a tonemap/
+> output write so windowed wavefront displays (accum-only today). Then the full
+> staged generate→intersect→logic→shade pipeline supersedes this env kernel.
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 
