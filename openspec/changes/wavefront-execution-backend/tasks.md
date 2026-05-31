@@ -99,16 +99,32 @@
 
 ## 5. Phase 1 — Wavefront path: stage kernels
 
-- [ ] 5.1 `wavefront/generate.slang`: seed camera rays for the current stream into the ray queue.
-- [ ] 5.2 `wavefront/intersect.slang`: traverse the shared BVH for queued rays (reuse the megakernel traversal include), write hits, and append each to its material queue.
-- [ ] 5.3 `wavefront/logic.slang`: light sampling + MIS + Russian roulette + next-bounce ray generation; terminated lanes accumulate radiance and free their slot (reuse the §1–§6 estimator and light/sampler includes).
-- [ ] 5.4 Per-material `shadeMaterial_X` shade dispatch: BSDF sample + throughput update over each material queue.
+> STAGED WAVEFRONT PATH TRACER DONE + A/B-VERIFIED. `shaders/wavefront/
+> wavefront_path.slang` (`wfPathGenerate` / `wfPathBounce` / `wfPathResolve`)
+> tears the megakernel's in-register path loop into compute dispatches over a
+> per-lane `WavefrontPathState` buffer in VRAM. The per-bounce body is a verbatim
+> relocation of `integrators/path.slang`'s `estimateRadiance` (+ runFrame's
+> primary-miss): it calls the SAME `evaluateBounce` (NEE over all lights + env,
+> MIS, BSDF sample, flat/graph/skin/python material dispatch) and the SAME env /
+> sphere-light MIS, so it is an unbiased estimator of the same integral.
+> `vk_wavefront.WavefrontPathPass` owns the 3 pipelines + path-state buffer and a
+> bounce loop (generate → bounce ×MAX with a path-state barrier between →
+> resolve); set 0 reuses the megakernel scene descriptor set (no binding
+> re-enumeration), set 1 binding 0 is the path-state buffer. A/B
+> (`test_wavefront_path_ab`): wavefront-vs-megakernel pixel match 0.960 vs the
+> megakernel-vs-itself MC noise floor 0.962, mean |Δ| 0.002 — i.e. the wavefront
+> matches the megakernel as well as two megakernel renders match each other.
+
+- [x] 5.1 `wfPathGenerate` seeds the camera ray + path state (β, L=0, rng, depth, alive, bsdfPdf=-1) for every pixel lane.
+- [~] 5.2 Intersection: `wfPathBounce` traverses the shared BVH (reused `traceScene` include) per alive lane, including the cutout-transparent skip + the BSDF-sampled sphere-light MIS trace. REMAINING (coherence/perf): a *separate* intersect.slang that appends hits to per-material queues (counting-sort `build_args`/`scatter` primitives are GPU-verified; wiring them into the loop is the per-material-dispatch path).
+- [~] 5.3 Integration logic: `wfPathBounce` does NEE (all lights + env) + MIS + Russian roulette + next-bounce ray generation; terminated lanes write radiance + clear ALIVE (flushed by `wfPathResolve`). Reuses the §1–§6 estimator + light/sampler includes verbatim. REMAINING: split into a standalone logic.slang with live-lane compaction (6.2).
+- [ ] 5.4 Per-material `shadeMaterial_X` shade *dispatch* over each material queue — NOT wired into the path loop yet: `wfPathBounce` shades inline via `evaluateBounce`'s material switch (correct + A/B-verified). The per-material shade *pipelines* + compile cache exist (6.4); routing the bounce loop's hits through per-material queues + `vkCmdDispatchIndirect` is the remaining coherence path (with 3.x).
 
 ## 6. Phase 1 — Wavefront path: streaming dispatch loop
 
 - [~] 6.1 `vk_wavefront.py WavefrontPasses` created (owns the stage buffers; verified on a real device). REMAINING: own the stage compute pipelines + the bounce-loop `dispatch()` (intersect → logic → shade ×N until queues drain or max depth), modeled on `SkinningPasses.dispatch()`.
-- [ ] 6.2 Implement stream refill / compaction of terminated lanes to keep occupancy high; advance through all pixels/samples for the frame. (Compaction primitive DONE + GPU-verified: `shaders/wavefront/compaction.slang` `compactAlive`, `test_wavefront_compaction.py` — remaining is calling it from the bounce loop in `WavefrontPasses`.)
-- [ ] 6.3 Wire the renderer per-frame path to dispatch wavefront vs the megakernel `vkCmdDispatch` based on the execution mode.
+- [~] 6.2 Stream model: `WavefrontPathPass` runs one full-frame stream (one path-state slot per pixel, one sample/pixel/frame, progressive accumulation across frames); terminated lanes early-out via the `pathAlive` check each bounce. REMAINING: tiled/fixed-size streams with terminated-lane *compaction* to bound memory below O(pixels) and keep occupancy high (compaction primitive `compactAlive` is GPU-verified; wiring it + tiling into the loop is the memory-bound work — the tiled-streaming spec requirement).
+- [x] 6.3 The renderer per-frame gate (`render_headless`/`render`) dispatches `WavefrontPathPass` (staged path tracer) for `wavefront` mode vs the megakernel `vkCmdDispatch` otherwise, keyed on `effective_execution_mode_index`. The path pass reuses the per-frame megakernel scene descriptor set as set 0; a `_wavefront_debug_pass` override remains for the stage-kernel verification tests.
 - [~] 6.4 Per-material shade compile-win DONE + GPU-verified: `build_wavefront_shade_passes` compiles each graph's `shadeSurface_<name>` via `vk_wavefront.compile_shade_module_cached` — a per-module content-hash SPIR-V cache keyed by (this module's source + its one generated-graph dep + the shared shader tree), so adding a material misses only its own key and resident materials are cache hits (`test_wavefront_shade_cache::test_shade_pipelines_cache_per_material`: rebuild compiles nothing; evicting one module recompiles exactly that one). REMAINING: skip the *megakernel* pipeline rebuild on a wavefront-mode add — the megakernel is still maintained as the shared graph-binding/param source + the bdpt fallback, so a wavefront add currently still re-emits it. Decoupling that is part of the wavefront-supersedes-megakernel work (gated on 6.3 + the bdpt fallback removal, 8.3).
 
 ## 7. Phase 2 — Geometry suballocator (mode-independent)
@@ -200,7 +216,7 @@ Carry-over facts (avoid re-investigating):
 
 ## 9. Tests + verification
 
-- [ ] 9.1 Headless A/B parity (extend `tests/test_headless.py`): megakernel vs wavefront for the `path` integrator within tolerance; add as a CI gate.
+- [x] 9.1 Headless A/B parity: `tests/test_wavefront_path_ab.py` renders the demo with the `path` integrator in both modes and asserts the wavefront matches the megakernel no worse than two megakernel renders match each other (MoltenVK is not bit-reproducible). Measured: match(wave,mega) 0.960 vs noise floor 0.962, mean |Δ| 0.002. GPU CI gate (`pytest.mark.gpu`).
 - [ ] 9.2 Headless A/B parity: megakernel vs wavefront for `bdpt` (after Phase 3).
 - [ ] 9.3 Indirect-dispatch correctness: indirect vs conservative direct-dispatch fallback produce equivalent images.
 - [x] 9.4 Suballocator unit tests: `test_slab_allocator.py` (11, GPU-free) — stable offsets across unrelated add/remove, free-list best-fit reuse, append-only growth preserves offsets, compaction packs + reports moves. `test_suballocator_gpu.py` (3, GPU) — remove keeps survivor offsets + re-uploads nothing; add keeps resident offsets stable; compaction leaves rendered output within the re-render noise floor.

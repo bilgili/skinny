@@ -439,6 +439,142 @@ class WavefrontEnvPass:
         vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
 
 
+def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str) -> Path:
+    """Compile a wavefront kernel that pulls in the full material/integrator
+    tree (integrators.path → skin/python/flat materials), so it needs the same
+    include paths + define as the megakernel. Writes to a per-entry .spv so
+    sibling entries from one module don't clobber each other."""
+    src = shader_dir / f"{module}.slang"
+    out = shader_dir / f"{out_name}.spv"
+    slangc = shutil.which("slangc")
+    if slangc is None:
+        raise RuntimeError("slangc not found on PATH — install the Slang compiler")
+    mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
+    cmd = [
+        slangc, str(src), "-target", "spirv", "-entry", entry, "-stage", "compute",
+        "-I", str(shader_dir), "-I", str(mtlx_genslang),
+        "-D", "SKINNY_COMPUTE_PIPELINE=1", "-fvk-use-scalar-layout", "-o", str(out),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Slang compilation failed ({module}:{entry}):\n{result.stderr}")
+    return out
+
+
+class WavefrontPathPass:
+    """Staged wavefront path tracer — the real per-frame wavefront dispatch.
+
+    Owns three compute pipelines compiled from ``wavefront/wavefront_path.slang``
+    (generate / bounce / resolve) and a per-frame bounce loop that round-trips a
+    per-lane path-state record through VRAM. Set 0 is the renderer's existing
+    megakernel scene descriptor set (passed at dispatch); set 1 binding 0 is the
+    path-state buffer this owns. The estimator is reused verbatim from
+    integrators/path.slang, so the accumulated image matches the megakernel.
+
+    Modelled on ``SkinningPasses``: a self-contained owner of GPU resources
+    driven by the renderer; ``record_dispatch`` records the whole loop into the
+    frame command buffer in place of the megakernel dispatch.
+    """
+
+    _GROUP = 8  # matches [numthreads(8, 8, 1)] in wavefront_path.slang
+    MAX_BOUNCES = 6  # lockstep with WF_MAX_BOUNCES in the shader
+
+    def __init__(self, ctx, shader_dir: Path, scene_set_layout,
+                 state_buffer, state_range: int, width: int, height: int) -> None:
+        self.ctx = ctx
+        self.width = int(width)
+        self.height = int(height)
+
+        modules = {}
+        for entry, out_name in (
+            ("wfPathGenerate", "wavefront/_wfpath_generate"),
+            ("wfPathBounce", "wavefront/_wfpath_bounce"),
+            ("wfPathResolve", "wavefront/_wfpath_resolve"),
+        ):
+            spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name)
+            code = spv.read_bytes()
+            modules[entry] = vk.vkCreateShaderModule(
+                ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+        self._modules = modules
+
+        # Set 1: path-state storage buffer.
+        state_binding = vk.VkDescriptorSetLayoutBinding(
+            binding=0, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+        self._state_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=1, pBindings=[state_binding]), None)
+
+        # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state].
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._state_layout]), None)
+
+        self._pipelines = {}
+        for entry, mod in modules.items():
+            stage = vk.VkPipelineShaderStageCreateInfo(
+                stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=mod, pName="main")
+            self._pipelines[entry] = vk.vkCreateComputePipelines(
+                ctx.device, vk.VK_NULL_HANDLE, 1,
+                [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device, vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[vk.VkDescriptorPoolSize(
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=1)]), None)
+        self._state_set = vk.vkAllocateDescriptorSets(
+            ctx.device, vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1,
+                pSetLayouts=[self._state_layout]))[0]
+        info = vk.VkDescriptorBufferInfo(buffer=state_buffer, offset=0, range=state_range)
+        vk.vkUpdateDescriptorSets(ctx.device, 1, [vk.VkWriteDescriptorSet(
+            dstSet=self._state_set, dstBinding=0, dstArrayElement=0, descriptorCount=1,
+            descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info])], 0, None)
+
+    def _bind(self, cmd, entry, scene_set) -> None:
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 2, [scene_set, self._state_set], 0, None)
+
+    def _dispatch(self, cmd) -> None:
+        gx = (self.width + self._GROUP - 1) // self._GROUP
+        gy = (self.height + self._GROUP - 1) // self._GROUP
+        vk.vkCmdDispatch(cmd, gx, gy, 1)
+
+    def record_dispatch(self, cmd, scene_set) -> None:
+        """Record generate → bounce ×MAX → resolve. `scene_set` is the
+        renderer's per-frame megakernel descriptor set (set 0)."""
+        barrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+
+        def mem_barrier():
+            vk.vkCmdPipelineBarrier(
+                cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [barrier], 0, None, 0, None)
+
+        self._bind(cmd, "wfPathGenerate", scene_set)
+        self._dispatch(cmd)
+        for _ in range(self.MAX_BOUNCES):
+            mem_barrier()
+            self._bind(cmd, "wfPathBounce", scene_set)
+            self._dispatch(cmd)
+        mem_barrier()
+        self._bind(cmd, "wfPathResolve", scene_set)
+        self._dispatch(cmd)
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        for p in self._pipelines.values():
+            vk.vkDestroyPipeline(self.ctx.device, p, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._state_layout, None)
+        for m in self._modules.values():
+            vk.vkDestroyShaderModule(self.ctx.device, m, None)
+
+
 class WavefrontPasses:
     """Owns the wavefront stage buffers for a given stream size + material count.
 

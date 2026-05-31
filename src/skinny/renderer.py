@@ -1062,9 +1062,15 @@ class Renderer:
         # non-Vulkan backends.
         self._wavefront_env_pass = None
         # Test/debug override: when set, the wavefront gate dispatches this pass
-        # instead of the env pass (used to verify intermediate stage kernels —
-        # e.g. primary visibility — against the live scene).
+        # instead of the staged path tracer (used to verify intermediate stage
+        # kernels — e.g. primary visibility — against the live scene).
         self._wavefront_debug_pass = None
+        # The real per-frame wavefront dispatch (staged path tracer) + its
+        # per-lane path-state buffer. Built lazily; rebuilt when the megakernel
+        # pipeline or the frame size changes (it reuses the megakernel set 0).
+        self._wavefront_path_pass = None
+        self._wf_path_state_buf = None
+        self._wf_path_pass_dims = None
 
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
@@ -1346,6 +1352,42 @@ class Renderer:
         if self._wavefront_debug_pass is not None:
             self._wavefront_debug_pass.destroy()
             self._wavefront_debug_pass = None
+        self._destroy_wavefront_path_pass()
+
+    def _ensure_wavefront_path_pass(self):
+        """Build (once) the staged wavefront path tracer — the real per-frame
+        wavefront dispatch. Returns it, or None on a non-Vulkan backend or
+        before the megakernel pipeline exists (it reuses the pipeline's set-0
+        layout + the renderer's per-frame scene descriptor sets). Rebuilt by
+        `_destroy_wavefront_path_pass` when the pipeline or frame size changes."""
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self.pipeline is None or self.descriptor_sets is None:
+            return None
+        if (self._wavefront_path_pass is not None
+                and self._wf_path_pass_dims == (self.width, self.height)):
+            return self._wavefront_path_pass
+        self._destroy_wavefront_path_pass()
+        from skinny.vk_wavefront import WavefrontPathPass
+        from skinny.wavefront_layout import PATH_STATE_STRIDE
+        n = self.width * self.height
+        self._wf_path_state_buf = StorageBuffer(self.ctx, n * PATH_STATE_STRIDE)
+        self._wavefront_path_pass = WavefrontPathPass(
+            self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
+            self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
+            self.width, self.height,
+        )
+        self._wf_path_pass_dims = (self.width, self.height)
+        return self._wavefront_path_pass
+
+    def _destroy_wavefront_path_pass(self) -> None:
+        if self._wavefront_path_pass is not None:
+            self._wavefront_path_pass.destroy()
+            self._wavefront_path_pass = None
+        if self._wf_path_state_buf is not None:
+            self._wf_path_state_buf.destroy()
+            self._wf_path_state_buf = None
+        self._wf_path_pass_dims = None
 
     def build_wavefront_trace_pass(self, module: str, entry: str,
                                    include_env: bool = False,
@@ -7085,11 +7127,20 @@ class Renderer:
         # artefacts in the rendered frame after a resize.
         self.hud_overlay.record_copy(cmd)
 
-        # Execution-mode gate (Phase-1 env-only milestone): wavefront writes the
-        # accumulation image via its own pass; megakernel is the default path.
+        # Execution-mode gate: in wavefront mode a staged compute pipeline writes
+        # the accumulation image; megakernel is the default in-kernel path. A
+        # test/debug pass overrides the staged path tracer when set; otherwise
+        # the real staged generate→bounce→resolve loop runs (reusing the
+        # megakernel scene descriptor set as set 0).
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            pass_ = self._wavefront_debug_pass or self._ensure_wavefront_env_pass()
-            pass_.record_dispatch(cmd)
+            if self._wavefront_debug_pass is not None:
+                self._wavefront_debug_pass.record_dispatch(cmd)
+            else:
+                path_pass = self._ensure_wavefront_path_pass()
+                if path_pass is not None:
+                    path_pass.record_dispatch(cmd, self.descriptor_sets[f])
+                else:
+                    self._ensure_wavefront_env_pass().record_dispatch(cmd)
         else:
             vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
             vk.vkCmdBindDescriptorSets(
