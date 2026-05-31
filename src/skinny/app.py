@@ -96,6 +96,15 @@ def _apply_saved_camera(renderer, saved_cam) -> None:
         renderer.camera_mode = mode
 
 
+def _apply_saved_gizmo_mode(renderer, saved_mode) -> None:
+    """Restore the persisted transform-gizmo mode (an int 0..3)."""
+    from skinny.gizmo import GizmoMode
+    try:
+        renderer.gizmo.mode = GizmoMode(int(saved_mode))
+    except (TypeError, ValueError):
+        return
+
+
 class InputHandler:
     """Manages GLFW callbacks and maps input to renderer state."""
 
@@ -248,8 +257,11 @@ class InputHandler:
             self._print_all_params()
         elif key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(win, True)
-        elif key == glfw.KEY_F1 or key == glfw.KEY_SPACE:
+        elif key == glfw.KEY_F1:
             self.renderer.show_hud = not self.renderer.show_hud
+        elif key == glfw.KEY_SPACE:
+            mode = self.renderer.gizmo_cycle_mode()
+            print(f"[Gizmo mode: {mode.name}]")
         elif key == glfw.KEY_F2:
             viewport = getattr(self.renderer, "debug_viewport", None)
             if viewport is not None:
@@ -395,7 +407,7 @@ class InputHandler:
             "1-9            : jump to parameter",
             "C camera  F recentre  R reset  P print  H help",
             "L focus  V vignette  Z zoom  X reset zoom  F2 debug",
-            "Space / F1 HUD       Esc quit",
+            "Space gizmo mode   F1 HUD   Esc quit",
         ]
         return lines
 
@@ -427,7 +439,8 @@ class InputHandler:
             "  Z                 : arm zoom rectangle (drag, release to apply)\n"
             "  X                 : reset zoom rectangle\n"
             "  F2                : toggle debug viewport window\n"
-            "  Space / F1        : toggle on-screen HUD\n"
+            "  Space             : cycle gizmo mode (rotate/translate × world/local)\n"
+            "  F1                : toggle on-screen HUD\n"
             "  Esc               : quit\n"
             "=======================\n"
         )
@@ -492,6 +505,7 @@ def main() -> None:
 
     _apply_saved_params(renderer, saved.get("params", {}))
     _apply_saved_camera(renderer, saved.get("camera"))
+    _apply_saved_gizmo_mode(renderer, saved.get("gizmo_mode"))
     renderer._update_light()
 
     from skinny.debug_viewport import DebugViewport
@@ -524,6 +538,7 @@ def main() -> None:
             "vulkan_window": _window_pos_dict(window),
             "params": _snapshot_params(renderer, input_handler.params),
             "camera": _snapshot_camera(renderer),
+            "gizmo_mode": int(renderer.gizmo.mode),
         }
         save_settings(out)
     except OSError:

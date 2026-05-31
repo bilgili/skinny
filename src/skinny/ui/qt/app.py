@@ -378,6 +378,14 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001
                 log.warning("Failed to apply saved camera: %s", exc)
 
+        gm = data.get("gizmo_mode")
+        if gm is not None:
+            try:
+                from skinny.gizmo import GizmoMode
+                self.renderer.gizmo.mode = GizmoMode(int(gm))
+            except (TypeError, ValueError):
+                pass
+
         # Recreate child docks the user had open last session — needs to
         # happen before restoreState so the named docks exist.
         open_docks = data.get("open_docks") or []
@@ -426,6 +434,10 @@ class MainWindow(QMainWindow):
             out["camera"] = _snapshot_camera(self.renderer)
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to snapshot camera: %s", exc)
+        try:
+            out["gizmo_mode"] = int(self.renderer.gizmo.mode)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to snapshot gizmo mode: %s", exc)
         open_docks: list[str] = []
         for name, dock in (
             ("scene_graph", self._scene_graph_dock),

@@ -27,3 +27,9 @@ def test_move_delegates_to_gizmo_controller():
 
 def test_release_delegates_to_gizmo_controller():
     assert "_gizmo.on_release" in inspect.getsource(RenderViewport.mouseReleaseEvent)
+
+
+def test_space_key_cycles_gizmo_mode():
+    src = inspect.getsource(RenderViewport.keyPressEvent)
+    assert "gizmo_cycle_mode" in src
+    assert "Qt.Key_Space" in src
