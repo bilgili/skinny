@@ -98,6 +98,14 @@ in the next.
 - **WHEN** the user sets the gizmo to translate-local and exits the application
 - **THEN** on the next launch the gizmo's initial mode is translate-local
 
+## RENAMED Requirements
+
+- FROM: `### Requirement: Grab and drag the rotate gizmo in the Qt viewport`
+- TO: `### Requirement: Grab and drag the transform gizmo in the Qt viewport`
+
+- FROM: `### Requirement: Gizmo ring hover feedback`
+- TO: `### Requirement: Gizmo handle hover feedback`
+
 ## MODIFIED Requirements
 
 ### Requirement: Grab and drag the transform gizmo in the Qt viewport
