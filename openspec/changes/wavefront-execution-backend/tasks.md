@@ -44,7 +44,7 @@
 ## 6. Phase 1 — Wavefront path: streaming dispatch loop
 
 - [ ] 6.1 Add `vk_wavefront.py` (`WavefrontPasses`) owning the stage pipelines and the bounce loop (intersect → logic → shade ×N until queues drain or max depth), modeled on `SkinningPasses.dispatch()`.
-- [ ] 6.2 Implement stream refill / compaction of terminated lanes to keep occupancy high; advance through all pixels/samples for the frame.
+- [ ] 6.2 Implement stream refill / compaction of terminated lanes to keep occupancy high; advance through all pixels/samples for the frame. (Compaction primitive DONE + GPU-verified: `shaders/wavefront/compaction.slang` `compactAlive`, `test_wavefront_compaction.py` — remaining is calling it from the bounce loop in `WavefrontPasses`.)
 - [ ] 6.3 Wire the renderer per-frame path to dispatch wavefront vs the megakernel `vkCmdDispatch` based on the execution mode.
 - [ ] 6.4 Make adding a new material in wavefront compile only its shade/eval pipeline and register it (no megakernel rebuild); reuse existing materials' pipelines.
 
