@@ -78,8 +78,10 @@ nodedefs, head geometry, presets, tattoos) is documented separately in
 - **Camera debug viewport** -- second window (or embedded dock) rendering
   frustum, lens rings, focus / DOF planes, mesh wireframes, AABBs, ground
   grid, and a camera-body glyph
-- **Rotate gizmo** -- screen-space ring gizmo (`gizmo.py`) for selected mesh
-  instance; line list composited by `main_pass.slang`
+- **Transform gizmo** -- screen-space gizmo (`gizmo.py`) for the selected mesh
+  instance: rotate rings or translate arrows, in world or local space, cycled
+  with `Space` (a `W`/`L` glyph hints the coordinate space); line list
+  composited by `main_pass.slang`
 - **Exposure + tonemapping** -- EV-stop exposure and selectable tonemap
   operator (ACES filmic / Reinhard / Hable / linear) as post-process knobs that
   don't reset accumulation; HDR/EXR screenshot export
@@ -332,7 +334,8 @@ shortcuts below forwarded to the viewport.
 | `Z` | Arm zoom rectangle (drag in viewport, release to apply) |
 | `X` | Reset zoom rectangle |
 | `F2` | Toggle camera debug viewport dock / window |
-| `Space / F1` | Toggle HUD |
+| `Space` | Cycle transform gizmo mode (rotate/translate × world/local) |
+| `F1` | Toggle HUD |
 | `Esc` | Quit |
 
 ## Assets
@@ -413,7 +416,7 @@ per-material furnace probes.
 | `fetch_hdrs.py` | Poly Haven HDRI download helper |
 | `lens_optics.py` | PBRT-v3 thick-lens helpers (CPU exit-pupil bounding) |
 | `bxdf_math.py` | CPU BSDF eval + lobe rasterisation for the BXDF visualiser |
-| `gizmo.py` | Rotate gizmo math + line-list buffer building |
+| `gizmo.py` | Transform gizmo math (rotate/translate × world/local) + line-list buffer building |
 | `debug_viewport.py` | Second-window camera/lens/wireframe debug renderer |
 | `mtlx_graph_view.py` | View-model for MaterialX nodegraph editor |
 | `scene_graph.py` | USD prim hierarchy tree model with typed editable properties |

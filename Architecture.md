@@ -111,7 +111,7 @@ mainImage()                                          main_pass.slang
   ├─ + BDPT light-splat mean (Q22.10 → float)
   ├─ exposure (2^EV) → tonemap (ACES / Reinhard / Hable / linear) → sRGB gamma
   ├─ per-material furnace energy-violation overlay (pink)
-  ├─ rotate-gizmo line composite (binding 22)
+  ├─ transform-gizmo line composite (binding 22)
   └─ HUD alpha composite → outputBuffer
 ```
 
@@ -563,13 +563,20 @@ places:
 
 Geometry is regenerated from live `Renderer` state every frame.
 
-### Rotate gizmo (`gizmo.py`)
+### Transform gizmo (`gizmo.py`)
 
-`RotateGizmo` tracks one selected mesh instance and exposes three
-orthogonal screen-space rings (X/Y/Z, world-axis aligned) around its
-pivot. The renderer rebuilds the line list per frame and uploads it to
-binding 22; `main_pass.slang` draws each segment as an anti-aliased
-line over the final tonemapped image.
+`TransformGizmo` tracks one selected mesh instance and has four modes —
+rotate and translate, each in world or local space — cycled with `Space`
+(`(index+1) % 4`, grouped by type). Rotate modes draw three orthogonal
+rings, translate modes draw three axis arrows, and a `W`/`L` glyph above
+the pivot hints the coordinate space. World modes align to the canonical
+X/Y/Z axes; local modes align to the instance's current orientation.
+Rotation drag is a true axis-angle rotation about the (world or local)
+ring axis composed as a matrix and re-decomposed to Euler; translate drag
+projects the mouse onto the screen-projected axis. The renderer rebuilds
+the line list per frame and uploads it to binding 22; `main_pass.slang`
+draws each segment as an anti-aliased line over the final tonemapped
+image. The active mode persists in `~/.skinny/settings.json`.
 
 ### BXDF visualiser (`bxdf_math.py` + `ui/qt/windows/bxdf.py`)
 
@@ -753,7 +760,7 @@ incrementally moved over.
 | 19 | StructuredBuffer | StdSurfaceParams (256 B each) | `bindings.slang` |
 | 20 | StructuredBuffer | DistantLight (analytic distant lights) | `scene_lights.slang` |
 | 21 | RWStructuredBuffer | BDPT light-splat buffer (Q22.10 uint per R/G/B) | `bindings.slang` |
-| 22 | StructuredBuffer | Rotate-gizmo line segments | `gizmo.py` |
+| 22 | StructuredBuffer | Transform-gizmo line segments | `gizmo.py` |
 | 23 | StructuredBuffer | Lens elements (thick-lens stack, float4) | `cameras/thick_lens.slang` |
 | 24 | StructuredBuffer | Per-radius exit-pupil bounds (float4) | `cameras/thick_lens.slang` |
 | 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe | `bindings.slang` |
@@ -827,7 +834,7 @@ a build-time requirement (generated `.slang` files are checked into git).
 | `scene_graph.py` | `SceneGraphNode`, `SceneGraphProperty`, `RendererRef` | USD prim hierarchy tree model with typed editable properties |
 | `mtlx_graph_view.py` | `NodeGraphView`, `NodeView`, `PortView` | View-model for MaterialX nodegraph editor |
 | `bxdf_math.py` | — | CPU BSDF eval + lobe rasterisation |
-| `gizmo.py` | `RotateGizmo` | Rotate gizmo math + line-list buffer |
+| `gizmo.py` | `TransformGizmo` | Transform gizmo math (rotate/translate × world/local) + line-list buffer |
 | `lens_optics.py` | — | PBRT-v3 thick-lens helpers |
 | `debug_viewport.py` | `DebugViewport` | Camera/lens/wireframe debug renderer |
 | `presets.py` | `Preset` | 12 built-in skin presets (Fitzpatrick I–VI × Female/Male) |
