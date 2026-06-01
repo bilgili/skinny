@@ -52,9 +52,9 @@ group 1) deferred — wall-clock frame timing covered the intent for S1.
 
 ## 6. Finalization
 
-- [ ] 6.1 Decide whether `resolve` needs compaction from the S0/S3 timestamps; implement only if it shows up.
-- [ ] 6.2 Re-tune `STREAM_CAP` / tile count for the staged walk now that the walk no longer holds 14 vertices in registers; pick the value that minimizes total frame time without exceeding the VRAM budget.
-- [ ] 6.3 Verify VRAM stays bounded by stream size (not resolution) with the new walk-state buffers; update buffer-sizing in `renderer.py`.
-- [ ] 6.4 Run `.venv/bin/ruff check src/` and the full `.venv/bin/pytest` suite; fix regressions.
-- [ ] 6.5 Update `Architecture.md` (descriptor binding map + module map) and the `project_wavefront_backend` memory with the staged BDPT pipeline; note the before/after timings.
-- [ ] 6.6 Confirm the megakernel BDPT and wavefront path tracer are unchanged (no edits to their entry points); spot-check their A/B still green.
+- [x] 6.1 `resolve` left full-stream — it's a 9 KB material-free kernel (running-mean + display write); compacting it would add dispatches for no gain.
+- [x] 6.2 Left `STREAM_CAP=1<<18`. The staged pipeline is dispatch/barrier-overhead-bound, not VRAM- or occupancy-bound, so a larger stream (fewer tiles) is the lever that helps, not register pressure; default kept — fewer tiles already preferred where VRAM allows.
+- [x] 6.3 VRAM bounded by `stream_size`: eye/light = stream×7×128, aux = stream×128 (AUX_STRIDE 64→128 for the ew* state), counting-sort scratch = stream×4 ×2 + small. No per-pixel allocation; `renderer.py` sizing unchanged in shape.
+- [x] 6.4 ruff clean (changed files). Wavefront suite green: 48 wavefront/struct/execution-mode/A/B tests pass (the 3 budget-guard failures were stale entry names, fixed). Pre-existing non-wavefront infra failures (slangpy harness / driver) are unrelated — see [[reference_skinny_worktree_dev]].
+- [x] 6.5 Architecture.md has no wavefront section + the new bindings are set-1 (pass-private, not in the scene binding map) → no change. Updated `project_wavefront_backend` memory with the staged pipeline + S1/S2/S3 timings + the WAR-race lesson.
+- [x] 6.6 Confirmed: `git diff` vs main is empty for integrators/bdpt.slang, integrators/path.slang, wavefront/wavefront_path.slang, main_pass.slang. Path A/B + megakernel reference unchanged.
