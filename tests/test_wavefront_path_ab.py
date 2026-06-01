@@ -67,6 +67,12 @@ def test_wavefront_path_matches_megakernel():
         assert renderer.effective_execution_mode_index == 1, "wavefront not active"
         assert np.all(np.isfinite(wave))
         assert float(wave.max()) > 1e-2, "wavefront path render is black"
+        # The demo is flat/graph materials only ⇒ the heavy catch-all shade
+        # kernel (skin/python) is never compiled — flat scenes shade through the
+        # small per-material flat kernel (the MoltenVK compile fix).
+        assert renderer._wavefront_path_pass.build_catchall is False, (
+            "flat-only scene should not compile the catch-all shade kernel"
+        )
 
         noise_floor = _match(mega1, mega2)
         match_wave = _match(wave, mega1)

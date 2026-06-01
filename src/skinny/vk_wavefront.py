@@ -484,18 +484,26 @@ class WavefrontPathPass:
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
-                 stream_size: int, num_pixels: int) -> None:
+                 stream_size: int, num_pixels: int, build_catchall: bool = True) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
+        self.build_catchall = bool(build_catchall)
 
-        modules = {}
-        for entry, out_name in (
+        # The flat shade kernel handles flat + MaterialX-graph materials and
+        # imports no skin/python (small). The heavy catch-all (wfPathShade) is
+        # compiled only when the scene actually has a non-flat material — so a
+        # common flat scene never compiles the ~2.8 MB kernel.
+        entries = [
             ("wfPathGenerate", "wavefront/_wfpath_generate"),
             ("wfPathIntersect", "wavefront/_wfpath_intersect"),
-            ("wfPathShade", "wavefront/_wfpath_shade"),
+            ("wfPathShadeFlat", "wavefront/_wfpath_shade_flat"),
             ("wfPathResolve", "wavefront/_wfpath_resolve"),
-        ):
+        ]
+        if self.build_catchall:
+            entries.append(("wfPathShade", "wavefront/_wfpath_shade"))
+        modules = {}
+        for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
@@ -591,13 +599,19 @@ class WavefrontPathPass:
             self._dispatch(cmd)
             for _ in range(self.MAX_BOUNCES):
                 # Each bounce: intersect (trace → hit / miss-terminate), then
-                # shade (NEE · sample · next ray) reading the stashed hit.
+                # per-material shade (NEE · sample · next ray) reading the hit.
+                # Flat lanes go through the small flat kernel; non-flat lanes
+                # (skin/python) through the catch-all, built only when present.
                 mem_barrier()
                 self._bind(cmd, "wfPathIntersect", scene_set)
                 self._dispatch(cmd)
                 mem_barrier()
-                self._bind(cmd, "wfPathShade", scene_set)
+                self._bind(cmd, "wfPathShadeFlat", scene_set)
                 self._dispatch(cmd)
+                if self.build_catchall:
+                    mem_barrier()
+                    self._bind(cmd, "wfPathShade", scene_set)
+                    self._dispatch(cmd)
             mem_barrier()
             self._bind(cmd, "wfPathResolve", scene_set)
             self._dispatch(cmd)

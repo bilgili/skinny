@@ -1373,8 +1373,13 @@ class Renderer:
             return None
         if self.pipeline is None or self.descriptor_sets is None:
             return None
-        if (self._wavefront_path_pass is not None
-                and self._wf_path_pass_dims == (self.width, self.height)):
+        # Build the heavy catch-all shade kernel only when the scene has a
+        # non-flat material (skin/python); flat-only scenes compile just the
+        # small flat shade kernel. Part of the rebuild key so a material-set
+        # change that introduces a non-flat type rebuilds the pass.
+        has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in self._material_types)
+        key = (self.width, self.height, has_nonflat)
+        if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
         from skinny.vk_wavefront import WavefrontPathPass
@@ -1393,9 +1398,9 @@ class Renderer:
             self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
             self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
             self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
-            stream_size, num_pixels,
+            stream_size, num_pixels, build_catchall=has_nonflat,
         )
-        self._wf_path_pass_dims = (self.width, self.height)
+        self._wf_path_pass_dims = key
         return self._wavefront_path_pass
 
     def _destroy_wavefront_path_pass(self) -> None:

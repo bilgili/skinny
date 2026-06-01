@@ -22,41 +22,21 @@
 // declarations, so its SPIR-V reflects a subset of the megakernel's layout.
 
 import common;            // RNG, createRNG, Ray, PI
-import bindings;          // fc, accumBuffer, scene buffers, effectiveFurnaceMode
+import bindings;          // fc, accumBuffer, scene buffers, effectiveFurnaceMode, materialTypes
 import scene_trace;       // traceScene, HitInfo
 import environment;       // sceneEnvRadiance, sceneEnvRadianceCell, envPdf
 import cameras.pinhole;   // PinholeCamera
 import interfaces;        // BounceResult
-import integrators.path;  // evaluateBounce (+ allLightsNEE, material dispatch)
-import scene_lights;      // NearestSphereHit, intersectSphereLights
-import lights.sphere_light;            // SphereLight
+import integrators.path;  // evaluateBounce (catch-all shade: skin / python / debug)
 import materials.flat.flat_shading;    // isCutoutTransparent
 import wavefront.wavefront_state;      // WavefrontPathState, PATH_FLAG_*
 import wavefront.wf_display;           // wfWriteDisplay (tonemap → output image)
-
-// Match integrators/path.slang::MAX_BOUNCES (the CPU loop dispatches this many
-// wfPathBounce passes; keep the two in lockstep).
-static const uint WF_MAX_BOUNCES = 6u;
-
-// Tiled streaming (§P1-E): the path-state buffer holds a fixed-size stream, not
-// one slot per pixel. The CPU loops `streamBase` over the frame in stream-size
-// tiles; lane `i` (the slot) maps to pixel `streamBase + i`. Slots whose global
-// lane falls past the frame are marked dead with a sentinel pixelIndex so the
-// bounce/resolve passes skip them without needing the base. Only generate reads
-// the base (the per-tile push constant); bounce/resolve work by slot + the
-// stored pixelIndex.
-static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
-
-struct WfTilePC { uint streamBase; };
-[[vk::push_constant]] ConstantBuffer<WfTilePC> wfTile;
-
-[[vk::binding(0, 1)]] RWStructuredBuffer<WavefrontPathState> wfState;
-// Staged bounce (§P1-E): intersect writes each alive lane's hit here; shade
-// reads it. Decouples the (material-free) trace from the (material-heavy) shade
-// so they can be separate dispatches / kernels.
-[[vk::binding(1, 1)]] RWStructuredBuffer<HitInfo> wfHits;
-
-uint2 wfDecodePixel(uint lane) { return uint2(lane % fc.width, lane / fc.width); }
+// Shared path-state bindings (wfState / wfHits / wfTile / wfDecodePixel /
+// wfTerminate) + the material-free finisher wfFinishShade.
+import wavefront.wf_shade_common;
+// Flat-material bounce eval — imports only the flat material + NEE, so the flat
+// shade kernel stays small (no skin/python). The catch-all uses evaluateBounce.
+import wavefront.flat_bounce;
 
 // Write the lane's accumulated radiance + clear ALIVE; persist the rng cursor.
 void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
@@ -158,89 +138,48 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
     wfHits[i] = h;
 }
 
-// Shade stage — the material-heavy half: per alive (= hit) lane, run the same
-// estimator body as the fused bounce (NEE + MIS + emission via evaluateBounce,
-// then accumulate, Russian roulette, BSDF-sampled next ray, sphere-light MIS).
+// Per-material shade — flat. Handles MATERIAL_TYPE_FLAT lanes (flat + MaterialX
+// graph materials). Imports only the flat material + NEE (via flat_bounce), so
+// this kernel is small — the common-case scenes (no skin/python) compile only
+// this, never the heavy catch-all (the MoltenVK Metal-compile fix).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    WavefrontPathState s = wfState[i];
+    if (!pathAlive(s))
+        return;
+    HitInfo h = wfHits[i];
+    if ((materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+        return;                                 // non-flat → catch-all kernel
+
+    RNG rng; rng.state = s.rngState;
+    Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
+    BounceResult br = evaluateFlatBounce(h, r, s.depth, rng);
+    wfFinishShade(i, s, rng, h, br);
+}
+
+// Per-material shade — catch-all for the non-flat material types (skin BSSRDF,
+// python materials, debug). Imports the full integrator/material tree via
+// evaluateBounce, so it is the heavy kernel — built (and dispatched) only when
+// the scene actually contains a non-flat material.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void wfPathShade(uint3 tid: SV_DispatchThreadID)
 {
-    uint i = tid.x;                            // stream slot
+    uint i = tid.x;
     WavefrontPathState s = wfState[i];
-    if (!pathAlive(s))                          // missed / terminated in intersect
+    if (!pathAlive(s))
         return;
+    HitInfo h = wfHits[i];
+    if ((materialTypes[h.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT)
+        return;                                 // flat → wfPathShadeFlat
 
     RNG rng; rng.state = s.rngState;
     Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
-    float3 throughput = s.throughput;
-    float3 radiance   = s.radiance;
-    float  misBsdfPdf = s.bsdfPdf;
-    uint   depth      = s.depth;
-    HitInfo h = wfHits[i];
-
-    BounceResult br = evaluateBounce(h, r, depth, rng);
-    radiance += throughput * br.fullRadiance;
-    if (depth == 0u || fc.numEmissiveTriangles == 0u)
-        radiance += throughput * br.bsdfSample.emission;
-    radiance += throughput * br.directLight;
-
-    if (!br.bsdfSample.valid)
-    {
-        wfTerminate(i, s, radiance, rng);
-        return;
-    }
-    throughput *= br.bsdfSample.weight;
-
-    if (depth > 0u)
-    {
-        float p = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05, 0.95);
-        if (rng.next() > p)
-        {
-            wfTerminate(i, s, radiance, rng);
-            return;
-        }
-        throughput /= p;
-    }
-
-    bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
-    misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
-               ? br.bsdfSample.pdf : -1.0;
-
-    float3 spawnOffset = br.bsdfSample.transmitted ? -h.normal * 0.002 : h.normal * 0.002;
-    r.origin    = h.position + spawnOffset;
-    r.direction = br.bsdfSample.wi;
-
-    // BSDF-sampled sphere-light hit: MIS against the NEE estimate.
-    NearestSphereHit sph = intersectSphereLights(r, 1e30, fc.numSphereLights);
-    HitInfo hNext = traceScene(fc, r);
-    float geom_t = hNext.hit ? hNext.t : 1e30;
-    if (sph.idx != 0xFFFFFFFFu && sph.t < geom_t)
-    {
-        SphereLight light = sphereLights[sph.idx];
-        float w_bsdf = 1.0;
-        if (!br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
-        {
-            float area = 4.0 * PI * light.radius * light.radius;
-            float pdf_light_sa = (sph.t * sph.t) / max(sph.cos_y * area, 1e-12);
-            w_bsdf = powerHeuristic(br.bsdfSample.pdf, pdf_light_sa);
-        }
-        radiance += throughput * light.radiance * w_bsdf;
-        wfTerminate(i, s, radiance, rng);
-        return;
-    }
-
-    // Survive to the next bounce. The CPU loop dispatches exactly
-    // WF_MAX_BOUNCES bounces, so a lane that reaches the last bounce simply
-    // never gets its stored continuation traced — matching estimateRadiance's
-    // loop exit (the depth-MAX ray is never followed).
-    s.rayOrigin  = r.origin;
-    s.rayDir     = r.direction;
-    s.throughput = throughput;
-    s.radiance   = radiance;
-    s.depth      = depth + 1u;
-    s.bsdfPdf    = misBsdfPdf;
-    s.rngState   = rng.state;
-    wfState[i] = s;
+    BounceResult br = evaluateBounce(h, r, s.depth, rng);
+    wfFinishShade(i, s, rng, h, br);
 }
 
 [shader("compute")]

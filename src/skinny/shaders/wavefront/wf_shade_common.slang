@@ -1,0 +1,106 @@
+// Shared wavefront path-state bindings + the material-free shade finisher, so
+// every per-material shade kernel (flat / catch-all) reuses them without
+// re-declaring the set-1 layout or duplicating the post-eval body. The finisher
+// is the part of the bounce that does NOT depend on the material: accumulate,
+// Russian roulette, BSDF-sampled next ray, sphere-light MIS, and the state
+// store. The material-specific half (NEE + BSDF sample → BounceResult) is the
+// caller's; it passes the result in.
+
+import common;          // RNG, Ray, PI, powerHeuristic
+import bindings;        // fc, effectiveFurnaceMode, materialTypes
+import interfaces;      // BounceResult, BSDFSample, HitInfo
+import scene_trace;     // traceScene
+import scene_lights;    // intersectSphereLights, NearestSphereHit
+import lights.sphere_light;            // SphereLight
+import wavefront.wavefront_state;      // WavefrontPathState, PATH_FLAG_*
+
+static const uint WF_MAX_BOUNCES = 6u;
+static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
+
+struct WfTilePC { uint streamBase; };
+[[vk::push_constant]] ConstantBuffer<WfTilePC> wfTile;
+
+[[vk::binding(0, 1)]] RWStructuredBuffer<WavefrontPathState> wfState;
+[[vk::binding(1, 1)]] RWStructuredBuffer<HitInfo> wfHits;
+
+uint2 wfDecodePixel(uint lane) { return uint2(lane % fc.width, lane / fc.width); }
+
+// Write the lane's accumulated radiance + clear ALIVE; persist the rng cursor.
+void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
+{
+    s.radiance = radiance;
+    s.flags &= ~PATH_FLAG_ALIVE;
+    s.rngState = rng.state;
+    wfState[i] = s;
+}
+
+// Finish a bounce given the material's BounceResult: accumulate emission +
+// direct light, Russian roulette, spawn the next ray, BSDF-sampled sphere-light
+// MIS, and store (or terminate). Verbatim from the fused bounce tail.
+void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, BounceResult br)
+{
+    float3 throughput = s.throughput;
+    float3 radiance   = s.radiance;
+    uint   depth      = s.depth;
+
+    radiance += throughput * br.fullRadiance;
+    if (depth == 0u || fc.numEmissiveTriangles == 0u)
+        radiance += throughput * br.bsdfSample.emission;
+    radiance += throughput * br.directLight;
+
+    if (!br.bsdfSample.valid)
+    {
+        wfTerminate(i, s, radiance, rng);
+        return;
+    }
+    throughput *= br.bsdfSample.weight;
+
+    if (depth > 0u)
+    {
+        float p = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05, 0.95);
+        if (rng.next() > p)
+        {
+            wfTerminate(i, s, radiance, rng);
+            return;
+        }
+        throughput /= p;
+    }
+
+    bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
+    float misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
+                     ? br.bsdfSample.pdf : -1.0;
+
+    Ray r;
+    float3 spawnOffset = br.bsdfSample.transmitted ? -h.normal * 0.002 : h.normal * 0.002;
+    r.origin    = h.position + spawnOffset;
+    r.direction = br.bsdfSample.wi;
+
+    // BSDF-sampled sphere-light hit: MIS against the NEE estimate.
+    NearestSphereHit sph = intersectSphereLights(r, 1e30, fc.numSphereLights);
+    HitInfo hNext = traceScene(fc, r);
+    float geom_t = hNext.hit ? hNext.t : 1e30;
+    if (sph.idx != 0xFFFFFFFFu && sph.t < geom_t)
+    {
+        SphereLight light = sphereLights[sph.idx];
+        float w_bsdf = 1.0;
+        if (!br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
+        {
+            float area = 4.0 * PI * light.radius * light.radius;
+            float pdf_light_sa = (sph.t * sph.t) / max(sph.cos_y * area, 1e-12);
+            w_bsdf = powerHeuristic(br.bsdfSample.pdf, pdf_light_sa);
+        }
+        radiance += throughput * light.radiance * w_bsdf;
+        wfTerminate(i, s, radiance, rng);
+        return;
+    }
+
+    // Survive to the next bounce (the CPU loop bounds the bounce count).
+    s.rayOrigin  = r.origin;
+    s.rayDir     = r.direction;
+    s.throughput = throughput;
+    s.radiance   = radiance;
+    s.depth      = depth + 1u;
+    s.bsdfPdf    = misBsdfPdf;
+    s.rngState   = rng.state;
+    wfState[i] = s;
+}
