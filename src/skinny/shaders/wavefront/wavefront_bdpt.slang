@@ -1,24 +1,24 @@
-// Staged wavefront bidirectional path tracer (P1 §8 / design §P1-G). The
-// megakernel BDPTIntegrator.estimateRadiance, torn into compute dispatches that
-// store the camera + light subpath vertices in VRAM between stages:
+// Wavefront bidirectional path tracer (P1 §8 / design §P1-G). The megakernel
+// BDPTIntegrator.estimateRadiance, decomposed into compute dispatches that store
+// the camera + light subpath vertices in VRAM between stages. Three subpath-build
+// strategies (selected per the pass's walk_mode; all produce the identical image):
 //
-//   wfBdptWalk     — per lane: trace the primary ray, build the eye subpath and
-//                    the light subpath (the SAME randomWalk + sampleLightOrigin
-//                    the megakernel uses), do the s=1 light-tracer splat, and
-//                    store both subpaths + bookkeeping to VRAM.
-//   wfBdptConnect  — per lane: reload both subpaths and run the connection
-//                    strategies (t=0 emissive, t=1 NEE connectT1, t≥2 generic +
-//                    MIS) verbatim, writing the eye-side radiance.
-//   wfBdptResolve  — fold the eye-side radiance into the running mean and add
-//                    the s=1 splat composite, matching main_pass.slang.
+//   megakernel — wfBdptWalk: build both subpaths + the s=1 splat in one kernel.
+//   eye        — wfBdptGenEye + per-bounce wfBdptBounceEye (staged eye walk),
+//                then wfBdptLightTail (megakernel light walk + splat).
+//   eye_light  — staged eye walk + staged light walk (gen/bounce-light) +
+//                standalone wfBdptSplat.
 //
-// Correctness is by reuse: every estimator function comes from
-// integrators/bdpt.slang unchanged, so the accumulated image is the same
-// estimator as the megakernel bdpt (A/B-verified). The rng cursor is carried
-// across the walk/connect split so the random sequence matches. Matches the
-// megakernel bdpt scope: flat first-hit only, pinhole camera. Set 0 is the
-// megakernel scene descriptor set (incl. lightSplatBuffer for the splat); set 1
-// holds the per-lane subpath + aux buffers this owns.
+// All modes then share: wfBdptClassify → build_args → scatter → split connect
+// (wfBdptConnectNee = emissive+t=1 NEE; wfBdptConnectFull adds t≥2 generic+MIS,
+// each indirect-dispatched over only its lanes) → wfBdptResolve (running mean +
+// display). The staged bounce kernels reimplement integrators/bdpt.slang's
+// randomWalk body verbatim; the megakernel + light-tail call it directly — so
+// every mode is the same estimator as the megakernel bdpt (A/B-verified, exact).
+// The rng cursor is carried across the staged dispatches so the sequence matches.
+// Scope: flat first-hit only, pinhole camera. Set 0 is the megakernel scene
+// descriptor set (incl. lightSplatBuffer for the splat); set 1 holds the per-lane
+// subpath + aux + counting-sort buffers this owns.
 
 import common;            // RNG, Ray, PI
 import bindings;          // fc, accumBuffer, lightSplatBuffer, materialTypes…
@@ -96,6 +96,224 @@ uint wfBdptQueueLane(uint slot, uint qpos)
     if (qpos >= wfSlotCount[slot]) return 0xFFFFFFFFu;
     return wfSlotQueue[wfSlotOffset[slot] + qpos];
 }
+
+// ── Megakernel walk variant (S1 walk_mode) ──────────────────────
+//
+// The original single-kernel subpath build (eye randomWalk + light randomWalk +
+// s=1 splat), used by walk_mode = megakernel (the default). Thin wrappers over
+// integrators/bdpt.slang's randomWalk/sampleLightOrigin/splatLightWalk — no
+// estimator logic duplicated. The staged kernels below (eye / eye_light modes)
+// reimplement randomWalk's body per bounce; only one set is dispatched per the
+// pass's walk_mode. wfBdptLightTail is also used by walk_mode = eye (staged eye
+// walk + megakernel light tail).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
+{
+    uint slot = tid.x;                          // stream slot
+    if (slot >= wfTile.streamSize) return;
+    uint base = slot * BDPT_MAX_VERTS;
+    uint lane = wfTile.streamBase + slot;        // global pixel lane
+    if (lane >= fc.width * fc.height)
+    {
+        wfAux[slot].pixel = WF_PIXEL_SENTINEL;   // out-of-frame tail → skip later
+        return;
+    }
+    uint2 pixel = uint2(lane % fc.width, lane / fc.width);
+
+    RNG rng = createRNG(pixel, fc.frameIndex);
+    PinholeCamera cam;
+    float lensWeight;
+    Ray ray = cam.generateRay(pixel, rng, lensWeight);
+
+    WfBdptAux aux;
+    aux.eyeLen = 0;
+    aux.lightLen = 0;
+    aux.lensWeight = lensWeight;
+    aux.pixel = lane;
+    aux.escaped = float3(0.0);
+    aux.radiance = float3(0.0);
+    aux.ewRayO = float3(0.0); aux.ewRayD = float3(0.0); aux.ewThroughput = float3(0.0);
+    aux.ewPdfFwdOmega = 0.0; aux.ewMisBsdfPdf = -1.0; aux.ewFlags = 0u;
+
+    BDPTVertex eye[BDPT_MAX_VERTS];
+    BDPTVertex camVtx;
+    camVtx.kind = BDPT_VK_CAMERA;
+    camVtx.position = ray.origin;
+    camVtx.N = -ray.direction;
+    camVtx.throughput = float3(1.0);
+    camVtx.emission = float3(0.0);
+    camVtx.pdfFwd = 1.0;
+    camVtx.pdfRev = 0.0;
+    camVtx.isDelta = false;
+    camVtx.onLight = false;
+    camVtx.matId = 0u;
+    camVtx.uv = float2(0.0);
+    camVtx.posObject = float3(0.0);
+    camVtx.geoN = -ray.direction;
+    camVtx.tangent = float3(1.0, 0.0, 0.0);
+    camVtx.hasTangent = false;
+    eye[0] = camVtx;
+
+    HitInfo firstHit = traceScene(fc, ray);
+    Ray r = ray;
+    for (uint skip = 0u; skip < 32u && firstHit.hit && isCutoutTransparent(firstHit); skip++)
+    {
+        r.origin = firstHit.position + r.direction * 0.002;
+        firstHit = traceScene(fc, r);
+    }
+    if (!firstHit.hit)
+    {
+        aux.escaped = sceneEnvRadiance(r.direction, fc.envIntensity,
+                                       effectiveFurnaceMode(firstHit.materialId));
+        aux.rngState = rng.state;
+        wfAux[slot] = aux;
+        return;
+    }
+    if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+    {
+        // Non-flat first hit — bdpt bails to black here (the megakernel path
+        // tracer covers skin/python). Matches estimateRadiance.
+        aux.rngState = rng.state;
+        wfAux[slot] = aux;
+        return;
+    }
+
+    FlatMaterial fmat = loadFlatMaterial(firstHit);
+    BDPTVertex z1;
+    z1.kind = BDPT_VK_SURFACE;
+    z1.position = firstHit.position;
+    z1.N = fmat.data.N;
+    z1.throughput = float3(1.0);
+    z1.emission = fmat.data.mat.emission;
+    z1.pdfFwd = 1.0;
+    z1.pdfRev = 0.0;
+    z1.isDelta = false;
+    z1.onLight = any(fmat.data.mat.emission > float3(0.0));
+    z1.matId = firstHit.materialId;
+    z1.uv = firstHit.uv;
+    z1.posObject = firstHit.positionObject;
+    z1.geoN = firstHit.normal;
+    z1.tangent = firstHit.tangent;
+    z1.hasTangent = firstHit.hasTangent;
+    eye[1] = z1;
+    int eyeLen = 2;
+
+    float3 T, B;
+    if (firstHit.hasTangent)
+    {
+        T = normalize(firstHit.tangent - z1.N * dot(firstHit.tangent, z1.N));
+        B = cross(z1.N, T);
+    }
+    else
+    {
+        buildBasis(z1.N, T, B);
+    }
+    float3 wo_ts = worldToTangent(-ray.direction, T, B, z1.N);
+
+    float3 escapedRadiance = bdptEnvNEE(
+        fmat, z1.position, z1.N, T, B, wo_ts, firstHit.materialId, rng);
+
+    BSDFSample bs = fmat.sample(wo_ts, rng);
+    if (bs.valid)
+    {
+        if (bs.pdf <= 0.0)
+            eye[1].isDelta = true;
+        float3 wi_world = tangentToWorld(bs.wi, T, B, z1.N);
+        float3 throughput = bs.weight;
+        Ray r2;
+        float3 spawnOffset = bs.transmitted ? -z1.N * 0.002 : z1.N * 0.002;
+        r2.origin = z1.position + spawnOffset;
+        r2.direction = wi_world;
+        float pdfFwdOmega = (bs.pdf > 0.0) ? bs.pdf : 1.0;
+        float misBsdfPdfIn = (bs.pdf > 0.0 && !bs.transmitted
+            && effectiveFurnaceMode(firstHit.materialId) == 0u) ? bs.pdf : -1.0;
+        eyeLen = randomWalk(eye, 2, r2, throughput, pdfFwdOmega, rng,
+                            true, escapedRadiance, misBsdfPdfIn);
+    }
+
+    // Light subpath.
+    BDPTVertex lightPath[BDPT_MAX_VERTS];
+    int lightLen = 0;
+    LightOriginSample lo = sampleLightOrigin(rng);
+    if (lo.valid)
+    {
+        lightPath[0] = lo.vertex;
+        lightLen = 1;
+        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
+        {
+            Ray rL;
+            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+            rL.direction = lo.dirOut;
+            float3 unusedEscape = float3(0.0);
+            lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
+                                  false, unusedEscape, -1.0);
+        }
+    }
+
+    // s = 1 light tracer splat (atomic into lightSplatBuffer, set 0).
+    splatLightWalk<PinholeCamera>(lightPath, lightLen, rng, cam);
+
+    // Store both subpaths + bookkeeping for the connection stage.
+    for (int i = 0; i < int(BDPT_MAX_VERTS); i++)
+    {
+        if (i < eyeLen)   wfEye[base + uint(i)]   = eye[i];
+        if (i < lightLen) wfLight[base + uint(i)] = lightPath[i];
+    }
+    aux.eyeLen = eyeLen;
+    aux.lightLen = lightLen;
+    aux.escaped = escapedRadiance;
+    aux.rngState = rng.state;   // connect resumes from here
+    wfAux[slot] = aux;
+}
+
+
+// Light subpath + s=1 splat as one kernel (walk_mode = eye). Runs for flat-eye
+// lanes (eyeLen >= 2); resumes the rng cursor left by the staged eye walk.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptLightTail(uint3 tid: SV_DispatchThreadID)
+{
+    uint slot = tid.x;
+    if (slot >= wfTile.streamSize)
+        return;
+    WfBdptAux aux = wfAux[slot];
+    if (aux.pixel == WF_PIXEL_SENTINEL || aux.eyeLen < 2)
+        return;
+    uint base = slot * BDPT_MAX_VERTS;
+
+    RNG rng; rng.state = aux.rngState;
+    PinholeCamera cam;
+
+    BDPTVertex lightPath[BDPT_MAX_VERTS];
+    int lightLen = 0;
+    LightOriginSample lo = sampleLightOrigin(rng);
+    if (lo.valid)
+    {
+        lightPath[0] = lo.vertex;
+        lightLen = 1;
+        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
+        {
+            Ray rL;
+            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+            rL.direction = lo.dirOut;
+            float3 unusedEscape = float3(0.0);
+            lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
+                                  false, unusedEscape, -1.0);
+        }
+    }
+
+    splatLightWalk<PinholeCamera>(lightPath, lightLen, rng, cam);
+
+    [loop]
+    for (int k = 0; k < int(BDPT_MAX_VERTS); k++)
+        if (k < lightLen) wfLight[base + uint(k)] = lightPath[k];
+
+    aux.lightLen = lightLen;
+    aux.rngState = rng.state;   // connect resumes from here
+    wfAux[slot] = aux;
+}
+
 
 // ── Staged eye walk (S2) ────────────────────────────────────────
 //

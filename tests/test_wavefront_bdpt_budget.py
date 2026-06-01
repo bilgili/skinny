@@ -93,10 +93,26 @@ def test_wavefront_bdpt_spv_under_budget(entry, tmp_path):
     )
 
 
+# Kernels each walk_mode builds (shared connect + resolve in every mode).
+_SHARED = (
+    "wfBdptClassify", "wfBdptBuildArgs", "wfBdptScatter",
+    "wfBdptConnectNee", "wfBdptConnectFull", "wfBdptResolve",
+)
+_MODE_ENTRIES = {
+    "megakernel": ("wfBdptWalk",) + _SHARED,
+    "eye": ("wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye",
+            "wfBdptLightTail") + _SHARED,
+    "eye_light": ("wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye",
+                  "wfBdptGenLight", "wfBdptBounceLight", "wfBdptSplat") + _SHARED,
+}
+
+
 @pytest.mark.gpu
-def test_wavefront_bdpt_pipelines_build():
-    """The staged bdpt compute pipelines build on this driver -- a focused
-    vkCreateComputePipelines guard, lighter than the A/B image parity test."""
+@pytest.mark.parametrize("walk_mode", sorted(_MODE_ENTRIES))
+def test_wavefront_bdpt_pipelines_build(walk_mode):
+    """Each bdpt walk_mode's compute pipelines build on this driver -- a focused
+    vkCreateComputePipelines guard, lighter than the A/B image parity test. Only
+    the active mode's kernels are compiled, so each mode is checked separately."""
     from skinny.renderer import Renderer
     from skinny.vk_context import VulkanContext
 
@@ -104,7 +120,7 @@ def test_wavefront_bdpt_pipelines_build():
     renderer = Renderer(
         vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
         tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-        execution_mode="wavefront",
+        execution_mode="wavefront", bdpt_walk=walk_mode,
     )
     try:
         deadline = 200
@@ -129,14 +145,10 @@ def test_wavefront_bdpt_pipelines_build():
         )
         bdpt = renderer._wavefront_bdpt_pass
         assert bdpt is not None, "bdpt pass not built after a wavefront-bdpt render"
-        for entry in (
-            "wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye",
-            "wfBdptGenLight", "wfBdptBounceLight", "wfBdptSplat",
-            "wfBdptClassify", "wfBdptBuildArgs", "wfBdptScatter",
-            "wfBdptConnectNee", "wfBdptConnectFull", "wfBdptResolve",
-        ):
+        assert bdpt.walk_mode == walk_mode
+        for entry in _MODE_ENTRIES[walk_mode]:
             assert bdpt._pipelines.get(entry) is not None, (
-                f"{entry} pipeline did not build"
+                f"{entry} pipeline did not build for walk_mode={walk_mode}"
             )
     finally:
         renderer.cleanup()

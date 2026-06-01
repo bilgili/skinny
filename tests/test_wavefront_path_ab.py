@@ -37,7 +37,7 @@ def _match(a, b):
     return float((d <= tol).mean())
 
 
-def _load(execution_mode, *, integrator_index=0, stream_cap=None):
+def _load(execution_mode, *, integrator_index=0, stream_cap=None, bdpt_walk="megakernel"):
     """Build a headless renderer in the given (fixed) execution mode, pump the
     async USD load, and apply the integrator + optional stream cap. Returns
     (ctx, renderer); the caller owns cleanup of both."""
@@ -48,7 +48,7 @@ def _load(execution_mode, *, integrator_index=0, stream_cap=None):
     renderer = Renderer(
         vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
         tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-        execution_mode=execution_mode,
+        execution_mode=execution_mode, bdpt_walk=bdpt_walk,
     )
     deadline = 200
     while deadline > 0 and (
@@ -154,10 +154,13 @@ def test_wavefront_path_tiled_streaming():
     )
 
 
-def test_wavefront_bdpt_matches_megakernel():
+@pytest.mark.parametrize("walk_mode", ["megakernel", "eye", "eye_light"])
+def test_wavefront_bdpt_matches_megakernel(walk_mode):
     """A/B parity for the bidirectional integrator (task 9.2): megakernel bdpt
-    vs the staged wavefront bdpt (subpath walks + connection stage). Same
-    noise-floor-relative criterion as the path A/B."""
+    vs the staged wavefront bdpt, for each `--bdpt-walk` mode (megakernel = one
+    walk kernel + connect compaction; eye / eye_light stage the eye / eye+light
+    walks). All three are the same estimator, so each must match the megakernel
+    no worse than the megakernel-vs-megakernel noise floor."""
     cap = 1000  # 10 tiles over the 96² frame — exercises tiled streaming for bdpt
 
     mega_ctx, mega = _load("megakernel", integrator_index=1)
@@ -169,7 +172,8 @@ def test_wavefront_bdpt_matches_megakernel():
         mega.cleanup()
         mega_ctx.destroy()
 
-    wave_ctx, wave = _load("wavefront", integrator_index=1, stream_cap=cap)
+    wave_ctx, wave = _load("wavefront", integrator_index=1, stream_cap=cap,
+                           bdpt_walk=walk_mode)
     try:
         assert wave.WAVEFRONT_BDPT_SUPPORTED, "wavefront bdpt gated off"
         assert wave.pipeline is None, "wavefront must not build the megakernel"
@@ -177,6 +181,7 @@ def test_wavefront_bdpt_matches_megakernel():
         assert wave.effective_execution_mode_index == 1, (
             "wavefront not active for bdpt (capability gate fell back)"
         )
+        assert wave._wavefront_bdpt_pass.walk_mode == walk_mode
         assert np.all(np.isfinite(wavef))
         assert float(wavef.max()) > 1e-2, "wavefront bdpt render is black"
         # bdpt subpath buffers are bounded by the stream cap, not the pixel count.
@@ -190,6 +195,6 @@ def test_wavefront_bdpt_matches_megakernel():
     match_wave = _match(wavef, mega1)
     assert noise_floor > 0.5, f"renderer too unstable to test ({noise_floor:.2f})"
     assert match_wave >= noise_floor - 0.06, (
-        f"wavefront bdpt diverges from the megakernel "
+        f"wavefront bdpt ({walk_mode}) diverges from the megakernel "
         f"(match {match_wave:.3f} vs floor {noise_floor:.3f})"
     )

@@ -807,32 +807,51 @@ class WavefrontBdptPass:
     # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
     STREAM_CAP = 1 << 18
 
+    WALK_MODES = ("megakernel", "eye", "eye_light")
+
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
-                 stream_size: int, num_pixels: int) -> None:
+                 stream_size: int, num_pixels: int,
+                 walk_mode: str = "megakernel") -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.num_pixels = int(num_pixels)
+        if walk_mode not in self.WALK_MODES:
+            raise ValueError(f"unknown bdpt walk_mode {walk_mode!r} (expected {self.WALK_MODES})")
+        self.walk_mode = walk_mode
 
-        # Staged entries: walk (megakernel for now) → connect counting sort
-        # (classify / build_args / scatter) → split connect (nee / full, indirect)
-        # → resolve. classify/build_args/scatter/resolve import no material tree
-        # (tiny kernels); only walk + the two connect kernels carry it.
-        modules = {}
-        for entry, out_name in (
-            ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
-            ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
-            ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
-            ("wfBdptGenLight", "wavefront/_wfbdpt_gen_light"),
-            ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
-            ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
+        # The connect counting sort (classify / build_args / scatter) + split
+        # connect (nee / full, indirect) + resolve are shared by all walk modes;
+        # only the subpath-build kernels differ:
+        #   megakernel — one wfBdptWalk kernel (eye+light+splat); the S1 win.
+        #   eye        — staged eye walk + megakernel light tail.
+        #   eye_light  — fully staged eye + light walks + standalone splat.
+        # Only the active mode's kernels are compiled/built (no wasted slangc).
+        shared = [
             ("wfBdptClassify", "wavefront/_wfbdpt_classify"),
             ("wfBdptBuildArgs", "wavefront/_wfbdpt_buildargs"),
             ("wfBdptScatter", "wavefront/_wfbdpt_scatter"),
             ("wfBdptConnectNee", "wavefront/_wfbdpt_connect_nee"),
             ("wfBdptConnectFull", "wavefront/_wfbdpt_connect_full"),
             ("wfBdptResolve", "wavefront/_wfbdpt_resolve"),
-        ):
+        ]
+        staged_eye = [
+            ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
+            ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
+            ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
+        ]
+        if walk_mode == "megakernel":
+            entries = [("wfBdptWalk", "wavefront/_wfbdpt_walk")] + shared
+        elif walk_mode == "eye":
+            entries = staged_eye + [("wfBdptLightTail", "wavefront/_wfbdpt_light_tail")] + shared
+        else:  # eye_light
+            entries = staged_eye + [
+                ("wfBdptGenLight", "wavefront/_wfbdpt_gen_light"),
+                ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
+                ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
+            ] + shared
+        modules = {}
+        for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
@@ -991,6 +1010,35 @@ class WavefrontBdptPass:
             self._stage(cmd, "wfBdptScatter", scene_set)
             mem_barrier()
 
+        def build_subpaths():
+            """Dispatch the subpath-construction kernels for the active walk_mode,
+            leaving each lane's aux (eyeLen/lightLen/escaped/rngState) ready for
+            the shared connect+resolve tail."""
+            if self.walk_mode == "megakernel":
+                self._stage(cmd, "wfBdptWalk", scene_set)     # eye+light+splat in one kernel
+                mem_barrier()
+                return
+            # staged eye walk (eye + eye_light modes)
+            self._stage(cmd, "wfBdptGenEye", scene_set)       # eye[0..1] + first ray
+            mem_barrier()
+            for _ in range(self.EYE_BOUNCES):
+                compact("wfBdptWalkClassify")                 # gather live eye lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceEye")    # extend one eye vertex
+                mem_barrier()
+            if self.walk_mode == "eye":
+                self._stage(cmd, "wfBdptLightTail", scene_set)  # megakernel light walk + splat
+                mem_barrier()
+                return
+            # eye_light: staged light walk + standalone splat
+            self._stage(cmd, "wfBdptGenLight", scene_set)     # light[0] + first light ray
+            mem_barrier()
+            for _ in range(self.LIGHT_BOUNCES):
+                compact("wfBdptWalkClassify")                 # gather live light lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceLight")  # extend one light vertex
+                mem_barrier()
+            self._stage(cmd, "wfBdptSplat", scene_set)        # s=1 light-tracer splat
+            mem_barrier()
+
         stream_base = 0
         first = True
         while stream_base < self.num_pixels:
@@ -998,21 +1046,8 @@ class WavefrontBdptPass:
                 mem_barrier()  # prior tile's resolve before reusing the buffers
             first = False
             self._push(cmd, 0, [stream_base, 0, self.stream_size])
-            self._stage(cmd, "wfBdptGenEye", scene_set)      # eye[0..1] + first ray
-            mem_barrier()
-            for _ in range(self.EYE_BOUNCES):
-                compact("wfBdptWalkClassify")                # gather live eye lanes → slot 0
-                indirect(self.SLOT_NEE, "wfBdptBounceEye")   # extend one eye vertex
-                mem_barrier()
-            self._stage(cmd, "wfBdptGenLight", scene_set)    # light[0] + first light ray
-            mem_barrier()
-            for _ in range(self.LIGHT_BOUNCES):
-                compact("wfBdptWalkClassify")                # gather live light lanes → slot 0
-                indirect(self.SLOT_NEE, "wfBdptBounceLight") # extend one light vertex
-                mem_barrier()
-            self._stage(cmd, "wfBdptSplat", scene_set)       # s=1 light-tracer splat
-            mem_barrier()
-            compact("wfBdptClassify")                        # route lanes NEE / FULL / dead
+            build_subpaths()
+            compact("wfBdptClassify")                         # route lanes NEE / FULL / dead
             indirect(self.SLOT_NEE, "wfBdptConnectNee")
             mem_barrier()
             indirect(self.SLOT_FULL, "wfBdptConnectFull")
