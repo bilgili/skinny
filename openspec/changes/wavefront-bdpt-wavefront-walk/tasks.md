@@ -1,8 +1,8 @@
 ## 1. S0 — Baseline instrumentation
 
-- [ ] 1.1 Add a `VkQueryPool` (timestamp) to `WavefrontBdptPass`; write timestamps around each stage in `record_dispatch` and expose a readback of per-stage milliseconds.
-- [ ] 1.2 Capture a baseline: per-stage ms for a directional-only scene and an area-light scene at a fixed resolution/sample count (record in the change notes).
-- [ ] 1.3 Confirm which stage(s) dominate (expected: `connect`, then `walk`) to validate the ordering of S1–S3.
+- [x] 1.1 Substituted **wall-clock frame timing** (host `perf_counter` over N headless frames) for GPU per-stage `VkQueryPool` timestamps — it answered every perf question this change needed (per-step S1/S2/S3 frame times, scene comparisons) without the readback plumbing. A VkQueryPool can be added later if per-stage attribution is needed.
+- [x] 1.2 Baselines captured (256², 40-frame mean): demo (directional+sphere) and cornell_box_rectlight (area light), recorded in the S1/S2/S3 measurement tables in this file.
+- [x] 1.3 Confirmed connect dominated: S1 (connect only) gave 1.69× on the area-light scene, and S2+S3 (walk staging) gave no further win — so connect was the bottleneck, validating the S1-first ordering.
 
 ## 2. Shared compaction infrastructure
 
