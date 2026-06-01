@@ -49,12 +49,41 @@ struct WfBdptAux
 // frame; slot i maps to pixel `streamBase + i`, and connect/resolve recover the
 // pixel from the stored `aux.pixel`. Out-of-frame tail slots are flagged dead.
 static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
-struct WfTilePC { uint streamBase; };
+// streamBase: per-tile pixel base (walk). shadeSlot: which connection slot an
+// indirect-dispatched connect kernel processes. streamSize: slots in the stream
+// buffers — bounds the full-stream kernels (the dispatch rounds up to 64).
+struct WfTilePC { uint streamBase; uint shadeSlot; uint streamSize; };
 [[vk::push_constant]] ConstantBuffer<WfTilePC> wfTile;
 
 [[vk::binding(0, 1)]] RWStructuredBuffer<BDPTVertex> wfEye;     // stream × BDPT_MAX_VERTS
 [[vk::binding(1, 1)]] RWStructuredBuffer<BDPTVertex> wfLight;   // stream × BDPT_MAX_VERTS
 [[vk::binding(2, 1)]] RWStructuredBuffer<WfBdptAux>  wfAux;     // stream
+
+// Connect-stage counting sort (P1 §8 compaction port). After the walk, each
+// live lane is classified by subpath shape into one connection slot; the heavy
+// generic+MIS double loop runs only for lanes whose light subpath has ≥2
+// vertices. Mirrors the path tracer's wfLaneSlot/…/wfIndirectArgs (set 1,
+// bindings 2..7) — here at bindings 3..8 (0..2 are the subpath/aux buffers).
+static const uint WF_BDPT_NUM_SLOTS = 2u;
+static const uint WF_BDPT_SLOT_NEE  = 0u;   // emissive + connectT1 (lightLen < 2)
+static const uint WF_BDPT_SLOT_FULL = 1u;   // + generic t≥2 + MIS (lightLen ≥ 2)
+static const uint WF_BDPT_GROUP     = 64u;  // connect [numthreads(64,1,1)]
+
+[[vk::binding(3, 1)]] RWStructuredBuffer<uint> wfLaneSlot;     // [stream]  slot per lane (SENTINEL = dead)
+[[vk::binding(4, 1)]] RWStructuredBuffer<uint> wfSlotCount;    // [NUM_SLOTS] live lanes per slot
+[[vk::binding(5, 1)]] RWStructuredBuffer<uint> wfSlotOffset;   // [NUM_SLOTS] queue base per slot
+[[vk::binding(6, 1)]] RWStructuredBuffer<uint> wfSlotQueue;    // [stream]  lane indices, grouped by slot
+[[vk::binding(7, 1)]] RWStructuredBuffer<uint> wfSlotCursor;   // [NUM_SLOTS] scatter write cursor
+[[vk::binding(8, 1)]] RWStructuredBuffer<uint> wfIndirectArgs; // [NUM_SLOTS*3] (x,y,z) per slot
+
+// Resolve the stream slot an indirect-dispatched connect kernel processes, or
+// 0xFFFFFFFF past the slot's queue (the lane early-outs). `qpos` is the dispatch
+// thread index within the slot's slice.
+uint wfBdptQueueLane(uint slot, uint qpos)
+{
+    if (qpos >= wfSlotCount[slot]) return 0xFFFFFFFFu;
+    return wfSlotQueue[wfSlotOffset[slot] + qpos];
+}
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -214,15 +243,81 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     wfAux[slot] = aux;
 }
 
+// Classify each post-walk lane by subpath shape and count it for the connect
+// counting sort. Dead lanes (out-of-frame, primary miss, or non-flat first hit
+// ⇒ eyeLen < 2) carry only the escaped radiance and are finalised here so the
+// connect kernels never run for them; live lanes are routed to the NEE slot
+// (lightLen < 2) or the FULL slot (lightLen ≥ 2). Full-stream dispatch.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void wfBdptConnect(uint3 tid: SV_DispatchThreadID)
+void wfBdptClassify(uint3 tid: SV_DispatchThreadID)
 {
-    uint slot = tid.x;
-    WfBdptAux aux = wfAux[slot];
-    if (aux.pixel == WF_PIXEL_SENTINEL)         // out-of-frame tail slot
+    uint i = tid.x;
+    if (i >= wfTile.streamSize)
         return;
-    uint base = slot * BDPT_MAX_VERTS;
+    WfBdptAux aux = wfAux[i];
+    if (aux.pixel == WF_PIXEL_SENTINEL)         // out-of-frame tail slot
+    {
+        wfLaneSlot[i] = WF_PIXEL_SENTINEL;
+        return;
+    }
+    if (aux.eyeLen < 2)                          // miss / non-flat: escaped only
+    {
+        aux.radiance = aux.escaped * aux.lensWeight;
+        wfAux[i] = aux;
+        wfLaneSlot[i] = WF_PIXEL_SENTINEL;
+        return;
+    }
+    uint slot = (aux.lightLen >= 2) ? WF_BDPT_SLOT_FULL : WF_BDPT_SLOT_NEE;
+    wfLaneSlot[i] = slot;
+    uint prev;
+    InterlockedAdd(wfSlotCount[slot], 1u, prev);
+}
+
+// Exclusive prefix-sum the per-slot counts into queue offsets and emit one
+// VkDispatchIndirectCommand (ceil(count/64),1,1) per slot. Single thread.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void wfBdptBuildArgs(uint3 tid: SV_DispatchThreadID)
+{
+    uint running = 0u;
+    for (uint slot = 0u; slot < WF_BDPT_NUM_SLOTS; ++slot)
+    {
+        wfSlotOffset[slot] = running;
+        uint c = wfSlotCount[slot];
+        running += c;
+        wfIndirectArgs[slot * 3u + 0u] = (c + WF_BDPT_GROUP - 1u) / WF_BDPT_GROUP;
+        wfIndirectArgs[slot * 3u + 1u] = 1u;
+        wfIndirectArgs[slot * 3u + 2u] = 1u;
+    }
+}
+
+// Place each live lane into its slot's contiguous queue slice via an atomic
+// write cursor (counting sort). Full-stream dispatch.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptScatter(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= wfTile.streamSize)
+        return;
+    uint slot = wfLaneSlot[i];
+    if (slot == WF_PIXEL_SENTINEL)              // dead → not enqueued
+        return;
+    uint local;
+    InterlockedAdd(wfSlotCursor[slot], 1u, local);
+    wfSlotQueue[wfSlotOffset[slot] + local] = i;
+}
+
+// Shared connection body for lane `i`. `includeGeneric` gates the O(s·t)
+// generic+MIS double loop (only the FULL slot runs it). The eye-side estimator
+// is identical to the megakernel bdpt; a lane runs exactly one of the two
+// connect kernels, so the rng consumption order (connectT1 draws, then the
+// rng-free generic loop) matches the fused connect verbatim.
+void wfBdptConnectLane(uint i, bool includeGeneric)
+{
+    WfBdptAux aux = wfAux[i];
+    uint base = i * BDPT_MAX_VERTS;
     int eyeLen = aux.eyeLen;
     int lightLen = aux.lightLen;
 
@@ -230,10 +325,10 @@ void wfBdptConnect(uint3 tid: SV_DispatchThreadID)
 
     BDPTVertex eye[BDPT_MAX_VERTS];
     BDPTVertex lightPath[BDPT_MAX_VERTS];
-    for (int i = 0; i < int(BDPT_MAX_VERTS); i++)
+    for (int k = 0; k < int(BDPT_MAX_VERTS); k++)
     {
-        if (i < eyeLen)   eye[i]       = wfEye[base + uint(i)];
-        if (i < lightLen) lightPath[i] = wfLight[base + uint(i)];
+        if (k < eyeLen)   eye[k]       = wfEye[base + uint(k)];
+        if (k < lightLen) lightPath[k] = wfLight[base + uint(k)];
     }
 
     float3 L = aux.escaped;
@@ -252,25 +347,53 @@ void wfBdptConnect(uint3 tid: SV_DispatchThreadID)
     for (int s = 2; s <= eyeLen; s++)
         L += connectT1(eye, s, rng);
 
-    // (s ≥ 2, t ≥ 2): generic connections + MIS.
-    [loop]
-    for (int s = 2; s <= eyeLen; s++)
+    // (s ≥ 2, t ≥ 2): generic connections + MIS (FULL slot only).
+    if (includeGeneric)
     {
         [loop]
-        for (int t = 2; t <= lightLen; t++)
+        for (int s = 2; s <= eyeLen; s++)
         {
-            if (s + t - 2 > int(BDPT_MAX_DEPTH)) continue;
-            ConnectResult cr = connectGeneric(eye, s, lightPath, t);
-            if (!cr.nonzero) continue;
-            float w = misWeight(eye, s, lightPath, t,
-                                cr.pdf_zsm1_rev, cr.pdf_zsm2_rev,
-                                cr.pdf_ytm1_rev, cr.pdf_ytm2_rev);
-            L += cr.contribution * w;
+            [loop]
+            for (int t = 2; t <= lightLen; t++)
+            {
+                if (s + t - 2 > int(BDPT_MAX_DEPTH)) continue;
+                ConnectResult cr = connectGeneric(eye, s, lightPath, t);
+                if (!cr.nonzero) continue;
+                float w = misWeight(eye, s, lightPath, t,
+                                    cr.pdf_zsm1_rev, cr.pdf_zsm2_rev,
+                                    cr.pdf_ytm1_rev, cr.pdf_ytm2_rev);
+                L += cr.contribution * w;
+            }
         }
     }
 
     aux.radiance = L * aux.lensWeight;
-    wfAux[slot] = aux;
+    wfAux[i] = aux;
+}
+
+// NEE slot: emissive + connectT1, no generic loop. Indirect-dispatched over the
+// NEE queue (lanes with lightLen < 2 — e.g. directional-only scenes).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptConnectNee(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = wfBdptQueueLane(wfTile.shadeSlot, tid.x);
+    if (i == 0xFFFFFFFFu)
+        return;
+    wfBdptConnectLane(i, false);
+}
+
+// FULL slot: emissive + connectT1 + generic + MIS. Indirect-dispatched over the
+// FULL queue (lanes with a ≥2-vertex light subpath). Zero groups when no scene
+// light produces a light subpath (e.g. directional-only).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptConnectFull(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = wfBdptQueueLane(wfTile.shadeSlot, tid.x);
+    if (i == 0xFFFFFFFFu)
+        return;
+    wfBdptConnectLane(i, true);
 }
 
 [shader("compute")]
@@ -278,6 +401,8 @@ void wfBdptConnect(uint3 tid: SV_DispatchThreadID)
 void wfBdptResolve(uint3 tid: SV_DispatchThreadID)
 {
     uint slot = tid.x;
+    if (slot >= wfTile.streamSize)              // dispatch rounds up to 64 — skip tail
+        return;
     uint px = wfAux[slot].pixel;
     if (px == WF_PIXEL_SENTINEL)                // out-of-frame tail slot
         return;
