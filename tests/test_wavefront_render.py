@@ -35,7 +35,11 @@ def _render(renderer, frames):
     return renderer.read_accumulation()[:, :, :3]
 
 
-def test_wavefront_env_matches_megakernel_at_background():
+def _load(execution_mode):
+    """Build a headless renderer in the given execution mode (fixed for the
+    instance — the mode is a constructor arg now, not a runtime toggle) and
+    pump the async USD load until the demo scene + scene bindings exist.
+    Returns (ctx, renderer); the caller owns cleanup of both."""
     from skinny.renderer import Renderer
     from skinny.vk_context import VulkanContext
 
@@ -43,44 +47,54 @@ def test_wavefront_env_matches_megakernel_at_background():
     renderer = Renderer(
         vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
         tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+        execution_mode=execution_mode,
     )
+    deadline = 200
+    while deadline > 0 and (
+        renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+    ):
+        renderer.update(0.025)
+        deadline -= 1
+    assert renderer._scene_bindings is not None, "scene bindings not built"
+    return ctx, renderer
+
+
+def test_wavefront_env_matches_megakernel_at_background():
+    # The execution mode is fixed per renderer instance now, so the A/B uses
+    # one megakernel renderer (reference) and one wavefront renderer.
+    mega_ctx, mega_r = _load("megakernel")
     try:
-        # Pump async USD load until the scene + pipeline exist.
-        deadline = 200
-        while deadline > 0 and (
-            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
-        ):
-            renderer.update(0.025)
-            deadline -= 1
-        assert renderer.pipeline is not None, "megakernel pipeline not built"
-
-        mega = _render(renderer, WARMUP)
-
-        # Switch to wavefront (resets accumulation via the state hash) + re-render.
-        renderer.set_execution_mode(1)  # EXECUTION_WAVEFRONT
-        assert renderer.effective_execution_mode_index == 1
-        wave = _render(renderer, WARMUP)
-
-        # The env pass shaded every pixel with the environment and wrote the
-        # accumulation image — it ran and read fc + env.
-        assert np.all(np.isfinite(wave))
-        assert float(wave.max()) > 1e-3, "wavefront env all black"
-
-        # The env pass ignores geometry, so it agrees with the megakernel only
-        # where the megakernel's rays also miss geometry (the background). Over
-        # a scene of three small spheres that is most of the frame: require a
-        # substantial fraction of pixels to match in linear HDR. The mismatched
-        # pixels are the shaded sphere region.
-        diff = np.abs(wave - mega)
-        tol = 0.05 * np.abs(mega) + 3e-3
-        matching = float((diff <= tol).all(axis=2).mean())
-        assert matching >= 0.30, (
-            f"only {matching:.0%} of pixels match the megakernel env "
-            f"(expected the background to match)"
-        )
+        assert mega_r.pipeline is not None, "megakernel pipeline not built"
+        mega = _render(mega_r, WARMUP)
     finally:
-        renderer.cleanup()
-        ctx.destroy()
+        mega_r.cleanup()
+        mega_ctx.destroy()
+
+    wave_ctx, wave_r = _load("wavefront")
+    try:
+        assert wave_r.pipeline is None, "wavefront must not build the megakernel"
+        assert wave_r.effective_execution_mode_index == 1
+        wave = _render(wave_r, WARMUP)
+    finally:
+        wave_r.cleanup()
+        wave_ctx.destroy()
+
+    # The wavefront path tracer shaded every pixel and wrote the accumulation
+    # image — it ran and read fc + env.
+    assert np.all(np.isfinite(wave))
+    assert float(wave.max()) > 1e-3, "wavefront env all black"
+
+    # The two backends agree on the background (where both miss geometry). Over
+    # a scene of three small spheres that is most of the frame: require a
+    # substantial fraction of pixels to match in linear HDR. The mismatched
+    # pixels are the shaded sphere region.
+    diff = np.abs(wave - mega)
+    tol = 0.05 * np.abs(mega) + 3e-3
+    matching = float((diff <= tol).all(axis=2).mean())
+    assert matching >= 0.30, (
+        f"only {matching:.0%} of pixels match the megakernel env "
+        f"(expected the background to match)"
+    )
 
 
 def _patch_mean(mask: np.ndarray, cx: int, cy: int, half: int = 4) -> float:
@@ -94,31 +108,16 @@ def test_wavefront_visibility_matches_known_geometry():
     """Primary-visibility (intersect) wavefront kernel: the hit mask must light
     up the demo scene's three known sphere positions and leave the corners
     (background) dark — proving the wavefront traverses the shared BVH."""
-    from skinny.renderer import Renderer
-    from skinny.vk_context import VulkanContext
-
-    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
-    renderer = Renderer(
-        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
-        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-    )
+    ctx, renderer = _load("wavefront")
     try:
-        deadline = 200
-        while deadline > 0 and (
-            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
-        ):
-            renderer.update(0.025)
-            deadline -= 1
-        assert renderer.pipeline is not None
-        # A megakernel frame settles the camera + uploads fc; geometry buffers
-        # are now allocated, so the visibility pass can bind them.
+        # Warmup frames settle the camera + upload fc; geometry buffers are
+        # allocated at USD load, so the visibility pass can bind them.
         for _ in range(4):
             renderer.update(0.04)
             renderer.render_headless()
 
         renderer._wavefront_debug_pass = renderer.build_wavefront_trace_pass(
             "wavefront/wavefront_visibility", "wavefrontVisibility")
-        renderer.set_execution_mode(1)  # EXECUTION_WAVEFRONT
         renderer.render_headless()       # dispatches the visibility pass
         mask = renderer.read_accumulation()[:, :, 0]  # hit flag in R
 
@@ -150,29 +149,15 @@ def test_wavefront_hit_normals_are_sensible():
     in the wavefront. The mapped normal (n*0.5+0.5) at sphere-hit pixels decodes
     to a unit vector, and at the silhouette centre faces roughly toward the
     camera — proving the shade stage gets a valid surface frame."""
-    from skinny.renderer import Renderer
-    from skinny.vk_context import VulkanContext
-
-    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
-    renderer = Renderer(
-        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
-        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-    )
+    ctx, renderer = _load("wavefront")
     try:
-        deadline = 200
-        while deadline > 0 and (
-            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
-        ):
-            renderer.update(0.025)
-            deadline -= 1
-        assert renderer.pipeline is not None
+        # Warmup frames settle the camera + upload fc before the debug pass runs.
         for _ in range(4):
             renderer.update(0.04)
             renderer.render_headless()
 
         renderer._wavefront_debug_pass = renderer.build_wavefront_trace_pass(
             "wavefront/wavefront_normal", "wavefrontNormal")
-        renderer.set_execution_mode(1)
         renderer.render_headless()
         img = renderer.read_accumulation()[:, :, :3]
 
@@ -197,22 +182,9 @@ def test_wavefront_diffuse_shades_geometry():
     environment background — proving the wavefront lights a surface with the hit
     normal + the scene's directional light. Not an A/B vs the megakernel (fixed
     albedo, single bounce) — a 'physically sensible lit surface' check."""
-    from skinny.renderer import Renderer
-    from skinny.vk_context import VulkanContext
-
-    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
-    renderer = Renderer(
-        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
-        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-    )
+    ctx, renderer = _load("wavefront")
     try:
-        deadline = 200
-        while deadline > 0 and (
-            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
-        ):
-            renderer.update(0.025)
-            deadline -= 1
-        assert renderer.pipeline is not None
+        # Warmup frames settle the camera + upload fc before the debug pass runs.
         for _ in range(4):
             renderer.update(0.04)
             renderer.render_headless()
@@ -221,7 +193,6 @@ def test_wavefront_diffuse_shades_geometry():
         vis = renderer.build_wavefront_trace_pass(
             "wavefront/wavefront_visibility", "wavefrontVisibility")
         renderer._wavefront_debug_pass = vis
-        renderer.set_execution_mode(1)
         renderer.render_headless()
         mask = renderer.read_accumulation()[:, :, 0] > 0.5
         vis.destroy()
@@ -255,22 +226,9 @@ def test_wavefront_material_albedo_per_material():
     must come out in material-driven colours that VARY across the surface set,
     not a single flat fill — proving the wavefront drives per-material
     evaluation through the descriptor-indexing path."""
-    from skinny.renderer import Renderer
-    from skinny.vk_context import VulkanContext
-
-    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
-    renderer = Renderer(
-        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
-        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-    )
+    ctx, renderer = _load("wavefront")
     try:
-        deadline = 200
-        while deadline > 0 and (
-            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
-        ):
-            renderer.update(0.025)
-            deadline -= 1
-        assert renderer.pipeline is not None
+        # Warmup frames settle the camera + upload fc before the debug pass runs.
         for _ in range(4):
             renderer.update(0.04)
             renderer.render_headless()
@@ -278,7 +236,6 @@ def test_wavefront_material_albedo_per_material():
         vis = renderer.build_wavefront_trace_pass(
             "wavefront/wavefront_visibility", "wavefrontVisibility")
         renderer._wavefront_debug_pass = vis
-        renderer.set_execution_mode(1)
         renderer.render_headless()
         mask = renderer.read_accumulation()[:, :, 0] > 0.5
         vis.destroy()
@@ -316,23 +273,10 @@ def test_wavefront_staged_shade_matches_fused():
     render the same surface as the combined kernel — adding a material compiles
     one of these, not the whole switch.
     """
-    from skinny.renderer import Renderer
-    from skinny.vk_context import VulkanContext
-
-    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
-    renderer = Renderer(
-        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
-        tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
-    )
+    ctx, renderer = _load("wavefront")
     fused = staged_group = None
     try:
-        deadline = 200
-        while deadline > 0 and (
-            renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
-        ):
-            renderer.update(0.025)
-            deadline -= 1
-        assert renderer.pipeline is not None
+        # Warmup frames settle the camera + upload fc before the debug pass runs.
         for _ in range(4):
             renderer.update(0.04)
             renderer.render_headless()
@@ -341,7 +285,6 @@ def test_wavefront_staged_shade_matches_fused():
         vis = renderer.build_wavefront_trace_pass(
             "wavefront/wavefront_visibility", "wavefrontVisibility")
         renderer._wavefront_debug_pass = vis
-        renderer.set_execution_mode(1)  # EXECUTION_WAVEFRONT
         renderer.update(0.04)
         renderer.render_headless()
         mask = renderer.read_accumulation()[:, :, 0] > 0.5

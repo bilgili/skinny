@@ -355,6 +355,8 @@ class ComputePipeline:
         entry_module: str,
         entry_point: str,
         graph_fragments: "list | None" = None,
+        *,
+        compile_pipeline: bool = True,
     ) -> None:
         self.ctx = ctx
         self.shader_dir = shader_dir
@@ -368,10 +370,31 @@ class ComputePipeline:
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
 
         import time as _time
-        t0 = _time.perf_counter()
-        print(f"[skinny] slangc → SPIR-V: {entry_module}.slang …", flush=True)
+        # Backend-independent scene plumbing, built unconditionally: regenerate
+        # the python-material genslang, emit generated_materials + per-graph
+        # modules + the python dispatcher (consumed by BOTH the megakernel and
+        # the wavefront shade kernels), and expose the per-graph binding map
+        # (`self.graph_bindings`).
+        self._run_codegen()
         self._emit_generated_materials()
         self._emit_python_dispatcher()
+
+        # Wavefront mode (`scene_bindings_only`): build the set-0 layout and
+        # stop — no main_pass slangc compile and no megakernel driver pipeline.
+        # The wavefront stage pipelines reuse this set-0 layout + the emitted
+        # material modules.
+        if not compile_pipeline:
+            self.descriptor_set_layout = self._create_descriptor_set_layout()
+            self._spirv_path = None
+            self._shader_module = None
+            self.pipeline_layout = None
+            self.pipeline = None
+            return
+
+        t0 = _time.perf_counter()
+        print(f"[skinny] slangc → SPIR-V: {entry_module}.slang …", flush=True)
+        # Compile BEFORE creating the descriptor-set layout so a slangc failure
+        # (caught by the renderer's empty-graph fallback) doesn't leak a layout.
         self._spirv_path = self._compile_slang()
         print(f"[skinny] slangc done in {_time.perf_counter() - t0:.2f}s "
               f"({self._spirv_path.stat().st_size // 1024} KB SPIR-V)", flush=True)
@@ -382,6 +405,23 @@ class ComputePipeline:
         print(f"[skinny] driver pipeline compile …", flush=True)
         self.pipeline = self._create_pipeline()
         print(f"[skinny] pipeline ready in {_time.perf_counter() - t0:.2f}s", flush=True)
+
+    @classmethod
+    def scene_bindings_only(cls, ctx, shader_dir, graph_fragments=None):
+        """Build ONLY the backend-independent scene plumbing — the set-0
+        descriptor-set layout, the `generated_materials`/per-graph + python
+        dispatcher emission, and the `graph_bindings` map — with NO megakernel
+        `main_pass` slangc compile and NO driver compute pipeline.
+
+        Wavefront mode owns one of these so it stands alone; the returned
+        object has ``.pipeline is None``. Same emission + layout code as a full
+        build, so the set-0 layout is byte-for-byte consistent across both
+        backends and the wavefront stage pipelines."""
+        return cls(
+            ctx, shader_dir,
+            entry_module="main_pass", entry_point="mainImage",
+            graph_fragments=graph_fragments, compile_pipeline=False,
+        )
 
     # ── Slang → SPIR-V compilation ───────────────────────────────
 
@@ -669,7 +709,8 @@ class ComputePipeline:
         return h.hexdigest()
 
     def _compile_slang(self) -> Path:
-        self._run_codegen()
+        # Codegen already ran in __init__ (before emission) so the genslang
+        # tree is current for both the megakernel and wavefront compiles.
         src = self.shader_dir / f"{self.entry_module}.slang"
         out = self.shader_dir / f"{self.entry_module}.spv"
 
@@ -1057,10 +1098,15 @@ class ComputePipeline:
     # ── Cleanup ──────────────────────────────────────────────────
 
     def destroy(self) -> None:
-        vk.vkDestroyPipeline(self.ctx.device, self.pipeline, None)
-        vk.vkDestroyPipelineLayout(self.ctx.device, self.pipeline_layout, None)
+        # A `scene_bindings_only` build has no compiled pipeline / module /
+        # pipeline-layout (those are None); it owns only the set-0 layout.
+        if self.pipeline is not None:
+            vk.vkDestroyPipeline(self.ctx.device, self.pipeline, None)
+        if self.pipeline_layout is not None:
+            vk.vkDestroyPipelineLayout(self.ctx.device, self.pipeline_layout, None)
         vk.vkDestroyDescriptorSetLayout(self.ctx.device, self.descriptor_set_layout, None)
-        vk.vkDestroyShaderModule(self.ctx.device, self._shader_module, None)
+        if self._shader_module is not None:
+            vk.vkDestroyShaderModule(self.ctx.device, self._shader_module, None)
 
 
 class UniformBuffer:

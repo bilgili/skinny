@@ -44,7 +44,6 @@ from skinny.params import (
     EXECUTION_WAVEFRONT,
     clamp_mode_index,
     effective_execution_mode,
-    next_mode_index,
 )
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
@@ -922,8 +921,10 @@ class Renderer:
         tattoo_dir: Path | None = None,
         usd_scene_path: Path | None = None,
         use_usd_mtlx_plugin: bool = False,
+        execution_mode: str = "megakernel",
     ) -> None:
         self.ctx = vk_ctx
+        self._requested_execution_mode = str(execution_mode)
         self.width = vk_ctx.width
         self.height = vk_ctx.height
         self.shader_dir = shader_dir
@@ -1045,18 +1046,26 @@ class Renderer:
         self.integrator_modes: list[str] = ["Path", "BDPT"]
         self.integrator_index = 0
 
-        # Execution backend selector, orthogonal to the integrator. Megakernel
-        # (index 0) is the single main_pass.slang compute dispatch — current
-        # behaviour and the default. Wavefront (index 1) is the staged
-        # per-material backend and is Vulkan only; on non-Vulkan backends only
-        # megakernel is offered so the selection is pinned there (mirrors the
-        # Vulkan-only GPU skinning / BVH-refit passes). Switching the selected
-        # mode resets accumulation via _current_state_hash.
+        # Execution backend, orthogonal to the integrator and FIXED for the
+        # session — selected on the command line (`--execution-mode`,
+        # constructor arg), not a runtime GUI toggle. Megakernel (index 0) is
+        # the single main_pass.slang compute dispatch (default); wavefront
+        # (index 1) is the staged per-material backend, Vulkan only. On
+        # non-Vulkan backends only megakernel is available, so any request
+        # collapses there (the Metal pin; mirrors the Vulkan-only GPU skinning /
+        # BVH-refit passes). The renderer compiles ONLY the selected backend
+        # (see `_build_pipeline_for_current_graphs`).
         _wavefront_capable = hasattr(self.ctx, "compute_queue")
         self.execution_modes: list[str] = (
             ["Megakernel", "Wavefront"] if _wavefront_capable else ["Megakernel"]
         )
-        self.execution_mode_index = EXECUTION_MEGAKERNEL
+        _mode_aliases = {"megakernel": EXECUTION_MEGAKERNEL, "wavefront": EXECUTION_WAVEFRONT}
+        _requested = _mode_aliases.get(
+            self._requested_execution_mode.strip().lower(), EXECUTION_MEGAKERNEL
+        )
+        # Clamp to the available modes (collapses wavefront → megakernel on a
+        # non-Vulkan / Metal backend, which offers only ["Megakernel"]).
+        self.execution_mode_index = clamp_mode_index(_requested, len(self.execution_modes))
         # Lazily built env-only wavefront pass (Phase-1 integration milestone),
         # constructed on first wavefront-mode dispatch. None until then / on
         # non-Vulkan backends.
@@ -1303,19 +1312,24 @@ class Renderer:
         self._refresh_camera_node()
 
     # ── Execution backend (megakernel | wavefront) ──────────────────
+    # The mode is fixed at construction (CLI `--execution-mode`), so there is
+    # no runtime setter / cycler and it is excluded from `_current_state_hash`.
 
-    def set_execution_mode(self, index: int) -> None:
-        """Select the execution backend by index, clamped to the available
-        modes. On non-Vulkan backends only megakernel is available, so any
-        request collapses to megakernel."""
-        self.execution_mode_index = clamp_mode_index(index, len(self.execution_modes))
+    @property
+    def _scene_set0_layout(self):
+        """Set-0 descriptor-set layout for the active backend, or None before
+        a scene is loaded. Owned by `self._scene_bindings` (which is the
+        megakernel `ComputePipeline` in megakernel mode, or a standalone
+        `scene_bindings_only` build in wavefront mode)."""
+        return self._scene_bindings.descriptor_set_layout if self._scene_bindings else None
 
-    def cycle_execution_mode(self) -> None:
-        """Advance to the next available execution mode, wrapping. A no-op
-        when only one mode is available (the Metal pin)."""
-        self.execution_mode_index = next_mode_index(
-            self.execution_mode_index, len(self.execution_modes)
-        )
+    @property
+    def _scene_graph_bindings(self) -> dict:
+        """MaterialX nodegraph → descriptor-binding map for the active backend,
+        independent of which backend is compiled."""
+        if self._scene_bindings is None:
+            return {}
+        return getattr(self._scene_bindings, "graph_bindings", {}) or {}
 
     @property
     def effective_execution_mode_index(self) -> int:
@@ -1333,6 +1347,18 @@ class Renderer:
         """True when the capability gate is overriding the selected execution
         mode (front-ends surface this to the user)."""
         return self.effective_execution_mode_index != self.execution_mode_index
+
+    @property
+    def _backend_render_ready(self) -> bool:
+        """True once the selected backend can dispatch a frame: the per-frame
+        scene descriptor sets exist and the compiled backend is present. In
+        megakernel mode that means the megakernel pipeline; in wavefront mode
+        the scene bindings (the staged stage pipelines build lazily)."""
+        if self.descriptor_sets is None:
+            return False
+        if self.effective_execution_mode_index == EXECUTION_MEGAKERNEL:
+            return self.pipeline is not None
+        return self._scene_bindings is not None
 
     def _ensure_wavefront_env_pass(self):
         """Build (once) the env-only wavefront pass. Returns it, or None on a
@@ -1366,12 +1392,12 @@ class Renderer:
     def _ensure_wavefront_path_pass(self):
         """Build (once) the staged wavefront path tracer — the real per-frame
         wavefront dispatch. Returns it, or None on a non-Vulkan backend or
-        before the megakernel pipeline exists (it reuses the pipeline's set-0
+        before the scene bindings exist (it reuses the scene-bindings set-0
         layout + the renderer's per-frame scene descriptor sets). Rebuilt by
-        `_destroy_wavefront_path_pass` when the pipeline or frame size changes."""
+        `_destroy_wavefront_path_pass` when the layout or frame size changes."""
         if not hasattr(self.ctx, "compute_queue"):
             return None
-        if self.pipeline is None or self.descriptor_sets is None:
+        if self._scene_bindings is None or self.descriptor_sets is None:
             return None
         # Build the heavy catch-all shade kernel only when the scene has a
         # non-flat material (skin/python); flat-only scenes compile just the
@@ -1395,7 +1421,7 @@ class Renderer:
         self._wf_path_hit_buf = StorageBuffer(
             self.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
         self._wavefront_path_pass = WavefrontPathPass(
-            self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
+            self.ctx, self.shader_dir, self._scene_set0_layout,
             self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
             self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
             stream_size, num_pixels, build_catchall=has_nonflat,
@@ -1416,11 +1442,11 @@ class Renderer:
 
     def _ensure_wavefront_bdpt_pass(self):
         """Build (once) the staged wavefront bdpt pass. Returns it, or None on a
-        non-Vulkan backend or before the megakernel pipeline exists. Allocates
-        the per-lane eye/light subpath-vertex buffers + aux buffer."""
+        non-Vulkan backend or before the scene bindings exist. Allocates the
+        per-lane eye/light subpath-vertex buffers + aux buffer."""
         if not hasattr(self.ctx, "compute_queue"):
             return None
-        if self.pipeline is None or self.descriptor_sets is None:
+        if self._scene_bindings is None or self.descriptor_sets is None:
             return None
         if (self._wavefront_bdpt_pass is not None
                 and self._wf_bdpt_pass_dims == (self.width, self.height)):
@@ -1440,7 +1466,7 @@ class Renderer:
         self._wf_bdpt_light_buf = StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_aux_buf = StorageBuffer(self.ctx, aux_bytes)
         self._wavefront_bdpt_pass = WavefrontBdptPass(
-            self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
+            self.ctx, self.shader_dir, self._scene_set0_layout,
             self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
             self._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
             stream_size, num_pixels,
@@ -1525,7 +1551,7 @@ class Renderer:
             {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
             {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
         ]
-        graph_bindings = getattr(self.pipeline, "graph_bindings", {}) or {}
+        graph_bindings = self._scene_graph_bindings
         for target, binding in graph_bindings.items():
             buf = self._graph_param_buffers.get(target)
             if buf is not None:
@@ -2024,8 +2050,10 @@ class Renderer:
                     # OBJ loads don't traverse `_gen_scene_materials`, so
                     # the lazy pipeline build never fires from the USD
                     # poll. Build an empty-graph pipeline here so the
-                    # renderer has something to dispatch.
-                    if self.pipeline is None:
+                    # renderer has something to dispatch. Keyed on the scene
+                    # bindings (None until first build) since `self.pipeline`
+                    # is always None in wavefront mode.
+                    if self._scene_bindings is None:
                         self._build_pipeline_for_current_graphs()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[skinny] failed to load {path.name}: {exc}")
@@ -2304,7 +2332,7 @@ class Renderer:
         # scenes without the gen-slang dependency.
         if lib is None:
             if (
-                self.pipeline is None
+                self._scene_bindings is None
                 or self._graph_set_signature() != self._pipeline_built_for_targets
             ):
                 self._build_pipeline_for_current_graphs()
@@ -2401,7 +2429,7 @@ class Renderer:
         # target_name from different `.mtlx` documents (different node
         # wiring, different texture paths) still trigger a rebuild.
         if (
-            self.pipeline is None
+            self._scene_bindings is None
             or self._graph_set_signature() != self._pipeline_built_for_targets
         ):
             self._build_pipeline_for_current_graphs()
@@ -2573,25 +2601,33 @@ class Renderer:
         )
 
     def _build_pipeline_for_current_graphs(self) -> None:
-        """Build (or rebuild) the compute pipeline + descriptor pool/sets
-        against the current `_scene_graph_fragments`.
+        """Build (or rebuild) the scene bindings + descriptor pool/sets — and,
+        in megakernel mode only, the megakernel compute pipeline — against the
+        current `_scene_graph_fragments`.
 
-        Handles both first-build (pipeline is None at startup; built lazily
-        once `_gen_scene_materials` has populated the fragment list from
+        Handles both first-build (scene bindings are None at startup; built
+        lazily once `_gen_scene_materials` has populated the fragment list from
         a loaded scene) and rebuild (scene graph set changed mid-session).
 
-        The pipeline's descriptor-set layout includes one storage buffer
-        per MaterialX nodegraph fragment at GRAPH_BINDING_BASE+idx, and
-        the aggregator's `evalSceneGraph` switch hard-codes the fragment
-        list — both must be re-emitted + recompiled whenever the fragment
-        set changes.
+        The set-0 descriptor-set layout includes one storage buffer per
+        MaterialX nodegraph fragment at GRAPH_BINDING_BASE+idx, and the
+        aggregator's `evalSceneGraph` switch hard-codes the fragment list —
+        both are re-emitted (+ the megakernel recompiled, in megakernel mode)
+        whenever the fragment set changes.
 
-        If slangc fails (malformed extracted fragment, extractor
-        regression, …) we fall back to an empty-graph pipeline so the
-        rest of the scene still renders; affected materials show magenta
-        via evalSceneGraph's `default` case.
+        Execution-mode gating: the megakernel `main_pass` pipeline is compiled
+        ONLY in megakernel mode. In wavefront mode the scene bindings are built
+        standalone (`scene_bindings_only` — no main_pass slangc, no driver
+        pipeline; `self.pipeline` stays None) and the wavefront stage pipelines
+        are built lazily by `_ensure_wavefront_*` on the first wavefront frame.
+
+        If slangc fails in megakernel mode (malformed extracted fragment,
+        extractor regression, …) we fall back to an empty-graph build so the
+        rest of the scene still renders; affected materials show magenta via
+        evalSceneGraph's `default` case.
         """
-        is_rebuild = self.pipeline is not None
+        megakernel = self.execution_mode_index == EXECUTION_MEGAKERNEL
+        is_rebuild = self._scene_bindings is not None
         if is_rebuild:
             vk.vkDeviceWaitIdle(self.ctx.device)
             if self.descriptor_pool is not None:
@@ -2601,17 +2637,22 @@ class Renderer:
                 )
                 self.descriptor_pool = None
                 self.descriptor_sets = None
-            # ComputePipeline owns pipeline, layout, module — destroy()
-            # tears all three down.
-            self.pipeline.destroy()
+            # The wavefront stage passes reuse the set-0 layout owned by the
+            # scene bindings, so a rebuild of the layout invalidates them too.
+            self._destroy_wavefront_path_pass()
+            self._destroy_wavefront_bdpt_pass()
+            # `self.pipeline` (megakernel) shares the scene-bindings object in
+            # megakernel mode; destroy the scene bindings once, then clear the
+            # alias. In wavefront mode `self.pipeline` is already None.
             self.pipeline = None
-            # Preview pipeline shares the main pipeline's descriptor set
-            # layout, so a main-pipeline rebuild invalidates its set 0
-            # layout reference. Drop it; render_material_preview will
-            # re-create lazily on next call.
+            # Preview pipeline shares the set-0 descriptor-set layout, so a
+            # rebuild invalidates its reference. Drop it; render_material_preview
+            # re-creates it lazily on next call.
             if self._preview_pipeline is not None:
                 self._preview_pipeline.destroy()
                 self._preview_pipeline = None
+            self._scene_bindings.destroy()
+            self._scene_bindings = None
 
         # Snapshot the attempted signature BEFORE the build — if slangc
         # fails we still want to record what we tried so the gate in
@@ -2619,32 +2660,45 @@ class Renderer:
         # for the same broken fragment set on every subsequent scene
         # poll.
         attempted_sig = self._graph_set_signature()
-        try:
-            self.pipeline = ComputePipeline(
+        if megakernel:
+            try:
+                self._scene_bindings = ComputePipeline(
+                    self.ctx,
+                    self.shader_dir,
+                    entry_module="main_pass",
+                    entry_point="mainImage",
+                    graph_fragments=list(self._scene_graph_fragments),
+                )
+            except RuntimeError as e:
+                action = "rebuild" if is_rebuild else "build"
+                print(
+                    f"[skinny] WARNING: pipeline {action} with "
+                    f"{len(self._scene_graph_fragments)} MaterialX graph(s) "
+                    f"failed:\n  {e}\n"
+                    f"[skinny]   → falling back to empty-graph pipeline. "
+                    f"Affected materials will render magenta."
+                )
+                self._scene_graph_fragments = []
+                self._material_graph_ids.clear()
+                self._scene_bindings = ComputePipeline(
+                    self.ctx,
+                    self.shader_dir,
+                    entry_module="main_pass",
+                    entry_point="mainImage",
+                    graph_fragments=[],
+                )
+            # In megakernel mode the scene bindings ARE the compiled pipeline.
+            self.pipeline = self._scene_bindings
+        else:
+            # Wavefront mode: build the scene plumbing (set-0 layout + material
+            # emission + graph bindings) WITHOUT compiling main_pass. The
+            # wavefront stage pipelines are built lazily in the render gate.
+            self._scene_bindings = ComputePipeline.scene_bindings_only(
                 self.ctx,
                 self.shader_dir,
-                entry_module="main_pass",
-                entry_point="mainImage",
                 graph_fragments=list(self._scene_graph_fragments),
             )
-        except RuntimeError as e:
-            action = "rebuild" if is_rebuild else "build"
-            print(
-                f"[skinny] WARNING: pipeline {action} with "
-                f"{len(self._scene_graph_fragments)} MaterialX graph(s) "
-                f"failed:\n  {e}\n"
-                f"[skinny]   → falling back to empty-graph pipeline. "
-                f"Affected materials will render magenta."
-            )
-            self._scene_graph_fragments = []
-            self._material_graph_ids.clear()
-            self.pipeline = ComputePipeline(
-                self.ctx,
-                self.shader_dir,
-                entry_module="main_pass",
-                entry_point="mainImage",
-                graph_fragments=[],
-            )
+            self.pipeline = None
         # `built_sig` reflects what we *attempted*, not the post-fallback
         # state — keeps the rebuild gate idempotent.
         built_sig = attempted_sig
@@ -2676,6 +2730,11 @@ class Renderer:
         # wasted ~9 s slangc compile at startup against an empty fragment
         # list that's immediately discarded when the scene loads.
         self.pipeline = None
+        # Backend-independent scene plumbing (set-0 layout + material/dispatcher
+        # emission + graph-binding map). Built in BOTH modes; in megakernel mode
+        # it IS `self.pipeline` (a full ComputePipeline), in wavefront mode it is
+        # a `scene_bindings_only` build with `.pipeline is None`.
+        self._scene_bindings = None
         self.descriptor_pool = None
         self.descriptor_sets = None
 
@@ -3070,7 +3129,7 @@ class Renderer:
             self.ctx.device, pool_info, None
         )
 
-        layouts = [self.pipeline.descriptor_set_layout] * MAX_FRAMES_IN_FLIGHT
+        layouts = [self._scene_set0_layout] * MAX_FRAMES_IN_FLIGHT
         alloc_info = vk.VkDescriptorSetAllocateInfo(
             descriptorPool=self.descriptor_pool,
             descriptorSetCount=MAX_FRAMES_IN_FLIGHT,
@@ -4642,7 +4701,7 @@ class Renderer:
                 self._graph_param_buffers[stale].destroy()
                 del self._graph_param_buffers[stale]
 
-        pipeline_bindings = getattr(self.pipeline, "graph_bindings", {}) or {}
+        pipeline_bindings = self._scene_graph_bindings
         for idx, gf in enumerate(self._scene_graph_fragments):
             stride = max(
                 (f.offset + f.size for f in gf.uniform_block), default=0
@@ -4842,7 +4901,10 @@ class Renderer:
         """Lazy-create preview image / readback / pipeline. False = unavailable."""
         from skinny.vk_compute import PreviewPipeline, StorageImage, ReadbackBuffer
 
-        if self.pipeline is None:
+        # The preview pipeline only needs the set-0 layout + the emitted
+        # material modules — both live on the scene bindings, so it works in
+        # wavefront mode too (where `self.pipeline` is None).
+        if self._scene_bindings is None:
             return False
         if self._preview_size != size:
             # Size changed (or first init) — tear down old image + readback
@@ -4871,7 +4933,7 @@ class Renderer:
             try:
                 self._preview_pipeline = PreviewPipeline(
                     self.ctx, self.shader_dir,
-                    self.pipeline.descriptor_set_layout,
+                    self._scene_set0_layout,
                     self._preview_image.view,
                 )
             except RuntimeError as e:
@@ -5437,6 +5499,16 @@ class Renderer:
         n_phi = int(params["n_phi"])
         n_theta = max(1, min(n_theta, 128))
         n_phi = max(1, min(n_phi, 128))
+
+        # The BXDF/BSSRDF visualiser reuses the megakernel main_pass tool-mode
+        # dispatch, which is not compiled in wavefront mode. Degrade gracefully
+        # to a zeroed grid instead of dereferencing a None pipeline.
+        if self.pipeline is None:
+            try:
+                callback(np.zeros((n_theta, n_phi, 3), dtype=np.float32))
+            except Exception as exc:
+                print(f"[skinny] bxdf eval callback raised: {exc}")
+            return
         if n_theta * n_phi > 128 * 64:
             raise ValueError(
                 f"BXDF grid {n_theta}×{n_phi} exceeds tool buffer capacity"
@@ -6818,7 +6890,8 @@ class Renderer:
             float(self.tattoo_density),
             int(self.scatter_index),
             int(self.integrator_index),
-            int(self.execution_mode_index),
+            # execution_mode_index is fixed for the session (CLI-selected), so
+            # it never changes mid-session and is omitted from the hash.
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),
@@ -6918,10 +6991,10 @@ class Renderer:
         self._refresh_gizmo_segments()
 
     def render(self) -> None:
-        # Pipeline is built lazily once a scene's MaterialX fragments are
-        # gen'd (USD metadata arrival, OBJ load). Until then the window
-        # has nothing to draw — skip the whole frame.
-        if self.pipeline is None or self.descriptor_sets is None:
+        # The selected backend is built lazily once a scene's MaterialX
+        # fragments are gen'd (USD metadata arrival, OBJ load). Until then the
+        # window has nothing to draw — skip the whole frame.
+        if not self._backend_render_ready:
             return
         f = self.current_frame
 
@@ -6995,20 +7068,37 @@ class Renderer:
         # Copy this frame's HUD bytes from staging into the device-local image.
         self.hud_overlay.record_copy(cmd)
 
-        # Bind pipeline and descriptors
-        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
-        vk.vkCmdBindDescriptorSets(
-            cmd,
-            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-            self.pipeline.pipeline_layout,
-            0, 1, [self.descriptor_sets[f]],
-            0, None,
-        )
+        # Execution-mode gate (mirrors render_headless): in wavefront mode the
+        # staged compute pipeline writes the offscreen image; megakernel binds
+        # main_pass directly. The offscreen image is then blitted to the
+        # swapchain below, identically for both backends.
+        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+            if self._wavefront_debug_pass is not None:
+                self._wavefront_debug_pass.record_dispatch(cmd)
+            else:
+                if self.integrator_index == 1:
+                    staged = self._ensure_wavefront_bdpt_pass()
+                else:
+                    staged = self._ensure_wavefront_path_pass()
+                if staged is not None:
+                    staged.record_dispatch(cmd, self.descriptor_sets[f])
+                else:
+                    self._ensure_wavefront_env_pass().record_dispatch(cmd)
+        else:
+            # Bind pipeline and descriptors
+            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
+            vk.vkCmdBindDescriptorSets(
+                cmd,
+                vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+                self.pipeline.pipeline_layout,
+                0, 1, [self.descriptor_sets[f]],
+                0, None,
+            )
 
-        # Dispatch into the offscreen image at render resolution.
-        groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-        groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-        vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+            # Dispatch into the offscreen image at render resolution.
+            groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+            groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+            vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
 
         # Offscreen GENERAL → TRANSFER_SRC for the blit source.
         offscreen_to_src = vk.VkImageMemoryBarrier(
@@ -7132,10 +7222,10 @@ class Renderer:
         windowed session that just rebound binding 1 to a swapchain image
         in render() doesn't corrupt the screenshot.
         """
-        # Pipeline not built yet — caller asked for a screenshot before any
+        # Backend not built yet — caller asked for a screenshot before any
         # scene/model was loaded. Return a fully-zeroed RGBA8 frame so the
         # web/screenshot path stays well-defined.
-        if self.pipeline is None or self.descriptor_sets is None:
+        if not self._backend_render_ready:
             return b"\x00" * (self.width * self.height * 4)
         f = self.current_frame
 
@@ -7576,5 +7666,12 @@ class Renderer:
         if getattr(self, "_preview_image", None) is not None:
             self._preview_image.destroy()
             self._preview_image = None
-        if self.pipeline is not None:
-            self.pipeline.destroy()
+        # The scene bindings own the set-0 layout (+ the megakernel pipeline in
+        # megakernel mode, where `self.pipeline is self._scene_bindings`). Tear
+        # the wavefront stage passes down first, then the scene bindings once.
+        self._destroy_wavefront_path_pass()
+        self._destroy_wavefront_bdpt_pass()
+        if self._scene_bindings is not None:
+            self._scene_bindings.destroy()
+            self._scene_bindings = None
+            self.pipeline = None

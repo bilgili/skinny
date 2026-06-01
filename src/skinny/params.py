@@ -76,13 +76,6 @@ def clamp_mode_index(index: int, n_modes: int) -> int:
     return max(0, min(int(index), n_modes - 1))
 
 
-def next_mode_index(current: int, n_modes: int) -> int:
-    """Advance ``current`` to the next mode, wrapping. No-op for a single mode."""
-    if n_modes <= 0:
-        return 0
-    return (int(current) + 1) % n_modes
-
-
 def effective_execution_mode(
     selected_index: int,
     integrator_index: int,
@@ -113,7 +106,10 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Direct light",      "direct_light_index",          "direct_light_modes"),
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Integrator",        "integrator_index",            "integrator_modes"),
-    _disc("Execution",         "execution_mode_index",        "execution_modes"),
+    # Execution mode (megakernel | wavefront) is a command-line / session
+    # selection (`--execution-mode`), fixed at renderer construction — not a
+    # runtime GUI toggle. So it is intentionally absent from STATIC_PARAMS
+    # (no Combo, no settings snapshot). See Renderer.__init__(execution_mode=).
     _disc("Tonemap",           "tonemap_index",               "tonemap_modes"),
     _cont("Exposure (EV)",     "exposure",                    0.1, -10.0, 10.0),
     _disc("Furnace mode",      "furnace_index",               "furnace_modes"),
