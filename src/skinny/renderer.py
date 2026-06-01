@@ -922,9 +922,18 @@ class Renderer:
         usd_scene_path: Path | None = None,
         use_usd_mtlx_plugin: bool = False,
         execution_mode: str = "megakernel",
+        bdpt_walk: str = "megakernel",
     ) -> None:
         self.ctx = vk_ctx
         self._requested_execution_mode = str(execution_mode)
+        # BDPT subpath-build strategy for wavefront+bdpt (CLI-fixed per session):
+        #   megakernel — one walk kernel (the S1 connect-compaction win, default)
+        #   eye        — staged eye walk + megakernel light tail
+        #   eye_light  — fully staged eye + light walks
+        # All produce the identical image; this only trades dispatch overhead vs
+        # occupancy. Validated/clamped by WavefrontBdptPass.
+        _bw = str(bdpt_walk).strip().lower()
+        self.bdpt_walk_mode = _bw if _bw in ("megakernel", "eye", "eye_light") else "megakernel"
         self.width = vk_ctx.width
         self.height = vk_ctx.height
         self.shader_dir = shader_dir
@@ -1469,7 +1478,7 @@ class Renderer:
             self.ctx, self.shader_dir, self._scene_set0_layout,
             self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
             self._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
-            stream_size, num_pixels,
+            stream_size, num_pixels, walk_mode=self.bdpt_walk_mode,
         )
         self._wf_bdpt_pass_dims = (self.width, self.height)
         return self._wavefront_bdpt_pass

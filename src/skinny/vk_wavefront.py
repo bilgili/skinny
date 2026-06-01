@@ -779,53 +779,112 @@ class IndirectPaintPass:
 
 
 class WavefrontBdptPass:
-    """Staged wavefront bidirectional path tracer (Phase 3). Three pipelines
-    from ``wavefront/wavefront_bdpt.slang`` (walk / connect / resolve) over
-    per-lane eye + light subpath-vertex buffers + an aux buffer. Set 0 is the
-    megakernel scene descriptor set (incl. lightSplatBuffer); set 1 holds the
-    subpath/aux buffers. The estimator is reused verbatim from
-    integrators/bdpt.slang, so the accumulated image matches the megakernel
-    bdpt. Matches its scope: flat first-hit, pinhole camera."""
+    """Staged wavefront bidirectional path tracer (Phase 3). Pipelines from
+    ``wavefront/wavefront_bdpt.slang``: walk (subpath build) → connect counting
+    sort (classify / build_args / scatter) → split connect (nee / full,
+    indirect-dispatched per slot) → resolve, over per-lane eye + light
+    subpath-vertex buffers + an aux buffer + the connect counting-sort buffers
+    (this pass owns them). Set 0 is the megakernel scene descriptor set (incl.
+    lightSplatBuffer); set 1 holds the subpath/aux/queue buffers. The connect
+    estimator is reused verbatim from integrators/bdpt.slang, so the accumulated
+    image matches the megakernel bdpt. The strategy split skips dead lanes and
+    runs the heavy generic+MIS double loop only for lanes with a ≥2-vertex light
+    subpath. Matches the megakernel scope: flat first-hit, pinhole camera."""
 
     _GROUP = 64           # matches [numthreads(64, 1, 1)] in wavefront_bdpt.slang
     BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # ≥ sizeof(BDPTVertex) (≈120 B scalar) — headroom
-    AUX_STRIDE = 64       # ≥ sizeof(WfBdptAux) (≈44 B scalar)
+    AUX_STRIDE = 128      # ≥ sizeof(WfBdptAux) (≈92 B scalar w/ eye-walk state)
+    # Connect counting-sort slots — lockstep with WF_BDPT_SLOT_* in the shader.
+    NUM_SLOTS = 2
+    SLOT_NEE = 0
+    SLOT_FULL = 1
+    # Eye-walk extend bounces: gen-eye seeds eye[0..1], the loop extends eye[2..].
+    EYE_BOUNCES = BDPT_MAX_VERTS - 2
+    # Light-walk extend bounces: gen-light seeds light[0], the loop extends light[1..].
+    LIGHT_BOUNCES = BDPT_MAX_VERTS - 1
     # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices
     # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
     STREAM_CAP = 1 << 18
 
+    WALK_MODES = ("megakernel", "eye", "eye_light")
+
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
-                 stream_size: int, num_pixels: int) -> None:
+                 stream_size: int, num_pixels: int,
+                 walk_mode: str = "megakernel") -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.num_pixels = int(num_pixels)
+        if walk_mode not in self.WALK_MODES:
+            raise ValueError(f"unknown bdpt walk_mode {walk_mode!r} (expected {self.WALK_MODES})")
+        self.walk_mode = walk_mode
 
-        modules = {}
-        for entry, out_name in (
-            ("wfBdptWalk", "wavefront/_wfbdpt_walk"),
-            ("wfBdptConnect", "wavefront/_wfbdpt_connect"),
+        # The connect counting sort (classify / build_args / scatter) + split
+        # connect (nee / full, indirect) + resolve are shared by all walk modes;
+        # only the subpath-build kernels differ:
+        #   megakernel — one wfBdptWalk kernel (eye+light+splat); the S1 win.
+        #   eye        — staged eye walk + megakernel light tail.
+        #   eye_light  — fully staged eye + light walks + standalone splat.
+        # Only the active mode's kernels are compiled/built (no wasted slangc).
+        shared = [
+            ("wfBdptClassify", "wavefront/_wfbdpt_classify"),
+            ("wfBdptBuildArgs", "wavefront/_wfbdpt_buildargs"),
+            ("wfBdptScatter", "wavefront/_wfbdpt_scatter"),
+            ("wfBdptConnectNee", "wavefront/_wfbdpt_connect_nee"),
+            ("wfBdptConnectFull", "wavefront/_wfbdpt_connect_full"),
             ("wfBdptResolve", "wavefront/_wfbdpt_resolve"),
-        ):
+        ]
+        staged_eye = [
+            ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
+            ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
+            ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
+        ]
+        if walk_mode == "megakernel":
+            entries = [("wfBdptWalk", "wavefront/_wfbdpt_walk")] + shared
+        elif walk_mode == "eye":
+            entries = staged_eye + [("wfBdptLightTail", "wavefront/_wfbdpt_light_tail")] + shared
+        else:  # eye_light
+            entries = staged_eye + [
+                ("wfBdptGenLight", "wavefront/_wfbdpt_gen_light"),
+                ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
+                ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
+            ] + shared
+        modules = {}
+        for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
         self._modules = modules
 
-        # Set 1: eye (0), light (1), aux (2) storage buffers.
+        # Connect-stage counting-sort buffers (this pass owns them), mirroring
+        # WavefrontPathPass: laneSlot (3), slotCount (4), slotOffset (5),
+        # slotQueue (6), slotCursor (7), indirectArgs (8). slotCount/cursor are
+        # zeroed each tile; indirectArgs needs INDIRECT_BUFFER for the connect
+        # vkCmdDispatchIndirect.
+        self._buffers = {}
+        self._buffers["lane_slot"] = StorageBuffer(ctx, self.stream_size * 4)
+        self._buffers["slot_count"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
+        self._buffers["slot_offset"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
+        self._buffers["slot_queue"] = StorageBuffer(ctx, self.stream_size * 4)
+        self._buffers["slot_cursor"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
+        self._buffers["indirect"] = StorageBuffer(ctx, self.NUM_SLOTS * 12, indirect=True)
+        self._indirect_buf = self._buffers["indirect"].buffer
+
+        # Set 1: eye (0), light (1), aux (2), + the 6 counting-sort buffers (3..8).
         bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
-            for b in (0, 1, 2)
+            for b in range(9)
         ]
         self._set_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=3, pBindings=bindings), None)
+                bindingCount=9, pBindings=bindings), None)
+        # Push constant {streamBase, shadeSlot, streamSize} (12 B).
         push_range = vk.VkPushConstantRange(
-            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)  # streamBase
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=12)
         self._pipe_layout = vk.vkCreatePipelineLayout(
             ctx.device, vk.VkPipelineLayoutCreateInfo(
                 setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout],
@@ -843,59 +902,155 @@ class WavefrontBdptPass:
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=3)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=9)]), None)
         self._set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
                 pSetLayouts=[self._set_layout]))[0]
+        bound = [
+            (eye_buf, vert_range), (light_buf, vert_range), (aux_buf, aux_range),
+            (self._buffers["lane_slot"].buffer, self._buffers["lane_slot"].size),
+            (self._buffers["slot_count"].buffer, self._buffers["slot_count"].size),
+            (self._buffers["slot_offset"].buffer, self._buffers["slot_offset"].size),
+            (self._buffers["slot_queue"].buffer, self._buffers["slot_queue"].size),
+            (self._buffers["slot_cursor"].buffer, self._buffers["slot_cursor"].size),
+            (self._buffers["indirect"].buffer, self._buffers["indirect"].size),
+        ]
         writes = []
-        for b, (buf, rng) in enumerate(
-                ((eye_buf, vert_range), (light_buf, vert_range), (aux_buf, aux_range))):
+        for b, (buf, rng) in enumerate(bound):
             info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
             writes.append(vk.VkWriteDescriptorSet(
                 dstSet=self._set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
         vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
 
-    def _stage(self, cmd, entry, scene_set) -> None:
+    def _bind(self, cmd, entry, scene_set) -> None:
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
         vk.vkCmdBindDescriptorSets(
             cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
             0, 2, [scene_set, self._set], 0, None)
+
+    def _dispatch_full(self, cmd) -> None:
         groups = (self.stream_size + self._GROUP - 1) // self._GROUP
         vk.vkCmdDispatch(cmd, groups, 1, 1)
 
-    def _push_base(self, cmd, stream_base) -> None:
+    def _stage(self, cmd, entry, scene_set) -> None:
+        """Bind + full-stream dispatch (walk / classify / scatter / resolve)."""
+        self._bind(cmd, entry, scene_set)
+        self._dispatch_full(cmd)
+
+    def _push(self, cmd, offset, values) -> None:
         import struct
 
         import cffi
-        buf = cffi.FFI().new("char[]", struct.pack("I", int(stream_base)))
+        data = struct.pack(f"{len(values)}I", *[int(v) for v in values])
+        buf = cffi.FFI().new("char[]", data)
         vk.vkCmdPushConstants(
-            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            int(offset), len(data), buf)
 
     def record_dispatch(self, cmd, scene_set) -> None:
-        """Tiled walk → connect → resolve. The frame's pixels are processed in
-        fixed-size streams; the eye/light/aux subpath buffers are bounded by
-        `stream_size`, not the pixel count."""
-        barrier = vk.VkMemoryBarrier(
+        """Tiled fully-staged bdpt. Per tile: gen-eye → eye bounce loop
+        { walk-classify → build_args → scatter → bounce-eye (indirect) } →
+        gen-light → light bounce loop { walk-classify → build_args → scatter →
+        bounce-light (indirect) } → splat → connect classify → build_args →
+        scatter → indirect connect over the NEE then FULL queues → resolve. The
+        eye/light/aux + queue buffers are bounded by `stream_size`, not the pixel
+        count; the counting-sort scratch is shared across all three compactions."""
+        cbarrier = vk.VkMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT
+            | vk.VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
 
         def mem_barrier():
+            # COMPUTE→COMPUTE (+ indirect read of the args build_args wrote).
             vk.vkCmdPipelineBarrier(
                 cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [barrier], 0, None, 0, None)
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                | vk.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                0, 1, [cbarrier], 0, None, 0, None)
+
+        def clear_counts():
+            cnt = self._buffers["slot_count"]
+            cur = self._buffers["slot_cursor"]
+            # WAR guard: a prior stage (the previous bounce's queue read, or the
+            # prior tile's connect) read slot_count/cursor via the indirect
+            # dispatch. The COMPUTE→COMPUTE mem_barrier does NOT order those reads
+            # before the TRANSFER fill below, so without this the fill races them —
+            # mild at one tile, badly corrupting at many. COMPUTE→TRANSFER fixes it.
+            pre = vk.VkMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT)
+            vk.vkCmdPipelineBarrier(
+                cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, [pre], 0, None, 0, None)
+            vk.vkCmdFillBuffer(cmd, cnt.buffer, 0, cnt.size, 0)
+            vk.vkCmdFillBuffer(cmd, cur.buffer, 0, cur.size, 0)
+            tb = vk.VkMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+            vk.vkCmdPipelineBarrier(
+                cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [tb], 0, None, 0, None)
+
+        def indirect(slot, entry):
+            self._push(cmd, 4, [slot])           # shadeSlot for wfBdptQueueLane
+            self._bind(cmd, entry, scene_set)
+            vk.vkCmdDispatchIndirect(cmd, self._indirect_buf, slot * 12)
+
+        def compact(classify_entry):
+            # clear counts → classify (count) → build_args → scatter, leaving the
+            # live lanes gathered into their slot queues for an indirect dispatch.
+            clear_counts()
+            self._stage(cmd, classify_entry, scene_set)
+            mem_barrier()
+            self._bind(cmd, "wfBdptBuildArgs", scene_set)
+            vk.vkCmdDispatch(cmd, 1, 1, 1)
+            mem_barrier()
+            self._stage(cmd, "wfBdptScatter", scene_set)
+            mem_barrier()
+
+        def build_subpaths():
+            """Dispatch the subpath-construction kernels for the active walk_mode,
+            leaving each lane's aux (eyeLen/lightLen/escaped/rngState) ready for
+            the shared connect+resolve tail."""
+            if self.walk_mode == "megakernel":
+                self._stage(cmd, "wfBdptWalk", scene_set)     # eye+light+splat in one kernel
+                mem_barrier()
+                return
+            # staged eye walk (eye + eye_light modes)
+            self._stage(cmd, "wfBdptGenEye", scene_set)       # eye[0..1] + first ray
+            mem_barrier()
+            for _ in range(self.EYE_BOUNCES):
+                compact("wfBdptWalkClassify")                 # gather live eye lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceEye")    # extend one eye vertex
+                mem_barrier()
+            if self.walk_mode == "eye":
+                self._stage(cmd, "wfBdptLightTail", scene_set)  # megakernel light walk + splat
+                mem_barrier()
+                return
+            # eye_light: staged light walk + standalone splat
+            self._stage(cmd, "wfBdptGenLight", scene_set)     # light[0] + first light ray
+            mem_barrier()
+            for _ in range(self.LIGHT_BOUNCES):
+                compact("wfBdptWalkClassify")                 # gather live light lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceLight")  # extend one light vertex
+                mem_barrier()
+            self._stage(cmd, "wfBdptSplat", scene_set)        # s=1 light-tracer splat
+            mem_barrier()
 
         stream_base = 0
         first = True
         while stream_base < self.num_pixels:
             if not first:
-                mem_barrier()  # prior tile's resolve before this tile reuses the buffers
+                mem_barrier()  # prior tile's resolve before reusing the buffers
             first = False
-            self._push_base(cmd, stream_base)
-            self._stage(cmd, "wfBdptWalk", scene_set)
+            self._push(cmd, 0, [stream_base, 0, self.stream_size])
+            build_subpaths()
+            compact("wfBdptClassify")                         # route lanes NEE / FULL / dead
+            indirect(self.SLOT_NEE, "wfBdptConnectNee")
             mem_barrier()
-            self._stage(cmd, "wfBdptConnect", scene_set)
+            indirect(self.SLOT_FULL, "wfBdptConnectFull")
             mem_barrier()
             self._stage(cmd, "wfBdptResolve", scene_set)
             stream_base += self.stream_size
@@ -908,6 +1063,9 @@ class WavefrontBdptPass:
         vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
         for m in self._modules.values():
             vk.vkDestroyShaderModule(self.ctx.device, m, None)
+        for buf in self._buffers.values():
+            buf.destroy()
+        self._buffers = {}
 
 
 class WavefrontPasses:

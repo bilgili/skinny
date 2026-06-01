@@ -473,6 +473,16 @@ def main() -> None:
              "backend (Vulkan only — pinned to megakernel on Metal). Only the "
              "selected backend is compiled.",
     )
+    parser.add_argument(
+        "--bdpt-walk", choices=("megakernel", "eye", "eye_light"),
+        default=os.environ.get("SKINNY_BDPT_WALK", "megakernel"),
+        help="Subpath-build strategy for wavefront + bdpt only (no effect "
+             "otherwise). 'megakernel' (default) builds both subpaths in one "
+             "kernel + the connect counting-sort (fastest). 'eye' stages the eye "
+             "walk into per-bounce dispatches; 'eye_light' also stages the light "
+             "walk + splat. All produce the identical image — this trades "
+             "dispatch overhead vs occupancy.",
+    )
     args = parser.parse_args()
 
     scene_path: Path | None = args.scene or args.usd
@@ -512,6 +522,7 @@ def main() -> None:
         usd_scene_path=scene_path,
         use_usd_mtlx_plugin=args.usdMtlx,
         execution_mode=args.execution_mode,
+        bdpt_walk=args.bdpt_walk,
     )
 
     _apply_saved_params(renderer, saved.get("params", {}))
