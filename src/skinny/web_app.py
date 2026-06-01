@@ -43,6 +43,7 @@ _GPU_PREFERENCE: str = "auto"
 _USD_PATH: Path | None = None
 _USE_USD_MTLX: bool = False
 _EXECUTION_MODE: str = "megakernel"
+_BDPT_WALK: str = "megakernel"
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -97,6 +98,7 @@ class SkinnySession:
                 usd_scene_path=_USD_PATH,
                 use_usd_mtlx_plugin=_USE_USD_MTLX,
                 execution_mode=_EXECUTION_MODE,
+                bdpt_walk=_BDPT_WALK,
             )
 
             self._log_init("Setting up video encoder...")
@@ -672,13 +674,22 @@ def main() -> None:
              "env). 'wavefront' is Vulkan only and compiles only the staged "
              "backend; pinned to megakernel on Metal.",
     )
+    parser.add_argument(
+        "--bdpt-walk", choices=("megakernel", "eye", "eye_light"),
+        default=os.environ.get("SKINNY_BDPT_WALK", "megakernel"),
+        help="Subpath-build strategy for wavefront + bdpt only (+ SKINNY_BDPT_WALK "
+             "env). 'megakernel' (default) builds both subpaths in one kernel + "
+             "connect compaction (fastest); 'eye' / 'eye_light' stage the eye / "
+             "eye+light walks. All produce the identical image.",
+    )
     args = parser.parse_args()
 
-    global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
+    global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE, _BDPT_WALK
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
     _EXECUTION_MODE = args.execution_mode
+    _BDPT_WALK = args.bdpt_walk
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
