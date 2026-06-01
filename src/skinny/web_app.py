@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import io
 import logging
+import os
 import struct
 import time
 import uuid
@@ -41,6 +42,7 @@ log = logging.getLogger(__name__)
 _GPU_PREFERENCE: str = "auto"
 _USD_PATH: Path | None = None
 _USE_USD_MTLX: bool = False
+_EXECUTION_MODE: str = "megakernel"
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -94,6 +96,7 @@ class SkinnySession:
                 tattoo_dir=repo_root / "tattoos",
                 usd_scene_path=_USD_PATH,
                 use_usd_mtlx_plugin=_USE_USD_MTLX,
+                execution_mode=_EXECUTION_MODE,
             )
 
             self._log_init("Setting up video encoder...")
@@ -662,12 +665,20 @@ def main() -> None:
     parser.add_argument("--usd", type=Path, default=None,
                         help="Path to a USD stage (alternative to positional scene arg).")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
+    parser.add_argument(
+        "--execution-mode", choices=("megakernel", "wavefront"),
+        default=os.environ.get("SKINNY_EXECUTION_MODE", "megakernel"),
+        help="GPU execution backend, fixed for each session (+ SKINNY_EXECUTION_MODE "
+             "env). 'wavefront' is Vulkan only and compiles only the staged "
+             "backend; pinned to megakernel on Metal.",
+    )
     args = parser.parse_args()
 
-    global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX
+    global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
+    _EXECUTION_MODE = args.execution_mode
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
