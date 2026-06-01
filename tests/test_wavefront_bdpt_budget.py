@@ -4,12 +4,12 @@ GPU pipeline build.
 Why: MoltenVK's SPIR-V->Metal compile (done at vkCreateComputePipelines time)
 becomes flaky for oversized compute kernels. The path tracer's catch-all shade
 kernel hit that at ~2.83 MB and motivated the 5.4-A per-type split. The bdpt
-walk kernel (wfBdptWalk) imports the full flat-BSDF + bdpt subpath/connection
-tree and is the largest bdpt kernel. It was measured 10/10 clean, deterministic
-to compile (shaderball scene, MoltenVK + Vulkan SDK 1.4.341.1, 2026-06-01), so
-no split is warranted now. These guards fail loudly if a future change pushes
-the kernel toward the danger zone (re-measure / split before shipping) or breaks
-the pipeline build outright.
+pass is now fully staged (eye/light walks into per-bounce extend kernels, the
+connection split into NEE/FULL); the heavy material-tree kernels are the two
+connect kernels (~1.15 MiB) and the bounce-extend kernels (≤0.49 MiB), all well
+under the danger zone. These guards fail loudly if a future change pushes a
+kernel toward it (re-measure / split before shipping) or breaks the pipeline
+build outright.
 
 The size guard compiles the *scene-independent baseline* of each kernel with
 slangc: the flat-BSDF + bdpt machinery with a no-op `evalSceneGraph` (zero
@@ -33,17 +33,24 @@ HDR_DIR = PROJECT_ROOT / "hdrs"
 TATTOO_DIR = PROJECT_ROOT / "tattoos"
 DEMO_SCENE = PROJECT_ROOT / "assets" / "three_materials_demo.usda"
 
-# Per-kernel baseline-compile budgets (bytes). Measured baseline sizes (no graph
-# injection) 2026-06-01:
-#   wfBdptWalk     1,722,112  (~1.64 MiB)   demo-injected: 1,884,528
-#   wfBdptConnect  1,204,760  (~1.15 MiB)   demo-injected: 1,328,340
-# Danger reference: the path catch-all (wfPathShade) was MoltenVK-flaky at
-# ~2,833,808 B. Budgets keep headroom over the baseline yet stay below that
-# known-bad size. If a kernel trips its budget, re-measure compile flakiness (or
-# split the kernel, path 5.4-A staged-bounce style) before raising the number.
+# Per-kernel baseline-compile budgets (bytes) for the heavy (material-tree)
+# staged bdpt kernels. Measured baseline sizes (no graph injection) 2026-06-01,
+# after the walk/connect staging:
+#   wfBdptBounceEye      513,296  (~0.49 MiB)   eye-walk extend
+#   wfBdptBounceLight    250,400  (~0.24 MiB)   light-walk extend
+#   wfBdptConnectNee   1,206,464  (~1.15 MiB)   emissive + connectT1
+#   wfBdptConnectFull  1,206,464  (~1.15 MiB)   + generic + MIS
+# (The small kernels — gen/classify/build_args/scatter/splat/resolve — carry no
+# material tree and are KB-scale; not budgeted.) Danger reference: the path
+# catch-all (wfPathShade) was MoltenVK-flaky at ~2,833,808 B. Budgets keep
+# headroom over the baseline yet stay below that known-bad size. If a kernel
+# trips its budget, re-measure compile flakiness (or split it further) before
+# raising the number.
 BDPT_SPV_BUDGETS = {
-    "wfBdptWalk": 2_400_000,
-    "wfBdptConnect": 2_000_000,
+    "wfBdptBounceEye": 1_500_000,
+    "wfBdptBounceLight": 1_200_000,
+    "wfBdptConnectNee": 2_000_000,
+    "wfBdptConnectFull": 2_000_000,
 }
 
 WIDTH = HEIGHT = 96
@@ -88,9 +95,8 @@ def test_wavefront_bdpt_spv_under_budget(entry, tmp_path):
 
 @pytest.mark.gpu
 def test_wavefront_bdpt_pipelines_build():
-    """The three bdpt compute pipelines (walk/connect/resolve) build on this
-    driver -- a focused vkCreateComputePipelines guard, lighter than the A/B
-    image parity test."""
+    """The staged bdpt compute pipelines build on this driver -- a focused
+    vkCreateComputePipelines guard, lighter than the A/B image parity test."""
     from skinny.renderer import Renderer
     from skinny.vk_context import VulkanContext
 
@@ -123,7 +129,12 @@ def test_wavefront_bdpt_pipelines_build():
         )
         bdpt = renderer._wavefront_bdpt_pass
         assert bdpt is not None, "bdpt pass not built after a wavefront-bdpt render"
-        for entry in ("wfBdptWalk", "wfBdptConnect", "wfBdptResolve"):
+        for entry in (
+            "wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye",
+            "wfBdptGenLight", "wfBdptBounceLight", "wfBdptSplat",
+            "wfBdptClassify", "wfBdptBuildArgs", "wfBdptScatter",
+            "wfBdptConnectNee", "wfBdptConnectFull", "wfBdptResolve",
+        ):
             assert bdpt._pipelines.get(entry) is not None, (
                 f"{entry} pipeline did not build"
             )
