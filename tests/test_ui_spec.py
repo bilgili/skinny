@@ -41,6 +41,7 @@ class _StubRenderer:
         self.direct_light_modes  = _named("On", "Off")
         self.scatter_modes       = _named("BSSRDF", "Volume")
         self.integrator_modes    = _named("Path", "Direct")
+        self.execution_modes     = _named("Megakernel", "Wavefront")
         self.furnace_modes       = _named("Off", "On")
         self.models              = _named("(none)")
         self.detail_maps_modes   = _named("Off", "On")
@@ -52,6 +53,7 @@ class _StubRenderer:
         self.direct_light_index = 0
         self.scatter_index = 0
         self.integrator_index = 0
+        self.execution_mode_index = 0
         self.furnace_index = 0
         self.model_index = 0
         self.detail_maps_index = 0
@@ -295,3 +297,42 @@ def test_window_openers_in_callbacks(stub_renderer):
         assert legacy not in button_labels, (
             f"{legacy!r} should be host-rendered, not in the tree"
         )
+
+
+# ── Execution-mode front-end parity (task 9.6) ─────────────────────
+
+
+def _find_combo(tree, path):
+    """The Combo node bound to ``path`` (None if absent). The setter captures
+    its ParamSpec.path as a default arg, same as ``_collect_bound_paths``."""
+    for n in spec.walk(tree):
+        if isinstance(n, spec.Combo):
+            defaults = getattr(n.setter, "__defaults__", None) or ()
+            if any(isinstance(d, str) and d == path for d in defaults):
+                return n
+    return None
+
+
+def test_execution_toggle_reachable_in_shared_ui(stub_renderer):
+    """The execution-mode toggle lives in the single data-driven UI tree that
+    every render-surface front-end (GLFW, Qt, web) renders — so each front-end
+    reaches it. It is a Combo over the live ``execution_modes`` list."""
+    tree = build_main_ui(stub_renderer)
+    assert "execution_mode_index" in _collect_bound_paths(tree), (
+        "execution-mode toggle not bound in the shared UI tree"
+    )
+    combo = _find_combo(tree, "execution_mode_index")
+    assert combo is not None, "execution-mode toggle is not a Combo"
+    assert list(combo.choices()) == ["Megakernel", "Wavefront"]
+
+
+def test_execution_toggle_pins_to_megakernel_on_metal(stub_renderer):
+    """On a Metal-style backend only Megakernel is available; the toggle still
+    builds (as a single-choice Combo) and cannot select wavefront — the front-
+    end is pinned to megakernel."""
+    stub_renderer.execution_modes = _named("Megakernel")
+    stub_renderer.execution_mode_index = 0
+    tree = build_main_ui(stub_renderer)
+    combo = _find_combo(tree, "execution_mode_index")
+    assert combo is not None, "execution-mode toggle missing on the Metal pin"
+    assert list(combo.choices()) == ["Megakernel"], "wavefront offered on Metal"

@@ -39,6 +39,13 @@ from skinny.mesh_cache import (
     make_cache_key,
     save_cached_mesh,
 )
+from skinny.params import (
+    EXECUTION_MEGAKERNEL,
+    EXECUTION_WAVEFRONT,
+    clamp_mode_index,
+    effective_execution_mode,
+    next_mode_index,
+)
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
@@ -901,6 +908,12 @@ def _write_hdr_rgbe(path: str, rgb: np.ndarray) -> None:
 class Renderer:
     """Sets up Vulkan resources and dispatches Slang compute shaders each frame."""
 
+    # Wavefront bidirectional integrator (Phase 3). True now that the staged
+    # wavefront bdpt (WavefrontBdptPass) reaches A/B parity with the megakernel
+    # bdpt: selecting Wavefront + BDPT routes to the staged subpath-walk +
+    # connection pipeline instead of falling back to the megakernel.
+    WAVEFRONT_BDPT_SUPPORTED = True
+
     def __init__(
         self,
         vk_ctx: VulkanContext,
@@ -1032,6 +1045,41 @@ class Renderer:
         self.integrator_modes: list[str] = ["Path", "BDPT"]
         self.integrator_index = 0
 
+        # Execution backend selector, orthogonal to the integrator. Megakernel
+        # (index 0) is the single main_pass.slang compute dispatch — current
+        # behaviour and the default. Wavefront (index 1) is the staged
+        # per-material backend and is Vulkan only; on non-Vulkan backends only
+        # megakernel is offered so the selection is pinned there (mirrors the
+        # Vulkan-only GPU skinning / BVH-refit passes). Switching the selected
+        # mode resets accumulation via _current_state_hash.
+        _wavefront_capable = hasattr(self.ctx, "compute_queue")
+        self.execution_modes: list[str] = (
+            ["Megakernel", "Wavefront"] if _wavefront_capable else ["Megakernel"]
+        )
+        self.execution_mode_index = EXECUTION_MEGAKERNEL
+        # Lazily built env-only wavefront pass (Phase-1 integration milestone),
+        # constructed on first wavefront-mode dispatch. None until then / on
+        # non-Vulkan backends.
+        self._wavefront_env_pass = None
+        # Test/debug override: when set, the wavefront gate dispatches this pass
+        # instead of the staged path tracer (used to verify intermediate stage
+        # kernels — e.g. primary visibility — against the live scene).
+        self._wavefront_debug_pass = None
+        # The real per-frame wavefront dispatch (staged path tracer) + its
+        # per-lane path-state buffer. Built lazily; rebuilt when the megakernel
+        # pipeline or the frame size changes (it reuses the megakernel set 0).
+        self._wavefront_path_pass = None
+        self._wf_path_state_buf = None
+        self._wf_path_hit_buf = None
+        self._wf_path_pass_dims = None
+        # Staged wavefront bdpt (Phase 3): subpath-vertex + aux buffers + pass,
+        # same lazy lifecycle as the path pass.
+        self._wavefront_bdpt_pass = None
+        self._wf_bdpt_eye_buf = None
+        self._wf_bdpt_light_buf = None
+        self._wf_bdpt_aux_buf = None
+        self._wf_bdpt_pass_dims = None
+
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
         # post-process knobs so they do not invalidate the accumulation
@@ -1085,6 +1133,16 @@ class Renderer:
             self._load_usd_model(usd_scene_path)
 
         self._mesh_cache_index: dict = load_cache_index()
+        # Geometry suballocator: per-mesh slabs over the shared vertex/index/BVH
+        # buffers (stable offsets + free-list), so a USD add/remove touches only
+        # the changed mesh instead of re-concatenating the whole scene. Keyed by
+        # (prim_path, sub-index); content changes are detected via _slab_content_fp.
+        # The legacy single-mesh OBJ path bypasses this and resets it (the OBJ
+        # upload clobbers offset 0). Mode-independent — both backends read the
+        # suballocated buffers.
+        from skinny.slab_allocator import SlabAllocator
+        self._slab_alloc = SlabAllocator()
+        self._slab_content_fp: dict = {}
         # Rebake-tracking: each (source, displacement-scale) combination
         # produces a different GPU mesh, so we remember what we last baked and
         # rebuild when any input changes. -1 and NaN sentinels force an initial
@@ -1243,6 +1301,379 @@ class Renderer:
             self.orbit_camera.yaw = float(np.arctan2(offset[0], offset[2]))
             self.camera_mode = "orbit"
         self._refresh_camera_node()
+
+    # ── Execution backend (megakernel | wavefront) ──────────────────
+
+    def set_execution_mode(self, index: int) -> None:
+        """Select the execution backend by index, clamped to the available
+        modes. On non-Vulkan backends only megakernel is available, so any
+        request collapses to megakernel."""
+        self.execution_mode_index = clamp_mode_index(index, len(self.execution_modes))
+
+    def cycle_execution_mode(self) -> None:
+        """Advance to the next available execution mode, wrapping. A no-op
+        when only one mode is available (the Metal pin)."""
+        self.execution_mode_index = next_mode_index(
+            self.execution_mode_index, len(self.execution_modes)
+        )
+
+    @property
+    def effective_execution_mode_index(self) -> int:
+        """Execution mode actually used to render this frame, after capability
+        gating. Wavefront + BDPT falls back to megakernel until the wavefront
+        bidirectional path lands."""
+        return effective_execution_mode(
+            self.execution_mode_index,
+            self.integrator_index,
+            self.WAVEFRONT_BDPT_SUPPORTED,
+        )
+
+    @property
+    def execution_mode_fallback_active(self) -> bool:
+        """True when the capability gate is overriding the selected execution
+        mode (front-ends surface this to the user)."""
+        return self.effective_execution_mode_index != self.execution_mode_index
+
+    def _ensure_wavefront_env_pass(self):
+        """Build (once) the env-only wavefront pass. Returns it, or None on a
+        non-Vulkan backend. Phase-1 integration milestone — superseded by the
+        staged pipeline."""
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self._wavefront_env_pass is None:
+            from skinny.vk_wavefront import WavefrontEnvPass
+            self._wavefront_env_pass = WavefrontEnvPass(
+                self.ctx, self.shader_dir,
+                uniform_buffer=self.uniform_buffer.buffer,
+                uniform_size=self.uniform_size,
+                accum_view=self.accum_image.view,
+                env_view=self.env_image.view,
+                env_sampler=self.env_image.sampler,
+                width=self.width, height=self.height,
+            )
+        return self._wavefront_env_pass
+
+    def _destroy_wavefront_env_pass(self) -> None:
+        if self._wavefront_env_pass is not None:
+            self._wavefront_env_pass.destroy()
+            self._wavefront_env_pass = None
+        if self._wavefront_debug_pass is not None:
+            self._wavefront_debug_pass.destroy()
+            self._wavefront_debug_pass = None
+        self._destroy_wavefront_path_pass()
+        self._destroy_wavefront_bdpt_pass()
+
+    def _ensure_wavefront_path_pass(self):
+        """Build (once) the staged wavefront path tracer — the real per-frame
+        wavefront dispatch. Returns it, or None on a non-Vulkan backend or
+        before the megakernel pipeline exists (it reuses the pipeline's set-0
+        layout + the renderer's per-frame scene descriptor sets). Rebuilt by
+        `_destroy_wavefront_path_pass` when the pipeline or frame size changes."""
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self.pipeline is None or self.descriptor_sets is None:
+            return None
+        # Build the heavy catch-all shade kernel only when the scene has a
+        # non-flat material (skin/python); flat-only scenes compile just the
+        # small flat shade kernel. Part of the rebuild key so a material-set
+        # change that introduces a non-flat type rebuilds the pass.
+        has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in self._material_types)
+        key = (self.width, self.height, has_nonflat)
+        if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
+            return self._wavefront_path_pass
+        self._destroy_wavefront_path_pass()
+        from skinny.vk_wavefront import WavefrontPathPass
+        from skinny.wavefront_layout import PATH_STATE_STRIDE
+        # Tiled streaming: the path-state buffer holds a fixed-size stream
+        # (capped at STREAM_CAP), not one slot per pixel — so VRAM does not grow
+        # with resolution. The frame is processed in ceil(num_pixels/stream)
+        # tiles. Allow a renderer override (`_wf_stream_cap`) for tests.
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wf_path_state_buf = StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
+        self._wf_path_hit_buf = StorageBuffer(
+            self.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
+        self._wavefront_path_pass = WavefrontPathPass(
+            self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
+            self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
+            self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
+            stream_size, num_pixels, build_catchall=has_nonflat,
+        )
+        self._wf_path_pass_dims = key
+        return self._wavefront_path_pass
+
+    def _destroy_wavefront_path_pass(self) -> None:
+        if self._wavefront_path_pass is not None:
+            self._wavefront_path_pass.destroy()
+            self._wavefront_path_pass = None
+        for attr in ("_wf_path_state_buf", "_wf_path_hit_buf"):
+            buf = getattr(self, attr, None)
+            if buf is not None:
+                buf.destroy()
+                setattr(self, attr, None)
+        self._wf_path_pass_dims = None
+
+    def _ensure_wavefront_bdpt_pass(self):
+        """Build (once) the staged wavefront bdpt pass. Returns it, or None on a
+        non-Vulkan backend or before the megakernel pipeline exists. Allocates
+        the per-lane eye/light subpath-vertex buffers + aux buffer."""
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self.pipeline is None or self.descriptor_sets is None:
+            return None
+        if (self._wavefront_bdpt_pass is not None
+                and self._wf_bdpt_pass_dims == (self.width, self.height)):
+            return self._wavefront_bdpt_pass
+        self._destroy_wavefront_bdpt_pass()
+        from skinny.vk_wavefront import WavefrontBdptPass
+        # Tiled streaming: subpath-vertex + aux buffers hold a fixed-size stream
+        # (capped), not one entry per pixel, so VRAM doesn't scale with
+        # resolution (each lane owns 2×BDPT_MAX_VERTS vertices). `_wf_stream_cap`
+        # overrides the cap for tests.
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
+        aux_bytes = stream_size * WavefrontBdptPass.AUX_STRIDE
+        self._wf_bdpt_eye_buf = StorageBuffer(self.ctx, vert_bytes)
+        self._wf_bdpt_light_buf = StorageBuffer(self.ctx, vert_bytes)
+        self._wf_bdpt_aux_buf = StorageBuffer(self.ctx, aux_bytes)
+        self._wavefront_bdpt_pass = WavefrontBdptPass(
+            self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
+            self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
+            self._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
+            stream_size, num_pixels,
+        )
+        self._wf_bdpt_pass_dims = (self.width, self.height)
+        return self._wavefront_bdpt_pass
+
+    def _destroy_wavefront_bdpt_pass(self) -> None:
+        if self._wavefront_bdpt_pass is not None:
+            self._wavefront_bdpt_pass.destroy()
+            self._wavefront_bdpt_pass = None
+        for attr in ("_wf_bdpt_eye_buf", "_wf_bdpt_light_buf", "_wf_bdpt_aux_buf"):
+            buf = getattr(self, attr, None)
+            if buf is not None:
+                buf.destroy()
+                setattr(self, attr, None)
+        self._wf_bdpt_pass_dims = None
+
+    def build_wavefront_trace_pass(self, module: str, entry: str,
+                                   include_env: bool = False,
+                                   include_lights: bool = False):
+        """Build a wavefront pass whose kernel calls `traceScene`. Binds the
+        renderer's shared geometry/BVH/instance/material buffers at the binding
+        numbers traceScene reflects (0/2/5/6/7/12/13/16; 13/16 from the
+        alpha-cutout path). `include_env` adds the env map (4); `include_lights`
+        adds the distant-light buffer (20) — used by the diffuse shade kernel.
+        The spec must match exactly what the kernel's SPIR-V reflects. Call
+        after geometry is loaded (vertex/index/BVH buffers reallocate on scene
+        reload, so rebuild the pass after a reload)."""
+        from skinny.vk_wavefront import BoundComputePass
+        sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        specs = [
+            {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
+            {"binding": 2, "type": vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             "view": self.accum_image.view, "layout": vk.VK_IMAGE_LAYOUT_GENERAL},
+            {"binding": 5, "type": sb, "buffer": self.vertex_buffer.buffer, "range": self.vertex_buffer.size},
+            {"binding": 6, "type": sb, "buffer": self.index_buffer.buffer, "range": self.index_buffer.size},
+            {"binding": 7, "type": sb, "buffer": self.bvh_buffer.buffer, "range": self.bvh_buffer.size},
+            {"binding": 12, "type": sb, "buffer": self.instance_buffer.buffer, "range": self.instance_buffer.size},
+            {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
+            {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
+        ]
+        if include_env:
+            specs.append({
+                "binding": 4, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                "sampler": self.env_image.sampler, "view": self.env_image.view,
+                "layout": vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            })
+        if include_lights:
+            specs.append({
+                "binding": 20, "type": sb,
+                "buffer": self.distant_lights_buffer.buffer,
+                "range": self.distant_lights_buffer.size,
+            })
+        return BoundComputePass(
+            self.ctx, self.shader_dir, module, entry, specs, self.width, self.height,
+        )
+
+    def build_wavefront_material_pass(self):
+        """Build the per-material albedo wavefront pass (`wavefront_material`):
+        camera ray → BVH → evalSceneGraphBaseColor → material base colour.
+        Binds the traceScene set + env (4) + every per-graph param SSBO (25+,
+        from `pipeline.graph_bindings`) + the bindless texture array (14, from
+        the texture pool). Over-providing graph bindings the kernel may not
+        reference is fine — the SPIR-V uses a subset of the layout."""
+        from skinny.vk_compute import BINDLESS_TEXTURE_CAPACITY
+        from skinny.vk_wavefront import BoundComputePass
+        sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        specs = [
+            {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
+            {"binding": 2, "type": vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             "view": self.accum_image.view, "layout": vk.VK_IMAGE_LAYOUT_GENERAL},
+            {"binding": 4, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+             "sampler": self.env_image.sampler, "view": self.env_image.view,
+             "layout": vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {"binding": 5, "type": sb, "buffer": self.vertex_buffer.buffer, "range": self.vertex_buffer.size},
+            {"binding": 6, "type": sb, "buffer": self.index_buffer.buffer, "range": self.index_buffer.size},
+            {"binding": 7, "type": sb, "buffer": self.bvh_buffer.buffer, "range": self.bvh_buffer.size},
+            {"binding": 12, "type": sb, "buffer": self.instance_buffer.buffer, "range": self.instance_buffer.size},
+            {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
+            {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
+        ]
+        graph_bindings = getattr(self.pipeline, "graph_bindings", {}) or {}
+        for target, binding in graph_bindings.items():
+            buf = self._graph_param_buffers.get(target)
+            if buf is not None:
+                specs.append({"binding": binding, "type": sb,
+                              "buffer": buf.buffer, "range": buf.size})
+        slots = [(idx, s.sampler, s.view) for idx, s in self.texture_pool.filled_slots()]
+        specs.append({
+            "binding": 14, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            "array_count": BINDLESS_TEXTURE_CAPACITY, "slots": slots,
+        })
+        return BoundComputePass(
+            self.ctx, self.shader_dir, "wavefront/wavefront_material",
+            "wavefrontMaterial", specs, self.width, self.height,
+        )
+
+    def build_wavefront_shade_passes(self):
+        """Build one per-material wavefront shade pass per scene graph fragment —
+        the staged per-material-pipeline shade (the compile-win). For each
+        `GraphFragment` this writes `shaders/wavefront/shade_<name>.slang` from
+        `emit_wavefront_shade_module` (which imports ONLY that graph's
+        `generated.<name>_graph` module, making it an independent compilation
+        unit) and compiles a `BoundComputePass` for its `shadeSurface_<name>`
+        entry. Each pass traces, shades only the pixels whose material maps to
+        its graphId, and overwrites the base colour; together they cover every
+        materialised hit — the fused `wavefront_material` pass, partitioned into
+        one pipeline per material.
+
+        Bindings: the traceScene set (0/2/5/6/7/12/13/16), this graph's param
+        SSBO at GRAPH_BINDING_BASE, and the 128-slot bindless texture pool at 14
+        (over-provided — graphs that sample no textures reflect no 14, which the
+        superset layout tolerates). Returns a `ShadePassGroup`; plug it into the
+        `_wavefront_debug_pass` seam. Rebuild after a scene/geometry reload.
+        """
+        from skinny.materialx_runtime import assign_graph_ids
+        from skinny.vk_compute import (
+            BINDLESS_TEXTURE_CAPACITY,
+            GRAPH_BINDING_BASE,
+            emit_wavefront_shade_module,
+        )
+        from skinny.vk_wavefront import (
+            BoundComputePass,
+            ShadePassGroup,
+            compile_shade_module_cached,
+            shared_shader_hash,
+        )
+
+        sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        id_map = assign_graph_ids(self._scene_graph_fragments)
+        wf_dir = self.shader_dir / "wavefront"
+        gen_dir = self.shader_dir / "generated"
+        shared_hash = shared_shader_hash(self.shader_dir)
+        slots = [(idx, s.sampler, s.view) for idx, s in self.texture_pool.filled_slots()]
+        passes = []
+        compiles: list[tuple[str, bool]] = []  # (graph_name, was_cached)
+        keys: dict[str, str] = {}
+        for gf in self._scene_graph_fragments:
+            name = gf.sanitized_name
+            src = emit_wavefront_shade_module(gf, id_map[gf.target_name], GRAPH_BINDING_BASE)
+            (wf_dir / f"shade_{name}.slang").write_text(src, encoding="utf-8")
+            # The module imports only this graph's generated module — fold its
+            # bytes into the cache key so each material caches independently.
+            graph_file = gen_dir / f"{name}_graph.slang"
+            dep = [graph_file.read_bytes()] if graph_file.exists() else []
+            spv, cached, key = compile_shade_module_cached(
+                self.shader_dir, f"wavefront/shade_{name}",
+                f"shadeSurface_{name}", dep, shared_hash,
+            )
+            compiles.append((name, cached))
+            keys[name] = key
+            specs = [
+                {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 "buffer": self.uniform_buffer.buffer, "range": self.uniform_size},
+                {"binding": 2, "type": vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                 "view": self.accum_image.view, "layout": vk.VK_IMAGE_LAYOUT_GENERAL},
+                {"binding": 5, "type": sb, "buffer": self.vertex_buffer.buffer, "range": self.vertex_buffer.size},
+                {"binding": 6, "type": sb, "buffer": self.index_buffer.buffer, "range": self.index_buffer.size},
+                {"binding": 7, "type": sb, "buffer": self.bvh_buffer.buffer, "range": self.bvh_buffer.size},
+                {"binding": 12, "type": sb, "buffer": self.instance_buffer.buffer, "range": self.instance_buffer.size},
+                {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
+                {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
+            ]
+            buf = self._graph_param_buffers.get(gf.target_name)
+            if buf is not None:
+                specs.append({"binding": GRAPH_BINDING_BASE, "type": sb,
+                              "buffer": buf.buffer, "range": buf.size})
+            specs.append({
+                "binding": 14, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                "array_count": BINDLESS_TEXTURE_CAPACITY, "slots": slots,
+            })
+            passes.append(BoundComputePass(
+                self.ctx, self.shader_dir, f"wavefront/shade_{name}",
+                f"shadeSurface_{name}", specs, self.width, self.height,
+                spv_path=spv,
+            ))
+        group = ShadePassGroup(self.ctx, passes)
+        # Compile-win bookkeeping: which materials hit the SPIR-V cache (compiled
+        # nothing) vs missed (compiled one kernel). Adding a material misses only
+        # its own key; resident materials are cache hits.
+        from skinny.vk_wavefront import _SHADE_CACHE_DIRNAME, _build_dir
+        group.shade_compiles = compiles
+        group.shade_keys = keys
+        group.cache_dir = _build_dir() / _SHADE_CACHE_DIRNAME
+        return group
+
+    def read_accumulation(self) -> "np.ndarray":
+        """Copy the linear-HDR accumulation image to host as an (H, W, 4)
+        float32 array. For A/B comparison that must not depend on tonemapping
+        (see CLAUDE.md headless notes)."""
+        import numpy as np
+
+        from skinny.vk_compute import ReadbackBuffer
+        w, h = self.width, self.height
+        readback = ReadbackBuffer(self.ctx, w, h, bytes_per_pixel=16)  # RGBA32F
+        f = self.current_frame
+        vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
+        cmd = self.command_buffers[f]
+        vk.vkResetCommandBuffer(cmd, 0)
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+        rng = vk.VkImageSubresourceRange(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)
+        to_src = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image=self.accum_image.image, subresourceRange=rng)
+        vk.vkCmdPipelineBarrier(cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, None, 0, None, 1, [to_src])
+        readback.record_copy_from(cmd, self.accum_image.image)
+        to_gen = vk.VkImageMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+            image=self.accum_image.image, subresourceRange=rng)
+        vk.vkCmdPipelineBarrier(cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, None, 0, None, 1, [to_gen])
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
+        vk.vkQueueSubmit(self.ctx.compute_queue, 1,
+                         [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+                         self.in_flight_fences[f])
+        vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
+        data = readback.read()
+        readback.destroy()
+        return np.frombuffer(data, dtype=np.float32).reshape(h, w, 4)
 
     def refresh_user_presets(self) -> None:
         """Re-scan ~/.skinny/presets/ and rebuild the preset list.
@@ -3235,6 +3666,12 @@ class Renderer:
         )
 
     def _upload_mesh(self, mesh: Mesh) -> None:
+        # Legacy single-mesh OBJ path: writes one BLAS at offset 0, clobbering
+        # any suballocated slab layout. Reset the slab allocator so a later USD
+        # resync rebuilds from scratch instead of trusting stale offsets.
+        from skinny.slab_allocator import SlabAllocator
+        self._slab_alloc = SlabAllocator()
+        self._slab_content_fp = {}
         self._ensure_mesh_buffer_capacity(
             mesh.num_vertices, mesh.num_triangles, mesh.num_nodes,
         )
@@ -3262,8 +3699,7 @@ class Renderer:
             if inst.prim_path:
                 prim_index.setdefault(inst.prim_path, []).append(i)
         self._prim_to_instances = prim_index
-        meshes = [inst.mesh for inst in scene.instances]
-        offsets = self._upload_meshes_concatenated(meshes)
+        offsets = self._upload_meshes_suballocated(scene.instances)
         # TLAS records only for enabled instances. Disabled instances keep
         # their BLAS data resident (cheap) but never get walked by rays.
         enabled_idx = [
@@ -5569,39 +6005,147 @@ class Renderer:
         if writes:
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
-    def _upload_meshes_concatenated(
-        self, meshes: list[Mesh]
+    # Shared-buffer element strides (bytes). Must match the packers in mesh.py
+    # and the grow math in _ensure_mesh_buffer_capacity.
+    _SLAB_V_STRIDE = 32  # vertex
+    _SLAB_T_STRIDE = 12  # triangle (3 × uint32 index)
+    _SLAB_N_STRIDE = 32  # BVH node
+
+    def _mesh_fingerprint(self, mesh: Mesh) -> str:
+        """Stable content fingerprint of a baked mesh (cached on the object).
+        Detects when a resident slab's geometry changed (e.g. a displacement
+        rebake) so it is re-uploaded rather than silently reused."""
+        fp = getattr(mesh, "_slab_fp", None)
+        if fp is None:
+            import hashlib
+            h = hashlib.blake2b(digest_size=16)
+            h.update(mesh.vertex_bytes)
+            h.update(mesh.index_bytes)
+            h.update(mesh.bvh_bytes)
+            fp = h.hexdigest()
+            try:
+                mesh._slab_fp = fp  # dataclass is mutable; cache to skip rehash
+            except Exception:  # noqa: BLE001 — frozen/slotted variant: just recompute
+                pass
+        return fp
+
+    def _upload_meshes_suballocated(
+        self, instances: "list"
     ) -> list[tuple[int, int, int]]:
-        """Pack multiple meshes back-to-back into the unified GPU buffers.
+        """Slab-allocate every instance mesh in the shared vertex/index/BVH
+        buffers and return one (node_offset, triangle_offset, vertex_offset)
+        per instance — the triple each shader Instance record holds.
 
-        Returns one (node_offset, triangle_offset, vertex_offset) per mesh
-        — the same triple the shader's Instance record holds. The shader
-        adds these offsets to the BLAS-local indices stored in each mesh's
-        BVH / index / vertex bytes.
-
-        Used by the USD path; the legacy single-mesh OBJ rebake stays on
-        `_upload_mesh` since it always lives at offsets (0, 0, 0).
+        Replaces the whole-scene concatenation: each instance keeps a slab with
+        **stable** offsets keyed by (prim_path, sub-index), so an add/remove
+        touches only the changed mesh. Departed meshes are freed to the
+        free-list (reused by later adds); resident, content-unchanged meshes are
+        not re-uploaded; content changes (rebake) free + re-allocate. Buffers
+        grow in place (existing slab offsets preserved), so TLAS BLAS offsets
+        stay valid without reindexing. Mode-independent — both execution modes
+        read these buffers.
         """
-        v_chunks: list[bytes] = []
-        i_chunks: list[bytes] = []
-        b_chunks: list[bytes] = []
+        alloc = self._slab_alloc
+        from skinny.slab_allocator import Counts
+
+        # Stable per-instance key: (prim_path, sub-index among same path). The
+        # loader yields a prim's sub-meshes in a deterministic order, so the
+        # key survives a resync for unchanged geometry. Anonymous instances fall
+        # back to their position (re-uploaded if the set shifts — no regression
+        # over the old concat-everything path).
+        keys: list = []
+        seen_path: dict[str, int] = {}
+        for i, inst in enumerate(instances):
+            pp = getattr(inst, "prim_path", None) or getattr(inst, "name", None)
+            if pp:
+                sub = seen_path.get(pp, 0)
+                seen_path[pp] = sub + 1
+                keys.append((pp, sub))
+            else:
+                keys.append(("__anon__", i))
+
+        # Content-change check: a resident key whose mesh bytes changed must be
+        # freed so it re-allocates (and re-uploads) fresh.
+        fps = [self._mesh_fingerprint(inst.mesh) for inst in instances]
+        for key, fp in zip(keys, fps):
+            if alloc.is_resident(key) and self._slab_content_fp.get(key) != fp:
+                alloc.free(key)
+                self._slab_content_fp.pop(key, None)
+
+        # Drop meshes that left the scene (free-list reclaims their regions).
+        for gone in alloc.retain_only(keys):
+            self._slab_content_fp.pop(gone, None)
+
+        # Allocate slabs (resident → reuse; else free-list best-fit or append).
         offsets: list[tuple[int, int, int]] = []
-        v_off = 0
-        t_off = 0
-        n_off = 0
-        for mesh in meshes:
-            offsets.append((n_off, t_off, v_off))
-            v_chunks.append(mesh.vertex_bytes)
-            i_chunks.append(mesh.index_bytes)
-            b_chunks.append(mesh.bvh_bytes)
-            v_off += mesh.num_vertices
-            t_off += mesh.num_triangles
-            n_off += mesh.num_nodes
-        self._ensure_mesh_buffer_capacity(v_off, t_off, n_off)
-        self.vertex_buffer.upload_sync(b"".join(v_chunks))
-        self.index_buffer.upload_sync(b"".join(i_chunks))
-        self.bvh_buffer.upload_sync(b"".join(b_chunks))
+        plan: list[tuple] = []  # (off, is_new, vbytes, ibytes, bbytes)
+        for key, fp, inst in zip(keys, fps, instances):
+            mesh = inst.mesh
+            res = alloc.allocate(key, Counts(mesh.num_vertices,
+                                             mesh.num_triangles,
+                                             mesh.num_nodes))
+            off = res.offsets  # (v, t, n)
+            offsets.append((off.n, off.t, off.v))  # shader order: node, tri, vert
+            self._slab_content_fp[key] = fp
+            plan.append((off, res.is_new,
+                         mesh.vertex_bytes, mesh.index_bytes, mesh.bvh_bytes))
+
+        # Grow the backing buffers if the high-water mark outran them. Growth
+        # preserves slab offsets, so a grown buffer is repopulated from every
+        # resident slab; non-grown buffers keep their data and take only new
+        # slabs. _ensure_mesh_buffer_capacity rebinds descriptors + re-seeds the
+        # dummy mesh, which the slab writes below then overwrite at real offsets.
+        hw = alloc.high_water
+        v_size_before = self.vertex_buffer.size
+        i_size_before = self.index_buffer.size
+        b_size_before = self.bvh_buffer.size
+        self._ensure_mesh_buffer_capacity(hw.v, hw.t, hw.n)
+        grew_v = self.vertex_buffer.size != v_size_before
+        grew_i = self.index_buffer.size != i_size_before
+        grew_n = self.bvh_buffer.size != b_size_before
+
+        for off, is_new, vb, ib, bb in plan:
+            if grew_v or is_new:
+                self.vertex_buffer.upload_range(vb, off.v * self._SLAB_V_STRIDE)
+            if grew_i or is_new:
+                self.index_buffer.upload_range(ib, off.t * self._SLAB_T_STRIDE)
+            if grew_n or is_new:
+                self.bvh_buffer.upload_range(bb, off.n * self._SLAB_N_STRIDE)
         return offsets
+
+    def compact_geometry(self) -> int:
+        """Defragment the shared geometry buffers: pack live slabs contiguously,
+        move their GPU bytes, and rewrite every referencing TLAS BLAS offset so
+        the rendered image is unchanged. Opt-in (fragmentation is otherwise
+        tolerated via the free-list). Returns the number of slabs relocated.
+
+        Safe to skip; safe to call repeatedly (a no-op when already packed)."""
+        scene = self._usd_scene
+        if scene is None or not scene.instances:
+            return 0
+        moves = self._slab_alloc.compact()
+        if not moves:
+            return 0
+        # Re-upload every live slab's bytes at its new offset. Build a key→mesh
+        # map from the current instances (the live set == current instances).
+        seen_path: dict[str, int] = {}
+        key_mesh: dict = {}
+        for inst in scene.instances:
+            pp = getattr(inst, "prim_path", None) or getattr(inst, "name", None)
+            if pp:
+                sub = seen_path.get(pp, 0)
+                seen_path[pp] = sub + 1
+                key_mesh[(pp, sub)] = inst.mesh
+        for key, _old, new, _counts in moves:
+            mesh = key_mesh.get(key)
+            if mesh is None:
+                continue
+            self.vertex_buffer.upload_range(mesh.vertex_bytes, new.v * self._SLAB_V_STRIDE)
+            self.index_buffer.upload_range(mesh.index_bytes, new.t * self._SLAB_T_STRIDE)
+            self.bvh_buffer.upload_range(mesh.bvh_bytes, new.n * self._SLAB_N_STRIDE)
+        # Rewrite TLAS instance records with the post-compaction offsets.
+        self._upload_usd_scene()
+        return len(moves)
 
     def _upload_instances(
         self,
@@ -6274,6 +6818,7 @@ class Renderer:
             float(self.tattoo_density),
             int(self.scatter_index),
             int(self.integrator_index),
+            int(self.execution_mode_index),
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),
@@ -6652,18 +7197,36 @@ class Renderer:
         # artefacts in the rendered frame after a resize.
         self.hud_overlay.record_copy(cmd)
 
-        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
-        vk.vkCmdBindDescriptorSets(
-            cmd,
-            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-            self.pipeline.pipeline_layout,
-            0, 1, [self.descriptor_sets[f]],
-            0, None,
-        )
-
-        groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-        groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-        vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+        # Execution-mode gate: in wavefront mode a staged compute pipeline writes
+        # the accumulation image; megakernel is the default in-kernel path. A
+        # test/debug pass overrides the staged path tracer when set; otherwise
+        # the real staged generate→bounce→resolve loop runs (reusing the
+        # megakernel scene descriptor set as set 0).
+        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+            if self._wavefront_debug_pass is not None:
+                self._wavefront_debug_pass.record_dispatch(cmd)
+            else:
+                # BDPT → staged wavefront bdpt; otherwise the path tracer.
+                if self.integrator_index == 1:
+                    staged = self._ensure_wavefront_bdpt_pass()
+                else:
+                    staged = self._ensure_wavefront_path_pass()
+                if staged is not None:
+                    staged.record_dispatch(cmd, self.descriptor_sets[f])
+                else:
+                    self._ensure_wavefront_env_pass().record_dispatch(cmd)
+        else:
+            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
+            vk.vkCmdBindDescriptorSets(
+                cmd,
+                vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+                self.pipeline.pipeline_layout,
+                0, 1, [self.descriptor_sets[f]],
+                0, None,
+            )
+            groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+            groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+            vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
 
         # Transition offscreen output: GENERAL → TRANSFER_SRC for readback
         barrier_to_src = vk.VkImageMemoryBarrier(
@@ -6967,6 +7530,7 @@ class Renderer:
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
 
+        self._destroy_wavefront_env_pass()
         for sem in self.image_available + self.render_finished:
             vk.vkDestroySemaphore(self.ctx.device, sem, None)
         for fence in self.in_flight_fences:

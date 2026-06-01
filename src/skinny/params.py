@@ -56,6 +56,54 @@ def _disc(name: str, path: str, choice_source: str) -> ParamSpec:
     return ParamSpec(name, path, "discrete", choice_source=choice_source)
 
 
+# ── Execution backend (orthogonal to the integrator axis) ──────────
+#
+# Index 0 = megakernel: the single main_pass.slang compute dispatch. This is
+# the current behaviour, the default, and the only mode on non-Vulkan backends.
+# Index 1 = wavefront: staged per-material compute dispatches (Vulkan only).
+EXECUTION_MEGAKERNEL = 0
+EXECUTION_WAVEFRONT = 1
+
+
+def clamp_mode_index(index: int, n_modes: int) -> int:
+    """Clamp a requested mode index into ``[0, n_modes - 1]``.
+
+    With a single available mode (e.g. wavefront pinned off on Metal) every
+    request collapses to 0, which is how the Metal pin is enforced.
+    """
+    if n_modes <= 0:
+        return 0
+    return max(0, min(int(index), n_modes - 1))
+
+
+def next_mode_index(current: int, n_modes: int) -> int:
+    """Advance ``current`` to the next mode, wrapping. No-op for a single mode."""
+    if n_modes <= 0:
+        return 0
+    return (int(current) + 1) % n_modes
+
+
+def effective_execution_mode(
+    selected_index: int,
+    integrator_index: int,
+    wavefront_bdpt_supported: bool,
+) -> int:
+    """Execution mode actually used to render, after capability gating.
+
+    Wavefront does not yet implement the bidirectional integrator, so selecting
+    wavefront together with BDPT (integrator index 1) falls back to the
+    megakernel until the wavefront bidirectional path lands. The selected mode
+    is preserved; only the *effective* mode changes.
+    """
+    if (
+        selected_index == EXECUTION_WAVEFRONT
+        and integrator_index == 1
+        and not wavefront_bdpt_supported
+    ):
+        return EXECUTION_MEGAKERNEL
+    return selected_index
+
+
 # Discrete first so Preset / Environment show up at the top.
 STATIC_PARAMS: list[ParamSpec] = [
     _disc("Preset",            "preset_index",                "presets"),
@@ -65,6 +113,7 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Direct light",      "direct_light_index",          "direct_light_modes"),
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Integrator",        "integrator_index",            "integrator_modes"),
+    _disc("Execution",         "execution_mode_index",        "execution_modes"),
     _disc("Tonemap",           "tonemap_index",               "tonemap_modes"),
     _cont("Exposure (EV)",     "exposure",                    0.1, -10.0, 10.0),
     _disc("Furnace mode",      "furnace_index",               "furnace_modes"),
