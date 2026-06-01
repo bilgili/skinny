@@ -1,8 +1,11 @@
-"""Phase-0 tests for the execution-mode axis (megakernel | wavefront).
+"""Tests for the execution-mode axis (megakernel | wavefront).
 
-GPU-free. Exercises the pure capability-gate helper, the mode clamp/cycle
-helpers, the shared ParamSpec + persistence wiring. The data-driven UI binding
-is covered separately by test_ui_spec once the param is added.
+GPU-free. Exercises the pure capability-gate helper and the mode clamp the
+renderer applies to the CLI-selected (`--execution-mode`) value at
+construction. The mode is fixed for the session — it is no longer a runtime
+GUI toggle or a persisted setting — so the snapshot/restore + Combo coverage
+that lived here is gone; the constructor selection + mutual-exclusion are
+covered by the GPU tests in test_wavefront_*.py.
 """
 
 from __future__ import annotations
@@ -10,17 +13,9 @@ from __future__ import annotations
 from skinny.params import (
     EXECUTION_MEGAKERNEL,
     EXECUTION_WAVEFRONT,
-    STATIC_PARAMS,
-    _apply_saved_params,
-    _snapshot_params,
     clamp_mode_index,
     effective_execution_mode,
-    next_mode_index,
 )
-
-
-def _exec_spec():
-    return next(p for p in STATIC_PARAMS if p.path == "execution_mode_index")
 
 
 # ── Capability gate ────────────────────────────────────────────────
@@ -52,7 +47,7 @@ def test_wavefront_bdpt_passes_through_once_supported():
     )
 
 
-# ── Mode index clamp / cycle (Metal pin = single mode) ──────────────
+# ── Mode index clamp (the constructor applies this to the CLI value) ─
 
 
 def test_clamp_keeps_in_range():
@@ -63,51 +58,7 @@ def test_clamp_keeps_in_range():
 
 
 def test_clamp_pins_single_mode():
-    # Metal: only "Megakernel" available — any request stays at 0.
-    assert clamp_mode_index(1, 1) == 0
-    assert clamp_mode_index(0, 1) == 0
-
-
-def test_cycle_wraps():
-    assert next_mode_index(0, 2) == 1
-    assert next_mode_index(1, 2) == 0
-
-
-def test_cycle_pins_single_mode():
-    assert next_mode_index(0, 1) == 0
-
-
-# ── ParamSpec presence ─────────────────────────────────────────────
-
-
-def test_execution_param_present_and_discrete():
-    spec = _exec_spec()
-    assert spec.kind == "discrete"
-    assert spec.choice_source == "execution_modes"
-
-
-# ── Persistence ────────────────────────────────────────────────────
-
-
-class _Stub:
-    def __init__(self, modes, index):
-        self.execution_modes = modes
-        self.execution_mode_index = index
-
-
-def test_execution_mode_roundtrips_through_settings():
-    r = _Stub(["Megakernel", "Wavefront"], EXECUTION_WAVEFRONT)
-    snap = _snapshot_params(r, [_exec_spec()])
-    assert snap == {"execution_mode_index": EXECUTION_WAVEFRONT}
-
-    restored = _Stub(["Megakernel", "Wavefront"], EXECUTION_MEGAKERNEL)
-    _apply_saved_params(restored, snap, [_exec_spec()])
-    assert restored.execution_mode_index == EXECUTION_WAVEFRONT
-
-
-def test_restore_rejects_unavailable_mode_on_metal():
-    # Metal exposes a single mode; a saved Wavefront index is out of range
-    # and must be rejected, leaving the pin at megakernel.
-    metal = _Stub(["Megakernel"], EXECUTION_MEGAKERNEL)
-    _apply_saved_params(metal, {"execution_mode_index": EXECUTION_WAVEFRONT}, [_exec_spec()])
-    assert metal.execution_mode_index == EXECUTION_MEGAKERNEL
+    # Metal / non-Vulkan: only "Megakernel" available — a wavefront request
+    # (index 1) collapses to 0, which is how the constructor enforces the pin.
+    assert clamp_mode_index(EXECUTION_WAVEFRONT, 1) == EXECUTION_MEGAKERNEL
+    assert clamp_mode_index(EXECUTION_MEGAKERNEL, 1) == EXECUTION_MEGAKERNEL

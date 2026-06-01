@@ -313,26 +313,13 @@ def _find_combo(tree, path):
     return None
 
 
-def test_execution_toggle_reachable_in_shared_ui(stub_renderer):
-    """The execution-mode toggle lives in the single data-driven UI tree that
-    every render-surface front-end (GLFW, Qt, web) renders — so each front-end
-    reaches it. It is a Combo over the live ``execution_modes`` list."""
+# The execution mode is fixed at construction (CLI `--execution-mode`), not a
+# runtime GUI toggle, so it is intentionally NOT a Combo in the shared UI tree.
+def test_execution_mode_not_a_runtime_toggle(stub_renderer):
+    """The execution mode is a session-fixed CLI selection, so it must NOT be
+    bound as a Combo in the data-driven UI tree any front-end renders."""
     tree = build_main_ui(stub_renderer)
-    assert "execution_mode_index" in _collect_bound_paths(tree), (
-        "execution-mode toggle not bound in the shared UI tree"
+    assert "execution_mode_index" not in _collect_bound_paths(tree), (
+        "execution mode must not be a runtime GUI toggle"
     )
-    combo = _find_combo(tree, "execution_mode_index")
-    assert combo is not None, "execution-mode toggle is not a Combo"
-    assert list(combo.choices()) == ["Megakernel", "Wavefront"]
-
-
-def test_execution_toggle_pins_to_megakernel_on_metal(stub_renderer):
-    """On a Metal-style backend only Megakernel is available; the toggle still
-    builds (as a single-choice Combo) and cannot select wavefront — the front-
-    end is pinned to megakernel."""
-    stub_renderer.execution_modes = _named("Megakernel")
-    stub_renderer.execution_mode_index = 0
-    tree = build_main_ui(stub_renderer)
-    combo = _find_combo(tree, "execution_mode_index")
-    assert combo is not None, "execution-mode toggle missing on the Metal pin"
-    assert list(combo.choices()) == ["Megakernel"], "wavefront offered on Metal"
+    assert _find_combo(tree, "execution_mode_index") is None

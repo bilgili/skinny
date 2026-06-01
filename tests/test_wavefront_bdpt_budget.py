@@ -98,21 +98,22 @@ def test_wavefront_bdpt_pipelines_build():
     renderer = Renderer(
         vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
         tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+        execution_mode="wavefront",
     )
     try:
         deadline = 200
         while deadline > 0 and (
             renderer._usd_scene is None
             or len(renderer._usd_scene.instances) < 3
-            or renderer.pipeline is None
+            or renderer._scene_bindings is None
         ):
             renderer.update(0.025)
             deadline -= 1
-        assert renderer.pipeline is not None, "megakernel pipeline not built (scene load)"
+        assert renderer._scene_bindings is not None, "scene bindings not built (scene load)"
+        assert renderer.pipeline is None, "wavefront must not build the megakernel"
 
         renderer.integrator_index = 1  # bdpt
         assert renderer.WAVEFRONT_BDPT_SUPPORTED, "wavefront bdpt gated off"
-        renderer.set_execution_mode(1)  # wavefront
         renderer._material_version += 1
         renderer.update(0.04)
         renderer.render_headless()  # builds + dispatches the bdpt pass

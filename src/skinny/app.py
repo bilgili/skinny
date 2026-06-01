@@ -9,6 +9,7 @@ Qt event loop would get in the way.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -463,6 +464,15 @@ def main() -> None:
         help="Rely on USD's built-in usdMtlx plugin for .mtlx file "
              "resolution instead of the MaterialX API fallback.",
     )
+    parser.add_argument(
+        "--execution-mode", choices=("megakernel", "wavefront"),
+        default=os.environ.get("SKINNY_EXECUTION_MODE", "megakernel"),
+        help="GPU execution backend, fixed for the session (mirrors "
+             "--backend / SKINNY_EXECUTION_MODE). 'megakernel' (default) is the "
+             "single main_pass dispatch; 'wavefront' is the staged per-material "
+             "backend (Vulkan only — pinned to megakernel on Metal). Only the "
+             "selected backend is compiled.",
+    )
     args = parser.parse_args()
 
     scene_path: Path | None = args.scene or args.usd
@@ -501,6 +511,7 @@ def main() -> None:
         tattoo_dir=repo_root / "tattoos",
         usd_scene_path=scene_path,
         use_usd_mtlx_plugin=args.usdMtlx,
+        execution_mode=args.execution_mode,
     )
 
     _apply_saved_params(renderer, saved.get("params", {}))
