@@ -36,6 +36,15 @@ registers for their whole duration — collapsing occupancy.
 No change to the rendered image, the integrator math, the BDPT scope (flat
 first-hit, pinhole camera), or the public execution-mode/integrator selection.
 
+**Outcome (measured):** the **connect compaction (S1) is the win** — 1.69× on
+heavy area-light BDPT — and is always on. The **walk staging (S2/S3) is correct
+(exact parity) but overhead-bound** (per-bounce dispatch/barrier cost outweighs
+the occupancy gain on the tested scenes; ~3× slower on a trivial scene). It is
+therefore shipped as a **selectable `--bdpt-walk` mode** (`megakernel` default =
+connect compaction only; `eye` / `eye_light` opt into the staged eye / eye+light
+walks) rather than the default — the win ships clean while the staged paths stay
+available for hardware/scenes where occupancy, not dispatch count, is the limiter.
+
 ## Capabilities
 
 ### New Capabilities

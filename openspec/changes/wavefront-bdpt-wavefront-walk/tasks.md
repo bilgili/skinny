@@ -58,3 +58,10 @@ group 1) deferred — wall-clock frame timing covered the intent for S1.
 - [x] 6.4 ruff clean (changed files). Wavefront suite green: 48 wavefront/struct/execution-mode/A/B tests pass (the 3 budget-guard failures were stale entry names, fixed). Pre-existing non-wavefront infra failures (slangpy harness / driver) are unrelated — see [[reference_skinny_worktree_dev]].
 - [x] 6.5 Architecture.md has no wavefront section + the new bindings are set-1 (pass-private, not in the scene binding map) → no change. Updated `project_wavefront_backend` memory with the staged pipeline + S1/S2/S3 timings + the WAR-race lesson.
 - [x] 6.6 Confirmed: `git diff` vs main is empty for integrators/bdpt.slang, integrators/path.slang, wavefront/wavefront_path.slang, main_pass.slang. Path A/B + megakernel reference unchanged.
+
+## 7. Selectable walk mode (`--bdpt-walk`)
+
+- [x] 7.1 Restore `wfBdptWalk` (megakernel eye+light+splat) + `wfBdptLightTail` alongside the staged kernels in one shader — thin wrappers over the shared `randomWalk`/`sampleLightOrigin`/`splatLightWalk` (no estimator logic duplicated).
+- [x] 7.2 Add `walk_mode` to `WavefrontBdptPass` (`megakernel` | `eye` | `eye_light`): compile + build ONLY the active mode's kernels (connect+resolve shared); branch `record_dispatch` via `build_subpaths()`.
+- [x] 7.3 Thread `bdpt_walk` through `Renderer.__init__` → `_ensure_wavefront_bdpt_pass`; add `--bdpt-walk` (env `SKINNY_BDPT_WALK`) to `app.py`, default `megakernel` (the S1 win). Affects wavefront+bdpt only; all modes image-identical.
+- [x] 7.4 Parametrize the bdpt A/B + the pipeline-build guard over the 3 walk modes: exact parity (0.00000 mean abs diff) and per-mode pipeline build verified; path A/B unchanged. 12 tests green.

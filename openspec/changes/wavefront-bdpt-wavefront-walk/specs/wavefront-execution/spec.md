@@ -1,31 +1,31 @@
 ## ADDED Requirements
 
-### Requirement: Wavefront BDPT builds subpaths through staged, compacted bounces
+### Requirement: Wavefront BDPT offers selectable subpath-build modes
 
-In `wavefront` mode the `bdpt` integrator SHALL construct both the camera (eye)
-subpath and the light subpath through per-bounce staged compute dispatches — a
-generate stage followed, for each bounce, by a material-free intersect stage and
-a material shading/extend stage — rather than a single in-kernel walk that builds
-the whole subpath at once. Each bounce SHALL compact the still-active lanes
-(counting sort) and dispatch the extend stage over only those lanes, so the work
-of later bounces scales with the number of paths still alive rather than the full
-stream size. Subpath vertices SHALL reside in GPU buffers between stages, not in
-per-thread registers for the duration of the walk. The accumulated image SHALL
-remain equivalent to the megakernel `bdpt` within the documented tolerance.
+In `wavefront` mode the `bdpt` integrator SHALL offer a selectable subpath-build
+strategy, fixed for the session, with at least: a single-kernel walk that builds
+both subpaths at once (the default), and a per-bounce staged walk in which the
+eye subpath — and optionally the light subpath — is built through a generate
+stage followed, for each bounce, by an active-lane compaction and an extend
+dispatch over only the still-live lanes (subpath vertices residing in GPU
+buffers between stages rather than per-thread registers for the walk's
+duration). Every mode SHALL produce an accumulated image equivalent to the
+megakernel `bdpt` within the documented tolerance; the mode SHALL affect only
+the `wavefront` + `bdpt` combination.
 
-#### Scenario: Later bounces process only live lanes
+#### Scenario: Every walk mode matches the megakernel image
 
-- **WHEN** a BDPT subpath walk advances and some lanes have terminated (miss,
+- **WHEN** the same scene, camera, and sample count are rendered with the `bdpt`
+  integrator in `megakernel` mode and in `wavefront` mode under any offered
+  subpath-build mode
+- **THEN** the accumulated images are equivalent within the documented tolerance
+
+#### Scenario: Staged walk processes only live lanes per bounce
+
+- **WHEN** a staged subpath walk advances and some lanes have terminated (miss,
   Russian roulette, non-flat hit, or maximum depth)
 - **THEN** the subsequent bounce's extend stage is dispatched over only the
   still-active lanes, not over the full stream
-
-#### Scenario: Staged BDPT matches the megakernel image
-
-- **WHEN** the same scene, camera, and sample count are rendered with the `bdpt`
-  integrator in `megakernel` mode and in `wavefront` mode
-- **THEN** the two accumulated images are equivalent within the documented
-  tolerance
 
 ### Requirement: Wavefront BDPT compacts and strategy-splits the connection stage
 
