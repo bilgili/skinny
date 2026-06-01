@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     def __init__(
         self, scene_path: Path | None, gpu_pref: str, use_usd_mtlx: bool,
-        execution_mode: str = "megakernel",
+        execution_mode: str = "megakernel", bdpt_walk: str = "megakernel",
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
             usd_scene_path=scene_path,
             use_usd_mtlx_plugin=use_usd_mtlx,
             execution_mode=execution_mode,
+            bdpt_walk=bdpt_walk,
         )
 
         # Render viewport: hosted in a dock so the user can detach / re-
@@ -579,6 +580,14 @@ def main() -> None:
              "env). 'wavefront' is Vulkan only and compiles only the staged "
              "backend; pinned to megakernel on Metal.",
     )
+    parser.add_argument(
+        "--bdpt-walk", choices=("megakernel", "eye", "eye_light"),
+        default=os.environ.get("SKINNY_BDPT_WALK", "megakernel"),
+        help="Subpath-build strategy for wavefront + bdpt only (+ SKINNY_BDPT_WALK "
+             "env). 'megakernel' (default) builds both subpaths in one kernel + "
+             "connect compaction (fastest); 'eye' / 'eye_light' stage the eye / "
+             "eye+light walks. All produce the identical image.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -586,7 +595,8 @@ def main() -> None:
     )
 
     app = QApplication(sys.argv)
-    win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode)
+    win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
+                     args.bdpt_walk)
     win.show()
     sys.exit(app.exec())
 
