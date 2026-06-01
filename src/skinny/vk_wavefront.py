@@ -801,6 +801,8 @@ class WavefrontBdptPass:
     SLOT_FULL = 1
     # Eye-walk extend bounces: gen-eye seeds eye[0..1], the loop extends eye[2..].
     EYE_BOUNCES = BDPT_MAX_VERTS - 2
+    # Light-walk extend bounces: gen-light seeds light[0], the loop extends light[1..].
+    LIGHT_BOUNCES = BDPT_MAX_VERTS - 1
     # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices
     # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
     STREAM_CAP = 1 << 18
@@ -819,9 +821,11 @@ class WavefrontBdptPass:
         modules = {}
         for entry, out_name in (
             ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
-            ("wfBdptEyeClassify", "wavefront/_wfbdpt_eye_classify"),
+            ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
             ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
-            ("wfBdptLightTail", "wavefront/_wfbdpt_light_tail"),
+            ("wfBdptGenLight", "wavefront/_wfbdpt_gen_light"),
+            ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
+            ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
             ("wfBdptClassify", "wavefront/_wfbdpt_classify"),
             ("wfBdptBuildArgs", "wavefront/_wfbdpt_buildargs"),
             ("wfBdptScatter", "wavefront/_wfbdpt_scatter"),
@@ -927,12 +931,13 @@ class WavefrontBdptPass:
             int(offset), len(data), buf)
 
     def record_dispatch(self, cmd, scene_set) -> None:
-        """Tiled staged eye walk → light tail → connect counting sort → split
-        connect → resolve. Per tile: gen-eye → for each bounce { eye-classify →
-        build_args → scatter → bounce-eye (indirect over live lanes) } →
-        light-tail → connect classify → build_args → scatter → indirect connect
-        over the NEE then FULL queues → resolve. The eye/light/aux + queue
-        buffers are bounded by `stream_size`, not the pixel count."""
+        """Tiled fully-staged bdpt. Per tile: gen-eye → eye bounce loop
+        { walk-classify → build_args → scatter → bounce-eye (indirect) } →
+        gen-light → light bounce loop { walk-classify → build_args → scatter →
+        bounce-light (indirect) } → splat → connect classify → build_args →
+        scatter → indirect connect over the NEE then FULL queues → resolve. The
+        eye/light/aux + queue buffers are bounded by `stream_size`, not the pixel
+        count; the counting-sort scratch is shared across all three compactions."""
         cbarrier = vk.VkMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
             dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT
@@ -996,10 +1001,16 @@ class WavefrontBdptPass:
             self._stage(cmd, "wfBdptGenEye", scene_set)      # eye[0..1] + first ray
             mem_barrier()
             for _ in range(self.EYE_BOUNCES):
-                compact("wfBdptEyeClassify")                 # gather live eye lanes → slot 0
-                indirect(self.SLOT_NEE, "wfBdptBounceEye")   # extend one vertex (slot 0 queue)
+                compact("wfBdptWalkClassify")                # gather live eye lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceEye")   # extend one eye vertex
                 mem_barrier()
-            self._stage(cmd, "wfBdptLightTail", scene_set)   # light subpath + s=1 splat
+            self._stage(cmd, "wfBdptGenLight", scene_set)    # light[0] + first light ray
+            mem_barrier()
+            for _ in range(self.LIGHT_BOUNCES):
+                compact("wfBdptWalkClassify")                # gather live light lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceLight") # extend one light vertex
+                mem_barrier()
+            self._stage(cmd, "wfBdptSplat", scene_set)       # s=1 light-tracer splat
             mem_barrier()
             compact("wfBdptClassify")                        # route lanes NEE / FULL / dead
             indirect(self.SLOT_NEE, "wfBdptConnectNee")

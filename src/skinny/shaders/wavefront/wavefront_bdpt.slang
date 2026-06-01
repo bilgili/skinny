@@ -241,12 +241,13 @@ void wfBdptGenEye(uint3 tid: SV_DispatchThreadID)
     wfAux[slot] = aux;
 }
 
-// Mark lanes whose eye walk is still extending into slot 0 and count them, so
-// build_args + scatter gather them for the next indirect bounce dispatch.
-// Full-stream dispatch.
+// Mark lanes whose walk (eye or light) is still extending into slot 0 and count
+// them, so build_args + scatter gather them for the next indirect bounce
+// dispatch. Shared by the eye and light bounce loops (both flag liveness in
+// ewFlags). Full-stream dispatch.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void wfBdptEyeClassify(uint3 tid: SV_DispatchThreadID)
+void wfBdptWalkClassify(uint3 tid: SV_DispatchThreadID)
 {
     uint i = tid.x;
     if (i >= wfTile.streamSize)
@@ -439,53 +440,215 @@ void wfBdptBounceEye(uint3 tid: SV_DispatchThreadID)
     wfAux[i] = aux;
 }
 
-// Light subpath + s=1 splat (still a megakernel; S3 stages it). Runs for lanes
-// with a flat eye first hit (eyeLen ≥ 2) only, matching estimateRadiance which
-// returns before the light walk on a primary miss / non-flat hit. Resumes the
-// rng cursor left by the eye walk, so the per-lane draw order matches the
-// megakernel. Full-stream dispatch.
+// ── Staged light walk + splat (S3) ──────────────────────────────
+//
+// The light subpath is built across per-bounce dispatches like the eye walk,
+// reusing the same alive-classify → build_args → scatter → indirect machinery
+// (liveness in ewFlags, vertices in wfLight). The s=1 light-tracer splat becomes
+// its own stage. Runs only for lanes with a flat eye first hit (eyeLen ≥ 2),
+// matching estimateRadiance which returns before the light subpath on a primary
+// miss / non-flat hit. The rng cursor flows eye-walk → gen-light → bounce-light,
+// so the per-lane draw order matches the megakernel and the image is unchanged.
+
+// Seed light[0] = light-origin vertex and the first light ray. Delta lights
+// (directional) yield lightLen 1 and no walk. Reuses the ew* transient fields
+// (the eye walk is done) for the light-walk loop state.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void wfBdptLightTail(uint3 tid: SV_DispatchThreadID)
+void wfBdptGenLight(uint3 tid: SV_DispatchThreadID)
 {
     uint slot = tid.x;
     if (slot >= wfTile.streamSize)
         return;
     WfBdptAux aux = wfAux[slot];
+    aux.ewFlags = 0u;                            // default: no light walk
     if (aux.pixel == WF_PIXEL_SENTINEL || aux.eyeLen < 2)
+    {
+        wfAux[slot] = aux;
         return;
+    }
     uint base = slot * BDPT_MAX_VERTS;
-
     RNG rng; rng.state = aux.rngState;
-    PinholeCamera cam;
 
-    BDPTVertex lightPath[BDPT_MAX_VERTS];
-    int lightLen = 0;
     LightOriginSample lo = sampleLightOrigin(rng);
+    aux.lightLen = 0;
     if (lo.valid)
     {
-        lightPath[0] = lo.vertex;
-        lightLen = 1;
+        wfLight[base + 0u] = lo.vertex;
+        aux.lightLen = 1;
         if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
         {
-            Ray rL;
-            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
-            rL.direction = lo.dirOut;
-            float3 unusedEscape = float3(0.0);
-            lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
-                                  false, unusedEscape, -1.0);
+            aux.ewRayO = lo.vertex.position + lo.vertex.N * 0.002;
+            aux.ewRayD = lo.dirOut;
+            aux.ewThroughput = lo.beta;
+            aux.ewPdfFwdOmega = lo.pdfDir;
+            aux.ewFlags = WF_BDPT_ALIVE;         // extend the light subpath
+        }
+    }
+    aux.rngState = rng.state;
+    wfAux[slot] = aux;
+}
+
+// Extend the light subpath by one vertex for one live lane — randomWalk's loop
+// body with isEyeWalk = false (no env-NEE, no sphere-light emissive, no escaped;
+// a miss just ends the walk). Indirect-dispatched over the live queue (slot 0).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptBounceLight(uint3 tid: SV_DispatchThreadID)
+{
+    uint slotLane = wfBdptQueueLane(0u, tid.x);
+    if (slotLane == 0xFFFFFFFFu)
+        return;
+    uint i = slotLane;
+    uint base = i * BDPT_MAX_VERTS;
+
+    WfBdptAux aux = wfAux[i];
+    int idx = aux.lightLen;                       // next write slot
+    Ray ray; ray.origin = aux.ewRayO; ray.direction = aux.ewRayD;
+    float3 throughput = aux.ewThroughput;
+    float pdfFwdOmega = aux.ewPdfFwdOmega;
+    RNG rng; rng.state = aux.rngState;
+
+    HitInfo h = traceScene(fc, ray);
+    [loop]
+    for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
+    {
+        ray.origin = h.position + ray.direction * 0.002;
+        h = traceScene(fc, ray);
+    }
+
+    if (!h.hit || (materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+    {
+        aux.rngState = rng.state; aux.ewFlags = 0u;   // miss / non-flat → end walk
+        wfAux[i] = aux;
+        return;
+    }
+
+    FlatMaterial mat = loadFlatMaterial(h);
+    FlatHitData fd = mat.data;
+
+    BDPTVertex v;
+    v.kind = BDPT_VK_SURFACE;
+    v.position = h.position;
+    v.N = fd.N;
+    v.throughput = throughput;
+    v.emission = fd.mat.emission;
+    v.pdfFwd = 0.0;
+    v.pdfRev = 0.0;
+    v.isDelta = false;
+    v.onLight = any(fd.mat.emission > float3(0.0));
+    v.matId = h.materialId;
+    v.uv = h.uv;
+    v.posObject = h.positionObject;
+    v.geoN = h.normal;
+    v.tangent = h.tangent;
+    v.hasTangent = h.hasTangent;
+
+    BDPTVertex prev = wfLight[base + uint(idx - 1)];
+    v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
+    int prevIdx = idx - 1;
+    wfLight[base + uint(idx)] = v;
+    idx++;
+    if (idx >= int(BDPT_MAX_VERTS))
+    {
+        aux.lightLen = idx; aux.rngState = rng.state; aux.ewFlags = 0u;
+        wfAux[i] = aux;
+        return;
+    }
+
+    float3 T, B;
+    if (h.hasTangent)
+    {
+        T = normalize(h.tangent - v.N * dot(h.tangent, v.N));
+        B = cross(v.N, T);
+    }
+    else
+    {
+        buildBasis(v.N, T, B);
+    }
+    float3 wo_ts = worldToTangent(-ray.direction, T, B, v.N);
+
+    // (no env-NEE on the light walk)
+    BSDFSample bs = mat.sample(wo_ts, rng);
+    if (!bs.valid)
+    {
+        aux.lightLen = idx; aux.rngState = rng.state; aux.ewFlags = 0u;
+        wfAux[i] = aux;
+        return;
+    }
+    float3 wi_world = tangentToWorld(bs.wi, T, B, v.N);
+
+    bool deltaBounce = (bs.pdf <= 0.0);
+    if (deltaBounce)
+        wfLight[base + uint(idx - 1)].isDelta = true;
+
+    if (prev.kind != BDPT_VK_CAMERA && !prev.isDelta)
+    {
+        float3 toPrev = prev.position - v.position;
+        float toPrevLen2 = dot(toPrev, toPrev);
+        if (toPrevLen2 > 1e-20)
+        {
+            float3 toPrevDir = toPrev / sqrt(toPrevLen2);
+            float pdfRevOmega;
+            if (deltaBounce)
+                pdfRevOmega = lambertSApdf(v, toPrevDir);
+            else
+            {
+                float3 woRev = worldToTangent(wi_world, T, B, v.N);
+                float3 wiRev = worldToTangent(toPrevDir, T, B, v.N);
+                pdfRevOmega = mat.evaluate(woRev, wiRev).pdf;
+            }
+            wfLight[base + uint(prevIdx)].pdfRev = convertSAtoArea(pdfRevOmega, v.position, prev);
         }
     }
 
-    splatLightWalk<PinholeCamera>(lightPath, lightLen, rng, cam);
+    throughput *= bs.weight;
 
+    float p = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05, 0.95);
+    if (rng.next() > p)
+    {
+        aux.lightLen = idx; aux.rngState = rng.state; aux.ewFlags = 0u;
+        wfAux[i] = aux;
+        return;
+    }
+    throughput /= p;
+
+    float3 spawnOffset = bs.transmitted ? -v.N * 0.002 : v.N * 0.002;
+    aux.ewRayO = v.position + spawnOffset;
+    aux.ewRayD = wi_world;
+    aux.ewThroughput = throughput;
+    aux.ewPdfFwdOmega = deltaBounce ? 1.0 : bs.pdf;
+    aux.lightLen = idx;
+    aux.rngState = rng.state;
+    aux.ewFlags = WF_BDPT_ALIVE;                  // survive to the next light bounce
+    wfAux[i] = aux;
+}
+
+// s=1 light-tracer splat: project each non-delta light-walk vertex onto the
+// camera and atomic-add into lightSplatBuffer. Standalone stage after the light
+// walk. Pinhole sampleWi draws no rng, so the cursor is untouched (connect
+// resumes from the same post-light-walk state). Full-stream dispatch.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfBdptSplat(uint3 tid: SV_DispatchThreadID)
+{
+    uint slot = tid.x;
+    if (slot >= wfTile.streamSize)
+        return;
+    WfBdptAux aux = wfAux[slot];
+    if (aux.pixel == WF_PIXEL_SENTINEL || aux.eyeLen < 2 || aux.lightLen < 2)
+        return;                                   // need ≥2 light vertices to splat
+    uint base = slot * BDPT_MAX_VERTS;
+
+    RNG rng; rng.state = aux.rngState;            // pinhole: no draw
+    PinholeCamera cam;
+
+    BDPTVertex lightPath[BDPT_MAX_VERTS];
     [loop]
     for (int k = 0; k < int(BDPT_MAX_VERTS); k++)
-        if (k < lightLen) wfLight[base + uint(k)] = lightPath[k];
+        if (k < aux.lightLen) lightPath[k] = wfLight[base + uint(k)];
 
-    aux.lightLen = lightLen;
-    aux.rngState = rng.state;   // connect resumes from here
-    wfAux[slot] = aux;
+    splatLightWalk<PinholeCamera>(lightPath, aux.lightLen, rng, cam);
 }
 
 // Classify each post-walk lane by subpath shape and count it for the connect

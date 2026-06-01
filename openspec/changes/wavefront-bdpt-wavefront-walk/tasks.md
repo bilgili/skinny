@@ -43,12 +43,12 @@ group 1) deferred — wall-clock frame timing covered the intent for S1.
 
 ## 5. S3 — Stage the light walk + standalone splat
 
-- [ ] 5.1 Define `LightWalkState`; add its per-lane buffer to set 1.
-- [ ] 5.2 Add `wfBdptGenLight` (`sampleLightOrigin` → light[0]; mark delta-light lanes so they skip the walk).
-- [ ] 5.3 Add `wfBdptIsectLight` (trace + miss/non-flat break + classify/count) and `wfBdptExtendLight` (indirect: build vertex + BSDF sample + RR + `pdfRev`).
-- [ ] 5.4 Add `wfBdptSplat` as a standalone stage after the light walk (iterate light vertices, project to camera, visibility, atomic into `lightSplatBuffer`); confirm it consumes no RNG for pinhole.
-- [ ] 5.5 Wire the light-walk bounce loop + splat into `record_dispatch`, removing the megakernel walk tail; the full pipeline is now gen-eye → eye-walk → gen-light → light-walk → splat → connect → resolve.
-- [ ] 5.6 Headless A/B vs megakernel bdpt (both scenes); confirm parity and RNG draw order; re-measure all stages.
+- [x] 5.1 Reused the `WfBdptAux.ew*` transient fields for the light-walk loop state (the eye walk is done by then) — no new buffer/binding.
+- [x] 5.2 Add `wfBdptGenLight` (`sampleLightOrigin` → light[0]; mark delta-light lanes so they skip the walk).
+- [x] 5.3 Combined into one `wfBdptBounceLight` (randomWalk body with isEyeWalk=false: no env-NEE/sphere-emissive/escaped; miss ends the walk), indirect over the live queue. Reuses the shared `wfBdptWalkClassify` (alive→slot0).
+- [x] 5.4 Add `wfBdptSplat` as a standalone stage after the light walk (iterate light vertices, project to camera, visibility, atomic into `lightSplatBuffer`); confirm it consumes no RNG for pinhole.
+- [x] 5.5 Wire the light-walk bounce loop + splat into `record_dispatch`, removing the megakernel walk tail; the full pipeline is now gen-eye → eye-walk → gen-light → light-walk → splat → connect → resolve.
+- [x] 5.6 A/B exact parity (0.00000 mean abs diff vs fresh megakernel on cornell_rectlight, cornell_sphere, demo). **Perf regression**: full staged pipeline is 3× slower than S1 on the demo (3.1→9.3 ms) and flat on cornell — the light bounce loop's fixed 6 iterations × ~4 dispatches/barriers are pure overhead on short-path scenes. Confirms walk-staging is a net loss; S1 (connect compaction) is the win.
 
 ## 6. Finalization
 
