@@ -479,6 +479,7 @@ class WavefrontPathPass:
     _GROUP = 64  # matches [numthreads(64, 1, 1)] in wavefront_path.slang
     MAX_BOUNCES = 6  # lockstep with WF_MAX_BOUNCES in the shader
     STREAM_CAP = 1 << 20  # max lanes per stream — bounds path-state VRAM (~68 MB)
+    NUM_SLOTS = 2  # lockstep with WF_NUM_SLOTS (0 = flat, 1 = non-flat catch-all)
 
     HIT_STRIDE = 96  # ≥ sizeof(HitInfo) (≈92 B scalar) — headroom
 
@@ -497,6 +498,8 @@ class WavefrontPathPass:
         entries = [
             ("wfPathGenerate", "wavefront/_wfpath_generate"),
             ("wfPathIntersect", "wavefront/_wfpath_intersect"),
+            ("wfBuildArgs", "wavefront/_wfpath_buildargs"),
+            ("wfScatter", "wavefront/_wfpath_scatter"),
             ("wfPathShadeFlat", "wavefront/_wfpath_shade_flat"),
             ("wfPathResolve", "wavefront/_wfpath_resolve"),
         ]
@@ -510,21 +513,34 @@ class WavefrontPathPass:
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
         self._modules = modules
 
-        # Set 1: path-state (0) + hit (1) storage buffers.
+        # Counting-sort queue buffers (this pass owns them): laneSlot (2),
+        # slotCount (3), slotOffset (4), slotQueue (5), slotCursor (6),
+        # indirectArgs (7). slotCount/cursor are zeroed each bounce; indirectArgs
+        # needs INDIRECT_BUFFER usage for vkCmdDispatchIndirect.
+        self._buffers = {}
+        self._buffers["lane_slot"] = StorageBuffer(ctx, self.stream_size * 4)
+        self._buffers["slot_count"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
+        self._buffers["slot_offset"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
+        self._buffers["slot_queue"] = StorageBuffer(ctx, self.stream_size * 4)
+        self._buffers["slot_cursor"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
+        self._buffers["indirect"] = StorageBuffer(ctx, self.NUM_SLOTS * 12, indirect=True)
+        self._indirect_buf = self._buffers["indirect"].buffer
+
+        # Set 1: path-state (0), hit (1), + the 6 queue buffers (2..7).
         state_bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
-            for b in (0, 1)
+            for b in range(8)
         ]
         self._state_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=2, pBindings=state_bindings), None)
+                bindingCount=8, pBindings=state_bindings), None)
 
         # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state] +
-        # a 4-byte push constant (the per-tile stream base, read by generate).
+        # a 12-byte push constant {streamBase, shadeSlot, streamSize}.
         push_range = vk.VkPushConstantRange(
-            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=12)
         self._pipe_layout = vk.vkCreatePipelineLayout(
             ctx.device, vk.VkPipelineLayoutCreateInfo(
                 setLayoutCount=2, pSetLayouts=[scene_set_layout, self._state_layout],
@@ -542,13 +558,22 @@ class WavefrontPathPass:
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=2)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=8)]), None)
         self._state_set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
                 pSetLayouts=[self._state_layout]))[0]
+        bound = [
+            (state_buffer, state_range), (hit_buffer, hit_range),
+            (self._buffers["lane_slot"].buffer, self._buffers["lane_slot"].size),
+            (self._buffers["slot_count"].buffer, self._buffers["slot_count"].size),
+            (self._buffers["slot_offset"].buffer, self._buffers["slot_offset"].size),
+            (self._buffers["slot_queue"].buffer, self._buffers["slot_queue"].size),
+            (self._buffers["slot_cursor"].buffer, self._buffers["slot_cursor"].size),
+            (self._buffers["indirect"].buffer, self._buffers["indirect"].size),
+        ]
         writes = []
-        for b, (buf, rng) in enumerate(((state_buffer, state_range), (hit_buffer, hit_range))):
+        for b, (buf, rng) in enumerate(bound):
             info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
             writes.append(vk.VkWriteDescriptorSet(
                 dstSet=self._state_set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
@@ -565,53 +590,77 @@ class WavefrontPathPass:
         groups = (self.stream_size + self._GROUP - 1) // self._GROUP
         vk.vkCmdDispatch(cmd, groups, 1, 1)
 
-    def _push_base(self, cmd, stream_base) -> None:
+    def _push(self, cmd, offset, values) -> None:
         import struct
 
         import cffi
-        buf = cffi.FFI().new("char[]", struct.pack("I", int(stream_base)))
+        data = struct.pack(f"{len(values)}I", *[int(v) for v in values])
+        buf = cffi.FFI().new("char[]", data)
         vk.vkCmdPushConstants(
-            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            int(offset), len(data), buf)
 
     def record_dispatch(self, cmd, scene_set) -> None:
-        """Record the tiled bounce loop. The frame's pixels are processed in
-        fixed-size streams (`stream_size` slots); for each tile, push its
-        `streamBase` then generate → bounce ×MAX → resolve. `scene_set` is the
-        renderer's per-frame megakernel descriptor set (set 0). Path-state VRAM
-        is bounded by `stream_size`, not the pixel count."""
-        barrier = vk.VkMemoryBarrier(
+        """Record the tiled, counting-sorted bounce loop. Per tile: generate →
+        for each bounce { intersect (trace + classify + count) → build_args →
+        scatter → per-material shade dispatched indirectly over each slot's
+        queue } → resolve. The shade dispatches cover only their slot's lanes
+        (coherence); path-state VRAM stays bounded by `stream_size`."""
+        cbarrier = vk.VkMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT
+            | vk.VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
 
         def mem_barrier():
+            # COMPUTE→COMPUTE (+ indirect read for the args buffer build_args wrote).
             vk.vkCmdPipelineBarrier(
                 cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [barrier], 0, None, 0, None)
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                | vk.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                0, 1, [cbarrier], 0, None, 0, None)
+
+        def clear_counts():
+            cnt = self._buffers["slot_count"]
+            cur = self._buffers["slot_cursor"]
+            vk.vkCmdFillBuffer(cmd, cnt.buffer, 0, cnt.size, 0)
+            vk.vkCmdFillBuffer(cmd, cur.buffer, 0, cur.size, 0)
+            tb = vk.VkMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+            vk.vkCmdPipelineBarrier(
+                cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [tb], 0, None, 0, None)
+
+        def shade(slot, entry):
+            self._push(cmd, 4, [slot])           # shadeSlot
+            self._bind(cmd, entry, scene_set)
+            vk.vkCmdDispatchIndirect(cmd, self._indirect_buf, slot * 12)
 
         stream_base = 0
         first = True
         while stream_base < self.num_pixels:
             if not first:
-                mem_barrier()  # previous tile's resolve before this tile reuses wfState
+                mem_barrier()  # prior tile's resolve before reusing the buffers
             first = False
-            self._push_base(cmd, stream_base)
+            self._push(cmd, 0, [stream_base, 0, self.stream_size])
             self._bind(cmd, "wfPathGenerate", scene_set)
             self._dispatch(cmd)
             for _ in range(self.MAX_BOUNCES):
-                # Each bounce: intersect (trace → hit / miss-terminate), then
-                # per-material shade (NEE · sample · next ray) reading the hit.
-                # Flat lanes go through the small flat kernel; non-flat lanes
-                # (skin/python) through the catch-all, built only when present.
+                clear_counts()
                 mem_barrier()
-                self._bind(cmd, "wfPathIntersect", scene_set)
+                self._bind(cmd, "wfPathIntersect", scene_set)  # trace + classify + count
                 self._dispatch(cmd)
                 mem_barrier()
-                self._bind(cmd, "wfPathShadeFlat", scene_set)
+                self._bind(cmd, "wfBuildArgs", scene_set)       # counts → offsets + args
+                vk.vkCmdDispatch(cmd, 1, 1, 1)
+                mem_barrier()
+                self._bind(cmd, "wfScatter", scene_set)         # lanes → per-slot queues
                 self._dispatch(cmd)
+                mem_barrier()
+                shade(0, "wfPathShadeFlat")                      # slot 0 (flat)
                 if self.build_catchall:
                     mem_barrier()
-                    self._bind(cmd, "wfPathShade", scene_set)
-                    self._dispatch(cmd)
+                    shade(1, "wfPathShade")                      # slot 1
             mem_barrier()
             self._bind(cmd, "wfPathResolve", scene_set)
             self._dispatch(cmd)
@@ -625,6 +674,9 @@ class WavefrontPathPass:
         vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._state_layout, None)
         for m in self._modules.values():
             vk.vkDestroyShaderModule(self.ctx.device, m, None)
+        for buf in self._buffers.values():
+            buf.destroy()
+        self._buffers = {}
 
 
 class IndirectPaintPass:

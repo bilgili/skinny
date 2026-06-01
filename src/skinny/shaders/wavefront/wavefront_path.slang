@@ -52,6 +52,8 @@ void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
 void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
 {
     uint i = tid.x;                            // slot in the fixed-size stream
+    if (i >= wfTile.streamSize)                 // dispatch rounds up to 64 — skip tail
+        return;
     uint lane = wfTile.streamBase + i;          // global pixel lane this tile
     if (lane >= fc.width * fc.height)
     {
@@ -93,6 +95,8 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
 void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 {
     uint i = tid.x;                            // stream slot
+    if (i >= wfTile.streamSize)
+        return;
     WavefrontPathState s = wfState[i];
     if (!pathAlive(s))                          // dead / out-of-frame slots skip
         return;
@@ -132,10 +136,53 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
     }
 
     // Hit: the cutout skip may have advanced the origin — persist it so shade
-    // spawns continuation rays from the resolved surface. Stash the hit.
+    // spawns continuation rays from the resolved surface. Stash the hit, then
+    // classify the lane by material slot + count it for the counting sort that
+    // routes each shade dispatch to only its lanes (build_args + scatter).
     s.rayOrigin = r.origin;
     wfState[i] = s;
     wfHits[i] = h;
+    uint slot = wfSlotForType(materialTypes[h.materialId] & 0xFFu);
+    wfLaneSlot[i] = slot;
+    uint prev;
+    InterlockedAdd(wfSlotCount[slot], 1u, prev);
+}
+
+// Build-args — exclusive prefix-sum the per-slot counts into queue offsets and
+// emit one VkDispatchIndirectCommand (ceil(count/64),1,1) per slot. Single
+// thread; WF_NUM_SLOTS is tiny.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void wfBuildArgs(uint3 tid: SV_DispatchThreadID)
+{
+    uint running = 0u;
+    for (uint slot = 0u; slot < WF_NUM_SLOTS; ++slot)
+    {
+        wfSlotOffset[slot] = running;
+        uint c = wfSlotCount[slot];
+        running += c;
+        wfIndirectArgs[slot * 3u + 0u] = (c + WF_SHADE_GROUP - 1u) / WF_SHADE_GROUP;
+        wfIndirectArgs[slot * 3u + 1u] = 1u;
+        wfIndirectArgs[slot * 3u + 2u] = 1u;
+    }
+}
+
+// Scatter — place each hit lane into its slot's contiguous queue slice via an
+// atomic write cursor (counting sort). Only lanes still alive after intersect
+// (= they hit this bounce) are enqueued.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfScatter(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= wfTile.streamSize)
+        return;
+    if (!pathAlive(wfState[i]))                 // missed / terminated → not enqueued
+        return;
+    uint slot = wfLaneSlot[i];
+    uint local;
+    InterlockedAdd(wfSlotCursor[slot], 1u, local);
+    wfSlotQueue[wfSlotOffset[slot] + local] = i;
 }
 
 // Per-material shade — flat. Handles MATERIAL_TYPE_FLAT lanes (flat + MaterialX
@@ -146,13 +193,12 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 {
-    uint i = tid.x;
-    WavefrontPathState s = wfState[i];
-    if (!pathAlive(s))
+    // Queue-indexed: indirect-dispatched over slot WF_SLOT_FLAT's lanes only.
+    uint i = wfQueueLane(wfTile.shadeSlot, tid.x);
+    if (i == 0xFFFFFFFFu)
         return;
+    WavefrontPathState s = wfState[i];
     HitInfo h = wfHits[i];
-    if ((materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
-        return;                                 // non-flat → catch-all kernel
 
     RNG rng; rng.state = s.rngState;
     Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
@@ -168,13 +214,12 @@ void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathShade(uint3 tid: SV_DispatchThreadID)
 {
-    uint i = tid.x;
-    WavefrontPathState s = wfState[i];
-    if (!pathAlive(s))
+    // Queue-indexed: indirect-dispatched over slot WF_SLOT_OTHER's lanes only.
+    uint i = wfQueueLane(wfTile.shadeSlot, tid.x);
+    if (i == 0xFFFFFFFFu)
         return;
+    WavefrontPathState s = wfState[i];
     HitInfo h = wfHits[i];
-    if ((materialTypes[h.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT)
-        return;                                 // flat → wfPathShadeFlat
 
     RNG rng; rng.state = s.rngState;
     Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
@@ -187,6 +232,8 @@ void wfPathShade(uint3 tid: SV_DispatchThreadID)
 void wfPathResolve(uint3 tid: SV_DispatchThreadID)
 {
     uint i = tid.x;                            // stream slot
+    if (i >= wfTile.streamSize)
+        return;
     uint pixelIndex = wfState[i].pixelIndex;
     if (pixelIndex == WF_PIXEL_SENTINEL)        // out-of-frame slot
         return;
