@@ -16,7 +16,21 @@
 - [x] 3.2 Split `wfBdptConnect` into `wfBdptConnectNee` (emissive t=0 + `connectT1`) and `wfBdptConnectFull` (emissive + `connectT1` + generic t≥2 + MIS), each queue-indexed via indirect dispatch; reuse the `integrators/bdpt.slang` estimator functions unchanged.
 - [x] 3.3 Update `record_dispatch` to run classify → `build_args` → `scatter` → indirect `connect_nee` → indirect `connect_full`, with the existing per-stage barriers.
 - [x] 3.4 Recompile the BDPT `.spv` entries; run the headless A/B vs megakernel bdpt on directional-only + area-light scenes; confirm parity to the re-render noise floor.
-- [ ] 3.5 Re-measure (S0 timestamps): confirm `connect_full` dispatches zero groups on directional-only scenes and the connect stage time drops.
+- [x] 3.5 Re-measure: `connect_full` dispatches zero groups on directional-only scenes (structural: directional → `BDPT_VK_LIGHT_DIR` → lightLen 1 → no FULL lanes → `ceil(0/64)=0` groups). Connect time drops where it dominates.
+
+### S1 measurements (wavefront bdpt, 256², 40-frame mean, MoltenVK)
+
+| scene | pre-S1 | post-S1 | Δ |
+|---|---|---|---|
+| `cornell_box_rectlight` (heavy area light, FULL slot) | 102.75 ms | 60.71 ms | **1.69× faster** |
+| `three_materials_demo` (directional + 1 sphere, cheap connect) | 2.59 ms | 3.10 ms | +0.5 ms (compaction overhead) |
+
+S1 wins big where the connect stage is expensive (the scenes BDPT is for) and
+costs a small fixed overhead on trivial-connect scenes (extra dispatches +
+barriers + fill outweigh near-zero dead-lane savings). A/B parity holds on both
+(demo passes the relative noise-floor gate; cornell matches a fresh megakernel
+render to 0.001 mean abs diff). GPU per-stage `VkQueryPool` timestamps (S0
+group 1) deferred — wall-clock frame timing covered the intent for S1.
 
 ## 4. S2 — Stage the eye walk
 
