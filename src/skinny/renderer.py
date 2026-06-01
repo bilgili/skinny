@@ -1070,6 +1070,7 @@ class Renderer:
         # pipeline or the frame size changes (it reuses the megakernel set 0).
         self._wavefront_path_pass = None
         self._wf_path_state_buf = None
+        self._wf_path_hit_buf = None
         self._wf_path_pass_dims = None
         # Staged wavefront bdpt (Phase 3): subpath-vertex + aux buffers + pass,
         # same lazy lifecycle as the path pass.
@@ -1386,9 +1387,12 @@ class Renderer:
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
         self._wf_path_state_buf = StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
+        self._wf_path_hit_buf = StorageBuffer(
+            self.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
         self._wavefront_path_pass = WavefrontPathPass(
             self.ctx, self.shader_dir, self.pipeline.descriptor_set_layout,
             self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
+            self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
             stream_size, num_pixels,
         )
         self._wf_path_pass_dims = (self.width, self.height)
@@ -1398,9 +1402,11 @@ class Renderer:
         if self._wavefront_path_pass is not None:
             self._wavefront_path_pass.destroy()
             self._wavefront_path_pass = None
-        if self._wf_path_state_buf is not None:
-            self._wf_path_state_buf.destroy()
-            self._wf_path_state_buf = None
+        for attr in ("_wf_path_state_buf", "_wf_path_hit_buf"):
+            buf = getattr(self, attr, None)
+            if buf is not None:
+                buf.destroy()
+                setattr(self, attr, None)
         self._wf_path_pass_dims = None
 
     def _ensure_wavefront_bdpt_pass(self):

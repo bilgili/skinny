@@ -480,9 +480,11 @@ class WavefrontPathPass:
     MAX_BOUNCES = 6  # lockstep with WF_MAX_BOUNCES in the shader
     STREAM_CAP = 1 << 20  # max lanes per stream — bounds path-state VRAM (~68 MB)
 
+    HIT_STRIDE = 96  # ≥ sizeof(HitInfo) (≈92 B scalar) — headroom
+
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
-                 state_buffer, state_range: int, stream_size: int,
-                 num_pixels: int) -> None:
+                 state_buffer, state_range: int, hit_buffer, hit_range: int,
+                 stream_size: int, num_pixels: int) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
@@ -490,7 +492,8 @@ class WavefrontPathPass:
         modules = {}
         for entry, out_name in (
             ("wfPathGenerate", "wavefront/_wfpath_generate"),
-            ("wfPathBounce", "wavefront/_wfpath_bounce"),
+            ("wfPathIntersect", "wavefront/_wfpath_intersect"),
+            ("wfPathShade", "wavefront/_wfpath_shade"),
             ("wfPathResolve", "wavefront/_wfpath_resolve"),
         ):
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name)
@@ -499,13 +502,16 @@ class WavefrontPathPass:
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
         self._modules = modules
 
-        # Set 1: path-state storage buffer.
-        state_binding = vk.VkDescriptorSetLayoutBinding(
-            binding=0, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+        # Set 1: path-state (0) + hit (1) storage buffers.
+        state_bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+            for b in (0, 1)
+        ]
         self._state_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=1, pBindings=[state_binding]), None)
+                bindingCount=2, pBindings=state_bindings), None)
 
         # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state] +
         # a 4-byte push constant (the per-tile stream base, read by generate).
@@ -528,15 +534,18 @@ class WavefrontPathPass:
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=1)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=2)]), None)
         self._state_set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
                 pSetLayouts=[self._state_layout]))[0]
-        info = vk.VkDescriptorBufferInfo(buffer=state_buffer, offset=0, range=state_range)
-        vk.vkUpdateDescriptorSets(ctx.device, 1, [vk.VkWriteDescriptorSet(
-            dstSet=self._state_set, dstBinding=0, dstArrayElement=0, descriptorCount=1,
-            descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info])], 0, None)
+        writes = []
+        for b, (buf, rng) in enumerate(((state_buffer, state_range), (hit_buffer, hit_range))):
+            info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=self._state_set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
 
     def _bind(self, cmd, entry, scene_set) -> None:
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
@@ -581,8 +590,13 @@ class WavefrontPathPass:
             self._bind(cmd, "wfPathGenerate", scene_set)
             self._dispatch(cmd)
             for _ in range(self.MAX_BOUNCES):
+                # Each bounce: intersect (trace → hit / miss-terminate), then
+                # shade (NEE · sample · next ray) reading the stashed hit.
                 mem_barrier()
-                self._bind(cmd, "wfPathBounce", scene_set)
+                self._bind(cmd, "wfPathIntersect", scene_set)
+                self._dispatch(cmd)
+                mem_barrier()
+                self._bind(cmd, "wfPathShade", scene_set)
                 self._dispatch(cmd)
             mem_barrier()
             self._bind(cmd, "wfPathResolve", scene_set)

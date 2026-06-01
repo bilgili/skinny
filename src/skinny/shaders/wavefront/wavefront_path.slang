@@ -51,6 +51,10 @@ struct WfTilePC { uint streamBase; };
 [[vk::push_constant]] ConstantBuffer<WfTilePC> wfTile;
 
 [[vk::binding(0, 1)]] RWStructuredBuffer<WavefrontPathState> wfState;
+// Staged bounce (§P1-E): intersect writes each alive lane's hit here; shade
+// reads it. Decouples the (material-free) trace from the (material-heavy) shade
+// so they can be separate dispatches / kernels.
+[[vk::binding(1, 1)]] RWStructuredBuffer<HitInfo> wfHits;
 
 uint2 wfDecodePixel(uint lane) { return uint2(lane % fc.width, lane / fc.width); }
 
@@ -99,21 +103,22 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
     wfState[i] = s;
 }
 
+// Intersect stage — trace the alive lanes' current ray, handle the cutout skip
+// + the miss (env), and stash the hit for the shade stage. Material-free: it
+// imports only the BVH traversal + env, NOT the material/integrator tree, so it
+// stays small. A lane that misses terminates here; a lane that hits stays alive
+// and shade processes wfHits[i].
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void wfPathBounce(uint3 tid: SV_DispatchThreadID)
+void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 {
     uint i = tid.x;                            // stream slot
     WavefrontPathState s = wfState[i];
     if (!pathAlive(s))                          // dead / out-of-frame slots skip
         return;
 
-    RNG rng; rng.state = s.rngState;
+    RNG rng; rng.state = s.rngState;            // not consumed here; preserved
     Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
-    float3 throughput = s.throughput;
-    float3 radiance   = s.radiance;
-    float  misBsdfPdf = s.bsdfPdf;
-    uint   depth      = s.depth;
 
     HitInfo h = traceScene(fc, r);
     for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
@@ -124,10 +129,11 @@ void wfPathBounce(uint3 tid: SV_DispatchThreadID)
 
     if (!h.hit)
     {
-        if (depth == 0u)
+        float3 radiance = s.radiance;
+        if (s.depth == 0u)
         {
             // runFrame primary-ray miss: env at full weight (no NEE partner).
-            radiance += throughput * sceneEnvRadiance(
+            radiance += s.throughput * sceneEnvRadiance(
                 r.direction, fc.envIntensity, fc.furnaceMode);
         }
         else
@@ -137,13 +143,40 @@ void wfPathBounce(uint3 tid: SV_DispatchThreadID)
             float3 envR = sceneEnvRadianceCell(
                 r.direction, fc.envIntensity, effectiveFurnaceMode(h.materialId));
             float w = 1.0;
-            if (misBsdfPdf > 0.0)
-                w = powerHeuristic(misBsdfPdf, envPdf(r.direction));
-            radiance += throughput * envR * w;
+            if (s.bsdfPdf > 0.0)
+                w = powerHeuristic(s.bsdfPdf, envPdf(r.direction));
+            radiance += s.throughput * envR * w;
         }
         wfTerminate(i, s, radiance, rng);
         return;
     }
+
+    // Hit: the cutout skip may have advanced the origin — persist it so shade
+    // spawns continuation rays from the resolved surface. Stash the hit.
+    s.rayOrigin = r.origin;
+    wfState[i] = s;
+    wfHits[i] = h;
+}
+
+// Shade stage — the material-heavy half: per alive (= hit) lane, run the same
+// estimator body as the fused bounce (NEE + MIS + emission via evaluateBounce,
+// then accumulate, Russian roulette, BSDF-sampled next ray, sphere-light MIS).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfPathShade(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;                            // stream slot
+    WavefrontPathState s = wfState[i];
+    if (!pathAlive(s))                          // missed / terminated in intersect
+        return;
+
+    RNG rng; rng.state = s.rngState;
+    Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
+    float3 throughput = s.throughput;
+    float3 radiance   = s.radiance;
+    float  misBsdfPdf = s.bsdfPdf;
+    uint   depth      = s.depth;
+    HitInfo h = wfHits[i];
 
     BounceResult br = evaluateBounce(h, r, depth, rng);
     radiance += throughput * br.fullRadiance;
