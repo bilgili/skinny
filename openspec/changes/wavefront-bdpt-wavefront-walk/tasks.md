@@ -34,12 +34,12 @@ group 1) deferred — wall-clock frame timing covered the intent for S1.
 
 ## 4. S2 — Stage the eye walk
 
-- [ ] 4.1 Define `EyeWalkState` (ray, throughput, pdfFwdOmega, misBsdfPdf, idx, rngState, flags, escaped, pixel); add the per-lane state buffer to set 1.
-- [ ] 4.2 Add `wfBdptGenEye` (camera ray + eye[0]=camera, eye[1]=z1, env-NEE at z1, first BSDF sample, initial state) writing the first vertices to the `wfEye` VRAM slice.
-- [ ] 4.3 Add `wfBdptIsectEye` (material-free trace + cutout skip + sphere-light emissive deposit + miss→env into `escaped`; classify alive vs dead and count).
-- [ ] 4.4 Add `wfBdptExtendEye` (indirect over live lanes: build the vertex, env-NEE, BSDF sample, RR, write back the previous vertex's `pdfRev`); reuse `randomWalk` body logic from `integrators/bdpt.slang`.
-- [ ] 4.5 Wire the eye-walk bounce loop in `record_dispatch` (gen → for b in 0..BDPT_MAX_DEPTH: intersect → build_args → scatter → extend), keeping the light walk + connect as the megakernel tail reading the same VRAM (hybrid).
-- [ ] 4.6 Headless A/B vs megakernel bdpt (both scenes); confirm parity and identical RNG draw order; re-measure walk stage time.
+- [x] 4.1 Define `EyeWalkState` (ray, throughput, pdfFwdOmega, misBsdfPdf, idx, rngState, flags, escaped, pixel); add the per-lane state buffer to set 1.
+- [x] 4.2 Add `wfBdptGenEye` (camera ray + eye[0]=camera, eye[1]=z1, env-NEE at z1, first BSDF sample, initial state) writing the first vertices to the `wfEye` VRAM slice.
+- [x] 4.3 Combined trace+extend into one `wfBdptBounceEye` (no separate isect kernel + hit buffer) dispatched over the live queue — same compaction + vertices-in-VRAM wins, fewer buffers. Trace + cutout skip + sphere-emissive + miss→escaped live at its head.
+- [x] 4.4 Add `wfBdptExtendEye` (indirect over live lanes: build the vertex, env-NEE, BSDF sample, RR, write back the previous vertex's `pdfRev`); reuse `randomWalk` body logic from `integrators/bdpt.slang`.
+- [x] 4.5 Wire the eye-walk bounce loop in `record_dispatch` (gen → for b in 0..BDPT_MAX_DEPTH: intersect → build_args → scatter → extend), keeping the light walk + connect as the megakernel tail reading the same VRAM (hybrid).
+- [x] 4.6 A/B vs megakernel bdpt: exact parity (0.00000 mean abs diff on cornell; demo gate passes). **Fixed a WAR race**: `clear_counts`' `vkCmdFillBuffer` (TRANSFER) was unordered vs prior compute reads of slot_count/cursor — added a COMPUTE→TRANSFER barrier. Perf: eye-walk staging is ~neutral/negative (demo 3.1→4.3 ms, cornell 61→60 ms) — connect was the bottleneck, not the eye walk.
 
 ## 5. S3 — Stage the light walk + standalone splat
 

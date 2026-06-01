@@ -794,11 +794,13 @@ class WavefrontBdptPass:
     _GROUP = 64           # matches [numthreads(64, 1, 1)] in wavefront_bdpt.slang
     BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # ≥ sizeof(BDPTVertex) (≈120 B scalar) — headroom
-    AUX_STRIDE = 64       # ≥ sizeof(WfBdptAux) (≈44 B scalar)
+    AUX_STRIDE = 128      # ≥ sizeof(WfBdptAux) (≈92 B scalar w/ eye-walk state)
     # Connect counting-sort slots — lockstep with WF_BDPT_SLOT_* in the shader.
     NUM_SLOTS = 2
     SLOT_NEE = 0
     SLOT_FULL = 1
+    # Eye-walk extend bounces: gen-eye seeds eye[0..1], the loop extends eye[2..].
+    EYE_BOUNCES = BDPT_MAX_VERTS - 2
     # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices
     # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
     STREAM_CAP = 1 << 18
@@ -816,7 +818,10 @@ class WavefrontBdptPass:
         # (tiny kernels); only walk + the two connect kernels carry it.
         modules = {}
         for entry, out_name in (
-            ("wfBdptWalk", "wavefront/_wfbdpt_walk"),
+            ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
+            ("wfBdptEyeClassify", "wavefront/_wfbdpt_eye_classify"),
+            ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
+            ("wfBdptLightTail", "wavefront/_wfbdpt_light_tail"),
             ("wfBdptClassify", "wavefront/_wfbdpt_classify"),
             ("wfBdptBuildArgs", "wavefront/_wfbdpt_buildargs"),
             ("wfBdptScatter", "wavefront/_wfbdpt_scatter"),
@@ -922,11 +927,12 @@ class WavefrontBdptPass:
             int(offset), len(data), buf)
 
     def record_dispatch(self, cmd, scene_set) -> None:
-        """Tiled walk → connect counting sort → split connect → resolve. Per
-        tile: walk (full stream) → classify (count live lanes by subpath shape,
-        finalise dead lanes) → build_args → scatter → indirect connect over the
-        NEE then FULL queues → resolve. The eye/light/aux + queue buffers are
-        bounded by `stream_size`, not the pixel count."""
+        """Tiled staged eye walk → light tail → connect counting sort → split
+        connect → resolve. Per tile: gen-eye → for each bounce { eye-classify →
+        build_args → scatter → bounce-eye (indirect over live lanes) } →
+        light-tail → connect classify → build_args → scatter → indirect connect
+        over the NEE then FULL queues → resolve. The eye/light/aux + queue
+        buffers are bounded by `stream_size`, not the pixel count."""
         cbarrier = vk.VkMemoryBarrier(
             srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
             dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT
@@ -943,6 +949,17 @@ class WavefrontBdptPass:
         def clear_counts():
             cnt = self._buffers["slot_count"]
             cur = self._buffers["slot_cursor"]
+            # WAR guard: a prior stage (the previous bounce's queue read, or the
+            # prior tile's connect) read slot_count/cursor via the indirect
+            # dispatch. The COMPUTE→COMPUTE mem_barrier does NOT order those reads
+            # before the TRANSFER fill below, so without this the fill races them —
+            # mild at one tile, badly corrupting at many. COMPUTE→TRANSFER fixes it.
+            pre = vk.VkMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT)
+            vk.vkCmdPipelineBarrier(
+                cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, [pre], 0, None, 0, None)
             vk.vkCmdFillBuffer(cmd, cnt.buffer, 0, cnt.size, 0)
             vk.vkCmdFillBuffer(cmd, cur.buffer, 0, cur.size, 0)
             tb = vk.VkMemoryBarrier(
@@ -952,10 +969,22 @@ class WavefrontBdptPass:
                 cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
                 vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [tb], 0, None, 0, None)
 
-        def connect(slot, entry):
-            self._push(cmd, 4, [slot])           # shadeSlot
+        def indirect(slot, entry):
+            self._push(cmd, 4, [slot])           # shadeSlot for wfBdptQueueLane
             self._bind(cmd, entry, scene_set)
             vk.vkCmdDispatchIndirect(cmd, self._indirect_buf, slot * 12)
+
+        def compact(classify_entry):
+            # clear counts → classify (count) → build_args → scatter, leaving the
+            # live lanes gathered into their slot queues for an indirect dispatch.
+            clear_counts()
+            self._stage(cmd, classify_entry, scene_set)
+            mem_barrier()
+            self._bind(cmd, "wfBdptBuildArgs", scene_set)
+            vk.vkCmdDispatch(cmd, 1, 1, 1)
+            mem_barrier()
+            self._stage(cmd, "wfBdptScatter", scene_set)
+            mem_barrier()
 
         stream_base = 0
         first = True
@@ -964,19 +993,18 @@ class WavefrontBdptPass:
                 mem_barrier()  # prior tile's resolve before reusing the buffers
             first = False
             self._push(cmd, 0, [stream_base, 0, self.stream_size])
-            self._stage(cmd, "wfBdptWalk", scene_set)
+            self._stage(cmd, "wfBdptGenEye", scene_set)      # eye[0..1] + first ray
             mem_barrier()
-            clear_counts()
-            self._stage(cmd, "wfBdptClassify", scene_set)   # count + finalise dead
+            for _ in range(self.EYE_BOUNCES):
+                compact("wfBdptEyeClassify")                 # gather live eye lanes → slot 0
+                indirect(self.SLOT_NEE, "wfBdptBounceEye")   # extend one vertex (slot 0 queue)
+                mem_barrier()
+            self._stage(cmd, "wfBdptLightTail", scene_set)   # light subpath + s=1 splat
             mem_barrier()
-            self._bind(cmd, "wfBdptBuildArgs", scene_set)   # counts → offsets + args
-            vk.vkCmdDispatch(cmd, 1, 1, 1)
+            compact("wfBdptClassify")                        # route lanes NEE / FULL / dead
+            indirect(self.SLOT_NEE, "wfBdptConnectNee")
             mem_barrier()
-            self._stage(cmd, "wfBdptScatter", scene_set)    # lanes → per-slot queues
-            mem_barrier()
-            connect(self.SLOT_NEE, "wfBdptConnectNee")
-            mem_barrier()
-            connect(self.SLOT_FULL, "wfBdptConnectFull")
+            indirect(self.SLOT_FULL, "wfBdptConnectFull")
             mem_barrier()
             self._stage(cmd, "wfBdptResolve", scene_set)
             stream_base += self.stream_size
