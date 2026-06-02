@@ -11,6 +11,7 @@ import interfaces;    // BounceResult, BSDFSample, HitInfo
 import nee;           // allLightsNEE (material-free)
 import materials.flat.flat_material;  // FlatMaterial, loadFlatMaterial
 import sampling.proposal;             // sampleBounceDirection (BSDF-only ⇒ mat.sample)
+import sampling.reuse;                 // reuseDirect (identity ⇒ allLightsNEE)
 
 BounceResult evaluateFlatBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
 {
@@ -40,7 +41,7 @@ BounceResult evaluateFlatBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
     }
     float3 wo = worldToTangent(V, T, B, N);
 
-    br.directLight = allLightsNEE(mat, h, N, T, B, wo, rng);
+    br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, rng);
 
     ProposalContext pctx;
     pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;
