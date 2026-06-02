@@ -15,6 +15,7 @@
 
 ## 4. Grouped shade pipelines
 
+- [ ] 4.0 **Prereq — extract per-type bounce evaluators** (mirrors `flat_bounce`): `skin_bounce.slang` (`evaluateSkinBounce`, imports only `materials.skin.skin_material`) and a python evaluator (`evaluatePythonBounce(pyId)`, imports only `python_materials_dispatcher`), each a verbatim copy of the matching `evaluateBounce` switch case. `evaluateBounce` stays for the megakernel. This is what lets a per-member shade kernel import only its own subtree (and be measured in PASS 1).
 - [ ] 4.1 `WavefrontPathPass`: constructor takes a `grouping` (ordered groups + `materialSlot` array) instead of `build_catchall: bool`. Build one shade pipeline per group; emit per-group shade entries that import only their members (single-member → straight-line; multi-member → switch on type / `pythonMaterialId`). Slot 0 (flat/graph) unchanged.
 - [ ] 4.2 `WavefrontPathPass` dispatch loop: record exactly `len(groups)` indirect shade dispatches (`vkCmdDispatchIndirect` per group over its slot queue), one barrier after all shades. Empty/unused slots are never dispatched.
 

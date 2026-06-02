@@ -115,6 +115,24 @@ A flat-only scene compiles only slot 0 (identical to today). Multi-material
 scenes that previously built the flaky catch-all now build size-bounded groups —
 same image, reliable compile.
 
+## Implementation Prerequisite (found while scoping the code)
+
+PASS-1 measurement requires compiling a **skin-only** and a **python-only** shade
+kernel — each importing only its own material subtree. Today only
+`flat_bounce.evaluateFlatBounce` exists; skin/python/debug all live inside
+`integrators/path.slang::evaluateBounce` (one switch over the whole material
+tree, importing `materials.skin.*` + `python_materials_dispatcher` together).
+
+So the first implementation step is to **extract per-type bounce evaluators** the
+way `flat_bounce` already was: `skin_bounce.slang` (`evaluateSkinBounce`, imports
+only `materials.skin.skin_material` → `evalSkinRadiance`) and a python evaluator
+(`evaluatePythonBounce(pyId)`, imports only `python_materials_dispatcher`). Each
+mirrors one `case` of `evaluateBounce`'s switch verbatim. The grouped shade
+kernel for a single-member group calls the one evaluator; a multi-member group
+switches among its members' evaluators. `evaluateBounce` itself stays for the
+megakernel (unchanged). This factoring is what makes per-member kernels small
+enough to measure and to stay under the limit.
+
 ## Open Question (resolve during implementation)
 
 Whether the python-material switch inside a multi-member group should dispatch
