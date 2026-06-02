@@ -213,6 +213,16 @@ struct FrameConstants
     //   3 = Linear (clamp only)
     float  exposure;
     uint   tonemapMode;
+    // ── Pluggable scene-sampling seam (sampling/proposal.slang) ──
+    // proposalMask: bit k = directional proposal k active at the bounce
+    //   (bit0 = BSDF, bit1 = environment-importance). reuseMode: 0 = identity
+    //   NEE/indirect (ReSTIR later). proposalAlpha: normalized one-sample-MIS
+    //   selection weights, one per slot (Σ = 1). Scalar layout — these append
+    //   tightly after tonemapMode; the Python packer in renderer._pack_uniforms
+    //   writes them in this exact order.
+    uint   proposalMask;
+    uint   reuseMode;
+    float4 proposalAlpha;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

@@ -1058,6 +1058,15 @@ class Renderer:
         self.integrator_modes: list[str] = ["Path", "BDPT"]
         self.integrator_index = 0
 
+        # Pluggable scene-sampling seam (sampling/proposal.slang). Active
+        # directional proposals at the bounce + the reuse mode around NEE.
+        # Default {bsdf}/none is bit-identical to the pre-seam renderer; folded
+        # into FrameConstants.proposalMask/proposalAlpha/reuseMode by
+        # _pack_uniforms. Front-end / CLI selection lands in a later commit.
+        from skinny.sampling import BsdfProposal, IdentityReuse
+        self.active_proposals = [BsdfProposal()]
+        self.active_reuse = IdentityReuse()
+
         # Execution backend, orthogonal to the integrator and FIXED for the
         # session — selected on the command line (`--execution-mode`,
         # constructor arg), not a runtime GUI toggle. Megakernel (index 0) is
@@ -6783,6 +6792,15 @@ class Renderer:
         # main_pass.slang::applyTonemap.
         data += struct.pack("f", float(self.exposure))                # 4 bytes
         data += struct.pack("I", int(self.tonemap_index))             # 4 bytes
+        # Pluggable scene-sampling seam — proposalMask + reuseMode + the
+        # float4 one-sample-MIS selection weights. Scalar layout: these append
+        # tightly, matching the FrameConstants tail in common.slang. Default
+        # {bsdf}/none folds to mask=1, alpha=(1,0,0,0), reuseMode=0 — the
+        # bounce takes the BSDF fast path, bit-identical to the pre-seam build.
+        from skinny.sampling import proposal_mask_and_alpha
+        prop_mask, prop_alpha = proposal_mask_and_alpha(self.active_proposals)
+        data += struct.pack("II", int(prop_mask), int(self.active_reuse.reuse_mode))  # 8 bytes
+        data += struct.pack("4f", *prop_alpha)                        # 16 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
