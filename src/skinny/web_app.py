@@ -45,6 +45,8 @@ _USE_USD_MTLX: bool = False
 _EXECUTION_MODE: str = "megakernel"
 _BDPT_WALK: str = "fused"
 _INTEGRATOR: str | None = None
+_PROPOSALS: str | None = None
+_REUSE: str | None = None
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -103,6 +105,11 @@ class SkinnySession:
             )
             if _INTEGRATOR is not None:
                 self.renderer.integrator_index = INTEGRATOR_INDEX[_INTEGRATOR]
+            if _PROPOSALS is not None:
+                self.renderer.proposal_preset_index = \
+                    self.renderer.proposal_preset_from_token(_PROPOSALS)
+            if _REUSE is not None:
+                self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(_REUSE)
 
             self._log_init("Setting up video encoder...")
             self.encoder = VideoEncoder(1280, 720, gpu_info=self.ctx.gpu_info)
@@ -674,13 +681,15 @@ def main() -> None:
     args = parser.parse_args()
 
     global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE, _BDPT_WALK
-    global _INTEGRATOR
+    global _INTEGRATOR, _PROPOSALS, _REUSE
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
     _EXECUTION_MODE = args.execution_mode
     _BDPT_WALK = resolve_walk(args.bdpt_walk)
     _INTEGRATOR = args.integrator
+    _PROPOSALS = args.proposals
+    _REUSE = args.reuse
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

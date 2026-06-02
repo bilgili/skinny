@@ -106,6 +106,12 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Direct light",      "direct_light_index",          "direct_light_modes"),
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Integrator",        "integrator_index",            "integrator_modes"),
+    # Scene-sampling seam: directional-proposal mixture at the bounce +
+    # reuse mode around NEE. Runtime-selectable + persisted like the
+    # integrator; changing either resets accumulation. Reuse has only the
+    # identity mode until ReSTIR lands.
+    _disc("Proposals",         "proposal_preset_index",       "proposal_preset_modes"),
+    _disc("Reuse",             "reuse_index",                 "reuse_modes"),
     # Execution mode (megakernel | wavefront) is a command-line / session
     # selection (`--execution-mode`), fixed at renderer construction — not a
     # runtime GUI toggle. So it is intentionally absent from STATIC_PARAMS

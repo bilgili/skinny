@@ -45,10 +45,13 @@ def add_render_flags(
     integrator: bool = True,
     execution: bool = True,
     walk: bool = True,
+    proposals: bool = True,
+    reuse: bool = True,
 ) -> None:
-    """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` flags
-    to ``parser``. Each flag can be suppressed via its keyword in the rare case a
-    front-end must omit it (none currently does)."""
+    """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` /
+    `--proposals` / `--reuse` flags to ``parser``. Each flag can be suppressed
+    via its keyword in the rare case a front-end must omit it (none currently
+    does)."""
     if integrator:
         parser.add_argument(
             "--integrator", choices=("path", "bdpt"), default=None,
@@ -57,6 +60,25 @@ def add_render_flags(
                  "unidirectional path tracer; 'bdpt' is the bidirectional path "
                  "tracer. On the interactive front-ends this sets the initial "
                  "integrator and it remains runtime-cycleable.",
+        )
+    if proposals:
+        parser.add_argument(
+            "--proposals", choices=("bsdf", "bsdf,env", "env"),
+            default=os.environ.get("SKINNY_PROPOSALS"),
+            metavar="{bsdf,bsdf+env,env}",
+            help="Directional-proposal mixture at the BSDF bounce (+ "
+                 "SKINNY_PROPOSALS env). 'bsdf' (default) is the material's own "
+                 "importance sampler — bit-identical to the classic renderer; "
+                 "'bsdf,env' MIS-mixes an environment-importance proposal "
+                 "(lower variance on IBL); 'env' is env-only. Runtime-selectable "
+                 "+ persisted on the interactive front-ends.",
+        )
+    if reuse:
+        parser.add_argument(
+            "--reuse", choices=("none",), default=os.environ.get("SKINNY_REUSE"),
+            help="Reuse/resampling mode around direct + indirect lighting (+ "
+                 "SKINNY_REUSE env). Only 'none' (stock NEE) ships today; "
+                 "ReSTIR-style reservoir reuse is a future mode.",
         )
     if execution:
         parser.add_argument(

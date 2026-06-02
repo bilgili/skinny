@@ -14,6 +14,9 @@ import scene_lights;
 import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
+// Proposal-mixture pdf so NEE's MIS companion weight matches the bounce
+// sampler (the NEE-coupling rule). BSDF-only ⇒ the plain bsdf pdf.
+import sampling.proposal;
 
 // ── Generic NEE ─────────────────────────────────────────────────
 
@@ -53,7 +56,14 @@ float3 neeLightEstimator<TM : IMaterial, TL : ILight>(
 
     float invPdfOmega = cosLight / (d2 * ls.pdfArea);
     float pdfLightSA  = d2 * ls.pdfArea / max(cosLight, 1e-12);
-    float wNEE        = powerHeuristic(pdfLightSA, bsdf.pdf);
+    // MIS companion = the bounce proposal mixture's pdf for this direction,
+    // not the bare bsdf pdf — otherwise enabling a non-BSDF proposal biases
+    // direct lighting. BSDF-only mixture ⇒ exactly bsdf.pdf (parity).
+    ProposalContext pc;
+    pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
+    pc.position = h.position; pc.materialId = h.materialId;
+    float misPdf = mixtureProposalPdf(mat, pc, wi);
+    float wNEE   = powerHeuristic(pdfLightSA, misPdf);
 
     return bsdf.response * ls.radiance * invPdfOmega * wNEE;
 }
@@ -97,9 +107,17 @@ float3 allLightsNEE<TM : IMaterial>(
         {
             float3 wi = worldToTangent(es.dir, T, B, N);
             BSDFSample b = mat.evaluate(wo, wi);
-            if (b.pdf > 0.0)            // delta lobes have no NEE counterpart
+            // Companion pdf = the bounce proposal mixture, so the env-miss and
+            // env-NEE strategies stay MIS-consistent when an env proposal is
+            // active. BSDF-only ⇒ misPdf == b.pdf (parity); the guard then
+            // matches the old `b.pdf > 0` delta check.
+            ProposalContext pc;
+            pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
+            pc.position = h.position; pc.materialId = h.materialId;
+            float misPdf = mixtureProposalPdf(mat, pc, wi);
+            if (misPdf > 0.0)
             {
-                float w = powerHeuristic(es.pdf, b.pdf);
+                float w = powerHeuristic(es.pdf, misPdf);
                 total += b.response * es.radiance / es.pdf * w;
             }
         }
