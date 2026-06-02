@@ -99,7 +99,7 @@ _SHARED = (
     "wfBdptConnectNee", "wfBdptConnectFull", "wfBdptResolve",
 )
 _MODE_ENTRIES = {
-    "megakernel": ("wfBdptWalk",) + _SHARED,
+    "fused": ("wfBdptWalk",) + _SHARED,
     "eye": ("wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye",
             "wfBdptLightTail") + _SHARED,
     "eye_light": ("wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye",

@@ -9,7 +9,6 @@ Qt event loop would get in the way.
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from skinny.params import (
     _get_nested, _set_nested, _snapshot_params, _apply_saved_params,
     _GANGED_MTLX_FIELDS, _SKIN_TO_MTLX,
 )
+from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.vk_context import VulkanContext
 from skinny.renderer import Renderer
 from skinny.settings import ensure_dirs, load_settings, save_settings
@@ -464,25 +464,7 @@ def main() -> None:
         help="Rely on USD's built-in usdMtlx plugin for .mtlx file "
              "resolution instead of the MaterialX API fallback.",
     )
-    parser.add_argument(
-        "--execution-mode", choices=("megakernel", "wavefront"),
-        default=os.environ.get("SKINNY_EXECUTION_MODE", "megakernel"),
-        help="GPU execution backend, fixed for the session (mirrors "
-             "--backend / SKINNY_EXECUTION_MODE). 'megakernel' (default) is the "
-             "single main_pass dispatch; 'wavefront' is the staged per-material "
-             "backend (Vulkan only — pinned to megakernel on Metal). Only the "
-             "selected backend is compiled.",
-    )
-    parser.add_argument(
-        "--bdpt-walk", choices=("megakernel", "eye", "eye_light"),
-        default=os.environ.get("SKINNY_BDPT_WALK", "megakernel"),
-        help="Subpath-build strategy for wavefront + bdpt only (no effect "
-             "otherwise). 'megakernel' (default) builds both subpaths in one "
-             "kernel + the connect counting-sort (fastest). 'eye' stages the eye "
-             "walk into per-bounce dispatches; 'eye_light' also stages the light "
-             "walk + splat. All produce the identical image — this trades "
-             "dispatch overhead vs occupancy.",
-    )
+    add_render_flags(parser)
     args = parser.parse_args()
 
     scene_path: Path | None = args.scene or args.usd
@@ -522,12 +504,15 @@ def main() -> None:
         usd_scene_path=scene_path,
         use_usd_mtlx_plugin=args.usdMtlx,
         execution_mode=args.execution_mode,
-        bdpt_walk=args.bdpt_walk,
+        bdpt_walk=resolve_walk(args.bdpt_walk),
     )
 
     _apply_saved_params(renderer, saved.get("params", {}))
     _apply_saved_camera(renderer, saved.get("camera"))
     _apply_saved_gizmo_mode(renderer, saved.get("gizmo_mode"))
+    # CLI --integrator (when given) wins over the persisted value for this launch.
+    if args.integrator is not None:
+        renderer.integrator_index = INTEGRATOR_INDEX[args.integrator]
     renderer._update_light()
 
     from skinny.debug_viewport import DebugViewport

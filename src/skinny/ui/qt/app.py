@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -27,6 +26,7 @@ from PySide6.QtWidgets import (
 
 import numpy as np
 
+from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
 from skinny.renderer import Renderer
 from skinny.settings import (
@@ -53,7 +53,8 @@ log = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     def __init__(
         self, scene_path: Path | None, gpu_pref: str, use_usd_mtlx: bool,
-        execution_mode: str = "megakernel", bdpt_walk: str = "megakernel",
+        execution_mode: str = "megakernel", bdpt_walk: str = "fused",
+        initial_integrator: str | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -164,6 +165,9 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             self._saved_settings = {}
         self._restore_session_state()
+        # CLI --integrator (when given) wins over the persisted value for this launch.
+        if initial_integrator is not None:
+            self.renderer.integrator_index = INTEGRATOR_INDEX[initial_integrator]
 
         # Keys the viewport responds to (camera mode toggle, focus reset,
         # HUD toggle, free-cam WASDQE). Forwarded from MainWindow when no
@@ -573,21 +577,7 @@ def main() -> None:
     parser.add_argument("--gpu", type=str, default="auto",
                         help="GPU preference: intel, nvidia, amd, discrete, auto")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
-    parser.add_argument(
-        "--execution-mode", choices=("megakernel", "wavefront"),
-        default=os.environ.get("SKINNY_EXECUTION_MODE", "megakernel"),
-        help="GPU execution backend, fixed for the session (+ SKINNY_EXECUTION_MODE "
-             "env). 'wavefront' is Vulkan only and compiles only the staged "
-             "backend; pinned to megakernel on Metal.",
-    )
-    parser.add_argument(
-        "--bdpt-walk", choices=("megakernel", "eye", "eye_light"),
-        default=os.environ.get("SKINNY_BDPT_WALK", "megakernel"),
-        help="Subpath-build strategy for wavefront + bdpt only (+ SKINNY_BDPT_WALK "
-             "env). 'megakernel' (default) builds both subpaths in one kernel + "
-             "connect compaction (fastest); 'eye' / 'eye_light' stage the eye / "
-             "eye+light walks. All produce the identical image.",
-    )
+    add_render_flags(parser)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -596,7 +586,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
-                     args.bdpt_walk)
+                     resolve_walk(args.bdpt_walk), args.integrator)
     win.show()
     sys.exit(app.exec())
 

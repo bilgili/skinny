@@ -37,7 +37,7 @@ def _match(a, b):
     return float((d <= tol).mean())
 
 
-def _load(execution_mode, *, integrator_index=0, stream_cap=None, bdpt_walk="megakernel"):
+def _load(execution_mode, *, integrator_index=0, stream_cap=None, bdpt_walk="fused"):
     """Build a headless renderer in the given (fixed) execution mode, pump the
     async USD load, and apply the integrator + optional stream cap. Returns
     (ctx, renderer); the caller owns cleanup of both."""
@@ -154,10 +154,10 @@ def test_wavefront_path_tiled_streaming():
     )
 
 
-@pytest.mark.parametrize("walk_mode", ["megakernel", "eye", "eye_light"])
+@pytest.mark.parametrize("walk_mode", ["fused", "eye", "eye_light"])
 def test_wavefront_bdpt_matches_megakernel(walk_mode):
     """A/B parity for the bidirectional integrator (task 9.2): megakernel bdpt
-    vs the staged wavefront bdpt, for each `--bdpt-walk` mode (megakernel = one
+    vs the staged wavefront bdpt, for each `--bdpt-walk` mode (fused = one
     walk kernel + connect compaction; eye / eye_light stage the eye / eye+light
     walks). All three are the same estimator, so each must match the megakernel
     no worse than the megakernel-vs-megakernel noise floor."""

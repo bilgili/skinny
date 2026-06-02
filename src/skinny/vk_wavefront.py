@@ -807,12 +807,12 @@ class WavefrontBdptPass:
     # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
     STREAM_CAP = 1 << 18
 
-    WALK_MODES = ("megakernel", "eye", "eye_light")
+    WALK_MODES = ("fused", "eye", "eye_light")
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
                  stream_size: int, num_pixels: int,
-                 walk_mode: str = "megakernel") -> None:
+                 walk_mode: str = "fused") -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.num_pixels = int(num_pixels)
@@ -823,8 +823,8 @@ class WavefrontBdptPass:
         # The connect counting sort (classify / build_args / scatter) + split
         # connect (nee / full, indirect) + resolve are shared by all walk modes;
         # only the subpath-build kernels differ:
-        #   megakernel — one wfBdptWalk kernel (eye+light+splat); the S1 win.
-        #   eye        — staged eye walk + megakernel light tail.
+        #   fused      — one wfBdptWalk kernel (eye+light+splat); the S1 win.
+        #   eye        — staged eye walk + fused light tail.
         #   eye_light  — fully staged eye + light walks + standalone splat.
         # Only the active mode's kernels are compiled/built (no wasted slangc).
         shared = [
@@ -840,7 +840,7 @@ class WavefrontBdptPass:
             ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
             ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
         ]
-        if walk_mode == "megakernel":
+        if walk_mode == "fused":
             entries = [("wfBdptWalk", "wavefront/_wfbdpt_walk")] + shared
         elif walk_mode == "eye":
             entries = staged_eye + [("wfBdptLightTail", "wavefront/_wfbdpt_light_tail")] + shared
@@ -1014,7 +1014,7 @@ class WavefrontBdptPass:
             """Dispatch the subpath-construction kernels for the active walk_mode,
             leaving each lane's aux (eyeLen/lightLen/escaped/rngState) ready for
             the shared connect+resolve tail."""
-            if self.walk_mode == "megakernel":
+            if self.walk_mode == "fused":
                 self._stage(cmd, "wfBdptWalk", scene_set)     # eye+light+splat in one kernel
                 mem_barrier()
                 return
@@ -1026,7 +1026,7 @@ class WavefrontBdptPass:
                 indirect(self.SLOT_NEE, "wfBdptBounceEye")    # extend one eye vertex
                 mem_barrier()
             if self.walk_mode == "eye":
-                self._stage(cmd, "wfBdptLightTail", scene_set)  # megakernel light walk + splat
+                self._stage(cmd, "wfBdptLightTail", scene_set)  # fused light walk + splat
                 mem_barrier()
                 return
             # eye_light: staged light walk + standalone splat
