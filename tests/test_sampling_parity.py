@@ -34,7 +34,6 @@ SHADER_DIR = PROJECT_ROOT / "src" / "skinny" / "shaders"
 HDR_DIR = PROJECT_ROOT / "hdrs"
 TATTOO_DIR = PROJECT_ROOT / "tattoos"
 DEMO_SCENE = PROJECT_ROOT / "assets" / "three_materials_demo.usda"
-GOLDEN_FILE = Path(__file__).parent / "_sampling_parity_golden.txt"
 
 pytestmark = pytest.mark.gpu
 
@@ -54,7 +53,11 @@ def _have_vulkan() -> bool:
 needs_vulkan = pytest.mark.skipif(not _have_vulkan(), reason="No Vulkan runtime")
 
 
-def _render_demo_digest() -> tuple[str, np.ndarray]:
+def _golden_file(execution_mode: str) -> Path:
+    return Path(__file__).parent / f"_sampling_parity_golden_{execution_mode}.txt"
+
+
+def _render_demo_digest(execution_mode: str = "megakernel") -> tuple[str, np.ndarray]:
     """Render the demo scene deterministically; return (sha256_hex, hdr_array)."""
     from skinny.vk_context import VulkanContext
     from skinny.renderer import Renderer
@@ -67,6 +70,7 @@ def _render_demo_digest() -> tuple[str, np.ndarray]:
             hdr_dir=HDR_DIR,
             tattoo_dir=TATTOO_DIR,
             usd_scene_path=DEMO_SCENE,
+            execution_mode=execution_mode,
         )
         try:
             # Pump the async loader until the three spheres exist.
@@ -102,22 +106,26 @@ def _render_demo_digest() -> tuple[str, np.ndarray]:
 
 @needs_vulkan
 @pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
-def test_baseline_parity():
-    """Default {bsdf}/none output is byte-identical to the captured golden."""
-    digest, arr = _render_demo_digest()
+@pytest.mark.parametrize("execution_mode", ["megakernel", "wavefront"])
+def test_baseline_parity(execution_mode):
+    """Default {bsdf}/none output is byte-identical to the captured golden, in
+    both execution backends (the bounce routes through the proposal seam in
+    each, and BSDF-only must collapse to the pre-seam sample)."""
+    digest, arr = _render_demo_digest(execution_mode)
     finite = np.isfinite(arr).all()
     assert finite, "non-finite values in accumulation image"
     nonblack = float(arr[..., :3].max())
     assert nonblack > 0.01, f"image is ~black (max={nonblack}); render likely broke"
 
-    if not GOLDEN_FILE.exists():
-        GOLDEN_FILE.write_text(digest + "\n")
-        pytest.skip(f"golden captured → {GOLDEN_FILE.name}: {digest[:16]}… (re-run to assert)")
+    golden_file = _golden_file(execution_mode)
+    if not golden_file.exists():
+        golden_file.write_text(digest + "\n")
+        pytest.skip(f"golden captured → {golden_file.name}: {digest[:16]}… (re-run to assert)")
 
-    golden = GOLDEN_FILE.read_text().strip()
+    golden = golden_file.read_text().strip()
     assert digest == golden, (
-        f"baseline parity BROKEN: {digest[:16]}… != golden {golden[:16]}…\n"
-        f"max|val|={nonblack:.6g}. The seam refactor changed the default-path image."
+        f"[{execution_mode}] baseline parity BROKEN: {digest[:16]}… != golden "
+        f"{golden[:16]}…\nmax|val|={nonblack:.6g}. The seam changed the default-path image."
     )
 
 
