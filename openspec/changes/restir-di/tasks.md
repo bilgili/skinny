@@ -1,0 +1,57 @@
+> Phasing: P1 (spatial + unbiased + shade), P2 (progressive temporal), P4
+> (biased toggle + tuning). P3 (reprojected temporal — motion vectors + prev
+> G-buffer) is a separate follow-on change, reserved in the config enum.
+
+## 1. Reuse-seam Slang module (realize the scene-sampling reservation)
+
+- [ ] 1.1 New `shaders/sampling/reuse.slang`: the reuse interface + `identityReuseDirect<TM:IMaterial>(...)` (forwards to stock `allLightsNEE` + the indirect spawn). Route the integrator's primary-direct through the seam so ReSTIR and identity switch behind one call.
+- [ ] 1.2 `common.slang`: `RESTIR_DI` reuse-mode constant; the per-pixel G-buffer record layout (world pos, normal, materialId, wo) — scalar layout, Python-mirrored.
+
+## 2. Reservoir core + initial RIS (P1)
+
+- [ ] 2.1 `shaders/restir/reservoir.slang`: `LightSampleRef` (type:2|id:30 + uv), `Reservoir` (y, wSum, W, M, pHat), weighted-reservoir-update, pack/unpack, the unshadowed target `p̂ = luminance(f·Le·G)`.
+- [ ] 2.2 `shaders/restir/initial.slang`: initial RIS pass — draw `M_light` light candidates (unified sampler over directional/sphere/emissive-tri/env) + `M_bsdf` BSDF candidates, weighted-reservoir-sample to 1. No shadow rays (unshadowed p̂). Reads the G-buffer.
+- [ ] 2.3 G-buffer fill: write pos/normal/materialId/wo per pixel from the primary hit (augment the wavefront primary intersect/shade or a small fill pass).
+
+## 3. Spatial reuse + unbiased combination (P1)
+
+- [ ] 3.1 `shaders/restir/spatial.slang`: gather `spatial_k` neighbors in `spatial_radius`; reject on G-buffer dissimilarity (normal/depth thresholds); merge reservoirs.
+- [ ] 3.2 Unbiased combination: per-neighbor MIS weight `m_i` + the domain-aware `1/Z` normalization (count neighbors whose domain could produce `y`) + the reconnection Jacobian (`cosθ/d²` ratio between shading points) + horizon/visibility domain check.
+
+## 4. Resolve + integration gate (P1)
+
+- [ ] 4.1 `shaders/restir/resolve.slang`: one shadow ray for the surviving `y`; direct = `f(y)·V(y)·W`; write into the path's radiance / accumulation at the pixel.
+- [ ] 4.2 Integration gate: at `depth == 0` with `reuseMode == RESTIR_DI`, skip `allLightsNEE` + the sphere-light/env-miss direct term in the bounce; still sample the bounce direction via the proposal mixture + spawn indirect. `depth ≥ 1` unchanged. Guard against env double-count vs the proposal mixture.
+
+## 5. Host: plugin + passes + buffers (P1)
+
+- [ ] 5.1 `sampling/reuse.py`: `RestirDiReuse(ReusePlugin)` (`reuse_mode = RESTIR_DI`) — owns the reservoir (×2) + G-buffer buffers, the ReSTIR config UBO, `build/destroy/resize/reset`, `passes()`, `bindings()`.
+- [ ] 5.2 `sampling/registry.py`: register `RestirDiReuse`; `REUSE_PLUGINS` += it; renderer `reuse_modes` → `["None", "ReSTIR DI"]`.
+- [ ] 5.3 `vk_wavefront.py` (or new `vk_restir.py`): build + schedule the ReSTIR pass set in wavefront mode when active; reuse-mode switch triggers the pass rebuild.
+- [ ] 5.4 `renderer.py`: allocate/resize per-pixel buffers on framebuffer resize; wavefront capability gate (megakernel/Metal → identity); fold the ReSTIR config + reuse mode into `_current_state_hash`.
+- [ ] 5.5 `params.py`: ReSTIR sub-config params (`M_light`, `M_bsdf`, `spatial_k`, `spatial_radius`, `M_cap`, `biased`, regime toggles) — gated visible when ReSTIR active.
+
+## 6. Progressive temporal (P2)
+
+- [ ] 6.1 `shaders/restir/temporal.slang`: merge the prev-frame reservoir at the same pixel (progressive = identity reprojection, static camera); cap `M` at `M_cap`; unbiased temporal combination.
+- [ ] 6.2 Wire the double-buffer swap (prev/curr) per accumulation iteration; reset prev on accumulation reset.
+
+## 7. Biased toggle + tuning (P4)
+
+- [ ] 7.1 `biased` path in spatial/temporal merge: sum reservoirs, normalize by `ΣM`, skip `m_i`/Jacobian. Toggle via the ReSTIR UBO.
+- [ ] 7.2 Sensible default tuning (`M_light`/`M_bsdf`/`spatial_k`/`radius`/`M_cap`) + document the cost/quality trade.
+
+## 8. Tests + verification
+
+- [ ] 8.1 Converge-to-reference (unbiased gate): ReSTIR DI vs stock NEE, both high-spp on an emissive/area-light scene — integrated radiance within tolerance. Reuse `test_sampling_parity::_accumulate`.
+- [ ] 8.2 Variance reduction: ReSTIR error < stock-NEE error at low spp vs a converged reference.
+- [ ] 8.3 Temporal beats spatial: progressive-temporal error < spatial-only error.
+- [ ] 8.4 Biased bounded: biased darkening within a stated bound, no divergence.
+- [ ] 8.5 Capability gate: `reuse=ReSTIR` + megakernel → identity (no reservoir passes); wavefront builds them.
+- [ ] 8.6 Furnace still passes; pinned-seed runs reproducible.
+- [ ] 8.7 `ruff` + `slangc` recompile (`main_pass` + wavefront variants) + `py_compile`.
+
+## Out of scope (this change)
+
+- [ ] P3 reprojected temporal (motion vectors + prev-frame G-buffer + disocclusion) — follow-on change.
+- World-space / secondary-vertex ReSTIR; ReSTIR GI / PT; denoising.
