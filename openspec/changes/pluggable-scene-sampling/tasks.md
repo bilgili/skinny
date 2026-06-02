@@ -1,8 +1,10 @@
-> Progress: megakernel proposal seam complete (commits f9e9f12, 344ac4d).
+> Progress: megakernel proposal seam + front-end selection complete.
 > BSDF + env proposals with one-sample MIS + NEE coupling; baseline bit-identical
 > (cross-checkout proof vs main pre-seam, hash c7f77c5a); env unbiased + variance-
-> reducing. Remaining: wavefront shade kernels, reuse-seam Slang module, CLI/UI/
-> settings selection, state-hash reset, {bsdf,bsdf} sanity test.
+> reducing. `--proposals`/`--reuse` CLI + data-driven GUI/web/debug selectors +
+> settings persistence + accumulation-reset all wired.
+> Remaining: wavefront shade kernels (3.3 / 7.1 wavefront), reuse-seam Slang
+> module (2.1), wavefront reuse-pass assembly (5.4), {bsdf,bsdf} sanity test (7.2).
 
 ## 1. Slang — proposal seam
 
@@ -30,16 +32,16 @@
 
 ## 5. Host — renderer wiring
 
-- [ ] 5.1 `renderer.py`: `active_proposals` (default `[BsdfProposal()]`) + `active_reuse` (default `IdentityReuse()`) **done**; CLI constructor args **pending** (6.1).
+- [x] 5.1 `renderer.py`: proposal mixture + reuse modeled as discrete presets (`proposal_preset_index`/`reuse_index` + `*_modes`), resolved to plugin instances by `_active_proposals()`/`_active_reuse()`. CLI override applied post-construction like the integrator (`proposal_preset_from_token`).
 - [x] 5.2 Uniform packer writes `proposalMask`, `reuseMode`, `proposalAlpha` (float4, Σ=1) — exact scalar-layout byte order.
-- [ ] 5.3 `_current_state_hash()`: include `proposalMask`, the alpha tuple, and the reuse-plugin id so accumulation resets on any sampling change. **(Pending — needed once selection is user-changeable.)**
+- [x] 5.3 `_current_state_hash()`: includes `proposal_preset_index` + `reuse_index` so accumulation resets on any sampling change.
 - [ ] 5.4 Wavefront build (`vk_wavefront.py`): active plugins contribute `passes()`/`bindings()`; reuse-mode switch triggers a pass rebuild. **(Pending — no reuse passes yet.)**
 
 ## 6. Host — front-end consistency
 
-- [ ] 6.1 `cli_common.py`: `--proposals bsdf,env` + `--reuse none` (+ env fallbacks), wired into `skinny`/`skinny-gui`/`skinny-web`.
-- [ ] 6.2 UI selectors in `app.py` (ImGui), `web_app.py`, `debug_viewport.py`.
-- [ ] 6.3 `settings.py`: persist proposal set + alphas + reuse id.
+- [x] 6.1 `cli_common.py`: `--proposals {bsdf,bsdf,env,env}` + `--reuse none` (+ `SKINNY_PROPOSALS`/`SKINNY_REUSE` env), applied in `app.py`, `web_app.py`, `headless.py` (skinny-render) like `--integrator`.
+- [x] 6.2 UI selectors: added `_disc("Proposals", …)` + `_disc("Reuse", …)` to `STATIC_PARAMS` — the data-driven UI surfaces them in ImGui (`app.py`), web (`web_app.py`), and the debug viewport for free.
+- [x] 6.3 Settings: the new `_disc` params are in the `STATIC_PARAMS` snapshot, so `settings.json` persists/restores `proposal_preset_index` + `reuse_index` automatically.
 
 ## 7. Tests + verification
 

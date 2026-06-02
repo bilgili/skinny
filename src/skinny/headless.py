@@ -134,7 +134,8 @@ class HeadlessRenderer:
     """
 
     def __init__(self, width: int, height: int, *, gpu: Optional[str] = None,
-                 execution_mode: str = "megakernel", bdpt_walk: str = "fused") -> None:
+                 execution_mode: str = "megakernel", bdpt_walk: str = "fused",
+                 proposals: Optional[str] = None, reuse: Optional[str] = None) -> None:
         import skinny
         from skinny.renderer import Renderer
         from skinny.vk_context import VulkanContext
@@ -149,6 +150,12 @@ class HeadlessRenderer:
                 execution_mode=execution_mode,
                 bdpt_walk=resolve_walk(bdpt_walk),
             )
+            # Scene-sampling seam selection (mirrors the interactive front-ends).
+            if proposals is not None:
+                self.renderer.proposal_preset_index = \
+                    self.renderer.proposal_preset_from_token(proposals)
+            if reuse is not None:
+                self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
         except Exception:
             self.ctx.destroy()
             raise
@@ -329,7 +336,8 @@ def main(argv: Optional[list] = None) -> int:
     try:
         with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu,
                               execution_mode=ns.execution_mode,
-                              bdpt_walk=ns.bdpt_walk) as r:
+                              bdpt_walk=ns.bdpt_walk,
+                              proposals=ns.proposals, reuse=ns.reuse) as r:
             if ns.animate:
                 frames = _parse_frames(ns.frames) if ns.frames else None
                 paths = r.render_animation(

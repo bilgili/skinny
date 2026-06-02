@@ -1058,14 +1058,25 @@ class Renderer:
         self.integrator_modes: list[str] = ["Path", "BDPT"]
         self.integrator_index = 0
 
-        # Pluggable scene-sampling seam (sampling/proposal.slang). Active
-        # directional proposals at the bounce + the reuse mode around NEE.
-        # Default {bsdf}/none is bit-identical to the pre-seam renderer; folded
-        # into FrameConstants.proposalMask/proposalAlpha/reuseMode by
-        # _pack_uniforms. Front-end / CLI selection lands in a later commit.
-        from skinny.sampling import BsdfProposal, IdentityReuse
-        self.active_proposals = [BsdfProposal()]
-        self.active_reuse = IdentityReuse()
+        # Pluggable scene-sampling seam (sampling/proposal.slang). The active
+        # directional-proposal mixture + reuse mode are modeled as discrete
+        # presets so the data-driven `_disc` UI surfaces them across every
+        # front-end and the settings snapshot persists them — exactly like the
+        # integrator selector. Each preset is (label, comma-separated proposal
+        # tokens). `_active_proposals()` / `_active_reuse()` resolve the current
+        # indices to plugin instances, folded into FrameConstants by
+        # _pack_uniforms. Default index 0 ({bsdf}/none) is bit-identical to the
+        # pre-seam renderer. Reuse has only the identity mode until ReSTIR lands.
+        self._PROPOSAL_PRESETS: list[tuple[str, str]] = [
+            ("BSDF",       "bsdf"),
+            ("BSDF + Env", "bsdf,env"),
+            ("Env",        "env"),
+        ]
+        self.proposal_preset_modes: list[str] = [n for n, _ in self._PROPOSAL_PRESETS]
+        self.proposal_preset_index = 0
+        self._REUSE_TOKENS: list[str] = ["none"]
+        self.reuse_modes: list[str] = ["None"]
+        self.reuse_index = 0
 
         # Execution backend, orthogonal to the integrator and FIXED for the
         # session — selected on the command line (`--execution-mode`,
@@ -6652,6 +6663,33 @@ class Renderer:
             )
             self._last_lens_print_t = now
 
+    # ── Scene-sampling seam: resolve preset indices → plugin instances ──
+
+    def _active_proposals(self) -> list:
+        """Active directional proposals for the current preset index."""
+        from skinny.sampling import parse_proposals
+        n = len(self._PROPOSAL_PRESETS)
+        idx = max(0, min(int(self.proposal_preset_index), n - 1))
+        return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
+
+    def _active_reuse(self):
+        """Active reuse plugin for the current reuse index."""
+        from skinny.sampling import parse_reuse
+        n = len(self._REUSE_TOKENS)
+        idx = max(0, min(int(self.reuse_index), n - 1))
+        return parse_reuse(self._REUSE_TOKENS[idx])
+
+    def proposal_preset_from_token(self, token: str) -> int:
+        """Map a `--proposals` CLI token (e.g. ``'bsdf,env'``) to a preset index.
+
+        Matches by token *set* so order doesn't matter; unknown combinations
+        fall back to preset 0 (``bsdf``)."""
+        want = frozenset(t.strip() for t in str(token).split(",") if t.strip())
+        for i, (_, tok) in enumerate(self._PROPOSAL_PRESETS):
+            if frozenset(tok.split(",")) == want:
+                return i
+        return 0
+
     def _pack_uniforms(self) -> bytes:
         self._sync_lens_buffer()
         aspect = self.width / self.height
@@ -6798,8 +6836,8 @@ class Renderer:
         # {bsdf}/none folds to mask=1, alpha=(1,0,0,0), reuseMode=0 — the
         # bounce takes the BSDF fast path, bit-identical to the pre-seam build.
         from skinny.sampling import proposal_mask_and_alpha
-        prop_mask, prop_alpha = proposal_mask_and_alpha(self.active_proposals)
-        data += struct.pack("II", int(prop_mask), int(self.active_reuse.reuse_mode))  # 8 bytes
+        prop_mask, prop_alpha = proposal_mask_and_alpha(self._active_proposals())
+        data += struct.pack("II", int(prop_mask), int(self._active_reuse().reuse_mode))  # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
 
         # Directional lights are no longer in the UBO — they live in the
@@ -6920,6 +6958,10 @@ class Renderer:
             float(self.tattoo_density),
             int(self.scatter_index),
             int(self.integrator_index),
+            # Scene-sampling seam: changing the proposal mixture or reuse mode
+            # resets accumulation so the new configuration converges cleanly.
+            int(self.proposal_preset_index),
+            int(self.reuse_index),
             # execution_mode_index is fixed for the session (CLI-selected), so
             # it never changes mid-session and is omitted from the hash.
             float(self.env_intensity),

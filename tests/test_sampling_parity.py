@@ -127,14 +127,14 @@ def _luminance(arr: np.ndarray) -> np.ndarray:
     return 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
 
 
-def _accumulate(renderer, proposals, n_samples: int, base_seed: int) -> np.ndarray:
-    """Deterministically accumulate ``n_samples`` frames with the given active
-    proposal set; return the mean linear-HDR image (H, W, 4).
+def _accumulate(renderer, preset_index: int, n_samples: int, base_seed: int) -> np.ndarray:
+    """Deterministically accumulate ``n_samples`` frames with the given proposal
+    preset (0 = bsdf, 1 = bsdf+env); return the mean linear-HDR image (H, W, 4).
 
     Drives frame_index (the RNG seed) and accum_frame (the running-mean index)
     by hand so the result is reproducible and independent of any prior render.
     """
-    renderer.active_proposals = list(proposals)
+    renderer.proposal_preset_index = int(preset_index)
     for i in range(n_samples):
         renderer.frame_index = base_seed + i
         renderer.accum_frame = i
@@ -154,10 +154,8 @@ def test_env_proposal_unbiased_and_reduces_variance():
     """
     from skinny.vk_context import VulkanContext
     from skinny.renderer import Renderer
-    from skinny.sampling import BsdfProposal, EnvImportanceProposal
 
-    bsdf = [BsdfProposal()]
-    bsdf_env = [BsdfProposal(), EnvImportanceProposal()]
+    BSDF, BSDF_ENV = 0, 1   # proposal preset indices
 
     ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
     try:
@@ -179,10 +177,10 @@ def test_env_proposal_unbiased_and_reduces_variance():
             # Isolate IBL so the env proposal is the thing under test.
             renderer.direct_light_index = 1
 
-            conv_bsdf = _accumulate(renderer, bsdf, 96, base_seed=1000)
-            conv_env = _accumulate(renderer, bsdf_env, 96, base_seed=2000)
-            lo_bsdf = _accumulate(renderer, bsdf, 16, base_seed=3000)
-            lo_env = _accumulate(renderer, bsdf_env, 16, base_seed=3000)
+            conv_bsdf = _accumulate(renderer, BSDF, 96, base_seed=1000)
+            conv_env = _accumulate(renderer, BSDF_ENV, 96, base_seed=2000)
+            lo_bsdf = _accumulate(renderer, BSDF, 16, base_seed=3000)
+            lo_env = _accumulate(renderer, BSDF_ENV, 16, base_seed=3000)
 
             for name, img in (("conv_bsdf", conv_bsdf), ("conv_env", conv_env)):
                 assert np.isfinite(img).all(), f"{name} has non-finite values"

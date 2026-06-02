@@ -513,6 +513,11 @@ def main() -> None:
     # CLI --integrator (when given) wins over the persisted value for this launch.
     if args.integrator is not None:
         renderer.integrator_index = INTEGRATOR_INDEX[args.integrator]
+    # CLI --proposals / --reuse likewise override the persisted sampling seam.
+    if args.proposals is not None:
+        renderer.proposal_preset_index = renderer.proposal_preset_from_token(args.proposals)
+    if args.reuse is not None:
+        renderer.reuse_index = renderer._REUSE_TOKENS.index(args.reuse)
     renderer._update_light()
 
     from skinny.debug_viewport import DebugViewport
