@@ -16,7 +16,6 @@ import argparse
 import asyncio
 import io
 import logging
-import os
 import struct
 import time
 import uuid
@@ -30,6 +29,7 @@ from tornado.ioloop import IOLoop
 from tornado.web import RequestHandler
 from tornado.websocket import WebSocketHandler
 
+from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.params import _set_nested
 from skinny.vk_context import VulkanContext
 from skinny.renderer import Renderer
@@ -43,7 +43,8 @@ _GPU_PREFERENCE: str = "auto"
 _USD_PATH: Path | None = None
 _USE_USD_MTLX: bool = False
 _EXECUTION_MODE: str = "megakernel"
-_BDPT_WALK: str = "megakernel"
+_BDPT_WALK: str = "fused"
+_INTEGRATOR: str | None = None
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -100,6 +101,8 @@ class SkinnySession:
                 execution_mode=_EXECUTION_MODE,
                 bdpt_walk=_BDPT_WALK,
             )
+            if _INTEGRATOR is not None:
+                self.renderer.integrator_index = INTEGRATOR_INDEX[_INTEGRATOR]
 
             self._log_init("Setting up video encoder...")
             self.encoder = VideoEncoder(1280, 720, gpu_info=self.ctx.gpu_info)
@@ -667,29 +670,17 @@ def main() -> None:
     parser.add_argument("--usd", type=Path, default=None,
                         help="Path to a USD stage (alternative to positional scene arg).")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
-    parser.add_argument(
-        "--execution-mode", choices=("megakernel", "wavefront"),
-        default=os.environ.get("SKINNY_EXECUTION_MODE", "megakernel"),
-        help="GPU execution backend, fixed for each session (+ SKINNY_EXECUTION_MODE "
-             "env). 'wavefront' is Vulkan only and compiles only the staged "
-             "backend; pinned to megakernel on Metal.",
-    )
-    parser.add_argument(
-        "--bdpt-walk", choices=("megakernel", "eye", "eye_light"),
-        default=os.environ.get("SKINNY_BDPT_WALK", "megakernel"),
-        help="Subpath-build strategy for wavefront + bdpt only (+ SKINNY_BDPT_WALK "
-             "env). 'megakernel' (default) builds both subpaths in one kernel + "
-             "connect compaction (fastest); 'eye' / 'eye_light' stage the eye / "
-             "eye+light walks. All produce the identical image.",
-    )
+    add_render_flags(parser)
     args = parser.parse_args()
 
     global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE, _BDPT_WALK
+    global _INTEGRATOR
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
     _EXECUTION_MODE = args.execution_mode
-    _BDPT_WALK = args.bdpt_walk
+    _BDPT_WALK = resolve_walk(args.bdpt_walk)
+    _INTEGRATOR = args.integrator
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

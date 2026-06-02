@@ -109,6 +109,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tooling
 
+- Unified render-selection flags across every front-end (`skinny`,
+  `skinny-gui`, `skinny-web`, `skinny-render`), defined once in
+  `skinny.cli_common`: `--integrator {path,bdpt}`, `--execution-mode
+  {megakernel,wavefront}`, and `--bdpt-walk {fused,eye,eye_light}`. The
+  interactive front-ends gained `--integrator` (sets the initial integrator,
+  still runtime-cycleable); `skinny-render` gained `--execution-mode` /
+  `--bdpt-walk`
+- The wavefront-bdpt single-kernel subpath build is now `--bdpt-walk fused`
+  (was `megakernel`), so `megakernel` names only the execution mode. The old
+  `megakernel` walk value is still accepted as a deprecated alias for `fused`
+  (CLI, `SKINNY_BDPT_WALK` env, and persisted values)
 - Headless render API (`skinny.headless`) and `skinny-render` CLI for offscreen
   USD rendering — accepts a file path or a live `Usd.Stage` mutated per frame;
   saves PNG/JPEG/BMP/EXR/HDR or returns a numpy array; supports USD-time and an

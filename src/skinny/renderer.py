@@ -45,6 +45,7 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
+from skinny.cli_common import resolve_walk
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
@@ -922,18 +923,20 @@ class Renderer:
         usd_scene_path: Path | None = None,
         use_usd_mtlx_plugin: bool = False,
         execution_mode: str = "megakernel",
-        bdpt_walk: str = "megakernel",
+        bdpt_walk: str = "fused",
     ) -> None:
         self.ctx = vk_ctx
         self._requested_execution_mode = str(execution_mode)
         # BDPT subpath-build strategy for wavefront+bdpt (CLI-fixed per session):
-        #   megakernel — one walk kernel (the S1 connect-compaction win, default)
-        #   eye        — staged eye walk + megakernel light tail
+        #   fused      — one walk kernel (the S1 connect-compaction win, default)
+        #   eye        — staged eye walk + fused light tail
         #   eye_light  — fully staged eye + light walks
         # All produce the identical image; this only trades dispatch overhead vs
-        # occupancy. Validated/clamped by WavefrontBdptPass.
-        _bw = str(bdpt_walk).strip().lower()
-        self.bdpt_walk_mode = _bw if _bw in ("megakernel", "eye", "eye_light") else "megakernel"
+        # occupancy. The deprecated `megakernel` alias resolves to `fused`.
+        try:
+            self.bdpt_walk_mode = resolve_walk(bdpt_walk)
+        except ValueError:
+            self.bdpt_walk_mode = "fused"
         self.width = vk_ctx.width
         self.height = vk_ctx.height
         self.shader_dir = shader_dir

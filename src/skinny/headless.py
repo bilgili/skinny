@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 
+from skinny.cli_common import add_render_flags, resolve_walk
+
 if TYPE_CHECKING:
     from pxr import Usd
 
@@ -131,7 +133,8 @@ class HeadlessRenderer:
                 r.render_scene(stage, f"out/{i:04d}.png", samples=64)
     """
 
-    def __init__(self, width: int, height: int, *, gpu: Optional[str] = None) -> None:
+    def __init__(self, width: int, height: int, *, gpu: Optional[str] = None,
+                 execution_mode: str = "megakernel", bdpt_walk: str = "fused") -> None:
         import skinny
         from skinny.renderer import Renderer
         from skinny.vk_context import VulkanContext
@@ -143,6 +146,8 @@ class HeadlessRenderer:
                 shader_dir=Path(skinny.__file__).resolve().parent / "shaders",
                 hdr_dir=_repo_root() / "hdrs",
                 tattoo_dir=_repo_root() / "tattoos",
+                execution_mode=execution_mode,
+                bdpt_walk=resolve_walk(bdpt_walk),
             )
         except Exception:
             self.ctx.destroy()
@@ -298,7 +303,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--width", type=int, default=1024)
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--samples", type=int, default=64)
-    p.add_argument("--integrator", choices=["path", "bdpt"], default="path")
+    add_render_flags(p)
     p.add_argument("--tonemap", choices=["aces", "reinhard", "hable", "linear"],
                    default="aces")
     p.add_argument("--exposure", type=float, default=0.0)
@@ -317,12 +322,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list] = None) -> int:
     ns = _build_parser().parse_args(argv)
     opts = dict(
-        samples=ns.samples, integrator=ns.integrator, tonemap=ns.tonemap,
+        samples=ns.samples, integrator=ns.integrator or "path", tonemap=ns.tonemap,
         exposure=ns.exposure, env_intensity=ns.env_intensity,
         direct_light=not ns.no_direct,
     )
     try:
-        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu) as r:
+        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu,
+                              execution_mode=ns.execution_mode,
+                              bdpt_walk=ns.bdpt_walk) as r:
             if ns.animate:
                 frames = _parse_frames(ns.frames) if ns.frames else None
                 paths = r.render_animation(
