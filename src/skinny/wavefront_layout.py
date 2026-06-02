@@ -12,6 +12,8 @@ alignment, fields tightly packed.
 
 from __future__ import annotations
 
+from skinny.wavefront_shade_packer import MAX_SLOTS
+
 # Scalar-layout byte sizes for the field types the record uses. All are
 # multiples of 4 with alignment <= 4, so the struct packs tightly with no
 # interior padding.
@@ -61,17 +63,21 @@ def queue_buffer_sizes(stream_size: int, num_materials: int) -> dict[str, int]:
     """Byte sizes for the wavefront stage buffers, the single source of truth
     the `WavefrontPasses` allocator (vk_wavefront.py) sizes against.
 
-    Stream-sized buffers scale with the lane count; per-material buffers scale
-    with the active material count. The hit buffer is intentionally absent —
-    its stride follows `HitData` (common.slang) and is pinned alongside the
-    intersect stage that produces it.
+    Stream-sized buffers scale with the lane count. The per-slot counting-sort
+    buffers scale with MAX_SLOTS (the fixed padded shade-slot count, not the
+    material count — the shade stage groups by slot, and the CPU dispatches only
+    the slots actually built). `material_slot` is the per-material slot lookup
+    table the classify stage reads, one uint per material. The hit buffer is
+    intentionally absent — its stride follows `HitData` (common.slang) and is
+    pinned alongside the intersect stage that produces it.
     """
     return {
         "path_state":      stream_size * PATH_STATE_STRIDE,
         "ray_queue":       stream_size * _UINT,
         "material_queue":  stream_size * _UINT,
         "ray_count":       _UINT,
-        "material_count":  num_materials * _UINT,
-        "material_offset": num_materials * _UINT,
-        "indirect_args":   num_materials * INDIRECT_ARGS_STRIDE,
+        "material_count":  MAX_SLOTS * _UINT,
+        "material_offset": MAX_SLOTS * _UINT,
+        "indirect_args":   MAX_SLOTS * INDIRECT_ARGS_STRIDE,
+        "material_slot":   max(1, num_materials) * _UINT,
     }

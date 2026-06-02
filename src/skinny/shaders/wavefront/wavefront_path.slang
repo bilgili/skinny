@@ -142,7 +142,7 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
     s.rayOrigin = r.origin;
     wfState[i] = s;
     wfHits[i] = h;
-    uint slot = wfSlotForType(materialTypes[h.materialId] & 0xFFu);
+    uint slot = wfSlotForMaterial(h.materialId);
     wfLaneSlot[i] = slot;
     uint prev;
     InterlockedAdd(wfSlotCount[slot], 1u, prev);
@@ -150,13 +150,15 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 
 // Build-args — exclusive prefix-sum the per-slot counts into queue offsets and
 // emit one VkDispatchIndirectCommand (ceil(count/64),1,1) per slot. Single
-// thread; WF_NUM_SLOTS is tiny.
+// thread; MAX_SLOTS is small (empty slots get a 0-group command, never dispatched
+// by the CPU). Padding the loop to MAX_SLOTS avoids recompiling on slot-count
+// changes.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void wfBuildArgs(uint3 tid: SV_DispatchThreadID)
 {
     uint running = 0u;
-    for (uint slot = 0u; slot < WF_NUM_SLOTS; ++slot)
+    for (uint slot = 0u; slot < MAX_SLOTS; ++slot)
     {
         wfSlotOffset[slot] = running;
         uint c = wfSlotCount[slot];
@@ -214,7 +216,7 @@ void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathShade(uint3 tid: SV_DispatchThreadID)
 {
-    // Queue-indexed: indirect-dispatched over slot WF_SLOT_OTHER's lanes only.
+    // Queue-indexed: indirect-dispatched over this shade group's slot lanes only.
     uint i = wfQueueLane(wfTile.shadeSlot, tid.x);
     if (i == 0xFFFFFFFFu)
         return;

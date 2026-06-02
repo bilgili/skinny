@@ -5,12 +5,12 @@
 
 ## 2. Slot count + buffers (dynamic via MAX_SLOTS)
 
-- [ ] 2.1 `wf_shade_common.slang`: `WF_NUM_SLOTS` (static `2u`) → `MAX_SLOTS` (`32`); clear-counts / build-args / classify loop bounds use it. Confirm group-count/offset/cursor/indirect-args indexing stays correct at the larger bound.
-- [ ] 2.2 `wavefront_layout.queue_buffer_sizes`: size `material_count` / `material_offset` / `indirect_args` to `MAX_SLOTS` (not the live material count). Keep the per-stream queue buffers stream-sized.
+- [x] 2.1 `wf_shade_common.slang`: `WF_NUM_SLOTS` (static `2u`) → `MAX_SLOTS` (`32`); clear-counts / build-args / classify loop bounds use it. Confirm group-count/offset/cursor/indirect-args indexing stays correct at the larger bound.
+- [x] 2.2 `wavefront_layout.queue_buffer_sizes`: size `material_count` / `material_offset` / `indirect_args` to `MAX_SLOTS` (not the live material count). Keep the per-stream queue buffers stream-sized.
 
 ## 3. Classifier: materialId → slot
 
-- [ ] 3.1 `wf_shade_common.slang`: replace `wfSlotForType(matType)` with `wfSlotForMaterial(matId)` reading a new `materialSlot[]` set-1 storage binding (one `uint`/material; flat + graph → 0). Update `wavefront_path.slang` classify (`wfLaneSlot[i] = wfSlotForMaterial(hit.materialId)`).
+- [x] 3.1 `wf_shade_common.slang`: replace `wfSlotForType(matType)` with `wfSlotForMaterial(matId)` reading a new `materialSlot[]` set-1 storage binding (one `uint`/material; flat + graph → 0). Update `wavefront_path.slang` classify (`wfLaneSlot[i] = wfSlotForMaterial(hit.materialId)`).
 - [ ] 3.2 `vk_wavefront.WavefrontPathPass`: own + bind the `materialSlot` buffer; upload from the grouping (renderer supplies the array).
 
 ## 4. Grouped shade pipelines

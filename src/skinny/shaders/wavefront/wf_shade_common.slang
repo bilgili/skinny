@@ -18,12 +18,17 @@ static const uint WF_MAX_BOUNCES = 6u;
 static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
 static const uint WF_SLOT_SENTINEL = 0xFFFFFFFFu;  // lane not enqueued this bounce
 static const uint WF_SHADE_GROUP = 64u;            // shade [numthreads(64,1,1)]
-// Per-material shade slots: 0 = flat/graph (wfPathShadeFlat), 1 = non-flat
-// catch-all (wfPathShade). The counting sort groups each bounce's hit lanes by
-// slot so each shade dispatch covers only its lanes (vkCmdDispatchIndirect).
-static const uint WF_NUM_SLOTS = 2u;
+// Per-material shade slots. Slot 0 is always the flat/graph kernel
+// (wfPathShadeFlat). Slots 1.. are size-bounded shade groups assigned by the CPU
+// bin-packer (wavefront_shade_packer); each hit's slot is looked up per material
+// in wfMaterialSlot. The counting sort groups each bounce's hit lanes by slot so
+// each shade dispatch covers only its lanes (vkCmdDispatchIndirect). MAX_SLOTS
+// is a fixed pad: classify/build-args loop over it (cheap), the CPU dispatches
+// only the groups actually built, so a large cap costs loop iterations + a few
+// buffer bytes, not dispatch count. Lockstep with MAX_SLOTS in
+// wavefront_shade_packer.py.
+static const uint MAX_SLOTS = 32u;
 static const uint WF_SLOT_FLAT = 0u;
-static const uint WF_SLOT_OTHER = 1u;
 
 // streamBase: per-tile pixel base (generate). shadeSlot: which material slot a
 // queue-indexed shade dispatch processes. streamSize: slots in the stream
@@ -38,13 +43,16 @@ struct WfTilePC { uint streamBase; uint shadeSlot; uint streamSize; };
 [[vk::binding(3, 1)]] RWStructuredBuffer<uint> wfSlotCount;     // [NUM_SLOTS] hits per slot
 [[vk::binding(4, 1)]] RWStructuredBuffer<uint> wfSlotOffset;    // [NUM_SLOTS] queue base per slot
 [[vk::binding(5, 1)]] RWStructuredBuffer<uint> wfSlotQueue;     // [stream]  lane indices, grouped by slot
-[[vk::binding(6, 1)]] RWStructuredBuffer<uint> wfSlotCursor;    // [NUM_SLOTS] scatter write cursor
-[[vk::binding(7, 1)]] RWStructuredBuffer<uint> wfIndirectArgs;  // [NUM_SLOTS*3] (x,y,z) per slot
+[[vk::binding(6, 1)]] RWStructuredBuffer<uint> wfSlotCursor;    // [MAX_SLOTS] scatter write cursor
+[[vk::binding(7, 1)]] RWStructuredBuffer<uint> wfIndirectArgs;  // [MAX_SLOTS*3] (x,y,z) per slot
+// Per-material shade slot, one uint per material (CPU bin-packer output):
+// flat/graph → 0, each non-flat material → its size-bounded group's slot.
+[[vk::binding(8, 1)]] StructuredBuffer<uint> wfMaterialSlot;    // [numMaterials]
 
 uint2 wfDecodePixel(uint lane) { return uint2(lane % fc.width, lane / fc.width); }
 
-// Map a hit's material type to its shade slot.
-uint wfSlotForType(uint matType) { return (matType == MATERIAL_TYPE_FLAT) ? WF_SLOT_FLAT : WF_SLOT_OTHER; }
+// Map a hit's material to its shade slot via the CPU-built per-material table.
+uint wfSlotForMaterial(uint matId) { return wfMaterialSlot[matId]; }
 
 // Resolve the stream slot a queue-indexed shade dispatch should process, or
 // 0xFFFFFFFF past the slot's queue (the lane should early-out). `qpos` is the
