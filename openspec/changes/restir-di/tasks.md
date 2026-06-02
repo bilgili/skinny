@@ -1,15 +1,24 @@
+> RESUME (paused at commit a4a4ce1): done = 1.1 reuse-seam (parity) + 2.1
+> reservoir core (RIS unbiasedness tested). NEXT = the render-able vertical
+> slice: 2.2 initial RIS over the real light domain (needs scene light/env
+> bindings + p̂=f·Le·G) → 5.x RestirDiReuse host plugin + wavefront pass set
+> (study vk_wavefront.py pass scheduling) → 4.x resolve + activate the depth-0
+> gate → converge-to-reference test (reuse test_sampling_parity::_accumulate).
+> Worktree ../skinny-restir-di has the venv + mtlx symlink + parity goldens —
+> no re-setup needed. VULKAN_SDK + DYLD_LIBRARY_PATH per CLAUDE.md.
+>
 > Phasing: P1 (spatial + unbiased + shade), P2 (progressive temporal), P4
 > (biased toggle + tuning). P3 (reprojected temporal — motion vectors + prev
 > G-buffer) is a separate follow-on change, reserved in the config enum.
 
 ## 1. Reuse-seam Slang module (realize the scene-sampling reservation)
 
-- [ ] 1.1 New `shaders/sampling/reuse.slang`: the reuse interface + `identityReuseDirect<TM:IMaterial>(...)` (forwards to stock `allLightsNEE` + the indirect spawn). Route the integrator's primary-direct through the seam so ReSTIR and identity switch behind one call.
+- [x] 1.1 `shaders/sampling/reuse.slang` realized: `reuseDirect<TM:IMaterial>` routes primary-direct through the seam in both backends (path.slang FLAT/PYTHON + wavefront flat_bounce.slang); identity ⇒ stock `allLightsNEE`, with the inert depth-0 ReSTIR gate wired. Parity bit-identical both backends (goldens c7f77c5a / 803d9f9c). Commit 35be502.
 - [ ] 1.2 `common.slang`: `RESTIR_DI` reuse-mode constant; the per-pixel G-buffer record layout (world pos, normal, materialId, wo) — scalar layout, Python-mirrored.
 
 ## 2. Reservoir core + initial RIS (P1)
 
-- [ ] 2.1 `shaders/restir/reservoir.slang`: `LightSampleRef` (type:2|id:30 + uv), `Reservoir` (y, wSum, W, M, pHat), weighted-reservoir-update, pack/unpack, the unshadowed target `p̂ = luminance(f·Le·G)`.
+- [x] 2.1 `shaders/restir/reservoir.slang`: `LightSampleRef` (type:2|id:30 + uv) + `Reservoir` (y, wSum, W, M, pHat) + pure RIS ops (reset/update/finalize, `W = wSum/(M·p̂)`). RIS unbiasedness unit-tested in isolation (test_restir_harness.slang + test_restir.py, slangpy): unbiased M=1/4/16, selection ∝ weight. Commit a4a4ce1. (The light-domain `p̂ = luminance(f·Le·G)` lives in 2.2, needs scene bindings.)
 - [ ] 2.2 `shaders/restir/initial.slang`: initial RIS pass — draw `M_light` light candidates (unified sampler over directional/sphere/emissive-tri/env) + `M_bsdf` BSDF candidates, weighted-reservoir-sample to 1. No shadow rays (unshadowed p̂). Reads the G-buffer.
 - [ ] 2.3 G-buffer fill: write pos/normal/materialId/wo per pixel from the primary hit (augment the wavefront primary intersect/shade or a small fill pass).
 
