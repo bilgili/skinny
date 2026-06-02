@@ -1,11 +1,25 @@
-> RESUME (paused at commit a4a4ce1): done = 1.1 reuse-seam (parity) + 2.1
-> reservoir core (RIS unbiasedness tested). NEXT = the render-able vertical
-> slice: 2.2 initial RIS over the real light domain (needs scene light/env
-> bindings + p̂=f·Le·G) → 5.x RestirDiReuse host plugin + wavefront pass set
-> (study vk_wavefront.py pass scheduling) → 4.x resolve + activate the depth-0
-> gate → converge-to-reference test (reuse test_sampling_parity::_accumulate).
+> RESUME (paused at commit 54fa487). Pure-math foundation DONE + verified:
+> 1.1 reuse-seam (parity bit-identical both backends) · 2.1 reservoir core (RIS
+> unbiasedness) · reservoirMerge (combine for spatial+temporal). 12 slangpy unit
+> tests green.
+>
+> NEXT GOAL = renderable initial-RIS ReSTIR (the coupled trunk, one vertical):
+>   1. STUDY vk_wavefront.py pass machinery (how a pass compiles/binds/dispatches
+>      + the per-frame schedule) — prerequisite for all plumbing.
+>   2. FREEZE contracts: G-buffer struct (pos/normal/matId/wo), descriptor
+>      bindings, ReSTIR config UBO/push-constant, pass-schedule. Parity-safe.
+>   3. BUILD: restir/initial.slang (light+BSDF candidates over the unified light
+>      set, unshadowed p̂=f·Le·G) → RestirDiReuse(ReusePlugin) + wavefront pass +
+>      reservoir buffer → restir/resolve.slang (shadow ray + f·V·W) → activate the
+>      depth-0 gate in reuse.slang (set reuseMode=1, register RestirDiReuse,
+>      reuse_modes += "ReSTIR DI", wavefront capability gate).
+>   4. TEST: converge-to-reference (ReSTIR vs reuse=none, high-spp image-mean
+>      match) via test_sampling_parity::_accumulate. THE unbiased gate.
+>   Then 3.x spatial reuse (Jacobian/MIS — hard math), 6.x temporal, 7.x biased.
+>
 > Worktree ../skinny-restir-di has the venv + mtlx symlink + parity goldens —
-> no re-setup needed. VULKAN_SDK + DYLD_LIBRARY_PATH per CLAUDE.md.
+> no re-setup. export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS
+> DYLD_LIBRARY_PATH=$VULKAN_SDK/lib ; bin/python3.13 -m pytest tests/test_restir.py
 >
 > Phasing: P1 (spatial + unbiased + shade), P2 (progressive temporal), P4
 > (biased toggle + tuning). P3 (reprojected temporal — motion vectors + prev
