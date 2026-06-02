@@ -119,3 +119,97 @@ def test_baseline_parity():
         f"baseline parity BROKEN: {digest[:16]}… != golden {golden[:16]}…\n"
         f"max|val|={nonblack:.6g}. The seam refactor changed the default-path image."
     )
+
+
+# ── Environment proposal: unbiasedness + variance reduction ────────
+
+def _luminance(arr: np.ndarray) -> np.ndarray:
+    return 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
+
+
+def _accumulate(renderer, proposals, n_samples: int, base_seed: int) -> np.ndarray:
+    """Deterministically accumulate ``n_samples`` frames with the given active
+    proposal set; return the mean linear-HDR image (H, W, 4).
+
+    Drives frame_index (the RNG seed) and accum_frame (the running-mean index)
+    by hand so the result is reproducible and independent of any prior render.
+    """
+    renderer.active_proposals = list(proposals)
+    for i in range(n_samples):
+        renderer.frame_index = base_seed + i
+        renderer.accum_frame = i
+        renderer.render_headless()
+    arr, samples = renderer.read_accumulation_hdr()
+    return np.ascontiguousarray(arr, dtype=np.float32) / max(samples, 1)
+
+
+@needs_vulkan
+@pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
+def test_env_proposal_unbiased_and_reduces_variance():
+    """{bsdf,env} converges to the same image as {bsdf} (unbiased MIS) and has
+    lower error at equal low sample count on an IBL-lit scene.
+
+    Bias here would mean the mixture pdf or the NEE-coupling is wrong. IBL is
+    isolated (direct lights off) so the environment proposal carries the signal.
+    """
+    from skinny.vk_context import VulkanContext
+    from skinny.renderer import Renderer
+    from skinny.sampling import BsdfProposal, EnvImportanceProposal
+
+    bsdf = [BsdfProposal()]
+    bsdf_env = [BsdfProposal(), EnvImportanceProposal()]
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    try:
+        renderer = Renderer(
+            vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+            tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+        )
+        try:
+            deadline = 400
+            while deadline > 0 and (
+                renderer._usd_scene is None
+                or len(renderer._usd_scene.instances) < 3
+            ):
+                renderer.update(0.025)
+                deadline -= 1
+            assert renderer._usd_scene is not None
+            for _ in range(16):
+                renderer.update(0.04)
+            # Isolate IBL so the env proposal is the thing under test.
+            renderer.direct_light_index = 1
+
+            conv_bsdf = _accumulate(renderer, bsdf, 96, base_seed=1000)
+            conv_env = _accumulate(renderer, bsdf_env, 96, base_seed=2000)
+            lo_bsdf = _accumulate(renderer, bsdf, 16, base_seed=3000)
+            lo_env = _accumulate(renderer, bsdf_env, 16, base_seed=3000)
+
+            for name, img in (("conv_bsdf", conv_bsdf), ("conv_env", conv_env)):
+                assert np.isfinite(img).all(), f"{name} has non-finite values"
+            lum_bsdf = _luminance(conv_bsdf)
+            lum_env = _luminance(conv_env)
+            mean_bsdf = float(lum_bsdf.mean())
+            mean_env = float(lum_env.mean())
+            assert mean_bsdf > 1e-3, f"IBL render ~black (mean={mean_bsdf}); no env signal"
+
+            # Unbiasedness: integrated radiance (a very low-variance statistic)
+            # must agree — a wrong mixture pdf / NEE coupling would shift energy.
+            rel = abs(mean_env - mean_bsdf) / mean_bsdf
+            assert rel < 0.03, (
+                f"env proposal biased: image-mean luminance {mean_env:.6g} vs "
+                f"bsdf-only {mean_bsdf:.6g} (rel {rel:.4f} ≥ 0.03)"
+            )
+
+            # Variance reduction: at 16 spp the env-mixed image is closer to the
+            # converged bsdf reference than bsdf-only is.
+            ref = _luminance(conv_bsdf)
+            err_bsdf = float(np.sqrt(np.mean((_luminance(lo_bsdf) - ref) ** 2)))
+            err_env = float(np.sqrt(np.mean((_luminance(lo_env) - ref) ** 2)))
+            assert err_env <= err_bsdf, (
+                f"env proposal did not reduce error: rmse env {err_env:.5g} > "
+                f"bsdf {err_bsdf:.5g}"
+            )
+        finally:
+            renderer.cleanup()
+    finally:
+        ctx.destroy()
