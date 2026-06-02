@@ -56,6 +56,31 @@ bool reservoirUpdate(inout Reservoir r, LightSampleRef x, float w, float pHat_x,
     return take;
 }
 
+// Merge a finalized source reservoir `src` into `dst` as a single
+// supercandidate with weight  w = pHatInDst · src.W · src.M, where pHatInDst is
+// src.y's target value evaluated in dst's domain. For same-point temporal reuse
+// pHatInDst == src.pHat (the geometry is unchanged); for spatial reuse it is
+// src.y re-evaluated at the canonical shading point (the reconnection). dst.M
+// accumulates src.M. `rand` ∈ [0,1). Returns true if dst adopted src.y.
+//
+// Combining reservoirs r₁…r_k into a fresh reservoir via reservoirMerge is the
+// unbiased multi-reservoir RIS combination (Bitterli 2020 Alg. 4): each source
+// contributes its W·M·p̂, the survivor is chosen ∝ those weights, and finalize
+// yields the combined contribution weight over ΣM samples.
+bool reservoirMerge(inout Reservoir dst, Reservoir src, float pHatInDst, float rand)
+{
+    float w = pHatInDst * src.W * float(src.M);
+    dst.wSum += w;
+    dst.M += src.M;
+    bool take = (w > 0.0) && (rand * dst.wSum < w);
+    if (take)
+    {
+        dst.y = src.y;
+        dst.pHat = pHatInDst;
+    }
+    return take;
+}
+
 // Finalize the contribution weight after the candidate stream (or a merge).
 void reservoirFinalize(inout Reservoir r)
 {

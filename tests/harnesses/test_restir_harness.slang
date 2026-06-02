@@ -46,6 +46,45 @@ float test_ris_mean(uint baseSeed, uint m, uint trials, uint perfectTarget)
     return acc / float(trials);
 }
 
+// Build TWO independent reservoirs (m candidates each) over the synthetic
+// target, then combine them into a fresh reservoir via reservoirMerge and
+// estimate ∫f. Same-domain merge ⇒ pHatInDst == src.pHat. The combination of
+// two M-sample reservoirs is an unbiased 2M-sample RIS estimate → 1/3.
+float test_merge_mean(uint baseSeed, uint m, uint trials, uint perfectTarget)
+{
+    float acc = 0.0;
+    for (uint t = 0u; t < trials; t++)
+    {
+        RNG rng;
+        rng.state = pcgHash(baseSeed + t * 2246822519u);
+
+        Reservoir r1; reservoirReset(r1);
+        Reservoir r2; reservoirReset(r2);
+        for (uint i = 0u; i < m; i++)
+        {
+            float x1 = rng.next();
+            float ph1 = synthPHat(x1, perfectTarget);
+            LightSampleRef a1; a1.packed = 0u; a1.uv = float2(x1, 0.0);
+            reservoirUpdate(r1, a1, ph1, ph1, rng.next());
+
+            float x2 = rng.next();
+            float ph2 = synthPHat(x2, perfectTarget);
+            LightSampleRef a2; a2.packed = 0u; a2.uv = float2(x2, 0.0);
+            reservoirUpdate(r2, a2, ph2, ph2, rng.next());
+        }
+        reservoirFinalize(r1);
+        reservoirFinalize(r2);
+
+        Reservoir s; reservoirReset(s);
+        reservoirMerge(s, r1, r1.pHat, rng.next());
+        reservoirMerge(s, r2, r2.pHat, rng.next());
+        reservoirFinalize(s);
+
+        acc += synthF(s.y.uv.x) * s.W;
+    }
+    return acc / float(trials);
+}
+
 // Empirical selection frequency check: fraction of `trials` in which the LAST
 // of two candidates (with weights wA, wB) is the survivor — should approach
 // wB/(wA+wB). Validates the reservoir replacement probability.

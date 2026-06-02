@@ -42,6 +42,27 @@ class TestRisUnbiased:
         assert max_dev(16) < max_dev(1), "M=16 should be tighter than M=1"
 
 
+class TestReservoirMerge:
+    """reservoirMerge — the combine used by spatial + temporal reuse."""
+
+    TRIALS = 300_000
+
+    @pytest.mark.parametrize("m", [1, 4, 16])
+    def test_merge_two_reservoirs_unbiased(self, restir_harness, m):
+        # Combining two independent M-sample reservoirs is an unbiased 2M-sample
+        # RIS estimate of ∫f.
+        mean = float(restir_harness.test_merge_mean(0xbeef + m, m, self.TRIALS, 0))
+        assert abs(mean - INT_F) < 0.01, f"merge M={m}: mean {mean:.5f} vs {INT_F:.5f}"
+
+    def test_merge_tighter_than_single(self, restir_harness):
+        # Merged 2×M should be no looser than a single M (more effective samples).
+        def max_dev(fn, *a):
+            return max(abs(float(fn(s * 6151 + 1, *a)) - INT_F) for s in range(12))
+        merged = max_dev(restir_harness.test_merge_mean, 8, 4000, 0)
+        single = max_dev(restir_harness.test_ris_mean, 8, 4000, 0)
+        assert merged <= single * 1.2, f"merge {merged:.4f} not tighter than single {single:.4f}"
+
+
 class TestReservoirSelection:
     def test_replacement_probability(self, restir_harness):
         # Two candidates, weights wA, wB → P(survivor == B) ≈ wB/(wA+wB).
