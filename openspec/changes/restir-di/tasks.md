@@ -17,6 +17,32 @@
 >      match) via test_sampling_parity::_accumulate. THE unbiased gate.
 >   Then 3.x spatial reuse (Jacobian/MIS — hard math), 6.x temporal, 7.x biased.
 >
+> PLUMBING DESIGN (derived from vk_wavefront.py study — the build spec):
+>   - Wavefront schedule (WavefrontPathPass.record_dispatch ~L603-668): per tile
+>     generate → for each bounce { intersect → buildargs → scatter → shade(flat
+>     slot0) → shade(catchall slot1) } → resolve. Bounce-0 `intersect` (~L651) =
+>     PRIMARY HIT (HitInfo in the hit buffer). `shade` runs reuseDirect (my
+>     depth-0 gate returns 0 when reuseMode=1). Set 0 = scene bindings (fc/lights/
+>     env/materials/accum); set 1 = path-state(0)+hit(1)+6 queues(2-7); 12B push.
+>   - ReSTIR buffers: per-PIXEL reservoir ×2 (prev/curr) + G-buffer, in a NEW
+>     descriptor set 2, owned by RestirDiReuse. Persist across the bounce loop +
+>     frames (temporal). Sized num_pixels, alloc/resize in renderer.
+>   - HOOK: WavefrontPathPass gets an optional `restir` ref; in record_dispatch,
+>     AT bounce 0 only, AFTER the primary intersect + BEFORE shade, call
+>     restir.record_primary_direct(cmd, scene_set, hit_buf, state_buf): records
+>     G-buffer fill → initial RIS → resolve (shadow ray + f·V·W, ADD into the
+>     path-state radiance at pixelIndex). Shade's gated reuseDirect=0 ⇒ no double
+>     count; wfPathResolve flushes radiance→accum as today.
+>   - Build order: restir/initial.slang (M_light light + M_bsdf BSDF candidates
+>     over scene_lights/env, unshadowed p̂=f·Le·G via mat.evaluate) → restir/
+>     resolve.slang (one shadow ray for survivor, f·V·W) → RestirDiReuse in
+>     sampling/reuse.py (buffers + set-2 + pipelines + record_primary_direct) →
+>     WavefrontPathPass hook → renderer.py (register, reuse_modes+="ReSTIR DI",
+>     wavefront-only capability gate, buffer alloc/resize, state-hash) → converge
+>     test. Reservoir+merge cores (restir/reservoir.slang) already done+tested.
+>   - Spatial pass set 2 also needs the canonical-point p̂ re-eval (mat.evaluate
+>     at the G-buffer point) + the Jacobian — that's phase 3.x, after this lands.
+>
 > Worktree ../skinny-restir-di has the venv + mtlx symlink + parity goldens —
 > no re-setup. export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS
 > DYLD_LIBRARY_PATH=$VULKAN_SDK/lib ; bin/python3.13 -m pytest tests/test_restir.py
