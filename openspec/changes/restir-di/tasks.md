@@ -34,11 +34,14 @@
 > RestirDiReuse.config or renderer._restir_config, in the rebuild key). All 3 regimes
 > (spatial-only/temporal-only/both) converge to NEE — test_restir_regimes_converge.
 >
-> NEXT (refinements — core spatiotemporal + selectable regimes built+correct):
->   - CONFIG UI/CLI: expose flags+tuning as _disc/_cont params (data-driven UI like
->     proposals) + state-hash for runtime tuning. Persistent RestirDiReuse instance
->     (renderer._active_reuse() currently makes fresh ones → config not yet user-
->     settable at runtime; _restir_config override works for tests).
+> REGIME SELECTOR DONE (commit 69e7aa9): restir_regime_index + _disc('ReSTIR regime',
+> {Spatial+Temporal, Spatial only, Temporal only}) → data-driven GUI/web/debug selector
+> + settings + accum-reset; _restir_build_config maps regime→RestirPC flags. All regimes
+> converge via the UI param (test_restir_regimes_converge). ReSTIR DI is now FUNCTIONALLY
+> COMPLETE + USABLE: spatiotemporal reuse, selectable regimes, configurable, all unbiased.
+>
+> NEXT (spec-completeness refinements; core is done + usable):
+>   - tuning sliders (mLight/k/radius/mCap as _cont, gated on ReSTIR) — optional.
 >   - VARIANCE DEMO: a flat-plane + high-contrast many-light test scene (USD) +
 >     loosen the domain check (depth-relative, not absolute pos<0.1) → show
 >     err_restir < err_none. THE validation the feature delivers.
