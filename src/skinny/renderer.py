@@ -1080,12 +1080,30 @@ class Renderer:
         self.reuse_modes: list[str] = ["None", "ReSTIR DI"]
         self.reuse_index = 0
         # ReSTIR reuse regime (only meaningful when reuse = ReSTIR DI). Maps to
-        # the RestirPC flags (bit0 spatial, bit1 temporal). On the progressive
-        # accumulator temporal reuse correlates frames (~neutral) — "Spatial only"
-        # opts out. Surfaced via the data-driven _disc UI + persisted.
-        self.restir_regime_modes: list[str] = ["Spatial + Temporal", "Spatial only", "Temporal only"]
-        self._RESTIR_REGIME_FLAGS = [0x3, 0x1, 0x2]
+        # the RestirPC flags (bit0 spatial, bit1 temporal). Spatial reuse uses the
+        # unbiased GRIS combination (converges to NEE). On the PROGRESSIVE
+        # accumulator temporal reuse double-counts correlated history (it fights
+        # the accumulator's own frame averaging) and biases glossy surfaces unless
+        # M_cap is kept small — proper deep temporal needs the reprojected (P3)
+        # regime. So "Spatial only" is the default; the temporal regimes are
+        # selectable but progressive-limited. Surfaced via the data-driven _disc
+        # UI + persisted.
+        self.restir_regime_modes: list[str] = ["Spatial only", "Spatial + Temporal", "Temporal only"]
+        self._RESTIR_REGIME_FLAGS = [0x1, 0x3, 0x2]
         self.restir_regime_index = 0
+        # Biased ΣM combination: faster (skips the GRIS per-domain re-eval) but
+        # biased; bounded on spatial-only, over-brightens with temporal on glossy.
+        # Stored as an index (0/1) so the data-driven _disc selector drives it.
+        self.restir_combination_modes: list[str] = ["Unbiased (GRIS)", "Biased (ΣM)"]
+        self.restir_biased = 0
+        # ReSTIR tuning (push-constant only — refreshed per frame, no pass
+        # rebuild). Gated visible in the UI when ReSTIR DI is active; folded into
+        # _current_state_hash so changes reset accumulation.
+        self.restir_m_light = 8        # initial light-sampled candidates
+        self.restir_m_bsdf = 1         # initial BSDF-sampled candidates
+        self.restir_spatial_k = 5      # spatial neighbours
+        self.restir_spatial_radius = 16.0   # screen px
+        self.restir_m_cap = 20         # temporal history cap
 
         # Execution backend, orthogonal to the integrator and FIXED for the
         # session — selected on the command line (`--execution-mode`,
@@ -1439,6 +1457,14 @@ class Renderer:
         cfg = dict(getattr(self._active_reuse(), "config", None) or {})
         idx = max(0, min(int(self.restir_regime_index), len(self._RESTIR_REGIME_FLAGS) - 1))
         cfg["flags"] = self._RESTIR_REGIME_FLAGS[idx]
+        if getattr(self, "restir_biased", False):
+            cfg["flags"] |= 0x4          # RESTIR_FLAG_BIASED — faster ΣM combination
+        # Tuning (push-constant only) from the UI-driven renderer attrs.
+        cfg["mLight"] = max(1, int(self.restir_m_light))
+        cfg["mBsdf"] = max(0, int(self.restir_m_bsdf))
+        cfg["spatialK"] = max(0, int(self.restir_spatial_k))
+        cfg["spatialRadius"] = max(1.0, float(self.restir_spatial_radius))
+        cfg["mCap"] = max(1, int(self.restir_m_cap))
         return cfg
 
     def _ensure_wavefront_path_pass(self):
@@ -1465,6 +1491,11 @@ class Renderer:
                int(self.restir_regime_index) if reuse_mode == 1 else None,
                tuple(sorted(_rcfg.items())) if _rcfg else None)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
+            # Live ReSTIR tuning: refresh the push-constant config each frame so
+            # slider changes (mLight/mBsdf/k/radius/mCap/biased) take effect
+            # without a pass rebuild (recompile). Pass structure is unchanged.
+            if self._restir_pass is not None:
+                self._restir_pass.config = self._restir_build_config()
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
         from skinny.vk_wavefront import WavefrontPathPass
@@ -7014,6 +7045,10 @@ class Renderer:
             int(self.proposal_preset_index),
             int(self.reuse_index),
             int(self.restir_regime_index),
+            bool(self.restir_biased),
+            int(self.restir_m_light), int(self.restir_m_bsdf),
+            int(self.restir_spatial_k), float(self.restir_spatial_radius),
+            int(self.restir_m_cap),
             # execution_mode_index is fixed for the session (CLI-selected), so
             # it never changes mid-session and is omitted from the hash.
             float(self.env_intensity),

@@ -112,8 +112,16 @@ STATIC_PARAMS: list[ParamSpec] = [
     # identity mode until ReSTIR lands.
     _disc("Proposals",         "proposal_preset_index",       "proposal_preset_modes"),
     _disc("Reuse",             "reuse_index",                 "reuse_modes"),
-    # ReSTIR DI reuse regime (only effective when Reuse = ReSTIR DI).
+    # ReSTIR DI reuse regime + tuning (only effective when Reuse = ReSTIR DI).
+    # Tuning is push-constant only — changes take effect live (no pass rebuild)
+    # and reset accumulation. Integer sliders use step 1.
     _disc("ReSTIR regime",     "restir_regime_index",         "restir_regime_modes"),
+    _disc("ReSTIR combine",    "restir_biased",               "restir_combination_modes"),
+    _cont("ReSTIR M light",    "restir_m_light",              1.0, 1.0, 64.0),
+    _cont("ReSTIR M bsdf",     "restir_m_bsdf",               1.0, 0.0, 8.0),
+    _cont("ReSTIR neighbours", "restir_spatial_k",            1.0, 0.0, 8.0),
+    _cont("ReSTIR radius",     "restir_spatial_radius",       1.0, 1.0, 64.0),
+    _cont("ReSTIR M cap",      "restir_m_cap",                1.0, 1.0, 64.0),
     # Execution mode (megakernel | wavefront) is a command-line / session
     # selection (`--execution-mode`), fixed at renderer construction — not a
     # runtime GUI toggle. So it is intentionally absent from STATIC_PARAMS

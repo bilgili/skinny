@@ -728,6 +728,31 @@ Light uniforms (part of UBO, not separate bindings):
 `ProceduralParams` (formerly binding 20) was removed; procedural flat colour is
 now derived inside `flat_shading.slang` without a dedicated buffer.
 
+### Wavefront pass-local descriptor sets (set 1)
+
+The wavefront passes bind the scene set above as **set 0** and add a pass-local
+**set 1** for their stream state (these are NOT part of the scene set):
+
+| Set 1 binding | Owner | Content |
+|---|---|---|
+| 0 | `WavefrontPathPass` / `RestirDiPass` | `WavefrontPathState[]` (per-lane path state) |
+| 1 | `WavefrontPathPass` / `RestirDiPass` | `HitInfo[]` (per-lane primary/bounce hit) |
+| 2–7 | `WavefrontPathPass` | counting-sort queues (lane-slot / counts / offsets / queue / cursor / indirect args) |
+
+**ReSTIR DI** (`RestirDiPass`) uses its own set-1 layout — it shares bindings 0–1
+(path-state + hit, over the same buffers as the path pass) and adds three
+ReSTIR-owned per-pixel buffers:
+
+| Set 1 binding | Owner | Content |
+|---|---|---|
+| 2 | `RestirDiPass` | `Reservoir[]` A (ping-pong; fill writes, spatial reads) |
+| 3 | `RestirDiPass` | `Reservoir[]` B (ping-pong; spatial writes, resolve reads; persists across frames for temporal) |
+| 4 | `RestirDiPass` | G-buffer `{pos, normal}[]` (spatial-neighbour domain check; per-neighbour material is re-loaded from `wfHits` for the GRIS p̂ re-eval) |
+
+`RestirPC` push constant (36 B scalar): `streamSize, flags (bit0 spatial / bit1
+temporal / bit2 biased), mLight, spatialK, spatialRadius, normalThresh,
+depthThresh, mCap, mBsdf`.
+
 ---
 
 ## SlangPile — Embedded Python→Slang Codegen

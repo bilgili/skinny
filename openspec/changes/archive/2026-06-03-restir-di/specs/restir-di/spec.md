@@ -124,14 +124,22 @@ mode or any ReSTIR config value SHALL reset progressive accumulation.
 
 ### Requirement: Variance reduction
 
-At equal low sample count, ReSTIR DI SHALL produce a lower-error direct-lighting
-image than stock NEE on a scene with many emissive triangles or a large area
-light, and progressive-temporal reuse SHALL reduce error further than
-spatial-only reuse.
+At equal low sample count, ReSTIR DI (spatial reuse, the default) SHALL produce a
+lower-error direct-lighting image than stock NEE on a scene with many emissive
+triangles or a large area light.
+
+> **Amended during implementation:** the original requirement also stated that
+> progressive-temporal reuse reduces error *further* than spatial-only. On
+> skinny's PROGRESSIVE accumulator this does not hold — temporal reuse
+> double-counts correlated history (it fights the accumulator's own frame
+> averaging; the bias grows with `M_cap` and shows on glossy surfaces). That
+> "temporal beats spatial" property belongs to the real-time **reprojected**
+> temporal regime, the deferred P3 follow-on (reserved in the selector). Spatial
+> reuse is the unbiased, variance-reducing default.
 
 #### Scenario: ReSTIR beats stock NEE at low sample count
 
 - **WHEN** a many-light scene is rendered at a low sample count with ReSTIR DI
-  and with stock NEE, each compared to a converged reference
-- **THEN** the ReSTIR image has lower error, and enabling progressive-temporal
-  reuse lowers it further than spatial-only
+  (spatial) and with stock NEE, each compared to a converged reference
+- **THEN** the ReSTIR image has lower error
+  (`tests/test_restir_variance.py`, `assets/restir_variance_demo.usda`)

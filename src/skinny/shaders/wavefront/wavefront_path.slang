@@ -126,10 +126,19 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
             // that spawned this ray (when it also ran env NEE).
             float3 envR = sceneEnvRadianceCell(
                 r.direction, fc.envIntensity, effectiveFurnaceMode(h.materialId));
-            float w = 1.0;
-            if (s.bsdfPdf > 0.0)
-                w = powerHeuristic(s.bsdfPdf, envPdf(r.direction));
-            radiance += s.throughput * envR * w;
+            // ReSTIR DI (reuseMode 1) owns primary-hit direct: a depth-0-spawned
+            // ray (now at depth 1) that misses to env is the BSDF env-miss direct
+            // term, already counted by ReSTIR's env BSDF candidate — skip it here.
+            // s.bsdfPdf>0 ⇒ the spawning bounce was non-transmitted env-NEE (the
+            // case ReSTIR added a candidate for); transmitted/furnace keep stock.
+            bool restirOwns = (fc.reuseMode == 1u) && (s.depth == 1u) && (s.bsdfPdf > 0.0);
+            if (!restirOwns)
+            {
+                float w = 1.0;
+                if (s.bsdfPdf > 0.0)
+                    w = powerHeuristic(s.bsdfPdf, envPdf(r.direction));
+                radiance += s.throughput * envR * w;
+            }
         }
         wfTerminate(i, s, radiance, rng);
         return;

@@ -255,36 +255,55 @@ lighting. `reuse=none` (identity) forwards to stock NEE; `reuse=ReSTIR DI` is
 **wavefront-only** (multi-pass) and capability-gates to identity on
 megakernel/Metal (`reuseMode` folds to 0 in `_pack_uniforms`).
 
+![ReSTIR DI fill → spatial → resolve pipeline](diagrams/restir_pipeline.svg)
+
 - **GPU side** (`vk_wavefront.RestirDiPass`): three pipelines compiled from
   `restir/restir_primary.slang` — `restirFill` → `restirSpatial` → `restirResolve`
   — over **set 1** = the shared path-state (0) + hit (1) buffers plus ReSTIR-owned
-  **ping-pong reservoirs A/B (2,3)** + a **G-buffer (4)** (pos+normal). A 32-B
+  **ping-pong reservoirs A/B (2,3)** + a **G-buffer (4)** (pos+normal). A 36-B
   push constant (`RestirPC`) carries the config (flags: bit0 spatial / bit1
-  temporal, plus `mLight`/`spatialK`/`radius`/thresholds/`mCap`).
+  temporal / bit2 biased, plus `mLight`/`mBsdf`/`spatialK`/`radius`/thresholds/`mCap`).
 - **Schedule:** `WavefrontPathPass.record_dispatch` calls `record_primary_direct`
   at **bounce 0**, after the primary intersect and before shade (and restores the
   `wfTile` push constants — ReSTIR binds an incompatible pipeline layout). Shade's
   depth-0 `reuseDirect` is gated to 0 so ReSTIR is the sole primary-NEE source; the
   result is added into the path-state radiance, and `wfPathResolve` flushes it as
   usual.
-- **Estimator:** `restirFill` runs an initial RIS over the environment light
-  (M-candidate, MIS-weighted unshadowed target `p̂ = luminance(f·cos·Le·wNEE)`);
-  `restirSpatial` merges k domain-checked screen-neighbours (env Jacobian = 1,
-  re-evaluating `p̂` at the canonical pixel) **and** last frame's reservoir
-  (M-capped, progressive temporal); `restirResolve` casts one shadow ray for the
-  survivor → `f·V·W`. Directional (delta) lights are added as plain NEE outside
-  the RIS. It composes with shade's still-active BSDF-sampled direct half, so it
-  **converges to `reuse=none`** (unbiased, A/B-verified).
-- **Regime selector:** `restir_regime_index` → a data-driven `_disc("ReSTIR
-  regime", …)` (Spatial+Temporal / Spatial only / Temporal only), surfaced on
-  every front-end + persisted, mapped to the `RestirPC` flags.
-- **Progressive-regime note:** on skinny's progressive accumulator, temporal
-  reuse correlates consecutive frames (it fights the frame-averaging) → ~neutral;
-  its real win is the real-time **reprojected** regime (a follow-up). Spatial
-  reuse needs flat surfaces. "Spatial only" opts out of the temporal correlation.
-
-Follow-ups (own changes): unbiased `m_i` combination, sphere/emissive-tri + BSDF
-candidates (full unified light domain), reprojected temporal, tuning sliders.
+- **Canonical integration (RIS owns primary direct):** `restirFill` runs an initial
+  RIS over the **unified light set** with both LIGHT- and BSDF-sampled candidates.
+  The target is the UNWEIGHTED `p̂ = luminance(f·Le)`; the technique MIS lives in the
+  balance-heuristic mixture source pdf `p_mix = (M_light·p_light + M_bsdf·p_bsdf)/M`.
+  Light candidates draw sphere / emissive-triangle / env ~ uniform over the active
+  techniques; BSDF candidates trace the proposal direction to the sphere lights / env
+  (sphere hits recover a reproducible uv, env stores an octahedral direction). The
+  path tracer's own depth-0 BSDF-hits-sphere (`wf_shade_common`) and env-miss
+  (`wavefront_path`) terms are **gated off** so they are not double-counted. Emissive
+  triangles are NEE-only (the stock renderer has no BSDF-tri MIS) → light-technique
+  only. Directional (delta) lights are plain NEE outside the RIS. `restirResolve`
+  casts one shadow ray for the survivor → `f·V·W`. **Converges to `reuse=none`** on
+  cornell_box_sphere/emissive + three_materials (glossy), A/B-verified against
+  megakernel-PT / BDPT / wavefront-NEE (all agree).
+- **Unbiased spatiotemporal combination (GRIS):** `restirSpatial` merges self +
+  k domain-checked screen-neighbours + last frame's reservoir using the
+  **generalized balance heuristic** — each source's MIS weight
+  `m_s = M_s·p̂_s(z_s) / Σ_j M_j·p̂_j(z_s)` re-evaluates the survivor's target in
+  every source's OWN domain (the source lane's material/frame re-loaded from
+  `wfHits[j]` via `restirLoadLane`; the DI same-light-point reconnection has
+  Jacobian 1). This bounds the spatial→temporal feedback that the old biased (ΣM)
+  combination let explode on glossy surfaces. A **biased toggle** (`flags` bit2)
+  selects the faster ΣM combination (skips the O(k²) re-eval; bounded on spatial,
+  over-brightens with temporal on glossy).
+- **Regime selector + tuning:** `restir_regime_index` → `_disc("ReSTIR regime", …)`
+  (default **Spatial only** / Spatial+Temporal / Temporal only), plus live
+  push-constant tuning (`_disc`/`_cont`: combine, M_light, M_bsdf, neighbours,
+  radius, M_cap) refreshed each frame with no pass rebuild. All reset accumulation.
+- **Progressive-regime note:** on skinny's progressive accumulator, temporal reuse
+  **double-counts correlated history** (it fights the accumulator's own frame
+  averaging) — bias scales with `M_cap` and shows on glossy surfaces — so the default
+  is spatial-only. Proper deep temporal is the real-time **reprojected** regime (a
+  P3 follow-on; reserved in the selector). Spatial reuse is unbiased (GRIS) and
+  reduces variance on many-light scenes (`assets/restir_variance_demo.usda`,
+  `tests/test_restir_variance.py`: ~30% lower RMSE than NEE at equal low spp).
 
 ---
 
@@ -335,8 +354,9 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 | `shaders/wavefront/{build_args,scatter,compaction,indirect_paint}.slang` | counting-sort / verification primitives |
 | `shaders/sampling/proposal.slang` | proposal seam (shared with megakernel) |
 | `shaders/sampling/reuse.slang` | reuse seam (`reuseDirect`: identity ⇒ NEE; ReSTIR gate) |
-| `shaders/restir/{reservoir,light_ris,restir_primary}.slang` | ReSTIR DI: reservoir core / env RIS + resolve / fill→spatial→resolve passes |
-| `vk_wavefront.py` (`RestirDiPass`) | ReSTIR DI pass set (reservoirs A/B + G-buffer, bounce-0 hook) |
+| `shaders/restir/{reservoir,light_ris,restir_primary}.slang` | ReSTIR DI: reservoir core / unified-light-domain RIS (light+BSDF candidates) + resolve / fill→spatial(GRIS)→resolve passes |
+| `shaders/wavefront/{wf_shade_common,wavefront_path}.slang` | depth-0 BSDF-hits-sphere / env-miss gates (ReSTIR owns primary direct) |
+| `vk_wavefront.py` (`RestirDiPass`) | ReSTIR DI pass set (reservoirs A/B + G-buffer, bounce-0 hook, 36-B RestirPC) |
 | `vk_compute.py:302-345` | per-material wavefront shade codegen |
 | `renderer.py:7147-7158` / `7367-7377` | wavefront render gate (windowed / headless) |
 | `renderer.py:1424-1462` / `1475-1507` | path / BDPT pass lifecycle |

@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="430" viewBox="0 0 860 430" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <style>
+      .box{rx:8;ry:8;stroke-width:1.5;}
+      .lbl{font-size:13px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:10.5px;fill:#475569;}
+      .buf{font-size:10.5px;font-weight:600;fill:#7c3aed;}
+      .flow{stroke:#475569;stroke-width:1.6;fill:none;}
+      .note{font-size:10.5px;fill:#64748b;}
+      .hdr{font-size:14px;font-weight:700;fill:#0f172a;}
+    </style>
+  </defs>
+
+  <text x="20" y="26" class="hdr">ReSTIR DI — primary-direct passes (wavefront, bounce 0)</text>
+
+  <!-- primary intersect -->
+  <rect x="20" y="56" width="150" height="64" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="95" y="82" text-anchor="middle" class="lbl">primary intersect</text>
+  <text x="95" y="100" text-anchor="middle" class="sub">HitInfo → wfHits[i]</text>
+
+  <!-- fill -->
+  <rect x="210" y="44" width="190" height="92" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="305" y="68" text-anchor="middle" class="lbl">restirFill — initial RIS</text>
+  <text x="305" y="86" text-anchor="middle" class="sub">M_light light + M_bsdf BSDF</text>
+  <text x="305" y="101" text-anchor="middle" class="sub">cand.; p̂=lum(f·Le), p_mix MIS</text>
+  <text x="305" y="116" text-anchor="middle" class="sub">unshadowed (deferred V)</text>
+  <text x="305" y="131" text-anchor="middle" class="buf">→ reservoirA (2) + G-buffer (4)</text>
+
+  <!-- spatial -->
+  <rect x="440" y="44" width="200" height="92" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="540" y="68" text-anchor="middle" class="lbl">restirSpatial — GRIS</text>
+  <text x="540" y="86" text-anchor="middle" class="sub">merge self + k neighbours</text>
+  <text x="540" y="101" text-anchor="middle" class="sub">+ temporal (prev), m_s balance</text>
+  <text x="540" y="116" text-anchor="middle" class="sub">heuristic, per-domain p̂ re-eval</text>
+  <text x="540" y="131" text-anchor="middle" class="buf">reservoirA → reservoirB (3)</text>
+
+  <!-- resolve -->
+  <rect x="680" y="44" width="160" height="92" class="box" fill="#fef2f2" stroke="#ef4444"/>
+  <text x="760" y="68" text-anchor="middle" class="lbl">restirResolve</text>
+  <text x="760" y="86" text-anchor="middle" class="sub">1 shadow ray for the</text>
+  <text x="760" y="101" text-anchor="middle" class="sub">survivor → f·V·W</text>
+  <text x="760" y="116" text-anchor="middle" class="sub">+ directional NEE</text>
+  <text x="760" y="131" text-anchor="middle" class="buf">→ path radiance</text>
+
+  <!-- flow arrows -->
+  <path class="flow" d="M170,88 L208,88" marker-end="url(#arr)"/>
+  <path class="flow" d="M400,90 L438,90" marker-end="url(#arr)"/>
+  <text x="419" y="82" text-anchor="middle" class="note">⟂</text>
+  <path class="flow" d="M640,90 L678,90" marker-end="url(#arr)"/>
+  <text x="659" y="82" text-anchor="middle" class="note">⟂</text>
+
+  <!-- temporal feedback (ping-pong B across frames) -->
+  <path class="flow" d="M540,136 C540,180 540,180 540,196" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+  <rect x="430" y="196" width="220" height="40" class="box" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="540" y="214" text-anchor="middle" class="sub">reservoirB persists to next frame</text>
+  <text x="540" y="229" text-anchor="middle" class="sub">(M-capped temporal history)</text>
+  <path class="flow" d="M430,216 C360,216 360,140 400,118" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+
+  <!-- gate note -->
+  <rect x="20" y="270" width="820" height="64" rx="8" ry="8" fill="#fffbeb" stroke="#f59e0b"/>
+  <text x="32" y="292" class="lbl">Canonical integration (RIS owns primary direct)</text>
+  <text x="32" y="311" class="sub">Shade's depth-0 reuseDirect = 0 (light-NEE half); the path tracer's depth-0 BSDF-hits-sphere (wf_shade_common) and</text>
+  <text x="32" y="326" class="sub">env-miss (wavefront_path) terms are gated off — ReSTIR's BSDF candidates own them. Emissive-tri = NEE-only. depth ≥ 1 unchanged.</text>
+
+  <!-- regime note -->
+  <rect x="20" y="350" width="820" height="62" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="32" y="372" class="lbl">Regimes</text>
+  <text x="32" y="391" class="sub">Default = Spatial only (unbiased GRIS, converges to NEE, reduces variance). Spatial+Temporal / Temporal only are selectable but</text>
+  <text x="32" y="406" class="sub">progressive-limited (temporal double-counts correlated frames on the accumulator). Reprojected temporal = P3 follow-on. Biased ΣM toggle = faster.</text>
+</svg>
