@@ -16,7 +16,7 @@ import interfaces;      // HitInfo, IMaterial
 import materials.flat.flat_material;   // FlatMaterial, loadFlatMaterial
 import environment;                     // sampleEnvDir, EnvSample (spatial re-eval)
 import restir.reservoir;                // Reservoir
-import restir.light_ris;                // restirFillReservoir / Resolve / Directional / EnvPHat
+import restir.light_ris;                // restirFillReservoir / Resolve / Directional / restirEvalRef
 import wavefront.wavefront_state;       // WavefrontPathState, pathAlive
 
 // ReSTIR set 1: wavefront path-state (0) + hit (1) [shared with WavefrontPathPass]
@@ -97,8 +97,9 @@ void restirFill(uint3 tid: SV_DispatchThreadID)
 }
 
 // Spatial reuse: merge self + k domain-checked neighbour reservoirs (reservoirA)
-// into reservoirB[i]. Env samples are directional ⇒ the reconnection Jacobian is
-// 1; the neighbour's sample is re-evaluated at THIS pixel's frame (restirEnvPHat).
+// into reservoirB[i]. The neighbour's sample (any light type) is re-evaluated at
+// THIS pixel via restirEvalRef — the DI reconnection (same world light point,
+// this shading point); the area-light geometry term is recomputed at pixel i.
 // BIASED combination (sum M-weighted) — the unbiased m_i/1-Z is a follow-up.
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -150,14 +151,16 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
             continue;
 
         Reservoir nb = wfReservoirA[j];
-        if (nb.W <= 0.0 || (nb.y.packed & 0x3u) != 2u)   // RLIGHT_ENV
+        if (nb.W <= 0.0)
             continue;
-        // Re-evaluate the neighbour's env sample at THIS pixel's frame.
-        EnvSample es = sampleEnvDir(nb.y.uv, fc.envIntensity);
-        float pHatI = restirEnvPHat(mat, es, N, T, B, wo);
-        if (pHatI <= 0.0)
+        // Re-evaluate the neighbour's sample at THIS pixel — the DI reconnection
+        // (same world light point, this shading point). Works for any light type
+        // (sphere / emissive-tri / env); the area-light geometry term is recomputed
+        // here at pixel i. BIASED combination — the unbiased m_i/1-Z is a follow-up.
+        RCand cj = restirEvalRef(mat, refType(nb.y), refId(nb.y), nb.y.uv, h, N, T, B, wo);
+        if (!cj.valid || cj.pHat <= 0.0)
             continue;
-        reservoirMerge(merged, nb, pHatI, rng.next());
+        reservoirMerge(merged, nb, cj.pHat, rng.next());
     }
 
     // TEMPORAL merge: fold last frame's reservoir, M-capped to bound lag.
