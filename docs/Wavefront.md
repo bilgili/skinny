@@ -245,9 +245,46 @@ plumbing**. `flat_bounce.slang:44-50` calls `sampleBounceDirection` through the
 seam; the catch-all routes through `integrators.path::evaluateBounce` which also
 uses it (commit `5e17c8f`: "route wavefront flat-shade through the proposal seam
 + wavefront parity"). The default BSDF-only mask collapses to the material's
-native `sample()` for bit-exact parity. Reuse modes are currently identity/None
-(`renderer.py:1078`); **ReSTIR DI** is the in-progress follow-up that plugs in
-here, building on the wavefront SoA queue substrate.
+native `sample()` for bit-exact parity.
+
+### Reuse seam: ReSTIR DI (`reuseMode == 1`, wavefront-only)
+
+The reuse hook (the other half of the scene-sampling seam) is realized by
+**ReSTIR DI** — reservoir spatiotemporal resampling of **primary-hit** direct
+lighting. `reuse=none` (identity) forwards to stock NEE; `reuse=ReSTIR DI` is
+**wavefront-only** (multi-pass) and capability-gates to identity on
+megakernel/Metal (`reuseMode` folds to 0 in `_pack_uniforms`).
+
+- **GPU side** (`vk_wavefront.RestirDiPass`): three pipelines compiled from
+  `restir/restir_primary.slang` — `restirFill` → `restirSpatial` → `restirResolve`
+  — over **set 1** = the shared path-state (0) + hit (1) buffers plus ReSTIR-owned
+  **ping-pong reservoirs A/B (2,3)** + a **G-buffer (4)** (pos+normal). A 32-B
+  push constant (`RestirPC`) carries the config (flags: bit0 spatial / bit1
+  temporal, plus `mLight`/`spatialK`/`radius`/thresholds/`mCap`).
+- **Schedule:** `WavefrontPathPass.record_dispatch` calls `record_primary_direct`
+  at **bounce 0**, after the primary intersect and before shade (and restores the
+  `wfTile` push constants — ReSTIR binds an incompatible pipeline layout). Shade's
+  depth-0 `reuseDirect` is gated to 0 so ReSTIR is the sole primary-NEE source; the
+  result is added into the path-state radiance, and `wfPathResolve` flushes it as
+  usual.
+- **Estimator:** `restirFill` runs an initial RIS over the environment light
+  (M-candidate, MIS-weighted unshadowed target `p̂ = luminance(f·cos·Le·wNEE)`);
+  `restirSpatial` merges k domain-checked screen-neighbours (env Jacobian = 1,
+  re-evaluating `p̂` at the canonical pixel) **and** last frame's reservoir
+  (M-capped, progressive temporal); `restirResolve` casts one shadow ray for the
+  survivor → `f·V·W`. Directional (delta) lights are added as plain NEE outside
+  the RIS. It composes with shade's still-active BSDF-sampled direct half, so it
+  **converges to `reuse=none`** (unbiased, A/B-verified).
+- **Regime selector:** `restir_regime_index` → a data-driven `_disc("ReSTIR
+  regime", …)` (Spatial+Temporal / Spatial only / Temporal only), surfaced on
+  every front-end + persisted, mapped to the `RestirPC` flags.
+- **Progressive-regime note:** on skinny's progressive accumulator, temporal
+  reuse correlates consecutive frames (it fights the frame-averaging) → ~neutral;
+  its real win is the real-time **reprojected** regime (a follow-up). Spatial
+  reuse needs flat surfaces. "Spatial only" opts out of the temporal correlation.
+
+Follow-ups (own changes): unbiased `m_i` combination, sphere/emissive-tri + BSDF
+candidates (full unified light domain), reprojected temporal, tuning sliders.
 
 ---
 
@@ -297,6 +334,9 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 | `shaders/wavefront/wavefront_state.slang` | `WavefrontPathState` record |
 | `shaders/wavefront/{build_args,scatter,compaction,indirect_paint}.slang` | counting-sort / verification primitives |
 | `shaders/sampling/proposal.slang` | proposal seam (shared with megakernel) |
+| `shaders/sampling/reuse.slang` | reuse seam (`reuseDirect`: identity ⇒ NEE; ReSTIR gate) |
+| `shaders/restir/{reservoir,light_ris,restir_primary}.slang` | ReSTIR DI: reservoir core / env RIS + resolve / fill→spatial→resolve passes |
+| `vk_wavefront.py` (`RestirDiPass`) | ReSTIR DI pass set (reservoirs A/B + G-buffer, bounce-0 hook) |
 | `vk_compute.py:302-345` | per-material wavefront shade codegen |
 | `renderer.py:7147-7158` / `7367-7377` | wavefront render gate (windowed / headless) |
 | `renderer.py:1424-1462` / `1475-1507` | path / BDPT pass lifecycle |
