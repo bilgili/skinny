@@ -225,3 +225,36 @@ reprojection subsystem (P3, its own change) · denoising · motion vectors.
 Per the project workflow, planning goes through an **OpenSpec change proposal**
 (`openspec/changes/restir-di/`) — a new `restir-di` capability that depends on
 the `scene-sampling` reuse hook — not a generic plan doc.
+
+## Implementation outcome (2026-06-03)
+
+Deviations from the plan, found while completing the spec:
+
+- **Canonical integration (Decision 5) shipped.** The RIS owns primary direct:
+  candidate generation mixes light- and BSDF-sampled candidates with the
+  UNWEIGHTED target `p̂ = lum(f·Le)` and a balance-heuristic mixture source pdf
+  `p_mix = (M_light·p_light + M_bsdf·p_bsdf)/M`; the path tracer's depth-0
+  BSDF-hits-sphere (`wf_shade_common`) and env-miss (`wavefront_path`) terms are
+  gated off. BSDF candidates target **sphere + env only** (sphere hits recover a
+  reproducible uv, env stores an octahedral direction); emissive triangles are
+  NEE-only in the stock renderer (no BSDF-tri MIS term) so they are light-technique
+  only — still unbiased (any unbiased estimator converges to the same integral).
+  (An intermediate "option B" — light-only RIS composing with shade's still-active
+  BSDF half, no gate — was the merged starting point; it was replaced by Decision 5.)
+- **Unbiased combination = GRIS, not the bare 1/Z.** Spatial/temporal reuse uses
+  the generalized balance heuristic `m_s = M_s·p̂_s(z_s)/Σ_j M_j·p̂_j(z_s)`,
+  re-evaluating the survivor's target in every source's own domain (the source
+  lane's material re-loaded from `wfHits[j]` — no fat G-buffer needed). DI reuses
+  the same world light point, so the reconnection shift is identity (Jacobian 1).
+  The naive biased ΣM combination over-brightened glossy surfaces via
+  spatial→temporal feedback (up to ~48% vs path tracing on a glossy material); the
+  GRIS m_i bounds it. The biased ΣM path is kept as a faster toggle.
+- **Default regime = Spatial only.** On the progressive accumulator, temporal reuse
+  double-counts correlated history (bias ∝ M_cap, glossy-specific) — see the
+  Variance-reduction spec amendment. Spatial reuse (GRIS) is unbiased and reduces
+  variance; progressive-temporal / temporal-only stay selectable but limited;
+  reprojected temporal is the P3 follow-on.
+- **Verification.** Converges to stock NEE on cornell_box_sphere / cornell_box_
+  emissive / three_materials (glossy), A/B-verified against megakernel-PT, BDPT and
+  wavefront-NEE (all agree). Variance demo: `assets/restir_variance_demo.usda` +
+  `tests/test_restir_variance.py` (~30% lower RMSE than NEE at equal low spp).

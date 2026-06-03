@@ -9,6 +9,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Rendering
 
+- ReSTIR DI reuse mode (wavefront-only) — reservoir resampling of primary-hit
+  direct lighting over the unified light set (sphere + emissive-triangle + env,
+  light- and BSDF-sampled candidates) with deferred visibility. Spatial reuse
+  uses the unbiased generalized balance heuristic (GRIS) and reduces variance on
+  many-light scenes; the path tracer's depth-0 BSDF-hits-light terms are gated so
+  ReSTIR owns primary direct (converges to stock NEE). Selectable regimes
+  (default Spatial only; Spatial+Temporal / Temporal only are progressive-limited,
+  reprojected temporal is a follow-on), a biased ΣM toggle, and live tuning
+  (candidate counts, neighbours, radius, M-cap). Capability-gates to identity on
+  megakernel/Metal. Built on the pluggable scene-sampling reuse seam.
 - Environment importance sampling: equirect HDR sampled by a sin θ-weighted
   2D piecewise-constant distribution (CDF buffers at bindings 31/32) for env
   next-event estimation + MIS — both the path tracer and BDPT consume it
