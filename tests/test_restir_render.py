@@ -156,6 +156,47 @@ def test_restir_regimes_converge():
 
 
 @needs_vulkan
+@pytest.mark.skipif(not SPHERE_SCENE.exists(), reason="cornell_box_sphere.usda missing")
+def test_restir_biased_toggle_bounded():
+    """The biased ΣM combination toggle (RESTIR_FLAG_BIASED) stays bounded — no
+    divergence, within a small deviation of stock NEE on a diffuse scene (spatial
+    reuse, where it does not feed back). Faster than the unbiased GRIS default."""
+    from skinny.vk_context import VulkanContext
+    from skinny.renderer import Renderer
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    try:
+        renderer = Renderer(
+            vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+            tattoo_dir=TATTOO_DIR, usd_scene_path=SPHERE_SCENE,
+            execution_mode="wavefront",
+        )
+        try:
+            deadline = 400
+            while deadline > 0 and (
+                renderer._usd_scene is None or len(renderer._usd_scene.instances) < 6
+            ):
+                renderer.update(0.025)
+                deadline -= 1
+            for _ in range(16):
+                renderer.update(0.04)
+
+            mean_none = float(_lum(_accumulate(renderer, REUSE_NONE, 80, 1000)).mean())
+            assert mean_none > 1e-3
+            renderer.restir_regime_index = 0     # spatial-only
+            renderer.restir_biased = True
+            img = _accumulate(renderer, REUSE_RESTIR, 80, 2000)
+            renderer.restir_biased = False
+            assert np.isfinite(img).all(), "biased combination diverged (non-finite)"
+            rel = abs(float(_lum(img).mean()) - mean_none) / mean_none
+            assert rel < 0.06, f"biased combination not bounded: rel {rel:.4f} ≥ 0.06"
+        finally:
+            renderer.cleanup()
+    finally:
+        ctx.destroy()
+
+
+@needs_vulkan
 @pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
 def test_restir_megakernel_falls_back_to_identity():
     """ReSTIR selected on megakernel folds to identity (no reservoir pass; the

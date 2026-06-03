@@ -1091,6 +1091,9 @@ class Renderer:
         self.restir_regime_modes: list[str] = ["Spatial only", "Spatial + Temporal", "Temporal only"]
         self._RESTIR_REGIME_FLAGS = [0x1, 0x3, 0x2]
         self.restir_regime_index = 0
+        # Biased ΣM combination: faster (skips the GRIS per-domain re-eval) but
+        # biased; bounded on spatial-only, over-brightens with temporal on glossy.
+        self.restir_biased = False
 
         # Execution backend, orthogonal to the integrator and FIXED for the
         # session — selected on the command line (`--execution-mode`,
@@ -1444,6 +1447,8 @@ class Renderer:
         cfg = dict(getattr(self._active_reuse(), "config", None) or {})
         idx = max(0, min(int(self.restir_regime_index), len(self._RESTIR_REGIME_FLAGS) - 1))
         cfg["flags"] = self._RESTIR_REGIME_FLAGS[idx]
+        if getattr(self, "restir_biased", False):
+            cfg["flags"] |= 0x4          # RESTIR_FLAG_BIASED — faster ΣM combination
         return cfg
 
     def _ensure_wavefront_path_pass(self):

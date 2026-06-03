@@ -50,6 +50,7 @@ struct RestirPC
 
 static const uint RESTIR_FLAG_SPATIAL  = 1u;
 static const uint RESTIR_FLAG_TEMPORAL = 2u;
+static const uint RESTIR_FLAG_BIASED   = 4u;   // ΣM combination (faster, skips GRIS)
 
 // Shared per-lane setup: returns false unless this lane is a live flat primary
 // hit. Fills the shading frame + outgoing direction.
@@ -175,6 +176,35 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
     {
         RCand c = restirEvalRef(mat, refType(sRef[a]), refId(sRef[a]), sRef[a].uv, h, N, T, B, wo);
         pCanon[a] = (c.valid) ? c.pHat : 0.0;
+    }
+
+    // BIASED toggle: the simple ΣM combination (Bitterli 2020 Alg. 4) — each
+    // source weighted by p̂_q(z_s)·W_s·M_s, normalized by ΣM. Skips the O(K²)
+    // per-domain p̂ re-eval (the GRIS denominator) → faster, but biased
+    // (discontinuity darkening; with TEMPORAL on glossy it over-brightens via
+    // feedback — keep it to spatial-only). Default is the unbiased GRIS below.
+    if ((rpc.flags & RESTIR_FLAG_BIASED) != 0u)
+    {
+        Reservoir outb;
+        reservoirReset(outb);
+        float mTot = 0.0;
+        for (uint a = 0u; a < K; a++)
+        {
+            mTot += sM[a];
+            if (pCanon[a] <= 0.0 || sW[a] <= 0.0)
+                continue;
+            float w = pCanon[a] * sW[a] * sM[a];
+            outb.wSum += w;
+            if (w > 0.0 && rng.next() * outb.wSum < w)
+            {
+                outb.y = sRef[a];
+                outb.pHat = pCanon[a];
+            }
+        }
+        outb.M = uint(mTot);
+        outb.W = (outb.pHat > 0.0 && mTot > 0.0) ? outb.wSum / (mTot * outb.pHat) : 0.0;
+        wfReservoirB[i] = outb;
+        return;
     }
 
     // MIS denominators D_s = Σ_j M_j·p̂_j(z_s) + own-domain target p̂_s(z_s).
