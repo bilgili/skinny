@@ -14,15 +14,23 @@ import common;          // RNG, pcgHash, worldToTangent, buildBasis
 import bindings;        // set 0: fc, materialTypes, lights, env, materials
 import interfaces;      // HitInfo, IMaterial
 import materials.flat.flat_material;   // FlatMaterial, loadFlatMaterial
+import environment;                     // sampleEnvDir, EnvSample (spatial re-eval)
 import restir.reservoir;                // Reservoir
-import restir.light_ris;                // restirFillReservoir / Resolve / Directional
+import restir.light_ris;                // restirFillReservoir / Resolve / Directional / EnvPHat
 import wavefront.wavefront_state;       // WavefrontPathState, pathAlive
 
 // ReSTIR set 1: wavefront path-state (0) + hit (1) [shared with WavefrontPathPass]
-// + the per-pixel reservoir buffer (2) [ReSTIR-owned, persistent].
+// Per-pixel G-buffer for the spatial-neighbour domain check.
+struct GBuf { float3 pos; float3 normal; };
+
+// + ping-pong reservoir buffers A/B (2,3) + a G-buffer (4) [ReSTIR-owned].
+//   fill: writes reservoirA + G-buffer ;  spatial: reservoirA → reservoirB ;
+//   resolve: reads reservoirB.
 [[vk::binding(0, 1)]] RWStructuredBuffer<WavefrontPathState> wfState;
 [[vk::binding(1, 1)]] RWStructuredBuffer<HitInfo>            wfHits;
-[[vk::binding(2, 1)]] RWStructuredBuffer<Reservoir>          wfReservoir;
+[[vk::binding(2, 1)]] RWStructuredBuffer<Reservoir>          wfReservoirA;
+[[vk::binding(3, 1)]] RWStructuredBuffer<Reservoir>          wfReservoirB;
+[[vk::binding(4, 1)]] RWStructuredBuffer<GBuf>              wfGBuffer;
 
 struct RestirPC { uint streamSize; };
 [[vk::push_constant]] ConstantBuffer<RestirPC> rpc;
@@ -56,7 +64,7 @@ bool restirLoadLane(uint i, out WavefrontPathState s, out HitInfo h,
     return true;
 }
 
-// Fill: initial RIS over the light set → wfReservoir[i].
+// Fill: initial RIS over the light set → reservoirA[i] + the G-buffer.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void restirFill(uint3 tid: SV_DispatchThreadID)
@@ -68,10 +76,77 @@ void restirFill(uint3 tid: SV_DispatchThreadID)
     // Separate RNG stream so we don't consume the shade kernel's cursor.
     RNG rng;
     rng.state = pcgHash(s.rngState ^ 0x9e3779b9u);
-    wfReservoir[i] = restirFillReservoir(mat, h, N, T, B, wo, rng);
+    wfReservoirA[i] = restirFillReservoir(mat, h, N, T, B, wo, rng);
+    GBuf g; g.pos = h.position; g.normal = N;
+    wfGBuffer[i] = g;
 }
 
-// Resolve: read the (possibly reused) reservoir → one shadow ray → add direct
+static const uint  RESTIR_SPATIAL_K      = 5u;     // neighbour samples
+static const float RESTIR_SPATIAL_RADIUS = 16.0;   // screen-space px
+static const float RESTIR_NORMAL_THRESH  = 0.9;    // dot(N_i, N_j) min
+static const float RESTIR_DEPTH_THRESH   = 0.1;    // |pos_i - pos_j| max (world)
+
+// Spatial reuse: merge self + k domain-checked neighbour reservoirs (reservoirA)
+// into reservoirB[i]. Env samples are directional ⇒ the reconnection Jacobian is
+// 1; the neighbour's sample is re-evaluated at THIS pixel's frame (restirEnvPHat).
+// BIASED combination (sum M-weighted) — the unbiased m_i/1-Z is a follow-up.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void restirSpatial(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    WavefrontPathState s; HitInfo h; FlatMaterial mat; float3 N, T, B, wo;
+    if (!restirLoadLane(i, s, h, mat, N, T, B, wo))
+    {
+        if (i < rpc.streamSize)
+            wfReservoirB[i] = wfReservoirA[i];     // passthrough non-ReSTIR lanes
+        return;
+    }
+    GBuf gi = wfGBuffer[i];
+
+    Reservoir merged;
+    reservoirReset(merged);
+    Reservoir self = wfReservoirA[i];
+    reservoirMerge(merged, self, self.pHat, 0.0);   // self always taken first (rand 0)
+
+    // Single-tile assumption: lane index == pixel index (stream_size ≥ pixels),
+    // so screen neighbours are reachable by lane offset. Cross-tile reuse is a
+    // later refinement.
+    uint px = i % fc.width;
+    uint py = i / fc.width;
+    RNG rng;
+    rng.state = pcgHash((i * 9781u) ^ 0x85ebca6bu ^ fc.frameIndex);
+    for (uint k = 0u; k < RESTIR_SPATIAL_K; k++)
+    {
+        float2 d = (rng.next2() * 2.0 - 1.0) * RESTIR_SPATIAL_RADIUS;
+        int nx = int(px) + int(round(d.x));
+        int ny = int(py) + int(round(d.y));
+        if (nx < 0 || ny < 0 || uint(nx) >= fc.width || uint(ny) >= fc.height)
+            continue;
+        uint j = uint(ny) * fc.width + uint(nx);
+        if (j == i || j >= rpc.streamSize)
+            continue;
+
+        GBuf gj = wfGBuffer[j];
+        if (dot(gi.normal, gj.normal) < RESTIR_NORMAL_THRESH ||
+            length(gi.pos - gj.pos) > RESTIR_DEPTH_THRESH)
+            continue;
+
+        Reservoir nb = wfReservoirA[j];
+        if (nb.W <= 0.0 || (nb.y.packed & 0x3u) != 2u)   // RLIGHT_ENV
+            continue;
+        // Re-evaluate the neighbour's env sample at THIS pixel's frame.
+        EnvSample es = sampleEnvDir(nb.y.uv, fc.envIntensity);
+        float pHatI = restirEnvPHat(mat, es, N, T, B, wo);
+        if (pHatI <= 0.0)
+            continue;
+        reservoirMerge(merged, nb, pHatI, rng.next());
+    }
+    reservoirFinalize(merged);
+    wfReservoirB[i] = merged;
+}
+
+// Resolve: read the spatially-reused reservoir (B) → one shadow ray → add direct
 // (+ directional NEE) into the path-state radiance.
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -81,7 +156,7 @@ void restirResolve(uint3 tid: SV_DispatchThreadID)
     WavefrontPathState s; HitInfo h; FlatMaterial mat; float3 N, T, B, wo;
     if (!restirLoadLane(i, s, h, mat, N, T, B, wo))
         return;
-    Reservoir r = wfReservoir[i];
+    Reservoir r = wfReservoirB[i];
     float3 direct = restirResolveReservoir(mat, h, N, T, B, wo, r)
                   + restirDirectional(mat, h, N, T, B, wo);
     s.radiance += s.throughput * direct;

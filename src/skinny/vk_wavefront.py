@@ -716,30 +716,36 @@ class RestirDiPass:
         self.ctx = ctx
         self.stream_size = int(stream_size)
 
-        # Two pipelines: fill (initial RIS → reservoir) + resolve (reservoir →
-        # shadow ray → radiance). Spatial/temporal passes slot between them.
+        # Three pipelines: fill (initial RIS → reservoirA + G-buffer) → spatial
+        # (reservoirA → reservoirB, domain-checked neighbour merge) → resolve
+        # (reservoirB → shadow ray → radiance).
         self._modules = {}
         self._pipelines = {}
         for entry, out_name in (("restirFill", "restir/_restir_fill"),
+                                ("restirSpatial", "restir/_restir_spatial"),
                                 ("restirResolve", "restir/_restir_resolve")):
             spv = _compile_full_spv(shader_dir, "restir/restir_primary", entry, out_name)
             code = spv.read_bytes()
             self._modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
 
-        # Per-pixel reservoir buffer (persistent for reuse). ReSTIR-owned.
-        self._reservoir = StorageBuffer(ctx, self.stream_size * self.RESERVOIR_STRIDE)
+        # Per-pixel ReSTIR-owned buffers: ping-pong reservoirs (A/B) + a G-buffer
+        # (pos+normal, 24 B → 32 B headroom) for the spatial domain check.
+        self._resA = StorageBuffer(ctx, self.stream_size * self.RESERVOIR_STRIDE)
+        self._resB = StorageBuffer(ctx, self.stream_size * self.RESERVOIR_STRIDE)
+        self._gbuffer = StorageBuffer(ctx, self.stream_size * 32)
 
-        # Set 1: path-state (0) + hit (1) [shared] + reservoir (2) [owned].
+        # Set 1: state (0) + hit (1) [shared] + reservoirA (2) + reservoirB (3) +
+        # G-buffer (4) [owned].
         set1_bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
-            for b in range(3)
+            for b in range(5)
         ]
         self._set_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=3, pBindings=set1_bindings), None)
+                bindingCount=5, pBindings=set1_bindings), None)
 
         push_range = vk.VkPushConstantRange(
             stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
@@ -759,14 +765,16 @@ class RestirDiPass:
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=3)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=5)]), None)
         self._set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
                 pSetLayouts=[self._set_layout]))[0]
         writes = []
         bound = [(state_buffer, state_range), (hit_buffer, hit_range),
-                 (self._reservoir.buffer, self._reservoir.size)]
+                 (self._resA.buffer, self._resA.size),
+                 (self._resB.buffer, self._resB.size),
+                 (self._gbuffer.buffer, self._gbuffer.size)]
         for b, (buf, rng) in enumerate(bound):
             info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
             writes.append(vk.VkWriteDescriptorSet(
@@ -797,7 +805,7 @@ class RestirDiPass:
         vk.vkCmdPushConstants(
             cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
         groups = (self.stream_size + self._GROUP - 1) // self._GROUP
-        for k, entry in enumerate(("restirFill", "restirResolve")):
+        for k, entry in enumerate(("restirFill", "restirSpatial", "restirResolve")):
             if k > 0:
                 self._barrier(cmd)
             vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
@@ -811,7 +819,9 @@ class RestirDiPass:
         vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
         for m in self._modules.values():
             vk.vkDestroyShaderModule(self.ctx.device, m, None)
-        self._reservoir.destroy()
+        self._resA.destroy()
+        self._resB.destroy()
+        self._gbuffer.destroy()
 
 
 class IndirectPaintPass:
