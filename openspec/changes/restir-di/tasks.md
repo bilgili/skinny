@@ -17,6 +17,17 @@
 > undemonstrated on the gray/curved-sphere demo (domain check rejects curved-surface
 > neighbours; gray env makes all env samples equal). reuse_mode-keyed rebuild.
 >
+> KEY FINDING (regime limitation, NOT a bug): on the PROGRESSIVE accumulator,
+> temporal reuse correlates consecutive frames → fights the frame-averaging →
+> ~neutral benefit (its real value is the real-time P3 reprojected regime). Spatial
+> reuse needs FLAT surfaces (the demo's curved spheres + domain check reject most
+> neighbours). Demo under IBL is also dim (dark specular materials). So end-to-end
+> variance benefit is ~neutral on the demo — both reuse passes are correct (converge,
+> unbiased) but the scene+regime understate them. The merge's variance reduction IS
+> unit-proven (test_restir.py::test_merge_tighter_than_single). Implication: maybe
+> make temporal OPT-OUT in the progressive regime (config toggle) + lean on spatial
+> for progressive; temporal shines in P3 real-time.
+>
 > NEXT (refinements — core spatiotemporal is built+correct):
 >   - VARIANCE DEMO: a flat-plane + high-contrast many-light test scene (USD) +
 >     loosen the domain check (depth-relative, not absolute pos<0.1) → show
