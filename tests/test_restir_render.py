@@ -105,11 +105,6 @@ def test_restir_converges_to_nee():
         ctx.destroy()
 
 
-def _cfg(flags):
-    return dict(flags=flags, mLight=8, spatialK=5, spatialRadius=16.0,
-               normalThresh=0.9, depthThresh=0.1, mCap=20)
-
-
 @needs_vulkan
 @pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
 def test_restir_regimes_converge():
@@ -138,12 +133,13 @@ def test_restir_regimes_converge():
 
             mean_none = float(_lum(_accumulate(renderer, REUSE_NONE, 80, 1000)).mean())
             assert mean_none > 1e-3
-            for flags, label in ((0x1, "spatial"), (0x2, "temporal"), (0x3, "both")):
-                renderer._restir_config = _cfg(flags)
-                img = _accumulate(renderer, REUSE_RESTIR, 80, 2000 + flags)
+            # Drive the actual UI param (restir_regime_index), not the test override.
+            for regime, label in ((1, "spatial"), (2, "temporal"), (0, "both")):
+                renderer.restir_regime_index = regime
+                img = _accumulate(renderer, REUSE_RESTIR, 80, 2000 + regime)
                 assert np.isfinite(img).all(), f"{label}: non-finite"
                 rel = abs(float(_lum(img).mean()) - mean_none) / mean_none
-                assert rel < 0.025, f"regime {label} (flags={flags}) biased: rel {rel:.4f}"
+                assert rel < 0.025, f"regime {label} (index={regime}) biased: rel {rel:.4f}"
         finally:
             renderer.cleanup()
     finally:

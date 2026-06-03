@@ -1079,6 +1079,13 @@ class Renderer:
         self._REUSE_TOKENS: list[str] = ["none", "restir-di"]
         self.reuse_modes: list[str] = ["None", "ReSTIR DI"]
         self.reuse_index = 0
+        # ReSTIR reuse regime (only meaningful when reuse = ReSTIR DI). Maps to
+        # the RestirPC flags (bit0 spatial, bit1 temporal). On the progressive
+        # accumulator temporal reuse correlates frames (~neutral) — "Spatial only"
+        # opts out. Surfaced via the data-driven _disc UI + persisted.
+        self.restir_regime_modes: list[str] = ["Spatial + Temporal", "Spatial only", "Temporal only"]
+        self._RESTIR_REGIME_FLAGS = [0x3, 0x1, 0x2]
+        self.restir_regime_index = 0
 
         # Execution backend, orthogonal to the integrator and FIXED for the
         # session — selected on the command line (`--execution-mode`,
@@ -1423,6 +1430,17 @@ class Renderer:
         self._destroy_wavefront_path_pass()
         self._destroy_wavefront_bdpt_pass()
 
+    def _restir_build_config(self) -> dict:
+        """ReSTIR config for the wavefront pass: the active reuse plugin's tuning
+        with `flags` set from the selected regime. A `_restir_config` override
+        (tests) wins entirely."""
+        if getattr(self, "_restir_config", None):
+            return self._restir_config
+        cfg = dict(getattr(self._active_reuse(), "config", None) or {})
+        idx = max(0, min(int(self.restir_regime_index), len(self._RESTIR_REGIME_FLAGS) - 1))
+        cfg["flags"] = self._RESTIR_REGIME_FLAGS[idx]
+        return cfg
+
     def _ensure_wavefront_path_pass(self):
         """Build (once) the staged wavefront path tracer — the real per-frame
         wavefront dispatch. Returns it, or None on a non-Vulkan backend or
@@ -1441,8 +1459,10 @@ class Renderer:
         # Reuse mode is part of the key so switching none↔ReSTIR rebuilds the
         # pass (and its ReSTIR sub-pass) — the seam's pass-structural contract.
         reuse_mode = int(self._active_reuse().reuse_mode)
+        # Rebuild when the reuse mode or the ReSTIR regime/config changes.
         _rcfg = getattr(self, "_restir_config", None)
         key = (self.width, self.height, has_nonflat, reuse_mode,
+               int(self.restir_regime_index) if reuse_mode == 1 else None,
                tuple(sorted(_rcfg.items())) if _rcfg else None)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             return self._wavefront_path_pass
@@ -1476,9 +1496,7 @@ class Renderer:
                 self.ctx, self.shader_dir, self._scene_set0_layout,
                 self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
                 self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
-                stream_size,
-                config=(getattr(self, "_restir_config", None)
-                        or getattr(self._active_reuse(), "config", None)),
+                stream_size, config=self._restir_build_config(),
             )
             self._wavefront_path_pass.set_restir(self._restir_pass)
         self._wf_path_pass_dims = key
@@ -6995,6 +7013,7 @@ class Renderer:
             # resets accumulation so the new configuration converges cleanly.
             int(self.proposal_preset_index),
             int(self.reuse_index),
+            int(self.restir_regime_index),
             # execution_mode_index is fixed for the session (CLI-selected), so
             # it never changes mid-session and is omitted from the hash.
             float(self.env_intensity),
