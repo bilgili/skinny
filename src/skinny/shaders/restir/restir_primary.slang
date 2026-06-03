@@ -85,6 +85,7 @@ static const uint  RESTIR_SPATIAL_K      = 5u;     // neighbour samples
 static const float RESTIR_SPATIAL_RADIUS = 16.0;   // screen-space px
 static const float RESTIR_NORMAL_THRESH  = 0.9;    // dot(N_i, N_j) min
 static const float RESTIR_DEPTH_THRESH   = 0.1;    // |pos_i - pos_j| max (world)
+static const uint  RESTIR_M_CAP          = 20u;    // temporal history cap (bounds lag)
 
 // Spatial reuse: merge self + k domain-checked neighbour reservoirs (reservoirA)
 // into reservoirB[i]. Env samples are directional ⇒ the reconnection Jacobian is
@@ -103,6 +104,11 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
         return;
     }
     GBuf gi = wfGBuffer[i];
+    // TEMPORAL: bufB[i] holds last frame's reservoir (this pass overwrites it
+    // below). Static camera ⇒ same pixel/geometry, so p̂ is unchanged. Read it
+    // before any write; only valid once accumulation has a prior frame.
+    Reservoir prev = wfReservoirB[i];
+    bool hasPrev = (fc.accumFrame > 0u) && (prev.W > 0.0);
 
     Reservoir merged;
     reservoirReset(merged);
@@ -142,6 +148,15 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
             continue;
         reservoirMerge(merged, nb, pHatI, rng.next());
     }
+
+    // TEMPORAL merge: fold last frame's reservoir, M-capped to bound lag.
+    // reservoirMerge weights by W·M, so clamping M scales the prev contribution.
+    if (hasPrev)
+    {
+        prev.M = min(prev.M, RESTIR_M_CAP);
+        reservoirMerge(merged, prev, prev.pHat, rng.next());
+    }
+
     reservoirFinalize(merged);
     wfReservoirB[i] = merged;
 }
