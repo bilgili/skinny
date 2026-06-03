@@ -9,14 +9,35 @@
 >   tests/test_restir_render.py: converge-to-NEE + megakernel identity fallback.
 >   reuse=none still bit-identical both backends.
 >
-> NEXT = M2 (reservoir RIS — localized Slang math, plumbing proven): swap the
-> inline allLightsNEE in restir_primary.slang for reservoir RIS over the unified
-> light set — M_light light candidates (sample sphere/tri/directional/env, weight
-> w=p̂/lightPdf, unshadowed p̂=luminance(f·Le·G) via mat.evaluate) streamed into a
-> Reservoir (restir/reservoir.slang, already tested) → finalize W → ONE shadow ray
-> for the survivor → f·V·W into radiance. Add M_bsdf BSDF candidates after.
-> Test: still converges to NEE + lower variance at low spp. Then 3.x spatial
-> (Jacobian/MIS, needs G-buffer + descriptor set 2), 6.x temporal, 7.x biased.
+> NEXT = M2 (reservoir RIS — the CANONICAL integration; correctness-critical,
+> build with focus). NOT a one-line swap: M1 relocated the FULL allLightsNEE
+> (carries the per-light MIS weight vs BSDF), so a light-only RIS would have no
+> clean pdf to MIS against shade's BSDF-hits-light → BIAS. The chosen fix
+> (design Decision 5) = put BSDF candidates IN the RIS AND gate shade's depth-0
+> BSDF-hits-light. Build in restir_primary.slang:
+>   - Candidate gen (M_light light + M_bsdf BSDF), SOLID-ANGLE measure:
+>     * light candidate: pick a non-delta emitter (sphere/tri/env) ~ uniform (or
+>       power pmf); u=rng.next2(); ls=light.samplePoint(pos,u) [ILight, returns
+>       point/normal/radiance/pdfArea]; wi=dir(ls.point-pos); pdfSA = pdfArea·d²/
+>       cosLight (area→Ω) or es.pdf for env; sourcePdf=(1/E)·pdfSA;
+>       p̂=luminance(f(wo,wi)·NdotL·ls.radiance) UNSHADOWED; w=p̂/sourcePdf;
+>       store LightSampleRef=(type,id, u-packed) so resolve REPRODUCES the point.
+>     * bsdf candidate: mat.sample→wi; trace; if it hits a light, p̂ likewise;
+>       sourcePdf = bsdfPdf(wi). (Reuses sampleBounceDirection? or mat.sample.)
+>   - reservoirUpdate per candidate → reservoirFinalize → W.
+>   - resolve: decode survivor (type,id,u), re-sample ls, wi; ONE shadow ray
+>     V=visibleSegment; integrand_RGB=f·NdotL·radiance; direct=integrand_RGB·V·W.
+>   - DIRECTIONAL lights are delta (pdfArea=0): NOT in RIS — add via plain NEE
+>     (loop distantLights, shadow ray) like allLightsNEE's directional branch.
+>   - GATE: also gate shade's depth-0 BSDF-hits-light (the sphere-light + env-miss
+>     terms in wfFinishShade / the bounce loop) when reuseMode==RESTIR_DI, since
+>     ReSTIR now owns the BSDF technique too. (M1 left it on; M2 must gate it.)
+>   - Light APIs: lights/{sphere,emissive_triangle,directional}_light.slang
+>     (ILight.samplePoint/pdfSolidAngle, load*Impl); environment.slang
+>     sampleEnvDir/envPdf; nee.slang for the patterns. reservoir.slang done+tested.
+>   Test: converges to NEE (canonical = same integral) + lower variance at low
+>   spp. THEN 3.x spatial (G-buffer + descriptor set 2 + Jacobian/MIS), 6.x
+>   temporal, 7.x biased.
 >
 > (old NEXT, now done — kept for the build map:)
 > NEXT GOAL = renderable initial-RIS ReSTIR (the coupled trunk, one vertical):
