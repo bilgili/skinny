@@ -57,7 +57,7 @@
 
 - [x] 8.1 Converge-to-reference: ReSTIR DI vs stock NEE on cornell_box_sphere/emissive + three_materials (`test_restir_lights.py`, `test_restir_render.py`).
 - [x] 8.2 Variance reduction: ReSTIR error < stock-NEE error at low spp on a many-light scene (`test_restir_variance.py`, `assets/restir_variance_demo.usda`).
-- [~] 8.3 Temporal beats spatial: **amended to a P3 (reprojected) property** — not achievable on the progressive accumulator (see the spec "Variance reduction" amendment). Diffuse-scene regime convergence is covered by `test_restir_regimes_converge`.
+- [x] 8.3 Temporal beats spatial: **amended to a P3 (reprojected) property** — not achievable on the progressive accumulator (see the spec "Variance reduction" amendment). Resolved by amendment; diffuse-scene regime convergence is covered by `test_restir_regimes_converge`.
 - [x] 8.4 Biased bounded: biased ΣM stays finite + within a small deviation on a diffuse scene (`test_restir_biased_toggle_bounded`).
 - [x] 8.5 Capability gate: `reuse=ReSTIR` + megakernel → identity (`test_restir_megakernel_falls_back_to_identity`).
 - [x] 8.6 Furnace preserved (env candidates gated off under furnace; the `reuseMode`/`bsdfPdf` gate guards leave furnace + reuse=none untouched — `test_sampling_parity`/`test_lights` pass); pinned-seed runs reproducible.
@@ -65,5 +65,5 @@
 
 ## Out of scope (this change)
 
-- [ ] P3 reprojected temporal (motion vectors + prev-frame G-buffer + disocclusion) — follow-on change. Reserved in the regime selector.
+- P3 reprojected temporal (motion vectors + prev-frame G-buffer + disocclusion) — follow-on change. Reserved in the regime selector.
 - World-space / secondary-vertex ReSTIR; ReSTIR GI / PT; denoising.
