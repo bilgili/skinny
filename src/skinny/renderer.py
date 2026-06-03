@@ -1080,11 +1080,16 @@ class Renderer:
         self.reuse_modes: list[str] = ["None", "ReSTIR DI"]
         self.reuse_index = 0
         # ReSTIR reuse regime (only meaningful when reuse = ReSTIR DI). Maps to
-        # the RestirPC flags (bit0 spatial, bit1 temporal). On the progressive
-        # accumulator temporal reuse correlates frames (~neutral) — "Spatial only"
-        # opts out. Surfaced via the data-driven _disc UI + persisted.
-        self.restir_regime_modes: list[str] = ["Spatial + Temporal", "Spatial only", "Temporal only"]
-        self._RESTIR_REGIME_FLAGS = [0x3, 0x1, 0x2]
+        # the RestirPC flags (bit0 spatial, bit1 temporal). Spatial reuse uses the
+        # unbiased GRIS combination (converges to NEE). On the PROGRESSIVE
+        # accumulator temporal reuse double-counts correlated history (it fights
+        # the accumulator's own frame averaging) and biases glossy surfaces unless
+        # M_cap is kept small — proper deep temporal needs the reprojected (P3)
+        # regime. So "Spatial only" is the default; the temporal regimes are
+        # selectable but progressive-limited. Surfaced via the data-driven _disc
+        # UI + persisted.
+        self.restir_regime_modes: list[str] = ["Spatial only", "Spatial + Temporal", "Temporal only"]
+        self._RESTIR_REGIME_FLAGS = [0x1, 0x3, 0x2]
         self.restir_regime_index = 0
 
         # Execution backend, orthogonal to the integrator and FIXED for the

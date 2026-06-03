@@ -119,7 +119,13 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
             float pdf_light_sa = (sph.t * sph.t) / max(sph.cos_y * area, 1e-12);
             w_bsdf = powerHeuristic(br.bsdfSample.pdf, pdf_light_sa);
         }
-        radiance += throughput * light.radiance * w_bsdf;
+        // ReSTIR DI (reuseMode 1) owns primary-hit direct: at the primary vertex
+        // its BSDF candidate already counted this sphere-hit term, so skip it
+        // here (still terminate — the ray hit an opaque emitter). Transmitted
+        // depth-0 bounces have no ReSTIR BSDF candidate → keep the stock add.
+        bool restirOwns = (fc.reuseMode == 1u) && (depth == 0u) && !br.bsdfSample.transmitted;
+        if (!restirOwns)
+            radiance += throughput * light.radiance * w_bsdf;
         wfTerminate(i, s, radiance, rng);
         return;
     }

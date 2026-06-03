@@ -35,4 +35,4 @@ class RestirDiReuse(ReusePlugin):
     # (its win is the real-time regime) — set flags=0x1 for spatial-only.
     def __init__(self):
         self.config = dict(flags=0x3, mLight=8, spatialK=5, spatialRadius=16.0,
-                           normalThresh=0.9, depthThresh=0.1, mCap=20)
+                           normalThresh=0.9, depthThresh=0.1, mCap=20, mBsdf=1)

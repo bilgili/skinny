@@ -38,12 +38,13 @@ struct RestirPC
 {
     uint  streamSize;
     uint  flags;
-    uint  mLight;        // initial light candidates
+    uint  mLight;        // initial light-sampled candidates
     uint  spatialK;      // spatial neighbours
     float spatialRadius; // screen px
     float normalThresh;  // dot(N_i, N_j) min
     float depthThresh;   // |pos_i - pos_j| max (world)
     uint  mCap;          // temporal history cap
+    uint  mBsdf;         // initial BSDF-sampled candidates
 };
 [[vk::push_constant]] ConstantBuffer<RestirPC> rpc;
 
@@ -91,16 +92,26 @@ void restirFill(uint3 tid: SV_DispatchThreadID)
     // Separate RNG stream so we don't consume the shade kernel's cursor.
     RNG rng;
     rng.state = pcgHash(s.rngState ^ 0x9e3779b9u);
-    wfReservoirA[i] = restirFillReservoir(mat, h, N, T, B, wo, rpc.mLight, rng);
+    wfReservoirA[i] = restirFillReservoir(mat, h, N, T, B, wo, rpc.mLight, rpc.mBsdf, rng);
     GBuf g; g.pos = h.position; g.normal = N;
     wfGBuffer[i] = g;
 }
 
-// Spatial reuse: merge self + k domain-checked neighbour reservoirs (reservoirA)
-// into reservoirB[i]. The neighbour's sample (any light type) is re-evaluated at
-// THIS pixel via restirEvalRef — the DI reconnection (same world light point,
-// this shading point); the area-light geometry term is recomputed at pixel i.
-// BIASED combination (sum M-weighted) — the unbiased m_i/1-Z is a follow-up.
+// Max combined sources: self + spatial neighbours + temporal.
+static const uint RESTIR_MAX_SRC = 12u;
+
+// Spatial + temporal reuse with the UNBIASED generalized balance heuristic
+// (GRIS, Lin 2022 / Bitterli 2020 unbiased). Each source sample z_s is combined
+// with MIS weight
+//     m_s = M_s·p̂_s(z_s) / Σ_j M_j·p̂_j(z_s)
+// where p̂_j(z_s) is z_s's target re-evaluated in source j's OWN domain (its
+// shading point + material, re-loaded from wfHits[j] via restirLoadLane). A
+// sample that many domains could have produced is down-weighted, which BOUNDS the
+// spatial→temporal feedback that the biased (ΣM) combination let explode on
+// glossy surfaces. DI reuses the same world light point (uv) ⇒ the reconnection
+// shift is identity (Jacobian 1); the geometry/BSDF change is captured by the
+// per-domain p̂ re-eval. The resampling weight is w_s = m_s·p̂_q(z_s)·W_s at the
+// canonical pixel q; W_out = Σw_s / p̂_q(Y) (the m_s normalize — no 1/M, no 1/Z).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void restirSpatial(uint3 tid: SV_DispatchThreadID)
@@ -114,27 +125,26 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
         return;
     }
     GBuf gi = wfGBuffer[i];
-    // TEMPORAL: bufB[i] holds last frame's reservoir (this pass overwrites it
-    // below). Static camera ⇒ same pixel/geometry, so p̂ is unchanged. Read it
-    // before any write; only valid once accumulation has a prior frame.
-    Reservoir prev = wfReservoirB[i];
+    Reservoir prev = wfReservoirB[i];              // last frame's reservoir (read before write)
     bool hasPrev = (fc.accumFrame > 0u) && (prev.W > 0.0)
                  && ((rpc.flags & RESTIR_FLAG_TEMPORAL) != 0u);
 
-    Reservoir merged;
-    reservoirReset(merged);
-    Reservoir self = wfReservoirA[i];
-    reservoirMerge(merged, self, self.pHat, 0.0);   // self always taken first (rand 0)
+    // ── Collect sources: self + domain-checked spatial neighbours + temporal ──
+    uint           sLane[RESTIR_MAX_SRC];
+    LightSampleRef sRef[RESTIR_MAX_SRC];
+    float          sW[RESTIR_MAX_SRC];
+    float          sM[RESTIR_MAX_SRC];
+    uint K = 0u;
 
-    // Single-tile assumption: lane index == pixel index (stream_size ≥ pixels),
-    // so screen neighbours are reachable by lane offset. Cross-tile reuse is a
-    // later refinement.
+    Reservoir self = wfReservoirA[i];
+    sLane[K] = i; sRef[K] = self.y; sW[K] = self.W; sM[K] = float(self.M); K++;
+
     uint px = i % fc.width;
     uint py = i / fc.width;
     RNG rng;
     rng.state = pcgHash((i * 9781u) ^ 0x85ebca6bu ^ fc.frameIndex);
     bool doSpatial = (rpc.flags & RESTIR_FLAG_SPATIAL) != 0u;
-    for (uint k = 0u; doSpatial && k < rpc.spatialK; k++)
+    for (uint k = 0u; doSpatial && k < rpc.spatialK && K < RESTIR_MAX_SRC - 1u; k++)
     {
         float2 d = (rng.next2() * 2.0 - 1.0) * rpc.spatialRadius;
         int nx = int(px) + int(round(d.x));
@@ -144,35 +154,70 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
         uint j = uint(ny) * fc.width + uint(nx);
         if (j == i || j >= rpc.streamSize)
             continue;
-
         GBuf gj = wfGBuffer[j];
         if (dot(gi.normal, gj.normal) < rpc.normalThresh ||
             length(gi.pos - gj.pos) > rpc.depthThresh)
             continue;
-
         Reservoir nb = wfReservoirA[j];
         if (nb.W <= 0.0)
             continue;
-        // Re-evaluate the neighbour's sample at THIS pixel — the DI reconnection
-        // (same world light point, this shading point). Works for any light type
-        // (sphere / emissive-tri / env); the area-light geometry term is recomputed
-        // here at pixel i. BIASED combination — the unbiased m_i/1-Z is a follow-up.
-        RCand cj = restirEvalRef(mat, refType(nb.y), refId(nb.y), nb.y.uv, h, N, T, B, wo);
-        if (!cj.valid || cj.pHat <= 0.0)
-            continue;
-        reservoirMerge(merged, nb, cj.pHat, rng.next());
+        sLane[K] = j; sRef[K] = nb.y; sW[K] = nb.W; sM[K] = float(nb.M); K++;
     }
-
-    // TEMPORAL merge: fold last frame's reservoir, M-capped to bound lag.
-    // reservoirMerge weights by W·M, so clamping M scales the prev contribution.
-    if (hasPrev)
+    if (hasPrev && K < RESTIR_MAX_SRC)
     {
-        prev.M = min(prev.M, rpc.mCap);
-        reservoirMerge(merged, prev, prev.pHat, rng.next());
+        sLane[K] = i; sRef[K] = prev.y; sW[K] = prev.W;
+        sM[K] = float(min(prev.M, rpc.mCap)); K++;        // M-capped temporal history
     }
 
-    reservoirFinalize(merged);
-    wfReservoirB[i] = merged;
+    // Canonical target p̂_q(z_s) of each source's sample at THIS pixel.
+    float pCanon[RESTIR_MAX_SRC];
+    for (uint a = 0u; a < K; a++)
+    {
+        RCand c = restirEvalRef(mat, refType(sRef[a]), refId(sRef[a]), sRef[a].uv, h, N, T, B, wo);
+        pCanon[a] = (c.valid) ? c.pHat : 0.0;
+    }
+
+    // MIS denominators D_s = Σ_j M_j·p̂_j(z_s) + own-domain target p̂_s(z_s).
+    // Load each source domain ONCE (outer j), evaluate every sample in it.
+    float D[RESTIR_MAX_SRC];
+    float pOwn[RESTIR_MAX_SRC];
+    for (uint a = 0u; a < K; a++) { D[a] = 0.0; pOwn[a] = 0.0; }
+    for (uint j = 0u; j < K; j++)
+    {
+        WavefrontPathState sj; HitInfo hj; FlatMaterial matj; float3 Nj, Tj, Bj, woj;
+        if (!restirLoadLane(sLane[j], sj, hj, matj, Nj, Tj, Bj, woj))
+            continue;                               // domain can't be reconstructed ⇒ contributes 0
+        for (uint a = 0u; a < K; a++)
+        {
+            RCand c = restirEvalRef(matj, refType(sRef[a]), refId(sRef[a]), sRef[a].uv,
+                                    hj, Nj, Tj, Bj, woj);
+            float p = (c.valid) ? c.pHat : 0.0;
+            D[a] += sM[j] * p;
+            if (j == a) pOwn[a] = p;
+        }
+    }
+
+    // Combine: select Y ∝ w_s = m_s·p̂_q(z_s)·W_s, m_s = M_s·p̂_s(z_s)/D_s.
+    Reservoir outr;
+    reservoirReset(outr);
+    float mTotal = 0.0;
+    for (uint a = 0u; a < K; a++)
+    {
+        mTotal += sM[a];
+        if (D[a] <= 0.0 || pCanon[a] <= 0.0 || sW[a] <= 0.0)
+            continue;
+        float m_s = sM[a] * pOwn[a] / D[a];
+        float w_s = m_s * pCanon[a] * sW[a];
+        outr.wSum += w_s;
+        if (w_s > 0.0 && rng.next() * outr.wSum < w_s)
+        {
+            outr.y = sRef[a];
+            outr.pHat = pCanon[a];
+        }
+    }
+    outr.M = uint(mTotal);
+    outr.W = (outr.pHat > 0.0) ? outr.wSum / outr.pHat : 0.0;   // m_s normalize ⇒ no 1/M
+    wfReservoirB[i] = outr;
 }
 
 // Resolve: read the spatially-reused reservoir (B) → one shadow ray → add direct
