@@ -1,3 +1,29 @@
+> RESUME (at commit 34d14bb). M2 DONE: restir/light_ris.slang reservoir-resamples
+> M=8 env candidates (MIS-weighted target p̂=luminance(f·NdotL·Le·wNEE), sourcePdf=
+> envPdf/T, deferred visibility) + directional NEE; restir_primary calls it.
+> Converges to NEE (unbiased, option B — composes with shade's BSDF half, no shade
+> gate). The reservoir is currently EPHEMERAL (built+resolved in one pass).
+>
+> NEXT = the REUSE (the defining ReSTIR feature; needs persistent per-pixel state):
+>   1. Store the reservoir in a per-pixel buffer (descriptor set 2 on RestirDiPass)
+>      + a G-buffer (pos/normal/matId/wo) — alloc renderer-side, double-buffer the
+>      reservoir for temporal. Split restir_primary into fill-reservoir (write) +
+>      resolve (read+shade), OR add separate passes (initial→spatial→resolve).
+>   2. SPATIAL reuse (restir/spatial.slang): merge k neighbor reservoirs via
+>      reservoirMerge (done+tested) with pHatInDst = the neighbor's sample
+>      re-evaluated at THIS shading point (needs G-buffer) + the unbiased m_i/1-Z
+>      + reconnection Jacobian (cosθ/d² ratio) + horizon/visibility domain check.
+>      THE hard math. Test: lower variance (use a HIGH-CONTRAST env, gray demo env
+>      understates it) + still converges.
+>   3. TEMPORAL reuse (restir/temporal.slang): merge prev-frame reservoir (same
+>      pixel, progressive) + M-cap.
+> Also pending: M2b sphere/emissive-tri + BSDF candidates (canonical, same pattern)
+> · config UBO (M_light/k/radius/M_cap/biased) · 7.x biased toggle. reservoir +
+> merge cores done+tested; M1 plumbing + M2 RIS done.
+>
+> (older resume blocks below kept for the build map.)
+>
+> --- prior:
 > RESUME (at commit 2bd05b8). DONE + verified:
 > - Pure-math: reuse-seam (parity) · reservoir core (RIS) · reservoirMerge. 12
 >   slangpy unit tests.
