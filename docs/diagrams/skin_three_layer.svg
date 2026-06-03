@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="240" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <style>
+    .t{fill:#1a2230;}
+    .f{fill:#566;font-size:11px;}
+  </style>
+  <rect x="40" y="24" width="220" height="56" rx="6" fill="#fdf0e6" stroke="#c4865b" stroke-width="1.4"/>
+  <text class="t" x="150" y="46" text-anchor="middle" font-weight="600">Epidermis</text>
+  <text class="f" x="150" y="66" text-anchor="middle">thickness, σs, g</text>
+  <text class="f" x="290" y="56" >melanin absorption (Donner &amp; Jensen 2006)</text>
+
+  <rect x="40" y="84" width="220" height="56" rx="6" fill="#f6e6e6" stroke="#b85b5b" stroke-width="1.4"/>
+  <text class="t" x="150" y="106" text-anchor="middle" font-weight="600">Dermis + tattoo pigment</text>
+  <text class="f" x="150" y="126" text-anchor="middle">hemoglobin (oxy/deoxy)</text>
+  <text class="f" x="290" y="116" >hemoglobin absorption · optional ink overlay</text>
+
+  <rect x="40" y="144" width="220" height="56" rx="6" fill="#f3eee6" stroke="#a08a5b" stroke-width="1.4"/>
+  <text class="t" x="150" y="166" text-anchor="middle" font-weight="600">Subcutaneous</text>
+  <text class="f" x="150" y="186" text-anchor="middle">σa, σs, g</text>
+  <text class="f" x="290" y="176" >fixed-optics fat layer</text>
+</svg>

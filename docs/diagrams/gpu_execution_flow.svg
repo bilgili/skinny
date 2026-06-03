@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="560" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <defs>
+    <marker id="arr2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.3;}
+    .d{fill:#eef7ee;stroke:#4a9a4a;stroke-width:1.3;}
+    .br{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.3;}
+    .t{fill:#1a2230;}
+    .f{fill:#7a8aa0;font-size:10.5px;font-style:italic;}
+    .e{stroke:#555;stroke-width:1.2;fill:none;marker-end:url(#arr2);}
+    .lbl{fill:#444;font-size:11px;}
+  </style>
+
+  <rect class="b" x="270" y="14" width="220" height="48" rx="8"/>
+  <text class="t" x="380" y="35" text-anchor="middle" font-weight="600">mainImage()</text>
+  <text class="f" x="380" y="52" text-anchor="middle">main_pass.slang</text>
+
+  <rect class="b" x="270" y="86" width="220" height="48" rx="8"/>
+  <text class="t" x="380" y="107" text-anchor="middle">cam.generateRay()</text>
+  <text class="f" x="380" y="124" text-anchor="middle">cameras/{pinhole,thick_lens}</text>
+
+  <rect class="b" x="270" y="158" width="220" height="48" rx="8"/>
+  <text class="t" x="380" y="179" text-anchor="middle">traceScene() → HitInfo</text>
+  <text class="f" x="380" y="196" text-anchor="middle">scene_trace · mesh_head / sdf_head</text>
+
+  <!-- integrator branch -->
+  <rect class="d" x="40" y="240" width="300" height="92" rx="8"/>
+  <text class="t" x="190" y="262" text-anchor="middle" font-weight="600">BDPT  (flat first-hit)</text>
+  <text class="f" x="190" y="280" text-anchor="middle">integrators/bdpt.slang</text>
+  <text class="f" x="190" y="298" text-anchor="middle">eye + light walks · (s,t) connect</text>
+  <text class="f" x="190" y="316" text-anchor="middle">s=1 splat → lightSplatBuffer</text>
+
+  <rect class="d" x="420" y="240" width="300" height="92" rx="8"/>
+  <text class="t" x="570" y="262" text-anchor="middle" font-weight="600">PathTracer  (else)</text>
+  <text class="f" x="570" y="280" text-anchor="middle">integrators/path.slang</text>
+  <text class="f" x="570" y="298" text-anchor="middle">for bounce 0..5: evaluateBounce</text>
+  <text class="f" x="570" y="316" text-anchor="middle">NEE + RR + sphere-light MIS</text>
+
+  <!-- merge -->
+  <rect class="b" x="270" y="372" width="220" height="44" rx="8"/>
+  <text class="t" x="380" y="399" text-anchor="middle">NaN/inf/neg guard</text>
+
+  <rect class="b" x="270" y="430" width="220" height="44" rx="8"/>
+  <text class="t" x="380" y="450" text-anchor="middle">accumulate (running mean)</text>
+  <text class="f" x="380" y="466" text-anchor="middle">+ BDPT light-splat mean</text>
+
+  <rect class="br" x="270" y="492" width="220" height="52" rx="8"/>
+  <text class="t" x="380" y="513" text-anchor="middle">exposure → tonemap → sRGB</text>
+  <text class="f" x="380" y="531" text-anchor="middle">+ furnace/gizmo/HUD → outputBuffer</text>
+
+  <path class="e" d="M380,62 L380,84"/>
+  <path class="e" d="M380,134 L380,156"/>
+  <path class="e" d="M310,206 L210,238"/>
+  <path class="e" d="M450,206 L550,238"/>
+  <text class="lbl" x="210" y="228" text-anchor="middle">BDPT</text>
+  <text class="lbl" x="556" y="228" text-anchor="middle">path / env-miss</text>
+  <path class="e" d="M210,332 L330,370"/>
+  <path class="e" d="M550,332 L430,370"/>
+  <path class="e" d="M380,416 L380,428"/>
+  <path class="e" d="M380,474 L380,490"/>
+</svg>

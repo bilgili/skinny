@@ -12,37 +12,29 @@ chain, volume transport, head geometry, and MaterialX skin codegen) are
 documented in [SkinRendering.md](SkinRendering.md). This file covers the generic
 renderer architecture.
 
+The renderer has **two GPU execution modes** for the *same* light-transport
+integral, selected once at startup with `--execution-mode megakernel|wavefront`
+and fixed for the session. Each has its own technical deep-dive:
+
+- **[Megakernel.md](Megakernel.md)** — the default: one monolithic
+  `[numthreads(8,8,1)]` dispatch of `main_pass.slang`, one thread traces a whole
+  path in a register-resident bounce loop.
+- **[Wavefront.md](Wavefront.md)** — the same estimator torn across many small
+  per-stage / per-material kernels connected by GPU queues; better material
+  coherence and small enough to compile on MoltenVK.
+
+Both are unbiased and A/B-verified to match; see
+[Wavefront.md § Megakernel vs wavefront](Wavefront.md#megakernel-vs-wavefront)
+for the side-by-side comparison and the rationale for having both. The section
+below describes the megakernel GPU flow in detail.
+
 ---
 
 ## High-Level Pipeline
 
 Three entry points share the same renderer core:
 
-```
-GLFW debug (skinny)            Qt desktop (skinny-gui)         Web (skinny-web)
-┌─────────────┐                ┌────────────────────┐          ┌────────────────────┐
-│ GLFW window │                │ QMainWindow        │          │ Browser tab        │
-│ + keyboard  │                │  ├ RenderViewport  │          │ (Panel widgets +   │
-│ params      │                │  ├ sidebar (spec)  │          │  WebCodecs canvas) │
-└──────┬──────┘                │  └ tool docks      │          └─────────┬──────────┘
-       │                       └─────────┬──────────┘                    │
-       │                                 │                               │
-       ▼                                 ▼                               ▼
-                       ┌─────────────────────────────────────┐    ┌──────────────────┐
-                       │ Renderer.py                          │    │ SkinnySession    │
-                       │  packs UBO, uploads bufs,            │◀───│ per-user wrapper │
-                       │  runs MaterialX codegen + cache      │    │ + H264 encoder   │
-                       └────────┬─────────────────────────────┘    └────────┬─────────┘
-                                │                                           │
-                                ▼                                           ▼
-                       ┌──────────────────┐                          ┌──────────────────┐
-                       │ Vulkan Compute   │                          │ Vulkan Compute   │
-                       │  Dispatch        │                          │  (headless)      │
-                       │  → swapchain /   │                          │  → readback      │
-                       │     offscreen    │                          │  → H264 encode   │
-                       └──────────────────┘                          │  → WebSocket     │
-                                                                     └──────────────────┘
-```
+![High-level pipeline: GLFW / Qt / Web front-ends feed Renderer.py, which dispatches Vulkan compute to swapchain or headless readback.](diagrams/high_level_pipeline.svg)
 
 `skinny-gui` and `skinny-web` share a **single widget-tree spec**
 (`ui/spec.py` + `ui/build_app_ui.py`). The Qt backend
@@ -82,38 +74,22 @@ the spec lights it up in both UIs.
 
 ## GPU Execution Flow
 
-```
-mainImage()                                          main_pass.slang
-  ├─ generateCameraRay(fc, pixel, rng)               cameras/{pinhole,thick_lens}.slang
-  ├─ traceScene(fc, ray)                             scene_trace.slang
-  │    ├─ furnace → unit sphere
-  │    ├─ mesh    → marchHeadMesh()                  mesh_head.slang
-  │    └─ SDF     → marchHead()                      sdf_head.slang
-  ├─ if BDPT + flat first-hit:
-  │    └─ BDPTIntegrator.estimateRadiance()          integrators/bdpt.slang
-  │         ├─ eye walk (4 verts, FlatMaterial)
-  │         ├─ light walk (4 verts, sphere/emissive/dir)
-  │         ├─ (s,t) connections with Lambertian approx
-  │         └─ light-tracer splat (s=1) → lightSplatBuffer
-  ├─ else:
-  │    └─ PathTracer.estimateRadiance()              integrators/path.slang
-  │         ├─ cutout transparency skip loop
-  │         ├─ for bounce 0..5:
-  │         │    ├─ evaluateBounce(h, r, bounce, rng)
-  │         │    │    ├─ FLAT → allLightsNEE + sample (FlatMaterial)
-  │         │    │    │    └─ if matlx_graph_id valid → evalSceneGraph(...)
-  │         │    │    ├─ SKIN → evalSkinRadiance (§1-§6)
-  │         │    │    └─ DEBUG → 0.5 + 0.5·N
-  │         │    ├─ Russian roulette (bounce > 0)
-  │         │    └─ sphere-light MIS on BSDF ray
-  ├─ NaN / inf / negative guard
-  ├─ progressive accumulation (running mean)
-  ├─ + BDPT light-splat mean (Q22.10 → float)
-  ├─ exposure (2^EV) → tonemap (ACES / Reinhard / Hable / linear) → sRGB gamma
-  ├─ per-material furnace energy-violation overlay (pink)
-  ├─ transform-gizmo line composite (binding 22)
-  └─ HUD alpha composite → outputBuffer
-```
+![GPU execution flow: mainImage generates a ray, traces the scene, branches to BDPT (flat first-hit) or PathTracer, then guards, accumulates, tonemaps, and composites overlays into outputBuffer.](diagrams/gpu_execution_flow.svg)
+
+The detailed per-step substructure (furnace/mesh/SDF trace dispatch, BDPT eye/light
+walk + (s,t) connections + s=1 splat, the path tracer's per-bounce
+`evaluateBounce` → FLAT/SKIN/DEBUG dispatch, Russian roulette, sphere-light MIS):
+
+- **`traceScene`** — furnace → unit sphere; mesh → `marchHeadMesh()`; SDF → `marchHead()`.
+- **BDPT** — eye walk (FlatMaterial) + light walk (sphere/emissive/dir) + (s,t)
+  connections + light-tracer splat (s=1) → `lightSplatBuffer`.
+- **PathTracer** — cutout-transparency skip loop, then `for bounce 0..5`:
+  `evaluateBounce` dispatches FLAT (`allLightsNEE` + sample, optional
+  `evalSceneGraph`), SKIN (`evalSkinRadiance` §1–§6), or DEBUG (`0.5 + 0.5·N`);
+  Russian roulette after bounce 0; sphere-light MIS on the BSDF ray.
+- **Post** — NaN/inf/neg guard → running-mean accumulation (+ BDPT light-splat
+  mean, Q22.10 → float) → exposure (2^EV) → tonemap → sRGB → furnace overlay →
+  gizmo line composite (binding 22) → HUD alpha → `outputBuffer`.
 
 `evalSceneGraph(materialId, hit, ...)` is generated per material into
 `shaders/generated/` by `MaterialXGenSlang` and dispatched via tag-switch
@@ -320,26 +296,12 @@ Arbitrary MaterialX nodegraphs (e.g. marble, wood, brass — see
 `assets/three_materials_demo.usda`) are compiled to per-material Slang
 modules at scene-load time and again whenever a graph signature changes.
 
-```
-USD scene with MaterialX ─► usd_loader.py
-                            └─► CompiledMaterial per UsdShade.Material
-                                ├─ MaterialXGenSlang generates:
-                                │     graph_<hash>.slang   (in shaders/generated/)
-                                │     defines `evalSceneGraph_<hash>(hit, params)`
-                                ├─ filename inputs replaced with bindless slot
-                                │  indices via TexturePool (binding 14)
-                                └─ generated_materials.slang switch-dispatches
-                                   `evalSceneGraph(materialId, hit, params)` →
-                                   the right per-graph function
+![MaterialX nodegraph pipeline: USD MaterialX → CompiledMaterial → MaterialXGenSlang emits graph_<hash>.slang and generated_materials.slang switch-dispatch; ComputePipeline runs codegen then Slang→SPIR-V with an mtime-LRU cache, skipping rebuild when the graph set is identical.](diagrams/materialx_pipeline.svg)
 
-Renderer._compile_pipeline()
-  └─ ComputePipeline._run_codegen()    # walks slangpile + MaterialX graphs
-  └─ Slang compile (SPIR-V)             # mtime-LRU cache, ≤32 entries
-       └─ SPV cache key = source hash + entry point
-  └─ Pipeline rebuild
-       └─ skipped when graph set is content-identical
-       └─ texture pool repopulated after rebuild
-```
+Details: filename inputs are replaced with bindless slot indices via `TexturePool`
+(binding 14); `evalSceneGraph_<hash>(hit, params)` is switch-dispatched by
+`generated_materials.slang`; the SPV cache key is `source hash + entry point`
+(≤32 entries); the texture pool is repopulated after each rebuild.
 
 Key invariants:
 
@@ -595,6 +557,10 @@ Edits flow back through `MaterialLibrary` and trigger a graph rebuild
 
 ## Headless Render API (`skinny.headless`)
 
+> Full signatures, return types, and examples for the whole programmatic
+> surface are in **[PythonAPI.md](PythonAPI.md)**. This section is the
+> architectural overview.
+
 `skinny.headless` is the public offscreen-render interface, driving
 `Renderer.set_usd_scene()` + `usd_loader.load_scene_from_stage()` directly
 with no window or event loop. Key symbols:
@@ -623,19 +589,7 @@ spec that the Qt app uses.
 
 ### Session Lifecycle
 
-```
-Browser connects → Panel creates session → SkinnySession.__init__()
-  ├─ VulkanContext(window=None)  # headless, no GLFW
-  ├─ Renderer(vk_ctx, ..., usd_scene)
-  ├─ VideoEncoder(w, h, gpu_info)  # H264 hw or sw
-  └─ Thread(_render_loop)  # starts immediately
-
-Browser disconnects → on_session_destroyed → session.cleanup()
-  ├─ _running = False → thread joins
-  ├─ encoder.close()
-  ├─ renderer.cleanup()
-  └─ ctx.destroy()
-```
+![Session lifecycle: a browser connect builds a SkinnySession (headless VulkanContext, Renderer, VideoEncoder, render thread); disconnect runs cleanup (thread join, encoder close, renderer cleanup, ctx destroy).](diagrams/session_lifecycle.svg)
 
 Max concurrent sessions capped (default 4) to bound GPU memory.
 
@@ -848,32 +802,7 @@ a build-time requirement (generated `.slang` files are checked into git).
 
 ## Shader Module Dependency Graph
 
-```
-                           common.slang
-                          ╱     |     ╲
-              interfaces      bindings    materials/skin/skin_bssrdf
-              ╱  |  |  ╲       |              |       ╲
-        ICamera  ISampler   IMaterial  scene_trace  materials/skin/skin_shading
-            |        |        ILight        |    ╲       |
-       cameras/  samplers/    BSDFSample sdf_head  mesh_head
-            |              |  BSDFEval                 ╲
-       lights/                                      materials/skin/{direct,ibl_*,
-            |                                            volume,transmission,hair_sheen}
-                                                          |
-                                            materials/skin/skin_material ─┐
-                                            materials/flat/flat_material ─┤
-                                            materials/debug_normal_material┤
-                                            materials/flat/flat_shading ──┤
-                                            shaders/generated/graph_*.slang┤
-                                              (via mtlx_gen_shim)         │
-                                                                          ▼
-                                              integrators/path.slang ──────┐
-                                              (evaluateBounce + bounce loop)
-                                              integrators/bdpt.slang ──────┤
-                                              (eye/light walks + MIS)      │
-                                                                           ▼
-                                                                  main_pass.slang
-```
+![Shader module dependency graph: common.slang feeds interfaces/bindings/scene-trace, which feed cameras/samplers/lights and the material implementations (flat, skin, debug, generated graphs), which feed the path and BDPT integrators, which feed main_pass.slang.](diagrams/shader_dependency_graph.svg)
 
 ---
 

@@ -9,7 +9,7 @@ and the related assets, shaders, and references.
 
 The generic pipeline (arbitrary MaterialX nodegraphs, flat/standard_surface
 materials, path/BDPT integrators, cameras, backends, web mode) is documented in
-[README.md](README.md) and [Architecture.md](Architecture.md).
+[README.md](../README.md) and [Architecture.md](Architecture.md).
 
 ## Features
 
@@ -61,18 +61,7 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 
 ### Three-Layer Biological Model (`materials/skin/skin_bssrdf.slang`)
 
-```
-         ┌──────────────────────┐
-         │   Epidermis          │  melanin absorption (Donner & Jensen 2006)
-         │   thickness, σs, g   │
-         ├──────────────────────┤
-         │   Dermis             │  hemoglobin absorption (oxy/deoxy)
-         │   + tattoo pigment   │  optional ink overlay
-         ├──────────────────────┤
-         │   Subcutaneous       │  fixed-optics fat layer
-         │   σa, σs, g          │
-         └──────────────────────┘
-```
+![Three-layer biological skin model: epidermis (melanin absorption), dermis + tattoo pigment (hemoglobin oxy/deoxy absorption + optional ink), subcutaneous fat (fixed optics).](diagrams/skin_three_layer.svg)
 
 `SkinLayerStack` (3 × `SkinLayer`) built from `MtlxSkinParams` (164 bytes, 27
 fields). Each layer has: σa, σs, thickness, g (anisotropy), IOR.
@@ -124,21 +113,7 @@ Delta-tracking (Woodcock tracking) through heterogeneous skin:
 
 ## MaterialX Skin Integration
 
-```
-skinny_defs.mtlx                     6 custom nodedefs
-        │                            (epidermis, dermis, subcut,
-        ▼                             scattering_layer, layered_bsdf,
-skinny_skin_default.mtlx              layered_vdf)
-        │
-        ▼
-MaterialXGenSlang                    Code generation
-        │
-        ▼
-mtlx/genslang/*.slang                6 generated Slang implementations
-        │
-        ▼
-skinny_genslang_impl.mtlx           Binds nodedefs → Slang source
-```
+![MaterialX skin integration: skinny_defs.mtlx (6 custom nodedefs) → skinny_skin_default.mtlx → MaterialXGenSlang → 6 generated Slang implementations → skinny_genslang_impl.mtlx binds nodedefs to Slang source.](diagrams/mtlx_skin_integration.svg)
 
 `MaterialLibrary` (`materialx_runtime.py`):
 - Loads stdlib + skinny custom libraries

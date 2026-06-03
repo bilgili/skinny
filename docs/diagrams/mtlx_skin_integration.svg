@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="320" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <defs>
+    <marker id="arrm" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.3;}
+    .g{fill:#eef7ee;stroke:#4a9a4a;stroke-width:1.3;}
+    .t{fill:#1a2230;font-family:ui-monospace,Menlo,monospace;}
+    .f{fill:#7a8aa0;font-size:10.5px;}
+    .e{stroke:#555;stroke-width:1.2;fill:none;marker-end:url(#arrm);}
+  </style>
+
+  <rect class="b" x="40" y="20" width="240" height="44" rx="8"/>
+  <text class="t" x="160" y="41" text-anchor="middle" font-weight="600">skinny_defs.mtlx</text>
+  <text class="f" x="160" y="57" text-anchor="middle" font-family="-apple-system">6 custom nodedefs</text>
+  <text class="f" x="430" y="36" font-family="-apple-system">epidermis, dermis, subcut,</text>
+  <text class="f" x="430" y="52" font-family="-apple-system">scattering_layer, layered_bsdf, layered_vdf</text>
+
+  <rect class="b" x="40" y="84" width="240" height="40" rx="8"/>
+  <text class="t" x="160" y="109" text-anchor="middle">skinny_skin_default.mtlx</text>
+
+  <rect class="g" x="40" y="144" width="240" height="40" rx="8"/>
+  <text class="t" x="160" y="169" text-anchor="middle" font-weight="600">MaterialXGenSlang</text>
+  <text class="f" x="430" y="168" font-family="-apple-system">code generation</text>
+
+  <rect class="g" x="40" y="204" width="240" height="44" rx="8"/>
+  <text class="t" x="160" y="225" text-anchor="middle">mtlx/genslang/*.slang</text>
+  <text class="f" x="160" y="241" text-anchor="middle" font-family="-apple-system">6 generated Slang impls</text>
+
+  <rect class="b" x="40" y="264" width="240" height="44" rx="8"/>
+  <text class="t" x="160" y="285" text-anchor="middle">skinny_genslang_impl.mtlx</text>
+  <text class="f" x="160" y="301" text-anchor="middle" font-family="-apple-system">binds nodedefs → Slang source</text>
+
+  <path class="e" d="M160,64 L160,82"/>
+  <path class="e" d="M160,124 L160,142"/>
+  <path class="e" d="M160,184 L160,202"/>
+  <path class="e" d="M160,248 L160,262"/>
+</svg>

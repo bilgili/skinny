@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="560" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">
+  <defs>
+    <marker id="arr5" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#666"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.2;}
+    .i{fill:#eef2fb;stroke:#7a8aa0;stroke-width:1.1;}
+    .m{fill:#eef7ee;stroke:#4a9a4a;stroke-width:1.2;}
+    .top{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.4;}
+    .t{fill:#1a2230;}
+    .e{stroke:#888;stroke-width:1;fill:none;marker-end:url(#arr5);}
+  </style>
+
+  <rect class="b" x="300" y="16" width="160" height="38" rx="7"/>
+  <text class="t" x="380" y="40" text-anchor="middle" font-weight="600">common.slang</text>
+
+  <rect class="i" x="120" y="92" width="150" height="36" rx="7"/>
+  <text class="t" x="195" y="115" text-anchor="middle">interfaces.slang</text>
+  <rect class="i" x="305" y="92" width="150" height="36" rx="7"/>
+  <text class="t" x="380" y="115" text-anchor="middle">bindings.slang</text>
+  <rect class="i" x="490" y="92" width="170" height="36" rx="7"/>
+  <text class="t" x="575" y="115" text-anchor="middle">scene_trace · *_head</text>
+
+  <rect class="b" x="40"  y="170" width="130" height="36" rx="7"/>
+  <text class="t" x="105" y="193" text-anchor="middle">cameras/</text>
+  <rect class="b" x="190" y="170" width="130" height="36" rx="7"/>
+  <text class="t" x="255" y="193" text-anchor="middle">samplers/ · lights/</text>
+  <rect class="b" x="340" y="170" width="150" height="36" rx="7"/>
+  <text class="t" x="415" y="193" text-anchor="middle">ISampler/IMaterial/ILight</text>
+  <rect class="b" x="510" y="170" width="170" height="36" rx="7"/>
+  <text class="t" x="595" y="193" text-anchor="middle">materials/skin/*</text>
+
+  <rect class="m" x="180" y="266" width="220" height="36" rx="7"/>
+  <text class="t" x="290" y="289" text-anchor="middle">materials/flat/flat_material</text>
+  <rect class="m" x="420" y="266" width="260" height="36" rx="7"/>
+  <text class="t" x="550" y="289" text-anchor="middle">materials/skin/skin_material</text>
+  <rect class="m" x="180" y="318" width="220" height="36" rx="7"/>
+  <text class="t" x="290" y="341" text-anchor="middle">debug_normal_material</text>
+  <rect class="m" x="420" y="318" width="260" height="36" rx="7"/>
+  <text class="t" x="550" y="341" text-anchor="middle">generated/graph_*.slang</text>
+
+  <rect class="b" x="230" y="406" width="300" height="40" rx="7"/>
+  <text class="t" x="380" y="425" text-anchor="middle" font-weight="600">integrators/path.slang  ·  bdpt.slang</text>
+  <text class="t" x="380" y="440" text-anchor="middle" font-size="10.5" fill="#7a8aa0">evaluateBounce + bounce loop / eye+light walks</text>
+
+  <rect class="top" x="290" y="496" width="180" height="40" rx="7"/>
+  <text class="t" x="380" y="521" text-anchor="middle" font-weight="600">main_pass.slang</text>
+
+  <path class="e" d="M360,54 L210,90"/>
+  <path class="e" d="M380,54 L380,90"/>
+  <path class="e" d="M410,54 L560,90"/>
+  <path class="e" d="M180,128 L120,168"/>
+  <path class="e" d="M210,128 L255,168"/>
+  <path class="e" d="M380,128 L415,168"/>
+  <path class="e" d="M575,128 L595,168"/>
+  <path class="e" d="M255,206 L290,264"/>
+  <path class="e" d="M595,206 L560,264"/>
+  <path class="e" d="M290,302 L300,404"/>
+  <path class="e" d="M550,354 L460,404"/>
+  <path class="e" d="M380,446 L380,494"/>
+</svg>

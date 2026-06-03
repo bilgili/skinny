@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="540" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <defs>
+    <marker id="arr7" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.3;}
+    .g{fill:#eef7ee;stroke:#4a9a4a;stroke-width:1.3;}
+    .br{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.3;}
+    .t{fill:#1a2230;}
+    .f{fill:#7a8aa0;font-size:10.5px;font-style:italic;}
+    .e{stroke:#555;stroke-width:1.2;fill:none;marker-end:url(#arr7);}
+    .loop{stroke:#c4865b;stroke-width:1.4;fill:none;stroke-dasharray:5 4;marker-end:url(#arr7);}
+  </style>
+  <text class="t" x="360" y="20" text-anchor="middle" font-weight="600" font-size="13">WavefrontPathPass.record_dispatch — staged, per tile</text>
+
+  <rect class="g" x="250" y="36" width="220" height="40" rx="8"/>
+  <text class="t" x="360" y="61" text-anchor="middle">wfPathGenerate</text>
+
+  <!-- bounce loop frame -->
+  <rect x="60" y="96" width="600" height="300" rx="10" fill="none" stroke="#c4865b" stroke-width="1.3" stroke-dasharray="3 3"/>
+  <text class="f" x="74" y="114" fill="#c4865b" font-style="normal">for bounce in 0 .. MAX_BOUNCES (CPU-driven, barriers between stages)</text>
+
+  <rect class="b" x="250" y="126" width="220" height="36" rx="8"/>
+  <text class="t" x="360" y="149" text-anchor="middle">clear_counts (fill + barrier)</text>
+
+  <rect class="b" x="220" y="178" width="280" height="44" rx="8"/>
+  <text class="t" x="360" y="199" text-anchor="middle">wfPathIntersect</text>
+  <text class="f" x="360" y="215" text-anchor="middle">trace · terminate · classify slot · atomic count</text>
+
+  <rect class="b" x="220" y="238" width="280" height="44" rx="8"/>
+  <text class="t" x="360" y="259" text-anchor="middle">wfBuildArgs  (1×1×1)</text>
+  <text class="f" x="360" y="275" text-anchor="middle">prefix-sum → indirect dispatch args</text>
+
+  <rect class="b" x="220" y="298" width="280" height="36" rx="8"/>
+  <text class="t" x="360" y="321" text-anchor="middle">wfScatter — counting-sort alive lanes</text>
+
+  <rect class="g" x="120" y="350" width="230" height="36" rx="8"/>
+  <text class="t" x="235" y="373" text-anchor="middle">shade(0) wfPathShadeFlat</text>
+  <rect class="g" x="370" y="350" width="230" height="36" rx="8"/>
+  <text class="t" x="485" y="373" text-anchor="middle">shade(1) wfPathShade</text>
+  <text class="f" x="360" y="338" text-anchor="middle">indirect dispatch per material slot</text>
+
+  <rect class="br" x="250" y="424" width="220" height="44" rx="8"/>
+  <text class="t" x="360" y="445" text-anchor="middle">wfPathResolve</text>
+  <text class="f" x="360" y="461" text-anchor="middle">running-mean accumulate + tonemap</text>
+
+  <path class="e" d="M360,76 L360,124"/>
+  <path class="e" d="M360,162 L360,176"/>
+  <path class="e" d="M360,222 L360,236"/>
+  <path class="e" d="M360,282 L360,296"/>
+  <path class="e" d="M320,334 L260,348"/>
+  <path class="e" d="M400,334 L470,348"/>
+  <!-- loop back -->
+  <path class="loop" d="M120,368 L80,368 L80,144 L248,144"/>
+  <path class="e" d="M360,396 L360,422"/>
+</svg>
