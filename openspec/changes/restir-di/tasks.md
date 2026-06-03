@@ -28,7 +28,17 @@
 > make temporal OPT-OUT in the progressive regime (config toggle) + lean on spatial
 > for progressive; temporal shines in P3 real-time.
 >
-> NEXT (refinements — core spatiotemporal is built+correct):
+> CONFIG DONE (commit 1c53598): RestirPC push constant (32 B) — flags (bit0 spatial,
+> bit1 temporal) + mLight/spatialK/spatialRadius/normalThresh/depthThresh/mCap. Was
+> hardcoded consts. RestirDiPass packs it (DEFAULT_CONFIG, renderer-overridable via
+> RestirDiReuse.config or renderer._restir_config, in the rebuild key). All 3 regimes
+> (spatial-only/temporal-only/both) converge to NEE — test_restir_regimes_converge.
+>
+> NEXT (refinements — core spatiotemporal + selectable regimes built+correct):
+>   - CONFIG UI/CLI: expose flags+tuning as _disc/_cont params (data-driven UI like
+>     proposals) + state-hash for runtime tuning. Persistent RestirDiReuse instance
+>     (renderer._active_reuse() currently makes fresh ones → config not yet user-
+>     settable at runtime; _restir_config override works for tests).
 >   - VARIANCE DEMO: a flat-plane + high-contrast many-light test scene (USD) +
 >     loosen the domain check (depth-relative, not absolute pos<0.1) → show
 >     err_restir < err_none. THE validation the feature delivers.
