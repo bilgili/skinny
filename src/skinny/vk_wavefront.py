@@ -490,6 +490,9 @@ class WavefrontPathPass:
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
         self.build_catchall = bool(build_catchall)
+        # Optional reuse plugin (ReSTIR DI) — scheduled at bounce 0 between the
+        # primary intersect and the shade. None = identity reuse (stock NEE).
+        self._restir = None
 
         # The flat shade kernel handles flat + MaterialX-graph materials and
         # imports no skin/python (small). The heavy catch-all (wfPathShade) is
@@ -600,6 +603,10 @@ class WavefrontPathPass:
             cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT,
             int(offset), len(data), buf)
 
+    def set_restir(self, restir) -> None:
+        """Attach (or clear) the ReSTIR DI reuse plugin scheduled at bounce 0."""
+        self._restir = restir
+
     def record_dispatch(self, cmd, scene_set) -> None:
         """Record the tiled, counting-sorted bounce loop. Per tile: generate →
         for each bounce { intersect (trace + classify + count) → build_args →
@@ -645,7 +652,7 @@ class WavefrontPathPass:
             self._push(cmd, 0, [stream_base, 0, self.stream_size])
             self._bind(cmd, "wfPathGenerate", scene_set)
             self._dispatch(cmd)
-            for _ in range(self.MAX_BOUNCES):
+            for bounce in range(self.MAX_BOUNCES):
                 clear_counts()
                 mem_barrier()
                 self._bind(cmd, "wfPathIntersect", scene_set)  # trace + classify + count
@@ -657,6 +664,14 @@ class WavefrontPathPass:
                 self._bind(cmd, "wfScatter", scene_set)         # lanes → per-slot queues
                 self._dispatch(cmd)
                 mem_barrier()
+                # ReSTIR DI reuse hook: at the primary vertex, compute primary
+                # direct (into the path-state radiance) before shade, whose
+                # depth-0 reuseDirect is gated to zero. ReSTIR binds a different
+                # pipeline layout, so restore the wfTile push constants after.
+                if bounce == 0 and self._restir is not None:
+                    self._restir.record_primary_direct(cmd, scene_set)
+                    mem_barrier()
+                    self._push(cmd, 0, [stream_base, 0, self.stream_size])
                 shade(0, "wfPathShadeFlat")                      # slot 0 (flat)
                 if self.build_catchall:
                     mem_barrier()
@@ -677,6 +692,101 @@ class WavefrontPathPass:
         for buf in self._buffers.values():
             buf.destroy()
         self._buffers = {}
+
+
+class RestirDiPass:
+    """ReSTIR DI wavefront pass set (the GPU side; the host-side selector is
+    sampling.reuse.RestirDiReuse).
+
+    Milestone 1 (plumbing): one compute pass (``restir/restir_primary.slang::
+    restirPrimaryDirect``) computes primary-hit direct lighting and adds it into
+    the path-state radiance, scheduled at bounce 0 by WavefrontPathPass's reuse
+    hook (the shade kernel's depth-0 reuseDirect is gated to zero, so this is the
+    sole primary-NEE source). Shares the renderer's scene descriptor set (set 0)
+    and the wavefront path-state + hit buffers (set 1). Reservoir buffers + the
+    RIS / spatial / temporal passes land in later milestones.
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] in restir_primary.slang
+
+    def __init__(self, ctx, shader_dir: Path, scene_set_layout,
+                 state_buffer, state_range: int, hit_buffer, hit_range: int,
+                 stream_size: int) -> None:
+        self.ctx = ctx
+        self.stream_size = int(stream_size)
+
+        spv = _compile_full_spv(shader_dir, "restir/restir_primary",
+                                "restirPrimaryDirect", "restir/_restir_primary")
+        code = spv.read_bytes()
+        self._module = vk.vkCreateShaderModule(
+            ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+
+        # Set 1: path-state (0) + hit (1) — the same buffers WavefrontPathPass
+        # binds; ReSTIR reads the primary hit and writes the radiance.
+        set1_bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+            for b in range(2)
+        ]
+        self._set_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=2, pBindings=set1_bindings), None)
+
+        # Pipeline layout: [set 0 = scene set, set 1 = state+hit] + 4-B push.
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
+
+        stage = vk.VkPipelineShaderStageCreateInfo(
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=self._module, pName="main")
+        self._pipeline = vk.vkCreateComputePipelines(
+            ctx.device, vk.VK_NULL_HANDLE, 1,
+            [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device, vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[vk.VkDescriptorPoolSize(
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=2)]), None)
+        self._set = vk.vkAllocateDescriptorSets(
+            ctx.device, vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1,
+                pSetLayouts=[self._set_layout]))[0]
+        writes = []
+        for b, (buf, rng) in enumerate([(state_buffer, state_range), (hit_buffer, hit_range)]):
+            info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=self._set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
+
+    def record_primary_direct(self, cmd, scene_set) -> None:
+        """Dispatch the primary-direct pass over one tile's lanes. Called at
+        bounce 0 (after the primary intersect, before shade)."""
+        import struct
+
+        import cffi
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 2, [scene_set, self._set], 0, None)
+        data = struct.pack("I", self.stream_size)
+        buf = cffi.FFI().new("char[]", data)
+        vk.vkCmdPushConstants(
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
+        groups = (self.stream_size + self._GROUP - 1) // self._GROUP
+        vk.vkCmdDispatch(cmd, groups, 1, 1)
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        vk.vkDestroyPipeline(self.ctx.device, self._pipeline, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
+        vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
 
 
 class IndirectPaintPass:

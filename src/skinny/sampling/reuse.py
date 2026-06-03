@@ -1,8 +1,7 @@
 """Concrete reuse modes shipped with the seam.
 
-Only the identity baseline ships now: it forwards direct lighting to the stock
-NEE and spawns the indirect ray as before (parity). ReSTIR-style reservoir
-reuse is a follow-up change that adds a ReusePlugin owning its passes/buffers.
+Identity (stock NEE) + ReSTIR DI (reservoir spatiotemporal resampling of
+primary-hit direct lighting, wavefront-only).
 """
 
 from __future__ import annotations
@@ -16,3 +15,16 @@ class IdentityReuse(ReusePlugin):
     name = "none"
     cli_token = "none"
     reuse_mode = 0          # FrameConstants.reuseMode identity
+
+
+class RestirDiReuse(ReusePlugin):
+    """ReSTIR DI: reservoir spatiotemporal resampling of primary-hit direct
+    lighting. Wavefront-only — the renderer builds the GPU pass set
+    (vk_wavefront.RestirDiPass) and capability-gates to identity on
+    megakernel/Metal. The passes/buffers are owned renderer-side; this selector
+    carries the reuse_mode uniform value + the name/token.
+    """
+
+    name = "restir-di"
+    cli_token = "restir-di"
+    reuse_mode = 1          # FrameConstants.reuseMode RESTIR_DI

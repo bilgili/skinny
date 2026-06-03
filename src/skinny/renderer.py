@@ -1074,8 +1074,10 @@ class Renderer:
         ]
         self.proposal_preset_modes: list[str] = [n for n, _ in self._PROPOSAL_PRESETS]
         self.proposal_preset_index = 0
-        self._REUSE_TOKENS: list[str] = ["none"]
-        self.reuse_modes: list[str] = ["None"]
+        # Reuse modes: identity (stock NEE) + ReSTIR DI (wavefront-only;
+        # falls back to identity on megakernel/Metal via the capability gate).
+        self._REUSE_TOKENS: list[str] = ["none", "restir-di"]
+        self.reuse_modes: list[str] = ["None", "ReSTIR DI"]
         self.reuse_index = 0
 
         # Execution backend, orthogonal to the integrator and FIXED for the
@@ -1436,7 +1438,10 @@ class Renderer:
         # small flat shade kernel. Part of the rebuild key so a material-set
         # change that introduces a non-flat type rebuilds the pass.
         has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in self._material_types)
-        key = (self.width, self.height, has_nonflat)
+        # Reuse mode is part of the key so switching none↔ReSTIR rebuilds the
+        # pass (and its ReSTIR sub-pass) — the seam's pass-structural contract.
+        reuse_mode = int(self._active_reuse().reuse_mode)
+        key = (self.width, self.height, has_nonflat, reuse_mode)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
@@ -1458,10 +1463,27 @@ class Renderer:
             self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
             stream_size, num_pixels, build_catchall=has_nonflat,
         )
+        # ReSTIR DI reuse plugin: build the primary-direct pass over the same
+        # path-state + hit buffers and hook it at bounce 0. We are in wavefront
+        # here, so constructing it only on reuse_mode == RESTIR_DI IS the
+        # capability gate (megakernel/Metal never reach this builder).
+        self._restir_pass = None
+        if reuse_mode == 1:  # RESTIR_DI
+            from skinny.vk_wavefront import RestirDiPass
+            self._restir_pass = RestirDiPass(
+                self.ctx, self.shader_dir, self._scene_set0_layout,
+                self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
+                self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
+                stream_size,
+            )
+            self._wavefront_path_pass.set_restir(self._restir_pass)
         self._wf_path_pass_dims = key
         return self._wavefront_path_pass
 
     def _destroy_wavefront_path_pass(self) -> None:
+        if getattr(self, "_restir_pass", None) is not None:
+            self._restir_pass.destroy()
+            self._restir_pass = None
         if self._wavefront_path_pass is not None:
             self._wavefront_path_pass.destroy()
             self._wavefront_path_pass = None
@@ -6837,7 +6859,14 @@ class Renderer:
         # bounce takes the BSDF fast path, bit-identical to the pre-seam build.
         from skinny.sampling import proposal_mask_and_alpha
         prop_mask, prop_alpha = proposal_mask_and_alpha(self._active_proposals())
-        data += struct.pack("II", int(prop_mask), int(self._active_reuse().reuse_mode))  # 8 bytes
+        # Reuse capability gate: ReSTIR DI is wavefront-only (multi-pass). On
+        # megakernel/Metal the reuseMode folds to 0 (identity) so the shader's
+        # depth-0 reuseDirect gate stays inert — stock NEE. The wavefront pass
+        # builder only constructs the ReSTIR sub-pass under the same condition.
+        reuse_mode = int(self._active_reuse().reuse_mode)
+        if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            reuse_mode = 0
+        data += struct.pack("II", int(prop_mask), reuse_mode)         # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
 
         # Directional lights are no longer in the UBO — they live in the

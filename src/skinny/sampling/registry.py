@@ -8,13 +8,13 @@ pair the renderer packs into FrameConstants.
 from __future__ import annotations
 
 from .proposals import BsdfProposal, EnvImportanceProposal
-from .reuse import IdentityReuse
+from .reuse import IdentityReuse, RestirDiReuse
 
 PROPOSAL_PLUGINS: dict[str, type] = {
     cls.name: cls for cls in (BsdfProposal, EnvImportanceProposal)
 }
 REUSE_PLUGINS: dict[str, type] = {
-    cls.name: cls for cls in (IdentityReuse,)
+    cls.name: cls for cls in (IdentityReuse, RestirDiReuse)
 }
 
 # Number of proposalAlpha slots in FrameConstants (float4).
