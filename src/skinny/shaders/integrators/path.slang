@@ -24,6 +24,9 @@ import nee;
 // Pluggable directional-proposal seam — the bounce draws its next direction
 // through sampleBounceDirection() (BSDF-only ⇒ identical to mat.sample()).
 import sampling.proposal;
+// Reuse seam — primary-hit direct routes through reuseDirect (identity ⇒
+// stock allLightsNEE; ReSTIR DI gates depth-0 + injects via reservoir passes).
+import sampling.reuse;
 
 static const uint MAX_BOUNCES = 6;
 
@@ -64,7 +67,7 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
             }
             float3 wo = worldToTangent(V, T, B, N);
 
-            br.directLight = allLightsNEE(mat, h, N, T, B, wo, rng);
+            br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, rng);
 
             ProposalContext pctx;
             pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;
@@ -93,7 +96,7 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
             }
             float3 wo = worldToTangent(V, T, B, N);
 
-            br.directLight = allLightsNEE(mat, h, N, T, B, wo, rng);
+            br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, rng);
 
             ProposalContext pctx;
             pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;

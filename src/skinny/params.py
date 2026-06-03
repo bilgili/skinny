@@ -112,6 +112,8 @@ STATIC_PARAMS: list[ParamSpec] = [
     # identity mode until ReSTIR lands.
     _disc("Proposals",         "proposal_preset_index",       "proposal_preset_modes"),
     _disc("Reuse",             "reuse_index",                 "reuse_modes"),
+    # ReSTIR DI reuse regime (only effective when Reuse = ReSTIR DI).
+    _disc("ReSTIR regime",     "restir_regime_index",         "restir_regime_modes"),
     # Execution mode (megakernel | wavefront) is a command-line / session
     # selection (`--execution-mode`), fixed at renderer construction — not a
     # runtime GUI toggle. So it is intentionally absent from STATIC_PARAMS

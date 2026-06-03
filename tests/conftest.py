@@ -85,3 +85,8 @@ def skin_harness(load_shader):
 @pytest.fixture(scope="session")
 def volume_harness(load_shader):
     return load_shader("test_volume_harness.slang")
+
+
+@pytest.fixture(scope="session")
+def restir_harness(load_shader):
+    return load_shader("test_restir_harness.slang")
