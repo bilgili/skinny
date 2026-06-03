@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="520" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <defs>
+    <marker id="arr6" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.3;}
+    .br{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.3;}
+    .t{fill:#1a2230;}
+    .f{fill:#7a8aa0;font-size:10.5px;font-style:italic;}
+    .e{stroke:#555;stroke-width:1.2;fill:none;marker-end:url(#arr6);}
+  </style>
+  <text class="t" x="360" y="20" text-anchor="middle" font-weight="600" font-size="13">runFrame() — one thread per pixel, one dispatch</text>
+
+  <rect class="b" x="230" y="38" width="260" height="40" rx="8"/>
+  <text class="t" x="360" y="63" text-anchor="middle">cam.generateRay()</text>
+
+  <rect class="b" x="230" y="98" width="260" height="40" rx="8"/>
+  <text class="t" x="360" y="123" text-anchor="middle">traceScene() → HitInfo</text>
+
+  <rect class="b" x="190" y="158" width="340" height="64" rx="8"/>
+  <text class="t" x="360" y="180" text-anchor="middle" font-weight="600">integrator select (runtime branch)</text>
+  <text class="f" x="360" y="198" text-anchor="middle">BDPT if flat first-hit · else PathTracer · env on miss</text>
+  <text class="f" x="360" y="214" text-anchor="middle">monomorphised structs, register-resident bounce loop</text>
+
+  <rect class="b" x="230" y="242" width="260" height="40" rx="8"/>
+  <text class="t" x="360" y="267" text-anchor="middle">NaN / inf / neg sanitise</text>
+
+  <rect class="b" x="230" y="302" width="260" height="48" rx="8"/>
+  <text class="t" x="360" y="323" text-anchor="middle">progressive accumulation</text>
+  <text class="f" x="360" y="340" text-anchor="middle">running mean + BDPT light-splat composite</text>
+
+  <rect class="br" x="230" y="370" width="260" height="40" rx="8"/>
+  <text class="t" x="360" y="395" text-anchor="middle">exposure → tonemap → sRGB</text>
+
+  <rect class="br" x="230" y="430" width="260" height="48" rx="8"/>
+  <text class="t" x="360" y="451" text-anchor="middle">overlays composite</text>
+  <text class="f" x="360" y="468" text-anchor="middle">focus / furnace / HUD / gizmo → outputBuffer</text>
+
+  <path class="e" d="M360,78 L360,96"/>
+  <path class="e" d="M360,138 L360,156"/>
+  <path class="e" d="M360,222 L360,240"/>
+  <path class="e" d="M360,282 L360,300"/>
+  <path class="e" d="M360,350 L360,368"/>
+  <path class="e" d="M360,410 L360,428"/>
+</svg>

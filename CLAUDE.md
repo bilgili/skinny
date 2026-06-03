@@ -9,6 +9,24 @@ a worktree off `main` for each piece of work instead of editing the primary
 checkout directly, then open a PR / merge from there. This keeps the main
 working directory clean and lets multiple changes proceed in isolation.
 
+### Documentation upkeep
+
+At the end of every implementation, review **all** Markdown documentation and
+update whatever the change touched, scoped to each document's subject. Technical
+docs live in `docs/` (`docs/Architecture.md`, `docs/SkinRendering.md`,
+`docs/Megakernel.md`, `docs/Wavefront.md`, `docs/PythonAPI.md`); `README.md`,
+`CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` stay at the repo root. A change to
+the wavefront pipeline updates `docs/Wavefront.md`; a new descriptor binding
+updates the `docs/Architecture.md` binding map; a new CLI flag updates
+`README.md`; a new public Python symbol updates `docs/PythonAPI.md`; and so on.
+Do not let docs drift from the code.
+
+For any diagram, use an **SVG diagram**, not an ASCII/text-art graph. Author the
+SVG under `docs/diagrams/` and embed it in the Markdown — from a doc in `docs/`
+use a relative path (`![alt](diagrams/foo.svg)`), from `README.md` at the root
+use `![alt](docs/diagrams/foo.svg)`. Replace existing text-art graphs with SVGs
+when you touch the surrounding section.
+
 ## Commands
 
 **Setup (from repo root):**
@@ -123,7 +141,7 @@ The binding set has grown well past the original skin-only layout (now bindings
 0–24 plus 30–32: flat-material params, bindless textures, MaterialX skin/std
 params, multiple light buffers, BDPT splat, gizmo, lens/exit-pupil, tool
 readback, and environment importance-sampling CDFs). The authoritative,
-up-to-date map lives in **[Architecture.md](Architecture.md) → Descriptor
+up-to-date map lives in **[Architecture.md](docs/Architecture.md) → Descriptor
 Binding Map**; do not duplicate it here.
 
 ### Shaders
@@ -132,7 +150,7 @@ All shaders are Slang (`.slang`) compiled to SPIR-V. `main_pass.slang` is the
 primary compute entry point (`mainImage`); it includes the other modules. Key
 ones:
 - `materials/skin/*` — layered skin optics, BSSRDF, GGX specular, and the §1–§6
-  estimator chain (see [SkinRendering.md](SkinRendering.md))
+  estimator chain (see [SkinRendering.md](docs/SkinRendering.md))
 - `materials/flat/*` — flat/standard_surface/OpenPBR BSDF (`IMaterial`)
 - `materials/debug_normal_material.slang` — normal visualisation material
 - `integrators/{path,bdpt}.slang` — path tracer + bidirectional path tracer
@@ -149,7 +167,7 @@ ones:
 - `common.slang` / `bindings.slang` / `interfaces.slang` — shared types, binding
   declarations, pluggable interfaces
 
-The full module map lives in **[Architecture.md](Architecture.md)**.
+The full module map lives in **[Architecture.md](docs/Architecture.md)**.
 
 A pre-compiled `main_pass.spv` is checked in. Any shader change requires a recompile with `slangc`.
 

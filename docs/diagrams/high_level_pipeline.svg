@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.4;rx:8;}
+    .core{fill:#eef7ee;stroke:#4a9a4a;stroke-width:1.4;}
+    .gpu{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.4;}
+    .t{fill:#1a2230;}
+    .s{fill:#566;font-size:11px;}
+    .e{stroke:#555;stroke-width:1.3;fill:none;marker-end:url(#arr);}
+  </style>
+
+  <!-- front ends -->
+  <rect class="box" x="20"  y="20" width="210" height="64" rx="8"/>
+  <text class="t" x="125" y="44" text-anchor="middle" font-weight="600">GLFW debug (skinny)</text>
+  <text class="s" x="125" y="62" text-anchor="middle">window + keyboard params</text>
+
+  <rect class="box" x="275" y="20" width="210" height="64" rx="8"/>
+  <text class="t" x="380" y="44" text-anchor="middle" font-weight="600">Qt desktop (skinny-gui)</text>
+  <text class="s" x="380" y="62" text-anchor="middle">QMainWindow + docks</text>
+
+  <rect class="box" x="530" y="20" width="210" height="64" rx="8"/>
+  <text class="t" x="635" y="44" text-anchor="middle" font-weight="600">Web (skinny-web)</text>
+  <text class="s" x="635" y="62" text-anchor="middle">Panel + WebCodecs canvas</text>
+
+  <!-- session wrapper for web -->
+  <rect class="box" x="530" y="150" width="210" height="56" rx="8"/>
+  <text class="t" x="635" y="172" text-anchor="middle" font-weight="600">SkinnySession</text>
+  <text class="s" x="635" y="190" text-anchor="middle">per-user wrapper + H264</text>
+
+  <!-- renderer core -->
+  <rect class="core" x="120" y="240" width="430" height="64" rx="8"/>
+  <text class="t" x="335" y="264" text-anchor="middle" font-weight="600">Renderer.py</text>
+  <text class="s" x="335" y="282" text-anchor="middle">packs UBO · uploads buffers · MaterialX codegen + cache · per-frame dispatch</text>
+
+  <!-- gpu outputs -->
+  <rect class="gpu" x="120" y="350" width="200" height="60" rx="8"/>
+  <text class="t" x="220" y="374" text-anchor="middle" font-weight="600">Vulkan Compute</text>
+  <text class="s" x="220" y="392" text-anchor="middle">dispatch → swapchain / offscreen</text>
+
+  <rect class="gpu" x="430" y="350" width="240" height="60" rx="8"/>
+  <text class="t" x="550" y="374" text-anchor="middle" font-weight="600">Vulkan Compute (headless)</text>
+  <text class="s" x="550" y="392" text-anchor="middle">readback → H264 → WebSocket</text>
+
+  <!-- edges -->
+  <path class="e" d="M125,84 L300,238"/>
+  <path class="e" d="M380,84 L360,238"/>
+  <path class="e" d="M635,84 L635,148"/>
+  <path class="e" d="M635,206 L420,238"/>
+  <path class="e" d="M300,304 L240,348"/>
+  <path class="e" d="M470,304 L545,348"/>
+</svg>

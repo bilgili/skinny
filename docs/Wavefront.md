@@ -1,0 +1,304 @@
+# Skinny — Wavefront Execution Mode
+
+The **wavefront** mode renders the *same* light-transport integral as the
+[megakernel](Megakernel.md), but tears the per-pixel bounce loop apart across
+**many small compute dispatches** connected by GPU-resident queues. Rays in
+flight are kept as a stream of state records in VRAM; each bounce runs as a
+sequence of stages (generate → intersect → build-args → scatter → shade →
+resolve), and lanes are bucketed by material so each shade dispatch hits one
+coherent material branch.
+
+It is one of two execution modes (`EXECUTION_WAVEFRONT = 1`, `params.py:65`),
+selected once at startup with `--execution-mode wavefront`
+(`cli_common.py:85`) and **fixed for the session**. Both modes run on Vulkan
+(MoltenVK on macOS) — "wavefront" is an execution strategy, not a separate
+graphics API. The implementation lives in `vk_wavefront.py`,
+`wavefront_layout.py`, and `shaders/wavefront/`.
+
+For the high-level contrast with the megakernel see
+[Megakernel vs wavefront](#megakernel-vs-wavefront) below.
+
+---
+
+## 1. Orchestration (`vk_wavefront.py`)
+
+Three Python pass classes own their GPU resources and record their entire
+staged dispatch loop into the frame command buffer (modelled on
+`vk_skinning.SkinningPasses`). The render gate replaces the megakernel's single
+dispatch:
+
+- **Gate** (`renderer.py:7147-7158`, headless `7367-7377`): when
+  `effective_execution_mode_index == EXECUTION_WAVEFRONT`, call
+  `staged.record_dispatch(cmd, descriptor_sets[f])` instead of `vkCmdDispatch`.
+- **Selection:** `integrator_index == 1` → `_ensure_wavefront_bdpt_pass()`; else
+  `_ensure_wavefront_path_pass()`; if no scene yet → `WavefrontEnvPass`
+  (env-only fallback). `WAVEFRONT_BDPT_SUPPORTED = True` (`renderer.py:915`), so
+  wavefront BDPT is live and no longer falls back to the megakernel.
+- **Lifecycle:** passes build lazily and cache on dims —
+  `_ensure_wavefront_path_pass` keys on `(width, height, build_catchall)`
+  (`renderer.py:1424-1462`), `_ensure_wavefront_bdpt_pass` on `(width, height)`
+  (`1475-1507`). Both reuse the megakernel's set-0 layout via
+  `self._scene_set0_layout` (`renderer.py:1351-1356`) — wavefront binds the
+  **same scene descriptor set 0**, so the UBO, materials, lights, textures, and
+  env CDFs are shared verbatim.
+
+> Vulkan-only: gated on `hasattr(ctx, "compute_queue")` (`renderer.py:1090`,
+> `1399`). There is no CPU fallback for the wavefront path.
+
+### Path stages (`WavefrontPathPass`, `vk_wavefront.py:464-679`)
+
+Constants: `_GROUP = 64` (`[numthreads(64,1,1)]`), `MAX_BOUNCES = 6` (lockstep
+`WF_MAX_BOUNCES`, `wf_shade_common.slang:17`), `STREAM_CAP = 1<<20`,
+`NUM_SLOTS = 2`, `HIT_STRIDE = 96`. Six/seven kernels are compiled from
+`wavefront_path.slang` to per-entry `.spv` (`_wfpath_*`). The `record_dispatch`
+loop (`vk_wavefront.py:603-667`), tiled by `stream_base` until `num_pixels`:
+
+![Wavefront path stages: wfPathGenerate seeds the stream, then a CPU-driven bounce loop runs clear_counts → wfPathIntersect → wfBuildArgs → wfScatter → indirect shade(0)/shade(1), looping back per bounce, then wfPathResolve accumulates and tonemaps.](diagrams/wavefront_path_stages.svg)
+
+Stage detail:
+
+| Stage | Work |
+|-------|------|
+| `wfPathGenerate` | seed camera ray + path state (full stream) |
+| `clear_counts()` | `vkCmdFillBuffer` zero `slot_count` + `slot_cursor` (+ barrier) |
+| `wfPathIntersect` | trace, cutout-skip, miss/env terminate, classify by material slot, `InterlockedAdd(wfSlotCount[slot])` |
+| `wfBuildArgs` | `vkCmdDispatch(1,1,1)`: prefix-sum counts → offsets, write `VkDispatchIndirectCommand` per slot |
+| `wfScatter` | counting-sort alive lanes into per-slot queue slices |
+| `shade(0, wfPathShadeFlat)` | `vkCmdDispatchIndirect(indirect, slot*12)` — flat + MaterialX |
+| `shade(1, wfPathShade)` | `vkCmdDispatchIndirect(indirect, 1*12)` — skin/python/debug (only if `build_catchall`; push `shadeSlot` at offset 4) |
+| `wfPathResolve` | running-mean accumulation + tonemap display (full stream) |
+
+The bounce loop (`clear_counts` → … → `shade`) repeats `MAX_BOUNCES` times,
+CPU-driven with barriers between stages.
+
+`mem_barrier()` (COMPUTE→COMPUTE | DRAW_INDIRECT) separates each stage. Push
+constant `WfTilePC {streamBase, shadeSlot, streamSize}` (12 B,
+`wf_shade_common.slang:31`). Pipeline layout = `[set0 scene, set1 path-state]`
++ 12 B push (`vk_wavefront.py:542-547`).
+
+### BDPT stages (`WavefrontBdptPass`, `vk_wavefront.py:781-1068`)
+
+Constants: `BDPT_MAX_VERTS = 7`, `VERTEX_STRIDE = 128`, `AUX_STRIDE = 128`,
+`NUM_SLOTS = 2` (`SLOT_NEE=0`, `SLOT_FULL=1`), `STREAM_CAP = 1<<18`,
+`EYE_BOUNCES = 5`, `LIGHT_BOUNCES = 6`. Three `walk_mode`s
+(`vk_wavefront.py:810`, picked per session) control only subpath construction;
+the connect+resolve tail is shared:
+
+- **`fused`** (default): one `wfBdptWalk` (eye + light + s=1 splat).
+- **`eye`**: staged eye walk (`wfBdptGenEye` + loop `wfBdptBounceEye`) +
+  `wfBdptLightTail` (fused light + splat).
+- **`eye_light`**: fully staged eye + light walks (`wfBdptGenLight`/
+  `wfBdptBounceLight`) + standalone `wfBdptSplat`.
+
+`record_dispatch` (`vk_wavefront.py:952-1056`) per tile: `build_subpaths()` →
+`compact("wfBdptClassify")` → `indirect(SLOT_NEE, wfBdptConnectNee)` →
+`indirect(SLOT_FULL, wfBdptConnectFull)` → `wfBdptResolve`. The staged
+eye/light walks reuse the same counting-sort machinery
+(`wfBdptWalkClassify` → buildargs → scatter → indirect `wfBdptBounceEye/Light`)
+per bounce. `clear_counts()` here adds an extra COMPUTE→TRANSFER WAR barrier
+(`vk_wavefront.py:981-986`) absent in the path pass, guarding prior
+indirect-dispatch reads of `slot_count` against the fill.
+
+---
+
+## 2. Stream state & material bucketing
+
+**Path-state record** `WavefrontPathState` (`wavefront_state.slang:15-26`,
+Python mirror `wavefront_layout.py:28-46`): **AoS**, scalar layout, **68 B
+stride** — `rayOrigin/rayDir/throughput/radiance` (4× float3) +
+`pixelIndex/rngState/depth/flags` (uint) + `bsdfPdf` (float). `flags` bits:
+`PATH_FLAG_ALIVE=1`, `PATH_FLAG_SPECULAR=2`. `tests/test_wavefront_state.py`
+locks the Slang struct ↔ Python table.
+
+> The record is intentionally AoS, **not** SoA (`wavefront_state.slang:8-9`):
+> convert hot fields to SoA only if profiling shows a bandwidth bottleneck. The
+> *queues* are SoA `uint` arrays; the per-lane path record is AoS.
+
+**Set-1 buffers** (`wf_shade_common.slang:34-42`): `wfState`(0),
+`wfHits`(1, `HitInfo`), then the counting-sort queue buffers — `wfLaneSlot`(2,
+slot per lane), `wfSlotCount`(3, `[NUM_SLOTS]`), `wfSlotOffset`(4, queue base
+per slot), `wfSlotQueue`(5, grouped lane indices), `wfSlotCursor`(6, scatter
+cursor), `wfIndirectArgs`(7, `[NUM_SLOTS*3]`). Allocated in
+`WavefrontPathPass.__init__` (`vk_wavefront.py:520-527`); `indirect` buffer
+created with `INDIRECT_BUFFER` usage.
+
+**Material bucketing = 2 slots, not per-material** — `wfSlotForType`
+(`wf_shade_common.slang:47`): `MATERIAL_TYPE_FLAT → WF_SLOT_FLAT(0)`, everything
+else → `WF_SLOT_OTHER(1)`. Slot 0 = `wfPathShadeFlat` (flat + MaterialX graph),
+slot 1 = `wfPathShade` (heavy catch-all: skin / BSSRDF / python / debug).
+`wfQueueLane(slot, qpos)` resolves the stream slot or `0xFFFFFFFF` past the
+slice (`wf_shade_common.slang:52-56`).
+
+> The standalone `compaction.slang`, `scatter.slang`, `build_args.slang`,
+> `shade_Marble_3D/Tiled_Brass/Tiled_Wood.slang`, and `indirect_paint.slang`
+> are **de-risk / verification carriers** and an *alternate* per-material
+> partition (`ShadePassGroup`, `renderer.py:1602`), **not** the live path-tracer
+> hot loop. The live loop uses the 2-slot in-shader counting sort embedded in
+> `wavefront_path.slang`. The per-material `shade_*` kernels are albedo-only
+> debug visualisers (`accumBuffer[pixel] = base_color`).
+
+---
+
+## 3. How a bounce is split (vs the megakernel loop)
+
+The megakernel runs generate→trace→shade→bounce in registers, one thread per
+pixel ([Megakernel.md §3](Megakernel.md)). The wavefront relocates the **same
+loop body verbatim** across dispatches, round-tripping `WavefrontPathState`
+through VRAM between bounces. Each kernel calls the same
+`evaluateBounce` / `evaluateFlatBounce` and the same MIS, so it is an unbiased
+estimator of the same integral (A/B-verified).
+
+Key differences in the mechanism:
+
+- **No ping-pong double-buffer.** Lanes stay in fixed stream slots
+  `[0, stream_size)`; liveness is the `PATH_FLAG_ALIVE` bit. Dead lanes are
+  skipped by the alive check in each kernel and excluded from the per-bounce
+  counting sort (scatter enqueues only alive lanes, `wavefront_path.slang:180`).
+- **The "queue" is per-bounce material routing, not inter-bounce compaction.**
+  There is no cross-bounce stream compaction in the live loop (standalone
+  `compaction.slang` is unused there).
+- **Bounce control flow lives on the CPU** — `MAX_BOUNCES` fixed iterations with
+  barriers, recorded into the command buffer.
+- `wfFinishShade` (`wf_shade_common.slang:70-136`) is the material-independent
+  bounce tail (accumulate, RR, spawn next ray, sphere-light MIS, store/terminate)
+  shared by both shade kernels.
+
+---
+
+## 4. BDPT wavefront stages (`wavefront_bdpt.slang`)
+
+Aux record `WfBdptAux` carries `eyeLen/lightLen/escaped/radiance/pixel/rngState`
+plus transient eye-walk state. Set 1: `wfEye`(0), `wfLight`(1), `wfAux`(2),
+queue buffers 3-8. Kernels:
+
+| Kernel | Role | Line |
+|--------|------|------|
+| `wfBdptWalk` | fused eye + light walk + s=1 splat | `:109` |
+| `wfBdptGenEye` / `wfBdptBounceEye` | staged eye walk (verbatim `randomWalk` body), indirect over slot 0 | `:335` / `:489` |
+| `wfBdptWalkClassify` | flag live (`ewFlags & ALIVE`) lanes for next bounce | `:468` |
+| `wfBdptGenLight` / `wfBdptBounceLight` | symmetric light walk | `:676` / `:715` |
+| `wfBdptLightTail` | fused light + splat (`eye` mode) | `:273` |
+| `wfBdptSplat` | standalone s=1 splat (`eyeLen≥2 && lightLen≥2`) | `:851` |
+| `wfBdptClassify` | route by subpath shape → finalize escaped / SLOT_FULL / SLOT_NEE | `:879` |
+| `wfBdptBuildArgs` / `wfBdptScatter` | counting sort | `:907` / `:925` |
+| `wfBdptConnectNee` | emissive + `connectT1` only | `:1004` |
+| `wfBdptConnectFull` | adds t≥2 `connectGeneric` + `misWeight` | `:1017` |
+| `wfBdptResolve` | running mean of the **eye-side** estimate into `accumBuffer` | `:1027` |
+
+The connect estimator is reused verbatim from `integrators/bdpt.slang`
+(`randomWalk`, `connectT1`, `connectGeneric`, `misWeight`, `splatLightWalk`,
+`bdptEnvNEE`). The NEE/FULL split skips the heavy O(s·t) generic+MIS double loop
+for NEE-only lanes. The s=1 light splat accumulates separately in
+`lightSplatBuffer` (composited only on display, never into `accumBuffer`), so
+headless A/B compares the eye-side estimate only (`:1042-1047`).
+
+---
+
+## 5. Material-sorted shading & codegen
+
+The **live path uses no per-material codegen** — just 2 fixed slots (flat vs
+catch-all). The per-material codegen is the *alternate* `ShadePassGroup`
+partition: `emit_wavefront_shade_module` (`vk_compute.py:302-345`) emits one
+`shade_<name>.slang` per `GraphFragment`, importing only `generated.<name>_graph`
+so each is an independent compilation unit; `compile_shade_module_cached`
+(`vk_wavefront.py:79-129`) is a per-module content-hash SPIR-V LRU cache keyed
+on entry + flags + module source + graph deps + `shared_shader_hash` (which
+excludes `generated/` and `wavefront/shade_*`, so adding one material misses
+only that key). This is the **MoltenVK compile win**: each shade kernel is
+small instead of one monolithic switch.
+
+`flat_bounce.slang::evaluateFlatBounce` is the `MATERIAL_TYPE_FLAT` branch of
+`evaluateBounce` standalone (imports only flat material + NEE +
+`sampling.proposal`), keeping `wfPathShadeFlat` small.
+`scatter.slang`/`build_args.slang`/`compaction.slang` are reusable
+counting-sort/compaction primitives (used by the de-risk `IndirectPaintPass`,
+mirrored inline in the live kernels).
+
+---
+
+## 6. Indirect args & queue counters
+
+- **Persistent stream, not persistent threads:** fixed `stream_size` slots,
+  tiled over pixels; no atomic work-stealing.
+- **Counters:** `wfSlotCount` (atomic-incremented in intersect/classify),
+  `wfSlotCursor` (atomic write cursor in scatter), `wfSlotOffset` (prefix-sum
+  bases). `slot_count` + `slot_cursor` zeroed each bounce via `vkCmdFillBuffer`
+  (`vk_wavefront.py:622-632`).
+- **Indirect dispatch:** `wfBuildArgs` writes a `VkDispatchIndirectCommand` per
+  slot; shade/connect kernels run via `vkCmdDispatchIndirect(indirect, slot*12)`
+  so each covers exactly `ceil(count/64)` groups (empty slots dispatch 0
+  groups). Barriers carry `DRAW_INDIRECT_BIT` + `INDIRECT_COMMAND_READ_BIT` so
+  build-args writes are visible to the dispatch (`vk_wavefront.py:609-620`).
+  `indirect_paint.slang` + `IndirectPaintPass` verify indirect == direct
+  equivalence.
+
+---
+
+## 7. Proposal / scene-sampling seam
+
+The seam (`sampling/proposal.slang`: `sampleBounceDirection` /
+`mixtureProposalPdf`) is driven by `fc.proposalMask` + `fc.proposalAlpha` packed
+into the **shared scene UBO (set 0, binding 0)** at `renderer.py:6839-6840`.
+Because the wavefront passes bind set 0 verbatim, they read the **same `fc`
+UBO** — the seam is active in wavefront mode with **no wavefront-specific
+plumbing**. `flat_bounce.slang:44-50` calls `sampleBounceDirection` through the
+seam; the catch-all routes through `integrators.path::evaluateBounce` which also
+uses it (commit `5e17c8f`: "route wavefront flat-shade through the proposal seam
++ wavefront parity"). The default BSDF-only mask collapses to the material's
+native `sample()` for bit-exact parity. Reuse modes are currently identity/None
+(`renderer.py:1078`); **ReSTIR DI** is the in-progress follow-up that plugs in
+here, building on the wavefront SoA queue substrate.
+
+---
+
+## Megakernel vs wavefront
+
+| Axis | [Megakernel](Megakernel.md) | Wavefront |
+|------|------------|-----------|
+| Dispatches / frame | **1** (`vkCmdDispatch`) | ~5 stages × 6 bounces × tiles + resolve |
+| Path loop | register-resident `for` loop, one thread/pixel | torn across kernels; state in VRAM |
+| Path state | registers (per thread) | `WavefrontPathState` 68 B AoS in VRAM, ×stream |
+| Material handling | runtime tag-switch per pixel (divergent) | counting-sort into 2 slots, indirect per-slot dispatch (coherent) |
+| Inter-stage data | none | queue buffers + indirect args, round-tripped each bounce |
+| Divergence | high (mixed materials serialise in a warp) | reduced (shade dispatch hits one material branch) |
+| Register pressure | high (one fat kernel) | lower (small per-stage kernels) |
+| Memory bandwidth | low (registers) | higher (VRAM state round-trip) |
+| CPU overhead | minimal command recording | heavy command recording, per-bounce fills/barriers |
+| Compile size | one large kernel — can trip MoltenVK Metal limit | many small kernels — sidesteps the limit |
+| Accumulation | inline in `main_pass` | `wfPathResolve` / `wfBdptResolve` |
+| VRAM vs resolution | output buffers scale with W×H | path stream capped + tiled, independent of resolution |
+
+**Why both exist.** The megakernel is the simple reference path, but its single
+fat kernel suffers warp divergence and register pressure, and on MoltenVK can
+exceed the Metal compiler's kernel-size limit. The wavefront mode splits the
+same estimator into small per-stage / per-material kernels connected by GPU
+queues: same math, better material coherence, each kernel small enough to
+compile. The cost is memory bandwidth (state round-trips through VRAM every
+bounce) and CPU-side command-recording overhead. `build_catchall=False` skips
+the heavy catch-all kernel entirely for flat-only scenes — the cheapest
+MoltenVK-compile case.
+
+Both are **unbiased estimators of the same integral** and A/B-verified to match:
+the wavefront kernels are verbatim relocations of the megakernel's per-bounce
+body calling the same `evaluateBounce` / MIS / proposal-seam code.
+
+---
+
+## Key files
+
+| File | Role |
+|------|------|
+| `vk_wavefront.py` | orchestration, all 3 pass classes, per-stage dispatch |
+| `wavefront_layout.py` | state stride + queue sizing (Python mirror) |
+| `shaders/wavefront/wavefront_path.slang` | path kernels (`_wfpath_*`) |
+| `shaders/wavefront/wavefront_bdpt.slang` | BDPT kernels (`_wfbdpt_*`) |
+| `shaders/wavefront/wf_shade_common.slang` | set-1 bindings + `wfFinishShade` + slot routing |
+| `shaders/wavefront/flat_bounce.slang` | flat-slot shade body |
+| `shaders/wavefront/wavefront_state.slang` | `WavefrontPathState` record |
+| `shaders/wavefront/{build_args,scatter,compaction,indirect_paint}.slang` | counting-sort / verification primitives |
+| `shaders/sampling/proposal.slang` | proposal seam (shared with megakernel) |
+| `vk_compute.py:302-345` | per-material wavefront shade codegen |
+| `renderer.py:7147-7158` / `7367-7377` | wavefront render gate (windowed / headless) |
+| `renderer.py:1424-1462` / `1475-1507` | path / BDPT pass lifecycle |
+| `renderer.py:915` | `WAVEFRONT_BDPT_SUPPORTED` |
+| `tests/test_wavefront_state.py` | struct-layout lock |

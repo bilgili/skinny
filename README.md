@@ -12,8 +12,10 @@ microfacet specular, and energy-conservation checks.
 
 Skin-specific rendering (three-layer optics, scattering modes, MaterialX skin
 nodedefs, head geometry, presets, tattoos) is documented separately in
-[SkinRendering.md](SkinRendering.md). Renderer internals are in
-[Architecture.md](Architecture.md).
+[SkinRendering.md](docs/SkinRendering.md). Renderer internals are in
+[Architecture.md](docs/Architecture.md); the two GPU execution modes in
+[Megakernel.md](docs/Megakernel.md) / [Wavefront.md](docs/Wavefront.md); the public Python
+API in [PythonAPI.md](docs/PythonAPI.md).
 
 ## Gallery
 
@@ -31,7 +33,7 @@ nodedefs, head geometry, presets, tattoos) is documented separately in
 - **Layered skin rendering** -- three-layer biological optics (epidermis /
   dermis / subcutaneous), custom MaterialX skin nodedefs, scattering modes,
   Fitzpatrick presets, detail/pores, and tattoos. See
-  [SkinRendering.md](SkinRendering.md)
+  [SkinRendering.md](docs/SkinRendering.md)
 - **MaterialX nodegraph compute** -- arbitrary MaterialX nodegraphs (marble,
   wood, brass, custom standard_surface authoring) compiled per-material to
   Slang modules through `MaterialXGenSlang` plus a bindless `SamplerTexture2D`
@@ -300,8 +302,10 @@ can open a `Usd.Stage`, mutate it per frame (move prims, change camera xforms,
 set USD time), and call `r.render_to_array(stage)` or `r.render_scene(stage,
 path)` for each frame — the pipeline is compiled only once.
 
-See `examples/` for minimal demo scripts and `Architecture.md` for
-`skinny.headless` internals.
+See `examples/` for minimal demo scripts. Full Python API reference (headless
+interface, `Renderer`, parameters, scene loading, presets) is in
+[PythonAPI.md](docs/PythonAPI.md); `skinny.headless` internals are in
+[Architecture.md](docs/Architecture.md).
 
 ### Mesh heads (legacy)
 
@@ -351,7 +355,7 @@ formats.
 ### Head Models
 
 Head geometry (analytic SDF head + discovered `heads/*.obj` mesh heads with
-detail maps) is documented in [SkinRendering.md](SkinRendering.md).
+detail maps) is documented in [SkinRendering.md](docs/SkinRendering.md).
 
 ### USD Scenes
 
@@ -491,7 +495,7 @@ per-material furnace probes.
 | Realistic camera | `lens_optics.py`, `shaders/cameras/thick_lens.slang` | Pharr, Jakob, Humphreys, *Physically Based Rendering 3e*, Ch. 6 |
 
 Skin-, subsurface-, volume-, and head-geometry references live in
-[SkinRendering.md](SkinRendering.md). Supporting techniques (ACES tone mapping,
+[SkinRendering.md](docs/SkinRendering.md). Supporting techniques (ACES tone mapping,
 PCG hashing, median-split BVH, Worley noise, Box-Muller sampling) are standard
 implementation building blocks.
 

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <defs>
+    <marker id="arrh" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.3;}
+    .c{fill:#eef7ee;stroke:#4a9a4a;stroke-width:1.3;}
+    .o{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.3;}
+    .t{fill:#1a2230;}
+    .f{fill:#7a8aa0;font-size:10.5px;font-style:italic;}
+    .e{stroke:#555;stroke-width:1.2;fill:none;marker-end:url(#arrh);}
+    .mono{font-family:ui-monospace,Menlo,monospace;}
+  </style>
+
+  <rect class="b" x="20" y="24" width="240" height="64" rx="8"/>
+  <text class="t mono" x="140" y="46" text-anchor="middle" font-weight="600">render_to_array(source)</text>
+  <text class="f" x="140" y="64" text-anchor="middle">module wrapper · render_scene</text>
+  <text class="f" x="140" y="80" text-anchor="middle">render_animation</text>
+
+  <rect class="c" x="20" y="150" width="240" height="92" rx="8"/>
+  <text class="t mono" x="140" y="172" text-anchor="middle" font-weight="600">HeadlessRenderer(w, h)</text>
+  <text class="f" x="140" y="192" text-anchor="middle">context manager</text>
+  <text class="f" x="140" y="210" text-anchor="middle">owns VulkanContext + Renderer</text>
+  <text class="f" x="140" y="228" text-anchor="middle">pipeline compiles once</text>
+
+  <rect class="b" x="330" y="150" width="200" height="44" rx="8"/>
+  <text class="t mono" x="430" y="172" text-anchor="middle">VulkanContext(window=None)</text>
+  <text class="f" x="430" y="188" text-anchor="middle">compute queue only</text>
+
+  <rect class="b" x="330" y="210" width="200" height="44" rx="8"/>
+  <text class="t mono" x="430" y="232" text-anchor="middle">Renderer(...)</text>
+  <text class="f" x="430" y="248" text-anchor="middle">set_usd_scene · update(dt)</text>
+
+  <rect class="o" x="580" y="180" width="160" height="60" rx="8"/>
+  <text class="t mono" x="660" y="202" text-anchor="middle">render_headless()</text>
+  <text class="f" x="660" y="220" text-anchor="middle">RGBA8 bytes</text>
+  <text class="f" x="660" y="236" text-anchor="middle">w*h*4</text>
+
+  <rect class="o" x="580" y="290" width="160" height="56" rx="8"/>
+  <text class="t" x="660" y="312" text-anchor="middle" font-weight="600">output</text>
+  <text class="f" x="660" y="330" text-anchor="middle">np.ndarray (h,w,4)</text>
+  <text class="f" x="660" y="345" text-anchor="middle">or PNG/EXR file</text>
+
+  <path class="e" d="M140,88 L140,148"/>
+  <path class="e" d="M260,180 L328,176"/>
+  <path class="e" d="M260,210 L328,228"/>
+  <path class="e" d="M530,200 L578,205"/>
+  <path class="e" d="M660,240 L660,288"/>
+  <path class="e" d="M580,318 L262,318 L210,244" />
+  <text class="f" x="360" y="312" text-anchor="middle">.copy() / save_screenshot</text>
+</svg>
