@@ -16,7 +16,7 @@ import common;          // RNG, pcgHash, worldToTangent, buildBasis
 import bindings;        // set 0: fc, materialTypes, lights, env, materials
 import interfaces;      // HitInfo, IMaterial
 import materials.flat.flat_material;   // FlatMaterial, loadFlatMaterial
-import nee;             // allLightsNEE
+import restir.light_ris;               // restirDirectLighting (reservoir RIS, M2)
 import wavefront.wavefront_state;       // WavefrontPathState, pathAlive
 
 // ReSTIR set 1: the wavefront path-state + hit buffers (same buffers as
@@ -69,7 +69,9 @@ void restirPrimaryDirect(uint3 tid: SV_DispatchThreadID)
     RNG rng;
     rng.state = pcgHash(s.rngState ^ 0x9e3779b9u);
 
-    float3 direct = allLightsNEE(mat, h, N, T, B, wo, rng);
+    // M2: reservoir RIS over the light set (MIS-weighted target) instead of the
+    // single-sample allLightsNEE. Composes with shade's BSDF-direct half.
+    float3 direct = restirDirectLighting(mat, h, N, T, B, wo, rng);
 
     s.radiance += s.throughput * direct;
     wfState[i] = s;
