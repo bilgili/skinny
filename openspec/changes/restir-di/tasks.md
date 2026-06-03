@@ -1,8 +1,24 @@
-> RESUME (paused at commit 54fa487). Pure-math foundation DONE + verified:
-> 1.1 reuse-seam (parity bit-identical both backends) · 2.1 reservoir core (RIS
-> unbiasedness) · reservoirMerge (combine for spatial+temporal). 12 slangpy unit
-> tests green.
+> RESUME (at commit 2bd05b8). DONE + verified:
+> - Pure-math: reuse-seam (parity) · reservoir core (RIS) · reservoirMerge. 12
+>   slangpy unit tests.
+> - M1 PLUMBING (the hard coupled trunk): renderable ReSTIR DI wavefront vertical
+>   WORKS + converges to NEE. restir/restir_primary.slang (primary-direct pass) +
+>   vk_wavefront.RestirDiPass + the bounce-0 hook in WavefrontPathPass + renderer
+>   wiring (reuse_modes+="ReSTIR DI", build-on-reuse=ReSTIR, capability gate,
+>   reuseMode-gate) + sampling.RestirDiReuse plugin. depth-0 gate live.
+>   tests/test_restir_render.py: converge-to-NEE + megakernel identity fallback.
+>   reuse=none still bit-identical both backends.
 >
+> NEXT = M2 (reservoir RIS — localized Slang math, plumbing proven): swap the
+> inline allLightsNEE in restir_primary.slang for reservoir RIS over the unified
+> light set — M_light light candidates (sample sphere/tri/directional/env, weight
+> w=p̂/lightPdf, unshadowed p̂=luminance(f·Le·G) via mat.evaluate) streamed into a
+> Reservoir (restir/reservoir.slang, already tested) → finalize W → ONE shadow ray
+> for the survivor → f·V·W into radiance. Add M_bsdf BSDF candidates after.
+> Test: still converges to NEE + lower variance at low spp. Then 3.x spatial
+> (Jacobian/MIS, needs G-buffer + descriptor set 2), 6.x temporal, 7.x biased.
+>
+> (old NEXT, now done — kept for the build map:)
 > NEXT GOAL = renderable initial-RIS ReSTIR (the coupled trunk, one vertical):
 >   1. STUDY vk_wavefront.py pass machinery (how a pass compiles/binds/dispatches
 >      + the per-frame schedule) — prerequisite for all plumbing.
