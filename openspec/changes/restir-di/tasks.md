@@ -4,7 +4,33 @@
 > Converges to NEE (unbiased, option B — composes with shade's BSDF half, no shade
 > gate). The reservoir is currently EPHEMERAL (built+resolved in one pass).
 >
-> NEXT = the REUSE (the defining ReSTIR feature; needs persistent per-pixel state):
+> REUSE INCREMENT 1 DONE (commit 584224c): persistent per-pixel reservoir buffer
+> (set 1 binding 2) + restirFill / restirResolve split in restir_primary.slang;
+> RestirDiPass dispatches fill→barrier→resolve. Behaviour-neutral, converges to NEE.
+> light_ris.slang factored (restirEnvPHat reusable for neighbour re-eval).
+>
+> NEXT = REUSE INCREMENT 2 = SPATIAL reuse (env case; Jacobian=1 since env is
+> directional — area-light Jacobian cosθ/d² is later w/ sphere/tri candidates):
+>   - G-buffer: restirFill also writes per-pixel pos+normal to a new buffer (set 1
+>     binding 3) for the neighbour domain check. RestirDiPass allocs it.
+>   - Ping-pong reservoirs: fill→bufA; restirSpatial reads bufA + G-buffer, writes
+>     bufB; restirResolve reads bufB. (2 reservoir buffers in RestirDiPass; rebind
+>     resolve to bufB.) Dispatch: fill→barrier→spatial→barrier→resolve.
+>   - restirSpatial.slang/entry: load pixel i context (restirLoadLane); fresh
+>     Reservoir s; reservoirMerge(s, bufA[i], bufA[i].pHat, rand) [self]; for k
+>     neighbours j in a screen radius (rng-jittered offsets): domain check
+>     (dot(N_i,N_j)>0.9 && |pos_i-pos_j| small via G-buffer); if ok, re-derive j's
+>     env sample (sampleEnvDir(bufA[j].y.uv)), pHatInDst=restirEnvPHat(i's frame,
+>     that es); reservoirMerge(s, bufA[j], pHatInDst, rand). finalize. bufB[i]=s.
+>   - START with the BIASED combination (above = sum M-weighted; slight
+>     discontinuity darkening — fine on the smooth demo). Test: still converges
+>     (within tol) + lower variance on a HIGH-CONTRAST env. THEN add UNBIASED
+>     m_i/1-Z (count neighbours whose domain could produce y) — the hard math.
+>   reservoirMerge is done+tested; restirEnvPHat re-evals p̂ at any frame.
+> THEN temporal (prev-frame reservoir double-buffer + M-cap), M2b candidates,
+> config UBO, biased toggle.
+>
+> (prior reuse plan:)
 >   1. Store the reservoir in a per-pixel buffer (descriptor set 2 on RestirDiPass)
 >      + a G-buffer (pos/normal/matId/wo) — alloc renderer-side, double-buffer the
 >      reservoir for temporal. Split restir_primary into fill-reservoir (write) +
