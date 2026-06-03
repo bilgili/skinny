@@ -1,57 +1,48 @@
-// ReSTIR DI primary-direct pass (wavefront). Runs once per lane at the primary
-// hit (bounce 0), BEFORE the shade kernel, scheduled by the reuse hook in
-// WavefrontPathPass. It computes the primary-hit direct lighting and ADDS it
-// into the path-state radiance; the shade kernel's depth-0 reuseDirect is gated
-// to zero (reuseMode == RESTIR_DI) so this is the sole source of primary NEE.
+// ReSTIR DI primary-direct passes (wavefront). Run once per lane at the primary
+// hit (bounce 0), scheduled by the reuse hook in WavefrontPathPass before shade
+// (whose depth-0 reuseDirect is gated to zero, so ReSTIR is the sole primary-NEE
+// source). The estimate ADDS into the path-state radiance.
 //
-// MILESTONE 1 (plumbing): the estimate is plain allLightsNEE (the NEE light-
-// sampling half), drawn on a SEPARATE RNG stream from shade. Combined with
-// shade's still-active BSDF-sampled sphere/env-miss term (the BSDF half, MIS-
-// weighted as before), the total equals stock NEE — so the image CONVERGES to
-// reuse=none, validating buffers / hook / descriptor sets / radiance injection
-// before any reservoir math. MILESTONE 2 replaces allLightsNEE with reservoir
-// RIS over the unified light set (restir/reservoir.slang).
+// Split into a fill pass (initial RIS → per-pixel reservoir buffer) and a
+// resolve pass (read reservoir → one shadow ray → shade), so the reservoir
+// persists in VRAM for spatial / temporal reuse passes to read. Behaviour is
+// identical to the single-pass M2 RIS (same candidates, same survivor, same
+// shadow ray) — it still CONVERGES to reuse=none. Spatial/temporal passes slot
+// between fill and resolve and merge neighbour / prev-frame reservoirs.
 
 import common;          // RNG, pcgHash, worldToTangent, buildBasis
 import bindings;        // set 0: fc, materialTypes, lights, env, materials
 import interfaces;      // HitInfo, IMaterial
 import materials.flat.flat_material;   // FlatMaterial, loadFlatMaterial
-import restir.light_ris;               // restirDirectLighting (reservoir RIS, M2)
+import restir.reservoir;                // Reservoir
+import restir.light_ris;                // restirFillReservoir / Resolve / Directional
 import wavefront.wavefront_state;       // WavefrontPathState, pathAlive
 
-// ReSTIR set 1: the wavefront path-state + hit buffers (same buffers as
-// WavefrontPathPass binds; ReSTIR only needs these two).
+// ReSTIR set 1: wavefront path-state (0) + hit (1) [shared with WavefrontPathPass]
+// + the per-pixel reservoir buffer (2) [ReSTIR-owned, persistent].
 [[vk::binding(0, 1)]] RWStructuredBuffer<WavefrontPathState> wfState;
 [[vk::binding(1, 1)]] RWStructuredBuffer<HitInfo>            wfHits;
+[[vk::binding(2, 1)]] RWStructuredBuffer<Reservoir>          wfReservoir;
 
 struct RestirPC { uint streamSize; };
 [[vk::push_constant]] ConstantBuffer<RestirPC> rpc;
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void restirPrimaryDirect(uint3 tid: SV_DispatchThreadID)
+// Shared per-lane setup: returns false unless this lane is a live flat primary
+// hit. Fills the shading frame + outgoing direction.
+bool restirLoadLane(uint i, out WavefrontPathState s, out HitInfo h,
+                    out FlatMaterial mat, out float3 N, out float3 T, out float3 B,
+                    out float3 wo)
 {
-    uint i = tid.x;
-    if (i >= rpc.streamSize)
-        return;
-
-    WavefrontPathState s = wfState[i];
-    if (!pathAlive(s) || s.depth != 0u)   // primary vertex only
-        return;
-
-    HitInfo h = wfHits[i];
-    if (!h.hit)
-        return;
-
-    // Milestone 1 handles flat / MaterialX-graph materials (the demo scene).
-    // Skin / python primary hits keep their own shading (no reuseDirect gate).
-    uint matType = materialTypes[h.materialId] & 0xFFu;
-    if (matType != MATERIAL_TYPE_FLAT)
-        return;
-
-    FlatMaterial mat = loadFlatMaterial(h);
-    float3 N = mat.data.N;
-    float3 T, B;
+    s = wfState[i];
+    mat = (FlatMaterial)0; N = float3(0,0,1); T = float3(1,0,0); B = float3(0,1,0);
+    wo = float3(0,0,1); h = (HitInfo)0;
+    if (i >= rpc.streamSize || !pathAlive(s) || s.depth != 0u)
+        return false;
+    h = wfHits[i];
+    if (!h.hit || (materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+        return false;
+    mat = loadFlatMaterial(h);
+    N = mat.data.N;
     if (h.hasTangent)
     {
         T = normalize(h.tangent - N * dot(h.tangent, N));
@@ -61,18 +52,38 @@ void restirPrimaryDirect(uint3 tid: SV_DispatchThreadID)
     {
         buildBasis(N, T, B);
     }
-    float3 V  = -s.rayDir;
-    float3 wo = worldToTangent(V, T, B, N);
+    wo = worldToTangent(-s.rayDir, T, B, N);
+    return true;
+}
 
-    // Separate RNG stream so we don't consume the shade kernel's cursor (its
-    // rngState is left untouched in wfState[i]).
+// Fill: initial RIS over the light set → wfReservoir[i].
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void restirFill(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    WavefrontPathState s; HitInfo h; FlatMaterial mat; float3 N, T, B, wo;
+    if (!restirLoadLane(i, s, h, mat, N, T, B, wo))
+        return;
+    // Separate RNG stream so we don't consume the shade kernel's cursor.
     RNG rng;
     rng.state = pcgHash(s.rngState ^ 0x9e3779b9u);
+    wfReservoir[i] = restirFillReservoir(mat, h, N, T, B, wo, rng);
+}
 
-    // M2: reservoir RIS over the light set (MIS-weighted target) instead of the
-    // single-sample allLightsNEE. Composes with shade's BSDF-direct half.
-    float3 direct = restirDirectLighting(mat, h, N, T, B, wo, rng);
-
+// Resolve: read the (possibly reused) reservoir → one shadow ray → add direct
+// (+ directional NEE) into the path-state radiance.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void restirResolve(uint3 tid: SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    WavefrontPathState s; HitInfo h; FlatMaterial mat; float3 N, T, B, wo;
+    if (!restirLoadLane(i, s, h, mat, N, T, B, wo))
+        return;
+    Reservoir r = wfReservoir[i];
+    float3 direct = restirResolveReservoir(mat, h, N, T, B, wo, r)
+                  + restirDirectional(mat, h, N, T, B, wo);
     s.radiance += s.throughput * direct;
     wfState[i] = s;
 }

@@ -26,37 +26,39 @@ static const uint RESTIR_M_LIGHT = 8u;   // initial light candidates (config UBO
 
 float _luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
-// Reservoir RIS over the light set + deferred-visibility resolve + directional
-// (delta) NEE. Returns the primary-hit direct radiance (RGB). Generic over the
-// material so the wavefront flat path instantiates it with FlatMaterial.
-float3 restirDirectLighting<TM : IMaterial>(
+// The unshadowed, MIS-weighted target value p̂(y) of an env sample `es` seen
+// from a shading point (frame T/B/N, outgoing wo). Used both to build the
+// reservoir and to re-evaluate a neighbour's sample at THIS point (spatial
+// reuse). Returns 0 when below the horizon / unsamplable.
+float restirEnvPHat<TM : IMaterial>(
+    TM mat, EnvSample es, float3 N, float3 T, float3 B, float3 wo)
+{
+    if (es.pdf <= 0.0 || dot(N, es.dir) <= 0.0)
+        return 0.0;
+    float3 wi = worldToTangent(es.dir, T, B, N);
+    BSDFSample b = mat.evaluate(wo, wi);
+    float wNEE = powerHeuristic(es.pdf, b.pdf);
+    return _luminance(b.response * es.radiance * wNEE);
+}
+
+// Initial RIS over the light set → a Reservoir (no shadow ray; deferred to
+// resolve). M2-first: env candidates. The survivor's reproducible ref (env u)
+// is stored so resolve (or a neighbour) can re-derive the sample.
+Reservoir restirFillReservoir<TM : IMaterial>(
     TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo, inout RNG rng)
 {
-    float3 pos = h.position;
-    // Env is a resampled technique only when not in furnace mode (matches
-    // allLightsNEE: furnace env is constant white, handled by the BSDF miss).
     bool envActive = (effectiveFurnaceMode(h.materialId) == 0u);
     uint techniques = envActive ? 1u : 0u;
 
     Reservoir r;
     reservoirReset(r);
-
-    // ── Initial RIS: M env candidates (unshadowed, MIS-weighted target) ──
     for (uint k = 0u; k < RESTIR_M_LIGHT && techniques > 0u; k++)
     {
         float2 u = rng.next2();
         EnvSample es = sampleEnvDir(u, fc.envIntensity);
-        if (es.pdf <= 0.0 || dot(N, es.dir) <= 0.0)
-            continue;
-
-        float3 wi = worldToTangent(es.dir, T, B, N);
-        BSDFSample b = mat.evaluate(wo, wi);
-        float wNEE = powerHeuristic(es.pdf, b.pdf);
-        float3 contrib = b.response * es.radiance * wNEE;   // unshadowed, MIS-weighted
-        float pHat = _luminance(contrib);
+        float pHat = restirEnvPHat(mat, es, N, T, B, wo);
         if (pHat <= 0.0)
             continue;
-
         float sourcePdf = es.pdf / float(techniques);
         LightSampleRef ref;
         ref.packed = RLIGHT_ENV;
@@ -64,23 +66,32 @@ float3 restirDirectLighting<TM : IMaterial>(
         reservoirUpdate(r, ref, pHat / sourcePdf, pHat, rng.next());
     }
     reservoirFinalize(r);
+    return r;
+}
 
-    // ── Resolve the survivor: one shadow ray, integrand·V·W ──
+// Resolve a reservoir at a shading point: one shadow ray for the survivor →
+// integrand·V·W (RGB).
+float3 restirResolveReservoir<TM : IMaterial>(
+    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo, Reservoir r)
+{
+    if (r.W <= 0.0 || (r.y.packed & 0x3u) != RLIGHT_ENV)
+        return float3(0.0);
+    EnvSample es = sampleEnvDir(r.y.uv, fc.envIntensity);   // reproduce the sample
+    if (es.pdf <= 0.0 || dot(N, es.dir) <= 0.0 ||
+        !visibleDirectional(fc, h.position, N, es.dir))
+        return float3(0.0);
+    float3 wi = worldToTangent(es.dir, T, B, N);
+    BSDFSample b = mat.evaluate(wo, wi);
+    float wNEE = powerHeuristic(es.pdf, b.pdf);
+    return b.response * es.radiance * wNEE * r.W;
+}
+
+// Directional (delta) lights: plain NEE, outside the RIS (no MIS).
+float3 restirDirectional<TM : IMaterial>(
+    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo)
+{
+    float3 pos = h.position;
     float3 direct = float3(0.0);
-    if (r.W > 0.0 && (r.y.packed & 0x3u) == RLIGHT_ENV)
-    {
-        EnvSample es = sampleEnvDir(r.y.uv, fc.envIntensity);   // reproduce the sample
-        if (es.pdf > 0.0 && dot(N, es.dir) > 0.0 &&
-            visibleDirectional(fc, pos, N, es.dir))
-        {
-            float3 wi = worldToTangent(es.dir, T, B, N);
-            BSDFSample b = mat.evaluate(wo, wi);
-            float wNEE = powerHeuristic(es.pdf, b.pdf);
-            direct += b.response * es.radiance * wNEE * r.W;
-        }
-    }
-
-    // ── Directional (delta) lights: plain NEE, outside the RIS (no MIS) ──
     for (uint d = 0u; d < fc.numDistantLights; d++)
     {
         DirectionalLightImpl dl = loadDirectionalLightImpl(distantLights[d]);
@@ -95,6 +106,5 @@ float3 restirDirectLighting<TM : IMaterial>(
         BSDFSample b = mat.evaluate(wo, wi);
         direct += b.response * ls.radiance;
     }
-
     return direct;
 }

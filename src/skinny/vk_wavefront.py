@@ -708,6 +708,7 @@ class RestirDiPass:
     """
 
     _GROUP = 64  # matches [numthreads(64,1,1)] in restir_primary.slang
+    RESERVOIR_STRIDE = 32  # ≥ sizeof(Reservoir) (28 B scalar) — headroom
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
@@ -715,25 +716,31 @@ class RestirDiPass:
         self.ctx = ctx
         self.stream_size = int(stream_size)
 
-        spv = _compile_full_spv(shader_dir, "restir/restir_primary",
-                                "restirPrimaryDirect", "restir/_restir_primary")
-        code = spv.read_bytes()
-        self._module = vk.vkCreateShaderModule(
-            ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+        # Two pipelines: fill (initial RIS → reservoir) + resolve (reservoir →
+        # shadow ray → radiance). Spatial/temporal passes slot between them.
+        self._modules = {}
+        self._pipelines = {}
+        for entry, out_name in (("restirFill", "restir/_restir_fill"),
+                                ("restirResolve", "restir/_restir_resolve")):
+            spv = _compile_full_spv(shader_dir, "restir/restir_primary", entry, out_name)
+            code = spv.read_bytes()
+            self._modules[entry] = vk.vkCreateShaderModule(
+                ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
 
-        # Set 1: path-state (0) + hit (1) — the same buffers WavefrontPathPass
-        # binds; ReSTIR reads the primary hit and writes the radiance.
+        # Per-pixel reservoir buffer (persistent for reuse). ReSTIR-owned.
+        self._reservoir = StorageBuffer(ctx, self.stream_size * self.RESERVOIR_STRIDE)
+
+        # Set 1: path-state (0) + hit (1) [shared] + reservoir (2) [owned].
         set1_bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
-            for b in range(2)
+            for b in range(3)
         ]
         self._set_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=2, pBindings=set1_bindings), None)
+                bindingCount=3, pBindings=set1_bindings), None)
 
-        # Pipeline layout: [set 0 = scene set, set 1 = state+hit] + 4-B push.
         push_range = vk.VkPushConstantRange(
             stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
         self._pipe_layout = vk.vkCreatePipelineLayout(
@@ -741,36 +748,47 @@ class RestirDiPass:
                 setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout],
                 pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
 
-        stage = vk.VkPipelineShaderStageCreateInfo(
-            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=self._module, pName="main")
-        self._pipeline = vk.vkCreateComputePipelines(
-            ctx.device, vk.VK_NULL_HANDLE, 1,
-            [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+        for entry, mod in self._modules.items():
+            stage = vk.VkPipelineShaderStageCreateInfo(
+                stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=mod, pName="main")
+            self._pipelines[entry] = vk.vkCreateComputePipelines(
+                ctx.device, vk.VK_NULL_HANDLE, 1,
+                [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
 
         self._pool = vk.vkCreateDescriptorPool(
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=2)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=3)]), None)
         self._set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
                 pSetLayouts=[self._set_layout]))[0]
         writes = []
-        for b, (buf, rng) in enumerate([(state_buffer, state_range), (hit_buffer, hit_range)]):
+        bound = [(state_buffer, state_range), (hit_buffer, hit_range),
+                 (self._reservoir.buffer, self._reservoir.size)]
+        for b, (buf, rng) in enumerate(bound):
             info = vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)
             writes.append(vk.VkWriteDescriptorSet(
                 dstSet=self._set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
         vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
 
+    def _barrier(self, cmd) -> None:
+        b = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+        vk.vkCmdPipelineBarrier(
+            cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [b], 0, None, 0, None)
+
     def record_primary_direct(self, cmd, scene_set) -> None:
-        """Dispatch the primary-direct pass over one tile's lanes. Called at
-        bounce 0 (after the primary intersect, before shade)."""
+        """Dispatch the ReSTIR primary-direct passes (fill → resolve) over one
+        tile's lanes. Called at bounce 0 (after the primary intersect, before
+        shade)."""
         import struct
 
         import cffi
-        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipeline)
         vk.vkCmdBindDescriptorSets(
             cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
             0, 2, [scene_set, self._set], 0, None)
@@ -779,14 +797,21 @@ class RestirDiPass:
         vk.vkCmdPushConstants(
             cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
         groups = (self.stream_size + self._GROUP - 1) // self._GROUP
-        vk.vkCmdDispatch(cmd, groups, 1, 1)
+        for k, entry in enumerate(("restirFill", "restirResolve")):
+            if k > 0:
+                self._barrier(cmd)
+            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
+            vk.vkCmdDispatch(cmd, groups, 1, 1)
 
     def destroy(self) -> None:
         vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
-        vk.vkDestroyPipeline(self.ctx.device, self._pipeline, None)
+        for p in self._pipelines.values():
+            vk.vkDestroyPipeline(self.ctx.device, p, None)
         vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
         vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
-        vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
+        for m in self._modules.values():
+            vk.vkDestroyShaderModule(self.ctx.device, m, None)
+        self._reservoir.destroy()
 
 
 class IndirectPaintPass:
