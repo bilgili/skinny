@@ -709,12 +709,17 @@ class RestirDiPass:
 
     _GROUP = 64  # matches [numthreads(64,1,1)] in restir_primary.slang
     RESERVOIR_STRIDE = 32  # ≥ sizeof(Reservoir) (28 B scalar) — headroom
+    # Default ReSTIR config (mirrors restir_primary.slang RestirPC). flags bit0
+    # spatial, bit1 temporal. Renderer overrides via RestirDiReuse.
+    DEFAULT_CONFIG = dict(flags=0x3, mLight=8, spatialK=5, spatialRadius=16.0,
+                          normalThresh=0.9, depthThresh=0.1, mCap=20)
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
-                 stream_size: int) -> None:
+                 stream_size: int, config: dict | None = None) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
+        self.config = {**self.DEFAULT_CONFIG, **(config or {})}
 
         # Three pipelines: fill (initial RIS → reservoirA + G-buffer) → spatial
         # (reservoirA → reservoirB, domain-checked neighbour merge) → resolve
@@ -748,7 +753,7 @@ class RestirDiPass:
                 bindingCount=5, pBindings=set1_bindings), None)
 
         push_range = vk.VkPushConstantRange(
-            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=32)
         self._pipe_layout = vk.vkCreatePipelineLayout(
             ctx.device, vk.VkPipelineLayoutCreateInfo(
                 setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout],
@@ -800,10 +805,15 @@ class RestirDiPass:
         vk.vkCmdBindDescriptorSets(
             cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
             0, 2, [scene_set, self._set], 0, None)
-        data = struct.pack("I", self.stream_size)
+        c = self.config
+        # RestirPC: streamSize, flags, mLight, spatialK, spatialRadius,
+        # normalThresh, depthThresh, mCap (scalar layout, 32 B).
+        data = struct.pack("IIIIfffI", self.stream_size, int(c["flags"]),
+                           int(c["mLight"]), int(c["spatialK"]), float(c["spatialRadius"]),
+                           float(c["normalThresh"]), float(c["depthThresh"]), int(c["mCap"]))
         buf = cffi.FFI().new("char[]", data)
         vk.vkCmdPushConstants(
-            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, buf)
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, buf)
         groups = (self.stream_size + self._GROUP - 1) // self._GROUP
         for k, entry in enumerate(("restirFill", "restirSpatial", "restirResolve")):
             if k > 0:

@@ -105,6 +105,51 @@ def test_restir_converges_to_nee():
         ctx.destroy()
 
 
+def _cfg(flags):
+    return dict(flags=flags, mLight=8, spatialK=5, spatialRadius=16.0,
+               normalThresh=0.9, depthThresh=0.1, mCap=20)
+
+
+@needs_vulkan
+@pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
+def test_restir_regimes_converge():
+    """All selectable reuse regimes (spatial-only / temporal-only / both) are
+    unbiased — each converges to stock NEE. Validates the config push constant
+    + the flag gates."""
+    from skinny.vk_context import VulkanContext
+    from skinny.renderer import Renderer
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    try:
+        renderer = Renderer(
+            vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+            tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+            execution_mode="wavefront",
+        )
+        try:
+            deadline = 400
+            while deadline > 0 and (
+                renderer._usd_scene is None or len(renderer._usd_scene.instances) < 3
+            ):
+                renderer.update(0.025)
+                deadline -= 1
+            for _ in range(16):
+                renderer.update(0.04)
+
+            mean_none = float(_lum(_accumulate(renderer, REUSE_NONE, 80, 1000)).mean())
+            assert mean_none > 1e-3
+            for flags, label in ((0x1, "spatial"), (0x2, "temporal"), (0x3, "both")):
+                renderer._restir_config = _cfg(flags)
+                img = _accumulate(renderer, REUSE_RESTIR, 80, 2000 + flags)
+                assert np.isfinite(img).all(), f"{label}: non-finite"
+                rel = abs(float(_lum(img).mean()) - mean_none) / mean_none
+                assert rel < 0.025, f"regime {label} (flags={flags}) biased: rel {rel:.4f}"
+        finally:
+            renderer.cleanup()
+    finally:
+        ctx.destroy()
+
+
 @needs_vulkan
 @pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
 def test_restir_megakernel_falls_back_to_identity():

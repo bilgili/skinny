@@ -32,8 +32,23 @@ struct GBuf { float3 pos; float3 normal; };
 [[vk::binding(3, 1)]] RWStructuredBuffer<Reservoir>          wfReservoirB;
 [[vk::binding(4, 1)]] RWStructuredBuffer<GBuf>              wfGBuffer;
 
-struct RestirPC { uint streamSize; };
+// ReSTIR config (push constant, 32 B scalar — renderer-driven via RestirDiReuse).
+// flags: bit0 = spatial reuse, bit1 = temporal reuse.
+struct RestirPC
+{
+    uint  streamSize;
+    uint  flags;
+    uint  mLight;        // initial light candidates
+    uint  spatialK;      // spatial neighbours
+    float spatialRadius; // screen px
+    float normalThresh;  // dot(N_i, N_j) min
+    float depthThresh;   // |pos_i - pos_j| max (world)
+    uint  mCap;          // temporal history cap
+};
 [[vk::push_constant]] ConstantBuffer<RestirPC> rpc;
+
+static const uint RESTIR_FLAG_SPATIAL  = 1u;
+static const uint RESTIR_FLAG_TEMPORAL = 2u;
 
 // Shared per-lane setup: returns false unless this lane is a live flat primary
 // hit. Fills the shading frame + outgoing direction.
@@ -76,16 +91,10 @@ void restirFill(uint3 tid: SV_DispatchThreadID)
     // Separate RNG stream so we don't consume the shade kernel's cursor.
     RNG rng;
     rng.state = pcgHash(s.rngState ^ 0x9e3779b9u);
-    wfReservoirA[i] = restirFillReservoir(mat, h, N, T, B, wo, rng);
+    wfReservoirA[i] = restirFillReservoir(mat, h, N, T, B, wo, rpc.mLight, rng);
     GBuf g; g.pos = h.position; g.normal = N;
     wfGBuffer[i] = g;
 }
-
-static const uint  RESTIR_SPATIAL_K      = 5u;     // neighbour samples
-static const float RESTIR_SPATIAL_RADIUS = 16.0;   // screen-space px
-static const float RESTIR_NORMAL_THRESH  = 0.9;    // dot(N_i, N_j) min
-static const float RESTIR_DEPTH_THRESH   = 0.1;    // |pos_i - pos_j| max (world)
-static const uint  RESTIR_M_CAP          = 20u;    // temporal history cap (bounds lag)
 
 // Spatial reuse: merge self + k domain-checked neighbour reservoirs (reservoirA)
 // into reservoirB[i]. Env samples are directional ⇒ the reconnection Jacobian is
@@ -108,7 +117,8 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
     // below). Static camera ⇒ same pixel/geometry, so p̂ is unchanged. Read it
     // before any write; only valid once accumulation has a prior frame.
     Reservoir prev = wfReservoirB[i];
-    bool hasPrev = (fc.accumFrame > 0u) && (prev.W > 0.0);
+    bool hasPrev = (fc.accumFrame > 0u) && (prev.W > 0.0)
+                 && ((rpc.flags & RESTIR_FLAG_TEMPORAL) != 0u);
 
     Reservoir merged;
     reservoirReset(merged);
@@ -122,9 +132,10 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
     uint py = i / fc.width;
     RNG rng;
     rng.state = pcgHash((i * 9781u) ^ 0x85ebca6bu ^ fc.frameIndex);
-    for (uint k = 0u; k < RESTIR_SPATIAL_K; k++)
+    bool doSpatial = (rpc.flags & RESTIR_FLAG_SPATIAL) != 0u;
+    for (uint k = 0u; doSpatial && k < rpc.spatialK; k++)
     {
-        float2 d = (rng.next2() * 2.0 - 1.0) * RESTIR_SPATIAL_RADIUS;
+        float2 d = (rng.next2() * 2.0 - 1.0) * rpc.spatialRadius;
         int nx = int(px) + int(round(d.x));
         int ny = int(py) + int(round(d.y));
         if (nx < 0 || ny < 0 || uint(nx) >= fc.width || uint(ny) >= fc.height)
@@ -134,8 +145,8 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
             continue;
 
         GBuf gj = wfGBuffer[j];
-        if (dot(gi.normal, gj.normal) < RESTIR_NORMAL_THRESH ||
-            length(gi.pos - gj.pos) > RESTIR_DEPTH_THRESH)
+        if (dot(gi.normal, gj.normal) < rpc.normalThresh ||
+            length(gi.pos - gj.pos) > rpc.depthThresh)
             continue;
 
         Reservoir nb = wfReservoirA[j];
@@ -153,7 +164,7 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
     // reservoirMerge weights by W·M, so clamping M scales the prev contribution.
     if (hasPrev)
     {
-        prev.M = min(prev.M, RESTIR_M_CAP);
+        prev.M = min(prev.M, rpc.mCap);
         reservoirMerge(merged, prev, prev.pHat, rng.next());
     }
 

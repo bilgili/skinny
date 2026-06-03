@@ -45,14 +45,14 @@ float restirEnvPHat<TM : IMaterial>(
 // resolve). M2-first: env candidates. The survivor's reproducible ref (env u)
 // is stored so resolve (or a neighbour) can re-derive the sample.
 Reservoir restirFillReservoir<TM : IMaterial>(
-    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo, inout RNG rng)
+    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo, uint mLight, inout RNG rng)
 {
     bool envActive = (effectiveFurnaceMode(h.materialId) == 0u);
     uint techniques = envActive ? 1u : 0u;
 
     Reservoir r;
     reservoirReset(r);
-    for (uint k = 0u; k < RESTIR_M_LIGHT && techniques > 0u; k++)
+    for (uint k = 0u; k < mLight && techniques > 0u; k++)
     {
         float2 u = rng.next2();
         EnvSample es = sampleEnvDir(u, fc.envIntensity);

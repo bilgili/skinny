@@ -1441,7 +1441,9 @@ class Renderer:
         # Reuse mode is part of the key so switching none↔ReSTIR rebuilds the
         # pass (and its ReSTIR sub-pass) — the seam's pass-structural contract.
         reuse_mode = int(self._active_reuse().reuse_mode)
-        key = (self.width, self.height, has_nonflat, reuse_mode)
+        _rcfg = getattr(self, "_restir_config", None)
+        key = (self.width, self.height, has_nonflat, reuse_mode,
+               tuple(sorted(_rcfg.items())) if _rcfg else None)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
@@ -1475,6 +1477,8 @@ class Renderer:
                 self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
                 self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
                 stream_size,
+                config=(getattr(self, "_restir_config", None)
+                        or getattr(self._active_reuse(), "config", None)),
             )
             self._wavefront_path_pass.set_restir(self._restir_pass)
         self._wf_path_pass_dims = key
