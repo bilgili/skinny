@@ -9,6 +9,26 @@
 > RestirDiPass dispatches fill→barrier→resolve. Behaviour-neutral, converges to NEE.
 > light_ris.slang factored (restirEnvPHat reusable for neighbour re-eval).
 >
+> SPATIOTEMPORAL REUSE DONE (commits d2a9fa7 spatial, 35de810 temporal). restirSpatial
+> merges self + k=5 domain-checked neighbours (reservoirA, env re-eval, Jacobian=1) +
+> last frame's reservoir (bufB, M-cap=20, accumFrame-gated) → bufB; resolve reads bufB.
+> Ping-pong A/B + G-buffer (pos+normal) in RestirDiPass (5 set-1 bindings, 3 pipelines).
+> BIASED combination; converges to NEE (unbiased). HONEST GAP: variance benefit
+> undemonstrated on the gray/curved-sphere demo (domain check rejects curved-surface
+> neighbours; gray env makes all env samples equal). reuse_mode-keyed rebuild.
+>
+> NEXT (refinements — core spatiotemporal is built+correct):
+>   - VARIANCE DEMO: a flat-plane + high-contrast many-light test scene (USD) +
+>     loosen the domain check (depth-relative, not absolute pos<0.1) → show
+>     err_restir < err_none. THE validation the feature delivers.
+>   - Config UBO: M_light/spatial_k/radius/M_cap/biased are hardcoded consts now;
+>     move to a ReSTIR UBO the plugin owns (renderer-driven, state-hash).
+>   - Unbiased m_i/1-Z (biased→unbiased default per design). M2b sphere/tri + BSDF
+>     candidates (area-light cosθ/d² Jacobian). Biased toggle. Reprojected temporal (P3).
+>   - DOC-UPKEEP (CLAUDE.md rule): Wavefront.md + Architecture.md binding map (the new
+>     ReSTIR set-1 bindings 2-4) + an SVG of the fill→spatial→resolve pipeline.
+>
+> (older spatial-only spec kept for reference:)
 > NEXT = REUSE INCREMENT 2 = SPATIAL reuse (env case; Jacobian=1 since env is
 > directional — area-light Jacobian cosθ/d² is later w/ sphere/tri candidates):
 >   - G-buffer: restirFill also writes per-pixel pos+normal to a new buffer (set 1
