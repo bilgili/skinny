@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 470" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="470" fill="#ffffff"/>
+  <text x="360" y="28" text-anchor="middle" font-size="16" font-weight="700" fill="#0f172a">Flat / std_surface BSDF — one composable lobe set</text>
+
+  <!-- sample / evaluate -->
+  <rect x="40" y="58" width="280" height="58" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="180" y="82" text-anchor="middle" font-weight="700" fill="#1e3a8a">FlatMaterial.sample(wo)</text>
+  <text x="180" y="101" text-anchor="middle" fill="#1e3a8a">draw a bounce direction wi</text>
+
+  <rect x="400" y="58" width="280" height="58" rx="8" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="540" y="82" text-anchor="middle" font-weight="700" fill="#14532d">FlatMaterial.evaluate(wo, wi)</text>
+  <text x="540" y="101" text-anchor="middle" fill="#14532d">response (f·cos) + solid-angle pdf</text>
+
+  <!-- one lobe set -->
+  <rect x="150" y="172" width="420" height="118" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+  <text x="360" y="195" text-anchor="middle" font-weight="700" fill="#0f172a">flat_lobes.slang — single source of truth</text>
+  <rect x="172" y="210" width="118" height="34" rx="6" fill="#fde68a" stroke="#d97706"/>
+  <text x="231" y="232" text-anchor="middle" fill="#7c2d12">coat (GGX VNDF)</text>
+  <rect x="301" y="210" width="118" height="34" rx="6" fill="#fde68a" stroke="#d97706"/>
+  <text x="360" y="232" text-anchor="middle" fill="#7c2d12">spec (GGX VNDF)</text>
+  <rect x="430" y="210" width="118" height="34" rx="6" fill="#fde68a" stroke="#d97706"/>
+  <text x="489" y="232" text-anchor="middle" fill="#7c2d12">diffuse (Lambert)</text>
+  <text x="360" y="268" text-anchor="middle" fill="#334155">flatBsdfPdf · flatBsdfResponse · per-lobe sampler dispatch (native)</text>
+  <text x="360" y="283" text-anchor="middle" font-size="11" fill="#64748b">each lobe carries a sampler id → ISampler (runtime-pluggable seam, native only)</text>
+
+  <line x1="180" y1="116" x2="250" y2="170" stroke="#475569" marker-end="url(#arrow)"/>
+  <line x1="540" y1="116" x2="470" y2="170" stroke="#475569" marker-end="url(#arrow)"/>
+
+  <!-- invariant -->
+  <rect x="150" y="312" width="420" height="46" rx="8" fill="#ede9fe" stroke="#7c3aed"/>
+  <text x="360" y="332" text-anchor="middle" font-weight="700" fill="#5b21b6">sample().pdf == evaluate().pdf  ·  response / pdf → bounded F·G₁</text>
+  <text x="360" y="349" text-anchor="middle" font-size="11" fill="#6d28d9">unbiased proposal mixture on layered materials, firefly-free by construction</text>
+  <line x1="360" y1="290" x2="360" y2="310" stroke="#475569" marker-end="url(#arrow)"/>
+
+  <!-- consumers -->
+  <rect x="150" y="392" width="420" height="40" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="360" y="416" text-anchor="middle" fill="#334155">consumed by: proposal mixture · NEE · BDPT connections + reverse pdf · ReSTIR</text>
+  <line x1="360" y1="358" x2="360" y2="390" stroke="#475569" marker-end="url(#arrow)"/>
+
+  <!-- preview-only closure -->
+  <rect x="586" y="172" width="120" height="118" rx="8" fill="#fef2f2" stroke="#f87171" stroke-dasharray="4 3"/>
+  <text x="646" y="212" text-anchor="middle" font-size="11" fill="#991b1b">evalStdSurfaceBSDF</text>
+  <text x="646" y="230" text-anchor="middle" font-size="11" fill="#991b1b">(binding 19)</text>
+  <text x="646" y="255" text-anchor="middle" font-size="11" font-weight="700" fill="#991b1b">raster</text>
+  <text x="646" y="271" text-anchor="middle" font-size="11" font-weight="700" fill="#991b1b">preview only</text>
+</svg>

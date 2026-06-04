@@ -5,41 +5,13 @@
 import common;
 import bindings;
 import interfaces;
-import mtlx_closures;
-import mtlx_std_surface;
 import materials.flat.flat_shading;
+import materials.flat.flat_lobes;
 import generated_materials;
-import samplers.ggx;
-import samplers.lambert;
-
-// MIS pdf across coat + base spec + base diffuse lobes. Each lobe samples
-// via its ISampler implementor; weights by lobe-selection probabilities.
-float flatBsdfPdf(float3 wo, float3 wi,
-                  float pCoat, float coatRoughness,
-                  float pSpec, float baseRoughness)
-{
-    GGXSampler     coatSampler; coatSampler.roughness = coatRoughness;
-    GGXSampler     specSampler; specSampler.roughness = baseRoughness;
-    LambertSampler diffSampler;
-    float basePdf = pSpec * specSampler.pdf(wi, wo)
-                  + (1.0 - pSpec) * diffSampler.pdf(wi, wo);
-    return pCoat * coatSampler.pdf(wi, wo) + (1.0 - pCoat) * basePdf;
-}
-
-// Lobe-selection probability from colored Fresnel / albedo balance.
-float flatLobePSpec(float NdotV, float3 albedo, float metallic, float3 F0)
-{
-    float3 Fview   = schlickFresnelColor(NdotV, F0);
-    float3 diffHue = albedo * (float3(1.0) - Fview) * (1.0 - metallic);
-    float specLum  = relativeLuminance(Fview);
-    float diffLum  = relativeLuminance(diffHue);
-    return clamp(specLum / max(specLum + diffLum, 1e-6), 0.05, 0.95);
-}
 
 struct FlatMaterial : IMaterial
 {
     FlatHitData data;
-    StdSurfaceParams sp;
     float3 F0;
 
     BSDFSample sample(float3 wo, inout RNG rng)
@@ -97,17 +69,14 @@ struct FlatMaterial : IMaterial
         float pSpec        = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
         float3 coatAttenuation = (m.coat > 0.0) ? m.coatColor : float3(1.0);
 
-        GGXSampler     coatSampler; coatSampler.roughness = m.coatRoughness;
-        GGXSampler     specSampler; specSampler.roughness = roughness;
-        LambertSampler diffSampler;
-
         float3 wi;
         float3 bounceWeight;
 
         // ── Coat lobe (selected with probability pCoat) ──
         if (m.coat > 0.0 && rng.next() < pCoat)
         {
-            wi = coatSampler.sample(wo, rng.next2());
+            wi = flatSampleLobe(LOBE_COAT, FLAT_SAMPLER_NATIVE, m.coatRoughness,
+                                wo, rng.next2());
             if (wi.z <= 0.0)
                 return s;
 
@@ -137,7 +106,8 @@ struct FlatMaterial : IMaterial
         float u = rng.next();
         if (u < pSpec)
         {
-            wi = specSampler.sample(wo, rng.next2());
+            wi = flatSampleLobe(LOBE_SPEC, FLAT_SAMPLER_NATIVE, roughness,
+                                wo, rng.next2());
             if (wi.z <= 0.0)
                 return s;
 
@@ -162,7 +132,8 @@ struct FlatMaterial : IMaterial
         }
         else
         {
-            wi = diffSampler.sample(wo, rng.next2());
+            wi = flatSampleLobe(LOBE_DIFFUSE, FLAT_SAMPLER_NATIVE, 0.0,
+                                wo, rng.next2());
             float3 Fview   = schlickFresnelColor(NdotV, F0);
             float3 diffHue = m.albedo * (float3(1.0) - Fview)
                            * (1.0 - m.metallic);
@@ -196,21 +167,18 @@ struct FlatMaterial : IMaterial
             e.pdf      = 0.0;
             return e;
         }
-        ClosureData cd = makeClosureData(
-            CLOSURE_TYPE_REFLECTION, wi, wo,
-            float3(0, 0, 1), float3(0), 1.0);
-        BSDF bsdf  = evalStdSurfaceBSDF(cd, sp, float3(0, 0, 1), float3(1, 0, 0));
-        e.response = bsdf.response * op;
 
-        float  NdotV = max(wo.z, 1e-6);
-        float3 baseColor = sp.base_color * sp.base;
-        float3 evalF0 = schlickF0(baseColor, sp.metalness,
-                                  sp.specular, sp.specular_IOR);
-        float  pSpec  = flatLobePSpec(NdotV, baseColor, sp.metalness, evalF0);
-        float  rough  = max(sp.specular_roughness, 0.04);
-        float  coatRough = max(sp.coat_roughness, 0.04);
-        float  pCoat = sp.coat * fresnelDielectric(NdotV, sp.coat_IOR);
-        e.pdf = flatBsdfPdf(wo, wi, pCoat, coatRough, pSpec, rough) * op;
+        // Unified lobe BSDF — the SAME 3-lobe model, params, and samplers
+        // FlatMaterial.sample() draws from, so e.pdf == sample().pdf and
+        // e.response / e.pdf reduces to the bounded native per-lobe weight.
+        FlatHitMat m       = data.mat;
+        float NdotV        = max(wo.z, 1e-6);
+        float coatFresnel  = (m.coat > 0.0) ? fresnelDielectric(NdotV, m.coatIOR) : 0.0;
+        float pCoat        = m.coat * coatFresnel;
+        float pSpec        = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
+
+        e.response = flatBsdfResponse(wo, wi, m, F0) * op;
+        e.pdf      = flatBsdfPdf(wo, wi, pCoat, m.coatRoughness, pSpec, m.roughness) * op;
         return e;
     }
 }
@@ -219,15 +187,12 @@ FlatMaterial loadFlatMaterial(HitInfo h)
 {
     FlatMaterial m;
     m.data = fetchFlatHitData(h);
-    m.sp   = loadStdSurfaceParams(h.materialId, h.positionObject,
-                                   h.normal, h.tangent, h.uv);
 
-    // Mirror loadStdSurfaceParams's graph dispatch onto the flat path's
-    // albedo so direct lobes (used by flatBsdfPdf / FlatMaterial.sample)
-    // pick up the same color the std_surface BSDF sees. The helper
-    // returns false for graphs that drive only other std_surface inputs
-    // (brass: specular_roughness + coat_*), in which case the SSBO-
-    // uploaded constant is the correct albedo.
+    // Graph dispatch onto the flat path's albedo so the lobe model picks up
+    // the same color a connected diffuseColor / base_color node drives. The
+    // helper returns false for graphs that drive only other inputs (brass:
+    // specular_roughness + coat_*), in which case the SSBO-uploaded constant
+    // is the correct albedo.
     uint graphId = materialGraphId(h.materialId);
     if (graphId >= 2u)
     {
@@ -240,14 +205,9 @@ FlatMaterial loadFlatMaterial(HitInfo h)
         }
     }
 
-    // UsdPreviewSurface authors `diffuseColor` connected to a UsdUVTexture.
-    // pack_std_surface_params can't sample textures on the CPU, so it falls
-    // back to the constant default (0.8 grey) for textured materials.
-    // fetchFlatHitData already sampled the texture for the diffuse lobe;
-    // copy that color into the std_surface params so FlatMaterial.evaluate's
-    // BSDF response (used by NEE) matches the textured albedo sample() uses.
-    m.sp.base_color = m.data.mat.albedo;
-
+    // fetchFlatHitData already sampled any diffuseColor texture into
+    // data.mat.albedo, so the lobe model (sample + evaluate) sees the
+    // textured color directly — no std_surface param mirror needed.
     m.F0 = schlickF0(m.data.mat.albedo, m.data.mat.metallic,
                      m.data.mat.specular, m.data.mat.ior);
     return m;

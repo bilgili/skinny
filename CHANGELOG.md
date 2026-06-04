@@ -9,6 +9,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Rendering
 
+- Unified flat / `std_surface` BSDF onto one composable lobe set —
+  `FlatMaterial.sample()` and `.evaluate()` now share `{coat, spec, diffuse}`
+  (`materials/flat/flat_lobes.slang`), so `sample().pdf == evaluate().pdf` and
+  `response / pdf` stays bounded (`F·G₁` / Lambert, no clamp). This is the
+  canonical BSDF for the path tracer **and** BDPT in both megakernel and wavefront
+  modes, and removes the directional-proposal-mixture bias on layered coat+metal
+  materials (brass under the BSDF+Env / Env presets: +4.6% → −0.2% vs the BDPT
+  reference; megakernel and wavefront converge identically). The MaterialX
+  `std_surface` closure (`evalStdSurfaceBSDF`, binding 19) is retained only for the
+  raster preview pass. Each lobe carries a runtime-pluggable sampler id (native
+  strategies only for now) — the seam a later `per-lobe-sampler-registry` change
+  populates with a host registry + alternative samplers.
+
 - ReSTIR DI reuse mode (wavefront-only) — reservoir resampling of primary-hit
   direct lighting over the unified light set (sphere + emissive-triangle + env,
   light- and BSDF-sampled candidates) with deferred visibility. Spatial reuse

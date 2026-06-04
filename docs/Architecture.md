@@ -231,27 +231,47 @@ the layer model, the §1–§6 estimator order, volume transport, and the Materi
 skin codegen — are documented in [SkinRendering.md](SkinRendering.md). The flat
 material and the bidirectional integrator below are general-purpose.
 
-### Flat Material BSDF (`materials/flat/flat_material.slang`)
+### Flat Material BSDF (`materials/flat/flat_material.slang` + `flat_lobes.slang`)
 
-Implements `IMaterial` interface — provides `sample()` / `evaluate()` in
-tangent space. Bounce loop and NEE are in `PathTracer`. BSDF layers:
+![Flat BSDF unified lobe model](diagrams/flat_bsdf_lobes.svg)
 
-- Opacity / refraction (Fresnel-weighted reflect/refract split). Cutout vs
-  alpha-blend opacity are split: cutout discards below `opacityThreshold`,
-  alpha-blend attenuates — matching UsdPreviewSurface `opacityThreshold`
+Implements `IMaterial` — `sample()` (draw a bounce direction) and `evaluate()`
+(response + solid-angle pdf, consumed by NEE, BDPT connections + reverse pdfs,
+ReSTIR, and the directional-proposal mixture). Both walk **one** lobe set
+(`{coat, spec, diffuse}`) over a single param source, so `sample().pdf ==
+evaluate().pdf` structurally and `evaluate().response / evaluate().pdf` reduces to
+the bounded native per-lobe weight (`F·G₁` for the GGX lobes, the diffuse albedo
+term for Lambert). This makes one canonical BSDF for the path tracer **and** BDPT
+in **both** megakernel and wavefront modes. The lobe model lives in
+`flat_lobes.slang` (`flatBsdfPdf`, `flatBsdfResponse`, the per-lobe sampler
+dispatch); `flat_material.slang` assembles it. BSDF layers:
+
+- Opacity / refraction (Fresnel-weighted reflect/refract split; delta lobe).
+  Cutout vs alpha-blend opacity are split: cutout discards below
+  `opacityThreshold`, alpha-blend attenuates — matching UsdPreviewSurface
   semantics
-- Clear coat (GGX, coat color tinting)
+- Clear coat (GGX VNDF, coat-color tinting)
 - Specular / diffuse MIS split (Schlick F0, luminance-weighted probability) —
-  GGX specular uses VNDF sampling (`samplers/ggx.slang`)
+  GGX specular uses VNDF sampling (`samplers/ggx.slang`), diffuse is Lambert
+- **Per-lobe runtime-pluggable sampler seam** — each lobe resolves a sampler id
+  to an `ISampler`, defaulting to its native strategy. Only native strategies
+  are registered today (the seam ships unpopulated); a future
+  `per-lobe-sampler-registry` change adds a host registry + alternative samplers
+  without touching `sample()` / `evaluate()`
 - Cutout alpha masking via `isCutoutTransparent()` (in `flat_shading.slang`)
 - **UsdPreviewSurface textures** — per-input channel selection (`channelMask`),
   normal-map `scale`/`bias` (`normalScale`/`normalBias`, for OpenGL vs DirectX
   Y convention), and wrap modes flow from each material's `TextureBinding`
   (binding 14 bindless textures)
 - **MaterialX graph evaluation** when `materialTypes[id]` packs a graph
-  slot — `evalSceneGraph(materialId, hit, ...)` (generated module) returns
-  `StdSurfaceParams` overrides (base_color, roughness, metallic, etc.) before
-  the BSDF math runs
+  slot — `evalSceneGraphBaseColor(materialId, hit, ...)` (generated module)
+  drives the lobe model's albedo before the BSDF math runs
+
+The full MaterialX `std_surface` closure (`evalStdSurfaceBSDF`, binding-19
+`StdSurfaceParams`) is **no longer** used by the path-traced / BDPT estimator — it
+is retained only for the raster `preview_pass`. Unifying `evaluate()` onto the
+same lobe model `sample()` draws from removed the proposal-mixture bias on layered
+coat+metal materials (brass under the BSDF+Env / Env presets).
 
 ### Python Material (`materials` type code 3)
 
@@ -711,7 +731,7 @@ incrementally moved over.
 | 16 | StructuredBuffer | Material type code + scatter + furnace + graph slot + python id (uint32 each) | `bindings.slang` |
 | 17 | StructuredBuffer | SphereLight (32 B each) | `scene_lights.slang` |
 | 18 | StructuredBuffer | EmissiveTriangle (64 B each) | `scene_lights.slang` |
-| 19 | StructuredBuffer | StdSurfaceParams (256 B each) | `bindings.slang` |
+| 19 | StructuredBuffer | StdSurfaceParams (256 B each) — raster `preview_pass` only; the path-traced / BDPT flat BSDF uses the `flat_lobes` model, not `evalStdSurfaceBSDF` | `bindings.slang` |
 | 20 | StructuredBuffer | DistantLight (analytic distant lights) | `scene_lights.slang` |
 | 21 | RWStructuredBuffer | BDPT light-splat buffer (Q22.10 uint per R/G/B) | `bindings.slang` |
 | 22 | StructuredBuffer | Transform-gizmo line segments | `gizmo.py` |
@@ -971,7 +991,7 @@ mtlx_gen_shim.slang      generated_materials.slang
 debug_line.slang
 cameras/{pinhole.slang, thick_lens.slang}
 materials/debug_normal_material.slang
-materials/flat/{flat_material.slang, flat_shading.slang}
+materials/flat/{flat_material.slang, flat_lobes.slang, flat_shading.slang}
 materials/skin/{skin_material.slang, skin_bssrdf.slang, skin_shading.slang,
                 skin_direct.slang, skin_ibl_specular.slang, skin_ibl_diffuse.slang,
                 skin_volume.slang, skin_transmission.slang, skin_hair_sheen.slang,
