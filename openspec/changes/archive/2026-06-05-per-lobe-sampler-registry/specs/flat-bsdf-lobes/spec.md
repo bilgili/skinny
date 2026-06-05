@@ -1,65 +1,4 @@
-# flat-bsdf-lobes Specification
-
-## Purpose
-TBD - created by archiving change unify-flat-bsdf-on-lobes. Update Purpose after archive.
-## Requirements
-### Requirement: Unified lobe BSDF with a single pdf
-
-The flat / `std_surface` material SHALL expose `sample()` and `evaluate()` built
-from **one** lobe set (`{coat, spec, diffuse}`) over a **single** parameter
-source, such that for any `(wo, wi)` the solid-angle pdf reported by `sample()`
-equals the pdf reported by `evaluate()`. The two methods SHALL NOT use different
-BSDF models, different parameter structs, or different roughness/opacity handling.
-
-#### Scenario: sample and evaluate pdf agree on a layered material
-
-- **WHEN** a coat+metal material (e.g. brass) is hit and a non-delta direction
-  `wi` is produced
-- **THEN** `sample().pdf` and `evaluate().pdf` for that `(wo, wi)` are equal to
-  floating-point tolerance
-
-### Requirement: Bounded per-lobe weight without clamping
-
-`evaluate().response / evaluate().pdf` SHALL reduce to the lobe's bounded native
-importance weight (`F·G₁` for the GGX coat/spec lobes, the diffuse albedo term
-for the Lambert lobe). The unified BSDF SHALL stay firefly-free **by
-construction** and SHALL NOT rely on a weight clamp, firefly cap, or other
-biasing safeguard to bound throughput.
-
-#### Scenario: no spec-lobe fireflies under the proposal mixture
-
-- **WHEN** the `{bsdf, env}` or `{env}` proposal renders a glossy or coated
-  surface
-- **THEN** per-bounce throughput stays bounded (no firefly spikes) without any
-  weight clamp, matching the bounded-weight behaviour of the BSDF-only path
-
-### Requirement: Canonical BSDF for Path Tracer and BDPT in both execution modes
-
-The unified lobe BSDF SHALL be the single BSDF used by **both** the path tracer
-and the bidirectional path tracer, in **both** the megakernel and wavefront
-execution modes. No integrator SHALL carry a separate or divergent flat-BSDF
-evaluation; `evalStdSurfaceBSDF` SHALL NOT appear in the path-traced or BDPT
-estimator path (it remains only for the raster preview pass).
-
-#### Scenario: PT and BDPT converge to one per-column value
-
-- **WHEN** `three_materials` renders IBL-only at high sample count under
-  PT-BSDF, PT-(BSDF+Env), PT-Env, and BDPT
-- **THEN** all four converge to the same per-column radiance (brass ≈ 0.219, plus
-  marble and wood), in both megakernel and wavefront modes
-
-### Requirement: Proposal mixture is unbiased on layered materials
-
-The unified model SHALL keep the proposal mixture unbiased on layered / coated
-materials: with a non-BSDF proposal active (BSDF+Env or Env), the converged image
-SHALL match the BSDF-only and BDPT references with no bias, because the drawing
-density and the weighting density come from the same model.
-
-#### Scenario: brass no longer darkens under BSDF+Env
-
-- **WHEN** brass renders IBL-only under the BSDF+Env proposal
-- **THEN** its converged radiance matches the BSDF-only / BDPT reference within
-  tolerance, and the prior ~3.7% darkening is gone
+## MODIFIED Requirements
 
 ### Requirement: Per-lobe runtime-pluggable sampler seam with native defaults
 
@@ -100,6 +39,8 @@ an unrecognized `(lobe, samplerId)` pair SHALL fall back to the native strategy.
 - **THEN** the lobe falls back to its native strategy rather than producing an
   undefined direction or density
 
+## ADDED Requirements
+
 ### Requirement: Selected per-lobe strategy is shared by sample() and evaluate()
 
 The renderer-selected sampler identifier for each lobe SHALL be read by **both**
@@ -129,4 +70,3 @@ basis-form VNDF SHALL share the GGX visible-normal density so its weight remains
   per-bounce diffuse weight stays bounded (no fireflies), and the low-sample
   variance is higher than the cosine strategy — confirming the seam swapped the
   strategy without introducing bias
-

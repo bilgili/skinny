@@ -47,6 +47,7 @@ _BDPT_WALK: str = "fused"
 _INTEGRATOR: str | None = None
 _PROPOSALS: str | None = None
 _REUSE: str | None = None
+_LOBE_SAMPLERS: str | None = None
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -110,6 +111,13 @@ class SkinnySession:
                     self.renderer.proposal_preset_from_token(_PROPOSALS)
             if _REUSE is not None:
                 self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(_REUSE)
+            if _LOBE_SAMPLERS is not None:
+                from skinny.sampling import parse_lobe_samplers
+
+                c, s, d = parse_lobe_samplers(_LOBE_SAMPLERS)
+                self.renderer.coat_sampler_index = c
+                self.renderer.spec_sampler_index = s
+                self.renderer.diff_sampler_index = d
 
             self._log_init("Setting up video encoder...")
             self.encoder = VideoEncoder(1280, 720, gpu_info=self.ctx.gpu_info)
@@ -681,7 +689,7 @@ def main() -> None:
     args = parser.parse_args()
 
     global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE, _BDPT_WALK
-    global _INTEGRATOR, _PROPOSALS, _REUSE
+    global _INTEGRATOR, _PROPOSALS, _REUSE, _LOBE_SAMPLERS
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
@@ -690,6 +698,7 @@ def main() -> None:
     _INTEGRATOR = args.integrator
     _PROPOSALS = args.proposals
     _REUSE = args.reuse
+    _LOBE_SAMPLERS = args.lobe_samplers
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

@@ -225,3 +225,146 @@ def test_env_proposal_unbiased_and_reduces_variance():
             renderer.cleanup()
     finally:
         ctx.destroy()
+
+
+# ── Per-lobe sampler registry: parity + variance ──────────────────
+
+
+def _accumulate_lobes(renderer, coat, spec, diff, n_samples, base_seed):
+    """Accumulate ``n_samples`` frames with a fixed per-lobe sampler selection;
+    return the raw running-mean linear-HDR image (H, W, 4). Indices select into
+    each lobe's registry list (0 = native; coat/spec 1 = basis VNDF; diff 1 =
+    uniform-hemisphere)."""
+    renderer.coat_sampler_index = int(coat)
+    renderer.spec_sampler_index = int(spec)
+    renderer.diff_sampler_index = int(diff)
+    for i in range(n_samples):
+        renderer.frame_index = base_seed + i
+        renderer.accum_frame = i
+        renderer.render_headless()
+    arr, _ = renderer.read_accumulation_hdr()
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def _thirds(arr):
+    """Per-column mean luminance — marble (L), wood (M), brass (R)."""
+    cols = np.array_split(np.arange(arr.shape[1]), 3)
+    return [float(_luminance(arr[:, c, :]).mean()) for c in cols]
+
+
+@needs_vulkan
+@pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
+@pytest.mark.parametrize("execution_mode", ["megakernel", "wavefront"])
+def test_basis_vndf_parity(execution_mode):
+    """coat/spec = Heitz-2018 basis VNDF converges to the SAME per-column radiance
+    as native, in both backends. Structural: the basis-form and the native
+    spherical-cap warp share one GGX visible-normal pdf, so ``sample().pdf`` ==
+    ``evaluate().pdf`` and only the noise realization differs. A divergence here
+    means the basis warp's implied density drifted from the shared VNDF pdf."""
+    from skinny.vk_context import VulkanContext
+    from skinny.renderer import Renderer
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    try:
+        renderer = Renderer(vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+                            tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE,
+                            execution_mode=execution_mode)
+        try:
+            deadline = 400
+            while deadline > 0 and (renderer._usd_scene is None
+                                    or len(renderer._usd_scene.instances) < 3):
+                renderer.update(0.025)
+                deadline -= 1
+            assert renderer._usd_scene is not None
+            assert len(renderer._usd_scene.instances) >= 3
+            for _ in range(16):
+                renderer.update(0.04)
+            renderer.direct_light_index = 1  # IBL only
+
+            native = _accumulate_lobes(renderer, 0, 0, 0, 128, 1000)
+            basis = _accumulate_lobes(renderer, 1, 1, 0, 128, 1000)
+            assert np.isfinite(native).all() and np.isfinite(basis).all()
+            nt, bt = _thirds(native), _thirds(basis)
+            assert min(nt) > 1e-3, f"IBL render ~black ({nt}); no signal"
+            for col, (n, b) in enumerate(zip(nt, bt)):
+                rel = abs(b - n) / max(n, 1e-6)
+                assert rel < 0.01, (
+                    f"[{execution_mode}] basis VNDF biased in column {col} (PT): "
+                    f"{b:.6g} vs native {n:.6g} (rel {rel:.4f} >= 0.01)"
+                )
+
+            # BDPT routes the flat BSDF through evaluate() (connections +
+            # reverse pdfs) and sample() — the same per-lobe id path — so basis
+            # parity must hold there too. (Wavefront BDPT falls back to
+            # megakernel, so this is a megakernel-only sub-check.)
+            if execution_mode == "megakernel":
+                renderer.integrator_index = 1  # BDPT
+                try:
+                    nb = _thirds(_accumulate_lobes(renderer, 0, 0, 0, 96, 5000))
+                    bb = _thirds(_accumulate_lobes(renderer, 1, 1, 0, 96, 5000))
+                    for col, (n, b) in enumerate(zip(nb, bb)):
+                        rel = abs(b - n) / max(n, 1e-6)
+                        assert rel < 0.015, (
+                            f"basis VNDF biased in column {col} (BDPT): {b:.6g} "
+                            f"vs native {n:.6g} (rel {rel:.4f} >= 0.015)"
+                        )
+                finally:
+                    renderer.integrator_index = 0
+        finally:
+            renderer.cleanup()
+    finally:
+        ctx.destroy()
+
+
+@needs_vulkan
+@pytest.mark.skipif(not DEMO_SCENE.exists(), reason="three_materials_demo.usda missing")
+def test_uniform_diffuse_unbiased_higher_variance():
+    """Diffuse uniform-hemisphere converges to the same image as cosine (unbiased,
+    bounded weight) but has higher low-sample variance — proving the seam swaps
+    the diffuse strategy without changing the integrand."""
+    from skinny.vk_context import VulkanContext
+    from skinny.renderer import Renderer
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    try:
+        renderer = Renderer(vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
+                            tattoo_dir=TATTOO_DIR, usd_scene_path=DEMO_SCENE)
+        try:
+            deadline = 400
+            while deadline > 0 and (renderer._usd_scene is None
+                                    or len(renderer._usd_scene.instances) < 3):
+                renderer.update(0.025)
+                deadline -= 1
+            assert renderer._usd_scene is not None
+            assert len(renderer._usd_scene.instances) >= 3
+            for _ in range(16):
+                renderer.update(0.04)
+            renderer.direct_light_index = 1
+
+            conv_cos = _accumulate_lobes(renderer, 0, 0, 0, 128, 1000)
+            conv_uni = _accumulate_lobes(renderer, 0, 0, 1, 128, 1000)
+            assert np.isfinite(conv_uni).all()
+            # Unbiased: converged means agree per column.
+            ct, ut = _thirds(conv_cos), _thirds(conv_uni)
+            for col, (c, u) in enumerate(zip(ct, ut)):
+                rel = abs(u - c) / max(c, 1e-6)
+                assert rel < 0.02, (
+                    f"uniform diffuse biased in column {col}: {u:.6g} vs cosine "
+                    f"{c:.6g} (rel {rel:.4f} >= 0.02)"
+                )
+            # Bounded weight: no fireflies (finite, no extreme spikes).
+            assert float(conv_uni[..., :3].max()) < 1e3
+            # Higher variance at low spp vs the converged cosine reference.
+            ref = _luminance(conv_cos)
+            lo_cos = _accumulate_lobes(renderer, 0, 0, 0, 16, 7000)
+            lo_uni = _accumulate_lobes(renderer, 0, 0, 1, 16, 7000)
+            err_cos = float(np.sqrt(np.mean((_luminance(lo_cos) - ref) ** 2)))
+            err_uni = float(np.sqrt(np.mean((_luminance(lo_uni) - ref) ** 2)))
+            assert err_uni > err_cos, (
+                f"uniform diffuse not higher-variance: uni {err_uni:.5g} "
+                f"<= cos {err_cos:.5g}"
+            )
+        finally:
+            renderer.cleanup()
+    finally:
+        ctx.destroy()

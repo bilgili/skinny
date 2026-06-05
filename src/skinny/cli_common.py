@@ -47,11 +47,12 @@ def add_render_flags(
     walk: bool = True,
     proposals: bool = True,
     reuse: bool = True,
+    lobe_samplers: bool = True,
 ) -> None:
     """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` /
-    `--proposals` / `--reuse` flags to ``parser``. Each flag can be suppressed
-    via its keyword in the rare case a front-end must omit it (none currently
-    does)."""
+    `--proposals` / `--reuse` / `--lobe-samplers` flags to ``parser``. Each flag
+    can be suppressed via its keyword in the rare case a front-end must omit it
+    (none currently does)."""
     if integrator:
         parser.add_argument(
             "--integrator", choices=("path", "bdpt"), default=None,
@@ -79,6 +80,17 @@ def add_render_flags(
             help="Reuse/resampling mode around direct + indirect lighting (+ "
                  "SKINNY_REUSE env). Only 'none' (stock NEE) ships today; "
                  "ReSTIR-style reservoir reuse is a future mode.",
+        )
+    if lobe_samplers:
+        parser.add_argument(
+            "--lobe-samplers", default=os.environ.get("SKINNY_LOBE_SAMPLERS"),
+            metavar="coat=…,spec=…,diff=…",
+            help="Per-lobe importance sampler for the flat/std_surface BSDF (+ "
+                 "SKINNY_LOBE_SAMPLERS env). Comma-separated lobe=strategy terms; "
+                 "unspecified lobes stay native. coat/spec accept 'native' "
+                 "(spherical-cap VNDF) or 'basis' (Heitz-2018 VNDF); diff accepts "
+                 "'native' (cosine) or 'uniform'. Runtime-selectable + persisted "
+                 "on the interactive front-ends.",
         )
     if execution:
         parser.add_argument(

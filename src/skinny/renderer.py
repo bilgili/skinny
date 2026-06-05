@@ -1079,6 +1079,27 @@ class Renderer:
         self._REUSE_TOKENS: list[str] = ["none", "restir-di"]
         self.reuse_modes: list[str] = ["None", "ReSTIR DI"]
         self.reuse_index = 0
+        # Per-lobe sampler selection for the flat/std_surface BSDF — runtime +
+        # GUI + persisted, folded into FrameConstants.flatLobeSamplers by
+        # _pack_uniforms and unpacked in flat_material.slang. Index 0 = native for
+        # every lobe (the default; the all-native selection is bit-identical to the
+        # pre-change renderer). Modes are data-driven from the registry so each
+        # lobe offers only valid strategies (basis VNDF on coat/spec,
+        # uniform-hemisphere on diffuse). Hashed into _current_state_hash so a
+        # change resets accumulation.
+        from skinny.sampling import (
+            LOBE_COAT,
+            LOBE_DIFFUSE,
+            LOBE_SPEC,
+            lobe_sampler_modes,
+        )
+
+        self.coat_sampler_modes: list[str] = lobe_sampler_modes(LOBE_COAT)
+        self.spec_sampler_modes: list[str] = lobe_sampler_modes(LOBE_SPEC)
+        self.diff_sampler_modes: list[str] = lobe_sampler_modes(LOBE_DIFFUSE)
+        self.coat_sampler_index = 0
+        self.spec_sampler_index = 0
+        self.diff_sampler_index = 0
         # ReSTIR reuse regime (only meaningful when reuse = ReSTIR DI). Maps to
         # the RestirPC flags (bit0 spatial, bit1 temporal). Spatial reuse uses the
         # unbiased GRIS combination (converges to NEE). On the PROGRESSIVE
@@ -6921,6 +6942,15 @@ class Renderer:
             reuse_mode = 0
         data += struct.pack("II", int(prop_mask), reuse_mode)         # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
+        # Per-lobe sampler selection (flatLobeSamplers): one uint, 8 bits/lobe
+        # (coat | spec<<8 | diff<<16), folded from the three selection indices.
+        # All-native (0) is the default — bit-identical draw path to pre-change.
+        from skinny.sampling import fold_lobe_samplers
+
+        flat_lobe_samplers = fold_lobe_samplers(
+            self.coat_sampler_index, self.spec_sampler_index, self.diff_sampler_index
+        )
+        data += struct.pack("I", int(flat_lobe_samplers))             # 4 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -7044,6 +7074,10 @@ class Renderer:
             # resets accumulation so the new configuration converges cleanly.
             int(self.proposal_preset_index),
             int(self.reuse_index),
+            # Per-lobe sampler selection (flat BSDF) — same reset semantics.
+            int(self.coat_sampler_index),
+            int(self.spec_sampler_index),
+            int(self.diff_sampler_index),
             int(self.restir_regime_index),
             bool(self.restir_biased),
             int(self.restir_m_light), int(self.restir_m_bsdf),

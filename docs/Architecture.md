@@ -254,10 +254,17 @@ dispatch); `flat_material.slang` assembles it. BSDF layers:
 - Specular / diffuse MIS split (Schlick F0, luminance-weighted probability) —
   GGX specular uses VNDF sampling (`samplers/ggx.slang`), diffuse is Lambert
 - **Per-lobe runtime-pluggable sampler seam** — each lobe resolves a sampler id
-  to an `ISampler`, defaulting to its native strategy. Only native strategies
-  are registered today (the seam ships unpopulated); a future
-  `per-lobe-sampler-registry` change adds a host registry + alternative samplers
-  without touching `sample()` / `evaluate()`
+  to a draw/density strategy, defaulting to native (2023 spherical-cap VNDF for
+  coat/spec, cosine for diffuse). The host registry (`sampling/lobe_samplers.py`)
+  also ships the Heitz-2018 basis-form VNDF (coat/spec — a different warp of the
+  *same* GGX visible-normal distribution, so its pdf is shared and parity is
+  structural) and uniform-hemisphere (diffuse). `sample()` and `evaluate()` read
+  the same per-lobe id from `fc.flatLobeSamplers`, so pdf agreement — hence
+  unbiasedness and the bounded `F·G₁` weight — holds for *any* registered
+  strategy; only `flatLobeSamplers`' diffuse byte changes a pdf (cosine vs
+  uniform). Selectable per lobe via `--lobe-samplers` / the GUI. Adding a strategy
+  is a dispatch case in `flat_lobes.slang` + a registry entry — `sample()` /
+  `evaluate()` stay untouched
 - Cutout alpha masking via `isCutoutTransparent()` (in `flat_shading.slang`)
 - **UsdPreviewSurface textures** — per-input channel selection (`channelMask`),
   normal-map `scale`/`bias` (`normalScale`/`normalBias`, for OpenGL vs DirectX
@@ -879,6 +886,8 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint2 | pickPixel; uint pickArmed (one-shot scene pick → toolBuffer) |
 | ... | float | exposure (EV stops, 2^EV) |
 | ... | uint | tonemapMode (0 ACES, 1 Reinhard, 2 Hable, 3 linear) |
+| ... | uint | proposalMask; uint reuseMode; float4 proposalAlpha (scene-sampling seam) |
+| ... | uint | flatLobeSamplers — per-lobe flat-BSDF sampler ids, 8 bits/lobe (`coat \| spec<<8 \| diff<<16`; 0 = native). Unpacked by `flat_material.slang`; no new binding |
 
 `cameraType` was removed — camera selection is implied by `numLensElements`
 (0 ⇒ pinhole). `exposure` and `tonemapMode` are post-process knobs and do not

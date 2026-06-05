@@ -112,6 +112,13 @@ STATIC_PARAMS: list[ParamSpec] = [
     # identity mode until ReSTIR lands.
     _disc("Proposals",         "proposal_preset_index",       "proposal_preset_modes"),
     _disc("Reuse",             "reuse_index",                 "reuse_modes"),
+    # Per-lobe sampler selection for the flat/std_surface BSDF. Runtime +
+    # persisted like the proposal/reuse selectors; changing any resets
+    # accumulation. Options are data-driven from the lobe-sampler registry, so
+    # each lobe offers only the strategies valid for it.
+    _disc("Coat sampler",      "coat_sampler_index",          "coat_sampler_modes"),
+    _disc("Spec sampler",      "spec_sampler_index",          "spec_sampler_modes"),
+    _disc("Diffuse sampler",   "diff_sampler_index",          "diff_sampler_modes"),
     # ReSTIR DI reuse regime + tuning (only effective when Reuse = ReSTIR DI).
     # Tuning is push-constant only — changes take effect live (no pass rebuild)
     # and reset accumulation. Integer sliders use step 1.

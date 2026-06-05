@@ -198,7 +198,9 @@ class TestRendererHeadless:
         renderer, _ = renderer_and_ctx
         renderer.update(0.016)
         data = renderer._pack_uniforms()
-        assert len(data) == 240, f"Expected 240 bytes, got {len(data)}"
+        # FrameConstants UBO: 476 bytes through proposalAlpha + 4 for the
+        # flatLobeSamplers uint tail (per-lobe-sampler-registry).
+        assert len(data) == 480, f"Expected 480 bytes, got {len(data)}"
 
     def test_pack_uniforms_direct_flag(self, renderer_and_ctx):
         renderer, _ = renderer_and_ctx

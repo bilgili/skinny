@@ -135,7 +135,8 @@ class HeadlessRenderer:
 
     def __init__(self, width: int, height: int, *, gpu: Optional[str] = None,
                  execution_mode: str = "megakernel", bdpt_walk: str = "fused",
-                 proposals: Optional[str] = None, reuse: Optional[str] = None) -> None:
+                 proposals: Optional[str] = None, reuse: Optional[str] = None,
+                 lobe_samplers: Optional[str] = None) -> None:
         import skinny
         from skinny.renderer import Renderer
         from skinny.vk_context import VulkanContext
@@ -156,6 +157,13 @@ class HeadlessRenderer:
                     self.renderer.proposal_preset_from_token(proposals)
             if reuse is not None:
                 self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
+            if lobe_samplers is not None:
+                from skinny.sampling import parse_lobe_samplers
+
+                c, s, d = parse_lobe_samplers(lobe_samplers)
+                self.renderer.coat_sampler_index = c
+                self.renderer.spec_sampler_index = s
+                self.renderer.diff_sampler_index = d
         except Exception:
             self.ctx.destroy()
             raise
@@ -337,7 +345,8 @@ def main(argv: Optional[list] = None) -> int:
         with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu,
                               execution_mode=ns.execution_mode,
                               bdpt_walk=ns.bdpt_walk,
-                              proposals=ns.proposals, reuse=ns.reuse) as r:
+                              proposals=ns.proposals, reuse=ns.reuse,
+                              lobe_samplers=ns.lobe_samplers) as r:
             if ns.animate:
                 frames = _parse_frames(ns.frames) if ns.frames else None
                 paths = r.render_animation(

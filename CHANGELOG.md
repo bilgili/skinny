@@ -22,6 +22,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   strategies only for now) — the seam a later `per-lobe-sampler-registry` change
   populates with a host registry + alternative samplers.
 
+- Per-lobe sampler registry for the flat / `std_surface` BSDF — populates that
+  `samplerId` seam. Each lobe's draw/density strategy is runtime-selectable per
+  lobe (`--lobe-samplers coat=…,spec=…,diff=…` / GUI / `SKINNY_LOBE_SAMPLERS`),
+  folded into one `FrameConstants.flatLobeSamplers` uint with **no** new
+  descriptor bindings. Registered alternates: the Heitz-2018 basis-form VNDF
+  (coat/spec — a different warp of the *same* GGX visible-normal distribution, so
+  the pdf is shared and converged radiance is identical to native, mega ≡ wave,
+  PT ≡ BDPT) and uniform-hemisphere (diffuse — unbiased, bounded weight,
+  demonstrably higher-variance than cosine). `sample()` and `evaluate()` read the
+  same per-lobe id so unbiasedness holds for any strategy; `flatBsdfResponse`
+  (= f·cos) is sampler-invariant. Registry in `sampling/lobe_samplers.py`; gate in
+  `tests/test_sampling_parity.py`.
+
 - ReSTIR DI reuse mode (wavefront-only) — reservoir resampling of primary-hit
   direct lighting over the unified light set (sphere + emissive-triangle + env,
   light- and BSDF-sampled candidates) with deferred visibility. Spatial reuse
