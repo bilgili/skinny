@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
 from skinny.params import (
     ParamSpec, RESOLUTION_PRESETS, _get_nested, _set_nested,
@@ -94,8 +94,10 @@ class AppCallbacks:
 
 
 def _classify(p: ParamSpec) -> str:
-    """Map a ParamSpec to its UI section key. Mirrors the rules in
-    ``web_app._group_params`` so Qt and web stay layout-identical.
+    """Map a ParamSpec to its UI section key. This is the single source of
+    truth for control-panel grouping: every front-end (Qt, Panel/web, debug
+    viewport) renders the tree ``build_main_ui`` builds from these keys, so the
+    layouts stay identical.
     """
     path = p.path
     if path == "preset_index" or path.startswith("mtlx.") or path in ("tattoo_index", "tattoo_density", "scatter_index"):
@@ -107,6 +109,10 @@ def _classify(p: ParamSpec) -> str:
     if path in ("normal_map_strength", "displacement_scale_mm",
                 "detail_maps_index"):
         return "Detail"
+    # ReSTIR DI: the Reuse enabler plus its restir_* tuning controls form a
+    # dedicated, self-contained group so enable-and-tune sit in one place.
+    if path == "reuse_index" or path.startswith("restir_"):
+        return "ReSTIR"
     return "Render"
 
 
@@ -116,7 +122,8 @@ def _group_params(
     """Return ``(by_group, all_params)``. Empty groups are dropped."""
     all_params = build_all_params(renderer)
     groups: dict[str, list[ParamSpec]] = {
-        "Render": [], "Skin": [], "Detail": [], "IBL": [], "Direct Light": [],
+        "Render": [], "ReSTIR": [], "Skin": [], "Detail": [], "IBL": [],
+        "Direct Light": [],
     }
     for p in all_params:
         groups[_classify(p)].append(p)
@@ -600,7 +607,7 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
         ),
     )
 
-    section_order = ["Render", "Skin", "Detail", "IBL", "Direct Light"]
+    section_order = ["Render", "ReSTIR", "Skin", "Detail", "IBL", "Direct Light"]
     for group in section_order:
         params_in_group = grouped.get(group)
         if not params_in_group and group not in ("IBL", "Direct Light"):

@@ -115,6 +115,12 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### UI and interaction
 
+- ReSTIR controls now live in a dedicated **ReSTIR** sidebar group — the `Reuse`
+  selector plus the regime, biased-combine, M-light/M-bsdf, neighbours, radius,
+  and M-cap tuning — split out of the general **Render** group and placed
+  directly after it. Defined once in `ui/build_app_ui.build_main_ui`
+  (`_classify`), so the Qt, web, and debug front-ends pick it up identically; the
+  group stays visible at identity reuse so you can switch into ReSTIR from it
 - Transform gizmo: the viewport manipulator now has four modes — rotate and
   translate, each in world or local space — cycled with `Space`
   (rotate-world → rotate-local → translate-world → translate-local). A `W`/`L`

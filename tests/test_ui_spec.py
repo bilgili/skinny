@@ -159,7 +159,7 @@ def test_top_level_section_order(stub_renderer):
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
         "Scene", "Resolution", "Capture", "Animation", "Scene Controls",
-        "Render", "Skin", "Detail", "IBL", "Direct Light",
+        "Render", "ReSTIR", "Skin", "Detail", "IBL", "Direct Light",
     ]
 
 
