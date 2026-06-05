@@ -1,0 +1,13 @@
+[
+  {"name": "ris-weight", "tex": "w_i = \\frac{\\hat{p}(x_i)}{p_{\\text{src}}(x_i)}"},
+  {"name": "ris-W", "tex": "W = \\frac{\\sum_i w_i}{M\\,\\hat{p}(y)}"},
+  {"name": "target", "tex": "\\hat{p} = \\operatorname{lum}(f \\cdot L_e)"},
+  {"name": "pmix", "tex": "p_{\\text{mix}}(\\omega_i) = \\frac{M_{\\text{light}}\\,p_{\\text{light}}(\\omega_i) + M_{\\text{bsdf}}\\,p_{\\text{bsdf}}(\\omega_i)\\,[\\,\\omega_i \\to \\text{sphere}\\,|\\,\\text{env}\\,]}{M_{\\text{light}} + M_{\\text{bsdf}}}"},
+  {"name": "merge", "tex": "w = \\hat{p}_{\\text{dst}}(\\text{src}.y)\\cdot \\text{src}.W \\cdot \\text{src}.M"},
+  {"name": "gris-ms", "tex": "m_s = \\frac{M_s\\,\\hat{p}_s(z_s)}{\\sum_j M_j\\,\\hat{p}_j(z_s)}"},
+  {"name": "gris-ws", "tex": "w_s = m_s\\,\\hat{p}_q(z_s)\\,W_s"},
+  {"name": "gris-Wout", "tex": "W_{\\text{out}} = \\frac{\\sum_s w_s}{\\hat{p}_q(Y)}"},
+  {"name": "biased", "tex": "W = \\frac{\\sum_s \\hat{p}_q(z_s)\\,W_s\\,M_s}{\\left(\\sum_s M_s\\right)\\hat{p}(Y)}"},
+  {"name": "resolve", "tex": "\\text{direct} = f(y)\\,L_e(y)\\,V(y)\\,W"},
+  {"name": "resolve-dir", "tex": "\\text{direct}_{\\text{dir}} = \\sum_d f(\\omega_{i,d})\\,L_{e,d}\\,V_d"}
+]

@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192.8" height="38.0" viewBox="0 0 192.8 38.0">
+  <rect x="0.5" y="0.5" width="191.8" height="37.0" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="24.4" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">p̂ = lum(f · L_e)</text>
+</svg>
