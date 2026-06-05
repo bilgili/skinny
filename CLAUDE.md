@@ -30,6 +30,13 @@ use a relative path (`![alt](diagrams/foo.svg)`), from `README.md` at the root
 use `![alt](docs/diagrams/foo.svg)`. Replace existing text-art graphs with SVGs
 when you touch the surrounding section.
 
+For mathematical equations, write **LaTeX** compiled by the Markdown host's math
+renderer (KaTeX/MathJax — both GitLab and GitHub support it): inline math in
+`$...$` and display equations in `$$...$$` blocks. Do **not** write equations as
+plain-text/Unicode in code fences or as ASCII fractions. Keep code identifiers
+(`functionName`, `fc.field`) in backticks rather than math. When you touch a
+section, convert any existing plain-text equations there to LaTeX.
+
 ## Commands
 
 **Setup (from repo root):**

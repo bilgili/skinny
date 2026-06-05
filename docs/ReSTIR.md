@@ -7,6 +7,10 @@ primary-hit direct lighting. It covers the rendering stages, the governing
 equations and the exact shader symbols that realize them, the design choices, the
 GUI controls, and the source papers.
 
+> Equations are LaTeX, rendered by the Markdown host's math support (KaTeX on
+> GitLab/GitHub). If you are reading this in a plain viewer without math
+> rendering, the `$...$` / `$$...$$` source is still legible.
+
 ReSTIR plugs into the **scene-sampling reuse seam** (the `ReusePlugin` socket
 reserved by the sampling change). The seam and the wavefront execution backend it
 rides on are documented in [Architecture.md](Architecture.md) (descriptor
@@ -30,9 +34,9 @@ sample distilled from a stream of candidates by *resampled importance sampling*
 (RIS) — and then **reuses** that reservoir across screen-space neighbours (and,
 optionally, across accumulation frames). Two ideas make it cheap and effective:
 
-- **Deferred visibility.** Candidates are scored by an *unshadowed* target `p̂`;
-  only the single survivor pays a shadow ray. A pixel evaluates dozens of
-  candidates for the price of one shadow ray.
+- **Deferred visibility.** Candidates are scored by an *unshadowed* target
+  $\hat{p}$; only the single survivor pays a shadow ray. A pixel evaluates dozens
+  of candidates for the price of one shadow ray.
 - **Spatial reuse.** A pixel borrows its neighbours' surviving samples, so the
   effective candidate count per pixel grows far beyond what it sampled itself —
   the variance reduction.
@@ -66,17 +70,17 @@ The three passes (`restir/restir_primary.slang`, dispatched in order with a
 memory barrier between each by `RestirDiPass.record_primary_direct`):
 
 1. **`restirFill`** — initial RIS. For each live flat primary-hit lane, stream
-   `M_light` light-sampled + `M_bsdf` BSDF-sampled candidates through a reservoir
-   using the *unshadowed* target `p̂`. Writes `reservoirA[i]` and the G-buffer
-   record `{pos, normal}[i]`. No shadow rays.
+   $M_\text{light}$ light-sampled + $M_\text{bsdf}$ BSDF-sampled candidates
+   through a reservoir using the *unshadowed* target $\hat{p}$. Writes
+   `reservoirA[i]` and the G-buffer record `{pos, normal}[i]`. No shadow rays.
 2. **`restirSpatial`** — spatiotemporal merge. Combine the pixel's own reservoir
    with up to `spatialK` domain-checked screen neighbours (from `reservoirA`) and,
    if the temporal flag is set, last frame's reservoir (from `reservoirB`). The
-   default is the **unbiased GRIS** combination; a **biased ΣM** toggle is the
-   faster alternative. Writes `reservoirB[i]`.
+   default is the **unbiased GRIS** combination; a **biased $\sum M$** toggle is
+   the faster alternative. Writes `reservoirB[i]`.
 3. **`restirResolve`** — shade. Read the merged `reservoirB[i]`, cast **one
-   shadow ray** for the surviving sample, and add `f·V·W` (plus directional NEE)
-   into the path-state radiance.
+   shadow ray** for the surviving sample, and add $f\,V\,W$ (plus directional
+   NEE) into the path-state radiance.
 
 `reservoirB` **persists across accumulation frames**, so the next frame's
 `restirSpatial` can read it as temporal history (M-capped). The reservoir buffers
@@ -93,10 +97,10 @@ struct LightSampleRef {       // unified over all RIS light types
 };
 struct Reservoir {
     LightSampleRef y;         // surviving sample
-    float wSum;               // Σ RIS weights seen
-    float W;                  // contribution weight = wSum / (M · p̂(y))
+    float wSum;               // sum of RIS weights seen
+    float W;                  // contribution weight = wSum / (M * pHat(y))
     uint  M;                  // candidate count (capped for temporal reuse)
-    float pHat;               // cached target p̂(y)
+    float pHat;               // cached target pHat(y)
 };
 struct GBuf { float3 pos; float3 normal; };   // restir/restir_primary.slang
 ```
@@ -110,46 +114,48 @@ lets resolve and spatial/temporal reuse re-derive the *same* light at *any* pixe
 
 ## Equations
 
-Notation: `f` is the BSDF response including the cosine term (`mat.evaluate(wo,
-wi).response`); `Le` is the light's emitted radiance; `V` is binary visibility;
-`lum(·)` is luminance. All directions are at the primary shading point.
+Notation: $f$ is the BSDF response including the cosine term
+(`mat.evaluate(wo, wi).response`); $L_e$ is the light's emitted radiance; $V$ is
+binary visibility; $\operatorname{lum}(\cdot)$ is luminance. All directions are
+at the primary shading point.
 
 ### 1. Resampled importance sampling (RIS)
 
-Candidates `x_i` are drawn from a source pdf `p_src`. Each carries a resampling
-weight and a target value:
+Candidates $x_i$ are drawn from a source pdf $p_\text{src}$. Each carries a
+resampling weight and a target value:
 
-```
-w_i = p̂(x_i) / p_src(x_i)
-```
+$$
+w_i = \frac{\hat{p}(x_i)}{p_\text{src}(x_i)}
+$$
 
-The reservoir keeps **one** survivor `y`, selected with probability proportional
-to `w_i` (streaming weighted reservoir sampling). After the stream the **unbiased
+The reservoir keeps **one** survivor $y$, selected with probability proportional
+to $w_i$ (streaming weighted reservoir sampling). After the stream the **unbiased
 contribution weight** is
 
-```
-W = (Σ w_i) / (M · p̂(y))
-```
+$$
+W = \frac{\sum_i w_i}{M \,\hat{p}(y)}
+$$
 
-and the estimate of the integral is `f(y) · W` — unbiased for any `M` whenever
-`p̂ > 0` wherever the true integrand `f ≠ 0`. *(Talbot et al. 2005; Bitterli et
-al. 2020.)*
+and the estimate of the integral is $f(y)\,W$ — unbiased for any $M$ whenever
+$\hat{p} > 0$ wherever the true integrand $f \neq 0$. *(Talbot et al. 2005;
+Bitterli et al. 2020.)*
 
-> **Implements:** `reservoirUpdate` (the `rand · wSum < w` survivor test) and
-> `reservoirFinalize` (`W = wSum / (M · p̂)`) in `restir/reservoir.slang`.
+> **Implements:** `reservoirUpdate` (the `rand * wSum < w` survivor test) and
+> `reservoirFinalize` ($W = w_\text{Sum} / (M\,\hat{p})$) in
+> `restir/reservoir.slang`.
 
-### 2. The target function `p̂` (unshadowed, unweighted)
+### 2. The target function $\hat{p}$ (unshadowed, unweighted)
 
 skinny's RIS owns *all* of primary direct (canonical integration, Decision 5), so
 the target is the unshadowed, **MIS-unweighted** light contribution:
 
-```
-p̂ = lum(f · Le)
-```
+$$
+\hat{p} = \operatorname{lum}(f \cdot L_e)
+$$
 
-Visibility `V` is deliberately **not** in `p̂` — it is deferred to the single
-resolve-time shadow ray. `p̂` is a scalar (luminance) so the reservoir stores one
-float; the resolve multiplies the cached RGB integrand `f·Le` by `V·W`.
+Visibility $V$ is deliberately **not** in $\hat{p}$ — it is deferred to the single
+resolve-time shadow ray. $\hat{p}$ is a scalar (luminance) so the reservoir stores
+one float; the resolve multiplies the cached RGB integrand $f\,L_e$ by $V\,W$.
 
 > **Implements:** `restirEvalRef` in `restir/light_ris.slang`
 > (`c.integrand = b.response * Le; c.pHat = lum(c.integrand)`).
@@ -158,44 +164,50 @@ float; the resolve multiplies the cached RGB integrand `f·Le` by `V·W`.
 
 `restirFill` mixes two candidate techniques — light sampling and BSDF sampling —
 into one estimator. By the balance heuristic *(Veach 1997)* the correct source
-pdf for a candidate direction `wi` is the **mixture pdf** over both techniques:
+pdf for a candidate direction $\omega_i$ is the **mixture pdf** over both
+techniques:
 
-```
-p_mix(wi) = ( M_light · p_light(wi) + M_bsdf · p_bsdf(wi) · [wi → sphere|env] ) / (M_light + M_bsdf)
-```
+$$
+p_\text{mix}(\omega_i) = \frac{M_\text{light}\,p_\text{light}(\omega_i)
+  + M_\text{bsdf}\,p_\text{bsdf}(\omega_i)\,[\,\omega_i \to \text{sphere}\,|\,\text{env}\,]}
+  {M_\text{light} + M_\text{bsdf}}
+$$
 
-- `p_light(wi) = pdfLightSA / nTech` — a single light technique is chosen
-  uniformly among the `nTech` active ones (sphere count + a triangle slot + an
-  env slot), so its pdf is divided by `nTech`.
+- $p_\text{light}(\omega_i) = p^{\Omega}_\text{light} / n_\text{tech}$ — a single
+  light technique is chosen uniformly among the $n_\text{tech}$ active ones
+  (sphere count + a triangle slot + an env slot), so its pdf is divided by
+  $n_\text{tech}$.
 - The area-light solid-angle pdf is the area pdf converted by the geometry term:
-  `pdfLightSA = d² · pdfArea / cosθ_light`. For the environment,
-  `pdfLightSA = envPdf(dir)` (the importance-sampling cell distribution).
-- `p_bsdf(wi)` is the proposal-mixture pdf (`mixtureProposalPdf`), and it is only
-  included for candidates the BSDF technique can actually hit — **sphere and env**
-  (`isSE`). Emissive triangles are NEE-only in the stock renderer (no BSDF-tri MIS
-  term), so they are sampled by the light technique only; the estimator stays
-  unbiased (any unbiased estimator converges to the same integral).
+  $p^{\Omega}_\text{light} = d^2\,p_\text{area} / \cos\theta_\text{light}$. For the
+  environment, $p^{\Omega}_\text{light} = \texttt{envPdf}(\omega_i)$ (the
+  importance-sampling cell distribution).
+- $p_\text{bsdf}(\omega_i)$ is the proposal-mixture pdf (`mixtureProposalPdf`), and
+  it is only included for candidates the BSDF technique can actually hit —
+  **sphere and env** (`isSE`). Emissive triangles are NEE-only in the stock
+  renderer (no BSDF-tri MIS term), so they are sampled by the light technique
+  only; the estimator stays unbiased (any unbiased estimator converges to the
+  same integral).
 
-Each candidate's RIS weight is then `w = p̂ / p_mix`.
+Each candidate's RIS weight is then $w = \hat{p} / p_\text{mix}$.
 
 > **Implements:** `_mixPdf` and the `w = c.pHat / src` lines in
 > `restirFillReservoir` (`restir/light_ris.slang`). Every drawn candidate counts
-> toward `M`, including invalid/occluded ones (which stream with `w = 0`).
+> toward $M$, including invalid/occluded ones (which stream with $w = 0$).
 
 ### 4. Combining reservoirs (the merge)
 
-Two reservoirs combine by treating one as a single *supercandidate*. Source `src`
-merged into `dst` contributes
+Two reservoirs combine by treating one as a single *supercandidate*. Source
+`src` merged into `dst` contributes
 
-```
-w = p̂_dst(src.y) · src.W · src.M
-```
+$$
+w = \hat{p}_\text{dst}(\text{src}.y) \cdot \text{src}.W \cdot \text{src}.M
+$$
 
-where `p̂_dst` is `src`'s surviving sample re-evaluated **in `dst`'s domain** (its
-shading point + material). Combining reservoirs this way is the unbiased
-multi-reservoir RIS combination *(Bitterli 2020, Alg. 4)*: each source contributes
-its `W·M·p̂`, the survivor is chosen ∝ those weights, and finalize yields the
-combined contribution weight over `ΣM` samples.
+where $\hat{p}_\text{dst}$ is `src`'s surviving sample re-evaluated **in `dst`'s
+domain** (its shading point + material). Combining reservoirs this way is the
+unbiased multi-reservoir RIS combination *(Bitterli 2020, Alg. 4)*: each source
+contributes its $W\,M\,\hat{p}$, the survivor is chosen $\propto$ those weights,
+and finalize yields the combined contribution weight over $\sum M$ samples.
 
 > **Implements:** `reservoirMerge` in `restir/reservoir.slang`. This is the
 > building block; `restirSpatial` uses the explicit per-source form below so it
@@ -203,71 +215,75 @@ combined contribution weight over `ΣM` samples.
 
 ### 5. Unbiased spatiotemporal combination (GRIS)
 
-The naive ΣM merge over neighbours is biased: a sample that many neighbours could
-have produced is over-counted, which on glossy surfaces lets spatial→temporal
-feedback over-brighten the image (measured up to ~48% vs path tracing). The fix is
-the **generalized balance heuristic** *(Lin et al. 2022, GRIS)*. Each source
-sample `z_s` is combined with the MIS weight
+The naive $\sum M$ merge over neighbours is biased: a sample that many neighbours
+could have produced is over-counted, which on glossy surfaces lets
+spatial→temporal feedback over-brighten the image (measured up to ~48% vs path
+tracing). The fix is the **generalized balance heuristic** *(Lin et al. 2022,
+GRIS)*. Each source sample $z_s$ is combined with the MIS weight
 
-```
-m_s = M_s · p̂_s(z_s) / Σ_j M_j · p̂_j(z_s)
-```
+$$
+m_s = \frac{M_s \,\hat{p}_s(z_s)}{\sum_j M_j \,\hat{p}_j(z_s)}
+$$
 
-where `p̂_j(z_s)` is `z_s`'s target re-evaluated in **source j's own domain** (its
-shading point + material, re-loaded from `wfHits[j]`). The per-source resampling
-weight at the canonical pixel `q` is
+where $\hat{p}_j(z_s)$ is $z_s$'s target re-evaluated in **source $j$'s own
+domain** (its shading point + material, re-loaded from `wfHits[j]`). The
+per-source resampling weight at the canonical pixel $q$ is
 
-```
-w_s = m_s · p̂_q(z_s) · W_s
-```
+$$
+w_s = m_s \,\hat{p}_q(z_s)\, W_s
+$$
 
-the survivor `Y` is chosen ∝ `w_s`, and the output contribution weight is
+the survivor $Y$ is chosen $\propto w_s$, and the output contribution weight is
 
-```
-W_out = (Σ w_s) / p̂_q(Y)        (the m_s already normalize — no 1/M, no 1/Z)
-```
+$$
+W_\text{out} = \frac{\sum_s w_s}{\hat{p}_q(Y)}
+$$
+
+where the $m_s$ already normalize, so there is no $1/M$ and no $1/Z$ factor.
 
 **Reconnection Jacobian.** Reusing a neighbour's sample at this pixel is a *shift
 map*; GRIS weights it by the shift's Jacobian. For DI the shift reuses the **same
 world light point** (the `uv` is shading-point-independent), so the shift is the
-identity and **the Jacobian is 1**; the geometry/BSDF change between domains is
-captured entirely by the per-domain `p̂` re-evaluation.
+identity and **the Jacobian is $1$**; the geometry/BSDF change between domains is
+captured entirely by the per-domain $\hat{p}$ re-evaluation.
 
 > **Implements:** the unbiased branch of `restirSpatial` in
-> `restir/restir_primary.slang` — the `D[a] += sM[j]·p` denominator loop (load
+> `restir/restir_primary.slang` — the `D[a] += sM[j]*p` denominator loop (load
 > each source domain once, evaluate every sample in it) and the
-> `m_s = sM[a]·pOwn[a]/D[a]; w_s = m_s·pCanon[a]·sW[a]` combine loop.
+> `m_s = sM[a]*pOwn[a]/D[a]; w_s = m_s*pCanon[a]*sW[a]` combine loop.
 
-### 6. Biased combination (ΣM toggle)
+### 6. Biased combination ($\sum M$ toggle)
 
-The `biased` toggle replaces GRIS with the simple ΣM combination *(Bitterli 2020,
-Alg. 4)* — each source weighted by `p̂_q(z_s)·W_s·M_s`, normalized by `ΣM`:
+The `biased` toggle replaces GRIS with the simple $\sum M$ combination *(Bitterli
+2020, Alg. 4)* — each source weighted by $\hat{p}_q(z_s)\,W_s\,M_s$, normalized by
+$\sum M$:
 
-```
-W = (Σ p̂_q(z_s)·W_s·M_s) / (ΣM · p̂(Y))
-```
+$$
+W = \frac{\sum_s \hat{p}_q(z_s)\,W_s\,M_s}{\left(\sum_s M_s\right)\hat{p}(Y)}
+$$
 
-It skips the `O(K²)` per-domain `p̂` re-evaluation (the GRIS denominator), so it is
-faster, but biased — discontinuity darkening on spatial-only, and over-brightening
-with temporal on glossy via the feedback the `m_s` would have bounded.
+It skips the $O(K^2)$ per-domain $\hat{p}$ re-evaluation (the GRIS denominator),
+so it is faster, but biased — discontinuity darkening on spatial-only, and
+over-brightening with temporal on glossy via the feedback the $m_s$ would have
+bounded.
 
 > **Implements:** the `RESTIR_FLAG_BIASED` branch of `restirSpatial`.
 
 ### 7. Resolve and directional lights
 
-Resolve casts one shadow ray for the survivor and adds the RGB estimate; the cached
-unweighted integrand `f·Le` is multiplied by `V·W`:
+Resolve casts one shadow ray for the survivor and adds the RGB estimate; the
+cached unweighted integrand $f\,L_e$ is multiplied by $V\,W$:
 
-```
-direct = (f(y) · Le(y)) · V(y) · W
-```
+$$
+\text{direct} = f(y)\,L_e(y)\,V(y)\,W
+$$
 
-Directional (delta) lights are handled separately by plain NEE **outside** the RIS
-(no MIS, they cannot be BSDF-sampled):
+Directional (delta) lights are handled separately by plain NEE **outside** the
+RIS (no MIS, they cannot be BSDF-sampled):
 
-```
-direct_dir = Σ_d  f(wi_d) · Le_d · V_d
-```
+$$
+\text{direct}_\text{dir} = \sum_d f(\omega_{i,d})\,L_{e,d}\,V_d
+$$
 
 > **Implements:** `restirResolveReservoir` (area: `visibleSegment`; env:
 > `visibleDirectional`) and `restirDirectional` in `restir/light_ris.slang`,
@@ -277,18 +293,18 @@ direct_dir = Σ_d  f(wi_d) · Le_d · V_d
 
 | Equation | Symbol | File |
 | --- | --- | --- |
-| RIS survivor `rand·wSum < w` | `reservoirUpdate` | `restir/reservoir.slang` |
-| Contribution weight `W = wSum/(M·p̂)` | `reservoirFinalize` | `restir/reservoir.slang` |
-| Supercandidate merge `w = p̂·W·M` | `reservoirMerge` | `restir/reservoir.slang` |
-| Target `p̂ = lum(f·Le)` | `restirEvalRef` | `restir/light_ris.slang` |
-| Mixture source pdf `p_mix` | `_mixPdf` | `restir/light_ris.slang` |
-| Area→SA pdf `d²·pdfArea/cosθ` | `restirEvalRef` | `restir/light_ris.slang` |
+| RIS survivor $\text{rand}\cdot w_\text{Sum} < w$ | `reservoirUpdate` | `restir/reservoir.slang` |
+| Contribution weight $W = w_\text{Sum}/(M\,\hat{p})$ | `reservoirFinalize` | `restir/reservoir.slang` |
+| Supercandidate merge $w = \hat{p}\,W\,M$ | `reservoirMerge` | `restir/reservoir.slang` |
+| Target $\hat{p} = \operatorname{lum}(f\,L_e)$ | `restirEvalRef` | `restir/light_ris.slang` |
+| Mixture source pdf $p_\text{mix}$ | `_mixPdf` | `restir/light_ris.slang` |
+| Area→SA pdf $d^2 p_\text{area}/\cos\theta$ | `restirEvalRef` | `restir/light_ris.slang` |
 | Initial RIS (light + BSDF candidates) | `restirFillReservoir` | `restir/light_ris.slang` |
-| Resolve `f·V·W` | `restirResolveReservoir` | `restir/light_ris.slang` |
+| Resolve $f\,V\,W$ | `restirResolveReservoir` | `restir/light_ris.slang` |
 | Directional NEE (outside RIS) | `restirDirectional` | `restir/light_ris.slang` |
 | Light-ref encode/recover | `octEncode`/`octDecode`, `sphereUVFromPoint` | `restir/light_ris.slang` |
 | Fill pass (per lane) | `restirFill` | `restir/restir_primary.slang` |
-| GRIS `m_s` + biased ΣM | `restirSpatial` | `restir/restir_primary.slang` |
+| GRIS $m_s$ + biased $\sum M$ | `restirSpatial` | `restir/restir_primary.slang` |
 | Resolve pass (shadow ray + add) | `restirResolve` | `restir/restir_primary.slang` |
 | Lane setup / material gate | `restirLoadLane` | `restir/restir_primary.slang` |
 | Depth-0 light-NEE gate | `reuseDirect` | `sampling/reuse.slang` |
@@ -325,17 +341,34 @@ with the deviations noted.
    selecting ReSTIR + megakernel/Metal falls back to identity (capability gate,
    like wavefront-BDPT).
 
+<a id="canonical-integration"></a>
+
+### Canonical integration (RIS owns primary direct)
+
+Because the RIS counts *all* of primary direct, the path tracer's own depth-0
+direct terms must be suppressed to avoid double-counting:
+
+- **Light-NEE half:** `reuseDirect` (`sampling/reuse.slang`) returns zero at
+  `depth == 0` under `reuseMode == RESTIR_DI`.
+- **BSDF-sampled sphere hit:** gated by `restirOwns` in `wf_shade_common.slang:126`
+  (`reuseMode == 1 && depth == 0 && !transmitted`).
+- **BSDF-sampled env miss:** the depth-0-spawned ray's env-miss direct term is
+  skipped in `wavefront_path.slang:129`.
+
+`depth ≥ 1` vertices are untouched (stock NEE + the proposal mixture). Identity
+reuse (`reuse=none`) keeps the pre-ReSTIR behaviour exactly.
+
 ### Shipped deviations
 
 - **Canonical integration (Decision 5) shipped fully.** The earlier merged
   starting point was a light-only RIS composing with shade's still-active BSDF
   half; it was replaced by the canonical form with the unweighted target and the
   mixture source pdf, and the depth-0 BSDF-sphere/env-miss terms gated off.
-- **Unbiased = GRIS, not the bare `1/Z`.** The brainstorm anticipated a `1/Z`
+- **Unbiased = GRIS, not the bare $1/Z$.** The brainstorm anticipated a $1/Z$
   domain-count normalization; the implementation uses the stronger GRIS balance
-  heuristic `m_s` (§5), which bounds the glossy spatial→temporal feedback the
-  naive ΣM let explode. No fat G-buffer is needed — each source's material is
-  re-loaded from `wfHits[j]`.
+  heuristic $m_s$ (§5), which bounds the glossy spatial→temporal feedback the
+  naive $\sum M$ let explode. No fat G-buffer is needed — each source's material
+  is re-loaded from `wfHits[j]`.
 - **Default regime = Spatial only.** On the progressive accumulator, temporal
   reuse double-counts correlated history; spatial GRIS is the unbiased,
   variance-reducing default (see [Caveats](#caveats-and-limits)).
@@ -360,12 +393,12 @@ ReSTIR DI`.
 | --- | --- | --- | --- | --- |
 | **Reuse** | `reuse_index` | None · ReSTIR DI | `fc.reuseMode` (0 / 1) | Selects identity vs ReSTIR. Triggers a wavefront pass rebuild. |
 | **ReSTIR regime** | `restir_regime_index` | Spatial only · Spatial + Temporal · Temporal only | `flags` bit0/bit1 via `_RESTIR_REGIME_FLAGS = [0x1, 0x3, 0x2]` | Which reuse axes are active. Triggers a pass rebuild. |
-| **ReSTIR combine** | `restir_biased` | Unbiased (GRIS) · Biased (ΣM) | `flags |= 0x4` when biased | GRIS vs ΣM combination (§5 vs §6). |
-| **ReSTIR M light** | `restir_m_light` | 1 – 64 | `rpc.mLight` | Light-sampled candidates per pixel in fill. |
-| **ReSTIR M bsdf** | `restir_m_bsdf` | 0 – 8 | `rpc.mBsdf` | BSDF-sampled candidates per pixel in fill. |
+| **ReSTIR combine** | `restir_biased` | Unbiased (GRIS) · Biased ($\sum M$) | `flags \|= 0x4` when biased | GRIS vs $\sum M$ combination (§5 vs §6). |
+| **ReSTIR M light** | `restir_m_light` | 1 – 64 | `rpc.mLight` ($M_\text{light}$) | Light-sampled candidates per pixel in fill. |
+| **ReSTIR M bsdf** | `restir_m_bsdf` | 0 – 8 | `rpc.mBsdf` ($M_\text{bsdf}$) | BSDF-sampled candidates per pixel in fill. |
 | **ReSTIR neighbours** | `restir_spatial_k` | 0 – 8 | `rpc.spatialK` | Spatial neighbours merged in `restirSpatial`. |
 | **ReSTIR radius** | `restir_spatial_radius` | 1 – 64 | `rpc.spatialRadius` (screen px) | Neighbour search radius. |
-| **ReSTIR M cap** | `restir_m_cap` | 1 – 64 | `rpc.mCap` | Temporal history cap (limits prev-frame `M`). |
+| **ReSTIR M cap** | `restir_m_cap` | 1 – 64 | `rpc.mCap` ($M_\text{cap}$) | Temporal history cap (limits prev-frame $M$). |
 
 The full push constant is `RestirPC` (36 B scalar:
 `streamSize, flags, mLight, spatialK, spatialRadius, normalThresh, depthThresh,
@@ -390,7 +423,7 @@ mode, regime, or any tuning value — resets progressive accumulation (folded in
   `restirSpatial` untouched and shade with stock NEE.
 - **Temporal on a progressive accumulator double-counts.** skinny accumulates by
   averaging frames; carrying a reservoir across frames feeds correlated history
-  back in, so the bias grows with `M_cap` and shows on glossy surfaces. The
+  back in, so the bias grows with $M_\text{cap}$ and shows on glossy surfaces. The
   "temporal beats spatial" property belongs to the real-time **reprojected**
   regime (the P3 follow-on), not the progressive accumulator. **Spatial-only
   (unbiased GRIS) is the default and the recommended regime.**
@@ -401,8 +434,8 @@ mode, regime, or any tuning value — resets progressive accumulation (folded in
 
 ReSTIR DI is validated against stock NEE as the reference:
 
-- `tests/test_restir.py` — the RIS core (`reservoirUpdate`/`Finalize` selection ∝
-  weight and `W`) unit-tested in isolation via the synthetic harness.
+- `tests/test_restir.py` — the RIS core (`reservoirUpdate`/`Finalize` selection
+  $\propto$ weight and $W$) unit-tested in isolation via the synthetic harness.
 - `tests/test_restir_lights.py` — unified light-domain candidate generation.
 - `tests/test_restir_render.py` — converges to the `reuse=none` reference on
   emissive / area-light scenes (the unbiased gate).
@@ -417,8 +450,8 @@ and `three_materials` (glossy) — all agree in converged radiance.
 
 1. **J. Talbot, D. Cline, P. Egbert.** *Importance Resampling for Global
    Illumination.* Eurographics Symposium on Rendering, 2005. — RIS, the
-   per-candidate weight `w_i = p̂/p_src` and the contribution weight
-   `W = Σw_i/(M·p̂)` (§1).
+   per-candidate weight $w_i = \hat{p}/p_\text{src}$ and the contribution weight
+   $W = \sum_i w_i/(M\,\hat{p})$ (§1).
 2. **B. Bitterli, C. Wyman, M. Pharr, P. Shirley, A. Lefohn, W. Jarosz.**
    *Spatiotemporal Reservoir Resampling for Real-Time Ray Tracing with Dynamic
    Direct Lighting.* ACM TOG (SIGGRAPH) 39(4), 2020. — ReSTIR DI; streaming
@@ -427,7 +460,7 @@ and `three_materials` (glossy) — all agree in converged radiance.
 3. **D. Lin, M. Kettunen, B. Bitterli, J. Pantaleoni, C. Wyman, C. Yuksel.**
    *Generalized Resampled Importance Sampling: Foundations of ReSTIR.* ACM TOG
    (SIGGRAPH) 41(4), 2022. — GRIS; the generalized balance-heuristic MIS weight
-   `m_s` and the reconnection/shift Jacobian (here identity for DI) (§5).
+   $m_s$ and the reconnection/shift Jacobian (here identity for DI) (§5).
 4. **E. Veach.** *Robust Monte Carlo Methods for Light Transport Simulation.*
    PhD thesis, Stanford University, 1997. — multiple importance sampling and the
    balance heuristic backing the light + BSDF mixture source pdf (§3).
