@@ -15,6 +15,17 @@ from .registry import (
     parse_reuse,
     proposal_mask_and_alpha,
 )
+from .lobe_samplers import (
+    LOBE_COAT,
+    LOBE_DIFFUSE,
+    LOBE_SAMPLERS,
+    LOBE_SPEC,
+    LobeSamplerStrategy,
+    fold_lobe_samplers,
+    lobe_sampler_modes,
+    parse_lobe_samplers,
+    strategies_for_lobe,
+)
 
 __all__ = [
     "AttachPoint",
@@ -29,4 +40,13 @@ __all__ = [
     "parse_proposals",
     "parse_reuse",
     "proposal_mask_and_alpha",
+    "LOBE_COAT",
+    "LOBE_SPEC",
+    "LOBE_DIFFUSE",
+    "LOBE_SAMPLERS",
+    "LobeSamplerStrategy",
+    "fold_lobe_samplers",
+    "lobe_sampler_modes",
+    "parse_lobe_samplers",
+    "strategies_for_lobe",
 ]

@@ -74,3 +74,40 @@ struct GGXSampler : ISampler
         return D * G1V / (4.0 * wo.z);
     }
 }
+
+// Heitz-2018 basis-form VNDF warp (Heitz, "Sampling the GGX Distribution of
+// Visible Normals", JCGT 7(4) 2018, sec. 4 algorithm). Draws a half-vector from
+// the *same* visible-normal distribution `D_vis` as `GGXSampler.sample` above —
+// only the unit-square→`D_vis` warp differs (orthonormal-basis construction vs
+// the 2023 spherical-cap parameterisation). Because the distribution is
+// identical, `GGXSampler.pdf` is the exact density for directions drawn here, so
+// this is a drop-in alternate sampler strategy with the same bounded `F·G₁`
+// weight. The `lensq` guard handles the basis degeneracy when `Vh` aligns with
+// +Z (the singularity the 2023 spherical-cap form removes structurally).
+float3 sampleGGXVNDFBasis(float roughness, float3 wo, float2 uv)
+{
+    float a  = max(roughness * roughness, 1e-4);
+    float3 Vh = normalize(float3(wo.xy * a, max(wo.z, 0.0)));
+
+    // Orthonormal basis around Vh (Heitz 2018 eq. for T1/T2).
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    float3 T1 = (lensq > 1e-7) ? (float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq))
+                               : float3(1.0, 0.0, 0.0);
+    float3 T2 = cross(Vh, T1);
+
+    // Concentric disk sample, then project onto the truncated hemisphere.
+    float r   = sqrt(uv.x);
+    float phi = 2.0 * PI * uv.y;
+    float t1  = r * cos(phi);
+    float t2  = r * sin(phi);
+    float s   = 0.5 * (1.0 + Vh.z);
+    t2        = (1.0 - s) * sqrt(clamp(1.0 - t1 * t1, 0.0, 1.0)) + s * t2;
+
+    float3 Nh = t1 * T1 + t2 * T2
+              + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+
+    // Unstretch back to the ellipsoid configuration; clamp z so the reflected
+    // direction never crosses the geometric horizon through underflow.
+    float3 H = normalize(float3(Nh.xy * a, max(Nh.z, 0.0)));
+    return reflect(-wo, H);
+}

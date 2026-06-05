@@ -69,13 +69,20 @@ struct FlatMaterial : IMaterial
         float pSpec        = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
         float3 coatAttenuation = (m.coat > 0.0) ? m.coatColor : float3(1.0);
 
+        // Per-lobe sampler ids (runtime selection in fc.flatLobeSamplers). The
+        // SAME ids feed flatBsdfPdf here and in evaluate(), so the draw density
+        // and the weight/MIS density agree for any registered strategy.
+        uint coatSId = flatLobeSamplerId(fc.flatLobeSamplers, LOBE_COAT);
+        uint specSId = flatLobeSamplerId(fc.flatLobeSamplers, LOBE_SPEC);
+        uint diffSId = flatLobeSamplerId(fc.flatLobeSamplers, LOBE_DIFFUSE);
+
         float3 wi;
         float3 bounceWeight;
 
         // ── Coat lobe (selected with probability pCoat) ──
         if (m.coat > 0.0 && rng.next() < pCoat)
         {
-            wi = flatSampleLobe(LOBE_COAT, FLAT_SAMPLER_NATIVE, m.coatRoughness,
+            wi = flatSampleLobe(LOBE_COAT, coatSId, m.coatRoughness,
                                 wo, rng.next2());
             if (wi.z <= 0.0)
                 return s;
@@ -97,7 +104,7 @@ struct FlatMaterial : IMaterial
             s.wi     = wi;
             s.weight = weight;
             s.pdf    = flatBsdfPdf(wo, wi, pCoat, m.coatRoughness,
-                                   pSpec, roughness);
+                                   pSpec, roughness, coatSId, specSId, diffSId);
             s.valid  = true;
             return s;
         }
@@ -106,7 +113,7 @@ struct FlatMaterial : IMaterial
         float u = rng.next();
         if (u < pSpec)
         {
-            wi = flatSampleLobe(LOBE_SPEC, FLAT_SAMPLER_NATIVE, roughness,
+            wi = flatSampleLobe(LOBE_SPEC, specSId, roughness,
                                 wo, rng.next2());
             if (wi.z <= 0.0)
                 return s;
@@ -132,18 +139,22 @@ struct FlatMaterial : IMaterial
         }
         else
         {
-            wi = flatSampleLobe(LOBE_DIFFUSE, FLAT_SAMPLER_NATIVE, 0.0,
+            wi = flatSampleLobe(LOBE_DIFFUSE, diffSId, 0.0,
                                 wo, rng.next2());
             float3 Fview   = schlickFresnelColor(NdotV, F0);
             float3 diffHue = m.albedo * (float3(1.0) - Fview)
                            * (1.0 - m.metallic);
-            bounceWeight = diffHue / max(1.0 - pSpec, 1e-6);
+            // Cosine sampling importance-samples cos so it cancels
+            // (weight = diffHue); uniform-hemisphere does not, leaving
+            // f·cos/pdf = 2·NdotL·diffHue — still bounded (≤ 2·diffHue).
+            float diffScale = (diffSId == FLAT_SAMPLER_UNIFORM) ? (2.0 * wi.z) : 1.0;
+            bounceWeight = diffScale * diffHue / max(1.0 - pSpec, 1e-6);
         }
 
         s.wi     = wi;
         s.weight = bounceWeight * coatAttenuation;
         s.pdf    = flatBsdfPdf(wo, wi, pCoat, m.coatRoughness,
-                               pSpec, roughness);
+                               pSpec, roughness, coatSId, specSId, diffSId);
         s.valid  = true;
         return s;
     }
@@ -168,17 +179,24 @@ struct FlatMaterial : IMaterial
             return e;
         }
 
-        // Unified lobe BSDF — the SAME 3-lobe model, params, and samplers
-        // FlatMaterial.sample() draws from, so e.pdf == sample().pdf and
-        // e.response / e.pdf reduces to the bounded native per-lobe weight.
+        // Unified lobe BSDF — the SAME 3-lobe model, params, and per-lobe
+        // sampler ids FlatMaterial.sample() draws from, so e.pdf == sample().pdf
+        // and e.response / e.pdf reduces to the bounded per-lobe weight.
+        // flatBsdfResponse (= f·cos) is sampler-invariant; only e.pdf reads the
+        // selected ids (the diffuse density differs cosine vs uniform).
         FlatHitMat m       = data.mat;
         float NdotV        = max(wo.z, 1e-6);
         float coatFresnel  = (m.coat > 0.0) ? fresnelDielectric(NdotV, m.coatIOR) : 0.0;
         float pCoat        = m.coat * coatFresnel;
         float pSpec        = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
 
+        uint coatSId = flatLobeSamplerId(fc.flatLobeSamplers, LOBE_COAT);
+        uint specSId = flatLobeSamplerId(fc.flatLobeSamplers, LOBE_SPEC);
+        uint diffSId = flatLobeSamplerId(fc.flatLobeSamplers, LOBE_DIFFUSE);
+
         e.response = flatBsdfResponse(wo, wi, m, F0) * op;
-        e.pdf      = flatBsdfPdf(wo, wi, pCoat, m.coatRoughness, pSpec, m.roughness) * op;
+        e.pdf      = flatBsdfPdf(wo, wi, pCoat, m.coatRoughness, pSpec, m.roughness,
+                                 coatSId, specSId, diffSId) * op;
         return e;
     }
 }

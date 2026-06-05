@@ -223,6 +223,12 @@ struct FrameConstants
     uint   proposalMask;
     uint   reuseMode;
     float4 proposalAlpha;
+    // Per-lobe sampler selection for the flat/std_surface BSDF — 8 bits per
+    // lobe: coat | spec<<8 | diff<<16 (0 = native; see flat_lobes.slang
+    // FLAT_SAMPLER_*). flat_material.slang unpacks via flatLobeSamplerId. Scalar
+    // tail — the Python packer in renderer._pack_uniforms appends it after
+    // proposalAlpha in this exact order. No new descriptor binding.
+    uint   flatLobeSamplers;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

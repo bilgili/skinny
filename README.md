@@ -385,6 +385,15 @@ Two integrators selectable at runtime:
 | Path tracing | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
 | BDPT | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
 
+**Per-lobe BSDF samplers.** The flat / `standard_surface` BSDF draws each lobe
+(`coat`, `spec`, `diffuse`) from a runtime-selectable importance sampler. Native
+is the 2023 spherical-cap VNDF (coat/spec) / cosine (diffuse); the registry also
+ships the Heitz-2018 basis-form VNDF (coat/spec) and uniform-hemisphere
+(diffuse). Select per lobe in the GUI or on the command line:
+`--lobe-samplers coat=basis,spec=basis,diff=uniform` (env
+`SKINNY_LOBE_SAMPLERS`). Every strategy shares one pdf between `sample()` and
+`evaluate()`, so switching is unbiased — only the noise / variance changes.
+
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding

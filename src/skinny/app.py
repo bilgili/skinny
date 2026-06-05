@@ -518,6 +518,14 @@ def main() -> None:
         renderer.proposal_preset_index = renderer.proposal_preset_from_token(args.proposals)
     if args.reuse is not None:
         renderer.reuse_index = renderer._REUSE_TOKENS.index(args.reuse)
+    # CLI --lobe-samplers overrides the persisted per-lobe sampler selection.
+    if getattr(args, "lobe_samplers", None) is not None:
+        from skinny.sampling import parse_lobe_samplers
+
+        c, s, d = parse_lobe_samplers(args.lobe_samplers)
+        renderer.coat_sampler_index = c
+        renderer.spec_sampler_index = s
+        renderer.diff_sampler_index = d
     renderer._update_light()
 
     from skinny.debug_viewport import DebugViewport
