@@ -222,9 +222,23 @@ class TestFrameQueue:
 
 
 class TestParamGrouping:
+    """Control-panel grouping is driven by ``build_app_ui._classify`` — the
+    single source of truth shared by the Qt, Panel/web, and debug-viewport
+    front-ends. These tests exercise the classifier directly, so they need
+    neither a renderer nor a Vulkan SDK.
+    """
+
+    @staticmethod
+    def _bucket(params):
+        # Mirror build_main_ui: classify each param, drop empty groups.
+        from skinny.ui.build_app_ui import _classify
+
+        groups: dict[str, list] = {}
+        for p in params:
+            groups.setdefault(_classify(p), []).append(p)
+        return groups
 
     def test_group_params_categories(self):
-        from skinny.web_app import _group_params
         from skinny.params import ParamSpec
 
         params = [
@@ -235,18 +249,19 @@ class TestParamGrouping:
             ParamSpec("Light elevation", "light_elevation", "continuous", 5.0, -90.0, 90.0),
             ParamSpec("Light color R", "light_color_r", "continuous", 0.05, 0.0, 1.0),
             ParamSpec("Normal map strength", "normal_map_strength", "continuous", 0.05, 0.0, 2.0),
-            ParamSpec("Subdivision", "subdivision_index", "discrete", choice_source="subdivision_modes"),
+            ParamSpec("Integrator", "integrator_index", "discrete", choice_source="integrator_modes"),
+            ParamSpec("Reuse", "reuse_index", "discrete", choice_source="reuse_modes"),
             ParamSpec("Scattering", "scatter_index", "discrete", choice_source="scatter_modes"),
         ]
-        groups = _group_params(params)
+        groups = self._bucket(params)
         assert "Render" in groups
+        assert "ReSTIR" in groups
         assert "Skin" in groups
         assert "IBL" in groups
         assert "Direct Light" in groups
         assert "Detail" in groups
 
     def test_group_params_light_split(self):
-        from skinny.web_app import _group_params
         from skinny.params import ParamSpec
 
         params = [
@@ -258,14 +273,11 @@ class TestParamGrouping:
             ParamSpec("Direct light", "direct_light_index", "discrete",
                       choice_source="direct_light_modes"),
         ]
-        groups = _group_params(params)
-        assert "IBL" in groups
+        groups = self._bucket(params)
         assert len(groups["IBL"]) == 2
-        assert "Direct Light" in groups
         assert len(groups["Direct Light"]) == 4
 
     def test_group_params_preset_in_skin(self):
-        from skinny.web_app import _group_params
         from skinny.params import ParamSpec
 
         params = [
@@ -273,38 +285,54 @@ class TestParamGrouping:
             ParamSpec("Melanin", "mtlx.layer_top_melanin", "continuous", 0.01, 0.0, 1.0),
             ParamSpec("Hemoglobin", "mtlx.layer_middle_hemoglobin", "continuous", 0.01, 0.0, 1.0),
         ]
-        groups = _group_params(params)
-        assert "Skin" in groups
+        groups = self._bucket(params)
         paths = [p.path for p in groups["Skin"]]
         assert "preset_index" in paths
         assert "mtlx.layer_top_melanin" in paths
         assert len(groups["Skin"]) == 3
 
     def test_group_params_empty_groups_excluded(self):
-        from skinny.web_app import _group_params
         from skinny.params import ParamSpec
 
+        # scatter_index classifies to Skin, so only that bucket appears.
         params = [
             ParamSpec("Scattering", "scatter_index", "discrete", choice_source="scatter_modes"),
         ]
-        groups = _group_params(params)
-        assert "Render" in groups
-        assert "Skin" not in groups
+        groups = self._bucket(params)
+        assert "Skin" in groups
+        assert "Render" not in groups
         assert "IBL" not in groups
         assert "Direct Light" not in groups
 
     def test_direct_light_in_direct_light_group(self):
-        from skinny.web_app import _group_params
         from skinny.params import ParamSpec
+        from skinny.ui.build_app_ui import _classify
 
-        params = [
-            ParamSpec("Direct light", "direct_light_index", "discrete",
-                      choice_source="direct_light_modes"),
+        p = ParamSpec("Direct light", "direct_light_index", "discrete",
+                      choice_source="direct_light_modes")
+        assert _classify(p) == "Direct Light"
+
+    def test_reuse_and_restir_tuning_form_the_restir_group(self):
+        from skinny.params import ParamSpec
+        from skinny.ui.build_app_ui import _classify
+
+        # The Reuse enabler plus every restir_* tuning control land in ReSTIR.
+        restir_paths = [
+            "reuse_index",
+            "restir_regime_index", "restir_biased", "restir_m_light",
+            "restir_m_bsdf", "restir_spatial_k", "restir_spatial_radius",
+            "restir_m_cap",
         ]
-        groups = _group_params(params)
-        assert "Direct Light" in groups
-        paths = [p.path for p in groups["Direct Light"]]
-        assert "direct_light_index" in paths
+        for path in restir_paths:
+            p = ParamSpec(path, path, "continuous", 1.0, 0.0, 1.0)
+            assert _classify(p) == "ReSTIR", path
+
+        # Adjacent Render-bucket selectors (incl. the general Proposals seam
+        # selector) stay out of the ReSTIR group.
+        for path in ("integrator_index", "proposal_preset_index",
+                     "tonemap_index", "exposure"):
+            p = ParamSpec(path, path, "continuous", 1.0, 0.0, 1.0)
+            assert _classify(p) == "Render", path
 
 
 # ── Params module ───────────────────────────────────────────────────

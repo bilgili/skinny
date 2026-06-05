@@ -245,7 +245,7 @@ Layout:
 
 - Central dock: render viewport (mouse drag = orbit, right-drag = pan,
   scroll = zoom)
-- Left dock: collapsible parameter sidebar (Render / Skin / Detail /
+- Left dock: collapsible parameter sidebar (Render / ReSTIR / Skin / Detail /
   Materials sections, generated from the shared widget-tree spec)
 - View menu: BXDF visualiser, MaterialX graph editor, scene graph
   inspector, camera debug viewport (each a `QDockWidget`)
