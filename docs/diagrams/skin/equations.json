@@ -1,0 +1,11 @@
+[
+  {"name": "melanin", "tex": "\\sigma_a(\\lambda) = c_{\\text{mel}}\\,\\mu_{\\text{eu}}(\\lambda)"},
+  {"name": "hemoglobin", "tex": "\\sigma_a = c_{\\text{hb}}\\,\\bigl(\\text{sat}\\cdot\\mu_{\\text{HbO}_2} + (1-\\text{sat})\\,\\mu_{\\text{Hb}}\\bigr)"},
+  {"name": "extinction", "tex": "\\sigma_t = \\sigma_a + \\sigma_s"},
+  {"name": "transmittance", "tex": "T(d) = e^{-\\sigma_t d}"},
+  {"name": "burley", "tex": "R(r) = \\frac{e^{-r/d} + e^{-r/(3d)}}{8\\pi\\,d\\,r}"},
+  {"name": "schlick", "tex": "F(\\theta) = F_0 + (1 - F_0)(1 - \\cos\\theta)^5"},
+  {"name": "fresnel0", "tex": "F_0 = \\left(\\frac{1 - n}{1 + n}\\right)^{2}"},
+  {"name": "hg-phase", "tex": "p(\\cos\\theta) = \\frac{1 - g^2}{4\\pi\\,(1 + g^2 - 2g\\cos\\theta)^{3/2}}"},
+  {"name": "free-flight", "tex": "\\Delta t = -\\frac{\\ln u}{\\bar{\\sigma}_t}"}
+]

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="374.8" height="88.5" viewBox="0 0 374.8 88.5">
+  <rect x="0.5" y="0.5" width="373.8" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">R(r) = </text>
+  <text x="95.6" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">exp(−r/d) + exp(−r/(3d))</text>
+  <line x1="85.6" y1="44.2" x2="364.8" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="171.2" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">8π · d · r</text>
+</svg>

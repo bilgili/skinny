@@ -1,7 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="299.2" height="66.4" viewBox="0 0 299.2 66.4">
-  <rect x="0.5" y="0.5" width="298.2" height="65.4" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="10.0" y="38.2" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">W = </text>
-  <text x="171.2" y="24.4" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">Σ_s p̂_q(z_s)·W_s·M_s</text>
-  <line x1="53.2" y1="33" x2="289.2" y2="33" stroke="#0f172a" stroke-width="1.3"/>
-  <text x="171.2" y="52.4" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">(Σ_s M_s) · p̂(Y)</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="230.1" height="88.5" viewBox="0 0 230.1 88.5">
+  <rect x="0.5" y="0.5" width="229.1" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">W = </text>
+  <text x="63.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">Σ</text>
+  <text x="74.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <text x="81.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> p̂</text>
+  <text x="103.4" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">q</text>
+  <text x="111.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(z</text>
+  <text x="132.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <text x="140.5" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">)·W</text>
+  <text x="172.9" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <text x="180.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">·M</text>
+  <text x="202.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <line x1="53.2" y1="44.2" x2="220.1" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="64.1" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(Σ</text>
+  <text x="85.7" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <text x="93.4" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> M</text>
+  <text x="115.0" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <text x="122.8" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">) · p̂(Y)</text>
 </svg>

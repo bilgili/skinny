@@ -1,7 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="806.8" height="66.4" viewBox="0 0 806.8 66.4">
-  <rect x="0.5" y="0.5" width="805.8" height="65.4" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="10.0" y="38.2" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">p_mix(ω_i) = </text>
-  <text x="473.6" y="24.4" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">M_light·p_light(ω_i) + M_bsdf·p_bsdf(ω_i)·[ω_i→sphere|env]</text>
-  <line x1="150.4" y1="33" x2="796.8" y2="33" stroke="#0f172a" stroke-width="1.3"/>
-  <text x="473.6" y="52.4" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">M_light + M_bsdf</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="634.0" height="88.5" viewBox="0 0 634.0 88.5">
+  <rect x="0.5" y="0.5" width="633.0" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">p</text>
+  <text x="20.8" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">mix</text>
+  <text x="44.1" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(ω</text>
+  <text x="65.7" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i</text>
+  <text x="73.5" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">) = </text>
+  <text x="126.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">M</text>
+  <text x="137.5" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">light</text>
+  <text x="176.4" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">·p</text>
+  <text x="198.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">light</text>
+  <text x="236.9" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(ω</text>
+  <text x="258.5" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i</text>
+  <text x="266.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">) + M</text>
+  <text x="320.2" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">bsdf</text>
+  <text x="351.3" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">·p</text>
+  <text x="372.9" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">bsdf</text>
+  <text x="404.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(ω</text>
+  <text x="425.6" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i</text>
+  <text x="433.4" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">)·[ω</text>
+  <text x="476.6" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i</text>
+  <text x="484.4" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">→sphere|env]</text>
+  <line x1="116.7" y1="44.2" x2="624.0" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="308.4" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">M</text>
+  <text x="319.2" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">light</text>
+  <text x="358.0" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> + M</text>
+  <text x="401.2" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">bsdf</text>
 </svg>

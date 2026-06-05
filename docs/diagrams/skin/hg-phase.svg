@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="416.7" height="88.5" viewBox="0 0 416.7 88.5">
+  <rect x="0.5" y="0.5" width="415.7" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">p(cosθ) = </text>
+  <text x="231.5" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">1 − g</text>
+  <text x="285.5" y="24.4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">2</text>
+  <line x1="118.0" y1="44.2" x2="406.7" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="128.0" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">4π · (1 + g</text>
+  <text x="246.8" y="62.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">2</text>
+  <text x="254.6" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> − 2g·cosθ)</text>
+  <text x="373.4" y="62.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">3/2</text>
+</svg>

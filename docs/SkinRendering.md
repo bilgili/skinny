@@ -66,12 +66,41 @@ referenced by `<implementation target="genslang">` tags in the nodedef files.
 `SkinLayerStack` (3 × `SkinLayer`) built from `MtlxSkinParams` (164 bytes, 27
 fields). Each layer has: σa, σs, thickness, g (anisotropy), IOR.
 
+Per-layer absorption is a wavelength-dependent RGB fit. Epidermis melanin
+(`melaninAbsorption`):
+
+![sigma_a(lambda) = c_mel · mu_eu(lambda)](diagrams/skin/melanin.svg)
+
+with eumelanin coefficients μ_eu = {6.6, 11.0, 24.0} mm⁻¹ at the RGB centres
+611/549/464 nm. Dermis haemoglobin mixes oxy/deoxy by blood oxygenation
+(`hemoglobinAbsorption`):
+
+![sigma_a = c_hb · (sat · mu_HbO2 + (1 - sat) · mu_Hb)](diagrams/skin/hemoglobin.svg)
+
+(μ_HbO₂ = {0.3, 7.0, 1.0}, μ_Hb = {1.6, 8.5, 3.2} mm⁻¹). The layer extinction that
+drives transport is the sum of absorption and scattering:
+
+![sigma_t = sigma_a + sigma_s](diagrams/skin/extinction.svg)
+
 Key functions:
 - `melaninAbsorption(melanin)` — wavelength-dependent absorption
 - `hemoglobinAbsorption(hemoglobin, oxygenation)` — oxy/deoxy spectral mix
 - `evaluateSubsurfaceScattering()` — Christensen-Burley diffusion BSSRDF
 - `evaluateSkinSpecular()` — GGX specular (VNDF visible-normal sampling,
   `samplers/ggx.slang`) with Schlick fresnel
+
+The subsurface term uses the Christensen-Burley normalised-diffusion reflectance
+profile (`burleyDiffusionProfile`), with the scaling length `d` derived from
+per-layer albedo:
+
+![R(r) = (exp(-r/d) + exp(-r/(3d))) / (8 pi d r)](diagrams/skin/burley.svg)
+
+The GGX specular lobe uses a Schlick Fresnel with normal-incidence reflectance F₀
+from the layer IOR `n` (`fresnelSchlick`):
+
+![F(theta) = F0 + (1 - F0)(1 - cos theta)^5](diagrams/skin/schlick.svg)
+
+![F0 = ((1 - n) / (1 + n))^2](diagrams/skin/fresnel0.svg)
 
 ### Skin Material Orchestrator (`materials/skin/skin_material.slang`)
 
@@ -110,6 +139,18 @@ Delta-tracking (Woodcock tracking) through heterogeneous skin:
 - `MAX_VOLUME_STEPS = 128`, `VOLUME_DEFAULT_BOUNCES = 8`
 - `mmPerUnit` converts between mm-valued optical coefficients and world-unit
   ray distances (FrameConstants offset +156)
+
+The Henyey-Greenstein phase function with anisotropy `g` (`henyeyGreenstein`)
+sets the scattering angle distribution:
+
+![p(cos theta) = (1 - g^2) / (4 pi (1 + g^2 - 2 g cos theta)^(3/2))](diagrams/skin/hg-phase.svg)
+
+Free-flight distances are sampled by exponential delta tracking against the
+majorant σ_maj, and segment transmittance is Beer-Lambert:
+
+![Delta t = -ln(u) / sigma_maj](diagrams/skin/free-flight.svg)
+
+![T(d) = exp(-sigma_t · d)](diagrams/skin/transmittance.svg)
 
 ## MaterialX Skin Integration
 

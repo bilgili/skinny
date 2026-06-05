@@ -1,4 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="441.2" height="38.0" viewBox="0 0 441.2 38.0">
-  <rect x="0.5" y="0.5" width="440.2" height="37.0" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="10.0" y="24.4" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">direct_dir = Σ_d f(ω_i,d) · L_e,d · V_d</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="353.9" height="50.2" viewBox="0 0 353.9 50.2">
+  <rect x="0.5" y="0.5" width="352.9" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">direct</text>
+  <text x="74.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">dir</text>
+  <text x="98.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = Σ</text>
+  <text x="141.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">d</text>
+  <text x="149.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> f(ω</text>
+  <text x="192.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i,d</text>
+  <text x="215.6" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">) · L</text>
+  <text x="269.6" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">e,d</text>
+  <text x="293.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> · V</text>
+  <text x="336.2" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">d</text>
 </svg>

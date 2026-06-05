@@ -1,7 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="202.0" height="66.4" viewBox="0 0 202.0 66.4">
-  <rect x="0.5" y="0.5" width="201.0" height="65.4" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="10.0" y="38.2" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">W_out = </text>
-  <text x="144.2" y="24.4" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">Σ_s w_s</text>
-  <line x1="96.4" y1="33" x2="192.0" y2="33" stroke="#0f172a" stroke-width="1.3"/>
-  <text x="144.2" y="52.4" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#0f172a">p̂_q(Y)</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="157.5" height="88.5" viewBox="0 0 157.5 88.5">
+  <rect x="0.5" y="0.5" width="156.5" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">W</text>
+  <text x="20.8" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">out</text>
+  <text x="44.1" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = </text>
+  <text x="88.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">Σ</text>
+  <text x="98.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <text x="106.6" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> w</text>
+  <text x="128.2" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">s</text>
+  <line x1="76.5" y1="44.2" x2="147.5" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="86.5" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">p̂</text>
+  <text x="97.3" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">q</text>
+  <text x="105.1" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(Y)</text>
 </svg>
