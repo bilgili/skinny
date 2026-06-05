@@ -780,6 +780,9 @@ ReSTIR-owned per-pixel buffers:
 temporal / bit2 biased), mLight, spatialK, spatialRadius, normalThresh,
 depthThresh, mCap, mBsdf`.
 
+The full ReSTIR DI reference — pipeline stages, equations, the equation→shader
+map, design choices, and GUI controls — is in **[ReSTIR.md](ReSTIR.md)**.
+
 ---
 
 ## SlangPile — Embedded Python→Slang Codegen

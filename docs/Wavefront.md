@@ -253,7 +253,10 @@ The reuse hook (the other half of the scene-sampling seam) is realized by
 **ReSTIR DI** — reservoir spatiotemporal resampling of **primary-hit** direct
 lighting. `reuse=none` (identity) forwards to stock NEE; `reuse=ReSTIR DI` is
 **wavefront-only** (multi-pass) and capability-gates to identity on
-megakernel/Metal (`reuseMode` folds to 0 in `_pack_uniforms`).
+megakernel/Metal (`reuseMode` folds to 0 in `_pack_uniforms`). This section is the
+wavefront-integration summary; the **full reference** — equations, the
+equation→shader map, design choices, and every GUI control — is in
+**[ReSTIR.md](ReSTIR.md)**.
 
 ![ReSTIR DI fill → spatial → resolve pipeline](diagrams/restir_pipeline.svg)
 

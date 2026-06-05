@@ -14,9 +14,12 @@ working directory clean and lets multiple changes proceed in isolation.
 At the end of every implementation, review **all** Markdown documentation and
 update whatever the change touched, scoped to each document's subject. Technical
 docs live in `docs/` (`docs/Architecture.md`, `docs/SkinRendering.md`,
-`docs/Megakernel.md`, `docs/Wavefront.md`, `docs/PythonAPI.md`); `README.md`,
+`docs/Megakernel.md`, `docs/Wavefront.md`, `docs/ReSTIR.md`,
+`docs/PythonAPI.md`); `README.md`,
 `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` stay at the repo root. A change to
-the wavefront pipeline updates `docs/Wavefront.md`; a new descriptor binding
+the wavefront pipeline updates `docs/Wavefront.md`; a change to ReSTIR DI
+(reservoir/RIS/GRIS shaders, the reuse pass set, or its GUI controls) updates
+`docs/ReSTIR.md`; a new descriptor binding
 updates the `docs/Architecture.md` binding map; a new CLI flag updates
 `README.md`; a new public Python symbol updates `docs/PythonAPI.md`; and so on.
 Do not let docs drift from the code.

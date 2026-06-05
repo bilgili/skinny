@@ -14,7 +14,8 @@ Skin-specific rendering (three-layer optics, scattering modes, MaterialX skin
 nodedefs, head geometry, presets, tattoos) is documented separately in
 [SkinRendering.md](docs/SkinRendering.md). Renderer internals are in
 [Architecture.md](docs/Architecture.md); the two GPU execution modes in
-[Megakernel.md](docs/Megakernel.md) / [Wavefront.md](docs/Wavefront.md); the public Python
+[Megakernel.md](docs/Megakernel.md) / [Wavefront.md](docs/Wavefront.md); ReSTIR
+direct-lighting reuse in [ReSTIR.md](docs/ReSTIR.md); the public Python
 API in [PythonAPI.md](docs/PythonAPI.md).
 
 ## Gallery
