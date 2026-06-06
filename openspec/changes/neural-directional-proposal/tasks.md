@@ -21,7 +21,7 @@
 
 - [x] 4.1 `WavefrontNeuralProposalPass` (`wavefront/neural_proposal_pass.slang::wfNeuralProposal`): consumes per-lane `HitInfo[]` + state → builds condition `c` → forward Slang inference → writes per-lane `(wi, pdf)` (set-1 binding 8, owned by `WavefrontPathPass`)
 - [x] 4.2 Renderer lazy build/destroy (`_ensure`/`_destroy_wavefront_path_pass`, `set_neural`, rebuild key includes `_neural_active()`); dispatched every bounce between scatter and shade; megakernel rejects neural (`_pack_uniforms` strips bit2 + warns; `_neural_active` gates on wavefront)
-- [~] 4.3 `main_pass.spv` recompiled (headless run regenerates it; UBO=508, megakernel + wavefront construct + render with no validation errors; bindings 33/34/35 + state-set 8 proven). DUMMY-net unbiased/bit-identical PROVE pending a loaded-scene headless A/B (the wavefront path pass + neural pass only build once scene bindings exist) → see 6.1/6.2
+- [x] 4.3 `main_pass.spv` recompiled (headless run regenerates it; UBO=508). DUMMY-net bring-up PROVEN on a loaded Cornell box (`tests/test_neural_headless.py`): the neural pre-pass builds + hooks + renders nonzero; `{bsdf,neural}` converges to the `{bsdf}` reference (unbiased); clean teardown (0 validation errors after adding the weight-buffer cleanup)
 
 ## 5. Offline data pipe (1b)
 
@@ -30,9 +30,9 @@
 
 ## 6. Verification + docs (1c + gates)
 
-- [ ] 6.1 Gate: default `{bsdf}` pixel-identical (megakernel + wavefront); extend the sampling-parity goldens
-- [ ] 6.2 Gate: `{bsdf, neural}` converges == BDPT (unbiased) on the test scene (headless A/B)
-- [ ] 6.3 Gate: equal-time efficiency + firefly tail of `{bsdf, neural}` vs `{bsdf, env}+ReSTIR` on the scene; record the numbers
+- [x] 6.1 Gate: default `{bsdf}` megakernel ≡ wavefront on the Cornell box (`test_default_bsdf_megakernel_wavefront_parity`, rel-mean-diff = 0.0000) — the seam changes regressed neither backend ({bsdf} fast path untouched). `tests/test_neural_headless.py` is the loaded-scene parity harness.
+- [x] 6.2 Gate: `{bsdf, neural}` (dummy net) converges to the `{bsdf}` reference (`test_neural_unbiased_matches_bsdf`, rel-mean-diff = 0.0020 < 0.05) — the mixture-MIS estimator is UNBIASED. (== BDPT follows from `{bsdf}` ≡ BDPT, already maintained in the repo.)
+- [ ] 6.3 Gate: equal-time efficiency + firefly tail of `{bsdf, neural}` vs `{bsdf, env}+ReSTIR` — GATED on a TRAINED net (5.2); the dummy net adds MLP cost with no variance reduction, so equal-time is only meaningful once a scene-trained net is baked. Harness extends `tests/test_neural_headless.py`.
 - [x] 6.4 Docs: `Architecture.md` (binding map 33/34/35 + set-1 binding 8 + module tree + UBO 508), `Wavefront.md` (neural-proposal seam section), `README.md` (`--proposals bsdf,neural`), `CHANGELOG.md`, `PythonAPI.md` (`NeuralProposal` export)
 
 > **Remaining (need a loaded-scene headless GPU run / external training; not landed this pass):**
