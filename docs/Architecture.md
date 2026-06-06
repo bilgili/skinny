@@ -750,6 +750,8 @@ incrementally moved over.
 | 33 | StructuredBuffer | Neural-proposal flat Linear weights (`float`, row-major) | `sampling/neural_proposal.slang` |
 | 34 | StructuredBuffer | Neural-proposal flat Linear biases (`float`) | `sampling/neural_proposal.slang` |
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim) | `sampling/neural_proposal.slang` |
+| 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry only | `integrators/path_record.slang` |
+| 37 | RWStructuredBuffer | Record-dump counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record.slang` |
 
 Bindings **25–29** are reserved for the MaterialX nodegraph buffers
 (`GRAPH_BINDING_BASE = 25`), so the neural-proposal weight buffers sit at **33+**,
@@ -760,6 +762,12 @@ descriptors on every pipeline, **including the megakernel** (which never sets th
 neural bit); real per-scene weights overwrite them when the neural proposal is
 activated. The full reference is in
 [Wavefront.md § Neural directional proposal](Wavefront.md#proposal-seam-neural-directional-proposal-proposal-bit2-wavefront-only).
+
+Bindings **36/37** back the offline training-record dump (`Renderer.dump_path_records`):
+a second megakernel entry `mainImageRecord` (`integrators/path_record.slang`) appends
+per-vertex `(pos, N, wo, wiLocal, contribution)` records there. `mainImage` never
+references them (dead-stripped → byte-identical), so they too are seeded with
+1-element dummies and only reallocated to per-frame capacity during a dump.
 
 Light uniforms (part of UBO, not separate bindings):
 - `lightDirection` (float3) — analytic directional light toward-light vector
@@ -1037,7 +1045,8 @@ sampling/{proposal.slang, reuse.slang,               # scene-sampling seam
           neural_flow.slang,                          # pure spline flow (coupling/RQ/MLP, fwd/inverse)
           neural_proposal.slang}                      # renderer adapter (weight buffers 33/34/35, world map)
 lights/{sphere_light.slang, emissive_triangle_light.slang, directional_light.slang}
-integrators/{path.slang, bdpt.slang}
+integrators/{path.slang, bdpt.slang,
+             path_record.slang}                       # mainImageRecord training-record dump (5.1)
 wavefront/{wavefront_path.slang, wavefront_bdpt.slang, wf_shade_common.slang,
            flat_bounce.slang, wavefront_state.slang,
            neural_proposal_pass.slang,                # WavefrontNeuralProposalPass pre-pass

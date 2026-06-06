@@ -2965,6 +2965,16 @@ class Renderer:
         self.neural_layers_buffer.upload_sync(_nw.header_bytes)
         self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
 
+        # Neural training-record dump (bindings 36/37, task 5.1). 1-element dummy
+        # append buffer + counter so the descriptors are always valid; the
+        # `mainImageRecord` entry never runs except inside dump_path_records,
+        # which reallocates `record_buffer` to the per-frame capacity, binds it,
+        # and reads it back. `mainImage` never touches these (dead-stripped).
+        from skinny.sampling.path_records import RECORD_STRIDE
+        self.record_buffer = StorageBuffer(self.ctx, RECORD_STRIDE)   # 1 dummy record
+        self.record_counter = StorageBuffer(self.ctx, 8)             # [count, capacity]
+        self._record_pipeline = None   # lazily-built mainImageRecord ComputePipeline
+
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
         # descriptor is valid even before the user flips off "None".
         self.tattoo_image = SampledImage(self.ctx, TATTOO_WIDTH, TATTOO_HEIGHT)
@@ -3296,7 +3306,8 @@ class Renderer:
                 #      stdSurface+lightSplat+gizmoSegments+
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envMarginalCdf+envCondCdf.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (18 + n_graph_slots),
+                # +3 neural weights (33/34/35) +2 record dump (36/37) = 23.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (23 + n_graph_slots),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -3667,7 +3678,11 @@ class Renderer:
             # descriptors on every pipeline that uses this layout.
             for _b, _buf in ((33, self.neural_weights_buffer),
                              (34, self.neural_biases_buffer),
-                             (35, self.neural_layers_buffer)):
+                             (35, self.neural_layers_buffer),
+                             # Training-record dump (36 = PathRecord append, 37 =
+                             # counter); dummies until dump_path_records rebinds.
+                             (36, self.record_buffer),
+                             (37, self.record_counter)):
                 writes.append(vk.VkWriteDescriptorSet(
                     dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -6892,6 +6907,32 @@ class Renderer:
                 return i
         return 0
 
+    def _neural_scene_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """World AABB ``(min, extent)`` for the neural condition's position
+        normalisation. The per-frame ``Scene`` snapshot has no instances for USD
+        scenes (their geometry streams straight to the GPU and is not mirrored
+        into ``Scene.instances``), so fall back to the streamed ``_usd_scene``
+        instances — otherwise the condition normalises against the degenerate
+        ``(0,1)`` default and the proposal sees un-normalised positions. Used by
+        BOTH ``_pack_uniforms`` (inference) and ``dump_path_records`` (the
+        training header) so train↔infer share the exact same AABB.
+        """
+        wb = self.scene.world_bounds() if self.scene is not None else None
+        if wb is None and self._usd_scene is not None and self._usd_scene.instances:
+            mins, maxs = [], []
+            for inst in self._usd_scene.instances:
+                wmin, wmax = inst.world_bounds()
+                mins.append(wmin)
+                maxs.append(wmax)
+            if mins:
+                wb = (np.minimum.reduce(mins).astype(np.float32),
+                      np.maximum.reduce(maxs).astype(np.float32))
+        if wb is None:
+            return np.zeros(3, dtype=np.float32), np.ones(3, dtype=np.float32)
+        bmin = np.asarray(wb[0], dtype=np.float32)
+        bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
+        return bmin, bext
+
     def _pack_uniforms(self) -> bytes:
         self._sync_lens_buffer()
         aspect = self.width / self.height
@@ -7074,13 +7115,7 @@ class Renderer:
         # matching FrameConstants in common.slang; read only when the NEURAL bit
         # is active, so default {bsdf} stays bit-identical. The encoding here MUST
         # match the offline trainer's (spline_flow) condition.
-        wb = self.scene.world_bounds()
-        if wb is not None:
-            bmin = np.asarray(wb[0], dtype=np.float32)
-            bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
-        else:
-            bmin = np.zeros(3, dtype=np.float32)
-            bext = np.ones(3, dtype=np.float32)
+        bmin, bext = self._neural_scene_bounds()
         data += bmin.tobytes()                                        # 12 bytes
         data += bext.tobytes()                                        # 12 bytes
         data += struct.pack("I", int(self._neural_network_version))   # 4 bytes
@@ -7943,6 +7978,103 @@ class Renderer:
         """User-facing format names — order is also the GUI dropdown order."""
         return ["PNG", "JPEG", "BMP", "EXR", "HDR"]
 
+    # ── Neural training-record dump (task 5.1) ──────────────────────
+
+    def _bind_record_buffer(self, buf) -> None:
+        """Point descriptor binding 36 (the PathRecord append buffer) at ``buf``
+        across all frames-in-flight descriptor sets."""
+        vk.vkDeviceWaitIdle(self.ctx.device)
+        for ds in self.descriptor_sets:
+            write = vk.VkWriteDescriptorSet(
+                dstSet=ds, dstBinding=36, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[vk.VkDescriptorBufferInfo(
+                    buffer=buf.buffer, offset=0, range=buf.size)])
+            vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
+
+    def _dispatch_record(self, descriptor_set) -> None:
+        """One-shot dispatch of the ``mainImageRecord`` entry over the frame."""
+        cmd = vk.vkAllocateCommandBuffers(
+            self.ctx.device, vk.VkCommandBufferAllocateInfo(
+                commandPool=self.ctx.command_pool,
+                level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY, commandBufferCount=1))[0]
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+                             self._record_pipeline.pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            self._record_pipeline.pipeline_layout, 0, 1, [descriptor_set], 0, None)
+        gx = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        gy = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        vk.vkCmdDispatch(cmd, gx, gy, 1)
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(self.ctx.compute_queue, 1,
+                         [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+                         vk.VK_NULL_HANDLE)
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
+    def dump_path_records(self, out_path, *, num_frames: int = 256,
+                          max_records_per_frame: int | None = None,
+                          frame_seed_base: int = 0) -> int:
+        """Emit per-vertex neural training records to a ``.nrec`` file (task 5.1).
+
+        Runs the ``mainImageRecord`` megakernel entry for ``num_frames``
+        independent frames (each a fresh ``frameIndex`` → fresh RNG → fresh
+        paths) and streams the records out. Backend-independent: it builds its
+        own record pipeline and reuses the scene descriptor set, so it works in
+        either execution mode. The file header carries the scene AABB so the
+        offline ``spline_flow`` trainer normalises the condition byte-for-byte
+        like the renderer. The records reflect the CURRENT proposal set as the
+        sample generator (the MIS weight is divided out, so any generator is
+        unbiased; ``{bsdf}`` or ``{bsdf,env}`` are the usual choices). Returns
+        the total number of records written.
+        """
+        import struct as _struct
+
+        from skinny.sampling.path_records import RECORD_STRIDE, pack_header
+        from skinny.vk_compute import ComputePipeline
+
+        if self._scene_bindings is None or self.descriptor_sets is None:
+            raise RuntimeError("dump_path_records: scene not built yet (pump update())")
+
+        rec_max_bounces = 6  # lockstep with path_record.slang REC_MAX_BOUNCES
+        capacity = int(self.width) * int(self.height) * rec_max_bounces
+        if max_records_per_frame is not None:
+            capacity = min(capacity, int(max_records_per_frame))
+
+        bmin, bext = self._neural_scene_bounds()
+
+        if self._record_pipeline is None:
+            self._record_pipeline = ComputePipeline(
+                self.ctx, self.shader_dir,
+                entry_module="main_pass", entry_point="mainImageRecord",
+                graph_fragments=list(self._scene_graph_fragments))
+
+        saved_frame_index = self.frame_index
+        big = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+        self._bind_record_buffer(big)
+        total = 0
+        try:
+            with open(out_path, "wb") as f:
+                f.write(pack_header(bmin, bext))
+                for i in range(int(num_frames)):
+                    self.frame_index = int(frame_seed_base) + i
+                    self.uniform_buffer.upload(self._pack_uniforms())
+                    self.record_counter.upload_sync(_struct.pack("<II", 0, capacity))
+                    self._dispatch_record(self.descriptor_sets[0])
+                    count = _struct.unpack("<I", self.record_counter.download_sync(4))[0]
+                    count = min(count, capacity)
+                    if count:
+                        f.write(big.download_sync(count * RECORD_STRIDE))
+                        total += count
+        finally:
+            self._bind_record_buffer(self.record_buffer)  # restore the dummy
+            big.destroy()
+            self.frame_index = saved_frame_index
+        return total
+
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
 
@@ -7972,6 +8104,11 @@ class Renderer:
         self.normal_image.destroy()
         self.tattoo_image.destroy()
         self.env_image.destroy()
+        # Env importance-sampling CDFs (bindings 31/32) — allocated once in
+        # _init_gpu; were previously never freed (surfaced by the record-dump's
+        # clean-teardown check).
+        self.env_marginal_buffer.destroy()
+        self.env_cond_buffer.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
         self._offscreen_output.destroy()
@@ -7981,6 +8118,11 @@ class Renderer:
         self.neural_weights_buffer.destroy()
         self.neural_biases_buffer.destroy()
         self.neural_layers_buffer.destroy()
+        if getattr(self, "_record_pipeline", None) is not None:
+            self._record_pipeline.destroy()
+            self._record_pipeline = None
+        self.record_buffer.destroy()
+        self.record_counter.destroy()
         self.light_splat_buffer.destroy()
         self.gizmo_segments_buffer.destroy()
         self.lens_elements_buffer.destroy()

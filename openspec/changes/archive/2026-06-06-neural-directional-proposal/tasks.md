@@ -1,0 +1,48 @@
+## 1. Slang inference + parity
+
+- [x] 1.1 New `shaders/sampling/neural_flow.slang`: port the spline-flow forward (`u → wi`) — coupling layers, MLP, rational-quadratic spline forward, logdet
+- [x] 1.2 Port the inverse (`wi → pdf`) — RQ spline inverse (analytic quadratic solve) + solid-angle Jacobian; both forward and inverse share the weight buffers
+- [x] 1.3 Define the flat weight layout (`weights[]`, `biases[]`, `LayerHeader[]`) and a `spline_flow` exporter that bakes a trained net to that file format
+- [x] 1.4 Slang↔PyTorch pdf-parity test: identical (condition, base sample) → direction + solid-angle pdf agree within tolerance (the 1a gate, before any render wiring). `tests/test_neural_parity.py` re-implements `neural_flow.slang` in numpy off the same flat weight layout and locks it against committed PyTorch goldens (`tests/data/neural_parity/`, baked by `generate_goldens.py`); CI-runnable with no torch/GPU. Forward `max |Δwi|=4.3e-6`, `rel Δpdf=2.5e-5`; inverse `rel Δpdf=5.2e-5`; fwd→inv round-trip `2e-14` (bars `1e-4` / `1e-3`). Optional GPU-runtime check (`sampleNeural`/`pdfNeural` over slangpy) skips cleanly where the typed `StructuredBuffer<NfLayerHeader>` cannot bind — GPU parity stays validated via the headless bring-up (4.3).
+
+## 2. Bindings + GPU state
+
+- [x] 2.1 Declare bindings 33/34/35 (weights / biases / layer-headers) in `sampling/neural_proposal.slang` + the hand-declared scene-set layout (`vk_compute._create_descriptor_set_layout`); the scope doc's 25/26/27 collide with `GRAPH_BINDING_BASE`, so 33/34/35 sit above the graph range + env CDFs. (`Architecture.md` map: in 6.4.)
+- [x] 2.2 Host weight buffers + upload helper (`sampling/neural_weights.py` NFW1 loader + dummy baker; renderer `_sync_neural_weights`); load the baked weights file
+- [x] 2.3 Add the `networkVersion` field (baseline 0) to the proposal sample (`WfNeuralSample`/`ProposalContext` + `FrameConstants.neuralNetworkVersion`) in `common.slang` / `interfaces.slang` / `proposal.slang`
+
+## 3. Seam wiring (proposal bit2)
+
+- [x] 3.1 `PROPOSAL_NEURAL = 0x4` in `proposal.slang`; extended `sampleBounceDirection` (3-way one-sample MIS, precomputed neural candidate) + `mixtureProposalPdf` (inline inverse) via `proposalWeights` (per-lane renormalisation, gated by `neuralValid`); `neuralActive` threaded through `nee`/`reuse` for unbiased NEE coupling
+- [x] 3.2 `NeuralProposal(ProposalPlugin)` (`mask_bit=0x4`, `default_weight`) registered in `proposals.py`/`registry`. GPU state is renderer-owned (mirrors `RestirDiReuse` → `RestirDiPass`): weight buffers + `WavefrontNeuralProposalPass`, not the throwaway plugin instances
+- [x] 3.3 `--proposals bsdf,neural` CLI + `BSDF + Neural` preset (data-driven `_disc` selector + settings persistence via `proposal_preset_index`, auto-surfaced); accumulation resets on proposal change (existing state-hash)
+
+## 4. Wavefront neural pass (1a plumbing)
+
+- [x] 4.1 `WavefrontNeuralProposalPass` (`wavefront/neural_proposal_pass.slang::wfNeuralProposal`): consumes per-lane `HitInfo[]` + state → builds condition `c` → forward Slang inference → writes per-lane `(wi, pdf)` (set-1 binding 8, owned by `WavefrontPathPass`)
+- [x] 4.2 Renderer lazy build/destroy (`_ensure`/`_destroy_wavefront_path_pass`, `set_neural`, rebuild key includes `_neural_active()`); dispatched every bounce between scatter and shade; megakernel rejects neural (`_pack_uniforms` strips bit2 + warns; `_neural_active` gates on wavefront)
+- [x] 4.3 `main_pass.spv` recompiled (headless run regenerates it; UBO=508). DUMMY-net bring-up PROVEN on a loaded Cornell box (`tests/test_neural_headless.py`): the neural pre-pass builds + hooks + renders nonzero; `{bsdf,neural}` converges to the `{bsdf}` reference (unbiased); clean teardown (0 validation errors after adding the weight-buffer cleanup)
+
+## 5. Offline data pipe (1b)
+
+- [x] 5.1 Record-dump mode: renderer emits per-vertex `(position, wi, contribution)` records to a file. New megakernel entry `mainImageRecord` (`shaders/integrators/path_record.slang`) — an RR-free path tracer that, per flat/graph reflective bounce, records `(pos, N, wo, wiLocal, contribution)` where `contribution = (L_final − L_k)/beta_in_k = weight·Li` (backward attribution from a local vertex stack; megakernel hosts it because one thread owns the whole path → the tail radiance is known at loop end). Records append to GPU bindings 36/37 (PathRecord buffer + `[count, capacity]` counter; `mainImage` never references them → byte-identical, dummied otherwise). `Renderer.dump_path_records()` builds the record pipeline lazily (own entry, shared set-0 layout), runs N independent frames, streams to a `.nrec` file (`sampling/path_records.py`: 64 B/record, header carries the scene AABB so the trainer normalises the condition identically). `wiLocal` is the world `wi` in the SAME shading frame the wavefront neural pass uses at inference (N=HitInfo.normal; T,B from tangent/buildBasis) → train↔infer frames match. Fixed two latent bugs en route: USD scenes had degenerate `(0,1)` condition bounds (`_neural_scene_bounds` now falls back to `_usd_scene` instances, used by both `_pack_uniforms` and the dump header) and `cleanup()` never freed the env CDF buffers. Gate `tests/test_neural_headless.py` 6.1/6.2 still pass (mainImage byte-identical). New `tests/test_record_dump.py` (megakernel + wavefront, 0 validation leaks): 121120 records/8 frames on the flat Cornell box, all finite, upper-hemisphere, unit, non-negative, in-AABB.
+- [x] 5.2 `spline_flow` trainer reads the records and trains a per-scene flow using the EXACT renderer condition encoding, then bakes the weights via the 1.3 exporter. New `spline_flow/render_records.py`: standalone `.nrec` reader → rebuilds the canonical 9-float condition (`neuralCondition`: pos→[-1,1]³ via the header AABB, N, wo) byte-for-byte → contribution-weighted MLE (`loss = -Σ w·log q_square / Σ w`, where `w = luminance(contribution) = f·cos·Li/p_gen`, samples `wi=hemisphere_to_square(wiLocal)`; the weighted forward-KL optimum is `q ∝ f·Li·cos`) on the renderer's `ConditionalSplineFlow2D(cond=9, layers=6, bins=24, hidden=96)` — the EXACT arch the Slang inference + NFW1 loader require — then `export_weights.export_flow` bakes NFW1. PROVEN end-to-end on Mac MPS: dumped 4.36M Cornell records, trained 3.65M valid samples (weighted-NLL 0.157→−0.288), pdf normalization mean|∫−1|=0.0067 (valid normalized density), baked `tests/data/cornell_neural.nfw1` (arch 6/24/96/9, 103104 weights) which loads + infers in-renderer (the Slang↔PyTorch parity from 1.4 carries over to the trained weights).
+
+## 6. Verification + docs (1c + gates)
+
+- [x] 6.1 Gate: default `{bsdf}` megakernel ≡ wavefront on the Cornell box (`test_default_bsdf_megakernel_wavefront_parity`, rel-mean-diff = 0.0000) — the seam changes regressed neither backend ({bsdf} fast path untouched). `tests/test_neural_headless.py` is the loaded-scene parity harness.
+- [x] 6.2 Gate: `{bsdf, neural}` (dummy net) converges to the `{bsdf}` reference (`test_neural_unbiased_matches_bsdf`, rel-mean-diff = 0.0020 < 0.05) — the mixture-MIS estimator is UNBIASED. (== BDPT follows from `{bsdf}` ≡ BDPT, already maintained in the repo.)
+- [x] 6.3 Gate: equal-time efficiency + firefly tail of `{bsdf, neural}` (TRAINED net, 5.2) vs `{bsdf, env}+ReSTIR` — measured headless (`test_neural_trained_equaltime_gate` extends `tests/test_neural_headless.py`, loads `tests/data/cornell_neural.nfw1`). RESULT (Mac MPS/MoltenVK, flat Cornell box): neural does NOT win equal-time — efficiency ratio neural/ReSTIR ≈ 0.035. The clamped **bulk** MSE is identical (neural 7.8e-7 ≈ ReSTIR 7.9e-7 ≈ bsdf), so per-sample there is no variance win on this scene; the ~28× loss is ENTIRELY the MLP pre-pass cost (95.8 vs 3.4 ms/frame), and the peaky one-shot net adds a firefly tail (raw rel-mean ≈ 0.98). Both are design-anticipated: (a) "the correctness gate is convergence, not speed (perf is the CUDA stage)" — the MLP cost is the deferred CUDA-perf non-goal; (b) the flat ceiling-lit Cornell box is BROAD-indirect (cosine already near-optimal), not the concentrated-indirect regime where Stage-0 showed 2.5–13×, so `f·Li·cos ≈ f·cos` and the guide ≈ cosine. UNBIASEDNESS (the must-pass Stage-1 gate) holds by mixture-MIS construction and is gated net-independently by 6.2. The equal-time WIN is a follow-up: GPU-optimised inference (CUDA stage) + guiding-iteration training (sample from the learned q, retrain — the one-shot {bsdf}-generated data caps net quality) + a concentrated-indirect scene + a firefly-robustness measure (pdf floor / lower neural α).
+- [x] 6.4 Docs: `Architecture.md` (binding map 33/34/35 + set-1 binding 8 + module tree + UBO 508), `Wavefront.md` (neural-proposal seam section), `README.md` (`--proposals bsdf,neural`), `CHANGELOG.md`, `PythonAPI.md` (`NeuralProposal` export)
+
+> **All tasks landed + GPU-proven on Mac (MPS/MoltenVK).** The offline data pipe
+> (1b: 5.1 record-dump + 5.2 `spline_flow` training) is complete end-to-end and a
+> real scene-trained net was baked, loaded, and A/B'd in-renderer. The 6.3
+> equal-time gate was measured honestly: neural is unbiased (the Stage-1 gate) but
+> does not win equal-time on Mac — the MLP inference cost is the deferred
+> CUDA-perf non-goal, and the flat Cornell box is broad-indirect so the guide ≈
+> cosine. Follow-ups (out of Stage-1 scope): GPU-optimised inference, guiding-
+> iteration training, a concentrated-indirect scene, and a firefly-robustness
+> measure (pdf floor / lower neural α). Bindings 36/37 + `mainImageRecord` added
+> for the dump (Architecture.md map updated); two latent bugs fixed en route
+> (USD condition bounds, env-CDF teardown).

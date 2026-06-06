@@ -336,15 +336,32 @@ machine-precision forward↔inverse round-trip). An optional slangpy test dispat
 the real `sampleNeural`/`pdfNeural` for the true on-device gate and skips where the
 typed header buffer cannot bind (then GPU parity rides on the headless bring-up).
 
-**Offline pipeline + status.** Stage 1 (this change): the renderer dumps
-per-vertex `(position, normal, wo, wi, contribution)` records; those train a flow
-in `spline_flow` under the **identical** condition encoding; the result bakes to
-`NFW1` and loads at runtime. **Landed so far:** the full plumbing — pre-pass,
-weight buffers, the MIS mixture, and the dummy-net bring-up that proves the seam
-unbiased. **Pending:** per-scene training of a real net and the equal-time
-quality gate (variance reduction vs `{bsdf}`/`{bsdf,env}` at matched cost).
-Online / dynamic training (the per-sample `neuralNetworkVersion` hook is reserved
-for it) is a later Stage-2 change.
+**Offline pipeline + status.** Stage 1 (this change) is complete end-to-end. The
+**record dump** is a *separate megakernel entry* `mainImageRecord`
+(`integrators/path_record.slang`) — an RR-free path tracer that, per flat/graph
+reflective bounce, appends `(position, normal, wo, wiLocal, contribution)` to
+bindings 36/37 (`Renderer.dump_path_records` → a `.nrec` file). Megakernel hosts
+it because one thread owns the whole path, so the tail radiance `Li` along each
+sampled `wi` is known at loop end and attributed back from a local register stack
+(`contribution = (L_final−L_k)/beta_in_k = f·cos·Li`); in wavefront the path is
+smeared across dispatches, so this would need a per-lane VRAM vertex stack +
+terminate splat. The dump is offline, so megakernel-only costs nothing at render
+time (inference stays wavefront-only). `mainImage` never references 36/37 →
+byte-identical. The offline `spline_flow/render_records.py` fits the flow from
+those records by contribution-weighted MLE (`q ∝ f·Li·cos`) under the **identical**
+`neuralCondition` encoding and bakes `NFW1`.
+
+**Landed + GPU-proven (Mac MPS/MoltenVK):** the full plumbing, a real scene-trained
+net (4.36M Cornell records → trained flow, pdf ∫≈1), loaded + A/B'd in-renderer.
+The equal-time gate (`test_neural_trained_equaltime_gate`) is **measured, not won
+on Mac**: the net is unbiased (mixture-MIS) but the MLP pre-pass is ~28× a bsdf
+bounce, and the flat ceiling-lit Cornell box is broad-indirect (cosine already
+near-optimal) so the guide ≈ cosine and adds a firefly tail with no offsetting
+win. The equal-time WIN is a follow-up — GPU-optimised inference (the deferred
+CUDA-perf goal), guiding-iteration training (sample from learned `q`, retrain — the
+one-shot `{bsdf}`-generated data caps net quality), a concentrated-indirect scene,
+and a firefly-robustness measure (pdf floor / lower neural α). Online / dynamic
+training (the per-sample `neuralNetworkVersion` hook) is a later Stage-2 change.
 
 **Host wiring.** Weight buffers + `WavefrontNeuralProposalPass` are built lazily
 in wavefront mode (mirroring `RestirDiPass`) in `renderer.py` / `vk_wavefront.py`.
