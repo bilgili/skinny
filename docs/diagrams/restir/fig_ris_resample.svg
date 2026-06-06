@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="360" viewBox="0 0 780 360" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="r1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3b82f6"/></marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="779" height="359" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="20" y="28" font-size="14" font-weight="700" fill="#0f172a">② RIS resamples M proposal draws toward the target p̂</text>
+
+  <!-- axes -->
+  <line x1="70" y1="288" x2="560" y2="288" stroke="#94a3b8" stroke-width="1.4"/>
+  <text x="560" y="306" text-anchor="end" font-size="10.5" fill="#64748b">light-sample space (direction / light point)</text>
+  <line x1="70" y1="288" x2="70" y2="70" stroke="#94a3b8" stroke-width="1.4"/>
+  <text x="58" y="74" text-anchor="end" font-size="10.5" fill="#64748b">density</text>
+
+  <!-- proposal pdf p_src (broad) -->
+  <path d="M80,262 C 220,232 420,238 552,258" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 3"/>
+  <text x="120" y="226" font-size="11" fill="#64748b">p_src (proposal: light + BSDF mixture)</text>
+
+  <!-- target p̂ (peaked) -->
+  <path d="M250,288 C 330,288 350,108 360,108 C 372,108 392,288 470,288 Z" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <text x="372" y="100" text-anchor="middle" font-size="11" font-weight="600" fill="#2563eb">p̂ = lum(f·Le) (target)</text>
+
+  <!-- candidate draws ~ p_src (spread along axis) -->
+  <g fill="#94a3b8">
+    <circle cx="110" cy="288" r="3"/><circle cx="155" cy="288" r="3"/><circle cx="205" cy="288" r="3"/>
+    <circle cx="250" cy="288" r="3"/><circle cx="300" cy="288" r="3"/><circle cx="345" cy="288" r="3"/>
+    <circle cx="400" cy="288" r="3"/><circle cx="450" cy="288" r="3"/><circle cx="500" cy="288" r="3"/>
+    <circle cx="540" cy="288" r="3"/>
+  </g>
+  <text x="92" y="324" font-size="10.5" fill="#475569">M candidates drawn ∼ p_src</text>
+
+  <!-- resampling: weight ∝ p̂/p_src pulls the survivor to the peak -->
+  <path d="M250,284 C 300,250 330,200 360,150" fill="none" stroke="#3b82f6" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#r1)"/>
+  <path d="M345,284 C 352,240 356,200 360,158" fill="none" stroke="#3b82f6" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#r1)"/>
+  <path d="M450,284 C 410,250 380,200 364,150" fill="none" stroke="#3b82f6" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#r1)"/>
+  <circle cx="360" cy="140" r="6" fill="#3b82f6"/>
+  <text x="372" y="138" font-size="11" font-weight="600" fill="#2563eb">survivor y (∝ p̂/p_src)</text>
+
+  <!-- reservoir summary -->
+  <rect x="600" y="120" width="160" height="120" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="680" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">reservoir</text>
+  <text x="680" y="168" text-anchor="middle" font-size="10.5" fill="#475569">streams M candidates,</text>
+  <text x="680" y="184" text-anchor="middle" font-size="10.5" fill="#475569">keeps 1 survivor y</text>
+  <text x="680" y="208" text-anchor="middle" font-size="11" fill="#0f172a">W = wSum / (M·p̂(y))</text>
+  <text x="680" y="228" text-anchor="middle" font-size="10" fill="#64748b">estimate = f(y)·W</text>
+  <path d="M566,150 C 585,150 585,170 598,172" fill="none" stroke="#94a3b8" stroke-width="1.3" stroke-dasharray="3 3"/>
+
+  <text x="20" y="346" font-size="10.5" fill="#475569">As M grows the survivor's distribution approaches p̂ — concentrating samples where f·Le is large, without any shadow rays.</text>
+</svg>

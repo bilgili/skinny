@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="t1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#475569"/></marker>
+    <marker id="t2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#a855f7"/></marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="719" height="319" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="20" y="28" font-size="14" font-weight="700" fill="#0f172a">④ Progressive temporal reuse — merge the M-capped previous-frame reservoir</text>
+
+  <!-- previous frame reservoir -->
+  <rect x="36" y="70" width="196" height="72" rx="8" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="134" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#7c3aed">previous frame</text>
+  <text x="134" y="114" text-anchor="middle" font-size="10.5" fill="#475569">reservoirB (persisted)</text>
+  <text x="134" y="130" text-anchor="middle" font-size="10.5" fill="#475569">M = 40 (history), y_prev</text>
+
+  <!-- M-cap clamp -->
+  <text x="270" y="98" text-anchor="middle" font-size="10" fill="#7c3aed">M-cap</text>
+  <text x="270" y="112" text-anchor="middle" font-size="10" fill="#475569">min(M, M_cap)</text>
+  <text x="270" y="126" text-anchor="middle" font-size="10" fill="#475569">= 20</text>
+  <line x1="232" y1="106" x2="300" y2="150" stroke="#a855f7" stroke-width="1.6" marker-end="url(#t2)"/>
+
+  <!-- current frame reservoir -->
+  <rect x="36" y="182" width="196" height="72" rx="8" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="134" y="206" text-anchor="middle" font-size="12" font-weight="700" fill="#2563eb">this frame</text>
+  <text x="134" y="226" text-anchor="middle" font-size="10.5" fill="#475569">fill → spatial reservoir</text>
+  <text x="134" y="242" text-anchor="middle" font-size="10.5" fill="#475569">M = 6, y_cur</text>
+  <line x1="232" y1="218" x2="300" y2="172" stroke="#475569" stroke-width="1.6" marker-end="url(#t1)"/>
+
+  <!-- merge -->
+  <circle cx="330" cy="161" r="22" fill="#ffffff" stroke="#475569" stroke-width="1.5"/>
+  <text x="330" y="167" text-anchor="middle" font-size="18" fill="#475569">⊕</text>
+  <text x="330" y="208" text-anchor="middle" font-size="10" fill="#64748b">reservoirMerge</text>
+
+  <!-- combined -->
+  <rect x="392" y="122" width="232" height="80" rx="8" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="508" y="148" text-anchor="middle" font-size="12" font-weight="700" fill="#059669">combined reservoir</text>
+  <text x="508" y="168" text-anchor="middle" font-size="10.5" fill="#475569">M = 26 → resolve (1 shadow ray)</text>
+  <text x="508" y="184" text-anchor="middle" font-size="10.5" fill="#475569">becomes next frame's reservoirB</text>
+  <line x1="352" y1="161" x2="390" y2="161" stroke="#475569" stroke-width="1.6" marker-end="url(#t1)"/>
+
+  <!-- persist loop back to previous -->
+  <path d="M508,122 C 508,52 134,52 134,68" fill="none" stroke="#a855f7" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#t2)"/>
+  <text x="320" y="48" text-anchor="middle" font-size="10" fill="#7c3aed">persists across accumulation frames (static camera ⇒ reprojection = identity)</text>
+
+  <text x="20" y="300" font-size="10.5" fill="#475569">Caveat: on skinny's progressive accumulator temporal history is correlated — bias grows with M_cap (glossy). Spatial-only is the default.</text>
+</svg>

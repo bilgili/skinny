@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="430" viewBox="0 0 780 430" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3b82f6"/></marker>
+    <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#10b981"/></marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="779" height="429" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="20" y="28" font-size="14" font-weight="700" fill="#0f172a">① Initial RIS at the primary hit — many unshadowed candidates, one shadow ray</text>
+
+  <!-- environment band -->
+  <rect x="250" y="46" width="500" height="26" rx="4" fill="#e0f2fe" stroke="#7dd3fc"/>
+  <text x="500" y="63" text-anchor="middle" font-size="11" fill="#0369a1">environment (IBL)</text>
+
+  <!-- lights -->
+  <ellipse cx="470" cy="120" rx="34" ry="16" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="470" y="124" text-anchor="middle" font-size="10.5" fill="#92400e">area light</text>
+  <circle cx="660" cy="150" r="20" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="660" y="153" text-anchor="middle" font-size="10.5" fill="#92400e">sphere</text>
+
+  <!-- occluder -->
+  <rect x="540" y="190" width="34" height="86" rx="3" fill="#cbd5e1" stroke="#94a3b8"/>
+  <text x="557" y="288" text-anchor="middle" font-size="10" fill="#64748b">occluder</text>
+
+  <!-- ground + shading point -->
+  <line x1="40" y1="340" x2="740" y2="340" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="40" y="340" width="700" height="58" fill="#f8fafc"/>
+  <circle cx="180" cy="340" r="6" fill="#0f172a"/>
+  <text x="150" y="362" font-size="11" fill="#0f172a">P (primary hit)</text>
+  <!-- eye ray -->
+  <line x1="70" y1="392" x2="176" y2="344" stroke="#64748b" stroke-width="1.4"/>
+  <text x="64" y="404" font-size="10" fill="#64748b">eye ray</text>
+  <!-- surface normal -->
+  <line x1="180" y1="340" x2="180" y2="300" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3 3"/>
+
+  <!-- candidate rays (dashed grey, unshadowed) -->
+  <g stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="4 3" fill="none">
+    <line x1="180" y1="340" x2="442" y2="126"/>
+    <line x1="180" y1="340" x2="470" y2="120"/>
+    <line x1="180" y1="340" x2="498" y2="126"/>
+    <line x1="180" y1="340" x2="300" y2="60"/>
+    <line x1="180" y1="340" x2="430" y2="58"/>
+    <line x1="180" y1="340" x2="610" y2="62"/>
+    <line x1="180" y1="340" x2="648" y2="152"/>
+    <line x1="180" y1="340" x2="120" y2="150"/>
+    <line x1="180" y1="340" x2="250" y2="120"/>
+  </g>
+  <!-- candidate weight dots (radius ~ pHat) -->
+  <circle cx="442" cy="126" r="3.5" fill="#94a3b8"/>
+  <circle cx="498" cy="126" r="3.5" fill="#94a3b8"/>
+  <circle cx="300" cy="60" r="2.6" fill="#94a3b8"/>
+  <circle cx="430" cy="58" r="3" fill="#94a3b8"/>
+  <circle cx="610" cy="62" r="2.6" fill="#94a3b8"/>
+  <circle cx="648" cy="152" r="2" fill="#94a3b8"/>
+  <circle cx="120" cy="150" r="2" fill="#94a3b8"/>
+  <circle cx="250" cy="120" r="2.4" fill="#94a3b8"/>
+  <!-- candidate toward sphere passes THROUGH the occluder: not tested now -->
+  <text x="596" y="234" font-size="9.5" fill="#ef4444">ignored at candidate time</text>
+
+  <!-- survivor: selected ∝ weight, gets the one shadow ray (visible) -->
+  <line x1="180" y1="340" x2="470" y2="120" stroke="#3b82f6" stroke-width="2.6" marker-end="url(#a1)"/>
+  <circle cx="470" cy="120" r="5" fill="#3b82f6"/>
+  <line x1="186" y1="336" x2="464" y2="124" stroke="#10b981" stroke-width="2" stroke-dasharray="1 0" marker-end="url(#a2)"/>
+  <text x="250" y="210" font-size="11" font-weight="600" fill="#3b82f6">survivor y (∝ p̂)</text>
+  <text x="250" y="226" font-size="10.5" fill="#10b981">→ 1 shadow ray, V(y)</text>
+
+  <!-- legend -->
+  <g font-size="10.5">
+    <line x1="430" y1="372" x2="458" y2="372" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="4 3"/>
+    <text x="464" y="376" fill="#475569">M candidates — unshadowed p̂ = lum(f·Le), no shadow rays</text>
+    <line x1="430" y1="390" x2="458" y2="390" stroke="#3b82f6" stroke-width="2.6"/>
+    <text x="464" y="394" fill="#475569">survivor (reservoir keeps one) — only it pays a shadow ray (deferred visibility)</text>
+  </g>
+</svg>

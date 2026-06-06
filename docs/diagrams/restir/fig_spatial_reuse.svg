@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="430" viewBox="0 0 700 430" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="s1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#10b981"/></marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="699" height="429" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="20" y="28" font-size="14" font-weight="700" fill="#0f172a">③ Spatial reuse — merge k neighbours in radius, reject geometry mismatches</text>
+
+  <!-- two surfaces split by a depth/normal discontinuity -->
+  <polygon points="60,60 300,60 120,348 60,348" fill="#eff6ff"/>
+  <polygon points="300,60 420,60 420,348 120,348" fill="#fff7ed"/>
+  <line x1="300" y1="60" x2="120" y2="348" stroke="#f59e0b" stroke-width="2"/>
+  <text x="150" y="84" font-size="11" fill="#3b82f6">surface A</text>
+  <text x="360" y="84" font-size="11" fill="#b45309">surface B</text>
+  <text x="300" y="362" font-size="10" fill="#b45309">depth / normal edge</text>
+
+  <!-- pixel grid -->
+  <g stroke="#cbd5e1" stroke-width="0.8">
+    <line x1="60" y1="60" x2="60" y2="348"/><line x1="96" y1="60" x2="96" y2="348"/><line x1="132" y1="60" x2="132" y2="348"/><line x1="168" y1="60" x2="168" y2="348"/><line x1="204" y1="60" x2="204" y2="348"/><line x1="240" y1="60" x2="240" y2="348"/><line x1="276" y1="60" x2="276" y2="348"/><line x1="312" y1="60" x2="312" y2="348"/><line x1="348" y1="60" x2="348" y2="348"/><line x1="384" y1="60" x2="384" y2="348"/><line x1="420" y1="60" x2="420" y2="348"/>
+    <line x1="60" y1="60" x2="420" y2="60"/><line x1="60" y1="96" x2="420" y2="96"/><line x1="60" y1="132" x2="420" y2="132"/><line x1="60" y1="168" x2="420" y2="168"/><line x1="60" y1="204" x2="420" y2="204"/><line x1="60" y1="240" x2="420" y2="240"/><line x1="60" y1="276" x2="420" y2="276"/><line x1="60" y1="312" x2="420" y2="312"/><line x1="60" y1="348" x2="420" y2="348"/>
+  </g>
+
+  <!-- search radius around the canonical pixel q -->
+  <circle cx="258" cy="232" r="82" fill="none" stroke="#3b82f6" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <text x="258" y="160" text-anchor="middle" font-size="10" fill="#3b82f6">spatialRadius</text>
+
+  <!-- canonical pixel q (on surface B) -->
+  <rect x="240" y="214" width="36" height="36" fill="#3b82f6" opacity="0.85"/>
+  <text x="258" y="236" text-anchor="middle" font-size="11" font-weight="700" fill="#ffffff">q</text>
+
+  <!-- accepted neighbours (same surface B): green + arrow into q -->
+  <g>
+    <circle cx="258" cy="178" r="6" fill="#10b981"/><line x1="258" y1="184" x2="258" y2="210" stroke="#10b981" stroke-width="1.6" marker-end="url(#s1)"/>
+    <circle cx="312" cy="214" r="6" fill="#10b981"/><line x1="306" y1="217" x2="280" y2="226" stroke="#10b981" stroke-width="1.6" marker-end="url(#s1)"/>
+    <circle cx="294" cy="286" r="6" fill="#10b981"/><line x1="290" y1="281" x2="270" y2="254" stroke="#10b981" stroke-width="1.6" marker-end="url(#s1)"/>
+  </g>
+  <!-- rejected neighbours (across the edge, surface A): red X, no arrow -->
+  <g stroke="#ef4444" stroke-width="2">
+    <line x1="181" y1="245" x2="191" y2="255"/><line x1="191" y1="245" x2="181" y2="255"/>
+    <line x1="185" y1="195" x2="195" y2="205"/><line x1="195" y1="195" x2="185" y2="205"/>
+  </g>
+  <text x="120" y="232" font-size="9.5" fill="#ef4444" text-anchor="end">rejected</text>
+  <text x="120" y="244" font-size="9.5" fill="#ef4444" text-anchor="end">(diff. surface)</text>
+
+  <!-- right panel: the test + merge -->
+  <text x="470" y="120" font-size="12" font-weight="700" fill="#0f172a">domain check (G-buffer)</text>
+  <text x="470" y="144" font-size="11" fill="#475569">accept neighbour j iff</text>
+  <text x="470" y="164" font-size="11" fill="#0f172a">dot(N_q, N_j) ≥ normalThresh</text>
+  <text x="470" y="182" font-size="11" fill="#0f172a">|pos_q − pos_j| ≤ depthThresh</text>
+  <text x="470" y="214" font-size="12" font-weight="700" fill="#0f172a">then merge (GRIS)</text>
+  <text x="470" y="236" font-size="10.5" fill="#475569">each accepted reservoir re-</text>
+  <text x="470" y="252" font-size="10.5" fill="#475569">evaluated at q with MIS weight</text>
+  <text x="470" y="270" font-size="11" fill="#0f172a">m_s, survivor chosen ∝ w_s</text>
+
+  <g font-size="10.5">
+    <circle cx="80" cy="392" r="6" fill="#10b981"/><text x="94" y="396" fill="#475569">accepted — same surface, contributes its sample</text>
+    <line x1="430" y1="388" x2="442" y2="400" stroke="#ef4444" stroke-width="2"/><line x1="442" y1="388" x2="430" y2="400" stroke="#ef4444" stroke-width="2"/>
+    <text x="452" y="396" fill="#475569">rejected — fails the normal/depth check</text>
+  </g>
+</svg>

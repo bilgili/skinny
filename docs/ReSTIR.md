@@ -44,6 +44,8 @@ optionally, across accumulation frames). Two ideas make it cheap and effective:
   effective candidate count per pixel grows far beyond what it sampled itself —
   the variance reduction.
 
+![Initial RIS at the primary hit: many unshadowed candidate rays to the lights, one survivor that pays the single shadow ray](diagrams/restir/fig_initial_ris.svg)
+
 ReSTIR DI **converges to the same direct-lighting integral as stock NEE** (it is
 unbiased in the default regime) while reaching a given noise level at a lower
 sample count.
@@ -140,6 +142,8 @@ wherever the true integrand f ≠ 0. *(Talbot et al. 2005; Bitterli et al. 2020.
 > **Implements:** `reservoirUpdate` (the `rand * wSum < w` survivor test) and
 > `reservoirFinalize` (`W = wSum / (M·p̂)`) in `restir/reservoir.slang`.
 
+![RIS resamples M proposal draws toward the target p̂; the survivor approaches the target distribution as M grows](diagrams/restir/fig_ris_resample.svg)
+
 ### 2. The target function p̂ (unshadowed, unweighted)
 
 skinny's RIS owns *all* of primary direct (canonical integration, Decision 5), so
@@ -229,6 +233,8 @@ captured entirely by the per-domain p̂ re-evaluation.
 > `restir/restir_primary.slang` — the `D[a] += sM[j]*p` denominator loop (load
 > each source domain once, evaluate every sample in it) and the
 > `m_s = sM[a]*pOwn[a]/D[a]; w_s = m_s*pCanon[a]*sW[a]` combine loop.
+
+![Spatial reuse: the canonical pixel merges k neighbours within the search radius, rejecting those across a normal/depth discontinuity](diagrams/restir/fig_spatial_reuse.svg)
 
 ### 6. Biased combination (ΣM toggle)
 
@@ -397,6 +403,9 @@ mode, regime, or any tuning value — resets progressive accumulation (folded in
   "temporal beats spatial" property belongs to the real-time **reprojected**
   regime (the P3 follow-on), not the progressive accumulator. **Spatial-only
   (unbiased GRIS) is the default and the recommended regime.**
+
+  ![Progressive temporal reuse: the M-capped previous-frame reservoir is merged into the current frame's and persists onward](diagrams/restir/fig_temporal_reuse.svg)
+
 - **Reprojected temporal is reserved.** Selecting it falls back to a supported
   regime until the motion-vector subsystem lands.
 
@@ -411,6 +420,8 @@ ReSTIR DI is validated against stock NEE as the reference:
   emissive / area-light scenes (the unbiased gate).
 - `tests/test_restir_variance.py` + `assets/restir_variance_demo.usda` — variance
   reduction: ~30% lower RMSE than NEE at equal low sample count.
+
+![Equal low sample count: stock NEE is noisy, ReSTIR DI spatial reuse is far smoother](diagrams/restir/fig_variance.svg)
 
 The unbiased spatial regime has been A/B-verified against megakernel path
 tracing, BDPT, and wavefront NEE on `cornell_box_sphere`, `cornell_box_emissive`,
