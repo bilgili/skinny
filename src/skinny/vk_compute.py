@@ -1027,6 +1027,30 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # bindings 33/34/35: neural directional-proposal frozen weights —
+            # weights[] / biases[] / NfLayerHeader[]. Read by the inline flow
+            # inverse in sampling/proposal.slang (so referenced by every pipeline
+            # that uses this layout, megakernel included); the renderer binds
+            # 1-element dummies until the neural proposal is activated. Placed
+            # ABOVE the MaterialX graph range (25..29) + env CDFs (31/32).
+            vk.VkDescriptorSetLayoutBinding(
+                binding=33,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            vk.VkDescriptorSetLayoutBinding(
+                binding=34,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            vk.VkDescriptorSetLayoutBinding(
+                binding=35,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
         ]
         # Bindings GRAPH_BINDING_BASE..(GRAPH_BINDING_BASE + N - 1): one
         # storage buffer per MaterialX nodegraph compiled into this pipeline.

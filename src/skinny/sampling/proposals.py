@@ -34,3 +34,26 @@ class EnvImportanceProposal(ProposalPlugin):
     cli_token = "env"
     mask_bit = 0x2          # PROPOSAL_ENV
     default_weight = 1.0
+
+
+class NeuralProposal(ProposalPlugin):
+    """Learned neural spline-flow directional proposal (bit2).
+
+    Frozen, offline-trained, wavefront-only. Like ``RestirDiReuse``, this is a
+    thin selector: the GPU state — the weight buffers (scene-set bindings
+    33/34/35) and the per-lane neural pre-pass (vk_wavefront.WavefrontNeural
+    ProposalPass) — is owned renderer-side and capability-gated off on the
+    megakernel. The renderer loads ``weights_path`` (or bakes a dummy net for the
+    1a plumbing bring-up). Selecting it sets the mask bit + ``proposalAlpha.z``;
+    the seam (shaders/sampling/proposal.slang) mixes it in via one-sample MIS.
+    """
+
+    name = "neural"
+    cli_token = "neural"
+    mask_bit = 0x4          # PROPOSAL_NEURAL — bit2
+    default_weight = 1.0
+
+    def __init__(self, weights_path=None):
+        # Default None → the renderer resolves a per-scene weights file (or bakes
+        # a dummy). Kept on the instance so a CLI/settings override threads here.
+        self.weights_path = weights_path

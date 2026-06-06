@@ -7,11 +7,11 @@ pair the renderer packs into FrameConstants.
 
 from __future__ import annotations
 
-from .proposals import BsdfProposal, EnvImportanceProposal
+from .proposals import BsdfProposal, EnvImportanceProposal, NeuralProposal
 from .reuse import IdentityReuse, RestirDiReuse
 
 PROPOSAL_PLUGINS: dict[str, type] = {
-    cls.name: cls for cls in (BsdfProposal, EnvImportanceProposal)
+    cls.name: cls for cls in (BsdfProposal, EnvImportanceProposal, NeuralProposal)
 }
 REUSE_PLUGINS: dict[str, type] = {
     cls.name: cls for cls in (IdentityReuse, RestirDiReuse)

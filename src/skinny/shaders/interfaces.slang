@@ -52,6 +52,24 @@ struct BounceResult
     BSDFSample bsdfSample; // wi converted to world space by evaluateBounce
 };
 
+// Per-lane forward sample produced by the wavefront neural-proposal pre-pass
+// (wavefront/neural_proposal_pass.slang) and consumed at the flat bounce
+// (sampling/proposal.slang via ProposalContext). 32 B scalar layout — matches
+// WavefrontPathPass.NEURAL_STRIDE and the neural pass's RWStructuredBuffer.
+//   wi      world-space neural-drawn direction
+//   pdf     solid-angle pdf at wi (forward); 0 ⇒ no valid sample this lane
+//   version producing network version (baseline 0; online-training hook)
+//   valid   1 = a forward sample was written for this lane, else 0
+struct WfNeuralSample
+{
+    float3 wi;
+    float  pdf;
+    uint   version;
+    uint   valid;
+    uint   _pad0;
+    uint   _pad1;
+};
+
 // ── Integrators ─────────────────────────────────────────────────
 
 interface IIntegrator

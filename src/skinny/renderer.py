@@ -1068,12 +1068,28 @@ class Renderer:
         # _pack_uniforms. Default index 0 ({bsdf}/none) is bit-identical to the
         # pre-seam renderer. Reuse has only the identity mode until ReSTIR lands.
         self._PROPOSAL_PRESETS: list[tuple[str, str]] = [
-            ("BSDF",       "bsdf"),
-            ("BSDF + Env", "bsdf,env"),
-            ("Env",        "env"),
+            ("BSDF",          "bsdf"),
+            ("BSDF + Env",    "bsdf,env"),
+            ("Env",           "env"),
+            # Learned neural spline-flow proposal (bit2). Wavefront-only — the
+            # megakernel capability-gate (in _pack_uniforms) strips the bit and
+            # falls back to its analytic subset, like ReSTIR DI → identity.
+            ("BSDF + Neural", "bsdf,neural"),
         ]
         self.proposal_preset_modes: list[str] = [n for n, _ in self._PROPOSAL_PRESETS]
         self.proposal_preset_index = 0
+        # Neural proposal (bit2) host state. `neural_network_version` is stamped
+        # into FrameConstants (baseline 0 — the per-sample version hook for online
+        # training). The GPU weight buffers + the WavefrontNeuralProposalPass are
+        # owned renderer-side and built lazily in wavefront mode (mirrors the
+        # ReSTIR pass); None until the neural preset is active. `_neural_warned`
+        # latches the one-shot megakernel-unsupported notice.
+        self._neural_network_version = 0
+        self._neural_warned = False
+        self._neural_pass = None
+        # Per-scene baked weights file (NFW1). None ⇒ the renderer bakes a dummy
+        # net for the 1a plumbing bring-up; a CLI/settings override threads here.
+        self._neural_weights_path = None
         # Reuse modes: identity (stock NEE) + ReSTIR DI (wavefront-only;
         # falls back to identity on megakernel/Metal via the capability gate).
         self._REUSE_TOKENS: list[str] = ["none", "restir-di"]
@@ -1510,7 +1526,8 @@ class Renderer:
         _rcfg = getattr(self, "_restir_config", None)
         key = (self.width, self.height, has_nonflat, reuse_mode,
                int(self.restir_regime_index) if reuse_mode == 1 else None,
-               tuple(sorted(_rcfg.items())) if _rcfg else None)
+               tuple(sorted(_rcfg.items())) if _rcfg else None,
+               self._neural_active())
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             # Live ReSTIR tuning: refresh the push-constant config each frame so
             # slider changes (mLight/mBsdf/k/radius/mCap/biased) take effect
@@ -1551,10 +1568,30 @@ class Renderer:
                 stream_size, config=self._restir_build_config(),
             )
             self._wavefront_path_pass.set_restir(self._restir_pass)
+        # Neural directional proposal (bit2): build the wavefront pre-pass over
+        # the same path-state + hit buffers + the path pass's per-lane neural
+        # buffer, and hook it every bounce. Constructing it only when neural is
+        # active (always wavefront here) IS the capability gate.
+        self._neural_pass = None
+        if self._neural_active():
+            self._sync_neural_weights()
+            from skinny.vk_wavefront import WavefrontNeuralProposalPass
+            self._neural_pass = WavefrontNeuralProposalPass(
+                self.ctx, self.shader_dir, self._scene_set0_layout,
+                self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
+                self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
+                self._wavefront_path_pass.neural_buf.buffer,
+                self._wavefront_path_pass.neural_buf.size,
+                stream_size, network_version=self._neural_network_version,
+            )
+            self._wavefront_path_pass.set_neural(self._neural_pass)
         self._wf_path_pass_dims = key
         return self._wavefront_path_pass
 
     def _destroy_wavefront_path_pass(self) -> None:
+        if getattr(self, "_neural_pass", None) is not None:
+            self._neural_pass.destroy()
+            self._neural_pass = None
         if getattr(self, "_restir_pass", None) is not None:
             self._restir_pass.destroy()
             self._restir_pass = None
@@ -2913,6 +2950,21 @@ class Renderer:
             self.ctx, ENV_HEIGHT * (ENV_WIDTH + 1) * 4)
         self._ensure_env_uploaded()
 
+        # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
+        # flow architecture and seeded with a dummy (zero) net so the inline flow
+        # inverse in proposal.slang always has valid descriptors, even with the
+        # neural proposal inactive. Real per-scene weights overwrite them on
+        # activation (_sync_neural_weights). The same dummy is the 1a bring-up net.
+        from skinny.sampling.neural_weights import make_dummy_weights
+        _nw = make_dummy_weights()
+        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nw.weight_bytes), 4))
+        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nw.bias_bytes), 4))
+        self.neural_layers_buffer = StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4))
+        self.neural_weights_buffer.upload_sync(_nw.weight_bytes)
+        self.neural_biases_buffer.upload_sync(_nw.bias_bytes)
+        self.neural_layers_buffer.upload_sync(_nw.header_bytes)
+        self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
+
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
         # descriptor is valid even before the user flips off "None".
         self.tattoo_image = SampledImage(self.ctx, TATTOO_WIDTH, TATTOO_HEIGHT)
@@ -3610,6 +3662,18 @@ class Renderer:
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 pBufferInfo=[env_cond_info],
             ))
+            # Neural proposal weights (33/34/35). Always bound (dummy net when
+            # inactive) so the inline flow inverse in proposal.slang has valid
+            # descriptors on every pipeline that uses this layout.
+            for _b, _buf in ((33, self.neural_weights_buffer),
+                             (34, self.neural_biases_buffer),
+                             (35, self.neural_layers_buffer)):
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=_buf.buffer, offset=0, range=_buf.size)],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_scene_descriptors(self) -> None:
@@ -6768,6 +6832,48 @@ class Renderer:
         idx = max(0, min(int(self.proposal_preset_index), n - 1))
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
 
+    def _neural_active(self) -> bool:
+        """True when the neural proposal (bit2) is selected AND the backend can
+        run it (wavefront only). Drives lazy pass build + the scene-set bind."""
+        if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            return False
+        return any(getattr(p, "mask_bit", 0) == 0x4 for p in self._active_proposals())
+
+    def _warn_neural_megakernel_once(self) -> None:
+        """One-shot notice that the neural proposal is unsupported on the
+        megakernel (reported, not silently dropped — the bit is stripped + the
+        mixture falls back to its analytic subset)."""
+        if not self._neural_warned:
+            self._neural_warned = True
+            print("[skinny] neural proposal is wavefront-only; ignored on the "
+                  "megakernel backend (falling back to the analytic proposals)")
+
+    def _sync_neural_weights(self) -> None:
+        """Upload the active neural weights to bindings 33/34/35. Loads the
+        resolved per-scene NFW1 file when ``_neural_weights_path`` is set;
+        otherwise keeps the dummy (zero) net seeded at init — the 1a bring-up
+        network. Idempotent: re-uploads only when the path changes. The buffers
+        are architecture-fixed, so a valid file's byte sizes always match."""
+        path = self._neural_weights_path
+        if path == self._neural_weights_loaded:
+            return
+        if path is None:
+            self._neural_weights_loaded = None
+            return
+        try:
+            from skinny.sampling.neural_weights import load_neural_weights
+            nw = load_neural_weights(path)
+        except Exception as exc:  # noqa: BLE001 - fall back to the dummy net
+            print(f"[skinny] neural weights load failed for {path}: {exc}; "
+                  "keeping the dummy net")
+            self._neural_weights_path = None
+            self._neural_weights_loaded = None
+            return
+        self.neural_weights_buffer.upload_sync(nw.weight_bytes)
+        self.neural_biases_buffer.upload_sync(nw.bias_bytes)
+        self.neural_layers_buffer.upload_sync(nw.header_bytes)
+        self._neural_weights_loaded = path
+
     def _active_reuse(self):
         """Active reuse plugin for the current reuse index."""
         from skinny.sampling import parse_reuse
@@ -6940,6 +7046,18 @@ class Renderer:
         reuse_mode = int(self._active_reuse().reuse_mode)
         if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
             reuse_mode = 0
+        # Neural proposal (bit2) is wavefront-only — the MLP runs as a compute
+        # pre-pass (vk_wavefront.WavefrontNeuralProposalPass), infeasible inline
+        # in the megakernel (MoltenVK big-kernel limit). On the megakernel strip
+        # the bit and renormalise the mixture over the analytic remainder, then
+        # warn once so the request is reported, not silently dropped.
+        if (prop_mask & 0x4) and self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            self._warn_neural_megakernel_once()
+            prop_mask &= ~0x4
+            a = list(prop_alpha)
+            a[2] = 0.0
+            s = sum(a) or 1.0
+            prop_alpha = (a[0] / s, a[1] / s, a[2] / s, a[3] / s)
         data += struct.pack("II", int(prop_mask), reuse_mode)         # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
         # Per-lobe sampler selection (flatLobeSamplers): one uint, 8 bits/lobe
@@ -6951,6 +7069,21 @@ class Renderer:
             self.coat_sampler_index, self.spec_sampler_index, self.diff_sampler_index
         )
         data += struct.pack("I", int(flat_lobe_samplers))             # 4 bytes
+        # Neural directional proposal — scene AABB (for the condition's position
+        # normalisation) + active frozen-net version (baseline 0). Scalar tail
+        # matching FrameConstants in common.slang; read only when the NEURAL bit
+        # is active, so default {bsdf} stays bit-identical. The encoding here MUST
+        # match the offline trainer's (spline_flow) condition.
+        wb = self.scene.world_bounds()
+        if wb is not None:
+            bmin = np.asarray(wb[0], dtype=np.float32)
+            bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
+        else:
+            bmin = np.zeros(3, dtype=np.float32)
+            bext = np.ones(3, dtype=np.float32)
+        data += bmin.tobytes()                                        # 12 bytes
+        data += bext.tobytes()                                        # 12 bytes
+        data += struct.pack("I", int(self._neural_network_version))   # 4 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by

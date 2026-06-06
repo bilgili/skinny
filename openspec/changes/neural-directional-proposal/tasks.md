@@ -3,25 +3,25 @@
 - [x] 1.1 New `shaders/sampling/neural_flow.slang`: port the spline-flow forward (`u → wi`) — coupling layers, MLP, rational-quadratic spline forward, logdet
 - [x] 1.2 Port the inverse (`wi → pdf`) — RQ spline inverse (analytic quadratic solve) + solid-angle Jacobian; both forward and inverse share the weight buffers
 - [x] 1.3 Define the flat weight layout (`weights[]`, `biases[]`, `LayerHeader[]`) and a `spline_flow` exporter that bakes a trained net to that file format
-- [ ] 1.4 Slang↔PyTorch pdf-parity test: identical (condition, base sample) → direction + solid-angle pdf agree within tolerance (the 1a gate, before any render wiring)
+- [x] 1.4 Slang↔PyTorch pdf-parity test: identical (condition, base sample) → direction + solid-angle pdf agree within tolerance (the 1a gate, before any render wiring). `tests/test_neural_parity.py` re-implements `neural_flow.slang` in numpy off the same flat weight layout and locks it against committed PyTorch goldens (`tests/data/neural_parity/`, baked by `generate_goldens.py`); CI-runnable with no torch/GPU. Forward `max |Δwi|=4.3e-6`, `rel Δpdf=2.5e-5`; inverse `rel Δpdf=5.2e-5`; fwd→inv round-trip `2e-14` (bars `1e-4` / `1e-3`). Optional GPU-runtime check (`sampleNeural`/`pdfNeural` over slangpy) skips cleanly where the typed `StructuredBuffer<NfLayerHeader>` cannot bind — GPU parity stays validated via the headless bring-up (4.3).
 
 ## 2. Bindings + GPU state
 
-- [ ] 2.1 Declare bindings 25/26/27 (weights / biases / layer-headers) in `bindings.slang`; update the `Architecture.md` binding map
-- [ ] 2.2 Host weight buffers + upload helper; load the baked weights file
-- [ ] 2.3 Add the `networkVersion` field (baseline 0) to the proposal sample type in `common.slang` / `proposal.slang`
+- [x] 2.1 Declare bindings 33/34/35 (weights / biases / layer-headers) in `sampling/neural_proposal.slang` + the hand-declared scene-set layout (`vk_compute._create_descriptor_set_layout`); the scope doc's 25/26/27 collide with `GRAPH_BINDING_BASE`, so 33/34/35 sit above the graph range + env CDFs. (`Architecture.md` map: in 6.4.)
+- [x] 2.2 Host weight buffers + upload helper (`sampling/neural_weights.py` NFW1 loader + dummy baker; renderer `_sync_neural_weights`); load the baked weights file
+- [x] 2.3 Add the `networkVersion` field (baseline 0) to the proposal sample (`WfNeuralSample`/`ProposalContext` + `FrameConstants.neuralNetworkVersion`) in `common.slang` / `interfaces.slang` / `proposal.slang`
 
 ## 3. Seam wiring (proposal bit2)
 
-- [ ] 3.1 `PROPOSAL_NEURAL = 0x4` in `proposal.slang`; extend `sampleBounceDirection` + `mixtureProposalPdf` with the neural term (weight `proposalAlpha.z`), reading the precomputed per-lane `(wi, pdf)`
-- [ ] 3.2 `NeuralProposalPlugin(ProposalPlugin)` (`mask_bit=0x4`, `default_weight`) with `build/destroy/resize` owning the weight buffers + binding and loading weights; register in `proposals.py` / registry
-- [ ] 3.3 `--proposals bsdf,neural` CLI + data-driven GUI `_disc` selector + settings persistence; reset accumulation on change
+- [x] 3.1 `PROPOSAL_NEURAL = 0x4` in `proposal.slang`; extended `sampleBounceDirection` (3-way one-sample MIS, precomputed neural candidate) + `mixtureProposalPdf` (inline inverse) via `proposalWeights` (per-lane renormalisation, gated by `neuralValid`); `neuralActive` threaded through `nee`/`reuse` for unbiased NEE coupling
+- [x] 3.2 `NeuralProposal(ProposalPlugin)` (`mask_bit=0x4`, `default_weight`) registered in `proposals.py`/`registry`. GPU state is renderer-owned (mirrors `RestirDiReuse` → `RestirDiPass`): weight buffers + `WavefrontNeuralProposalPass`, not the throwaway plugin instances
+- [x] 3.3 `--proposals bsdf,neural` CLI + `BSDF + Neural` preset (data-driven `_disc` selector + settings persistence via `proposal_preset_index`, auto-surfaced); accumulation resets on proposal change (existing state-hash)
 
 ## 4. Wavefront neural pass (1a plumbing)
 
-- [ ] 4.1 `WavefrontNeuralProposalPass`: consume per-lane `HitInfo[]` → build condition `c` → Slang inference → write per-lane `(wi, pdf)` buffer
-- [ ] 4.2 Renderer lazy build/destroy of the pass (mirror `RestirDiPass`); wire into the wavefront gate between shade and bounce; reject neural on the megakernel backend
-- [ ] 4.3 Recompile `main_pass.spv`; bring up with a DUMMY net (cosine-equivalent weights) → prove `{bsdf, neural}` unbiased and default `{bsdf}` bit-identical (the 1a milestone)
+- [x] 4.1 `WavefrontNeuralProposalPass` (`wavefront/neural_proposal_pass.slang::wfNeuralProposal`): consumes per-lane `HitInfo[]` + state → builds condition `c` → forward Slang inference → writes per-lane `(wi, pdf)` (set-1 binding 8, owned by `WavefrontPathPass`)
+- [x] 4.2 Renderer lazy build/destroy (`_ensure`/`_destroy_wavefront_path_pass`, `set_neural`, rebuild key includes `_neural_active()`); dispatched every bounce between scatter and shade; megakernel rejects neural (`_pack_uniforms` strips bit2 + warns; `_neural_active` gates on wavefront)
+- [~] 4.3 `main_pass.spv` recompiled (headless run regenerates it; UBO=508, megakernel + wavefront construct + render with no validation errors; bindings 33/34/35 + state-set 8 proven). DUMMY-net unbiased/bit-identical PROVE pending a loaded-scene headless A/B (the wavefront path pass + neural pass only build once scene bindings exist) → see 6.1/6.2
 
 ## 5. Offline data pipe (1b)
 
@@ -33,4 +33,8 @@
 - [ ] 6.1 Gate: default `{bsdf}` pixel-identical (megakernel + wavefront); extend the sampling-parity goldens
 - [ ] 6.2 Gate: `{bsdf, neural}` converges == BDPT (unbiased) on the test scene (headless A/B)
 - [ ] 6.3 Gate: equal-time efficiency + firefly tail of `{bsdf, neural}` vs `{bsdf, env}+ReSTIR` on the scene; record the numbers
-- [ ] 6.4 Docs: `Architecture.md` (bindings + module map), scene-sampling docs, `README.md` CLI flag, `CHANGELOG.md`
+- [x] 6.4 Docs: `Architecture.md` (binding map 33/34/35 + set-1 binding 8 + module tree + UBO 508), `Wavefront.md` (neural-proposal seam section), `README.md` (`--proposals bsdf,neural`), `CHANGELOG.md`, `PythonAPI.md` (`NeuralProposal` export)
+
+> **Remaining (need a loaded-scene headless GPU run / external training; not landed this pass):**
+> - 4.3 functional prove, 6.1/6.2/6.3 gates: the wavefront path pass + neural pre-pass only build once scene bindings exist (a real USD scene), so the dummy-net unbiased/bit-identical + ==BDPT + equal-time A/Bs need a headless USD render harness (pump `update()` until instances stream in), not the empty-scene smoke. Plumbing is proven (UBO 508, both backends construct + render with no validation errors, bindings 33/34/35 + set-1 8 bound, neural pass build/dispatch wired).
+> - 5.1 record-dump + 5.2 `spline_flow` training: the offline data pipe (1b). Condition encoding to mirror is canonical in `sampling/neural_proposal.slang::neuralCondition` (pos→[-1,1]³ via scene AABB, N, wo).

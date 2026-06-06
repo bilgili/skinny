@@ -6,7 +6,7 @@ scene-sampling-design.md and openspec/changes/pluggable-scene-sampling/.
 """
 
 from .plugin import AttachPoint, ProposalPlugin, ReusePlugin, SamplingPlugin
-from .proposals import BsdfProposal, EnvImportanceProposal
+from .proposals import BsdfProposal, EnvImportanceProposal, NeuralProposal
 from .reuse import IdentityReuse
 from .registry import (
     PROPOSAL_PLUGINS,
@@ -34,6 +34,7 @@ __all__ = [
     "ReusePlugin",
     "BsdfProposal",
     "EnvImportanceProposal",
+    "NeuralProposal",
     "IdentityReuse",
     "PROPOSAL_PLUGINS",
     "REUSE_PLUGINS",

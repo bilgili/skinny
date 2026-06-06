@@ -482,6 +482,7 @@ class WavefrontPathPass:
     NUM_SLOTS = 2  # lockstep with WF_NUM_SLOTS (0 = flat, 1 = non-flat catch-all)
 
     HIT_STRIDE = 96  # ≥ sizeof(HitInfo) (≈92 B scalar) — headroom
+    NEURAL_STRIDE = 32  # = sizeof(WfNeuralSample) (interfaces.slang): wi,pdf,version,valid,2×pad
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
@@ -493,6 +494,9 @@ class WavefrontPathPass:
         # Optional reuse plugin (ReSTIR DI) — scheduled at bounce 0 between the
         # primary intersect and the shade. None = identity reuse (stock NEE).
         self._restir = None
+        # Optional neural-proposal pre-pass — scheduled EVERY bounce between
+        # scatter and shade, writing the per-lane (wi, pdf) the flat shade reads.
+        self._neural = None
 
         # The flat shade kernel handles flat + MaterialX-graph materials and
         # imports no skin/python (small). The heavy catch-all (wfPathShade) is
@@ -528,17 +532,23 @@ class WavefrontPathPass:
         self._buffers["slot_cursor"] = StorageBuffer(ctx, self.NUM_SLOTS * 4)
         self._buffers["indirect"] = StorageBuffer(ctx, self.NUM_SLOTS * 12, indirect=True)
         self._indirect_buf = self._buffers["indirect"].buffer
+        # Per-lane neural-proposal forward sample (set 1, binding 8). Owned here
+        # (always allocated, zero-init valid==0); the wavefront neural pre-pass
+        # writes it when the neural proposal is active. The flat shade kernel
+        # reads wfNeural[i] — so the binding is always in this set's layout.
+        self._buffers["neural"] = StorageBuffer(ctx, self.stream_size * self.NEURAL_STRIDE)
+        self.neural_buf = self._buffers["neural"]
 
-        # Set 1: path-state (0), hit (1), + the 6 queue buffers (2..7).
+        # Set 1: path-state (0), hit (1), the 6 queue buffers (2..7), neural (8).
         state_bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
-            for b in range(8)
+            for b in range(9)
         ]
         self._state_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=8, pBindings=state_bindings), None)
+                bindingCount=9, pBindings=state_bindings), None)
 
         # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state] +
         # a 12-byte push constant {streamBase, shadeSlot, streamSize}.
@@ -561,7 +571,7 @@ class WavefrontPathPass:
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=8)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=9)]), None)
         self._state_set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
@@ -574,6 +584,7 @@ class WavefrontPathPass:
             (self._buffers["slot_queue"].buffer, self._buffers["slot_queue"].size),
             (self._buffers["slot_cursor"].buffer, self._buffers["slot_cursor"].size),
             (self._buffers["indirect"].buffer, self._buffers["indirect"].size),
+            (self._buffers["neural"].buffer, self._buffers["neural"].size),
         ]
         writes = []
         for b, (buf, rng) in enumerate(bound):
@@ -606,6 +617,10 @@ class WavefrontPathPass:
     def set_restir(self, restir) -> None:
         """Attach (or clear) the ReSTIR DI reuse plugin scheduled at bounce 0."""
         self._restir = restir
+
+    def set_neural(self, neural) -> None:
+        """Attach (or clear) the neural-proposal pre-pass run every bounce."""
+        self._neural = neural
 
     def record_dispatch(self, cmd, scene_set) -> None:
         """Record the tiled, counting-sorted bounce loop. Per tile: generate →
@@ -664,6 +679,13 @@ class WavefrontPathPass:
                 self._bind(cmd, "wfScatter", scene_set)         # lanes → per-slot queues
                 self._dispatch(cmd)
                 mem_barrier()
+                # Neural-proposal pre-pass: forward-sample every live lane into
+                # the neural buffer the flat shade reads. Binds its own pipeline
+                # layout, so restore the wfTile push constants afterwards.
+                if self._neural is not None:
+                    self._neural.record(cmd, scene_set)
+                    mem_barrier()
+                    self._push(cmd, 0, [stream_base, 0, self.stream_size])
                 # ReSTIR DI reuse hook: at the primary vertex, compute primary
                 # direct (into the path-state radiance) before shade, whose
                 # depth-0 reuseDirect is gated to zero. ReSTIR binds a different
@@ -691,6 +713,107 @@ class WavefrontPathPass:
             vk.vkDestroyShaderModule(self.ctx.device, m, None)
         for buf in self._buffers.values():
             buf.destroy()
+
+
+class WavefrontNeuralProposalPass:
+    """Neural directional-proposal pre-pass (wavefront-only).
+
+    One compute kernel (``wavefront/neural_proposal_pass.slang::wfNeuralProposal``):
+    for every live lane it reads the path-state + HitInfo, builds the spline-flow
+    condition, draws a forward sample, and writes the per-lane ``(wi, pdf)`` into
+    the buffer the flat shade kernel reads (WavefrontPathPass set-1 binding 8).
+    Scheduled between scatter and shade each bounce, mirroring ``RestirDiPass``.
+
+    Set 0 is the renderer's shared scene set (provides ``fc`` + the neural weight
+    buffers at 33/34/35); set 1 is this pass's own state / hit / neural-out. The
+    out buffer is owned by ``WavefrontPathPass`` and shared here, so the two
+    passes index the same per-lane records.
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] in neural_proposal_pass.slang
+
+    def __init__(self, ctx, shader_dir: Path, scene_set_layout,
+                 state_buffer, state_range: int, hit_buffer, hit_range: int,
+                 neural_buffer, neural_range: int, stream_size: int,
+                 network_version: int = 0) -> None:
+        self.ctx = ctx
+        self.stream_size = int(stream_size)
+        self.network_version = int(network_version)
+
+        spv = _compile_full_spv(shader_dir, "wavefront/neural_proposal_pass",
+                                "wfNeuralProposal", "wavefront/_wfneural")
+        code = spv.read_bytes()
+        self._module = vk.vkCreateShaderModule(
+            ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+
+        # Set 1: state (0), hit (1), neural-out (2).
+        set_bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+            for b in range(3)
+        ]
+        self._set_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=3, pBindings=set_bindings), None)
+
+        # Push constant: {streamSize, networkVersion, _pad0, _pad1} = 16 B.
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=16)
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._set_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
+        stage = vk.VkPipelineShaderStageCreateInfo(
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=self._module, pName="main")
+        self._pipeline = vk.vkCreateComputePipelines(
+            ctx.device, vk.VK_NULL_HANDLE, 1,
+            [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device, vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[vk.VkDescriptorPoolSize(
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=3)]), None)
+        self._set = vk.vkAllocateDescriptorSets(
+            ctx.device, vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1,
+                pSetLayouts=[self._set_layout]))[0]
+        bound = [(state_buffer, state_range), (hit_buffer, hit_range),
+                 (neural_buffer, neural_range)]
+        writes = []
+        for b, (buf, rng) in enumerate(bound):
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=self._set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[vk.VkDescriptorBufferInfo(buffer=buf, offset=0, range=rng)]))
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
+
+    def record(self, cmd, scene_set) -> None:
+        """Dispatch the forward pass over the whole stream (one thread per lane).
+
+        Records bind + push + dispatch; the caller barriers around it (the shade
+        kernel reads the neural buffer this writes)."""
+        import struct
+
+        import cffi
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 2, [scene_set, self._set], 0, None)
+        data = struct.pack("IIII", self.stream_size, self.network_version, 0, 0)
+        buf = cffi.FFI().new("char[]", data)
+        vk.vkCmdPushConstants(cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, len(data), buf)
+        groups = (self.stream_size + self._GROUP - 1) // self._GROUP
+        vk.vkCmdDispatch(cmd, groups, 1, 1)
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        vk.vkDestroyPipeline(self.ctx.device, self._pipeline, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._set_layout, None)
+        vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
         self._buffers = {}
 
 

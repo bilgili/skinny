@@ -67,11 +67,12 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
             }
             float3 wo = worldToTangent(V, T, B, N);
 
-            br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, rng);
+            br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, false, rng);
 
             ProposalContext pctx;
             pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;
             pctx.position = h.position; pctx.materialId = h.materialId;
+            pctx.neuralValid = false;   // megakernel: neural is wavefront-only
             BSDFSample bs = sampleBounceDirection(mat, pctx, rng);
             if (bs.valid)
                 bs.wi = tangentToWorld(bs.wi, T, B, N);
@@ -96,11 +97,12 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
             }
             float3 wo = worldToTangent(V, T, B, N);
 
-            br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, rng);
+            br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, false, rng);
 
             ProposalContext pctx;
             pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;
             pctx.position = h.position; pctx.materialId = h.materialId;
+            pctx.neuralValid = false;   // megakernel: neural is wavefront-only
             BSDFSample bs = sampleBounceDirection(mat, pctx, rng);
             if (bs.valid)
                 bs.wi = tangentToWorld(bs.wi, T, B, N);

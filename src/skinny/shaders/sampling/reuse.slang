@@ -20,13 +20,17 @@ static const uint REUSE_IDENTITY  = 0u;
 static const uint REUSE_RESTIR_DI = 1u;
 
 // Direct lighting at a shading vertex, routed through the reuse seam.
+// `neuralActive` flags a lane whose bounce mixture includes the neural proposal
+// (a flat wavefront lane); NEE's MIS companion then includes the neural term so
+// direct + indirect stay coupled. Always false on the megakernel and non-flat
+// lanes (neural is wavefront flat-only).
 float3 reuseDirect<TM : IMaterial>(
     TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo,
-    uint depth, inout RNG rng)
+    uint depth, bool neuralActive, inout RNG rng)
 {
     // Primary-hit direct owned by ReSTIR: gate the inline estimate at the
     // primary vertex so the reservoir resolve pass is its sole source.
     if (fc.reuseMode == REUSE_RESTIR_DI && depth == 0u)
         return float3(0.0);
-    return allLightsNEE(mat, h, N, T, B, wo, rng);
+    return allLightsNEE(mat, h, N, T, B, wo, neuralActive, rng);
 }

@@ -211,7 +211,7 @@ void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 
     RNG rng; rng.state = s.rngState;
     Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
-    BounceResult br = evaluateFlatBounce(h, r, s.depth, rng);
+    BounceResult br = evaluateFlatBounce(h, r, s.depth, rng, wfNeural[i]);
     wfFinishShade(i, s, rng, h, br);
 }
 

@@ -35,6 +35,25 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (= f·cos) is sampler-invariant. Registry in `sampling/lobe_samplers.py`; gate in
   `tests/test_sampling_parity.py`.
 
+- Neural directional proposal (wavefront-only) — a learned, position-conditioned
+  rational-quadratic **neural spline flow** (proposal bit2,
+  `--proposals bsdf,neural` / GUI "BSDF + Neural") that proposes the BSDF bounce
+  direction with an exact solid-angle pdf and MIS-mixes into the scene-sampling
+  proposal seam. Frozen, offline-trained per scene (standalone `spline_flow` repo)
+  in the **NFW1** weight format. Architecture is **Option A** — a compute pre-pass
+  (`WavefrontNeuralProposalPass`, `wavefront/neural_proposal_pass.slang`) draws one
+  forward sample per live lane between scatter and shade; the flat shade kernel
+  reads it and evaluates the arbitrary-direction inverse pdf inline
+  (`sampling/{neural_flow,neural_proposal,proposal}.slang` + `nee.slang`). Scoped to
+  the flat wavefront shade kernel; unbiased regardless of net quality
+  (`proposalWeights` renormalises, the same effective weights drive the bounce and
+  NEE companion pdfs). New weight buffers at **bindings 33/34/35** (above the
+  MaterialX graph range) — always bound with an all-zero dummy net so the inline
+  inverse resolves everywhere; the megakernel strips the bit and falls back to its
+  analytic proposal subset (mirroring ReSTIR DI → identity). FrameConstants gained
+  a scalar tail (scene AABB + net version), UBO now 508 B. **Stage 1: plumbing +
+  dummy-net bring-up landed**; per-scene training and the equal-time quality gate
+  are pending.
 - ReSTIR DI reuse mode (wavefront-only) — reservoir resampling of primary-hit
   direct lighting over the unified light set (sphere + emissive-triangle + env,
   light- and BSDF-sampled candidates) with deferred visibility. Spatial reuse

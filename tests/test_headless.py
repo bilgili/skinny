@@ -123,7 +123,6 @@ class TestRendererHeadless:
             vk_ctx=ctx,
             shader_dir=SHADER_DIR,
             hdr_dir=HDR_DIR,
-            head_dir=HEAD_DIR,
             tattoo_dir=TATTOO_DIR,
         )
         yield renderer, ctx
@@ -199,8 +198,9 @@ class TestRendererHeadless:
         renderer.update(0.016)
         data = renderer._pack_uniforms()
         # FrameConstants UBO: 476 bytes through proposalAlpha + 4 for the
-        # flatLobeSamplers uint tail (per-lobe-sampler-registry).
-        assert len(data) == 480, f"Expected 480 bytes, got {len(data)}"
+        # flatLobeSamplers uint tail + 28 for the neural-proposal tail
+        # (sceneBoundsMin 12 + sceneBoundsExtent 12 + neuralNetworkVersion 4).
+        assert len(data) == 508, f"Expected 508 bytes, got {len(data)}"
 
     def test_pack_uniforms_direct_flag(self, renderer_and_ctx):
         renderer, _ = renderer_and_ctx
@@ -452,7 +452,6 @@ class TestHeadlessEncoding:
             vk_ctx=ctx,
             shader_dir=SHADER_DIR,
             hdr_dir=HDR_DIR,
-            head_dir=HEAD_DIR,
             tattoo_dir=TATTOO_DIR,
         )
         yield renderer, ctx

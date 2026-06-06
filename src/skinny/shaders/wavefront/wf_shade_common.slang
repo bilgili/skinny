@@ -40,6 +40,11 @@ struct WfTilePC { uint streamBase; uint shadeSlot; uint streamSize; };
 [[vk::binding(5, 1)]] RWStructuredBuffer<uint> wfSlotQueue;     // [stream]  lane indices, grouped by slot
 [[vk::binding(6, 1)]] RWStructuredBuffer<uint> wfSlotCursor;    // [NUM_SLOTS] scatter write cursor
 [[vk::binding(7, 1)]] RWStructuredBuffer<uint> wfIndirectArgs;  // [NUM_SLOTS*3] (x,y,z) per slot
+// Per-lane neural-proposal forward sample, written by the neural pre-pass
+// (wavefront/neural_proposal_pass.slang) and read by the flat shade kernel. A
+// 1-element dummy when the neural proposal is inactive (wfNeural[i].valid == 0
+// then, so the flat bounce keeps {bsdf,env}). Owned by WavefrontPathPass.
+[[vk::binding(8, 1)]] RWStructuredBuffer<WfNeuralSample> wfNeural;  // [stream]
 
 uint2 wfDecodePixel(uint lane) { return uint2(lane % fc.width, lane / fc.width); }
 
