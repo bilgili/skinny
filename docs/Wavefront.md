@@ -245,7 +245,128 @@ plumbing**. `flat_bounce.slang:44-50` calls `sampleBounceDirection` through the
 seam; the catch-all routes through `integrators.path::evaluateBounce` which also
 uses it (commit `5e17c8f`: "route wavefront flat-shade through the proposal seam
 + wavefront parity"). The default BSDF-only mask collapses to the material's
-native `sample()` for bit-exact parity.
+native `sample()` for bit-exact parity. Shipped proposal bits: `0x1` BSDF
+(always on), `0x2` environment importance, `0x4` **neural** (the learned
+spline-flow proposal below). `proposalWeights()` renormalises the active bits'
+selection weights to Σ = 1 per lane, so any subset stays unbiased.
+
+### Proposal seam: neural directional proposal (proposal bit2, wavefront-only)
+
+The **neural directional proposal** (`--proposals bsdf,neural`, proposal bit
+`0x4`) is a learned, position-conditioned **rational-quadratic neural spline
+flow** that proposes the BSDF bounce direction toward the incident-light-aware
+integrand and reports an **exact solid-angle pdf**. The net is **frozen,
+offline-trained per scene** (in a standalone `spline_flow` PyTorch repo) and
+**wavefront-only**: the MLP is infeasible inline in the megakernel under
+MoltenVK's big-kernel limit, so the megakernel **strips the bit** and falls back
+to its analytic proposal subset (renormalising `{bsdf, env}` to Σ = 1), mirroring
+the [ReSTIR DI → identity](#reuse-seam-restir-di-reusemode--1-wavefront-only)
+capability gate. Selecting it on the megakernel warns once rather than silently
+dropping the request.
+
+The seam stays **provably unbiased regardless of the net's quality** (one-sample
+MIS divides throughput by the full mixture pdf), so an untrained / dummy net only
+costs variance — never bias. That is exactly what the current Stage-1 milestone
+verifies before any training.
+
+**Option A — pre-pass + inline inverse.** Rather than evaluate the MLP inside the
+hot bounce kernel, the forward draw is amortised across the live lanes by a
+**compute pre-pass**:
+
+- **`WavefrontNeuralProposalPass`** (`shaders/wavefront/neural_proposal_pass.slang`
+  → `wfNeuralProposal`) runs once per live lane each bounce, scheduled **between
+  scatter and shade** (the same slot the ReSTIR DI burst uses). It reads the
+  lane's `HitInfo` + path state, builds the condition, draws **one forward** flow
+  sample, and writes a per-lane `WfNeuralSample {wi, pdf, version, valid}` (32 B)
+  to **set-1 binding 8** (`wfNeural`, owned by `WavefrontPathPass`). The base
+  sample is hashed from the global pixel + frame + bounce — **independent of the
+  shade kernel's RNG stream**, so enabling neural never perturbs the
+  `{bsdf}`/`{bsdf,env}` draw paths.
+- The **flat wavefront shade kernel** reads that record and mixes the precomputed
+  forward direction into the bounce via one-sample MIS (`flat_bounce.slang` →
+  `sampleBounceDirection`). Neural is scoped to the **lean flat** shade kernel
+  only — the skin / catch-all kernels never run it.
+- The **inverse** pdf — needed for *arbitrary* directions the flow did not draw
+  (NEE light directions, BSDF-/env-selected bounce directions) — is evaluated
+  **inline** in the flat shade (`neuralPdfWorld` in `sampling/neural_proposal.slang`,
+  called from `sampling/proposal.slang` + `nee.slang`), because those directions
+  are RNG-drawn in-kernel and cannot be precomputed. The inverse is the only
+  inline MLP eval, and its three weight buffers (bindings 33/34/35) are always
+  bound so the static reference resolves on every pipeline, including the
+  megakernel (seeded with an all-zero dummy net until activation).
+
+**Unbiasedness.** `proposalWeights()` (`sampling/proposal.slang`) gives the
+per-lane effective one-sample-MIS weights: neural participates **only when its
+bit is set AND the lane has a precomputed sample** (`neuralValid` — true only on
+flat wavefront lanes); otherwise `{bsdf, env}` renormalise to Σ = 1. The **same**
+effective weights + the inline inverse drive both the bounce-mixture pdf and the
+NEE companion pdf (`mixtureProposalPdf`), so direct and indirect lighting stay
+MIS-consistent. A `neuralActive` bool is threaded through
+`sampling/reuse.slang` / `nee.slang` so the NEE companion includes the neural
+term **exactly on neural lanes**.
+
+**Condition encoding (canonical).** The condition handed to the flow is 9-dim,
+raw-concatenated (no hashgrid) and **must match the offline trainer byte-for-byte**
+(a mismatch raises variance silently, never bias):
+`c = [ (pos − bboxMin)/bboxExtent·2 − 1  (∈ [−1,1]³), shadingNormal.xyz,
+outgoingWorldDir.xyz ]`. The scene AABB (`fc.sceneBoundsMin` /
+`sceneBoundsExtent`) rides in the UBO tail (read only when neural is active). The
+flow hemisphere is y-up in the shading frame. The math itself lives in
+`shaders/sampling/neural_flow.slang` (coupling layers, RQ-spline forward/inverse,
+MLP, log-det); `neural_proposal.slang` is the thin renderer adapter (weight
+buffers, world↔flow-local frame map). Fixed architecture: 6 layers, 24 spline
+bins, hidden 96, condition 9.
+
+**Weights file (NFW1).** Per-scene weights are baked to a little-endian `NFW1`
+binary (`uint32 magic=0x4E465731, version=1; uint32 layers,bins,hidden,cond;`
+then a `NfLayerHeader` table `(weightOffset, biasOffset, inDim, outDim)`, the
+flat `f32` weights, and the flat `f32` biases), loaded host-side by
+`src/skinny/sampling/neural_weights.py` and uploaded to bindings 33/34/35
+(`NeuralProposal` plugin in `sampling/proposals.py`). `make_dummy_weights()`
+bakes the all-zero bring-up net.
+
+**Parity regression.** `tests/test_neural_parity.py` locks the Slang port
+against the PyTorch reference: it re-implements `neural_flow.slang` in numpy off
+the *same* flat `NFW1` layout (`headers/weights/biases`) and asserts the forward
+`(wi, solid-angle pdf)` and the inverse pdf match committed PyTorch goldens
+(`tests/data/neural_parity/`, baked once by `generate_goldens.py` with the
+`spline_flow` torch venv). It runs in CI with **no torch and no GPU**; the proven
+bar is `|Δwi| < 1e-4` / relative pdf `< 1e-3` (achieved `~4e-6` / `~5e-5`, with a
+machine-precision forward↔inverse round-trip). An optional slangpy test dispatches
+the real `sampleNeural`/`pdfNeural` for the true on-device gate and skips where the
+typed header buffer cannot bind (then GPU parity rides on the headless bring-up).
+
+**Offline pipeline + status.** Stage 1 (this change) is complete end-to-end. The
+**record dump** is a *separate megakernel entry* `mainImageRecord`
+(`integrators/path_record.slang`) — an RR-free path tracer that, per flat/graph
+reflective bounce, appends `(position, normal, wo, wiLocal, contribution)` to
+bindings 36/37 (`Renderer.dump_path_records` → a `.nrec` file). Megakernel hosts
+it because one thread owns the whole path, so the tail radiance `Li` along each
+sampled `wi` is known at loop end and attributed back from a local register stack
+(`contribution = (L_final−L_k)/beta_in_k = f·cos·Li`); in wavefront the path is
+smeared across dispatches, so this would need a per-lane VRAM vertex stack +
+terminate splat. The dump is offline, so megakernel-only costs nothing at render
+time (inference stays wavefront-only). `mainImage` never references 36/37 →
+byte-identical. The offline `spline_flow/render_records.py` fits the flow from
+those records by contribution-weighted MLE (`q ∝ f·Li·cos`) under the **identical**
+`neuralCondition` encoding and bakes `NFW1`.
+
+**Landed + GPU-proven (Mac MPS/MoltenVK):** the full plumbing, a real scene-trained
+net (4.36M Cornell records → trained flow, pdf ∫≈1), loaded + A/B'd in-renderer.
+The equal-time gate (`test_neural_trained_equaltime_gate`) is **measured, not won
+on Mac**: the net is unbiased (mixture-MIS) but the MLP pre-pass is ~28× a bsdf
+bounce, and the flat ceiling-lit Cornell box is broad-indirect (cosine already
+near-optimal) so the guide ≈ cosine and adds a firefly tail with no offsetting
+win. The equal-time WIN is a follow-up — GPU-optimised inference (the deferred
+CUDA-perf goal), guiding-iteration training (sample from learned `q`, retrain — the
+one-shot `{bsdf}`-generated data caps net quality), a concentrated-indirect scene,
+and a firefly-robustness measure (pdf floor / lower neural α). Online / dynamic
+training (the per-sample `neuralNetworkVersion` hook) is a later Stage-2 change.
+
+**Host wiring.** Weight buffers + `WavefrontNeuralProposalPass` are built lazily
+in wavefront mode (mirroring `RestirDiPass`) in `renderer.py` / `vk_wavefront.py`.
+The GUI preset is **"BSDF + Neural"** (`proposal_preset_index`, persisted; env
+`SKINNY_PROPOSALS=bsdf,neural`); changing it resets progressive accumulation.
 
 ### Reuse seam: ReSTIR DI (`reuseMode == 1`, wavefront-only)
 
@@ -355,8 +476,12 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 | `shaders/wavefront/flat_bounce.slang` | flat-slot shade body |
 | `shaders/wavefront/wavefront_state.slang` | `WavefrontPathState` record |
 | `shaders/wavefront/{build_args,scatter,compaction,indirect_paint}.slang` | counting-sort / verification primitives |
-| `shaders/sampling/proposal.slang` | proposal seam (shared with megakernel) |
-| `shaders/sampling/reuse.slang` | reuse seam (`reuseDirect`: identity ⇒ NEE; ReSTIR gate) |
+| `shaders/sampling/proposal.slang` | proposal seam (shared with megakernel); `proposalWeights` / `sampleBounceDirection` / `mixtureProposalPdf` + the neural inline inverse |
+| `shaders/sampling/reuse.slang` | reuse seam (`reuseDirect`: identity ⇒ NEE; ReSTIR gate; `neuralActive` thread to the NEE companion) |
+| `shaders/sampling/{neural_flow,neural_proposal}.slang` | neural proposal: pure spline flow (fwd/inverse) / renderer adapter (weight buffers 33/34/35, condition + world map) |
+| `shaders/wavefront/neural_proposal_pass.slang` (`wfNeuralProposal`) | neural pre-pass — one forward sample per live lane → `wfNeural` (set-1 binding 8) |
+| `vk_wavefront.py` (`WavefrontNeuralProposalPass`) | neural pre-pass set (scene set 0 + own 3-binding set 1); scheduled scatter→shade |
+| `sampling/{proposals.py,neural_weights.py}` | `NeuralProposal` plugin / NFW1 weight loader + dummy baker |
 | `shaders/restir/{reservoir,light_ris,restir_primary}.slang` | ReSTIR DI: reservoir core / unified-light-domain RIS (light+BSDF candidates) + resolve / fill→spatial(GRIS)→resolve passes |
 | `shaders/wavefront/{wf_shade_common,wavefront_path}.slang` | depth-0 BSDF-hits-sphere / env-miss gates (ReSTIR owns primary direct) |
 | `vk_wavefront.py` (`RestirDiPass`) | ReSTIR DI pass set (reservoirs A/B + G-buffer, bounce-0 hook, 36-B RestirPC) |

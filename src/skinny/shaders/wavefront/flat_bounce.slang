@@ -7,14 +7,21 @@
 // flat std_surface path via loadFlatMaterial).
 
 import common;        // RNG, Ray, buildBasis, worldToTangent, tangentToWorld
-import interfaces;    // BounceResult, BSDFSample, HitInfo
+import interfaces;    // BounceResult, BSDFSample, HitInfo, WfNeuralSample
+import bindings;      // fc (proposalMask)
 import nee;           // allLightsNEE (material-free)
 import materials.flat.flat_material;  // FlatMaterial, loadFlatMaterial
-import sampling.proposal;             // sampleBounceDirection (BSDF-only ⇒ mat.sample)
+import sampling.proposal;             // sampleBounceDirection, PROPOSAL_NEURAL
 import sampling.reuse;                 // reuseDirect (identity ⇒ allLightsNEE)
 
-BounceResult evaluateFlatBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
+// `neural` is the wavefront neural pre-pass's per-lane forward sample (valid==0
+// when none / neural inactive). The flat shade kernel is the only path that
+// feeds it; the seam mixes the precomputed candidate at the bounce and evaluates
+// the inverse pdf inline for NEE/MIS (Option A — neural is wavefront flat-only).
+BounceResult evaluateFlatBounce(HitInfo h, Ray r, uint bounce, inout RNG rng,
+                                WfNeuralSample neural)
 {
+    bool neuralActive = ((fc.proposalMask & PROPOSAL_NEURAL) != 0u) && (neural.valid != 0u);
     float3 V = -r.direction;
 
     BounceResult br;
@@ -41,11 +48,15 @@ BounceResult evaluateFlatBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
     }
     float3 wo = worldToTangent(V, T, B, N);
 
-    br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, rng);
+    br.directLight = reuseDirect(mat, h, N, T, B, wo, bounce, neuralActive, rng);
 
     ProposalContext pctx;
     pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;
     pctx.position = h.position; pctx.materialId = h.materialId;
+    pctx.neuralWi = neural.wi;
+    pctx.neuralPdf = neural.pdf;
+    pctx.networkVersion = neural.version;
+    pctx.neuralValid = neuralActive;
     BSDFSample bs = sampleBounceDirection(mat, pctx, rng);
     if (bs.valid)
         bs.wi = tangentToWorld(bs.wi, T, B, N);

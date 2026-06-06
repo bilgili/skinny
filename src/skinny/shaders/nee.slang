@@ -22,7 +22,7 @@ import sampling.proposal;
 
 float3 neeLightEstimator<TM : IMaterial, TL : ILight>(
     TM mat, TL light, HitInfo h, float3 N, float3 T, float3 B,
-    float3 wo, FrameConstants fc, float2 u)
+    float3 wo, bool neuralActive, FrameConstants fc, float2 u)
 {
     LightSample ls = light.samplePoint(h.position, u);
     if (!ls.valid)
@@ -62,6 +62,7 @@ float3 neeLightEstimator<TM : IMaterial, TL : ILight>(
     ProposalContext pc;
     pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
     pc.position = h.position; pc.materialId = h.materialId;
+    pc.neuralValid = neuralActive;   // include the neural term iff this lane uses neural
     float misPdf = mixtureProposalPdf(mat, pc, wi);
     float wNEE   = powerHeuristic(pdfLightSA, misPdf);
 
@@ -70,20 +71,20 @@ float3 neeLightEstimator<TM : IMaterial, TL : ILight>(
 
 float3 allLightsNEE<TM : IMaterial>(
     TM mat, HitInfo h, float3 N, float3 T, float3 B,
-    float3 wo, inout RNG rng)
+    float3 wo, bool neuralActive, inout RNG rng)
 {
     float3 total = float3(0.0);
 
     for (uint d = 0u; d < fc.numDistantLights; d++)
     {
         DirectionalLightImpl dirLight = loadDirectionalLightImpl(distantLights[d]);
-        total += neeLightEstimator(mat, dirLight, h, N, T, B, wo, fc, float2(0.0));
+        total += neeLightEstimator(mat, dirLight, h, N, T, B, wo, neuralActive, fc, float2(0.0));
     }
 
     for (uint i = 0u; i < fc.numSphereLights; i++)
     {
         SphereLightImpl sl = loadSphereLightImpl(sphereLights[i]);
-        total += neeLightEstimator(mat, sl, h, N, T, B, wo, fc, rng.next2());
+        total += neeLightEstimator(mat, sl, h, N, T, B, wo, neuralActive, fc, rng.next2());
     }
 
     if (fc.numEmissiveTriangles > 0u)
@@ -92,7 +93,7 @@ float3 allLightsNEE<TM : IMaterial>(
                        fc.numEmissiveTriangles - 1u);
         EmissiveTriangleLightImpl el = loadEmissiveTriangleLightImpl(
             emissiveTriangles[idx], fc.numEmissiveTriangles);
-        total += neeLightEstimator(mat, el, h, N, T, B, wo, fc, rng.next2());
+        total += neeLightEstimator(mat, el, h, N, T, B, wo, neuralActive, fc, rng.next2());
     }
 
     // Environment NEE. Importance-sample the env distribution and combine
@@ -114,6 +115,7 @@ float3 allLightsNEE<TM : IMaterial>(
             ProposalContext pc;
             pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
             pc.position = h.position; pc.materialId = h.materialId;
+            pc.neuralValid = neuralActive;   // env-NEE companion: match the bounce mixture
             float misPdf = mixtureProposalPdf(mat, pc, wi);
             if (misPdf > 0.0)
             {

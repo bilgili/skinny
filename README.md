@@ -395,6 +395,18 @@ ships the Heitz-2018 basis-form VNDF (coat/spec) and uniform-hemisphere
 `SKINNY_LOBE_SAMPLERS`). Every strategy shares one pdf between `sample()` and
 `evaluate()`, so switching is unbiased — only the noise / variance changes.
 
+**Directional-proposal mixture.** The bounce direction is drawn from a
+runtime-selectable mixture of proposals via one-sample MIS:
+`--proposals {bsdf,bsdf+env,env,bsdf+neural,neural}` (env `SKINNY_PROPOSALS`,
+also GUI/persisted). `bsdf` (default) is the material's own importance sampler —
+bit-identical to the classic renderer; `bsdf,env` MIS-mixes an
+environment-importance proposal (lower variance on IBL); `env` is env-only;
+`bsdf,neural` MIS-mixes a learned, position-conditioned **neural spline-flow**
+proposal (frozen, offline-trained per scene; **wavefront-only**, flat materials —
+the megakernel strips the neural bit and falls back to its analytic subset). All
+proposals report exact solid-angle pdfs, so every mixture is unbiased — only the
+variance changes.
+
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding
@@ -490,6 +502,8 @@ per-material furnace probes.
 | `materials/flat/flat_shading.slang` | Flat-material data loading, GGX helpers, procedural color |
 | `materials/debug_normal_material.slang` | Normal visualisation `IMaterial` |
 | `samplers/{ggx,lambert,uniform_sphere,henyey_greenstein,mis_combine}.slang` | Sampler library + MIS power heuristic |
+| `sampling/{proposal,reuse}.slang` | Scene-sampling seam — directional-proposal mixture + reuse hook |
+| `sampling/{neural_flow,neural_proposal}.slang` | Neural directional proposal — spline-flow inference (`neural_flow`) + renderer adapter (`neural_proposal`) |
 | `lights/{sphere,emissive_triangle,directional}_light.slang` | `ILight` implementations |
 | `integrators/{path,bdpt}.slang` | `IIntegrator` implementations |
 

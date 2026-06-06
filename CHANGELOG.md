@@ -35,6 +35,49 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (= f·cos) is sampler-invariant. Registry in `sampling/lobe_samplers.py`; gate in
   `tests/test_sampling_parity.py`.
 
+- Neural directional proposal (wavefront-only) — a learned, position-conditioned
+  rational-quadratic **neural spline flow** (proposal bit2,
+  `--proposals bsdf,neural` / GUI "BSDF + Neural") that proposes the BSDF bounce
+  direction with an exact solid-angle pdf and MIS-mixes into the scene-sampling
+  proposal seam. Frozen, offline-trained per scene (standalone `spline_flow` repo)
+  in the **NFW1** weight format. Architecture is **Option A** — a compute pre-pass
+  (`WavefrontNeuralProposalPass`, `wavefront/neural_proposal_pass.slang`) draws one
+  forward sample per live lane between scatter and shade; the flat shade kernel
+  reads it and evaluates the arbitrary-direction inverse pdf inline
+  (`sampling/{neural_flow,neural_proposal,proposal}.slang` + `nee.slang`). Scoped to
+  the flat wavefront shade kernel; unbiased regardless of net quality
+  (`proposalWeights` renormalises, the same effective weights drive the bounce and
+  NEE companion pdfs). New weight buffers at **bindings 33/34/35** (above the
+  MaterialX graph range) — always bound with an all-zero dummy net so the inline
+  inverse resolves everywhere; the megakernel strips the bit and falls back to its
+  analytic proposal subset (mirroring ReSTIR DI → identity). FrameConstants gained
+  a scalar tail (scene AABB + net version), UBO now 508 B.
+
+- Neural proposal — offline training pipe (Stage 1b/1c). `Renderer.dump_path_records`
+  emits per-vertex `(position, normal, wo, wiLocal, contribution)` training records
+  to a `.nrec` file via a second megakernel entry `mainImageRecord`
+  (`integrators/path_record.slang`, an RR-free path tracer that backward-attributes
+  the tail radiance `contribution = (L_final−L_k)/beta_in_k = f·cos·Li`); records
+  land on new **bindings 36/37** (`mainImage` never references them → byte-identical).
+  The standalone `spline_flow/render_records.py` trains the flow from those records by
+  contribution-weighted MLE (`q ∝ f·Li·cos`) using the exact `neuralCondition`
+  encoding and bakes NFW1. Verified end-to-end on Mac MPS (4.36M Cornell records →
+  trained net, pdf ∫≈1). The equal-time gate is **measured, not won on Mac**: the
+  net is unbiased (mixture-MIS) but the MLP pre-pass is ~28× a bsdf bounce on
+  MoltenVK/MPS (the deferred CUDA-perf goal) and the flat ceiling-lit Cornell box is
+  broad-indirect (cosine already near-optimal), so the guide ≈ cosine and adds a
+  firefly tail with no offsetting win. Follow-ups: GPU-optimised inference,
+  guiding-iteration training, a concentrated-indirect scene, a pdf-floor / lower-α
+  firefly measure.
+
+### Fixed
+
+- USD scenes used a degenerate `(0,1)` AABB for the neural-proposal condition's
+  position normalisation (the per-frame `Scene` snapshot has no instances for USD —
+  geometry streams straight to the GPU); `_neural_scene_bounds` now falls back to the
+  streamed `_usd_scene` instances, used by both inference and the dump header.
+- `Renderer.cleanup()` never freed the env importance-sampling CDF buffers
+  (bindings 31/32) — fixed (surfaced by the record-dump's clean-teardown check).
 - ReSTIR DI reuse mode (wavefront-only) — reservoir resampling of primary-hit
   direct lighting over the unified light set (sphere + emissive-triangle + env,
   light- and BSDF-sampled candidates) with deferred visibility. Spatial reuse

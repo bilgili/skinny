@@ -229,6 +229,15 @@ struct FrameConstants
     // tail — the Python packer in renderer._pack_uniforms appends it after
     // proposalAlpha in this exact order. No new descriptor binding.
     uint   flatLobeSamplers;
+    // ── Neural directional proposal (sampling/neural_proposal.slang) ──
+    // Scene AABB (world space) for the condition's position normalisation, plus
+    // the active frozen-net version (baseline 0 — the per-sample networkVersion
+    // hook for online training). Scalar tail: _pack_uniforms appends these after
+    // flatLobeSamplers in this exact order. Read only when the NEURAL proposal
+    // bit is active, so the default {bsdf} path stays bit-identical.
+    float3 sceneBoundsMin;
+    float3 sceneBoundsExtent;
+    uint   neuralNetworkVersion;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

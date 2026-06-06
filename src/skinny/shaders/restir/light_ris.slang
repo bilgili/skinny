@@ -109,6 +109,7 @@ float _misPdf<TM : IMaterial>(
     ProposalContext pc;
     pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
     pc.position = h.position; pc.materialId = h.materialId;
+    pc.neuralValid = false;   // ReSTIR reuse is decoupled from the neural proposal (Stage 1)
     return mixtureProposalPdf(mat, pc, wi);
 }
 
@@ -241,6 +242,7 @@ Reservoir restirFillReservoir<TM : IMaterial>(
         ProposalContext pc;
         pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
         pc.position = h.position; pc.materialId = h.materialId;
+        pc.neuralValid = false;   // ReSTIR reuse is decoupled from the neural proposal (Stage 1)
         BSDFSample bs = sampleBounceDirection(mat, pc, rng);
         if (!bs.valid || bs.transmitted || bs.pdf <= 0.0)
         {

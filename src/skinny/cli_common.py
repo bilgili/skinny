@@ -64,15 +64,18 @@ def add_render_flags(
         )
     if proposals:
         parser.add_argument(
-            "--proposals", choices=("bsdf", "bsdf,env", "env"),
+            "--proposals",
+            choices=("bsdf", "bsdf,env", "env", "bsdf,neural", "neural"),
             default=os.environ.get("SKINNY_PROPOSALS"),
-            metavar="{bsdf,bsdf+env,env}",
+            metavar="{bsdf,bsdf+env,env,bsdf+neural,neural}",
             help="Directional-proposal mixture at the BSDF bounce (+ "
                  "SKINNY_PROPOSALS env). 'bsdf' (default) is the material's own "
                  "importance sampler — bit-identical to the classic renderer; "
                  "'bsdf,env' MIS-mixes an environment-importance proposal "
-                 "(lower variance on IBL); 'env' is env-only. Runtime-selectable "
-                 "+ persisted on the interactive front-ends.",
+                 "(lower variance on IBL); 'env' is env-only; 'bsdf,neural' "
+                 "MIS-mixes the learned neural spline-flow proposal "
+                 "(wavefront-only, flat materials). Runtime-selectable + "
+                 "persisted on the interactive front-ends.",
         )
     if reuse:
         parser.add_argument(

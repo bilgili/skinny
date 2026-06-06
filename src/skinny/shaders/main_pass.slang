@@ -17,6 +17,7 @@ import interfaces;
 import scene_trace;
 import environment;
 import integrators.path;
+import integrators.path_record;   // estimateRadianceRecord — the mainImageRecord dump entry
 import integrators.bdpt;
 import cameras.pinhole;
 import cameras.thick_lens;
@@ -372,6 +373,45 @@ void bssrdfEvalThread(uint2 cell)
 
     uint outIdx = 16u + cell.y * nTheta + cell.x;
     toolBuffer[outIdx] = float4(response, 1.0);
+}
+
+// ── Record-dump entry (task 5.1) ────────────────────────────────
+//
+// Offline training-data collection for the neural proposal. Mirrors runFrame's
+// primary-ray generation, then runs the RR-free recording path tracer
+// (integrators.path_record) which appends per-vertex training records to
+// bindings 36/37. Writes NOTHING to the image / accumulation / tool buffers —
+// the host (renderer.dump_path_records) reads the records back to a file.
+// Compiled as a SEPARATE megakernel entry so `mainImage` stays byte-identical.
+void runFrameRecord<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
+{
+    float lensWeight;
+    Ray ray = cam.generateRay(pixel, rng, lensWeight);
+    HitInfo hit = traceScene(fc, ray);
+    if (hit.hit)
+        estimateRadianceRecord(ray, hit, rng);
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void mainImageRecord(uint3 dispatchThreadID: SV_DispatchThreadID)
+{
+    uint2 pixel = dispatchThreadID.xy;
+    if (pixel.x >= fc.width || pixel.y >= fc.height)
+        return;
+
+    RNG rng = createRNG(pixel, fc.frameIndex);
+
+    if (fc.numLensElements > 0u)
+    {
+        ThickLensCamera cam;
+        runFrameRecord<ThickLensCamera>(cam, pixel, rng);
+    }
+    else
+    {
+        PinholeCamera cam;
+        runFrameRecord<PinholeCamera>(cam, pixel, rng);
+    }
 }
 
 [shader("compute")]

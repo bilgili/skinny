@@ -747,6 +747,27 @@ incrementally moved over.
 | 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe | `bindings.slang` |
 | 31 | StructuredBuffer | Env importance-sampling marginal CDF (ENV_H+1 floats) | `environment.slang` |
 | 32 | StructuredBuffer | Env importance-sampling conditional CDF (H×(W+1) floats) | `environment.slang` |
+| 33 | StructuredBuffer | Neural-proposal flat Linear weights (`float`, row-major) | `sampling/neural_proposal.slang` |
+| 34 | StructuredBuffer | Neural-proposal flat Linear biases (`float`) | `sampling/neural_proposal.slang` |
+| 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim) | `sampling/neural_proposal.slang` |
+| 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry only | `integrators/path_record.slang` |
+| 37 | RWStructuredBuffer | Record-dump counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record.slang` |
+
+Bindings **25–29** are reserved for the MaterialX nodegraph buffers
+(`GRAPH_BINDING_BASE = 25`), so the neural-proposal weight buffers sit at **33+**,
+above the graph range, the tool buffer (30), and the env CDFs (31/32). All three
+are **always bound** — the renderer seeds them with a full-sized all-zero ("dummy")
+net so the inline flow inverse referenced by `sampling/proposal.slang` has valid
+descriptors on every pipeline, **including the megakernel** (which never sets the
+neural bit); real per-scene weights overwrite them when the neural proposal is
+activated. The full reference is in
+[Wavefront.md § Neural directional proposal](Wavefront.md#proposal-seam-neural-directional-proposal-proposal-bit2-wavefront-only).
+
+Bindings **36/37** back the offline training-record dump (`Renderer.dump_path_records`):
+a second megakernel entry `mainImageRecord` (`integrators/path_record.slang`) appends
+per-vertex `(pos, N, wo, wiLocal, contribution)` records there. `mainImage` never
+references them (dead-stripped → byte-identical), so they too are seeded with
+1-element dummies and only reallocated to per-frame capacity during a dump.
 
 Light uniforms (part of UBO, not separate bindings):
 - `lightDirection` (float3) — analytic directional light toward-light vector
@@ -765,6 +786,11 @@ The wavefront passes bind the scene set above as **set 0** and add a pass-local
 | 0 | `WavefrontPathPass` / `RestirDiPass` | `WavefrontPathState[]` (per-lane path state) |
 | 1 | `WavefrontPathPass` / `RestirDiPass` | `HitInfo[]` (per-lane primary/bounce hit) |
 | 2–7 | `WavefrontPathPass` | counting-sort queues (lane-slot / counts / offsets / queue / cursor / indirect args) |
+| 8 | `WavefrontPathPass` | `WfNeuralSample[]` (per-lane neural forward sample `{wi, pdf, version, valid}`, 32 B) — written by the neural pre-pass, read by the flat shade |
+
+The **neural pre-pass** (`WavefrontNeuralProposalPass`) binds set 0 verbatim and a
+3-binding set 1 of its own (0 path-state, 1 hit, 2 the `wfNeural` output buffer above);
+see [Wavefront.md § Neural directional proposal](Wavefront.md#proposal-seam-neural-directional-proposal-proposal-bit2-wavefront-only).
 
 **ReSTIR DI** (`RestirDiPass`) uses its own set-1 layout — it shares bindings 0–1
 (path-state + hit, over the same buffers as the path pass) and adds three
@@ -891,10 +917,15 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | tonemapMode (0 ACES, 1 Reinhard, 2 Hable, 3 linear) |
 | ... | uint | proposalMask; uint reuseMode; float4 proposalAlpha (scene-sampling seam) |
 | ... | uint | flatLobeSamplers — per-lobe flat-BSDF sampler ids, 8 bits/lobe (`coat \| spec<<8 \| diff<<16`; 0 = native). Unpacked by `flat_material.slang`; no new binding |
+| ... | float3 | sceneBoundsMin; float3 sceneBoundsExtent — scene AABB for the neural-proposal condition's position normalisation |
+| ... | uint | neuralNetworkVersion — active frozen-net version (baseline 0; per-sample network-version hook for future online training) |
 
 `cameraType` was removed — camera selection is implied by `numLensElements`
 (0 ⇒ pinhole). `exposure` and `tonemapMode` are post-process knobs and do not
-reset accumulation.
+reset accumulation. The neural-proposal scalar tail (`sceneBoundsMin` /
+`sceneBoundsExtent` / `neuralNetworkVersion`) brings the UBO to **508 B** (was
+480); it is read only when the neural proposal bit is active, so the default
+`{bsdf}` path stays bit-identical.
 
 ---
 
@@ -995,7 +1026,7 @@ README.md
 ```
 common.slang             interfaces.slang        bindings.slang
 main_pass.slang          preview_pass.slang
-scene_trace.slang        scene_lights.slang
+scene_trace.slang        scene_lights.slang      nee.slang
 mesh_head.slang          sdf_head.slang
 environment.slang        volume_render.slang
 mtlx_closures.slang      mtlx_std_surface.slang  mtlx_noise.slang
@@ -1010,8 +1041,17 @@ materials/skin/{skin_material.slang, skin_bssrdf.slang, skin_shading.slang,
                 detail.slang}
 samplers/{ggx.slang, lambert.slang, uniform_sphere.slang,
           henyey_greenstein.slang, mis_combine.slang}
+sampling/{proposal.slang, reuse.slang,               # scene-sampling seam
+          neural_flow.slang,                          # pure spline flow (coupling/RQ/MLP, fwd/inverse)
+          neural_proposal.slang}                      # renderer adapter (weight buffers 33/34/35, world map)
 lights/{sphere_light.slang, emissive_triangle_light.slang, directional_light.slang}
-integrators/{path.slang, bdpt.slang}
+integrators/{path.slang, bdpt.slang,
+             path_record.slang}                       # mainImageRecord training-record dump (5.1)
+wavefront/{wavefront_path.slang, wavefront_bdpt.slang, wf_shade_common.slang,
+           flat_bounce.slang, wavefront_state.slang,
+           neural_proposal_pass.slang,                # WavefrontNeuralProposalPass pre-pass
+           build_args.slang, scatter.slang, compaction.slang, indirect_paint.slang}
+restir/{reservoir.slang, light_ris.slang, restir_primary.slang}
 generated/                          # MaterialXGenSlang output, gitignored
 lib/mx_closure_type.glsl
 ```

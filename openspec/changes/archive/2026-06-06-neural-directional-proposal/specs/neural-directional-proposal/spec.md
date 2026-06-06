@@ -1,0 +1,102 @@
+## ADDED Requirements
+
+### Requirement: Learned directional proposal with exact solid-angle pdf
+The neural directional proposal SHALL draw a bounce direction from a learned distribution
+conditioned on the local shading state and SHALL report its exact probability density in
+solid-angle measure (sr⁻¹), supporting both drawing a sample (forward) and evaluating the
+density of an externally supplied direction (inverse) so it can participate in the mixture
+pdf.
+
+#### Scenario: Draw produces a valid sample and density
+- **WHEN** the neural proposal is selected and a bounce direction is drawn at a vertex
+- **THEN** it returns a unit direction in the upper hemisphere and a finite positive
+  solid-angle pdf
+
+#### Scenario: Density of a direction it did not draw
+- **WHEN** the mixture needs the neural density for a light-sampled or other-proposal
+  direction `wi`
+- **THEN** the proposal returns the exact solid-angle pdf it would assign to `wi` via
+  inverse evaluation
+
+#### Scenario: Density integrates to one
+- **WHEN** the learned density is integrated over the hemisphere for a fixed condition
+- **THEN** the integral is approximately 1
+
+### Requirement: Frozen offline-trained weights as loadable GPU state
+The neural proposal SHALL load frozen, offline-trained network weights from a file and
+upload them to GPU buffers it owns, allocating those buffers and their descriptor bindings
+only while the proposal is active and releasing them when it is deselected.
+
+#### Scenario: Activation allocates and loads
+- **WHEN** the neural proposal is selected for a render
+- **THEN** its weight buffers are allocated, bound, and populated from the weights file
+
+#### Scenario: Deselection releases
+- **WHEN** the neural proposal is deselected
+- **THEN** its buffers and bindings are released and no neural GPU state remains
+
+### Requirement: Wavefront-only neural inference pass
+The renderer SHALL run neural proposal inference as a wavefront compute pass that consumes
+per-lane hit state and produces a per-lane direction and pdf for the bounce stage, and the
+neural proposal SHALL NOT be available in the megakernel backend.
+
+#### Scenario: Wavefront produces per-lane proposal
+- **WHEN** a render uses the wavefront backend with the neural proposal active
+- **THEN** a neural pass writes a per-lane `(wi, pdf)` that the bounce MIS mixture consumes
+
+#### Scenario: Megakernel rejects neural
+- **WHEN** the neural proposal is requested with the megakernel backend
+- **THEN** the renderer reports it as unsupported rather than silently ignoring the request
+
+### Requirement: Unbiased composition and default parity
+With the default proposal set the renderer SHALL produce output identical to before this
+change, and enabling the neural proposal SHALL remain unbiased so that the converged image
+with `{bsdf, neural}` matches the reference image.
+
+#### Scenario: Default selection is byte-identical
+- **WHEN** the renderer runs with the default proposal set `{bsdf}` on a fixed scene,
+  seed, and frame count
+- **THEN** the output image is pixel-identical to the pre-change renderer
+
+#### Scenario: Neural proposal is unbiased
+- **WHEN** `{bsdf, neural}` renders a scene to a high sample count
+- **THEN** the converged image matches the BDPT / bsdf-only reference within noise
+
+### Requirement: Slang inference matches the reference implementation
+The Slang neural inference SHALL reproduce the reference (PyTorch) flow's sampling and pdf
+for identical inputs within a numerical tolerance.
+
+#### Scenario: pdf parity on fixed inputs
+- **WHEN** the same condition and base sample are fed to the Slang and PyTorch flows
+- **THEN** the produced direction and its solid-angle pdf agree within tolerance
+
+### Requirement: Offline training-record dump
+The renderer SHALL be able to emit per-vertex path records of position, outgoing-sampled
+direction, and contribution to a file so a per-scene network can be trained offline.
+
+#### Scenario: Dump captures records
+- **WHEN** record-dump mode is enabled during a render
+- **THEN** per-vertex `(position, wi, contribution)` records are written for offline training
+
+### Requirement: Per-sample network version
+Each neural proposal sample SHALL carry the network version that produced it, and any later
+density evaluation for that sample SHALL use that version's pdf, with baseline version 0 for
+the frozen network.
+
+#### Scenario: Sample stamps its version
+- **WHEN** the neural proposal draws a sample
+- **THEN** the sample records the active network version and its pdf is evaluated against
+  that version
+
+### Requirement: Command-line, GUI, and persisted selection
+The neural proposal SHALL be selectable via the proposal-set command-line flag, surfaced in
+the interactive UI selector, and persisted in user settings, consistent with the other
+proposals, and changing the selection SHALL reset progressive accumulation.
+
+#### Scenario: Selection flag activates the proposal
+- **WHEN** the application is launched with `--proposals bsdf,neural`
+- **THEN** the neural proposal is active for the session and the selection persists
+
+#### Scenario: Changing selection resets accumulation
+- **WHEN** the neural proposal is enabled or disabled
+- **THEN** progressive accumulation resets

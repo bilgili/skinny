@@ -1068,12 +1068,28 @@ class Renderer:
         # _pack_uniforms. Default index 0 ({bsdf}/none) is bit-identical to the
         # pre-seam renderer. Reuse has only the identity mode until ReSTIR lands.
         self._PROPOSAL_PRESETS: list[tuple[str, str]] = [
-            ("BSDF",       "bsdf"),
-            ("BSDF + Env", "bsdf,env"),
-            ("Env",        "env"),
+            ("BSDF",          "bsdf"),
+            ("BSDF + Env",    "bsdf,env"),
+            ("Env",           "env"),
+            # Learned neural spline-flow proposal (bit2). Wavefront-only — the
+            # megakernel capability-gate (in _pack_uniforms) strips the bit and
+            # falls back to its analytic subset, like ReSTIR DI → identity.
+            ("BSDF + Neural", "bsdf,neural"),
         ]
         self.proposal_preset_modes: list[str] = [n for n, _ in self._PROPOSAL_PRESETS]
         self.proposal_preset_index = 0
+        # Neural proposal (bit2) host state. `neural_network_version` is stamped
+        # into FrameConstants (baseline 0 — the per-sample version hook for online
+        # training). The GPU weight buffers + the WavefrontNeuralProposalPass are
+        # owned renderer-side and built lazily in wavefront mode (mirrors the
+        # ReSTIR pass); None until the neural preset is active. `_neural_warned`
+        # latches the one-shot megakernel-unsupported notice.
+        self._neural_network_version = 0
+        self._neural_warned = False
+        self._neural_pass = None
+        # Per-scene baked weights file (NFW1). None ⇒ the renderer bakes a dummy
+        # net for the 1a plumbing bring-up; a CLI/settings override threads here.
+        self._neural_weights_path = None
         # Reuse modes: identity (stock NEE) + ReSTIR DI (wavefront-only;
         # falls back to identity on megakernel/Metal via the capability gate).
         self._REUSE_TOKENS: list[str] = ["none", "restir-di"]
@@ -1510,7 +1526,8 @@ class Renderer:
         _rcfg = getattr(self, "_restir_config", None)
         key = (self.width, self.height, has_nonflat, reuse_mode,
                int(self.restir_regime_index) if reuse_mode == 1 else None,
-               tuple(sorted(_rcfg.items())) if _rcfg else None)
+               tuple(sorted(_rcfg.items())) if _rcfg else None,
+               self._neural_active())
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             # Live ReSTIR tuning: refresh the push-constant config each frame so
             # slider changes (mLight/mBsdf/k/radius/mCap/biased) take effect
@@ -1551,10 +1568,30 @@ class Renderer:
                 stream_size, config=self._restir_build_config(),
             )
             self._wavefront_path_pass.set_restir(self._restir_pass)
+        # Neural directional proposal (bit2): build the wavefront pre-pass over
+        # the same path-state + hit buffers + the path pass's per-lane neural
+        # buffer, and hook it every bounce. Constructing it only when neural is
+        # active (always wavefront here) IS the capability gate.
+        self._neural_pass = None
+        if self._neural_active():
+            self._sync_neural_weights()
+            from skinny.vk_wavefront import WavefrontNeuralProposalPass
+            self._neural_pass = WavefrontNeuralProposalPass(
+                self.ctx, self.shader_dir, self._scene_set0_layout,
+                self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
+                self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
+                self._wavefront_path_pass.neural_buf.buffer,
+                self._wavefront_path_pass.neural_buf.size,
+                stream_size, network_version=self._neural_network_version,
+            )
+            self._wavefront_path_pass.set_neural(self._neural_pass)
         self._wf_path_pass_dims = key
         return self._wavefront_path_pass
 
     def _destroy_wavefront_path_pass(self) -> None:
+        if getattr(self, "_neural_pass", None) is not None:
+            self._neural_pass.destroy()
+            self._neural_pass = None
         if getattr(self, "_restir_pass", None) is not None:
             self._restir_pass.destroy()
             self._restir_pass = None
@@ -2913,6 +2950,31 @@ class Renderer:
             self.ctx, ENV_HEIGHT * (ENV_WIDTH + 1) * 4)
         self._ensure_env_uploaded()
 
+        # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
+        # flow architecture and seeded with a dummy (zero) net so the inline flow
+        # inverse in proposal.slang always has valid descriptors, even with the
+        # neural proposal inactive. Real per-scene weights overwrite them on
+        # activation (_sync_neural_weights). The same dummy is the 1a bring-up net.
+        from skinny.sampling.neural_weights import make_dummy_weights
+        _nw = make_dummy_weights()
+        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nw.weight_bytes), 4))
+        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nw.bias_bytes), 4))
+        self.neural_layers_buffer = StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4))
+        self.neural_weights_buffer.upload_sync(_nw.weight_bytes)
+        self.neural_biases_buffer.upload_sync(_nw.bias_bytes)
+        self.neural_layers_buffer.upload_sync(_nw.header_bytes)
+        self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
+
+        # Neural training-record dump (bindings 36/37, task 5.1). 1-element dummy
+        # append buffer + counter so the descriptors are always valid; the
+        # `mainImageRecord` entry never runs except inside dump_path_records,
+        # which reallocates `record_buffer` to the per-frame capacity, binds it,
+        # and reads it back. `mainImage` never touches these (dead-stripped).
+        from skinny.sampling.path_records import RECORD_STRIDE
+        self.record_buffer = StorageBuffer(self.ctx, RECORD_STRIDE)   # 1 dummy record
+        self.record_counter = StorageBuffer(self.ctx, 8)             # [count, capacity]
+        self._record_pipeline = None   # lazily-built mainImageRecord ComputePipeline
+
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
         # descriptor is valid even before the user flips off "None".
         self.tattoo_image = SampledImage(self.ctx, TATTOO_WIDTH, TATTOO_HEIGHT)
@@ -3244,7 +3306,8 @@ class Renderer:
                 #      stdSurface+lightSplat+gizmoSegments+
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envMarginalCdf+envCondCdf.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (18 + n_graph_slots),
+                # +3 neural weights (33/34/35) +2 record dump (36/37) = 23.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (23 + n_graph_slots),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -3610,6 +3673,22 @@ class Renderer:
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 pBufferInfo=[env_cond_info],
             ))
+            # Neural proposal weights (33/34/35). Always bound (dummy net when
+            # inactive) so the inline flow inverse in proposal.slang has valid
+            # descriptors on every pipeline that uses this layout.
+            for _b, _buf in ((33, self.neural_weights_buffer),
+                             (34, self.neural_biases_buffer),
+                             (35, self.neural_layers_buffer),
+                             # Training-record dump (36 = PathRecord append, 37 =
+                             # counter); dummies until dump_path_records rebinds.
+                             (36, self.record_buffer),
+                             (37, self.record_counter)):
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=_buf.buffer, offset=0, range=_buf.size)],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_scene_descriptors(self) -> None:
@@ -6768,6 +6847,48 @@ class Renderer:
         idx = max(0, min(int(self.proposal_preset_index), n - 1))
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
 
+    def _neural_active(self) -> bool:
+        """True when the neural proposal (bit2) is selected AND the backend can
+        run it (wavefront only). Drives lazy pass build + the scene-set bind."""
+        if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            return False
+        return any(getattr(p, "mask_bit", 0) == 0x4 for p in self._active_proposals())
+
+    def _warn_neural_megakernel_once(self) -> None:
+        """One-shot notice that the neural proposal is unsupported on the
+        megakernel (reported, not silently dropped — the bit is stripped + the
+        mixture falls back to its analytic subset)."""
+        if not self._neural_warned:
+            self._neural_warned = True
+            print("[skinny] neural proposal is wavefront-only; ignored on the "
+                  "megakernel backend (falling back to the analytic proposals)")
+
+    def _sync_neural_weights(self) -> None:
+        """Upload the active neural weights to bindings 33/34/35. Loads the
+        resolved per-scene NFW1 file when ``_neural_weights_path`` is set;
+        otherwise keeps the dummy (zero) net seeded at init — the 1a bring-up
+        network. Idempotent: re-uploads only when the path changes. The buffers
+        are architecture-fixed, so a valid file's byte sizes always match."""
+        path = self._neural_weights_path
+        if path == self._neural_weights_loaded:
+            return
+        if path is None:
+            self._neural_weights_loaded = None
+            return
+        try:
+            from skinny.sampling.neural_weights import load_neural_weights
+            nw = load_neural_weights(path)
+        except Exception as exc:  # noqa: BLE001 - fall back to the dummy net
+            print(f"[skinny] neural weights load failed for {path}: {exc}; "
+                  "keeping the dummy net")
+            self._neural_weights_path = None
+            self._neural_weights_loaded = None
+            return
+        self.neural_weights_buffer.upload_sync(nw.weight_bytes)
+        self.neural_biases_buffer.upload_sync(nw.bias_bytes)
+        self.neural_layers_buffer.upload_sync(nw.header_bytes)
+        self._neural_weights_loaded = path
+
     def _active_reuse(self):
         """Active reuse plugin for the current reuse index."""
         from skinny.sampling import parse_reuse
@@ -6785,6 +6906,32 @@ class Renderer:
             if frozenset(tok.split(",")) == want:
                 return i
         return 0
+
+    def _neural_scene_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """World AABB ``(min, extent)`` for the neural condition's position
+        normalisation. The per-frame ``Scene`` snapshot has no instances for USD
+        scenes (their geometry streams straight to the GPU and is not mirrored
+        into ``Scene.instances``), so fall back to the streamed ``_usd_scene``
+        instances — otherwise the condition normalises against the degenerate
+        ``(0,1)`` default and the proposal sees un-normalised positions. Used by
+        BOTH ``_pack_uniforms`` (inference) and ``dump_path_records`` (the
+        training header) so train↔infer share the exact same AABB.
+        """
+        wb = self.scene.world_bounds() if self.scene is not None else None
+        if wb is None and self._usd_scene is not None and self._usd_scene.instances:
+            mins, maxs = [], []
+            for inst in self._usd_scene.instances:
+                wmin, wmax = inst.world_bounds()
+                mins.append(wmin)
+                maxs.append(wmax)
+            if mins:
+                wb = (np.minimum.reduce(mins).astype(np.float32),
+                      np.maximum.reduce(maxs).astype(np.float32))
+        if wb is None:
+            return np.zeros(3, dtype=np.float32), np.ones(3, dtype=np.float32)
+        bmin = np.asarray(wb[0], dtype=np.float32)
+        bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
+        return bmin, bext
 
     def _pack_uniforms(self) -> bytes:
         self._sync_lens_buffer()
@@ -6940,6 +7087,18 @@ class Renderer:
         reuse_mode = int(self._active_reuse().reuse_mode)
         if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
             reuse_mode = 0
+        # Neural proposal (bit2) is wavefront-only — the MLP runs as a compute
+        # pre-pass (vk_wavefront.WavefrontNeuralProposalPass), infeasible inline
+        # in the megakernel (MoltenVK big-kernel limit). On the megakernel strip
+        # the bit and renormalise the mixture over the analytic remainder, then
+        # warn once so the request is reported, not silently dropped.
+        if (prop_mask & 0x4) and self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            self._warn_neural_megakernel_once()
+            prop_mask &= ~0x4
+            a = list(prop_alpha)
+            a[2] = 0.0
+            s = sum(a) or 1.0
+            prop_alpha = (a[0] / s, a[1] / s, a[2] / s, a[3] / s)
         data += struct.pack("II", int(prop_mask), reuse_mode)         # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
         # Per-lobe sampler selection (flatLobeSamplers): one uint, 8 bits/lobe
@@ -6951,6 +7110,15 @@ class Renderer:
             self.coat_sampler_index, self.spec_sampler_index, self.diff_sampler_index
         )
         data += struct.pack("I", int(flat_lobe_samplers))             # 4 bytes
+        # Neural directional proposal — scene AABB (for the condition's position
+        # normalisation) + active frozen-net version (baseline 0). Scalar tail
+        # matching FrameConstants in common.slang; read only when the NEURAL bit
+        # is active, so default {bsdf} stays bit-identical. The encoding here MUST
+        # match the offline trainer's (spline_flow) condition.
+        bmin, bext = self._neural_scene_bounds()
+        data += bmin.tobytes()                                        # 12 bytes
+        data += bext.tobytes()                                        # 12 bytes
+        data += struct.pack("I", int(self._neural_network_version))   # 4 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -7810,6 +7978,103 @@ class Renderer:
         """User-facing format names — order is also the GUI dropdown order."""
         return ["PNG", "JPEG", "BMP", "EXR", "HDR"]
 
+    # ── Neural training-record dump (task 5.1) ──────────────────────
+
+    def _bind_record_buffer(self, buf) -> None:
+        """Point descriptor binding 36 (the PathRecord append buffer) at ``buf``
+        across all frames-in-flight descriptor sets."""
+        vk.vkDeviceWaitIdle(self.ctx.device)
+        for ds in self.descriptor_sets:
+            write = vk.VkWriteDescriptorSet(
+                dstSet=ds, dstBinding=36, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[vk.VkDescriptorBufferInfo(
+                    buffer=buf.buffer, offset=0, range=buf.size)])
+            vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
+
+    def _dispatch_record(self, descriptor_set) -> None:
+        """One-shot dispatch of the ``mainImageRecord`` entry over the frame."""
+        cmd = vk.vkAllocateCommandBuffers(
+            self.ctx.device, vk.VkCommandBufferAllocateInfo(
+                commandPool=self.ctx.command_pool,
+                level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY, commandBufferCount=1))[0]
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+                             self._record_pipeline.pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            self._record_pipeline.pipeline_layout, 0, 1, [descriptor_set], 0, None)
+        gx = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        gy = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        vk.vkCmdDispatch(cmd, gx, gy, 1)
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(self.ctx.compute_queue, 1,
+                         [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+                         vk.VK_NULL_HANDLE)
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
+    def dump_path_records(self, out_path, *, num_frames: int = 256,
+                          max_records_per_frame: int | None = None,
+                          frame_seed_base: int = 0) -> int:
+        """Emit per-vertex neural training records to a ``.nrec`` file (task 5.1).
+
+        Runs the ``mainImageRecord`` megakernel entry for ``num_frames``
+        independent frames (each a fresh ``frameIndex`` → fresh RNG → fresh
+        paths) and streams the records out. Backend-independent: it builds its
+        own record pipeline and reuses the scene descriptor set, so it works in
+        either execution mode. The file header carries the scene AABB so the
+        offline ``spline_flow`` trainer normalises the condition byte-for-byte
+        like the renderer. The records reflect the CURRENT proposal set as the
+        sample generator (the MIS weight is divided out, so any generator is
+        unbiased; ``{bsdf}`` or ``{bsdf,env}`` are the usual choices). Returns
+        the total number of records written.
+        """
+        import struct as _struct
+
+        from skinny.sampling.path_records import RECORD_STRIDE, pack_header
+        from skinny.vk_compute import ComputePipeline
+
+        if self._scene_bindings is None or self.descriptor_sets is None:
+            raise RuntimeError("dump_path_records: scene not built yet (pump update())")
+
+        rec_max_bounces = 6  # lockstep with path_record.slang REC_MAX_BOUNCES
+        capacity = int(self.width) * int(self.height) * rec_max_bounces
+        if max_records_per_frame is not None:
+            capacity = min(capacity, int(max_records_per_frame))
+
+        bmin, bext = self._neural_scene_bounds()
+
+        if self._record_pipeline is None:
+            self._record_pipeline = ComputePipeline(
+                self.ctx, self.shader_dir,
+                entry_module="main_pass", entry_point="mainImageRecord",
+                graph_fragments=list(self._scene_graph_fragments))
+
+        saved_frame_index = self.frame_index
+        big = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+        self._bind_record_buffer(big)
+        total = 0
+        try:
+            with open(out_path, "wb") as f:
+                f.write(pack_header(bmin, bext))
+                for i in range(int(num_frames)):
+                    self.frame_index = int(frame_seed_base) + i
+                    self.uniform_buffer.upload(self._pack_uniforms())
+                    self.record_counter.upload_sync(_struct.pack("<II", 0, capacity))
+                    self._dispatch_record(self.descriptor_sets[0])
+                    count = _struct.unpack("<I", self.record_counter.download_sync(4))[0]
+                    count = min(count, capacity)
+                    if count:
+                        f.write(big.download_sync(count * RECORD_STRIDE))
+                        total += count
+        finally:
+            self._bind_record_buffer(self.record_buffer)  # restore the dummy
+            big.destroy()
+            self.frame_index = saved_frame_index
+        return total
+
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
 
@@ -7839,12 +8104,25 @@ class Renderer:
         self.normal_image.destroy()
         self.tattoo_image.destroy()
         self.env_image.destroy()
+        # Env importance-sampling CDFs (bindings 31/32) — allocated once in
+        # _init_gpu; were previously never freed (surfaced by the record-dump's
+        # clean-teardown check).
+        self.env_marginal_buffer.destroy()
+        self.env_cond_buffer.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
         self._offscreen_output.destroy()
         self._readback.destroy()
         self.uniform_buffer.destroy()
         self.mtlx_skin_buffer.destroy()
+        self.neural_weights_buffer.destroy()
+        self.neural_biases_buffer.destroy()
+        self.neural_layers_buffer.destroy()
+        if getattr(self, "_record_pipeline", None) is not None:
+            self._record_pipeline.destroy()
+            self._record_pipeline = None
+        self.record_buffer.destroy()
+        self.record_counter.destroy()
         self.light_splat_buffer.destroy()
         self.gizmo_segments_buffer.destroy()
         self.lens_elements_buffer.destroy()

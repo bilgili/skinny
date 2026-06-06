@@ -23,13 +23,15 @@
 //     lighting stay MIS-consistent (the NEE-coupling rule).
 
 import common;       // RNG, worldToTangent / tangentToWorld
-import interfaces;   // IMaterial, BSDFSample
+import interfaces;   // IMaterial, BSDFSample, WfNeuralSample
 import bindings;     // fc (proposalMask / proposalAlpha / envIntensity)
 import environment;  // sampleEnvDir, envPdf, EnvSample
+import sampling.neural_proposal;  // neuralPdfWorld (inline inverse) + weight buffers
 
 // Proposal slot bits — must match the host registry (sampling/proposals.py).
-static const uint PROPOSAL_BSDF = 0x1u;
-static const uint PROPOSAL_ENV  = 0x2u;
+static const uint PROPOSAL_BSDF   = 0x1u;
+static const uint PROPOSAL_ENV    = 0x2u;
+static const uint PROPOSAL_NEURAL = 0x4u;   // bit2 — learned spline-flow proposal
 
 // Shading condition handed to every proposal. The tangent frame (T, B, N)
 // lets a world-space proposal (env) convert to/from the bounce's tangent
@@ -42,7 +44,33 @@ struct ProposalContext
     float3 B;          // world-space bitangent
     float3 position;   // world-space shading point
     uint   materialId;
+    // Neural proposal (bit2): the wavefront pre-pass's precomputed per-lane
+    // FORWARD sample. neuralValid = false on the megakernel and on non-flat
+    // wavefront lanes — those keep the {bsdf,env} subset (weights renormalise,
+    // staying per-lane unbiased). The arbitrary-direction INVERSE pdf is always
+    // evaluated inline (neuralPdfWorld); only the forward candidate is
+    // precomputed. Stamped with the producing network version (baseline 0).
+    float3 neuralWi;        // world-space neural-drawn direction
+    float  neuralPdf;       // solid-angle pdf at neuralWi (forward)
+    uint   networkVersion;
+    bool   neuralValid;
 };
+
+// Per-lane effective one-sample-MIS selection weights. The neural proposal
+// participates only when its bit is set AND a forward candidate exists for this
+// lane (neuralValid); otherwise its weight folds away and {bsdf,env} renormalise
+// to Σ = 1, keeping each lane's estimator self-consistent + unbiased. With
+// {bsdf,env} (no neural) this is identical to the pre-change weights (Σ already
+// 1 ⇒ the divide is a no-op).
+void proposalWeights(ProposalContext c, out float aB, out float aE, out float aN)
+{
+    aB = fc.proposalAlpha.x;
+    aE = ((fc.proposalMask & PROPOSAL_ENV) != 0u) ? fc.proposalAlpha.y : 0.0;
+    bool neuralOn = ((fc.proposalMask & PROPOSAL_NEURAL) != 0u) && c.neuralValid;
+    aN = neuralOn ? fc.proposalAlpha.z : 0.0;
+    float s = aB + aE + aN;
+    if (s > 0.0) { aB /= s; aE /= s; aN /= s; }
+}
 
 // Draw the next bounce direction from the active proposal mixture. Returns a
 // BSDFSample (tangent-space wi; caller converts to world). The single-proposal
@@ -64,17 +92,20 @@ BSDFSample sampleBounceDirection<TM : IMaterial>(TM mat, ProposalContext c, inou
     if (!cand.valid || cand.pdf <= 0.0)
         return cand;
 
-    float aB = fc.proposalAlpha.x;   // BSDF selection weight
-    float aE = fc.proposalAlpha.y;   // env selection weight
+    float aB, aE, aN;
+    proposalWeights(c, aB, aE, aN);
 
-    // One-sample MIS: pick a technique ∝ α. BSDF reuses `cand.wi`; env draws a
-    // fresh direction from the environment distribution.
+    // One-sample MIS: pick a technique ∝ α over [bsdf | env | neural]. BSDF
+    // reuses `cand.wi`; env draws a fresh env direction; neural reuses the
+    // pre-pass's precomputed world candidate (no inline forward MLP).
     float3 wiT;
-    if (rng.next() < aB)
+    float  xi = rng.next();
+    bool   pickedNeural = false;
+    if (xi < aB)
     {
         wiT = cand.wi;
     }
-    else
+    else if (xi < aB + aE)
     {
         EnvSample es = sampleEnvDir(rng.next2(), fc.envIntensity);
         if (es.pdf <= 0.0)            // no distribution → zero-contribution
@@ -89,12 +120,35 @@ BSDFSample sampleBounceDirection<TM : IMaterial>(TM mat, ProposalContext c, inou
             return cand;
         }
     }
+    else
+    {
+        // Neural technique — precomputed per-lane forward sample (world space).
+        pickedNeural = true;
+        wiT = worldToTangent(c.neuralWi, c.T, c.B, c.N);
+        if (wiT.z <= 0.0)
+        {
+            cand.valid = false;
+            return cand;
+        }
+    }
 
     // Full mixture pdf (solid-angle) at the chosen direction. Use the material
     // EVALUATE pdf for the BSDF component so it matches mixtureProposalPdf().
     BSDFSample ev = mat.evaluate(c.woT, wiT);
     float3 worldWi = tangentToWorld(wiT, c.T, c.B, c.N);
-    float  mixPdf  = aB * ev.pdf + aE * envPdf(worldWi);
+    float  mixPdf  = aB * ev.pdf;
+    if (aE > 0.0)
+        mixPdf += aE * envPdf(worldWi);
+    if (aN > 0.0)
+    {
+        // Neural pdf at the chosen wi: reuse the precomputed forward pdf when
+        // neural drew it, else the inline inverse (the only inline MLP eval).
+        float pN = pickedNeural
+                 ? c.neuralPdf
+                 : neuralPdfWorld(c.position, c.N, c.T, c.B,
+                                  tangentToWorld(c.woT, c.T, c.B, c.N), worldWi);
+        mixPdf += aN * pN;
+    }
     if (mixPdf <= 0.0)
     {
         cand.valid = false;
@@ -122,13 +176,17 @@ float mixtureProposalPdf<TM : IMaterial>(TM mat, ProposalContext c, float3 wiT)
     if (fc.proposalMask == PROPOSAL_BSDF)
         return bsdfPdf;
 
-    float aB = fc.proposalAlpha.x;
-    float aE = fc.proposalAlpha.y;
-    float ePdf = 0.0;
-    if ((fc.proposalMask & PROPOSAL_ENV) != 0u && wiT.z > 0.0)
+    float aB, aE, aN;
+    proposalWeights(c, aB, aE, aN);
+    float pdf = aB * bsdfPdf;
+    if ((aE > 0.0 || aN > 0.0) && wiT.z > 0.0)
     {
         float3 worldWi = tangentToWorld(wiT, c.T, c.B, c.N);
-        ePdf = envPdf(worldWi);
+        if (aE > 0.0)
+            pdf += aE * envPdf(worldWi);
+        if (aN > 0.0)
+            pdf += aN * neuralPdfWorld(c.position, c.N, c.T, c.B,
+                                       tangentToWorld(c.woT, c.T, c.B, c.N), worldWi);
     }
-    return aB * bsdfPdf + aE * ePdf;
+    return pdf;
 }
