@@ -16,6 +16,15 @@ the Vulkan render in one process:
     placeholder. When torch is active, `bench_concurrent_train_render` runs the
     real trainer each frame - CUDA training concurrent with the Vulkan render in
     one process, the task-7.3 integration.
+  * moving-object render   - `bench_moving_object_render` translates one instance
+    each frame (real TLAS re-upload) with the online loop live; confirms the
+    moving-object scene renders stably under geometry motion + concurrent training.
+  * frames-to-recover      - `bench_frames_to_recover` converges the real flow on
+    one radiance lobe, "moves the object" (mirror lobe at the same condition fed
+    into the recency-weighted replay), and counts cycles until the NLL recovers -
+    the online-adaptation metric. Records are synthesized-but-pose-grounded since
+    the live GPU drain device-losts under the 2 s TDR here; the trainer + replay
+    under test are real.
 
 Run (skinny renderer venv; the real trainer needs torch - the CUDA build, e.g.
 ``pip install torch --index-url https://download.pytorch.org/whl/cu126`` - plus
@@ -192,6 +201,150 @@ def bench_concurrent_train_render(handoff: str = "interop", width: int = 96,
     }
 
 
+def _peaked_records(direction, n: int, pos, spread: float = 0.18,
+                    rng=None) -> np.ndarray:
+    """Records whose `wi_local` cluster around `direction` (upper hemisphere) at a
+    fixed condition `pos` - a stand-in for the radiance lobe a light/object at one
+    pose produces. Moving the object = re-pointing `direction` at the same `pos`,
+    which is the hardest recovery (overwrite the same conditional)."""
+    from skinny.sampling.path_records import RECORD_DTYPE
+
+    rng = rng or np.random.default_rng(0)
+    d = np.asarray(direction, np.float32)
+    d = d / np.linalg.norm(d)
+    recs = np.zeros(n, dtype=RECORD_DTYPE)
+    w = d[None, :] + rng.normal(scale=spread, size=(n, 3)).astype(np.float32)
+    w[:, 1] = np.abs(w[:, 1]) + 0.05                  # keep y-up (build_dataset filter)
+    w /= np.linalg.norm(w, axis=1, keepdims=True)
+    recs["wi_local"] = w
+    recs["pos"] = np.asarray(pos, np.float32)
+    recs["contrib"] = 1.0
+    return recs
+
+
+def bench_frames_to_recover(steps_per_cycle: int = 32, batch: int = 2048,
+                            converge_cycles: int = 12, max_cycles: int = 30,
+                            recover_eps: float = 0.03) -> dict:
+    """Frames-to-recover after a moving object (task 7.3). Train the real flow to
+    convergence on radiance lobe A, then 'move the object' (lobe B at the SAME
+    condition, fed each cycle into the recency-weighted replay), and count cycles
+    until the training NLL returns to the A-converged level - the recency-weighting
+    adaptation the online loop relies on. Needs torch + spline_flow (else skip)."""
+    from skinny.sampling.neural_replay import ReplayBuffer
+    from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
+
+    trainer = NeuralTrainer(TrainerConfig(batch=batch, steps_per_cycle=steps_per_cycle))
+    if not trainer.torch_active:
+        return {"skipped": "torch/spline_flow unavailable - real trainer inactive"}
+
+    replay = ReplayBuffer(capacity=400_000)
+    rng = np.random.default_rng(0)
+    pos = np.array([0.5, 0.5, 0.5], np.float32)
+    dir_a = np.array([0.6, 0.7, 0.0], np.float32)
+    dir_b = np.array([-0.6, 0.7, 0.0], np.float32)     # mirror lobe -> same converged loss
+
+    # Converge on A (drain a batch of A each cycle, like the renderer per frame).
+    for _ in range(converge_cycles):
+        replay.add(_peaked_records(dir_a, batch, pos, rng=rng))
+        trainer.train_cycle(replay, rng)
+    loss_a = float(trainer.last_loss)
+
+    # Move the object: lobe B now, same condition. Recency must demote A.
+    traj, frames_to_recover = [], None
+    for k in range(1, max_cycles + 1):
+        replay.add(_peaked_records(dir_b, batch, pos, rng=rng))
+        trainer.train_cycle(replay, rng)
+        loss = float(trainer.last_loss)
+        traj.append(round(loss, 4))
+        if frames_to_recover is None and loss <= loss_a + recover_eps:
+            frames_to_recover = k
+
+    return {
+        "steps_per_cycle": steps_per_cycle, "batch": batch,
+        "loss_converged_A": round(loss_a, 4),
+        "loss_spike_after_move": max(traj) if traj else None,
+        "frames_to_recover": frames_to_recover if frames_to_recover is not None
+        else f">{max_cycles}",
+        "recover_eps": recover_eps,
+        "loss_trajectory": traj,
+    }
+
+
+def bench_moving_object_render(handoff: str = "interop", frames: int = 12,
+                               width: int = 96, height: int = 96) -> dict:
+    """A literally-moving object rendered headless with the online loop live
+    (task 7.3): translate one instance each frame (TLAS re-upload), run a trainer
+    cycle + handoff publish, render. Confirms the moving-object scene runs and the
+    per-frame cost stays stable with geometry motion + concurrent training."""
+    ctx, r = _build_neural_renderer(width, height, handoff=handoff)
+    try:
+        if handoff == "interop":
+            reason = _interop_skip_reason(ctx)
+            if reason:
+                return {"skipped": reason}
+        r.enable_online_training(handoff=handoff)
+        torch_active = bool(r._neural_trainer.torch_active)
+        _feed_records(r)
+
+        insts = r._usd_scene.instances
+        idx = len(insts) - 1                           # last loaded (the sphere here)
+        base = np.array(insts[idx].transform, np.float32).copy()
+
+        def _center():
+            lo, hi = insts[idx].world_bounds()
+            return (np.asarray(lo) + np.asarray(hi)) * 0.5
+
+        c_base = _center()
+        # Detect which slot holds translation in this transform convention.
+        T = base.copy()
+        T[3, 0] += 1.0
+        insts[idx].transform = T
+        r._reupload_instance_transforms()
+        slot_row = float(np.linalg.norm(_center() - c_base)) > 1e-4
+        insts[idx].transform = base.copy()
+        r._reupload_instance_transforms()
+
+        rng = np.random.default_rng(0)
+        train_ms, pub_ms, frame_ms = [], [], []
+        max_disp = 0.0
+        for f in range(frames):
+            off = 0.4 * float(np.sin(f * 0.5))
+            T = base.copy()
+            if slot_row:
+                T[3, 0] += off
+            else:
+                T[0, 3] += off
+            insts[idx].transform = T
+            r._reupload_instance_transforms()
+            max_disp = max(max_disp, float(np.linalg.norm(_center() - c_base)))
+
+            t0 = time.perf_counter()
+            new_w = r._neural_trainer.train_cycle(r._neural_replay, rng)
+            t1 = time.perf_counter()
+            r._neural_publisher.publish(new_w)
+            t2 = time.perf_counter()
+            r.update(0.04)
+            r.render_headless()
+            t3 = time.perf_counter()
+            train_ms.append((t1 - t0) * 1e3)
+            pub_ms.append((t2 - t1) * 1e3)
+            frame_ms.append((t3 - t2) * 1e3)
+        ver = r._neural_network_version
+    finally:
+        r.cleanup()
+        ctx.destroy()
+
+    return {
+        "handoff": handoff, "frames": frames, "moved_instance": idx,
+        "object_world_displacement": round(max_disp, 4),
+        "torch_active": torch_active, "final_version": ver,
+        "train_ms_med": float(np.median(train_ms)),
+        "publish_ms_med": float(np.median(pub_ms)),
+        "render+swap_ms_med": float(np.median(frame_ms)),
+        "render+swap_ms_p90": float(np.percentile(frame_ms, 90)),
+    }
+
+
 def bench_trainer_cycle(cycles: int = 8, batch: int = 4096,
                         steps_per_cycle: int = 64) -> dict:
     """Time one warm-started trainer cycle in isolation (real CUDA loop when torch
@@ -233,6 +386,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--frames", type=int, default=64)
     ap.add_argument("--concurrent-frames", type=int, default=12)
+    ap.add_argument("--moving-frames", type=int, default=12)
+    ap.add_argument("--max-recover-cycles", type=int, default=30)
     ap.add_argument("--width", type=int, default=96)
     ap.add_argument("--height", type=int, default=96)
     ap.add_argument("--cycles", type=int, default=8)
@@ -260,6 +415,13 @@ def main() -> None:
     conc_res = bench_concurrent_train_render(
         "interop", args.width, args.height, args.concurrent_frames)
     _show("concurrent CUDA-train + Vulkan-render (interop, one process)", conc_res)
+
+    move_res = bench_moving_object_render(
+        "interop", args.moving_frames, args.width, args.height)
+    _show("moving-object render (interop, geometry animated per frame)", move_res)
+
+    recover_res = bench_frames_to_recover(max_cycles=args.max_recover_cycles)
+    _show("frames-to-recover after a moving object (recency replay)", recover_res)
 
     trainer_res = bench_trainer_cycle(cycles=args.cycles)
     _show("CUDA trainer cycle (isolated)", trainer_res)
