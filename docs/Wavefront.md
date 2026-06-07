@@ -314,8 +314,9 @@ outgoingWorldDir.xyz ]`. The scene AABB (`fc.sceneBoundsMin` /
 flow hemisphere is y-up in the shading frame. The math itself lives in
 `shaders/sampling/neural_flow.slang` (coupling layers, RQ-spline forward/inverse,
 MLP, log-det); `neural_proposal.slang` is the thin renderer adapter (weight
-buffers, world↔flow-local frame map). Fixed architecture: 6 layers, 24 spline
-bins, hidden 96, condition 9.
+buffers, world↔flow-local frame map). Default architecture: 6 layers, 24 spline
+bins, hidden 96, condition 9 — the size + precision are now **build-time
+configurable** (see [Neural size & precision](#neural-size--precision-tuning-neural-precision-size-study)).
 
 **Weights file (NFW1).** Per-scene weights are baked to a little-endian `NFW1`
 binary (`uint32 magic=0x4E465731, version=1; uint32 layers,bins,hidden,cond;`
@@ -367,6 +368,61 @@ training (the per-sample `neuralNetworkVersion` hook) is a later Stage-2 change.
 in wavefront mode (mirroring `RestirDiPass`) in `renderer.py` / `vk_wavefront.py`.
 The GUI preset is **"BSDF + Neural"** (`proposal_preset_index`, persisted; env
 `SKINNY_PROPOSALS=bsdf,neural`); changing it resets progressive accumulation.
+
+### Neural size & precision tuning (`neural-precision-size-study`)
+
+The network **size** (`NF_LAYERS`/`NF_BINS`/`NF_HIDDEN`) and **inference
+precision** are build-time configurable, with the default (`fp32 @ 6/24/96`)
+**byte-identical** to the shipped proposal. The single host source of truth is
+`NeuralBuildConfig(layers, bins, hidden, precision)`
+(`skinny.sampling.neural_weights`); the renderer takes it as `Renderer(...,
+neural_config=…)` and threads it into every neural `.spv` compile (its `-D`
+flags) + the weight upload (its dtype). The default config emits **no** `-D`
+flags, so its cache key + SPIR-V are unchanged.
+
+- **Size** — `NF_LAYERS/NF_BINS/NF_HIDDEN` are `#ifndef`-guarded defines
+  (`neural_flow.slang`); a non-default size recompiles the flow modules (the
+  wavefront pre-pass, the inline inverse in the flat shade, the record entry)
+  via `slangc -D` and bakes/loads an NFW1 at those dims (the loader arch assert
+  is the mismatch guard). The host (`export_weights.export_flow`) is already
+  size-parametric.
+- **Precision** — two compile-time aliases: **`NF_WT`** (weight *storage*, the
+  `StructuredBuffer` element at 33/34) and **`NF_CT`** (the MLP GEMM
+  *accumulate*). Three modes: **fp32** (`float`/`float`), **fp16-storage**
+  (`half`/`float` — ½-byte weights, float GEMM) and **fp16-compute**
+  (`half`/`half`). The **RQ-spline math + the returned solid-angle pdf stay
+  `float` in every mode** (catastrophic-cancellation prone in fp16). NFW1 stays
+  fp32 on disk; the host casts to half at upload. `vk_context` probes
+  `shaderFloat16` + `uniformAndStorageBuffer16BitAccess` and enables them when
+  present; an fp16 mode on a device without the capability **falls back to fp32**
+  (logged) rather than failing.
+
+**Study (it is a measurement, not a product).** A two-track harness maps quality
+vs cost across the size×precision grid on MoltenVK: the *precision* track reports
+fp16 pdf-parity drift vs the fp32/PyTorch reference
+(`tests/test_neural_parity.py`, scene-independent — measured drift on the Cornell
+net is `~4e-4` (storage) / `~1e-3` (compute), negligible); the *size* track
+retrains per size in `spline_flow/bake_grid.py` and reports held-out NLL. Both
+add an in-renderer unbiased + firefly check and the MoltenVK ms/frame +
+weight-buffer bytes (`tests/study_size_precision.py` → a CSV + `RESULTS.md` with
+the Pareto knee and a recommended ship config). Every fp16/size mode stays
+**unbiased** (mixture-MIS; gated by `test_fp16_unbiased_gate`): the converged
+Cornell image matches the fp32 reference within noise, and the fp16 weight buffer
+is exactly **half** the bytes. The gates: `test_default_config_byte_identical`
+(4.1, the default `-D`-free build) + `test_fp16_unbiased_gate` (4.2, skips on
+devices without fp16).
+
+**Study result (M5 Pro / MoltenVK, flat Cornell box — `docs/diagrams/neural_study/RESULTS.md`).**
+On this broad-indirect scene held-out NLL is **flat across size** (~2% spread,
+−0.276…−0.282) — a smaller net fits nearly as well — and **fp16-compute is the
+fastest precision in 6/7 sizes** (half ALU + bandwidth; the cross-size ms/frame
+is thermally noisy, so weight bytes is the clean cost axis). The recommended
+**Pareto knee is `L6 B24 H48 @ fp16-compute`** — **75 KB, 18% of the baseline
+fp32's 412 KB**, NLL within 2% of best, unbiased + firefly-bounded. The headline:
+on Apple Silicon the net can shrink hard **and** drop to fp16 at negligible
+quality cost, so the equal-time loser (Stage 1's MLP pre-pass cost) has real
+headroom before the CUDA stage. *Shipping* a chosen config is a later change; the
+study only recommends one.
 
 ### Reuse seam: ReSTIR DI (`reuseMode == 1`, wavefront-only)
 

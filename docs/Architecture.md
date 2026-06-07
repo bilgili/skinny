@@ -747,9 +747,9 @@ incrementally moved over.
 | 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe | `bindings.slang` |
 | 31 | StructuredBuffer | Env importance-sampling marginal CDF (ENV_H+1 floats) | `environment.slang` |
 | 32 | StructuredBuffer | Env importance-sampling conditional CDF (H×(W+1) floats) | `environment.slang` |
-| 33 | StructuredBuffer | Neural-proposal flat Linear weights (`float`, row-major) | `sampling/neural_proposal.slang` |
-| 34 | StructuredBuffer | Neural-proposal flat Linear biases (`float`) | `sampling/neural_proposal.slang` |
-| 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim) | `sampling/neural_proposal.slang` |
+| 33 | StructuredBuffer | Neural-proposal flat Linear weights (`NF_WT`, row-major — `float` by default, `half` in the fp16 precision modes) | `sampling/neural_proposal.slang` |
+| 34 | StructuredBuffer | Neural-proposal flat Linear biases (`NF_WT` — `float`/`half`) | `sampling/neural_proposal.slang` |
+| 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
 | 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry only | `integrators/path_record.slang` |
 | 37 | RWStructuredBuffer | Record-dump counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record.slang` |
 
@@ -762,6 +762,16 @@ descriptors on every pipeline, **including the megakernel** (which never sets th
 neural bit); real per-scene weights overwrite them when the neural proposal is
 activated. The full reference is in
 [Wavefront.md § Neural directional proposal](Wavefront.md#proposal-seam-neural-directional-proposal-proposal-bit2-wavefront-only).
+
+The network **size and precision are build-time configurable** (study change
+`neural-precision-size-study`): bindings 33/34 keep their slots but their **element
+type follows `NF_WT`** — `float` in the default fp32 mode, `half` in the
+fp16-storage / fp16-compute modes (the host casts the fp32 NFW1 file to half at
+upload, halving the GPU footprint). Their byte size tracks the configured
+`(layers, bins, hidden)`. The header buffer (35) is precision- and size-agnostic.
+No binding slot moves; the shader's `NF_WT`/`NF_CT` aliases + `NF_LAYERS/BINS/HIDDEN`
+`#ifndef` defaults reproduce the shipped net byte-for-byte when no override is
+given. See [Wavefront.md § Neural size & precision](Wavefront.md#neural-size--precision-tuning-neural-precision-size-study).
 
 Bindings **36/37** back the offline training-record dump (`Renderer.dump_path_records`):
 a second megakernel entry `mainImageRecord` (`integrators/path_record.slang`) appends

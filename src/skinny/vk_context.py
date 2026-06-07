@@ -185,11 +185,45 @@ class VulkanContext:
             for idx in unique_families
         ]
 
+        # fp16 capability probe (study change neural-precision-size-study). The
+        # neural-proposal fp16 precision modes need 16-bit SSBO reads (the half
+        # weight buffers at 33/34) and, for fp16-compute, half ALU. Promoted
+        # locations: 16-bit storage is in VkPhysicalDeviceVulkan11Features,
+        # shaderFloat16 in …Vulkan12Features. Probe via Features2, enable what is
+        # present, and publish capability flags so the renderer skips (falls back
+        # to fp32) on devices that lack support instead of failing hard. slangc
+        # emits the `UniformAndStorageBuffer16BitAccess` capability for half SSBO
+        # access, so the storage mode gates on uniformAndStorageBuffer16BitAccess.
+        has_16bit = has_float16 = False
+        try:
+            f11_q = vk.VkPhysicalDeviceVulkan11Features()
+            f12_q = vk.VkPhysicalDeviceVulkan12Features(pNext=f11_q)
+            f2_q = vk.VkPhysicalDeviceFeatures2(pNext=f12_q)
+            vk.vkGetPhysicalDeviceFeatures2(self.physical_device, f2_q)
+            has_16bit = bool(f11_q.uniformAndStorageBuffer16BitAccess)
+            has_float16 = bool(f12_q.shaderFloat16)
+        except Exception as exc:  # noqa: BLE001 — any failure ⇒ fp32-only, no crash
+            print(f"[fp16] feature probe unavailable ({exc}); fp16 modes disabled")
+        self.supports_fp16_storage = has_16bit
+        self.supports_fp16_compute = has_16bit and has_float16
+        print(f"[fp16] storage={self.supports_fp16_storage} "
+              f"compute={self.supports_fp16_compute} "
+              f"(uniformAndStorageBuffer16BitAccess={has_16bit}, shaderFloat16={has_float16})")
+
+        # 16-bit storage lives in the Vulkan 1.1 feature struct; chain it behind
+        # the 1.2 struct. Enabling a supported-but-unused feature is a no-op, so
+        # the default fp32 build is unaffected.
+        features11 = vk.VkPhysicalDeviceVulkan11Features(
+            storageBuffer16BitAccess=vk.VK_TRUE if has_16bit else vk.VK_FALSE,
+            uniformAndStorageBuffer16BitAccess=vk.VK_TRUE if has_16bit else vk.VK_FALSE,
+        )
         indexing_features = vk.VkPhysicalDeviceVulkan12Features(
             descriptorBindingPartiallyBound=vk.VK_TRUE,
             shaderSampledImageArrayNonUniformIndexing=vk.VK_TRUE,
             scalarBlockLayout=vk.VK_TRUE,
             descriptorBindingSampledImageUpdateAfterBind=vk.VK_TRUE,
+            shaderFloat16=vk.VK_TRUE if has_float16 else vk.VK_FALSE,
+            pNext=features11,
         )
 
         import sys

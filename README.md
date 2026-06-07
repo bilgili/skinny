@@ -405,7 +405,10 @@ environment-importance proposal (lower variance on IBL); `env` is env-only;
 proposal (frozen, offline-trained per scene; **wavefront-only**, flat materials —
 the megakernel strips the neural bit and falls back to its analytic subset). All
 proposals report exact solid-angle pdfs, so every mixture is unbiased — only the
-variance changes.
+variance changes. The neural network's **size and precision are build-time
+configurable** (`NeuralBuildConfig`; mixed fp16 on Apple-Silicon Metal with
+graceful fp32 fallback) — the default reproduces the shipped net byte-for-byte;
+see [docs/Wavefront.md § Neural size & precision](docs/Wavefront.md#neural-size--precision-tuning-neural-precision-size-study).
 
 ### Furnace Mode
 

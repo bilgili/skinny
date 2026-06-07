@@ -924,8 +924,16 @@ class Renderer:
         use_usd_mtlx_plugin: bool = False,
         execution_mode: str = "megakernel",
         bdpt_walk: str = "fused",
+        neural_config=None,
     ) -> None:
         self.ctx = vk_ctx
+        # Neural size/precision build config (study change
+        # neural-precision-size-study). Fixed for the renderer's lifetime — the
+        # study harness builds a fresh headless renderer per grid cell. Falls
+        # back to fp32 on devices lacking fp16 via _effective_neural_config().
+        from skinny.sampling.neural_weights import NeuralBuildConfig
+        self._neural_config = neural_config or NeuralBuildConfig()
+        self._fp16_fallback_warned = False
         self._requested_execution_mode = str(execution_mode)
         # BDPT subpath-build strategy for wavefront+bdpt (CLI-fixed per session):
         #   fused      — one walk kernel (the S1 connect-compaction win, default)
@@ -1553,6 +1561,7 @@ class Renderer:
             self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
             self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
             stream_size, num_pixels, build_catchall=has_nonflat,
+            neural_config=self._effective_neural_config(),
         )
         # ReSTIR DI reuse plugin: build the primary-direct pass over the same
         # path-state + hit buffers and hook it at bounce 0. We are in wavefront
@@ -1583,6 +1592,7 @@ class Renderer:
                 self._wavefront_path_pass.neural_buf.buffer,
                 self._wavefront_path_pass.neural_buf.size,
                 stream_size, network_version=self._neural_network_version,
+                neural_config=self._effective_neural_config(),
             )
             self._wavefront_path_pass.set_neural(self._neural_pass)
         self._wf_path_pass_dims = key
@@ -2956,12 +2966,15 @@ class Renderer:
         # neural proposal inactive. Real per-scene weights overwrite them on
         # activation (_sync_neural_weights). The same dummy is the 1a bring-up net.
         from skinny.sampling.neural_weights import make_dummy_weights
-        _nw = make_dummy_weights()
-        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nw.weight_bytes), 4))
-        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nw.bias_bytes), 4))
+        _ncfg = self._effective_neural_config()
+        _nw = make_dummy_weights(_ncfg)
+        _nwb = _nw.weight_bytes_for(_ncfg.precision)   # half bytes in the fp16 modes
+        _nbb = _nw.bias_bytes_for(_ncfg.precision)
+        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nwb), 4))
+        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nbb), 4))
         self.neural_layers_buffer = StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4))
-        self.neural_weights_buffer.upload_sync(_nw.weight_bytes)
-        self.neural_biases_buffer.upload_sync(_nw.bias_bytes)
+        self.neural_weights_buffer.upload_sync(_nwb)
+        self.neural_biases_buffer.upload_sync(_nbb)
         self.neural_layers_buffer.upload_sync(_nw.header_bytes)
         self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
 
@@ -6863,29 +6876,60 @@ class Renderer:
             print("[skinny] neural proposal is wavefront-only; ignored on the "
                   "megakernel backend (falling back to the analytic proposals)")
 
+    def _effective_neural_config(self):
+        """The active NeuralBuildConfig with precision degraded to what the device
+        supports — graceful fp32 fallback (study change
+        neural-precision-size-study). An fp16 mode whose required capability
+        (16-bit storage and/or shaderFloat16) is absent runs at fp32 instead of
+        failing; the downgrade is logged once. The size dims are unaffected."""
+        from dataclasses import replace
+
+        from skinny.sampling.neural_weights import NeuralPrecision
+
+        cfg = self._neural_config
+        prec = cfg.precision
+        need_storage = prec.needs_device_fp16_storage
+        need_compute = prec.needs_device_fp16_compute
+        supported = (
+            (not need_storage or getattr(self.ctx, "supports_fp16_storage", False))
+            and (not need_compute or getattr(self.ctx, "supports_fp16_compute", False))
+        )
+        if supported:
+            return cfg
+        if not self._fp16_fallback_warned:
+            self._fp16_fallback_warned = True
+            print(f"[fp16] precision '{prec.value}' unsupported on this device "
+                  f"(storage={getattr(self.ctx, 'supports_fp16_storage', False)}, "
+                  f"compute={getattr(self.ctx, 'supports_fp16_compute', False)}); "
+                  "falling back to fp32")
+        return replace(cfg, precision=NeuralPrecision.FP32)
+
     def _sync_neural_weights(self) -> None:
         """Upload the active neural weights to bindings 33/34/35. Loads the
         resolved per-scene NFW1 file when ``_neural_weights_path`` is set;
         otherwise keeps the dummy (zero) net seeded at init — the 1a bring-up
-        network. Idempotent: re-uploads only when the path changes. The buffers
-        are architecture-fixed, so a valid file's byte sizes always match."""
+        network. Idempotent: re-uploads only when the path changes. NFW1 is fp32
+        on disk; the bytes are cast to the effective precision's storage dtype at
+        upload, and the load asserts the baked arch matches the built dims (study
+        change neural-precision-size-study)."""
         path = self._neural_weights_path
         if path == self._neural_weights_loaded:
             return
         if path is None:
             self._neural_weights_loaded = None
             return
+        cfg = self._effective_neural_config()
         try:
             from skinny.sampling.neural_weights import load_neural_weights
-            nw = load_neural_weights(path)
+            nw = load_neural_weights(path, expect=cfg.arch)
         except Exception as exc:  # noqa: BLE001 - fall back to the dummy net
             print(f"[skinny] neural weights load failed for {path}: {exc}; "
                   "keeping the dummy net")
             self._neural_weights_path = None
             self._neural_weights_loaded = None
             return
-        self.neural_weights_buffer.upload_sync(nw.weight_bytes)
-        self.neural_biases_buffer.upload_sync(nw.bias_bytes)
+        self.neural_weights_buffer.upload_sync(nw.weight_bytes_for(cfg.precision))
+        self.neural_biases_buffer.upload_sync(nw.bias_bytes_for(cfg.precision))
         self.neural_layers_buffer.upload_sync(nw.header_bytes)
         self._neural_weights_loaded = path
 

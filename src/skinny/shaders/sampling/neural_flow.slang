@@ -12,10 +12,41 @@
 // square->solid-angle Jacobian 2*pi, so q_omega = q_square / (2*pi).
 
 // ---- architecture (MUST match the baked weights) ----
+// NF_LAYERS / NF_BINS / NF_HIDDEN are build-time configurable (study change
+// neural-precision-size-study): `#ifndef`-guarded so `slangc -D NF_HIDDEN=48`
+// (etc.) selects an off-default size. The host threads the same `-D` into every
+// module that imports this file (the wavefront pre-pass, the inline inverse, the
+// record entry) and folds the dims into the pipeline cache key; the NFW1 loader
+// asserts the baked `(layers,bins,hidden,cond)` matches the built dims. With no
+// override the defaults below reproduce the shipped net byte-for-byte.
+#ifndef NF_LAYERS
+#define NF_LAYERS 6     // coupling layers
+#endif
+#ifndef NF_BINS
+#define NF_BINS 24      // rational-quadratic spline bins (K)
+#endif
+#ifndef NF_HIDDEN
+#define NF_HIDDEN 96    // MLP hidden width
+#endif
+
+// ---- inference precision (mixed fp16; study change neural-precision-size-study) ----
+// NF_WT = weight *storage* type (the `StructuredBuffer` element bound at 33/34);
+// NF_CT = the MLP GEMM *accumulate*/activation type. Three modes via `-D`:
+//   fp32          (default)      : NF_WT=float NF_CT=float — byte-identical to ship
+//   fp16-storage  -D NF_WT=half               : half weights, float GEMM (½ bytes)
+//   fp16-compute  -D NF_WT=half -D NF_CT=half : half weights + half GEMM
+// The RQ-spline math (softmax/cumsum/exp/log + the analytic inverse-quadratic
+// solve) and the returned solid-angle pdf stay `float` in EVERY mode — fp16 there
+// is catastrophic-cancellation prone. Conversions at the GEMM boundary are
+// implicit, so the fp32 token stream is unchanged (no redundant casts).
+#ifndef NF_WT
+#define NF_WT float
+#endif
+#ifndef NF_CT
+#define NF_CT float
+#endif
+
 static const int   NF_DIM    = 2;     // flow dimensionality (a direction = 2 dof)
-static const int   NF_LAYERS = 6;     // coupling layers
-static const int   NF_BINS   = 24;    // rational-quadratic spline bins (K)
-static const int   NF_HIDDEN = 96;    // MLP hidden width
 static const int   NF_COND   = 9;     // condition dim (renderer: pos3 + N3 + wo3)
 static const float NF_PI     = 3.14159265358979323846f;
 static const float NF_LOG2PI = 1.83787706640934548356f;   // log(2*pi)
@@ -40,13 +71,19 @@ float nf_softplus(float x) { return log(1.0f + exp(x)); }
 
 // Evaluate one Linear layer: out[o] = bias[o] + sum_i W[o,i]*in[i], optional SiLU.
 // `n_in`/`n_out` are the runtime dims from the header (<= the static maxima).
+// Weights/biases are NF_WT (fp16 storage in the fp16 modes); the accumulate +
+// activations are NF_CT (fp16 in fp16-compute). The half↔float conversions at
+// the GEMM boundary are implicit; in fp32 (NF_WT=NF_CT=float) every type below
+// is `float`, so the emitted SPIR-V is identical to the shipped kernel. The SiLU
+// nonlinearity is evaluated in `float` (cheap, fp16-exp is lossy) then stored as
+// NF_CT — the *compute* this mode trades to fp16 is the O(NF_HIDDEN²) GEMM.
 void nf_linear(
-    StructuredBuffer<float> W, StructuredBuffer<float> B, NfLayerHeader h,
-    float inp[NF_HIDDEN], int n_in, bool act, out float outp[NF_HIDDEN])
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, NfLayerHeader h,
+    NF_CT inp[NF_HIDDEN], int n_in, bool act, out NF_CT outp[NF_HIDDEN])
 {
     for (int o = 0; o < (int)h.outDim; ++o)
     {
-        float acc = B[h.biasOffset + o];
+        NF_CT acc = B[h.biasOffset + o];
         uint row = h.weightOffset + (uint)o * h.inDim;
         for (int i = 0; i < n_in; ++i)
             acc += W[row + (uint)i] * inp[i];
@@ -57,19 +94,20 @@ void nf_linear(
 // 3-layer conditioner MLP for one coupling layer: (pass-through coord, cond) ->
 // NF_PARAMS spline parameters. `base3` is the index of this coupling's first header.
 void nf_mlp(
-    StructuredBuffer<float> W, StructuredBuffer<float> B, StructuredBuffer<NfLayerHeader> H,
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     int base3, float xcond, float cond[NF_COND], out float params[NF_PARAMS])
 {
-    float a[NF_HIDDEN];
+    NF_CT a[NF_HIDDEN];
     a[0] = xcond;
     for (int i = 0; i < NF_COND; ++i) a[1 + i] = cond[i];
 
-    float b[NF_HIDDEN];
+    NF_CT b[NF_HIDDEN];
     nf_linear(W, B, H[base3 + 0], a, NF_MLP_IN, true, b);   // in -> hidden, SiLU
     nf_linear(W, B, H[base3 + 1], b, NF_HIDDEN, true, a);   // hidden -> hidden, SiLU
 
     // hidden -> NF_PARAMS, linear. Reuse the wide local buffer then copy out.
-    float wide[NF_HIDDEN];
+    // params stays `float` — the spline decode/eval below is full-precision.
+    NF_CT wide[NF_HIDDEN];
     nf_linear(W, B, H[base3 + 2], a, NF_HIDDEN, false, wide);
     for (int p = 0; p < NF_PARAMS; ++p) params[p] = wide[p];
 }
@@ -176,7 +214,7 @@ float2 nf_hemi_to_square(float3 wld)
 
 // Forward flow u -> z accumulating log|det dz/du| (coupling layers alternate the mask).
 float2 nf_flow_forward(
-    StructuredBuffer<float> W, StructuredBuffer<float> B, StructuredBuffer<NfLayerHeader> H,
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float2 u, float cond[NF_COND], out float logdet)
 {
     float2 z = u; logdet = 0.0f;
@@ -198,7 +236,7 @@ float2 nf_flow_forward(
 
 // Inverse flow z -> u accumulating log|det du/dz|.
 float2 nf_flow_inverse(
-    StructuredBuffer<float> W, StructuredBuffer<float> B, StructuredBuffer<NfLayerHeader> H,
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float2 zin, float cond[NF_COND], out float logdet)
 {
     float2 z = zin; logdet = 0.0f;
@@ -220,7 +258,7 @@ float2 nf_flow_inverse(
 
 // PUBLIC: sample a hemisphere direction from the flow. base sample u in [0,1]^2.
 float3 sampleNeural(
-    StructuredBuffer<float> W, StructuredBuffer<float> B, StructuredBuffer<NfLayerHeader> H,
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float cond[NF_COND], float2 u, out float pdfOmega)
 {
     float logdet;
@@ -232,7 +270,7 @@ float3 sampleNeural(
 
 // PUBLIC: exact solid-angle pdf the flow assigns to direction `wi` (for the MIS mix).
 float pdfNeural(
-    StructuredBuffer<float> W, StructuredBuffer<float> B, StructuredBuffer<NfLayerHeader> H,
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float cond[NF_COND], float3 wi)
 {
     if (wi.y <= 0.0f) return 0.0f;

@@ -23,8 +23,23 @@ import sampling.neural_flow;   // NfLayerHeader, sampleNeural, pdfNeural, NF_CON
 // proposal.slang, so these three bindings sit in the shared scene-set layout
 // even on the megakernel (which never sets the NEURAL bit); the renderer binds
 // 1-element dummies there until the neural proposal is activated.
-[[vk::binding(33)]] StructuredBuffer<float>         neuralWeights;
-[[vk::binding(34)]] StructuredBuffer<float>         neuralBiases;
+// NF_WT default — Slang `#define`s do NOT cross the `import` boundary, so the
+// alias from sampling.neural_flow is not visible here; this fallback keeps the
+// default megakernel/wavefront build (no `-D`) compiling `StructuredBuffer<float>`.
+// The host passes `-D NF_WT=half` (command-line defines ARE global to the
+// compile) for the fp16 modes, which overrides this guard AND neural_flow's in
+// lockstep. Keep the default in sync with neural_flow.slang.
+#ifndef NF_WT
+#define NF_WT float
+#endif
+
+// 33/34 element type follows NF_WT (sampling.neural_flow): `float` by default,
+// `half` in the fp16-storage / fp16-compute precision modes (study change
+// neural-precision-size-study). The binding slots never move; only the element
+// type — and the bytes the host uploads — change. NfLayerHeader (35) is precision-
+// and size-agnostic (it carries the layout the loader already validates).
+[[vk::binding(33)]] StructuredBuffer<NF_WT>         neuralWeights;
+[[vk::binding(34)]] StructuredBuffer<NF_WT>         neuralBiases;
 [[vk::binding(35)]] StructuredBuffer<NfLayerHeader> neuralLayers;
 
 // Canonical condition c = (position normalised to the scene AABB → [-1,1]³,

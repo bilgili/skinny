@@ -268,6 +268,180 @@ def test_neural_trained_equaltime_gate():
     assert mse_n > 0.0 and t_neural > 0.0 and eff_n > 0.0
 
 
+# ===========================================================================
+# Size × precision study (neural-precision-size-study) — gates + render+cost
+# driver. The precision modes need fp16 device support (probed in vk_context);
+# where absent they fall back to fp32 and the fp16 gates skip cleanly.
+# ===========================================================================
+
+def _load_study(proposals_token, neural_config=None, neural_net=None,
+                execution_mode="wavefront"):
+    """`_load_cfg` with an explicit NeuralBuildConfig (size + precision) threaded
+    into the renderer constructor — the study builds a fresh renderer per cell so
+    the neural buffers + compiles are sized for the config at init."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=WIDTH, height=HEIGHT)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR, tattoo_dir=TATTOO_DIR,
+        usd_scene_path=SCENE, execution_mode=execution_mode, neural_config=neural_config,
+    )
+    renderer.proposal_preset_index = renderer.proposal_preset_from_token(proposals_token)
+    if neural_net is not None:
+        renderer._neural_weights_path = neural_net
+    deadline = WARMUP
+    while deadline > 0 and (
+        renderer._usd_scene is None
+        or len(renderer._usd_scene.instances) < 1
+        or renderer._scene_bindings is None
+    ):
+        renderer.update(0.025)
+        deadline -= 1
+    assert renderer._scene_bindings is not None, "scene bindings never built"
+    return ctx, renderer
+
+
+def _device_supports(precision):
+    """True if this device can run `precision` (drives the fp16 gate skips)."""
+    from skinny.vk_context import VulkanContext
+    ctx = VulkanContext(window=None, width=8, height=8)
+    try:
+        if precision.needs_device_fp16_compute:
+            return bool(ctx.supports_fp16_compute)
+        if precision.needs_device_fp16_storage:
+            return bool(ctx.supports_fp16_storage)
+        return True
+    finally:
+        ctx.destroy()
+
+
+def measure_cell(layers, bins, hidden, precision, *, neural_net=None,
+                 ref=None, converge_frames=96, time_frames=24):
+    """Render+cost measurement for one size×precision grid cell (task 3.2).
+
+    Returns a dict with MoltenVK ms/frame, the weight-buffer bytes, the unbiased
+    rel-mean vs `ref` ({bsdf}), and the firefly p99.9 tail. Builds a fresh
+    renderer with the NeuralBuildConfig (its compiles + uploads are sized for the
+    cell), converges the linear-HDR accumulation, then times steady-state frames.
+    """
+    import time
+
+    from skinny.sampling.neural_weights import NeuralBuildConfig
+
+    cfg = NeuralBuildConfig(layers=layers, bins=bins, hidden=hidden, precision=precision)
+    ctx, r = _load_study("bsdf,neural", neural_config=cfg, neural_net=neural_net)
+    try:
+        eff = r._effective_neural_config()
+        img = _converge(r, converge_frames)
+        # steady-state timing (compile/converge already paid)
+        r.update(0.04)
+        r.render_headless()
+        t0 = time.perf_counter()
+        for _ in range(time_frames):
+            r.update(0.04)
+            r.render_headless()
+        ms = (time.perf_counter() - t0) / time_frames * 1e3
+        wbytes = int(r.neural_weights_buffer.size)
+        rel = _rel_mean_diff(img, ref) if ref is not None else float("nan")
+        p999 = float(np.percentile(img, 99.9))
+        return {
+            "layers": layers, "bins": bins, "hidden": hidden,
+            "precision": precision.value, "eff_precision": eff.precision.value,
+            "fell_back": eff.precision != precision,
+            "ms_per_frame": ms, "weight_bytes": wbytes,
+            "unbiased_rel_mean": rel, "firefly_p999": p999,
+            "mean": float(img.mean()),
+        }
+    finally:
+        r.cleanup()
+        ctx.destroy()
+
+
+def test_default_config_byte_identical():
+    """4.1: the default fp32 @ 6/24/96 config adds NO `-D` flags, so every neural
+    compile is byte-identical to the shipped proposal. Proven two ways: the
+    config invariant (empty defines / empty tag), and a compile equivalence —
+    the neural pass built with the default config equals the one built with the
+    explicit float/6/24/96 defines (i.e. `-D NF_WT=float …` ≡ the `#ifndef`
+    default), so a non-default config is the ONLY thing that changes the bytes."""
+    import shutil
+    import subprocess
+
+    from skinny.sampling.neural_weights import NeuralBuildConfig
+
+    base = NeuralBuildConfig()
+    assert base.slang_defines() == (), base.slang_defines()
+    assert base.is_default_size and base.precision.value == "fp32"
+
+    slangc = shutil.which("slangc")
+    if slangc is None:
+        pytest.skip("slangc not on PATH")
+    src = SHADER_DIR / "wavefront" / "neural_proposal_pass.slang"
+    mtlx = SHADER_DIR.parent / "mtlx" / "genslang"
+    common = [slangc, str(src), "-target", "spirv", "-entry", "wfNeuralProposal",
+              "-stage", "compute", "-I", str(SHADER_DIR), "-I", str(mtlx),
+              "-D", "SKINNY_COMPUTE_PIPELINE=1", "-fvk-use-scalar-layout"]
+    out_a = SHADER_DIR / "wavefront" / "_gate_default.spv"
+    out_b = SHADER_DIR / "wavefront" / "_gate_explicit.spv"
+    explicit = ["-D", "NF_WT=float", "-D", "NF_CT=float",
+                "-D", "NF_LAYERS=6", "-D", "NF_BINS=24", "-D", "NF_HIDDEN=96"]
+    try:
+        assert subprocess.run([*common, "-o", str(out_a)]).returncode == 0
+        assert subprocess.run([*common, *explicit, "-o", str(out_b)]).returncode == 0
+        assert out_a.read_bytes() == out_b.read_bytes(), \
+            "default config diverges from the explicit fp32/6-24-96 defines"
+    finally:
+        for p in (out_a, out_b):
+            p.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("precision_name", ["fp16-storage", "fp16-compute"])
+def test_fp16_unbiased_gate(precision_name):
+    """4.2: each fp16 mode (dummy net) converges to the SAME image as the fp32
+    {bsdf,neural} reference — the mixture-MIS estimator stays unbiased in reduced
+    precision. Skips cleanly on a device without the required fp16 capability."""
+    from skinny.sampling.neural_weights import NeuralBuildConfig, NeuralPrecision
+
+    prec = NeuralPrecision(precision_name)
+    if not _device_supports(prec):
+        pytest.skip(f"device lacks {precision_name} capability")
+
+    ctx, r = _load_study("bsdf,neural", neural_config=NeuralBuildConfig())
+    try:
+        ref = _converge(r)
+    finally:
+        r.cleanup()
+        ctx.destroy()
+    ctx, r = _load_study("bsdf,neural", neural_config=NeuralBuildConfig(precision=prec))
+    try:
+        assert r._effective_neural_config().precision == prec, "unexpected fp32 fallback"
+        got = _converge(r)
+    finally:
+        r.cleanup()
+        ctx.destroy()
+    rel = _rel_mean_diff(got, ref)
+    print(f"\n[4.2] {precision_name} vs fp32 {{bsdf,neural}} rel-mean-diff = {rel:.4f}")
+    assert rel < 0.05, f"{precision_name} biased vs fp32: rel={rel:.4f}"
+
+
+def test_study_smoke():
+    """3.2 smoke: the render+cost driver measures a cell (cost + bytes + unbiased
+    + firefly) on the dummy net. The full grid runs via tests/study_size_precision.py."""
+    ctx, r = _load_study("bsdf")
+    try:
+        ref = _converge(r, 48)
+    finally:
+        r.cleanup()
+        ctx.destroy()
+    m = measure_cell(6, 24, 96, __import__(
+        "skinny.sampling.neural_weights", fromlist=["NeuralPrecision"]
+    ).NeuralPrecision.FP32, ref=ref, converge_frames=48, time_frames=8)
+    print(f"\n[3.2] cell {m}")
+    assert m["ms_per_frame"] > 0 and m["weight_bytes"] > 0
+    assert np.isfinite(m["unbiased_rel_mean"]) and m["unbiased_rel_mean"] < 0.06
+
+
 if __name__ == "__main__":  # pragma: no cover - manual harness
     import sys
     sys.exit(pytest.main([__file__, "-q", "-s"]))

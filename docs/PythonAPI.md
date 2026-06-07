@@ -154,12 +154,42 @@ class Renderer:                                       # :908
                  usd_scene_path: Path | None = None,
                  use_usd_mtlx_plugin: bool = False,
                  execution_mode: str = "megakernel",
-                 bdpt_walk: str = "fused") -> None: ... # :917
+                 bdpt_walk: str = "fused",
+                 neural_config: NeuralBuildConfig | None = None) -> None: ... # :917
 ```
 
 `execution_mode` (`"megakernel"` | `"wavefront"`) and `bdpt_walk`
 (`"fused"` | `"eye"` | `"eye_light"`) are **fixed for the renderer's lifetime** —
 they are excluded from the accumulation state hash.
+
+`neural_config` (`skinny.sampling.neural_weights.NeuralBuildConfig`, default
+`None` ⇒ the shipped `fp32 @ 6/24/96`) selects the neural proposal's **size +
+precision** for the renderer's lifetime (the size×precision study builds a fresh
+renderer per grid cell). It is also fixed for the lifetime; on a device lacking
+fp16 it falls back to fp32 (logged). See [Neural build config](#neural-build-config).
+
+#### Neural build config
+
+`NeuralBuildConfig` + `NeuralPrecision` (`skinny.sampling.neural_weights`) are the
+single source of truth for the neural proposal's build-time size + precision
+(study `neural-precision-size-study`):
+
+```python
+from skinny.sampling.neural_weights import NeuralBuildConfig, NeuralPrecision
+
+NeuralBuildConfig()                                   # shipped fp32 @ 6/24/96 (default)
+NeuralBuildConfig(precision=NeuralPrecision.FP16_STORAGE)   # half weights, float GEMM
+NeuralBuildConfig(layers=4, bins=16, hidden=48)             # a smaller net
+```
+
+| Member | Notes |
+|--------|-------|
+| `NeuralBuildConfig(layers=6, bins=24, hidden=96, precision=FP32)` | frozen dataclass; the default reproduces the shipped net |
+| `.slang_defines() -> tuple[str, ...]` | the `slangc -D` tokens; **empty for the default** (⇒ byte-identical compiles) |
+| `.cache_tag -> str` | slug folded into the wavefront `.spv` name so configs don't collide |
+| `.arch -> (layers, bins, hidden, cond)` | the NFW1 architecture the loader validates |
+| `NeuralPrecision.{FP32, FP16_STORAGE, FP16_COMPUTE}` | `.weight_half` / `.compute_half` drive the upload dtype + `NF_WT`/`NF_CT` |
+| `NeuralWeights.weight_bytes_for(precision)` / `.bias_bytes_for(...)` | fp32 NFW1 → the upload bytes (cast to half for the fp16 modes) |
 
 ### Frame loop & output
 
