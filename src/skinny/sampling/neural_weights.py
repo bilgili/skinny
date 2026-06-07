@@ -274,3 +274,26 @@ def bake_dummy_weights(path: str | Path,
     p.write_bytes(bytes(buf))
     return NeuralWeights(cfg.layers, cfg.bins, cfg.hidden, NF_COND,
                          np.array(headers, dtype="<u4"), weights, biases)
+
+
+def write_neural_weights(path: str | Path, nw: NeuralWeights) -> NeuralWeights:
+    """Serialise a ``NeuralWeights`` to an ``NFW1`` file (inverse of
+    ``load_neural_weights``). The online trainer (change ``neural-online-training``)
+    uses this to publish updated weights that the renderer hot-reloads via the
+    file-double-buffer handoff. NFW1 on disk is always fp32."""
+    buf = bytearray()
+    buf += struct.pack("<II", MAGIC, VERSION)
+    buf += struct.pack("<IIII", nw.layers, nw.bins, nw.hidden, nw.cond)
+    buf += struct.pack("<I", len(nw.headers))
+    for h in nw.headers:
+        buf += struct.pack("<IIII", *(int(x) for x in h))
+    w = np.ascontiguousarray(nw.weights, dtype="<f4")
+    b = np.ascontiguousarray(nw.biases, dtype="<f4")
+    buf += struct.pack("<I", len(w))
+    buf += w.tobytes()
+    buf += struct.pack("<I", len(b))
+    buf += b.tobytes()
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(bytes(buf))
+    return nw
