@@ -54,6 +54,7 @@ from skinny.vk_context import VulkanContext
 from skinny.vk_compute import (
     BINDLESS_TEXTURE_CAPACITY,
     ComputePipeline,
+    ExternalTimelineSemaphore,
     HostStorageBuffer,
     HudOverlay,
     SampledImage,
@@ -2995,6 +2996,12 @@ class Renderer:
         self.neural_biases_buffer.upload_sync(_nbb)
         self.neural_layers_buffer.upload_sync(_nw.header_bytes)
         self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
+        # Interop handoff (task 5.2): an exportable timeline semaphore orders the
+        # CUDA weight-write vs the Vulkan read. Allocated only under
+        # `--neural-handoff interop`; a guarded no-op (export_handle()→None) on
+        # devices without external-semaphore support.
+        self.neural_timeline_semaphore = (
+            ExternalTimelineSemaphore(self.ctx) if _ext_neural else None)
 
         # Neural training-record dump (bindings 36/37, task 5.1). 1-element dummy
         # append buffer + counter so the descriptors are always valid; the
@@ -6998,11 +7005,18 @@ class Renderer:
         self._neural_trainer = (trainer if trainer is not None
                                 else NeuralTrainer(TrainerConfig(arch=cfg), initial=init))
         kind = handoff or self._neural_handoff_kind
-        # The interop publisher writes weights into the CUDA-shared weight buffer
-        # (task 5.2 seam); hand it the exported buffer so the NVIDIA-box CUDA
-        # import has the Vulkan memory + its export handle.
-        if kind == "interop" and "exported_buffer" not in publisher_kwargs:
-            publisher_kwargs["exported_buffer"] = getattr(self, "neural_weights_buffer", None)
+        # The interop publisher (task 5.2) writes weights+biases straight into the
+        # CUDA-shared binding-33/34 buffers and signals the exported timeline
+        # semaphore; hand it the exported Vulkan objects so the CUDA import has the
+        # memory + semaphore handles, plus the active storage precision.
+        if kind == "interop":
+            publisher_kwargs.setdefault(
+                "weights_buffer", getattr(self, "neural_weights_buffer", None))
+            publisher_kwargs.setdefault(
+                "biases_buffer", getattr(self, "neural_biases_buffer", None))
+            publisher_kwargs.setdefault(
+                "timeline_semaphore", getattr(self, "neural_timeline_semaphore", None))
+            publisher_kwargs.setdefault("precision", cfg.precision)
         self._neural_publisher = make_publisher(
             kind, initial=init, expect_arch=cfg.arch, **publisher_kwargs)
         self._online_training = True
@@ -8379,9 +8393,18 @@ class Renderer:
         self._readback.destroy()
         self.uniform_buffer.destroy()
         self.mtlx_skin_buffer.destroy()
+        # Interop handoff (task 5.2): release the CUDA imports (external memory +
+        # semaphore + stream) BEFORE freeing the Vulkan objects they reference.
+        if getattr(self, "_neural_publisher", None) is not None:
+            _close = getattr(self._neural_publisher, "close", None)
+            if _close is not None:
+                _close()
         self.neural_weights_buffer.destroy()
         self.neural_biases_buffer.destroy()
         self.neural_layers_buffer.destroy()
+        if getattr(self, "neural_timeline_semaphore", None) is not None:
+            self.neural_timeline_semaphore.destroy()
+            self.neural_timeline_semaphore = None
         if getattr(self, "_record_pipeline", None) is not None:
             self._record_pipeline.destroy()
             self._record_pipeline = None

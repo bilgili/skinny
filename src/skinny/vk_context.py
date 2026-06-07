@@ -194,7 +194,7 @@ class VulkanContext:
         # to fp32) on devices that lack support instead of failing hard. slangc
         # emits the `UniformAndStorageBuffer16BitAccess` capability for half SSBO
         # access, so the storage mode gates on uniformAndStorageBuffer16BitAccess.
-        has_16bit = has_float16 = False
+        has_16bit = has_float16 = has_timeline = False
         try:
             f11_q = vk.VkPhysicalDeviceVulkan11Features()
             f12_q = vk.VkPhysicalDeviceVulkan12Features(pNext=f11_q)
@@ -202,6 +202,10 @@ class VulkanContext:
             vk.vkGetPhysicalDeviceFeatures2(self.physical_device, f2_q)
             has_16bit = bool(f11_q.uniformAndStorageBuffer16BitAccess)
             has_float16 = bool(f12_q.shaderFloat16)
+            # Timeline semaphore (core 1.2) orders the CUDA weight-write vs the
+            # Vulkan read for the interop handoff (change neural-online-training,
+            # task 5.2). Probe + enable; absent ⇒ interop semaphore unavailable.
+            has_timeline = bool(f12_q.timelineSemaphore)
         except Exception as exc:  # noqa: BLE001 — any failure ⇒ fp32-only, no crash
             print(f"[fp16] feature probe unavailable ({exc}); fp16 modes disabled")
         self.supports_fp16_storage = has_16bit
@@ -223,6 +227,7 @@ class VulkanContext:
             scalarBlockLayout=vk.VK_TRUE,
             descriptorBindingSampledImageUpdateAfterBind=vk.VK_TRUE,
             shaderFloat16=vk.VK_TRUE if has_float16 else vk.VK_FALSE,
+            timelineSemaphore=vk.VK_TRUE if has_timeline else vk.VK_FALSE,
             pNext=features11,
         )
 
@@ -243,12 +248,21 @@ class VulkanContext:
         # import + timeline-semaphore sync is the seam neural_handoff_interop fills
         # on the NVIDIA box (task 5.2). MoltenVK lacks the extension → no-op.
         self.supports_external_memory = False
+        self.supports_external_semaphore = False
         self._external_memory_handle_type = 0
-        ext_mem_name = None
+        self._external_semaphore_handle_type = 0
+        ext_mem_name = ext_sema_name = None
+        mem_htype = sema_htype = 0
         if sys.platform == "win32":
             ext_mem_name = vk.VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME
+            ext_sema_name = vk.VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME
+            mem_htype = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
+            sema_htype = vk.VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT
         elif sys.platform.startswith("linux"):
             ext_mem_name = getattr(vk, "VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME", None)
+            ext_sema_name = getattr(vk, "VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME", None)
+            mem_htype = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+            sema_htype = vk.VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
 
         def _make_info(exts):
             return vk.VkDeviceCreateInfo(
@@ -260,21 +274,40 @@ class VulkanContext:
                 pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
             )
 
-        if ext_mem_name is not None and self._device_extension_available(ext_mem_name):
+        mem_ok = ext_mem_name is not None and self._device_extension_available(ext_mem_name)
+        sema_ok = (ext_sema_name is not None and has_timeline
+                   and self._device_extension_available(ext_sema_name))
+
+        # The interop handoff (task 5.2) needs external memory (CUDA imports the
+        # weight buffers) AND an external timeline semaphore (CUDA-write↔Vulkan-read
+        # ordering). Graded fallback — try both, then memory only, then a plain
+        # device — so a device with one but not the other still gets what it
+        # supports and any failure never destabilises the default render path.
+        attempts = []
+        if mem_ok and sema_ok:
+            attempts.append((device_extensions + [ext_mem_name, ext_sema_name], True, True))
+        if mem_ok:
+            attempts.append((device_extensions + [ext_mem_name], True, False))
+        attempts.append((device_extensions, False, False))
+
+        for exts, want_mem, want_sema in attempts:
             try:
-                device = vk.vkCreateDevice(
-                    self.physical_device, _make_info(device_extensions + [ext_mem_name]), None)
-                self.supports_external_memory = True
-                self._external_memory_handle_type = (
-                    vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
-                    if sys.platform == "win32"
-                    else vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
+                device = vk.vkCreateDevice(self.physical_device, _make_info(exts), None)
+            except Exception as exc:  # noqa: BLE001 — try a smaller extension set
+                print(f"[interop] device create with external extensions failed "
+                      f"({exc}); retrying with fewer")
+                continue
+            self.supports_external_memory = want_mem
+            self.supports_external_semaphore = want_sema
+            if want_mem:
+                self._external_memory_handle_type = mem_htype
                 print("[interop] external-memory export enabled "
                       "(bindings 33/34/35 shareable with CUDA under --neural-handoff interop)")
-                return device
-            except Exception as exc:  # noqa: BLE001 — never destabilise the render device
-                print(f"[interop] external-memory enable failed ({exc}); "
-                      "interop handoff unavailable, file handoff unaffected")
+            if want_sema:
+                self._external_semaphore_handle_type = sema_htype
+                print("[interop] external timeline-semaphore enabled "
+                      "(CUDA-write/Vulkan-read ordering under --neural-handoff interop)")
+            return device
 
         return vk.vkCreateDevice(self.physical_device, _make_info(device_extensions), None)
 

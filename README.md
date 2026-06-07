@@ -417,11 +417,13 @@ offline bake. `--neural-handoff {file,interop}` (env `SKINNY_NEURAL_HANDOFF`,
 also GUI/persisted) selects how freshly-trained weights are handed from the
 async trainer back to the renderer: `file` (default) double-buffers through an
 NFW1 file the renderer hot-reloads — a CPU round-trip that works on **any**
-platform; `interop` writes weights straight into the Vulkan weight buffer from
-CUDA via `VK_KHR_external_memory` (no CPU round-trip) — the real-time path,
-**CUDA-only** (raises on platforms without it). The renderer swaps in new
-weights only at a frame boundary and bumps the per-sample network version, so an
-async swap raises variance only, never bias. See
+platform; `interop` writes weights + biases straight into the Vulkan weight
+buffers from CUDA via `VK_KHR_external_memory` + an exported timeline semaphore
+(no CPU round-trip) — the real-time path, **CUDA-only** (needs the `interop`
+extra, `pip install -e ".[interop]"`; raises a clear error and falls back to
+`file` on platforms without CUDA / external-memory Vulkan). The renderer swaps in
+new weights only at a frame boundary and bumps the per-sample network version, so
+an async swap raises variance only, never bias. See
 [docs/Architecture.md § Online neural training](docs/Architecture.md#online-neural-training).
 
 ### Furnace Mode
