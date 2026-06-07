@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="470" viewBox="0 0 880 470" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrP" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#a855f7"/>
+    </marker>
+    <style>
+      .box{stroke-width:1.5;}
+      .lbl{font-size:12.5px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:10.5px;fill:#475569;}
+      .buf{font-size:10.5px;font-weight:600;fill:#7c3aed;}
+      .flow{stroke:#475569;stroke-width:1.6;fill:none;}
+      .note{font-size:10px;fill:#64748b;}
+      .hdr{font-size:13.5px;font-weight:700;fill:#0f172a;}
+    </style>
+  </defs>
+
+  <!-- TITLE -->
+  <text x="20" y="26" class="hdr">Online neural training — drain → train → publish → frame-end swap</text>
+
+  <!-- TOP ROW: the live loop -->
+  <rect x="14" y="40" width="852" height="186" rx="10" fill="#fafcff" stroke="#dbeafe"/>
+
+  <!-- renderer (Vulkan) -->
+  <rect x="28" y="64" width="160" height="92" rx="8" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="108" y="90" text-anchor="middle" class="lbl">Renderer (Vulkan)</text>
+  <text x="108" y="108" text-anchor="middle" class="sub">megakernel mainImageRecord</text>
+  <text x="108" y="124" text-anchor="middle" class="sub">per-vertex PathRecord</text>
+  <text x="108" y="140" text-anchor="middle" class="buf">→ append 36 / counter 37</text>
+
+  <!-- ReplayBuffer -->
+  <rect x="222" y="64" width="156" height="92" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="300" y="90" text-anchor="middle" class="lbl">ReplayBuffer</text>
+  <text x="300" y="108" text-anchor="middle" class="sub">drain_path_records</text>
+  <text x="300" y="124" text-anchor="middle" class="sub">_to_replay (reader)</text>
+  <text x="300" y="140" text-anchor="middle" class="sub">recency-weighted</text>
+
+  <!-- NeuralTrainer -->
+  <rect x="412" y="64" width="172" height="92" rx="8" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="498" y="90" text-anchor="middle" class="lbl">NeuralTrainer</text>
+  <text x="498" y="108" text-anchor="middle" class="sub">train_cycle (warm-start)</text>
+  <text x="498" y="124" text-anchor="middle" class="sub">contribution-weighted MLE</text>
+  <text x="498" y="140" text-anchor="middle" class="note">CUDA fp16 / CPU / MPS</text>
+
+  <!-- NeuralWeightPublisher -->
+  <rect x="618" y="64" width="234" height="92" rx="8" class="box" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="735" y="90" text-anchor="middle" class="lbl">NeuralWeightPublisher</text>
+  <text x="735" y="108" text-anchor="middle" class="sub">publish() — stage pending θ</text>
+  <text x="735" y="124" text-anchor="middle" class="buf">file: NFW1 hot-reload (any HW)</text>
+  <text x="735" y="140" text-anchor="middle" class="buf">interop: CUDA → Vk buffer (CUDA)</text>
+
+  <!-- top-row arrows -->
+  <path class="flow" d="M188,110 L220,110" marker-end="url(#arr)"/>
+  <text x="204" y="102" text-anchor="middle" class="note">drain</text>
+  <path class="flow" d="M378,110 L410,110" marker-end="url(#arr)"/>
+  <text x="394" y="102" text-anchor="middle" class="note">train</text>
+  <path class="flow" d="M584,110 L616,110" marker-end="url(#arr)"/>
+  <text x="600" y="102" text-anchor="middle" class="note">publish</text>
+
+  <!-- FRAME BOUNDARY band -->
+  <text x="20" y="262" class="hdr">Frame boundary — _online_frame_end_swap() (after fence wait / after present)</text>
+  <rect x="14" y="274" width="852" height="160" rx="10" fill="#fdfcff" stroke="#f3e8ff"/>
+
+  <!-- swap node -->
+  <rect x="28" y="300" width="210" height="104" rx="8" class="box" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="133" y="326" text-anchor="middle" class="lbl">publisher.swap()</text>
+  <text x="133" y="344" text-anchor="middle" class="sub">promote pending → render</text>
+  <text x="133" y="360" text-anchor="middle" class="sub">_apply_render_weights</text>
+  <text x="133" y="376" text-anchor="middle" class="sub">networkVersion++</text>
+  <text x="133" y="394" text-anchor="middle" class="note">render weights frozen per frame</text>
+
+  <!-- theta_render buffers -->
+  <rect x="282" y="300" width="246" height="104" rx="8" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="405" y="326" text-anchor="middle" class="lbl">θ_render — bindings 33 / 34 / 35</text>
+  <text x="405" y="344" text-anchor="middle" class="sub">weights / biases / layer headers</text>
+  <text x="405" y="360" text-anchor="middle" class="sub">re-uploaded (or externally-shared</text>
+  <text x="405" y="376" text-anchor="middle" class="sub">memory in interop mode)</text>
+  <text x="405" y="394" text-anchor="middle" class="buf">read by pre-pass + inline inverse</text>
+
+  <!-- version stamps -->
+  <rect x="572" y="300" width="280" height="104" rx="8" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="712" y="326" text-anchor="middle" class="lbl">per-sample version stamp</text>
+  <text x="712" y="344" text-anchor="middle" class="sub">FrameConstants.neuralNetworkVersion</text>
+  <text x="712" y="360" text-anchor="middle" class="sub">+ WavefrontNeuralProposalPass push-const</text>
+  <text x="712" y="378" text-anchor="middle" class="sub">density evaluated at the version that drew it</text>
+  <text x="712" y="394" text-anchor="middle" class="note">async swap → variance only, never bias</text>
+
+  <!-- frame-boundary arrows -->
+  <path class="flow" d="M238,352 L280,352" marker-end="url(#arr)"/>
+  <path class="flow" d="M528,352 L570,352" marker-end="url(#arr)"/>
+
+  <!-- publisher → swap (pending θ down into the boundary band) -->
+  <path class="flow" d="M735,156 C735,210 220,210 175,298" marker-end="url(#arrP)" stroke="#a855f7" stroke-dasharray="4 3"/>
+  <text x="445" y="200" text-anchor="middle" class="note">pending θ (acquire_for_render)</text>
+
+  <!-- version stamp loops back up to the renderer for the next frame -->
+  <path class="flow" d="M712,300 C712,244 108,244 108,158" marker-end="url(#arrP)" stroke="#a855f7" stroke-dasharray="4 3"/>
+  <text x="430" y="240" text-anchor="middle" class="note">next frame draws against θ_render @ networkVersion</text>
+</svg>

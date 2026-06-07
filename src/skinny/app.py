@@ -9,6 +9,8 @@ Qt event loop would get in the way.
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -505,7 +507,14 @@ def main() -> None:
         use_usd_mtlx_plugin=args.usdMtlx,
         execution_mode=args.execution_mode,
         bdpt_walk=resolve_walk(args.bdpt_walk),
+        neural_handoff=args.neural_handoff,
     )
+
+    # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
+    if "--neural-handoff" not in sys.argv and not os.environ.get("SKINNY_NEURAL_HANDOFF"):
+        saved_handoff = saved.get("neural_handoff")
+        if saved_handoff in ("file", "interop"):
+            renderer._neural_handoff_kind = saved_handoff
 
     _apply_saved_params(renderer, saved.get("params", {}))
     _apply_saved_camera(renderer, saved.get("camera"))
@@ -559,6 +568,7 @@ def main() -> None:
             "params": _snapshot_params(renderer, input_handler.params),
             "camera": _snapshot_camera(renderer),
             "gizmo_mode": int(renderer.gizmo.mode),
+            "neural_handoff": renderer._neural_handoff_kind,
         }
         save_settings(out)
     except OSError:

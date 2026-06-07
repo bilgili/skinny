@@ -411,6 +411,19 @@ configurable** (`NeuralBuildConfig`; mixed fp16 on Apple-Silicon Metal with
 graceful fp32 fallback) — the default reproduces the shipped net byte-for-byte;
 see [docs/Wavefront.md § Neural size & precision](docs/Wavefront.md#neural-size--precision-tuning-neural-precision-size-study).
 
+**Online neural training.** The neural proposal can be trained *continuously*
+while the scene animates, so the net adapts instead of staying frozen on an
+offline bake. `--neural-handoff {file,interop}` (env `SKINNY_NEURAL_HANDOFF`,
+also GUI/persisted) selects how freshly-trained weights are handed from the
+async trainer back to the renderer: `file` (default) double-buffers through an
+NFW1 file the renderer hot-reloads — a CPU round-trip that works on **any**
+platform; `interop` writes weights straight into the Vulkan weight buffer from
+CUDA via `VK_KHR_external_memory` (no CPU round-trip) — the real-time path,
+**CUDA-only** (raises on platforms without it). The renderer swaps in new
+weights only at a frame boundary and bumps the per-sample network version, so an
+async swap raises variance only, never bias. See
+[docs/Architecture.md § Online neural training](docs/Architecture.md#online-neural-training).
+
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding

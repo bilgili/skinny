@@ -98,6 +98,37 @@ def test_choice_flags_reject_bad(flag, bad):
         _parser().parse_args([flag, bad])
 
 
+# ── --neural-handoff (online-training weight handoff backend) ─────────
+
+def test_neural_handoff_default(monkeypatch):
+    monkeypatch.delenv("SKINNY_NEURAL_HANDOFF", raising=False)
+    ns = _parser().parse_args([])
+    assert ns.neural_handoff == "file"
+
+
+def test_neural_handoff_explicit():
+    ns = _parser().parse_args(["--neural-handoff", "interop"])
+    assert ns.neural_handoff == "interop"
+
+
+def test_neural_handoff_env_fallback(monkeypatch):
+    monkeypatch.setenv("SKINNY_NEURAL_HANDOFF", "interop")
+    ns = _parser().parse_args([])
+    assert ns.neural_handoff == "interop"
+
+
+def test_neural_handoff_rejects_bad(monkeypatch):
+    monkeypatch.delenv("SKINNY_NEURAL_HANDOFF", raising=False)
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["--neural-handoff", "shared-mem"])
+
+
+def test_neural_handoff_can_be_suppressed():
+    p = _parser(neural_handoff=False)
+    ns = p.parse_args([])
+    assert not hasattr(ns, "neural_handoff")
+
+
 # ── suppression kwargs ───────────────────────────────────────────────
 
 def test_flags_can_be_suppressed():

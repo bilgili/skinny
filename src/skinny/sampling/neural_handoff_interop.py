@@ -50,13 +50,28 @@ class InteropWeightPublisher(NeuralWeightPublisher):
         self._expect = expect_arch
         self._version = 0
         self._cuda_ptr = None  # set by _import_external_memory on the NVIDIA box
+        # The Vulkan side (task 5.1) allocates bindings 33/34/35 as exportable and
+        # hands the OS memory handle here; the CUDA import below consumes it.
+        self._export_handle = (
+            exported_buffer.export_handle() if exported_buffer is not None else None)
+        self._buffer_size = getattr(exported_buffer, "size", 0)
 
     def _import_external_memory(self):
-        # cudaImportExternalMemory(self._exported_buffer.handle, size) →
-        # cudaExternalMemoryGetMappedBuffer → device pointer aliasing the Vulkan
-        # weight buffer. NVIDIA-box implementation seam.
+        # NVIDIA-box implementation seam (task 5.2). The Vulkan export half is wired
+        # (task 5.1): `self._export_handle` is the OS handle to the device memory
+        # backing bindings 33/34/35 and `self._buffer_size` its byte size. The
+        # remaining CUDA step:
+        #   desc = cudaExternalMemoryHandleDesc(
+        #       type=cudaExternalMemoryHandleTypeOpaqueWin32,    # *OpaqueFd on Linux
+        #       handle.win32.handle=self._export_handle, size=self._buffer_size)
+        #   extMem = cudaImportExternalMemory(desc)
+        #   self._cuda_ptr = cudaExternalMemoryGetMappedBuffer(extMem, 0, self._buffer_size)
+        # via cuda-python / a ctypes shim to cudart (torch does not expose the
+        # external-memory API). publish() then cudaMemcpy's weights into _cuda_ptr.
         raise NotImplementedError(
-            "interop external-memory import is implemented on the NVIDIA box"
+            "interop external-memory import is implemented on the NVIDIA box; "
+            f"Vulkan export handle is {'present' if self._export_handle else 'unavailable'} "
+            f"(size={self._buffer_size}B) — cudaImportExternalMemory consumes it."
         )
 
     def publish(self, weights: NeuralWeights) -> int:
@@ -69,6 +84,10 @@ class InteropWeightPublisher(NeuralWeightPublisher):
     def swap(self) -> bool:
         # Renderer waits on the timeline value for the staged version at frame end;
         # no CPU buffer copy — the GPU memory already holds the new weights.
+        # Timeline-semaphore sync contract (task 5.2): the trainer's CUDA write
+        # signals an exported VK_KHR_external_semaphore (timeline) at the staged
+        # version value; the renderer's frame-end swap waits that value before
+        # binding the weights, so a CUDA write in flight can never tear a frame.
         raise NotImplementedError(
             "interop swap is implemented on the NVIDIA box (timeline-semaphore wait)"
         )

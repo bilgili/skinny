@@ -65,6 +65,23 @@ def pack_header(bounds_min, bounds_extent) -> bytes:
     return head
 
 
+def records_from_buffer(raw: bytes, count: int) -> np.ndarray:
+    """Parse the first ``count`` records out of a raw GPU drain buffer.
+
+    The live online-training drain (``Renderer.drain_path_records_to_replay``)
+    reads the append buffer (binding 36) and counter (binding 37) directly, so —
+    unlike :func:`read_records` — there is no file header to skip. ``count`` is
+    the GPU-reported counter, which can exceed the buffer capacity (the shader
+    atomically bumps it even past the cap); this clamps to the bytes actually
+    present so the reader never runs past the end. Returns a writable
+    ``RECORD_DTYPE`` copy (detached from ``raw``) ready for ``ReplayBuffer.add``.
+    """
+    n = min(int(count), len(raw) // RECORD_STRIDE)
+    if n <= 0:
+        return np.empty(0, dtype=RECORD_DTYPE)
+    return np.frombuffer(raw, dtype=RECORD_DTYPE, count=n).copy()
+
+
 def read_records(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Parse a ``.nrec`` file → (records, bounds_min, bounds_extent).
 

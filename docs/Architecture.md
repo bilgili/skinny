@@ -773,11 +773,23 @@ No binding slot moves; the shader's `NF_WT`/`NF_CT` aliases + `NF_LAYERS/BINS/HI
 `#ifndef` defaults reproduce the shipped net byte-for-byte when no override is
 given. See [Wavefront.md § Neural size & precision](Wavefront.md#neural-size--precision-tuning-neural-precision-size-study).
 
-Bindings **36/37** back the offline training-record dump (`Renderer.dump_path_records`):
-a second megakernel entry `mainImageRecord` (`integrators/path_record.slang`) appends
-per-vertex `(pos, N, wo, wiLocal, contribution)` records there. `mainImage` never
-references them (dead-stripped → byte-identical), so they too are seeded with
-1-element dummies and only reallocated to per-frame capacity during a dump.
+Under **`--neural-handoff interop`** (online training, change
+`neural-online-training`) bindings 33/34/35 are allocated as **externally-shared
+memory** (`VK_KHR_external_memory`) so the CUDA trainer can write freshly-baked
+weights straight into them with no CPU round-trip — the slots and element types
+are unchanged, only the buffers' memory backing differs. The default
+`--neural-handoff file` keeps them as ordinary device-local buffers the host
+re-uploads on a hot-reload. See [Online neural training](#online-neural-training).
+
+Bindings **36/37** back the per-vertex training-record dump
+(`Renderer.dump_path_records`): a second megakernel entry `mainImageRecord`
+(`integrators/path_record.slang`) appends per-vertex
+`(pos, N, wo, wiLocal, contribution)` records there. `mainImage` never references
+them (dead-stripped → byte-identical), so they too are seeded with 1-element
+dummies and only reallocated to per-frame capacity during a dump. The **online
+training loop** drains those same buffers live into a recency-weighted replay
+buffer (`Renderer.drain_path_records_to_replay`, via the shared
+`records_from_buffer` reader) — see [Online neural training](#online-neural-training).
 
 Light uniforms (part of UBO, not separate bindings):
 - `lightDirection` (float3) — analytic directional light toward-light vector
@@ -818,6 +830,59 @@ depthThresh, mCap, mBsdf`.
 
 The full ReSTIR DI reference — pipeline stages, equations, the equation→shader
 map, design choices, and GUI controls — is in **[ReSTIR.md](ReSTIR.md)**.
+
+---
+
+## Online neural training
+
+The neural directional proposal (the `{bsdf,neural}` wavefront proposal) can be
+trained **continuously while the scene animates**, so the net adapts instead of
+staying frozen on a per-scene offline bake (change `neural-online-training`,
+Stage 2). The renderer runs a four-stage loop whose only render-thread cost is
+the frame-end weight swap; training itself happens off the render path.
+
+![Online neural training loop: the renderer emits path records to bindings 36/37, a recency-weighted ReplayBuffer feeds the NeuralTrainer, the NeuralWeightPublisher stages weights through a file or interop backend, and the frame-end swap promotes them into the binding-33/34/35 weight buffers while bumping networkVersion.](diagrams/neural/online_training_loop.svg)
+
+1. **Drain** — `Renderer.drain_path_records_to_replay()` reads the per-vertex
+   `PathRecord`s the producer appended to bindings 36 (append) / 37 (counter)
+   into a recency-weighted `ReplayBuffer`
+   (`sampling/neural_replay.py`), via the shared reader `records_from_buffer`
+   (`sampling/path_records.py`). The record producer is the `mainImageRecord`
+   **megakernel**, which device-losts under the 2 s TDR watchdog on
+   NVIDIA/Windows, so the live GPU drain is an NVIDIA-box seam (a follow-up
+   proposal `wavefront-native-path-records` moves emission onto the wavefront
+   path to remove it).
+2. **Train** — `Renderer.online_train_and_publish()` runs one warm-started cycle
+   of `NeuralTrainer.train_cycle` (`sampling/neural_trainer.py`):
+   contribution-weighted MLE on the replay batch, reusing `spline_flow`'s
+   `ConditionalSplineFlow2D` + `render_records` loss. Device branch: CPU/MPS for
+   CI, CUDA + `autocast(fp16)` + `GradScaler` on the NVIDIA box (linear GEMMs in
+   fp16 on tensor cores, the RQ-spline math in fp32); torch-free venvs fall back
+   to a placeholder. It bakes the new weights and `publish()`es them.
+3. **Publish** — a `NeuralWeightPublisher` (`sampling/neural_handoff.py`) stages
+   the pending weights through one of **two handoff backends**, selected by
+   `--neural-handoff` (env `SKINNY_NEURAL_HANDOFF`, persisted):
+   - **`file`** (default, `neural_handoff_file.py`) — the trainer writes an NFW1
+     file, the renderer hot-reloads it: a CPU round-trip that works on **any**
+     platform.
+   - **`interop`** (`neural_handoff_interop.py`) — CUDA writes weights straight
+     into the Vulkan weight buffer via `VK_KHR_external_memory` +
+     `cudaImportExternalMemory`, with no CPU round-trip — the real-time path,
+     **CUDA-only** and guarded. Bindings 33/34/35 become externally-shared
+     memory in this mode.
+4. **Swap** — `Renderer._online_frame_end_swap()` runs at the **frame boundary**
+   (after the fence wait in `render_headless`, after present in `render`):
+   `publisher.swap()` promotes pending→render, `_apply_render_weights` re-uploads
+   the new weights to bindings 33/34/35, and `networkVersion` is incremented in
+   both `FrameConstants.neuralNetworkVersion` **and** the
+   `WavefrontNeuralProposalPass` push-constant stamp.
+
+Render weights stay **frozen during a frame**, so each sample's density is always
+evaluated against the network version that drew it. An asynchronous swap
+therefore raises **variance only, never bias** — mixture-MIS unbiasedness is
+preserved exactly as it is for an untrained net. The wavefront-side commitment
+discipline is detailed in
+[Wavefront.md § Online neural training: frame-end weight swap](Wavefront.md#online-neural-training-frame-end-weight-swap).
 
 ---
 

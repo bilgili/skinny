@@ -17,7 +17,11 @@ from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
 from skinny.sampling.neural_handoff import make_publisher
 from skinny.sampling.neural_handoff_interop import InteropWeightPublisher, interop_available
 from skinny.sampling.neural_weights import make_dummy_weights
-from skinny.sampling.path_records import RECORD_DTYPE
+from skinny.sampling.path_records import (
+    RECORD_DTYPE,
+    RECORD_STRIDE,
+    records_from_buffer,
+)
 
 
 def _records(n: int, tag: float) -> np.ndarray:
@@ -26,6 +30,46 @@ def _records(n: int, tag: float) -> np.ndarray:
     r["wi_local"] = [0.0, 0.0, 1.0]
     r["contrib"] = 1.0
     return r
+
+
+# ── live-drain reader (renderer reads bindings 36/37 → these bytes) ───
+# The GPU drain runs the megakernel record entry, which device-losts under the
+# 2s Windows TDR on this box; the reader contract (raw drain bytes → records →
+# replay) is what we validate off-GPU here. See drain_path_records_to_replay.
+
+def test_records_from_buffer_roundtrips():
+    src = _records(7, tag=3.0)
+    out = records_from_buffer(src.tobytes(), 7)
+    assert out.dtype == RECORD_DTYPE
+    np.testing.assert_array_equal(out, src)
+
+
+def test_records_from_buffer_truncates_to_available():
+    # The GPU counter can over-report past the buffer capacity; the reader must
+    # clamp to what the raw bytes actually hold, never read past the end.
+    src = _records(4, tag=1.0)
+    out = records_from_buffer(src.tobytes(), count=10)
+    assert len(out) == 4
+
+
+def test_records_from_buffer_empty():
+    assert len(records_from_buffer(b"", 0)) == 0
+    assert len(records_from_buffer(_records(2, 1.0).tobytes(), 0)) == 0
+
+
+def test_records_from_buffer_is_writable_copy():
+    # replay.add mutates generations on its own array; the drained batch must be
+    # a detached, writable copy (np.frombuffer alone is read-only).
+    out = records_from_buffer(_records(3, 2.0).tobytes(), 3)
+    assert out.flags.writeable
+    out["pos"] = 9.0  # must not raise
+
+
+def test_records_from_buffer_feeds_replay():
+    replay = ReplayBuffer(capacity=1_000)
+    raw = _records(250, tag=5.0).tobytes()
+    replay.add(records_from_buffer(raw, len(raw) // RECORD_STRIDE))
+    assert len(replay) == 250
 
 
 def test_replay_recency_weighting():
