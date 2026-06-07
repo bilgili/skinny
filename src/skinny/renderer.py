@@ -1110,6 +1110,16 @@ class Renderer:
         self._neural_replay = None
         self._neural_trainer = None
         self._neural_publisher = None
+        # Path-record source for the live online drain (change wavefront-native-
+        # path-records): 'auto' picks the wavefront-native emitter when running
+        # the wavefront path integrator (no megakernel dispatch, no 2 s-TDR), and
+        # the megakernel `mainImageRecord` otherwise. 'megakernel'/'wavefront'
+        # force a source. `_wf_record_active` is the resolved gate (set by
+        # enable_online_training) that drives FrameConstants.recordMode + the
+        # path pass's full-size record buffers.
+        self._record_source = "auto"
+        self._wf_record_active = False
+        self._wf_record_capacity = 0
         # Per-scene baked weights file (NFW1). None ⇒ the renderer bakes a dummy
         # net for the 1a plumbing bring-up; a CLI/settings override threads here.
         self._neural_weights_path = None
@@ -1547,10 +1557,13 @@ class Renderer:
         reuse_mode = int(self._active_reuse().reuse_mode)
         # Rebuild when the reuse mode or the ReSTIR regime/config changes.
         _rcfg = getattr(self, "_restir_config", None)
+        # Record mode is part of the key so enabling/disabling the wavefront
+        # record drain rebuilds the pass with full-size vs dummy record buffers.
+        wf_record = bool(getattr(self, "_wf_record_active", False))
         key = (self.width, self.height, has_nonflat, reuse_mode,
                int(self.restir_regime_index) if reuse_mode == 1 else None,
                tuple(sorted(_rcfg.items())) if _rcfg else None,
-               self._neural_active())
+               self._neural_active(), wf_record)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             # Live ReSTIR tuning: refresh the push-constant config each frame so
             # slider changes (mLight/mBsdf/k/radius/mCap/biased) take effect
@@ -1576,6 +1589,7 @@ class Renderer:
             self._wf_path_state_buf.buffer, self._wf_path_state_buf.size,
             self._wf_path_hit_buf.buffer, self._wf_path_hit_buf.size,
             stream_size, num_pixels, build_catchall=has_nonflat,
+            record_capacity=(stream_size if wf_record else 0),
             neural_config=self._effective_neural_config(),
         )
         # ReSTIR DI reuse plugin: build the primary-direct pass over the same
@@ -7020,10 +7034,20 @@ class Renderer:
         self._neural_publisher = make_publisher(
             kind, initial=init, expect_arch=cfg.arch, **publisher_kwargs)
         self._online_training = True
+        # Resolve the record source. Wavefront-native emission removes the
+        # megakernel record dispatch (the 2 s-TDR / ~400 s-compile seam on
+        # NVIDIA/Windows): the normal wavefront render fills bindings 36/37 and
+        # the drain just reads them. When the source is the megakernel, the
+        # wavefront render stays byte-identical (recordMode 0) and the drain
+        # dispatches `mainImageRecord` as before.
+        self._wf_record_active = (self._resolve_record_source() == "wavefront")
+        if self._wf_record_active and self.descriptor_sets is not None:
+            self._ensure_wf_record_drain()
         return self._neural_publisher
 
     def disable_online_training(self) -> None:
         self._online_training = False
+        self._wf_record_active = False
 
     def online_drain(self, **kw) -> int:
         """Drain one frame of GPU records into the replay buffer (the live feed,
@@ -7315,6 +7339,12 @@ class Renderer:
         data += bmin.tobytes()                                        # 12 bytes
         data += bext.tobytes()                                        # 12 bytes
         data += struct.pack("I", int(self._neural_network_version))   # 4 bytes
+        # Wavefront-native path-record emission (change wavefront-native-path-
+        # records): 1 only while the wavefront record drain is active, so the
+        # default render packs 0 and stays byte-identical. Scalar tail matching
+        # FrameConstants.recordMode in common.slang.
+        record_mode = 1 if getattr(self, "_wf_record_active", False) else 0
+        data += struct.pack("I", int(record_mode))                   # 4 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -8291,6 +8321,65 @@ class Renderer:
                 graph_fragments=list(self._scene_graph_fragments))
         return self._record_pipeline
 
+    def _resolve_record_source(self) -> str:
+        """Resolve the live-drain record source to ``'wavefront'`` or
+        ``'megakernel'``. ``'auto'`` (default) picks the wavefront-native emitter
+        when running the wavefront *path* integrator on a GPU-compute backend —
+        no megakernel dispatch, so it sidesteps the 2 s Windows TDR / ~400 s
+        pipeline compile that loses the device for the megakernel record entry.
+        It falls back to the megakernel for bdpt (wavefront record emission is
+        out of scope for bdpt) and for megakernel execution. ``'megakernel'`` /
+        ``'wavefront'`` force a source."""
+        src = str(getattr(self, "_record_source", "auto")).lower()
+        if src in ("megakernel", "wavefront"):
+            return src
+        if (self.effective_execution_mode_index == EXECUTION_WAVEFRONT
+                and self.integrator_index != 1):  # 1 = bdpt → out of scope
+            return "wavefront"
+        return "megakernel"
+
+    def _ensure_wf_record_drain(self, max_records_per_frame: int | None = None) -> int:
+        """Allocate + bind the persistent wavefront-native drain target (binding
+        36) and seed the counter (binding 37) to ``[0, capacity]``. Idempotent:
+        only (re)allocates when the capacity grows. Returns the capacity (in
+        records). The wavefront render's `emitRecord` appends here directly; the
+        drain reads it back without dispatching the megakernel."""
+        import struct as _struct
+
+        from skinny.sampling.path_records import RECORD_STRIDE
+
+        rec_max_bounces = 6  # lockstep with REC_MAX_BOUNCES
+        capacity = int(self.width) * int(self.height) * rec_max_bounces
+        cap_limit = (1 << 20) if max_records_per_frame is None else int(max_records_per_frame)
+        capacity = max(1, min(capacity, cap_limit))
+        if (self._drain_buffer is None
+                or self._drain_buffer.size < capacity * RECORD_STRIDE):
+            if self._drain_buffer is not None:
+                self._drain_buffer.destroy()
+            self._drain_buffer = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+            self._bind_record_buffer(self._drain_buffer)
+            self.record_counter.upload_sync(_struct.pack("<II", 0, capacity))
+        self._wf_record_capacity = capacity
+        return capacity
+
+    def _drain_wavefront_records(self, replay, max_records_per_frame: int | None) -> int:
+        """Drain the records the wavefront render already produced into bindings
+        36/37 — no megakernel dispatch. Reads the counter, appends the records to
+        ``replay``, then resets the counter for the next frame's render."""
+        import struct as _struct
+
+        from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
+
+        cap = self._ensure_wf_record_drain(max_records_per_frame)
+        count = _struct.unpack("<I", self.record_counter.download_sync(4))[0]
+        count = min(count, cap)
+        if count:
+            raw = self._drain_buffer.download_sync(count * RECORD_STRIDE)
+            replay.add(records_from_buffer(raw, count))
+        # Reset the counter so the next render's records start at index 0.
+        self.record_counter.upload_sync(_struct.pack("<II", 0, cap))
+        return count
+
     def drain_path_records_to_replay(self, replay, *,
                                      max_records_per_frame: int | None = None,
                                      frame_seed: int | None = None) -> int:
@@ -8322,6 +8411,13 @@ class Renderer:
         if self._scene_bindings is None or self.descriptor_sets is None:
             raise RuntimeError(
                 "drain_path_records_to_replay: scene not built yet (pump update())")
+
+        # Wavefront-native source: the normal wavefront render already appended
+        # this frame's records to bindings 36/37 (FrameConstants.recordMode on),
+        # so just read them back — no megakernel `mainImageRecord` dispatch (the
+        # 2 s-TDR / ~400 s-compile seam this change removes).
+        if self._resolve_record_source() == "wavefront":
+            return self._drain_wavefront_records(replay, max_records_per_frame)
 
         rec_max_bounces = 6  # lockstep with path_record.slang REC_MAX_BOUNCES
         capacity = int(self.width) * int(self.height) * rec_max_bounces

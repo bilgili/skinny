@@ -57,6 +57,34 @@ _UINT = 4
 INDIRECT_ARGS_STRIDE = 3 * _UINT  # 12 B
 
 
+# ── Wavefront-native path-record buffers (change wavefront-native-path-records) ─
+# Mirror of RecVertex in shaders/wavefront/wf_records.slang — the per-lane
+# vertex stack the wavefront record emitter carries in VRAM (NOT in
+# WavefrontPathState). The path pass allocates the record-stack buffer as
+# `stream_size * REC_MAX_BOUNCES * REC_VERTEX_STRIDE` bytes and a per-lane count
+# buffer as `stream_size * 4` bytes — full-size only while recording, else
+# 1-element dummies. `tests/test_wavefront_state.py` locks this to the Slang struct.
+REC_MAX_BOUNCES = 6  # lockstep with REC_MAX_BOUNCES (path_record_common.slang)
+
+REC_VERTEX_FIELDS: list[tuple[str, str]] = [
+    ("pos",     "float3"),
+    ("normal",  "float3"),
+    ("wo",      "float3"),
+    ("wiLocal", "float3"),
+    ("L_k",     "float3"),
+    ("beta_in", "float3"),
+    ("depth",   "uint"),
+]
+
+
+def rec_vertex_size() -> int:
+    """Scalar-layout byte size of RecVertex (tight, 4-byte aligned)."""
+    return sum(SLANG_SCALAR_SIZES[t] for _, t in REC_VERTEX_FIELDS)
+
+
+REC_VERTEX_STRIDE = rec_vertex_size()  # 76 B
+
+
 def queue_buffer_sizes(stream_size: int, num_materials: int) -> dict[str, int]:
     """Byte sizes for the wavefront stage buffers, the single source of truth
     the `WavefrontPasses` allocator (vk_wavefront.py) sizes against.

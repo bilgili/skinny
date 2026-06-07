@@ -238,6 +238,14 @@ struct FrameConstants
     float3 sceneBoundsMin;
     float3 sceneBoundsExtent;
     uint   neuralNetworkVersion;
+    // ── Wavefront-native path-record emission (wavefront/wf_records.slang) ──
+    // 0 = off (default render is byte-identical: no per-lane record stack
+    // writes, no record appends). Non-zero while online neural training drives
+    // the wavefront record drain — the wavefront shade/terminate kernels then
+    // push a per-lane vertex stack and splat PathRecords to bindings 36/37 at
+    // path termination. Scalar tail: _pack_uniforms appends it last in this
+    // exact order. Read only by the wavefront path kernels.
+    uint   recordMode;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

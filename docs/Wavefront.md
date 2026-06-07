@@ -344,13 +344,46 @@ reflective bounce, appends `(position, normal, wo, wiLocal, contribution)` to
 bindings 36/37 (`Renderer.dump_path_records` → a `.nrec` file). Megakernel hosts
 it because one thread owns the whole path, so the tail radiance `Li` along each
 sampled `wi` is known at loop end and attributed back from a local register stack
-(`contribution = (L_final−L_k)/beta_in_k = f·cos·Li`); in wavefront the path is
-smeared across dispatches, so this would need a per-lane VRAM vertex stack +
-terminate splat. The dump is offline, so megakernel-only costs nothing at render
-time (inference stays wavefront-only). `mainImage` never references 36/37 →
+(`contribution = (L_final−L_k)/beta_in_k = f·cos·Li`). The dump is offline, so
+megakernel-only costs nothing at render time. `mainImage` never references 36/37 →
 byte-identical. The offline `spline_flow/render_records.py` fits the flow from
 those records by contribution-weighted MLE (`q ∝ f·Li·cos`) under the **identical**
 `neuralCondition` encoding and bakes `NFW1`.
+
+#### Wavefront-native record emission (`wavefront/wf_records.slang`)
+
+For the **live** online-training drain (Stage 2), dispatching that megakernel
+each frame is fatal on NVIDIA/Windows: the 8 MB record entry ~400 s-compiles a
+driver pipeline and a single dispatch exceeds the 2 s Windows TDR, losing the
+device. The wavefront path integrator therefore emits the **same** `PathRecord`
+stream directly. Because the path is smeared across per-bounce dispatches, the
+tail radiance is not resident at the bounce that sampled `wi`, so the snapshots
+live in a **per-lane VRAM vertex stack** instead of registers:
+
+- **Storage.** `RecVertex[stream·REC_MAX_BOUNCES]` + a per-lane count, in two
+  *separate* set-1 buffers (bindings 9/10) — **not** inside `WavefrontPathState`,
+  which is copied by value in every kernel (inlining a 6-deep stack there would
+  spill to scratch and ~8× its bandwidth in every kernel). Full-size only while
+  recording; 1-element dummies otherwise.
+- **Push** (`wfPushRecord`, in `wfFinishShade`): on a guideable bounce
+  (flat/python, reflective, sampled dir in the HitInfo-normal upper hemisphere)
+  snapshot `(pos, N, wo, wiLocal, L_k, beta_in, depth)` **before** the throughput
+  update — the same guard and snapshot order as `estimateRadianceRecord`.
+- **Splat** (`wfEmitRecords`): at lane termination — `wfTerminate` (miss / RR /
+  no-valid-bsdf / sphere-light hit) and the max-depth survivors at
+  `wfPathResolve` — `L_final` is the lane's radiance, so each stacked vertex emits
+  `recordContrib(L_final, L_k, beta_in)` to bindings 36/37 via the shared
+  `emitRecord`, dropping non-finite. `recordContrib` (`path_record_common.slang`)
+  is the ONE source of truth shared with the megakernel dump.
+- **Gate.** All of the above is behind `fc.recordMode`, set only while the
+  wavefront record drain is active — so the default render takes no stack writes,
+  no appends, and is **bit-identical** (verified: recordMode off vs on diff = 0).
+- **Drain.** `Renderer.drain_path_records_to_replay` is source-selectable
+  (`_record_source`: `auto` picks wavefront for the wavefront path integrator,
+  else megakernel). In wavefront mode the normal render already filled 36/37, so
+  the drain just reads the counter + buffer and resets it — no extra dispatch.
+  The megakernel `mainImageRecord` stays available for the offline `.nrec` dump
+  and as a forced (`megakernel`) drain source on non-TDR boxes.
 
 **Landed + GPU-proven (Mac MPS/MoltenVK):** the full plumbing, a real scene-trained
 net (4.36M Cornell records → trained flow, pdf ∫≈1), loaded + A/B'd in-renderer.

@@ -13,6 +13,9 @@ import scene_trace;     // traceScene
 import scene_lights;    // intersectSphereLights, NearestSphereHit
 import lights.sphere_light;            // SphereLight
 import wavefront.wavefront_state;      // WavefrontPathState, PATH_FLAG_*
+// Wavefront-native path records: per-lane vertex stack + terminate-time splat
+// (gated by fc.recordMode; no-op + byte-identical render when off).
+import wavefront.wf_records;           // wfPushRecord, wfEmitRecords
 
 static const uint WF_MAX_BOUNCES = 6u;
 static const uint WF_PIXEL_SENTINEL = 0xFFFFFFFFu;
@@ -61,8 +64,12 @@ uint wfQueueLane(uint slot, uint qpos)
 }
 
 // Write the lane's accumulated radiance + clear ALIVE; persist the rng cursor.
+// On termination `radiance` IS the path's L_final, so splat the lane's stacked
+// guideable records here (gated; no-op when not recording).
 void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
 {
+    if (fc.recordMode != 0u)
+        wfEmitRecords(i, radiance);
     s.radiance = radiance;
     s.flags &= ~PATH_FLAG_ALIVE;
     s.rngState = rng.state;
@@ -88,6 +95,14 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
         wfTerminate(i, s, radiance, rng);
         return;
     }
+
+    // Record-mode: snapshot this guideable vertex BEFORE the throughput update,
+    // so beta_in_k = throughput entering the vertex and L_k = radiance after its
+    // local terms — the same snapshot order as estimateRadianceRecord. Splatted
+    // at lane termination (wfTerminate / wfPathResolve). No-op when not recording.
+    if (fc.recordMode != 0u)
+        wfPushRecord(i, h, s.rayDir, br.bsdfSample, radiance, throughput, depth);
+
     throughput *= br.bsdfSample.weight;
 
     if (depth > 0u)

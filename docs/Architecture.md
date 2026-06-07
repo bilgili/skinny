@@ -750,8 +750,8 @@ incrementally moved over.
 | 33 | StructuredBuffer | Neural-proposal flat Linear weights (`NF_WT`, row-major — `float` by default, `half` in the fp16 precision modes) | `sampling/neural_proposal.slang` |
 | 34 | StructuredBuffer | Neural-proposal flat Linear biases (`NF_WT` — `float`/`half`) | `sampling/neural_proposal.slang` |
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
-| 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry only | `integrators/path_record.slang` |
-| 37 | RWStructuredBuffer | Record-dump counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record.slang` |
+| 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry **and** the wavefront path integrator (when `fc.recordMode` is set) | `integrators/path_record_common.slang` |
+| 37 | RWStructuredBuffer | Record append counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record_common.slang` |
 
 Bindings **25–29** are reserved for the MaterialX nodegraph buffers
 (`GRAPH_BINDING_BASE = 25`), so the neural-proposal weight buffers sit at **33+**,
@@ -785,15 +785,23 @@ read so a frame never tears. The default `--neural-handoff file` keeps them as
 ordinary device-local buffers the host re-uploads on a hot-reload. See
 [Online neural training](#online-neural-training).
 
-Bindings **36/37** back the per-vertex training-record dump
-(`Renderer.dump_path_records`): a second megakernel entry `mainImageRecord`
-(`integrators/path_record.slang`) appends per-vertex
-`(pos, N, wo, wiLocal, contribution)` records there. `mainImage` never references
-them (dead-stripped → byte-identical), so they too are seeded with 1-element
-dummies and only reallocated to per-frame capacity during a dump. The **online
-training loop** drains those same buffers live into a recency-weighted replay
-buffer (`Renderer.drain_path_records_to_replay`, via the shared
-`records_from_buffer` reader) — see [Online neural training](#online-neural-training).
+Bindings **36/37** back the per-vertex training-record stream
+(`PathRecord`/`emitRecord`, shared in `integrators/path_record_common.slang`).
+Two producers append to them: the offline dump via a second megakernel entry
+`mainImageRecord` (`Renderer.dump_path_records` → a `.nrec` file), and — for the
+**live online-training drain** — the wavefront path integrator itself, which
+emits the same records during the normal render whenever `fc.recordMode` is set
+(`wavefront/wf_records.slang`; a per-lane vertex stack in the path pass's own
+set-1 bindings 9/10 carries the snapshots, splatted at termination). `mainImage`
+never references 36/37 (dead-stripped → byte-identical), so they are seeded with
+1-element dummies and only reallocated to per-frame capacity during a dump or
+while the wavefront drain is armed. `Renderer.drain_path_records_to_replay` is
+source-selectable (`_record_source`: `auto` → wavefront for the wavefront path
+integrator, else the megakernel dispatch): the wavefront source needs **no**
+megakernel dispatch — removing the ~400 s-compile / 2 s-TDR seam that loses the
+device on NVIDIA/Windows — and reads the buffers the render already filled via
+the shared `records_from_buffer` reader. See
+[Online neural training](#online-neural-training).
 
 Light uniforms (part of UBO, not separate bindings):
 - `lightDirection` (float3) — analytic directional light toward-light vector

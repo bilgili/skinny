@@ -31,39 +31,65 @@ that sampled `wi`.
 
 ## Approach: per-lane vertex stack + terminate-time splat
 
-Carry the snapshot stack in the per-lane path state (VRAM), not registers:
+Carry the snapshot stack in per-lane VRAM, not registers:
 
 ```
-struct RecVertex { float3 pos, normal, wo, wiLocal; float3 L_k, beta_in_k; uint depth; }
-// up to REC_MAX_BOUNCES (6) per lane, in the path-state buffer
+struct RecVertex { float3 pos, normal, wo, wiLocal; float3 L_k, beta_in; uint depth; }  // 76 B
+// up to REC_MAX_BOUNCES (6) per lane
 ```
 
-- **On a guideable bounce** (flat/graph material, reflective, `wiLocal.y > 1e-4`,
-  `pdf > 0`): push `RecVertex` with the pre-throughput-update `beta_in_k` and the
-  running `L_k` — the same guard and snapshot order as the megakernel.
-- **At lane termination** (miss / absorb / max depth / light hit): `L_final` is the
+**Storage (revised from the original proposal).** The stack lives in SEPARATE
+set-1 buffers — `wfRecStack[stream·REC_MAX_BOUNCES]` (binding 9) + a per-lane
+`wfRecCount` (binding 10), owned by `WavefrontPathPass` — NOT inside
+`WavefrontPathState`. That struct is copied by value in every wavefront kernel
+(`s = wfState[i]; … wfState[i] = s`); inlining a 6-deep stack there would force a
+dynamically-indexed local array into scratch and ~8× the path-state bandwidth in
+*every* kernel even when not training — re-introducing the register/bandwidth
+pressure the wavefront split exists to avoid. The buffers are full-size only
+while recording and 1-element dummies otherwise (the `wfNeural`/36-37 pattern),
+so the default render stays byte-identical and pays no extra VRAM or bandwidth.
+
+- **On a guideable bounce** (flat/python material, reflective, `wiLocal.y > 1e-4`,
+  `pdf > 0`) in `wfFinishShade`: push `RecVertex` with the pre-throughput-update
+  `beta_in` and the running `L_k` — the same guard and snapshot order as the
+  megakernel (`wfPushRecord`).
+- **At lane termination** (miss / RR / no-valid-bsdf / sphere-light hit via
+  `wfTerminate`, and max-depth survivors via `wfPathResolve`): `L_final` is the
   lane's accumulated radiance; iterate the lane's stack and `emitRecord` each
-  `contrib_k`, dropping non-finite samples — identical to the megakernel's tail
-  loop. Emission uses the existing bounds-safe `emitRecord` (atomic counter < cap).
+  `recordContrib(L_final, L_k, beta_in)`, dropping non-finite — identical to the
+  megakernel's tail loop. Emission uses the bounds-safe `emitRecord` (counter < cap).
 
-This reuses the exact arithmetic in `path_record.slang`; only the *storage* of the
-snapshots moves from registers to the per-lane state buffer.
+The attribution arithmetic is shared via `integrators/path_record_common.slang`
+(`recordContrib`); only the *storage* of the snapshots moves from registers to
+the per-lane VRAM buffers.
 
 ## Record-mode gate
 
-Emission is gated by a frame-constants flag set only while online training is
-active (`Renderer._online_training`). When off, the wavefront kernels take the
+Emission is gated by `FrameConstants.recordMode`, set only while the wavefront
+record drain is active (`Renderer._wf_record_active`, resolved from the record
+source at `enable_online_training`). When off, the wavefront kernels take the
 shipped path with no stack writes and no emit — the default render stays
-byte-identical and pays no record overhead.
+byte-identical and pays no record overhead (verified: recordMode off vs on
+produces a bit-identical image, diff = 0).
 
-## Renderer rewire
+## Renderer rewire (dual-source drain)
 
-`drain_path_records_to_replay` stops dispatching `mainImageRecord`. Instead, with
-record-mode enabled the normal wavefront render already filled bindings 36/37, so
-the drain just reads the counter + buffer and `records_from_buffer` → `replay.add`.
-The megakernel `mainImageRecord` entry and `dump_path_records` are kept for the
-**offline** `.nrec` dump (not on the per-frame path, so its compile/TDR cost is
-irrelevant there; it can also run on a non-TDR box).
+`drain_path_records_to_replay` is **source-selectable** rather than a wholesale
+replacement, so megakernel training stays available. `_record_source` is
+`auto` | `megakernel` | `wavefront`; `auto` resolves to `wavefront` for the
+wavefront *path* integrator (and `megakernel` for bdpt — out of scope — or
+megakernel execution).
+
+- **wavefront source:** the normal wavefront render already filled bindings 36/37
+  (recordMode on), so the drain just reads the counter + buffer
+  (`records_from_buffer` → `replay.add`) and resets the counter for the next
+  frame — **no** `mainImageRecord` dispatch, so no ~400 s-compile and no 2 s-TDR
+  device-loss. Records come from the same paths that produced the displayed frame.
+- **megakernel source:** the existing path — dispatch `mainImageRecord`, read
+  back — unchanged, for non-TDR boxes that want it.
+
+The megakernel `mainImageRecord` entry and `dump_path_records` are also kept for
+the **offline** `.nrec` dump (not on the per-frame path).
 
 ## Why not just raise the TDR
 

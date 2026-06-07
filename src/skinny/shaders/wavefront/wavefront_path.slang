@@ -34,13 +34,22 @@ import wavefront.wf_display;           // wfWriteDisplay (tonemap → output ima
 // Shared path-state bindings (wfState / wfHits / wfTile / wfDecodePixel /
 // wfTerminate) + the material-free finisher wfFinishShade.
 import wavefront.wf_shade_common;
+// Wavefront-native path records — wfResetRecords (generate) + wfEmitRecords
+// (this file's wfTerminate + wfPathResolve). Imports are not transitive, so
+// declare it here too even though wf_shade_common also imports it.
+import wavefront.wf_records;
 // Flat-material bounce eval — imports only the flat material + NEE, so the flat
 // shade kernel stays small (no skin/python). The catch-all uses evaluateBounce.
 import wavefront.flat_bounce;
 
 // Write the lane's accumulated radiance + clear ALIVE; persist the rng cursor.
+// On termination `radiance` IS the path's L_final, so splat the lane's stacked
+// guideable records here (gated; no-op when not recording). Mirrors the copy in
+// wf_shade_common.slang — the intersect-stage miss terminates through this one.
 void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
 {
+    if (fc.recordMode != 0u)
+        wfEmitRecords(i, radiance);
     s.radiance = radiance;
     s.flags &= ~PATH_FLAG_ALIVE;
     s.rngState = rng.state;
@@ -62,6 +71,10 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
         wfState[i].flags = 0u;
         return;
     }
+    // Record-mode: reset this lane's record stack at the start of every tile
+    // (the stream slot is reused across tiles). No-op when not recording.
+    if (fc.recordMode != 0u)
+        wfResetRecords(i);
     uint2 pixel = wfDecodePixel(lane);
 
     RNG rng = createRNG(pixel, fc.frameIndex);
@@ -247,6 +260,13 @@ void wfPathResolve(uint3 tid: SV_DispatchThreadID)
     if (pixelIndex == WF_PIXEL_SENTINEL)        // out-of-frame slot
         return;
     uint2 pixel = wfDecodePixel(pixelIndex);
+
+    // Record-mode: a lane still ALIVE here exhausted WF_MAX_BOUNCES without
+    // terminating, so it never splatted its stack — do it now with its final
+    // radiance as L_final. Terminated lanes already emitted in wfTerminate and
+    // cleared ALIVE, so they are skipped. No-op when not recording.
+    if (fc.recordMode != 0u && pathAlive(wfState[i]))
+        wfEmitRecords(i, wfState[i].radiance);
 
     float3 sample = wfState[i].radiance;
     // Same sanitisation as main_pass.slang: kill NaN/Inf, clamp negatives.

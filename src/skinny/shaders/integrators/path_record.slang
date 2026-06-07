@@ -34,37 +34,10 @@ import scene_lights;  // intersectSphereLights, NearestSphereHit
 import environment;   // sceneEnvRadianceCell, envPdf
 import lights.sphere_light;   // SphereLight
 import integrators.path;      // evaluateBounce — the shared per-bounce material dispatch
-
-static const uint REC_MAX_BOUNCES = 6;   // lockstep with integrators.path MAX_BOUNCES
-
-// One training record — scalar layout (-fvk-use-scalar-layout): float3 = 12 B,
-// tightly packed → 64 B stride. Host mirror: skinny.sampling.path_records
-// (RECORD_STRIDE / RECORD_DTYPE) + spline_flow/render_records.py.
-struct PathRecord
-{
-    float3 pos;       // 0..12   world hit position (raw; trainer normalises via header AABB)
-    float3 normal;    // 12..24  world shading normal (= HitInfo.normal, == neuralCondition N)
-    float3 wo;        // 24..36  world outgoing dir toward the previous vertex (= -rayDir)
-    float3 wiLocal;   // 36..48  sampled bounce dir in flow-local (x=T,y=N,z=B) frame, y-up
-    float3 contrib;   // 48..60  (L_final - L_k)/beta_in_k = weight_k·Li_k  (RGB training weight)
-    uint   depth;     // 60..64  bounce index (0 = primary hit)
-};
-
-// Append buffer (binding 36) + counter (binding 37: [0]=atomic count, [1]=capacity).
-// Declared here only; imported by main_pass.slang. `mainImage` never references
-// them → dead-stripped from its entry (stays byte-identical); the host binds
-// 1-element dummies until a dump runs. See Architecture.md binding map.
-[[vk::binding(36)]] RWStructuredBuffer<PathRecord> recordBuf;
-[[vk::binding(37)]] RWStructuredBuffer<uint>       recordCounter;
-
-void emitRecord(PathRecord rec)
-{
-    uint cap = recordCounter[1];
-    uint idx;
-    InterlockedAdd(recordCounter[0], 1u, idx);
-    if (idx < cap)
-        recordBuf[idx] = rec;
-}
+// Shared record primitives — the ONE source of truth for PathRecord, bindings
+// 36/37, emitRecord, REC_MAX_BOUNCES, and the recordContrib attribution weight
+// (also imported by the wavefront-native emitter wavefront/wf_records.slang).
+import integrators.path_record_common;
 
 // RR-free unidirectional path tracer that emits one training record per
 // flat/graph reflective bounce. Mirrors integrators.path::PathTracer.
@@ -183,17 +156,14 @@ void estimateRadianceRecord(Ray ray, HitInfo firstHit, inout RNG rng)
         }
     }
 
-    // Backward attribution: the radiance gathered from segment k onward is
-    // (L_final - L_k) = beta_out_k·Li_k; dividing by beta_in_k folds in this
-    // vertex's f·cos/pdf so the stored weight ∝ the integrand the proposal
-    // should match. Clamp ≥ 0 (float noise) and drop non-finite samples.
-    // DOC:contrib#core start
+    // Backward attribution: the shared `recordContrib` folds this vertex's
+    // f·cos/pdf into the tail radiance so the stored weight ∝ the integrand the
+    // proposal should match. Drop non-finite samples. The wavefront-native
+    // emitter calls the SAME helper — identical training weight.
     float3 Lfinal = radiance;
     for (uint k = 0u; k < recCount; k++)
     {
-        float3 beta = max(recBeta[k], float3(1e-8));
-        float3 contrib = max((Lfinal - recL[k]) / beta, float3(0.0));
-        // DOC:contrib#core end
+        float3 contrib = recordContrib(Lfinal, recL[k], recBeta[k]);
         if (any(isnan(contrib)) || any(isinf(contrib)))
             continue;
         PathRecord rec;
