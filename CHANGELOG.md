@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Neural guiding
+
+- Online-training scaffolding for the neural directional proposal (Stage 2, change
+  `neural-online-training`) — the sampling-layer seam for continuous, recency
+  -weighted training that tracks animation. New `sampling/neural_replay.py`
+  (recency-weighted ring buffer over the shipped `PathRecord` layout, evicts stale
+  records on motion), `sampling/neural_trainer.py` (warm-started async trainer
+  skeleton on the shipped flow arch; the PyTorch optimisation step reuses
+  `spline_flow` and is filled on the CUDA box), and a `NeuralWeightPublisher`
+  handoff seam (`sampling/neural_handoff*.py`) with two flag-selectable backends:
+  a **file double-buffer** (writes `NFW1`, hot-reloads via `neural_weights`,
+  swaps + bumps `networkVersion` at frame end — works on any platform) and a
+  **GPU-shared-memory interop** path (`VK_KHR_external_memory` +
+  `cudaImportExternalMemory`, CUDA-guarded, raises off-CUDA). Added a canonical
+  `write_neural_weights` NFW1 writer. The async swap stays unbiased by evaluating
+  each sample against its stamped `networkVersion`; staleness raises variance only.
+  Renderer-runtime wiring (live GPU-counter drain, frame-end swap point, the
+  `--neural-handoff` flag, external-memory buffer export) and the CUDA trainer/
+  interop internals are the NVIDIA-box follow-up. Mac-tested:
+  `tests/test_neural_online.py` (replay recency/capacity/eviction, file-handoff
+  swap + version, end-to-end drain→train→publish→swap loop, interop guard).
+
 ### Rendering
 
 - Unified flat / `std_surface` BSDF onto one composable lobe set —
