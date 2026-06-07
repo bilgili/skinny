@@ -877,7 +877,9 @@ the frame-end weight swap; training itself happens off the render path.
      real-time path, **CUDA-only** (needs `cuda-python`) and guarded — it raises a
      clear `NotImplementedError` and `--neural-handoff file` is used instead where
      CUDA or the external-memory Vulkan extensions are absent. Implemented and
-     verified on an RTX 4090 (`tests/test_neural_interop.py`).
+     verified on an RTX 4090 (`tests/test_neural_interop.py`); the interop
+     `publish()` is **~54x faster** than the file backend's NFW1 round-trip
+     (~0.5 ms vs ~29 ms, `tests/bench_neural_online.py`).
 4. **Swap** — `Renderer._online_frame_end_swap()` runs at the **frame boundary**
    (after the fence wait in `render_headless`, after present in `render`):
    `publisher.swap()` promotes pending→render and `networkVersion` is incremented
