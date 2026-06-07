@@ -234,15 +234,63 @@ class VulkanContext:
         if sys.platform == "darwin":
             device_extensions.append(vk.VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)
 
-        device_create_info = vk.VkDeviceCreateInfo(
-            pNext=indexing_features,
-            queueCreateInfoCount=len(queue_create_infos),
-            pQueueCreateInfos=queue_create_infos,
-            enabledExtensionCount=len(device_extensions),
-            ppEnabledExtensionNames=device_extensions,
-            pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
-        )
-        return vk.vkCreateDevice(self.physical_device, device_create_info, None)
+        # External-memory export (change neural-online-training, task 5.1): enable
+        # the OS-specific external-memory extension when the device advertises it,
+        # so the neural weight buffers (33/34/35) can be shared with CUDA under
+        # `--neural-handoff interop` (no CPU round-trip). Additive + guarded: probe
+        # availability, try to enable, and fall back to a device WITHOUT it on any
+        # failure so the default render path is never destabilised. The CUDA-side
+        # import + timeline-semaphore sync is the seam neural_handoff_interop fills
+        # on the NVIDIA box (task 5.2). MoltenVK lacks the extension → no-op.
+        self.supports_external_memory = False
+        self._external_memory_handle_type = 0
+        ext_mem_name = None
+        if sys.platform == "win32":
+            ext_mem_name = vk.VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME
+        elif sys.platform.startswith("linux"):
+            ext_mem_name = getattr(vk, "VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME", None)
+
+        def _make_info(exts):
+            return vk.VkDeviceCreateInfo(
+                pNext=indexing_features,
+                queueCreateInfoCount=len(queue_create_infos),
+                pQueueCreateInfos=queue_create_infos,
+                enabledExtensionCount=len(exts),
+                ppEnabledExtensionNames=exts,
+                pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
+            )
+
+        if ext_mem_name is not None and self._device_extension_available(ext_mem_name):
+            try:
+                device = vk.vkCreateDevice(
+                    self.physical_device, _make_info(device_extensions + [ext_mem_name]), None)
+                self.supports_external_memory = True
+                self._external_memory_handle_type = (
+                    vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
+                    if sys.platform == "win32"
+                    else vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
+                print("[interop] external-memory export enabled "
+                      "(bindings 33/34/35 shareable with CUDA under --neural-handoff interop)")
+                return device
+            except Exception as exc:  # noqa: BLE001 — never destabilise the render device
+                print(f"[interop] external-memory enable failed ({exc}); "
+                      "interop handoff unavailable, file handoff unaffected")
+
+        return vk.vkCreateDevice(self.physical_device, _make_info(device_extensions), None)
+
+    def _device_extension_available(self, name) -> bool:
+        """True if the physical device advertises device extension ``name``."""
+        try:
+            props = vk.vkEnumerateDeviceExtensionProperties(self.physical_device, None)
+        except Exception:  # noqa: BLE001
+            return False
+        target = name.decode() if isinstance(name, bytes) else str(name)
+        for p in props:
+            ext = p.extensionName
+            ext = ext.decode() if isinstance(ext, bytes) else str(ext)
+            if ext == target:
+                return True
+        return False
 
     # ── Swapchain ────────────────────────────────────────────────
 

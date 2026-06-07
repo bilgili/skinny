@@ -925,6 +925,7 @@ class Renderer:
         execution_mode: str = "megakernel",
         bdpt_walk: str = "fused",
         neural_config=None,
+        neural_handoff: str = "file",
     ) -> None:
         self.ctx = vk_ctx
         # Neural size/precision build config (study change
@@ -1095,6 +1096,15 @@ class Renderer:
         self._neural_network_version = 0
         self._neural_warned = False
         self._neural_pass = None
+        # Online training (Stage 2, change neural-online-training). The replay
+        # buffer + trainer + weight publisher are built lazily by
+        # enable_online_training; `_neural_handoff_kind` selects the publisher
+        # backend (--neural-handoff: 'file' | 'interop'). Off until enabled.
+        self._neural_handoff_kind = str(neural_handoff)
+        self._online_training = False
+        self._neural_replay = None
+        self._neural_trainer = None
+        self._neural_publisher = None
         # Per-scene baked weights file (NFW1). None ⇒ the renderer bakes a dummy
         # net for the 1a plumbing bring-up; a CLI/settings override threads here.
         self._neural_weights_path = None
@@ -2970,9 +2980,13 @@ class Renderer:
         _nw = make_dummy_weights(_ncfg)
         _nwb = _nw.weight_bytes_for(_ncfg.precision)   # half bytes in the fp16 modes
         _nbb = _nw.bias_bytes_for(_ncfg.precision)
-        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nwb), 4))
-        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nbb), 4))
-        self.neural_layers_buffer = StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4))
+        # Under `--neural-handoff interop` the weight buffers are CUDA-shareable
+        # (VK_KHR_external_memory, task 5.1); a guarded no-op on devices without
+        # the extension. The file handoff uses plain device-local buffers.
+        _ext_neural = (self._neural_handoff_kind == "interop")
+        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nwb), 4), external=_ext_neural)
+        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nbb), 4), external=_ext_neural)
+        self.neural_layers_buffer = StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4), external=_ext_neural)
         self.neural_weights_buffer.upload_sync(_nwb)
         self.neural_biases_buffer.upload_sync(_nbb)
         self.neural_layers_buffer.upload_sync(_nw.header_bytes)
@@ -2987,6 +3001,7 @@ class Renderer:
         self.record_buffer = StorageBuffer(self.ctx, RECORD_STRIDE)   # 1 dummy record
         self.record_counter = StorageBuffer(self.ctx, 8)             # [count, capacity]
         self._record_pipeline = None   # lazily-built mainImageRecord ComputePipeline
+        self._drain_buffer = None      # persistent live-drain target (task 1.2)
 
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
         # descriptor is valid even before the user flips off "None".
@@ -6933,6 +6948,119 @@ class Renderer:
         self.neural_layers_buffer.upload_sync(nw.header_bytes)
         self._neural_weights_loaded = path
 
+    # ── Online neural training (Stage 2, change neural-online-training) ──
+
+    @property
+    def online_training_active(self) -> bool:
+        return self._online_training
+
+    def _current_neural_weights(self):
+        """The ``NeuralWeights`` currently driving inference (the loaded per-scene
+        net, or the dummy bring-up net) — the warm-start for online training."""
+        from skinny.sampling.neural_weights import (
+            load_neural_weights,
+            make_dummy_weights,
+        )
+        cfg = self._effective_neural_config()
+        path = self._neural_weights_path
+        if path is not None:
+            try:
+                return load_neural_weights(path, expect=cfg.arch)
+            except Exception:  # noqa: BLE001 — fall back to the dummy net
+                pass
+        # make_dummy_weights takes the build config itself; cfg.arch is the
+        # (layers, bins, hidden, cond) tuple used only as a load-time expectation.
+        return make_dummy_weights(cfg)
+
+    def enable_online_training(self, *, handoff: str | None = None,
+                               replay=None, trainer=None,
+                               capacity: int = 1_000_000, **publisher_kwargs):
+        """Start the online training loop (change neural-online-training).
+
+        A recency-weighted ``ReplayBuffer`` feeds a warm-started ``NeuralTrainer``
+        whose new weights a ``NeuralWeightPublisher`` double-buffers into the
+        render buffers at the frame boundary, bumping ``networkVersion``.
+        ``handoff`` overrides the renderer's ``--neural-handoff`` backend
+        (``file`` | ``interop``). Returns the publisher.
+        """
+        from skinny.sampling.neural_handoff import make_publisher
+        from skinny.sampling.neural_replay import ReplayBuffer
+        from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
+
+        cfg = self._effective_neural_config()
+        init = self._current_neural_weights()
+        self._neural_replay = (replay if replay is not None
+                               else ReplayBuffer(capacity=capacity))
+        self._neural_trainer = (trainer if trainer is not None
+                                else NeuralTrainer(TrainerConfig(arch=cfg), initial=init))
+        kind = handoff or self._neural_handoff_kind
+        # The interop publisher writes weights into the CUDA-shared weight buffer
+        # (task 5.2 seam); hand it the exported buffer so the NVIDIA-box CUDA
+        # import has the Vulkan memory + its export handle.
+        if kind == "interop" and "exported_buffer" not in publisher_kwargs:
+            publisher_kwargs["exported_buffer"] = getattr(self, "neural_weights_buffer", None)
+        self._neural_publisher = make_publisher(
+            kind, initial=init, expect_arch=cfg.arch, **publisher_kwargs)
+        self._online_training = True
+        return self._neural_publisher
+
+    def disable_online_training(self) -> None:
+        self._online_training = False
+
+    def online_drain(self, **kw) -> int:
+        """Drain one frame of GPU records into the replay buffer (the live feed,
+        task 1.2). HARDWARE SEAM: the record entry is a megakernel that
+        device-losts under the 2 s Windows TDR, so this runs on the NVIDIA box
+        (task 7.3), not the Mac/wavefront suite. No-op when online training is
+        off."""
+        if not self._online_training or self._neural_replay is None:
+            return 0
+        return self.drain_path_records_to_replay(self._neural_replay, **kw)
+
+    def online_train_and_publish(self, rng=None):
+        """Run one warm-started training cycle on the replay buffer and stage the
+        result for the next frame-end swap. Returns the staged version, or
+        ``None`` when there is nothing to train on / online training is off."""
+        if not self._online_training or self._neural_trainer is None:
+            return None
+        if self._neural_replay is None or len(self._neural_replay) == 0:
+            return None
+        new_w = self._neural_trainer.train_cycle(self._neural_replay, rng)
+        return self._neural_publisher.publish(new_w)
+
+    def _apply_render_weights(self, nw, version: int) -> None:
+        """Upload ``nw`` to the inference buffers (33/34/35) and stamp ``version``
+        everywhere the per-sample density key is read — ``FrameConstants`` and the
+        neural pass push-constant — so a swapped sample is always evaluated
+        against the version that drew it (task 4.3)."""
+        cfg = self._effective_neural_config()
+        self.neural_weights_buffer.upload_sync(nw.weight_bytes_for(cfg.precision))
+        self.neural_biases_buffer.upload_sync(nw.bias_bytes_for(cfg.precision))
+        self.neural_layers_buffer.upload_sync(nw.header_bytes)
+        self._neural_network_version = int(version)
+        if self._neural_pass is not None:
+            self._neural_pass.network_version = int(version)
+
+    def _online_frame_end_swap(self) -> bool:
+        """Frame-end double-buffer swap point (task 4.2): promote any pending
+        weights to the render buffers and increment ``networkVersion``. Render
+        weights stay frozen during a frame; the swap happens only here, at the
+        boundary, so the per-sample version stamp is consistent within a frame and
+        unbiasedness holds across an async swap (task 4.3). Returns True on swap.
+        """
+        if not self._online_training or self._neural_publisher is None:
+            return False
+        if not self._neural_publisher.swap():
+            return False
+        nw, version = self._neural_publisher.acquire_for_render()
+        if nw is not None:
+            self._apply_render_weights(nw, version)
+        else:
+            self._neural_network_version = int(version)
+            if self._neural_pass is not None:
+                self._neural_pass.network_version = int(version)
+        return True
+
     def _active_reuse(self):
         """Active reuse plugin for the current reuse index."""
         from skinny.sampling import parse_reuse
@@ -7617,6 +7745,13 @@ class Renderer:
         )
         self.ctx.vkQueuePresentKHR(self.ctx.present_queue, present_info)
 
+        # Frame-end double-buffer swap for online neural training (task 4.2):
+        # _apply_render_weights' upload_sync waits the device idle, so the
+        # in-flight frame's reads of bindings 33/34/35 complete before the swap
+        # overwrites them.
+        if self._online_training:
+            self._online_frame_end_swap()
+
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
 
     def render_headless(self) -> bytes:
@@ -7776,6 +7911,12 @@ class Renderer:
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
         )
+
+        # Frame-end double-buffer swap for online neural training (task 4.2):
+        # the frame's GPU work is complete, so promoting pending weights now only
+        # affects the NEXT frame — render weights stayed frozen this frame.
+        if self._online_training:
+            self._online_frame_end_swap()
 
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
         return self._readback.read()
@@ -8078,7 +8219,6 @@ class Renderer:
         import struct as _struct
 
         from skinny.sampling.path_records import RECORD_STRIDE, pack_header
-        from skinny.vk_compute import ComputePipeline
 
         if self._scene_bindings is None or self.descriptor_sets is None:
             raise RuntimeError("dump_path_records: scene not built yet (pump update())")
@@ -8090,11 +8230,7 @@ class Renderer:
 
         bmin, bext = self._neural_scene_bounds()
 
-        if self._record_pipeline is None:
-            self._record_pipeline = ComputePipeline(
-                self.ctx, self.shader_dir,
-                entry_module="main_pass", entry_point="mainImageRecord",
-                graph_fragments=list(self._scene_graph_fragments))
+        self._ensure_record_pipeline()
 
         saved_frame_index = self.frame_index
         big = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
@@ -8118,6 +8254,80 @@ class Renderer:
             big.destroy()
             self.frame_index = saved_frame_index
         return total
+
+    def _ensure_record_pipeline(self):
+        """Lazily build the ``mainImageRecord`` megakernel pipeline (shared by the
+        ``.nrec`` dump and the live drain). Backend-independent — it reuses the
+        scene descriptor set, so it runs in either execution mode."""
+        if self._record_pipeline is None:
+            from skinny.vk_compute import ComputePipeline
+            self._record_pipeline = ComputePipeline(
+                self.ctx, self.shader_dir,
+                entry_module="main_pass", entry_point="mainImageRecord",
+                graph_fragments=list(self._scene_graph_fragments))
+        return self._record_pipeline
+
+    def drain_path_records_to_replay(self, replay, *,
+                                     max_records_per_frame: int | None = None,
+                                     frame_seed: int | None = None) -> int:
+        """Drain one frame of GPU path records straight into ``replay`` (the live
+        online-training feed, task 1.2) instead of streaming them to a ``.nrec``
+        file. Runs the ``mainImageRecord`` entry once over the frame, reads the
+        GPU counter (binding 37), and appends the produced records (the shipped
+        ``RECORD_DTYPE`` layout, binding 36) to the recency-weighted buffer.
+        Returns the number of records drained this frame.
+
+        The drain buffer is allocated once and kept bound to binding 36 (only the
+        record entry reads it; ``mainImage`` dead-strips it), so steady-state
+        online training pays no per-frame (re)allocation. ``replay.add`` stamps a
+        fresh generation, so repeated drains accumulate with recency weighting.
+
+        HARDWARE SEAM: the record entry is a *megakernel*. On NVIDIA/Windows the
+        8 MB megakernel runs longer than the 2 s GPU watchdog (TDR) and the
+        dispatch loses the device — so this live GPU drain is exercised on a box
+        without that watchdog (the NVIDIA-box benchmark, task 7.3), not in the
+        Mac/wavefront test suite. The reader contract it depends on
+        (``records_from_buffer``) is validated off-GPU. A wavefront-native record
+        path that avoids the megakernel entirely is proposed separately
+        (``openspec/changes/wavefront-native-path-records``).
+        """
+        import struct as _struct
+
+        from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
+
+        if self._scene_bindings is None or self.descriptor_sets is None:
+            raise RuntimeError(
+                "drain_path_records_to_replay: scene not built yet (pump update())")
+
+        rec_max_bounces = 6  # lockstep with path_record.slang REC_MAX_BOUNCES
+        capacity = int(self.width) * int(self.height) * rec_max_bounces
+        cap_limit = (1 << 20) if max_records_per_frame is None else int(max_records_per_frame)
+        capacity = max(1, min(capacity, cap_limit))
+
+        self._ensure_record_pipeline()
+
+        # (Re)allocate the persistent drain target only when capacity grows.
+        if self._drain_buffer is None or self._drain_buffer.size < capacity * RECORD_STRIDE:
+            if self._drain_buffer is not None:
+                self._drain_buffer.destroy()
+            self._drain_buffer = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+            self._bind_record_buffer(self._drain_buffer)
+
+        saved_frame_index = self.frame_index
+        try:
+            if frame_seed is not None:
+                self.frame_index = int(frame_seed)
+            self.uniform_buffer.upload(self._pack_uniforms())
+            self.record_counter.upload_sync(_struct.pack("<II", 0, capacity))
+            self._dispatch_record(self.descriptor_sets[0])
+            count = _struct.unpack("<I", self.record_counter.download_sync(4))[0]
+            count = min(count, capacity)
+            if count:
+                raw = self._drain_buffer.download_sync(count * RECORD_STRIDE)
+                replay.add(records_from_buffer(raw, count))
+            return count
+        finally:
+            self.frame_index = saved_frame_index
 
     def cleanup(self) -> None:
         vk.vkDeviceWaitIdle(self.ctx.device)
@@ -8165,6 +8375,9 @@ class Renderer:
         if getattr(self, "_record_pipeline", None) is not None:
             self._record_pipeline.destroy()
             self._record_pipeline = None
+        if getattr(self, "_drain_buffer", None) is not None:
+            self._drain_buffer.destroy()
+            self._drain_buffer = None
         self.record_buffer.destroy()
         self.record_counter.destroy()
         self.light_splat_buffer.destroy()

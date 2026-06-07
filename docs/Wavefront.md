@@ -362,12 +362,49 @@ win. The equal-time WIN is a follow-up — GPU-optimised inference (the deferred
 CUDA-perf goal), guiding-iteration training (sample from learned `q`, retrain — the
 one-shot `{bsdf}`-generated data caps net quality), a concentrated-indirect scene,
 and a firefly-robustness measure (pdf floor / lower neural α). Online / dynamic
-training (the per-sample `neuralNetworkVersion` hook) is a later Stage-2 change.
+training (the per-sample `neuralNetworkVersion` hook) lands in Stage 2 — see
+[Online neural training: frame-end weight swap](#online-neural-training-frame-end-weight-swap) below.
 
 **Host wiring.** Weight buffers + `WavefrontNeuralProposalPass` are built lazily
 in wavefront mode (mirroring `RestirDiPass`) in `renderer.py` / `vk_wavefront.py`.
 The GUI preset is **"BSDF + Neural"** (`proposal_preset_index`, persisted; env
 `SKINNY_PROPOSALS=bsdf,neural`); changing it resets progressive accumulation.
+
+### Online neural training: frame-end weight swap
+
+Stage 2 lets the neural proposal train **continuously** while the scene
+animates, so the net adapts instead of staying frozen on a per-scene offline
+bake. An async trainer publishes fresh weights at any time; the renderer
+**never** touches the inference buffers mid-frame. The whole drain→train→
+publish→swap loop is documented in
+[Architecture.md § Online neural training](Architecture.md#online-neural-training);
+this section covers only the wavefront-side commitment point.
+
+**Render weights are frozen for the duration of a frame.** The
+`WavefrontNeuralProposalPass` pre-pass and the inline inverse in the flat shade
+both read bindings 33/34/35 and the active `neuralNetworkVersion`, which stay
+fixed while the command buffer for a frame executes. The single point where new
+weights are promoted is the **frame boundary**:
+
+- `Renderer._online_frame_end_swap()` runs **after the fence wait** in
+  `render_headless` (and **after present** in `render`) — once the GPU is done
+  reading the current weights. It `publisher.swap()`s the trainer's pending
+  weights into the render slot, re-uploads them via `_apply_render_weights`
+  (bindings 33/34/35), and increments the network version **in both places the
+  per-sample density key is read**: `FrameConstants.neuralNetworkVersion` (the
+  inline inverse) **and** the `WavefrontNeuralProposalPass` push-constant stamp
+  (the forward pre-pass). The two are kept in lockstep so a forward draw and its
+  inverse pdf always agree.
+
+**Why a mid-flight swap is still unbiased.** Because the weights a frame draws
+with are exactly the weights its per-sample density is evaluated against (the
+version stamp guarantees it), an asynchronous swap can only change *which*
+frozen net a given sample saw — never the consistency of its one-sample-MIS
+weight (`β ·= f·cos / p_mix`). A stale or freshly-swapped net therefore raises
+**variance only, never bias**; mixture-MIS unbiasedness is preserved across the
+swap exactly as it is across an untrained net. The two weight-handoff backends
+(`file` hot-reload vs CUDA↔Vulkan `interop`) differ only in *how* the pending
+weights reach the buffer, not in this swap discipline.
 
 ### Neural size & precision tuning (`neural-precision-size-study`)
 

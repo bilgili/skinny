@@ -2048,13 +2048,19 @@ class StorageBuffer:
     buffer alongside the device-local one; a one-shot command does the copy.
     """
 
-    def __init__(self, ctx: VulkanContext, size_bytes: int, *, indirect: bool = False) -> None:
+    def __init__(self, ctx: VulkanContext, size_bytes: int, *, indirect: bool = False,
+                 external: bool = False) -> None:
         self.ctx = ctx
         self.size = max(int(size_bytes), 16)  # GPU drivers dislike zero-sized buffers
         # `indirect` adds INDIRECT_BUFFER usage so a build-args kernel can write
         # VkDispatchIndirectCommand triples this buffer holds and the renderer
         # can feed it to vkCmdDispatchIndirect (the wavefront per-material shade).
         self._indirect = bool(indirect)
+        # `external` allocates the device-local memory as exportable to CUDA
+        # (VK_KHR_external_memory) for the interop weight handoff (task 5.1). A
+        # guarded no-op when the device lacks the extension — the buffer is then a
+        # plain device-local buffer and `export_handle()` returns None.
+        self.external = bool(external) and getattr(ctx, "supports_external_memory", False)
 
         # Host-visible staging (SRC for uploads, DST for download_sync readback).
         stg_info = vk.VkBufferCreateInfo(
@@ -2086,10 +2092,15 @@ class StorageBuffer:
                         | vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
         if self._indirect:
             device_usage |= vk.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+        ext_buf_info = (
+            vk.VkExternalMemoryBufferCreateInfo(handleTypes=ctx._external_memory_handle_type)
+            if self.external else None
+        )
         buf_info = vk.VkBufferCreateInfo(
             size=self.size,
             usage=device_usage,
             sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+            pNext=ext_buf_info,
         )
         self.buffer = vk.vkCreateBuffer(ctx.device, buf_info, None)
         buf_reqs = vk.vkGetBufferMemoryRequirements(ctx.device, self.buffer)
@@ -2098,14 +2109,47 @@ class StorageBuffer:
             vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             mem_props,
         )
+        export_info = (
+            vk.VkExportMemoryAllocateInfo(handleTypes=ctx._external_memory_handle_type)
+            if self.external else None
+        )
         self.memory = vk.vkAllocateMemory(
             ctx.device,
             vk.VkMemoryAllocateInfo(
-                allocationSize=buf_reqs.size, memoryTypeIndex=buf_type
+                allocationSize=buf_reqs.size, memoryTypeIndex=buf_type, pNext=export_info,
             ),
             None,
         )
         vk.vkBindBufferMemory(ctx.device, self.buffer, self.memory, 0)
+
+    def export_handle(self):
+        """OS handle to this buffer's device memory for CUDA import
+        (``cudaImportExternalMemory``), or None unless allocated ``external=True``
+        on a device that supports it (task 5.1). Best-effort: the extension
+        function is loaded by name and any failure returns None — the CUDA-side
+        import + sync is the seam ``neural_handoff_interop`` fills on the NVIDIA
+        box (task 5.2)."""
+        if not self.external:
+            return None
+        try:
+            import sys
+            if sys.platform == "win32":
+                fn = vk.vkGetDeviceProcAddr(self.ctx.device, "vkGetMemoryWin32HandleKHR")
+                if fn is None:
+                    return None
+                info = vk.VkMemoryGetWin32HandleInfoKHR(
+                    memory=self.memory,
+                    handleType=self.ctx._external_memory_handle_type)
+                return fn(self.ctx.device, info)
+            fn = vk.vkGetDeviceProcAddr(self.ctx.device, "vkGetMemoryFdKHR")
+            if fn is None:
+                return None
+            info = vk.VkMemoryGetFdInfoKHR(
+                memory=self.memory,
+                handleType=self.ctx._external_memory_handle_type)
+            return fn(self.ctx.device, info)
+        except Exception:  # noqa: BLE001 — handle retrieval is the interop seam
+            return None
 
     def upload_sync(self, data: bytes) -> None:
         """Copy ``data`` into the device-local buffer via a one-shot transfer."""

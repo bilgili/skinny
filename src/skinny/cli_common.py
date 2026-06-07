@@ -48,11 +48,12 @@ def add_render_flags(
     proposals: bool = True,
     reuse: bool = True,
     lobe_samplers: bool = True,
+    neural_handoff: bool = True,
 ) -> None:
     """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` /
-    `--proposals` / `--reuse` / `--lobe-samplers` flags to ``parser``. Each flag
-    can be suppressed via its keyword in the rare case a front-end must omit it
-    (none currently does)."""
+    `--proposals` / `--reuse` / `--lobe-samplers` / `--neural-handoff` flags to
+    ``parser``. Each flag can be suppressed via its keyword in the rare case a
+    front-end must omit it (none currently does)."""
     if integrator:
         parser.add_argument(
             "--integrator", choices=("path", "bdpt"), default=None,
@@ -94,6 +95,18 @@ def add_render_flags(
                  "(spherical-cap VNDF) or 'basis' (Heitz-2018 VNDF); diff accepts "
                  "'native' (cosine) or 'uniform'. Runtime-selectable + persisted "
                  "on the interactive front-ends.",
+        )
+    if neural_handoff:
+        parser.add_argument(
+            "--neural-handoff", choices=("file", "interop"),
+            default=os.environ.get("SKINNY_NEURAL_HANDOFF", "file"),
+            help="Weight-handoff backend for online neural-proposal training (+ "
+                 "SKINNY_NEURAL_HANDOFF env). 'file' (default) double-buffers "
+                 "through an NFW1 file the renderer hot-reloads — a CPU "
+                 "round-trip that runs on any platform; 'interop' writes weights "
+                 "straight into the Vulkan-exported buffer from CUDA "
+                 "(VK_KHR_external_memory) with no round-trip — the real-time "
+                 "path, CUDA-only (raises on platforms without it).",
         )
     if execution:
         parser.add_argument(

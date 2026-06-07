@@ -181,6 +181,88 @@ def test_neural_unbiased_matches_bsdf():
     assert rel < 0.05, f"{{bsdf,neural}} biased vs {{bsdf}} reference: rel={rel:.4f}"
 
 
+def test_external_memory_export_capability():
+    """5.1: the neural weight buffers can be allocated CUDA-shareable
+    (VK_KHR_external_memory) for the interop handoff, behind a capability check —
+    a guarded no-op where the extension is absent, and never destabilising the
+    default device (proven by the other GPU tests still rendering)."""
+    from skinny.vk_compute import StorageBuffer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=16, height=16)
+    try:
+        # A non-external buffer is always a plain device-local buffer.
+        plain = StorageBuffer(ctx, 4096)
+        try:
+            assert not plain.external
+            assert plain.export_handle() is None
+        finally:
+            plain.destroy()
+
+        if not getattr(ctx, "supports_external_memory", False):
+            pytest.skip("device lacks VK_KHR_external_memory (e.g. MoltenVK) — export no-ops")
+
+        buf = StorageBuffer(ctx, 4096, external=True)
+        try:
+            assert buf.external, "external buffer allocation with export create-info failed"
+            buf.export_handle()  # best-effort seam — must not raise (handle or None)
+        finally:
+            buf.destroy()
+    finally:
+        ctx.destroy()
+
+
+def test_online_file_handoff_swap_unbiased(tmp_path):
+    """7.1 / 4.2 / 4.3: the online file double-buffer handoff end to end on the
+    working wavefront path. Train on records, publish, and the frame-end swap
+    promotes the new weights + increments networkVersion (syncing both the
+    FrameConstants stamp and the neural pass push-constant), while {bsdf,neural}
+    stays unbiased vs {bsdf} — mixture-MIS holds across the swap regardless of
+    the proposal weights. (The GPU record drain is a megakernel that device-losts
+    under the 2 s Windows TDR, so the replay buffer is fed synthetically here; the
+    reader contract is covered off-GPU in test_neural_online.)"""
+    from skinny.sampling.path_records import RECORD_DTYPE
+
+    ctx_b, r_b = _load("wavefront", "bsdf")
+    try:
+        ref = _converge(r_b)
+    finally:
+        r_b.cleanup()
+        ctx_b.destroy()
+
+    ctx, r = _load("wavefront", "bsdf,neural")
+    try:
+        r.update(0.04)
+        r.render_headless()                      # build the neural pre-pass
+        assert r._neural_pass is not None
+        pub = r.enable_online_training(handoff="file", weights_dir=str(tmp_path))
+        assert r._neural_network_version == 0 and pub.current_version() == 0
+
+        recs = np.zeros(2048, dtype=RECORD_DTYPE)
+        recs["wi_local"] = [0.0, 1.0, 0.0]
+        recs["contrib"] = 1.0
+        r._neural_replay.add(recs)               # stand-in for the GPU drain
+        staged = r.online_train_and_publish(rng=np.random.default_rng(0))
+        assert staged == 1
+        assert r._neural_network_version == 0    # frozen — not yet at a frame end
+
+        r.update(0.04)
+        r.render_headless()                      # frame-end swap fires here
+        assert r._neural_network_version == 1, "frame-end swap did not bump version"
+        assert r._neural_pass.network_version == 1, "per-sample stamp not synced to swap"
+        assert pub.current_version() == 1
+
+        version = r._neural_network_version
+        neural = _converge(r)
+    finally:
+        r.cleanup()
+        ctx.destroy()
+    rel = _rel_mean_diff(neural, ref)
+    print(f"\n[7.1] online file-handoff swap {{bsdf,neural}} vs {{bsdf}} "
+          f"rel-mean-diff = {rel:.4f} (networkVersion={version})")
+    assert rel < 0.06, f"{{bsdf,neural}} biased across an online swap: rel={rel:.4f}"
+
+
 @pytest.mark.skipif(not NET_FIXTURE.exists(), reason="trained net fixture absent (run 5.2)")
 def test_neural_trained_equaltime_gate():
     """6.3: equal-time efficiency + firefly tail of {bsdf,neural} (a TRAINED net,
