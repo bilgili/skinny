@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="459.3" height="50.2" viewBox="0 0 459.3 50.2">
+  <rect x="0.5" y="0.5" width="458.3" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">y</text>
+  <text x="20.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">1:d</text>
+  <text x="44.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = x</text>
+  <text x="87.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">1:d</text>
+  <text x="110.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">,    y</text>
+  <text x="175.5" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">d+1:D</text>
+  <text x="214.3" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = τ( x</text>
+  <text x="289.9" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">d+1:D</text>
+  <text x="328.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> ; Θ(x</text>
+  <text x="393.6" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">1:d</text>
+  <text x="416.9" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">) )</text>
+</svg>

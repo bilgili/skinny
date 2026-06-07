@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="528.0" height="50.2" viewBox="0 0 528.0 50.2">
+  <rect x="0.5" y="0.5" width="527.0" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">L(θ) = − Σ</text>
+  <text x="118.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n</text>
+  <text x="125.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> w</text>
+  <text x="147.4" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n</text>
+  <text x="155.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> log q</text>
+  <text x="220.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">θ</text>
+  <text x="227.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(ω</text>
+  <text x="249.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n</text>
+  <text x="257.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> | c</text>
+  <text x="300.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n</text>
+  <text x="308.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">),    w</text>
+  <text x="383.7" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n</text>
+  <text x="391.5" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> ∝ f L</text>
+  <text x="456.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i</text>
+  <text x="464.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> cosθ</text>
+</svg>

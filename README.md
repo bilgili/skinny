@@ -16,8 +16,9 @@ nodedefs, head geometry, presets, tattoos) is documented separately in
 [Architecture.md](docs/Architecture.md); the two GPU execution modes in
 [Megakernel.md](docs/Megakernel.md) / [Wavefront.md](docs/Wavefront.md); ReSTIR
 direct-lighting reuse in [ReSTIR.md](docs/ReSTIR.md); the SplineFlow neural path
-guiding proposal in [NeuralGuiding.md](docs/NeuralGuiding.md); the public Python
-API in [PythonAPI.md](docs/PythonAPI.md).
+guiding proposal in [NeuralGuiding.md](docs/NeuralGuiding.md), with its
+first-principles theory companion in [SplineFlows.md](docs/SplineFlows.md); the
+public Python API in [PythonAPI.md](docs/PythonAPI.md).
 
 ## Gallery
 

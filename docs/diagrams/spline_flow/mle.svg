@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="608.4" height="50.2" viewBox="0 0 608.4 50.2">
+  <rect x="0.5" y="0.5" width="607.4" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">θ* = argmax</text>
+  <text x="128.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">θ</text>
+  <text x="136.6" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> Σ</text>
+  <text x="158.2" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n=1</text>
+  <text x="181.5" y="24.4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">N</text>
+  <text x="189.3" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> log p</text>
+  <text x="254.1" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">x</text>
+  <text x="261.9" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(x</text>
+  <text x="283.5" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">n</text>
+  <text x="291.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> ; θ) = argmin</text>
+  <text x="442.4" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">θ</text>
+  <text x="450.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> KL( p* ‖ p</text>
+  <text x="569.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">θ</text>
+  <text x="576.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> )</text>
+</svg>

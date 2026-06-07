@@ -10,6 +10,13 @@ governing equations and the exact shader symbols that realize them, the network
 architecture, the size×precision study, the design choices, the controls, and the
 source papers.
 
+> **New to spline flows?** [SplineFlows.md](SplineFlows.md) is the theory
+> companion — it builds the idea from first principles (normalizing flows → the
+> rational-quadratic spline transform → maximum-likelihood training → sampling)
+> and only then derives *why* a conditional flow is the right importance sampler
+> for a renderer. Read it for the "why"; read on here for the "how it runs on the
+> GPU".
+
 > Equations are shipped as **SVG images** (the repo's GitLab does not render
 > KaTeX/`$$` math reliably). The LaTeX sources live in
 > `docs/diagrams/neural/equations.json`; regenerate the SVGs with

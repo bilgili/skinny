@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="360" viewBox="0 0 840 360" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrP" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrD" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#6366f1"/>
+    </marker>
+    <style>
+      .hdr{font-size:14px;font-weight:700;fill:#0f172a;}
+      .lbl{font-size:13px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:11px;fill:#475569;}
+      .note{font-size:10.5px;fill:#64748b;}
+      .gl{font-size:12px;font-weight:600;fill:#7c3aed;}
+      .il{font-size:12px;font-weight:600;fill:#3730a3;}
+    </style>
+  </defs>
+
+  <text x="20" y="28" class="hdr">A coupling layer: pass one half unchanged, transform the other half with a spline whose knots it predicts</text>
+
+  <!-- input split -->
+  <rect x="40" y="78" width="120" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="100" y="106" text-anchor="middle" class="lbl">x_1:d  (passed)</text>
+  <rect x="40" y="226" width="120" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="100" y="254" text-anchor="middle" class="lbl">x_d+1:D  (transformed)</text>
+  <text x="100" y="60" text-anchor="middle" class="note">input x, split by a binary mask</text>
+
+  <!-- identity copy of x_1:d -->
+  <line x1="160" y1="101" x2="690" y2="101" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="410" y="92" text-anchor="middle" class="sub">identity · copy</text>
+  <rect x="694" y="78" width="120" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="754" y="106" text-anchor="middle" class="lbl">y_1:d = x_1:d</text>
+
+  <!-- conditioner MLP -->
+  <line x1="100" y1="124" x2="100" y2="150" stroke="#6366f1" stroke-width="1.8"/>
+  <line x1="100" y1="150" x2="246" y2="150" stroke="#6366f1" stroke-width="1.8" marker-end="url(#arrD)"/>
+  <rect x="250" y="128" width="150" height="46" rx="8" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="325" y="148" text-anchor="middle" class="il">conditioner Θ(x_1:d, c)</text>
+  <text x="325" y="164" text-anchor="middle" class="note">arbitrary MLP — need not invert</text>
+
+  <!-- knots out of conditioner -->
+  <line x1="400" y1="151" x2="468" y2="151" stroke="#6366f1" stroke-width="1.8" marker-end="url(#arrD)"/>
+  <rect x="470" y="128" width="150" height="46" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="545" y="148" text-anchor="middle" class="gl">knots  w_k, h_k, δ_k</text>
+  <text x="545" y="164" text-anchor="middle" class="note">3K+1 spline parameters</text>
+
+  <!-- knots feed the spline (dashed) -->
+  <line x1="545" y1="174" x2="545" y2="226" stroke="#7c3aed" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#arrP)"/>
+
+  <!-- transformed branch through the RQ spline -->
+  <line x1="160" y1="249" x2="486" y2="249" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="490" y="226" width="110" height="46" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="545" y="248" text-anchor="middle" class="gl">RQ spline τ</text>
+  <text x="545" y="263" text-anchor="middle" class="note">monotone, invertible</text>
+  <line x1="600" y1="249" x2="690" y2="249" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#arrP)"/>
+  <rect x="694" y="226" width="120" height="46" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="754" y="248" text-anchor="middle" class="lbl">y_d+1:D</text>
+  <text x="754" y="263" text-anchor="middle" class="note">= τ(x_d+1:D; Θ)</text>
+
+  <!-- bottom note -->
+  <rect x="40" y="300" width="774" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="56" y="320" class="sub">Because each output depends only on its own coordinate plus the passed half, the Jacobian is triangular:  det ∂y/∂x = Πᵢ τ′(xᵢ; Θᵢ).</text>
+  <text x="56" y="337" class="note">The spline is invertible in closed form, so the layer runs both ways at the same cost. Stacking layers and swapping which half is masked mixes every coordinate.</text>
+</svg>

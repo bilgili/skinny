@@ -1,0 +1,18 @@
+[
+  { "name": "forward", "tex": "x = T_\\theta(u), \\qquad u \\sim p_u(u)" },
+  { "name": "change-of-vars", "tex": "p_x(x) = p_u\\!\\big(f(x)\\big)\\left|\\det\\frac{\\partial f}{\\partial x}\\right|, \\qquad f = T_\\theta^{-1}" },
+  { "name": "log-likelihood", "tex": "\\log p_x(x) = \\log p_u\\!\\big(f(x)\\big) + \\log\\left|\\det\\frac{\\partial f}{\\partial x}\\right|" },
+  { "name": "composition", "tex": "T_\\theta = T_K \\circ \\cdots \\circ T_1, \\qquad \\log\\left|\\det J_T\\right| = \\sum_{k=1}^{K} \\log\\left|\\det J_{T_k}\\right|" },
+  { "name": "coupling", "tex": "y_{1:d} = x_{1:d}, \\qquad y_{d+1:D} = \\tau\\!\\big(x_{d+1:D};\\ \\Theta(x_{1:d})\\big)" },
+  { "name": "coupling-jac", "tex": "\\det\\frac{\\partial y}{\\partial x} = \\prod_{i>d} \\tau'\\!\\big(x_i;\\ \\Theta_i\\big)" },
+  { "name": "rqs", "tex": "g(\\xi) = y_k + \\frac{h_k\\,[\\,s_k\\,\\xi^2 + \\delta_k\\,\\xi(1-\\xi)\\,]}{s_k + (\\delta_{k+1} + \\delta_k - 2 s_k)\\,\\xi(1-\\xi)}" },
+  { "name": "rqs-where", "tex": "\\xi = \\frac{x - x_k}{w_k}, \\quad s_k = \\frac{h_k}{w_k}, \\quad h_k = y_{k+1} - y_k" },
+  { "name": "rqs-deriv", "tex": "g'(\\xi) = \\frac{s_k^2\\,[\\,\\delta_{k+1}\\,\\xi^2 + 2 s_k\\,\\xi(1-\\xi) + \\delta_k\\,(1-\\xi)^2\\,]}{[\\,s_k + (\\delta_{k+1} + \\delta_k - 2 s_k)\\,\\xi(1-\\xi)\\,]^2}" },
+  { "name": "params", "tex": "w = \\mathrm{softmax}(\\theta^w)\\cdot 2B, \\quad h = \\mathrm{softmax}(\\theta^h)\\cdot 2B, \\quad \\delta = \\mathrm{softplus}(\\theta^\\delta) > 0" },
+  { "name": "mle", "tex": "\\theta^\\star = \\arg\\max_\\theta \\sum_{n=1}^{N} \\log p_x(x_n;\\theta) = \\arg\\min_\\theta D_{\\mathrm{KL}}\\!\\big(p^\\star \\,\\|\\, p_\\theta\\big)" },
+  { "name": "cond", "tex": "\\log p_x(x \\mid c) = \\log p_u\\!\\big(f(x;c)\\big) + \\log\\left|\\det\\frac{\\partial f}{\\partial x}\\right|" },
+  { "name": "mc", "tex": "\\langle L_o\\rangle = \\frac{1}{N}\\sum_{i=1}^{N} \\frac{f(\\omega_i)\\,L_i(\\omega_i)\\cos\\theta_i}{p(\\omega_i)}" },
+  { "name": "optimal", "tex": "\\mathrm{Var}\\langle L_o\\rangle = 0 \\iff p(\\omega) \\propto f(\\omega)\\,L_i(\\omega)\\cos\\theta" },
+  { "name": "mis", "tex": "p_{\\mathrm{mix}}(\\omega) = \\sum_i \\alpha_i\\,p_i(\\omega), \\qquad \\sum_i \\alpha_i = 1" },
+  { "name": "weighted-nll", "tex": "\\mathcal{L}(\\theta) = -\\sum_n w_n\\,\\log q_\\theta(\\omega_n \\mid c_n), \\qquad w_n \\propto f\\,L_i\\,\\cos\\theta" }
+]
