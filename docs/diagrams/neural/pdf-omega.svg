@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="174.4" height="88.5" viewBox="0 0 174.4 88.5">
+  <rect x="0.5" y="0.5" width="173.4" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">q</text>
+  <text x="20.8" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">ω</text>
+  <text x="28.6" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(ω) = </text>
+  <text x="103.4" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">q</text>
+  <text x="114.2" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">□</text>
+  <text x="122.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(z)</text>
+  <line x1="93.4" y1="44.2" x2="164.4" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="118.1" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">2π</text>
+</svg>
