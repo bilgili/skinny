@@ -24,6 +24,16 @@ updates the `docs/Architecture.md` binding map; a new CLI flag updates
 `README.md`; a new public Python symbol updates `docs/PythonAPI.md`; and so on.
 Do not let docs drift from the code.
 
+`docs/ReSTIR.md` and `docs/NeuralGuiding.md` embed Slang excerpts beneath each
+equation via `docs/diagrams/embed_code.cjs`: the snippets are sliced out of the
+shaders at `// DOC:<key>#<slice> start/end` markers and filled into
+`<!-- CODE:<key> … -->` placeholders — **never hand-edit a generated ```slang
+block**. After touching a marked shader region (or adding an equation), run
+`node docs/diagrams/embed_code.cjs` to regenerate, and `node
+docs/diagrams/embed_code.cjs --check` to fail on drift (unresolved placeholder,
+empty slice list, or unbalanced marker). The per-equation symbol→code tables are
+hand-written and live beside each block.
+
 For any diagram, use an **SVG diagram**, not an ASCII/text-art graph. Author the
 SVG under `docs/diagrams/` and embed it in the Markdown — from a doc in `docs/`
 use a relative path (`![alt](diagrams/foo.svg)`), from `README.md` at the root

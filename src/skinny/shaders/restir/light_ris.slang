@@ -116,9 +116,11 @@ float _misPdf<TM : IMaterial>(
 // Evaluate a reproducible (type, id, uv) reference at a shading point. Visibility
 // deferred. Used by fill (build), resolve (survivor), and spatial/temporal reuse
 // (re-evaluate a neighbour's sample at THIS pixel — the reconnection).
+// DOC:target#sig start
 RCand restirEvalRef<TM : IMaterial>(
     TM mat, uint type, uint id, float2 uv, HitInfo h,
     float3 N, float3 T, float3 B, float3 wo)
+// DOC:target#sig end
 {
     RCand c;
     c.integrand = float3(0.0); c.pHat = 0.0; c.pdfLightSA = 0.0; c.pdfBsdf = 0.0;
@@ -158,7 +160,9 @@ RCand restirEvalRef<TM : IMaterial>(
         float cosLight = max(dot(ls.normal, -dir), 0.0);
         if (cosLight <= 0.0)
             return c;
+        // DOC:pmix#area start
         pdfLightSA = d2 * ls.pdfArea / cosLight;     // area → solid-angle measure
+        // DOC:pmix#area end
         Le = ls.radiance;
         c.toPoint = ls.point;
         c.isSE = (type == RLIGHT_SPHERE);            // tri = NEE-only (light technique)
@@ -166,24 +170,28 @@ RCand restirEvalRef<TM : IMaterial>(
     if (pdfLightSA <= 0.0 || dot(N, dir) <= 0.0)
         return c;
 
+    // DOC:target#core start
     float3 wi = worldToTangent(dir, T, B, N);
     BSDFSample b = mat.evaluate(wo, wi);
     c.integrand = b.response * Le;                   // UNWEIGHTED (MIS lives in p_mix)
     c.pHat = _luminance(c.integrand);
     c.pdfLightSA = pdfLightSA;
     c.pdfBsdf = _misPdf(mat, h, N, T, B, wo, wi);
+    // DOC:target#core end
     c.dir = dir;
     c.valid = true;
     return c;
 }
 
 // Mixture source pdf for a candidate (balance heuristic over light + BSDF).
+// DOC:pmix#mix start
 float _mixPdf(RCand c, uint nTech, uint mLight, uint mBsdf)
 {
     float pLight = c.pdfLightSA / float(max(nTech, 1u));
     float pBsdf  = c.isSE ? c.pdfBsdf : 0.0;
     return (float(mLight) * pLight + float(mBsdf) * pBsdf) / float(max(mLight + mBsdf, 1u));
 }
+// DOC:pmix#mix end
 
 // Initial RIS over the unified light set → a Reservoir (no shadow ray; deferred
 // to resolve). M_light light candidates (technique ~ uniform over the active
@@ -290,24 +298,30 @@ Reservoir restirFillReservoir<TM : IMaterial>(
 
 // Resolve a reservoir at a shading point: one shadow ray for the survivor →
 // integrand·V·W (RGB), over any light type.
+// DOC:resolve#sig start
 float3 restirResolveReservoir<TM : IMaterial>(
     TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo, Reservoir r)
+// DOC:resolve#sig end
 {
     if (r.W <= 0.0)
         return float3(0.0);
     RCand c = restirEvalRef(mat, refType(r.y), refId(r.y), r.y.uv, h, N, T, B, wo);
     if (!c.valid || c.pHat <= 0.0)
         return float3(0.0);
+    // DOC:resolve#core start
     bool vis = c.isEnv ? visibleDirectional(fc, h.position, N, c.dir)
                        : visibleSegment(fc, h.position, c.toPoint);
     if (!vis)
         return float3(0.0);
     return c.integrand * r.W;
+    // DOC:resolve#core end
 }
 
 // Directional (delta) lights: plain NEE, outside the RIS (no MIS).
+// DOC:resolve-dir#sig start
 float3 restirDirectional<TM : IMaterial>(
     TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo)
+// DOC:resolve-dir#sig end
 {
     float3 pos = h.position;
     float3 direct = float3(0.0);
@@ -321,9 +335,11 @@ float3 restirDirectional<TM : IMaterial>(
         float3 dir = toL / max(length(toL), 1e-8);
         if (dot(N, dir) <= 0.0 || !visibleDirectional(fc, pos, N, dir))
             continue;
+        // DOC:resolve-dir#core start
         float3 wi = worldToTangent(dir, T, B, N);
         BSDFSample b = mat.evaluate(wo, wi);
         direct += b.response * ls.radiance;
+        // DOC:resolve-dir#core end
     }
     return direct;
 }

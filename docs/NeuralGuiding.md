@@ -153,6 +153,29 @@ the world shading normal, the outgoing world direction:
 
 ![Condition c = (2(p − b_min)/e − 1, N, ω_o) ∈ ℝ⁹](diagrams/neural/cond.svg)
 
+<!-- CODE:cond body -->
+```slang
+// from neural_proposal.slang
+void neuralCondition(float3 posWorld, float3 N, float3 woWorld, out float cond[NF_COND])
+{
+    float3 ext = max(fc.sceneBoundsExtent, float3(1e-6f));
+    float3 p = (posWorld - fc.sceneBoundsMin) / ext;   // [0,1]³
+    p = p * 2.0f - 1.0f;                               // [-1,1]³
+    cond[0] = p.x; cond[1] = p.y; cond[2] = p.z;
+    cond[3] = N.x; cond[4] = N.y; cond[5] = N.z;
+    cond[6] = woWorld.x; cond[7] = woWorld.y; cond[8] = woWorld.z;
+}
+```
+<!-- /CODE:cond -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| p | `posWorld` | world hit position |
+| b_min, e | `fc.sceneBoundsMin`, `ext` | scene AABB min + extent |
+| 2(p−b_min)/e − 1 | `cond[0..2]` | position normalised to [−1,1]³ |
+| N | `cond[3..5]` | world shading normal |
+| ω_o | `cond[6..8]` | outgoing world direction |
+
 ### 2. Forward draw
 
 A draw maps a uniform base sample through the conditional flow:
@@ -165,6 +188,43 @@ rational-quadratic spline; consecutive layers alternate which coordinate is
 transformed:
 
 ![z'_t = RQS(z_t; θ_L(z_c, c)), z'_c = z_c](diagrams/neural/coupling.svg)
+
+`nf_flow_forward` is the coupling-layer stack `T_θ` (alternating which coordinate
+each layer transforms):
+
+<!-- CODE:coupling sig,core -->
+```slang
+// from neural_flow.slang
+float2 nf_flow_forward(
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
+    float2 u, float cond[NF_COND], out float logdet)
+    // …
+    float2 z = u; logdet = 0.0f;
+    for (int L = 0; L < NF_LAYERS; ++L)
+    {
+        bool even = (L % 2 == 0);                 // even: dim0 conditions, dim1 transforms
+        float xcond = even ? z.x : z.y;
+        float xtr   = even ? z.y : z.x;
+        float params[NF_PARAMS];
+        nf_mlp(W, B, H, L * 3, xcond, cond, params);
+        float widths[NF_BINS]; float heights[NF_BINS]; float derivs[NF_BINS + 1];
+        nf_decode(params, widths, heights, derivs);
+        float ld; float ytr = nf_rqs_fwd(xtr, widths, heights, derivs, ld);
+        logdet += ld;
+        if (even) z.y = ytr; else z.x = ytr;
+    }
+    return z;
+```
+<!-- /CODE:coupling -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| u | `u` | uniform base sample ∈ [0,1]² |
+| z | `z` | flow output on the unit square |
+| L | `L` | coupling-layer index (parity picks z_c vs z_t) |
+| θ_L(z_c, c) | `nf_mlp(...)` → `params` | conditioner MLP knots for layer L |
+| RQS | `nf_rqs_fwd` | per-layer monotone spline transform |
+| log\|det ∂z/∂u\| | `logdet` | accumulated forward log-Jacobian |
 
 ### 3. Rational-quadratic spline
 
@@ -180,12 +240,54 @@ floor) and the derivatives from softplus; the inverse is the analytic solution o
 the underlying quadratic. The spline math is evaluated in **fp32 in every
 precision mode**.
 
+<!-- CODE:rqs sig,core -->
+```slang
+// from neural_flow.slang
+float nf_rqs_fwd(float x, float widths[NF_BINS], float heights[NF_BINS],
+                 float derivs[NF_BINS + 1], out float logdet)
+    // …
+    float num = hgt * (delta * theta * theta + d0 * t1);
+    float den = delta + (d0 + d1 - 2.0f * delta) * t1;
+    den = max(den, NF_EPS);
+    float y = y0 + num / den;
+```
+<!-- /CODE:rqs -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| x | `x` | bin-local input coordinate |
+| w_k | `w` | bin width |
+| h_k | `hgt` | bin height |
+| s = h_k/w_k | `delta` | bin slope |
+| d_k, d_{k+1} | `d0`, `d1` | boundary derivatives |
+| θ = (x − x_k)/w_k | `theta` | normalised position in the bin |
+| y_k | `y0` | bin's output knot |
+| y | `y` | spline output |
+
 ### 4. Log-det Jacobian
 
 Because each spline is monotone and coordinates alternate, the flow's log
 Jacobian determinant is the sum of the per-layer 1-D spline log-derivatives:
 
 ![log|det ∂z/∂u| = Σ_L log|∂y_L/∂x_L|](diagrams/neural/logdet.svg)
+
+The per-spline log-derivative `log|∂y/∂x|` (computed inside `nf_rqs_fwd`); the
+sum over layers Σ_L is the `logdet += ld` accumulation in `nf_flow_forward` above:
+
+<!-- CODE:logdet deriv -->
+```slang
+// from neural_flow.slang
+    float dn = delta * delta * (d1 * theta * theta + 2.0f * delta * t1 + d0 * (1.0f - theta) * (1.0f - theta));
+    float dydx = dn / (den * den);
+    logdet = log(max(dydx, NF_EPS));
+```
+<!-- /CODE:logdet -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| ∂y/∂x | `dydx` | derivative of one bin's RQ transform |
+| log\|∂y_L/∂x_L\| | `logdet` (out of `nf_rqs_fwd`) | one layer's log-derivative |
+| Σ_L | `logdet += ld` (in `nf_flow_forward`) | sum across coupling layers |
 
 ### 5. Density on the unit square
 
@@ -194,12 +296,54 @@ forward draw's density on the square is the inverse Jacobian:
 
 ![q_□(z) = exp(−log|det ∂z/∂u|)](diagrams/neural/pdf-square.svg)
 
+<!-- CODE:pdf-square core -->
+```slang
+// from neural_flow.slang
+    float logdet;
+    float2 z = nf_flow_forward(W, B, H, u, cond, logdet);
+    float log_q_square = -logdet;                       // base pdf on unit square = 1
+```
+<!-- /CODE:pdf-square -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| log\|det ∂z/∂u\| | `logdet` | forward log-Jacobian from the flow |
+| log q_□(z) | `log_q_square` | = −logdet (base density on the square is 1) |
+| z | `z` | flow output on the unit square |
+
 ### 6. Solid-angle density
 
 The y-up square→hemisphere map (`φ = 2πu`, `cosθ = v`) has constant Jacobian
 `2π`, so the solid-angle density is
 
 ![q_ω(ω) = q_□(z) / 2π](diagrams/neural/pdf-omega.svg)
+
+The square→hemisphere map (`nf_square_to_hemi`) and the constant-2π conversion in
+`sampleNeural`:
+
+<!-- CODE:pdf-omega map,pdf -->
+```slang
+// from neural_flow.slang
+float3 nf_square_to_hemi(float2 z)
+{
+    float u = clamp(z.x, 0.0f, 1.0f);
+    float v = clamp(z.y, 0.0f, 1.0f);
+    float phi = 2.0f * NF_PI * u;
+    float st = sqrt(max(1.0f - v * v, 0.0f));
+    return float3(st * cos(phi), v, st * sin(phi));
+}
+    // …
+    pdfOmega = exp(log_q_square - NF_LOG2PI);
+```
+<!-- /CODE:pdf-omega -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| φ = 2πu | `phi` | azimuth from the first square coord |
+| cosθ = v | `v` | elevation from the second square coord |
+| ω | return of `nf_square_to_hemi` | y-up hemisphere direction |
+| q_□(z) | `exp(log_q_square)` | density on the square |
+| q_ω(ω) = q_□/2π | `pdfOmega` | solid-angle density (`exp(log_q_square − log2π)`) |
 
 ### 7. Inverse density of an arbitrary direction
 
@@ -209,12 +353,65 @@ reverse, and accumulate the inverse log-det:
 
 ![q_ω(ω) = (1/2π) exp(log|det ∂u/∂z|), z = M⁻¹(ω)](diagrams/neural/pdf-inv.svg)
 
+<!-- CODE:pdf-inv sig,core -->
+```slang
+// from neural_flow.slang
+float pdfNeural(
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
+    float cond[NF_COND], float3 wi)
+    // …
+    if (wi.y <= 0.0f) return 0.0f;
+    float2 z = nf_hemi_to_square(wi);
+    float logdet;
+    nf_flow_inverse(W, B, H, z, cond, logdet);          // log|det du/dz| = log q_square
+    return exp(logdet - NF_LOG2PI);
+```
+<!-- /CODE:pdf-inv -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| ω | `wi` | query direction (flow-local, y-up) |
+| z = M⁻¹(ω) | `nf_hemi_to_square(wi)` | map the direction back to the square |
+| log\|det ∂u/∂z\| | `logdet` (from `nf_flow_inverse`) | inverse log-Jacobian = log q_□ |
+| q_ω(ω) | return value | (1/2π)·exp(logdet); 0 in the lower hemisphere |
+
 ### 8. Mixture pdf
 
 The active proposals form a one-sample-MIS mixture with weights that renormalise
 to Σ = 1 over the active, valid techniques:
 
 ![p_mix(ω) = α_b p_bsdf(ω) + α_e p_env(ω) + α_n q_ω(ω)](diagrams/neural/mix-pdf.svg)
+
+The α renormalisation (`proposalWeights`) and the mixture-pdf sum
+(`mixtureProposalPdf`):
+
+<!-- CODE:mix-pdf weights,pdf -->
+```slang
+// from proposal.slang
+    float s = aB + aE + aN;
+    if (s > 0.0) { aB /= s; aE /= s; aN /= s; }
+    // …
+    float pdf = aB * bsdfPdf;
+    if ((aE > 0.0 || aN > 0.0) && wiT.z > 0.0)
+    {
+        float3 worldWi = tangentToWorld(wiT, c.T, c.B, c.N);
+        if (aE > 0.0)
+            pdf += aE * envPdf(worldWi);
+        if (aN > 0.0)
+            pdf += aN * neuralPdfWorld(c.position, c.N, c.T, c.B,
+                                       tangentToWorld(c.woT, c.T, c.B, c.N), worldWi);
+    }
+    return pdf;
+```
+<!-- /CODE:mix-pdf -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| α_b, α_e, α_n | `aB`, `aE`, `aN` | bsdf / env / neural mixture weights (Σ = 1) |
+| p_bsdf(ω) | `bsdfPdf` | material's own pdf |
+| p_env(ω) | `envPdf(worldWi)` | environment importance-sampling pdf |
+| q_ω(ω) | `neuralPdfWorld(...)` | neural inverse density (§7) |
+| p_mix(ω) | `pdf` (return) | α_b·p_bsdf + α_e·p_env + α_n·q_ω |
 
 ### 9. Unbiased throughput update
 
@@ -223,6 +420,23 @@ this is what keeps the estimator unbiased:
 
 ![β ← β · f(ω)cosθ / p_mix(ω)](diagrams/neural/estimator.svg)
 
+In `sampleBounceDirection`, the chosen technique's sample is reweighted by the
+full mixture pdf so the estimator stays unbiased:
+
+<!-- CODE:estimator core -->
+```slang
+// from proposal.slang
+    outp.pdf         = mixPdf;
+    outp.weight      = ev.response / mixPdf;
+```
+<!-- /CODE:estimator -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| p_mix(ω) | `mixPdf` | full mixture pdf at the chosen direction |
+| f(ω)cosθ | `ev.response` | BSDF response incl. cosine (`mat.evaluate`) |
+| f·cosθ / p_mix | `outp.weight` | the throughput multiplier β ← β·weight |
+
 ### 10. Training weight (offline)
 
 Each recorded vertex stores the per-unit-throughput tail radiance, so a
@@ -230,12 +444,37 @@ contribution-weighted fit learns `q ∝ f · L_i · cosθ`:
 
 ![w_k = (L_final − L_k) / β_in,k](diagrams/neural/contrib.svg)
 
+The backward attribution loop in `estimateRadianceRecord` (the `.nrec` record dump):
+
+<!-- CODE:contrib core -->
+```slang
+// from path_record.slang
+    float3 Lfinal = radiance;
+    for (uint k = 0u; k < recCount; k++)
+    {
+        float3 beta = max(recBeta[k], float3(1e-8));
+        float3 contrib = max((Lfinal - recL[k]) / beta, float3(0.0));
+```
+<!-- /CODE:contrib -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| L_final | `Lfinal` | total path radiance |
+| L_k | `recL[k]` | radiance gathered up to vertex k |
+| β_in,k | `beta` (`recBeta[k]`) | throughput entering vertex k |
+| w_k = (L_final − L_k)/β_in,k | `contrib` | RGB training weight (clamped ≥ 0) |
+
 ### 11. Training objective (offline)
 
 The flow is fit by minimizing the contribution-weighted negative log-likelihood
 (forward KL / mass-covering) over the recorded dataset `D`:
 
 ![L(θ) = −E_{(c,ω,w)~D}[ w · log q_θ(ω | c) ]](diagrams/neural/loss.svg)
+
+> The training objective is **offline** — it lives in the standalone `spline_flow`
+> trainer (PyTorch), not in any in-repo Slang shader, so there is no embedded
+> snippet here. The renderer only consumes the baked weights (`.nfw1`); the
+> Slang side (§1–§9) is inference-only.
 
 ## Equation → implementation map
 

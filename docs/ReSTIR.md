@@ -142,6 +142,52 @@ wherever the true integrand f ≠ 0. *(Talbot et al. 2005; Bitterli et al. 2020.
 > **Implements:** `reservoirUpdate` (the `rand * wSum < w` survivor test) and
 > `reservoirFinalize` (`W = wSum / (M·p̂)`) in `restir/reservoir.slang`.
 
+`reservoirUpdate` streams one candidate and keeps the survivor with probability ∝ wᵢ:
+
+<!-- CODE:ris-w body -->
+```slang
+// from reservoir.slang
+bool reservoirUpdate(inout Reservoir r, LightSampleRef x, float w, float pHat_x, float rand)
+{
+    r.wSum += w;
+    r.M += 1u;
+    bool take = (w > 0.0) && (rand * r.wSum < w);
+    if (take)
+    {
+        r.y = x;
+        r.pHat = pHat_x;
+    }
+    return take;
+}
+```
+<!-- /CODE:ris-w -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| wᵢ | `w` | candidate RIS weight p̂(xᵢ)/p_src(xᵢ) (caller-supplied) |
+| Σwᵢ | `r.wSum` | running sum of resampling weights |
+| M | `r.M` | candidate count |
+| y | `r.y` | surviving sample |
+| p̂(y) | `r.pHat` | cached target value of the survivor |
+
+`reservoirFinalize` turns the stream into the unbiased contribution weight W:
+
+<!-- CODE:ris-W body -->
+```slang
+// from reservoir.slang
+void reservoirFinalize(inout Reservoir r)
+{
+    float denom = float(r.M) * r.pHat;
+    r.W = (denom > 0.0) ? r.wSum / denom : 0.0;
+}
+```
+<!-- /CODE:ris-W -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| W | `r.W` | contribution weight Σwᵢ/(M·p̂(y)) |
+| M·p̂(y) | `denom` | normaliser (0 ⇒ W = 0) |
+
 ![RIS resamples M proposal draws toward the target p̂; the survivor approaches the target distribution as M grows](diagrams/restir/fig_ris_resample.svg)
 
 ### 2. The target function p̂ (unshadowed, unweighted)
@@ -157,6 +203,29 @@ float; the resolve multiplies the cached RGB integrand f·Le by V·W.
 
 > **Implements:** `restirEvalRef` in `restir/light_ris.slang`
 > (`c.integrand = b.response * Le; c.pHat = lum(c.integrand)`).
+
+<!-- CODE:target sig,core -->
+```slang
+// from light_ris.slang
+RCand restirEvalRef<TM : IMaterial>(
+    TM mat, uint type, uint id, float2 uv, HitInfo h,
+    float3 N, float3 T, float3 B, float3 wo)
+    // …
+    float3 wi = worldToTangent(dir, T, B, N);
+    BSDFSample b = mat.evaluate(wo, wi);
+    c.integrand = b.response * Le;                   // UNWEIGHTED (MIS lives in p_mix)
+    c.pHat = _luminance(c.integrand);
+    c.pdfLightSA = pdfLightSA;
+    c.pdfBsdf = _misPdf(mat, h, N, T, B, wo, wi);
+```
+<!-- /CODE:target -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| f | `b.response` | BSDF response incl. cosine (`mat.evaluate(wo, wi)`) |
+| Le | `Le` | light radiance |
+| f·Le | `c.integrand` | unweighted RGB integrand (cached for resolve) |
+| p̂ | `c.pHat` | scalar target = lum(f·Le) |
 
 ### 3. The mixture source pdf (light + BSDF candidates)
 
@@ -184,6 +253,32 @@ Each candidate's RIS weight is then w = p̂ / p_mix.
 > `restirFillReservoir` (`restir/light_ris.slang`). Every drawn candidate counts
 > toward M, including invalid/occluded ones (which stream with w = 0).
 
+The area→solid-angle conversion (inside `restirEvalRef`) and the balance-heuristic
+mixture pdf (`_mixPdf`):
+
+<!-- CODE:pmix area,mix -->
+```slang
+// from light_ris.slang
+        pdfLightSA = d2 * ls.pdfArea / cosLight;     // area → solid-angle measure
+    // …
+float _mixPdf(RCand c, uint nTech, uint mLight, uint mBsdf)
+{
+    float pLight = c.pdfLightSA / float(max(nTech, 1u));
+    float pBsdf  = c.isSE ? c.pdfBsdf : 0.0;
+    return (float(mLight) * pLight + float(mBsdf) * pBsdf) / float(max(mLight + mBsdf, 1u));
+}
+```
+<!-- /CODE:pmix -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| p_light^Ω | `pdfLightSA` | light pdf in solid-angle measure |
+| d²·p_area/cosθ | `d2 * ls.pdfArea / cosLight` | area→SA geometry conversion |
+| p_light | `pLight` | per-technique light pdf (÷ n_tech) |
+| p_bsdf | `pBsdf` | BSDF proposal pdf, sphere/env only (`c.isSE`) |
+| M_light, M_bsdf | `mLight`, `mBsdf` | candidate counts per technique |
+| p_mix | return value | balance-heuristic source pdf |
+
 ### 4. Combining reservoirs (the merge)
 
 Two reservoirs combine by treating one as a single *supercandidate*. Source
@@ -200,6 +295,32 @@ combined contribution weight over ΣM samples.
 > **Implements:** `reservoirMerge` in `restir/reservoir.slang`. This is the
 > building block; `restirSpatial` uses the explicit per-source form below so it
 > can apply per-domain MIS weights.
+
+<!-- CODE:merge body -->
+```slang
+// from reservoir.slang
+bool reservoirMerge(inout Reservoir dst, Reservoir src, float pHatInDst, float rand)
+{
+    float w = pHatInDst * src.W * float(src.M);
+    dst.wSum += w;
+    dst.M += src.M;
+    bool take = (w > 0.0) && (rand * dst.wSum < w);
+    if (take)
+    {
+        dst.y = src.y;
+        dst.pHat = pHatInDst;
+    }
+    return take;
+}
+```
+<!-- /CODE:merge -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| p̂_dst(src.y) | `pHatInDst` | src's survivor re-evaluated in dst's domain |
+| src.W, src.M | `src.W`, `src.M` | source contribution weight + count |
+| w | `w` | supercandidate weight p̂_dst·src.W·src.M |
+| ΣM | `dst.M` | combined sample count |
 
 ### 5. Unbiased spatiotemporal combination (GRIS)
 
@@ -234,6 +355,57 @@ captured entirely by the per-domain p̂ re-evaluation.
 > each source domain once, evaluate every sample in it) and the
 > `m_s = sM[a]*pOwn[a]/D[a]; w_s = m_s*pCanon[a]*sW[a]` combine loop.
 
+<!-- CODE:gris sig,denom,combine -->
+```slang
+// from restir_primary.slang
+void restirSpatial(uint3 tid: SV_DispatchThreadID)
+    // …
+    for (uint j = 0u; j < K; j++)
+    {
+        WavefrontPathState sj; HitInfo hj; FlatMaterial matj; float3 Nj, Tj, Bj, woj;
+        if (!restirLoadLane(sLane[j], sj, hj, matj, Nj, Tj, Bj, woj))
+            continue;                               // domain can't be reconstructed ⇒ contributes 0
+        for (uint a = 0u; a < K; a++)
+        {
+            RCand c = restirEvalRef(matj, refType(sRef[a]), refId(sRef[a]), sRef[a].uv,
+                                    hj, Nj, Tj, Bj, woj);
+            float p = (c.valid) ? c.pHat : 0.0;
+            D[a] += sM[j] * p;
+            if (j == a) pOwn[a] = p;
+        }
+    }
+    // …
+    for (uint a = 0u; a < K; a++)
+    {
+        mTotal += sM[a];
+        if (D[a] <= 0.0 || pCanon[a] <= 0.0 || sW[a] <= 0.0)
+            continue;
+        float m_s = sM[a] * pOwn[a] / D[a];
+        float w_s = m_s * pCanon[a] * sW[a];
+        outr.wSum += w_s;
+        if (w_s > 0.0 && rng.next() * outr.wSum < w_s)
+        {
+            outr.y = sRef[a];
+            outr.pHat = pCanon[a];
+        }
+    }
+    outr.M = uint(mTotal);
+    outr.W = (outr.pHat > 0.0) ? outr.wSum / outr.pHat : 0.0;   // m_s normalize ⇒ no 1/M
+```
+<!-- /CODE:gris -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| K | `K` | number of sources (self + neighbours + temporal) |
+| M_j | `sM[j]` | sample count of source j |
+| p̂_j(z_s) | `c.pHat` (inner loop) | sample z_s's target in source j's domain |
+| D_s = Σ_j M_j·p̂_j(z_s) | `D[a]` | GRIS denominator |
+| p̂_s(z_s) | `pOwn[a]` | z_s's target in its own domain |
+| p̂_q(z_s) | `pCanon[a]` | z_s's target at the canonical pixel |
+| m_s | `m_s` | generalized balance MIS weight |
+| w_s | `w_s` | per-source resampling weight |
+| W_out | `outr.W` | output contribution weight (no 1/M — m_s normalize) |
+
 ![Spatial reuse: the canonical pixel merges k neighbours within the search radius, rejecting those across a normal/depth discontinuity](diagrams/restir/fig_spatial_reuse.svg)
 
 ### 6. Biased combination (ΣM toggle)
@@ -248,6 +420,35 @@ faster, but biased — discontinuity darkening on spatial-only, and over-brighte
 with temporal on glossy via the feedback the m_s would have bounded.
 
 > **Implements:** the `RESTIR_FLAG_BIASED` branch of `restirSpatial`.
+
+<!-- CODE:biased core -->
+```slang
+// from restir_primary.slang
+        for (uint a = 0u; a < K; a++)
+        {
+            mTot += sM[a];
+            if (pCanon[a] <= 0.0 || sW[a] <= 0.0)
+                continue;
+            float w = pCanon[a] * sW[a] * sM[a];
+            outb.wSum += w;
+            if (w > 0.0 && rng.next() * outb.wSum < w)
+            {
+                outb.y = sRef[a];
+                outb.pHat = pCanon[a];
+            }
+        }
+        outb.M = uint(mTot);
+        outb.W = (outb.pHat > 0.0 && mTot > 0.0) ? outb.wSum / (mTot * outb.pHat) : 0.0;
+```
+<!-- /CODE:biased -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| p̂_q(z_s) | `pCanon[a]` | source sample's target at this pixel |
+| W_s, M_s | `sW[a]`, `sM[a]` | source weight + count |
+| w | `w` | per-source weight p̂_q·W_s·M_s |
+| ΣM | `mTot` | total sample count (the normaliser) |
+| W | `outb.W` | biased contribution weight wSum/(ΣM·p̂(Y)) |
 
 ### 7. Resolve and directional lights
 
@@ -264,6 +465,50 @@ RIS (no MIS, they cannot be BSDF-sampled):
 > **Implements:** `restirResolveReservoir` (area: `visibleSegment`; env:
 > `visibleDirectional`) and `restirDirectional` in `restir/light_ris.slang`,
 > summed in `restirResolve`.
+
+`restirResolveReservoir` casts the survivor's single shadow ray and scales the
+cached integrand by V·W:
+
+<!-- CODE:resolve sig,core -->
+```slang
+// from light_ris.slang
+float3 restirResolveReservoir<TM : IMaterial>(
+    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo, Reservoir r)
+    // …
+    bool vis = c.isEnv ? visibleDirectional(fc, h.position, N, c.dir)
+                       : visibleSegment(fc, h.position, c.toPoint);
+    if (!vis)
+        return float3(0.0);
+    return c.integrand * r.W;
+```
+<!-- /CODE:resolve -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| V(y) | `vis` | binary visibility (the one deferred shadow ray) |
+| f(y)·Le(y) | `c.integrand` | cached unweighted integrand |
+| W | `r.W` | reservoir contribution weight |
+| f·Le·V·W | return value | RGB direct estimate |
+
+`restirDirectional` adds delta (directional) lights by plain NEE, outside the RIS:
+
+<!-- CODE:resolve-dir sig,core -->
+```slang
+// from light_ris.slang
+float3 restirDirectional<TM : IMaterial>(
+    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo)
+    // …
+        float3 wi = worldToTangent(dir, T, B, N);
+        BSDFSample b = mat.evaluate(wo, wi);
+        direct += b.response * ls.radiance;
+```
+<!-- /CODE:resolve-dir -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| f(ωᵢ,d) | `b.response` | BSDF response toward light d |
+| Le,d | `ls.radiance` | directional light radiance |
+| Σ_d | `direct +=` over `d` | sum over directional lights (V_d already gated) |
 
 ## Equation → implementation map
 
@@ -330,6 +575,30 @@ direct terms must be suppressed to avoid double-counting:
   (`reuseMode == 1 && depth == 0 && !transmitted`).
 - **BSDF-sampled env miss:** the depth-0-spawned ray's env-miss direct term is
   skipped in `wavefront_path.slang:129`.
+
+The light-NEE gate is the whole of `reuseDirect`:
+
+<!-- CODE:gate body -->
+```slang
+// from reuse.slang
+float3 reuseDirect<TM : IMaterial>(
+    TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo,
+    uint depth, bool neuralActive, inout RNG rng)
+{
+    // Primary-hit direct owned by ReSTIR: gate the inline estimate at the
+    // primary vertex so the reservoir resolve pass is its sole source.
+    if (fc.reuseMode == REUSE_RESTIR_DI && depth == 0u)
+        return float3(0.0);
+    return allLightsNEE(mat, h, N, T, B, wo, neuralActive, rng);
+}
+```
+<!-- /CODE:gate -->
+
+| symbol | code | meaning |
+| --- | --- | --- |
+| reuseMode | `fc.reuseMode` | active reuse selector (`REUSE_RESTIR_DI` = 1) |
+| depth 0 | `depth == 0u` | primary vertex (RIS owns it ⇒ return 0) |
+| depth ≥ 1 | else branch | stock `allLightsNEE` (proposal-mixture-coupled) |
 
 `depth ≥ 1` vertices are untouched (stock NEE + the proposal mixture). Identity
 reuse (`reuse=none`) keeps the pre-ReSTIR behaviour exactly.

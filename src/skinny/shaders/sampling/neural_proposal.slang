@@ -44,6 +44,7 @@ import sampling.neural_flow;   // NfLayerHeader, sampleNeural, pdfNeural, NF_CON
 
 // Canonical condition c = (position normalised to the scene AABB → [-1,1]³,
 // shading normal, outgoing world dir). MUST match the trainer's encoding.
+// DOC:cond#body start
 void neuralCondition(float3 posWorld, float3 N, float3 woWorld, out float cond[NF_COND])
 {
     float3 ext = max(fc.sceneBoundsExtent, float3(1e-6f));
@@ -53,6 +54,7 @@ void neuralCondition(float3 posWorld, float3 N, float3 woWorld, out float cond[N
     cond[3] = N.x; cond[4] = N.y; cond[5] = N.z;
     cond[6] = woWorld.x; cond[7] = woWorld.y; cond[8] = woWorld.z;
 }
+// DOC:cond#body end
 
 // Flow-local frame: +Y = shading normal (the flow hemisphere is y-up). Map
 // to/from world via the shading basis, so (T, N, B) ↔ flow-local (x, y, z).
