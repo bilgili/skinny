@@ -491,15 +491,24 @@ class WavefrontPathPass:
 
     HIT_STRIDE = 96  # ≥ sizeof(HitInfo) (≈92 B scalar) — headroom
     NEURAL_STRIDE = 32  # = sizeof(WfNeuralSample) (interfaces.slang): wi,pdf,version,valid,2×pad
+    REC_VERTEX_STRIDE = 76  # = sizeof(RecVertex) (wavefront/wf_records.slang): 6×float3 + uint
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
                  stream_size: int, num_pixels: int, build_catchall: bool = True,
-                 neural_config=None) -> None:
+                 record_capacity: int = 0, neural_config=None) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
         self.build_catchall = bool(build_catchall)
+        # Wavefront-native path records (change wavefront-native-path-records):
+        # per-lane vertex stack (binding 9) + stacked count (binding 10) in this
+        # pass's set 1, in SEPARATE buffers (NOT inside the by-value-copied
+        # WavefrontPathState). Full-size only while online training drives the
+        # record drain; 1-element dummies otherwise so the default render is
+        # byte-identical and pays no extra VRAM/bandwidth. The shade/terminate
+        # kernels touch them only under fc.recordMode.
+        self.record_capacity = int(record_capacity)
         # Neural size/precision config (study change neural-precision-size-study).
         # The flat/catch-all shade kernels import the inline flow inverse
         # (proposal → neural_proposal → neural_flow), so they compile against the
@@ -559,17 +568,25 @@ class WavefrontPathPass:
         # reads wfNeural[i] — so the binding is always in this set's layout.
         self._buffers["neural"] = StorageBuffer(ctx, self.stream_size * self.NEURAL_STRIDE)
         self.neural_buf = self._buffers["neural"]
+        # Record stack (9) + per-lane count (10). Dummy (1 element) when not
+        # recording; the shaders never touch them then (fc.recordMode == 0).
+        rec_stack_elems = max(1, self.record_capacity * self.MAX_BOUNCES)
+        rec_count_elems = max(1, self.record_capacity)
+        self._buffers["rec_stack"] = StorageBuffer(ctx, rec_stack_elems * self.REC_VERTEX_STRIDE)
+        self._buffers["rec_count"] = StorageBuffer(ctx, rec_count_elems * 4)
 
-        # Set 1: path-state (0), hit (1), the 6 queue buffers (2..7), neural (8).
+        # Set 1: path-state (0), hit (1), the 6 queue buffers (2..7), neural (8),
+        # record stack (9), record count (10).
+        num_bindings = 11
         state_bindings = [
             vk.VkDescriptorSetLayoutBinding(
                 binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
-            for b in range(9)
+            for b in range(num_bindings)
         ]
         self._state_layout = vk.vkCreateDescriptorSetLayout(
             ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
-                bindingCount=9, pBindings=state_bindings), None)
+                bindingCount=num_bindings, pBindings=state_bindings), None)
 
         # Pipeline layout: [set 0 = megakernel scene set, set 1 = path state] +
         # a 12-byte push constant {streamBase, shadeSlot, streamSize}.
@@ -592,7 +609,8 @@ class WavefrontPathPass:
             ctx.device, vk.VkDescriptorPoolCreateInfo(
                 maxSets=1, poolSizeCount=1,
                 pPoolSizes=[vk.VkDescriptorPoolSize(
-                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=9)]), None)
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    descriptorCount=num_bindings)]), None)
         self._state_set = vk.vkAllocateDescriptorSets(
             ctx.device, vk.VkDescriptorSetAllocateInfo(
                 descriptorPool=self._pool, descriptorSetCount=1,
@@ -606,6 +624,8 @@ class WavefrontPathPass:
             (self._buffers["slot_cursor"].buffer, self._buffers["slot_cursor"].size),
             (self._buffers["indirect"].buffer, self._buffers["indirect"].size),
             (self._buffers["neural"].buffer, self._buffers["neural"].size),
+            (self._buffers["rec_stack"].buffer, self._buffers["rec_stack"].size),
+            (self._buffers["rec_count"].buffer, self._buffers["rec_count"].size),
         ]
         writes = []
         for b, (buf, rng) in enumerate(bound):

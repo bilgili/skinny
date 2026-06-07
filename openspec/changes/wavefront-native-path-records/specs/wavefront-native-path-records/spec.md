@@ -57,13 +57,22 @@ the hot path.
   altering the transport estimate
 
 ### Requirement: Online drain sources wavefront records
-The renderer's live record drain SHALL read the wavefront-produced records when
-record mode is enabled, without dispatching the `mainImageRecord` megakernel, while
-the megakernel record entry and the file dump remain available for the offline
-`.nrec` path.
+The renderer's live record drain SHALL be source-selectable, and SHALL default to
+reading the wavefront-produced records (without dispatching the `mainImageRecord`
+megakernel) when running the wavefront path integrator. The megakernel record
+entry SHALL remain available both for the offline `.nrec` dump and as an
+explicitly-selected live drain source on hardware without the megakernel watchdog
+limitation.
 
 #### Scenario: Online training drains without the megakernel
-- **WHEN** online training is active on the wavefront backend
+- **WHEN** online training is active on the wavefront backend with the path
+  integrator and the default record source
 - **THEN** the per-frame drain reads the records the wavefront render produced and
   appends them to the replay buffer, and the megakernel record pipeline is not built
   or dispatched on the per-frame path
+
+#### Scenario: Megakernel remains a selectable live drain source
+- **WHEN** the record source is explicitly set to the megakernel (e.g. on a box
+  without the GPU watchdog limitation)
+- **THEN** the live drain dispatches the `mainImageRecord` entry and reads its
+  records, exactly as before this change

@@ -451,25 +451,30 @@ contribution-weighted fit learns `q ∝ f · L_i · cosθ`:
 
 ![w_k = (L_final − L_k) / β_in,k](diagrams/neural/contrib.svg)
 
-The backward attribution loop in `estimateRadianceRecord` (the `.nrec` record dump):
+The attribution weight is computed by the shared `recordContrib` helper — the
+ONE source of truth used by both record producers: the megakernel
+`estimateRadianceRecord` (the offline `.nrec` dump) and the wavefront-native
+emitter (`wavefront/wf_records.slang`, the live online-training drain). Each
+calls it at path termination with the snapshotted `L_k`/`β_in,k` and the path's
+total radiance `L_final`:
 
 <!-- CODE:contrib core -->
 ```slang
-// from path_record.slang
-    float3 Lfinal = radiance;
-    for (uint k = 0u; k < recCount; k++)
-    {
-        float3 beta = max(recBeta[k], float3(1e-8));
-        float3 contrib = max((Lfinal - recL[k]) / beta, float3(0.0));
+// from path_record_common.slang
+float3 recordContrib(float3 Lfinal, float3 L_k, float3 beta_in_k)
+{
+    float3 beta = max(beta_in_k, float3(1e-8));
+    return max((Lfinal - L_k) / beta, float3(0.0));
+}
 ```
 <!-- /CODE:contrib -->
 
 | symbol | code | meaning |
 | --- | --- | --- |
 | L_final | `Lfinal` | total path radiance |
-| L_k | `recL[k]` | radiance gathered up to vertex k |
-| β_in,k | `beta` (`recBeta[k]`) | throughput entering vertex k |
-| w_k = (L_final − L_k)/β_in,k | `contrib` | RGB training weight (clamped ≥ 0) |
+| L_k | `L_k` | radiance gathered up to vertex k |
+| β_in,k | `beta` (`beta_in_k`) | throughput entering vertex k |
+| w_k = (L_final − L_k)/β_in,k | return value | RGB training weight (clamped ≥ 0) |
 
 ### 11. Training objective (offline)
 
