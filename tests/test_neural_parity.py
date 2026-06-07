@@ -77,27 +77,57 @@ def _softplus(x):
     return np.log1p(np.exp(x))
 
 
-def _linear(nw, header, inp, act):
+def _f16(x):
+    """Round a float array through IEEE half and back — models NF_WT/NF_CT=half
+    storage/compute quantization (study change neural-precision-size-study)."""
+    return np.asarray(x, np.float32).astype(np.float16).astype(np.float32)
+
+
+def _linear(nw, header, inp, act, prec=(False, False)):
     """One Linear layer: out[o] = bias[o] + sum_i W[o,i]*in[i], optional SiLU.
 
     ``header`` is a row of ``NeuralWeights.headers``:
     (weightOffset, biasOffset, inDim, outDim). Mirrors ``nf_linear``.
+
+    ``prec`` = (wt_half, ct_half) mirrors the shader's NF_WT/NF_CT aliases:
+      wt_half — weights/biases stored as half (fp16-storage + fp16-compute).
+      ct_half — the activations + GEMM accumulate are half (fp16-compute only);
+                the SiLU is evaluated in float then re-quantized, exactly as
+                nf_linear does. Default (False, False) = the shipped fp32 path,
+                so the golden parity tests below are byte-for-byte unchanged.
     """
+    wt_half, ct_half = prec
     w_off, b_off, in_dim, out_dim = (int(v) for v in header)
-    w = nw.weights[w_off:w_off + out_dim * in_dim].reshape(out_dim, in_dim)
-    out = w @ inp[:in_dim] + nw.biases[b_off:b_off + out_dim]
-    return _silu(out) if act else out
+    w = nw.weights[w_off:w_off + out_dim * in_dim].reshape(out_dim, in_dim).astype(np.float32)
+    b = nw.biases[b_off:b_off + out_dim].astype(np.float32)
+    if wt_half:                                  # NF_WT=half — half weight storage
+        w, b = _f16(w), _f16(b)
+    x = inp[:in_dim].astype(np.float32)
+    if ct_half:                                  # NF_CT=half — half activations/GEMM
+        x = _f16(x)
+        out = _f16(_f16(w) @ _f16(x)) + b
+        out = _f16(out)
+    else:
+        out = w @ x + b
+    if act:
+        out = _silu(out)
+        if ct_half:
+            out = _f16(out)
+    return out
 
 
-def _mlp(nw, base3, xcond, cond):
+def _mlp(nw, base3, xcond, cond, prec=(False, False)):
     """3-layer conditioner MLP for one coupling (mirrors ``nf_mlp``).
 
     ``base3`` indexes this coupling's first header (3 Linear per coupling).
+    ``prec`` selects the MLP precision; the spline decode/eval stays float.
     """
     a = np.concatenate([[xcond], cond]).astype(np.float32)
-    a = _linear(nw, nw.headers[base3 + 0], a, True)     # in -> hidden, SiLU
-    a = _linear(nw, nw.headers[base3 + 1], a, True)     # hidden -> hidden, SiLU
-    return _linear(nw, nw.headers[base3 + 2], a, False)[:NF_PARAMS]  # -> NF_PARAMS
+    if prec[1]:                                  # half activations enter the MLP
+        a = _f16(a)
+    a = _linear(nw, nw.headers[base3 + 0], a, True, prec)   # in -> hidden, SiLU
+    a = _linear(nw, nw.headers[base3 + 1], a, True, prec)   # hidden -> hidden, SiLU
+    return _linear(nw, nw.headers[base3 + 2], a, False, prec)[:NF_PARAMS]  # -> NF_PARAMS
 
 
 def _decode(params, K=NF_BINS):
@@ -179,7 +209,7 @@ def _rqs_inv(y, w, h, d):
     return min(max(x, 0.0), 1.0), -fwdlog
 
 
-def _flow_forward(nw, u, cond):
+def _flow_forward(nw, u, cond, prec=(False, False)):
     """Forward flow u -> z, accumulating log|det dz/du| (mirrors
     ``nf_flow_forward``: even layer conditions on dim0, transforms dim1)."""
     z = np.array(u, np.float64)
@@ -188,7 +218,7 @@ def _flow_forward(nw, u, cond):
         even = (L % 2 == 0)
         xcond = z[0] if even else z[1]
         xtr = z[1] if even else z[0]
-        w, h, d = _decode(_mlp(nw, L * 3, xcond, cond))
+        w, h, d = _decode(_mlp(nw, L * 3, xcond, cond, prec))
         ytr, ld = _rqs_fwd(xtr, w, h, d)
         if even:
             z[1] = ytr
@@ -198,7 +228,7 @@ def _flow_forward(nw, u, cond):
     return z, logdet
 
 
-def _flow_inverse(nw, zin, cond):
+def _flow_inverse(nw, zin, cond, prec=(False, False)):
     """Inverse flow z -> u, accumulating log|det du/dz| (mirrors
     ``nf_flow_inverse``: reversed layer order)."""
     z = np.array(zin, np.float64)
@@ -207,7 +237,7 @@ def _flow_inverse(nw, zin, cond):
         even = (L % 2 == 0)
         ycond = z[0] if even else z[1]
         ytr = z[1] if even else z[0]
-        w, h, d = _decode(_mlp(nw, L * 3, ycond, cond))
+        w, h, d = _decode(_mlp(nw, L * 3, ycond, cond, prec))
         xtr, ld = _rqs_inv(ytr, w, h, d)
         if even:
             z[1] = xtr
@@ -235,19 +265,19 @@ def _hemi_to_square(wld):
     return np.array([phi / (2.0 * math.pi), min(max(wld[1], 0.0), 1.0)], np.float64)
 
 
-def _sample_neural(nw, cond, u):
+def _sample_neural(nw, cond, u, prec=(False, False)):
     """PUBLIC mirror of ``sampleNeural``: forward u -> (wi, solid-angle pdf)."""
-    z, logdet = _flow_forward(nw, u, cond)
+    z, logdet = _flow_forward(nw, u, cond, prec)
     pdf_omega = math.exp(-logdet - LOG2PI)   # base pdf on unit square = 1
     return _square_to_hemi(z), pdf_omega
 
 
-def _pdf_neural(nw, cond, wi):
+def _pdf_neural(nw, cond, wi, prec=(False, False)):
     """PUBLIC mirror of ``pdfNeural``: inverse wi -> solid-angle pdf."""
     if wi[1] <= 0.0:
         return 0.0
     z = _hemi_to_square(wi)
-    _, logdet = _flow_inverse(nw, z, cond)   # log|det du/dz| = log q_square
+    _, logdet = _flow_inverse(nw, z, cond, prec)   # log|det du/dz| = log q_square
     return math.exp(logdet - LOG2PI)
 
 
@@ -348,6 +378,71 @@ def test_forward_then_inverse_pdf_consistent(weights, goldens):
     assert max_rel < PDF_REL_TOL, (
         f"forward/inverse pdf mismatch: max rel = {max_rel:.2e} (bar {PDF_REL_TOL:.0e})"
     )
+
+
+# ---------------------------------------------------------------------------
+# PRECISION TRACK (study change neural-precision-size-study): fp16 pdf-parity
+# drift. The SAME trained net evaluated at fp16-storage / fp16-compute vs the
+# fp32 reference — numerical fidelity, scene-independent (unlike the size track,
+# which retrains per size). The drift is REPORTED (spec: "the measured drift is
+# reported, not hidden") and bounded by a relaxed, mode-specific bar (fp16's
+# ~10-bit mantissa is looser than the 1e-3 fp32 golden bar). The fp32 mirror is
+# itself golden-matched (tests above), so drift-vs-mirror ≈ drift-vs-PyTorch.
+# ---------------------------------------------------------------------------
+
+# Generous regression guards; the measured drift (printed) sits well under them.
+# fp16-storage only quantizes the weights (GEMM stays float); fp16-compute also
+# runs the GEMM in half, so it drifts further.
+FP16_STORAGE_PDF_REL_BAR = 0.05
+FP16_COMPUTE_PDF_REL_BAR = 0.30
+
+
+def _pdf_drift(weights, goldens, prec):
+    """Max + mean relative forward-pdf drift of a precision mode vs the fp32
+    mirror, over the committed forward (cond, u) inputs."""
+    max_rel = mean_rel = 0.0
+    n = 0
+    for cond, u in zip(goldens["forward_cond"], goldens["forward_u"]):
+        c = cond.astype(np.float32)
+        uu = u.astype(np.float32)
+        _, pdf32 = _sample_neural(weights, c, uu)            # fp32 reference
+        _, pdf16 = _sample_neural(weights, c, uu, prec)      # the fp16 mode
+        rel = abs(pdf16 - pdf32) / max(pdf32, 1e-8)
+        max_rel = max(max_rel, rel)
+        mean_rel += rel
+        n += 1
+    return max_rel, mean_rel / max(n, 1)
+
+
+def test_fp16_storage_pdf_drift(weights, goldens):
+    """3.1: fp16-storage (half weights, float GEMM) drift vs fp32 — reported + bounded."""
+    max_rel, mean_rel = _pdf_drift(weights, goldens, (True, False))
+    print(f"\n[3.1] fp16-storage pdf drift vs fp32: max={max_rel:.2e} mean={mean_rel:.2e} "
+          f"(bar {FP16_STORAGE_PDF_REL_BAR:.0e})")
+    assert max_rel < FP16_STORAGE_PDF_REL_BAR, (
+        f"fp16-storage drift {max_rel:.2e} exceeds bar {FP16_STORAGE_PDF_REL_BAR:.0e}"
+    )
+
+
+def test_fp16_compute_pdf_drift(weights, goldens):
+    """3.1: fp16-compute (half weights + half GEMM) drift vs fp32 — reported + bounded."""
+    max_rel, mean_rel = _pdf_drift(weights, goldens, (True, True))
+    print(f"\n[3.1] fp16-compute pdf drift vs fp32: max={max_rel:.2e} mean={mean_rel:.2e} "
+          f"(bar {FP16_COMPUTE_PDF_REL_BAR:.0e})")
+    assert max_rel < FP16_COMPUTE_PDF_REL_BAR, (
+        f"fp16-compute drift {max_rel:.2e} exceeds bar {FP16_COMPUTE_PDF_REL_BAR:.0e}"
+    )
+
+
+def test_fp16_pdf_positive_finite(weights, goldens):
+    """3.1: both fp16 modes must still produce finite, strictly-positive pdfs — a
+    valid mixture component is the unbiasedness precondition (4.2 confirms the
+    in-renderer convergence on GPU)."""
+    for cond, u in zip(goldens["forward_cond"], goldens["forward_u"]):
+        for prec in ((True, False), (True, True)):
+            _, pdf = _sample_neural(weights, cond.astype(np.float32),
+                                    u.astype(np.float32), prec)
+            assert math.isfinite(pdf) and pdf > 0.0, f"bad fp16 pdf {pdf} prec={prec}"
 
 
 # ---------------------------------------------------------------------------

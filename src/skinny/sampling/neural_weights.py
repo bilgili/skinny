@@ -21,6 +21,7 @@ Binary layout (little-endian), identical to ``export_weights.py``::
 
 from __future__ import annotations
 
+import enum
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,10 @@ import numpy as np
 MAGIC = 0x4E465731
 VERSION = 1
 
-# Architecture — MUST match shaders/sampling/neural_flow.slang (NF_* consts).
+# Default architecture — the shipped net + the shader's `#ifndef` defaults
+# (shaders/sampling/neural_flow.slang: NF_LAYERS/NF_BINS/NF_HIDDEN). The size is
+# build-time configurable (study change neural-precision-size-study); these are
+# the defaults, NF_COND is fixed by the renderer's condition encoding.
 NF_LAYERS = 6
 NF_BINS = 24
 NF_HIDDEN = 96
@@ -39,6 +43,87 @@ NF_PARAMS = 3 * NF_BINS + 1          # widths(K) + heights(K) + derivs(K+1)
 NF_MLP_IN = 1 + NF_COND              # one pass-through coord + condition
 # One NfLayerHeader = 4 × uint32 (weightOffset, biasOffset, inDim, outDim).
 HEADER_STRIDE = 16
+
+
+class NeuralPrecision(enum.Enum):
+    """MLP inference precision (study change neural-precision-size-study).
+
+    Drives both the host upload (which dtype the weight bytes are cast to) and
+    the shader compile (the NF_WT/NF_CT `-D` aliases). The RQ-spline math + the
+    returned pdf are always full precision; only the linear-layer GEMMs change.
+    """
+
+    FP32 = "fp32"                    # NF_WT=float NF_CT=float — the shipped net
+    FP16_STORAGE = "fp16-storage"    # NF_WT=half  NF_CT=float — ½-byte weights
+    FP16_COMPUTE = "fp16-compute"    # NF_WT=half  NF_CT=half  — + half GEMM
+
+    @property
+    def weight_half(self) -> bool:
+        """True when the weight *storage* (bindings 33/34) is half — both fp16
+        modes upload half bytes; only fp32 stays 4-byte float."""
+        return self is not NeuralPrecision.FP32
+
+    @property
+    def compute_half(self) -> bool:
+        """True when the MLP GEMM *accumulate* is half (fp16-compute only)."""
+        return self is NeuralPrecision.FP16_COMPUTE
+
+    @property
+    def needs_device_fp16_compute(self) -> bool:
+        """fp16-compute needs `shaderFloat16` (half ALU); the storage mode only
+        needs 16-bit SSBO access. The renderer gates fallback on these."""
+        return self is NeuralPrecision.FP16_COMPUTE
+
+    @property
+    def needs_device_fp16_storage(self) -> bool:
+        return self.weight_half
+
+
+@dataclass(frozen=True)
+class NeuralBuildConfig:
+    """A point in the size×precision grid: the shader dims + the inference
+    precision. The single source of truth threaded into every neural ``.spv``
+    compile (its `-D` flags) and the weight upload (its dtype). The default
+    config emits NO `-D` flags, so its compiles are byte-identical to the
+    shipped proposal (study change neural-precision-size-study)."""
+
+    layers: int = NF_LAYERS
+    bins: int = NF_BINS
+    hidden: int = NF_HIDDEN
+    precision: NeuralPrecision = NeuralPrecision.FP32
+
+    @property
+    def arch(self) -> tuple[int, int, int, int]:
+        """(layers, bins, hidden, cond) — the NFW1 architecture tuple the loader
+        validates a baked net against."""
+        return (self.layers, self.bins, self.hidden, NF_COND)
+
+    @property
+    def is_default_size(self) -> bool:
+        return (self.layers, self.bins, self.hidden) == (NF_LAYERS, NF_BINS, NF_HIDDEN)
+
+    def slang_defines(self) -> tuple[str, ...]:
+        """Flat `-D name=value` tokens for slangc. Only non-default dims/precision
+        emit a flag, so the default config → empty tuple → unchanged cache key →
+        byte-identical SPIR-V."""
+        d: list[str] = []
+        if self.layers != NF_LAYERS:
+            d += ["-D", f"NF_LAYERS={self.layers}"]
+        if self.bins != NF_BINS:
+            d += ["-D", f"NF_BINS={self.bins}"]
+        if self.hidden != NF_HIDDEN:
+            d += ["-D", f"NF_HIDDEN={self.hidden}"]
+        if self.precision.weight_half:
+            d += ["-D", "NF_WT=half"]
+        if self.precision.compute_half:
+            d += ["-D", "NF_CT=half"]
+        return tuple(d)
+
+    @property
+    def cache_tag(self) -> str:
+        """Short slug uniquely identifying this config — folded into the wavefront
+        `.spv` out-name so distinct configs never clobber each other's module."""
+        return f"L{self.layers}B{self.bins}H{self.hidden}_{self.precision.value}"
 
 
 @dataclass
@@ -65,11 +150,25 @@ class NeuralWeights:
     def bias_bytes(self) -> bytes:
         return self.biases.astype("<f4").tobytes()
 
-    def assert_matches_shader(self) -> None:
-        """Raise if the file's architecture differs from the Slang constants —
-        a mismatch would index the flat buffers wrong and corrupt inference."""
+    def weight_bytes_for(self, precision: NeuralPrecision) -> bytes:
+        """Weight bytes in the storage dtype for ``precision`` — fp32 stays
+        4-byte float; the fp16 modes cast fp32→half (``<f2``) at upload, halving
+        the GPU footprint. NFW1 on disk is always fp32; this is the upload-time
+        cast (study change neural-precision-size-study)."""
+        dt = "<f2" if precision.weight_half else "<f4"
+        return self.weights.astype(dt).tobytes()
+
+    def bias_bytes_for(self, precision: NeuralPrecision) -> bytes:
+        dt = "<f2" if precision.weight_half else "<f4"
+        return self.biases.astype(dt).tobytes()
+
+    def assert_matches_shader(self, expect: tuple[int, int, int, int] | None = None) -> None:
+        """Raise if the file's architecture differs from the built dimensions — a
+        mismatch would index the flat buffers wrong and corrupt inference. With no
+        argument it checks the default (shipped) architecture; the renderer passes
+        the active NeuralBuildConfig.arch for an off-default size."""
         got = (self.layers, self.bins, self.hidden, self.cond)
-        want = (NF_LAYERS, NF_BINS, NF_HIDDEN, NF_COND)
+        want = expect if expect is not None else (NF_LAYERS, NF_BINS, NF_HIDDEN, NF_COND)
         if got != want:
             raise ValueError(
                 f"neural weights architecture {got} != shader "
@@ -77,17 +176,20 @@ class NeuralWeights:
             )
 
 
-def _layout() -> tuple[list[tuple[int, int, int, int]], int, int]:
-    """Header table + total (nWeights, nBiases) for the fixed architecture.
+def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
+            hidden: int = NF_HIDDEN) -> tuple[list[tuple[int, int, int, int]], int, int]:
+    """Header table + total (nWeights, nBiases) for the given architecture.
 
-    Three Linear layers per coupling: (NF_MLP_IN→hidden), (hidden→hidden),
-    (hidden→NF_PARAMS). Row-major [out, in], matching the exporter + the Slang
-    ``W[weightOffset + o*inDim + i]`` indexing.
+    Three Linear layers per coupling: (mlp_in→hidden), (hidden→hidden),
+    (hidden→n_params). Row-major [out, in], matching the exporter + the Slang
+    ``W[weightOffset + o*inDim + i]`` indexing. Defaults to the shipped size.
     """
-    dims = [(NF_MLP_IN, NF_HIDDEN), (NF_HIDDEN, NF_HIDDEN), (NF_HIDDEN, NF_PARAMS)]
+    n_params = 3 * bins + 1
+    mlp_in = 1 + NF_COND
+    dims = [(mlp_in, hidden), (hidden, hidden), (hidden, n_params)]
     headers: list[tuple[int, int, int, int]] = []
     w_off = b_off = 0
-    for _ in range(NF_LAYERS):
+    for _ in range(layers):
         for in_dim, out_dim in dims:
             headers.append((w_off, b_off, in_dim, out_dim))
             w_off += out_dim * in_dim
@@ -95,8 +197,12 @@ def _layout() -> tuple[list[tuple[int, int, int, int]], int, int]:
     return headers, w_off, b_off
 
 
-def load_neural_weights(path: str | Path) -> NeuralWeights:
-    """Parse an ``NFW1`` file. Raises on bad magic / version / truncation."""
+def load_neural_weights(path: str | Path,
+                        expect: tuple[int, int, int, int] | None = None) -> NeuralWeights:
+    """Parse an ``NFW1`` file. Raises on bad magic / version / truncation, and on
+    an architecture mismatch against ``expect`` (defaults to the shipped size when
+    None) — the loader assert is the size-mismatch guard for the configurable
+    build (study change neural-precision-size-study)."""
     data = Path(path).read_bytes()
     o = 0
     magic, ver = struct.unpack_from("<II", data, o); o += 8
@@ -116,40 +222,46 @@ def load_neural_weights(path: str | Path) -> NeuralWeights:
     biases = np.frombuffer(data, dtype="<f4", count=n_biases, offset=o).copy()
     nw = NeuralWeights(int(layers), int(bins), int(hidden), int(cond),
                        headers, weights, biases)
-    nw.assert_matches_shader()
+    nw.assert_matches_shader(expect)
     return nw
 
 
-def make_dummy_weights() -> NeuralWeights:
-    """In-memory all-zero net for the fixed architecture (no file I/O).
+def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights:
+    """In-memory all-zero net for the given architecture (no file I/O).
 
     Used to seed bindings 33/34/35 so the inline flow inverse in proposal.slang
     always has valid, correctly-sized descriptors even when neural is inactive.
+    Defaults to the shipped size; pass a config to size the dummy for an
+    off-default build.
     """
-    headers, n_weights, n_biases = _layout()
+    cfg = config or NeuralBuildConfig()
+    headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden)
     return NeuralWeights(
-        NF_LAYERS, NF_BINS, NF_HIDDEN, NF_COND,
+        cfg.layers, cfg.bins, cfg.hidden, NF_COND,
         np.array(headers, dtype="<u4"),
         np.zeros(n_weights, dtype="<f4"),
         np.zeros(n_biases, dtype="<f4"),
     )
 
 
-def bake_dummy_weights(path: str | Path) -> NeuralWeights:
-    """Write a valid all-zero ``NFW1`` net (no PyTorch).
+def bake_dummy_weights(path: str | Path,
+                       config: NeuralBuildConfig | None = None) -> NeuralWeights:
+    """Write a valid all-zero ``NFW1`` net (no PyTorch) at the given architecture.
 
     An untrained / zero net still produces a normalised, finite-pdf distribution
     over the hemisphere (the RQ spline degenerates to a near-identity map), so it
     is a correct *dummy* for the 1a bring-up: the mixture-MIS estimator stays
     unbiased regardless of the proposal's quality, which is exactly what the
-    plumbing milestone proves before any training.
+    plumbing milestone proves before any training. The header stores fp32 on disk
+    in every precision mode — the half cast happens at upload, not in the file.
     """
-    headers, n_weights, n_biases = _layout()
+    cfg = config or NeuralBuildConfig()
+    headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden)
     weights = np.zeros(n_weights, dtype="<f4")
     biases = np.zeros(n_biases, dtype="<f4")
     buf = bytearray()
     buf += struct.pack("<II", MAGIC, VERSION)
-    buf += struct.pack("<IIII", NF_LAYERS, NF_BINS, NF_HIDDEN, NF_COND)
+    buf += struct.pack("<IIII", cfg.layers, cfg.bins, cfg.hidden, NF_COND)
     buf += struct.pack("<I", len(headers))
     for h in headers:
         buf += struct.pack("<IIII", *h)
@@ -160,5 +272,5 @@ def bake_dummy_weights(path: str | Path) -> NeuralWeights:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(bytes(buf))
-    return NeuralWeights(NF_LAYERS, NF_BINS, NF_HIDDEN, NF_COND,
+    return NeuralWeights(cfg.layers, cfg.bins, cfg.hidden, NF_COND,
                          np.array(headers, dtype="<u4"), weights, biases)

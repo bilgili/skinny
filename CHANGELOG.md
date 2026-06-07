@@ -70,6 +70,29 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   guiding-iteration training, a concentrated-indirect scene, a pdf-floor / lower-α
   firefly measure.
 
+- Neural proposal — **build-time-configurable size + precision** + a
+  size×precision quality-vs-cost **study** (the MLP pre-pass cost, not quality,
+  is what loses the equal-time gate on Mac — so: how small can the net get, and
+  does Apple-Silicon fp16 cut the cost?). The network size (`NF_LAYERS/NF_BINS/
+  NF_HIDDEN`) and inference precision become `slangc -D`-selectable via one
+  `NeuralBuildConfig(layers, bins, hidden, precision)`
+  (`skinny.sampling.neural_weights`) threaded into every neural compile + the
+  weight upload; the default `fp32 @ 6/24/96` build is **byte-identical** to the
+  shipped proposal (no `-D` flags). Mixed fp16 via two compile-time aliases —
+  `NF_WT` (weight storage, the binding-33/34 element type) and `NF_CT` (MLP GEMM
+  accumulate) — giving **fp32** / **fp16-storage** (`half`/`float`, ½-byte
+  weights) / **fp16-compute** (`half`/`half`); the RQ-spline math + the returned
+  pdf stay `float` in every mode. NFW1 stays fp32 on disk (host casts to half at
+  upload — no new format); `vk_context` probes `shaderFloat16` +
+  `uniformAndStorageBuffer16BitAccess` and falls back to fp32 (logged) where
+  absent. Unbiasedness holds in every mode (mixture-MIS;
+  `test_fp16_unbiased_gate`). The two-track study
+  (`tests/study_size_precision.py` + `spline_flow/bake_grid.py`) maps fp16
+  pdf-parity drift (negligible: `~4e-4`/`~1e-3` on the Cornell net) + held-out
+  NLL against MoltenVK ms/frame + weight bytes → a Pareto table + a recommended
+  config (a measurement; *shipping* a config is a later change). No new
+  descriptor bindings (33/34 only change element type).
+
 ### Fixed
 
 - USD scenes used a degenerate `(0,1)` AABB for the neural-proposal condition's

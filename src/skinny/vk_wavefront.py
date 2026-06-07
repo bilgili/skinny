@@ -439,13 +439,20 @@ class WavefrontEnvPass:
         vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
 
 
-def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str) -> Path:
+def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
+                      defines: tuple[str, ...] = (), tag: str = "") -> Path:
     """Compile a wavefront kernel that pulls in the full material/integrator
     tree (integrators.path → skin/python/flat materials), so it needs the same
     include paths + define as the megakernel. Writes to a per-entry .spv so
-    sibling entries from one module don't clobber each other."""
+    sibling entries from one module don't clobber each other.
+
+    ``defines`` are extra ``-D`` tokens (the neural size/precision config —
+    study change neural-precision-size-study); ``tag`` is folded into the .spv
+    filename so distinct configs never clobber each other's module (the pipeline
+    cache key). The default config passes ``defines=()`` and ``tag=""`` → the
+    flags + filename are unchanged → byte-identical to the shipped kernel."""
     src = shader_dir / f"{module}.slang"
-    out = shader_dir / f"{out_name}.spv"
+    out = shader_dir / f"{out_name}{tag}.spv"
     slangc = shutil.which("slangc")
     if slangc is None:
         raise RuntimeError("slangc not found on PATH — install the Slang compiler")
@@ -453,7 +460,8 @@ def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str) 
     cmd = [
         slangc, str(src), "-target", "spirv", "-entry", entry, "-stage", "compute",
         "-I", str(shader_dir), "-I", str(mtlx_genslang),
-        "-D", "SKINNY_COMPUTE_PIPELINE=1", "-fvk-use-scalar-layout", "-o", str(out),
+        "-D", "SKINNY_COMPUTE_PIPELINE=1", *defines, "-fvk-use-scalar-layout",
+        "-o", str(out),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -486,11 +494,23 @@ class WavefrontPathPass:
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
-                 stream_size: int, num_pixels: int, build_catchall: bool = True) -> None:
+                 stream_size: int, num_pixels: int, build_catchall: bool = True,
+                 neural_config=None) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
         self.build_catchall = bool(build_catchall)
+        # Neural size/precision config (study change neural-precision-size-study).
+        # The flat/catch-all shade kernels import the inline flow inverse
+        # (proposal → neural_proposal → neural_flow), so they compile against the
+        # selected NF_* dims + NF_WT/NF_CT precision. Default config → no `-D` and
+        # an empty tag → the shade .spv is byte-identical to the shipped kernel.
+        if neural_config is None:
+            from skinny.sampling.neural_weights import NeuralBuildConfig
+            neural_config = NeuralBuildConfig()
+        self._neural_config = neural_config
+        self._nf_defines = neural_config.slang_defines()
+        self._nf_tag = f"_{neural_config.cache_tag}" if self._nf_defines else ""
         # Optional reuse plugin (ReSTIR DI) — scheduled at bounce 0 between the
         # primary intersect and the shade. None = identity reuse (stock NEE).
         self._restir = None
@@ -514,7 +534,8 @@ class WavefrontPathPass:
             entries.append(("wfPathShade", "wavefront/_wfpath_shade"))
         modules = {}
         for entry, out_name in entries:
-            spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name)
+            spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name,
+                                    defines=self._nf_defines, tag=self._nf_tag)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -735,13 +756,22 @@ class WavefrontNeuralProposalPass:
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
                  neural_buffer, neural_range: int, stream_size: int,
-                 network_version: int = 0) -> None:
+                 network_version: int = 0, neural_config=None) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.network_version = int(network_version)
 
+        # Forward-pass compile at the selected size/precision (study change
+        # neural-precision-size-study). Default config → no `-D`, empty tag →
+        # the shipped `_wfneural.spv`.
+        if neural_config is None:
+            from skinny.sampling.neural_weights import NeuralBuildConfig
+            neural_config = NeuralBuildConfig()
+        nf_defines = neural_config.slang_defines()
+        nf_tag = f"_{neural_config.cache_tag}" if nf_defines else ""
         spv = _compile_full_spv(shader_dir, "wavefront/neural_proposal_pass",
-                                "wfNeuralProposal", "wavefront/_wfneural")
+                                "wfNeuralProposal", "wavefront/_wfneural",
+                                defines=nf_defines, tag=nf_tag)
         code = spv.read_bytes()
         self._module = vk.vkCreateShaderModule(
             ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
