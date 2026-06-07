@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="413.7" height="88.5" viewBox="0 0 413.7 88.5">
+  <rect x="0.5" y="0.5" width="412.7" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">y = y</text>
+  <text x="64.0" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="71.8" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> + </text>
+  <text x="134.3" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">h</text>
+  <text x="145.1" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="152.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> [ s θ</text>
+  <text x="217.6" y="24.4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">2</text>
+  <text x="225.4" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> + d</text>
+  <text x="268.6" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="276.4" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> θ(1−θ) ]</text>
+  <line x1="104.2" y1="44.2" x2="403.7" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="114.2" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">s + (d</text>
+  <text x="179.0" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="186.8" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> + d</text>
+  <text x="230.0" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k+1</text>
+  <text x="253.3" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> − 2s) θ(1−θ)</text>
+</svg>

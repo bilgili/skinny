@@ -1,0 +1,15 @@
+[
+  { "name": "cond", "tex": "c = \\left(\\,2\\frac{p - b_{\\min}}{e} - 1,\\ N,\\ \\omega_o\\right) \\in \\mathbb{R}^{9}" },
+  { "name": "flow-fwd", "tex": "z = T_\\theta(u;\\,c), \\qquad u \\sim \\mathcal{U}\\!\\left([0,1]^2\\right)" },
+  { "name": "coupling", "tex": "z'_t = \\mathrm{RQS}\\!\\left(z_t;\\ \\theta_L(z_c, c)\\right), \\qquad z'_c = z_c" },
+  { "name": "rqs", "tex": "y = y_k + \\frac{h_k\\,[\\,s\\,\\theta^2 + d_k\\,\\theta(1-\\theta)\\,]}{s + (d_k + d_{k+1} - 2s)\\,\\theta(1-\\theta)}" },
+  { "name": "rqs-where", "tex": "\\theta = \\frac{x - x_k}{w_k}, \\qquad s = \\frac{h_k}{w_k}" },
+  { "name": "logdet", "tex": "\\log\\left|\\det\\frac{\\partial z}{\\partial u}\\right| = \\sum_{L} \\log\\left|\\frac{\\partial y_L}{\\partial x_L}\\right|" },
+  { "name": "pdf-square", "tex": "q_{\\square}(z) = \\exp\\!\\left(-\\log\\left|\\det\\frac{\\partial z}{\\partial u}\\right|\\right)" },
+  { "name": "pdf-omega", "tex": "q_\\omega(\\omega) = \\frac{q_{\\square}(z)}{2\\pi}" },
+  { "name": "pdf-inv", "tex": "q_\\omega(\\omega) = \\frac{1}{2\\pi}\\exp\\!\\left(\\log\\left|\\det\\frac{\\partial u}{\\partial z}\\right|\\right), \\quad z = M^{-1}(\\omega)" },
+  { "name": "mix-pdf", "tex": "p_{\\mathrm{mix}}(\\omega) = \\alpha_b\\,p_{\\mathrm{bsdf}}(\\omega) + \\alpha_e\\,p_{\\mathrm{env}}(\\omega) + \\alpha_n\\,q_\\omega(\\omega)" },
+  { "name": "estimator", "tex": "\\beta \\leftarrow \\beta\\,\\frac{f(\\omega)\\cos\\theta}{p_{\\mathrm{mix}}(\\omega)}" },
+  { "name": "contrib", "tex": "w_k = \\frac{L_{\\text{final}} - L_k}{\\beta_{\\text{in},k}}" },
+  { "name": "loss", "tex": "\\mathcal{L}(\\theta) = -\\,\\mathbb{E}_{(c,\\omega,w)\\sim\\mathcal{D}}\\big[\\,w\\,\\log q_\\theta(\\omega \\mid c)\\,\\big]" }
+]

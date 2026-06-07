@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="348.8" height="50.2" viewBox="0 0 348.8 50.2">
+  <rect x="0.5" y="0.5" width="347.8" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">z = T</text>
+  <text x="64.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">θ</text>
+  <text x="71.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">(u ; c),    u ~ U([0,1]</text>
+  <text x="320.2" y="24.4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">2</text>
+  <text x="328.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">)</text>
+</svg>

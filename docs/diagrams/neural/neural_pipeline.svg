@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="500" viewBox="0 0 860 500" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrP" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#a855f7"/>
+    </marker>
+    <style>
+      .box{stroke-width:1.5;}
+      .lbl{font-size:12.5px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:10.5px;fill:#475569;}
+      .buf{font-size:10.5px;font-weight:600;fill:#7c3aed;}
+      .flow{stroke:#475569;stroke-width:1.6;fill:none;}
+      .note{font-size:10px;fill:#64748b;}
+      .hdr{font-size:13.5px;font-weight:700;fill:#0f172a;}
+    </style>
+  </defs>
+
+  <!-- ONLINE: per-frame inference -->
+  <text x="20" y="26" class="hdr">Online — per-bounce wavefront inference (the only on-device cost)</text>
+  <rect x="14" y="36" width="832" height="170" rx="10" fill="#fafcff" stroke="#dbeafe"/>
+
+  <rect x="28" y="60" width="150" height="64" rx="8" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="103" y="84" text-anchor="middle" class="lbl">primary / scatter</text>
+  <text x="103" y="102" text-anchor="middle" class="sub">HitInfo → npHits[i]</text>
+  <text x="103" y="116" text-anchor="middle" class="sub">live lanes (PATH_ALIVE)</text>
+
+  <rect x="220" y="52" width="210" height="92" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="325" y="76" text-anchor="middle" class="lbl">wfNeuralProposal (pre-pass)</text>
+  <text x="325" y="94" text-anchor="middle" class="sub">build c, decorrelated u (px,frame,depth)</text>
+  <text x="325" y="110" text-anchor="middle" class="sub">neuralSampleWorld → 1 forward draw</text>
+  <text x="325" y="126" text-anchor="middle" class="sub">stamp networkVersion</text>
+  <text x="325" y="141" text-anchor="middle" class="buf">→ WfNeuralSample {wi, pdf, valid}</text>
+
+  <rect x="472" y="52" width="220" height="92" rx="8" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="582" y="76" text-anchor="middle" class="lbl">flat shade — proposal seam</text>
+  <text x="582" y="94" text-anchor="middle" class="sub">sampleBounceDirection (one-sample MIS)</text>
+  <text x="582" y="110" text-anchor="middle" class="sub">p_mix = α_b·bsdf + α_e·env + α_n·q_ω</text>
+  <text x="582" y="126" text-anchor="middle" class="sub">inverse pdf inline (neuralPdfWorld)</text>
+  <text x="582" y="141" text-anchor="middle" class="buf">β ·= f·cos / p_mix  (unbiased)</text>
+
+  <rect x="724" y="60" width="112" height="64" rx="8" class="box" fill="#fef2f2" stroke="#ef4444"/>
+  <text x="780" y="88" text-anchor="middle" class="lbl">next bounce</text>
+  <text x="780" y="106" text-anchor="middle" class="sub">/ accumulate</text>
+
+  <path class="flow" d="M178,92 L218,92" marker-end="url(#arr)"/>
+  <path class="flow" d="M430,98 L470,98" marker-end="url(#arr)"/>
+  <path class="flow" d="M692,98 L722,96" marker-end="url(#arr)"/>
+
+  <!-- weights buffer feeding both stages -->
+  <rect x="300" y="166" width="290" height="30" rx="6" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="445" y="186" text-anchor="middle" class="buf">frozen weights — bindings 33 / 34 / 35 (NF_WT)</text>
+  <path class="flow" d="M360,166 L345,146" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+  <path class="flow" d="M530,166 L560,146" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+
+  <!-- OFFLINE: training loop -->
+  <text x="20" y="246" class="hdr">Offline — per-scene training loop (no render-time cost)</text>
+  <rect x="14" y="256" width="832" height="210" rx="10" fill="#fdfcff" stroke="#f3e8ff"/>
+
+  <rect x="28" y="284" width="180" height="92" rx="8" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="118" y="308" text-anchor="middle" class="lbl">mainImageRecord</text>
+  <text x="118" y="326" text-anchor="middle" class="sub">megakernel, RR-free PT</text>
+  <text x="118" y="342" text-anchor="middle" class="sub">per-vertex PathRecord</text>
+  <text x="118" y="358" text-anchor="middle" class="sub">wₖ=(L_final−L_k)/β_in,k</text>
+  <text x="118" y="373" text-anchor="middle" class="buf">append buf 36 / counter 37</text>
+
+  <rect x="252" y="298" width="150" height="64" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="327" y="322" text-anchor="middle" class="lbl">.nrec file</text>
+  <text x="327" y="340" text-anchor="middle" class="sub">NREC: AABB header</text>
+  <text x="327" y="356" text-anchor="middle" class="sub">+ 64 B records</text>
+
+  <rect x="446" y="290" width="170" height="80" rx="8" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="531" y="314" text-anchor="middle" class="lbl">spline_flow (PyTorch)</text>
+  <text x="531" y="332" text-anchor="middle" class="sub">fit q_θ, forward-KL /</text>
+  <text x="531" y="348" text-anchor="middle" class="sub">weighted NLL</text>
+  <text x="531" y="364" text-anchor="middle" class="note">MPS / CUDA, standalone repo</text>
+
+  <rect x="660" y="298" width="176" height="64" rx="8" class="box" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="748" y="322" text-anchor="middle" class="lbl">export_weights.py</text>
+  <text x="748" y="340" text-anchor="middle" class="sub">→ NFW1 (fp32 on disk)</text>
+  <text x="748" y="356" text-anchor="middle" class="sub">(layers,bins,hidden,cond)</text>
+
+  <path class="flow" d="M208,330 L250,330" marker-end="url(#arr)"/>
+  <path class="flow" d="M402,330 L444,330" marker-end="url(#arr)"/>
+  <path class="flow" d="M616,330 L658,330" marker-end="url(#arr)"/>
+
+  <!-- feedback: NFW1 → load → online weights -->
+  <rect x="300" y="406" width="320" height="40" rx="8" class="box" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="460" y="424" text-anchor="middle" class="sub">neural_weights.load_neural_weights — assert arch matches built dims</text>
+  <text x="460" y="439" text-anchor="middle" class="sub">host casts fp32 → half for fp16 modes, uploads to 33/34/35</text>
+  <path class="flow" d="M748,362 C748,410 660,426 622,426" marker-end="url(#arrP)" stroke="#a855f7" stroke-dasharray="4 3"/>
+  <path class="flow" d="M300,426 C200,426 445,200 445,196" marker-end="url(#arrP)" stroke="#a855f7" stroke-dasharray="4 3"/>
+  <text x="150" y="430" class="note">loaded into the frozen weight buffers (top)</text>
+</svg>

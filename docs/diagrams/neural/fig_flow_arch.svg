@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="520" viewBox="0 0 860 520" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <style>
+      .box{stroke-width:1.5;}
+      .lbl{font-size:12.5px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:10.5px;fill:#475569;}
+      .buf{font-size:10.5px;font-weight:600;fill:#7c3aed;}
+      .flow{stroke:#475569;stroke-width:1.6;fill:none;}
+      .note{font-size:10px;fill:#64748b;}
+      .hdr{font-size:14px;font-weight:700;fill:#0f172a;}
+    </style>
+  </defs>
+
+  <text x="20" y="26" class="hdr">Conditional RQ neural spline flow — NF_LAYERS coupling layers alternate the masked coordinate</text>
+
+  <!-- top row: end-to-end flow -->
+  <rect x="20" y="52" width="120" height="56" rx="8" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="80" y="76" text-anchor="middle" class="lbl">u ∈ [0,1]²</text>
+  <text x="80" y="94" text-anchor="middle" class="sub">uniform base sample</text>
+
+  <rect x="180" y="46" width="130" height="68" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="245" y="70" text-anchor="middle" class="lbl">coupling L=0</text>
+  <text x="245" y="87" text-anchor="middle" class="sub">cond z.x → transf z.y</text>
+  <text x="245" y="103" text-anchor="middle" class="sub">+ log|dy/dx|</text>
+
+  <rect x="350" y="46" width="130" height="68" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="415" y="70" text-anchor="middle" class="lbl">coupling L=1</text>
+  <text x="415" y="87" text-anchor="middle" class="sub">cond z.y → transf z.x</text>
+  <text x="415" y="103" text-anchor="middle" class="sub">+ log|dy/dx|</text>
+
+  <text x="510" y="86" text-anchor="middle" class="lbl">···</text>
+
+  <rect x="540" y="46" width="130" height="68" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="605" y="70" text-anchor="middle" class="lbl">coupling L=5</text>
+  <text x="605" y="87" text-anchor="middle" class="sub">(NF_LAYERS−1)</text>
+  <text x="605" y="103" text-anchor="middle" class="sub">+ log|dy/dx|</text>
+
+  <rect x="710" y="46" width="130" height="68" rx="8" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="775" y="68" text-anchor="middle" class="lbl">z ∈ [0,1]²</text>
+  <text x="775" y="85" text-anchor="middle" class="sub">→ hemisphere ω</text>
+  <text x="775" y="101" text-anchor="middle" class="buf">q_ω = q_□ / 2π</text>
+
+  <path class="flow" d="M140,80 L178,80" marker-end="url(#arr)"/>
+  <path class="flow" d="M310,80 L348,80" marker-end="url(#arr)"/>
+  <path class="flow" d="M480,80 L498,80" marker-end="url(#arr)"/>
+  <path class="flow" d="M522,80 L538,80" marker-end="url(#arr)"/>
+  <path class="flow" d="M670,80 L708,80" marker-end="url(#arr)"/>
+
+  <text x="20" y="142" class="sub">forward (sample): u → z accumulate log|det ∂z/∂u|   ·   inverse (pdf): z → u accumulate log|det ∂u/∂z|, layers in reverse</text>
+
+  <!-- detail: inside one coupling layer -->
+  <text x="20" y="184" class="hdr">Inside one coupling layer — the conditioner MLP emits the spline knots</text>
+
+  <!-- inputs -->
+  <rect x="20" y="208" width="150" height="84" rx="8" class="box" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="95" y="232" text-anchor="middle" class="lbl">MLP input</text>
+  <text x="95" y="250" text-anchor="middle" class="sub">pass-through coord z_c</text>
+  <text x="95" y="266" text-anchor="middle" class="sub">+ condition c (9)</text>
+  <text x="95" y="282" text-anchor="middle" class="sub">= NF_MLP_IN = 10</text>
+
+  <!-- MLP -->
+  <rect x="210" y="200" width="230" height="100" rx="8" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="325" y="224" text-anchor="middle" class="lbl">3-layer conditioner MLP</text>
+  <text x="325" y="243" text-anchor="middle" class="sub">10 → H → H → 3K+1   (SiLU)</text>
+  <text x="325" y="261" text-anchor="middle" class="sub">H = NF_HIDDEN (96),  K = NF_BINS (24)</text>
+  <text x="325" y="279" text-anchor="middle" class="buf">weights/biases NF_WT (33/34) · headers (35)</text>
+  <text x="325" y="295" text-anchor="middle" class="note">GEMM accumulate NF_CT (fp32 default; half in fp16-compute)</text>
+
+  <!-- decode -->
+  <rect x="480" y="200" width="160" height="100" rx="8" class="box" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="560" y="224" text-anchor="middle" class="lbl">decode knots</text>
+  <text x="560" y="243" text-anchor="middle" class="sub">softmax widths (K)</text>
+  <text x="560" y="259" text-anchor="middle" class="sub">softmax heights (K)</text>
+  <text x="560" y="275" text-anchor="middle" class="sub">softplus derivs (K+1)</text>
+  <text x="560" y="293" text-anchor="middle" class="note">always fp32</text>
+
+  <!-- RQ spline -->
+  <rect x="680" y="200" width="160" height="100" rx="8" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="760" y="224" text-anchor="middle" class="lbl">monotone RQ spline</text>
+  <text x="760" y="243" text-anchor="middle" class="sub">z'_t = RQS(z_t)</text>
+  <text x="760" y="259" text-anchor="middle" class="sub">forward / inverse</text>
+  <text x="760" y="275" text-anchor="middle" class="sub">+ log|dy/dx|</text>
+  <text x="760" y="293" text-anchor="middle" class="note">analytic, fp32</text>
+
+  <path class="flow" d="M170,250 L208,250" marker-end="url(#arr)"/>
+  <path class="flow" d="M440,250 L478,250" marker-end="url(#arr)"/>
+  <path class="flow" d="M640,250 L678,250" marker-end="url(#arr)"/>
+
+  <!-- the spline curve illustration -->
+  <text x="20" y="344" class="hdr">Monotone rational-quadratic spline on [0,1]² — K bins, learned knots</text>
+  <rect x="40" y="360" width="150" height="150" fill="#ffffff" stroke="#cbd5e1"/>
+  <!-- grid -->
+  <g stroke="#eef2f7" stroke-width="1">
+    <line x1="77" y1="360" x2="77" y2="510"/><line x1="115" y1="360" x2="115" y2="510"/><line x1="152" y1="360" x2="152" y2="510"/>
+    <line x1="40" y1="397" x2="190" y2="397"/><line x1="40" y1="435" x2="190" y2="435"/><line x1="40" y1="472" x2="190" y2="472"/>
+  </g>
+  <!-- monotone curve -->
+  <path d="M40,510 C90,505 100,430 120,410 C140,390 165,372 190,360" fill="none" stroke="#7c3aed" stroke-width="2.2"/>
+  <!-- knots -->
+  <circle cx="40" cy="510" r="3" fill="#0f172a"/><circle cx="77" cy="492" r="3" fill="#0f172a"/>
+  <circle cx="115" cy="412" r="3" fill="#0f172a"/><circle cx="152" cy="376" r="3" fill="#0f172a"/><circle cx="190" cy="360" r="3" fill="#0f172a"/>
+  <text x="44" y="525" class="note">x (bin widths wₖ)</text>
+  <text x="16" y="368" class="note" transform="rotate(-90 16,368)">y (heights hₖ, derivs dₖ)</text>
+
+  <text x="220" y="380" class="sub">Each coupling layer transforms one of the two flow coordinates with a learned</text>
+  <text x="220" y="398" class="sub">piecewise rational-quadratic, monotone map — invertible in closed form, so the</text>
+  <text x="220" y="416" class="sub">same weights give both a forward draw (u → ω) and the exact inverse density</text>
+  <text x="220" y="434" class="sub">(ω → q_ω) the MIS mixture needs. The bin knots (widths, heights, slopes) are</text>
+  <text x="220" y="452" class="sub">the MLP output; conditioning on the masked coordinate + scene state c makes</text>
+  <text x="220" y="470" class="sub">the lobe position-, normal-, and view-dependent.</text>
+  <text x="220" y="496" class="note">Default net: NF_LAYERS=6 · NF_BINS=24 · NF_HIDDEN=96 — all build-time `-D` configurable.</text>
+</svg>
