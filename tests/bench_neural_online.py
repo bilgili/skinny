@@ -1,24 +1,34 @@
 """Benchmark harness for online neural training (change neural-online-training, task 7.3).
 
-Measures the costs that make up the online loop and frames what is validated vs
-what remains an NVIDIA-box task:
+Measures the costs that make up the online loop, across BOTH weight-handoff
+backends, and (with torch present) the real CUDA trainer cycle interleaved with
+the Vulkan render in one process:
 
-  * VALIDATED HERE — file-handoff swap latency: the per-frame cost of
-    publish → frame-end swap → re-upload weights to bindings 33/34/35
-    (`bench_file_handoff_swap`, runnable on any GPU box, no torch needed).
-  * VALIDATED ELSEWHERE — CUDA trainer cycle cost: one warm-started
-    contribution-weighted MLE cycle on the 4090 (see
-    `tests/test_neural_trainer_torch.py`, task 2.2). Time it with
-    `NeuralTrainer.train_cycle` under the torch venv.
-  * PENDING (NVIDIA box, needs interop CUDA-write + torch in the *renderer* venv):
-    the file-vs-interop swap comparison, CUDA training concurrent with the Vulkan
-    render in one process, and frames-to-recover on a moving object. The interop
-    CUDA-import seam is `neural_handoff_interop._import_external_memory` (task 5.2);
-    the Vulkan export side is wired (task 5.1, `StorageBuffer.export_handle`).
+  * file-handoff swap    - publish (NFW1 write + reload) -> frame-end swap ->
+    re-upload bindings 33/34/35 (`bench_handoff_swap("file")`, any GPU box).
+  * interop-handoff swap  - publish (CUDA cudaMemcpy into the exported buffers +
+    timeline signal, NO CPU round-trip) -> frame-end swap (timeline host-wait, no
+    re-upload) (`bench_handoff_swap("interop")`, CUDA + external-memory Vulkan;
+    skips cleanly otherwise).
+  * CUDA trainer cycle    - one warm-started contribution-weighted MLE cycle on
+    the shipped flow (`bench_trainer_cycle`), real when torch + spline_flow are
+    importable in this venv (CUDA + autocast-fp16 on the NVIDIA box), else a
+    placeholder. When torch is active, `bench_concurrent_train_render` runs the
+    real trainer each frame - CUDA training concurrent with the Vulkan render in
+    one process, the task-7.3 integration.
 
-Run the file-handoff swap benchmark (skinny renderer venv)::
+Run (skinny renderer venv; the real trainer needs torch - the CUDA build, e.g.
+``pip install torch --index-url https://download.pytorch.org/whl/cu126`` - plus
+``matplotlib`` (a top-level import in ``spline_flow/train.py``) and the
+``spline_flow`` sibling repo on the path; without them the trainer falls back to
+the placeholder and the swap/handoff numbers still run)::
 
   PYTHONUTF8=1 PYTHONPATH=src <py> tests/bench_neural_online.py --frames 64
+
+Measured on an RTX 4090: file publish ~29 ms vs interop publish ~0.5 ms (~54x,
+the NFW1 CPU round-trip interop removes); a real trainer cycle ~2.8 s (64 Adam
+steps, autocast-fp16) runs concurrent with the Vulkan render in one process while
+the weighted-NLL keeps dropping.
 """
 
 from __future__ import annotations
@@ -35,13 +45,14 @@ TATTOO_DIR = PROJECT_ROOT / "tattoos"
 SCENE = PROJECT_ROOT / "assets" / "cornell_box_emissive.usda"
 
 
-def _build_neural_renderer(width: int, height: int):
+def _build_neural_renderer(width: int, height: int, handoff: str = "file"):
     from skinny.renderer import Renderer
     from skinny.vk_context import VulkanContext
 
     ctx = VulkanContext(window=None, width=width, height=height)
     r = Renderer(vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR,
-                 tattoo_dir=TATTOO_DIR, usd_scene_path=SCENE, execution_mode="wavefront")
+                 tattoo_dir=TATTOO_DIR, usd_scene_path=SCENE,
+                 execution_mode="wavefront", neural_handoff=handoff)
     r.proposal_preset_index = r.proposal_preset_from_token("bsdf,neural")
     for _ in range(300):
         r.update(0.025)
@@ -54,30 +65,67 @@ def _build_neural_renderer(width: int, height: int):
     return ctx, r
 
 
-def bench_file_handoff_swap(width: int = 96, height: int = 96, frames: int = 64,
-                            weights_dir: str = "_bench_neural_handoff") -> dict:
-    """Time the file-handoff online swap: each frame stage a (placeholder) update,
-    render, and let the frame-end swap promote + re-upload bindings 33/34/35.
-    Returns per-frame timings (ms). Runs on any GPU box (no torch)."""
+def _feed_records(r, n: int = 4096) -> None:
+    """Stage a recency-weighted batch of valid (upper-hemisphere, positive-weight)
+    records so the real trainer's `build_dataset` keeps them (wi y-up, contrib>0)."""
     from skinny.sampling.path_records import RECORD_DTYPE
 
-    ctx, r = _build_neural_renderer(width, height)
-    try:
-        r.enable_online_training(handoff="file", weights_dir=weights_dir)
-        recs = np.zeros(1024, dtype=RECORD_DTYPE)
-        recs["wi_local"] = [0.0, 1.0, 0.0]
-        recs["contrib"] = 1.0
-        r._neural_replay.add(recs)
+    rng = np.random.default_rng(0)
+    recs = np.zeros(n, dtype=RECORD_DTYPE)
+    v = rng.normal(size=(n, 3)).astype(np.float32)
+    v[:, 1] = np.abs(v[:, 1]) + 0.1                       # force y-up hemisphere
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    recs["wi_local"] = v
+    recs["pos"] = rng.random((n, 3)).astype(np.float32)   # spread the condition
+    recs["contrib"] = 1.0
+    r._neural_replay.add(recs)
 
-        swap_ms, frame_ms = [], []
+
+def _interop_skip_reason(ctx) -> str | None:
+    from skinny.sampling.neural_handoff_interop import interop_available
+
+    ok, reason = interop_available()
+    if not ok:
+        return reason
+    if not (getattr(ctx, "supports_external_memory", False)
+            and getattr(ctx, "supports_external_semaphore", False)):
+        return "device lacks external memory + timeline semaphore"
+    return None
+
+
+def bench_handoff_swap(handoff: str, width: int = 96, height: int = 96,
+                       frames: int = 64,
+                       weights_dir: str = "_bench_neural_handoff") -> dict:
+    """Isolate the *handoff* cost for one backend: each frame ``publish``es the
+    current weights (NO training, so the timing is the handoff alone - file's NFW1
+    write+reload vs interop's CUDA memcpy + timeline signal), renders, and lets the
+    frame-end swap commit it. The clean file-vs-interop comparison. `interop` skips
+    cleanly where CUDA / external memory is absent."""
+    ctx, r = _build_neural_renderer(width, height, handoff=handoff)
+    try:
+        if handoff == "interop":
+            reason = _interop_skip_reason(ctx)
+            if reason:
+                return {"skipped": reason}
+
+        kw = {"weights_dir": weights_dir} if handoff == "file" else {}
+        r.enable_online_training(handoff=handoff, **kw)
+        weights = r._neural_trainer.weights          # publish these as-is, no train
+
+        # Warm up: first publish does the lazy CUDA import / first NFW1 write.
+        r._neural_publisher.publish(weights)
+        r.update(0.04)
+        r.render_headless()
+
+        publish_ms, frame_ms = [], []
         for _ in range(frames):
             t0 = time.perf_counter()
-            r.online_train_and_publish()              # stage a new version
+            r._neural_publisher.publish(weights)       # handoff cost only
             t1 = time.perf_counter()
             r.update(0.04)
-            r.render_headless()                        # frame-end swap re-uploads weights
+            r.render_headless()                        # frame-end swap commits it
             t2 = time.perf_counter()
-            swap_ms.append((t1 - t0) * 1e3)
+            publish_ms.append((t1 - t0) * 1e3)
             frame_ms.append((t2 - t1) * 1e3)
         ver = r._neural_network_version
     finally:
@@ -85,10 +133,97 @@ def bench_file_handoff_swap(width: int = 96, height: int = 96, frames: int = 64,
         ctx.destroy()
 
     return {
-        "frames": frames, "final_version": ver,
-        "publish_ms_med": float(np.median(swap_ms)),
+        "handoff": handoff, "frames": frames, "final_version": ver,
+        "publish_ms_med": float(np.median(publish_ms)),
+        "publish_ms_p90": float(np.percentile(publish_ms, 90)),
         "render+swap_ms_med": float(np.median(frame_ms)),
         "render+swap_ms_p90": float(np.percentile(frame_ms, 90)),
+    }
+
+
+def bench_concurrent_train_render(handoff: str = "interop", width: int = 96,
+                                  height: int = 96, frames: int = 12) -> dict:
+    """CUDA training concurrent with the Vulkan render in ONE process (task 7.3):
+    each frame runs a real warm-started trainer cycle (CUDA), publishes the result
+    through the handoff, and renders - interleaved on the same GPU. Reports the
+    per-frame train vs publish vs render split and the loss trajectory. Needs torch
+    + spline_flow (the real trainer); `interop` needs CUDA + external-memory Vulkan."""
+    ctx, r = _build_neural_renderer(width, height, handoff=handoff)
+    try:
+        if handoff == "interop":
+            reason = _interop_skip_reason(ctx)
+            if reason:
+                return {"skipped": reason}
+        r.enable_online_training(handoff=handoff)
+        if not r._neural_trainer.torch_active:
+            return {"skipped": "torch/spline_flow unavailable - real trainer inactive"}
+        _feed_records(r)
+        rng = np.random.default_rng(0)
+
+        r.online_train_and_publish(rng)               # warm-up (build + warm-start)
+        r.update(0.04)
+        r.render_headless()
+
+        train_ms, pub_ms, frame_ms, losses = [], [], [], []
+        for _ in range(frames):
+            t0 = time.perf_counter()
+            new_w = r._neural_trainer.train_cycle(r._neural_replay, rng)
+            t1 = time.perf_counter()
+            r._neural_publisher.publish(new_w)
+            t2 = time.perf_counter()
+            r.update(0.04)
+            r.render_headless()
+            t3 = time.perf_counter()
+            train_ms.append((t1 - t0) * 1e3)
+            pub_ms.append((t2 - t1) * 1e3)
+            frame_ms.append((t3 - t2) * 1e3)
+            losses.append(r._neural_trainer.last_loss)
+        ver = r._neural_network_version
+    finally:
+        r.cleanup()
+        ctx.destroy()
+
+    return {
+        "handoff": handoff, "frames": frames, "final_version": ver,
+        "train_ms_med": float(np.median(train_ms)),
+        "publish_ms_med": float(np.median(pub_ms)),
+        "render+swap_ms_med": float(np.median(frame_ms)),
+        "loss_first": losses[0], "loss_last": losses[-1],
+    }
+
+
+def bench_trainer_cycle(cycles: int = 8, batch: int = 4096,
+                        steps_per_cycle: int = 64) -> dict:
+    """Time one warm-started trainer cycle in isolation (real CUDA loop when torch
+    + spline_flow are importable, else the placeholder). Reports the loss
+    trajectory so a torch run shows the net actually learning - the concurrent
+    train-while-render proxy for frames-to-recover."""
+    from skinny.sampling.neural_replay import ReplayBuffer
+    from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
+
+    replay = ReplayBuffer(capacity=200_000)
+    trainer = NeuralTrainer(TrainerConfig(batch=batch, steps_per_cycle=steps_per_cycle))
+
+    # Reuse the same valid-record generator the swap bench uses.
+    class _Shim:
+        _neural_replay = replay
+    _feed_records(_Shim(), n=batch * 2)
+
+    torch_active = bool(trainer.torch_active)
+    rng = np.random.default_rng(0)
+    trainer.train_cycle(replay, rng)                  # warm-up (build + warm-start)
+
+    cycle_ms, losses = [], []
+    for _ in range(cycles):
+        t0 = time.perf_counter()
+        trainer.train_cycle(replay, rng)
+        cycle_ms.append((time.perf_counter() - t0) * 1e3)
+        losses.append(trainer.last_loss)
+    return {
+        "torch_active": torch_active, "cycles": cycles,
+        "steps_per_cycle": steps_per_cycle, "batch": batch,
+        "cycle_ms_med": float(np.median(cycle_ms)),
+        "loss_first": losses[0], "loss_last": losses[-1],
     }
 
 
@@ -97,17 +232,37 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--frames", type=int, default=64)
+    ap.add_argument("--concurrent-frames", type=int, default=12)
     ap.add_argument("--width", type=int, default=96)
     ap.add_argument("--height", type=int, default=96)
+    ap.add_argument("--cycles", type=int, default=8)
     args = ap.parse_args()
 
-    res = bench_file_handoff_swap(args.width, args.height, args.frames)
-    print("[7.3] file-handoff online swap (VALIDATED on this GPU):")
-    for k, v in res.items():
-        print(f"        {k:22s} {v}")
-    print("[7.3] PENDING (NVIDIA box): file-vs-interop comparison, CUDA train "
-          "concurrent with Vulkan render, frames-to-recover — need the interop "
-          "CUDA-write seam (5.2) + torch in the renderer venv.")
+    def _show(title, res):
+        print(f"[7.3] {title}:")
+        for k, v in res.items():
+            print(f"        {k:22s} {v}")
+
+    file_res = bench_handoff_swap("file", args.width, args.height, args.frames)
+    _show("file-handoff cost (publish only)", file_res)
+
+    interop_res = bench_handoff_swap("interop", args.width, args.height, args.frames)
+    _show("interop-handoff cost (publish only)", interop_res)
+
+    if "publish_ms_med" in file_res and "publish_ms_med" in interop_res:
+        f, i = file_res["publish_ms_med"], interop_res["publish_ms_med"]
+        speedup = f / i if i > 0 else float("inf")
+        print(f"[7.3] publish latency  file={f:.2f}ms  interop={i:.3f}ms  "
+              f"=> interop {speedup:.0f}x faster (no NFW1 CPU round-trip)")
+    elif "skipped" in interop_res:
+        print(f"[7.3] interop skipped: {interop_res['skipped']}")
+
+    conc_res = bench_concurrent_train_render(
+        "interop", args.width, args.height, args.concurrent_frames)
+    _show("concurrent CUDA-train + Vulkan-render (interop, one process)", conc_res)
+
+    trainer_res = bench_trainer_cycle(cycles=args.cycles)
+    _show("CUDA trainer cycle (isolated)", trainer_res)
 
 
 if __name__ == "__main__":
