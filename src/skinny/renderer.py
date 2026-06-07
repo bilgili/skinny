@@ -1084,6 +1084,10 @@ class Renderer:
             # megakernel capability-gate (in _pack_uniforms) strips the bit and
             # falls back to its analytic subset, like ReSTIR DI → identity.
             ("BSDF + Neural", "bsdf,neural"),
+            # Neural-only guiding (no BSDF MIS partner). Wavefront-only; on the
+            # megakernel the stripped mask is empty, so it folds back to {bsdf}
+            # (see the empty-mask guard in _pack_uniforms).
+            ("Neural",        "neural"),
         ]
         self.proposal_preset_modes: list[str] = [n for n, _ in self._PROPOSAL_PRESETS]
         self.proposal_preset_index = 0
@@ -7271,6 +7275,12 @@ class Renderer:
             a[2] = 0.0
             s = sum(a) or 1.0
             prop_alpha = (a[0] / s, a[1] / s, a[2] / s, a[3] / s)
+            if prop_mask == 0:
+                # Neural-only on the megakernel: stripping the bit leaves an empty
+                # mixture. Fold back to the {bsdf} fast path so the bounce still has
+                # a valid proposal (rather than a zero mask / zero alpha).
+                prop_mask = 0x1
+                prop_alpha = (1.0, 0.0, 0.0, 0.0)
         data += struct.pack("II", int(prop_mask), reuse_mode)         # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
         # Per-lobe sampler selection (flatLobeSamplers): one uint, 8 bits/lobe

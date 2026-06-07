@@ -181,6 +181,51 @@ def test_neural_unbiased_matches_bsdf():
     assert rel < 0.05, f"{{bsdf,neural}} biased vs {{bsdf}} reference: rel={rel:.4f}"
 
 
+def test_neural_only_proposal_connected():
+    """The `neural` (neural-only) --proposals token must map to a real preset and
+    appear in the UI mode list (proposal_preset_modes drives the GUI selector).
+    Regression: the CLI enum advertised `neural` but no preset matched, so the
+    token silently fell back to {bsdf} and never showed in the UI."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=16, height=16)
+    try:
+        r = Renderer(vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR, tattoo_dir=TATTOO_DIR)
+        try:
+            assert "Neural" in r.proposal_preset_modes, \
+                f"neural-only missing from the UI mode list: {r.proposal_preset_modes}"
+            idx = r.proposal_preset_from_token("neural")
+            assert r._PROPOSAL_PRESETS[idx][1] == "neural", \
+                "the 'neural' token did not map to a neural-only preset (fell back to bsdf)"
+        finally:
+            r.cleanup()
+    finally:
+        ctx.destroy()
+
+
+def test_neural_only_proposal_active_and_unbiased():
+    """neural-only activates the neural pass on wavefront and stays unbiased vs
+    {bsdf} — single-proposal MIS is plain importance sampling against the flow's
+    q>0 hemisphere pdf (the noise-robust spatial mean cancels the high variance)."""
+    ctx_b, r_b = _load("wavefront", "bsdf")
+    try:
+        ref = _converge(r_b, 128)
+    finally:
+        r_b.cleanup()
+        ctx_b.destroy()
+    ctx_n, r_n = _load("wavefront", "neural")
+    try:
+        assert r_n._neural_active(), "neural-only did not activate the neural pass"
+        got = _converge(r_n, 128)
+    finally:
+        r_n.cleanup()
+        ctx_n.destroy()
+    rel = _rel_mean_diff(got, ref)
+    print(f"\n[neural-only] vs {{bsdf}} rel-mean-diff = {rel:.4f}")
+    assert rel < 0.08, f"neural-only biased vs {{bsdf}}: rel={rel:.4f}"
+
+
 def test_external_memory_export_capability():
     """5.1: the neural weight buffers can be allocated CUDA-shareable
     (VK_KHR_external_memory) for the interop handoff, behind a capability check —
