@@ -182,6 +182,17 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
             node.renderer_ref = RendererRef("camera", 0)
             _add_camera_props(node, prim, time)
 
+        # Analytic gprims (Sphere/Cube/Cylinder/Cone/Capsule/Plane) are
+        # tessellated into renderable instances by the loader just like meshes,
+        # but they are not UsdGeom.Mesh, so the mesh branch above skipped them.
+        # Attach the instance ref by path so the scene graph can target the
+        # gizmo. (Streaming load back-fills this via populate_instance_refs;
+        # this covers the reload path that rebuilds against a baked scene.)
+        if node.renderer_ref is None:
+            gprim_idx = instance_map.get(path)
+            if gprim_idx is not None:
+                node.renderer_ref = RendererRef("instance", gprim_idx)
+
         if prim.IsA(UsdGeom.Xformable) and not prim.IsA(UsdGeom.Camera):
             _add_transform_props(node, prim, time, instance_map)
 
@@ -954,8 +965,15 @@ def inject_renderer_camera(
 
 
 def populate_instance_refs(root: SceneGraphNode, scene) -> int:
-    """Walk ``root`` and assign ``RendererRef('instance', i)`` to every Mesh
-    node whose USD path matches a ``scene.instances[i].name``.
+    """Walk ``root`` and assign ``RendererRef('instance', i)`` to every node
+    whose USD path matches a ``scene.instances[i].name``.
+
+    Matches by path, not prim type: the loader bakes analytic gprims
+    (Sphere/Cube/Cylinder/Cone/Capsule/Plane) into instances exactly like
+    ``UsdGeom.Mesh`` prims, and those nodes are typed ``"Sphere"`` etc., not
+    ``"Mesh"``. Gating on ``type_name == "Mesh"`` left them ungizmoable. The
+    ``name_to_idx`` keys are unique baked-instance prim paths, so a path match
+    can only ever land on a real instance node.
 
     Returns the number of refs that were newly attached. Idempotent — nodes
     that already have a renderer_ref are left alone.
@@ -969,13 +987,13 @@ def populate_instance_refs(root: SceneGraphNode, scene) -> int:
 
     def walk(node: SceneGraphNode) -> None:
         nonlocal updated
-        if node.renderer_ref is None and node.type_name == "Mesh":
+        if node.renderer_ref is None:
             idx = name_to_idx.get(node.path)
             if idx is not None:
                 node.renderer_ref = RendererRef("instance", idx)
                 # The 'enabled' prop was created in the Xformable branch
                 # (toggle=subtree) before we knew the ref. Re-tag it as a
-                # node toggle now that this Mesh has a renderer leaf.
+                # node toggle now that this node has a renderer leaf.
                 for p in node.properties:
                     if p.name == "enabled":
                         p.editable = True

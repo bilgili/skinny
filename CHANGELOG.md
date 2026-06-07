@@ -117,6 +117,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Transform gizmo (and the HUD) never drew in **wavefront** execution mode (so
+  with ReSTIR on, which forces wavefront). The gizmo overlay was composited only
+  in `main_pass.slang`, which wavefront skips — the wavefront display tail
+  (`wavefront/wf_display.slang::wfWriteDisplay`) composited the HUD but
+  deliberately omitted the gizmo. It now runs the same screen-space gizmo line
+  composite (binding 22 / `numGizmoSegments`), so the editor gizmo is visible in
+  wavefront mode (path, BDPT, and ReSTIR) just like megakernel. The segment list
+  is already rebuilt + uploaded every frame regardless of mode.
+- Transform gizmo never appeared when an analytic gprim (`UsdGeom.Sphere`,
+  `Cube`, `Cylinder`, `Cone`, `Capsule`, `Plane`) was selected in the
+  scene-graph dock. The loader tessellates those into renderable instances just
+  like `UsdGeom.Mesh` prims, but the scene-graph builder and
+  `populate_instance_refs` only attached the `instance` `renderer_ref` to nodes
+  typed `"Mesh"`, so selecting a gprim cleared the gizmo target
+  (`set_gizmo_target(-1)`). Both now match a baked instance by prim path
+  regardless of prim type (`build_scene_graph` covers the reload path,
+  `populate_instance_refs` the streaming path). Authored `Mesh` prims were
+  unaffected.
 - USD scenes used a degenerate `(0,1)` AABB for the neural-proposal condition's
   position normalisation (the per-frame `Scene` snapshot has no instances for USD —
   geometry streams straight to the GPU); `_neural_scene_bounds` now falls back to the

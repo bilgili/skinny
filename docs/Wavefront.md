@@ -71,6 +71,17 @@ Stage detail:
 The bounce loop (`clear_counts` → … → `shade`) repeats `MAX_BOUNCES` times,
 CPU-driven with barriers between stages.
 
+The display tail is shared by every wavefront resolve kernel (path, BDPT, and
+ReSTIR-via-path) through `wfWriteDisplay` (`wavefront/wf_display.slang`), the
+sole writer of the output image (binding 1). Mirroring `main_pass.slang`'s
+post-accumulation path, it composites the s=1 light splat, applies exposure +
+tonemap + sRGB, then overlays the **HUD** (binding 3) and the **transform
+gizmo** (binding 22). Because the gizmo segment list and `numGizmoSegments` are
+rebuilt + uploaded every frame regardless of execution mode, the editor gizmo
+draws in wavefront mode exactly as in megakernel. The focus-plane + furnace
+over-energy overlays remain megakernel-only (they need the primary ray / scene
+hit, which the wavefront does not keep per-pixel).
+
 `mem_barrier()` (COMPUTE→COMPUTE | DRAW_INDIRECT) separates each stage. Push
 constant `WfTilePC {streamBase, shadeSlot, streamSize}` (12 B,
 `wf_shade_common.slang:31`). Pipeline layout = `[set0 scene, set1 path-state]`

@@ -554,7 +554,9 @@ Geometry is regenerated from live `Renderer` state every frame.
 
 ### Transform gizmo (`gizmo.py`)
 
-`TransformGizmo` tracks one selected mesh instance and has four modes —
+`TransformGizmo` tracks one selected scene instance — any baked instance,
+including analytic gprims (Sphere/Cube/Cylinder/…) the loader tessellates,
+not just `UsdGeom.Mesh` prims — and has four modes —
 rotate and translate, each in world or local space — cycled with `Space`
 (`(index+1) % 4`, grouped by type). Rotate modes draw three orthogonal
 rings, translate modes draw three axis arrows, and a `W`/`L` glyph above
