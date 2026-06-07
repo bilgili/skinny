@@ -775,11 +775,15 @@ given. See [Wavefront.md § Neural size & precision](Wavefront.md#neural-size--p
 
 Under **`--neural-handoff interop`** (online training, change
 `neural-online-training`) bindings 33/34/35 are allocated as **externally-shared
-memory** (`VK_KHR_external_memory`) so the CUDA trainer can write freshly-baked
-weights straight into them with no CPU round-trip — the slots and element types
-are unchanged, only the buffers' memory backing differs. The default
-`--neural-handoff file` keeps them as ordinary device-local buffers the host
-re-uploads on a hot-reload. See [Online neural training](#online-neural-training).
+memory** (`VK_KHR_external_memory`, **dedicated allocation** — required for the
+CUDA import on NVIDIA) so the CUDA trainer can write freshly-baked weights (33)
+and biases (34) straight into them with no CPU round-trip — the slots and element
+types are unchanged, only the buffers' memory backing differs. A companion
+exportable **timeline semaphore** (`VK_KHR_timeline_semaphore` +
+`VK_KHR_external_semaphore_win32`/`_fd`) orders the CUDA write against the Vulkan
+read so a frame never tears. The default `--neural-handoff file` keeps them as
+ordinary device-local buffers the host re-uploads on a hot-reload. See
+[Online neural training](#online-neural-training).
 
 Bindings **36/37** back the per-vertex training-record dump
 (`Renderer.dump_path_records`): a second megakernel entry `mainImageRecord`
@@ -865,17 +869,25 @@ the frame-end weight swap; training itself happens off the render path.
    - **`file`** (default, `neural_handoff_file.py`) — the trainer writes an NFW1
      file, the renderer hot-reloads it: a CPU round-trip that works on **any**
      platform.
-   - **`interop`** (`neural_handoff_interop.py`) — CUDA writes weights straight
-     into the Vulkan weight buffer via `VK_KHR_external_memory` +
-     `cudaImportExternalMemory`, with no CPU round-trip — the real-time path,
-     **CUDA-only** and guarded. Bindings 33/34/35 become externally-shared
-     memory in this mode.
+   - **`interop`** (`neural_handoff_interop.py`) — CUDA writes weights (33) and
+     biases (34) straight into the Vulkan-exported buffers via
+     `cudaImportExternalMemory` → `cudaExternalMemoryGetMappedBuffer` →
+     `cudaMemcpyAsync`, with no CPU round-trip, then signals the exported timeline
+     semaphore at the staged version (`cudaSignalExternalSemaphoresAsync`). The
+     real-time path, **CUDA-only** (needs `cuda-python`) and guarded — it raises a
+     clear `NotImplementedError` and `--neural-handoff file` is used instead where
+     CUDA or the external-memory Vulkan extensions are absent. Implemented and
+     verified on an RTX 4090 (`tests/test_neural_interop.py`).
 4. **Swap** — `Renderer._online_frame_end_swap()` runs at the **frame boundary**
    (after the fence wait in `render_headless`, after present in `render`):
-   `publisher.swap()` promotes pending→render, `_apply_render_weights` re-uploads
-   the new weights to bindings 33/34/35, and `networkVersion` is incremented in
-   both `FrameConstants.neuralNetworkVersion` **and** the
-   `WavefrontNeuralProposalPass` push-constant stamp.
+   `publisher.swap()` promotes pending→render and `networkVersion` is incremented
+   in both `FrameConstants.neuralNetworkVersion` **and** the
+   `WavefrontNeuralProposalPass` push-constant stamp. For the **file** backend the
+   swap also `_apply_render_weights`-uploads the new weights to bindings 33/34/35;
+   for **interop** there is no re-upload — `acquire_for_render()` returns no
+   host-side weights because the CUDA write already populated the bound buffers, so
+   the swap only **host-waits the timeline** to the staged version (the CUDA write
+   is provably resident) and re-stamps the version.
 
 Render weights stay **frozen during a frame**, so each sample's density is always
 evaluated against the network version that drew it. An asynchronous swap

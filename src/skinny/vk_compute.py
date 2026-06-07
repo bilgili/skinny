@@ -2109,14 +2109,21 @@ class StorageBuffer:
             vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             mem_props,
         )
-        export_info = (
-            vk.VkExportMemoryAllocateInfo(handleTypes=ctx._external_memory_handle_type)
+        # CUDA's import of an OPAQUE_WIN32 buffer (cudaImportExternalMemory) needs
+        # a *dedicated* allocation on NVIDIA, so chain VkMemoryDedicatedAllocateInfo
+        # onto the export info for the external path. `alloc_size` is the padded
+        # allocation size CUDA imports (not the logical `size`).
+        self.alloc_size = buf_reqs.size
+        alloc_pnext = (
+            vk.VkExportMemoryAllocateInfo(
+                pNext=vk.VkMemoryDedicatedAllocateInfo(buffer=self.buffer),
+                handleTypes=ctx._external_memory_handle_type)
             if self.external else None
         )
         self.memory = vk.vkAllocateMemory(
             ctx.device,
             vk.VkMemoryAllocateInfo(
-                allocationSize=buf_reqs.size, memoryTypeIndex=buf_type, pNext=export_info,
+                allocationSize=buf_reqs.size, memoryTypeIndex=buf_type, pNext=alloc_pnext,
             ),
             None,
         )
@@ -2288,6 +2295,86 @@ class StorageBuffer:
         vk.vkFreeMemory(self.ctx.device, self.memory, None)
         vk.vkDestroyBuffer(self.ctx.device, self.staging_buffer, None)
         vk.vkFreeMemory(self.ctx.device, self.staging_memory, None)
+
+
+class ExternalTimelineSemaphore:
+    """A Vulkan timeline semaphore, optionally exportable to CUDA.
+
+    Orders the CUDA weight-write against the Vulkan weight-read for the interop
+    weight handoff (change neural-online-training, task 5.2): the trainer's CUDA
+    stream signals the timeline at the staged network version; the renderer's
+    frame-end swap host-waits that value so the new weights are provably resident
+    before the next frame binds the exported buffers. ``export_handle()`` yields
+    the OS handle CUDA imports with ``cudaImportExternalSemaphore``; a guarded
+    no-op where the device lacks external-semaphore support (then it is a plain
+    in-process timeline semaphore and ``export_handle()`` returns None)."""
+
+    def __init__(self, ctx: VulkanContext, initial_value: int = 0) -> None:
+        self.ctx = ctx
+        self.external = bool(getattr(ctx, "supports_external_semaphore", False))
+        type_info = vk.VkSemaphoreTypeCreateInfo(
+            semaphoreType=vk.VK_SEMAPHORE_TYPE_TIMELINE,
+            initialValue=int(initial_value),
+        )
+        pnext = type_info
+        if self.external:
+            pnext = vk.VkExportSemaphoreCreateInfo(
+                pNext=type_info,
+                handleTypes=ctx._external_semaphore_handle_type,
+            )
+        self.semaphore = vk.vkCreateSemaphore(
+            ctx.device, vk.VkSemaphoreCreateInfo(pNext=pnext), None)
+
+    def export_handle(self):
+        """OS handle to this semaphore for CUDA import
+        (``cudaImportExternalSemaphore``), or None unless created external on a
+        device that supports it. Best-effort — any failure returns None."""
+        if not self.external:
+            return None
+        try:
+            import sys
+            if sys.platform == "win32":
+                fn = vk.vkGetDeviceProcAddr(self.ctx.device, "vkGetSemaphoreWin32HandleKHR")
+                if fn is None:
+                    return None
+                info = vk.VkSemaphoreGetWin32HandleInfoKHR(
+                    semaphore=self.semaphore,
+                    handleType=self.ctx._external_semaphore_handle_type)
+                return fn(self.ctx.device, info)
+            fn = vk.vkGetDeviceProcAddr(self.ctx.device, "vkGetSemaphoreFdKHR")
+            if fn is None:
+                return None
+            info = vk.VkSemaphoreGetFdInfoKHR(
+                semaphore=self.semaphore,
+                handleType=self.ctx._external_semaphore_handle_type)
+            return fn(self.ctx.device, info)
+        except Exception:  # noqa: BLE001 — handle retrieval is the interop seam
+            return None
+
+    def value(self) -> int:
+        """Current timeline counter value."""
+        return int(vk.vkGetSemaphoreCounterValue(self.ctx.device, self.semaphore))
+
+    def wait(self, value: int, timeout_ns: int = 1_000_000_000) -> bool:
+        """Block the host until the counter reaches ``value`` (or timeout). True on
+        reach, False on timeout."""
+        info = vk.VkSemaphoreWaitInfo(
+            semaphoreCount=1, pSemaphores=[self.semaphore], pValues=[int(value)])
+        # The `vulkan` binding returns None for VK_SUCCESS and the positive
+        # VK_TIMEOUT code on timeout (negative VkResults raise). Reached ⇔ not a
+        # timeout.
+        res = vk.vkWaitSemaphores(self.ctx.device, info, int(timeout_ns))
+        return res is None or res == vk.VK_SUCCESS
+
+    def signal(self, value: int) -> None:
+        """Host-signal the timeline to ``value`` (test / fallback path; the trainer
+        normally signals from CUDA)."""
+        vk.vkSignalSemaphore(
+            self.ctx.device,
+            vk.VkSemaphoreSignalInfo(semaphore=self.semaphore, value=int(value)))
+
+    def destroy(self) -> None:
+        vk.vkDestroySemaphore(self.ctx.device, self.semaphore, None)
 
 
 class HostStorageBuffer:

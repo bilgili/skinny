@@ -52,6 +52,13 @@ web = [
     "bokeh>=3.4",
     "av>=12.0",
 ]
+# CUDA↔Vulkan weight-handoff interop (--neural-handoff interop, change
+# neural-online-training): cuda-python drives cudaImportExternalMemory /
+# ImportExternalSemaphore. CUDA-only and opt-in — the default file handoff needs
+# none of it, so it stays out of the base install.
+interop = [
+    "cuda-python>=12.0",
+]
 
 [project.scripts]
 skinny = "skinny.app:main"

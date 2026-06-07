@@ -389,12 +389,17 @@ weights are promoted is the **frame boundary**:
 - `Renderer._online_frame_end_swap()` runs **after the fence wait** in
   `render_headless` (and **after present** in `render`) — once the GPU is done
   reading the current weights. It `publisher.swap()`s the trainer's pending
-  weights into the render slot, re-uploads them via `_apply_render_weights`
-  (bindings 33/34/35), and increments the network version **in both places the
-  per-sample density key is read**: `FrameConstants.neuralNetworkVersion` (the
+  weights into the render slot and increments the network version **in both places
+  the per-sample density key is read**: `FrameConstants.neuralNetworkVersion` (the
   inline inverse) **and** the `WavefrontNeuralProposalPass` push-constant stamp
   (the forward pre-pass). The two are kept in lockstep so a forward draw and its
-  inverse pdf always agree.
+  inverse pdf always agree. How the pending weights reach bindings 33/34/35
+  depends on the backend: the **file** backend re-uploads them via
+  `_apply_render_weights`; the **interop** backend's `swap()` instead **host-waits
+  the exported timeline semaphore** to the staged version (so the CUDA write is
+  provably resident) and re-stamps the version with no re-upload —
+  `acquire_for_render()` returns no host weights because the CUDA write already
+  populated the bound buffers.
 
 **Why a mid-flight swap is still unbiased.** Because the weights a frame draws
 with are exactly the weights its per-sample density is evaluated against (the
