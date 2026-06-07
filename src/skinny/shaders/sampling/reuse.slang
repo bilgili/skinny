@@ -24,6 +24,7 @@ static const uint REUSE_RESTIR_DI = 1u;
 // (a flat wavefront lane); NEE's MIS companion then includes the neural term so
 // direct + indirect stay coupled. Always false on the megakernel and non-flat
 // lanes (neural is wavefront flat-only).
+// DOC:gate#body start
 float3 reuseDirect<TM : IMaterial>(
     TM mat, HitInfo h, float3 N, float3 T, float3 B, float3 wo,
     uint depth, bool neuralActive, inout RNG rng)
@@ -34,3 +35,4 @@ float3 reuseDirect<TM : IMaterial>(
         return float3(0.0);
     return allLightsNEE(mat, h, N, T, B, wo, neuralActive, rng);
 }
+// DOC:gate#body end

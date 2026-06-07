@@ -141,8 +141,10 @@ void nf_decode(
 }
 
 // Monotone rational-quadratic spline, forward. Returns y; outputs log|dy/dx|.
+// DOC:rqs#sig start
 float nf_rqs_fwd(float x, float widths[NF_BINS], float heights[NF_BINS],
                  float derivs[NF_BINS + 1], out float logdet)
+// DOC:rqs#sig end
 {
     x = clamp(x, 0.0f, 1.0f);
     float xk = 0.0f; int idx = 0;
@@ -157,13 +159,17 @@ float nf_rqs_fwd(float x, float widths[NF_BINS], float heights[NF_BINS],
     float delta = hgt / w;
     float theta = (x - x0) / w;
     float t1 = theta * (1.0f - theta);
+    // DOC:rqs#core start
     float num = hgt * (delta * theta * theta + d0 * t1);
     float den = delta + (d0 + d1 - 2.0f * delta) * t1;
     den = max(den, NF_EPS);
     float y = y0 + num / den;
+    // DOC:rqs#core end
+    // DOC:logdet#deriv start
     float dn = delta * delta * (d1 * theta * theta + 2.0f * delta * t1 + d0 * (1.0f - theta) * (1.0f - theta));
     float dydx = dn / (den * den);
     logdet = log(max(dydx, NF_EPS));
+    // DOC:logdet#deriv end
     return clamp(y, 0.0f, 1.0f);
 }
 
@@ -196,6 +202,7 @@ float nf_rqs_inv(float y, float widths[NF_BINS], float heights[NF_BINS],
 }
 
 // Square <-> hemisphere (y-up), matching the prototype.
+// DOC:pdf-omega#map start
 float3 nf_square_to_hemi(float2 z)
 {
     float u = clamp(z.x, 0.0f, 1.0f);
@@ -204,6 +211,7 @@ float3 nf_square_to_hemi(float2 z)
     float st = sqrt(max(1.0f - v * v, 0.0f));
     return float3(st * cos(phi), v, st * sin(phi));
 }
+// DOC:pdf-omega#map end
 
 float2 nf_hemi_to_square(float3 wld)
 {
@@ -213,10 +221,13 @@ float2 nf_hemi_to_square(float3 wld)
 }
 
 // Forward flow u -> z accumulating log|det dz/du| (coupling layers alternate the mask).
+// DOC:coupling#sig start
 float2 nf_flow_forward(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float2 u, float cond[NF_COND], out float logdet)
+// DOC:coupling#sig end
 {
+    // DOC:coupling#core start
     float2 z = u; logdet = 0.0f;
     for (int L = 0; L < NF_LAYERS; ++L)
     {
@@ -232,6 +243,7 @@ float2 nf_flow_forward(
         if (even) z.y = ytr; else z.x = ytr;
     }
     return z;
+    // DOC:coupling#core end
 }
 
 // Inverse flow z -> u accumulating log|det du/dz|.
@@ -261,21 +273,29 @@ float3 sampleNeural(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float cond[NF_COND], float2 u, out float pdfOmega)
 {
+    // DOC:pdf-square#core start
     float logdet;
     float2 z = nf_flow_forward(W, B, H, u, cond, logdet);
     float log_q_square = -logdet;                       // base pdf on unit square = 1
+    // DOC:pdf-square#core end
+    // DOC:pdf-omega#pdf start
     pdfOmega = exp(log_q_square - NF_LOG2PI);
+    // DOC:pdf-omega#pdf end
     return nf_square_to_hemi(z);
 }
 
 // PUBLIC: exact solid-angle pdf the flow assigns to direction `wi` (for the MIS mix).
+// DOC:pdf-inv#sig start
 float pdfNeural(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
     float cond[NF_COND], float3 wi)
+// DOC:pdf-inv#sig end
 {
+    // DOC:pdf-inv#core start
     if (wi.y <= 0.0f) return 0.0f;
     float2 z = nf_hemi_to_square(wi);
     float logdet;
     nf_flow_inverse(W, B, H, z, cond, logdet);          // log|det du/dz| = log q_square
     return exp(logdet - NF_LOG2PI);
+    // DOC:pdf-inv#core end
 }

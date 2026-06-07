@@ -187,11 +187,13 @@ void estimateRadianceRecord(Ray ray, HitInfo firstHit, inout RNG rng)
     // (L_final - L_k) = beta_out_k·Li_k; dividing by beta_in_k folds in this
     // vertex's f·cos/pdf so the stored weight ∝ the integrand the proposal
     // should match. Clamp ≥ 0 (float noise) and drop non-finite samples.
+    // DOC:contrib#core start
     float3 Lfinal = radiance;
     for (uint k = 0u; k < recCount; k++)
     {
         float3 beta = max(recBeta[k], float3(1e-8));
         float3 contrib = max((Lfinal - recL[k]) / beta, float3(0.0));
+        // DOC:contrib#core end
         if (any(isnan(contrib)) || any(isinf(contrib)))
             continue;
         PathRecord rec;

@@ -68,8 +68,10 @@ void proposalWeights(ProposalContext c, out float aB, out float aE, out float aN
     aE = ((fc.proposalMask & PROPOSAL_ENV) != 0u) ? fc.proposalAlpha.y : 0.0;
     bool neuralOn = ((fc.proposalMask & PROPOSAL_NEURAL) != 0u) && c.neuralValid;
     aN = neuralOn ? fc.proposalAlpha.z : 0.0;
+    // DOC:mix-pdf#weights start
     float s = aB + aE + aN;
     if (s > 0.0) { aB /= s; aE /= s; aN /= s; }
+    // DOC:mix-pdf#weights end
 }
 
 // Draw the next bounce direction from the active proposal mixture. Returns a
@@ -160,8 +162,10 @@ BSDFSample sampleBounceDirection<TM : IMaterial>(TM mat, ProposalContext c, inou
     outp.transmitted = false;          // env + reflective (non-delta) only
     outp.emission    = cand.emission;  // technique-independent self-emission
     outp.wi          = wiT;
+    // DOC:estimator#core start
     outp.pdf         = mixPdf;
     outp.weight      = ev.response / mixPdf;
+    // DOC:estimator#core end
     outp.response    = float3(0.0);
     return outp;
 }
@@ -178,6 +182,7 @@ float mixtureProposalPdf<TM : IMaterial>(TM mat, ProposalContext c, float3 wiT)
 
     float aB, aE, aN;
     proposalWeights(c, aB, aE, aN);
+    // DOC:mix-pdf#pdf start
     float pdf = aB * bsdfPdf;
     if ((aE > 0.0 || aN > 0.0) && wiT.z > 0.0)
     {
@@ -189,4 +194,5 @@ float mixtureProposalPdf<TM : IMaterial>(TM mat, ProposalContext c, float3 wiT)
                                        tangentToWorld(c.woT, c.T, c.B, c.N), worldWi);
     }
     return pdf;
+    // DOC:mix-pdf#pdf end
 }

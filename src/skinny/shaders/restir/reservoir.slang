@@ -43,6 +43,7 @@ void reservoirReset(out Reservoir r)
 
 // Stream a candidate `x` with RIS weight `w` (= p̂(x)/sourcePdf(x)) and its
 // target value `pHat_x`. `rand` ∈ [0,1). Returns true when `x` is selected.
+// DOC:ris-w#body start
 bool reservoirUpdate(inout Reservoir r, LightSampleRef x, float w, float pHat_x, float rand)
 {
     r.wSum += w;
@@ -55,6 +56,7 @@ bool reservoirUpdate(inout Reservoir r, LightSampleRef x, float w, float pHat_x,
     }
     return take;
 }
+// DOC:ris-w#body end
 
 // Merge a finalized source reservoir `src` into `dst` as a single
 // supercandidate with weight  w = pHatInDst · src.W · src.M, where pHatInDst is
@@ -67,6 +69,7 @@ bool reservoirUpdate(inout Reservoir r, LightSampleRef x, float w, float pHat_x,
 // unbiased multi-reservoir RIS combination (Bitterli 2020 Alg. 4): each source
 // contributes its W·M·p̂, the survivor is chosen ∝ those weights, and finalize
 // yields the combined contribution weight over ΣM samples.
+// DOC:merge#body start
 bool reservoirMerge(inout Reservoir dst, Reservoir src, float pHatInDst, float rand)
 {
     float w = pHatInDst * src.W * float(src.M);
@@ -80,10 +83,13 @@ bool reservoirMerge(inout Reservoir dst, Reservoir src, float pHatInDst, float r
     }
     return take;
 }
+// DOC:merge#body end
 
 // Finalize the contribution weight after the candidate stream (or a merge).
+// DOC:ris-W#body start
 void reservoirFinalize(inout Reservoir r)
 {
     float denom = float(r.M) * r.pHat;
     r.W = (denom > 0.0) ? r.wSum / denom : 0.0;
 }
+// DOC:ris-W#body end

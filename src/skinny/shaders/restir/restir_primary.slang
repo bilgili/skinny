@@ -115,7 +115,9 @@ static const uint RESTIR_MAX_SRC = 12u;
 // canonical pixel q; W_out = Σw_s / p̂_q(Y) (the m_s normalize — no 1/M, no 1/Z).
 [shader("compute")]
 [numthreads(64, 1, 1)]
+// DOC:gris#sig start
 void restirSpatial(uint3 tid: SV_DispatchThreadID)
+// DOC:gris#sig end
 {
     uint i = tid.x;
     WavefrontPathState s; HitInfo h; FlatMaterial mat; float3 N, T, B, wo;
@@ -188,6 +190,7 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
         Reservoir outb;
         reservoirReset(outb);
         float mTot = 0.0;
+        // DOC:biased#core start
         for (uint a = 0u; a < K; a++)
         {
             mTot += sM[a];
@@ -203,6 +206,7 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
         }
         outb.M = uint(mTot);
         outb.W = (outb.pHat > 0.0 && mTot > 0.0) ? outb.wSum / (mTot * outb.pHat) : 0.0;
+        // DOC:biased#core end
         wfReservoirB[i] = outb;
         return;
     }
@@ -212,6 +216,7 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
     float D[RESTIR_MAX_SRC];
     float pOwn[RESTIR_MAX_SRC];
     for (uint a = 0u; a < K; a++) { D[a] = 0.0; pOwn[a] = 0.0; }
+    // DOC:gris#denom start
     for (uint j = 0u; j < K; j++)
     {
         WavefrontPathState sj; HitInfo hj; FlatMaterial matj; float3 Nj, Tj, Bj, woj;
@@ -226,11 +231,13 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
             if (j == a) pOwn[a] = p;
         }
     }
+    // DOC:gris#denom end
 
     // Combine: select Y ∝ w_s = m_s·p̂_q(z_s)·W_s, m_s = M_s·p̂_s(z_s)/D_s.
     Reservoir outr;
     reservoirReset(outr);
     float mTotal = 0.0;
+    // DOC:gris#combine start
     for (uint a = 0u; a < K; a++)
     {
         mTotal += sM[a];
@@ -247,6 +254,7 @@ void restirSpatial(uint3 tid: SV_DispatchThreadID)
     }
     outr.M = uint(mTotal);
     outr.W = (outr.pHat > 0.0) ? outr.wSum / outr.pHat : 0.0;   // m_s normalize ⇒ no 1/M
+    // DOC:gris#combine end
     wfReservoirB[i] = outr;
 }
 
