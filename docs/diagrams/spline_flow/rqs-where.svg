@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="562.2" height="50.2" viewBox="0 0 562.2 50.2">
+  <rect x="0.5" y="0.5" width="561.2" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">ξ = (x − x</text>
+  <text x="118.0" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="125.8" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">) / w</text>
+  <text x="179.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="187.6" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">,    s</text>
+  <text x="252.4" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="260.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = h</text>
+  <text x="303.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="311.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> / w</text>
+  <text x="354.3" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="362.1" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">,    h</text>
+  <text x="426.9" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+  <text x="434.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = y</text>
+  <text x="477.9" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k+1</text>
+  <text x="501.2" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> − y</text>
+  <text x="544.4" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">k</text>
+</svg>

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="380" viewBox="0 0 820 380" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrP" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/>
+    </marker>
+    <style>
+      .hdr{font-size:14px;font-weight:700;fill:#0f172a;}
+      .lbl{font-size:13px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:11px;fill:#475569;}
+      .note{font-size:10.5px;fill:#64748b;}
+      .gl{font-size:12px;font-weight:600;fill:#7c3aed;}
+    </style>
+  </defs>
+
+  <text x="20" y="28" class="hdr">A normalizing flow is an invertible map between a simple base density and a complex target — exact both ways</text>
+
+  <!-- base distribution card -->
+  <rect x="50" y="80" width="200" height="210" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="150" y="104" text-anchor="middle" class="lbl">base  p_u(u)</text>
+  <text x="150" y="120" text-anchor="middle" class="note">uniform / Gaussian, tractable</text>
+  <g fill="#94a3b8">
+    <circle cx="86" cy="150" r="3"/><circle cx="118" cy="150" r="3"/><circle cx="150" cy="150" r="3"/><circle cx="182" cy="150" r="3"/><circle cx="214" cy="150" r="3"/>
+    <circle cx="86" cy="182" r="3"/><circle cx="118" cy="182" r="3"/><circle cx="150" cy="182" r="3"/><circle cx="182" cy="182" r="3"/><circle cx="214" cy="182" r="3"/>
+    <circle cx="86" cy="214" r="3"/><circle cx="118" cy="214" r="3"/><circle cx="150" cy="214" r="3"/><circle cx="182" cy="214" r="3"/><circle cx="214" cy="214" r="3"/>
+    <circle cx="86" cy="246" r="3"/><circle cx="118" cy="246" r="3"/><circle cx="150" cy="246" r="3"/><circle cx="182" cy="246" r="3"/><circle cx="214" cy="246" r="3"/>
+  </g>
+  <text x="150" y="280" text-anchor="middle" class="note">u ∈ [0,1]ᵈ</text>
+
+  <!-- target distribution card -->
+  <rect x="570" y="80" width="200" height="210" rx="10" fill="#faf5ff" stroke="#d8b4fe"/>
+  <text x="670" y="104" text-anchor="middle" class="lbl">target  p_x(x)</text>
+  <text x="670" y="120" text-anchor="middle" class="note">multimodal, scene-shaped</text>
+  <g fill="#7c3aed" opacity="0.16">
+    <ellipse cx="630" cy="170" rx="40" ry="28"/>
+    <ellipse cx="710" cy="210" rx="30" ry="40"/>
+    <ellipse cx="650" cy="240" rx="26" ry="20"/>
+  </g>
+  <g fill="#7c3aed" opacity="0.5">
+    <ellipse cx="630" cy="170" rx="16" ry="11"/>
+    <ellipse cx="710" cy="210" rx="11" ry="16"/>
+    <ellipse cx="650" cy="240" rx="9" ry="7"/>
+  </g>
+
+  <!-- forward: sample -->
+  <line x1="258" y1="150" x2="562" y2="150" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#arrP)"/>
+  <text x="410" y="140" text-anchor="middle" class="gl">x = T_θ(u)   forward · draw a sample</text>
+
+  <!-- inverse: density / train -->
+  <line x1="562" y1="235" x2="258" y2="235" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="410" y="255" text-anchor="middle" class="sub">f = T_θ⁻¹(x)   inverse · evaluate p_x(x) · train</text>
+
+  <!-- middle stack of layers -->
+  <rect x="348" y="170" width="124" height="44" rx="8" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="410" y="190" text-anchor="middle" class="sub" fill="#3730a3">K coupling layers</text>
+  <text x="410" y="205" text-anchor="middle" class="note">T_θ = T_K ∘ ··· ∘ T_1</text>
+
+  <!-- bottom note -->
+  <rect x="40" y="316" width="740" height="48" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="56" y="336" class="sub">Tractable Jacobian:  log p_x(x) = log p_u( f(x) ) + log|det ∂f/∂x|.</text>
+  <text x="56" y="353" class="note">The same weights both sample (u → x, push forward) and score density (x → p_x, run the inverse) — no second model, no approximation.</text>
+</svg>
