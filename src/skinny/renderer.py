@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import math
 import struct
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1119,6 +1120,12 @@ class Renderer:
         self._neural_replay = None
         self._neural_trainer = None
         self._neural_publisher = None
+        # Background trainer thread (change online-training-trigger): started by
+        # enable_online_training, loops online_train_and_publish + a short sleep
+        # so a slow cycle (numpy oracle ~seconds) never stalls the render thread.
+        self._trainer_thread = None
+        self._trainer_stop = None
+        self._trainer_cadence_s = 0.05
         # Path-record source for the live online drain (change wavefront-native-
         # path-records): 'auto' picks the wavefront-native emitter when running
         # the wavefront path integrator (no megakernel dispatch, no 2 s-TDR), and
@@ -7063,11 +7070,78 @@ class Renderer:
         self._wf_record_active = (self._resolve_record_source() == "wavefront")
         if self._wf_record_active and self.descriptor_sets is not None:
             self._ensure_wf_record_drain()
+        self._start_trainer_thread()
         return self._neural_publisher
 
     def disable_online_training(self) -> None:
         self._online_training = False
         self._wf_record_active = False
+        self._stop_trainer_thread()
+
+    def _start_trainer_thread(self) -> None:
+        """Spin up the daemon trainer thread (change online-training-trigger).
+
+        The thread loops ``online_train_and_publish`` + a short sleep on the host
+        replay buffer; the render thread keeps draining + swapping. The publisher
+        double-buffer is the only trainer→render handoff, so no extra weight
+        locking is needed. Idempotent — a no-op if a thread is already running."""
+        if self._trainer_thread is not None and self._trainer_thread.is_alive():
+            return
+        self._trainer_stop = threading.Event()
+        rng = np.random.default_rng()
+
+        def _loop(stop=self._trainer_stop):
+            while not stop.is_set():
+                if self._online_training and self._neural_trainer is not None:
+                    try:
+                        self.online_train_and_publish(rng)
+                    except Exception as exc:  # noqa: BLE001 — keep the loop alive
+                        print(f"[neural] trainer cycle failed: {exc}")
+                stop.wait(self._trainer_cadence_s)
+
+        self._trainer_thread = threading.Thread(
+            target=_loop, name="skinny-neural-trainer", daemon=True)
+        self._trainer_thread.start()
+
+    def _stop_trainer_thread(self) -> None:
+        """Signal the trainer thread to stop and join it (change
+        online-training-trigger). Safe to call when no thread is running."""
+        if self._trainer_stop is not None:
+            self._trainer_stop.set()
+        thread = self._trainer_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._trainer_thread = None
+        self._trainer_stop = None
+
+    def can_online_train(self) -> tuple[bool, str]:
+        """Prerequisite check for online training (change online-training-trigger).
+
+        True only when the execution mode is wavefront (the record drain + neural
+        pre-pass are wavefront-only) AND a neural proposal is active in the
+        mixture. Returns ``(ok, reason)``; ``reason`` names the missing
+        prerequisite when ``ok`` is False, and is empty when ``ok`` is True."""
+        if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            return (False, "online training requires --execution-mode wavefront")
+        if not self._neural_active():
+            return (False, "online training requires a neural proposal in the "
+                           "mixture (--proposals …,neural)")
+        return (True, "")
+
+    def online_training_tick(self) -> int:
+        """Per-frame driver the render loop calls once per frame (change
+        online-training-trigger). Drains GPU path records into the replay buffer
+        on the render thread (cheap; must touch the GPU/queue here) so the
+        background trainer thread has fresh data. No-op — returns 0 — when online
+        training is off. The actual per-cycle training runs on the trainer thread;
+        the frame-end swap in render()/render_headless() promotes new weights."""
+        if not self._online_training:
+            return 0
+        # The drain reads GPU records, so the scene must be built; skip the frame
+        # while it isn't (USD streams in async, a rebake transiently nulls these).
+        if self._scene_bindings is None or self.descriptor_sets is None:
+            return 0
+        return self.online_drain()
 
     def online_drain(self, **kw) -> int:
         """Drain one frame of GPU records into the replay buffer (the live feed,

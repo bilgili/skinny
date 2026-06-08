@@ -440,6 +440,29 @@ fp32 weights, so the handoff format is unchanged. The inference precision adds a
 device feature, portable across Vulkan/Metal/MoltenVK; see
 [docs/NeuralGuiding.md § Training backends & the precision matrix](docs/NeuralGuiding.md#training-backends--the-precision-matrix).
 
+`--online-training` (flag, env `SKINNY_ONLINE_TRAINING`, also persisted) is the
+switch that actually **starts** the loop on the interactive front-ends (`skinny`
+and `skinny-gui`) — the `--neural-handoff` / `--neural-trainer` /
+`--train-precision` flags above only *configure* it. It has two prerequisites:
+`--execution-mode wavefront` **and** a neural proposal in the mixture
+(`--proposals bsdf,neural` or `--proposals neural`). A missing prerequisite is
+refused with a clear one-line message at startup — never a silent no-op — and an
+unsupported backend/handoff combo (`--neural-trainer mlx`, or `--neural-handoff
+interop` off CUDA) surfaces its own error. Off by default: without the flag the
+renderer is byte-identical to before. The supported **Mac** combo (no CUDA) is
+`--neural-trainer cpu` (or `auto`, which picks the numpy oracle there) with
+`--neural-handoff file`; e.g.
+
+```bash
+skinny-gui --execution-mode wavefront --proposals bsdf,neural \
+  --online-training --neural-trainer cpu --neural-handoff file
+```
+
+Training runs on a dedicated background thread, so a slow cycle (the numpy
+oracle is ~seconds) never stalls the viewport; the renderer drains GPU path
+records each frame and the frame-end swap promotes new weights. See
+[docs/NeuralGuiding.md § Running online training](docs/NeuralGuiding.md#running-online-training).
+
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding

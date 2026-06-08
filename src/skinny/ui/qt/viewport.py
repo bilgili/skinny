@@ -27,14 +27,38 @@ class _RenderWorker(QObject):
     frame_ready = Signal(bytes, int, int, int)  # pixels, w, h, accum_frame
     error = Signal(str)
 
-    def __init__(self, renderer, lock: Lock) -> None:
+    def __init__(self, renderer, lock: Lock, online_training: bool = False) -> None:
         super().__init__()
         self.renderer = renderer
         self._lock = lock
         self._running = True
+        # --online-training (change online-training-trigger): enable lazily once
+        # the scene is built, then drive the per-frame tick on this render thread.
+        self._online_training_requested = bool(online_training)
+        self._online_training_enabled = False
+        self._online_training_refused = False
 
     def stop(self) -> None:
         self._running = False
+
+    def _maybe_online_training(self, dt: float) -> None:
+        """Enable online training once the scene is built and drive its per-frame
+        drain — runs under the render lock on the worker (render) thread."""
+        if not self._online_training_requested or self.renderer is None:
+            return
+        if not self._online_training_enabled:
+            ok, reason = self.renderer.can_online_train()
+            if not ok:
+                if not self._online_training_refused:
+                    self._online_training_refused = True
+                    print(f"[skinny] --online-training refused: {reason}")
+                self._online_training_requested = False
+                return
+            if self.renderer.descriptor_sets is None:
+                return  # scene not built yet; retry next frame
+            self.renderer.enable_online_training()
+            self._online_training_enabled = True
+        self.renderer.online_training_tick()
 
     def run(self) -> None:
         prev = time.perf_counter()
@@ -46,6 +70,7 @@ class _RenderWorker(QObject):
 
                 with self._lock:
                     self.renderer.update(dt)
+                    self._maybe_online_training(dt)
                     pixels = self.renderer.render_headless()
                     w = int(self.renderer.width)
                     h = int(self.renderer.height)
@@ -75,7 +100,7 @@ class RenderViewport(QWidget):
     show the current accumulation count.
     """
 
-    def __init__(self, renderer, parent=None) -> None:
+    def __init__(self, renderer, parent=None, online_training: bool = False) -> None:
         super().__init__(parent)
         self.renderer = renderer
         self._render_lock = Lock()
@@ -116,7 +141,7 @@ class RenderViewport(QWidget):
 
         # Start the worker thread.
         self._thread = QThread(self)
-        self._worker = _RenderWorker(renderer, self._render_lock)
+        self._worker = _RenderWorker(renderer, self._render_lock, online_training)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.frame_ready.connect(self._on_frame_ready)
@@ -404,3 +429,5 @@ class RenderViewport(QWidget):
         self._worker.stop()
         self._thread.quit()
         self._thread.wait(2000)
+        # Stop + join the background trainer thread (no-op when not training).
+        self.renderer.disable_online_training()

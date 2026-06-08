@@ -26,6 +26,12 @@ WALK_CHOICES = ("fused", "eye", "eye_light")
 _WALK_ALIASES = {"megakernel": "fused"}
 
 
+def _env_flag(name: str) -> bool:
+    """Truthy parse of a boolean env var for a ``store_true`` flag default —
+    '1'/'true'/'yes'/'on' (case-insensitive) enable it; unset/empty is False."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def resolve_walk(value: str) -> str:
     """Normalize a bdpt-walk value, mapping the deprecated ``megakernel`` alias
     to ``fused``. Raises ``ValueError`` on a genuinely unknown value."""
@@ -51,12 +57,13 @@ def add_render_flags(
     neural_handoff: bool = True,
     neural_trainer: bool = True,
     train_precision: bool = True,
+    online_training: bool = True,
 ) -> None:
     """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` /
     `--proposals` / `--reuse` / `--lobe-samplers` / `--neural-handoff` /
-    `--neural-trainer` / `--train-precision` flags to ``parser``. Each flag can
-    be suppressed via its keyword in the rare case a front-end must omit it
-    (none currently does)."""
+    `--neural-trainer` / `--train-precision` / `--online-training` flags to
+    ``parser``. Each flag can be suppressed via its keyword in the rare case a
+    front-end must omit it (none currently does)."""
     if integrator:
         parser.add_argument(
             "--integrator", choices=("path", "bdpt"), default=None,
@@ -134,6 +141,18 @@ def add_render_flags(
                  "it (torch autocast on CUDA) and falls back to fp32 otherwise. "
                  "Training always bakes fp32 weights, so the on-disk/handoff "
                  "format is unchanged. Persisted on the interactive front-ends.",
+        )
+    if online_training:
+        parser.add_argument(
+            "--online-training", action="store_true",
+            default=_env_flag("SKINNY_ONLINE_TRAINING"),
+            help="Enable the online neural-proposal training loop on the "
+                 "interactive front-ends (+ SKINNY_ONLINE_TRAINING env). Requires "
+                 "--execution-mode wavefront AND a neural proposal in the mixture "
+                 "(--proposals …,neural); a missing prerequisite is refused with a "
+                 "clear message, not a silent no-op. Off by default (behavior is "
+                 "byte-identical to today). Persisted on the interactive "
+                 "front-ends like --neural-handoff.",
         )
     if execution:
         parser.add_argument(
