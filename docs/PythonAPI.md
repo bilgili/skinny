@@ -218,6 +218,24 @@ make_training_backend("cuda")     # TorchTrainingBackend(device="cuda"); raises 
 | `build_dataset_np(batch, bounds) -> (cond, z, w)` | the shared numpy dataset contract (contiguous float32), consumed by every backend |
 | `TrainerConfig.backend` / `.train_precision` | select the backend (`cpu\|cuda\|mlx\|auto`) and the optimizer precision (`fp32\|fp16`); `arch.precision` is the independent inference precision |
 
+#### Online training driver
+
+`Renderer` exposes the online-training lifecycle the front-ends drive (change
+`online-training-trigger`). `enable_online_training` builds the
+`ReplayBuffer` + `NeuralTrainer` + `NeuralWeightPublisher` and **starts a daemon
+trainer thread** that loops `online_train_and_publish` off the render thread;
+`disable_online_training` signals it to stop and joins it. The render loop calls
+`online_training_tick()` once per frame; the frame-end swap inside
+`render()` / `render_headless()` promotes newly published weights.
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `can_online_train()` | `(self) -> tuple[bool, str]` | prerequisite gate: `(True, "")` only when the execution mode is wavefront **and** a neural proposal is active; otherwise `(False, reason)` naming the missing prerequisite. The front-ends refuse loudly on `False`, never a silent no-op |
+| `enable_online_training(*, handoff=None, trainer_backend=None, train_precision=None, replay=None, trainer=None, capacity=1_000_000, **publisher_kwargs)` | `-> NeuralWeightPublisher` | builds the replay buffer + trainer + publisher, sets `_online_training`, resolves the record source, and starts the background trainer thread. `handoff`/`trainer_backend`/`train_precision` override the renderer's `--neural-handoff`/`--neural-trainer`/`--train-precision`. Surfaces the existing `mlx`/`interop` errors |
+| `online_training_tick()` | `(self) -> int` | per-frame driver: drains GPU path records into the replay buffer on the **render thread** and returns the count; a no-op returning `0` when training is off or the scene isn't built yet. Returns promptly — the per-cycle training runs on the trainer thread |
+| `disable_online_training()` | `(self) -> None` | clears `_online_training` and stops + joins the trainer thread; safe when never enabled |
+| `online_training_active` (property) | `-> bool` | whether the loop is on |
+
 ### Frame loop & output
 
 | Method | Signature | Notes |

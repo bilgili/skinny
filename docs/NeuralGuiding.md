@@ -112,6 +112,54 @@ fp8-storage (e4m3) is the most *portable* precision: the shader decodes the byte
 to float in the scalar GEMM (`neural_flow.slang nf_decode_e4m3`), needing no
 device feature, so it runs on Vulkan / Metal / MoltenVK alike.
 
+## Running online training
+
+The backend/precision flags above only *configure* the loop; `--online-training`
+(change `online-training-trigger`, env `SKINNY_ONLINE_TRAINING`, persisted) is the
+switch that **starts** it on the interactive front-ends (`skinny` GLFW and
+`skinny-gui` Qt). Without it the renderer is byte-identical to an offline-bake run.
+
+**Prerequisites** (checked at startup, refused with a clear one-line message — never
+a silent no-op): `--execution-mode wavefront` **and** a neural proposal in the
+mixture (`--proposals bsdf,neural` or `--proposals neural`). The record drain and
+the neural pre-pass are wavefront-only, so the megakernel cannot drive the loop.
+
+**Mac recipe** (no CUDA — the numpy reference oracle + the file handoff):
+
+```bash
+skinny-gui --execution-mode wavefront --proposals bsdf,neural \
+  --online-training --neural-trainer cpu --neural-handoff file
+```
+
+`--neural-trainer auto` resolves to `cpu` on a torch-free Mac, so it works too.
+The unsupported combos surface their own errors rather than starting a broken loop:
+`--neural-trainer mlx` is reserved (`NotImplementedError`), and `--neural-handoff
+interop` needs CUDA + `VK_KHR_external_memory` (`NotImplementedError` off CUDA).
+
+**Reading the `[neural]` logs.** On enable the trainer prints its configuration
+once and then a throttled per-cycle progress line:
+
+- `[neural] trainer ready: backend=… arch=L…/B…/H…/cond… train_precision=…
+  infer_precision=… steps/cycle=… batch=…` — the trainer was constructed; online
+  training is live.
+- `[neural] warm-started <backend> flow from current weights` — each cycle begins
+  from the live weights (incremental update, not a from-scratch retrain).
+- `[neural] trained N cycle(s) [T total] on S samples/cycle × K steps: loss=…,
+  M ms/cycle` — periodic progress; `ms/cycle` is the off-render-thread training
+  cost (the numpy oracle is ~seconds; CUDA is fast), surfaced so it's visible.
+
+**The async-trainer-thread model.** `enable_online_training` starts a daemon
+trainer thread that loops `online_train_and_publish` (sample the replay buffer →
+`train_cycle` → `publish`) with a short sleep between cycles. The **render thread**
+does the cheap, GPU-touching work — `online_training_tick()` drains a frame of path
+records into the recency-weighted `ReplayBuffer` each frame, and the frame-end
+double-buffer swap promotes any newly published weights and bumps the per-sample
+network version. So a slow cycle never stalls the viewport: it only changes how
+often new weights appear, not the frame rate. The replay buffer guards its `add`
+(render thread) against `sample` (trainer thread) with a lock; every `vkQueue*`
+call stays on the render thread. `disable_online_training` (called at shutdown)
+signals the thread to stop and joins it.
+
 ## Stages of rendering
 
 SplineFlow runs as a **pre-pass + seam** pair on the wavefront backend, mirroring

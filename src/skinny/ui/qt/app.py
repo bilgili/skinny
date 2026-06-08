@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
         execution_mode: str = "megakernel", bdpt_walk: str = "fused",
         initial_integrator: str | None = None,
         neural_handoff: str = "file", neural_trainer: str = "auto",
-        train_precision: str = "fp32",
+        train_precision: str = "fp32", online_training: bool = False,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -101,7 +101,8 @@ class MainWindow(QMainWindow):
         placeholder.setFixedSize(0, 0)
         self.setCentralWidget(placeholder)
 
-        self.viewport = RenderViewport(self.renderer, parent=self)
+        self.viewport = RenderViewport(
+            self.renderer, parent=self, online_training=online_training)
         render_dock = QDockWidget("Render", self)
         # objectName is required by QMainWindow.saveState/restoreState.
         render_dock.setObjectName("render")
@@ -594,7 +595,8 @@ def main() -> None:
                      resolve_walk(args.bdpt_walk), args.integrator,
                      neural_handoff=args.neural_handoff,
                      neural_trainer=args.neural_trainer,
-                     train_precision=args.train_precision)
+                     train_precision=args.train_precision,
+                     online_training=args.online_training)
     win.show()
     sys.exit(app.exec())
 

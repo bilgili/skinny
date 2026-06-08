@@ -527,6 +527,12 @@ def main() -> None:
         saved_prec = saved.get("train_precision")
         if saved_prec in ("fp32", "fp16"):
             renderer._train_precision = saved_prec
+    # --online-training (change online-training-trigger): CLI/env wins, else
+    # restore the persisted flag. Enabling waits until the scene is ready (below).
+    online_training_requested = bool(args.online_training)
+    if ("--online-training" not in sys.argv
+            and not os.environ.get("SKINNY_ONLINE_TRAINING")):
+        online_training_requested = bool(saved.get("online_training", False))
 
     _apply_saved_params(renderer, saved.get("params", {}))
     _apply_saved_camera(renderer, saved.get("camera"))
@@ -559,6 +565,16 @@ def main() -> None:
 
     input_handler = InputHandler(window, renderer)
 
+    # --online-training prerequisite gate (change online-training-trigger). The
+    # static prerequisites (wavefront + a neural proposal) are known now, so
+    # refuse loudly up front; enabling itself waits until the scene is built.
+    if online_training_requested:
+        ok, reason = renderer.can_online_train()
+        if not ok:
+            print(f"[skinny] --online-training refused: {reason}")
+            online_training_requested = False
+    online_training_enabled = False
+
     prev_time = time.perf_counter()
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -569,6 +585,13 @@ def main() -> None:
 
         input_handler.update(dt)
         renderer.update(dt)
+        # Enable online training once the scene is built (enable_online_training
+        # surfaces the existing mlx/interop errors); then drive the per-frame tick.
+        if (online_training_requested and not online_training_enabled
+                and renderer.descriptor_sets is not None):
+            renderer.enable_online_training()
+            online_training_enabled = True
+        renderer.online_training_tick()
         renderer.hud_text_lines = input_handler.build_hud_lines()
         renderer.render()
         debug_viewport.update(dt)
@@ -583,11 +606,14 @@ def main() -> None:
             "neural_handoff": renderer._neural_handoff_kind,
             "neural_trainer": renderer._neural_trainer_kind,
             "train_precision": renderer._train_precision,
+            "online_training": bool(online_training_requested),
         }
         save_settings(out)
     except OSError:
         pass
 
+    # Stop + join the background trainer thread before tearing down the GPU.
+    renderer.disable_online_training()
     debug_viewport.destroy()
     renderer.cleanup()
     vk_ctx.destroy()
