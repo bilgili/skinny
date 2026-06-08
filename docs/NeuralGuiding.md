@@ -75,8 +75,42 @@ mixture collapses to the material's native sampler and the image is
 | Backend | **Wavefront only.** The megakernel keeps the `{bsdf, env}` subset; selecting neural on the megakernel/Metal is reported unsupported (capability gate). |
 | Vertices | **All flat/python bounces** (`depth ≥ 0`), upper hemisphere only — the flow's domain. |
 | Materials | **Flat / standard_surface / OpenPBR / python only.** Skin / MaterialX-graph lanes set `neuralValid = false` and keep the `{bsdf, env}` subset (weights renormalise). |
-| Training | **Frozen, offline, per scene** in the `spline_flow` repo; the renderer dumps `.nrec` records and loads `.nfw1` weights. No online/adaptive training (a reserved Stage 3). |
-| Precision/size | Network size (`NF_LAYERS/BINS/HIDDEN`) and MLP precision (fp32 / fp16-storage / fp16-compute) are **build-time configurable**; the spline core + pdf stay fp32 always. |
+| Training | **Offline** (per scene, in `spline_flow`) **or online** — an async trainer warm-starts the shipped flow and does small recency-weighted updates, with the per-cycle gradient step behind a selectable `TrainingBackend` (see below). The renderer dumps `.nrec` records and loads/hands off `.nfw1` weights. |
+| Precision/size | Network size (`NF_LAYERS/BINS/HIDDEN`) and **inference** MLP precision (fp32 / fp16-storage / fp16-compute / fp8-storage) are **build-time configurable**; **training** precision (fp32 / fp16) is an independent dial. The spline core + pdf stay fp32 always. |
+
+### Training backends & the precision matrix
+
+Online training (change `neural-trainer-backends`) runs the per-cycle gradient
+step behind a small `TrainingBackend` interface (`is_available`,
+`supports_precision`, `warm_start`, `update`, `export`) so the compute framework
+is swappable. `NeuralTrainer` stays the orchestrator (replay sampling →
+`build_dataset_np` → backend → publish). Select it with `--neural-trainer`:
+
+| Token | Backend | Notes |
+| --- | --- | --- |
+| `cpu` | `NumpyTrainingBackend` | torch-free reference oracle — forward **and** backward of the contribution-weighted MLE on the shipped flow via a tiny pure-numpy autodiff tape. The guaranteed-available fallback (a torch-free Mac trains for real, not a placeholder) and the independent numeric oracle the torch/MLX backends are checked against. fp32 only. |
+| `cuda` | `TorchTrainingBackend(device=cuda)` | the torch loop on the training box; autocast-fp16 GEMMs at `--train-precision fp16`. Raises clearly if torch/CUDA are absent. |
+| `mlx` | — | reserved for a later change (Apple Silicon). |
+| `auto` (default) | cuda if torch+CUDA, else cpu | — |
+
+**Train vs. infer precision are independent dials** (post-training quantization).
+Training always bakes **fp32** weights — the on-disk/handoff format never changes —
+so the inference precision is a separate upload-time cast + shader variant:
+
+| | fp32 | fp16-storage | fp16-compute | fp8-storage |
+| --- | --- | --- | --- | --- |
+| **Inference** `NF_WT`/`NF_CT` | float/float | half/float | half/half | e4m3→float / float |
+| weight GPU bytes | ×1 | ×½ | ×½ | ×¼ |
+| device feature | — | 16-bit storage | `shaderFloat16` | **none** (manual decode) |
+| **Training** `--train-precision` | optimizer fp32 | — | — | — |
+| | fp16 | torch autocast on CUDA, else fp32 fallback | | |
+
+Reduced precision here is **variance, not bias**: the reported solid-angle pdf is
+full-precision float in every mode, so a lower-precision GEMM perturbs the
+*proposal* but never the *density* — the mixture-MIS estimator stays unbiased.
+fp8-storage (e4m3) is the most *portable* precision: the shader decodes the byte
+to float in the scalar GEMM (`neural_flow.slang nf_decode_e4m3`), needing no
+device feature, so it runs on Vulkan / Metal / MoltenVK alike.
 
 ## Stages of rendering
 

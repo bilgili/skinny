@@ -49,11 +49,14 @@ def add_render_flags(
     reuse: bool = True,
     lobe_samplers: bool = True,
     neural_handoff: bool = True,
+    neural_trainer: bool = True,
+    train_precision: bool = True,
 ) -> None:
     """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` /
-    `--proposals` / `--reuse` / `--lobe-samplers` / `--neural-handoff` flags to
-    ``parser``. Each flag can be suppressed via its keyword in the rare case a
-    front-end must omit it (none currently does)."""
+    `--proposals` / `--reuse` / `--lobe-samplers` / `--neural-handoff` /
+    `--neural-trainer` / `--train-precision` flags to ``parser``. Each flag can
+    be suppressed via its keyword in the rare case a front-end must omit it
+    (none currently does)."""
     if integrator:
         parser.add_argument(
             "--integrator", choices=("path", "bdpt"), default=None,
@@ -107,6 +110,30 @@ def add_render_flags(
                  "straight into the Vulkan-exported buffer from CUDA "
                  "(VK_KHR_external_memory) with no round-trip — the real-time "
                  "path, CUDA-only (raises on platforms without it).",
+        )
+    if neural_trainer:
+        parser.add_argument(
+            "--neural-trainer", choices=("cpu", "cuda", "mlx", "auto"),
+            default=os.environ.get("SKINNY_NEURAL_TRAINER", "auto"),
+            help="Training-compute backend for online neural-proposal training "
+                 "(+ SKINNY_NEURAL_TRAINER env). 'auto' (default) picks the torch "
+                 "CUDA backend when torch + a CUDA device are present, else the "
+                 "torch-free numpy reference oracle. 'cpu' forces the numpy "
+                 "reference (always available); 'cuda' forces torch on CUDA "
+                 "(raises if torch/CUDA are absent); 'mlx' is reserved for a "
+                 "later change. Persisted on the interactive front-ends.",
+        )
+    if train_precision:
+        parser.add_argument(
+            "--train-precision", choices=("fp32", "fp16"),
+            default=os.environ.get("SKINNY_TRAIN_PRECISION", "fp32"),
+            help="Optimizer compute precision for online training (+ "
+                 "SKINNY_TRAIN_PRECISION env), independent of the inference "
+                 "precision. 'fp32' (default) trains in full precision; 'fp16' "
+                 "uses the framework's mixed precision where the device supports "
+                 "it (torch autocast on CUDA) and falls back to fp32 otherwise. "
+                 "Training always bakes fp32 weights, so the on-disk/handoff "
+                 "format is unchanged. Persisted on the interactive front-ends.",
         )
     if execution:
         parser.add_argument(

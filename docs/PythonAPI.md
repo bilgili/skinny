@@ -188,8 +188,35 @@ NeuralBuildConfig(layers=4, bins=16, hidden=48)             # a smaller net
 | `.slang_defines() -> tuple[str, ...]` | the `slangc -D` tokens; **empty for the default** (⇒ byte-identical compiles) |
 | `.cache_tag -> str` | slug folded into the wavefront `.spv` name so configs don't collide |
 | `.arch -> (layers, bins, hidden, cond)` | the NFW1 architecture the loader validates |
-| `NeuralPrecision.{FP32, FP16_STORAGE, FP16_COMPUTE}` | `.weight_half` / `.compute_half` drive the upload dtype + `NF_WT`/`NF_CT` |
-| `NeuralWeights.weight_bytes_for(precision)` / `.bias_bytes_for(...)` | fp32 NFW1 → the upload bytes (cast to half for the fp16 modes) |
+| `NeuralPrecision.{FP32, FP16_STORAGE, FP16_COMPUTE, FP8_STORAGE}` | `.weight_half` / `.compute_half` / `.weight_fp8` + `.storage_bytes` (4/2/1) drive the upload dtype + the `NF_WT`/`NF_CT`/`NF_FP8` defines |
+| `NeuralWeights.weight_bytes_for(precision)` / `.bias_bytes_for(...)` | fp32 NFW1 → the upload bytes (half for the fp16 modes; e4m3 packed in `uint` words for `FP8_STORAGE`, a quarter of fp32) |
+| `f32_to_e4m3(arr)` / `e4m3_to_f32(bytes)` (`skinny.sampling.neural_weights`) | the e4m3 (OCP E4M3FN) codec mirrored bit-for-bit by `neural_flow.slang nf_decode_e4m3` (the fp8-storage decode) |
+
+#### Training backends
+
+`skinny.sampling.training_backends` is the pluggable per-cycle **training-compute**
+seam behind the online trainer (change `neural-trainer-backends`). `NeuralTrainer`
+stays the orchestrator; the backend owns only the gradient step.
+
+```python
+from skinny.sampling.training_backends import (
+    make_training_backend, build_dataset_np,
+    NumpyTrainingBackend, TorchTrainingBackend)
+
+make_training_backend("auto")     # cuda+torch if available, else the numpy oracle
+make_training_backend("cpu")      # NumpyTrainingBackend — torch-free, always available
+make_training_backend("cuda")     # TorchTrainingBackend(device="cuda"); raises if absent
+```
+
+| Member | Notes |
+|--------|-------|
+| `TrainingBackend` (ABC) | `is_available` / `supports_precision(p, device)` / `warm_start(weights, cfg)` / `update(cond, z, w) -> float\|None` / `export() -> NeuralWeights`; stateful across cycles (warm model + optimizer) |
+| `make_training_backend(kind="auto", *, device="auto", train_precision="fp32", spline_flow_path=None)` | token → backend (`cpu`→numpy, `cuda`→torch, `mlx`→reserved); unavailable explicit token raises clearly |
+| `TRAINING_BACKENDS` | name-keyed token table (`cpu` / `cuda` / `mlx`) |
+| `NumpyTrainingBackend` | torch-free reference oracle: forward + backward of the contribution-weighted MLE via a tiny pure-numpy autodiff tape; fp32 only |
+| `TorchTrainingBackend(device="cpu\|mps\|cuda")` | the torch loop; CUDA autocast-fp16 at `train_precision="fp16"`; in-memory bake |
+| `build_dataset_np(batch, bounds) -> (cond, z, w)` | the shared numpy dataset contract (contiguous float32), consumed by every backend |
+| `TrainerConfig.backend` / `.train_precision` | select the backend (`cpu\|cuda\|mlx\|auto`) and the optimizer precision (`fp32\|fp16`); `arch.precision` is the independent inference precision |
 
 ### Frame loop & output
 
@@ -432,6 +459,7 @@ These submodules expose a curated `__all__` (the top-level package does not):
 |--------|---------|
 | `skinny.sampling` (`__init__.py:19`) | `AttachPoint`, `SamplingPlugin`, `ProposalPlugin`, `ReusePlugin`, `BsdfProposal`, `EnvImportanceProposal`, `NeuralProposal`, `IdentityReuse`, `PROPOSAL_PLUGINS`, `REUSE_PLUGINS`, `parse_proposals`, `parse_reuse`, `proposal_mask_and_alpha` |
 | `skinny.sampling.path_records` | neural training-record (`.nrec`) format — `RECORD_DTYPE`, `RECORD_STRIDE`, `pack_header`, `read_records` (shared with the offline `spline_flow` trainer) |
+| `skinny.sampling.training_backends` | pluggable online training-compute backends — `TrainingBackend`, `NumpyTrainingBackend`, `TorchTrainingBackend`, `make_training_backend`, `TRAINING_BACKENDS`, `build_dataset_np` |
 | `skinny.gfx` (`__init__.py:76`) | backend abstraction — `Backend`, `Device`, `Buffer`, `ComputePipeline`, `DescriptorLayout`, `Format`, `Extent2D/3D`, … |
 | `skinny.gfx.vulkan` (`__init__.py:22`) | `VulkanBackend`, `VulkanDevice`, `VulkanBuffer`, `VulkanImage`, `VulkanCommandList`, `VulkanQueue`, `VulkanFence`, `VulkanSemaphore`, `VulkanSampler`, `VulkanShaderModule`, `VulkanPresenter` |
 | `skinny.gfx.metal` (`__init__.py:43`) | `MetalBackend` (stub; MoltenVK still uses the Vulkan backend) |

@@ -508,6 +508,8 @@ def main() -> None:
         execution_mode=args.execution_mode,
         bdpt_walk=resolve_walk(args.bdpt_walk),
         neural_handoff=args.neural_handoff,
+        neural_trainer=args.neural_trainer,
+        train_precision=args.train_precision,
     )
 
     # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
@@ -515,6 +517,16 @@ def main() -> None:
         saved_handoff = saved.get("neural_handoff")
         if saved_handoff in ("file", "interop"):
             renderer._neural_handoff_kind = saved_handoff
+    # Same precedence for --neural-trainer / --train-precision (change
+    # neural-trainer-backends): CLI/env wins, else restore the persisted value.
+    if "--neural-trainer" not in sys.argv and not os.environ.get("SKINNY_NEURAL_TRAINER"):
+        saved_trainer = saved.get("neural_trainer")
+        if saved_trainer in ("cpu", "cuda", "mlx", "auto"):
+            renderer._neural_trainer_kind = saved_trainer
+    if "--train-precision" not in sys.argv and not os.environ.get("SKINNY_TRAIN_PRECISION"):
+        saved_prec = saved.get("train_precision")
+        if saved_prec in ("fp32", "fp16"):
+            renderer._train_precision = saved_prec
 
     _apply_saved_params(renderer, saved.get("params", {}))
     _apply_saved_camera(renderer, saved.get("camera"))
@@ -569,6 +581,8 @@ def main() -> None:
             "camera": _snapshot_camera(renderer),
             "gizmo_mode": int(renderer.gizmo.mode),
             "neural_handoff": renderer._neural_handoff_kind,
+            "neural_trainer": renderer._neural_trainer_kind,
+            "train_precision": renderer._train_precision,
         }
         save_settings(out)
     except OSError:

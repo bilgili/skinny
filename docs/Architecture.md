@@ -775,6 +775,16 @@ No binding slot moves; the shader's `NF_WT`/`NF_CT` aliases + `NF_LAYERS/BINS/HI
 `#ifndef` defaults reproduce the shipped net byte-for-byte when no override is
 given. See [Wavefront.md § Neural size & precision](Wavefront.md#neural-size--precision-tuning-neural-precision-size-study).
 
+A fourth **fp8-storage** mode (`NeuralPrecision.FP8_STORAGE`, change
+`neural-trainer-backends`) compiles with `-D NF_FP8=1 -D NF_WT=uint`: bindings
+33/34 carry e4m3 (OCP E4M3FN) weights packed 4-per-`uint` (a **quarter** of the
+fp32 footprint), and `neural_flow.slang nf_fetch` decodes each byte to float in
+the scalar GEMM (`nf_decode_e4m3`). The decode is plain integer math + `exp2`, so
+it needs **no device feature** — the most portable precision (Vulkan / Metal /
+MoltenVK alike). `NF_CT` stays `float`; fp8 *compute* is out of scope (would need
+a cooperative-matrix rewrite). The host encode is `neural_weights.f32_to_e4m3`,
+mirrored bit-for-bit by the shader decode.
+
 Under **`--neural-handoff interop`** (online training, change
 `neural-online-training`) bindings 33/34/35 are allocated as **externally-shared
 memory** (`VK_KHR_external_memory`, **dedicated allocation** — required for the

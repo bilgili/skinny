@@ -446,6 +446,59 @@ def test_fp16_pdf_positive_finite(weights, goldens):
 
 
 # ---------------------------------------------------------------------------
+# PRECISION TRACK — fp8 weight storage (e4m3; change neural-trainer-backends).
+# fp8-storage quantizes the weights to e4m3 and decodes them back to float in
+# the scalar GEMM (no compute precision change), so the mirror is the fp32 path
+# run on an e4m3-quantized copy of the weights — exactly what nf_fetch does on
+# the GPU (same codec, neural_weights.f32_to_e4m3 / e4m3_to_f32). e4m3's 3-bit
+# mantissa drifts further than fp16, so the bar is looser; still reported.
+# ---------------------------------------------------------------------------
+
+FP8_STORAGE_PDF_REL_BAR = 0.60
+
+
+def _fp8_quantized(nw):
+    """An e4m3 round-tripped copy of ``nw`` — models fp8 weight storage."""
+    from skinny.sampling.neural_weights import (
+        NeuralWeights, e4m3_to_f32, f32_to_e4m3)
+    w = e4m3_to_f32(f32_to_e4m3(nw.weights)).astype("<f4")
+    b = e4m3_to_f32(f32_to_e4m3(nw.biases)).astype("<f4")
+    return NeuralWeights(nw.layers, nw.bins, nw.hidden, nw.cond,
+                         nw.headers.copy(), w, b)
+
+
+def test_fp8_storage_pdf_drift(weights, goldens):
+    """6.5: fp8-storage (e4m3 weights, float GEMM) drift vs fp32 — reported + bounded."""
+    nw8 = _fp8_quantized(weights)
+    max_rel = mean_rel = 0.0
+    n = 0
+    for cond, u in zip(goldens["forward_cond"], goldens["forward_u"]):
+        c = cond.astype(np.float32)
+        uu = u.astype(np.float32)
+        _, pdf32 = _sample_neural(weights, c, uu)
+        _, pdf8 = _sample_neural(nw8, c, uu)
+        rel = abs(pdf8 - pdf32) / max(pdf32, 1e-8)
+        max_rel = max(max_rel, rel)
+        mean_rel += rel
+        n += 1
+    mean_rel /= max(n, 1)
+    print(f"\n[6.5] fp8-storage pdf drift vs fp32: max={max_rel:.2e} mean={mean_rel:.2e} "
+          f"(bar {FP8_STORAGE_PDF_REL_BAR:.0e})")
+    assert max_rel < FP8_STORAGE_PDF_REL_BAR, (
+        f"fp8-storage drift {max_rel:.2e} exceeds bar {FP8_STORAGE_PDF_REL_BAR:.0e}")
+
+
+def test_fp8_storage_pdf_positive_finite(weights, goldens):
+    """6.5: fp8-storage must still produce finite, strictly-positive pdfs (valid
+    sample + valid mixture component — the unbiasedness precondition)."""
+    nw8 = _fp8_quantized(weights)
+    for cond, u in zip(goldens["forward_cond"], goldens["forward_u"]):
+        wi, pdf = _sample_neural(nw8, cond.astype(np.float32), u.astype(np.float32))
+        assert np.all(np.isfinite(wi)) and abs(np.linalg.norm(wi) - 1.0) < 1e-3
+        assert math.isfinite(pdf) and pdf > 0.0, f"bad fp8 pdf {pdf}"
+
+
+# ---------------------------------------------------------------------------
 # OPTIONAL: GPU-runtime parity (the true 1a gate) — skipped without Vulkan.
 #
 # Compiles a tiny Slang compute kernel that calls sampleNeural / pdfNeural over
