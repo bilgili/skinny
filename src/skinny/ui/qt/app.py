@@ -57,6 +57,8 @@ class MainWindow(QMainWindow):
         initial_integrator: str | None = None,
         neural_handoff: str = "file", neural_trainer: str = "auto",
         train_precision: str = "fp32", online_training: bool = False,
+        proposals: str | None = None, reuse: str | None = None,
+        lobe_samplers: str | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -174,6 +176,22 @@ class MainWindow(QMainWindow):
         # CLI --integrator (when given) wins over the persisted value for this launch.
         if initial_integrator is not None:
             self.renderer.integrator_index = INTEGRATOR_INDEX[initial_integrator]
+        # CLI --proposals / --reuse / --lobe-samplers likewise override the
+        # persisted sampling seam (mirrors app.py GLFW). --proposals must be
+        # applied before the worker enables online training, which gates on the
+        # neural proposal being active.
+        if proposals is not None:
+            self.renderer.proposal_preset_index = (
+                self.renderer.proposal_preset_from_token(proposals))
+        if reuse is not None:
+            self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
+        if lobe_samplers is not None:
+            from skinny.sampling import parse_lobe_samplers
+
+            c, s, d = parse_lobe_samplers(lobe_samplers)
+            self.renderer.coat_sampler_index = c
+            self.renderer.spec_sampler_index = s
+            self.renderer.diff_sampler_index = d
 
         # Keys the viewport responds to (camera mode toggle, focus reset,
         # HUD toggle, free-cam WASDQE). Forwarded from MainWindow when no
@@ -596,7 +614,9 @@ def main() -> None:
                      neural_handoff=args.neural_handoff,
                      neural_trainer=args.neural_trainer,
                      train_precision=args.train_precision,
-                     online_training=args.online_training)
+                     online_training=args.online_training,
+                     proposals=args.proposals, reuse=args.reuse,
+                     lobe_samplers=args.lobe_samplers)
     win.show()
     sys.exit(app.exec())
 

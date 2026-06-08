@@ -47,6 +47,11 @@ class _RenderWorker(QObject):
         if not self._online_training_requested or self.renderer is None:
             return
         if not self._online_training_enabled:
+            # Defer the prerequisite check until the scene is built: the worker
+            # thread starts before MainWindow applies --proposals, so an early
+            # can_online_train() would see the default preset and refuse for good.
+            if self.renderer.descriptor_sets is None:
+                return  # scene not built yet; retry next frame
             ok, reason = self.renderer.can_online_train()
             if not ok:
                 if not self._online_training_refused:
@@ -54,8 +59,6 @@ class _RenderWorker(QObject):
                     print(f"[skinny] --online-training refused: {reason}")
                 self._online_training_requested = False
                 return
-            if self.renderer.descriptor_sets is None:
-                return  # scene not built yet; retry next frame
             self.renderer.enable_online_training()
             self._online_training_enabled = True
         self.renderer.online_training_tick()
