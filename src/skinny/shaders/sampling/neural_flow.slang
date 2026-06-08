@@ -46,6 +46,40 @@
 #define NF_CT float
 #endif
 
+// ---- fp8 weight storage (e4m3; study change neural-trainer-backends) ----
+// A fourth mode, selected by `-D NF_FP8=1 -D NF_WT=uint`: weights are 8-bit
+// e4m3 packed 4-per-`uint`, decoded to `float` in the scalar GEMM. The decode
+// is plain integer math + exp2, so it needs NO device feature (portable across
+// Vulkan / Metal / MoltenVK) — fp8 *compute* would need a cooperative-matrix
+// rewrite and is out of scope. The buffers stay typed `StructuredBuffer<NF_WT>`
+// (= `StructuredBuffer<uint>` here), so no signature changes; only `nf_fetch`
+// below branches. NF_CT stays `float`.
+#ifdef NF_FP8
+// e4m3 (OCP E4M3FN): 1 sign, 4 exp (bias 7), 3 mantissa; no inf, max |x| = 448.
+// Bit-for-bit identical to the host encoder (neural_weights.f32_to_e4m3).
+float nf_decode_e4m3(uint bits)
+{
+    uint s = (bits >> 7) & 0x1u;
+    uint e = (bits >> 3) & 0xFu;
+    uint m = bits & 0x7u;
+    float val = (e == 0u) ? (float(m) * (1.0f / 512.0f))            // 2^-9 * m
+                          : ((1.0f + float(m) * 0.125f) * exp2(float(int(e) - 7)));
+    return (s != 0u) ? -val : val;
+}
+float nf_fetch(StructuredBuffer<NF_WT> buf, uint idx)
+{
+    uint word = buf[idx >> 2];
+    uint by   = (word >> ((idx & 3u) * 8u)) & 0xFFu;
+    return nf_decode_e4m3(by);
+}
+#else
+// fp32 / fp16 storage: a plain element fetch. In fp32 (NF_WT=float) this is
+// `buf[idx]`; in the fp16 modes it returns the half element (the compute type
+// conversion at the multiply is unchanged), so the emitted SPIR-V matches the
+// shipped kernels exactly.
+NF_WT nf_fetch(StructuredBuffer<NF_WT> buf, uint idx) { return buf[idx]; }
+#endif
+
 static const int   NF_DIM    = 2;     // flow dimensionality (a direction = 2 dof)
 static const int   NF_COND   = 9;     // condition dim (renderer: pos3 + N3 + wo3)
 static const float NF_PI     = 3.14159265358979323846f;
@@ -83,10 +117,10 @@ void nf_linear(
 {
     for (int o = 0; o < (int)h.outDim; ++o)
     {
-        NF_CT acc = B[h.biasOffset + o];
+        NF_CT acc = nf_fetch(B, h.biasOffset + (uint)o);
         uint row = h.weightOffset + (uint)o * h.inDim;
         for (int i = 0; i < n_in; ++i)
-            acc += W[row + (uint)i] * inp[i];
+            acc += nf_fetch(W, row + (uint)i) * inp[i];
         outp[o] = act ? nf_silu(acc) : acc;
     }
 }

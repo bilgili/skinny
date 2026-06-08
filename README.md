@@ -427,6 +427,19 @@ new weights only at a frame boundary and bumps the per-sample network version, s
 an async swap raises variance only, never bias. See
 [docs/Architecture.md § Online neural training](docs/Architecture.md#online-neural-training).
 
+`--neural-trainer {cpu,cuda,mlx,auto}` (env `SKINNY_NEURAL_TRAINER`, also
+persisted) selects the **training-compute** backend: `auto` (default) uses torch
+on CUDA when available, else the torch-free **numpy reference oracle**; `cpu`
+forces the numpy reference (always available — a torch-free Mac trains for real);
+`cuda` forces torch on CUDA (raises if absent); `mlx` is reserved for a later
+change. `--train-precision {fp32,fp16}` (env `SKINNY_TRAIN_PRECISION`, persisted)
+sets the optimizer precision independently of inference precision — `fp16` uses
+torch autocast on CUDA and falls back to fp32 elsewhere. Training always bakes
+fp32 weights, so the handoff format is unchanged. The inference precision adds an
+**fp8-storage** (e4m3) mode — quarter-size weights decoded in-shader with no
+device feature, portable across Vulkan/Metal/MoltenVK; see
+[docs/NeuralGuiding.md § Training backends & the precision matrix](docs/NeuralGuiding.md#training-backends--the-precision-matrix).
+
 ### Furnace Mode
 
 Swaps the scene to a unit sphere under unit-white radiance. Pixels exceeding

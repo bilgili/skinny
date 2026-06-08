@@ -927,6 +927,8 @@ class Renderer:
         bdpt_walk: str = "fused",
         neural_config=None,
         neural_handoff: str = "file",
+        neural_trainer: str = "auto",
+        train_precision: str = "fp32",
     ) -> None:
         self.ctx = vk_ctx
         # Neural size/precision build config (study change
@@ -1104,8 +1106,15 @@ class Renderer:
         # Online training (Stage 2, change neural-online-training). The replay
         # buffer + trainer + weight publisher are built lazily by
         # enable_online_training; `_neural_handoff_kind` selects the publisher
-        # backend (--neural-handoff: 'file' | 'interop'). Off until enabled.
+        # backend (--neural-handoff: 'file' | 'interop'). `_neural_trainer_kind`
+        # selects the training-compute backend (--neural-trainer: 'cpu' numpy |
+        # 'cuda' torch | 'mlx' | 'auto') and `_train_precision` the optimizer
+        # precision (--train-precision: 'fp32' | 'fp16'); both feed TrainerConfig
+        # in enable_online_training (change neural-trainer-backends). Off until
+        # enabled.
         self._neural_handoff_kind = str(neural_handoff)
+        self._neural_trainer_kind = str(neural_trainer)
+        self._train_precision = str(train_precision)
         self._online_training = False
         self._neural_replay = None
         self._neural_trainer = None
@@ -6998,6 +7007,8 @@ class Renderer:
         return make_dummy_weights(cfg)
 
     def enable_online_training(self, *, handoff: str | None = None,
+                               trainer_backend: str | None = None,
+                               train_precision: str | None = None,
                                replay=None, trainer=None,
                                capacity: int = 1_000_000, **publisher_kwargs):
         """Start the online training loop (change neural-online-training).
@@ -7005,8 +7016,11 @@ class Renderer:
         A recency-weighted ``ReplayBuffer`` feeds a warm-started ``NeuralTrainer``
         whose new weights a ``NeuralWeightPublisher`` double-buffers into the
         render buffers at the frame boundary, bumping ``networkVersion``.
-        ``handoff`` overrides the renderer's ``--neural-handoff`` backend
-        (``file`` | ``interop``). Returns the publisher.
+        ``handoff`` overrides the renderer's ``--neural-handoff`` publisher
+        (``file`` | ``interop``); ``trainer_backend`` overrides the
+        ``--neural-trainer`` compute backend (``cpu`` | ``cuda`` | ``mlx`` |
+        ``auto``) and ``train_precision`` the ``--train-precision`` optimizer
+        precision (change neural-trainer-backends). Returns the publisher.
         """
         from skinny.sampling.neural_handoff import make_publisher
         from skinny.sampling.neural_replay import ReplayBuffer
@@ -7016,8 +7030,14 @@ class Renderer:
         init = self._current_neural_weights()
         self._neural_replay = (replay if replay is not None
                                else ReplayBuffer(capacity=capacity))
+        # Inference precision defaults to match the chosen training precision
+        # (post-training quantization); both feed the trainer's TrainerConfig.
+        backend_kind = trainer_backend or self._neural_trainer_kind
+        precision = train_precision or self._train_precision
         self._neural_trainer = (trainer if trainer is not None
-                                else NeuralTrainer(TrainerConfig(arch=cfg), initial=init))
+                                else NeuralTrainer(TrainerConfig(
+                                    arch=cfg, backend=backend_kind,
+                                    train_precision=precision), initial=init))
         kind = handoff or self._neural_handoff_kind
         # The interop publisher (task 5.2) writes weights+biases straight into the
         # CUDA-shared binding-33/34 buffers and signals the exported timeline

@@ -44,24 +44,107 @@ NF_MLP_IN = 1 + NF_COND              # one pass-through coord + condition
 # One NfLayerHeader = 4 × uint32 (weightOffset, biasOffset, inDim, outDim).
 HEADER_STRIDE = 16
 
+# e4m3 (OCP "E4M3FN") 8-bit float: 1 sign, 4 exponent (bias 7), 3 mantissa; no
+# inf, max finite magnitude 448. Used for the fp8 weight-STORAGE inference mode
+# (NeuralPrecision.FP8_STORAGE): the host encodes fp32→e4m3 here and the shader
+# decodes byte→float in the scalar GEMM (neural_flow.slang nf_decode_e4m3). NFW1
+# on disk stays fp32 in every precision mode; this is an upload-time cast.
+E4M3_MAX = 448.0
+
+
+def f32_to_e4m3(x: np.ndarray) -> np.ndarray:
+    """Round fp32 → e4m3 bytes (uint8), round-to-nearest-even, saturating to
+    ±448. Matches the in-shader :func:`e4m3_to_f32` decode bit-for-bit."""
+    x = np.asarray(x, np.float64)
+    shape = x.shape
+    x = x.ravel()
+    sign = np.signbit(x).astype(np.uint32)
+    ax = np.abs(x)
+    nz = np.isfinite(ax) & (ax > 0.0)
+    axc = np.where(np.isfinite(ax), np.minimum(ax, E4M3_MAX), E4M3_MAX)
+
+    e = np.floor(np.log2(np.where(nz, axc, 1.0))).astype(np.int64)
+    # normal: e >= -6
+    en = np.clip(e, -6, 8)
+    mant = axc / np.exp2(en.astype(np.float64)) - 1.0
+    q = np.rint(mant * 8.0).astype(np.int64)
+    carry = q >= 8
+    en = np.where(carry, en + 1, en)
+    q = np.where(carry, 0, q)
+    over = en > 8
+    en = np.where(over, 8, en)
+    q = np.where(over, 6, q)
+    exp_n = (en + 7).astype(np.uint32)
+    man_n = q.astype(np.uint32)
+    # never emit the e4m3 NaN slot (exp=15, man=7) → clamp to 448 (exp15, man6)
+    nan_slot = (exp_n == 15) & (man_n == 7)
+    man_n = np.where(nan_slot, 6, man_n)
+
+    # subnormal: e < -6 → value = m * 2^-9, m in 1..7 (m==8 rolls to normal e=-6)
+    qs = np.clip(np.rint(axc / (2.0 ** -9)).astype(np.int64), 0, 8)
+    exp_s = np.where(qs >= 8, 1, 0).astype(np.uint32)
+    man_s = np.where(qs >= 8, 0, qs).astype(np.uint32)
+
+    normal = nz & (e >= -6)
+    sub = nz & (e < -6)
+    exp_f = np.where(normal, exp_n, np.where(sub, exp_s, 0)).astype(np.uint32)
+    man_f = np.where(normal, man_n, np.where(sub, man_s, 0)).astype(np.uint32)
+    out = (sign << 7) | (exp_f << 3) | man_f
+    out = np.where(nz, out, sign << 7).astype(np.uint8)   # ±0 → 0x00 / 0x80
+    return out.reshape(shape)
+
+
+def e4m3_to_f32(b: np.ndarray) -> np.ndarray:
+    """Decode e4m3 bytes (uint8) → fp32, matching neural_flow.slang
+    nf_decode_e4m3 (and the GPU scalar GEMM)."""
+    b = np.asarray(b, np.uint32)
+    s = (b >> 7) & 0x1
+    e = (b >> 3) & 0xF
+    m = b & 0x7
+    val = np.where(e == 0,
+                   m.astype(np.float64) / 512.0,                       # 2^-9 * m
+                   (1.0 + m.astype(np.float64) * 0.125) * np.exp2(e.astype(np.float64) - 7.0))
+    return np.where(s != 0, -val, val).astype(np.float32)
+
+
+def _pack_e4m3(arr: np.ndarray) -> bytes:
+    """Encode an fp32 array to e4m3 bytes, padded to a multiple of 4 so the
+    shader can bind it as ``StructuredBuffer<uint>`` (4 weights / word)."""
+    enc = f32_to_e4m3(np.ascontiguousarray(arr, np.float32)).reshape(-1)
+    pad = (-enc.size) % 4
+    if pad:
+        enc = np.concatenate([enc, np.zeros(pad, np.uint8)])
+    return enc.tobytes()
+
 
 class NeuralPrecision(enum.Enum):
-    """MLP inference precision (study change neural-precision-size-study).
+    """MLP inference precision (study change neural-precision-size-study,
+    extended by change neural-trainer-backends).
 
     Drives both the host upload (which dtype the weight bytes are cast to) and
-    the shader compile (the NF_WT/NF_CT `-D` aliases). The RQ-spline math + the
-    returned pdf are always full precision; only the linear-layer GEMMs change.
+    the shader compile (the NF_WT/NF_CT/NF_FP8 `-D` aliases). The RQ-spline math
+    + the returned pdf are always full precision; only the linear-layer GEMMs
+    change.
     """
 
     FP32 = "fp32"                    # NF_WT=float NF_CT=float — the shipped net
     FP16_STORAGE = "fp16-storage"    # NF_WT=half  NF_CT=float — ½-byte weights
     FP16_COMPUTE = "fp16-compute"    # NF_WT=half  NF_CT=half  — + half GEMM
+    FP8_STORAGE = "fp8-storage"      # e4m3 weights decoded to float in the GEMM
+    #                                  — ¼-byte weights, no device feature needed
 
     @property
     def weight_half(self) -> bool:
-        """True when the weight *storage* (bindings 33/34) is half — both fp16
-        modes upload half bytes; only fp32 stays 4-byte float."""
-        return self is not NeuralPrecision.FP32
+        """True when the weight *storage* (bindings 33/34) is fp16 half — both
+        fp16 modes upload half bytes; fp32 stays 4-byte float and fp8 is a
+        separate quarter-byte path (see :attr:`weight_fp8`)."""
+        return self in (NeuralPrecision.FP16_STORAGE, NeuralPrecision.FP16_COMPUTE)
+
+    @property
+    def weight_fp8(self) -> bool:
+        """True when the weight storage is 8-bit e4m3, decoded to float in the
+        scalar GEMM (manual decode → no device feature required)."""
+        return self is NeuralPrecision.FP8_STORAGE
 
     @property
     def compute_half(self) -> bool:
@@ -69,9 +152,17 @@ class NeuralPrecision(enum.Enum):
         return self is NeuralPrecision.FP16_COMPUTE
 
     @property
+    def storage_bytes(self) -> int:
+        """Bytes per weight scalar in the GPU buffer: 4 (fp32), 2 (fp16), 1 (fp8)."""
+        if self.weight_fp8:
+            return 1
+        return 2 if self.weight_half else 4
+
+    @property
     def needs_device_fp16_compute(self) -> bool:
         """fp16-compute needs `shaderFloat16` (half ALU); the storage mode only
-        needs 16-bit SSBO access. The renderer gates fallback on these."""
+        needs 16-bit SSBO access. The renderer gates fallback on these. fp8
+        decodes from `uint` words and needs neither."""
         return self is NeuralPrecision.FP16_COMPUTE
 
     @property
@@ -117,6 +208,10 @@ class NeuralBuildConfig:
             d += ["-D", "NF_WT=half"]
         if self.precision.compute_half:
             d += ["-D", "NF_CT=half"]
+        if self.precision.weight_fp8:
+            # e4m3 weights packed in uint words; NF_WT becomes the storage word
+            # type and nf_fetch decodes byte→float (NF_CT stays float).
+            d += ["-D", "NF_FP8=1", "-D", "NF_WT=uint"]
         return tuple(d)
 
     @property
@@ -152,13 +247,18 @@ class NeuralWeights:
 
     def weight_bytes_for(self, precision: NeuralPrecision) -> bytes:
         """Weight bytes in the storage dtype for ``precision`` — fp32 stays
-        4-byte float; the fp16 modes cast fp32→half (``<f2``) at upload, halving
-        the GPU footprint. NFW1 on disk is always fp32; this is the upload-time
-        cast (study change neural-precision-size-study)."""
+        4-byte float; the fp16 modes cast fp32→half (``<f2``); fp8 encodes
+        fp32→e4m3 (¼ the bytes) packed for a ``StructuredBuffer<uint>``. NFW1 on
+        disk is always fp32; this is the upload-time cast (study change
+        neural-precision-size-study, fp8 by neural-trainer-backends)."""
+        if precision.weight_fp8:
+            return _pack_e4m3(self.weights)
         dt = "<f2" if precision.weight_half else "<f4"
         return self.weights.astype(dt).tobytes()
 
     def bias_bytes_for(self, precision: NeuralPrecision) -> bytes:
+        if precision.weight_fp8:
+            return _pack_e4m3(self.biases)
         dt = "<f2" if precision.weight_half else "<f4"
         return self.biases.astype(dt).tobytes()
 
@@ -205,20 +305,25 @@ def load_neural_weights(path: str | Path,
     build (study change neural-precision-size-study)."""
     data = Path(path).read_bytes()
     o = 0
-    magic, ver = struct.unpack_from("<II", data, o); o += 8
+    magic, ver = struct.unpack_from("<II", data, o)
+    o += 8
     if magic != MAGIC:
         raise ValueError(f"{path}: bad magic 0x{magic:08X} (want 0x{MAGIC:08X})")
     if ver != VERSION:
         raise ValueError(f"{path}: unsupported version {ver}")
-    layers, bins, hidden, cond = struct.unpack_from("<IIII", data, o); o += 16
-    (n_headers,) = struct.unpack_from("<I", data, o); o += 4
+    layers, bins, hidden, cond = struct.unpack_from("<IIII", data, o)
+    o += 16
+    (n_headers,) = struct.unpack_from("<I", data, o)
+    o += 4
     headers = np.frombuffer(data, dtype="<u4", count=n_headers * 4,
                             offset=o).reshape(n_headers, 4).copy()
     o += n_headers * HEADER_STRIDE
-    (n_weights,) = struct.unpack_from("<I", data, o); o += 4
+    (n_weights,) = struct.unpack_from("<I", data, o)
+    o += 4
     weights = np.frombuffer(data, dtype="<f4", count=n_weights, offset=o).copy()
     o += n_weights * 4
-    (n_biases,) = struct.unpack_from("<I", data, o); o += 4
+    (n_biases,) = struct.unpack_from("<I", data, o)
+    o += 4
     biases = np.frombuffer(data, dtype="<f4", count=n_biases, offset=o).copy()
     nw = NeuralWeights(int(layers), int(bins), int(hidden), int(cond),
                        headers, weights, biases)

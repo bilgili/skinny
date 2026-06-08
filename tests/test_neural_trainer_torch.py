@@ -26,10 +26,11 @@ except ModuleNotFoundError:
 from skinny.sampling.neural_replay import ReplayBuffer
 from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
 from skinny.sampling.path_records import RECORD_DTYPE
+from skinny.sampling.training_backends import TorchTrainingBackend
 
 
 def _torch_ready() -> bool:
-    return NeuralTrainer(TrainerConfig(device="cpu")).torch_active
+    return TorchTrainingBackend(device="cpu").is_available()
 
 
 if pytest is not None:
@@ -70,7 +71,7 @@ def test_train_cycle_updates_weights_and_is_finite():
     replay.add(_concentrated_records(8192, rng))
     trainer = NeuralTrainer(TrainerConfig(
         steps_per_cycle=150, batch=2048, lr=2e-3, device=_device(),
-        bounds=(np.zeros(3), np.ones(3))))
+        bounds=(np.zeros(3), np.ones(3))), backend=_torch_backend())
     assert trainer.torch_active
     w0 = trainer.weights.weights.copy()
     new = trainer.train_cycle(replay, rng)
@@ -88,14 +89,14 @@ def test_train_cycle_warm_starts_across_cycles():
     replay = ReplayBuffer(capacity=50_000)
     trainer = NeuralTrainer(TrainerConfig(
         steps_per_cycle=60, batch=1024, device=_device(),
-        bounds=(np.zeros(3), np.ones(3))))
+        bounds=(np.zeros(3), np.ones(3))), backend=_torch_backend())
     losses = []
     for _ in range(3):
         replay.add(_concentrated_records(4096, rng))
         w = trainer.train_cycle(replay, rng)
         assert np.all(np.isfinite(w.weights))
         losses.append(trainer.last_loss)
-    assert trainer._model is not None                     # warm flow persisted
+    assert trainer._backend._model is not None            # warm flow persisted
     assert all(x is not None and np.isfinite(x) for x in losses)
 
 
