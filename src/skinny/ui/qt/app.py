@@ -55,6 +55,8 @@ class MainWindow(QMainWindow):
         self, scene_path: Path | None, gpu_pref: str, use_usd_mtlx: bool,
         execution_mode: str = "megakernel", bdpt_walk: str = "fused",
         initial_integrator: str | None = None,
+        neural_handoff: str = "file", neural_trainer: str = "auto",
+        train_precision: str = "fp32",
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -79,6 +81,9 @@ class MainWindow(QMainWindow):
             use_usd_mtlx_plugin=use_usd_mtlx,
             execution_mode=execution_mode,
             bdpt_walk=bdpt_walk,
+            neural_handoff=neural_handoff,
+            neural_trainer=neural_trainer,
+            train_precision=train_precision,
         )
 
         # Render viewport: hosted in a dock so the user can detach / re-
@@ -586,7 +591,10 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
-                     resolve_walk(args.bdpt_walk), args.integrator)
+                     resolve_walk(args.bdpt_walk), args.integrator,
+                     neural_handoff=args.neural_handoff,
+                     neural_trainer=args.neural_trainer,
+                     train_precision=args.train_precision)
     win.show()
     sys.exit(app.exec())
 
