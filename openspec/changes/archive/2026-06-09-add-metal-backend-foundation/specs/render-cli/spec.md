@@ -1,15 +1,4 @@
-# render-cli Specification
-
-## Purpose
-
-Provide a single, shared command-line surface for the three render-selection
-axes — integrator (`path` / `bdpt`), execution mode (`megakernel` /
-`wavefront`), and the wavefront-bdpt subpath-build walk (`fused` / `eye` /
-`eye_light`) — so every front-end (windowed `skinny`, Qt `skinny-gui`, web
-`skinny-web`, headless `skinny-render`) exposes the same flags from one
-definition and cannot drift apart.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Unified render-selection flags across every front-end
 

@@ -29,6 +29,12 @@ class VulkanContext:
 
     VALIDATION_LAYERS = ["VK_LAYER_KHRONOS_validation"]
 
+    # Backend predicate, mirrored by MetalContext (skinny.metal_context). Lets the
+    # renderer and later Metal-vs-Vulkan guards branch on a clean attribute
+    # instead of an isinstance check. The Vulkan side is, by definition, "vulkan".
+    backend_name = "vulkan"
+    is_metal = False
+
     def __init__(
         self,
         window=None,

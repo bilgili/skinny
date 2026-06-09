@@ -7,6 +7,29 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Backend
+
+- Native **Metal backend foundation** (change `add-metal-backend-foundation`,
+  P1 of a phased plan) — a native Metal device built on SlangPy's
+  `DeviceType.metal` (slang-rhi, no MoltenVK, no raw PyObjC) in new
+  `metal_context.py` (`MetalContext`) + minimal `metal_compute.py`
+  (`StorageBuffer` / `StorageImage` / `ComputePipeline`). Proves a trivial Slang
+  compute dispatch on Metal that is **bit-identical** to the same kernel on
+  Vulkan, plus a windowed clear+present whose GPU fence signals every frame.
+  Slang compiles to Metal **in-process** (no `slangc` shell-out); the present
+  path drives the slang-rhi `Surface` bridged from the GLFW Cocoa `NSWindow`
+  (no manual `CAMetalLayer`). Pipeline params go via `set_data` byte blobs only,
+  never per-field cursor writes (fence-hang discipline). New shared
+  `--backend {auto,metal,vulkan}` flag (env `SKINNY_BACKEND`, persisted on the
+  interactive front-ends) resolved once by `backend_select.select_backend` /
+  `make_context` and routed through all four front-ends (`skinny`, `skinny-gui`,
+  `skinny-web`, `skinny-render`). **Scope:** device + dispatch + present +
+  selection only — the full renderer is not yet ported to Metal, so `auto`
+  resolves to Vulkan and `--backend metal` on a real front-end reports the
+  foundation phase and exits; `vulkan` is byte-identical to before on every
+  platform. Mac-tested: `tests/test_backend_select.py`,
+  `tests/test_metal_foundation.py`.
+
 ### Neural guiding
 
 - Online-training scaffolding for the neural directional proposal (Stage 2, change

@@ -48,6 +48,7 @@ def resolve_walk(value: str) -> str:
 def add_render_flags(
     parser: argparse.ArgumentParser,
     *,
+    backend: bool = True,
     integrator: bool = True,
     execution: bool = True,
     walk: bool = True,
@@ -59,11 +60,27 @@ def add_render_flags(
     train_precision: bool = True,
     online_training: bool = True,
 ) -> None:
-    """Add the shared `--integrator` / `--execution-mode` / `--bdpt-walk` /
-    `--proposals` / `--reuse` / `--lobe-samplers` / `--neural-handoff` /
-    `--neural-trainer` / `--train-precision` / `--online-training` flags to
-    ``parser``. Each flag can be suppressed via its keyword in the rare case a
-    front-end must omit it (none currently does)."""
+    """Add the shared `--backend` / `--integrator` / `--execution-mode` /
+    `--bdpt-walk` / `--proposals` / `--reuse` / `--lobe-samplers` /
+    `--neural-handoff` / `--neural-trainer` / `--train-precision` /
+    `--online-training` flags to ``parser``. Each flag can be suppressed via its
+    keyword in the rare case a front-end must omit it (none currently does)."""
+    if backend:
+        # `default=None` is a sentinel meaning "use env / persisted / auto",
+        # resolved by skinny.backend_select.select_backend (precedence: explicit
+        # flag > SKINNY_BACKEND env > persisted > auto). Same pattern as
+        # --integrator's None default.
+        parser.add_argument(
+            "--backend", choices=("auto", "metal", "vulkan"), default=None,
+            help="GPU backend, fixed for the session (+ SKINNY_BACKEND env). "
+                 "'auto' (default) resolves to 'vulkan' in this build: native "
+                 "Metal is in a foundation phase — the device + a trivial compute "
+                 "dispatch + present are proven, but the full renderer is not yet "
+                 "ported to Metal, so '--backend metal' on a real front-end "
+                 "reports that full rendering lands in a later phase and exits. "
+                 "'vulkan' is byte-identical to today (MoltenVK under Vulkan on "
+                 "macOS).",
+        )
     if integrator:
         parser.add_argument(
             "--integrator", choices=("path", "bdpt"), default=None,

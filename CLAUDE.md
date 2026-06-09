@@ -137,11 +137,15 @@ slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage 
   -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders
 ```
 
-On macOS the app defaults to the native Metal backend (`--backend metal`) when
-Apple's Metal compiler tools are installed. If `xcrun -find metal` or
-`xcrun -find metallib` fails, the automatic backend falls back to Vulkan;
-explicit `--backend metal` fails early with an Xcode setup hint. Other platforms
-default to Vulkan. `SKINNY_BACKEND=metal|vulkan` also selects the backend.
+`--backend {auto,metal,vulkan}` (env `SKINNY_BACKEND`, persisted on the
+interactive front-ends) selects the GPU backend via the shared resolver in
+`backend_select.py` (precedence: flag > env > persisted > `auto`). The native
+**Metal** backend is currently a *foundation* (device + trivial compute dispatch
++ present, in `metal_context.py`); the full renderer is not yet ported to Metal,
+so `auto` resolves to **Vulkan** on every platform and `--backend metal` on a
+real front-end reports the foundation phase and exits (full Metal render lands in
+a later phase). `--backend vulkan` is the production path everywhere (MoltenVK
+under Vulkan on macOS).
 
 ## Architecture
 
@@ -156,7 +160,7 @@ default to Vulkan. `SKINNY_BACKEND=metal|vulkan` also selects the backend.
 - Progressive accumulation — `accum_frame` increments while `_current_state_hash()` is unchanged. Any state change resets it to 0. The accumulation image is persistent across frames.
 - Mesh rebaking — triggered by source/subdivision/displacement changes. Displacement-slider changes are debounced to 300 ms to avoid per-drag bakes. Auto-subdivision reads frequency stats from the displacement and normal maps via `head_textures.compute_texture_stats`.
 
-**Metal plumbing (`metal_backend.py`)** — `MetalContext` uses SlangPy/RHI with `DeviceType.metal`, creates a surface from the GLFW Cocoa window handle, binds shader globals through `ShaderCursor`, and dispatches `main_pass.slang` directly to Metal.
+**Metal plumbing (`metal_context.py`, `metal_compute.py`)** — `MetalContext` uses SlangPy/RHI with `DeviceType.metal`: a native Metal device, a surface from the GLFW Cocoa `NSWindow` (`WindowHandle(nswindow=…)` → slang-rhi `Surface`, no `CAMetalLayer`), and `present_clear`. `metal_compute.py` has minimal `StorageBuffer`/`StorageImage`/`ComputePipeline` wrappers (Slang→Metal compiled in-process). **Foundation phase**: a trivial compute dispatch + present are proven (entry points are `computeMain`, never `main`); it does **not** dispatch `main_pass.slang` yet — the full render port is a later phase. Pipeline params go via `set_data` byte blobs, never per-field `ShaderCursor` writes (fence-hang discipline). Capability flags are all `False` here.
 
 **Vulkan plumbing (`vk_context.py`, `vk_compute.py`)** — `VulkanContext` owns instance, device, queues, swapchain, and command pool. `ComputePipeline` loads the pre-compiled SPIR-V and reflects the descriptor set layout. `StorageBuffer`, `StorageImage`, `SampledImage`, and `UniformBuffer` wrap GPU memory with synchronous upload helpers.
 

@@ -134,14 +134,17 @@ class HeadlessRenderer:
     """
 
     def __init__(self, width: int, height: int, *, gpu: Optional[str] = None,
+                 backend: str = "vulkan",
                  execution_mode: str = "megakernel", bdpt_walk: str = "fused",
                  proposals: Optional[str] = None, reuse: Optional[str] = None,
                  lobe_samplers: Optional[str] = None) -> None:
         import skinny
+        from skinny.backend_select import make_context
         from skinny.renderer import Renderer
-        from skinny.vk_context import VulkanContext
 
-        self.ctx = VulkanContext(window=None, width=width, height=height, gpu_preference=gpu)
+        self.ctx = make_context(
+            backend, window=None, width=width, height=height, gpu_preference=gpu
+        )
         try:
             self.renderer = Renderer(
                 vk_ctx=self.ctx,
@@ -336,13 +339,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     ns = _build_parser().parse_args(argv)
+    from skinny.backend_select import METAL_FOUNDATION_NOTICE, select_backend
+
+    # skinny-render is non-interactive (no persisted setting): resolve the
+    # backend from --backend / SKINNY_BACKEND / auto. auto resolves to Vulkan in
+    # this foundation phase; an explicit --backend metal is reported and exits.
+    try:
+        backend = select_backend(ns.backend)
+    except RuntimeError as exc:
+        raise SystemExit(f"skinny-render: {exc}")
+    if backend == "metal":
+        raise SystemExit(METAL_FOUNDATION_NOTICE)
     opts = dict(
         samples=ns.samples, integrator=ns.integrator or "path", tonemap=ns.tonemap,
         exposure=ns.exposure, env_intensity=ns.env_intensity,
         direct_light=not ns.no_direct,
     )
     try:
-        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu,
+        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu, backend=backend,
                               execution_mode=ns.execution_mode,
                               bdpt_walk=ns.bdpt_walk,
                               proposals=ns.proposals, reuse=ns.reuse,

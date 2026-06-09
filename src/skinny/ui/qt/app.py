@@ -45,7 +45,11 @@ from skinny.ui.qt.windows.debug_viewport import DebugViewportDock
 from skinny.ui.qt.windows.material_graph import MaterialGraphDock
 from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
 from skinny.ui.qt.windows.scene_graph import SceneGraphDock
-from skinny.vk_context import VulkanContext
+from skinny.backend_select import (
+    METAL_FOUNDATION_NOTICE,
+    make_context,
+    select_backend,
+)
 
 log = logging.getLogger(__name__)
 
@@ -59,17 +63,24 @@ class MainWindow(QMainWindow):
         train_precision: str = "fp32", online_training: bool = False,
         reuse: str | None = None,
         lobe_samplers: str | None = None,
+        backend: str = "vulkan",
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
         self.resize(1600, 900)
 
+        # Resolved GPU backend, persisted in the session snapshot. The Qt GUI is
+        # offscreen-rendered (no GLFW window); the full renderer is Vulkan-only in
+        # this foundation phase, so main() resolves/gates the backend before
+        # constructing this window (auto→vulkan; explicit metal reported + exits).
+        self._backend_name = backend
+
         # Renderer setup — synchronous on main thread (no per-user sessions
         # to worry about in the desktop entry). Headless mode: no GLFW
         # window, no surface, no swapchain. DebugViewport renders to an
         # offscreen image and Qt blits it.
-        self.ctx = VulkanContext(
-            window=None, width=1280, height=720, gpu_preference=gpu_pref,
+        self.ctx = make_context(
+            backend, window=None, width=1280, height=720, gpu_preference=gpu_pref,
         )
         log.info("GPU: %s", self.ctx.gpu_info.name)
 
@@ -480,6 +491,7 @@ class MainWindow(QMainWindow):
                 open_docks.append(name)
         out["open_docks"] = open_docks
         out["last_dirs"] = last_dirs_snapshot()
+        out["backend"] = self._backend_name
         try:
             out["section_states"] = self._tree_builder.section_states()
         except Exception as exc:  # noqa: BLE001
@@ -608,6 +620,17 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s",
     )
 
+    # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
+    # > auto). auto resolves to Vulkan in this foundation phase; an explicit
+    # --backend metal builds the device but the full renderer is not yet ported,
+    # so report that and exit cleanly rather than crashing.
+    try:
+        backend = select_backend(args.backend, persisted=load_settings().get("backend"))
+    except RuntimeError as exc:
+        raise SystemExit(f"skinny-gui: {exc}")
+    if backend == "metal":
+        raise SystemExit(METAL_FOUNDATION_NOTICE)
+
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
                      resolve_walk(args.bdpt_walk), args.integrator,
@@ -616,7 +639,8 @@ def main() -> None:
                      train_precision=args.train_precision,
                      online_training=args.online_training,
                      reuse=args.reuse,
-                     lobe_samplers=args.lobe_samplers)
+                     lobe_samplers=args.lobe_samplers,
+                     backend=backend)
     win.show()
     sys.exit(app.exec())
 

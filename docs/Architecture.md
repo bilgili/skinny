@@ -692,7 +692,64 @@ readback into a `QImage` via `RenderViewport`.
 
 ---
 
+## Backend selection
+
+The active GPU backend is resolved once per session by a single shared resolver
+in `backend_select.py`, used by every front-end:
+
+- `select_backend(prefer, *, persisted=None)` applies the precedence **explicit
+  `--backend` flag > `SKINNY_BACKEND` env > persisted setting > `auto`**,
+  returning `"vulkan"` or `"metal"`. In the current foundation phase `auto`
+  resolves to **Vulkan** on every host (the renderer is not yet ported to Metal);
+  an explicit `--backend metal` returns `"metal"` only when the Metal device
+  constructs, otherwise it raises a clear error naming the missing requirement.
+- `make_context(backend, window, width, height, **kw)` constructs the matching
+  context — a `VulkanContext` (`vk_context.py`) or a `MetalContext`
+  (`metal_context.py`) — both exposing the same duck-typed surface the renderer
+  reads (`width`/`height`, compute/present queues, `swapchain_info`,
+  `allocate_command_buffers`, `recreate_swapchain`, `destroy`, the
+  `backend_name`/`is_metal` predicate, and the capability flags). The four
+  front-ends (`app.py`, `headless.py`, `ui/qt/app.py`, `web_app.py`) call
+  `make_context` instead of constructing a context directly; `app.py` and
+  `skinny-gui` persist/restore the selected backend like the other render flags.
+
+A real front-end that resolves to `metal` in this phase exits with a clear
+"foundation built, full render lands in a later phase — use `--backend vulkan`"
+message (`METAL_FOUNDATION_NOTICE`) rather than crashing, because the renderer's
+`vk_compute` resources need a `VkDevice`. The Metal device + dispatch + present
+foundation is exercised through `make_context` directly by the tests and the
+present smoke.
+
+### MetalContext foundation (`metal_context.py`, `metal_compute.py`)
+
+`MetalContext` stands up a **native** Metal device through SlangPy's
+`DeviceType.metal` (slang-rhi — no MoltenVK, no raw PyObjC) and mirrors the
+`VulkanContext` surface. The present path uses the slang-rhi `Surface`
+(`configure` / `acquire_next_image` / `present`) bridged to a GLFW window via its
+Cocoa `NSWindow` pointer (`WindowHandle(nswindow=…)` from `glfw.get_cocoa_window`)
+— no manual `CAMetalLayer`. `metal_compute.py` provides the minimal
+`StorageBuffer` / `StorageImage` / `ComputePipeline` wrappers; Slang compiles to
+Metal **in-process** (no `slangc` shell-out), and pipeline parameters are bound
+as resources or via `set_data` byte blobs, never per-field cursor writes (a
+scalar cursor write around an open Metal encoder can leave the GPU fence
+un-signalled). Foundation kernels name their entry `computeMain`, never `main`
+(Slang's Metal target reserves `main` and the rename breaks pipeline creation).
+
+This phase (P1) proves the device + a trivial compute dispatch (bit-identical to
+the same Slang kernel on Vulkan) + windowed present. The full renderer (megakernel
+head render, materials, ReSTIR, neural inference, wavefront) and the MLX↔Metal
+zero-copy weight handoff are staged in later changes; until then the capability
+flags `supports_external_memory` / `supports_external_semaphore` /
+`supports_fp16_storage` / `supports_fp16_compute` report `false` on Metal so the
+renderer stays on its fp32 / file-handoff paths.
+
 ## Backend Abstraction (`gfx/`)
+
+> Note: the `gfx/` ABC below is **distinct** from the live Metal foundation in
+> [Backend selection](#backend-selection) above. The renderer drives
+> `VulkanContext` / `MetalContext` duck-typed via `make_context`; the `gfx/`
+> abstraction has no importers outside `gfx/` and remains unused scaffolding (a
+> possible later cleanup, not on the path to the Metal backend).
 
 A new abstraction layer lets the renderer talk to a `Backend` instance
 (`gfx/backend.py`) instead of touching Vulkan directly:
@@ -708,7 +765,7 @@ Backend
 | Backend | Status |
 |---------|--------|
 | `gfx/vulkan/` | Production — wraps `vk_context.py` + `vk_compute.py` |
-| `gfx/metal/` | Stub for a future native macOS path; MoltenVK still uses the Vulkan backend |
+| `gfx/metal/` | Unused stub (`MetalBackend.create()` raises). The live native-Metal path is `metal_context.py` (see [Backend selection](#backend-selection)), **not** this ABC |
 
 `vk_context.py` and `vk_compute.py` keep their direct Vulkan API; the
 abstraction is layered above them so existing code keeps working while
