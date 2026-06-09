@@ -31,7 +31,11 @@ from tornado.websocket import WebSocketHandler
 
 from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.params import _set_nested
-from skinny.vk_context import VulkanContext
+from skinny.backend_select import (
+    METAL_FOUNDATION_NOTICE,
+    make_context,
+    select_backend,
+)
 from skinny.renderer import Renderer
 from skinny.video_encoder import VideoEncoder
 
@@ -39,6 +43,7 @@ log = logging.getLogger(__name__)
 
 # ── Module-level config (set by main) ────────────────────────────────
 
+_BACKEND: str = "vulkan"
 _GPU_PREFERENCE: str = "auto"
 _USD_PATH: Path | None = None
 _USE_USD_MTLX: bool = False
@@ -73,7 +78,7 @@ class SkinnySession:
         self.ready = False
         self._init_error: Exception | None = None
         self._init_log: list[str] = []
-        self.ctx: VulkanContext | None = None
+        self.ctx = None  # VulkanContext | MetalContext, built in initialize()
         self.renderer: Renderer | None = None
         self.encoder: VideoEncoder | None = None
         self._active[session_id] = self
@@ -85,9 +90,9 @@ class SkinnySession:
     def initialize(self) -> None:
         """Heavy initialization — run from a background thread."""
         try:
-            self._log_init("Creating Vulkan context...")
-            self.ctx = VulkanContext(
-                window=None, width=1280, height=720,
+            self._log_init(f"Creating {_BACKEND} context...")
+            self.ctx = make_context(
+                _BACKEND, window=None, width=1280, height=720,
                 gpu_preference=_GPU_PREFERENCE,
             )
             self._log_init(f"GPU: {self.ctx.gpu_info.name}")
@@ -688,8 +693,21 @@ def main() -> None:
     add_render_flags(parser)
     args = parser.parse_args()
 
-    global _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE, _BDPT_WALK
-    global _INTEGRATOR, _PROPOSALS, _REUSE, _LOBE_SAMPLERS
+    # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > auto). The
+    # web server is multi-session and stateless across runs (no persisted
+    # setting). auto resolves to Vulkan in this foundation phase; an explicit
+    # --backend metal builds the device but the full renderer is not yet ported,
+    # so report that and exit cleanly rather than crashing.
+    try:
+        resolved_backend = select_backend(args.backend)
+    except RuntimeError as exc:
+        raise SystemExit(f"skinny-web: {exc}")
+    if resolved_backend == "metal":
+        raise SystemExit(METAL_FOUNDATION_NOTICE)
+
+    global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
+    global _BDPT_WALK, _INTEGRATOR, _PROPOSALS, _REUSE, _LOBE_SAMPLERS
+    _BACKEND = resolved_backend
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx

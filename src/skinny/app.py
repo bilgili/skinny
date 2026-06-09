@@ -23,7 +23,11 @@ from skinny.params import (
     _GANGED_MTLX_FIELDS, _SKIN_TO_MTLX,
 )
 from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
-from skinny.vk_context import VulkanContext
+from skinny.backend_select import (
+    METAL_FOUNDATION_NOTICE,
+    make_context,
+    select_backend,
+)
 from skinny.renderer import Renderer
 from skinny.settings import ensure_dirs, load_settings, save_settings
 
@@ -474,6 +478,17 @@ def main() -> None:
     ensure_dirs()
     saved = load_settings()
 
+    # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
+    # > auto). In this foundation phase auto resolves to Vulkan; an explicit
+    # --backend metal builds the device but the full renderer is not yet ported,
+    # so report that and exit cleanly rather than crashing.
+    try:
+        backend = select_backend(args.backend, persisted=saved.get("backend"))
+    except RuntimeError as exc:
+        raise SystemExit(f"skinny: {exc}")
+    if backend == "metal":
+        raise SystemExit(METAL_FOUNDATION_NOTICE)
+
     if not glfw.init():
         raise RuntimeError("Failed to initialise GLFW")
 
@@ -495,7 +510,7 @@ def main() -> None:
         if isinstance(x, (int, float)) and isinstance(y, (int, float)):
             glfw.set_window_pos(window, int(x), int(y))
 
-    vk_ctx = VulkanContext(window, WINDOW_WIDTH, WINDOW_HEIGHT)
+    vk_ctx = make_context(backend, window, WINDOW_WIDTH, WINDOW_HEIGHT)
 
     repo_root = Path(__file__).resolve().parents[2]
     renderer = Renderer(
@@ -599,6 +614,7 @@ def main() -> None:
 
     try:
         out: dict = {
+            "backend": backend,
             "vulkan_window": _window_pos_dict(window),
             "params": _snapshot_params(renderer, input_handler.params),
             "camera": _snapshot_camera(renderer),

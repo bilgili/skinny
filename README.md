@@ -379,6 +379,20 @@ Example scenes ship in `assets/`:
 
 ## Rendering Modes
 
+### GPU backend (`--backend`)
+
+`--backend {auto,metal,vulkan}` (env `SKINNY_BACKEND`, persisted on the
+interactive front-ends) selects the GPU backend for the session, exposed
+identically by every front-end from one shared definition. `auto` (the default)
+resolves to **Vulkan** today (precedence: `--backend` flag > `SKINNY_BACKEND` >
+persisted > `auto`); `vulkan` is byte-identical to that on every platform
+(MoltenVK under Vulkan on macOS). A native **Metal** backend is in a *foundation
+phase*: the Metal device, a trivial compute dispatch, and present are built and
+tested, but the full renderer is not yet ported to Metal — so `--backend metal`
+reports that and exits cleanly (and an explicit `metal` on a host with no Metal
+device fails with a clear message). Full native-Metal rendering lands in a later
+phase. See [docs/Architecture.md § Backend selection](docs/Architecture.md#backend-selection).
+
 ### Sampling
 
 Two integrators selectable at runtime:
