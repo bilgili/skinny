@@ -57,7 +57,7 @@ class MainWindow(QMainWindow):
         initial_integrator: str | None = None,
         neural_handoff: str = "file", neural_trainer: str = "auto",
         train_precision: str = "fp32", online_training: bool = False,
-        proposals: str | None = None, reuse: str | None = None,
+        reuse: str | None = None,
         lobe_samplers: str | None = None,
     ) -> None:
         super().__init__()
@@ -176,13 +176,11 @@ class MainWindow(QMainWindow):
         # CLI --integrator (when given) wins over the persisted value for this launch.
         if initial_integrator is not None:
             self.renderer.integrator_index = INTEGRATOR_INDEX[initial_integrator]
-        # CLI --proposals / --reuse / --lobe-samplers likewise override the
-        # persisted sampling seam (mirrors app.py GLFW). --proposals must be
-        # applied before the worker enables online training, which gates on the
-        # neural proposal being active.
-        if proposals is not None:
-            self.renderer.proposal_preset_index = (
-                self.renderer.proposal_preset_from_token(proposals))
+        # CLI --reuse / --lobe-samplers override the persisted sampling seam
+        # (mirrors app.py GLFW). skinny-gui has no --proposals: the Proposals
+        # combobox owns proposal selection at runtime, and the online-training
+        # gate now polls lazily until a neural proposal becomes active, so no
+        # startup seed is needed.
         if reuse is not None:
             self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
         if lobe_samplers is not None:
@@ -601,7 +599,9 @@ def main() -> None:
     parser.add_argument("--gpu", type=str, default="auto",
                         help="GPU preference: intel, nvidia, amd, discrete, auto")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
-    add_render_flags(parser)
+    # No --proposals on skinny-gui: the Proposals combobox owns proposal
+    # selection at runtime (and persists it).
+    add_render_flags(parser, proposals=False)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -615,7 +615,7 @@ def main() -> None:
                      neural_trainer=args.neural_trainer,
                      train_precision=args.train_precision,
                      online_training=args.online_training,
-                     proposals=args.proposals, reuse=args.reuse,
+                     reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers)
     win.show()
     sys.exit(app.exec())

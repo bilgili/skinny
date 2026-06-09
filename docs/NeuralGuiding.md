@@ -119,15 +119,30 @@ The backend/precision flags above only *configure* the loop; `--online-training`
 switch that **starts** it on the interactive front-ends (`skinny` GLFW and
 `skinny-gui` Qt). Without it the renderer is byte-identical to an offline-bake run.
 
-**Prerequisites** (checked at startup, refused with a clear one-line message — never
-a silent no-op): `--execution-mode wavefront` **and** a neural proposal in the
-mixture (`--proposals bsdf,neural` or `--proposals neural`). The record drain and
-the neural pre-pass are wavefront-only, so the megakernel cannot drive the loop.
+**Prerequisites**: `--execution-mode wavefront` **and** a neural proposal active
+in the mixture. The record drain and the neural pre-pass are wavefront-only, so
+the megakernel cannot drive the loop. The two prerequisites have different
+lifetimes:
+
+- **Execution mode** is fixed for the session — a non-wavefront mode is refused
+  at startup with a clear one-line message (never a silent no-op) and the loop
+  gives up for the session.
+- **An active neural proposal** is runtime-selectable. On `skinny-gui` (no
+  `--proposals` flag) you launch with `--online-training`, then pick a neural
+  proposal in the **Proposals** combobox; the worker arms (one "waiting for a
+  neural proposal" log line) and starts training the instant a neural proposal
+  becomes active. On `skinny` GLFW the proposal is the `--proposals bsdf,neural`
+  / `--proposals neural` flag (runtime-cycleable too).
 
 **Mac recipe** (no CUDA — the numpy reference oracle + the file handoff):
 
 ```bash
-skinny-gui --execution-mode wavefront --proposals bsdf,neural \
+# skinny-gui: launch armed, then select a neural proposal in the combobox.
+skinny-gui --execution-mode wavefront \
+  --online-training --neural-trainer cpu --neural-handoff file
+
+# skinny (GLFW): the neural proposal is a CLI flag.
+skinny --execution-mode wavefront --proposals bsdf,neural \
   --online-training --neural-trainer cpu --neural-handoff file
 ```
 

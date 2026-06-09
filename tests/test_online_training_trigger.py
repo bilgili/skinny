@@ -109,6 +109,17 @@ def test_can_online_train_true_when_both_hold():
     assert reason == ""
 
 
+def test_online_train_execution_supported_tracks_wavefront_only():
+    # The permanent half of the gate: True iff wavefront, independent of whether
+    # a neural proposal is active (that half is runtime-selectable). The Qt
+    # worker uses this to keep polling on a transient (neural) miss but give up
+    # on a permanent (non-wavefront) one.
+    wave = types.SimpleNamespace(effective_execution_mode_index=EXECUTION_WAVEFRONT)
+    mega = types.SimpleNamespace(effective_execution_mode_index=EXECUTION_MEGAKERNEL)
+    assert Renderer.online_train_execution_supported(wave) is True
+    assert Renderer.online_train_execution_supported(mega) is False
+
+
 # ── 5.3 background trainer thread lifecycle ──────────────────────────
 
 def test_trainer_thread_starts_and_advances_then_joins():
