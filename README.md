@@ -399,8 +399,10 @@ ships the Heitz-2018 basis-form VNDF (coat/spec) and uniform-hemisphere
 
 **Directional-proposal mixture.** The bounce direction is drawn from a
 runtime-selectable mixture of proposals via one-sample MIS:
-`--proposals {bsdf,bsdf+env,env,bsdf+neural,neural}` (env `SKINNY_PROPOSALS`,
-also GUI/persisted). `bsdf` (default) is the material's own importance sampler —
+`--proposals {bsdf,bsdf+env,env,bsdf+neural,neural}` (env `SKINNY_PROPOSALS`) on
+`skinny` / `skinny-web` / `skinny-render`; on `skinny-gui` the **Proposals**
+combobox owns the selection at runtime (no `--proposals` flag there). Persisted
+either way. `bsdf` (default) is the material's own importance sampler —
 bit-identical to the classic renderer; `bsdf,env` MIS-mixes an
 environment-importance proposal (lower variance on IBL); `env` is env-only;
 `bsdf,neural` MIS-mixes a learned, position-conditioned **neural spline-flow**
@@ -444,17 +446,26 @@ device feature, portable across Vulkan/Metal/MoltenVK; see
 switch that actually **starts** the loop on the interactive front-ends (`skinny`
 and `skinny-gui`) — the `--neural-handoff` / `--neural-trainer` /
 `--train-precision` flags above only *configure* it. It has two prerequisites:
-`--execution-mode wavefront` **and** a neural proposal in the mixture
-(`--proposals bsdf,neural` or `--proposals neural`). A missing prerequisite is
-refused with a clear one-line message at startup — never a silent no-op — and an
-unsupported backend/handoff combo (`--neural-trainer mlx`, or `--neural-handoff
-interop` off CUDA) surfaces its own error. Off by default: without the flag the
-renderer is byte-identical to before. The supported **Mac** combo (no CUDA) is
+`--execution-mode wavefront` **and** a neural proposal active in the mixture.
+The wavefront prerequisite is fixed for the session, so a non-wavefront mode is
+refused with a clear one-line message at startup — never a silent no-op. The
+neural-proposal prerequisite is runtime-selectable, so on `skinny-gui` you can
+launch with `--online-training` and *then* pick a neural proposal in the
+**Proposals** combobox — the loop is armed and starts the moment a neural
+proposal becomes active (no `--proposals` flag on the GUI). An unsupported
+backend/handoff combo (`--neural-trainer mlx`, or `--neural-handoff interop` off
+CUDA) surfaces its own error. Off by default: without the flag the renderer is
+byte-identical to before. The supported **Mac** combo (no CUDA) is
 `--neural-trainer cpu` (or `auto`, which picks the numpy oracle there) with
 `--neural-handoff file`; e.g.
 
 ```bash
-skinny-gui --execution-mode wavefront --proposals bsdf,neural \
+# skinny-gui: launch armed, then select a neural proposal in the combobox.
+skinny-gui --execution-mode wavefront \
+  --online-training --neural-trainer cpu --neural-handoff file
+
+# skinny (GLFW): the neural proposal is a CLI flag.
+skinny --execution-mode wavefront --proposals bsdf,neural \
   --online-training --neural-trainer cpu --neural-handoff file
 ```
 

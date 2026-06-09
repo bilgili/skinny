@@ -7114,6 +7114,17 @@ class Renderer:
         self._trainer_thread = None
         self._trainer_stop = None
 
+    def online_train_execution_supported(self) -> bool:
+        """Whether this session's execution mode permits online training at all
+        (wavefront-only; the record drain + neural pre-pass are wavefront-only).
+
+        The execution axis is fixed for the session, so a False here is a
+        *permanent* refusal. Distinct from :meth:`can_online_train`, which also
+        requires a neural proposal to be *currently* active — that half is
+        runtime-selectable (e.g. the skinny-gui Proposals combobox), so a False
+        there is transient, not permanent."""
+        return self.effective_execution_mode_index == EXECUTION_WAVEFRONT
+
     def can_online_train(self) -> tuple[bool, str]:
         """Prerequisite check for online training (change online-training-trigger).
 
