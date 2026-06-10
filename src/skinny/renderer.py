@@ -8727,7 +8727,11 @@ class Renderer:
             self.frame_index = saved_frame_index
 
     def cleanup(self) -> None:
-        vk.vkDeviceWaitIdle(self.ctx.device)
+        # Backend-neutral device drain (see `_build_pipeline_for_current_graphs`).
+        # Metal routes through slang-rhi's `Device.wait_for_idle`; the semaphore /
+        # fence / descriptor-pool teardown below is all Vulkan-only but no-ops on
+        # Metal (empty sync lists, `descriptor_pool is None`).
+        self.ctx.wait_idle()
 
         self._destroy_wavefront_env_pass()
         for sem in self.image_available + self.render_finished:
