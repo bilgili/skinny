@@ -477,6 +477,7 @@ class ComputePipeline:
         self.uniform_layout = {}
         self.uniform_size = 0
         self._default_tex = None
+        self._kernel = None  # lazy compute-kernel for the generic dispatch_kernel path
 
         if not compile_pipeline:
             return
@@ -593,6 +594,23 @@ class ComputePipeline:
         dev.submit_command_buffer(enc.finish())
         dev.wait_for_idle()
 
+    def dispatch_kernel(self, thread_count, *, buffers=None, vars=None) -> None:
+        """Generic low-level dispatch for non-megakernel kernels (the foundation
+        trivial path). Binds shader globals by name from :class:`StorageBuffer`s
+        (their native buffer) plus any already-native ``vars``, and dispatches the
+        kernel over ``thread_count`` (an int triple). Resource binding only — no
+        per-field cursor writes (design D4). Separate from the megakernel
+        :meth:`dispatch`, which binds the ``fc`` uniform block + descriptor map."""
+        dev = self.ctx.device
+        if self._kernel is None:
+            self._kernel = dev.create_compute_kernel(self.program)
+        bound = dict(vars or {})
+        for name, res in (buffers or {}).items():
+            bound[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        self._kernel.dispatch(thread_count=list(thread_count), vars=bound)
+        dev.wait_for_idle()
+
     def destroy(self) -> None:
         self.pipeline = None
         self._default_tex = None
+        self._kernel = None

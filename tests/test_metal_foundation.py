@@ -61,12 +61,19 @@ def _dispatch_arange_metal_context(shader_dir) -> np.ndarray:
     from skinny.metal_context import MetalContext
 
     ctx = MetalContext(window=None, width=64, height=64)
+    buf = pipe = None
     try:
         buf = StorageBuffer(ctx, _N * 4)
         pipe = ComputePipeline(ctx, shader_dir, _MODULE, _ENTRY)
-        pipe.dispatch([_N, 1, 1], buffers={"result": buf})
-        return np.frombuffer(buf.download_sync(), dtype=np.uint32)[:_N].copy()
+        pipe.dispatch_kernel([_N, 1, 1], buffers={"result": buf})
+        return np.frombuffer(buf.download_sync(_N * 4), dtype=np.uint32)[:_N].copy()
     finally:
+        # Explicit per-resource teardown before the device closes — repeated
+        # device/pipeline churn without this is the Metal-test leak vector.
+        if pipe is not None:
+            pipe.destroy()
+        if buf is not None:
+            buf.destroy()
         ctx.destroy()
 
 
