@@ -3938,7 +3938,8 @@ class Renderer:
                 and b_need <= self.bvh_buffer.size):
             return
 
-        vk.vkDeviceWaitIdle(self.ctx.device)
+        # Backend-neutral drain before freeing in-flight mesh buffers.
+        self.ctx.wait_idle()
 
         v_new = max(self.vertex_buffer.size * 2, v_need)
         i_new = max(self.index_buffer.size * 2, i_need)
@@ -3959,7 +3960,12 @@ class Renderer:
         self.index_buffer = self._gpu.StorageBuffer(self.ctx, i_new)
         self.bvh_buffer = self._gpu.StorageBuffer(self.ctx, b_new)
 
-        self._rebind_mesh_descriptors()
+        # Metal binds mesh buffers by reference at dispatch (no Vulkan descriptor
+        # sets — `descriptor_sets is None`), so the next dispatch picks up the
+        # freshly-allocated buffers automatically; the descriptor rewrite is a
+        # Vulkan-only step.
+        if not self.is_metal:
+            self._rebind_mesh_descriptors()
         self.vertex_buffer.upload_sync(self._dummy_mesh.vertex_bytes)
         self.index_buffer.upload_sync(self._dummy_mesh.index_bytes)
         self.bvh_buffer.upload_sync(self._dummy_mesh.bvh_bytes)

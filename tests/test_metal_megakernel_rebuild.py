@@ -42,6 +42,51 @@ pytest.importorskip("slangpy")
 _COMPILE_GATE = "RUN_METAL_MEGAKERNEL_COMPILE"
 
 
+def _metal_renderer(shader_dir):
+    """Construct a headless megakernel Renderer on Metal, or skip cleanly if the
+    backend (or the Vulkan SDK that `renderer.py` imports unconditionally) is
+    unavailable. Returns (ctx, renderer)."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    try:
+        from skinny.metal_context import MetalContext
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (VULKAN_SDK unset)
+        pytest.skip(f"renderer import needs the Vulkan SDK on the dylib path: {exc}")
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=shader_dir, execution_mode="megakernel"
+    )
+    return ctx, renderer
+
+
+def test_metal_mesh_buffer_grow(shader_dir):
+    """`_ensure_mesh_buffer_capacity` grows the vertex/index/bvh buffers when a
+    mesh exceeds current capacity — reached on every real OBJ/USD load. On Metal
+    it must drain via the `wait_idle` seam and SKIP the Vulkan-only descriptor
+    rebind (`descriptor_sets is None` there). Cheap: pure buffer realloc, no
+    megakernel compile, so this runs in the ordinary suite."""
+    ctx, renderer = _metal_renderer(shader_dir)
+    try:
+        v0 = renderer.vertex_buffer.size
+        i0 = renderer.index_buffer.size
+        b0 = renderer.bvh_buffer.size
+        # Demand far more than the initial capacity to force the grow branch.
+        renderer._ensure_mesh_buffer_capacity(
+            num_vertices=v0 * 4, num_triangles=i0 * 4, num_nodes=b0 * 4,
+        )
+        assert renderer.vertex_buffer.size > v0
+        assert renderer.index_buffer.size > i0
+        assert renderer.bvh_buffer.size > b0
+        # Metal never builds Vulkan descriptor sets.
+        assert renderer.descriptor_sets is None
+    finally:
+        renderer.cleanup()
+        ctx.destroy()
+
+
 @pytest.mark.skipif(
     os.environ.get(_COMPILE_GATE) != "1",
     reason=(
