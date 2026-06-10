@@ -122,3 +122,12 @@ def test_unknown_backend_raises_value_error(monkeypatch):
 def test_make_context_unknown_backend_raises():
     with pytest.raises(ValueError, match="unknown backend"):
         bs.make_context("opengl")
+
+
+# ── the foundation refusal is gone (task 6.4) ────────────────────────
+
+def test_foundation_refusal_removed():
+    # The Metal megakernel renders for real now: the foundation-phase refusal
+    # constant must not exist, so no front-end can reintroduce the `--backend
+    # metal` SystemExit. The four front-ends resolve + launch on Metal directly.
+    assert not hasattr(bs, "METAL_FOUNDATION_NOTICE")
