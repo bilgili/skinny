@@ -8283,7 +8283,7 @@ class Renderer:
             return
 
 
-        vk.vkDeviceWaitIdle(self.ctx.device)
+        self.ctx.wait_idle()
 
         self._offscreen_output.destroy()
         self._readback.destroy()
@@ -8307,7 +8307,13 @@ class Renderer:
         self.hud_overlay = self._gpu.HudOverlay(self.ctx, width, height)
         self.hud_overlay.upload(bytes(width * height))
 
-        self._rewrite_size_dependent_descriptors()
+        # Vulkan binds these images through a persistent descriptor set, so the
+        # set-0 entries must be re-pointed at the freshly recreated images. Metal
+        # has no persistent descriptor set — the megakernel dispatch binds
+        # `accum_image.texture` / `_offscreen_output.texture` by reference each
+        # frame, so the new images are picked up automatically.
+        if not self.is_metal:
+            self._rewrite_size_dependent_descriptors()
 
         self.accum_frame = 0
         self._last_state_hash = None
@@ -8359,6 +8365,18 @@ class Renderer:
         ``(array, sample_count)`` where ``array`` is shape (H, W, 4) and
         the caller divides by ``sample_count`` to get linear mean radiance.
         """
+
+        if self.is_metal:
+            # Metal `StorageImage` is rgba32_float; `read_rgba()` drains the
+            # texture straight to an (H, W, 4) float32 host array — no transfer
+            # command buffer, barriers, or fence needed. Match the Vulkan path's
+            # shape/dtype and sample-count exactly.
+            self.ctx.wait_idle()
+            arr = np.asarray(
+                self.accum_image.read_rgba(), dtype=np.float32,
+            ).reshape(self.height, self.width, 4).copy()
+            samples = max(1, int(self.accum_frame) + 1)
+            return arr, samples
 
         vk.vkDeviceWaitIdle(self.ctx.device)
 

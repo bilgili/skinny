@@ -87,6 +87,51 @@ def test_metal_mesh_buffer_grow(shader_dir):
         ctx.destroy()
 
 
+def test_metal_read_accumulation_hdr(shader_dir):
+    """`read_accumulation_hdr` on Metal drains the rgba32_float accumulation
+    texture straight to host — no transfer command buffer, barriers, or fence
+    (the Vulkan path's machinery). Must return the SAME `(H, W, 4)` float32
+    shape + `accum_frame+1` sample count. Cheap: no megakernel compile, just a
+    texture readback, so this runs in the ordinary suite."""
+    import numpy as np
+
+    ctx, renderer = _metal_renderer(shader_dir)
+    try:
+        arr, samples = renderer.read_accumulation_hdr()
+        assert arr.shape == (renderer.height, renderer.width, 4)
+        assert arr.dtype == np.float32
+        assert samples == max(1, int(renderer.accum_frame) + 1)
+    finally:
+        renderer.cleanup()
+        ctx.destroy()
+
+
+def test_metal_resize(shader_dir):
+    """`resize` recreates the offscreen/accum/HUD images at the new size, drains
+    via the `wait_idle` seam, and SKIPS the Vulkan-only descriptor rewrite
+    (`descriptor_sets is None` on Metal — the megakernel dispatch binds the
+    textures by reference each frame). A subsequent `read_accumulation_hdr`
+    reflects the new dimensions. Cheap: image realloc only, no megakernel
+    compile."""
+    ctx, renderer = _metal_renderer(shader_dir)
+    try:
+        old_accum = renderer.accum_image
+        # Dims must clear the 64-px floor and be distinct from the initial 64×64;
+        # 128/96 are workgroup-aligned, so resize() won't early-return.
+        renderer.resize(128, 96)
+        assert (renderer.width, renderer.height) == (128, 96)
+        assert (ctx.width, ctx.height) == (128, 96)
+        assert renderer.accum_image is not old_accum, "accum image not recreated"
+        assert renderer.descriptor_sets is None, "Metal must not build descriptor sets"
+        # Accumulation resets on resize, and the readback honors the new size.
+        assert renderer.accum_frame == 0
+        arr, _ = renderer.read_accumulation_hdr()
+        assert arr.shape == (96, 128, 4)
+    finally:
+        renderer.cleanup()
+        ctx.destroy()
+
+
 @pytest.mark.skipif(
     os.environ.get(_COMPILE_GATE) != "1",
     reason=(

@@ -243,6 +243,8 @@ trainer thread** that loops `online_train_and_publish` off the render thread;
 | `update(dt)` | `(self, dt: float) -> None` (`:6985`) | advance animation/camera, detect dirty state, reset accumulation |
 | `render()` | `(self) -> None` (`:7065`) | windowed: dispatch + present to swapchain |
 | `render_headless()` | `(self) -> bytes` (`:7289`) | **returns raw RGBA8 `bytes`, length `width*height*4`** (tonemapped/sRGB) |
+| `read_accumulation_hdr()` | `(self) -> tuple[np.ndarray, int]` (`:8363`) | linear-HDR readback: `(H, W, 4)` float32 accum buffer + sample count; divide array by count for mean radiance. **Vulkan + Metal** (Metal drains the rgba32_float texture directly — no transfer/fence) |
+| `resize(width, height)` | `(self, int, int) -> None` (`:8265`) | change render resolution at runtime (clamped ≥64, workgroup-aligned); recreates offscreen/accum/HUD images, resets accumulation. **Vulkan + Metal** |
 | `save_screenshot(path_or_file, fmt)` | `-> None` (`:7631`) | `png`/`jpeg`/`bmp` → LDR; `exr`/`hdr` → linear HDR from accum buffer |
 | `dump_path_records(out_path, *, num_frames=256, ...)` | `-> int` | offline neural training-record dump → a `.nrec` file (per-vertex `(pos, N, wo, wiLocal, contribution)` via the `mainImageRecord` megakernel entry); returns the record count. Feeds `spline_flow/render_records.py`. |
 | `cleanup()` | `(self) -> None` (`:7692`) | release GPU resources |
