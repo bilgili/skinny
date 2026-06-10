@@ -48,6 +48,18 @@ Per-frame: `vkCmdBindPipeline` → `vkCmdBindDescriptorSets(descriptor_sets[f])`
 BXDF/BSSRDF visualiser, keyed by `toolBuffer[0]` (`renderer.py:5609-5619`,
 `main_pass.slang:386-396`).
 
+The same `toolBuffer[0].x` dispatch hijack also drives a **structural AOV** mode
+(`TOOL_MODE_STRUCTURAL`, `bindings.slang`). When armed, `runFrame` writes one
+`float4` per pixel — `(hit-mask, instanceId, materialId, depth)` — into
+`toolBuffer` from slot `TOOL_STRUCT_AOV_BASE` (16) instead of shading, reusing
+the real primary ray + `traceScene`. It feeds the Metal↔Vulkan **structural
+parity** test (6.1): the structural channel is deterministic across backends
+(integer ids + depth, no transcendental divergence), so it is compared
+bit-exact (ids/mask) / within a tiny depth tolerance, while shaded color uses a
+perceptual bar (6.2). Host entry point: `Renderer.read_structural_aov()`. The
+winning TLAS instance index is carried on `HitInfo.instanceId`
+(`mesh_head.slang` records it in `marchHeadMesh`).
+
 ---
 
 ## 2. Per-pixel flow (all inline in one invocation)

@@ -40,6 +40,23 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
     Ray ray = cam.generateRay(pixel, rng, lensWeight);
     HitInfo hit = traceScene(fc, ray);
 
+    // Structural AOV (Metal↔Vulkan parity test, 6.1). When armed, write one
+    // float4 per pixel — (hit-mask, instanceId, materialId, depth) — into the
+    // tool buffer and skip shading. Reuses the real primary ray + traceScene so
+    // the channel reflects exactly what the renderer traces. Deterministic
+    // across backends (same createRNG(pixel, frameIndex) ⇒ same AA jitter ⇒
+    // same ray). Mutually exclusive with the BXDF/BSSRDF tool modes.
+    if (asuint(toolBuffer[0].x) == TOOL_MODE_STRUCTURAL)
+    {
+        uint slot = TOOL_STRUCT_AOV_BASE + pixel.y * fc.width + pixel.x;
+        toolBuffer[slot] = float4(
+            hit.hit ? 1.0 : 0.0,
+            float(hit.instanceId),
+            float(hit.materialId),
+            hit.hit ? hit.t : 0.0);
+        return;
+    }
+
     // BXDF visualizer pick. When the CPU has armed a pick and this pixel
     // matches the requested one, snapshot the hit into toolBuffer. Cheap:
     // one buffer write per frame at one pixel. Pick output sits at
@@ -237,6 +254,7 @@ void bxdfEvalThread(uint2 cell)
     h.hit            = true;
     h.hasTangent     = true;
     h.materialId     = matId;
+    h.instanceId     = 0u;
 
     uint matType = materialTypes[matId] & 0xFFu;
     float3 response = float3(0.0);

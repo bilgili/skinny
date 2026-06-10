@@ -55,10 +55,18 @@ uniform FrameConstants fc;
 //             slot index = 16 + j*n_theta + i  where (i, j) = (theta, phi)
 [[vk::binding(30)]] RWStructuredBuffer<float4>     toolBuffer;
 
-static const uint TOOL_MODE_OFF    = 0u;
-static const uint TOOL_MODE_PICK   = 1u;  // pick path uses fc.pickArmed, not toolMode
-static const uint TOOL_MODE_BXDF   = 2u;
-static const uint TOOL_MODE_BSSRDF = 3u;
+static const uint TOOL_MODE_OFF        = 0u;
+static const uint TOOL_MODE_PICK       = 1u;  // pick path uses fc.pickArmed, not toolMode
+static const uint TOOL_MODE_BXDF       = 2u;
+static const uint TOOL_MODE_BSSRDF     = 3u;
+static const uint TOOL_MODE_STRUCTURAL = 4u;  // per-pixel structural AOV → toolBuffer
+
+// Structural-AOV (TOOL_MODE_STRUCTURAL) writes one float4 per pixel —
+// (hit-mask, instanceId, materialId, depth) — into toolBuffer starting at this
+// slot, for the Metal↔Vulkan structural-parity test (6.1). Past the 16-slot
+// header/pick region; overlaps the BXDF grid output, but the tool modes are
+// mutually exclusive (only one armed per frame). Mirrors renderer.TOOL_STRUCT_AOV_BASE.
+static const uint TOOL_STRUCT_AOV_BASE = 16u;
 
 static const uint MATERIAL_TYPE_SKIN         = 0u;
 static const uint MATERIAL_TYPE_FLAT         = 1u;

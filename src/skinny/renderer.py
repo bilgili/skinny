@@ -221,6 +221,16 @@ EMISSIVE_TRI_CAPACITY = 256
 STD_SURFACE_STRIDE = 256
 STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 
+# Tool-buffer (binding 30) dispatch modes. Slot 0.x of the tool buffer selects
+# how main_pass.mainImage / runFrame behave for the frame; these mirror the
+# constants in shaders/bindings.slang. TOOL_MODE_STRUCTURAL writes one float4
+# per pixel — (hit-mask, instanceId, materialId, depth) — into the tool buffer
+# starting at slot TOOL_STRUCT_AOV_BASE, used by the Metal↔Vulkan structural-
+# parity test (6.1). The structural region overlaps the BXDF grid output, but
+# the modes are mutually exclusive (only one is armed at a time).
+TOOL_MODE_STRUCTURAL = 4
+TOOL_STRUCT_AOV_BASE = 16  # float4 slots; past the 16-slot header/pick region
+
 # Default diffuse for materials whose UsdPreviewSurface diffuseColor is
 # texture-connected rather than constant — mid-grey keeps unbound prims
 # visible until bindless textures (Phase C-4) actually sample the file.
@@ -5965,6 +5975,59 @@ class Renderer:
             callback(result)
         except Exception as exc:
             print(f"[skinny] bxdf eval callback raised: {exc}")
+
+    def read_structural_aov(self) -> np.ndarray:
+        """Dispatch one megakernel frame in ``TOOL_MODE_STRUCTURAL`` and read the
+        per-primary-ray structural channel back from the tool buffer.
+
+        Returns an ``(H, W, 4)`` float32 array; the last axis is
+        ``(hit_mask, instance_id, material_id, depth)`` — hit_mask is 1.0 on a
+        hit else 0.0, the ids are integer-valued floats, and depth is the
+        world-space ray parameter at the hit (0.0 on a miss).
+
+        Backend-agnostic: the dispatch goes through the active backend's headless
+        frame path and the tool buffer (binding 30) is host-visible on both
+        backends. Used by the Metal↔Vulkan structural-parity test (6.1); the
+        ``runFrame`` structural write reuses the real primary ray, so the channel
+        reflects exactly what the renderer traces. Determinism: the frame is
+        dispatched from ``accum_frame == 0`` so both backends use the same
+        ``createRNG(pixel, frameIndex)`` AA jitter.
+
+        Raises ``RuntimeError`` if the megakernel pipeline is not built (e.g.
+        wavefront mode, where the tool-mode dispatch is not compiled) and
+        ``ValueError`` if the resolution overflows the tool buffer.
+        """
+        if self.pipeline is None or not self._backend_render_ready:
+            raise RuntimeError(
+                "read_structural_aov requires a built megakernel pipeline"
+            )
+        w, h = self.width, self.height
+        n = w * h
+        base_bytes = TOOL_STRUCT_AOV_BASE * 16
+        need = base_bytes + n * 16
+        if need > self.tool_buffer.size:
+            raise ValueError(
+                f"structural AOV needs {need} B but tool buffer is "
+                f"{self.tool_buffer.size} B — lower the render resolution"
+            )
+
+        # Arm: TOOL_MODE_STRUCTURAL at tool-buffer slot 0.x. Only .x is read.
+        header = bytearray(16)
+        struct.pack_into("Ifff", header, 0, TOOL_MODE_STRUCTURAL, 0.0, 0.0, 0.0)
+        self.tool_buffer.write(bytes(header), offset=0)
+        # Zero the structural region so a partial/missed write reads as a miss.
+        self.tool_buffer.write(b"\x00" * (n * 16), offset=base_bytes)
+
+        # Deterministic single frame: same frameIndex on both backends ⇒ same
+        # AA jitter ⇒ same primary rays.
+        self.accum_frame = 0
+        self.render_headless()
+
+        # Disarm so the next normal frame renders.
+        self.tool_buffer.write(b"\x00" * 16, offset=0)
+
+        raw = self.tool_buffer.read(n * 16, offset=base_bytes)
+        return np.frombuffer(raw, dtype=np.float32).reshape(h, w, 4).copy()
 
     def _refresh_gizmo_segments(self) -> None:
         view = self.camera.view_matrix()

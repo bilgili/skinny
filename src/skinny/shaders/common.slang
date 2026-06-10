@@ -28,6 +28,7 @@ struct HitInfo
     bool   hit;
     bool   hasTangent;     // true when uv comes from an asset (not the fallback sphere map)
     uint   materialId;     // index into the active material set
+    uint   instanceId;     // winning TLAS instance index (structural AOV / parity)
 };
 
 // Per-material flat-shading record. Used by main_pass.slang when a hit's

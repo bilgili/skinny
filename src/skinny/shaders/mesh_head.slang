@@ -266,6 +266,7 @@ HitInfo marchHeadBLAS(
     info.tangent    = float3(1, 0, 0);
     info.hasTangent = false;
     info.materialId = 0u;
+    info.instanceId = 0u;
 
     int    closestTri;
     float2 closestBary;
@@ -385,6 +386,7 @@ HitInfo marchHeadMesh(Ray rayWorld, uint count)
     best.tangent        = float3(1, 0, 0);
     best.hasTangent     = false;
     best.materialId     = 0u;
+    best.instanceId     = 0u;
 
     for (uint i = 0u; i < count; i++)
     {
@@ -430,6 +432,7 @@ HitInfo marchHeadMesh(Ray rayWorld, uint count)
             best.normal         = normalWorld;
             best.tangent        = tangentWorld;
             best.materialId     = inst.materialId;
+            best.instanceId     = i;
             // backT scales with the same direction-projection convention.
             if (h.backT > 0.0)
             {
