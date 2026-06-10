@@ -25,6 +25,16 @@ import materials.skin.skin_volume;
 import materials.skin.skin_transmission;
 import materials.skin.skin_hair_sheen;
 
+// Metal splits combined `Sampler2D` detail maps into `Texture2D` + a per-map
+// `SamplerState` (see skin_shading.slang). The sample macro is re-defined here
+// because preprocessor macros do not cross `import`; Vulkan expands to the exact
+// prior token stream → byte-identical SPIR-V.
+#if defined(SKINNY_METAL)
+#define MAP_SAMPLE_LEVEL(T, UV, LOD)  T.SampleLevel(T##Sampler, UV, LOD)
+#else
+#define MAP_SAMPLE_LEVEL(T, UV, LOD)  T.SampleLevel(UV, LOD)
+#endif
+
 // ── Detail / params staging ─────────────────────────────────────
 
 struct SkinShading
@@ -59,13 +69,13 @@ SkinShading buildSkinShading(HitInfo hit, FrameConstants fc, uint scatterBits)
         float3 B = cross(N, T);
         if (useNormalMap)
         {
-            float3 nSample = normalMap.SampleLevel(hit.uv, 0.0).xyz;
+            float3 nSample = MAP_SAMPLE_LEVEL(normalMap, hit.uv, 0.0).xyz;
             float2 nxy = (nSample.xy * 2.0 - 1.0) * clamp(fc.normalMapStrength, 0.0, 4.0);
             float  nz  = sqrt(max(1.0 - dot(nxy, nxy), 1e-4));
             N_detail = normalize(T * nxy.x + B * nxy.y + N * nz);
         }
         if (useRoughnessMap)
-            mapRough = roughnessMap.SampleLevel(hit.uv, 0.0).x;
+            mapRough = MAP_SAMPLE_LEVEL(roughnessMap, hit.uv, 0.0).x;
     }
     N = N_detail;
 

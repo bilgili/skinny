@@ -2,7 +2,21 @@
 
 import common;
 
+// slang-rhi's Metal backend cannot bind a combined `Sampler2D` (it asserts
+// "Unsupported binding type"), so on the Metal target every combined sampler is
+// split into a plain `Texture2D` + its own `SamplerState`. Vulkan keeps the
+// combined form, so its SPIR-V is byte-identical. `MAP_SAMPLE_LEVEL(T, uv, lod)`
+// expands to `T.SampleLevel(T##Sampler, uv, lod)` on Metal and the unchanged
+// `T.SampleLevel(uv, lod)` on Vulkan (macros do not cross `import`; defined per
+// sampling file).
+#if defined(SKINNY_METAL)
+[[vk::binding(4)]]  Texture2D<float4> envMap;
+[[vk::binding(39)]] SamplerState envMapSampler;
+#define MAP_SAMPLE_LEVEL(T, UV, LOD)  T.SampleLevel(T##Sampler, UV, LOD)
+#else
 [[vk::binding(4)]] Sampler2D<float4> envMap;
+#define MAP_SAMPLE_LEVEL(T, UV, LOD)  T.SampleLevel(UV, LOD)
+#endif
 
 // Direction → equirectangular UV. Convention: +y up, phi around y from +z.
 float2 directionToEquirectUV(float3 dir)
@@ -16,7 +30,7 @@ float2 directionToEquirectUV(float3 dir)
 float3 sampleEnvironment(float3 dir, float intensity)
 {
     float2 uv = directionToEquirectUV(dir);
-    return envMap.SampleLevel(uv, 0.0).rgb * intensity;
+    return MAP_SAMPLE_LEVEL(envMap, uv, 0.0).rgb * intensity;
 }
 
 // Unit-white fallback when furnace / energy-conservation mode is active.
@@ -55,7 +69,7 @@ float3 sampleEnvironmentCell(float3 dir, float intensity)
     int iv = clamp(int(uv.y * float(ENV_DIST_H)), 0, ENV_DIST_H - 1);
     float2 c = float2((float(iu) + 0.5) / float(ENV_DIST_W),
                       (float(iv) + 0.5) / float(ENV_DIST_H));
-    return envMap.SampleLevel(c, 0.0).rgb * intensity;
+    return MAP_SAMPLE_LEVEL(envMap, c, 0.0).rgb * intensity;
 }
 
 float3 sceneEnvRadianceCell(float3 dir, float intensity, uint furnaceMode)

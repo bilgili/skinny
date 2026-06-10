@@ -11,10 +11,26 @@ import skinny_skin_layered_bsdf_genslang;
 
 // ── Skin-specific resource bindings ─────────────────────────────
 
+// On the Metal target combined `Sampler2D` is unsupported by slang-rhi, so each
+// detail map is a `Texture2D` + its own `SamplerState`; Vulkan keeps the
+// combined form byte-identical. See MAP_SAMPLE_LEVEL below / environment.slang.
+#if defined(SKINNY_METAL)
+[[vk::binding(8)]]  Texture2D<float4>              tattooMap;
+[[vk::binding(40)]] SamplerState                  tattooMapSampler;
+[[vk::binding(9)]]  Texture2D<float4>              normalMap;
+[[vk::binding(41)]] SamplerState                  normalMapSampler;
+[[vk::binding(10)]] Texture2D<float4>              roughnessMap;
+[[vk::binding(42)]] SamplerState                  roughnessMapSampler;
+[[vk::binding(11)]] Texture2D<float4>              displacementMap;
+[[vk::binding(43)]] SamplerState                  displacementMapSampler;
+#define MAP_SAMPLE_LEVEL(T, UV, LOD)  T.SampleLevel(T##Sampler, UV, LOD)
+#else
 [[vk::binding(8)]]  Sampler2D<float4>              tattooMap;
 [[vk::binding(9)]]  Sampler2D<float4>              normalMap;
 [[vk::binding(10)]] Sampler2D<float4>              roughnessMap;
 [[vk::binding(11)]] Sampler2D<float4>              displacementMap;
+#define MAP_SAMPLE_LEVEL(T, UV, LOD)  T.SampleLevel(UV, LOD)
+#endif
 [[vk::binding(15)]] StructuredBuffer<MtlxSkinParams> mtlxSkin;
 
 // ── Closure-type tags for the genslang BSDF ─────────────────────
@@ -27,7 +43,7 @@ static const int SKINNY_CLOSURE_INDIRECT     = 3;
 
 float4 inkAtHit(HitInfo h, float tattooDensity)
 {
-    float4 s = tattooMap.SampleLevel(h.uv, 0.0);
+    float4 s = MAP_SAMPLE_LEVEL(tattooMap, h.uv, 0.0);
     return float4(s.rgb, s.a * tattooDensity);
 }
 

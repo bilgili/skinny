@@ -67,6 +67,32 @@ from skinny.vk_compute import (
 WORKGROUP_SIZE = 8
 MAX_FRAMES_IN_FLIGHT = 2
 
+# Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
+# matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
+# packer (`_pack_uniforms_msl`, design D3) to relocate each field from the Vulkan
+# scalar blob into the MSL struct at its reflected offset — `float3` fields keep
+# 12 scalar bytes but land in a 16-byte MSL slot. Names match the compiled
+# module's reflected field names (the embedded `Camera` is `camera.<field>`).
+# A drift guard asserts the cumulative size equals `len(_pack_uniforms())`.
+_FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
+    ("camera.viewInverse", 64), ("camera.projInverse", 64),
+    ("camera.view", 64), ("camera.proj", 64),
+    ("camera.position", 12), ("camera.fov", 4),
+    ("frameIndex", 4), ("accumFrame", 4), ("time", 4), ("width", 4), ("height", 4),
+    ("numDistantLights", 4), ("useMesh", 4), ("tattooDensity", 4), ("envIntensity", 4),
+    ("furnaceMode", 4), ("mmPerUnit", 4), ("detailFlags", 4), ("normalMapStrength", 4),
+    ("displacementScaleMM", 4), ("numInstances", 4), ("numSphereLights", 4),
+    ("numEmissiveTriangles", 4), ("integratorType", 4), ("numGizmoSegments", 4),
+    ("numLensElements", 4), ("filmDistance", 4), ("rearZ", 4), ("rearAperture", 4),
+    ("frontZ", 4), ("filmHalfH", 4), ("irisZ", 4), ("numPupilBounds", 4),
+    ("filmDiagRadiusW", 4), ("focusOverlay", 4), ("focusPlaneOrigin", 12),
+    ("focusPlaneNormal", 12), ("zoomMin", 8), ("zoomMax", 8), ("lensVignetteDebug", 4),
+    ("pickPixel", 8), ("pickArmed", 4), ("exposure", 4), ("tonemapMode", 4),
+    ("proposalMask", 4), ("reuseMode", 4), ("proposalAlpha", 16), ("flatLobeSamplers", 4),
+    ("sceneBoundsMin", 12), ("sceneBoundsExtent", 12), ("neuralNetworkVersion", 4),
+    ("recordMode", 4),
+)
+
 # Cap on lens elements packed into the binding-23 SSBO. PBRT lens designs
 # in the wild peak around 11-13 surfaces (Canon FD 200/1.8, double-Gauss
 # variants); 32 leaves headroom for compound zooms without bloating the
@@ -237,18 +263,22 @@ class TexturePool:
 
     SENTINEL = 0xFFFFFFFF
 
-    def __init__(self, ctx: VulkanContext) -> None:
+    def __init__(self, ctx, gpu) -> None:
         self.ctx = ctx
-        self._slots: list[SampledImage | None] = [None] * BINDLESS_TEXTURE_CAPACITY
+        # GPU-resource module (vk_compute / metal_compute) — the pool's bindless
+        # capacity follows the active backend's cap (Metal trims to fit its
+        # 128-texture / 16-sampler argument limit, design D8).
+        self._gpu = gpu
+        self._capacity = int(getattr(gpu, "BINDLESS_TEXTURE_CAPACITY",
+                                     BINDLESS_TEXTURE_CAPACITY))
+        self._slots = [None] * self._capacity
         self._by_path: dict[str, int] = {}
         self._next_slot = 0
 
-    _WRAP_TO_VK = {
-        "repeat":  vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        "clamp":   vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        "mirror":  vk.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
-        "black":   vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-        "useMetadata": vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    # Backend-neutral wrap tokens (resolved per backend inside SampledImage).
+    _WRAP_TOKENS = {
+        "repeat": "repeat", "clamp": "clamp", "mirror": "mirror",
+        "black": "black", "useMetadata": "repeat",
     }
 
     def add_or_get(
@@ -283,13 +313,13 @@ class TexturePool:
             img = Image.open(path).convert("RGBA")
         except (FileNotFoundError, OSError):
             return self.SENTINEL
-        if self._next_slot >= BINDLESS_TEXTURE_CAPACITY:
+        if self._next_slot >= self._capacity:
             return self.SENTINEL
         w, h = img.size
-        fmt = vk.VK_FORMAT_R8G8B8A8_UNORM if linear else vk.VK_FORMAT_R8G8B8A8_SRGB
-        addr_u = self._WRAP_TO_VK.get(wrap_s, vk.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-        addr_v = self._WRAP_TO_VK.get(wrap_t, vk.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-        slot = SampledImage(
+        fmt = "rgba8_unorm" if linear else "rgba8_srgb"
+        addr_u = self._WRAP_TOKENS.get(wrap_s, "repeat")
+        addr_v = self._WRAP_TOKENS.get(wrap_t, "repeat")
+        slot = self._gpu.SampledImage(
             self.ctx, w, h,
             format=fmt,
             bytes_per_pixel=4,
@@ -932,6 +962,19 @@ class Renderer:
         train_precision: str = "fp32",
     ) -> None:
         self.ctx = vk_ctx
+        # Resolve the GPU-resource module once from the context (design D1): the
+        # renderer builds every megakernel resource through `self._gpu.*`, which is
+        # `vk_compute` on a VulkanContext (byte-identical to before) and
+        # `metal_compute` on a MetalContext — no per-construction-site backend
+        # branch. `is_metal` gates the few genuinely different paths (uniform pack,
+        # frame dispatch).
+        from skinny.backend_select import resource_module
+        self._gpu = resource_module(self.ctx)
+        self.is_metal = bool(getattr(self.ctx, "is_metal", False))
+        # Shared sampler for the Metal bindless texture pool (binding 38, design
+        # D8). One sampler instead of the 128 a combined Sampler2D[] would emit.
+        self._metal_common_sampler = (
+            self._gpu._make_sampler(self.ctx) if self.is_metal else None)
         # Neural size/precision build config (study change
         # neural-precision-size-study). Fixed for the renderer's lifetime — the
         # study harness builds a fresh headless renderer per grid cell. Falls
@@ -1499,6 +1542,11 @@ class Renderer:
         scene descriptor sets exist and the compiled backend is present. In
         megakernel mode that means the megakernel pipeline; in wavefront mode
         the scene bindings (the staged stage pipelines build lazily)."""
+        if self.is_metal:
+            # The Metal megakernel binds resources at dispatch (no Vulkan
+            # descriptor sets); readiness is just the compiled pipeline. ReSTIR/
+            # wavefront fold back to the megakernel on Metal.
+            return self.pipeline is not None
         if self.descriptor_sets is None:
             return False
         if self.effective_execution_mode_index == EXECUTION_MEGAKERNEL:
@@ -1597,8 +1645,8 @@ class Renderer:
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
-        self._wf_path_state_buf = StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
-        self._wf_path_hit_buf = StorageBuffer(
+        self._wf_path_state_buf = self._gpu.StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
+        self._wf_path_hit_buf = self._gpu.StorageBuffer(
             self.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
         self._wavefront_path_pass = WavefrontPathPass(
             self.ctx, self.shader_dir, self._scene_set0_layout,
@@ -1682,9 +1730,9 @@ class Renderer:
         stream_size = max(1, min(num_pixels, cap))
         vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
         aux_bytes = stream_size * WavefrontBdptPass.AUX_STRIDE
-        self._wf_bdpt_eye_buf = StorageBuffer(self.ctx, vert_bytes)
-        self._wf_bdpt_light_buf = StorageBuffer(self.ctx, vert_bytes)
-        self._wf_bdpt_aux_buf = StorageBuffer(self.ctx, aux_bytes)
+        self._wf_bdpt_eye_buf = self._gpu.StorageBuffer(self.ctx, vert_bytes)
+        self._wf_bdpt_light_buf = self._gpu.StorageBuffer(self.ctx, vert_bytes)
+        self._wf_bdpt_aux_buf = self._gpu.StorageBuffer(self.ctx, aux_bytes)
         self._wavefront_bdpt_pass = WavefrontBdptPass(
             self.ctx, self.shader_dir, self._scene_set0_layout,
             self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
@@ -1882,9 +1930,8 @@ class Renderer:
         (see CLAUDE.md headless notes)."""
         import numpy as np
 
-        from skinny.vk_compute import ReadbackBuffer
         w, h = self.width, self.height
-        readback = ReadbackBuffer(self.ctx, w, h, bytes_per_pixel=16)  # RGBA32F
+        readback = self._gpu.ReadbackBuffer(self.ctx, w, h, bytes_per_pixel=16)  # RGBA32F
         f = self.current_frame
         vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
         cmd = self.command_buffers[f]
@@ -2188,7 +2235,7 @@ class Renderer:
         through without requiring a separate `_upload_flat_materials`
         round-trip.
         """
-        from skinny.vk_compute import python_material_ids as _ids_fn
+        from skinny.megakernel_sources import python_material_ids as _ids_fn
         ids = _ids_fn()
         out: dict[int, int] = {}
         scene = self._usd_scene if self._usd_scene is not None else self.scene
@@ -2882,7 +2929,7 @@ class Renderer:
         attempted_sig = self._graph_set_signature()
         if megakernel:
             try:
-                self._scene_bindings = ComputePipeline(
+                self._scene_bindings = self._gpu.ComputePipeline(
                     self.ctx,
                     self.shader_dir,
                     entry_module="main_pass",
@@ -2900,7 +2947,7 @@ class Renderer:
                 )
                 self._scene_graph_fragments = []
                 self._material_graph_ids.clear()
-                self._scene_bindings = ComputePipeline(
+                self._scene_bindings = self._gpu.ComputePipeline(
                     self.ctx,
                     self.shader_dir,
                     entry_module="main_pass",
@@ -2913,7 +2960,7 @@ class Renderer:
             # Wavefront mode: build the scene plumbing (set-0 layout + material
             # emission + graph bindings) WITHOUT compiling main_pass. The
             # wavefront stage pipelines are built lazily in the render gate.
-            self._scene_bindings = ComputePipeline.scene_bindings_only(
+            self._scene_bindings = self._gpu.ComputePipeline.scene_bindings_only(
                 self.ctx,
                 self.shader_dir,
                 graph_fragments=list(self._scene_graph_fragments),
@@ -2923,13 +2970,23 @@ class Renderer:
         # state — keeps the rebuild gate idempotent.
         built_sig = attempted_sig
 
-        # Allocate descriptor pool + sets sized for the new fragment count;
-        # then push graph SSBOs, texture-pool slots, and per-material type
-        # codes against the freshly-allocated descriptor sets.
-        self._create_descriptors()
-        self._upload_graph_param_buffers()
-        self._update_texture_pool_descriptors()
-        self._upload_material_types()
+        if self.is_metal:
+            # Metal binds resources at dispatch (no Vulkan descriptor pool/sets);
+            # only the per-graph SSBO data + material-type codes need uploading.
+            # The texture-pool textures are bound directly from the pool at
+            # dispatch, so `_update_texture_pool_descriptors` (a Vulkan
+            # descriptor-write) is skipped.
+            self.descriptor_sets = None
+            self._upload_graph_param_buffers()
+            self._upload_material_types()
+        else:
+            # Allocate descriptor pool + sets sized for the new fragment count;
+            # then push graph SSBOs, texture-pool slots, and per-material type
+            # codes against the freshly-allocated descriptor sets.
+            self._create_descriptors()
+            self._upload_graph_param_buffers()
+            self._update_texture_pool_descriptors()
+            self._upload_material_types()
         self._pipeline_built_for_targets = built_sig
         if is_rebuild:
             print(
@@ -2960,7 +3017,7 @@ class Renderer:
 
         # Uniform buffer — FrameConstants + SkinParams + light
         self.uniform_size = 512  # generous, std140 aligned
-        self.uniform_buffer = UniformBuffer(self.ctx, self.uniform_size)
+        self.uniform_buffer = self._gpu.UniformBuffer(self.ctx, self.uniform_size)
 
         # Per-material skin UBO array (binding 15). StructuredBuffer of
         # MtlxSkinParams, one per material slot — only skin-typed slots
@@ -2970,7 +3027,7 @@ class Renderer:
         # _init_materialx_runtime may have set this already from reflection.
         if not hasattr(self, 'mtlx_skin_record_size') or self.mtlx_skin_record_size == 0:
             self.mtlx_skin_record_size = 164
-        self.mtlx_skin_buffer = StorageBuffer(
+        self.mtlx_skin_buffer = self._gpu.StorageBuffer(
             self.ctx,
             self.material_capacity * self.mtlx_skin_record_size + 256,
         )
@@ -2983,7 +3040,7 @@ class Renderer:
         # Persistent HDR accumulation image (progressive convergence).
         # transfer_src=True so screenshot path can copy raw float radiance
         # to a host-visible staging buffer for EXR/HDR export.
-        self.accum_image = StorageImage(
+        self.accum_image = self._gpu.StorageImage(
             self.ctx, self.width, self.height, transfer_src=True,
         )
 
@@ -2991,17 +3048,17 @@ class Renderer:
         # Pre-zero the staging buffer so the GPU image starts clean even if
         # render() never gets to upload before render_headless() / a
         # screenshot dispatch reads it.
-        self.hud_overlay = HudOverlay(self.ctx, self.width, self.height)
+        self.hud_overlay = self._gpu.HudOverlay(self.ctx, self.width, self.height)
         self.hud_overlay.upload(bytes(self.width * self.height))
 
         # HDR environment texture (RGBA32F, equirectangular).
         from skinny.environment import ENV_HEIGHT, ENV_WIDTH
-        self.env_image = SampledImage(self.ctx, ENV_WIDTH, ENV_HEIGHT)
+        self.env_image = self._gpu.SampledImage(self.ctx, ENV_WIDTH, ENV_HEIGHT)
         # Environment importance-sampling CDFs (bindings 31/32). Sized for the
         # full equirect resolution; uploaded by _ensure_env_uploaded whenever
         # the env changes. Drives env NEE + MIS in path.slang.
-        self.env_marginal_buffer = StorageBuffer(self.ctx, (ENV_HEIGHT + 1) * 4)
-        self.env_cond_buffer = StorageBuffer(
+        self.env_marginal_buffer = self._gpu.StorageBuffer(self.ctx, (ENV_HEIGHT + 1) * 4)
+        self.env_cond_buffer = self._gpu.StorageBuffer(
             self.ctx, ENV_HEIGHT * (ENV_WIDTH + 1) * 4)
         self._ensure_env_uploaded()
 
@@ -3019,9 +3076,9 @@ class Renderer:
         # (VK_KHR_external_memory, task 5.1); a guarded no-op on devices without
         # the extension. The file handoff uses plain device-local buffers.
         _ext_neural = (self._neural_handoff_kind == "interop")
-        self.neural_weights_buffer = StorageBuffer(self.ctx, max(len(_nwb), 4), external=_ext_neural)
-        self.neural_biases_buffer = StorageBuffer(self.ctx, max(len(_nbb), 4), external=_ext_neural)
-        self.neural_layers_buffer = StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4), external=_ext_neural)
+        self.neural_weights_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nwb), 4), external=_ext_neural)
+        self.neural_biases_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nbb), 4), external=_ext_neural)
+        self.neural_layers_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4), external=_ext_neural)
         self.neural_weights_buffer.upload_sync(_nwb)
         self.neural_biases_buffer.upload_sync(_nbb)
         self.neural_layers_buffer.upload_sync(_nw.header_bytes)
@@ -3039,31 +3096,31 @@ class Renderer:
         # which reallocates `record_buffer` to the per-frame capacity, binds it,
         # and reads it back. `mainImage` never touches these (dead-stripped).
         from skinny.sampling.path_records import RECORD_STRIDE
-        self.record_buffer = StorageBuffer(self.ctx, RECORD_STRIDE)   # 1 dummy record
-        self.record_counter = StorageBuffer(self.ctx, 8)             # [count, capacity]
+        self.record_buffer = self._gpu.StorageBuffer(self.ctx, RECORD_STRIDE)   # 1 dummy record
+        self.record_counter = self._gpu.StorageBuffer(self.ctx, 8)             # [count, capacity]
         self._record_pipeline = None   # lazily-built mainImageRecord ComputePipeline
         self._drain_buffer = None      # persistent live-drain target (task 1.2)
 
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
         # descriptor is valid even before the user flips off "None".
-        self.tattoo_image = SampledImage(self.ctx, TATTOO_WIDTH, TATTOO_HEIGHT)
+        self.tattoo_image = self._gpu.SampledImage(self.ctx, TATTOO_WIDTH, TATTOO_HEIGHT)
         self.tattoo_image.upload_sync(blank_tattoo_data())
         self._ensure_tattoo_uploaded()
 
         # Per-model detail maps — RGBA8, 2K square. Three images cover
         # normal / roughness / displacement respectively. Seeded with
         # blanks so the descriptors are valid on frame 1.
-        self.normal_image = SampledImage(
+        self.normal_image = self._gpu.SampledImage(
             self.ctx, DETAIL_TEX_RES, DETAIL_TEX_RES,
-            format=vk.VK_FORMAT_R8G8B8A8_UNORM, bytes_per_pixel=4,
+            format="rgba8_unorm", bytes_per_pixel=4,
         )
-        self.roughness_image = SampledImage(
+        self.roughness_image = self._gpu.SampledImage(
             self.ctx, DETAIL_TEX_RES, DETAIL_TEX_RES,
-            format=vk.VK_FORMAT_R8G8B8A8_UNORM, bytes_per_pixel=4,
+            format="rgba8_unorm", bytes_per_pixel=4,
         )
-        self.displacement_image = SampledImage(
+        self.displacement_image = self._gpu.SampledImage(
             self.ctx, DETAIL_TEX_RES, DETAIL_TEX_RES,
-            format=vk.VK_FORMAT_R8G8B8A8_UNORM, bytes_per_pixel=4,
+            format="rgba8_unorm", bytes_per_pixel=4,
         )
         self.normal_image.upload_sync(blank_normal_bytes())
         self.roughness_image.upload_sync(blank_roughness_bytes())
@@ -3105,9 +3162,9 @@ class Renderer:
             v_size = max(v_size, usd_v_bytes + 256)
             i_size = max(i_size, usd_i_bytes + 256)
             b_size = max(b_size, usd_b_bytes + 256)
-        self.vertex_buffer = StorageBuffer(self.ctx, v_size)
-        self.index_buffer = StorageBuffer(self.ctx, i_size)
-        self.bvh_buffer = StorageBuffer(self.ctx, b_size)
+        self.vertex_buffer = self._gpu.StorageBuffer(self.ctx, v_size)
+        self.index_buffer = self._gpu.StorageBuffer(self.ctx, i_size)
+        self.bvh_buffer = self._gpu.StorageBuffer(self.ctx, b_size)
         # Upload the dummy mesh so the buffers are valid on first frame
         # even before the user picks a real mesh (or if none are present).
         self._upload_mesh(self._dummy_mesh)
@@ -3119,7 +3176,7 @@ class Renderer:
         # so the upload path can grow into multi-mesh scenes (Phase D)
         # without reallocation.
         self.instance_capacity = 16
-        self.instance_buffer = StorageBuffer(
+        self.instance_buffer = self._gpu.StorageBuffer(
             self.ctx, self.instance_capacity * INSTANCE_STRIDE + 256
         )
         self._upload_instances([np.eye(4, dtype=np.float32)], material_ids=[0])
@@ -3127,7 +3184,7 @@ class Renderer:
 
         # Flat-material parameter buffer — one record per scene material.
         # Sized for FLAT_MATERIAL_CAPACITY entries up front.
-        self.flat_material_buffer = StorageBuffer(
+        self.flat_material_buffer = self._gpu.StorageBuffer(
             self.ctx, self.material_capacity * FLAT_MATERIAL_STRIDE + 256
         )
         # Initialize with one zeroed record so the buffer is valid even
@@ -3137,11 +3194,11 @@ class Renderer:
 
         # Bindless texture array (binding 14). Slots are populated lazily by
         # `_upload_flat_materials` from each Material.texture_paths entry.
-        self.texture_pool = TexturePool(self.ctx)
+        self.texture_pool = TexturePool(self.ctx, self._gpu)
 
         # Per-material type-code buffer (binding 16). One uint per slot,
         # written each time _upload_flat_materials runs.
-        self.material_types_buffer = StorageBuffer(
+        self.material_types_buffer = self._gpu.StorageBuffer(
             self.ctx, self.material_capacity * 4 + 16
         )
         self._material_types: list[int] = [MATERIAL_TYPE_FLAT]
@@ -3153,7 +3210,7 @@ class Renderer:
 
         # Sphere-light buffer (binding 17). Filled from
         # scene.lights_sphere; fc.numSphereLights bounds the active range.
-        self.sphere_lights_buffer = StorageBuffer(
+        self.sphere_lights_buffer = self._gpu.StorageBuffer(
             self.ctx, SPHERE_LIGHT_CAPACITY * SPHERE_LIGHT_STRIDE + 16
         )
         self.sphere_lights_buffer.upload_sync(
@@ -3166,7 +3223,7 @@ class Renderer:
         # single lightDirection/lightRadiance uniforms so the integrators
         # can iterate every authored distant light via DirectionalLightImpl
         # (ILight).
-        self.distant_lights_buffer = StorageBuffer(
+        self.distant_lights_buffer = self._gpu.StorageBuffer(
             self.ctx, DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE + 16
         )
         self.distant_lights_buffer.upload_sync(
@@ -3177,7 +3234,7 @@ class Renderer:
         # Emissive-triangle buffer (binding 18). Built from scene instances
         # whose material has non-zero emissiveColor. The shader samples one
         # triangle per pixel per frame for next-event estimation.
-        self.emissive_tri_buffer = StorageBuffer(
+        self.emissive_tri_buffer = self._gpu.StorageBuffer(
             self.ctx, EMISSIVE_TRI_CAPACITY * EMISSIVE_TRI_STRIDE + 16
         )
         self.emissive_tri_buffer.upload_sync(
@@ -3188,7 +3245,7 @@ class Renderer:
         # StdSurfaceParams buffer (binding 19). One 256-byte record per
         # material slot, carrying the full MaterialX standard_surface input
         # set for evalStdSurfaceBSDF in mtlx_std_surface.slang.
-        self.std_surface_buffer = StorageBuffer(
+        self.std_surface_buffer = self._gpu.StorageBuffer(
             self.ctx, self.material_capacity * STD_SURFACE_STRIDE + 16
         )
         self.std_surface_buffer.upload_sync(
@@ -3198,7 +3255,7 @@ class Renderer:
         # BDPT light-tracer splat buffer (binding 21). 3 × uint32 per pixel
         # (Q22.10 fixed-point, atomic-add target). Cleared via fill_zero_sync
         # whenever the accumulation resets so the running mean stays correct.
-        self.light_splat_buffer = StorageBuffer(
+        self.light_splat_buffer = self._gpu.StorageBuffer(
             self.ctx, self.width * self.height * 3 * 4
         )
         self.light_splat_buffer.fill_zero_sync()
@@ -3212,7 +3269,7 @@ class Renderer:
         )
         self.gizmo_segment_capacity = GIZMO_SEGMENT_CAPACITY
         self.gizmo_segment_stride = GIZMO_SEGMENT_STRIDE
-        self.gizmo_segments_buffer = StorageBuffer(
+        self.gizmo_segments_buffer = self._gpu.StorageBuffer(
             self.ctx,
             self.gizmo_segment_capacity * self.gizmo_segment_stride + 16,
         )
@@ -3240,7 +3297,7 @@ class Renderer:
         # signature changes; otherwise reused frame to frame.
         self.lens_element_capacity = MAX_LENS_ELEMENTS
         self.lens_element_stride = 16   # float4
-        self.lens_elements_buffer = StorageBuffer(
+        self.lens_elements_buffer = self._gpu.StorageBuffer(
             self.ctx,
             self.lens_element_capacity * self.lens_element_stride + 16,
         )
@@ -3263,7 +3320,7 @@ class Renderer:
         # keeping the rendered area full-screen even at small fstops.
         self.lens_pupil_capacity = 64
         self.lens_pupil_stride = 16
-        self.lens_pupil_buffer = StorageBuffer(
+        self.lens_pupil_buffer = self._gpu.StorageBuffer(
             self.ctx,
             self.lens_pupil_capacity * self.lens_pupil_stride + 16,
         )
@@ -3283,18 +3340,17 @@ class Renderer:
         # binding 1 to the swapchain image per frame, so this offscreen
         # only sees writes during the screenshot path.
         # Must be created before _create_descriptors which writes binding 1.
-        from skinny.vk_compute import ReadbackBuffer
-        self._offscreen_output = StorageImage(
+        self._offscreen_output = self._gpu.StorageImage(
             self.ctx, self.width, self.height,
-            format=vk.VK_FORMAT_R8G8B8A8_UNORM,
+            format="rgba8_unorm",
             transfer_src=True,
         )
-        self._readback = ReadbackBuffer(self.ctx, self.width, self.height)
+        self._readback = self._gpu.ReadbackBuffer(self.ctx, self.width, self.height)
 
         # BXDF visualizer output (binding 30). Host-visible SSBO holding
         # the picked HitInfo and (future) BXDF eval grid. Sized for a
         # 128 × 64 float4 lobe grid + 32-slot header, plus headroom.
-        self.tool_buffer = HostStorageBuffer(self.ctx, 128 * 64 * 16 + 4096)
+        self.tool_buffer = self._gpu.HostStorageBuffer(self.ctx, 128 * 64 * 16 + 4096)
         self._pick_armed: bool = False
         self._pick_pixel: tuple[int, int] = (0, 0)
         self._pick_frame_count: int = 0
@@ -3307,8 +3363,14 @@ class Renderer:
         # Command buffers
         self.command_buffers = self.ctx.allocate_command_buffers(MAX_FRAMES_IN_FLIGHT)
 
-        # Synchronisation
-        if self.ctx.swapchain_info is not None:
+        # Synchronisation. The Metal megakernel dispatch is synchronous
+        # (submit + wait_for_idle each frame), so it needs no Vulkan
+        # fences/semaphores — the present-smoke fence is owned by the surface.
+        if self.is_metal:
+            self.image_available = []
+            self.render_finished = []
+            self.in_flight_fences = []
+        elif self.ctx.swapchain_info is not None:
             swapchain_image_count = len(self.ctx.swapchain_info.images)
             self.image_available = [
                 vk.vkCreateSemaphore(
@@ -3326,14 +3388,15 @@ class Renderer:
             self.image_available = []
             self.render_finished = []
 
-        self.in_flight_fences = [
-            vk.vkCreateFence(
-                self.ctx.device,
-                vk.VkFenceCreateInfo(flags=vk.VK_FENCE_CREATE_SIGNALED_BIT),
-                None,
-            )
-            for _ in range(MAX_FRAMES_IN_FLIGHT)
-        ]
+        if not self.is_metal:
+            self.in_flight_fences = [
+                vk.vkCreateFence(
+                    self.ctx.device,
+                    vk.VkFenceCreateInfo(flags=vk.VK_FENCE_CREATE_SIGNALED_BIT),
+                    None,
+                )
+                for _ in range(MAX_FRAMES_IN_FLIGHT)
+            ]
 
         self.current_frame = 0
 
@@ -3888,9 +3951,9 @@ class Renderer:
         self.index_buffer.destroy()
         self.bvh_buffer.destroy()
 
-        self.vertex_buffer = StorageBuffer(self.ctx, v_new)
-        self.index_buffer = StorageBuffer(self.ctx, i_new)
-        self.bvh_buffer = StorageBuffer(self.ctx, b_new)
+        self.vertex_buffer = self._gpu.StorageBuffer(self.ctx, v_new)
+        self.index_buffer = self._gpu.StorageBuffer(self.ctx, i_new)
+        self.bvh_buffer = self._gpu.StorageBuffer(self.ctx, b_new)
 
         self._rebind_mesh_descriptors()
         self.vertex_buffer.upload_sync(self._dummy_mesh.vertex_bytes)
@@ -4809,19 +4872,19 @@ class Renderer:
             self.material_capacity = new_cap
             self._per_material_furnace = [False] * new_cap
             self.flat_material_buffer.destroy()
-            self.flat_material_buffer = StorageBuffer(
+            self.flat_material_buffer = self._gpu.StorageBuffer(
                 self.ctx, new_cap * FLAT_MATERIAL_STRIDE + 256
             )
             self.material_types_buffer.destroy()
-            self.material_types_buffer = StorageBuffer(
+            self.material_types_buffer = self._gpu.StorageBuffer(
                 self.ctx, new_cap * 4 + 16
             )
             self.mtlx_skin_buffer.destroy()
-            self.mtlx_skin_buffer = StorageBuffer(
+            self.mtlx_skin_buffer = self._gpu.StorageBuffer(
                 self.ctx, new_cap * self.mtlx_skin_record_size + 256
             )
             self.std_surface_buffer.destroy()
-            self.std_surface_buffer = StorageBuffer(
+            self.std_surface_buffer = self._gpu.StorageBuffer(
                 self.ctx, new_cap * STD_SURFACE_STRIDE + 16
             )
             self._rebind_scene_descriptors()
@@ -4830,7 +4893,7 @@ class Renderer:
         # `flatMaterials[matId]` still holds the UsdPreviewSurface inputs
         # that the generated `_pyMatInputs_<id>` adapter reads. Pack flat
         # data either way; only the type tag (and packed python_id) changes.
-        from skinny.vk_compute import python_material_ids as _py_mat_ids_fn
+        from skinny.megakernel_sources import python_material_ids as _py_mat_ids_fn
         py_ids = _py_mat_ids_fn()
         self._material_python_ids: dict[int, int] = {}
 
@@ -4965,7 +5028,7 @@ class Renderer:
         slots whose graphId matches the buffer's graph receive packed bytes.
         """
         from skinny.materialx_runtime import pack_uniform_block
-        from skinny.vk_compute import GRAPH_BINDING_BASE
+        from skinny.megakernel_sources import GRAPH_BINDING_BASE
 
         if not getattr(self, "_graph_param_buffers", None):
             self._graph_param_buffers = {}
@@ -4989,7 +5052,7 @@ class Renderer:
             if existing is None or existing.size < buf_size:
                 if existing is not None:
                     existing.destroy()
-                self._graph_param_buffers[gf.target_name] = StorageBuffer(
+                self._graph_param_buffers[gf.target_name] = self._gpu.StorageBuffer(
                     self.ctx, buf_size
                 )
             data = bytearray(self.material_capacity * stride)
@@ -5043,6 +5106,11 @@ class Renderer:
                 packed = pack_uniform_block(gf.uniform_block, overrides)
                 data[mat_idx * stride : mat_idx * stride + len(packed)] = packed
             self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
+
+            # Metal binds the graph SSBO at dispatch by name (no Vulkan descriptor
+            # set); the data upload above is all that's needed here.
+            if self.is_metal:
+                continue
 
             # Defensive: if rebuild fell back to an empty-graph pipeline
             # (slangc failure), this fragment's binding may be absent.
@@ -5175,7 +5243,7 @@ class Renderer:
 
     def _ensure_preview_resources(self, size: int) -> bool:
         """Lazy-create preview image / readback / pipeline. False = unavailable."""
-        from skinny.vk_compute import PreviewPipeline, StorageImage, ReadbackBuffer
+        from skinny.vk_compute import PreviewPipeline
 
         # The preview pipeline only needs the set-0 layout + the emitted
         # material modules — both live on the scene bindings, so it works in
@@ -5197,12 +5265,12 @@ class Renderer:
             self._preview_size = size
 
         if self._preview_image is None:
-            self._preview_image = StorageImage(
+            self._preview_image = self._gpu.StorageImage(
                 self.ctx, size, size, transfer_src=True,
             )
         if self._preview_readback is None:
             # RGBA32F = 16 bytes per pixel.
-            self._preview_readback = ReadbackBuffer(
+            self._preview_readback = self._gpu.ReadbackBuffer(
                 self.ctx, size, size, bytes_per_pixel=16,
             )
         if self._preview_pipeline is None:
@@ -6522,7 +6590,7 @@ class Renderer:
             new_cap = max(len(transforms), self.instance_capacity * 2)
             self.instance_capacity = new_cap
             self.instance_buffer.destroy()
-            self.instance_buffer = StorageBuffer(
+            self.instance_buffer = self._gpu.StorageBuffer(
                 self.ctx, self.instance_capacity * INSTANCE_STRIDE + 256
             )
             self._rebind_scene_descriptors()
@@ -7252,6 +7320,105 @@ class Renderer:
         bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
         return bmin, bext
 
+    def _pack_uniforms_msl(self) -> bytes:
+        """Pack the `fc` uniform block to the Metal Shading Language struct layout
+        (design D3). Reuses `_pack_uniforms` (the Vulkan scalar blob) verbatim and
+        relocates every field to its reflected MSL offset, so the field *values*
+        can never drift between backends — only their placement differs (Slang pads
+        `float3` to 16 B on Metal, making the struct 592 B vs the 512 B scalar
+        blob). Offsets come from the compiled module's reflection
+        (`pipeline.uniform_layout`), never a hand-maintained table. Uploaded via
+        `set_data` byte blobs only (design D4)."""
+        scalar = self._pack_uniforms()
+        layout = self.pipeline.uniform_layout
+        size = self.pipeline.uniform_size
+        out = bytearray(size)
+        off = 0
+        for name, sz in _FC_SCALAR_FIELDS:
+            moff, _msz = layout[name]
+            out[moff:moff + sz] = scalar[off:off + sz]
+            off += sz
+        # Drift guard (task 3.3): the scalar field table must cover the whole blob,
+        # and the packed MSL length must equal the reflected struct size.
+        assert off == len(scalar), (
+            f"MSL field table covers {off}B but scalar blob is {len(scalar)}B")
+        assert len(out) == size, (len(out), size)
+        return bytes(out)
+
+    def _build_metal_binds(self) -> dict:
+        """Map every Metal megakernel shader global → its native SlangPy resource
+        (bind-by-name, design D2). The pipeline filters to the names the compiled
+        module actually references, so binding an unused name is harmless and a
+        dead-stripped one is simply skipped."""
+        b = {
+            # Storage buffers (bindings 5-7, 12-24, 30-37).
+            "meshVertices": self.vertex_buffer.buffer,
+            "meshIndices": self.index_buffer.buffer,
+            "bvhNodes": self.bvh_buffer.buffer,
+            "instances": self.instance_buffer.buffer,
+            "flatMaterials": self.flat_material_buffer.buffer,
+            "materialTypes": self.material_types_buffer.buffer,
+            "mtlxSkin": self.mtlx_skin_buffer.buffer,
+            "sphereLights": self.sphere_lights_buffer.buffer,
+            "emissiveTriangles": self.emissive_tri_buffer.buffer,
+            "stdSurfaceParams": self.std_surface_buffer.buffer,
+            "distantLights": self.distant_lights_buffer.buffer,
+            "lightSplatBuffer": self.light_splat_buffer.buffer,
+            "gizmoSegments": self.gizmo_segments_buffer.buffer,
+            "lensElements": self.lens_elements_buffer.buffer,
+            "exitPupilBounds": self.lens_pupil_buffer.buffer,
+            "toolBuffer": self.tool_buffer.buffer,
+            "envMarginalCdf": self.env_marginal_buffer.buffer,
+            "envCondCdf": self.env_cond_buffer.buffer,
+            "neuralWeights": self.neural_weights_buffer.buffer,
+            "neuralBiases": self.neural_biases_buffer.buffer,
+            "neuralLayers": self.neural_layers_buffer.buffer,
+            "recordBuf": self.record_buffer.buffer,
+            "recordCounter": self.record_counter.buffer,
+            # Storage images (bindings 1-3).
+            "outputBuffer": self._offscreen_output.texture,
+            "accumBuffer": self.accum_image.texture,
+            "hudMask": self.hud_overlay.texture,
+            # Shared bindless-pool sampler (binding 38, design D8).
+            "commonSampler": self._metal_common_sampler,
+        }
+        # Discrete maps: combined `Sampler2D` is unsupported on Metal, so each is a
+        # `Texture2D` + its own `SamplerState` (bindings 4/8-11 + 39-43, design D8).
+        for name, img in (
+            ("envMap", self.env_image), ("tattooMap", self.tattoo_image),
+            ("normalMap", self.normal_image), ("roughnessMap", self.roughness_image),
+            ("displacementMap", self.displacement_image),
+        ):
+            b[name] = img.texture
+            b[name + "Sampler"] = img.sampler
+        return b
+
+    def _render_megakernel_metal(self) -> None:
+        """Bind every megakernel resource and dispatch one frame on the Metal
+        pipeline (design D2/D4). Writes the display image into `_offscreen_output`."""
+        mtlx_bytes = self._pack_mtlx_skin_array()
+        if mtlx_bytes:
+            self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+        binds = self._build_metal_binds()
+        bindless = (
+            "flatMaterialTextures",
+            [(s.texture if s is not None else None) for s in self.texture_pool._slots],
+        )
+        self.pipeline.dispatch(
+            self.width, self.height,
+            uniform_blob=self._pack_uniforms_msl(),
+            binds=binds, bindless=bindless,
+        )
+
+    def _render_headless_metal(self) -> bytes:
+        """Metal megakernel headless render → raw RGBA8 bytes (the structural-
+        parity test path). Mirrors the Vulkan `render_headless` minus the Vulkan
+        command-buffer/descriptor machinery — resources bind at dispatch."""
+        self._render_megakernel_metal()
+        arr = self._offscreen_output.read_rgba()  # (H, W, 4)
+        from skinny.metal_compute import _rgba_f32_to_rgba8
+        return _rgba_f32_to_rgba8(arr).tobytes()
+
     def _pack_uniforms(self) -> bytes:
         self._sync_lens_buffer()
         aspect = self.width / self.height
@@ -7926,6 +8093,9 @@ class Renderer:
         # web/screenshot path stays well-defined.
         if not self._backend_render_ready:
             return b"\x00" * (self.width * self.height * 4)
+        if self.is_metal:
+            self.poll_pick_result()
+            return self._render_headless_metal()
         f = self.current_frame
 
         # Drain BXDF visualiser scene-pick callbacks once their frame has
@@ -8102,7 +8272,6 @@ class Renderer:
         if width == self.width and height == self.height:
             return
 
-        from skinny.vk_compute import ReadbackBuffer
 
         vk.vkDeviceWaitIdle(self.ctx.device)
 
@@ -8116,16 +8285,16 @@ class Renderer:
         self.ctx.width = width
         self.ctx.height = height
 
-        self._offscreen_output = StorageImage(
+        self._offscreen_output = self._gpu.StorageImage(
             self.ctx, width, height,
-            format=vk.VK_FORMAT_R8G8B8A8_UNORM,
+            format="rgba8_unorm",
             transfer_src=True,
         )
-        self._readback = ReadbackBuffer(self.ctx, width, height)
-        self.accum_image = StorageImage(
+        self._readback = self._gpu.ReadbackBuffer(self.ctx, width, height)
+        self.accum_image = self._gpu.StorageImage(
             self.ctx, width, height, transfer_src=True,
         )
-        self.hud_overlay = HudOverlay(self.ctx, width, height)
+        self.hud_overlay = self._gpu.HudOverlay(self.ctx, width, height)
         self.hud_overlay.upload(bytes(width * height))
 
         self._rewrite_size_dependent_descriptors()
@@ -8180,11 +8349,10 @@ class Renderer:
         ``(array, sample_count)`` where ``array`` is shape (H, W, 4) and
         the caller divides by ``sample_count`` to get linear mean radiance.
         """
-        from skinny.vk_compute import ReadbackBuffer
 
         vk.vkDeviceWaitIdle(self.ctx.device)
 
-        rb = ReadbackBuffer(
+        rb = self._gpu.ReadbackBuffer(
             self.ctx, self.width, self.height, bytes_per_pixel=16,
         )
 
@@ -8392,7 +8560,7 @@ class Renderer:
         self._ensure_record_pipeline()
 
         saved_frame_index = self.frame_index
-        big = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+        big = self._gpu.StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
         self._bind_record_buffer(big)
         total = 0
         try:
@@ -8461,7 +8629,7 @@ class Renderer:
                 or self._drain_buffer.size < capacity * RECORD_STRIDE):
             if self._drain_buffer is not None:
                 self._drain_buffer.destroy()
-            self._drain_buffer = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+            self._drain_buffer = self._gpu.StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
             self._bind_record_buffer(self._drain_buffer)
             self.record_counter.upload_sync(_struct.pack("<II", 0, capacity))
         self._wf_record_capacity = capacity
@@ -8535,7 +8703,7 @@ class Renderer:
         if self._drain_buffer is None or self._drain_buffer.size < capacity * RECORD_STRIDE:
             if self._drain_buffer is not None:
                 self._drain_buffer.destroy()
-            self._drain_buffer = StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
+            self._drain_buffer = self._gpu.StorageBuffer(self.ctx, capacity * RECORD_STRIDE)
             self._bind_record_buffer(self._drain_buffer)
 
         saved_frame_index = self.frame_index

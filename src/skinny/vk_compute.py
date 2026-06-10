@@ -19,6 +19,36 @@ from skinny.vk_context import VulkanContext
 # shader change but consumes more descriptor slots.
 BINDLESS_TEXTURE_CAPACITY = 128
 
+
+def _vk_format_token(fmt):
+    """Resolve a backend-neutral image-format token to a ``VkFormat``. Ints (an
+    existing ``VkFormat``) pass through unchanged, so all current call sites and
+    their SPIR-V/resources are byte-identical; the renderer passes string tokens
+    so a construction site is the same on the Metal backend (see metal_compute)."""
+    if isinstance(fmt, str):
+        return {
+            "rgba32f": vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+            "rgba32_float": vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+            "rgba8_unorm": vk.VK_FORMAT_R8G8B8A8_UNORM,
+            "rgba8_srgb": vk.VK_FORMAT_R8G8B8A8_SRGB,
+            "r8_unorm": vk.VK_FORMAT_R8_UNORM,
+        }.get(fmt, vk.VK_FORMAT_R32G32B32A32_SFLOAT)
+    return fmt
+
+
+def _vk_address_token(mode):
+    """Resolve a backend-neutral address-mode token to a ``VkSamplerAddressMode``;
+    ints pass through unchanged (byte-identical)."""
+    if isinstance(mode, str):
+        return {
+            "repeat": vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            "clamp": vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            "mirror": vk.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
+            "black": vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            "useMetadata": vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        }.get(mode, vk.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+    return mode
+
 # The backend-agnostic megakernel-source emission (the `generated_materials` /
 # per-graph / python-dispatcher Slang that `main_pass.slang` imports) lives in
 # the Vulkan-free `megakernel_sources` module so the Metal backend can reuse it
@@ -756,6 +786,7 @@ class StorageImage:
         format: int = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
         transfer_src: bool = False,
     ) -> None:
+        format = _vk_format_token(format)  # accept backend-neutral tokens (int passes through)
         self.ctx = ctx
         self.width = width
         self.height = height
@@ -1348,6 +1379,12 @@ class SampledImage:
         address_mode_u: int = vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
         address_mode_v: int = vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
     ) -> None:
+        # Accept backend-neutral string tokens (the renderer passes these so a
+        # SampledImage construction site is identical on Metal); existing int
+        # VkFormat / VkSamplerAddressMode args pass through unchanged.
+        format = _vk_format_token(format)
+        address_mode_u = _vk_address_token(address_mode_u)
+        address_mode_v = _vk_address_token(address_mode_v)
         self.ctx = ctx
         self.width = width
         self.height = height

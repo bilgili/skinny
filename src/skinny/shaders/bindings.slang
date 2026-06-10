@@ -12,7 +12,22 @@ uniform FrameConstants fc;
 [[vk::binding(2)]]  RWTexture2D<float4> accumBuffer;
 [[vk::binding(3)]]  [[vk::image_format("r8")]] RWTexture2D<float> hudMask;
 [[vk::binding(13)]] StructuredBuffer<FlatMaterialParams> flatMaterials;
+// Bindless flat-material texture pool (binding 14). On Vulkan it is a combined
+// Sampler2D[128] (one UPDATE_AFTER_BIND combined-image-sampler array). Native
+// Metal caps a compute kernel at 16 sampler arguments and 128 texture
+// arguments; a combined Sampler2D[128] lowers to array<texture2d,128> +
+// array<sampler,128>, blowing past both limits once the discrete maps are
+// added. So on the Metal target the pool is a plain Texture2D array sampled
+// through one shared `commonSampler` (binding 38) — collapsing 128 samplers to
+// 1 — and its capacity is trimmed to leave room for the ~8 discrete textures
+// inside Metal's 128-texture budget. The Vulkan declaration (and its SPIR-V) is
+// unchanged. See FLATTEX_SAMPLE_LEVEL/GRAD in flat_shading.slang & mtlx_gen_shim.slang.
+#if defined(SKINNY_METAL)
+[[vk::binding(14)]] Texture2D<float4> flatMaterialTextures[120];
+[[vk::binding(38)]] SamplerState commonSampler;
+#else
 [[vk::binding(14)]] Sampler2D<float4> flatMaterialTextures[128];
+#endif
 [[vk::binding(16)]] StructuredBuffer<uint> materialTypes;
 [[vk::binding(19)]] StructuredBuffer<StdSurfaceParams> stdSurfaceParams;
 // BDPT light-tracer splat buffer: per-pixel R, G, B as fixed-point uint

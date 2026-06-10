@@ -145,6 +145,46 @@ Metal-target language construct was rejected; `[[vk::binding]]` maps cleanly.
 ReSTIR/wavefront capability gates already fold back to the megakernel on Metal, so
 no new gate is required for P2.
 
+### D8: `commonSampler` split for the bindless pool on Metal (O4 resolution — user decision, this change)
+The megakernel's bindless flat-material pool is declared
+`[[vk::binding(14)]] Sampler2D<float4> flatMaterialTextures[128]` — a **combined**
+image+sampler array. Slang's Metal target lowers a combined `Sampler2D[128]` to
+`array<texture2d,128>` **plus** `array<sampler,128>`, which exceeds Apple Metal's
+hard per-compute-stage argument limits (**128 textures / 16 samplers**) the moment
+the discrete maps (env, tattoo, normal, roughness, displacement + the three
+RW images) are added. `create_compute_pipeline` then fails with Apple's Metal
+compiler error `'texture'/'sampler' attribute parameter is out of bounds`. This is
+an **Apple Metal limit, not a Slang/slangpy bug** — empirically confirmed identical
+on slangpy 0.41.0 **and** 0.42.0 (same bundled Metal compiler `32023.883`), and on
+a standalone `slangc -target metallib` (it segfaults on the same MSL). Slang 2026.1
+exposes no Metal argument-buffer flag, and slang-rhi direct-binds global resources
+(argument buffers are only emitted for `ParameterBlock<T>`).
+
+**Resolution (target-gated, Vulkan untouched):** on the Metal target only
+(`#if defined(SKINNY_METAL)`), the pool becomes a plain `Texture2D<float4>` array
+sampled through one shared `SamplerState commonSampler` at **binding 38** —
+collapsing 128 samplers → 1 (now 6 total: 5 discrete + commonSampler ≤ 16) — and
+its capacity is trimmed to **120** so `120 + 8` discrete textures = 128 (≤ Metal's
+128-texture limit). The Vulkan declaration stays the combined `Sampler2D[128]`, so
+the Vulkan SPIR-V is **byte-identical** (verified sha256 `78b98e4b…` before/after)
+and **MoltenVK is unaffected** (it consumes that unchanged SPIR-V; the separate
+`Texture2D[]`+`SamplerState` form — which has its own MoltenVK quirks — never
+reaches it). The ~14 sample sites use gated `FLATTEX_SAMPLE_LEVEL/GRAD` macros that
+expand to the exact prior token stream on Vulkan and pass `commonSampler` on Metal.
+The renderer's Metal path binds binding 14 as textures + binding 38 as the shared
+sampler; the Vulkan path is unchanged.
+*Alternatives rejected:* (a) reduce the bindless cap to ≤11 with the combined model
+(fits Metal but caps the pool at ~11 textures and is fragile at the 16-sampler
+ceiling); (b) `ParameterBlock` → Metal argument buffer (version-independent but
+forces `pb.x` at every access site across all shaders **and** changes the Vulkan
+descriptor *set* layout — far larger blast radius, deferred); (c) upgrade slangpy
+(tested 0.42.0 — no change, same Apple limit).
+*Capability note:* on Metal the flat-material **texture pool** is capped at 120
+slots (vs 128 on Vulkan); a Metal scene using >120 pooled textures would lose the
+overflow. Acceptable for the head-render parity deliverable (skin uses the discrete
+normal/roughness/displacement maps at bindings 9–11, not the pool). The full-cap
+fix is the deferred argument-buffer route.
+
 ## Risks / Trade-offs
 
 - **MSL uniform-layout drift** (`float3` 16 B padding; 288 B vs 272 B). →
@@ -198,6 +238,10 @@ no new gate is required for P2.
 - **O3:** Perceptual-tolerance metric + threshold for D5 — SSIM ≥ 0.99 vs
   relative-MSE < ε on the accumulation (linear-HDR) image; pick against a fixed
   reference scene during test authoring.
-- **O4:** Bindless `SampledImage` capacity (`BINDLESS_TEXTURE_CAPACITY`) on Metal —
-  does the Metal argument-buffer texture limit accommodate it, or is a smaller cap
-  needed? Verify against the device limits during texture binding.
+- **O4 (RESOLVED — `commonSampler` split, see D8):** Apple Metal's hard
+  per-compute-stage limits are **128 textures / 16 samplers** (not an
+  argument-buffer capacity question — slang-rhi direct-binds globals). The combined
+  `Sampler2D[128]` pool emits 128 textures **and** 128 samplers, exceeding both. Fix:
+  on the Metal target the pool is `Texture2D[120]` + a shared `SamplerState
+  commonSampler` (binding 38); Vulkan keeps the combined `Sampler2D[128]`
+  byte-identical. Confirmed unchanged on slangpy 0.42.0 (same Apple compiler).

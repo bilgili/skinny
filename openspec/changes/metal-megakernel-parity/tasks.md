@@ -10,7 +10,7 @@
 
 - [x] 2.0 Extract the backend-agnostic generated-Slang **emission** out of `vk_compute.ComputePipeline.__init__` into a shared helper (per spike 1.1 / design D7): `_emit_generated_materials` (→ `generated_materials.slang` + `generated/*_graph.slang`) and `_emit_python_dispatcher` (→ `python_materials_dispatcher.slang`) are pure text generation; both backends must run them into `shader_dir` before linking `main_pass.slang`. Move them to a module-level function (e.g. `emit_megakernel_sources(shader_dir, graph_fragments)`) that `vk_compute` and `metal_compute` both call. Vulkan output byte-unchanged.
   - **DONE:** new **Vulkan-free** module `src/skinny/megakernel_sources.py` holds `GRAPH_BINDING_BASE`, `scan_python_materials`, `python_material_ids`, `emit_megakernel_aggregator`, `run_codegen`, `emit_generated_materials`, `emit_python_dispatcher`, and the orchestrator `emit_megakernel_sources(shader_dir, graph_fragments) -> (graph_bindings, python_material_modules)`. `vk_compute` re-exports these (back-compat for renderer/tests) and `ComputePipeline.__init__` now calls the orchestrator. Verified: imports **without** the Vulkan SDK (the whole point); `vk_compute` re-exports + classes import with SDK; `tests/test_material_emitters.py` + `tests/test_backend_select.py` green (24 passed); ruff clean on the 2 new/edited files (the 2 vk_compute findings — unused `numpy`, one f-string — are **pre-existing on `main`**). **End-to-end proof:** `emit_megakernel_sources(SH, [])` then linking `main_pass.slang` on a real Metal device gets all the way past the missing-module errors into Metal codegen (see 4.1 `NonUniformResourceIndex` finding).
-- [ ] 2.1 Expand `src/skinny/metal_compute.py` to public-API parity with the `vk_compute.py` classes the renderer consumes: `StorageBuffer`, `StorageImage`, `SampledImage`, `UniformBuffer`, `HostStorageBuffer`, `ComputePipeline` (+ the constants/helpers imported inline: `BINDLESS_TEXTURE_CAPACITY`, `ReadbackBuffer`, `GRAPH_BINDING_BASE`, etc. that the megakernel path touches). Identical class names, constructor signatures, and upload-helper names. The Metal `ComputePipeline` runs `emit_megakernel_sources` (2.0) then links in-process with `include_paths=[shaders, mtlx/genslang]` + `#define SKINNY_COMPUTE_PIPELINE 1` (NO `-fvk-use-scalar-layout`). Resource binds via `dispatch(vars=…)`/`ShaderCursor`, uniforms via `set_data` only (D4).
+- [x] 2.1 Expand `src/skinny/metal_compute.py` to public-API parity with the `vk_compute.py` classes the renderer consumes: `StorageBuffer`, `StorageImage`, `SampledImage`, `UniformBuffer`, `HostStorageBuffer`, `ComputePipeline` (+ the constants/helpers imported inline: `BINDLESS_TEXTURE_CAPACITY`, `ReadbackBuffer`, `GRAPH_BINDING_BASE`, etc. that the megakernel path touches). Identical class names, constructor signatures, and upload-helper names. The Metal `ComputePipeline` runs `emit_megakernel_sources` (2.0) then links in-process with `include_paths=[shaders, mtlx/genslang]` + `#define SKINNY_COMPUTE_PIPELINE 1` (NO `-fvk-use-scalar-layout`). Resource binds via `dispatch(vars=…)`/`ShaderCursor`, uniforms via `set_data` only (D4).
 - [x] 2.2 Add `backend_select.resource_module(ctx)` returning `vk_compute` or `metal_compute` keyed on `ctx.is_metal`. **DONE** (deferred imports so the Metal path never imports `vulkan`).
 - [ ] 2.3 In `renderer.py`, resolve the resource layer once (`self._gpu = resource_module(self.ctx)`) and route the top-level import + the ~9 inline `from skinny.vk_compute import …` sites on the megakernel path through it. Grep-gate: no `from skinny.vk_compute import` remains on a Metal-reachable path.
 
@@ -22,7 +22,38 @@
 
 ## 4. Megakernel pipeline + descriptors + textures on Metal (D2)
 
-- [ ] 4.0 **Metal-target shader fix (O2 blocker found by 2.0 e2e):** `flat_shading.slang` uses `flatMaterialTextures[NonUniformResourceIndex(idx)]` (lines ~94, ~126); `NonUniformResourceIndex` is **unavailable in the compute stage on the Metal target** (Slang `error[E36107]` on both `mainImage` and `mainImageRecord`). It is only a divergence hint — wrap it so it is identity on Metal and unchanged on Vulkan (e.g. a `NRI(x)` macro/helper that maps to `NonUniformResourceIndex(x)` except under the Metal target where it is just `x`). Grep for all `NonUniformResourceIndex` sites. Vulkan SPIR-V output must stay byte-identical (recompile `main_pass.spv`). Note: `mainImageRecord` (the path-record dump entry) is megakernel/wavefront-only — confirm whether the Metal megakernel needs it or it can be excluded from the Metal link.
+- [x] 4.0a **Metal bindless texture/sampler limit (O4 → D8):** the combined
+  `Sampler2D<float4> flatMaterialTextures[128]` pool exceeds Apple Metal's hard
+  compute-stage argument limits (128 textures / 16 samplers) — `create_compute_pipeline`
+  fails with `'texture'/'sampler' attribute parameter is out of bounds`. **DONE &
+  VERIFIED:** target-gated split (`#if defined(SKINNY_METAL)`) — on Metal the pool is
+  `Texture2D<float4>[120]` sampled through a shared `SamplerState commonSampler` at
+  **binding 38**; Vulkan keeps the combined `Sampler2D[128]`. ~14 sample sites use the
+  gated `FLATTEX_SAMPLE_LEVEL/GRAD` macros (`bindings.slang`, `flat_shading.slang`,
+  `mtlx_gen_shim.slang`). Verified: Metal `create_compute_pipeline` now **succeeds**
+  (commonSampler + flatMaterialTextures reflected); Vulkan SPIR-V **byte-identical**
+  (`78b98e4b…`) so MoltenVK is unaffected. Confirmed it is an Apple Metal limit, not a
+  slangpy version issue (identical on 0.41.0 and 0.42.0; `slangc -target metallib`
+  segfaults on the same MSL). Capability note: Metal flat-texture pool capped at 120.
+  - **Extended (slang-rhi finding):** slang-rhi's Metal backend **cannot bind ANY
+    combined `Sampler2D`** — it aborts at runtime with `Assertion failed: Unsupported
+    binding type (metal-shader-object.cpp:325)`, on both the low-level root-object
+    bind and the high-level `kernel.dispatch(vars=)` path. So the **5 discrete maps**
+    (`envMap` b4, `tattooMap` b8, `normalMap` b9, `roughnessMap` b10,
+    `displacementMap` b11) are **also** split on Metal into `Texture2D` + a per-map
+    `SamplerState` at bindings **39–43** (each keeps its own sampler → 5 + commonSampler
+    = 6 ≤ 16). Gated via `MAP_SAMPLE_LEVEL(T,uv,lod)` (uses `T##Sampler` token-paste,
+    confirmed supported) in `environment.slang`, `skin_shading.slang`,
+    `skin_material.slang`; separate `Texture2D[]`+`SamplerState` dispatch verified OK.
+    slangpy upgraded 0.41.0 → **0.42.0** (Metal env) along the way.
+  - **KEYSTONE PROVEN (de-risks 4.1–4.4):** full `main_pass` `mainImage` on a live
+    Metal device — `create_compute_pipeline` + reflect (39 globals) + bind every
+    resource type (23 buffers, 3 RW images, 5 `Texture2D`+sampler, 120-bindless array,
+    `commonSampler`, `fc` via `set_data`) + `bind_pipeline`/`dispatch`/`submit` + texture
+    readback → finite 16×16 output, clean exit, fence signalled, **no hang, no assert**.
+
+- [x] 4.0 **Metal-target shader fix (O2 blocker found by 2.0 e2e):** `flat_shading.slang` uses `flatMaterialTextures[NonUniformResourceIndex(idx)]` (lines ~94, ~126); `NonUniformResourceIndex` is **unavailable in the compute stage on the Metal target** (Slang `error[E36107]` on both `mainImage` and `mainImageRecord`). It is only a divergence hint — wrap it so it is identity on Metal and unchanged on Vulkan (e.g. a `NRI(x)` macro/helper that maps to `NonUniformResourceIndex(x)` except under the Metal target where it is just `x`). Grep for all `NonUniformResourceIndex` sites. Vulkan SPIR-V output must stay byte-identical (recompile `main_pass.spv`). Note: `mainImageRecord` (the path-record dump entry) is megakernel/wavefront-only — confirm whether the Metal megakernel needs it or it can be excluded from the Metal link.
+  - **DONE & VERIFIED:** all 14 `NonUniformResourceIndex(` sites (8 in `flat_shading.slang`, 6 in `mtlx_gen_shim.slang`) wrapped in `NRI(x)`. Because Slang preprocessor `#define`s do **not** cross `import` module boundaries, the gated macro is defined **per file** (`#if defined(SKINNY_METAL) → (x) #else → NonUniformResourceIndex(x)`). `SKINNY_METAL` is set **session-globally** on the in-process Metal compile (via `SlangCompilerOptions.defines`) so it reaches every imported module; the Vulkan `slangc` path never defines it. **Verified:** (a) Metal — `main_pass.slang` `mainImage` now `link_program` + `create_compute_kernel` succeed on a live Metal device (E36107 gone), reflecting 33 global params (binding map 0–24/30–37); (b) Vulkan — `main_pass.spv` is **byte-identical** before/after (sha256 `78b98e4b…` both). The Metal megakernel links **only `mainImage`** — `mainImageRecord` (neural training dump) is out of P2 scope, so it is excluded from the Metal link.
 - [ ] 4.1 Build the Metal megakernel `ComputePipeline` from `main_pass.slang` (`mainImage`), compiled in-process (or the §1.1 fallback) after `emit_megakernel_sources` (2.0). Reflect/address the descriptor-binding map (bindings 0–24, 30–32) so the renderer's existing binding map drives the same logical slots.
 - [ ] 4.2 Bind all megakernel buffers (flat-material params, MaterialX skin/std params, light buffers, gizmo, env importance-sampling CDFs) through the Metal pipeline via resource binds. No per-field scalar cursor writes anywhere on the Metal path (D4).
 - [ ] 4.3 Bind the bindless `SampledImage` pool + the shared `commonSampler` on Metal; verify head normal/roughness/displacement maps, tattoos, and the environment map sample (respect the Metal argument-buffer texture limit — O4).

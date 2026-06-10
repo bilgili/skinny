@@ -9,6 +9,35 @@ import mtlx_closures;
 import mtlx_std_surface;
 import generated_materials;
 
+// `NonUniformResourceIndex` is a divergence hint for bindless indexing. Slang's
+// Metal target rejects it in the compute stage (error E36107 — unavailable);
+// it only annotates divergence, so dropping it on Metal is sound. `NRI(x)` is
+// identity on the in-process Metal compile (which defines `SKINNY_METAL`) and
+// `NonUniformResourceIndex(x)` on Vulkan. The Vulkan SPIR-V stays byte-identical
+// because `SKINNY_METAL` is never defined on the Vulkan slangc path, so the
+// preprocessor reproduces the original token stream exactly. (Preprocessor
+// macros do not cross `import` boundaries, so this is defined per file.)
+#if defined(SKINNY_METAL)
+#define NRI(x) (x)
+#else
+#define NRI(x) NonUniformResourceIndex(x)
+#endif
+
+// Bindless flat-material texture sampling. On the Metal target the pool is a
+// plain `Texture2D` array (binding 14) read through the shared `commonSampler`
+// (binding 38) — see bindings.slang — so a sample passes the sampler
+// explicitly. On Vulkan the pool is a combined `Sampler2D` array, so the macro
+// expands to the exact prior `flatMaterialTextures[NRI(i)].SampleLevel(uv, lod)`
+// token stream → byte-identical SPIR-V. (Macros do not cross `import`; defined
+// per file.)
+#if defined(SKINNY_METAL)
+#define FLATTEX_SAMPLE_LEVEL(I, UV, LOD)    flatMaterialTextures[NRI(I)].SampleLevel(commonSampler, UV, LOD)
+#define FLATTEX_SAMPLE_GRAD(I, UV, DX, DY)  flatMaterialTextures[NRI(I)].SampleGrad(commonSampler, UV, DX, DY)
+#else
+#define FLATTEX_SAMPLE_LEVEL(I, UV, LOD)    flatMaterialTextures[NRI(I)].SampleLevel(UV, LOD)
+#define FLATTEX_SAMPLE_GRAD(I, UV, DX, DY)  flatMaterialTextures[NRI(I)].SampleGrad(UV, DX, DY)
+#endif
+
 float relativeLuminance(float3 c)
 {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
@@ -91,8 +120,7 @@ bool isCutoutTransparent(HitInfo h)
     float alpha = 1.0;
     if (p.opacityTextureIdx != 0xFFFFFFFFu)
     {
-        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
-                       .SampleLevel(h.uv, 0.0);
+        float4 s = FLATTEX_SAMPLE_LEVEL(p.opacityTextureIdx, h.uv, 0.0);
         alpha = pickChannel(s, channelFor(p.channelMask, 12u));
     }
     return alpha < p.opacityThreshold;
@@ -123,8 +151,7 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.albedo = p.diffuseColor;
     if (p.diffuseTextureIdx != 0xFFFFFFFFu)
     {
-        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.diffuseTextureIdx)]
-                       .SampleLevel(h.uv, 0.0);
+        float4 s = FLATTEX_SAMPLE_LEVEL(p.diffuseTextureIdx, h.uv, 0.0);
         uint cc = channelFor(p.channelMask, 0u);
         // For diffuse the rgb (code 0) path keeps the vector fetch;
         // explicit scalar channels broadcast to a grey triplet so
@@ -135,8 +162,7 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.roughness = clamp(p.roughness, 0.04, 1.0);
     if (p.roughnessTextureIdx != 0xFFFFFFFFu)
     {
-        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.roughnessTextureIdx)]
-                       .SampleLevel(h.uv, 0.0);
+        float4 s = FLATTEX_SAMPLE_LEVEL(p.roughnessTextureIdx, h.uv, 0.0);
         float r = pickChannel(s, channelFor(p.channelMask, 4u));
         out_.mat.roughness = clamp(r, 0.04, 1.0);
     }
@@ -144,8 +170,7 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.metallic = clamp(p.metallic, 0.0, 1.0);
     if (p.metallicTextureIdx != 0xFFFFFFFFu)
     {
-        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.metallicTextureIdx)]
-                       .SampleLevel(h.uv, 0.0);
+        float4 s = FLATTEX_SAMPLE_LEVEL(p.metallicTextureIdx, h.uv, 0.0);
         float m = pickChannel(s, channelFor(p.channelMask, 8u));
         out_.mat.metallic = clamp(m, 0.0, 1.0);
     }
@@ -166,8 +191,7 @@ FlatHitData fetchFlatHitData(HitInfo h)
     bool cutoutMode = (p.opacityTextureIdx != 0xFFFFFFFFu) && (p.opacityThreshold > 0.0);
     if (p.opacityTextureIdx != 0xFFFFFFFFu && !cutoutMode)
     {
-        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.opacityTextureIdx)]
-                       .SampleLevel(h.uv, 0.0);
+        float4 s = FLATTEX_SAMPLE_LEVEL(p.opacityTextureIdx, h.uv, 0.0);
         out_.mat.opacity = pickChannel(s, channelFor(p.channelMask, 12u));
     }
     else if (cutoutMode)
@@ -182,8 +206,7 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.emission = p.emissiveColor;
     if (p.emissiveTextureIdx != 0xFFFFFFFFu)
     {
-        float4 s = flatMaterialTextures[NonUniformResourceIndex(p.emissiveTextureIdx)]
-                       .SampleLevel(h.uv, 0.0);
+        float4 s = FLATTEX_SAMPLE_LEVEL(p.emissiveTextureIdx, h.uv, 0.0);
         uint cc = channelFor(p.channelMask, 16u);
         float3 emTex = (cc == 0u) ? s.rgb : float3(pickChannel(s, cc));
         if (all(out_.mat.emission == float3(0.0)))
@@ -201,8 +224,7 @@ FlatHitData fetchFlatHitData(HitInfo h)
         // flips the green channel before reconstructing the tangent
         // vector. Z is rebuilt from XY so per-channel scale errors on B
         // don't leak into the surface normal direction.
-        float3 sampled = flatMaterialTextures[NonUniformResourceIndex(p.normalTextureIdx)]
-                            .SampleLevel(h.uv, 0.0).xyz;
+        float3 sampled = FLATTEX_SAMPLE_LEVEL(p.normalTextureIdx, h.uv, 0.0).xyz;
         float3 tn = sampled * p.normalScale + p.normalBias;
         tn.z = sqrt(max(1.0 - dot(tn.xy, tn.xy), 0.0));
         float3 N = h.normal;
