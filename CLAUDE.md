@@ -139,13 +139,14 @@ slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage 
 
 `--backend {auto,metal,vulkan}` (env `SKINNY_BACKEND`, persisted on the
 interactive front-ends) selects the GPU backend via the shared resolver in
-`backend_select.py` (precedence: flag > env > persisted > `auto`). The native
-**Metal** backend is currently a *foundation* (device + trivial compute dispatch
-+ present, in `metal_context.py`); the full renderer is not yet ported to Metal,
-so `auto` resolves to **Vulkan** on every platform and `--backend metal` on a
-real front-end reports the foundation phase and exits (full Metal render lands in
-a later phase). `--backend vulkan` is the production path everywhere (MoltenVK
-under Vulkan on macOS).
+`backend_select.py` (precedence: flag > env > persisted > `auto`). Both backends
+run the full megakernel renderer: the native **Metal** backend
+(`metal_context.py`/`metal_compute.py`) compiles `main_pass.slang` in-process via
+SlangPy (slang-rhi, no MoltenVK) and dispatches it, so `auto` resolves to
+**Metal** on Apple-Silicon macOS (when a Metal device constructs) and to
+**Vulkan** everywhere else. An explicit `--backend metal` on a host with no Metal
+device errors clearly. `--backend vulkan` is the production path everywhere
+(MoltenVK under Vulkan on macOS).
 
 ## Architecture
 

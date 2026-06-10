@@ -77,6 +77,7 @@
 ## 6. Tests
 
 - [ ] 6.1 Headless structural-parity test: same fixed scene rendered through the megakernel on Metal vs Vulkan; assert byte-identical deterministic structural outputs (geometry/instance IDs, hit/miss mask, depth). Skips cleanly off Apple Silicon / when a backend is unavailable.
+  - **DEFERRED to its own change (user decision).** Byte-identical structural parity requires a geometry/instance-ID + depth + hit-mask **AOV** that the megakernel does not emit today (only a normal-viz material and the BXDF visualizer exist); building that output path + the dual-backend readback + the comparison is a sizeable sub-project. Shaded-color parity (6.2) covers the visible-correctness bar in this change; the structural AOV + byte-identical test ships as a follow-up OpenSpec change.
 - [ ] 6.2 Shaded-color tolerance test: converged linear-HDR accumulation image on Metal vs Vulkan within the chosen perceptual metric/threshold (resolve O3 here — SSIM ≥ 0.99 vs relative-MSE < ε against the reference scene).
 - [ ] 6.3 MSL uniform-offset test: packed Metal uniform length == reflected MSL struct size; Vulkan `std140` packing byte-unchanged.
 - [x] 6.4 Selection tests: `auto`→Metal on a (mocked) Metal-capable Apple-Silicon host; `auto`→Vulkan elsewhere; explicit `--backend metal` launches the renderer (no refusal); explicit-unavailable still errors clearly; `--backend vulkan` byte-identical.
@@ -85,9 +86,12 @@
 
 ## 7. Docs
 
-- [ ] 7.1 `docs/Megakernel.md`: Metal megakernel parity + the MSL uniform layout (288 B vs 272 B; reflected offsets).
-- [ ] 7.2 `docs/Architecture.md`: the resource-layer backend split (`resource_module(ctx)`); Metal note on the descriptor binding map; `auto`→Metal on Apple Silicon.
-- [ ] 7.3 `README.md` (`--backend auto` now renders on Metal on Apple Silicon), `CHANGELOG.md`, and align `CLAUDE.md`/`openspec/config.yaml` (Metal renders the megakernel; `auto` no longer pinned to Vulkan).
+- [x] 7.1 `docs/Megakernel.md`: Metal megakernel parity + the MSL uniform layout (288 B vs 272 B; reflected offsets).
+  - **DONE:** new "Backends: Vulkan and Metal" section — both run the megakernel; Metal compiles `main_pass.slang` in-process + binds by name; the MSL `fc` layout (592 B vs 512 B scalar, Camera 288 B vs 272 B, `float3`→16 B) with the reflected offsets (camera.position@256, focusPlaneOrigin@416, focusPlaneNormal@432, zoomMin@448, pickPixel@472) and the `_pack_uniforms_msl` drift guards; `is_metal`-selected, Vulkan std140 byte-unchanged.
+- [x] 7.2 `docs/Architecture.md`: the resource-layer backend split (`resource_module(ctx)`); Metal note on the descriptor binding map; `auto`→Metal on Apple Silicon.
+  - **DONE:** Backend-selection section now states `auto`→Metal on Apple-Silicon macOS (else Vulkan) + documents `resource_module(ctx)` (the `vk_compute`/`metal_compute` split keyed on `is_metal`, with the `is_metal`-gated spots). The old `METAL_FOUNDATION_NOTICE` refusal paragraph is replaced; "MetalContext foundation" → "MetalContext" describing the in-process megakernel compile + bind-by-name + the Metal-target texture/sampler split + `NRI`. The Descriptor Binding Map gains a Metal-split note (binding 14→`Texture2D[120]`+`commonSampler`@38, discrete maps' per-map `SamplerState`@39–43; slots 0–37 identical). The `gfx/` "foundation" wording is corrected.
+- [x] 7.3 `README.md` (`--backend auto` now renders on Metal on Apple Silicon), `CHANGELOG.md`, and align `CLAUDE.md`/`openspec/config.yaml` (Metal renders the megakernel; `auto` no longer pinned to Vulkan).
+  - **DONE:** README `--backend` paragraph rewritten (auto→Metal on Apple Silicon, both backends run the full megakernel); `CHANGELOG.md` gains a "Metal megakernel render parity" entry under `[Unreleased] → Backend`; `CLAUDE.md` backend paragraph + `openspec/config.yaml` context/backend-selection lines updated (Metal renders the megakernel; `auto` no longer pinned to Vulkan).
 
 ## 8. Validate
 
