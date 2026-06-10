@@ -46,7 +46,6 @@ from skinny.ui.qt.windows.material_graph import MaterialGraphDock
 from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
 from skinny.ui.qt.windows.scene_graph import SceneGraphDock
 from skinny.backend_select import (
-    METAL_FOUNDATION_NOTICE,
     make_context,
     select_backend,
 )
@@ -621,15 +620,12 @@ def main() -> None:
     )
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
-    # > auto). auto resolves to Vulkan in this foundation phase; an explicit
-    # --backend metal builds the device but the full renderer is not yet ported,
-    # so report that and exit cleanly rather than crashing.
+    # > auto). auto resolves to Metal on Apple Silicon, else Vulkan; an explicit,
+    # unavailable --backend metal errors clearly rather than crashing.
     try:
         backend = select_backend(args.backend, persisted=load_settings().get("backend"))
     except RuntimeError as exc:
         raise SystemExit(f"skinny-gui: {exc}")
-    if backend == "metal":
-        raise SystemExit(METAL_FOUNDATION_NOTICE)
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,

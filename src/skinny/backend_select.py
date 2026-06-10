@@ -11,15 +11,10 @@ Two entry points:
   :class:`skinny.metal_context.MetalContext`), both of which expose the same
   duck-typed surface the renderer consumes.
 
-**Foundation phase (P1).** The renderer (``renderer.py``) builds every GPU
-resource through ``vk_compute`` on a raw ``VkDevice``; it is not yet ported to
-Metal. So in this phase ``auto`` resolves to Vulkan on every host, and a real
-front-end that resolves to ``metal`` (an explicit ``--backend metal`` on an
-Apple-Silicon host where the Metal device constructs) refuses to launch the full
-renderer with :data:`METAL_FOUNDATION_NOTICE`. The native-Metal device + trivial
-compute dispatch + present foundation is exercised through ``make_context``
-directly by the tests and the present smoke. The ``auto``→Metal flip for the full
-renderer lands with megakernel render parity in a later change.
+The renderer runs the full megakernel on both backends. ``auto`` resolves to
+**Metal on Apple-Silicon macOS** (when a ``DeviceType.metal`` device constructs)
+and to **Vulkan** everywhere else; an explicit ``--backend metal`` on a host
+where the device cannot construct raises a clear error rather than degrading.
 """
 
 from __future__ import annotations
@@ -29,17 +24,6 @@ import platform
 import sys
 
 BACKEND_CHOICES = ("auto", "metal", "vulkan")
-
-# Shown when a real front-end resolves to Metal in the foundation phase. The
-# device is constructible (otherwise select_backend would have raised the
-# unavailable error), but the full renderer is Vulkan-only until the P2 port.
-METAL_FOUNDATION_NOTICE = (
-    "skinny: the native Metal backend is in a foundation phase — the Metal "
-    "device, a trivial compute dispatch, and present are built and tested, but "
-    "the full renderer is not yet ported to Metal (that lands in a later phase). "
-    "Re-run with --backend vulkan (the default 'auto' already resolves to "
-    "Vulkan)."
-)
 
 
 def metal_available() -> tuple[bool, str]:
@@ -73,9 +57,9 @@ def select_backend(prefer: str | None = None, *, persisted: str | None = None) -
     """Resolve the active backend name to ``"vulkan"`` or ``"metal"``.
 
     Precedence: explicit ``prefer`` (the ``--backend`` flag) > ``SKINNY_BACKEND``
-    env > ``persisted`` setting > ``auto``. In the foundation phase ``auto``
-    resolves to ``vulkan`` on every host (the renderer is not yet Metal-ready).
-    An explicit ``metal`` request that cannot construct a Metal device raises a
+    env > ``persisted`` setting > ``auto``. ``auto`` resolves to ``metal`` on
+    Apple-Silicon macOS when a Metal device constructs, else ``vulkan``. An
+    explicit ``metal`` request that cannot construct a Metal device raises a
     ``RuntimeError`` naming the missing requirement rather than degrading.
     """
     env = os.environ.get("SKINNY_BACKEND") or None
@@ -97,8 +81,9 @@ def select_backend(prefer: str | None = None, *, persisted: str | None = None) -
             )
         return "metal"
 
-    # auto → vulkan in the foundation phase (see module docstring / design D7).
-    return "vulkan"
+    # auto → metal on Apple-Silicon macOS when the device constructs, else vulkan.
+    ok, _reason = metal_available()
+    return "metal" if ok else "vulkan"
 
 
 def make_context(

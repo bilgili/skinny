@@ -32,7 +32,6 @@ from tornado.websocket import WebSocketHandler
 from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.params import _set_nested
 from skinny.backend_select import (
-    METAL_FOUNDATION_NOTICE,
     make_context,
     select_backend,
 )
@@ -695,15 +694,12 @@ def main() -> None:
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > auto). The
     # web server is multi-session and stateless across runs (no persisted
-    # setting). auto resolves to Vulkan in this foundation phase; an explicit
-    # --backend metal builds the device but the full renderer is not yet ported,
-    # so report that and exit cleanly rather than crashing.
+    # setting). auto resolves to Metal on Apple Silicon, else Vulkan; an explicit,
+    # unavailable --backend metal errors clearly rather than crashing.
     try:
         resolved_backend = select_backend(args.backend)
     except RuntimeError as exc:
         raise SystemExit(f"skinny-web: {exc}")
-    if resolved_backend == "metal":
-        raise SystemExit(METAL_FOUNDATION_NOTICE)
 
     global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
     global _BDPT_WALK, _INTEGRATOR, _PROPOSALS, _REUSE, _LOBE_SAMPLERS

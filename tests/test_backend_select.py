@@ -1,9 +1,8 @@
 """Backend-selection unit tests (no GPU — the device probe is mocked).
 
 Covers the shared ``--backend`` flag surface and the ``select_backend`` /
-``make_context`` resolver in :mod:`skinny.backend_select`. In this foundation
-phase ``auto`` resolves to Vulkan on every host (the renderer is not yet ported
-to Metal — design D7); the ``auto``→Metal flip is a later change.
+``make_context`` resolver in :mod:`skinny.backend_select`. ``auto`` resolves to
+Metal on a Metal-capable host (mocked) and to Vulkan elsewhere.
 """
 
 from __future__ import annotations
@@ -58,12 +57,20 @@ def test_backend_flag_choices_and_default_identical_across_frontends():
     assert action.default is None
 
 
-# ── select_backend: precedence + foundation-phase auto→vulkan ────────
+# ── select_backend: precedence + auto→Metal/Vulkan resolution ────────
 
-def test_auto_resolves_vulkan_even_when_metal_available(monkeypatch):
-    # auto stays Vulkan in the foundation phase, even on a Metal-capable host.
+def test_auto_resolves_metal_when_available(monkeypatch):
+    # auto → Metal on a Metal-capable host.
     monkeypatch.delenv("SKINNY_BACKEND", raising=False)
     monkeypatch.setattr(bs, "metal_available", lambda: (True, ""))
+    assert select_backend(None) == "metal"
+    assert select_backend("auto") == "metal"
+
+
+def test_auto_resolves_vulkan_when_metal_unavailable(monkeypatch):
+    # auto → Vulkan when no Metal device constructs (non-Apple-Silicon, etc.).
+    monkeypatch.delenv("SKINNY_BACKEND", raising=False)
+    monkeypatch.setattr(bs, "metal_available", lambda: (False, "not arm64 macOS"))
     assert select_backend(None) == "vulkan"
     assert select_backend("auto") == "vulkan"
 
@@ -115,7 +122,3 @@ def test_unknown_backend_raises_value_error(monkeypatch):
 def test_make_context_unknown_backend_raises():
     with pytest.raises(ValueError, match="unknown backend"):
         bs.make_context("opengl")
-
-
-def test_metal_foundation_notice_directs_to_vulkan():
-    assert "vulkan" in bs.METAL_FOUNDATION_NOTICE.lower()

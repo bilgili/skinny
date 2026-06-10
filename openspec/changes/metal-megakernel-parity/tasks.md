@@ -66,8 +66,10 @@
 
 ## 5. Flip `auto`→Metal; drop the foundation refusal (D4)
 
-- [ ] 5.1 `select_backend("auto")` → `metal` on Apple-Silicon macOS when the Metal device constructs, else `vulkan`. Precedence (explicit > env > persisted > auto) unchanged.
-- [ ] 5.2 Remove the `METAL_FOUNDATION_NOTICE` refusal in the four front-ends (`app.py`, `headless.py`, `ui/qt/app.py`, `web_app.py`); they build the context via `make_context` and run the renderer on the resolved backend. Persist/restore the selected backend unchanged.
+- [x] 5.1 `select_backend("auto")` → `metal` on Apple-Silicon macOS when the Metal device constructs, else `vulkan`. Precedence (explicit > env > persisted > auto) unchanged.
+  - **DONE & VERIFIED:** the `auto` branch now returns `"metal" if metal_available()[0] else "vulkan"` (probes + closes a device). Precedence untouched (explicit `prefer` > `SKINNY_BACKEND` > `persisted` > `auto`); explicit `vulkan` stays Vulkan; explicit unavailable `metal` still raises the clear `RuntimeError`. Live on this Apple-Silicon Mac: `select_backend("auto")` → `metal`, `select_backend("vulkan")` → `vulkan`. Unit tests `tests/test_backend_select.py` updated (auto→Metal when available, auto→Vulkan when not) — **17 passed**.
+- [x] 5.2 Remove the `METAL_FOUNDATION_NOTICE` refusal in the four front-ends (`app.py`, `headless.py`, `ui/qt/app.py`, `web_app.py`); they build the context via `make_context` and run the renderer on the resolved backend. Persist/restore the selected backend unchanged.
+  - **DONE:** the `if backend == "metal": raise SystemExit(METAL_FOUNDATION_NOTICE)` block + the `METAL_FOUNDATION_NOTICE` import are removed from all four front-ends; each resolves the backend (auto→Metal on Apple Silicon) and builds the context via `make_context` unchanged. The `METAL_FOUNDATION_NOTICE` constant + its docstring paragraph are deleted from `backend_select.py`, and the stale comments are rewritten. `app.py`/`skinny-gui` still persist/restore the `"backend"` key unchanged. All four front-ends `py_compile` clean (the 4 remaining ruff F401s in `app.py` are pre-existing unused `params` imports on `main`, not from this change).
 
 ## 6. Tests
 

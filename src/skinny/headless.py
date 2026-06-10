@@ -339,17 +339,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     ns = _build_parser().parse_args(argv)
-    from skinny.backend_select import METAL_FOUNDATION_NOTICE, select_backend
+    from skinny.backend_select import select_backend
 
     # skinny-render is non-interactive (no persisted setting): resolve the
-    # backend from --backend / SKINNY_BACKEND / auto. auto resolves to Vulkan in
-    # this foundation phase; an explicit --backend metal is reported and exits.
+    # backend from --backend / SKINNY_BACKEND / auto. auto resolves to Metal on
+    # Apple Silicon, else Vulkan; an explicit, unavailable --backend metal errors.
     try:
         backend = select_backend(ns.backend)
     except RuntimeError as exc:
         raise SystemExit(f"skinny-render: {exc}")
-    if backend == "metal":
-        raise SystemExit(METAL_FOUNDATION_NOTICE)
     opts = dict(
         samples=ns.samples, integrator=ns.integrator or "path", tonemap=ns.tonemap,
         exposure=ns.exposure, env_intensity=ns.env_intensity,

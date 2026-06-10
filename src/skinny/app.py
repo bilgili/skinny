@@ -24,7 +24,6 @@ from skinny.params import (
 )
 from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.backend_select import (
-    METAL_FOUNDATION_NOTICE,
     make_context,
     select_backend,
 )
@@ -480,14 +479,12 @@ def main() -> None:
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
     # > auto). In this foundation phase auto resolves to Vulkan; an explicit
-    # --backend metal builds the device but the full renderer is not yet ported,
-    # so report that and exit cleanly rather than crashing.
+    # Resolve the backend (auto → Metal on Apple Silicon, else Vulkan). An
+    # explicit, unavailable --backend metal errors clearly rather than crashing.
     try:
         backend = select_backend(args.backend, persisted=saved.get("backend"))
     except RuntimeError as exc:
         raise SystemExit(f"skinny: {exc}")
-    if backend == "metal":
-        raise SystemExit(METAL_FOUNDATION_NOTICE)
 
     if not glfw.init():
         raise RuntimeError("Failed to initialise GLFW")
