@@ -23,20 +23,31 @@
 
 import common;
 
+// float4-packed so the scalar (Vulkan, `-fvk-use-scalar-layout`) and MSL (Metal)
+// StructuredBuffer layouts agree. A bare `float3 a; <scalar> b;` packs to 16 B
+// under scalar layout (b fills the float3's slack) but the Metal target pads the
+// float3 to 16 B and pushes b to offset 16 — so the same CPU bytes are read at
+// the wrong offsets and every ray misses. Storing each pair as one float4
+// (.xyz + .w) is 16 B on both targets; the property getters keep every accessor
+// site unchanged and the CPU byte layout is byte-identical to the old packing.
 struct MeshVertex
 {
-    float3 position;
-    float  u;
-    float3 normal;
-    float  v;
+    float4 _positionU;   // xyz = position, w = u
+    float4 _normalV;     // xyz = normal,   w = v
+    property float3 position { get { return _positionU.xyz; } }
+    property float  u        { get { return _positionU.w; } }
+    property float3 normal   { get { return _normalV.xyz; } }
+    property float  v        { get { return _normalV.w; } }
 };
 
 struct BvhNode
 {
-    float3 aabbMin;
-    int    leftOrCount;
-    float3 aabbMax;
-    int    rightOrFirst;
+    float4 _aabbMinL;    // xyz = aabbMin, w = asfloat(leftOrCount)
+    float4 _aabbMaxR;    // xyz = aabbMax, w = asfloat(rightOrFirst)
+    property float3 aabbMin      { get { return _aabbMinL.xyz; } }
+    property int    leftOrCount  { get { return asint(_aabbMinL.w); } }
+    property float3 aabbMax      { get { return _aabbMaxR.xyz; } }
+    property int    rightOrFirst { get { return asint(_aabbMaxR.w); } }
 };
 
 [[vk::binding(5)]] StructuredBuffer<MeshVertex> meshVertices;

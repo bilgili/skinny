@@ -219,6 +219,12 @@ class HostStorageBuffer:
             memory_type=spy.MemoryType.device_local,
             label="skinny.host_storage",
         )
+        # Zero-initialise the GPU buffer. Device-local memory is uninitialised
+        # garbage otherwise, and the megakernel reads `toolBuffer[0].x` every
+        # frame as the tool mode (binding 30) — a stray non-zero value hijacks
+        # `mainImage` into the BXDF/BSSRDF tool branch and skips the scene render.
+        self.buffer.copy_from_numpy(
+            np.frombuffer(bytes(self._shadow), dtype=np.uint8).copy())
 
     def write(self, data: bytes, offset: int = 0) -> None:
         end = int(offset) + len(data)
@@ -500,6 +506,16 @@ class ComputePipeline:
         opts = spy.SlangCompilerOptions()
         opts.include_paths = [self.shader_dir, mtlx_genslang]
         opts.defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+        # Match the Vulkan `slangc` path's matrix layout. slangc defaults to
+        # column-major (HLSL/Slang default — the Vulkan flags never override it)
+        # and both the `_pack_uniforms` camera matrices and the `Instance`
+        # `float4x4` transforms (binding 12) are packed for that convention.
+        # SlangPy defaults to row_major, which transposes every matrix on Metal:
+        # the camera `mul`s drop the per-pixel projection term AND the instance
+        # world↔local transform is wrong, so every primary ray misses the head and
+        # the frame collapses to the flat environment. Column-major aligns Metal
+        # with Vulkan so the same packed bytes are read identically.
+        opts.matrix_layout = spy.SlangMatrixLayout.column_major
         session = dev.create_slang_session(compiler_options=opts)
 
         src_path = self.shader_dir / f"{self.entry_module}.slang"

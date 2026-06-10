@@ -3963,8 +3963,12 @@ class Renderer:
         # Metal binds mesh buffers by reference at dispatch (no Vulkan descriptor
         # sets — `descriptor_sets is None`), so the next dispatch picks up the
         # freshly-allocated buffers automatically; the descriptor rewrite is a
-        # Vulkan-only step.
-        if not self.is_metal:
+        # Vulkan-only step. It is also skipped when the descriptor sets don't
+        # exist yet (a large mesh can grow the buffers before the pipeline build
+        # allocates them — e.g. loading a big OBJ before the lazy build runs); the
+        # subsequent `_build_pipeline_for_current_graphs` writes the descriptors
+        # against the current buffers.
+        if not self.is_metal and self.descriptor_sets is not None:
             self._rebind_mesh_descriptors()
         self.vertex_buffer.upload_sync(self._dummy_mesh.vertex_bytes)
         self.index_buffer.upload_sync(self._dummy_mesh.index_bytes)
@@ -7429,6 +7433,28 @@ class Renderer:
         from skinny.metal_compute import _rgba_f32_to_rgba8
         return _rgba_f32_to_rgba8(arr).tobytes()
 
+    def _render_windowed_metal(self) -> None:
+        """Windowed Metal frame: dispatch the megakernel into `_offscreen_output`
+        (rgba8) and blit it onto the acquired slang-rhi surface image, then
+        present. The blit converts the surface's native format (typically
+        `bgra8_unorm` on macOS) and scales to the window extent. A `None` image
+        means the surface had nothing ready this tick — skip the frame. The device
+        is drained each frame so the present fence signals (no per-field cursor
+        writes anywhere on the Metal path, design D4)."""
+        surface = getattr(self.ctx, "surface", None)
+        if surface is None:
+            return
+        self.poll_pick_result()
+        self._render_megakernel_metal()
+        image = surface.acquire_next_image()
+        if image is None:
+            return
+        enc = self.ctx.device.create_command_encoder()
+        enc.blit(image, self._offscreen_output.texture)
+        self.ctx.device.submit_command_buffer(enc.finish())
+        surface.present()
+        self.ctx.device.wait_for_idle()
+
     def _pack_uniforms(self) -> bytes:
         self._sync_lens_buffer()
         aspect = self.width / self.height
@@ -7864,6 +7890,11 @@ class Renderer:
         # fragments are gen'd (USD metadata arrival, OBJ load). Until then the
         # window has nothing to draw — skip the whole frame.
         if not self._backend_render_ready:
+            return
+        if self.is_metal:
+            # Metal has no Vulkan swapchain/fence machinery — dispatch the
+            # megakernel and blit the offscreen frame to the slang-rhi surface.
+            self._render_windowed_metal()
             return
         f = self.current_frame
 
