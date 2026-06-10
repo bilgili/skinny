@@ -323,6 +323,7 @@ class VulkanContext:                                  # :27
     VALIDATION_LAYERS = ["VK_LAYER_KHRONOS_validation"]
     def __init__(self, window=None, width=1280, height=720, *,
                  enable_validation=True, gpu_preference=None) -> None    # :32
+    def wait_idle(self) -> None                                         # :477
     def destroy(self) -> None                                           # :356
 ```
 
@@ -330,6 +331,11 @@ class VulkanContext:                                  # :27
 compute queue only. Exposes `.width`, `.height`, `.device`, `.physical_device`,
 `.gpu_info`, `.compute_queue`, `.command_pool`. `destroy()` waits idle and tears
 everything down. (The wavefront path keys off `hasattr(ctx, "compute_queue")`.)
+
+`wait_idle()` is the backend-neutral device drain (`vkDeviceWaitIdle` on Vulkan,
+`Device.wait_for_idle` on the Metal twin `MetalContext`); the renderer calls
+`ctx.wait_idle()` before tearing down a pipeline so neither backend reaches for a
+Vulkan-only symbol on a rebuild.
 
 ---
 

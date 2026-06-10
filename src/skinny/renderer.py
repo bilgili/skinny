@@ -2896,8 +2896,12 @@ class Renderer:
         megakernel = self.execution_mode_index == EXECUTION_MEGAKERNEL
         is_rebuild = self._scene_bindings is not None
         if is_rebuild:
-            vk.vkDeviceWaitIdle(self.ctx.device)
+            # Backend-neutral device drain. Metal routes through slang-rhi's
+            # ``Device.wait_for_idle``; Vulkan calls ``vkDeviceWaitIdle``.
+            self.ctx.wait_idle()
             if self.descriptor_pool is not None:
+                # Vulkan-only: descriptor pools are a VK concept (Metal uses
+                # argument buffers and never populates ``descriptor_pool``).
                 # Pool destroy frees descriptor sets implicitly.
                 vk.vkDestroyDescriptorPool(
                     self.ctx.device, self.descriptor_pool, None,

@@ -472,6 +472,17 @@ class VulkanContext:
         )
         return vk.vkAllocateCommandBuffers(self.device, alloc_info)
 
+    # ── Sync ─────────────────────────────────────────────────────
+
+    def wait_idle(self) -> None:
+        """Block until the device has finished all submitted work.
+
+        Backend-neutral seam (mirrors :meth:`MetalContext.wait_idle`) so the
+        renderer can call ``self.ctx.wait_idle()`` without branching on
+        ``is_metal``.
+        """
+        vk.vkDeviceWaitIdle(self.device)
+
     # ── Cleanup ──────────────────────────────────────────────────
 
     def destroy(self) -> None:

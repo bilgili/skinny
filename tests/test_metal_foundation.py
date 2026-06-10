@@ -103,6 +103,27 @@ def test_trivial_dispatch_metal_vs_vulkan_parity(shader_dir):
     np.testing.assert_array_equal(metal_out, vk_out)
 
 
+# ── device drain seam (wait_idle) ────────────────────────────────────
+
+def test_metal_wait_idle_runs():
+    """`MetalContext.wait_idle()` is the backend-neutral device drain the
+    renderer's pipeline-rebuild path calls instead of `vk.vkDeviceWaitIdle`
+    (which crashes on a Metal device). Prove the seam exists and drains a
+    fresh device without error. No ComputePipeline → no megakernel compile →
+    no MTLCompilerService spike, so this is safe to run unguarded."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    try:
+        assert ctx.is_metal is True
+        ctx.wait_idle()  # must not raise; routes to Device.wait_for_idle
+    finally:
+        ctx.destroy()
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():

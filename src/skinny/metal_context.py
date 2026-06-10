@@ -171,6 +171,17 @@ class MetalContext:
         self.device.wait_for_idle()
         return True
 
+    # ── Sync ─────────────────────────────────────────────────────
+
+    def wait_idle(self) -> None:
+        """Block until the device has finished all submitted work.
+
+        Backend-neutral seam (mirrors :meth:`VulkanContext.wait_idle`) so the
+        renderer can call ``self.ctx.wait_idle()`` without branching on
+        ``is_metal``. Delegates to slang-rhi's ``Device.wait_for_idle``.
+        """
+        self.device.wait_for_idle()
+
     # ── Swapchain lifecycle ──────────────────────────────────────
 
     def recreate_swapchain(self, width: int, height: int) -> None:
