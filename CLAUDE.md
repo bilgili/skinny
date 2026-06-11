@@ -142,12 +142,12 @@ interactive front-ends) selects the GPU backend via the shared resolver in
 `backend_select.py` (precedence: flag > env > persisted > `auto`). Both backends
 run the full megakernel renderer: the native **Metal** backend
 (`metal_context.py`/`metal_compute.py`) compiles `main_pass.slang` in-process via
-SlangPy (slang-rhi, no MoltenVK) and dispatches it. **`auto` resolves to
-**Vulkan** everywhere** — Metal reaches geometry/structural parity (6.1) but its
-shaded skin color is not yet at parity (6.2), so Metal is **opt-in** via an
-explicit `--backend metal` rather than the default. An explicit `--backend metal`
-on a host with no Metal device errors clearly. `--backend vulkan` is the
-production path everywhere (MoltenVK under Vulkan on macOS).
+SlangPy (slang-rhi, no MoltenVK) and dispatches it. **`auto` resolves to native
+**Metal** on a Metal-capable Apple-Silicon host** — the native backend is at full
+parity with Vulkan (geometry 6.1, shaded color 6.2, windowed present 6.5) — and
+falls back to **Vulkan** everywhere else. An explicit `--backend metal` on a host
+with no Metal device errors clearly. `--backend vulkan` forces the production
+MoltenVK-under-Vulkan path on every platform.
 
 ## Architecture
 

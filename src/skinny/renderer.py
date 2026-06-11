@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import vulkan as vk
@@ -52,17 +52,14 @@ from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
 from skinny.tattoos import TATTOO_HEIGHT, TATTOO_WIDTH, Tattoo, blank_tattoo_data, load_tattoos
 from skinny.vk_context import VulkanContext
-from skinny.vk_compute import (
-    BINDLESS_TEXTURE_CAPACITY,
-    ComputePipeline,
-    ExternalTimelineSemaphore,
-    HostStorageBuffer,
-    HudOverlay,
-    SampledImage,
-    StorageBuffer,
-    StorageImage,
-    UniformBuffer,
-)
+# GPU-resource classes (StorageBuffer, ComputePipeline, …) are resolved per
+# backend at runtime via `backend_select.resource_module(ctx)` → `self._gpu.*`
+# (vk_compute on Vulkan, metal_compute on Metal) so this module never imports
+# `vulkan` on a Metal-only host (task 2.3). The single remaining type annotation
+# (`SampledImage`) is pulled in under TYPE_CHECKING — never executed at runtime,
+# so it forces no import on any backend.
+if TYPE_CHECKING:
+    from skinny.vk_compute import SampledImage
 
 WORKGROUP_SIZE = 8
 MAX_FRAMES_IN_FLIGHT = 2
@@ -279,8 +276,7 @@ class TexturePool:
         # capacity follows the active backend's cap (Metal trims to fit its
         # 128-texture / 16-sampler argument limit, design D8).
         self._gpu = gpu
-        self._capacity = int(getattr(gpu, "BINDLESS_TEXTURE_CAPACITY",
-                                     BINDLESS_TEXTURE_CAPACITY))
+        self._capacity = int(gpu.BINDLESS_TEXTURE_CAPACITY)
         self._slots = [None] * self._capacity
         self._by_path: dict[str, int] = {}
         self._next_slot = 0
@@ -2527,6 +2523,58 @@ class Renderer:
                 out += b"\x00" * self.mtlx_skin_record_size
         return bytes(out)
 
+    def _pack_mtlx_skin_array_msl(self) -> bytes:
+        """Metal sibling of `_pack_mtlx_skin_array`: relocate every scalar-layout
+        record into the reflected MSL element layout of the `mtlxSkin`
+        `StructuredBuffer` (design D3, like `_pack_uniforms_msl` does for `fc`).
+
+        The gen-reflected skin UBO (`cm.uniform_block`, what `pack_material_values`
+        emits) packs `float3` at scalar offsets (no vec3→16 promotion under
+        `-fvk-use-scalar-layout`). Metal's MSL layout pads each `float3` to 16 B and
+        16-aligns it, shifting every later field — so the scalar record cannot be
+        float4-wrapped the way `BvhNode`/`FlatMaterialParams` are. Instead copy each
+        field's data bytes from its scalar offset (`UniformField.offset`) to its
+        reflected MSL offset (`pipeline.mtlx_skin_layout[name]`), record by record,
+        at the MSL element stride. Offsets come from live reflection, never a
+        hand-table. Falls back to the scalar packer when reflection is unavailable
+        (no skin material / buffer dead-stripped) so frame 0 still has valid bytes."""
+        layout = getattr(self.pipeline, "mtlx_skin_layout", None)
+        stride = getattr(self.pipeline, "mtlx_skin_stride", 0)
+        cm = self._mtlx_skin_material
+        if not layout or not stride or cm is None or not cm.uniform_block:
+            return self._pack_mtlx_skin_array()
+        from skinny.materialx_runtime import pack_material_values
+
+        base = dict(self.mtlx_overrides)
+        scene_mats = (
+            self._usd_scene.materials if self._usd_scene is not None else []
+        )
+        fields = cm.uniform_block
+
+        def to_msl(scalar: bytes) -> bytes:
+            rec = bytearray(stride)
+            for f in fields:
+                moff = layout.get(f.name)
+                if moff is None:
+                    continue  # field dead-stripped from the MSL struct
+                rec[moff[0]:moff[0] + f.size] = scalar[f.offset:f.offset + f.size]
+            return bytes(rec)
+
+        out = bytearray()
+        for slot in range(self.material_capacity):
+            if slot >= len(scene_mats):
+                out += b"\x00" * stride
+                continue
+            mat = scene_mats[slot]
+            if mat.mtlx_target_name == "M_skinny_skin_default":
+                merged = dict(base)
+                for k, v in mat.parameter_overrides.items():
+                    merged[k] = v
+                out += to_msl(pack_material_values(cm.uniform_block, merged))
+            else:
+                out += b"\x00" * stride
+        return bytes(out)
+
     def _init_materialx_runtime(self) -> None:
         """Bootstrap MaterialLibrary and pre-generate skin material Slang.
 
@@ -3041,9 +3089,15 @@ class Renderer:
         # _init_materialx_runtime may have set this already from reflection.
         if not hasattr(self, 'mtlx_skin_record_size') or self.mtlx_skin_record_size == 0:
             self.mtlx_skin_record_size = 164
+        # On Metal the per-element stride grows (each `float3` pads to 16 B in MSL),
+        # and the pipeline reflection that yields the exact stride is built lazily
+        # after this point — so size each slot at a safe 256 B ceiling (≥ any MSL
+        # stride for the 164 B / 27-field record). The MSL repack writes records at
+        # the reflected stride; the buffer only needs to be large enough.
+        slot_bytes = 256 if self.is_metal else self.mtlx_skin_record_size
         self.mtlx_skin_buffer = self._gpu.StorageBuffer(
             self.ctx,
-            self.material_capacity * self.mtlx_skin_record_size + 256,
+            self.material_capacity * slot_bytes + 256,
         )
         # Seed with current SkinParameters → MaterialX defaults so the
         # buffer is valid on frame 0.
@@ -3101,8 +3155,13 @@ class Renderer:
         # CUDA weight-write vs the Vulkan read. Allocated only under
         # `--neural-handoff interop`; a guarded no-op (export_handle()→None) on
         # devices without external-semaphore support.
-        self.neural_timeline_semaphore = (
-            ExternalTimelineSemaphore(self.ctx) if _ext_neural else None)
+        # Vulkan-only interop primitive — imported lazily so the Metal path (where
+        # `_ext_neural` is always False) never pulls in `vulkan` (task 2.3).
+        if _ext_neural:
+            from skinny.vk_compute import ExternalTimelineSemaphore
+            self.neural_timeline_semaphore = ExternalTimelineSemaphore(self.ctx)
+        else:
+            self.neural_timeline_semaphore = None
 
         # Neural training-record dump (bindings 36/37, task 5.1). 1-element dummy
         # append buffer + counter so the descriptors are always valid; the
@@ -3435,7 +3494,7 @@ class Renderer:
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 # env + tattoo + n/r/d (5) + bindless flat-material array.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (5 + BINDLESS_TEXTURE_CAPACITY),
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (5 + self._gpu.BINDLESS_TEXTURE_CAPACITY),
             )
         )
         # Storage buffers per frame: vertices, indices, BVH nodes, TLAS
@@ -4904,8 +4963,9 @@ class Renderer:
                 self.ctx, new_cap * 4 + 16
             )
             self.mtlx_skin_buffer.destroy()
+            mtlx_slot_bytes = 256 if self.is_metal else self.mtlx_skin_record_size
             self.mtlx_skin_buffer = self._gpu.StorageBuffer(
-                self.ctx, new_cap * self.mtlx_skin_record_size + 256
+                self.ctx, new_cap * mtlx_slot_bytes + 256
             )
             self.std_surface_buffer.destroy()
             self.std_surface_buffer = self._gpu.StorageBuffer(
@@ -7478,7 +7538,7 @@ class Renderer:
     def _render_megakernel_metal(self) -> None:
         """Bind every megakernel resource and dispatch one frame on the Metal
         pipeline (design D2/D4). Writes the display image into `_offscreen_output`."""
-        mtlx_bytes = self._pack_mtlx_skin_array()
+        mtlx_bytes = self._pack_mtlx_skin_array_msl()
         if mtlx_bytes:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
         binds = self._build_metal_binds()

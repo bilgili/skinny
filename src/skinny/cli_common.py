@@ -73,13 +73,12 @@ def add_render_flags(
         parser.add_argument(
             "--backend", choices=("auto", "metal", "vulkan"), default=None,
             help="GPU backend, fixed for the session (+ SKINNY_BACKEND env). "
-                 "'auto' (default) resolves to 'vulkan' in this build: native "
-                 "Metal is in a foundation phase — the device + a trivial compute "
-                 "dispatch + present are proven, but the full renderer is not yet "
-                 "ported to Metal, so '--backend metal' on a real front-end "
-                 "reports that full rendering lands in a later phase and exits. "
-                 "'vulkan' is byte-identical to today (MoltenVK under Vulkan on "
-                 "macOS).",
+                 "'auto' (default) resolves to native 'metal' on a Metal-capable "
+                 "Apple-Silicon host — the native backend is at full parity with "
+                 "Vulkan (geometry, shaded color, windowed present) — and falls "
+                 "back to 'vulkan' everywhere else. 'metal' forces the native "
+                 "backend (errors if no Metal device); 'vulkan' forces MoltenVK "
+                 "under Vulkan (the production path on every platform).",
         )
     if integrator:
         parser.add_argument(

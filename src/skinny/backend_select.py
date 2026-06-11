@@ -58,12 +58,12 @@ def select_backend(prefer: str | None = None, *, persisted: str | None = None) -
     """Resolve the active backend name to ``"vulkan"`` or ``"metal"``.
 
     Precedence: explicit ``prefer`` (the ``--backend`` flag) > ``SKINNY_BACKEND``
-    env > ``persisted`` setting > ``auto``. ``auto`` resolves to ``vulkan``
-    everywhere — Metal renders correct geometry (structural parity, 6.1) but its
-    shaded skin color is not yet at parity (6.2), so Metal is opt-in via an
-    explicit ``--backend metal`` rather than the default. An explicit ``metal``
-    request that cannot construct a Metal device raises a ``RuntimeError`` naming
-    the missing requirement rather than degrading.
+    env > ``persisted`` setting > ``auto``. ``auto`` resolves to ``metal`` on a
+    Metal-capable Apple-Silicon host (the native backend is at full parity with
+    Vulkan — geometry 6.1, shaded color 6.2, windowed present 6.5) and falls back
+    to ``vulkan`` everywhere else. An explicit ``metal`` request that cannot
+    construct a Metal device raises a ``RuntimeError`` naming the missing
+    requirement rather than degrading.
     """
     env = os.environ.get("SKINNY_BACKEND") or None
     choice = (prefer or env or persisted or "auto").strip().lower()
@@ -84,9 +84,11 @@ def select_backend(prefer: str | None = None, *, persisted: str | None = None) -
             )
         return "metal"
 
-    # auto → vulkan everywhere. Metal is opt-in via --backend metal until its
-    # shaded-color parity (6.2) lands; geometry parity (6.1) is already verified.
-    return "vulkan"
+    # auto → Metal on a Metal-capable Apple-Silicon host (full parity: geometry
+    # 6.1 + shaded color 6.2 + windowed present 6.5), else Vulkan. Probes a device
+    # (and closes it) via metal_available().
+    ok, _ = metal_available()
+    return "metal" if ok else "vulkan"
 
 
 def make_context(
