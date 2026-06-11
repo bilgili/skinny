@@ -482,6 +482,14 @@ class ComputePipeline:
         self.pipeline = None
         self.uniform_layout = {}
         self.uniform_size = 0
+        # Reflected MSL layout of the `mtlxSkin` StructuredBuffer element
+        # (binding 15). Maps field-name → (msl_offset, msl_size); `stride` is the
+        # MSL element stride. Empty/0 until `_build` reflects them (or if the
+        # buffer is dead-stripped). Drives the renderer's `_pack_mtlx_skin_array_msl`
+        # repack — Slang pads each `float3` to 16 B on Metal, so the gen-reflected
+        # scalar record (`pack_material_values`) must be relocated field-by-field.
+        self.mtlx_skin_layout = {}
+        self.mtlx_skin_stride = 0
         self._default_tex = None
         self._kernel = None  # lazy compute-kernel for the generic dispatch_kernel path
 
@@ -529,6 +537,7 @@ class ComputePipeline:
 
         self._reflect_globals()
         self._reflect_uniform_layout()
+        self._reflect_mtlx_skin_layout()
         # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
         self._default_tex = dev.create_texture(
             type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
@@ -567,6 +576,30 @@ class ComputePipeline:
 
         walk(tl, 0, "")
         self.uniform_layout = layout
+
+    def _reflect_mtlx_skin_layout(self) -> None:
+        """Reflect the MSL field offsets/size + element stride of the ``mtlxSkin``
+        ``StructuredBuffer<MtlxSkinParams>`` (binding 15). ``mtlx_skin_layout`` maps
+        each field name → (offset, size) inside one MSL record; ``mtlx_skin_stride``
+        is the per-element stride. Empty/0 when the buffer is dead-stripped (no skin
+        material in the scene). Unlike ``fc``, the float3 fields here sit at
+        non-16-aligned scalar offsets, so the renderer cannot float4-wrap them — it
+        repacks the gen-reflected scalar record into this MSL layout per frame
+        (`_pack_mtlx_skin_array_msl`)."""
+        p = next((p for p in self.program.layout.parameters
+                  if p.name == "mtlxSkin"), None)
+        if p is None:
+            return
+        # StructuredBuffer<T> → element type layout carries the struct fields.
+        etl = getattr(p.type_layout, "element_type_layout", None)
+        if etl is None or not getattr(etl, "fields", None):
+            return
+        layout: dict[str, tuple[int, int]] = {}
+        for f in etl.fields:
+            ftl = f.type_layout
+            layout[f.name] = (int(f.offset), int(getattr(ftl, "size", 0)))
+        self.mtlx_skin_layout = layout
+        self.mtlx_skin_stride = int(getattr(etl, "stride", 0) or etl.size)
 
     # ── Dispatch ─────────────────────────────────────────────────
 
