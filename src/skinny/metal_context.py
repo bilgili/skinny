@@ -4,9 +4,10 @@
 It constructs a native Metal device through SlangPy / slang-rhi (no MoltenVK, no
 raw PyObjC) and exposes the **same duck-typed surface the renderer reads off the
 Vulkan context** — ``width`` / ``height``, ``compute_queue`` / ``present_queue``,
-``swapchain_info``, ``allocate_command_buffers``, ``recreate_swapchain``,
-``destroy``, the ``backend_name`` / ``is_metal`` predicate, and the capability
-flags — so later phases can drive it duck-typed without Metal-specific knowledge
+``swapchain_info``, ``gpu_info``, ``allocate_command_buffers``,
+``recreate_swapchain``, ``destroy``, the ``backend_name`` / ``is_metal``
+predicate, and the capability flags — so later phases can drive it duck-typed
+without Metal-specific knowledge
 at the context layer.
 
 **Foundation phase (P1).** This covers device bring-up, a trivial compute
@@ -42,6 +43,24 @@ class MetalSwapchainInfo:
     format: object
     width: int
     height: int
+
+
+@dataclass
+class MetalGpuInfo:
+    """Duck-typed analogue of :class:`skinny.hardware.GpuInfo` for the Metal path.
+
+    The Qt / web front-ends and the video encoder read three fields off
+    ``ctx.gpu_info`` — ``name``, ``is_discrete``, and ``preferred_h264_encoder``.
+    Apple-Silicon GPUs are unified-memory (integrated, never discrete) and encode
+    H.264 through VideoToolbox, so the latter two are fixed; ``name`` comes from
+    slang-rhi's ``Device.info.adapter_name`` (e.g. ``"Apple M5 Pro"``). Kept local
+    to this module so the Metal backend never imports :mod:`skinny.hardware`,
+    which pulls in the ``vulkan`` extension.
+    """
+
+    name: str
+    is_discrete: bool = False
+    preferred_h264_encoder: str = "h264_videotoolbox"
 
 
 class MetalContext:
@@ -83,6 +102,13 @@ class MetalContext:
         # its own validation, so they are no-ops here in P1.
 
         self.device = spy.create_device(type=spy.DeviceType.metal)
+
+        # Duck-typed parity with VulkanContext.gpu_info — front-ends read
+        # gpu_info.name and the encoder reads preferred_h264_encoder. slang-rhi
+        # owns device selection (gpu_preference is a P1 no-op), so the name comes
+        # from its reported adapter.
+        self.gpu_info = MetalGpuInfo(name=self.device.info.adapter_name)
+        print(f"[GPU] Selected: {self.gpu_info.name} (Metal)")
 
         # SlangPy records and submits work on the device's implicit queue
         # (ComputeKernel.dispatch / submit_command_buffer); there are no separate

@@ -79,12 +79,15 @@ _FORMAT_TOKENS = {
     "rgba32f": "rgba32_float",
     "rgba32_float": "rgba32_float",
     "rgba8_unorm": "rgba8_unorm",
-    "rgba8_srgb": "rgba8_srgb",
+    # slang-rhi spells the 8-bit sRGB format `rgba8_unorm_srgb` (Vulkan's
+    # VK_FORMAT_R8G8B8A8_SRGB / the `rgba8_srgb` neutral token); the bare
+    # `rgba8_srgb` is not a `slangpy.Format` member.
+    "rgba8_srgb": "rgba8_unorm_srgb",
     "r8_unorm": "r8_unorm",
     "r32_float": "r32_float",
 }
-_VKFORMAT_INTS = {  # VkFormat enum values → token
-    9: "r8_unorm", 37: "rgba8_unorm", 43: "rgba8_srgb", 109: "rgba32_float",
+_VKFORMAT_INTS = {  # VkFormat enum values → slangpy.Format name
+    9: "r8_unorm", 37: "rgba8_unorm", 43: "rgba8_unorm_srgb", 109: "rgba32_float",
 }
 _ADDRESS_TOKENS = {"repeat", "clamp", "mirror", "black", "useMetadata"}
 _VK_ADDRESS_INTS = {0: "repeat", 1: "mirror", 2: "clamp", 3: "black"}

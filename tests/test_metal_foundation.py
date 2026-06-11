@@ -124,6 +124,50 @@ def test_metal_wait_idle_runs():
         ctx.destroy()
 
 
+# ── gpu_info duck-typed parity ───────────────────────────────────────
+
+def test_metal_context_exposes_gpu_info():
+    """`MetalContext.gpu_info` mirrors `VulkanContext.gpu_info` — the Qt/web
+    front-ends read `gpu_info.name` and the video encoder reads
+    `gpu_info.preferred_h264_encoder`. A missing attribute crashes window
+    construction (`AttributeError: 'MetalContext' object has no attribute
+    'gpu_info'`). No ComputePipeline → no megakernel compile, safe unguarded."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    try:
+        gi = ctx.gpu_info
+        assert isinstance(gi.name, str) and gi.name  # e.g. "Apple M5 Pro"
+        assert gi.is_discrete is False               # Apple Silicon = unified mem
+        assert gi.preferred_h264_encoder == "h264_videotoolbox"
+    finally:
+        ctx.destroy()
+
+
+# ── image-format token resolution ────────────────────────────────────
+
+def test_metal_format_tokens_resolve_to_real_slangpy_formats():
+    """Every value in `_FORMAT_TOKENS` / `_VKFORMAT_INTS` must name a real
+    `slangpy.Format` member, else `_resolve_format`'s `getattr(spy.Format, …)`
+    raises `AttributeError: type object 'Format' has no attribute '…'` at texture-
+    load / render time (slang-rhi spells 8-bit sRGB `rgba8_unorm_srgb`, not the
+    `rgba8_srgb` neutral token). Pure enum-name check — no device, no compile."""
+    spy = pytest.importorskip("slangpy")
+    from skinny.metal_compute import _FORMAT_TOKENS, _VKFORMAT_INTS, _resolve_format
+
+    for name in (*_FORMAT_TOKENS.values(), *_VKFORMAT_INTS.values()):
+        assert hasattr(spy.Format, name), f"slangpy.Format has no member {name!r}"
+
+    # The sRGB neutral token and VkFormat R8G8B8A8_SRGB (43) both land on the
+    # slang-rhi sRGB format — this is the exact regression that crashed the
+    # three-materials USD scene render on Metal.
+    assert _resolve_format(spy, "rgba8_srgb") == spy.Format.rgba8_unorm_srgb
+    assert _resolve_format(spy, 43) == spy.Format.rgba8_unorm_srgb
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():

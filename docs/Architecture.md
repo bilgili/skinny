@@ -708,9 +708,12 @@ in `backend_select.py`, used by every front-end:
 - `make_context(backend, window, width, height, **kw)` constructs the matching
   context — a `VulkanContext` (`vk_context.py`) or a `MetalContext`
   (`metal_context.py`) — both exposing the same duck-typed surface the renderer
-  reads (`width`/`height`, compute/present queues, `swapchain_info`,
+  reads (`width`/`height`, compute/present queues, `swapchain_info`, `gpu_info`,
   `allocate_command_buffers`, `recreate_swapchain`, `destroy`, the
-  `backend_name`/`is_metal` predicate, and the capability flags). The four
+  `backend_name`/`is_metal` predicate, and the capability flags). `gpu_info`
+  carries `.name`, `.is_discrete`, and `.preferred_h264_encoder` on both
+  backends, so the front-ends' status line and the video encoder stay
+  backend-agnostic. The four
   front-ends (`app.py`, `headless.py`, `ui/qt/app.py`, `web_app.py`) call
   `make_context` instead of constructing a context directly; `app.py` and
   `skinny-gui` persist/restore the selected backend like the other render flags.
