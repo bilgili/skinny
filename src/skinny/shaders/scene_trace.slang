@@ -23,6 +23,7 @@ HitInfo traceFurnaceSphere(Ray ray)
     h.tangent        = float3(1.0, 0.0, 0.0);
     h.hasTangent     = false;
     h.materialId     = 0u;
+    h.instanceId     = 0u;
 
     float3 oc   = ray.origin;
     float  b    = dot(oc, ray.direction);

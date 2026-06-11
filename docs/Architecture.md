@@ -699,10 +699,11 @@ in `backend_select.py`, used by every front-end:
 
 - `select_backend(prefer, *, persisted=None)` applies the precedence **explicit
   `--backend` flag > `SKINNY_BACKEND` env > persisted setting > `auto`**,
-  returning `"vulkan"` or `"metal"`. In the current foundation phase `auto`
-  resolves to **Vulkan** on every host (the renderer is not yet ported to Metal);
-  an explicit `--backend metal` returns `"metal"` only when the Metal device
-  constructs, otherwise it raises a clear error naming the missing requirement.
+  returning `"vulkan"` or `"metal"`. `auto` resolves to **Vulkan** everywhere —
+  Metal reaches geometry/structural parity (6.1) but its shaded skin color is not
+  yet at parity (6.2), so it is **opt-in** via an explicit `--backend metal` (which
+  returns `"metal"` only when the `DeviceType.metal` device constructs, otherwise
+  raising a clear error naming the missing requirement) rather than the default.
 - `make_context(backend, window, width, height, **kw)` constructs the matching
   context — a `VulkanContext` (`vk_context.py`) or a `MetalContext`
   (`metal_context.py`) — both exposing the same duck-typed surface the renderer
@@ -713,39 +714,54 @@ in `backend_select.py`, used by every front-end:
   `make_context` instead of constructing a context directly; `app.py` and
   `skinny-gui` persist/restore the selected backend like the other render flags.
 
-A real front-end that resolves to `metal` in this phase exits with a clear
-"foundation built, full render lands in a later phase — use `--backend vulkan`"
-message (`METAL_FOUNDATION_NOTICE`) rather than crashing, because the renderer's
-`vk_compute` resources need a `VkDevice`. The Metal device + dispatch + present
-foundation is exercised through `make_context` directly by the tests and the
-present smoke.
+The renderer builds its GPU resources through whichever sibling module matches
+the context, resolved once by `resource_module(ctx)` (keyed on `ctx.is_metal`):
+`vk_compute` for a `VulkanContext`, `metal_compute` for a `MetalContext`. Both
+expose the **same public API** (`StorageBuffer`, `StorageImage`, `SampledImage`,
+`UniformBuffer`, `HostStorageBuffer`, `ComputePipeline`, …), so the construction
+sites stay backend-agnostic (`self._gpu = resource_module(self.ctx)`); imports are
+deferred so the Metal path never imports `vulkan`. The few genuinely
+backend-specific spots are gated on `is_metal`: the MSL uniform pack
+(`_pack_uniforms_msl`), the bind-by-name megakernel dispatch (no Vulkan descriptor
+sets), and the teardown drain (the backend-neutral `ctx.wait_idle()` seam).
 
-### MetalContext foundation (`metal_context.py`, `metal_compute.py`)
+### MetalContext (`metal_context.py`, `metal_compute.py`)
 
 `MetalContext` stands up a **native** Metal device through SlangPy's
 `DeviceType.metal` (slang-rhi — no MoltenVK, no raw PyObjC) and mirrors the
 `VulkanContext` surface. The present path uses the slang-rhi `Surface`
 (`configure` / `acquire_next_image` / `present`) bridged to a GLFW window via its
 Cocoa `NSWindow` pointer (`WindowHandle(nswindow=…)` from `glfw.get_cocoa_window`)
-— no manual `CAMetalLayer`. `metal_compute.py` provides the minimal
-`StorageBuffer` / `StorageImage` / `ComputePipeline` wrappers; Slang compiles to
-Metal **in-process** (no `slangc` shell-out), and pipeline parameters are bound
-as resources or via `set_data` byte blobs, never per-field cursor writes (a
-scalar cursor write around an open Metal encoder can leave the GPU fence
-un-signalled). Foundation kernels name their entry `computeMain`, never `main`
-(Slang's Metal target reserves `main` and the rename breaks pipeline creation).
+— no manual `CAMetalLayer`. `metal_compute.py` provides the full resource layer at
+API parity with `vk_compute`, including the megakernel `ComputePipeline`: it runs
+`emit_megakernel_sources` then compiles `main_pass.slang` (`mainImage`) to Metal
+**in-process** (no `slangc` shell-out, no `.metallib`) with
+`SKINNY_COMPUTE_PIPELINE=1` + `SKINNY_METAL=1`, reflects the global binding map,
+and dispatches by **binding resources by name** (the renderer's binding map drives
+the same logical slots). Pipeline parameters are bound as whole resources or via
+`set_data` byte blobs, **never per-field cursor writes** (a scalar cursor write
+around an open Metal encoder can leave the GPU fence un-signalled). Megakernel
+entry is `mainImage`; trivial/foundation kernels name their entry `computeMain`,
+never `main` (Slang's Metal target reserves `main` and the rename breaks pipeline
+creation).
 
-This phase (P1) proves the device + a trivial compute dispatch (bit-identical to
-the same Slang kernel on Vulkan) + windowed present. The full renderer (megakernel
-head render, materials, ReSTIR, neural inference, wavefront) and the MLX↔Metal
-zero-copy weight handoff are staged in later changes; until then the capability
-flags `supports_external_memory` / `supports_external_semaphore` /
+**Metal-target shader adaptations** (gated `#if defined(SKINNY_METAL)`, Vulkan
+SPIR-V byte-unchanged): the combined `Sampler2D` pool exceeds Apple's compute
+argument limits and slang-rhi cannot bind a combined `Sampler2D` at all, so the
+bindless `flatMaterialTextures` pool becomes `Texture2D[120]` sampled through a
+shared `commonSampler` (binding 38), the five discrete maps (env/tattoo/normal/
+roughness/displacement) split into `Texture2D` + a per-map `SamplerState`
+(bindings 39–43), and `NonUniformResourceIndex` (unavailable in the compute stage
+on the Metal target) collapses to identity via the `NRI(x)` macro.
+
+The MLX↔Metal zero-copy weight handoff is staged in a later change; until then the
+capability flags `supports_external_memory` / `supports_external_semaphore` /
 `supports_fp16_storage` / `supports_fp16_compute` report `false` on Metal so the
 renderer stays on its fp32 / file-handoff paths.
 
 ## Backend Abstraction (`gfx/`)
 
-> Note: the `gfx/` ABC below is **distinct** from the live Metal foundation in
+> Note: the `gfx/` ABC below is **distinct** from the live Metal backend in
 > [Backend selection](#backend-selection) above. The renderer drives
 > `VulkanContext` / `MetalContext` duck-typed via `make_context`; the `gfx/`
 > abstraction has no importers outside `gfx/` and remains unused scaffolding (a
@@ -811,6 +827,16 @@ incrementally moved over.
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
 | 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry **and** the wavefront path integrator (when `fc.recordMode` is set) | `integrators/path_record_common.slang` |
 | 37 | RWStructuredBuffer | Record append counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record_common.slang` |
+
+The table is the **Vulkan** layout. On the **Metal** target (gated
+`#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
+`Sampler2D` slots split into a `Texture2D` + a `SamplerState`, because slang-rhi's
+Metal backend cannot bind a combined `Sampler2D` and the 128-texture pool exceeds
+Apple's compute argument limits: binding 14 becomes `Texture2D[120]` sampled
+through a shared `commonSampler` at **binding 38**, and the five discrete maps
+(env 4, tattoo 8, normal 9, roughness 10, displacement 11) keep their texture slot
+but gain a per-map `SamplerState` at **bindings 39–43** (5 + `commonSampler` =
+6 ≤ 16). The buffer/image slots (0–37) are identical on both backends.
 
 Bindings **25–29** are reserved for the MaterialX nodegraph buffers
 (`GRAPH_BINDING_BASE = 25`), so the neural-proposal weight buffers sit at **33+**,

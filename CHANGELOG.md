@@ -9,6 +9,29 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Backend
 
+- **Metal megakernel render parity** (change `metal-megakernel-parity`, P2) — the
+  full megakernel renderer now runs natively on Metal. `metal_compute.py` grew to
+  resource-layer parity with `vk_compute` (`StorageBuffer` / `StorageImage` /
+  `SampledImage` / `UniformBuffer` / `HostStorageBuffer` / `ComputePipeline`), and
+  the Metal `ComputePipeline` compiles `main_pass.slang` (`mainImage`) to Metal
+  **in-process** (no `slangc`, no `.metallib`) after `emit_megakernel_sources`,
+  reflects the binding map, and dispatches by **binding resources by name** (no
+  Vulkan descriptor sets). New `_pack_uniforms_msl` relocates the `FrameConstants`
+  block to the reflected MSL layout (**592 B** vs the **512 B** Vulkan scalar —
+  `float3` pads to 16 B), `set_data` only. Metal-target shader adaptations (Vulkan
+  SPIR-V byte-unchanged): bindless `Texture2D[120]` + shared `commonSampler`,
+  per-map discrete samplers (bindings 38–43), and an `NRI` macro for the
+  compute-stage `NonUniformResourceIndex`. **`auto` now resolves to Metal on
+  Apple-Silicon macOS** (else Vulkan); the foundation-phase `--backend metal`
+  refusal is removed from all four front-ends. The renderer resolves its resource
+  layer once via `backend_select.resource_module(ctx)` and drains teardown through
+  a backend-neutral `ctx.wait_idle()` seam. Mac-verified (guarded): megakernel
+  pipeline build + binding-map reflection, buffer/bindless/sampler binds, a head
+  render with no hang, MSL offset pins, and shaded Metal↔Vulkan parity; byte-
+  identical *structural* parity (geom/instance-ID AOV) is deferred to a follow-up
+  change. New tests `tests/test_metal_megakernel_{binding_map,dispatch,head_render,
+  rebuild}.py`, `tests/test_metal_vulkan_shaded_parity.py`.
+
 - Native **Metal backend foundation** (change `add-metal-backend-foundation`,
   P1 of a phased plan) — a native Metal device built on SlangPy's
   `DeviceType.metal` (slang-rhi, no MoltenVK, no raw PyObjC) in new

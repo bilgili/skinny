@@ -1,9 +1,8 @@
 """Backend-selection unit tests (no GPU — the device probe is mocked).
 
 Covers the shared ``--backend`` flag surface and the ``select_backend`` /
-``make_context`` resolver in :mod:`skinny.backend_select`. In this foundation
-phase ``auto`` resolves to Vulkan on every host (the renderer is not yet ported
-to Metal — design D7); the ``auto``→Metal flip is a later change.
+``make_context`` resolver in :mod:`skinny.backend_select`. ``auto`` resolves to
+Metal on a Metal-capable host (mocked) and to Vulkan elsewhere.
 """
 
 from __future__ import annotations
@@ -58,12 +57,25 @@ def test_backend_flag_choices_and_default_identical_across_frontends():
     assert action.default is None
 
 
-# ── select_backend: precedence + foundation-phase auto→vulkan ────────
+# ── select_backend: precedence + auto→Vulkan resolution ──────────────
 
 def test_auto_resolves_vulkan_even_when_metal_available(monkeypatch):
-    # auto stays Vulkan in the foundation phase, even on a Metal-capable host.
+    # auto → Vulkan everywhere: Metal is opt-in until shaded parity (6.2) lands,
+    # so a Metal-capable host still defaults to Vulkan and never probes the device.
     monkeypatch.delenv("SKINNY_BACKEND", raising=False)
-    monkeypatch.setattr(bs, "metal_available", lambda: (True, ""))
+
+    def _boom():
+        raise AssertionError("auto must not probe metal_available()")
+
+    monkeypatch.setattr(bs, "metal_available", _boom)
+    assert select_backend(None) == "vulkan"
+    assert select_backend("auto") == "vulkan"
+
+
+def test_auto_resolves_vulkan_when_metal_unavailable(monkeypatch):
+    # auto → Vulkan when no Metal device constructs (non-Apple-Silicon, etc.).
+    monkeypatch.delenv("SKINNY_BACKEND", raising=False)
+    monkeypatch.setattr(bs, "metal_available", lambda: (False, "not arm64 macOS"))
     assert select_backend(None) == "vulkan"
     assert select_backend("auto") == "vulkan"
 
@@ -117,5 +129,10 @@ def test_make_context_unknown_backend_raises():
         bs.make_context("opengl")
 
 
-def test_metal_foundation_notice_directs_to_vulkan():
-    assert "vulkan" in bs.METAL_FOUNDATION_NOTICE.lower()
+# ── the foundation refusal is gone (task 6.4) ────────────────────────
+
+def test_foundation_refusal_removed():
+    # The Metal megakernel renders for real now: the foundation-phase refusal
+    # constant must not exist, so no front-end can reintroduce the `--backend
+    # metal` SystemExit. The four front-ends resolve + launch on Metal directly.
+    assert not hasattr(bs, "METAL_FOUNDATION_NOTICE")

@@ -77,6 +77,16 @@ if gt "$M" "$MTLC_WEDGE_GB"; then
   exit 4
 fi
 
+# macOS SIP strips DYLD_* from the environment when this protected `/bin/bash`
+# was exec'd, but leaves VULKAN_SDK intact. `renderer.py` imports `vulkan`
+# unconditionally (even the Metal path), and that binding loads libvulkan off the
+# dylib path — so re-derive DYLD_LIBRARY_PATH from the surviving VULKAN_SDK before
+# launching the (non-protected) child. No-op when the SDK isn't set.
+if [ -n "${VULKAN_SDK:-}" ] && [ -z "${DYLD_LIBRARY_PATH:-}" ]; then
+  export DYLD_LIBRARY_PATH="$VULKAN_SDK/lib"
+  log "re-derived DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH (SIP stripped it from /bin/bash)"
+fi
+
 # ---- launch ----
 log "launch: $*"
 "$@" &

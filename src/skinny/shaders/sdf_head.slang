@@ -258,6 +258,7 @@ HitInfo marchHead(Ray ray)
     info.tangent        = float3(1, 0, 0);
     info.hasTangent     = false;
     info.materialId     = 0u;
+    info.instanceId     = 0u;
 
     float t = 0.01;
     for (int i = 0; i < MAX_MARCH_STEPS; i++)

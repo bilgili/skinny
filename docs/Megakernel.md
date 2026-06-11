@@ -48,6 +48,18 @@ Per-frame: `vkCmdBindPipeline` → `vkCmdBindDescriptorSets(descriptor_sets[f])`
 BXDF/BSSRDF visualiser, keyed by `toolBuffer[0]` (`renderer.py:5609-5619`,
 `main_pass.slang:386-396`).
 
+The same `toolBuffer[0].x` dispatch hijack also drives a **structural AOV** mode
+(`TOOL_MODE_STRUCTURAL`, `bindings.slang`). When armed, `runFrame` writes one
+`float4` per pixel — `(hit-mask, instanceId, materialId, depth)` — into
+`toolBuffer` from slot `TOOL_STRUCT_AOV_BASE` (16) instead of shading, reusing
+the real primary ray + `traceScene`. It feeds the Metal↔Vulkan **structural
+parity** test (6.1): the structural channel is deterministic across backends
+(integer ids + depth, no transcendental divergence), so it is compared
+bit-exact (ids/mask) / within a tiny depth tolerance, while shaded color uses a
+perceptual bar (6.2). Host entry point: `Renderer.read_structural_aov()`. The
+winning TLAS instance index is carried on `HitInfo.instanceId`
+(`mesh_head.slang` records it in `marchHeadMesh`).
+
 ---
 
 ## 2. Per-pixel flow (all inline in one invocation)
@@ -183,6 +195,37 @@ compile limit.
 
 See [Wavefront.md § Megakernel vs wavefront](Wavefront.md#megakernel-vs-wavefront)
 for the side-by-side table.
+
+---
+
+## Backends: Vulkan and Metal
+
+The megakernel runs on both backends. Vulkan loads the pre-compiled
+`main_pass.spv`; the native **Metal** backend compiles `main_pass.slang`
+(`mainImage`) to Metal **in-process** via SlangPy (slang-rhi, no MoltenVK, no
+`.metallib`) after `emit_megakernel_sources` emits the generated material
+modules, then dispatches by **binding resources by name** — the renderer's
+binding map drives the same logical slots, with no Vulkan descriptor sets. The
+resource layer is resolved once by `resource_module(ctx)` (`vk_compute` vs
+`metal_compute`), so the renderer's construction sites are backend-agnostic; see
+[Architecture.md § Backend selection](Architecture.md#backend-selection).
+
+**MSL uniform layout (`FrameConstants fc`, binding 0).** Slang pads `float3` to
+16 B on the Metal target, so the reflected MSL block is **592 B / 16-align** vs
+the Vulkan scalar **512 B / 4-align** (the embedded `Camera` is 288 B vs 272 B).
+`_pack_uniforms_msl` reuses the Vulkan scalar blob from `_pack_uniforms` verbatim
+and relocates each field to its **reflected** MSL offset (`pipeline.uniform_layout`
+— never hardcoded; e.g. `camera.position`@256, `focusPlaneOrigin`@416,
+`focusPlaneNormal`@432, `zoomMin`@448, `pickPixel`@472), uploaded via `set_data`
+only. Drift guards assert the field table covers the whole scalar blob and the
+packed length equals the reflected struct size. The renderer picks
+`_pack_uniforms` vs `_pack_uniforms_msl` by `ctx.is_metal`; the Vulkan std140
+path is byte-unchanged.
+
+Skin/std-surface params and the lights arrive as SSBOs (not part of `fc`). For
+the Metal-target texture/sampler split (`commonSampler`, the discrete-map
+samplers, `NRI`) see
+[Architecture.md § MetalContext](Architecture.md#metalcontext-metal_contextpy-metal_computepy).
 
 ---
 

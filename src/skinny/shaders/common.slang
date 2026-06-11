@@ -28,44 +28,50 @@ struct HitInfo
     bool   hit;
     bool   hasTangent;     // true when uv comes from an asset (not the fallback sphere map)
     uint   materialId;     // index into the active material set
+    uint   instanceId;     // winning TLAS instance index (structural AOV / parity)
 };
 
 // Per-material flat-shading record. Used by main_pass.slang when a hit's
 // materialTypes[id] == MATERIAL_TYPE_FLAT. Layout matches
 // renderer.pack_flat_material exactly: 128 B / record, scalar-layout.
+// float4-packed so the Vulkan scalar (`-fvk-use-scalar-layout`) and Metal MSL
+// StructuredBuffer layouts agree: each `float3` + its trailing scalar is one
+// float4 (.xyz + .w), 16 B on both targets. Scalar-only runs already match. The
+// property getters keep every accessor site unchanged; the CPU byte layout
+// (documented offsets) is byte-identical to the old packing. See mesh_head.slang
+// for the same pattern + the rationale.
 struct FlatMaterialParams
 {
-    float3 diffuseColor;          // 0..12
-    float  roughness;             // 12..16 (packs into vec3 trailing pad)
-    float  metallic;              // 16..20
-    float  specular;              // 20..24
-    float  opacity;               // 24..28
-    uint   diffuseTextureIdx;     // 28..32; 0xFFFFFFFF = use constant
-    uint   roughnessTextureIdx;   // 32..36; sentinel = use constant
-    uint   metallicTextureIdx;    // 36..40; sentinel = use constant
-    uint   normalTextureIdx;      // 40..44; sentinel = use mesh normal
-    uint   emissiveTextureIdx;    // 44..48; sentinel = use emissive const
-    float3 emissiveColor;         // 48..60
-    float  ior;                   // 60..64; index of refraction (1.0 = vacuum)
-    float  coat;                  // 64..68; clear coat weight (0..1)
-    float  coatRoughness;         // 68..72
-    float  coatIOR;               // 72..76
-    uint   opacityTextureIdx;     // 76..80; sentinel = use constant
-    float3 coatColor;             // 80..92
-    float  opacityThreshold;      // 92..96; cutout alpha threshold
-    // UsdUVTexture `inputs:scale.xyz` / `inputs:bias.xyz` from the normal
-    // map node. OpenGL convention is (2,2,2)/(-1,-1,-1); DirectX-style
-    // maps author scale.y=-2 + bias.y=+1 to flip Y. Renderer fills in the
-    // OpenGL defaults when no USD binding is present.
-    float3 normalScale;           // 96..108
-    // Packed per-input channel selector. 4 bits per input encoding
-    // {0=rgb, 1=r, 2=g, 3=b, 4=a}. Bit positions match renderer's
-    // _CHANNEL_SHIFT: diffuse(0), roughness(4), metallic(8), opacity(12),
-    // emissive(16). Zero (the default) keeps the legacy per-input
-    // hard-coded channel fetch.
-    uint   channelMask;           // 108..112
-    float3 normalBias;            // 112..124
-    uint   _pad0;                 // 124..128
+    float4 _diffuseColorRoughness;    // 0..16   xyz=diffuseColor, w=roughness
+    float  metallic;                  // 16..20
+    float  specular;                  // 20..24
+    float  opacity;                   // 24..28
+    uint   diffuseTextureIdx;         // 28..32; 0xFFFFFFFF = use constant
+    uint   roughnessTextureIdx;       // 32..36; sentinel = use constant
+    uint   metallicTextureIdx;        // 36..40; sentinel = use constant
+    uint   normalTextureIdx;          // 40..44; sentinel = use mesh normal
+    uint   emissiveTextureIdx;        // 44..48; sentinel = use emissive const
+    float4 _emissiveColorIor;         // 48..64  xyz=emissiveColor, w=ior (1=vacuum)
+    float  coat;                      // 64..68; clear coat weight (0..1)
+    float  coatRoughness;             // 68..72
+    float  coatIOR;                   // 72..76
+    uint   opacityTextureIdx;         // 76..80; sentinel = use constant
+    float4 _coatColorOpacityThreshold;// 80..96  xyz=coatColor, w=opacityThreshold
+    // _normalScaleChannelMask: xyz = UsdUVTexture inputs:scale.xyz (OpenGL conv
+    // (2,2,2)/(-1,-1,-1)); w = channelMask (per-input 4-bit channel selector,
+    // _CHANNEL_SHIFT diffuse(0)/roughness(4)/metallic(8)/opacity(12)/emissive(16)).
+    float4 _normalScaleChannelMask;   // 96..112 xyz=normalScale, w=channelMask
+    float4 _normalBiasPad;            // 112..128 xyz=normalBias, w=_pad0
+
+    property float3 diffuseColor     { get { return _diffuseColorRoughness.xyz; } }
+    property float  roughness        { get { return _diffuseColorRoughness.w; } }
+    property float3 emissiveColor    { get { return _emissiveColorIor.xyz; } }
+    property float  ior              { get { return _emissiveColorIor.w; } }
+    property float3 coatColor        { get { return _coatColorOpacityThreshold.xyz; } }
+    property float  opacityThreshold { get { return _coatColorOpacityThreshold.w; } }
+    property float3 normalScale      { get { return _normalScaleChannelMask.xyz; } }
+    property uint   channelMask      { get { return asuint(_normalScaleChannelMask.w); } }
+    property float3 normalBias       { get { return _normalBiasPad.xyz; } }
 };
 
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang

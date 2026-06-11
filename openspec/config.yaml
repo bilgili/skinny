@@ -2,14 +2,14 @@ schema: spec-driven
 context: |
   skinny is a physically-based skin renderer: layered skin optics (BSSRDF, GGX
   specular), path + bidirectional path tracing, MaterialX materials, USD scene
-  loading, progressive accumulation. Interactive GLFW app on Vulkan, with a
-  native Metal backend in a foundation phase.
+  loading, progressive accumulation. Interactive GLFW app on Vulkan or a native
+  Metal backend (both run the full megakernel renderer).
 
   Tech stack: Python 3.11+ (src/ layout, package `skinny`); Slang shaders
   compiled to SPIR-V via slangc (`main_pass.slang` is the compute entry); Vulkan
-  backend in vk_context.py / vk_compute.py; native Metal device foundation in
-  metal_context.py / metal_compute.py (SlangPy/RHI DeviceType.metal — device +
-  trivial dispatch + present only; full render is a later phase); backend
+  backend in vk_context.py / vk_compute.py; native Metal backend in
+  metal_context.py / metal_compute.py (SlangPy/RHI DeviceType.metal — compiles
+  main_pass.slang in-process and dispatches the megakernel); backend
   selection in backend_select.py (`make_context`); MaterialX >=1.39 built from
   source with PyMaterialXGenSlang (the PyPI wheel lacks it); USD via
   usd_loader.py; ImGui/Qt UI under ui/.
@@ -33,8 +33,8 @@ context: |
   match the SkinParams Slang struct exactly. Any shader change requires
   recompiling main_pass.spv with slangc. Keep Slang modular; share utilities via
   common.slang. Backend selection: `--backend {auto,metal,vulkan}` (SKINNY_BACKEND
-  env, persisted) via backend_select.select_backend; `auto` resolves to Vulkan in
-  this foundation phase (native Metal render is a later phase).
+  env, persisted) via backend_select.select_backend; `auto` resolves to Metal on
+  Apple-Silicon macOS (when the device constructs), else Vulkan.
 
   Authoritative reference docs: Architecture.md (module map + descriptor binding
   map), SkinRendering.md (skin estimator chain sections 1-6), CLAUDE.md and
