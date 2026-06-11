@@ -111,36 +111,48 @@ struct MtlxSkinParams
     uint   skin_surface_thin_walled;      // +160
 };
 
+// float4-packed so the CPU scalar bytes are read identically on Metal. Under
+// the Vulkan scalar layout a `float3` is 4-aligned (12 B), but MSL 16-aligns and
+// pads it to 16 B — so a `float3 v0; float pad;` pair, which the CPU packs as
+// v0@0/pad@12/next@16, would be read by Metal as v0@0/pad@16/next@32 (every later
+// field shifted). Wrapping each `float3 + scalar` into one `float4` makes the
+// layout 16-aligned on BOTH backends with byte-identical CPU packing; read-only
+// `property` getters keep every accessor site unchanged. (Same recipe as
+// BvhNode/MeshVertex/FlatMaterialParams.)
 struct EmissiveTriangle
 {
-    float3 v0;
-    float  pad0;
-    float3 v1;
-    float  pad1;
-    float3 v2;
-    float  pad2;
-    float3 emission;
-    float  area;
+    float4 _v0;              // xyz = v0
+    float4 _v1;              // xyz = v1
+    float4 _v2;              // xyz = v2
+    float4 _emissionArea;    // xyz = emission, w = area
+
+    property float3 v0       { get { return _v0.xyz; } }
+    property float3 v1       { get { return _v1.xyz; } }
+    property float3 v2       { get { return _v2.xyz; } }
+    property float3 emission { get { return _emissionArea.xyz; } }
+    property float  area     { get { return _emissionArea.w; } }
 };
 
 // Distant (directional) light record. `direction` points TOWARD the light
 // (= -L for a surface normal n; same convention as the legacy uniform).
 // Mirrors UsdLux.DistantLight: radiance is color × intensity × 2^exposure.
-// Packed std430-aligned (vec3 + float pad) to match SphereLight cadence.
 struct DistantLight
 {
-    float3 direction;
-    float  pad0;
-    float3 radiance;
-    float  pad1;
+    float4 _direction;       // xyz = direction
+    float4 _radiance;        // xyz = radiance
+
+    property float3 direction { get { return _direction.xyz; } }
+    property float3 radiance  { get { return _radiance.xyz; } }
 };
 
 struct SphereLight
 {
-    float3 position;
-    float  radius;
-    float3 radiance;
-    float  pad;
+    float4 _positionRadius;  // xyz = position, w = radius
+    float4 _radiance;        // xyz = radiance
+
+    property float3 position { get { return _positionRadius.xyz; } }
+    property float  radius   { get { return _positionRadius.w; } }
+    property float3 radiance  { get { return _radiance.xyz; } }
 };
 
 struct GizmoSegment
