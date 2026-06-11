@@ -181,15 +181,15 @@ def test_metal_vulkan_shaded_parity():
         f"metal_contrast={m_contrast:.2f} vulkan_contrast={v_contrast:.2f}"
     )
 
-    # STRUCTURAL SMOKE (Metal volume march capped under SKINNY_METAL, so it is
-    # lighter than full-step Vulkan — tight rel-MSE/brightness parity is NOT
-    # expected yet; restored once the Metal dispatch is tiled). What we DO assert:
-    #   (1) Metal survives the shaded dispatch (we got here = no reboot/hang),
-    #   (2) Metal integrates real, structured skin radiance (not env-only flat),
-    #   (3) the head silhouette/structure correlates with the Vulkan reference.
+    # Metal accumulation integrates real (nonzero, structured) skin radiance and
+    # matches the Vulkan reference to within the perceptual bar. NOTE: the Metal
+    # volume march is capped under SKINNY_METAL (16 steps / 4 bounces) as a GPU-
+    # watchdog mitigation; for this reference scene the SSS volume path contributes
+    # negligibly, so the capped Metal image is still bit-tight vs full-step Vulkan
+    # (observed rel_mse≈0.0000, corr≈0.9999) — i.e. the cap does not relax the bar
+    # here. A heavy-SSS scene would need the cap lifted (tiled dispatch) for parity.
     assert m_contrast > 2.0, f"Metal image is ~flat (max/mean={m_contrast:.2f})"
     assert v_contrast > 2.0, f"Vulkan image is ~flat (max/mean={v_contrast:.2f})"
-    assert corr > 0.60, f"shaded structure correlation too low: {corr}"
-    # rel_mse / mean_ratio are informational at the smoke bar (see print above);
-    # the strict thresholds (_REL_MSE_MAX, mean_ratio∈[0.7,1.43], corr>_CORR_MIN)
-    # return with the tiled, uncapped Metal dispatch.
+    assert 0.7 < mean_ratio < 1.43, f"overall brightness mismatch: {mean_ratio}"
+    assert corr > _CORR_MIN, f"shaded parity correlation too low: {corr}"
+    assert rel_mse < _REL_MSE_MAX, f"shaded parity pooled rel-MSE too high: {rel_mse}"
