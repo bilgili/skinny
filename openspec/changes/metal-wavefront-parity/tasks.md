@@ -9,10 +9,10 @@
 
 ## 2. Backend-neutral wavefront driver (design phase 2)
 
-- [ ] 2.1 Define the stage-descriptor model (`entry`, binding spec, dispatch-size source: fixed | per-tile | indirect-args-buffer) and the backend-adapter interface in a new `wavefront_passes.py` (or equivalent shared module).
-- [ ] 2.2 Implement the Vulkan adapter as a thin wrapper over the existing `vk_wavefront.WavefrontPathPass.record_dispatch` so Vulkan output is byte-for-byte unchanged.
-- [ ] 2.3 Route the renderer to build the wavefront driver through the new abstraction on a `VulkanContext`; verify no regression (existing wavefront tests pass, Vulkan A/B unchanged).
-- [ ] 2.4 Migrate buffer allocation to the backend-neutral `StorageBuffer`/`StorageImage` wrappers (sizes still from `wavefront_layout.queue_buffer_sizes`), so the same allocation runs on `metal_compute`.
+- [x] 2.1 Define the stage-descriptor model and the backend-adapter interface in a new shared module. *(Done as `wavefront_driver.py`: `WavefrontRecorder` protocol + `record_path_loop` — a command-recorder interface, not a static list, since the loop has data-dependent control flow (tiling, per-bounce, conditional neural/ReSTIR/catch-all) and fill/push ops beyond plain dispatch. GPU-free, pinned by `tests/test_wavefront_driver.py` (5 cases).)*
+- [x] 2.2 Implement the Vulkan adapter over the existing `vk_wavefront.WavefrontPathPass.record_dispatch` so Vulkan output is byte-for-byte unchanged. *(`_VkPathRecorder` sequences the pass's existing `vk` helpers; `record_dispatch` now delegates to `record_path_loop`. A/B + render tests: 11 passed in 153.9s, == 154.8s baseline.)*
+- [x] 2.3 Route the renderer to build the wavefront driver through the new abstraction on a `VulkanContext`; verify no regression. *(Satisfied by construction — `record_dispatch`'s signature is unchanged, so the renderer call site flows through `record_path_loop` with no edit; verified by the unchanged A/B.)*
+- [ ] 2.4 Migrate buffer allocation to the backend-neutral `StorageBuffer`/`StorageImage` wrappers (sizes still from `wavefront_layout.queue_buffer_sizes`), so the same allocation runs on `metal_compute`. **DEFERRED to phase 3:** `vk_wavefront.py` does `import vulkan as vk` at module top, so a Metal host can't import the pass at all — backend-neutral buffers are coupled to phase 3's vulkan-import-free restructure (where `__init__` branches on `is_metal` for pipelines + buffers together), not a standalone swap.
 
 ## 3. Wavefront path integrator on Metal (design phase 3)
 

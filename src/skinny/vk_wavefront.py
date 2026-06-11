@@ -469,6 +469,81 @@ def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
     return out
 
 
+class _VkPathRecorder:
+    """Vulkan adapter for :func:`skinny.wavefront_driver.record_path_loop`.
+
+    Sequences :class:`WavefrontPathPass`'s existing ``vk`` command helpers,
+    reproducing the historical inline ``record_dispatch`` byte-for-byte. Holds
+    the frame command buffer + the bound scene descriptor set and exposes the
+    pass's pipelines, queue buffers, and plugins through the backend-neutral
+    :class:`skinny.wavefront_driver.WavefrontRecorder` protocol.
+    """
+
+    def __init__(self, p: "WavefrontPathPass", cmd, scene_set) -> None:
+        self._p = p
+        self._cmd = cmd
+        self._scene = scene_set
+        # COMPUTE→COMPUTE (+ indirect read for the args buffer build_args wrote).
+        self._cbarrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT
+            | vk.VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
+
+    @property
+    def stream_size(self) -> int:
+        return self._p.stream_size
+
+    @property
+    def has_neural(self) -> bool:
+        return self._p._neural is not None
+
+    @property
+    def has_restir(self) -> bool:
+        return self._p._restir is not None
+
+    def barrier(self) -> None:
+        vk.vkCmdPipelineBarrier(
+            self._cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            | vk.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, [self._cbarrier], 0, None, 0, None)
+
+    def clear_counts(self) -> None:
+        cmd = self._cmd
+        cnt = self._p._buffers["slot_count"]
+        cur = self._p._buffers["slot_cursor"]
+        vk.vkCmdFillBuffer(cmd, cnt.buffer, 0, cnt.size, 0)
+        vk.vkCmdFillBuffer(cmd, cur.buffer, 0, cur.size, 0)
+        tb = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+        vk.vkCmdPipelineBarrier(
+            cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [tb], 0, None, 0, None)
+
+    def push_tile(self, stream_base: int) -> None:
+        self._p._push(self._cmd, 0, [stream_base, 0, self._p.stream_size])
+
+    def dispatch_full(self, entry: str) -> None:
+        self._p._bind(self._cmd, entry, self._scene)
+        self._p._dispatch(self._cmd)
+
+    def dispatch_one(self, entry: str) -> None:
+        self._p._bind(self._cmd, entry, self._scene)
+        vk.vkCmdDispatch(self._cmd, 1, 1, 1)
+
+    def shade(self, slot: int, entry: str) -> None:
+        self._p._push(self._cmd, 4, [slot])           # shadeSlot
+        self._p._bind(self._cmd, entry, self._scene)
+        vk.vkCmdDispatchIndirect(self._cmd, self._p._indirect_buf, slot * 12)
+
+    def neural_prepass(self) -> None:
+        self._p._neural.record(self._cmd, self._scene)
+
+    def restir_primary_direct(self) -> None:
+        self._p._restir.record_primary_direct(self._cmd, self._scene)
+
+
 class WavefrontPathPass:
     """Staged wavefront path tracer — the real per-frame wavefront dispatch.
 
@@ -664,85 +739,22 @@ class WavefrontPathPass:
         self._neural = neural
 
     def record_dispatch(self, cmd, scene_set) -> None:
-        """Record the tiled, counting-sorted bounce loop. Per tile: generate →
-        for each bounce { intersect (trace + classify + count) → build_args →
-        scatter → per-material shade dispatched indirectly over each slot's
-        queue } → resolve. The shade dispatches cover only their slot's lanes
-        (coherence); path-state VRAM stays bounded by `stream_size`."""
-        cbarrier = vk.VkMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT
-            | vk.VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
+        """Record the tiled, counting-sorted bounce loop into ``cmd``.
 
-        def mem_barrier():
-            # COMPUTE→COMPUTE (+ indirect read for the args buffer build_args wrote).
-            vk.vkCmdPipelineBarrier(
-                cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
-                | vk.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                0, 1, [cbarrier], 0, None, 0, None)
+        The stage order lives in the backend-neutral
+        :func:`skinny.wavefront_driver.record_path_loop`; this method supplies
+        the Vulkan adapter (:class:`_VkPathRecorder`) that records each primitive
+        with ``vk`` commands. The Metal backend implements the same protocol with
+        a slang-rhi encoder, so both share one definition of the loop."""
+        from skinny.wavefront_driver import record_path_loop
 
-        def clear_counts():
-            cnt = self._buffers["slot_count"]
-            cur = self._buffers["slot_cursor"]
-            vk.vkCmdFillBuffer(cmd, cnt.buffer, 0, cnt.size, 0)
-            vk.vkCmdFillBuffer(cmd, cur.buffer, 0, cur.size, 0)
-            tb = vk.VkMemoryBarrier(
-                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
-                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
-            vk.vkCmdPipelineBarrier(
-                cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [tb], 0, None, 0, None)
-
-        def shade(slot, entry):
-            self._push(cmd, 4, [slot])           # shadeSlot
-            self._bind(cmd, entry, scene_set)
-            vk.vkCmdDispatchIndirect(cmd, self._indirect_buf, slot * 12)
-
-        stream_base = 0
-        first = True
-        while stream_base < self.num_pixels:
-            if not first:
-                mem_barrier()  # prior tile's resolve before reusing the buffers
-            first = False
-            self._push(cmd, 0, [stream_base, 0, self.stream_size])
-            self._bind(cmd, "wfPathGenerate", scene_set)
-            self._dispatch(cmd)
-            for bounce in range(self.MAX_BOUNCES):
-                clear_counts()
-                mem_barrier()
-                self._bind(cmd, "wfPathIntersect", scene_set)  # trace + classify + count
-                self._dispatch(cmd)
-                mem_barrier()
-                self._bind(cmd, "wfBuildArgs", scene_set)       # counts → offsets + args
-                vk.vkCmdDispatch(cmd, 1, 1, 1)
-                mem_barrier()
-                self._bind(cmd, "wfScatter", scene_set)         # lanes → per-slot queues
-                self._dispatch(cmd)
-                mem_barrier()
-                # Neural-proposal pre-pass: forward-sample every live lane into
-                # the neural buffer the flat shade reads. Binds its own pipeline
-                # layout, so restore the wfTile push constants afterwards.
-                if self._neural is not None:
-                    self._neural.record(cmd, scene_set)
-                    mem_barrier()
-                    self._push(cmd, 0, [stream_base, 0, self.stream_size])
-                # ReSTIR DI reuse hook: at the primary vertex, compute primary
-                # direct (into the path-state radiance) before shade, whose
-                # depth-0 reuseDirect is gated to zero. ReSTIR binds a different
-                # pipeline layout, so restore the wfTile push constants after.
-                if bounce == 0 and self._restir is not None:
-                    self._restir.record_primary_direct(cmd, scene_set)
-                    mem_barrier()
-                    self._push(cmd, 0, [stream_base, 0, self.stream_size])
-                shade(0, "wfPathShadeFlat")                      # slot 0 (flat)
-                if self.build_catchall:
-                    mem_barrier()
-                    shade(1, "wfPathShade")                      # slot 1
-            mem_barrier()
-            self._bind(cmd, "wfPathResolve", scene_set)
-            self._dispatch(cmd)
-            stream_base += self.stream_size
+        record_path_loop(
+            _VkPathRecorder(self, cmd, scene_set),
+            num_pixels=self.num_pixels,
+            stream_size=self.stream_size,
+            max_bounces=self.MAX_BOUNCES,
+            build_catchall=self.build_catchall,
+        )
 
     def destroy(self) -> None:
         vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
