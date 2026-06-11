@@ -384,13 +384,15 @@ Example scenes ship in `assets/`:
 `--backend {auto,metal,vulkan}` (env `SKINNY_BACKEND`, persisted on the
 interactive front-ends) selects the GPU backend for the session, exposed
 identically by every front-end from one shared definition. `auto` (the default)
-resolves to the native **Metal** backend on Apple-Silicon macOS (when a Metal
-device constructs) and to **Vulkan** everywhere else (precedence: `--backend`
-flag > `SKINNY_BACKEND` > persisted > `auto`). Both backends run the full
-megakernel renderer: Metal compiles `main_pass.slang` in-process via SlangPy
-(slang-rhi, no MoltenVK), and `vulkan` is the production path everywhere
-(MoltenVK under Vulkan on macOS). An explicit `--backend metal` on a host with no
-Metal device fails with a clear message rather than degrading. See
+resolves to **Vulkan** everywhere (precedence: `--backend` flag > `SKINNY_BACKEND`
+> persisted > `auto`). The native **Metal** backend runs the full megakernel and
+reaches geometry/structural parity, but its shaded skin color is not yet at
+parity, so it is **opt-in** via an explicit `--backend metal` rather than the
+default. Both backends run the full megakernel renderer: Metal compiles
+`main_pass.slang` in-process via SlangPy (slang-rhi, no MoltenVK), and `vulkan`
+is the production path everywhere (MoltenVK under Vulkan on macOS). An explicit
+`--backend metal` on a host with no Metal device fails with a clear message
+rather than degrading. See
 [docs/Architecture.md § Backend selection](docs/Architecture.md#backend-selection).
 
 ### Sampling

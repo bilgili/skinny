@@ -12,9 +12,10 @@ Two entry points:
   duck-typed surface the renderer consumes.
 
 The renderer runs the full megakernel on both backends. ``auto`` resolves to
-**Metal on Apple-Silicon macOS** (when a ``DeviceType.metal`` device constructs)
-and to **Vulkan** everywhere else; an explicit ``--backend metal`` on a host
-where the device cannot construct raises a clear error rather than degrading.
+**Vulkan** everywhere: Metal reaches geometry/structural parity (6.1) but its
+shaded skin color is not yet at parity (6.2), so Metal stays opt-in via an
+explicit ``--backend metal`` (which raises a clear error if a ``DeviceType.metal``
+device cannot construct, rather than degrading).
 """
 
 from __future__ import annotations
@@ -57,10 +58,12 @@ def select_backend(prefer: str | None = None, *, persisted: str | None = None) -
     """Resolve the active backend name to ``"vulkan"`` or ``"metal"``.
 
     Precedence: explicit ``prefer`` (the ``--backend`` flag) > ``SKINNY_BACKEND``
-    env > ``persisted`` setting > ``auto``. ``auto`` resolves to ``metal`` on
-    Apple-Silicon macOS when a Metal device constructs, else ``vulkan``. An
-    explicit ``metal`` request that cannot construct a Metal device raises a
-    ``RuntimeError`` naming the missing requirement rather than degrading.
+    env > ``persisted`` setting > ``auto``. ``auto`` resolves to ``vulkan``
+    everywhere — Metal renders correct geometry (structural parity, 6.1) but its
+    shaded skin color is not yet at parity (6.2), so Metal is opt-in via an
+    explicit ``--backend metal`` rather than the default. An explicit ``metal``
+    request that cannot construct a Metal device raises a ``RuntimeError`` naming
+    the missing requirement rather than degrading.
     """
     env = os.environ.get("SKINNY_BACKEND") or None
     choice = (prefer or env or persisted or "auto").strip().lower()
@@ -81,9 +84,9 @@ def select_backend(prefer: str | None = None, *, persisted: str | None = None) -
             )
         return "metal"
 
-    # auto → metal on Apple-Silicon macOS when the device constructs, else vulkan.
-    ok, _reason = metal_available()
-    return "metal" if ok else "vulkan"
+    # auto → vulkan everywhere. Metal is opt-in via --backend metal until its
+    # shaded-color parity (6.2) lands; geometry parity (6.1) is already verified.
+    return "vulkan"
 
 
 def make_context(

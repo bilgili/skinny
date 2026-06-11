@@ -57,14 +57,19 @@ def test_backend_flag_choices_and_default_identical_across_frontends():
     assert action.default is None
 
 
-# ── select_backend: precedence + auto→Metal/Vulkan resolution ────────
+# ── select_backend: precedence + auto→Vulkan resolution ──────────────
 
-def test_auto_resolves_metal_when_available(monkeypatch):
-    # auto → Metal on a Metal-capable host.
+def test_auto_resolves_vulkan_even_when_metal_available(monkeypatch):
+    # auto → Vulkan everywhere: Metal is opt-in until shaded parity (6.2) lands,
+    # so a Metal-capable host still defaults to Vulkan and never probes the device.
     monkeypatch.delenv("SKINNY_BACKEND", raising=False)
-    monkeypatch.setattr(bs, "metal_available", lambda: (True, ""))
-    assert select_backend(None) == "metal"
-    assert select_backend("auto") == "metal"
+
+    def _boom():
+        raise AssertionError("auto must not probe metal_available()")
+
+    monkeypatch.setattr(bs, "metal_available", _boom)
+    assert select_backend(None) == "vulkan"
+    assert select_backend("auto") == "vulkan"
 
 
 def test_auto_resolves_vulkan_when_metal_unavailable(monkeypatch):
