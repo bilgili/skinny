@@ -17,8 +17,20 @@
 import common;
 import materials.skin.skin_bssrdf;
 import environment;
+#if defined(SKINNY_METAL)
+// Watchdog-safe caps for the Metal megakernel: the whole SSS path runs in ONE
+// compute dispatch over every pixel, so the full 128-step × 32-bounce delta
+// march (≈4096 steps/px) overruns the macOS GPU watchdog → GPU fault → reboot.
+// Capped here for the 6.2 shaded smoke (proves the kernel survives + the skin
+// material shades a structured head); tight Metal↔Vulkan parity is restored by
+// tiling the dispatch (later). Vulkan SPIR-V is byte-unchanged (SKINNY_METAL is
+// only defined on the in-process Metal compile, never the slangc path).
+static const int   MAX_VOLUME_STEPS = 16;
+static const int   VOLUME_DEFAULT_BOUNCES = 4;
+#else
 static const int   MAX_VOLUME_STEPS = 128;
 static const int   VOLUME_DEFAULT_BOUNCES = 8;
+#endif
 
 // ── Phase functions ─────────────────────────────────────────────
 
@@ -229,7 +241,11 @@ float3 volumeRenderSkin(
     float3 slabOut    = hit.normal;                 // outward surface normal
     bool   hasDirect  = dot(lightRadiance, lightRadiance) > 1e-8;
 
+#if defined(SKINNY_METAL)
+    int bounces = clamp(maxBounces, 1, 4);   // watchdog-safe cap (6.2 smoke)
+#else
     int bounces = clamp(maxBounces, 1, 32);
+#endif
     for (int bounce = 0; bounce < bounces; bounce++)
     {
         MediumSample ms = sampleMedium(currentRay, tMin, tMax, params, ink, mmPerUnit, rng);
