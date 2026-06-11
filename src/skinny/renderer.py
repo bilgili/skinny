@@ -5126,12 +5126,28 @@ class Renderer:
 
         pipeline_bindings = self._scene_graph_bindings
         for idx, gf in enumerate(self._scene_graph_fragments):
-            stride = max(
+            scalar_stride = max(
                 (f.offset + f.size for f in gf.uniform_block), default=0
             )
-            stride = (stride + 3) & ~3
-            stride = max(stride, 4)  # avoid zero-sized SSBO
-            buf_size = self.material_capacity * stride + 16
+            scalar_stride = (scalar_stride + 3) & ~3
+            scalar_stride = max(scalar_stride, 4)  # avoid zero-sized SSBO
+
+            # `pack_uniform_block` emits the scalar/std430 record (float3 = 12 B).
+            # On Metal the generated `GraphParams_*` struct is read with MSL layout
+            # (Slang pads every float3 to 16 B and 16-aligns it), so each field
+            # must be relocated from its scalar offset to its reflected MSL offset
+            # and the buffer sized at the MSL element stride — exactly the design-
+            # D3 repack the skin params get in `_pack_mtlx_skin_array_msl`. Without
+            # it every field after a leading float3 is misread; a purely-procedural
+            # graph (marble: no textures, colour entirely from `color_mix_*` params)
+            # then reads its colours as zero and renders black on Metal.
+            msl = None
+            if self.is_metal:
+                graph_layouts = getattr(self.pipeline, "graph_param_layouts", None) or {}
+                msl = graph_layouts.get(gf.target_name)  # ({field:(off,size)}, stride)
+            upload_stride = msl[1] if msl is not None else scalar_stride
+
+            buf_size = self.material_capacity * upload_stride + 16
             existing = self._graph_param_buffers.get(gf.target_name)
             if existing is None or existing.size < buf_size:
                 if existing is not None:
@@ -5139,7 +5155,7 @@ class Renderer:
                 self._graph_param_buffers[gf.target_name] = self._gpu.StorageBuffer(
                     self.ctx, buf_size
                 )
-            data = bytearray(self.material_capacity * stride)
+            data = bytearray(self.material_capacity * upload_stride)
             # Filename uniforms come from MaterialXGenSlang reflection with
             # the `.mtlx`-authored path as their `default` (str). We pair
             # each one with the resolved bindless texture-pool slot so
@@ -5188,7 +5204,17 @@ class Renderer:
                         slot = 0
                     overrides[f.name] = slot
                 packed = pack_uniform_block(gf.uniform_block, overrides)
-                data[mat_idx * stride : mat_idx * stride + len(packed)] = packed
+                if msl is not None:
+                    layout, _ = msl
+                    rec = bytearray(upload_stride)
+                    for f in gf.uniform_block:
+                        moff = layout.get(f.name)
+                        if moff is None:
+                            continue  # field dead-stripped from the MSL struct
+                        rec[moff[0]:moff[0] + f.size] = packed[f.offset:f.offset + f.size]
+                    data[mat_idx * upload_stride:(mat_idx + 1) * upload_stride] = rec
+                else:
+                    data[mat_idx * scalar_stride:mat_idx * scalar_stride + len(packed)] = packed
             self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
 
             # Metal binds the graph SSBO at dispatch by name (no Vulkan descriptor
@@ -7542,6 +7568,17 @@ class Renderer:
         ):
             b[name] = img.texture
             b[name + "Sampler"] = img.sampler
+        # Per-graph MaterialX param SSBOs (globals `graphParams_<sanitized>`,
+        # bindings GRAPH_BINDING_BASE+i). Bind-by-name like every other resource;
+        # the pipeline filters to the graphs the compiled module references. These
+        # were previously unbound on the megakernel path, so any graph that reads
+        # its params (rather than a bindless texture) — e.g. the purely-procedural
+        # marble — saw a zeroed SSBO and rendered black. Contents are MSL-relocated
+        # in `_upload_graph_param_buffers`.
+        for gf in getattr(self, "_scene_graph_fragments", None) or []:
+            buf = (getattr(self, "_graph_param_buffers", None) or {}).get(gf.target_name)
+            if buf is not None:
+                b[f"graphParams_{gf.sanitized_name}"] = buf.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:

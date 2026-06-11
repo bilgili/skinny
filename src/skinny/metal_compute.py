@@ -493,6 +493,14 @@ class ComputePipeline:
         # scalar record (`pack_material_values`) must be relocated field-by-field.
         self.mtlx_skin_layout = {}
         self.mtlx_skin_stride = 0
+        # Reflected MSL layout of each per-graph `StructuredBuffer<GraphParams_*>`
+        # (bindings GRAPH_BINDING_BASE+i). Maps graph target_name →
+        # ({field: (msl_offset, msl_size)}, msl_stride). Same float3→16 B MSL
+        # padding hazard as `mtlx_skin_layout`: the generated GraphParams structs
+        # carry raw `float3` fields at scalar offsets, so the renderer relocates
+        # the scalar-packed record into this layout per slot
+        # (`_upload_graph_param_buffers`). Empty until `_build` reflects them.
+        self.graph_param_layouts: dict[str, tuple[dict[str, tuple[int, int]], int]] = {}
         self._default_tex = None
         self._kernel = None  # lazy compute-kernel for the generic dispatch_kernel path
 
@@ -541,6 +549,7 @@ class ComputePipeline:
         self._reflect_globals()
         self._reflect_uniform_layout()
         self._reflect_mtlx_skin_layout()
+        self._reflect_graph_param_layouts()
         # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
         self._default_tex = dev.create_texture(
             type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
@@ -603,6 +612,32 @@ class ComputePipeline:
             layout[f.name] = (int(f.offset), int(getattr(ftl, "size", 0)))
         self.mtlx_skin_layout = layout
         self.mtlx_skin_stride = int(getattr(etl, "stride", 0) or etl.size)
+
+    def _reflect_graph_param_layouts(self) -> None:
+        """Reflect the MSL field offsets/size + element stride of each per-graph
+        ``StructuredBuffer<GraphParams_*>`` (global ``graphParams_<sanitized>``).
+        Stores ``graph_param_layouts[target_name] = ({field: (offset, size)},
+        stride)``. Same rationale as :meth:`_reflect_mtlx_skin_layout`: the
+        generated GraphParams structs sit at scalar offsets with raw ``float3``
+        fields, which Slang pads to 16 B on Metal — so the renderer repacks the
+        scalar record into this MSL layout per slot
+        (``_upload_graph_param_buffers``). Graphs whose buffer was dead-stripped
+        (e.g. an empty-graph fallback) are simply absent from the map."""
+        params = {p.name: p for p in self.program.layout.parameters}
+        for gf in self.graph_fragments:
+            pname = f"graphParams_{gf.sanitized_name}"
+            p = params.get(pname)
+            if p is None:
+                continue
+            etl = getattr(p.type_layout, "element_type_layout", None)
+            if etl is None or not getattr(etl, "fields", None):
+                continue
+            layout = {
+                f.name: (int(f.offset), int(getattr(f.type_layout, "size", 0)))
+                for f in etl.fields
+            }
+            stride = int(getattr(etl, "stride", 0) or etl.size)
+            self.graph_param_layouts[gf.target_name] = (layout, stride)
 
     # ── Dispatch ─────────────────────────────────────────────────
 
