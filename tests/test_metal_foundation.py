@@ -168,6 +168,26 @@ def test_metal_format_tokens_resolve_to_real_slangpy_formats():
     assert _resolve_format(spy, 43) == spy.Format.rgba8_unorm_srgb
 
 
+# ── Metal no-op for Vulkan-only descriptor writes ────────────────────
+
+def test_update_texture_pool_descriptors_noop_on_metal():
+    """`_update_texture_pool_descriptors` writes Vulkan descriptor set 14; on
+    Metal `descriptor_sets is None` and the pool is bound by name at dispatch, so
+    it must short-circuit. `_upload_flat_materials` calls it on every material
+    upload — without the guard the Metal USD-scene render crashes with
+    `TypeError: 'NoneType' object is not iterable`. Stub via `__new__` (no device,
+    no megakernel compile); `descriptor_sets` left None to prove it is untouched."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)  # bypass __init__ — no GPU/context needed
+    r.is_metal = True
+    r.descriptor_sets = None
+    r._update_texture_pool_descriptors()  # must return without iterating None
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():

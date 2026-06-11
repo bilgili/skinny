@@ -6539,6 +6539,15 @@ class Renderer:
         textures) for every descriptor set. PARTIALLY_BOUND lets unfilled
         slots stay invalid — the shader gates reads behind a sentinel idx.
         """
+        # Metal has no Vulkan descriptor sets (`descriptor_sets is None`); the
+        # bindless pool is bound by name straight from `texture_pool` at dispatch
+        # (see `_build_pipeline_for_current_graphs`), so this Vulkan descriptor-
+        # write is a no-op. The pipeline-build path already skips it, but
+        # `_upload_flat_materials` calls it unconditionally on every material
+        # upload — without this guard the Metal leg crashes there with
+        # `TypeError: 'NoneType' object is not iterable`.
+        if self.is_metal:
+            return
         filled = self.texture_pool.filled_slots()
         if not filled:
             return
