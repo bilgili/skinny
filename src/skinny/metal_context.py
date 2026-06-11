@@ -50,11 +50,14 @@ class MetalContext:
     backend_name = "metal"
     is_metal = True
 
-    # Conservative foundation-phase capability flags (design D5): the renderer
-    # stays on its fp32 and file-handoff paths on Metal until the shared-storage
-    # MTLBuffer / MTLSharedEvent / fp16 equivalents arrive in later phases.
+    # External-memory / -semaphore interop stays off on Metal: frozen neural
+    # weights load by buffer upload, not a GPU↔GPU handoff (design D6), so the
+    # renderer keeps its file-handoff path here.
     supports_external_memory = False
     supports_external_semaphore = False
+    # fp16 flags are class-level defaults; ``__init__`` overrides them per device
+    # from the slang-rhi feature probe (``_probe_fp16``). They stay ``False`` until
+    # a constructed device reports ``Feature.half``.
     supports_fp16_storage = False
     supports_fp16_compute = False
 
@@ -84,6 +87,18 @@ class MetalContext:
 
         self.device = spy.create_device(type=spy.DeviceType.metal)
 
+        # Probe fp16 support on the real device (design D6 / task 1.1). slang-rhi
+        # exposes a single ``Feature.half`` covering half-precision storage +
+        # compute, so both flags follow it. NOTE: slang-rhi 0.42's Metal backend
+        # under-reports this — ``has_feature(half)`` is ``False`` even on Apple
+        # Silicon, which natively supports MSL ``half`` — so the renderer
+        # conservatively stays on fp32 (D6's "device without fp16 → fp32" branch).
+        # Enabling fp16 neural storage despite the flag (an empirical compile
+        # probe) is deferred to the neural phase.
+        fp16 = self._probe_fp16(self.device)
+        self.supports_fp16_storage = fp16
+        self.supports_fp16_compute = fp16
+
         # SlangPy records and submits work on the device's implicit queue
         # (ComputeKernel.dispatch / submit_command_buffer); there are no separate
         # VkQueue handles to expose. Mirror the VulkanContext attribute names as
@@ -96,6 +111,26 @@ class MetalContext:
         if not self._headless:
             self.surface = self._create_surface(window)
             self.swapchain_info = self._configure_surface(self.width, self.height)
+
+    # ── Capability probes ────────────────────────────────────────
+
+    @staticmethod
+    def _probe_fp16(device) -> bool:
+        """Whether the slang-rhi device reports half-precision support.
+
+        Returns ``device.has_feature(Feature.half)``, guarded so a slangpy build
+        without that enum value (or a device that raises) degrades to ``False``
+        rather than crashing context construction.
+        """
+        import slangpy as spy
+
+        half = getattr(spy.Feature, "half", None)
+        if half is None:
+            return False
+        try:
+            return bool(device.has_feature(half))
+        except Exception:  # noqa: BLE001 — unknown feature ⇒ treat as unsupported
+            return False
 
     # ── Surface ──────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 ## 1. Metal capabilities + dispatch primitives (design phase 1)
 
-- [ ] 1.1 Probe the Metal device for half-precision support in `metal_context.py`; set `supports_fp16_storage`/`supports_fp16_compute` from the probe (keep `supports_external_memory`/`supports_external_semaphore` `false`).
+- [x] 1.1 Probe the Metal device for half-precision support in `metal_context.py`; set `supports_fp16_storage`/`supports_fp16_compute` from the probe (keep `supports_external_memory`/`supports_external_semaphore` `false`). *(slang-rhi 0.42 under-reports `half` on Metal → conservatively fp32 here; see design Open Questions.)*
 - [ ] 1.2 Add `ComputePipeline.dispatch_indirect(args_buffer, offset, *, bindings)` to `metal_compute.py` via the slang-rhi command encoder's indirect entry; add a one-time `supports_indirect_dispatch` probe with a logged result.
 - [ ] 1.3 Implement the CPU slot-count-readback + direct-dispatch fallback used when `supports_indirect_dispatch` is false; assert it produces the same dispatch counts as the indirect path.
 - [ ] 1.4 Add single-frame multi-pass command encoding to `metal_compute.py`: one encoder for the whole loop with a global compute-memory barrier between stages, replacing per-stage `wait_for_idle`; keep `set_data`-only parameter binding (D4 fence-hang discipline).

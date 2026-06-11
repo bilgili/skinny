@@ -186,10 +186,27 @@ the lost feature.
 
 ## Open Questions
 
-- Does the vendored SlangPy/slang-rhi expose indirect compute dispatch and an
-  explicit multi-pass command encoder with compute barriers, or must D2/D3 use
-  the CPU-readback + per-stage path for v1? (Resolve in phase 1 by probing the
-  installed binding.)
+- ~~Does the vendored SlangPy/slang-rhi expose indirect compute dispatch and an
+  explicit multi-pass command encoder with compute barriers?~~ **RESOLVED (phase 1,
+  slangpy 0.42):** YES on all three. `ComputePassEncoder.dispatch_compute_indirect(
+  BufferOffsetPair)` is native (D2's CPU-readback fallback becomes a defensive
+  path, not the primary). `CommandEncoder.begin_compute_pass()` →
+  `ComputePassEncoder{bind_pipeline→ShaderObject root, dispatch_compute(uint3
+  groups), end}`, with `CommandEncoder.global_barrier()` between passes and
+  `set_buffer_state(buffer, ResourceState)` for transitions — D3's single-encoder
+  multi-pass loop is supported as designed. Low-level pipeline via
+  `Device.create_compute_pipeline(program)`; bind resources by wrapping the
+  `bind_pipeline` root `ShaderObject` in `spy.ShaderCursor` and using `set_data`
+  (D4 discipline carries). `dispatch_compute` takes **thread-group counts**, not
+  thread counts — divide by `ComputePipeline.thread_group_size`.
+- **NEW (phase 1) — fp16 feature under-reported on Metal:** slang-rhi 0.42's Metal
+  backend returns `Device.has_feature(Feature.half) == False` even on Apple Silicon
+  (which natively supports MSL `half`); it also warns "No supported shader model
+  found." So D6's flag-driven probe (task 1.1) conservatively yields fp32 on this
+  host. Enabling fp16 neural storage despite the flag (phase 6) needs an empirical
+  compile-probe (compile + run a tiny `half`-using kernel) rather than trusting
+  `has_feature`, or an Apple-Silicon-implies-`half` override. Decision deferred to
+  the neural phase, gated on fp32 parity landing first.
 - Exact perceptual tolerance for the neural fp16 A/B — reuse the megakernel
   color tolerance, or tighten given the proposal's narrower output?
 - Should `vk_wavefront.py` keep its name as the Vulkan adapter, or move the
