@@ -22,10 +22,16 @@ SHALL NOT perform per-field scalar `ShaderCursor` writes into uniform structs
 phase's fence-hang discipline.
 
 The rendered output on Metal SHALL match the Vulkan megakernel at **structural
-parity**: exact equality on the deterministic structural outputs (geometry/instance
-identifiers, the hit/miss mask, and depth), and equality within a stated perceptual
-tolerance on the converged shaded color of a fixed scene. Byte-identical shaded
-color across backends is NOT required.
+parity**: with rays held identical across backends (matched `frameIndex` AA
+jitter), the deterministic structural outputs (geometry/instance + material
+identifiers, the hit/miss mask, and depth) SHALL agree up to pure floating-point
+cross-compiler divergence — hit-count parity and hit-mask agreement bounded to a
+thin silhouette edge band, identifiers exact on commonly-hit pixels, and depth
+within a robust tolerance. Bit-identical structural outputs across the two shader
+compilers (Slang→Metal vs Slang→SPIR-V) are NOT required — sub-ULP ray
+differences flip near-tangent hit/miss and perturb grazing-ray depth. The
+converged shaded color SHALL match within a stated perceptual tolerance; byte-
+identical shaded color across backends is NOT required.
 
 The Metal capability flags (`supports_external_memory`,
 `supports_external_semaphore`, `supports_fp16_storage`, `supports_fp16_compute`)
@@ -41,12 +47,17 @@ continue to fold back to the megakernel via the existing capability gates.
   binds the full descriptor set, and produces a head render frame (no foundation
   refusal, no fence hang)
 
-#### Scenario: Structural outputs match Vulkan exactly
+#### Scenario: Structural outputs match Vulkan
 
 - **WHEN** the same fixed scene is rendered headless through the megakernel on the
-  Metal backend and on the Vulkan backend
-- **THEN** the deterministic structural outputs (geometry/instance IDs, hit/miss
-  mask, depth) are byte-identical between the two backends
+  Metal backend and on the Vulkan backend, with rays held identical (matched
+  `frameIndex` AA jitter)
+- **THEN** geometry is traced on both backends; the hit counts agree (hit-count
+  parity) and the hit/miss masks agree on the bulk of hits (residual differences
+  confined to a thin silhouette edge band); the geometry/instance + material IDs
+  are exact on commonly-hit pixels; and depth agrees within a robust tolerance
+  (median and 95th-percentile relative bounds) — the residual divergence being
+  pure FP cross-compiler codegen, not a geometry mismatch
 
 #### Scenario: Shaded color matches Vulkan within tolerance
 
