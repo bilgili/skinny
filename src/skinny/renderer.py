@@ -6023,10 +6023,15 @@ class Renderer:
         self.accum_frame = 0
         self.render_headless()
 
+        # Read the GPU's structural output BEFORE disarming. On Metal,
+        # HostStorageBuffer.write() re-uploads the full host shadow (which never
+        # saw the GPU writes), so disarming first would clobber the structural
+        # region back to the pre-dispatch zeros — the read must come first.
+        raw = self.tool_buffer.read(n * 16, offset=base_bytes)
+
         # Disarm so the next normal frame renders.
         self.tool_buffer.write(b"\x00" * 16, offset=0)
 
-        raw = self.tool_buffer.read(n * 16, offset=base_bytes)
         return np.frombuffer(raw, dtype=np.float32).reshape(h, w, 4).copy()
 
     def _refresh_gizmo_segments(self) -> None:
