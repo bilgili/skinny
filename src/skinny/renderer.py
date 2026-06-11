@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import vulkan as vk
@@ -52,17 +52,14 @@ from skinny.presets import PRESETS, Preset
 from skinny.settings import load_user_presets
 from skinny.tattoos import TATTOO_HEIGHT, TATTOO_WIDTH, Tattoo, blank_tattoo_data, load_tattoos
 from skinny.vk_context import VulkanContext
-from skinny.vk_compute import (
-    BINDLESS_TEXTURE_CAPACITY,
-    ComputePipeline,
-    ExternalTimelineSemaphore,
-    HostStorageBuffer,
-    HudOverlay,
-    SampledImage,
-    StorageBuffer,
-    StorageImage,
-    UniformBuffer,
-)
+# GPU-resource classes (StorageBuffer, ComputePipeline, …) are resolved per
+# backend at runtime via `backend_select.resource_module(ctx)` → `self._gpu.*`
+# (vk_compute on Vulkan, metal_compute on Metal) so this module never imports
+# `vulkan` on a Metal-only host (task 2.3). The single remaining type annotation
+# (`SampledImage`) is pulled in under TYPE_CHECKING — never executed at runtime,
+# so it forces no import on any backend.
+if TYPE_CHECKING:
+    from skinny.vk_compute import SampledImage
 
 WORKGROUP_SIZE = 8
 MAX_FRAMES_IN_FLIGHT = 2
@@ -279,8 +276,7 @@ class TexturePool:
         # capacity follows the active backend's cap (Metal trims to fit its
         # 128-texture / 16-sampler argument limit, design D8).
         self._gpu = gpu
-        self._capacity = int(getattr(gpu, "BINDLESS_TEXTURE_CAPACITY",
-                                     BINDLESS_TEXTURE_CAPACITY))
+        self._capacity = int(gpu.BINDLESS_TEXTURE_CAPACITY)
         self._slots = [None] * self._capacity
         self._by_path: dict[str, int] = {}
         self._next_slot = 0
@@ -3159,8 +3155,13 @@ class Renderer:
         # CUDA weight-write vs the Vulkan read. Allocated only under
         # `--neural-handoff interop`; a guarded no-op (export_handle()→None) on
         # devices without external-semaphore support.
-        self.neural_timeline_semaphore = (
-            ExternalTimelineSemaphore(self.ctx) if _ext_neural else None)
+        # Vulkan-only interop primitive — imported lazily so the Metal path (where
+        # `_ext_neural` is always False) never pulls in `vulkan` (task 2.3).
+        if _ext_neural:
+            from skinny.vk_compute import ExternalTimelineSemaphore
+            self.neural_timeline_semaphore = ExternalTimelineSemaphore(self.ctx)
+        else:
+            self.neural_timeline_semaphore = None
 
         # Neural training-record dump (bindings 36/37, task 5.1). 1-element dummy
         # append buffer + counter so the descriptors are always valid; the
@@ -3493,7 +3494,7 @@ class Renderer:
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 # env + tattoo + n/r/d (5) + bindless flat-material array.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (5 + BINDLESS_TEXTURE_CAPACITY),
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (5 + self._gpu.BINDLESS_TEXTURE_CAPACITY),
             )
         )
         # Storage buffers per frame: vertices, indices, BVH nodes, TLAS
