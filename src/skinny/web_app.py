@@ -49,7 +49,6 @@ _USE_USD_MTLX: bool = False
 _EXECUTION_MODE: str = "megakernel"
 _BDPT_WALK: str = "fused"
 _INTEGRATOR: str | None = None
-_PROPOSALS: str | None = None
 _REUSE: str | None = None
 _LOBE_SAMPLERS: str | None = None
 
@@ -110,9 +109,6 @@ class SkinnySession:
             )
             if _INTEGRATOR is not None:
                 self.renderer.integrator_index = INTEGRATOR_INDEX[_INTEGRATOR]
-            if _PROPOSALS is not None:
-                self.renderer.proposal_preset_index = \
-                    self.renderer.proposal_preset_from_token(_PROPOSALS)
             if _REUSE is not None:
                 self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(_REUSE)
             if _LOBE_SAMPLERS is not None:
@@ -689,7 +685,9 @@ def main() -> None:
     parser.add_argument("--usd", type=Path, default=None,
                         help="Path to a USD stage (alternative to positional scene arg).")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
-    add_render_flags(parser)
+    # No --proposals on the interactive front-ends (skinny-web / skinny-gui):
+    # the in-app Proposals control owns proposal selection at runtime.
+    add_render_flags(parser, proposals=False)
     args = parser.parse_args()
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > auto). The
@@ -702,7 +700,7 @@ def main() -> None:
         raise SystemExit(f"skinny-web: {exc}")
 
     global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
-    global _BDPT_WALK, _INTEGRATOR, _PROPOSALS, _REUSE, _LOBE_SAMPLERS
+    global _BDPT_WALK, _INTEGRATOR, _REUSE, _LOBE_SAMPLERS
     _BACKEND = resolved_backend
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
@@ -710,7 +708,6 @@ def main() -> None:
     _EXECUTION_MODE = args.execution_mode
     _BDPT_WALK = resolve_walk(args.bdpt_walk)
     _INTEGRATOR = args.integrator
-    _PROPOSALS = args.proposals
     _REUSE = args.reuse
     _LOBE_SAMPLERS = args.lobe_samplers
     SkinnySession.MAX_SESSIONS = args.max_sessions

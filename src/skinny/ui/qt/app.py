@@ -69,9 +69,10 @@ class MainWindow(QMainWindow):
         self.resize(1600, 900)
 
         # Resolved GPU backend, persisted in the session snapshot. The Qt GUI is
-        # offscreen-rendered (no GLFW window); the full renderer is Vulkan-only in
-        # this foundation phase, so main() resolves/gates the backend before
-        # constructing this window (auto→vulkan; explicit metal reported + exits).
+        # offscreen-rendered (no GLFW window) via make_context(window=None) — the
+        # headless path both backends support at full parity, so auto→Metal on
+        # Apple Silicon works here too. main() resolves the backend (an explicit,
+        # unavailable --backend metal errors) before constructing this window.
         self._backend_name = backend
 
         # Renderer setup — synchronous on main thread (no per-user sessions
@@ -189,7 +190,7 @@ class MainWindow(QMainWindow):
         # CLI --reuse / --lobe-samplers override the persisted sampling seam
         # (mirrors app.py GLFW). skinny-gui has no --proposals: the Proposals
         # combobox owns proposal selection at runtime, and the online-training
-        # gate now polls lazily until a neural proposal becomes active, so no
+        # gate polls lazily until a neural proposal becomes active, so no
         # startup seed is needed.
         if reuse is not None:
             self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
@@ -610,8 +611,8 @@ def main() -> None:
     parser.add_argument("--gpu", type=str, default="auto",
                         help="GPU preference: intel, nvidia, amd, discrete, auto")
     parser.add_argument("--usdMtlx", action="store_true", default=False)
-    # No --proposals on skinny-gui: the Proposals combobox owns proposal
-    # selection at runtime (and persists it).
+    # No --proposals on the interactive front-ends (skinny-gui / skinny-web):
+    # the Proposals combobox owns proposal selection at runtime (and persists it).
     add_render_flags(parser, proposals=False)
     args = parser.parse_args()
 

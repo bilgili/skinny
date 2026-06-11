@@ -699,11 +699,12 @@ in `backend_select.py`, used by every front-end:
 
 - `select_backend(prefer, *, persisted=None)` applies the precedence **explicit
   `--backend` flag > `SKINNY_BACKEND` env > persisted setting > `auto`**,
-  returning `"vulkan"` or `"metal"`. `auto` resolves to **Vulkan** everywhere —
-  Metal reaches geometry/structural parity (6.1) but its shaded skin color is not
-  yet at parity (6.2), so it is **opt-in** via an explicit `--backend metal` (which
-  returns `"metal"` only when the `DeviceType.metal` device constructs, otherwise
-  raising a clear error naming the missing requirement) rather than the default.
+  returning `"vulkan"` or `"metal"`. `auto` resolves to native **Metal** on a
+  Metal-capable Apple-Silicon host — the native backend is at full parity with
+  Vulkan (geometry 6.1, shaded color 6.2, windowed present 6.5) — and falls back to
+  **Vulkan** everywhere else. An explicit `--backend metal` returns `"metal"` only
+  when the `DeviceType.metal` device constructs, otherwise raising a clear error
+  naming the missing requirement.
 - `make_context(backend, window, width, height, **kw)` constructs the matching
   context — a `VulkanContext` (`vk_context.py`) or a `MetalContext`
   (`metal_context.py`) — both exposing the same duck-typed surface the renderer
