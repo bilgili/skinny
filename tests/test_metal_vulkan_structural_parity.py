@@ -126,6 +126,7 @@ def test_metal_vulkan_structural_parity():
     m_hit = m_aov[..., 0] > 0.5
     v_hit = v_aov[..., 0] > 0.5
     n_hit = int(v_hit.sum())
+    m_n = int(m_hit.sum())
     edge_disagree = int(np.count_nonzero(m_hit != v_hit))
 
     # Depth deviation on the commonly-hit pixels (both backends agree it's a hit).
@@ -138,8 +139,8 @@ def test_metal_vulkan_structural_parity():
         depth_max_abs = depth_max_rel = float("nan")
 
     print(
-        f"\n[6.1 structural] res={_RES} vulkan_hits={n_hit} "
-        f"hitmask_disagree={edge_disagree} px "
+        f"\n[6.1 structural] res={_RES} vulkan_hits={n_hit} metal_hits={m_n} "
+        f"both={int(both.sum())} hitmask_disagree={edge_disagree} px "
         f"depth_max_abs={depth_max_abs:.3e} depth_max_rel={depth_max_rel:.3e}"
     )
 
