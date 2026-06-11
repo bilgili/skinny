@@ -682,6 +682,13 @@ Each `.write()` produces a `.slang.map.json` alongside the generated file, mappi
 }
 ```
 
+`source` paths are emitted **relative to the repo root** (the nearest ancestor
+holding `pyproject.toml`), not as absolute paths. This keeps a committed
+`.slang.map.json` byte-identical no matter which checkout or git worktree
+regenerated it — an absolute path would embed the worktree directory and
+re-dirty the artifact on every switch. When no `pyproject.toml` marker is found,
+the path falls back to being relative to the `.map.json` file's own directory.
+
 ---
 
 ## Output Structure

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import os
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,30 @@ class SourceMapEntry:
     symbol: str
 
 
+def _relativize_source(source: str, map_dir: Path) -> str:
+    """Return ``source`` as a POSIX path stripped of the absolute checkout
+    prefix, so the emitted ``.slang.map.json`` is worktree-independent.
+
+    ``inspect.getsourcefile`` yields an absolute path that embeds the current
+    checkout/worktree directory (e.g.
+    ``…/.claude/worktrees/<branch>/python_materials/foo.py``). Committing that
+    re-dirties the artifact on every worktree switch and leaks the local
+    directory layout. Rewrite it relative to the repo root — the nearest
+    ancestor holding ``pyproject.toml`` — matching the already-relative
+    ``generated`` field; when no marker is found, fall back to a path relative
+    to the sourcemap's own directory. Both forms drop the absolute,
+    worktree-specific prefix, so the committed file is byte-identical
+    regardless of where the repo is checked out.
+    """
+    if source == "<unknown>":
+        return source
+    src = Path(source).resolve()
+    for root in src.parents:
+        if (root / "pyproject.toml").is_file():
+            return src.relative_to(root).as_posix()
+    return Path(os.path.relpath(src, map_dir)).as_posix()
+
+
 @dataclass
 class CompiledModule:
     module_name: str
@@ -55,10 +80,16 @@ class CompiledModule:
         slang_path.parent.mkdir(parents=True, exist_ok=True)
         slang_path.write_text(self.source, encoding="utf-8")
         map_path = slang_path.with_suffix(".slang.map.json")
+        map_dir = map_path.parent
+        mappings = []
+        for entry in self.source_map:
+            row = dict(entry.__dict__)
+            row["source"] = _relativize_source(entry.source, map_dir)
+            mappings.append(row)
         map_payload = {
             "generated": str(self.relative_path).replace("\\", "/"),
-            "sources": sorted({entry.source for entry in self.source_map}),
-            "mappings": [entry.__dict__ for entry in self.source_map],
+            "sources": sorted({row["source"] for row in mappings}),
+            "mappings": mappings,
         }
         map_path.write_text(json.dumps(map_payload, indent=2), encoding="utf-8")
         manifest = out / "slangpile_manifest.json"
