@@ -743,6 +743,16 @@ class DebugViewport:
     def open(self) -> None:
         if self._open:
             return
+        # The debug viewport is a Vulkan **graphics** rasteriser (render pass,
+        # framebuffers, VkFormat, a graphics-capable queue). The native Metal
+        # backend is compute-only (no Vulkan device/queues), so it cannot build
+        # these resources — fail with a clear message instead of a cryptic
+        # AttributeError on the first Vulkan-only attribute it reaches.
+        if getattr(self._vk_ctx, "is_metal", False):
+            raise RuntimeError(
+                "debug viewport requires the Vulkan backend (it is a Vulkan "
+                "rasteriser); it is not available on the native Metal backend"
+            )
         if self._embedded:
             if self._cmd_buffer is None:
                 self._build_embedded_resources()

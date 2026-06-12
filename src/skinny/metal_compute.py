@@ -80,12 +80,15 @@ _FORMAT_TOKENS = {
     "rgba32f": "rgba32_float",
     "rgba32_float": "rgba32_float",
     "rgba8_unorm": "rgba8_unorm",
-    "rgba8_srgb": "rgba8_srgb",
+    # slang-rhi spells the 8-bit sRGB format `rgba8_unorm_srgb` (Vulkan's
+    # VK_FORMAT_R8G8B8A8_SRGB / the `rgba8_srgb` neutral token); the bare
+    # `rgba8_srgb` is not a `slangpy.Format` member.
+    "rgba8_srgb": "rgba8_unorm_srgb",
     "r8_unorm": "r8_unorm",
     "r32_float": "r32_float",
 }
-_VKFORMAT_INTS = {  # VkFormat enum values → token
-    9: "r8_unorm", 37: "rgba8_unorm", 43: "rgba8_srgb", 109: "rgba32_float",
+_VKFORMAT_INTS = {  # VkFormat enum values → slangpy.Format name
+    9: "r8_unorm", 37: "rgba8_unorm", 43: "rgba8_unorm_srgb", 109: "rgba32_float",
 }
 _ADDRESS_TOKENS = {"repeat", "clamp", "mirror", "black", "useMetadata"}
 _VK_ADDRESS_INTS = {0: "repeat", 1: "mirror", 2: "clamp", 3: "black"}
@@ -491,6 +494,23 @@ class ComputePipeline:
         # scalar record (`pack_material_values`) must be relocated field-by-field.
         self.mtlx_skin_layout = {}
         self.mtlx_skin_stride = 0
+        # Reflected MSL layout of each per-graph `StructuredBuffer<GraphParams_*>`
+        # (bindings GRAPH_BINDING_BASE+i). Maps graph target_name →
+        # ({field: (msl_offset, msl_size)}, msl_stride). Same float3→16 B MSL
+        # padding hazard as `mtlx_skin_layout`: the generated GraphParams structs
+        # carry raw `float3` fields at scalar offsets, so the renderer relocates
+        # the scalar-packed record into this layout per slot
+        # (`_upload_graph_param_buffers`). Empty until `_build` reflects them.
+        self.graph_param_layouts: dict[str, tuple[dict[str, tuple[int, int]], int]] = {}
+        # Reflected MSL layout of the `StructuredBuffer<StdSurfaceParams>` global
+        # (`stdSurfaceParams`, binding 19). `{field: (msl_offset, msl_size)}` plus
+        # the MSL element stride. Same float3→16 B MSL padding hazard as
+        # `graph_param_layouts`/`mtlx_skin_layout`: the host packs the record in
+        # scalar/std430 layout (`pack_std_surface_params`, float3 = 12 B), so the
+        # renderer relocates each field into this MSL layout per slot
+        # (`pack_std_surface_params_msl`). Empty/0 until `_build` reflects them.
+        self.std_surface_layout: dict[str, tuple[int, int]] = {}
+        self.std_surface_stride: int = 0
         self._default_tex = None
         self._kernel = None  # lazy compute-kernel for the generic dispatch_kernel path
 
@@ -539,6 +559,8 @@ class ComputePipeline:
         self._reflect_globals()
         self._reflect_uniform_layout()
         self._reflect_mtlx_skin_layout()
+        self._reflect_graph_param_layouts()
+        self._reflect_std_surface_layout()
         # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
         self._default_tex = dev.create_texture(
             type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
@@ -601,6 +623,58 @@ class ComputePipeline:
             layout[f.name] = (int(f.offset), int(getattr(ftl, "size", 0)))
         self.mtlx_skin_layout = layout
         self.mtlx_skin_stride = int(getattr(etl, "stride", 0) or etl.size)
+
+    def _reflect_graph_param_layouts(self) -> None:
+        """Reflect the MSL field offsets/size + element stride of each per-graph
+        ``StructuredBuffer<GraphParams_*>`` (global ``graphParams_<sanitized>``).
+        Stores ``graph_param_layouts[target_name] = ({field: (offset, size)},
+        stride)``. Same rationale as :meth:`_reflect_mtlx_skin_layout`: the
+        generated GraphParams structs sit at scalar offsets with raw ``float3``
+        fields, which Slang pads to 16 B on Metal — so the renderer repacks the
+        scalar record into this MSL layout per slot
+        (``_upload_graph_param_buffers``). Graphs whose buffer was dead-stripped
+        (e.g. an empty-graph fallback) are simply absent from the map."""
+        params = {p.name: p for p in self.program.layout.parameters}
+        for gf in self.graph_fragments:
+            pname = f"graphParams_{gf.sanitized_name}"
+            p = params.get(pname)
+            if p is None:
+                continue
+            etl = getattr(p.type_layout, "element_type_layout", None)
+            if etl is None or not getattr(etl, "fields", None):
+                continue
+            layout = {
+                f.name: (int(f.offset), int(getattr(f.type_layout, "size", 0)))
+                for f in etl.fields
+            }
+            stride = int(getattr(etl, "stride", 0) or etl.size)
+            self.graph_param_layouts[gf.target_name] = (layout, stride)
+
+    def _reflect_std_surface_layout(self) -> None:
+        """Reflect the MSL field offsets/size + element stride of the
+        ``StructuredBuffer<StdSurfaceParams>`` global (``stdSurfaceParams``,
+        binding 19). Stores ``std_surface_layout = {field: (offset, size)}`` and
+        ``std_surface_stride``. Same rationale as
+        :meth:`_reflect_graph_param_layouts`: ``StdSurfaceParams`` is a run of
+        ``float3``+scalar fields the host packs in scalar layout
+        (``pack_std_surface_params``), but Slang reads it MSL-padded on Metal
+        (``float3``→16 B, 16-aligned), shifting every field after ``base_color``
+        and growing the element stride past the scalar 256 B (≈400 B). The
+        renderer relocates each scalar field into this layout per slot
+        (``pack_std_surface_params_msl``). Empty/0 if the binding was
+        dead-stripped (no std_surface material in the linked program)."""
+        p = next((q for q in self.program.layout.parameters
+                  if q.name == "stdSurfaceParams"), None)
+        if p is None:
+            return
+        etl = getattr(p.type_layout, "element_type_layout", None)
+        if etl is None or not getattr(etl, "fields", None):
+            return
+        self.std_surface_layout = {
+            f.name: (int(f.offset), int(getattr(f.type_layout, "size", 0)))
+            for f in etl.fields
+        }
+        self.std_surface_stride = int(getattr(etl, "stride", 0) or etl.size)
 
     # ── Dispatch ─────────────────────────────────────────────────
 

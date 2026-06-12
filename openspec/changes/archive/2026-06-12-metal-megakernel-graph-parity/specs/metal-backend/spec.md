@@ -1,117 +1,4 @@
-# metal-backend Specification
-
-## Purpose
-
-Provide a native Metal rendering backend, built on SlangPy's `DeviceType.metal`,
-that mirrors the context surface the renderer consumes from Vulkan so the
-renderer drives it duck-typed, and resolve the active backend through a single
-shared resolver used by every front-end (`--backend {auto,metal,vulkan}` with a
-`SKINNY_BACKEND` fallback and capability gating). This foundation phase covers
-device bring-up, a trivial compute dispatch, present, and backend selection;
-full render parity arrives in later changes, so `auto` resolves to Vulkan and an
-explicit `--backend metal` refuses the full renderer with a clear message.
-## Requirements
-### Requirement: Native Metal device backend foundation
-
-The system SHALL provide a native Metal rendering backend built on SlangPy's
-`DeviceType.metal`, exposed through a `MetalContext` that mirrors the surface the
-renderer consumes from the Vulkan context — dimensions, compute and present
-queues, a swapchain-equivalent, command-buffer allocation, capability flags,
-`recreate_swapchain`, and `destroy` — so the renderer drives it duck-typed
-without Metal-specific knowledge at the context layer. The Metal backend SHALL be
-import- and platform-guarded so non-Apple-Silicon hosts never construct it. The
-device foundation supports device bring-up, compute dispatch, and present; the
-megakernel head render on this device is delivered by the megakernel render-parity
-requirement. ReSTIR, neural inference, and wavefront execution on Metal remain
-deferred to later changes.
-
-On the Metal backend the capability flags `supports_external_memory`,
-`supports_external_semaphore`, `supports_fp16_storage`, and
-`supports_fp16_compute` SHALL report `false`, so the renderer stays on its fp32
-and file-handoff paths until the corresponding Metal equivalents are added.
-
-#### Scenario: Metal context constructs windowed and headless
-
-- **WHEN** a `MetalContext` is constructed on an Apple-Silicon macOS host, both
-  with a GLFW window and headless (`window=None`)
-- **THEN** it builds a native Metal device via SlangPy `DeviceType.metal` and
-  exposes the Vulkan-compatible context surface, without falling back to MoltenVK
-
-#### Scenario: Trivial Metal dispatch matches the Vulkan backend
-
-- **WHEN** the same trivial Slang compute kernel (e.g. write the global invocation
-  id into a storage buffer) is dispatched on the Metal backend and on the Vulkan
-  backend
-- **THEN** the two output buffers are identical
-
-#### Scenario: Metal present clears and presents without hanging
-
-- **WHEN** a windowed `MetalContext` clears and presents several frames
-- **THEN** every frame's GPU fence is signalled and the frames present, with no
-  indefinite fence wait (pipeline parameters are set via `set_data` byte blobs,
-  never per-field cursor writes)
-
-### Requirement: Backend selection with capability gating and fallback
-
-The system SHALL resolve the active rendering backend from a single shared
-resolver used by every front-end, selected by `--backend {auto,metal,vulkan}`
-with a `SKINNY_BACKEND` environment fallback and the interactive front-ends'
-persisted setting. Precedence SHALL be explicit flag, then environment, then
-persisted value, then `auto`. An explicitly requested backend that cannot be
-constructed SHALL fail with a clear message naming the missing requirement rather
-than silently degrading. The `vulkan` selection SHALL remain byte-identical to
-the current behavior on every platform (MoltenVK under Vulkan on macOS
-unchanged).
-
-Now that the megakernel renders on Metal, `auto` SHALL resolve to Metal on an
-Apple-Silicon macOS host where the Metal device constructs, and to Vulkan
-otherwise. A front-end that resolves to `metal` SHALL launch the full renderer on
-the Metal backend (the foundation-phase refusal notice is removed). On every
-non-Apple-Silicon host and whenever the Metal device does not construct, `auto`
-SHALL resolve to Vulkan.
-
-#### Scenario: Auto resolves to Metal on Apple Silicon
-
-- **WHEN** the application is launched with `--backend auto` (or no `--backend`)
-  on an Apple-Silicon macOS host where the Metal device constructs
-- **THEN** the active backend resolves to Metal and the full renderer runs on the
-  Metal backend
-
-#### Scenario: Auto resolves to Vulkan elsewhere
-
-- **WHEN** the application is launched with `--backend auto` (or no `--backend`)
-  on a host that is not Apple-Silicon macOS, or where the Metal device does not
-  construct
-- **THEN** the active backend resolves to Vulkan and the renderer behaves
-  byte-identically to the Vulkan path
-
-#### Scenario: Explicit Metal launches the renderer
-
-- **WHEN** `--backend metal` is requested on an Apple-Silicon host where the
-  Metal device constructs, on one of the real front-ends
-- **THEN** the front-end launches the full renderer on the Metal backend with no
-  foundation-phase refusal
-
-#### Scenario: Explicit unavailable backend fails clearly
-
-- **WHEN** `--backend metal` is requested on a host without a constructible Metal
-  device (non-Apple-Silicon, or the Metal toolchain/device unavailable)
-- **THEN** selection raises a clear error naming the missing requirement rather
-  than silently falling back to Vulkan
-
-#### Scenario: Vulkan selection is unchanged
-
-- **WHEN** `--backend vulkan` (or `SKINNY_BACKEND=vulkan`) is selected on any
-  platform
-- **THEN** the renderer constructs a `VulkanContext` and behaves byte-identically
-  to the renderer before this change
-
-#### Scenario: Same backend flag on every front-end
-
-- **WHEN** any of `skinny`, `skinny-gui`, `skinny-web`, `skinny-render` is run
-  with `--help`
-- **THEN** the `--backend {auto,metal,vulkan}` flag is present with identical
-  choices and default, defined from the single shared source
+## MODIFIED Requirements
 
 ### Requirement: Megakernel render parity on Metal
 
@@ -208,30 +95,7 @@ continue to fold back to the megakernel via the existing capability gates.
   point, and no megakernel construction site contains a backend-specific
   conditional
 
-### Requirement: MSL-correct uniform layout on Metal
-
-The system SHALL upload the megakernel uniform block (`FrameConstants`,
-`SkinParams`, `Light`) to the Metal pipeline using a layout that matches the
-Metal Shading Language struct layout produced by Slang's Metal target, which
-differs from the Vulkan `std140` layout (notably Slang pads `float3` to 16 bytes,
-so the Metal struct is larger than the scalar/`std140` blob). The MSL field
-offsets SHALL be derived from the compiled module's reflection rather than a
-hand-maintained table, and the packed blob SHALL be uploaded via `set_data` only.
-The Vulkan `std140` packing (`SkinParameters.pack()` and the Vulkan uniform path)
-SHALL remain unchanged.
-
-#### Scenario: Uniform blob matches the reflected MSL struct size
-
-- **WHEN** the megakernel uniform block is packed for the Metal backend
-- **THEN** the packed length equals the size of the MSL uniform struct reported by
-  the compiled module's reflection, and field offsets are taken from that
-  reflection
-
-#### Scenario: Vulkan uniform packing is unchanged
-
-- **WHEN** the megakernel uniform block is packed for the Vulkan backend
-- **THEN** the `std140` layout from `SkinParameters.pack()` and the Vulkan uniform
-  path are byte-identical to before this change
+## ADDED Requirements
 
 ### Requirement: Vulkan-only host paths degrade safely on Metal
 
@@ -279,4 +143,3 @@ BXDF/BSSRDF visualiser SHALL return an empty result grid on Metal.
 - **THEN** the debug viewport raises a clear "requires the Vulkan backend"
   message and stays closed, and the visualiser returns an empty grid — neither
   crashes the application or the render thread
-

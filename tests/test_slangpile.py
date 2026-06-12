@@ -12,6 +12,7 @@ from skinny.slangpile.diagnostics import SlangPileError
 
 
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
 
@@ -1193,3 +1194,64 @@ class TestSlangTypes:
         assert is_slang_type(float32x3)
         assert not is_slang_type(42)
         assert not is_slang_type("float")
+
+
+class TestSourceMapWorktreeIndependence:
+    """The emitted ``.slang.map.json`` must not embed the absolute checkout
+    path. ``inspect.getsourcefile`` yields an absolute path that contains the
+    worktree directory, so committing it re-dirties the artifact on every
+    worktree switch and leaks the local layout. Source paths are rewritten
+    relative to the repo root, making a regen from a different checkout
+    byte-identical."""
+
+    @staticmethod
+    def _build_map(repo_root: Path):
+        from skinny.slangpile import build_module
+
+        repo_root.mkdir(parents=True, exist_ok=True)
+        (repo_root / "pyproject.toml").write_text("[project]\nname = 'fake'\n", encoding="utf-8")
+        pkg = repo_root / "python_materials"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        code = (
+            "from skinny import slangpile as sp\n"
+            "\n"
+            "@sp.shader\n"
+            "def detail(a: sp.float32) -> sp.float32:\n"
+            "    return a\n"
+        )
+        src = pkg / "detail_material.py"
+        src.write_text(code, encoding="utf-8")
+
+        name = "python_materials.detail_material"
+        spec = importlib.util.spec_from_file_location(name, str(src))
+        mod = importlib.util.module_from_spec(spec)
+        mod.__name__ = name
+        sys.modules[name] = mod
+        try:
+            spec.loader.exec_module(mod)
+            out_dir = repo_root / "src" / "gen"
+            build_module(mod, out_dir)
+        finally:
+            sys.modules.pop(name, None)
+
+        map_path = out_dir / "python_materials" / "detail_material.slang.map.json"
+        text = map_path.read_text(encoding="utf-8")
+        return text, json.loads(text)
+
+    def test_source_paths_are_relative(self, tmp_path):
+        _, data = self._build_map(tmp_path / "worktree-aaaa")
+
+        assert data["sources"], "expected at least one mapped source"
+        for entry in data["sources"]:
+            assert not Path(entry).is_absolute(), entry
+            assert "worktree-aaaa" not in entry, entry
+        for mapping in data["mappings"]:
+            assert not Path(mapping["source"]).is_absolute(), mapping["source"]
+            assert "worktree-aaaa" not in mapping["source"], mapping["source"]
+
+    def test_regen_from_different_worktree_is_byte_identical(self, tmp_path):
+        text_a, _ = self._build_map(tmp_path / "worktree-aaaa")
+        text_b, _ = self._build_map(tmp_path / "worktree-bbbbbbbbbbbb")
+
+        assert text_a == text_b

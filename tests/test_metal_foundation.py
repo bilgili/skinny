@@ -190,6 +190,29 @@ def test_metal_capability_flags_reflect_device():
         ctx.destroy()
 
 
+# ── gpu_info duck-typed parity ───────────────────────────────────────
+
+def test_metal_context_exposes_gpu_info():
+    """`MetalContext.gpu_info` mirrors `VulkanContext.gpu_info` — the Qt/web
+    front-ends read `gpu_info.name` and the video encoder reads
+    `gpu_info.preferred_h264_encoder`. A missing attribute crashes window
+    construction (`AttributeError: 'MetalContext' object has no attribute
+    'gpu_info'`). No ComputePipeline → no megakernel compile, safe unguarded."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    try:
+        gi = ctx.gpu_info
+        assert isinstance(gi.name, str) and gi.name  # e.g. "Apple M5 Pro"
+        assert gi.is_discrete is False               # Apple Silicon = unified mem
+        assert gi.preferred_h264_encoder == "h264_videotoolbox"
+    finally:
+        ctx.destroy()
+
+
 # ── 1.4 single-frame multi-pass encoder + barrier ────────────────────
 
 def test_metal_frame_encoder_multipass_barrier(shader_dir):
@@ -224,6 +247,110 @@ def test_metal_frame_encoder_multipass_barrier(shader_dir):
             if obj is not None:
                 obj.destroy()
         ctx.destroy()
+
+
+# ── image-format token resolution ────────────────────────────────────
+
+def test_metal_format_tokens_resolve_to_real_slangpy_formats():
+    """Every value in `_FORMAT_TOKENS` / `_VKFORMAT_INTS` must name a real
+    `slangpy.Format` member, else `_resolve_format`'s `getattr(spy.Format, …)`
+    raises `AttributeError: type object 'Format' has no attribute '…'` at texture-
+    load / render time (slang-rhi spells 8-bit sRGB `rgba8_unorm_srgb`, not the
+    `rgba8_srgb` neutral token). Pure enum-name check — no device, no compile."""
+    spy = pytest.importorskip("slangpy")
+    from skinny.metal_compute import _FORMAT_TOKENS, _VKFORMAT_INTS, _resolve_format
+
+    for name in (*_FORMAT_TOKENS.values(), *_VKFORMAT_INTS.values()):
+        assert hasattr(spy.Format, name), f"slangpy.Format has no member {name!r}"
+
+    # The sRGB neutral token and VkFormat R8G8B8A8_SRGB (43) both land on the
+    # slang-rhi sRGB format — this is the exact regression that crashed the
+    # three-materials USD scene render on Metal.
+    assert _resolve_format(spy, "rgba8_srgb") == spy.Format.rgba8_unorm_srgb
+    assert _resolve_format(spy, 43) == spy.Format.rgba8_unorm_srgb
+
+
+# ── Metal no-op for Vulkan-only descriptor writes ────────────────────
+
+def test_update_texture_pool_descriptors_noop_on_metal():
+    """`_update_texture_pool_descriptors` writes Vulkan descriptor set 14; on
+    Metal `descriptor_sets is None` and the pool is bound by name at dispatch, so
+    it must short-circuit. `_upload_flat_materials` calls it on every material
+    upload — without the guard the Metal USD-scene render crashes with
+    `TypeError: 'NoneType' object is not iterable`. Stub via `__new__` (no device,
+    no megakernel compile); `descriptor_sets` left None to prove it is untouched."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)  # bypass __init__ — no GPU/context needed
+    r.is_metal = True
+    r.descriptor_sets = None
+    r._update_texture_pool_descriptors()  # must return without iterating None
+
+
+def test_rebind_descriptors_noop_on_metal():
+    """`_rebind_scene_descriptors` / `_rebind_aux_material_descriptors` rewrite
+    Vulkan descriptor sets after a buffer realloc; on Metal `_build_metal_binds`
+    re-reads each live buffer at dispatch, so both must short-circuit. They run on
+    the instance/material grow path (e.g. a 20+-instance USD scene) — without the
+    guard the Vulkan `VkDescriptorBufferInfo(buffer=<slangpy buffer>)` call raises
+    `TypeError: an integer is required`. Stub via `__new__`, no buffers set, to
+    prove the methods return before touching any Vulkan/buffer attribute."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)
+    r.is_metal = True
+    r._rebind_scene_descriptors()        # must return before reading instance_buffer
+    r._rebind_aux_material_descriptors()  # must return before reading std_surface_buffer
+
+
+def test_debug_viewport_refuses_metal_cleanly():
+    """The debug viewport is a Vulkan **graphics** rasteriser; the compute-only
+    Metal backend can't build it. `open()` must raise a clear RuntimeError on a
+    Metal context (not a cryptic `AttributeError: 'MetalContext' object has no
+    attribute 'queue_family_indices'`) and leave the viewport closed, so the Qt
+    dock's showEvent degrades gracefully. Stub via `__new__` — no GPU."""
+    import types
+
+    try:
+        from skinny.debug_viewport import DebugViewport
+    except OSError as exc:  # libvulkan not on the dylib path (module imports vulkan)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    dv = DebugViewport.__new__(DebugViewport)
+    dv._vk_ctx = types.SimpleNamespace(is_metal=True)
+    dv._open = False
+    dv._embedded = True
+    with pytest.raises(RuntimeError, match="Vulkan backend"):
+        dv.open()
+    assert dv._open is False
+
+
+def test_bxdf_eval_degrades_on_metal():
+    """`request_bxdf_eval` (BXDF/BSSRDF visualiser) does a Vulkan-only one-shot
+    readback (`command_pool` / `vkDeviceWaitIdle` / `descriptor_sets`). On Metal
+    `self.pipeline` is non-None, so the old `pipeline is None` guard wouldn't catch
+    it and it crashed on `self.ctx.command_pool`. It must instead degrade to a
+    zeroed grid via the callback. Stub via `__new__`, pipeline non-None, is_metal
+    True — proves it never reaches the Vulkan path (no ctx needed)."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)
+    r.is_metal = True
+    r.pipeline = object()  # non-None: only the is_metal arm may divert control
+    got = []
+    r.request_bxdf_eval({"n_theta": 4, "n_phi": 3}, got.append)
+    assert len(got) == 1
+    assert got[0].shape == (4, 3, 3)
+    assert not got[0].any()  # all zeros — graceful empty grid
 
 
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────

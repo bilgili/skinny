@@ -29,10 +29,10 @@ dependencies = [
     # source with MATERIALX_BUILD_PYTHON=ON. Both the wheel and a from-source
     # build satisfy this constraint.
     "MaterialX>=1.39",
-    "PySide6>=6.7",
+    "PySide6>=6.11.1",
     "zstandard>=0.25.0",
     "usd-core>=26.5",
-    "panel>=1.8.10",
+    "panel>=1.9.3",
     "holoviews>=1.22.1",
     "OpenEXR>=3.4.11"
 ]
@@ -45,7 +45,7 @@ dev = [
 # usd-core lands in Phase D and is opt-in until then; declaring it as an
 # extra keeps `pip install -e .` cheap for users who only want the renderer.
 usd = [
-    "usd-core>=24.0",
+    "usd-core>=26.5",
 ]
 web = [
     "panel>=1.4",
