@@ -50,6 +50,17 @@ _RES = 64
 _SAMPLES = 96
 _REL_MSE_MAX = 0.02   # whole-frame; pre-fix ≈0.27
 _CORR_MIN = 0.98      # pre-fix ≈0.27
+# Per-material bands. Whole-frame metrics are dominated by the matching
+# background/marble, so they pass even when one textured material is off — the
+# wood standard_surface was ~11 % bright (M/V≈1.110, rel-MSE≈0.031 on its region
+# alone) from the Metal bindless `commonSampler` clamping V while Vulkan tiled it
+# (uvtiling=4), while whole-frame rel-MSE stayed ≈0.0004. Post-fix all three
+# materials match to M/V=1.000, rel-MSE=0.0000. These per-material checks are
+# what actually catch that class of bug (a sampler/param divergence on one
+# textured material that whole-frame metrics wash out).
+_MAT_RATIO_LO = 0.95
+_MAT_RATIO_HI = 1.05
+_MAT_REL_MSE_MAX = 0.01
 
 
 def _pump_until_ready(r, *, budget_s: float = 120.0) -> bool:
@@ -119,10 +130,12 @@ def test_metal_vulkan_procedural_graph_parity():
     rel_mse = float(np.mean((m_img - v_img) ** 2) / (np.mean(v_img ** 2) + 1e-8))
     corr = float(np.corrcoef(m_img.ravel(), v_img.ravel())[0, 1])
 
-    # Per-material guard: no flat/graph material that is lit on Vulkan may be
-    # near-black on Metal (the exact marble failure — graph params unbound /
-    # misaligned zeroed its colour). Keyed off the Vulkan structural AOV's
-    # material-id channel so it is independent of streaming/instance order.
+    # Per-material guard: every flat/graph material lit on Vulkan must match on
+    # Metal both in mean radiance (tight ratio band — catches the wood ~11 %
+    # commonSampler clamp-V bug, and the marble near-black from unbound/misaligned
+    # graph params) and in spatial detail (per-region rel-MSE). Keyed off the
+    # Vulkan structural AOV's material-id channel so it is independent of
+    # streaming/instance order.
     v_hit = v_aov[..., 0] > 0.5
     v_mat = v_aov[..., 2]
     worst = ""
@@ -132,14 +145,20 @@ def test_metal_vulkan_procedural_graph_parity():
         mm = float(m_img[mask].mean())
         if vm > 1e-4:  # only materials that actually carry radiance on Vulkan
             ratio = mm / vm
-            if ratio < 0.5 or ratio > 2.0:
-                worst += f" mat{mid}:M/V={ratio:.3f}(V={vm:.4f},M={mm:.4f})"
+            mat_rel_mse = float(np.mean((m_img[mask] - v_img[mask]) ** 2)
+                                / (np.mean(v_img[mask] ** 2) + 1e-8))
+            if (ratio < _MAT_RATIO_LO or ratio > _MAT_RATIO_HI
+                    or mat_rel_mse > _MAT_REL_MSE_MAX):
+                worst += (f" mat{mid}:M/V={ratio:.3f}(V={vm:.4f},M={mm:.4f},"
+                          f"relMSE={mat_rel_mse:.4f})")
 
     print(
         f"\n[graph-parity] rel_mse={rel_mse:.4f} (<{_REL_MSE_MAX}) "
         f"corr={corr:.4f} (>{_CORR_MIN}) per-mat-outliers:{worst or ' none'}"
     )
 
-    assert not worst, f"material(s) diverge >2x between backends:{worst}"
+    assert not worst, (
+        f"material(s) diverge between backends (ratio∉[{_MAT_RATIO_LO},"
+        f"{_MAT_RATIO_HI}] or rel-MSE>{_MAT_REL_MSE_MAX}):{worst}")
     assert corr > _CORR_MIN, f"procedural-graph parity correlation too low: {corr}"
     assert rel_mse < _REL_MSE_MAX, f"procedural-graph parity rel-MSE too high: {rel_mse}"

@@ -842,6 +842,13 @@ through a shared `commonSampler` at **binding 38**, and the five discrete maps
 but gain a per-map `SamplerState` at **bindings 39–43** (5 + `commonSampler` =
 6 ≤ 16). The buffer/image slots (0–37) are identical on both backends.
 
+`commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
+samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared
+sampler cannot honour per-texture USD `wrapS`/`wrapT`, so repeat/repeat is the
+correct default for the tiling material pool — clamp-V (the equirect env-map
+default) would clamp a `tiledimage` sampled past v=1 (e.g. a `uvtiling=4`
+material) to the edge row on Metal while Vulkan tiles it.
+
 Bindings **25–29** are reserved for the MaterialX nodegraph buffers
 (`GRAPH_BINDING_BASE = 25`), so the neural-proposal weight buffers sit at **33+**,
 above the graph range, the tool buffer (30), and the env CDFs (31/32). All three

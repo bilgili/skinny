@@ -1037,8 +1037,18 @@ class Renderer:
         self.is_metal = bool(getattr(self.ctx, "is_metal", False))
         # Shared sampler for the Metal bindless texture pool (binding 38, design
         # D8). One sampler instead of the 128 a combined Sampler2D[] would emit.
+        # MUST be repeat/repeat to match the Vulkan per-slot samplers, whose
+        # TexturePool default is wrap_s=wrap_t="repeat": `_make_sampler` defaults
+        # address_v="clamp" (right for the equirect env map, wrong for tiling
+        # material textures). With clamp-V a texture sampled past v=1 — e.g. a
+        # MaterialX `tiledimage` at uvtiling=4 like the wood material — clamps to
+        # the edge row on Metal while Vulkan tiles, leaving wood ~11% bright
+        # (rel-MSE ≈0.03 on its region). Per-texture USD wrapS/wrapT still can't be
+        # honoured per-slot under one shared sampler (D8); repeat/repeat is the
+        # correct default and matches the pool default.
         self._metal_common_sampler = (
-            self._gpu._make_sampler(self.ctx) if self.is_metal else None)
+            self._gpu._make_sampler(self.ctx, address_v="repeat")
+            if self.is_metal else None)
         # Neural size/precision build config (study change
         # neural-precision-size-study). Fixed for the renderer's lifetime — the
         # study harness builds a fresh headless renderer per grid cell. Falls
