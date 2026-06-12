@@ -28,11 +28,18 @@ corresponding `wavefront-execution`, `restir-di`, and `neural-directional-propos
 deltas; they are no longer deferred.
 
 On the Metal backend the capability flags `supports_external_memory` and
-`supports_external_semaphore` SHALL report `false` (frozen neural weights load by
-buffer upload, not GPU↔GPU interop). The flags `supports_fp16_storage` and
-`supports_fp16_compute` SHALL report the real Metal device's fp16 support, so the
-renderer uses fp16 neural storage/inference where available and falls back to fp32
-on a device that lacks it.
+`supports_external_semaphore` SHALL report `false` (Metal exposes no exported
+memory or semaphore handles). The context SHALL additionally report a
+`supports_shared_memory` capability flag that is `true` on unified-memory Metal
+devices and `false` otherwise; consumers on other backends read the flag as
+`false` by default. The Metal storage-buffer wrapper SHALL support a
+shared-storage allocation mode whose contents the host can update in place
+(without a staging round-trip) for host→GPU weight handoff — this is the
+unified-memory interop path used by the `neural-online-training` Metal interop
+publisher. The flags `supports_fp16_storage` and `supports_fp16_compute` SHALL
+report the real Metal device's fp16 support, so the renderer uses fp16 neural
+storage/inference where available and falls back to fp32 on a device that lacks
+it.
 
 #### Scenario: Metal context constructs windowed and headless
 
@@ -62,6 +69,19 @@ on a device that lacks it.
 - **THEN** `supports_fp16_storage` and `supports_fp16_compute` report `true`, and on
   a device without fp16 support they report `false` and the renderer falls back to
   fp32 neural state
+
+#### Scenario: Shared-memory capability flag reflects unified memory
+
+- **WHEN** a `MetalContext` is constructed on an Apple-Silicon unified-memory device
+- **THEN** `supports_shared_memory` reports `true` while `supports_external_memory`
+  and `supports_external_semaphore` still report `false`
+
+#### Scenario: Shared-storage buffer accepts in-place host writes
+
+- **WHEN** a Metal storage buffer is allocated in shared-storage mode, the host
+  writes new contents in place, and a compute dispatch then reads the buffer
+- **THEN** the dispatch observes the written bytes without any explicit staging
+  upload call, and a buffer allocated without shared mode behaves as before
 
 ### Requirement: Backend selection with capability gating and fallback
 

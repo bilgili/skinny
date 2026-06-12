@@ -438,11 +438,13 @@ offline bake. `--neural-handoff {file,interop}` (env `SKINNY_NEURAL_HANDOFF`,
 also GUI/persisted) selects how freshly-trained weights are handed from the
 async trainer back to the renderer: `file` (default) double-buffers through an
 NFW1 file the renderer hot-reloads — a CPU round-trip that works on **any**
-platform; `interop` writes weights + biases straight into the Vulkan weight
-buffers from CUDA via `VK_KHR_external_memory` + an exported timeline semaphore
-(no CPU round-trip) — the real-time path, **CUDA-only** (needs the `interop`
-extra, `pip install -e ".[interop]"`; raises a clear error and falls back to
-`file` on platforms without CUDA / external-memory Vulkan). The renderer swaps in
+platform; `interop` publishes weights + biases GPU-side with no file round-trip,
+resolved per backend: on **Vulkan**, CUDA writes the exported weight buffers via
+`VK_KHR_external_memory` + an exported timeline semaphore (needs the `interop`
+extra, `pip install -e ".[interop]"`); on the native **Metal** backend the
+unified-memory shared-storage weight buffers are written in place at the frame
+boundary (no extra dependency). It raises a clear error naming the `file`
+fallback on hosts with neither path. The renderer swaps in
 new weights only at a frame boundary and bumps the per-sample network version, so
 an async swap raises variance only, never bias. See
 [docs/Architecture.md § Online neural training](docs/Architecture.md#online-neural-training).
@@ -471,8 +473,9 @@ neural-proposal prerequisite is runtime-selectable, so on `skinny-gui` you can
 launch with `--online-training` and *then* pick a neural proposal in the
 **Proposals** combobox — the loop is armed and starts the moment a neural
 proposal becomes active (no `--proposals` flag on the GUI). An unsupported
-backend/handoff combo (`--neural-trainer mlx`, or `--neural-handoff interop` off
-CUDA) surfaces its own error. Off by default: without the flag the renderer is
+backend/handoff combo (`--neural-trainer mlx`, or `--neural-handoff interop`
+with neither CUDA nor Metal UMA) surfaces its own error. Off by default:
+without the flag the renderer is
 byte-identical to before. The supported **Mac** combo (no CUDA) is
 `--neural-trainer cpu` (or `auto`, which picks the numpy oracle there) with
 `--neural-handoff file`; e.g.

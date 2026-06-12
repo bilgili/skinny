@@ -60,6 +60,21 @@ DISCRETE_MAP_SAMPLERS = {
 }
 
 
+_shared_fallback_warned = False
+
+
+def _warn_shared_fallback(reason) -> None:
+    """One-shot notice that shared-storage mode degraded to staged uploads
+    (change metal-neural-interop, design D3 fallback). The publisher keeps
+    working — every write just pays the device-local staging copy."""
+    global _shared_fallback_warned
+    if _shared_fallback_warned:
+        return
+    _shared_fallback_warned = True
+    print(f"[metal] shared-storage buffer unavailable ({reason}); "
+          "falling back to staged uploads", flush=True)
+
+
 def _buffer_usage(spy, *, indirect: bool = False):
     usage = (
         spy.BufferUsage.unordered_access
@@ -148,27 +163,66 @@ class StorageBuffer:
     """Device-local storage buffer (SSBO) — Metal sibling of
     ``vk_compute.StorageBuffer(ctx, size_bytes, *, indirect=False, external=False)``.
 
-    ``external`` is accepted for signature parity but is a no-op on Metal (the
-    shared-storage/MTLSharedEvent handoff is a later phase; capability flags are
-    ``False``). A host shadow backs ``upload_range`` so partial writes compose."""
+    ``external`` is accepted for signature parity but is a no-op on Metal — there
+    are no exported memory handles (capability flag stays ``False``). The Metal
+    interop seam is ``shared`` instead (change metal-neural-interop, design D3):
+    a shared-mode buffer allocates from the host-visible heap
+    (``MemoryType.upload`` → ``MTLStorageModeShared`` on Apple-Silicon UMA) so
+    ``write_in_place`` lands host bytes the next dispatch reads with no staging
+    round-trip. slangpy 0.42 exposes no mapped pointer, so the in-place write is
+    one host memcpy via ``copy_from_numpy`` (probe: task 1.1). A host shadow
+    backs ``upload_range`` so partial writes compose."""
 
     def __init__(self, ctx, size_bytes: int, *, indirect: bool = False,
-                 external: bool = False) -> None:
+                 external: bool = False, shared: bool = False) -> None:
         self.ctx = ctx
         spy = ctx._spy
         self.size = max(int(size_bytes), 16)  # GPU drivers dislike zero-sized buffers
-        self.external = False  # no Metal shared-storage export yet (P1 D5)
+        self.external = False  # no Metal external-memory export (P1 D5)
+        self.shared = False
         self._shadow = bytearray(self.size)
-        self.buffer = ctx.device.create_buffer(
-            size=self.size,
-            usage=_buffer_usage(spy, indirect=indirect),
-            memory_type=spy.MemoryType.device_local,
-            label="skinny.storage",
-        )
+        if shared:
+            try:
+                self.buffer = ctx.device.create_buffer(
+                    size=self.size,
+                    usage=_buffer_usage(spy, indirect=indirect),
+                    memory_type=spy.MemoryType.upload,
+                    label="skinny.storage.shared",
+                )
+                self.shared = True
+            except Exception as exc:  # noqa: BLE001 — degrade to staged uploads
+                _warn_shared_fallback(exc)
+        if not self.shared:
+            self.buffer = ctx.device.create_buffer(
+                size=self.size,
+                usage=_buffer_usage(spy, indirect=indirect),
+                memory_type=spy.MemoryType.device_local,
+                label="skinny.storage",
+            )
 
     def _flush(self) -> None:
         self.buffer.copy_from_numpy(
             np.frombuffer(bytes(self._shadow), dtype=np.uint8).copy())
+
+    def write_in_place(self, data: bytes, offset: int = 0) -> None:
+        """Host-write ``data`` at ``offset`` so the next dispatch reads it.
+
+        On a shared-mode buffer this is the UMA in-place path: one host memcpy
+        into the shared heap, no staging upload. The caller owns hazard ordering
+        — write only when no in-flight command buffer reads the buffer (the
+        neural publisher calls this at the frame boundary, design D1). On a
+        non-shared buffer it degenerates to the staged ``upload_range`` path
+        (logged once) so the publisher still works."""
+        if not self.shared:
+            _warn_shared_fallback("write_in_place on a non-shared buffer")
+        end = int(offset) + len(data)
+        if end > self.size:
+            raise ValueError(
+                f"StorageBuffer write_in_place: {offset}+{len(data)}B "
+                f"> buffer {self.size}B"
+            )
+        self._shadow[int(offset):end] = bytes(data)
+        self._flush()
 
     def upload_sync(self, data: bytes) -> None:
         payload = bytes(data)
@@ -194,6 +248,22 @@ class StorageBuffer:
     def download_sync(self, byte_count: int) -> bytes:
         self.ctx.device.wait_for_idle()
         n = min(int(byte_count), self.size)
+        if self.shared:
+            # slang-rhi refuses `to_numpy()` on an upload-heap buffer — bounce
+            # the bytes through a read_back staging copy so a shared buffer
+            # reads back its true GPU-visible contents like any other.
+            spy = self.ctx._spy
+            staging = self.ctx.device.create_buffer(
+                size=self.size,
+                usage=spy.BufferUsage.copy_destination,
+                memory_type=spy.MemoryType.read_back,
+                label="skinny.storage.shared.readback",
+            )
+            enc = self.ctx.device.create_command_encoder()
+            enc.copy_buffer(staging, 0, self.buffer, 0, self.size)
+            self.ctx.device.submit_command_buffer(enc.finish())
+            self.ctx.device.wait_for_idle()
+            return staging.to_numpy().tobytes()[:n]
         return self.buffer.to_numpy().tobytes()[:n]
 
     def fill_zero_sync(self) -> None:

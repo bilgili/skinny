@@ -9,6 +9,25 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Backend
 
+- **Metal neural interop** (change `metal-neural-interop`) — `--neural-handoff
+  interop` now works on the native Metal backend: a new
+  `MetalSharedWeightPublisher` stages freshly-trained weights host-side and the
+  frame-boundary swap writes them **in place** into the binding-33/34 weight
+  buffers, which are allocated as **UMA shared-storage**
+  (`StorageBuffer(shared=True)`, `MemoryType.upload` → `MTLStorageModeShared`)
+  — no NFW1 file round-trip, no staging upload, no semaphore (the swap runs on
+  the render thread after the frame's device drain, so a frame never reads a
+  half-written network). `MetalContext` gains a `supports_shared_memory`
+  capability flag (probed; the external-memory / -semaphore flags stay `false`
+  — Metal exports no handles), and `make_publisher("interop")` resolves the
+  mechanism per backend (CUDA on Vulkan, UMA on Metal) with a clear
+  `NotImplementedError` naming the `file` fallback where neither exists.
+  Published bytes are byte-identical to the file path at every
+  `NeuralPrecision` (fp32/fp16/fp8-e4m3); the staged in-place copy lands in
+  ≤0.1 ms at the shipped fp32 size (Apple M5 Pro). The Metal
+  `render`/`render_headless` paths now run the frame-end weight swap
+  (previously Vulkan-only). The wavefront record drain remains Vulkan-only — a
+  fully-on-Metal online loop is still gated on the drain, not the handoff.
 - **Metal wavefront parity** (change `metal-wavefront-parity`) — the wavefront
   execution mode now runs on the native Metal backend at parity with Vulkan:
   staged **path** and **BDPT** integrators (all three walk modes), **ReSTIR DI**

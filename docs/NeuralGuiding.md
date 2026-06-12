@@ -149,7 +149,22 @@ skinny --execution-mode wavefront --proposals bsdf,neural \
 `--neural-trainer auto` resolves to `cpu` on a torch-free Mac, so it works too.
 The unsupported combos surface their own errors rather than starting a broken loop:
 `--neural-trainer mlx` is reserved (`NotImplementedError`), and `--neural-handoff
-interop` needs CUDA + `VK_KHR_external_memory` (`NotImplementedError` off CUDA).
+interop` needs a GPU handoff path — CUDA + `VK_KHR_external_memory` on Vulkan,
+or the native Metal backend on a unified-memory device (`NotImplementedError`
+where neither exists).
+
+**Metal UMA interop** (change `metal-neural-interop`). On the native Metal
+backend `--neural-handoff interop` selects `MetalSharedWeightPublisher` instead
+of the CUDA publisher: bindings 33/34 are allocated as shared-storage
+(`MTLStorageModeShared`) buffers, `publish()` only stages the precision-cast
+bytes host-side, and the frame-boundary `swap()` writes them into the buffers in
+place — no NFW1 file, no staging upload. The synchronization model needs no
+semaphore: the swap runs on the render thread after the frame's
+`wait_for_idle()`, so no in-flight command buffer ever reads a half-written
+network (the CUDA path keeps its exported timeline semaphore instead). Published
+bytes are identical to the file path for every precision; the staged in-place
+copy lands in well under 0.1 ms at the shipped fp32 size. The
+`supports_shared_memory` capability flag on `MetalContext` gates the publisher.
 
 **Reading the `[neural]` logs.** On enable the trainer prints its configuration
 once and then a throttled per-cycle progress line:
@@ -713,10 +728,12 @@ identity-ish map and stays unbiased.
   wavefront-BDPT), not silently ignored. Both wavefront backends run inference:
   Vulkan (`vk_wavefront.WavefrontNeuralProposalPass`) and native Metal
   (`metal_wavefront.MetalNeuralProposalPass` — fp32 on current slang-rhi, whose
-  Metal fp16 probe under-reports; weights upload via `set_data`, no
-  external-memory interop). The wavefront **record drain** (online training)
+  Metal fp16 probe under-reports; no exported-handle external memory, but the
+  online weight handoff has its UMA shared-storage interop, change
+  `metal-neural-interop`). The wavefront **record drain** (online training)
   remains Vulkan-only — its record buffers are compiled out under the Metal
-  slot cap (`wf_records.slang` stubs).
+  slot cap (`wf_records.slang` stubs) — so a fully-on-Metal online loop is
+  still gated on the drain, not on the handoff.
 - **Flat/python materials only.** Skin / MaterialX-graph lanes set
   `neuralValid = false` and pass through with `{bsdf, env}`.
 - **Frozen / offline.** Weights are trained per scene in `spline_flow` and loaded

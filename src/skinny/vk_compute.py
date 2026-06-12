@@ -1628,9 +1628,13 @@ class StorageBuffer:
     """
 
     def __init__(self, ctx: VulkanContext, size_bytes: int, *, indirect: bool = False,
-                 external: bool = False) -> None:
+                 external: bool = False, shared: bool = False) -> None:
         self.ctx = ctx
         self.size = max(int(size_bytes), 16)  # GPU drivers dislike zero-sized buffers
+        # `shared` is the Metal UMA in-place-write mode (metal-neural-interop);
+        # accepted here for construction-site parity and ignored — Vulkan interop
+        # is the exported-memory path below, and `write_in_place` is Metal-only.
+        self.shared = False
         # `indirect` adds INDIRECT_BUFFER usage so a build-args kernel can write
         # VkDispatchIndirectCommand triples this buffer holds and the renderer
         # can feed it to vkCmdDispatchIndirect (the wavefront per-material shade).

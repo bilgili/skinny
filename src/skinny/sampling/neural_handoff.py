@@ -49,11 +49,28 @@ class NeuralWeightPublisher(abc.ABC):
 
 
 def make_publisher(kind: str, **kwargs) -> NeuralWeightPublisher:
-    """Factory for the ``--neural-handoff`` flag value (``file`` | ``interop``)."""
+    """Factory for the ``--neural-handoff`` flag value (``file`` | ``interop``).
+
+    ``interop`` resolves per GPU backend (change metal-neural-interop, design
+    D2): a Metal ``weights_buffer`` selects the UMA shared-storage publisher,
+    anything else the Vulkan↔CUDA external-memory publisher. The user intent is
+    "GPU handoff, no file"; which mechanism applies is a backend property."""
     if kind == "file":
         from .neural_handoff_file import FileWeightPublisher
         return FileWeightPublisher(**kwargs)
     if kind == "interop":
+        ctx = getattr(kwargs.get("weights_buffer"), "ctx", None)
+        if getattr(ctx, "is_metal", False):
+            from .neural_handoff_interop_metal import MetalSharedWeightPublisher
+            kwargs.pop("timeline_semaphore", None)  # no exported semaphores on Metal
+            return MetalSharedWeightPublisher(**kwargs)
         from .neural_handoff_interop import InteropWeightPublisher
-        return InteropWeightPublisher(**kwargs)
+        try:
+            return InteropWeightPublisher(**kwargs)
+        except NotImplementedError as exc:
+            raise NotImplementedError(
+                "interop weight handoff unavailable: needs CUDA with Vulkan "
+                "external memory, or the native Metal backend on a unified-memory "
+                f"device ({exc}). Use --neural-handoff file on this platform."
+            ) from exc
     raise ValueError(f"unknown neural handoff backend {kind!r} (want 'file' or 'interop')")
