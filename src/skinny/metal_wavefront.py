@@ -223,7 +223,110 @@ class _MetalWavefrontRecorder:
             "neural directional proposal on Metal lands in phase 6")
 
     def restir_primary_direct(self) -> None:
-        raise NotImplementedError("ReSTIR DI on Metal lands in phase 5")
+        """Encode the ReSTIR DI primary-direct pass set (fill → spatial →
+        resolve) at bounce 0 — the Metal analogue of
+        ``vk_wavefront.RestirDiPass.record_primary_direct``. The Vulkan
+        36 B ``rpc`` push constant rides the same ``set_data`` uniform-blob
+        mechanism as ``wfTile`` (design D4); the reservoir/G-buffer binds are
+        already merged into ``self._binds`` by ``dispatch_frame``."""
+        rp = self._p._restir
+        groups = ((rp.stream_size + rp._GROUP - 1) // rp._GROUP, 1, 1)
+        blob = rp.rpc_blob()
+        for k, entry in enumerate(("restirFill", "restirSpatial", "restirResolve")):
+            if k > 0:
+                self._enc.barrier()
+            self._enc.dispatch(
+                rp._entries[entry], groups, bindings=self._binds,
+                uniform_blob=self._fc, uniforms={"rpc": blob},
+                bindless=self._bindless)
+
+
+class MetalRestirDiPass:
+    """ReSTIR DI wavefront pass set on a :class:`~skinny.metal_context.
+    MetalContext` — the Metal sibling of ``vk_wavefront.RestirDiPass`` (change
+    metal-wavefront-parity, phase 5; the host-side selector is
+    ``sampling.reuse.RestirDiReuse``).
+
+    Compiles the three ``restir/restir_primary.slang`` entries (fill →
+    spatial → resolve) through the same in-process Slang→Metal session as the
+    wavefront kernels, and owns the per-pixel ping-pong reservoir + G-buffer
+    ``StorageBuffer``s, sized from the **reflected MSL** element strides
+    (Slang pads ``float3`` to 16 B on Metal, so the Vulkan scalar-headroom
+    strides could undersize them). The buffers persist across frames — the
+    temporal pass reads last frame's ``wfReservoirB`` — and reset only when
+    the renderer rebuilds the pass on a reuse-config-hash change (the
+    pass-structural contract of the scene-sampling reuse hook).
+
+    The shared ``wfState``/``wfHits`` buffers and the scene globals bind by
+    name at dispatch (``dispatch_frame`` merges :attr:`bind_map` over the
+    scene binds); the ``rpc`` config block is a ``set_data`` byte blob per
+    dispatch (design D4), packed scalar — uints/floats only, so the MSL
+    constant-buffer layout matches the Vulkan 36 B push constant.
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] in restir_primary.slang
+    RESERVOIR_STRIDE = 32  # reflection fallback only — MSL stride is authoritative
+    GBUF_STRIDE = 32       # reflection fallback only
+    # Default ReSTIR config (mirrors restir_primary.slang RestirPC and the
+    # Vulkan pass's DEFAULT_CONFIG — lockstep). flags bit0 spatial, bit1
+    # temporal. Renderer overrides via RestirDiReuse.
+    DEFAULT_CONFIG = dict(flags=0x3, mLight=8, spatialK=5, spatialRadius=16.0,
+                          normalThresh=0.9, depthThresh=0.1, mCap=20, mBsdf=1)
+
+    def __init__(self, ctx, shader_dir: Path, stream_size: int,
+                 config: dict | None = None) -> None:
+        self.ctx = ctx
+        self.stream_size = int(stream_size)
+        self.config = {**self.DEFAULT_CONFIG, **(config or {})}
+
+        # No neural defines: parity with the Vulkan `_compile_full_spv`
+        # restir kernels, which compile with the plain define set.
+        session = _metal_slang_session(ctx, Path(shader_dir))
+        src_path = Path(shader_dir) / "restir" / "restir_primary.slang"
+        module = session.load_module_from_source(
+            "restir_primary", src_path.read_text(encoding="utf-8"), str(src_path))
+        self._entries = {e: _EntryPipeline(ctx, session, module, e)
+                         for e in ("restirFill", "restirSpatial", "restirResolve")}
+
+        fill = self._entries["restirFill"].program
+        self.reservoir_stride = ((_reflect_element(fill, "wfReservoirA")
+                                  or (None, 0))[1] or self.RESERVOIR_STRIDE)
+        self.gbuf_stride = ((_reflect_element(fill, "wfGBuffer")
+                             or (None, 0))[1] or self.GBUF_STRIDE)
+
+        # Ping-pong reservoirs (A/B) + G-buffer (pos+normal) for the spatial
+        # domain check. Zero-filled once: device-local memory is otherwise
+        # uninitialised, and spatial reads wfReservoirB (the temporal history)
+        # before the first resolve writes it.
+        n = self.stream_size
+        self._resA = StorageBuffer(ctx, n * self.reservoir_stride)
+        self._resB = StorageBuffer(ctx, n * self.reservoir_stride)
+        self._gbuffer = StorageBuffer(ctx, n * self.gbuf_stride)
+        for buf in (self._resA, self._resB, self._gbuffer):
+            buf.fill_zero_sync()
+        # Slang global name → buffer, merged into the scene binds per dispatch.
+        self.bind_map = {
+            "wfReservoirA": self._resA,
+            "wfReservoirB": self._resB,
+            "wfGBuffer": self._gbuffer,
+        }
+
+    def rpc_blob(self) -> bytes:
+        """The RestirPC config block: streamSize, flags, mLight, spatialK,
+        spatialRadius, normalThresh, depthThresh, mCap, mBsdf (scalar, 36 B —
+        identical to the Vulkan push-constant pack)."""
+        c = self.config
+        return struct.pack(
+            "IIIIfffII", self.stream_size, int(c["flags"]), int(c["mLight"]),
+            int(c["spatialK"]), float(c["spatialRadius"]),
+            float(c["normalThresh"]), float(c["depthThresh"]), int(c["mCap"]),
+            int(c.get("mBsdf", 1)))
+
+    def destroy(self) -> None:  # SlangPy owns lifetimes via refcount
+        for buf in (self._resA, self._resB, self._gbuffer):
+            buf.destroy()
+        self.bind_map = {}
+        self._entries = {}
 
 
 class MetalWavefrontPathPass:
@@ -381,11 +484,11 @@ class MetalWavefrontPathPass:
         )
 
     def set_restir(self, restir) -> None:
-        """Reuse-plugin seam (phase 5). Only identity reuse is supported on
-        Metal until the ReSTIR pass set is ported."""
-        if restir is not None:
-            raise NotImplementedError("ReSTIR DI on Metal lands in phase 5")
-        self._restir = None
+        """Hook the ReSTIR DI reuse plugin (a :class:`MetalRestirDiPass`, or
+        ``None`` for identity reuse). The recorder schedules its fill →
+        spatial → resolve set at bounce 0 through the shared
+        ``record_path_loop`` reuse hook."""
+        self._restir = restir
 
     def set_neural(self, neural) -> None:
         """Neural-proposal seam (phase 6)."""
@@ -405,6 +508,8 @@ class MetalWavefrontPathPass:
         ``bindless_textures`` the flat-material texture-pool slot list."""
         all_binds = dict(binds)
         all_binds.update(self._bind_map)
+        if self._restir is not None:
+            all_binds.update(self._restir.bind_map)
         bindless = None
         if bindless_textures is not None:
             bindless = ("flatMaterialTextures", bindless_textures, self.default_tex)

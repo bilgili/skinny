@@ -1791,17 +1791,29 @@ class Renderer:
         """Build (once) the Metal staged wavefront path tracer (change
         metal-wavefront-parity phase 3). Returns it, or None before the scene
         bindings exist. The pass owns its path-state/hit/queue buffers, sized
-        from the reflected MSL strides; ReSTIR + neural attach in phases 5/6,
-        so they are not part of the rebuild key yet."""
+        from the reflected MSL strides; the ReSTIR DI reuse pass (phase 5)
+        attaches through the same bounce-0 hook as Vulkan, so the reuse mode
+        and config are part of the rebuild key. Neural attaches in phase 6."""
         if self._scene_bindings is None:
             return None
         has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in self._material_types)
+        # Reuse mode is part of the key so switching none↔ReSTIR rebuilds the
+        # pass (and its ReSTIR sub-pass) — the seam's pass-structural contract.
+        reuse_mode = int(self._active_reuse().reuse_mode)
+        _rcfg = getattr(self, "_restir_config", None)
         key = (self.width, self.height, has_nonflat,
-               self._graph_set_signature())
+               self._graph_set_signature(), reuse_mode,
+               int(self.restir_regime_index) if reuse_mode == 1 else None,
+               tuple(sorted(_rcfg.items())) if _rcfg else None)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
+            # Live ReSTIR tuning: refresh the config blob each frame so slider
+            # changes (mLight/mBsdf/k/radius/mCap/biased) take effect without a
+            # pass rebuild (recompile). Pass structure is unchanged.
+            if self._restir_pass is not None:
+                self._restir_pass.config = self._restir_build_config()
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
-        from skinny.metal_wavefront import MetalWavefrontPathPass
+        from skinny.metal_wavefront import MetalRestirDiPass, MetalWavefrontPathPass
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None)
                   or MetalWavefrontPathPass.STREAM_CAP)
@@ -1812,6 +1824,18 @@ class Renderer:
             graph_fragments=list(self._scene_graph_fragments),
             neural_config=self._effective_neural_config(),
         )
+        # ReSTIR DI reuse plugin (phase 5): the pass owns the persistent
+        # reservoir/G-buffer StorageBuffers and binds the path pass's
+        # wfState/wfHits by name at dispatch. Constructing it only on
+        # reuse_mode == RESTIR_DI IS the capability gate (the megakernel on
+        # either device folds reuseMode to 0 — identity reuse).
+        self._restir_pass = None
+        if reuse_mode == 1:  # RESTIR_DI
+            self._restir_pass = MetalRestirDiPass(
+                self.ctx, self.shader_dir, stream_size,
+                config=self._restir_build_config(),
+            )
+            self._wavefront_path_pass.set_restir(self._restir_pass)
         self._wf_path_pass_dims = key
         # The scene-build uploads ran before any Metal reflection existed
         # (wavefront mode compiles no megakernel), so the per-graph SSBOs and
@@ -8035,9 +8059,10 @@ class Renderer:
         from skinny.sampling import proposal_mask_and_alpha
         prop_mask, prop_alpha = proposal_mask_and_alpha(self._active_proposals())
         # Reuse capability gate: ReSTIR DI is wavefront-only (multi-pass). On
-        # megakernel/Metal the reuseMode folds to 0 (identity) so the shader's
-        # depth-0 reuseDirect gate stays inert — stock NEE. The wavefront pass
-        # builder only constructs the ReSTIR sub-pass under the same condition.
+        # the megakernel (either device) the reuseMode folds to 0 (identity) so
+        # the shader's depth-0 reuseDirect gate stays inert — stock NEE. On the
+        # wavefront backend both Vulkan and Metal run ReSTIR (phase 5); the
+        # pass builders construct the ReSTIR sub-pass under the same condition.
         reuse_mode = int(self._active_reuse().reuse_mode)
         if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
             reuse_mode = 0
