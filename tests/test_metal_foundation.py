@@ -207,6 +207,28 @@ def test_rebind_descriptors_noop_on_metal():
     r._rebind_aux_material_descriptors()  # must return before reading std_surface_buffer
 
 
+def test_debug_viewport_refuses_metal_cleanly():
+    """The debug viewport is a Vulkan **graphics** rasteriser; the compute-only
+    Metal backend can't build it. `open()` must raise a clear RuntimeError on a
+    Metal context (not a cryptic `AttributeError: 'MetalContext' object has no
+    attribute 'queue_family_indices'`) and leave the viewport closed, so the Qt
+    dock's showEvent degrades gracefully. Stub via `__new__` — no GPU."""
+    import types
+
+    try:
+        from skinny.debug_viewport import DebugViewport
+    except OSError as exc:  # libvulkan not on the dylib path (module imports vulkan)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    dv = DebugViewport.__new__(DebugViewport)
+    dv._vk_ctx = types.SimpleNamespace(is_metal=True)
+    dv._open = False
+    dv._embedded = True
+    with pytest.raises(RuntimeError, match="Vulkan backend"):
+        dv.open()
+    assert dv._open is False
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():
