@@ -132,6 +132,17 @@ SHALL NOT perform per-field scalar `ShaderCursor` writes into uniform structs
 (uniform data is uploaded via `set_data` byte blobs), preserving the foundation
 phase's fence-hang discipline.
 
+Parity SHALL hold for **flat / standard_surface materials and procedural
+MaterialX-graph materials**, not only skin and simple textured materials. Each
+generated per-graph parameter buffer (`StructuredBuffer<GraphParams_*>`) SHALL be
+bound by name on the Metal megakernel dispatch, and its scalar/std430-packed
+record SHALL be relocated into the reflected MSL element layout (Slang pads
+`float3` to 16 B on Metal, shifting every field after a leading `float3`) at the
+MSL element stride, using offsets taken from live pipeline reflection. A
+purely-procedural graph material whose colour comes entirely from its parameter
+SSBO (e.g. a `fractal3d` marble) SHALL render the same colour on Metal as on
+Vulkan and SHALL NOT render black.
+
 The rendered output on Metal SHALL match the Vulkan megakernel at **structural
 parity**: with rays held identical across backends (matched `frameIndex` AA
 jitter), the deterministic structural outputs (geometry/instance + material
@@ -178,6 +189,17 @@ continue to fold back to the megakernel via the existing capability gates.
   within the stated perceptual tolerance, with no requirement of byte-identical
   color
 
+#### Scenario: Procedural MaterialX-graph material matches Vulkan
+
+- **WHEN** a multi-material USD scene containing a purely-procedural graph
+  material (colour driven entirely by `GraphParams_*` parameters, e.g. a
+  `fractal3d` marble) is rendered to convergence through the megakernel on both
+  the Metal and Vulkan backends
+- **THEN** the per-graph parameter buffer is bound and read with MSL-correct
+  field offsets on Metal, the material's converged colour matches Vulkan within
+  the perceptual tolerance, and no material that is lit on Vulkan is near-black
+  on Metal
+
 #### Scenario: Resource layer resolves by backend without per-site branches
 
 - **WHEN** the renderer constructs its megakernel GPU resources on either a
@@ -210,4 +232,51 @@ SHALL remain unchanged.
 - **WHEN** the megakernel uniform block is packed for the Vulkan backend
 - **THEN** the `std140` layout from `SkinParameters.pack()` and the Vulkan uniform
   path are byte-identical to before this change
+
+### Requirement: Vulkan-only host paths degrade safely on Metal
+
+Every renderer or front-end path implemented against the Vulkan context SHALL either run a Metal-equivalent path or short-circuit on `is_metal`, and SHALL NOT crash by dereferencing a Vulkan-only attribute on the compute-only `MetalContext`.
+
+The compute-only `MetalContext` does not expose the Vulkan-specific context
+surface (`command_pool`, `instance`, `physical_device`, `queue_family_indices`,
+external-handle types) and has no Vulkan descriptor sets (`descriptor_sets is
+None`); it binds every megakernel resource by name fresh at each dispatch.
+
+Specifically: the Vulkan descriptor-set rewrite helpers (texture-pool descriptor
+update; scene, auxiliary-material, and mesh descriptor rebinds invoked when a
+buffer reallocates as a scene streams) SHALL be no-ops on Metal, since the next
+dispatch rebinds the live buffers by name. The renderer's duck-typed context
+surface SHALL expose `gpu_info` (carrying at least `name`, `is_discrete`, and
+`preferred_h264_encoder`) on both backends so the front-ends and the video
+encoder stay backend-agnostic. Backend-neutral image-format tokens (including the
+`rgba8_srgb` token) SHALL resolve to a valid `slangpy.Format` on Metal.
+
+Vulkan-only GUI tools that have no Metal implementation yet SHALL degrade
+visibly rather than crash: the debug viewport (a Vulkan graphics rasteriser)
+SHALL refuse to open on Metal with a clear message and stay closed, and the
+BXDF/BSSRDF visualiser SHALL return an empty result grid on Metal.
+
+#### Scenario: Streaming a many-instance scene does not crash on Metal
+
+- **WHEN** a USD scene whose instance/material/mesh buffers grow and reallocate
+  as it streams (e.g. a 20+-instance scene) is loaded on the Metal megakernel
+  backend
+- **THEN** the descriptor-rebind helpers short-circuit on Metal and the scene
+  renders a full frame, with no `TypeError`/`AttributeError` from a Vulkan
+  descriptor call on a slangpy buffer
+
+#### Scenario: Front-end reads gpu_info on Metal
+
+- **WHEN** a front-end or the video encoder reads `ctx.gpu_info.name` /
+  `ctx.gpu_info.preferred_h264_encoder` on a `MetalContext`
+- **THEN** the attributes resolve (e.g. the adapter name and a VideoToolbox
+  encoder) with no missing-attribute error
+
+#### Scenario: Vulkan-only GUI tool degrades on Metal
+
+- **WHEN** the debug viewport or the BXDF/BSSRDF visualiser is invoked on the
+  Metal backend
+- **THEN** the debug viewport raises a clear "requires the Vulkan backend"
+  message and stays closed, and the visualiser returns an empty grid — neither
+  crashes the application or the render thread
 
