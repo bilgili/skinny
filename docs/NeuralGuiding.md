@@ -72,7 +72,7 @@ mixture collapses to the material's native sampler and the image is
 
 | Property | Value |
 | --- | --- |
-| Backend | **Wavefront only.** The megakernel keeps the `{bsdf, env}` subset; selecting neural on the megakernel/Metal is reported unsupported (capability gate). |
+| Backend | **Wavefront only**, on both Vulkan and native Metal (change `metal-wavefront-parity`: `metal_wavefront.MetalNeuralProposalPass`; selecting neural rebuilds the Metal pass with `SKINNY_METAL_NEURAL=1`, which un-stubs the weight buffers under Metal's 31-buffer-slot cap). The megakernel on either device keeps the `{bsdf, env}` subset; selecting neural there is reported unsupported (capability gate). |
 | Vertices | **All flat/python bounces** (`depth ≥ 0`), upper hemisphere only — the flow's domain. |
 | Materials | **Flat / standard_surface / OpenPBR / python only.** Skin / MaterialX-graph lanes set `neuralValid = false` and keep the `{bsdf, env}` subset (weights renormalise). |
 | Training | **Offline** (per scene, in `spline_flow`) **or online** — an async trainer warm-starts the shipped flow and does small recency-weighted updates, with the per-cycle gradient step behind a selectable `TrainingBackend` (see below). The renderer dumps `.nrec` records and loads/hands off `.nfw1` weights. |
@@ -708,9 +708,15 @@ identity-ish map and stays unbiased.
 
 ## Caveats and limits
 
-- **Wavefront-only.** The megakernel/Metal backends keep the `{bsdf, env}` subset;
-  requesting neural there is reported unsupported (capability gate, like
-  wavefront-BDPT), not silently ignored.
+- **Wavefront-only.** The megakernel (on either device) keeps the `{bsdf, env}`
+  subset; requesting neural there is reported unsupported (capability gate, like
+  wavefront-BDPT), not silently ignored. Both wavefront backends run inference:
+  Vulkan (`vk_wavefront.WavefrontNeuralProposalPass`) and native Metal
+  (`metal_wavefront.MetalNeuralProposalPass` — fp32 on current slang-rhi, whose
+  Metal fp16 probe under-reports; weights upload via `set_data`, no
+  external-memory interop). The wavefront **record drain** (online training)
+  remains Vulkan-only — its record buffers are compiled out under the Metal
+  slot cap (`wf_records.slang` stubs).
 - **Flat/python materials only.** Skin / MaterialX-graph lanes set
   `neuralValid = false` and pass through with `{bsdf, env}`.
 - **Frozen / offline.** Weights are trained per scene in `spline_flow` and loaded

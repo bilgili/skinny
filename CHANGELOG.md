@@ -9,6 +9,32 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Backend
 
+- **Metal wavefront parity** (change `metal-wavefront-parity`) — the wavefront
+  execution mode now runs on the native Metal backend at parity with Vulkan:
+  staged **path** and **BDPT** integrators (all three walk modes), **ReSTIR DI**
+  reuse, and the **neural directional proposal**. The loop stage orders moved to
+  a backend-neutral driver (`wavefront_driver.py`: `record_path_loop` /
+  `record_bdpt_loop` over a `WavefrontRecorder` protocol) that the existing
+  Vulkan recorder reproduces byte-for-byte; `metal_wavefront.py` adds the Metal
+  side — per-entry in-process Slang→Metal pipelines, queue buffers sized from
+  the **reflected MSL strides** (`float3` pads to 16 B: `WavefrontPathState`
+  96 B, `BDPTVertex` 176 B), one `MetalFrameEncoder` per frame with global
+  barriers, and a CPU slot-count-readback fallback for the per-material
+  indirect dispatches behind a logged empirical probe (slang-rhi 0.42's Metal
+  indirect dispatch is a silent no-op). Selecting the neural proposal rebuilds
+  the Metal pass with `SKINNY_METAL_NEURAL=1`, un-stubbing the frozen-weight
+  buffers under Metal's 31-buffer-slot argument table by compiling out the
+  three wavefront-dead globals (`toolBuffer`, `recordBuf`, `recordCounter`);
+  weights upload via `set_data` (fp32 — the device fp16 probe under-reports on
+  current slang-rhi). Guarded A/B: path, BDPT, and ReSTIR bit-identical to the
+  Vulkan wavefront render on this host; neural rel-MSE 0.00000 / corr 1.00000
+  and unbiased. Equal-time (three-materials @ 256², M5 Pro): wavefront path
+  ≈ 0.22× the Metal megakernel (per-bounce host syncs from the readback
+  fallback; closes when slang-rhi ships Metal indirect dispatch). Mode
+  selection stays user-driven — no silent fallback. Vulkan SPIR-V
+  byte-identical throughout; the wavefront record drain (online training)
+  remains Vulkan-only.
+
 - **Metal megakernel render parity** (change `metal-megakernel-parity`, P2) — the
   full megakernel renderer now runs natively on Metal. `metal_compute.py` grew to
   resource-layer parity with `vk_compute` (`StorageBuffer` / `StorageImage` /

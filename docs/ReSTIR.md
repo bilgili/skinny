@@ -54,7 +54,7 @@ sample count.
 
 | Property | Value |
 | --- | --- |
-| Backend | **Wavefront only.** Megakernel and Metal fall back to identity (stock NEE) — `reuseMode` folds to 0 in `renderer._pack_uniforms`. |
+| Backend | **Wavefront only**, on both Vulkan and native Metal (change `metal-wavefront-parity`: `metal_wavefront.MetalRestirDiPass`, bit-identical to the Vulkan pass set on this host). The megakernel on either device falls back to identity (stock NEE) — `reuseMode` folds to 0 in `renderer._pack_uniforms`. |
 | Vertices | **Primary hit only** (`depth == 0`). Secondary path vertices (`depth ≥ 1`) keep stock NEE. |
 | Materials | **Flat / standard_surface / OpenPBR only.** `restirLoadLane` gates on `MATERIAL_TYPE_FLAT`; skin / MaterialX-graph / python-material lanes pass through to stock NEE. |
 | Light types | Sphere + emissive-triangle + environment in the unified RIS; **directional (delta) lights are plain NEE** outside the RIS. |
@@ -559,8 +559,10 @@ with the deviations noted.
    light/sphere/env direct terms (ReSTIR counted them). The proposal mixture still
    drives the bounce *direction* for indirect.
 6. **Backend — wavefront-only.** Multi-pass reuse can't live in the megakernel;
-   selecting ReSTIR + megakernel/Metal falls back to identity (capability gate,
-   like wavefront-BDPT).
+   selecting ReSTIR + megakernel falls back to identity (capability gate, like
+   wavefront-BDPT). Both wavefront backends run it: Vulkan
+   (`vk_wavefront.RestirDiPass`) and native Metal
+   (`metal_wavefront.MetalRestirDiPass`, change `metal-wavefront-parity`).
 
 <a id="canonical-integration"></a>
 
@@ -661,8 +663,9 @@ mode, regime, or any tuning value — resets progressive accumulation (folded in
 
 ## Caveats and limits
 
-- **Wavefront-only.** Megakernel and Metal silently fall back to identity (stock
-  NEE); `reuseMode` folds to 0 in `_pack_uniforms` on those backends.
+- **Wavefront-only.** The megakernel (on either device) silently falls back to
+  identity (stock NEE); `reuseMode` folds to 0 in `_pack_uniforms` there. The
+  wavefront backend runs ReSTIR on both Vulkan and native Metal.
 - **Flat materials only.** `restirLoadLane` accepts only `MATERIAL_TYPE_FLAT`
   primary hits; skin / MaterialX-graph / python-material lanes pass through
   `restirSpatial` untouched and shade with stock NEE.
