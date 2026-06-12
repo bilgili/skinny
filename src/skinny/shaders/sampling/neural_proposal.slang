@@ -38,9 +38,20 @@ import sampling.neural_flow;   // NfLayerHeader, sampleNeural, pdfNeural, NF_CON
 // neural-precision-size-study). The binding slots never move; only the element
 // type — and the bytes the host uploads — change. NfLayerHeader (35) is precision-
 // and size-agnostic (it carries the layout the loader already validates).
+//
+// Metal target (change metal-wavefront-parity phase 3): the neural proposal is
+// not ported until phase 6, and Metal caps a kernel's argument table at 31
+// buffer slots — the wavefront flat-shade kernel's scene + queue globals sit at
+// that cap, so these three weight buffers would overflow it. The SKINNY_METAL
+// branch declares no buffers and stubs the two world-space entry points (pdf 0
+// → the proposal MIS treats neural as absent); `fc.proposalMask`'s NEURAL bit
+// is never set on Metal, so the stubs are the existing runtime no-op path. The
+// Vulkan compile (no SKINNY_METAL) is byte-identical to before.
+#if !defined(SKINNY_METAL)
 [[vk::binding(33)]] StructuredBuffer<NF_WT>         neuralWeights;
 [[vk::binding(34)]] StructuredBuffer<NF_WT>         neuralBiases;
 [[vk::binding(35)]] StructuredBuffer<NfLayerHeader> neuralLayers;
+#endif
 
 // Canonical condition c = (position normalised to the scene AABB → [-1,1]³,
 // shading normal, outgoing world dir). MUST match the trainer's encoding.
@@ -64,6 +75,23 @@ float3 neuralLocalToWorld(float3 loc, float3 N, float3 T, float3 B)
 float3 neuralWorldToLocal(float3 w, float3 N, float3 T, float3 B)
 { return float3(dot(w, T), dot(w, N), dot(w, B)); }
 
+#if defined(SKINNY_METAL)
+// Phase-6 stubs (see the weight-buffer gate above): pdf 0 ⇒ the proposal MIS
+// chain treats the neural component as absent; never reachable at runtime on
+// Metal because the renderer rejects the NEURAL proposal bit there.
+float3 neuralSampleWorld(float3 posWorld, float3 N, float3 T, float3 B,
+                         float3 woWorld, float2 u, out float pdfOmega)
+{
+    pdfOmega = 0.0f;
+    return N;
+}
+
+float neuralPdfWorld(float3 posWorld, float3 N, float3 T, float3 B,
+                     float3 woWorld, float3 wiWorld)
+{
+    return 0.0f;
+}
+#else
 // Forward — draw a world-space bounce direction + its solid-angle pdf.
 float3 neuralSampleWorld(float3 posWorld, float3 N, float3 T, float3 B,
                          float3 woWorld, float2 u, out float pdfOmega)
@@ -83,3 +111,4 @@ float neuralPdfWorld(float3 posWorld, float3 N, float3 T, float3 B,
     float3 loc = neuralWorldToLocal(wiWorld, N, T, B);
     return pdfNeural(neuralWeights, neuralBiases, neuralLayers, cond, loc);
 }
+#endif

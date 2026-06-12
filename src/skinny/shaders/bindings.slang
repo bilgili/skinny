@@ -6,12 +6,6 @@ import mtlx_std_surface;
 
 uniform FrameConstants fc;
 
-[[vk::binding(20)]] StructuredBuffer<DistantLight> distantLights;
-
-[[vk::binding(1)]]  RWTexture2D<float4> outputBuffer;
-[[vk::binding(2)]]  RWTexture2D<float4> accumBuffer;
-[[vk::binding(3)]]  [[vk::image_format("r8")]] RWTexture2D<float> hudMask;
-[[vk::binding(13)]] StructuredBuffer<FlatMaterialParams> flatMaterials;
 // Bindless flat-material texture pool (binding 14). On Vulkan it is a combined
 // Sampler2D[128] (one UPDATE_AFTER_BIND combined-image-sampler array). Native
 // Metal caps a compute kernel at 16 sampler arguments and 128 texture
@@ -22,10 +16,31 @@ uniform FrameConstants fc;
 // 1 — and its capacity is trimmed to leave room for the ~8 discrete textures
 // inside Metal's 128-texture budget. The Vulkan declaration (and its SPIR-V) is
 // unchanged. See FLATTEX_SAMPLE_LEVEL/GRAD in flat_shading.slang & mtlx_gen_shim.slang.
+//
+// The Metal declaration MUST come before every other texture-typed global
+// (change metal-wavefront-parity, task 3.3): Slang's Metal backend emits the
+// texture ARRAY parameter without an explicit [[texture(N)]] attribute, so
+// Metal auto-assigns its slots starting at 0 — while scalar texture globals
+// get explicit indices from the program-wide reflected order. If any texture
+// global precedes the array in that order but is dead-stripped from a kernel
+// (e.g. outputBuffer/accumBuffer/hudMask in the wavefront shade kernels), the
+// array's actual slots shift below its reflected slots and every bindless
+// sample aliases the wrong texture (the wood-renders-gray bug: array slot 0
+// read outputBuffer). Declaring the array first pins reflected base == Metal
+// auto-assigned base == 0 in every kernel, dead-strip or not. The megakernel
+// keeps every preceding texture live, which is why it never hit this.
 #if defined(SKINNY_METAL)
 [[vk::binding(14)]] Texture2D<float4> flatMaterialTextures[120];
 [[vk::binding(38)]] SamplerState commonSampler;
-#else
+#endif
+
+[[vk::binding(20)]] StructuredBuffer<DistantLight> distantLights;
+
+[[vk::binding(1)]]  RWTexture2D<float4> outputBuffer;
+[[vk::binding(2)]]  RWTexture2D<float4> accumBuffer;
+[[vk::binding(3)]]  [[vk::image_format("r8")]] RWTexture2D<float> hudMask;
+[[vk::binding(13)]] StructuredBuffer<FlatMaterialParams> flatMaterials;
+#if !defined(SKINNY_METAL)
 [[vk::binding(14)]] Sampler2D<float4> flatMaterialTextures[128];
 #endif
 [[vk::binding(16)]] StructuredBuffer<uint> materialTypes;

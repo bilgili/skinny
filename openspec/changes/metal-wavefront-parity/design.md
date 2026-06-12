@@ -209,5 +209,21 @@ the lost feature.
   the neural phase, gated on fp32 parity landing first.
 - Exact perceptual tolerance for the neural fp16 A/B — reuse the megakernel
   color tolerance, or tighten given the proposal's narrower output?
+- **NEW (phase 3) — Metal 31-buffer-slot budget vs phases 5/6:** the wavefront
+  program's scene + queue buffer globals sit at Metal's 31-slot argument-table
+  cap, so phase 3 compiles out the wavefront-native record drain
+  (`wf_records.slang` stubs) and the neural-proposal weight buffers
+  (`neural_proposal.slang` pdf-0 stubs) under `SKINNY_METAL`. Phase 6 must
+  bring `neuralWeights/Biases/Layers` back under the cap (free dead slots,
+  argument buffers / `ParameterBlock`, or a packed single weights buffer);
+  the record-drain port (training on Metal) has the same constraint.
+- **NEW (phase 3) — unattributed Metal texture-array auto-assignment:** Slang's
+  Metal backend emits texture-array parameters without `[[texture(N)]]`, so
+  Metal assigns their slots from 0 while slang-rhi binds at the reflected
+  index. Any texture global that precedes such an array in the program layout
+  but is dead-stripped from a kernel shifts the array's actual slots below the
+  reflected ones (the wood-renders-gray bug). Mitigated by declaring
+  `flatMaterialTextures` first on the Metal branch of `bindings.slang`; any
+  future Metal-target texture array must follow the same rule.
 - Should `vk_wavefront.py` keep its name as the Vulkan adapter, or move the
   Vulkan adapter under the new driver module? (Naming only; no behavior impact.)

@@ -35,6 +35,21 @@ struct RecVertex
     uint   depth;    // 72..76  bounce index
 };
 
+#if defined(SKINNY_METAL)
+// Metal target (change metal-wavefront-parity phase 3): the wavefront-native
+// record drain is not ported yet, and Metal caps a kernel's argument table at
+// 31 buffer slots — the wavefront program's scene + queue buffer globals
+// already sit near that cap, so the four record buffers (wfRecStack/wfRecCount
+// here + recordBuf/recordCounter through `emitRecord`) would overflow it
+// ("'buffer' attribute parameter is out of bounds"). Stub the emitters so all
+// four dead-strip from every wavefront kernel; fc.recordMode is never set on
+// Metal, so the stubs are semantically the no-op path. The Vulkan compile
+// (no SKINNY_METAL) is byte-identical to before.
+void wfResetRecords(uint i) {}
+void wfPushRecord(uint i, HitInfo h, float3 rayDir, BSDFSample bs,
+                  float3 L_k, float3 beta_in, uint depth) {}
+void wfEmitRecords(uint i, float3 Lfinal) {}
+#else
 // Per-lane record stack (binding 9) + per-lane stacked count (binding 10), in
 // the path pass's own set 1. Sized [stream * REC_MAX_BOUNCES] / [stream] when
 // recording; 1-element dummies otherwise. Owned by WavefrontPathPass.
@@ -108,3 +123,4 @@ void wfEmitRecords(uint i, float3 Lfinal)
     }
     wfRecCount[i] = 0u;
 }
+#endif

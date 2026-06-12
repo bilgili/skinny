@@ -827,43 +827,73 @@ class MetalFrameEncoder:
         self._enc = ctx.device.create_command_encoder()
         self._submitted = False
 
-    def _root(self, pipe: ComputePipeline, bindings, uniform_blob):
+    def _root(self, pipe: ComputePipeline, bindings, uniform_blob,
+              uniforms=None, bindless=None):
         ro = self.ctx.device.create_root_shader_object(pipe.program)
         cur = self._spy.ShaderCursor(ro)
         if uniform_blob is not None:
             cur["fc"].set_data(
                 np.frombuffer(bytes(uniform_blob), dtype=np.uint8).copy())
+        # Additional uniform blocks (e.g. the wavefront per-tile constants that
+        # are Vulkan push constants) — byte blobs via set_data only (design D4).
+        # A `ConstantBuffer<T>` global cannot bind bytes directly; dereference
+        # to its element first (plain `uniform T` cursors dereference to
+        # themselves, so this is safe for both declaration styles).
+        for name, blob in (uniforms or {}).items():
+            if blob is None or name not in pipe.global_names:
+                continue
+            field = cur[name]
+            deref = field.dereference()
+            target = deref if deref.is_valid() else field
+            target.set_data(np.frombuffer(bytes(blob), dtype=np.uint8).copy())
         for name, res in (bindings or {}).items():
             if res is None or name not in pipe.global_names:
                 continue
             cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        # Bindless texture array: (global_name, [native_texture | None, …],
+        # default_texture) — every slot must be bound on Metal, so None slots get
+        # the default 1×1 texture (mirrors ComputePipeline.dispatch).
+        if bindless is not None:
+            name, textures, default_tex = bindless
+            if name in pipe.global_names:
+                slot_cur = cur[name]
+                for i in range(BINDLESS_TEXTURE_CAPACITY):
+                    tex = textures[i] if i < len(textures) and textures[i] is not None \
+                        else default_tex
+                    slot_cur[i] = tex
         return ro
 
     def dispatch(self, pipe: ComputePipeline, groups, *, bindings=None,
-                 uniform_blob=None) -> None:
+                 uniform_blob=None, uniforms=None, bindless=None) -> None:
         """Encode a direct dispatch of ``pipe`` over the ``(x, y, z)`` thread-group
         count ``groups`` into the shared encoder (no submit)."""
-        ro = self._root(pipe, bindings, uniform_blob)
+        ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
         cpass = self._enc.begin_compute_pass()
         cpass.bind_pipeline(pipe.pipeline, ro)
         cpass.dispatch_compute(self._spy.math.uint3(*(int(g) for g in groups)))
         cpass.end()
 
     def dispatch_indirect(self, pipe: ComputePipeline, args_buffer, offset: int = 0,
-                          *, bindings=None, uniform_blob=None) -> None:
+                          *, bindings=None, uniform_blob=None, uniforms=None,
+                          bindless=None) -> None:
         """Encode a native indirect dispatch of ``pipe`` into the shared encoder.
 
         Native path only — the CPU-readback fallback needs a host round-trip on the
         args buffer, which breaks single-encoder accumulation; the recorder reads
         the count via :meth:`flush` and falls back to :meth:`dispatch` itself when
         ``ctx.supports_indirect_dispatch`` is false (task 1.3)."""
-        ro = self._root(pipe, bindings, uniform_blob)
+        ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
         native_args = getattr(args_buffer, "buffer", args_buffer)
         cpass = self._enc.begin_compute_pass()
         cpass.bind_pipeline(pipe.pipeline, ro)
         cpass.dispatch_compute_indirect(
             self._spy.BufferOffsetPair(native_args, int(offset)))
         cpass.end()
+
+    def clear(self, buffer) -> None:
+        """Encode a full-buffer zero-fill (the Metal analogue of
+        ``vkCmdFillBuffer(.., 0)`` the wavefront count/cursor clears use)."""
+        self._enc.clear_buffer(getattr(buffer, "buffer", buffer))
 
     def barrier(self) -> None:
         """Global compute-memory barrier between stages (design D3) — makes every
