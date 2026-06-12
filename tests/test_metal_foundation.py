@@ -124,6 +124,72 @@ def test_metal_wait_idle_runs():
         ctx.destroy()
 
 
+# ── 1.6 indirect-dispatch primitive + capability flags ───────────────
+
+def _dispatch_arange_indirect(shader_dir, groups: int):
+    """Run the trivial kernel through ``ComputePipeline.dispatch_indirect`` with a
+    GPU-side ``(groups, 1, 1)`` args triple. ``numthreads`` is 64, so ``groups``
+    workgroups write ``arange(64 * groups)``. Returns ``(out, supported)`` where
+    ``supported`` is the device's ``supports_indirect_dispatch`` probe result, so
+    the caller can assert the native and CPU-readback-fallback paths agree."""
+    from skinny.metal_compute import ComputePipeline, StorageBuffer
+    from skinny.metal_context import MetalContext
+
+    n = 64 * groups
+    ctx = MetalContext(window=None, width=64, height=64)
+    res = args = pipe = None
+    try:
+        res = StorageBuffer(ctx, n * 4)
+        args = StorageBuffer(ctx, 12, indirect=True)
+        args.upload_sync(np.array([groups, 1, 1], dtype=np.uint32).tobytes())
+        pipe = ComputePipeline(ctx, shader_dir, _MODULE, _ENTRY)
+        pipe.dispatch_indirect(args, 0, bindings={"result": res})
+        out = np.frombuffer(res.download_sync(n * 4), dtype=np.uint32)[:n].copy()
+        return out, bool(ctx.supports_indirect_dispatch)
+    finally:
+        if pipe is not None:
+            pipe.destroy()
+        if args is not None:
+            args.destroy()
+        if res is not None:
+            res.destroy()
+        ctx.destroy()
+
+
+def test_metal_dispatch_indirect_matches_direct(shader_dir):
+    """The indirect dispatch (native or CPU-readback fallback, selected by the
+    one-time ``supports_indirect_dispatch`` probe) issues the same group count as a
+    direct dispatch — both produce ``arange``."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    indirect, _supported = _dispatch_arange_indirect(shader_dir, groups=4)  # 4*64=256
+    direct = _dispatch_arange_metal_context(shader_dir)                     # _N == 256
+    expected = np.arange(_N, dtype=np.uint32)
+    np.testing.assert_array_equal(indirect, expected)
+    np.testing.assert_array_equal(indirect, direct)
+
+
+def test_metal_capability_flags_reflect_device():
+    """fp16 + indirect-dispatch capability flags are real booleans probed from the
+    device (design D2/D6), not left as ``None``/unset."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    try:
+        for flag in ("supports_fp16_storage", "supports_fp16_compute",
+                     "supports_indirect_dispatch"):
+            assert isinstance(getattr(ctx, flag), bool), flag
+        # External interop stays off on Metal (design D6 non-goal).
+        assert ctx.supports_external_memory is False
+        assert ctx.supports_external_semaphore is False
+    finally:
+        ctx.destroy()
+
+
 # ── gpu_info duck-typed parity ───────────────────────────────────────
 
 def test_metal_context_exposes_gpu_info():
@@ -144,6 +210,42 @@ def test_metal_context_exposes_gpu_info():
         assert gi.is_discrete is False               # Apple Silicon = unified mem
         assert gi.preferred_h264_encoder == "h264_videotoolbox"
     finally:
+        ctx.destroy()
+
+
+# ── 1.4 single-frame multi-pass encoder + barrier ────────────────────
+
+def test_metal_frame_encoder_multipass_barrier(shader_dir):
+    """Two compute stages encoded into ONE command encoder with a global barrier
+    between them and a SINGLE submit: stage 1 writes ``tid``, stage 2 adds 1000.
+    The result is ``arange(N) + 1000`` iff stage 2 observed stage 1's writes —
+    proving the multi-pass encoder + barrier replace per-stage ``wait_for_idle``."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    from skinny.metal_compute import ComputePipeline, MetalFrameEncoder, StorageBuffer
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    buf = write = bias = None
+    try:
+        buf = StorageBuffer(ctx, _N * 4)
+        write = ComputePipeline(ctx, shader_dir, _MODULE, _ENTRY)        # computeMain
+        bias = ComputePipeline(ctx, shader_dir, _MODULE, "addBias")
+        groups = (_N // 64, 1, 1)  # 64 threads/group
+
+        enc = MetalFrameEncoder(ctx)
+        enc.dispatch(write, groups, bindings={"result": buf})
+        enc.barrier()
+        enc.dispatch(bias, groups, bindings={"result": buf})
+        enc.submit()
+
+        out = np.frombuffer(buf.download_sync(_N * 4), dtype=np.uint32)[:_N]
+        np.testing.assert_array_equal(out, np.arange(_N, dtype=np.uint32) + 1000)
+    finally:
+        for obj in (write, bias, buf):
+            if obj is not None:
+                obj.destroy()
         ctx.destroy()
 
 

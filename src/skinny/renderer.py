@@ -1312,12 +1312,13 @@ class Renderer:
         # session — selected on the command line (`--execution-mode`,
         # constructor arg), not a runtime GUI toggle. Megakernel (index 0) is
         # the single main_pass.slang compute dispatch (default); wavefront
-        # (index 1) is the staged per-material backend, Vulkan only. On
-        # non-Vulkan backends only megakernel is available, so any request
-        # collapses there (the Metal pin; mirrors the Vulkan-only GPU skinning /
-        # BVH-refit passes). The renderer compiles ONLY the selected backend
+        # (index 1) is the staged per-material backend on Vulkan AND native
+        # Metal (change metal-wavefront-parity phase 3 — the Metal path
+        # integrator runs through `metal_wavefront.MetalWavefrontPathPass`;
+        # wavefront BDPT still pins Metal to the megakernel until phase 4).
+        # The renderer compiles ONLY the selected backend
         # (see `_build_pipeline_for_current_graphs`).
-        _wavefront_capable = hasattr(self.ctx, "compute_queue")
+        _wavefront_capable = hasattr(self.ctx, "compute_queue") or self.is_metal
         self.execution_modes: list[str] = (
             ["Megakernel", "Wavefront"] if _wavefront_capable else ["Megakernel"]
         )
@@ -1586,6 +1587,21 @@ class Renderer:
         return self._scene_bindings.descriptor_set_layout if self._scene_bindings else None
 
     @property
+    def _msl_layout_source(self):
+        """Object owning the reflected MSL layouts on Metal (``uniform_layout``,
+        ``graph_param_layouts``, ``std_surface_layout``, ``mtlx_skin_layout``):
+        the megakernel pipeline in megakernel mode, else the lazily-built Metal
+        wavefront pass — path, or bdpt when the bidirectional integrator is
+        the only compiled program (both reflect the same surface from their
+        own programs). ``None`` before any exists — the MSL relocators then
+        fall through to their scalar defaults."""
+        if self.pipeline is not None:
+            return self.pipeline
+        if self._wavefront_path_pass is not None:
+            return self._wavefront_path_pass
+        return self._wavefront_bdpt_pass
+
+    @property
     def _scene_graph_bindings(self) -> dict:
         """MaterialX nodegraph → descriptor-binding map for the active backend,
         independent of which backend is compiled."""
@@ -1596,8 +1612,9 @@ class Renderer:
     @property
     def effective_execution_mode_index(self) -> int:
         """Execution mode actually used to render this frame, after capability
-        gating. Wavefront + BDPT falls back to megakernel until the wavefront
-        bidirectional path lands."""
+        gating. Wavefront + BDPT runs the staged bidirectional pipeline on both
+        backends (Vulkan since wavefront phase 3; Metal since
+        metal-wavefront-parity phase 4)."""
         return effective_execution_mode(
             self.execution_mode_index,
             self.integrator_index,
@@ -1618,8 +1635,11 @@ class Renderer:
         the scene bindings (the staged stage pipelines build lazily)."""
         if self.is_metal:
             # The Metal megakernel binds resources at dispatch (no Vulkan
-            # descriptor sets); readiness is just the compiled pipeline. ReSTIR/
-            # wavefront fold back to the megakernel on Metal.
+            # descriptor sets); readiness is the compiled pipeline. In wavefront
+            # mode no megakernel is compiled (`scene_bindings_only`) — readiness
+            # is the scene bindings; the stage pipelines build lazily.
+            if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+                return self._scene_bindings is not None
             return self.pipeline is not None
         if self.descriptor_sets is None:
             return False
@@ -1681,6 +1701,8 @@ class Renderer:
         before the scene bindings exist (it reuses the scene-bindings set-0
         layout + the renderer's per-frame scene descriptor sets). Rebuilt by
         `_destroy_wavefront_path_pass` when the layout or frame size changes."""
+        if self.is_metal:
+            return self._ensure_wavefront_path_pass_metal()
         if not hasattr(self.ctx, "compute_queue"):
             return None
         if self._scene_bindings is None or self.descriptor_sets is None:
@@ -1765,6 +1787,91 @@ class Renderer:
         self._wf_path_pass_dims = key
         return self._wavefront_path_pass
 
+    def _ensure_wavefront_path_pass_metal(self):
+        """Build (once) the Metal staged wavefront path tracer (change
+        metal-wavefront-parity phase 3). Returns it, or None before the scene
+        bindings exist. The pass owns its path-state/hit/queue buffers, sized
+        from the reflected MSL strides; the ReSTIR DI reuse pass (phase 5)
+        attaches through the same bounce-0 hook as Vulkan, so the reuse mode
+        and config are part of the rebuild key. The neural pre-pass (phase 6)
+        attaches through the every-bounce hook; neural is in the key because
+        selecting it recompiles the shade kernels with SKINNY_METAL_NEURAL=1
+        (the weight buffers are slot-cap stubs otherwise)."""
+        if self._scene_bindings is None:
+            return None
+        has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in self._material_types)
+        # Reuse mode is part of the key so switching none↔ReSTIR rebuilds the
+        # pass (and its ReSTIR sub-pass) — the seam's pass-structural contract.
+        reuse_mode = int(self._active_reuse().reuse_mode)
+        _rcfg = getattr(self, "_restir_config", None)
+        key = (self.width, self.height, has_nonflat,
+               self._graph_set_signature(), reuse_mode,
+               int(self.restir_regime_index) if reuse_mode == 1 else None,
+               tuple(sorted(_rcfg.items())) if _rcfg else None,
+               self._neural_active())
+        if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
+            # Live ReSTIR tuning: refresh the config blob each frame so slider
+            # changes (mLight/mBsdf/k/radius/mCap/biased) take effect without a
+            # pass rebuild (recompile). Pass structure is unchanged.
+            if self._restir_pass is not None:
+                self._restir_pass.config = self._restir_build_config()
+            return self._wavefront_path_pass
+        self._destroy_wavefront_path_pass()
+        from skinny.metal_wavefront import (
+            MetalNeuralProposalPass,
+            MetalRestirDiPass,
+            MetalWavefrontPathPass,
+        )
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None)
+                  or MetalWavefrontPathPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wavefront_path_pass = MetalWavefrontPathPass(
+            self.ctx, self.shader_dir, stream_size, num_pixels,
+            build_catchall=has_nonflat,
+            graph_fragments=list(self._scene_graph_fragments),
+            neural_config=self._effective_neural_config(),
+            neural_active=self._neural_active(),
+        )
+        # ReSTIR DI reuse plugin (phase 5): the pass owns the persistent
+        # reservoir/G-buffer StorageBuffers and binds the path pass's
+        # wfState/wfHits by name at dispatch. Constructing it only on
+        # reuse_mode == RESTIR_DI IS the capability gate (the megakernel on
+        # either device folds reuseMode to 0 — identity reuse).
+        self._restir_pass = None
+        if reuse_mode == 1:  # RESTIR_DI
+            self._restir_pass = MetalRestirDiPass(
+                self.ctx, self.shader_dir, stream_size,
+                config=self._restir_build_config(),
+            )
+            self._wavefront_path_pass.set_restir(self._restir_pass)
+        # Neural directional proposal (bit2, phase 6): upload the frozen
+        # weights into the renderer's backend-neutral 33/34/35 buffers
+        # (`set_data` on Metal — no external-memory interop, design D6) and
+        # hook the forward pre-pass every bounce, mirroring the Vulkan
+        # builder. Constructing it only when neural is active (always
+        # wavefront here) IS the capability gate; deselection rebuilds the
+        # pass (key change) and `_destroy_wavefront_path_pass` releases it.
+        self._neural_pass = None
+        if self._neural_active():
+            self._sync_neural_weights()
+            self._neural_pass = MetalNeuralProposalPass(
+                self.ctx, self.shader_dir, self._wavefront_path_pass,
+                stream_size, network_version=self._neural_network_version,
+                neural_config=self._effective_neural_config(),
+            )
+            self._wavefront_path_pass.set_neural(self._neural_pass)
+        self._wf_path_pass_dims = key
+        # The scene-build uploads ran before any Metal reflection existed
+        # (wavefront mode compiles no megakernel), so the per-graph SSBOs and
+        # std-surface records were packed at scalar offsets. Re-relocate them
+        # now that this pass exposes the reflected MSL layouts.
+        self._upload_graph_param_buffers()
+        mats = getattr(self, "_last_uploaded_materials", None)
+        if mats:
+            self._upload_flat_materials(mats)
+        return self._wavefront_path_pass
+
     def _destroy_wavefront_path_pass(self) -> None:
         if getattr(self, "_neural_pass", None) is not None:
             self._neural_pass.destroy()
@@ -1783,9 +1890,12 @@ class Renderer:
         self._wf_path_pass_dims = None
 
     def _ensure_wavefront_bdpt_pass(self):
-        """Build (once) the staged wavefront bdpt pass. Returns it, or None on a
-        non-Vulkan backend or before the scene bindings exist. Allocates the
-        per-lane eye/light subpath-vertex buffers + aux buffer."""
+        """Build (once) the staged wavefront bdpt pass for the active backend.
+        Returns it, or None before the scene bindings exist. On Vulkan it
+        allocates the per-lane eye/light subpath-vertex buffers + aux buffer;
+        the Metal pass owns its buffers (sized from reflected MSL strides)."""
+        if self.is_metal:
+            return self._ensure_wavefront_bdpt_pass_metal()
         if not hasattr(self.ctx, "compute_queue"):
             return None
         if self._scene_bindings is None or self.descriptor_sets is None:
@@ -1814,6 +1924,39 @@ class Renderer:
             stream_size, num_pixels, walk_mode=self.bdpt_walk_mode,
         )
         self._wf_bdpt_pass_dims = (self.width, self.height)
+        return self._wavefront_bdpt_pass
+
+    def _ensure_wavefront_bdpt_pass_metal(self):
+        """Build (once) the Metal staged wavefront bdpt pass (change
+        metal-wavefront-parity phase 4). Returns it, or None before the scene
+        bindings exist. The pass owns its eye/light/aux + counting-sort
+        buffers, sized from the reflected MSL strides."""
+        if self._scene_bindings is None:
+            return None
+        key = (self.width, self.height, self.bdpt_walk_mode,
+               self._graph_set_signature())
+        if self._wavefront_bdpt_pass is not None and self._wf_bdpt_pass_dims == key:
+            return self._wavefront_bdpt_pass
+        self._destroy_wavefront_bdpt_pass()
+        from skinny.metal_wavefront import MetalWavefrontBdptPass
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None)
+                  or MetalWavefrontBdptPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wavefront_bdpt_pass = MetalWavefrontBdptPass(
+            self.ctx, self.shader_dir, stream_size, num_pixels,
+            walk_mode=self.bdpt_walk_mode,
+            graph_fragments=list(self._scene_graph_fragments),
+        )
+        self._wf_bdpt_pass_dims = key
+        # The scene-build uploads ran before any Metal reflection existed
+        # (wavefront mode compiles no megakernel), so the per-graph SSBOs and
+        # std-surface records were packed at scalar offsets. Re-relocate them
+        # now that this pass exposes the reflected MSL layouts.
+        self._upload_graph_param_buffers()
+        mats = getattr(self, "_last_uploaded_materials", None)
+        if mats:
+            self._upload_flat_materials(mats)
         return self._wavefront_bdpt_pass
 
     def _destroy_wavefront_bdpt_pass(self) -> None:
@@ -2003,6 +2146,12 @@ class Renderer:
         float32 array. For A/B comparison that must not depend on tonemapping
         (see CLAUDE.md headless notes)."""
         import numpy as np
+
+        if self.is_metal:
+            # Metal storage images read back directly (drains the device);
+            # no Vulkan command-buffer / layout-transition machinery.
+            return np.asarray(
+                self.accum_image.read_rgba(), dtype=np.float32)
 
         w, h = self.width, self.height
         readback = self._gpu.ReadbackBuffer(self.ctx, w, h, bytes_per_pixel=16)  # RGBA32F
@@ -2606,8 +2755,8 @@ class Renderer:
         at the MSL element stride. Offsets come from live reflection, never a
         hand-table. Falls back to the scalar packer when reflection is unavailable
         (no skin material / buffer dead-stripped) so frame 0 still has valid bytes."""
-        layout = getattr(self.pipeline, "mtlx_skin_layout", None)
-        stride = getattr(self.pipeline, "mtlx_skin_stride", 0)
+        layout = getattr(self._msl_layout_source, "mtlx_skin_layout", None)
+        stride = getattr(self._msl_layout_source, "mtlx_skin_stride", 0)
         cm = self._mtlx_skin_material
         if not layout or not stride or cm is None or not cm.uniform_block:
             return self._pack_mtlx_skin_array()
@@ -5036,6 +5185,10 @@ class Renderer:
         through the bindless TexturePool so the GPU has the actual image and
         the packed record carries the resolved array slot.
         """
+        # Cached so the Metal wavefront pass build can re-run this upload once
+        # its reflected MSL layouts exist (the wavefront-mode scene build is
+        # `scene_bindings_only` — no megakernel reflection at upload time).
+        self._last_uploaded_materials = list(materials)
         if len(materials) > self.material_capacity:
             new_cap = max(len(materials), self.material_capacity * 2)
             self.material_capacity = new_cap
@@ -5180,9 +5333,9 @@ class Renderer:
         # is empty there and this falls through to the scalar path. It hardens the
         # forthcoming Metal preview/raster port. Vulkan always reads scalar
         # (stride 256, no relocation).
-        ss_layout = (getattr(self.pipeline, "std_surface_layout", None)
+        ss_layout = (getattr(self._msl_layout_source, "std_surface_layout", None)
                      if self.is_metal else None) or None
-        ss_stride = (getattr(self.pipeline, "std_surface_stride", 0)
+        ss_stride = (getattr(self._msl_layout_source, "std_surface_stride", 0)
                      if ss_layout else 0) or STD_SURFACE_STRIDE
         ss_data = bytearray()
         for i, mat in enumerate(materials):
@@ -5258,7 +5411,8 @@ class Renderer:
             # then reads its colours as zero and renders black on Metal.
             msl = None
             if self.is_metal:
-                graph_layouts = getattr(self.pipeline, "graph_param_layouts", None) or {}
+                graph_layouts = getattr(
+                    self._msl_layout_source, "graph_param_layouts", None) or {}
                 msl = graph_layouts.get(gf.target_name)  # ({field:(off,size)}, stride)
             upload_stride = msl[1] if msl is not None else scalar_stride
 
@@ -7626,8 +7780,8 @@ class Renderer:
         (`pipeline.uniform_layout`), never a hand-maintained table. Uploaded via
         `set_data` byte blobs only (design D4)."""
         scalar = self._pack_uniforms()
-        layout = self.pipeline.uniform_layout
-        size = self.pipeline.uniform_size
+        layout = self._msl_layout_source.uniform_layout
+        size = self._msl_layout_source.uniform_size
         out = bytearray(size)
         off = 0
         for name, sz in _FC_SCALAR_FIELDS:
@@ -7717,11 +7871,45 @@ class Renderer:
             binds=binds, bindless=bindless,
         )
 
-    def _render_headless_metal(self) -> bytes:
-        """Metal megakernel headless render → raw RGBA8 bytes (the structural-
-        parity test path). Mirrors the Vulkan `render_headless` minus the Vulkan
-        command-buffer/descriptor machinery — resources bind at dispatch."""
+    def _render_wavefront_metal(self, staged) -> None:
+        """Dispatch one staged wavefront frame on the Metal backend (change
+        metal-wavefront-parity phases 3/4): the shared `record_path_loop` /
+        `record_bdpt_loop` stage order, encoded into one frame command encoder
+        by the pass (path or bdpt — same `dispatch_frame` surface). The resolve
+        stage writes both the accumulation image and the display image, exactly
+        like the Vulkan wavefront path."""
+        mtlx_bytes = self._pack_mtlx_skin_array_msl()
+        if mtlx_bytes:
+            self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+        staged.dispatch_frame(
+            binds=self._build_metal_binds(),
+            uniform_blob=self._pack_uniforms_msl(),
+            bindless_textures=[
+                (s.texture if s is not None else None)
+                for s in self.texture_pool._slots
+            ],
+        )
+
+    def _render_scene_metal(self) -> None:
+        """Render one Metal frame into `_offscreen_output` through the active
+        execution mode: the staged wavefront tracer when selected (and
+        buildable) — bdpt when the bidirectional integrator is active (phase
+        4), else the path tracer — falling back to the megakernel."""
+        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+            if self.integrator_index == 1:  # BDPT → staged wavefront bdpt
+                staged = self._ensure_wavefront_bdpt_pass()
+            else:
+                staged = self._ensure_wavefront_path_pass()
+            if staged is not None:
+                self._render_wavefront_metal(staged)
+                return
         self._render_megakernel_metal()
+
+    def _render_headless_metal(self) -> bytes:
+        """Metal headless render → raw RGBA8 bytes (the structural-parity test
+        path). Mirrors the Vulkan `render_headless` minus the Vulkan
+        command-buffer/descriptor machinery — resources bind at dispatch."""
+        self._render_scene_metal()
         arr = self._offscreen_output.read_rgba()  # (H, W, 4)
         from skinny.metal_compute import _rgba_f32_to_rgba8
         return _rgba_f32_to_rgba8(arr).tobytes()
@@ -7738,7 +7926,7 @@ class Renderer:
         if surface is None:
             return
         self.poll_pick_result()
-        self._render_megakernel_metal()
+        self._render_scene_metal()
         image = surface.acquire_next_image()
         if image is None:
             return
@@ -7896,9 +8084,10 @@ class Renderer:
         from skinny.sampling import proposal_mask_and_alpha
         prop_mask, prop_alpha = proposal_mask_and_alpha(self._active_proposals())
         # Reuse capability gate: ReSTIR DI is wavefront-only (multi-pass). On
-        # megakernel/Metal the reuseMode folds to 0 (identity) so the shader's
-        # depth-0 reuseDirect gate stays inert — stock NEE. The wavefront pass
-        # builder only constructs the ReSTIR sub-pass under the same condition.
+        # the megakernel (either device) the reuseMode folds to 0 (identity) so
+        # the shader's depth-0 reuseDirect gate stays inert — stock NEE. On the
+        # wavefront backend both Vulkan and Metal run ReSTIR (phase 5); the
+        # pass builders construct the ReSTIR sub-pass under the same condition.
         reuse_mode = int(self._active_reuse().reuse_mode)
         if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
             reuse_mode = 0

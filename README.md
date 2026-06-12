@@ -386,13 +386,16 @@ interactive front-ends) selects the GPU backend for the session, exposed
 identically by every front-end from one shared definition. `auto` (the default)
 resolves to native **Metal** on a Metal-capable Apple-Silicon host and falls back
 to **Vulkan** everywhere else (precedence: `--backend` flag > `SKINNY_BACKEND`
-> persisted > `auto`). The native **Metal** backend runs the full megakernel at
-full parity with Vulkan (geometry, shaded color, windowed present). Both backends
-run the full megakernel renderer: Metal compiles `main_pass.slang` in-process via
+> persisted > `auto`). The native **Metal** backend runs the full renderer at
+parity with Vulkan: the megakernel (geometry, shaded color, windowed present)
+**and** the wavefront execution mode — staged path + BDPT integrators, ReSTIR DI
+reuse, and the neural directional proposal (change `metal-wavefront-parity`).
+Both backends compile from the same Slang sources: Metal compiles in-process via
 SlangPy (slang-rhi, no MoltenVK), and `vulkan` forces the production path
 everywhere (MoltenVK under Vulkan on macOS). An explicit `--backend metal` on a
 host with no Metal device fails with a clear message rather than degrading. See
-[docs/Architecture.md § Backend selection](docs/Architecture.md#backend-selection).
+[docs/Architecture.md § Backend selection](docs/Architecture.md#backend-selection)
+and [docs/Wavefront.md § Metal wavefront backend](docs/Wavefront.md#metal-wavefront-backend).
 
 ### Sampling
 

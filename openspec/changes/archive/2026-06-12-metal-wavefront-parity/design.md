@@ -186,11 +186,44 @@ the lost feature.
 
 ## Open Questions
 
-- Does the vendored SlangPy/slang-rhi expose indirect compute dispatch and an
-  explicit multi-pass command encoder with compute barriers, or must D2/D3 use
-  the CPU-readback + per-stage path for v1? (Resolve in phase 1 by probing the
-  installed binding.)
+- ~~Does the vendored SlangPy/slang-rhi expose indirect compute dispatch and an
+  explicit multi-pass command encoder with compute barriers?~~ **RESOLVED (phase 1,
+  slangpy 0.42):** YES on all three. `ComputePassEncoder.dispatch_compute_indirect(
+  BufferOffsetPair)` is native (D2's CPU-readback fallback becomes a defensive
+  path, not the primary). `CommandEncoder.begin_compute_pass()` →
+  `ComputePassEncoder{bind_pipeline→ShaderObject root, dispatch_compute(uint3
+  groups), end}`, with `CommandEncoder.global_barrier()` between passes and
+  `set_buffer_state(buffer, ResourceState)` for transitions — D3's single-encoder
+  multi-pass loop is supported as designed. Low-level pipeline via
+  `Device.create_compute_pipeline(program)`; bind resources by wrapping the
+  `bind_pipeline` root `ShaderObject` in `spy.ShaderCursor` and using `set_data`
+  (D4 discipline carries). `dispatch_compute` takes **thread-group counts**, not
+  thread counts — divide by `ComputePipeline.thread_group_size`.
+- **NEW (phase 1) — fp16 feature under-reported on Metal:** slang-rhi 0.42's Metal
+  backend returns `Device.has_feature(Feature.half) == False` even on Apple Silicon
+  (which natively supports MSL `half`); it also warns "No supported shader model
+  found." So D6's flag-driven probe (task 1.1) conservatively yields fp32 on this
+  host. Enabling fp16 neural storage despite the flag (phase 6) needs an empirical
+  compile-probe (compile + run a tiny `half`-using kernel) rather than trusting
+  `has_feature`, or an Apple-Silicon-implies-`half` override. Decision deferred to
+  the neural phase, gated on fp32 parity landing first.
 - Exact perceptual tolerance for the neural fp16 A/B — reuse the megakernel
   color tolerance, or tighten given the proposal's narrower output?
+- **NEW (phase 3) — Metal 31-buffer-slot budget vs phases 5/6:** the wavefront
+  program's scene + queue buffer globals sit at Metal's 31-slot argument-table
+  cap, so phase 3 compiles out the wavefront-native record drain
+  (`wf_records.slang` stubs) and the neural-proposal weight buffers
+  (`neural_proposal.slang` pdf-0 stubs) under `SKINNY_METAL`. Phase 6 must
+  bring `neuralWeights/Biases/Layers` back under the cap (free dead slots,
+  argument buffers / `ParameterBlock`, or a packed single weights buffer);
+  the record-drain port (training on Metal) has the same constraint.
+- **NEW (phase 3) — unattributed Metal texture-array auto-assignment:** Slang's
+  Metal backend emits texture-array parameters without `[[texture(N)]]`, so
+  Metal assigns their slots from 0 while slang-rhi binds at the reflected
+  index. Any texture global that precedes such an array in the program layout
+  but is dead-stripped from a kernel shifts the array's actual slots below the
+  reflected ones (the wood-renders-gray bug). Mitigated by declaring
+  `flatMaterialTextures` first on the Metal branch of `bindings.slang`; any
+  future Metal-target texture array must follow the same rule.
 - Should `vk_wavefront.py` keep its name as the Vulkan adapter, or move the
   Vulkan adapter under the new driver module? (Naming only; no behavior impact.)

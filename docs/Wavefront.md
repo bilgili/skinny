@@ -268,7 +268,9 @@ The **neural directional proposal** (`--proposals bsdf,neural`, proposal bit
 flow** that proposes the BSDF bounce direction toward the incident-light-aware
 integrand and reports an **exact solid-angle pdf**. The net is **frozen,
 offline-trained per scene** (in a standalone `spline_flow` PyTorch repo) and
-**wavefront-only**: the MLP is infeasible inline in the megakernel under
+**wavefront-only** — on both Vulkan and native Metal (see
+[the Metal wavefront backend](#metal-wavefront-backend) section): the MLP is
+infeasible inline in the megakernel under
 MoltenVK's big-kernel limit, so the megakernel **strips the bit** and falls back
 to its analytic proposal subset (renormalising `{bsdf, env}` to Σ = 1), mirroring
 the [ReSTIR DI → identity](#reuse-seam-restir-di-reusemode--1-wavefront-only)
@@ -515,8 +517,10 @@ study only recommends one.
 The reuse hook (the other half of the scene-sampling seam) is realized by
 **ReSTIR DI** — reservoir spatiotemporal resampling of **primary-hit** direct
 lighting. `reuse=none` (identity) forwards to stock NEE; `reuse=ReSTIR DI` is
-**wavefront-only** (multi-pass) and capability-gates to identity on
-megakernel/Metal (`reuseMode` folds to 0 in `_pack_uniforms`). This section is the
+**wavefront-only** (multi-pass) and capability-gates to identity on the
+megakernel of either device (`reuseMode` folds to 0 in `_pack_uniforms`); both
+wavefront backends run it (Vulkan `RestirDiPass`, Metal
+`metal_wavefront.MetalRestirDiPass`). This section is the
 wavefront-integration summary; the **full reference** — equations, the
 equation→shader map, design choices, and every GUI control — is in
 **[ReSTIR.md](ReSTIR.md)**.
@@ -573,6 +577,66 @@ equation→shader map, design choices, and every GUI control — is in
 
 ---
 
+<a id="metal-wavefront-backend"></a>
+
+## Metal wavefront backend (`wavefront_driver.py` + `metal_wavefront.py`)
+
+Since change `metal-wavefront-parity`, the wavefront execution mode runs on the
+**native Metal backend** at parity with Vulkan. The loop *stage orders* live in
+the backend-neutral **`wavefront_driver.py`** (`record_path_loop` /
+`record_bdpt_loop` over the `WavefrontRecorder` protocol) — the single source
+of truth both backends drive. `vk_wavefront.py` supplies the Vulkan recorder
+(byte-identical to the historical inline command recording);
+**`metal_wavefront.py`** supplies the Metal primitives:
+
+- **`MetalWavefrontPathPass` / `MetalWavefrontBdptPass`** — per-entry
+  in-process Slang→Metal pipelines (one session, `SKINNY_METAL=1`, no
+  `slangc`/SPIR-V), with the path-state / hit / counting-sort queue buffers
+  sized from the **reflected MSL strides** (Slang pads `float3` to 16 B on
+  Metal — e.g. `WavefrontPathState` 96 B vs 68 B scalar, `BDPTVertex` 176 B vs
+  the 128 B scalar headroom; host constants would undersize them).
+- **`MetalRestirDiPass`** — the ReSTIR DI fill→spatial→resolve set; persistent
+  ping-pong reservoirs + G-buffer at reflected strides; the 36 B `rpc` config
+  rides the `set_data` uniform-blob mechanism.
+- **`MetalNeuralProposalPass`** — the neural forward pre-pass. Selecting the
+  neural proposal rebuilds the pass set with **`SKINNY_METAL_NEURAL=1`**, which
+  un-stubs the frozen-weight buffers and the inline inverse pdf. Metal caps a
+  kernel's argument table at **31 buffer slots**, and slots are assigned
+  program-wide in declaration order — the un-stubbed program fits because the
+  three buffer globals dead in every wavefront kernel (`toolBuffer`,
+  `recordBuf`, `recordCounter`) are compiled out under that define. Weights
+  upload via `set_data` (no external-memory interop); fp32 on current
+  slang-rhi (the Metal fp16 probe under-reports). The wavefront **record
+  drain** (online training) stays Vulkan-only (`wf_records.slang` stubs).
+- **One `MetalFrameEncoder` per frame** — every stage encodes into a single
+  command encoder with a global compute barrier between stages (no per-stage
+  `wait_for_idle`), submitted once.
+- **Indirect dispatch fallback** — slang-rhi 0.42's Metal backend silently
+  no-ops `dispatchComputeIndirect`, so the logged capability probe resolves
+  false and the per-material shade uses the CPU slot-count-readback fallback:
+  flush the encoder, read the GPU-written `(x, y, z)` triple, issue an
+  equal-count direct dispatch.
+
+**Parity** (guarded A/B tests, `RUN_METAL_WAVEFRONT_COMPILE=1` under
+`scripts/guarded_metal.sh`): path, all three BDPT walk modes, and ReSTIR DI are
+**bit-identical** to the Vulkan wavefront render on this host (both backends
+end on the same Metal GPU); the neural proposal matches at rel-MSE 0.00000 /
+correlation 1.00000 with ~91 % of pixels exactly equal, and stays unbiased
+(`tests/test_metal_{wavefront_path,wavefront_bdpt,restir,neural}_ab.py`).
+
+**Equal-time** (`scripts/bench_metal_equal_time.py`, three-materials demo @
+256², M5 Pro, steady-state): megakernel path **438.8 fps** (28.8 Mspp/s) vs
+wavefront path **97.5 fps** (6.4 Mspp/s) — wavefront ≈ **0.22×** the
+megakernel; wavefront BDPT 68.1 fps (the megakernel BDPT case is not benched —
+its Metal kernel compile is impractically long, the original MoltenVK
+big-kernel pain point in native form). The gap is dominated by the per-bounce
+CPU-readback fallback's host syncs; it closes when slang-rhi ships a working
+Metal indirect dispatch (the probe flips automatically). Mode selection stays
+**user-driven** — there is no silent performance fallback from wavefront to
+megakernel; the megakernel remains the default on both backends.
+
+---
+
 ## Megakernel vs wavefront
 
 | Axis | [Megakernel](Megakernel.md) | Wavefront |
@@ -611,7 +675,9 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 | File | Role |
 |------|------|
 | `vk_wavefront.py` | orchestration, all 3 pass classes, per-stage dispatch |
-| `wavefront_layout.py` | state stride + queue sizing (Python mirror) |
+| `wavefront_driver.py` | backend-neutral stage orders (`record_path_loop` / `record_bdpt_loop`, `WavefrontRecorder` protocol) — shared by Vulkan + Metal |
+| `metal_wavefront.py` | Metal recorder + pass classes (path / BDPT / ReSTIR / neural) — in-process Slang→Metal, reflected-MSL buffer sizing |
+| `wavefront_layout.py` | state stride + queue sizing (Python mirror; `msl=` strides for Metal) |
 | `shaders/wavefront/wavefront_path.slang` | path kernels (`_wfpath_*`) |
 | `shaders/wavefront/wavefront_bdpt.slang` | BDPT kernels (`_wfbdpt_*`) |
 | `shaders/wavefront/wf_shade_common.slang` | set-1 bindings + `wfFinishShade` + slot routing |

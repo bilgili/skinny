@@ -27,6 +27,13 @@ struct PathRecord
 // Append buffer (binding 36) + counter (binding 37: [0]=atomic count, [1]=capacity).
 // `mainImage` never references them → dead-stripped from its entry (stays
 // byte-identical); the host binds 1-element dummies until a dump/drain runs.
+// Metal slot-cap gate (change metal-wavefront-parity phase 6): the wavefront
+// program with the neural proposal un-stubbed (SKINNY_METAL_NEURAL) sits
+// exactly at Metal's 31-buffer-slot argument table, and these two globals are
+// dead there (wf_records.slang stubs the only wavefront emitter under
+// SKINNY_METAL) — compile them out of that build so neuralWeights/Biases/
+// Layers fit. The megakernel + Vulkan builds are unaffected.
+#if !(defined(SKINNY_METAL) && defined(SKINNY_METAL_NEURAL))
 [[vk::binding(36)]] RWStructuredBuffer<PathRecord> recordBuf;
 [[vk::binding(37)]] RWStructuredBuffer<uint>       recordCounter;
 
@@ -38,6 +45,7 @@ void emitRecord(PathRecord rec)
     if (idx < cap)
         recordBuf[idx] = rec;
 }
+#endif
 
 // Backward attribution: the radiance gathered from vertex k onward is
 // (L_final - L_k) = beta_out_k·Li_k; dividing by beta_in_k folds in this

@@ -29,6 +29,8 @@ import platform
 import sys
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass
 class MetalSwapchainInfo:
@@ -69,13 +71,21 @@ class MetalContext:
     backend_name = "metal"
     is_metal = True
 
-    # Conservative foundation-phase capability flags (design D5): the renderer
-    # stays on its fp32 and file-handoff paths on Metal until the shared-storage
-    # MTLBuffer / MTLSharedEvent / fp16 equivalents arrive in later phases.
+    # External-memory / -semaphore interop stays off on Metal: frozen neural
+    # weights load by buffer upload, not a GPU↔GPU handoff (design D6), so the
+    # renderer keeps its file-handoff path here.
     supports_external_memory = False
     supports_external_semaphore = False
+    # fp16 flags are class-level defaults; ``__init__`` overrides them per device
+    # from the slang-rhi feature probe (``_probe_fp16``). They stay ``False`` until
+    # a constructed device reports ``Feature.half``.
     supports_fp16_storage = False
     supports_fp16_compute = False
+    # GPU-driven indirect compute dispatch (``vkCmdDispatchIndirect`` analogue) for
+    # the wavefront per-material shade + tiled bounce loop. Class-level default;
+    # ``__init__`` overrides it per device from ``_probe_indirect_dispatch`` (design
+    # D2). ``False`` selects the CPU slot-count-readback + direct-dispatch fallback.
+    supports_indirect_dispatch = False
 
     def __init__(
         self,
@@ -103,6 +113,34 @@ class MetalContext:
 
         self.device = spy.create_device(type=spy.DeviceType.metal)
 
+        # Probe fp16 support on the real device (design D6 / task 1.1). slang-rhi
+        # exposes a single ``Feature.half`` covering half-precision storage +
+        # compute, so both flags follow it. NOTE: slang-rhi 0.42's Metal backend
+        # under-reports this — ``has_feature(half)`` is ``False`` even on Apple
+        # Silicon, which natively supports MSL ``half`` — so the renderer
+        # conservatively stays on fp32 (D6's "device without fp16 → fp32" branch).
+        # Enabling fp16 neural storage despite the flag (an empirical compile
+        # probe) is deferred to the neural phase.
+        fp16 = self._probe_fp16(self.device)
+        self.supports_fp16_storage = fp16
+        self.supports_fp16_compute = fp16
+
+        # Probe GPU-driven indirect compute dispatch (design D2). A one-time,
+        # logged result: the wavefront driver reads it to pick the native indirect
+        # path or the CPU slot-count-readback fallback (task 1.3). The probe is
+        # EMPIRICAL — slang-rhi 0.42 exposes the Python entry but its Metal backend
+        # no-ops it ("dispatchComputeIndirect is not supported!"), so a structural
+        # hasattr check would lie; the probe runs a real indirect dispatch and
+        # verifies the GPU wrote the expected sentinel.
+        self.supports_indirect_dispatch = self._probe_indirect_dispatch(spy, self.device)
+        print(
+            "[metal] indirect compute dispatch: "
+            + ("native (dispatch_compute_indirect)"
+               if self.supports_indirect_dispatch
+               else "unavailable — CPU slot-count-readback fallback"),
+            flush=True,
+        )
+
         # Duck-typed parity with VulkanContext.gpu_info — front-ends read
         # gpu_info.name and the encoder reads preferred_h264_encoder. slang-rhi
         # owns device selection (gpu_preference is a P1 no-op), so the name comes
@@ -122,6 +160,79 @@ class MetalContext:
         if not self._headless:
             self.surface = self._create_surface(window)
             self.swapchain_info = self._configure_surface(self.width, self.height)
+
+    # ── Capability probes ────────────────────────────────────────
+
+    @staticmethod
+    def _probe_fp16(device) -> bool:
+        """Whether the slang-rhi device reports half-precision support.
+
+        Returns ``device.has_feature(Feature.half)``, guarded so a slangpy build
+        without that enum value (or a device that raises) degrades to ``False``
+        rather than crashing context construction.
+        """
+        import slangpy as spy
+
+        half = getattr(spy.Feature, "half", None)
+        if half is None:
+            return False
+        try:
+            return bool(device.has_feature(half))
+        except Exception:  # noqa: BLE001 — unknown feature ⇒ treat as unsupported
+            return False
+
+    @staticmethod
+    def _probe_indirect_dispatch(spy, device) -> bool:
+        """Whether this Metal device actually executes GPU-driven indirect compute
+        dispatch — determined empirically, not by surface inspection (design D2).
+
+        slang-rhi 0.42 binds ``ComputePassEncoder.dispatch_compute_indirect`` on
+        every backend but its Metal implementation silently no-ops (logging
+        ``dispatchComputeIndirect is not supported!`` and leaving the destination
+        untouched), so a ``hasattr`` probe would wrongly report support and the
+        wavefront shade stages would dispatch nothing. Compile a one-workgroup
+        kernel, dispatch it through the indirect entry with a ``(1,1,1)`` args
+        triple, and confirm the GPU wrote the sentinel; any failure (missing
+        surface, compile error, backend no-op, raised exception) ⇒ unsupported, so
+        the renderer takes the CPU slot-count-readback fallback (task 1.3).
+        """
+        required = ("ComputePassEncoder", "BufferOffsetPair")
+        if not all(hasattr(spy, n) for n in required):
+            return False
+        if not hasattr(spy.BufferUsage, "indirect_argument"):
+            return False
+        src = (
+            "RWStructuredBuffer<uint> probe_out;\n"
+            "[shader(\"compute\")] [numthreads(1, 1, 1)]\n"
+            "void probeMain(uint3 tid : SV_DispatchThreadID)"
+            " { probe_out[0] = 0x5Au; }\n"
+        )
+        try:
+            module = device.load_module_from_source("indirect_probe", src)
+            program = device.link_program([module], [module.entry_point("probeMain")])
+            pipeline = device.create_compute_pipeline(program=program)
+            usage = (spy.BufferUsage.unordered_access | spy.BufferUsage.shader_resource
+                     | spy.BufferUsage.copy_source | spy.BufferUsage.copy_destination)
+            out = device.create_buffer(
+                size=4, usage=usage, memory_type=spy.MemoryType.device_local)
+            out.copy_from_numpy(np.zeros(4, dtype=np.uint8))
+            args = device.create_buffer(
+                size=12, usage=usage | spy.BufferUsage.indirect_argument,
+                memory_type=spy.MemoryType.device_local)
+            args.copy_from_numpy(np.array([1, 1, 1], dtype=np.uint32))
+
+            ro = device.create_root_shader_object(program)
+            spy.ShaderCursor(ro)["probe_out"] = out
+            enc = device.create_command_encoder()
+            cpass = enc.begin_compute_pass()
+            cpass.bind_pipeline(pipeline, ro)
+            cpass.dispatch_compute_indirect(spy.BufferOffsetPair(args, 0))
+            cpass.end()
+            device.submit_command_buffer(enc.finish())
+            device.wait_for_idle()
+            return int(out.to_numpy().view(np.uint32)[0]) == 0x5A
+        except Exception:  # noqa: BLE001 — any probe failure ⇒ fallback path
+            return False
 
     # ── Surface ──────────────────────────────────────────────────
 

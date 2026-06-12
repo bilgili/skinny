@@ -3,11 +3,12 @@
 ## Purpose
 
 Add a `wavefront` execution mode as an axis orthogonal to the integrator
-(`path` / `bdpt`): a Vulkan-backend renderer that produces each frame through
-staged compute dispatches communicating via GPU-resident path-state buffers and
-ray queues, reuses the shared scene front-end, and bounds memory by tiled
-streaming rather than per-pixel allocation. `megakernel` remains the default and
-preserves current behavior; Metal pins to `megakernel`.
+(`path` / `bdpt`): a renderer — on both the Vulkan and native Metal backends —
+that produces each frame through staged compute dispatches communicating via
+GPU-resident path-state buffers and ray queues, reuses the shared scene
+front-end, and bounds memory by tiled streaming rather than per-pixel
+allocation. `megakernel` remains the default on both backends and preserves
+current behavior.
 ## Requirements
 ### Requirement: Execution-mode axis orthogonal to the integrator
 
@@ -94,18 +95,37 @@ to the user.
 - **THEN** the renderer uses megakernel bdpt and indicates that wavefront is not
   active for this combination
 
-### Requirement: Wavefront is a Vulkan-backend feature
+### Requirement: Wavefront runs on the Vulkan and Metal backends
 
-The wavefront execution mode SHALL be available on the Vulkan backend. On the
-Metal backend the execution mode SHALL be pinned to `megakernel` and the wavefront
-selection SHALL be unavailable, consistent with other Vulkan-only GPU compute
-features.
+The wavefront execution mode SHALL be available on both the Vulkan and the native
+Metal backend. Both backends SHALL drive the same staged bounce loop (generate →
+intersect → build_args → scatter → per-material shade → resolve) from a single
+backend-neutral driver, differing only in their dispatch and synchronization
+primitives (Vulkan command-buffer recording with `vkCmdDispatchIndirect`; Metal
+single-frame command encoding with indirect dispatch or the logged CPU-readback
+fallback). The wavefront option SHALL be selectable on every front-end on both
+backends, and the megakernel default SHALL remain unchanged on each.
 
-#### Scenario: Metal pins to megakernel
+#### Scenario: Wavefront selectable on Metal
 
-- **WHEN** the application runs on the Metal backend
-- **THEN** the execution mode is `megakernel` and the wavefront option is not
-  selectable
+- **WHEN** the application runs on the Metal backend and the user selects the
+  wavefront execution mode
+- **THEN** the scene renders via the staged wavefront passes on Metal, not the
+  megakernel, and the option is selectable on the front-end
+
+#### Scenario: Wavefront selectable on Vulkan
+
+- **WHEN** the application runs on the Vulkan backend and the user selects the
+  wavefront execution mode
+- **THEN** the scene renders via the staged wavefront passes, byte-identically to
+  the behavior before this change
+
+#### Scenario: Same staged loop on both backends
+
+- **WHEN** the same scene is rendered with the wavefront path integrator on Metal
+  and on Vulkan at an equal sample budget
+- **THEN** both run the identical stage order and per-bounce memory bound, and the
+  structural outputs agree exactly across backends
 
 ### Requirement: Wavefront BDPT offers selectable subpath-build modes
 

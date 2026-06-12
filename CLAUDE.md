@@ -140,14 +140,17 @@ slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage 
 `--backend {auto,metal,vulkan}` (env `SKINNY_BACKEND`, persisted on the
 interactive front-ends) selects the GPU backend via the shared resolver in
 `backend_select.py` (precedence: flag > env > persisted > `auto`). Both backends
-run the full megakernel renderer: the native **Metal** backend
-(`metal_context.py`/`metal_compute.py`) compiles `main_pass.slang` in-process via
-SlangPy (slang-rhi, no MoltenVK) and dispatches it. **`auto` resolves to native
-**Metal** on a Metal-capable Apple-Silicon host** — the native backend is at full
-parity with Vulkan (geometry 6.1, shaded color 6.2, windowed present 6.5) — and
-falls back to **Vulkan** everywhere else. An explicit `--backend metal` on a host
-with no Metal device errors clearly. `--backend vulkan` forces the production
-MoltenVK-under-Vulkan path on every platform.
+run the full renderer — megakernel **and** wavefront execution modes: the native
+**Metal** backend (`metal_context.py`/`metal_compute.py`) compiles the Slang
+sources in-process via SlangPy (slang-rhi, no MoltenVK); the wavefront mode on
+Metal (`wavefront_driver.py` + `metal_wavefront.py`, change
+`metal-wavefront-parity`) runs the staged path/BDPT integrators, ReSTIR DI, and
+the neural directional proposal at parity with Vulkan. **`auto` resolves to
+native **Metal** on a Metal-capable Apple-Silicon host** — the native backend is
+at full parity with Vulkan — and falls back to **Vulkan** everywhere else. An
+explicit `--backend metal` on a host with no Metal device errors clearly.
+`--backend vulkan` forces the production MoltenVK-under-Vulkan path on every
+platform.
 
 ## Architecture
 

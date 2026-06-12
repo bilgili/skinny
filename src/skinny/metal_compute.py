@@ -26,6 +26,7 @@ The Vulkan path is byte-identical and unaffected.
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -733,7 +734,184 @@ class ComputePipeline:
         self._kernel.dispatch(thread_count=list(thread_count), vars=bound)
         dev.wait_for_idle()
 
+    def dispatch_indirect(self, args_buffer, offset: int = 0, *, bindings=None) -> None:
+        """Indirect compute dispatch (design D2) — Metal sibling of the Vulkan
+        ``vkCmdDispatchIndirect`` the wavefront per-material shade uses.
+
+        The thread-group count is a ``VkDispatchIndirectCommand`` triple
+        ``(x, y, z)`` of ``uint32`` stored in ``args_buffer`` at byte ``offset`` —
+        exactly the layout a ``build_args`` kernel writes. ``args_buffer`` is a
+        :class:`StorageBuffer` (built with ``indirect=True``) or a native
+        ``Buffer``; ``bindings`` is ``name → resource`` (wrapper or native
+        ``Buffer``/``Texture``/``Sampler``), bound by name on the program's root
+        object, skipping names absent from the reflected globals (dead-stripped).
+        Resource binding only — no per-field scalar cursor writes (design D4).
+
+        Two paths, selected by the context's one-time ``supports_indirect_dispatch``
+        probe (design D2):
+
+        * **native** — feed ``args_buffer`` straight to
+          ``dispatch_compute_indirect``; the group count is read GPU-side, no host
+          round-trip.
+        * **CPU-readback fallback (task 1.3)** — when the device no-ops indirect
+          dispatch (slang-rhi 0.42's Metal backend), drain the device, read the
+          ``(x, y, z)`` triple back to the host, and issue an equivalent direct
+          ``dispatch_compute`` over the same group count. Correct, but a per-call
+          host↔GPU sync. The two paths issue the **same** group count by
+          construction (same triple), which the task 1.6 unit test asserts.
+
+        This standalone form opens, submits, and drains its own command encoder; the
+        multi-pass loop (task 1.4) re-encodes the same dispatch into one shared
+        frame encoder.
+        """
+        spy = self._spy
+        dev = self.ctx.device
+        native_args = getattr(args_buffer, "buffer", args_buffer)
+
+        ro = dev.create_root_shader_object(self.program)
+        cur = spy.ShaderCursor(ro)
+        for name, res in (bindings or {}).items():
+            if res is None or name not in self.global_names:
+                continue
+            cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+
+        groups = None
+        if not self.ctx.supports_indirect_dispatch:
+            # Drain so a GPU-written args buffer (a prior build_args dispatch) is
+            # visible, then read the (x, y, z) group-count triple to the host.
+            dev.wait_for_idle()
+            raw = native_args.to_numpy().tobytes()
+            gx, gy, gz = struct.unpack_from("<III", raw, int(offset))
+            groups = (int(gx), int(gy), int(gz))
+
+        enc = dev.create_command_encoder()
+        cpass = enc.begin_compute_pass()
+        cpass.bind_pipeline(self.pipeline, ro)
+        if groups is None:
+            cpass.dispatch_compute_indirect(spy.BufferOffsetPair(native_args, int(offset)))
+        else:
+            cpass.dispatch_compute(spy.math.uint3(*groups))
+        cpass.end()
+        dev.submit_command_buffer(enc.finish())
+        dev.wait_for_idle()
+
     def destroy(self) -> None:
         self.pipeline = None
         self._default_tex = None
         self._kernel = None
+
+
+class MetalFrameEncoder:
+    """Single-frame, multi-pass compute command encoder (design D3) — the Metal
+    sibling of recording the whole wavefront bounce loop into one Vulkan command
+    buffer.
+
+    Accumulates a sequence of compute dispatches into **one** slang-rhi command
+    encoder, inserting a global compute-memory barrier between stages (so stage
+    N+1 observes stage N's buffer writes — the analogue of the Vulkan
+    ``COMPUTE→COMPUTE`` pipeline barrier), and submits + drains **once** at
+    :meth:`submit`. This replaces the per-stage ``wait_for_idle`` of the
+    single-shot :meth:`ComputePipeline.dispatch_kernel` so a 6-bounce loop is not
+    serialized on the GPU idle each stage.
+
+    Parameter binding stays ``set_data``-only for the uniform block (D4 fence-hang
+    discipline); resources bind by name on each stage's root object. The Metal
+    wavefront recorder (phase 3) drives the bounce loop through this surface;
+    :meth:`flush` lets it submit + drain mid-frame when the indirect CPU-readback
+    fallback (task 1.3) must read a GPU-written args buffer back to the host.
+    """
+
+    def __init__(self, ctx) -> None:
+        self.ctx = ctx
+        self._spy = ctx._spy
+        self._enc = ctx.device.create_command_encoder()
+        self._submitted = False
+
+    def _root(self, pipe: ComputePipeline, bindings, uniform_blob,
+              uniforms=None, bindless=None):
+        ro = self.ctx.device.create_root_shader_object(pipe.program)
+        cur = self._spy.ShaderCursor(ro)
+        if uniform_blob is not None:
+            cur["fc"].set_data(
+                np.frombuffer(bytes(uniform_blob), dtype=np.uint8).copy())
+        # Additional uniform blocks (e.g. the wavefront per-tile constants that
+        # are Vulkan push constants) — byte blobs via set_data only (design D4).
+        # A `ConstantBuffer<T>` global cannot bind bytes directly; dereference
+        # to its element first (plain `uniform T` cursors dereference to
+        # themselves, so this is safe for both declaration styles).
+        for name, blob in (uniforms or {}).items():
+            if blob is None or name not in pipe.global_names:
+                continue
+            field = cur[name]
+            deref = field.dereference()
+            target = deref if deref.is_valid() else field
+            target.set_data(np.frombuffer(bytes(blob), dtype=np.uint8).copy())
+        for name, res in (bindings or {}).items():
+            if res is None or name not in pipe.global_names:
+                continue
+            cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        # Bindless texture array: (global_name, [native_texture | None, …],
+        # default_texture) — every slot must be bound on Metal, so None slots get
+        # the default 1×1 texture (mirrors ComputePipeline.dispatch).
+        if bindless is not None:
+            name, textures, default_tex = bindless
+            if name in pipe.global_names:
+                slot_cur = cur[name]
+                for i in range(BINDLESS_TEXTURE_CAPACITY):
+                    tex = textures[i] if i < len(textures) and textures[i] is not None \
+                        else default_tex
+                    slot_cur[i] = tex
+        return ro
+
+    def dispatch(self, pipe: ComputePipeline, groups, *, bindings=None,
+                 uniform_blob=None, uniforms=None, bindless=None) -> None:
+        """Encode a direct dispatch of ``pipe`` over the ``(x, y, z)`` thread-group
+        count ``groups`` into the shared encoder (no submit)."""
+        ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
+        cpass = self._enc.begin_compute_pass()
+        cpass.bind_pipeline(pipe.pipeline, ro)
+        cpass.dispatch_compute(self._spy.math.uint3(*(int(g) for g in groups)))
+        cpass.end()
+
+    def dispatch_indirect(self, pipe: ComputePipeline, args_buffer, offset: int = 0,
+                          *, bindings=None, uniform_blob=None, uniforms=None,
+                          bindless=None) -> None:
+        """Encode a native indirect dispatch of ``pipe`` into the shared encoder.
+
+        Native path only — the CPU-readback fallback needs a host round-trip on the
+        args buffer, which breaks single-encoder accumulation; the recorder reads
+        the count via :meth:`flush` and falls back to :meth:`dispatch` itself when
+        ``ctx.supports_indirect_dispatch`` is false (task 1.3)."""
+        ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
+        native_args = getattr(args_buffer, "buffer", args_buffer)
+        cpass = self._enc.begin_compute_pass()
+        cpass.bind_pipeline(pipe.pipeline, ro)
+        cpass.dispatch_compute_indirect(
+            self._spy.BufferOffsetPair(native_args, int(offset)))
+        cpass.end()
+
+    def clear(self, buffer) -> None:
+        """Encode a full-buffer zero-fill (the Metal analogue of
+        ``vkCmdFillBuffer(.., 0)`` the wavefront count/cursor clears use)."""
+        self._enc.clear_buffer(getattr(buffer, "buffer", buffer))
+
+    def barrier(self) -> None:
+        """Global compute-memory barrier between stages (design D3) — makes every
+        prior stage's writes visible to subsequent reads in this encoder."""
+        self._enc.global_barrier()
+
+    def flush(self) -> None:
+        """Submit + drain the accumulated work and reopen a fresh encoder, without
+        ending the frame. Used so a GPU-written args buffer is visible to a host
+        readback mid-frame (the indirect fallback)."""
+        self.ctx.device.submit_command_buffer(self._enc.finish())
+        self.ctx.device.wait_for_idle()
+        self._enc = self.ctx.device.create_command_encoder()
+
+    def submit(self) -> None:
+        """Submit the whole frame's encoder once and drain the device."""
+        if self._submitted:
+            return
+        self.ctx.device.submit_command_buffer(self._enc.finish())
+        self.ctx.device.wait_for_idle()
+        self._submitted = True

@@ -758,10 +758,30 @@ roughness/displacement) split into `Texture2D` + a per-map `SamplerState`
 (bindings 39–43), and `NonUniformResourceIndex` (unavailable in the compute stage
 on the Metal target) collapses to identity via the `NRI(x)` macro.
 
-The MLX↔Metal zero-copy weight handoff is staged in a later change; until then the
-capability flags `supports_external_memory` / `supports_external_semaphore` /
-`supports_fp16_storage` / `supports_fp16_compute` report `false` on Metal so the
-renderer stays on its fp32 / file-handoff paths.
+**Wavefront on Metal** (change `metal-wavefront-parity`): the wavefront
+execution mode — staged path + BDPT integrators, ReSTIR DI reuse, and the
+neural directional proposal — runs on the native Metal backend at parity with
+Vulkan. The stage orders live in the backend-neutral `wavefront_driver.py`;
+`metal_wavefront.py` supplies the Metal pass classes (per-entry in-process
+pipelines, queue buffers sized from the **reflected MSL strides**, one
+`MetalFrameEncoder` per frame with global barriers, and the CPU
+slot-count-readback fallback while slang-rhi's Metal indirect dispatch is a
+no-op — selected by the logged `supports_indirect_dispatch` probe). Metal caps
+a kernel's argument table at **31 buffer slots**, assigned program-wide in
+declaration order: the wavefront build compiles out the record-drain buffers
+(`wf_records.slang` stubs), and the neural-active build (`SKINNY_METAL_NEURAL=1`)
+additionally compiles out `toolBuffer`/`recordBuf`/`recordCounter` (dead in
+every wavefront kernel) to fit the un-stubbed `neuralWeights/Biases/Layers`.
+See [Wavefront.md → Metal wavefront backend](Wavefront.md#metal-wavefront-backend).
+
+The MLX↔Metal zero-copy weight handoff is staged in a later change; until then
+the capability flags `supports_external_memory` / `supports_external_semaphore`
+report `false` on Metal so the renderer stays on its file-handoff path.
+`supports_fp16_storage` / `supports_fp16_compute` come from a device probe —
+`false` on current slang-rhi (0.42 under-reports `half` on Metal), so neural
+weights load fp32 via `_effective_neural_config()`'s graceful downgrade.
+`supports_indirect_dispatch` is probed **empirically** (a real indirect
+dispatch + sentinel readback; a structural `hasattr` check would lie).
 
 ## Backend Abstraction (`gfx/`)
 
@@ -823,14 +843,14 @@ incrementally moved over.
 | 22 | StructuredBuffer | Transform-gizmo line segments | `gizmo.py` |
 | 23 | StructuredBuffer | Lens elements (thick-lens stack, float4) | `cameras/thick_lens.slang` |
 | 24 | StructuredBuffer | Per-radius exit-pupil bounds (float4) | `cameras/thick_lens.slang` |
-| 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe | `bindings.slang` |
+| 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe. *Metal slot-cap gate:* compiled out of the neural-active wavefront build (`SKINNY_METAL && SKINNY_METAL_NEURAL`), where it is dead, to fit 33–35 under Metal's 31-buffer argument table | `bindings.slang` |
 | 31 | StructuredBuffer | Env importance-sampling marginal CDF (ENV_H+1 floats) | `environment.slang` |
 | 32 | StructuredBuffer | Env importance-sampling conditional CDF (H×(W+1) floats) | `environment.slang` |
 | 33 | StructuredBuffer | Neural-proposal flat Linear weights (`NF_WT`, row-major — `float` by default, `half` in the fp16 precision modes) | `sampling/neural_proposal.slang` |
 | 34 | StructuredBuffer | Neural-proposal flat Linear biases (`NF_WT` — `float`/`half`) | `sampling/neural_proposal.slang` |
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
-| 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry **and** the wavefront path integrator (when `fc.recordMode` is set) | `integrators/path_record_common.slang` |
-| 37 | RWStructuredBuffer | Record append counter (`uint[2]` = `[count, capacity]`) | `integrators/path_record_common.slang` |
+| 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry **and** the wavefront path integrator (when `fc.recordMode` is set). *Metal slot-cap gate:* compiled out of the neural-active wavefront build (with 30/37, see binding 30) | `integrators/path_record_common.slang` |
+| 37 | RWStructuredBuffer | Record append counter (`uint[2]` = `[count, capacity]`) — same Metal slot-cap gate as 36 | `integrators/path_record_common.slang` |
 
 The table is the **Vulkan** layout. On the **Metal** target (gated
 `#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
