@@ -6,8 +6,18 @@ path-state StructuredBuffer as ``stream_size * PATH_STATE_STRIDE`` bytes; the
 Slang struct and this table must stay in lockstep or the wavefront stages read
 garbage (``tests/test_wavefront_state.py`` locks them together).
 
-Scalar layout (``-fvk-use-scalar-layout``): ``float3`` = 12 B with 4-byte
-alignment, fields tightly packed.
+Two layouts (design B / change metal-wavefront-parity):
+
+* **scalar** (Vulkan, ``-fvk-use-scalar-layout``): ``float3`` = 12 B with 4-byte
+  alignment, fields tightly packed. This is the default everywhere.
+* **MSL** (Metal in-process Slang→Metal): the Metal target pads ``float3`` to a
+  16-byte size *and* 16-byte alignment, so the same struct has a larger stride.
+  The wavefront record/queue buffers are GPU-internal scratch (the host never
+  packs them — only allocates), so the **only** cross-backend artifact is the
+  buffer size: on Metal the allocator must size against the MSL stride or the
+  Metal kernels overrun. Pass ``msl=True`` to the size helpers on the Metal path;
+  ``tests/test_wavefront_state.py`` locks the MSL strides to the reflected Metal
+  layout (task 1.5).
 """
 
 from __future__ import annotations
@@ -24,6 +34,33 @@ SLANG_SCALAR_SIZES: dict[str, int] = {
     "int": 4,
 }
 
+# MSL (Metal target) byte sizes + alignments. Slang pads ``float3`` to 16 B
+# (size *and* alignment) on Metal; every other field keeps its natural
+# size==alignment. A struct's stride rounds up to its largest member alignment.
+SLANG_MSL_SIZES: dict[str, int] = {
+    "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
+}
+SLANG_MSL_ALIGNS: dict[str, int] = {
+    "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
+}
+
+
+def _struct_stride(fields: list[tuple[str, str]], *, msl: bool) -> int:
+    """Byte stride of a record struct under the scalar (Vulkan) or MSL (Metal)
+    layout. Scalar packs tightly (all alignments <= 4); MSL walks per-field
+    alignment and rounds the total up to the struct's largest member alignment.
+    """
+    if not msl:
+        return sum(SLANG_SCALAR_SIZES[t] for _, t in fields)
+    offset = 0
+    struct_align = 1
+    for _, t in fields:
+        align = SLANG_MSL_ALIGNS[t]
+        struct_align = max(struct_align, align)
+        offset = (offset + align - 1) // align * align
+        offset += SLANG_MSL_SIZES[t]
+    return (offset + struct_align - 1) // struct_align * struct_align
+
 # (field_name, slang_type) in declaration order — must match the Slang struct.
 FIELDS: list[tuple[str, str]] = [
     ("rayOrigin",  "float3"),
@@ -38,12 +75,13 @@ FIELDS: list[tuple[str, str]] = [
 ]
 
 
-def path_state_size() -> int:
-    """Scalar-layout byte size of WavefrontPathState (tight, 4-byte aligned)."""
-    return sum(SLANG_SCALAR_SIZES[t] for _, t in FIELDS)
+def path_state_size(*, msl: bool = False) -> int:
+    """Byte stride of WavefrontPathState — scalar (default) or MSL (``msl=True``)."""
+    return _struct_stride(FIELDS, msl=msl)
 
 
-PATH_STATE_STRIDE = path_state_size()  # 68 B
+PATH_STATE_STRIDE = path_state_size()              # 68 B (scalar / Vulkan)
+PATH_STATE_STRIDE_MSL = path_state_size(msl=True)  # 96 B (Metal)
 
 # `flags` bit positions (mirror the static consts in wavefront_state.slang).
 PATH_FLAG_ALIVE = 1 << 0     # lane still bouncing
@@ -77,15 +115,17 @@ REC_VERTEX_FIELDS: list[tuple[str, str]] = [
 ]
 
 
-def rec_vertex_size() -> int:
-    """Scalar-layout byte size of RecVertex (tight, 4-byte aligned)."""
-    return sum(SLANG_SCALAR_SIZES[t] for _, t in REC_VERTEX_FIELDS)
+def rec_vertex_size(*, msl: bool = False) -> int:
+    """Byte stride of RecVertex — scalar (default) or MSL (``msl=True``)."""
+    return _struct_stride(REC_VERTEX_FIELDS, msl=msl)
 
 
-REC_VERTEX_STRIDE = rec_vertex_size()  # 76 B
+REC_VERTEX_STRIDE = rec_vertex_size()              # 76 B (scalar / Vulkan)
+REC_VERTEX_STRIDE_MSL = rec_vertex_size(msl=True)  # 112 B (Metal)
 
 
-def queue_buffer_sizes(stream_size: int, num_materials: int) -> dict[str, int]:
+def queue_buffer_sizes(stream_size: int, num_materials: int,
+                       *, msl: bool = False) -> dict[str, int]:
     """Byte sizes for the wavefront stage buffers, the single source of truth
     the `WavefrontPasses` allocator (vk_wavefront.py) sizes against.
 
@@ -93,9 +133,15 @@ def queue_buffer_sizes(stream_size: int, num_materials: int) -> dict[str, int]:
     with the active material count. The hit buffer is intentionally absent —
     its stride follows `HitData` (common.slang) and is pinned alongside the
     intersect stage that produces it.
+
+    ``msl=True`` sizes the struct-backed buffers (``path_state``) against the
+    Metal MSL stride so the Metal wavefront allocator does not undersize them;
+    plain (uint-stride) queue buffers are layout-agnostic. Vulkan callers omit
+    it and keep the scalar sizing byte-for-byte.
     """
+    path_state_stride = PATH_STATE_STRIDE_MSL if msl else PATH_STATE_STRIDE
     return {
-        "path_state":      stream_size * PATH_STATE_STRIDE,
+        "path_state":      stream_size * path_state_stride,
         "ray_queue":       stream_size * _UINT,
         "material_queue":  stream_size * _UINT,
         "ray_count":       _UINT,

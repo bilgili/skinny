@@ -12,19 +12,40 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from skinny.wavefront_layout import (
     FIELDS,
     INDIRECT_ARGS_STRIDE,
     PATH_STATE_STRIDE,
+    PATH_STATE_STRIDE_MSL,
+    REC_VERTEX_FIELDS,
+    REC_VERTEX_STRIDE_MSL,
+    SLANG_MSL_ALIGNS,
+    SLANG_MSL_SIZES,
     SLANG_SCALAR_SIZES,
     path_state_size,
     queue_buffer_sizes,
+    rec_vertex_size,
 )
 
-_STATE_SLANG = (
-    Path(__file__).resolve().parent.parent
-    / "src" / "skinny" / "shaders" / "wavefront" / "wavefront_state.slang"
-)
+_SHADERS = Path(__file__).resolve().parent.parent / "src" / "skinny" / "shaders"
+_STATE_SLANG = _SHADERS / "wavefront" / "wavefront_state.slang"
+_RECORDS_SLANG = _SHADERS / "wavefront" / "wf_records.slang"
+
+
+def _msl_offsets(fields: list[tuple[str, str]]) -> list[tuple[str, int]]:
+    """Per-field (name, byte offset) of a record struct under the MSL layout —
+    the same walk `wavefront_layout._struct_stride` uses, exposed for the
+    reflection lock test."""
+    out: list[tuple[str, int]] = []
+    offset = 0
+    for name, t in fields:
+        align = SLANG_MSL_ALIGNS[t]
+        offset = (offset + align - 1) // align * align
+        out.append((name, offset))
+        offset += SLANG_MSL_SIZES[t]
+    return out
 
 
 def _parse_struct_fields(src: str, struct_name: str) -> list[tuple[str, str]]:
@@ -104,3 +125,86 @@ def test_zero_materials_yields_empty_per_material_buffers():
     assert s["indirect_args"] == 0
     # the stream-sized buffers are independent of material count
     assert s["path_state"] == 256 * PATH_STATE_STRIDE
+
+
+# ── MSL (Metal) layout sizing (task 1.5 / design B) ────────────────
+#
+# The Metal in-process Slang→Metal compile pads `float3` to 16 B, so the
+# GPU-internal record/queue buffers need a larger stride on Metal than the
+# scalar Vulkan layout. These lock the mirror's MSL strides to the values Slang's
+# Metal target actually reflects, so the Metal wavefront allocator (phase 3,
+# `queue_buffer_sizes(..., msl=True)`) cannot undersize the buffers.
+
+
+def test_msl_strides_are_padded():
+    # 4× float3 → 16 B each + 5 scalars(20) = 84 → round to 16 → 96.
+    assert path_state_size(msl=True) == PATH_STATE_STRIDE_MSL == 96
+    # 6× float3 → 16 B each + uint(4) = 100 → round to 16 → 112.
+    assert rec_vertex_size(msl=True) == REC_VERTEX_STRIDE_MSL == 112
+    # MSL is never smaller than scalar (it only adds float3 padding).
+    assert PATH_STATE_STRIDE_MSL >= PATH_STATE_STRIDE
+    assert REC_VERTEX_STRIDE_MSL >= rec_vertex_size(msl=False)
+
+
+def test_queue_buffer_sizes_msl_covers_scalar():
+    scalar = queue_buffer_sizes(stream_size=1024, num_materials=4)
+    msl = queue_buffer_sizes(stream_size=1024, num_materials=4, msl=True)
+    # The struct-backed buffer grows; layout-agnostic uint queues are unchanged.
+    assert msl["path_state"] == 1024 * PATH_STATE_STRIDE_MSL
+    assert msl["path_state"] > scalar["path_state"]
+    for key in ("ray_queue", "material_queue", "ray_count",
+                "material_count", "material_offset", "indirect_args"):
+        assert msl[key] == scalar[key]
+    # Default (no msl kwarg) stays byte-identical to the scalar Vulkan sizing.
+    assert queue_buffer_sizes(1024, 4) == scalar
+
+
+def _reflect_msl_layout(struct: str, import_mod: str):
+    """Reflect (stride, [(field, offset), …]) of a struct under Slang's Metal
+    target by importing the real shader module — the GPU-free truth the mirror is
+    locked to. Returns None when no Metal device is available."""
+    spy = pytest.importorskip("slangpy")
+    from skinny.backend_select import metal_available
+
+    ok, _reason = metal_available()
+    if not ok:
+        return None
+    try:
+        dev = spy.create_device(
+            type=spy.DeviceType.metal,
+            include_paths=[str(_SHADERS), str(_SHADERS.parent / "mtlx" / "genslang")],
+        )
+    except Exception:
+        return None
+    try:
+        src = (f"import {import_mod};\n"
+               f"StructuredBuffer<{struct}> probe_b;\n"
+               f"[shader(\"compute\")] [numthreads(1, 1, 1)]\n"
+               f"void m(uint3 t : SV_DispatchThreadID) {{}}\n")
+        module = dev.load_module_from_source("wf_layout_refl", src)
+        program = dev.link_program([module], [module.entry_point("m")])
+        p = next(x for x in program.layout.parameters if x.name == "probe_b")
+        etl = p.type_layout.element_type_layout
+        stride = int(getattr(etl, "stride", 0) or etl.size)
+        offsets = [(f.name, int(f.offset)) for f in etl.fields]
+        return stride, offsets
+    finally:
+        dev.close()
+
+
+def test_msl_path_state_matches_reflected_metal_layout():
+    refl = _reflect_msl_layout("WavefrontPathState", "wavefront.wavefront_state")
+    if refl is None:
+        pytest.skip("no Metal device for MSL reflection")
+    stride, offsets = refl
+    assert stride == PATH_STATE_STRIDE_MSL
+    assert offsets == _msl_offsets(FIELDS)
+
+
+def test_msl_rec_vertex_matches_reflected_metal_layout():
+    refl = _reflect_msl_layout("RecVertex", "wavefront.wf_records")
+    if refl is None:
+        pytest.skip("no Metal device for MSL reflection")
+    stride, offsets = refl
+    assert stride == REC_VERTEX_STRIDE_MSL
+    assert offsets == _msl_offsets(REC_VERTEX_FIELDS)
