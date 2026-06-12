@@ -188,6 +188,25 @@ def test_update_texture_pool_descriptors_noop_on_metal():
     r._update_texture_pool_descriptors()  # must return without iterating None
 
 
+def test_rebind_descriptors_noop_on_metal():
+    """`_rebind_scene_descriptors` / `_rebind_aux_material_descriptors` rewrite
+    Vulkan descriptor sets after a buffer realloc; on Metal `_build_metal_binds`
+    re-reads each live buffer at dispatch, so both must short-circuit. They run on
+    the instance/material grow path (e.g. a 20+-instance USD scene) — without the
+    guard the Vulkan `VkDescriptorBufferInfo(buffer=<slangpy buffer>)` call raises
+    `TypeError: an integer is required`. Stub via `__new__`, no buffers set, to
+    prove the methods return before touching any Vulkan/buffer attribute."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)
+    r.is_metal = True
+    r._rebind_scene_descriptors()        # must return before reading instance_buffer
+    r._rebind_aux_material_descriptors()  # must return before reading std_surface_buffer
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():

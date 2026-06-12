@@ -3898,6 +3898,14 @@ class Renderer:
 
     def _rebind_scene_descriptors(self) -> None:
         """Re-write descriptor bindings 12, 13, 15, 16 after buffer reallocation."""
+        # Metal has no Vulkan descriptor sets; `_build_metal_binds` re-reads each
+        # buffer reference fresh at every dispatch, so a realloc is picked up
+        # automatically. Without this guard the Vulkan `VkDescriptorBufferInfo`
+        # call below fails on a slangpy buffer with
+        # `TypeError: an integer is required` (e.g. a 20+-instance scene grows the
+        # instance buffer and trips the rebind mid-stream).
+        if self.is_metal:
+            return
         inst_info = vk.VkDescriptorBufferInfo(
             buffer=self.instance_buffer.buffer, offset=0,
             range=self.instance_buffer.size,
@@ -3945,6 +3953,10 @@ class Renderer:
 
     def _rebind_aux_material_descriptors(self) -> None:
         """Re-write descriptor binding 19 after buffer reallocation."""
+        # Vulkan-only (see `_rebind_scene_descriptors`): Metal rebinds the live
+        # std_surface buffer at dispatch, so this is a no-op there.
+        if self.is_metal:
+            return
         ss_info = vk.VkDescriptorBufferInfo(
             buffer=self.std_surface_buffer.buffer, offset=0,
             range=self.std_surface_buffer.size,
@@ -3962,6 +3974,12 @@ class Renderer:
 
     def _rebind_mesh_descriptors(self) -> None:
         """Re-write descriptor bindings 5, 6, 7 after buffer reallocation."""
+        # Vulkan-only (see `_rebind_scene_descriptors`): Metal rebinds the live
+        # vertex/index/BVH buffers at dispatch, so this is a no-op there. The mesh-
+        # grow path ("growing mesh buffers …") on a 20+-instance scene hits this
+        # first, otherwise crashing with `TypeError: an integer is required`.
+        if self.is_metal:
+            return
         vtx_info = vk.VkDescriptorBufferInfo(
             buffer=self.vertex_buffer.buffer, offset=0, range=self.vertex_buffer.size,
         )
