@@ -39,15 +39,18 @@ import sampling.neural_flow;   // NfLayerHeader, sampleNeural, pdfNeural, NF_CON
 // type — and the bytes the host uploads — change. NfLayerHeader (35) is precision-
 // and size-agnostic (it carries the layout the loader already validates).
 //
-// Metal target (change metal-wavefront-parity phase 3): the neural proposal is
-// not ported until phase 6, and Metal caps a kernel's argument table at 31
-// buffer slots — the wavefront flat-shade kernel's scene + queue globals sit at
-// that cap, so these three weight buffers would overflow it. The SKINNY_METAL
-// branch declares no buffers and stubs the two world-space entry points (pdf 0
-// → the proposal MIS treats neural as absent); `fc.proposalMask`'s NEURAL bit
-// is never set on Metal, so the stubs are the existing runtime no-op path. The
-// Vulkan compile (no SKINNY_METAL) is byte-identical to before.
-#if !defined(SKINNY_METAL)
+// Metal target (change metal-wavefront-parity): Metal caps a kernel's argument
+// table at 31 buffer slots — the wavefront flat-shade kernel's scene + queue
+// globals sit near that cap, so these three weight buffers are compiled in
+// only when the neural proposal is actually selected. The default SKINNY_METAL
+// build (no SKINNY_METAL_NEURAL) declares no buffers and stubs the two
+// world-space entry points (pdf 0 → the proposal MIS treats neural as absent);
+// `fc.proposalMask`'s NEURAL bit gates the runtime path, so the stubs are the
+// existing no-op path. Selecting the neural proposal rebuilds the Metal
+// wavefront pass with `SKINNY_METAL_NEURAL=1` (phase 6), which restores the
+// real buffers + inline inverse below. The Vulkan compile (no SKINNY_METAL)
+// is byte-identical to before.
+#if !defined(SKINNY_METAL) || defined(SKINNY_METAL_NEURAL)
 [[vk::binding(33)]] StructuredBuffer<NF_WT>         neuralWeights;
 [[vk::binding(34)]] StructuredBuffer<NF_WT>         neuralBiases;
 [[vk::binding(35)]] StructuredBuffer<NfLayerHeader> neuralLayers;
@@ -75,10 +78,11 @@ float3 neuralLocalToWorld(float3 loc, float3 N, float3 T, float3 B)
 float3 neuralWorldToLocal(float3 w, float3 N, float3 T, float3 B)
 { return float3(dot(w, T), dot(w, N), dot(w, B)); }
 
-#if defined(SKINNY_METAL)
-// Phase-6 stubs (see the weight-buffer gate above): pdf 0 ⇒ the proposal MIS
-// chain treats the neural component as absent; never reachable at runtime on
-// Metal because the renderer rejects the NEURAL proposal bit there.
+#if defined(SKINNY_METAL) && !defined(SKINNY_METAL_NEURAL)
+// Slot-cap stubs (see the weight-buffer gate above): pdf 0 ⇒ the proposal MIS
+// chain treats the neural component as absent; never reachable at runtime
+// because a Metal wavefront pass with the neural proposal selected compiles
+// with SKINNY_METAL_NEURAL=1 (the real branch below).
 float3 neuralSampleWorld(float3 posWorld, float3 N, float3 T, float3 B,
                          float3 woWorld, float2 u, out float pdfOmega)
 {

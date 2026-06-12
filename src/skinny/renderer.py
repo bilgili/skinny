@@ -1793,7 +1793,10 @@ class Renderer:
         bindings exist. The pass owns its path-state/hit/queue buffers, sized
         from the reflected MSL strides; the ReSTIR DI reuse pass (phase 5)
         attaches through the same bounce-0 hook as Vulkan, so the reuse mode
-        and config are part of the rebuild key. Neural attaches in phase 6."""
+        and config are part of the rebuild key. The neural pre-pass (phase 6)
+        attaches through the every-bounce hook; neural is in the key because
+        selecting it recompiles the shade kernels with SKINNY_METAL_NEURAL=1
+        (the weight buffers are slot-cap stubs otherwise)."""
         if self._scene_bindings is None:
             return None
         has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in self._material_types)
@@ -1804,7 +1807,8 @@ class Renderer:
         key = (self.width, self.height, has_nonflat,
                self._graph_set_signature(), reuse_mode,
                int(self.restir_regime_index) if reuse_mode == 1 else None,
-               tuple(sorted(_rcfg.items())) if _rcfg else None)
+               tuple(sorted(_rcfg.items())) if _rcfg else None,
+               self._neural_active())
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             # Live ReSTIR tuning: refresh the config blob each frame so slider
             # changes (mLight/mBsdf/k/radius/mCap/biased) take effect without a
@@ -1813,7 +1817,11 @@ class Renderer:
                 self._restir_pass.config = self._restir_build_config()
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
-        from skinny.metal_wavefront import MetalRestirDiPass, MetalWavefrontPathPass
+        from skinny.metal_wavefront import (
+            MetalNeuralProposalPass,
+            MetalRestirDiPass,
+            MetalWavefrontPathPass,
+        )
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None)
                   or MetalWavefrontPathPass.STREAM_CAP)
@@ -1823,6 +1831,7 @@ class Renderer:
             build_catchall=has_nonflat,
             graph_fragments=list(self._scene_graph_fragments),
             neural_config=self._effective_neural_config(),
+            neural_active=self._neural_active(),
         )
         # ReSTIR DI reuse plugin (phase 5): the pass owns the persistent
         # reservoir/G-buffer StorageBuffers and binds the path pass's
@@ -1836,6 +1845,22 @@ class Renderer:
                 config=self._restir_build_config(),
             )
             self._wavefront_path_pass.set_restir(self._restir_pass)
+        # Neural directional proposal (bit2, phase 6): upload the frozen
+        # weights into the renderer's backend-neutral 33/34/35 buffers
+        # (`set_data` on Metal — no external-memory interop, design D6) and
+        # hook the forward pre-pass every bounce, mirroring the Vulkan
+        # builder. Constructing it only when neural is active (always
+        # wavefront here) IS the capability gate; deselection rebuilds the
+        # pass (key change) and `_destroy_wavefront_path_pass` releases it.
+        self._neural_pass = None
+        if self._neural_active():
+            self._sync_neural_weights()
+            self._neural_pass = MetalNeuralProposalPass(
+                self.ctx, self.shader_dir, self._wavefront_path_pass,
+                stream_size, network_version=self._neural_network_version,
+                neural_config=self._effective_neural_config(),
+            )
+            self._wavefront_path_pass.set_neural(self._neural_pass)
         self._wf_path_pass_dims = key
         # The scene-build uploads ran before any Metal reflection existed
         # (wavefront mode compiles no megakernel), so the per-graph SSBOs and

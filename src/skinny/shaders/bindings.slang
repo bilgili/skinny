@@ -68,7 +68,17 @@ uniform FrameConstants fc;
 //             [11] = (uv.xy, hasTangent, _)
 //   [16..N] : BXDF eval grid output (n_theta × n_phi float4 entries)
 //             slot index = 16 + j*n_theta + i  where (i, j) = (theta, phi)
+// Metal slot-cap gate (change metal-wavefront-parity phase 6): the wavefront
+// program with the neural proposal un-stubbed (SKINNY_METAL_NEURAL) sits
+// exactly at Metal's 31-buffer-slot argument table, so the three buffer
+// globals that are dead in every wavefront kernel — toolBuffer here plus
+// recordBuf/recordCounter (integrators/path_record_common.slang) — are
+// compiled out of that build to make room for neuralWeights/Biases/Layers.
+// The megakernel (SKINNY_METAL only) and Vulkan (no SKINNY_METAL) builds are
+// unaffected; no wavefront kernel references the tool dispatch.
+#if !(defined(SKINNY_METAL) && defined(SKINNY_METAL_NEURAL))
 [[vk::binding(30)]] RWStructuredBuffer<float4>     toolBuffer;
+#endif
 
 static const uint TOOL_MODE_OFF        = 0u;
 static const uint TOOL_MODE_PICK       = 1u;  // pick path uses fc.pickArmed, not toolMode

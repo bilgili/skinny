@@ -219,8 +219,18 @@ class _MetalWavefrontRecorder:
         self._dispatch(entry, (gx, gy, gz))
 
     def neural_prepass(self) -> None:
-        raise NotImplementedError(
-            "neural directional proposal on Metal lands in phase 6")
+        """Encode the neural-proposal forward pass over the whole stream — the
+        Metal analogue of ``vk_wavefront.WavefrontNeuralProposalPass.record``.
+        The Vulkan 16 B ``npc`` push constant rides the same ``set_data``
+        uniform-blob mechanism as ``wfTile``/``rpc`` (design D4); the
+        npState/npHits/npOut binds are already merged into ``self._binds`` by
+        ``dispatch_frame``."""
+        np_ = self._p._neural
+        groups = ((np_.stream_size + np_._GROUP - 1) // np_._GROUP, 1, 1)
+        self._enc.dispatch(
+            np_._entries["wfNeuralProposal"], groups, bindings=self._binds,
+            uniform_blob=self._fc, uniforms={"npc": np_.npc_blob()},
+            bindless=self._bindless)
 
     def restir_primary_direct(self) -> None:
         """Encode the ReSTIR DI primary-direct pass set (fill → spatial →
@@ -329,6 +339,68 @@ class MetalRestirDiPass:
         self._entries = {}
 
 
+class MetalNeuralProposalPass:
+    """Neural directional-proposal pre-pass on a :class:`~skinny.metal_context.
+    MetalContext` — the Metal sibling of ``vk_wavefront.
+    WavefrontNeuralProposalPass`` (change metal-wavefront-parity, phase 6).
+
+    Compiles the single ``wavefront/neural_proposal_pass.slang::
+    wfNeuralProposal`` entry through the same in-process Slang→Metal session
+    as the wavefront kernels, with ``SKINNY_METAL_NEURAL=1`` so the frozen
+    weight buffers (33/34/35) are real declarations rather than the slot-cap
+    stubs, plus the size/precision defines of the active ``NeuralBuildConfig``
+    (the host must match — ``renderer._effective_neural_config()`` degrades
+    fp16 to fp32 on devices whose probe lacks it, design D6).
+
+    Owns no buffers: ``npState``/``npHits``/``npOut`` alias the path pass's
+    state/hit/neural ``StorageBuffer``s via :attr:`bind_map` (merged into the
+    scene binds per dispatch), and the weight buffers are the renderer's
+    backend-neutral 33/34/35 allocations, bound by name from
+    ``_build_metal_binds``. The Vulkan 16 B ``npc`` push constant
+    ``{streamSize, networkVersion, pad, pad}`` is a ``set_data`` byte blob
+    (design D4).
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] in neural_proposal_pass.slang
+
+    def __init__(self, ctx, shader_dir: Path, path_pass: "MetalWavefrontPathPass",
+                 stream_size: int, network_version: int = 0,
+                 neural_config=None) -> None:
+        self.ctx = ctx
+        self.stream_size = int(stream_size)
+        self.network_version = int(network_version)
+
+        if neural_config is None:
+            from skinny.sampling.neural_weights import NeuralBuildConfig
+            neural_config = NeuralBuildConfig()
+        defines = _defines_dict(neural_config.slang_defines())
+        defines["SKINNY_METAL_NEURAL"] = "1"
+        session = _metal_slang_session(ctx, Path(shader_dir), defines)
+        src_path = Path(shader_dir) / "wavefront" / "neural_proposal_pass.slang"
+        module = session.load_module_from_source(
+            "neural_proposal_pass", src_path.read_text(encoding="utf-8"),
+            str(src_path))
+        self._entries = {"wfNeuralProposal": _EntryPipeline(
+            ctx, session, module, "wfNeuralProposal")}
+
+        # Slang global name → buffer, merged into the scene binds per dispatch
+        # (the Vulkan pass's set-1 contents: state 0, hit 1, neural-out 2).
+        self.bind_map = {
+            "npState": path_pass.buffers["state"],
+            "npHits": path_pass.buffers["hit"],
+            "npOut": path_pass.buffers["neural"],
+        }
+
+    def npc_blob(self) -> bytes:
+        """The NeuralPC block: {streamSize, networkVersion, _pad0, _pad1}
+        (16 B — identical to the Vulkan push-constant pack)."""
+        return struct.pack("4I", self.stream_size, self.network_version, 0, 0)
+
+    def destroy(self) -> None:  # SlangPy owns lifetimes via refcount
+        self.bind_map = {}
+        self._entries = {}
+
+
 class MetalWavefrontPathPass:
     """Staged wavefront path tracer on a :class:`~skinny.metal_context.
     MetalContext` — the Metal sibling of ``vk_wavefront.WavefrontPathPass``.
@@ -353,7 +425,8 @@ class MetalWavefrontPathPass:
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  build_catchall: bool = True, record_capacity: int = 0,
-                 graph_fragments=None, neural_config=None) -> None:
+                 graph_fragments=None, neural_config=None,
+                 neural_active: bool = False) -> None:
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
         self.stream_size = int(stream_size)
@@ -363,6 +436,7 @@ class MetalWavefrontPathPass:
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
         self._restir = None  # reuse plugin seam (phase 5)
         self._neural = None  # neural pre-pass seam (phase 6)
+        self.neural_active = bool(neural_active)
 
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
@@ -372,8 +446,14 @@ class MetalWavefrontPathPass:
         spy = ctx._spy
         dev = ctx.device
 
-        session = _metal_slang_session(
-            ctx, self.shader_dir, _defines_dict(neural_config.slang_defines()))
+        # SKINNY_METAL_NEURAL un-stubs the frozen weight buffers + the inline
+        # inverse pdf in the shade kernels (phase 6). Compiled in only when the
+        # neural proposal is selected, so the default build stays under Metal's
+        # 31-buffer-slot argument-table cap with the same headroom as phase 3.
+        defines = _defines_dict(neural_config.slang_defines())
+        if self.neural_active:
+            defines["SKINNY_METAL_NEURAL"] = "1"
+        session = _metal_slang_session(ctx, self.shader_dir, defines)
 
         src_path = self.shader_dir / "wavefront" / "wavefront_path.slang"
         module = session.load_module_from_source(
@@ -491,11 +571,17 @@ class MetalWavefrontPathPass:
         self._restir = restir
 
     def set_neural(self, neural) -> None:
-        """Neural-proposal seam (phase 6)."""
-        if neural is not None:
-            raise NotImplementedError(
-                "neural directional proposal on Metal lands in phase 6")
-        self._neural = None
+        """Hook the neural-proposal pre-pass (a :class:`MetalNeuralProposalPass`,
+        or ``None``). The recorder schedules its forward dispatch every bounce
+        between scatter and shade through the shared ``record_path_loop`` hook.
+        Requires the pass to have been built with ``neural_active=True`` — the
+        shade kernels' inline inverse pdf is the slot-cap stub otherwise."""
+        if neural is not None and not self.neural_active:
+            raise RuntimeError(
+                "MetalWavefrontPathPass was compiled without "
+                "SKINNY_METAL_NEURAL (neural_active=False); rebuild the pass "
+                "with neural_active=True before attaching a neural pre-pass")
+        self._neural = neural
 
     def dispatch_frame(self, *, binds: dict, uniform_blob: bytes,
                        bindless_textures=None) -> None:
@@ -510,6 +596,8 @@ class MetalWavefrontPathPass:
         all_binds.update(self._bind_map)
         if self._restir is not None:
             all_binds.update(self._restir.bind_map)
+        if self._neural is not None:
+            all_binds.update(self._neural.bind_map)
         bindless = None
         if bindless_textures is not None:
             bindless = ("flatMaterialTextures", bindless_textures, self.default_tex)
