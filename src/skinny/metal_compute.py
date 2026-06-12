@@ -26,6 +26,7 @@ The Vulkan path is byte-identical and unaffected.
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -657,6 +658,67 @@ class ComputePipeline:
         for name, res in (buffers or {}).items():
             bound[name] = getattr(res, "buffer", getattr(res, "texture", res))
         self._kernel.dispatch(thread_count=list(thread_count), vars=bound)
+        dev.wait_for_idle()
+
+    def dispatch_indirect(self, args_buffer, offset: int = 0, *, bindings=None) -> None:
+        """Indirect compute dispatch (design D2) — Metal sibling of the Vulkan
+        ``vkCmdDispatchIndirect`` the wavefront per-material shade uses.
+
+        The thread-group count is a ``VkDispatchIndirectCommand`` triple
+        ``(x, y, z)`` of ``uint32`` stored in ``args_buffer`` at byte ``offset`` —
+        exactly the layout a ``build_args`` kernel writes. ``args_buffer`` is a
+        :class:`StorageBuffer` (built with ``indirect=True``) or a native
+        ``Buffer``; ``bindings`` is ``name → resource`` (wrapper or native
+        ``Buffer``/``Texture``/``Sampler``), bound by name on the program's root
+        object, skipping names absent from the reflected globals (dead-stripped).
+        Resource binding only — no per-field scalar cursor writes (design D4).
+
+        Two paths, selected by the context's one-time ``supports_indirect_dispatch``
+        probe (design D2):
+
+        * **native** — feed ``args_buffer`` straight to
+          ``dispatch_compute_indirect``; the group count is read GPU-side, no host
+          round-trip.
+        * **CPU-readback fallback (task 1.3)** — when the device no-ops indirect
+          dispatch (slang-rhi 0.42's Metal backend), drain the device, read the
+          ``(x, y, z)`` triple back to the host, and issue an equivalent direct
+          ``dispatch_compute`` over the same group count. Correct, but a per-call
+          host↔GPU sync. The two paths issue the **same** group count by
+          construction (same triple), which the task 1.6 unit test asserts.
+
+        This standalone form opens, submits, and drains its own command encoder; the
+        multi-pass loop (task 1.4) re-encodes the same dispatch into one shared
+        frame encoder.
+        """
+        spy = self._spy
+        dev = self.ctx.device
+        native_args = getattr(args_buffer, "buffer", args_buffer)
+
+        ro = dev.create_root_shader_object(self.program)
+        cur = spy.ShaderCursor(ro)
+        for name, res in (bindings or {}).items():
+            if res is None or name not in self.global_names:
+                continue
+            cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+
+        groups = None
+        if not self.ctx.supports_indirect_dispatch:
+            # Drain so a GPU-written args buffer (a prior build_args dispatch) is
+            # visible, then read the (x, y, z) group-count triple to the host.
+            dev.wait_for_idle()
+            raw = native_args.to_numpy().tobytes()
+            gx, gy, gz = struct.unpack_from("<III", raw, int(offset))
+            groups = (int(gx), int(gy), int(gz))
+
+        enc = dev.create_command_encoder()
+        cpass = enc.begin_compute_pass()
+        cpass.bind_pipeline(self.pipeline, ro)
+        if groups is None:
+            cpass.dispatch_compute_indirect(spy.BufferOffsetPair(native_args, int(offset)))
+        else:
+            cpass.dispatch_compute(spy.math.uint3(*groups))
+        cpass.end()
+        dev.submit_command_buffer(enc.finish())
         dev.wait_for_idle()
 
     def destroy(self) -> None:
