@@ -1591,12 +1591,15 @@ class Renderer:
         """Object owning the reflected MSL layouts on Metal (``uniform_layout``,
         ``graph_param_layouts``, ``std_surface_layout``, ``mtlx_skin_layout``):
         the megakernel pipeline in megakernel mode, else the lazily-built Metal
-        wavefront path pass (which reflects the same surface from its own
-        programs). ``None`` before either exists — the MSL relocators then fall
-        through to their scalar defaults."""
+        wavefront pass — path, or bdpt when the bidirectional integrator is
+        the only compiled program (both reflect the same surface from their
+        own programs). ``None`` before any exists — the MSL relocators then
+        fall through to their scalar defaults."""
         if self.pipeline is not None:
             return self.pipeline
-        return self._wavefront_path_pass
+        if self._wavefront_path_pass is not None:
+            return self._wavefront_path_pass
+        return self._wavefront_bdpt_pass
 
     @property
     def _scene_graph_bindings(self) -> dict:
@@ -1609,14 +1612,13 @@ class Renderer:
     @property
     def effective_execution_mode_index(self) -> int:
         """Execution mode actually used to render this frame, after capability
-        gating. Wavefront + BDPT falls back to megakernel until the wavefront
-        bidirectional path lands."""
-        # Wavefront BDPT is Vulkan-only until metal-wavefront-parity phase 4 —
-        # on Metal a BDPT + wavefront request falls back to the megakernel.
+        gating. Wavefront + BDPT runs the staged bidirectional pipeline on both
+        backends (Vulkan since wavefront phase 3; Metal since
+        metal-wavefront-parity phase 4)."""
         return effective_execution_mode(
             self.execution_mode_index,
             self.integrator_index,
-            self.WAVEFRONT_BDPT_SUPPORTED and not self.is_metal,
+            self.WAVEFRONT_BDPT_SUPPORTED,
         )
 
     @property
@@ -1839,9 +1841,12 @@ class Renderer:
         self._wf_path_pass_dims = None
 
     def _ensure_wavefront_bdpt_pass(self):
-        """Build (once) the staged wavefront bdpt pass. Returns it, or None on a
-        non-Vulkan backend or before the scene bindings exist. Allocates the
-        per-lane eye/light subpath-vertex buffers + aux buffer."""
+        """Build (once) the staged wavefront bdpt pass for the active backend.
+        Returns it, or None before the scene bindings exist. On Vulkan it
+        allocates the per-lane eye/light subpath-vertex buffers + aux buffer;
+        the Metal pass owns its buffers (sized from reflected MSL strides)."""
+        if self.is_metal:
+            return self._ensure_wavefront_bdpt_pass_metal()
         if not hasattr(self.ctx, "compute_queue"):
             return None
         if self._scene_bindings is None or self.descriptor_sets is None:
@@ -1870,6 +1875,39 @@ class Renderer:
             stream_size, num_pixels, walk_mode=self.bdpt_walk_mode,
         )
         self._wf_bdpt_pass_dims = (self.width, self.height)
+        return self._wavefront_bdpt_pass
+
+    def _ensure_wavefront_bdpt_pass_metal(self):
+        """Build (once) the Metal staged wavefront bdpt pass (change
+        metal-wavefront-parity phase 4). Returns it, or None before the scene
+        bindings exist. The pass owns its eye/light/aux + counting-sort
+        buffers, sized from the reflected MSL strides."""
+        if self._scene_bindings is None:
+            return None
+        key = (self.width, self.height, self.bdpt_walk_mode,
+               self._graph_set_signature())
+        if self._wavefront_bdpt_pass is not None and self._wf_bdpt_pass_dims == key:
+            return self._wavefront_bdpt_pass
+        self._destroy_wavefront_bdpt_pass()
+        from skinny.metal_wavefront import MetalWavefrontBdptPass
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None)
+                  or MetalWavefrontBdptPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wavefront_bdpt_pass = MetalWavefrontBdptPass(
+            self.ctx, self.shader_dir, stream_size, num_pixels,
+            walk_mode=self.bdpt_walk_mode,
+            graph_fragments=list(self._scene_graph_fragments),
+        )
+        self._wf_bdpt_pass_dims = key
+        # The scene-build uploads ran before any Metal reflection existed
+        # (wavefront mode compiles no megakernel), so the per-graph SSBOs and
+        # std-surface records were packed at scalar offsets. Re-relocate them
+        # now that this pass exposes the reflected MSL layouts.
+        self._upload_graph_param_buffers()
+        mats = getattr(self, "_last_uploaded_materials", None)
+        if mats:
+            self._upload_flat_materials(mats)
         return self._wavefront_bdpt_pass
 
     def _destroy_wavefront_bdpt_pass(self) -> None:
@@ -7786,8 +7824,9 @@ class Renderer:
 
     def _render_wavefront_metal(self, staged) -> None:
         """Dispatch one staged wavefront frame on the Metal backend (change
-        metal-wavefront-parity phase 3): the shared `record_path_loop` stage
-        order, encoded into one frame command encoder by the pass. The resolve
+        metal-wavefront-parity phases 3/4): the shared `record_path_loop` /
+        `record_bdpt_loop` stage order, encoded into one frame command encoder
+        by the pass (path or bdpt — same `dispatch_frame` surface). The resolve
         stage writes both the accumulation image and the display image, exactly
         like the Vulkan wavefront path."""
         mtlx_bytes = self._pack_mtlx_skin_array_msl()
@@ -7804,10 +7843,14 @@ class Renderer:
 
     def _render_scene_metal(self) -> None:
         """Render one Metal frame into `_offscreen_output` through the active
-        execution mode: the staged wavefront path tracer when selected (and
-        buildable), else the megakernel."""
+        execution mode: the staged wavefront tracer when selected (and
+        buildable) — bdpt when the bidirectional integrator is active (phase
+        4), else the path tracer — falling back to the megakernel."""
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            staged = self._ensure_wavefront_path_pass()
+            if self.integrator_index == 1:  # BDPT → staged wavefront bdpt
+                staged = self._ensure_wavefront_bdpt_pass()
+            else:
+                staged = self._ensure_wavefront_path_pass()
             if staged is not None:
                 self._render_wavefront_metal(staged)
                 return

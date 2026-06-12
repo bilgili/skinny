@@ -1,9 +1,10 @@
-"""Metal wavefront execution backend — the staged path tracer on slang-rhi.
+"""Metal wavefront execution backend — the staged path + bdpt tracers on slang-rhi.
 
-Metal sibling of :mod:`skinny.vk_wavefront`'s ``WavefrontPathPass`` (change
-metal-wavefront-parity, design D1/D3). The bounce-loop *stage order* lives in
-:func:`skinny.wavefront_driver.record_path_loop` — shared with Vulkan — so this
-module supplies only the Metal primitives:
+Metal sibling of :mod:`skinny.vk_wavefront`'s ``WavefrontPathPass`` /
+``WavefrontBdptPass`` (change metal-wavefront-parity, design D1/D3). The loop
+*stage orders* live in :func:`skinny.wavefront_driver.record_path_loop` /
+:func:`~skinny.wavefront_driver.record_bdpt_loop` — shared with Vulkan — so
+this module supplies only the Metal primitives:
 
 * per-entry **in-process Slang→Metal** pipelines (one slang session, one module
   load, one linked program + compute pipeline per kernel entry — no ``slangc``,
@@ -13,7 +14,7 @@ module supplies only the Metal primitives:
   on Metal, so the Vulkan scalar strides would undersize them; the reflected
   ``wfState`` stride is asserted equal to the GPU-free
   ``wavefront_layout.path_state_size(msl=True)`` mirror from task 1.5);
-* :class:`_MetalPathRecorder`, the :class:`skinny.wavefront_driver.
+* :class:`_MetalWavefrontRecorder`, the :class:`skinny.wavefront_driver.
   WavefrontRecorder` adapter that encodes every stage into **one**
   :class:`skinny.metal_compute.MetalFrameEncoder` per frame with a global
   compute barrier between stages (design D3 — no per-stage ``wait_for_idle``).
@@ -35,7 +36,7 @@ import struct
 from pathlib import Path
 
 from skinny.metal_compute import MetalFrameEncoder, StorageBuffer
-from skinny.wavefront_driver import record_path_loop
+from skinny.wavefront_driver import record_bdpt_loop, record_path_loop
 from skinny.wavefront_layout import path_state_size, rec_vertex_size
 
 
@@ -98,6 +99,23 @@ def _reflect_element(program, name: str):
     return fields, stride
 
 
+def _metal_slang_session(ctx, shader_dir: Path, extra_defines: dict | None = None):
+    """In-process Slang→Metal session — identical compiler surface to the
+    Metal megakernel (`metal_compute.ComputePipeline._build`): MSL layout
+    (no scalar-layout flag), column-major matrices so the Vulkan-packed
+    camera/instance matrices read identically, and the same include + define
+    set as the Vulkan ``_compile_full_spv`` wavefront kernels."""
+    spy = ctx._spy
+    mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
+    opts = spy.SlangCompilerOptions()
+    opts.include_paths = [shader_dir, mtlx_genslang]
+    defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+    defines.update(extra_defines or {})
+    opts.defines = defines
+    opts.matrix_layout = spy.SlangMatrixLayout.column_major
+    return ctx.device.create_slang_session(compiler_options=opts)
+
+
 class _EntryPipeline:
     """One linked wavefront kernel entry: program + compute pipeline + the
     reflected global-parameter names (the bind-by-name filter). Duck-types the
@@ -112,8 +130,13 @@ class _EntryPipeline:
         self.global_names = {p.name for p in self.program.layout.parameters}
 
 
-class _MetalPathRecorder:
-    """Metal adapter for :func:`skinny.wavefront_driver.record_path_loop`.
+class _MetalWavefrontRecorder:
+    """Metal adapter for the :class:`skinny.wavefront_driver.WavefrontRecorder`
+    protocol — drives both :func:`~skinny.wavefront_driver.record_path_loop`
+    (over a :class:`MetalWavefrontPathPass`) and
+    :func:`~skinny.wavefront_driver.record_bdpt_loop` (over a
+    :class:`MetalWavefrontBdptPass`); the two passes expose the same
+    ``stream_size`` / ``_GROUP`` / ``_entries`` / ``buffers`` surface.
 
     Encodes each primitive into the pass's per-frame
     :class:`~skinny.metal_compute.MetalFrameEncoder`. The Vulkan push-constant
@@ -122,7 +145,7 @@ class _MetalPathRecorder:
     dispatch owns a fresh root shader object, so per-stage values are
     naturally scoped — no GPU push-constant state to restore)."""
 
-    def __init__(self, p: "MetalWavefrontPathPass", enc: MetalFrameEncoder,
+    def __init__(self, p, enc: MetalFrameEncoder,
                  binds: dict, fc_blob: bytes, bindless) -> None:
         self._p = p
         self._enc = enc
@@ -246,19 +269,8 @@ class MetalWavefrontPathPass:
         spy = ctx._spy
         dev = ctx.device
 
-        # In-process Slang→Metal session — identical compiler surface to the
-        # Metal megakernel (`metal_compute.ComputePipeline._build`): MSL layout
-        # (no scalar-layout flag), column-major matrices so the Vulkan-packed
-        # camera/instance matrices read identically, and the same include +
-        # define set as the Vulkan `_compile_full_spv` wavefront kernels.
-        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        opts = spy.SlangCompilerOptions()
-        opts.include_paths = [self.shader_dir, mtlx_genslang]
-        defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
-        defines.update(_defines_dict(neural_config.slang_defines()))
-        opts.defines = defines
-        opts.matrix_layout = spy.SlangMatrixLayout.column_major
-        session = dev.create_slang_session(compiler_options=opts)
+        session = _metal_slang_session(
+            ctx, self.shader_dir, _defines_dict(neural_config.slang_defines()))
 
         src_path = self.shader_dir / "wavefront" / "wavefront_path.slang"
         module = session.load_module_from_source(
@@ -397,13 +409,214 @@ class MetalWavefrontPathPass:
         if bindless_textures is not None:
             bindless = ("flatMaterialTextures", bindless_textures, self.default_tex)
         enc = MetalFrameEncoder(self.ctx)
-        rec = _MetalPathRecorder(self, enc, all_binds, uniform_blob, bindless)
+        rec = _MetalWavefrontRecorder(self, enc, all_binds, uniform_blob, bindless)
         record_path_loop(
             rec,
             num_pixels=self.num_pixels,
             stream_size=self.stream_size,
             max_bounces=self.MAX_BOUNCES,
             build_catchall=self.build_catchall,
+        )
+        enc.submit()
+
+    def destroy(self) -> None:  # SlangPy owns lifetimes via refcount
+        for buf in self.buffers.values():
+            buf.destroy()
+        self.buffers = {}
+        self._bind_map = {}
+        self._entries = {}
+        self.default_tex = None
+
+
+class MetalWavefrontBdptPass:
+    """Staged wavefront bidirectional path tracer on a :class:`~skinny.
+    metal_context.MetalContext` — the Metal sibling of
+    ``vk_wavefront.WavefrontBdptPass`` (change metal-wavefront-parity,
+    phase 4).
+
+    The loop *stage order* lives in :func:`skinny.wavefront_driver.
+    record_bdpt_loop` (shared with Vulkan); this pass supplies the per-entry
+    Slang→Metal pipelines for the active ``walk_mode`` plus the eye/light
+    subpath-vertex, aux, and connect counting-sort buffers — all sized from
+    the **reflected MSL** element strides (design D4: Slang pads ``float3``
+    to 16 B on Metal, so the Vulkan scalar strides would undersize them).
+    The strategy-split connect and staged bounce-extend kernels dispatch
+    indirectly over their compacted slot queues through the same
+    :class:`_MetalWavefrontRecorder` primitives as the path pass (native
+    indirect when probed, else the CPU-readback fallback).
+
+    Exposes the same reflected-layout surface as the Metal megakernel /
+    wavefront-path pipelines (``uniform_layout`` / ``graph_param_layouts`` /
+    ``std_surface_layout`` / ``mtlx_skin_layout``) so the renderer's MSL
+    relocators work when this pass is the only compiled Metal program.
+    """
+
+    _GROUP = 64           # matches [numthreads(64, 1, 1)] in wavefront_bdpt.slang
+    BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
+    VERTEX_STRIDE = 128   # reflection fallback only — MSL stride is authoritative
+    AUX_STRIDE = 128      # reflection fallback only
+    NUM_SLOTS = 2         # lockstep with WF_BDPT_NUM_SLOTS in the shader
+    SLOT_NEE = 0
+    SLOT_FULL = 1
+    # Eye-walk extend bounces: gen-eye seeds eye[0..1], the loop extends eye[2..].
+    EYE_BOUNCES = BDPT_MAX_VERTS - 2
+    # Light-walk extend bounces: gen-light seeds light[0], the loop extends light[1..].
+    LIGHT_BOUNCES = BDPT_MAX_VERTS - 1
+    # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices.
+    STREAM_CAP = 1 << 18
+
+    WALK_MODES = ("fused", "eye", "eye_light")
+
+    def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
+                 walk_mode: str = "fused", graph_fragments=None) -> None:
+        self.ctx = ctx
+        self.shader_dir = Path(shader_dir)
+        self.stream_size = int(stream_size)
+        self.num_pixels = int(num_pixels)
+        if walk_mode not in self.WALK_MODES:
+            raise ValueError(
+                f"unknown bdpt walk_mode {walk_mode!r} (expected {self.WALK_MODES})")
+        self.walk_mode = walk_mode
+        self.graph_fragments = list(graph_fragments) if graph_fragments else []
+        self._restir = None  # recorder protocol stubs — bdpt has no reuse hook
+        self._neural = None  # nor a neural pre-pass
+
+        spy = ctx._spy
+        dev = ctx.device
+        # No neural defines: parity with the Vulkan `_compile_full_spv` bdpt
+        # kernels, which compile with the plain define set.
+        session = _metal_slang_session(ctx, self.shader_dir)
+        src_path = self.shader_dir / "wavefront" / "wavefront_bdpt.slang"
+        module = session.load_module_from_source(
+            "wavefront_bdpt", src_path.read_text(encoding="utf-8"), str(src_path))
+
+        # Entry set per walk mode — mirrors the Vulkan pass: the connect
+        # counting sort + split connect + resolve are shared by all modes; only
+        # the subpath-build kernels differ. Only the active mode's kernels are
+        # compiled (no wasted Metal pipeline builds).
+        shared = ["wfBdptClassify", "wfBdptBuildArgs", "wfBdptScatter",
+                  "wfBdptConnectNee", "wfBdptConnectFull", "wfBdptResolve"]
+        staged_eye = ["wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye"]
+        if walk_mode == "fused":
+            entries = ["wfBdptWalk"] + shared
+        elif walk_mode == "eye":
+            entries = staged_eye + ["wfBdptLightTail"] + shared
+        else:  # eye_light
+            entries = staged_eye + ["wfBdptGenLight", "wfBdptBounceLight",
+                                    "wfBdptSplat"] + shared
+        self._entries = {e: _EntryPipeline(ctx, session, module, e)
+                         for e in entries}
+
+        # ── Reflected MSL strides (design D4) ────────────────────────
+        # BDPTVertex / WfBdptAux round-trip through VRAM GPU-side only, so the
+        # host needs just the stride to size the buffers. Reflect from any
+        # program that references the globals (the subpath-build kernels do).
+        progs = [ep.program for ep in self._entries.values()]
+
+        def stride_of(name: str, fallback: int) -> int:
+            for prog in progs:
+                ref = _reflect_element(prog, name)
+                if ref is not None and ref[1]:
+                    return ref[1]
+            return fallback
+
+        self.vertex_stride = stride_of("wfEye", self.VERTEX_STRIDE)
+        self.aux_stride = stride_of("wfAux", self.AUX_STRIDE)
+
+        # ── Buffers (backend-neutral wrappers, MSL sizing) ───────────
+        # Mirrors the Vulkan pass's set-1 contents (eye/light/aux + the 6
+        # counting-sort buffers); bound by Slang global name. Zero-filled once:
+        # device-local memory is otherwise uninitialised and connect/resolve
+        # read wfAux before the first full write cycle.
+        n = self.stream_size
+        vert_bytes = n * self.BDPT_MAX_VERTS * self.vertex_stride
+        self.buffers: dict[str, StorageBuffer] = {
+            "eye": StorageBuffer(ctx, vert_bytes),
+            "light": StorageBuffer(ctx, vert_bytes),
+            "aux": StorageBuffer(ctx, n * self.aux_stride),
+            "lane_slot": StorageBuffer(ctx, n * 4),
+            "slot_count": StorageBuffer(ctx, self.NUM_SLOTS * 4),
+            "slot_offset": StorageBuffer(ctx, self.NUM_SLOTS * 4),
+            "slot_queue": StorageBuffer(ctx, n * 4),
+            "slot_cursor": StorageBuffer(ctx, self.NUM_SLOTS * 4),
+            "indirect": StorageBuffer(ctx, self.NUM_SLOTS * 12, indirect=True),
+        }
+        for buf in self.buffers.values():
+            buf.fill_zero_sync()
+        # Slang global name → buffer, merged into the scene binds per dispatch.
+        self._bind_map = {
+            "wfEye": self.buffers["eye"],
+            "wfLight": self.buffers["light"],
+            "wfAux": self.buffers["aux"],
+            "wfLaneSlot": self.buffers["lane_slot"],
+            "wfSlotCount": self.buffers["slot_count"],
+            "wfSlotOffset": self.buffers["slot_offset"],
+            "wfSlotQueue": self.buffers["slot_queue"],
+            "wfSlotCursor": self.buffers["slot_cursor"],
+            "wfIndirectArgs": self.buffers["indirect"],
+        }
+
+        # ── Reflected layouts for the renderer's MSL relocators ──────
+        # (duck-types the megakernel/wavefront-path reflection surface — in
+        # bdpt wavefront mode this pass is the `_msl_layout_source`.)
+        self.uniform_layout: dict = {}
+        self.uniform_size = 0
+        for prog in progs:
+            layout, size = _reflect_uniform_layout(prog)
+            if layout:
+                self.uniform_layout, self.uniform_size = layout, size
+                break
+        self.mtlx_skin_layout: dict = {}
+        self.mtlx_skin_stride = 0
+        self.std_surface_layout: dict = {}
+        self.std_surface_stride = 0
+        for prog in progs:
+            ref = _reflect_element(prog, "stdSurfaceParams")
+            if ref is not None and ref[0]:
+                self.std_surface_layout, self.std_surface_stride = ref
+                break
+        self.graph_param_layouts: dict = {}
+        for gf in self.graph_fragments:
+            for prog in progs:
+                ref = _reflect_element(prog, f"graphParams_{gf.sanitized_name}")
+                if ref is not None and ref[0]:
+                    self.graph_param_layouts[gf.target_name] = ref
+                    break
+
+        # Default 1×1 texture for unfilled bindless slots (Metal binds every
+        # slot; mirrors the megakernel pipeline's `_default_tex`).
+        self.default_tex = dev.create_texture(
+            type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
+            width=1, height=1,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            memory_type=spy.MemoryType.device_local,
+            label="skinny.wf_bdpt_bindless_default",
+        )
+
+    def dispatch_frame(self, *, binds: dict, uniform_blob: bytes,
+                       bindless_textures=None) -> None:
+        """Record + submit one wavefront bdpt frame: the shared
+        ``record_bdpt_loop`` stage order over one ``MetalFrameEncoder``.
+
+        Same surface as ``MetalWavefrontPathPass.dispatch_frame``: ``binds``
+        is the renderer's scene global → native resource map; the pass's own
+        subpath/queue buffers are merged on top."""
+        all_binds = dict(binds)
+        all_binds.update(self._bind_map)
+        bindless = None
+        if bindless_textures is not None:
+            bindless = ("flatMaterialTextures", bindless_textures, self.default_tex)
+        enc = MetalFrameEncoder(self.ctx)
+        rec = _MetalWavefrontRecorder(self, enc, all_binds, uniform_blob, bindless)
+        record_bdpt_loop(
+            rec,
+            num_pixels=self.num_pixels,
+            stream_size=self.stream_size,
+            walk_mode=self.walk_mode,
+            eye_bounces=self.EYE_BOUNCES,
+            light_bounces=self.LIGHT_BOUNCES,
+            slot_nee=self.SLOT_NEE,
+            slot_full=self.SLOT_FULL,
         )
         enc.submit()
 

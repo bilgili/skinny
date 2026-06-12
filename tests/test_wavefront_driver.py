@@ -9,7 +9,9 @@ caught here, not at convergence.
 
 from __future__ import annotations
 
-from skinny.wavefront_driver import record_path_loop
+import pytest
+
+from skinny.wavefront_driver import record_bdpt_loop, record_path_loop
 
 
 class _StubRecorder:
@@ -131,3 +133,101 @@ def test_restir_runs_only_at_bounce_zero():
     # ReSTIR appears in the first bounce, before the first shade.
     first_shade = rec.ops.index(("shade", 0, "wfPathShadeFlat"))
     assert ri < first_shade
+
+
+# ── record_bdpt_loop (phase 4) ──────────────────────────────────────
+
+
+def _bdpt_compact(classify):
+    """clear → classify → build_args → scatter, each barrier-separated."""
+    return [
+        ("clear_counts",),
+        ("dispatch_full", classify),
+        ("barrier",),
+        ("dispatch_one", "wfBdptBuildArgs"),
+        ("barrier",),
+        ("dispatch_full", "wfBdptScatter"),
+        ("barrier",),
+    ]
+
+
+def _bdpt_tail():
+    """The connect + resolve sequence every walk mode shares."""
+    return [
+        *_bdpt_compact("wfBdptClassify"),
+        ("shade", 0, "wfBdptConnectNee"),
+        ("barrier",),
+        ("shade", 1, "wfBdptConnectFull"),
+        ("barrier",),
+        ("dispatch_full", "wfBdptResolve"),
+    ]
+
+
+def _staged_bounce(entry, bounces):
+    out = []
+    for _ in range(bounces):
+        out += [*_bdpt_compact("wfBdptWalkClassify"), ("shade", 0, entry), ("barrier",)]
+    return out
+
+
+def test_bdpt_fused_single_tile():
+    rec = _StubRecorder(stream_size=64)
+    record_bdpt_loop(rec, num_pixels=64, stream_size=64, walk_mode="fused",
+                     eye_bounces=5, light_bounces=6)
+    assert rec.ops == [
+        ("push_tile", 0),
+        ("dispatch_full", "wfBdptWalk"),
+        ("barrier",),
+        *_bdpt_tail(),
+    ]
+
+
+def test_bdpt_eye_staged_walk_plus_fused_light_tail():
+    rec = _StubRecorder(stream_size=64)
+    record_bdpt_loop(rec, num_pixels=64, stream_size=64, walk_mode="eye",
+                     eye_bounces=2, light_bounces=6)
+    assert rec.ops == [
+        ("push_tile", 0),
+        ("dispatch_full", "wfBdptGenEye"),
+        ("barrier",),
+        *_staged_bounce("wfBdptBounceEye", 2),
+        ("dispatch_full", "wfBdptLightTail"),
+        ("barrier",),
+        *_bdpt_tail(),
+    ]
+
+
+def test_bdpt_eye_light_fully_staged():
+    rec = _StubRecorder(stream_size=64)
+    record_bdpt_loop(rec, num_pixels=64, stream_size=64, walk_mode="eye_light",
+                     eye_bounces=2, light_bounces=3)
+    assert rec.ops == [
+        ("push_tile", 0),
+        ("dispatch_full", "wfBdptGenEye"),
+        ("barrier",),
+        *_staged_bounce("wfBdptBounceEye", 2),
+        ("dispatch_full", "wfBdptGenLight"),
+        ("barrier",),
+        *_staged_bounce("wfBdptBounceLight", 3),
+        ("dispatch_full", "wfBdptSplat"),
+        ("barrier",),
+        *_bdpt_tail(),
+    ]
+
+
+def test_bdpt_two_tiles_leading_barrier_on_second():
+    rec = _StubRecorder(stream_size=64)
+    record_bdpt_loop(rec, num_pixels=128, stream_size=64, walk_mode="fused",
+                     eye_bounces=5, light_bounces=6)
+    assert rec.ops[0] == ("push_tile", 0)
+    i = rec.ops.index(("push_tile", 64))
+    assert rec.ops[i - 1] == ("barrier",)
+    assert rec.ops[i - 2] == ("dispatch_full", "wfBdptResolve")
+    assert rec.ops[i + 1] == ("dispatch_full", "wfBdptWalk")
+
+
+def test_bdpt_rejects_unknown_walk_mode():
+    rec = _StubRecorder(stream_size=64)
+    with pytest.raises(ValueError, match="walk_mode"):
+        record_bdpt_loop(rec, num_pixels=64, stream_size=64, walk_mode="nope",
+                         eye_bounces=5, light_bounces=6)
