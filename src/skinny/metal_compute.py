@@ -501,6 +501,15 @@ class ComputePipeline:
         # the scalar-packed record into this layout per slot
         # (`_upload_graph_param_buffers`). Empty until `_build` reflects them.
         self.graph_param_layouts: dict[str, tuple[dict[str, tuple[int, int]], int]] = {}
+        # Reflected MSL layout of the `StructuredBuffer<StdSurfaceParams>` global
+        # (`stdSurfaceParams`, binding 19). `{field: (msl_offset, msl_size)}` plus
+        # the MSL element stride. Same float3→16 B MSL padding hazard as
+        # `graph_param_layouts`/`mtlx_skin_layout`: the host packs the record in
+        # scalar/std430 layout (`pack_std_surface_params`, float3 = 12 B), so the
+        # renderer relocates each field into this MSL layout per slot
+        # (`pack_std_surface_params_msl`). Empty/0 until `_build` reflects them.
+        self.std_surface_layout: dict[str, tuple[int, int]] = {}
+        self.std_surface_stride: int = 0
         self._default_tex = None
         self._kernel = None  # lazy compute-kernel for the generic dispatch_kernel path
 
@@ -550,6 +559,7 @@ class ComputePipeline:
         self._reflect_uniform_layout()
         self._reflect_mtlx_skin_layout()
         self._reflect_graph_param_layouts()
+        self._reflect_std_surface_layout()
         # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
         self._default_tex = dev.create_texture(
             type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
@@ -638,6 +648,32 @@ class ComputePipeline:
             }
             stride = int(getattr(etl, "stride", 0) or etl.size)
             self.graph_param_layouts[gf.target_name] = (layout, stride)
+
+    def _reflect_std_surface_layout(self) -> None:
+        """Reflect the MSL field offsets/size + element stride of the
+        ``StructuredBuffer<StdSurfaceParams>`` global (``stdSurfaceParams``,
+        binding 19). Stores ``std_surface_layout = {field: (offset, size)}`` and
+        ``std_surface_stride``. Same rationale as
+        :meth:`_reflect_graph_param_layouts`: ``StdSurfaceParams`` is a run of
+        ``float3``+scalar fields the host packs in scalar layout
+        (``pack_std_surface_params``), but Slang reads it MSL-padded on Metal
+        (``float3``→16 B, 16-aligned), shifting every field after ``base_color``
+        and growing the element stride past the scalar 256 B (≈400 B). The
+        renderer relocates each scalar field into this layout per slot
+        (``pack_std_surface_params_msl``). Empty/0 if the binding was
+        dead-stripped (no std_surface material in the linked program)."""
+        p = next((q for q in self.program.layout.parameters
+                  if q.name == "stdSurfaceParams"), None)
+        if p is None:
+            return
+        etl = getattr(p.type_layout, "element_type_layout", None)
+        if etl is None or not getattr(etl, "fields", None):
+            return
+        self.std_surface_layout = {
+            f.name: (int(f.offset), int(getattr(f.type_layout, "size", 0)))
+            for f in etl.fields
+        }
+        self.std_surface_stride = int(getattr(etl, "stride", 0) or etl.size)
 
     # ── Dispatch ─────────────────────────────────────────────────
 

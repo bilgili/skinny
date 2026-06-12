@@ -539,6 +539,64 @@ def pack_std_surface_params(material) -> bytes:
     )
 
 
+# StdSurfaceParams fields in struct order as (name, float-count). Names match
+# the Slang struct in mtlx_std_surface.slang and `pack_std_surface_params`'s
+# scalar (std430) packing — scalar offset of each field is the running byte sum
+# (float3 = 12 B, no 16-B promotion). Used by `pack_std_surface_params_msl` to
+# relocate the scalar record into Metal's MSL layout (where float3 → 16 B), keyed
+# by the reflected field names. Total must equal STD_SURFACE_STRIDE (256 B).
+_STD_SURFACE_FIELDS: tuple[tuple[str, int], ...] = (
+    ("base_color", 3), ("base", 1), ("diffuse_roughness", 1), ("metalness", 1),
+    ("specular", 1), ("specular_roughness", 1), ("specular_color", 3),
+    ("specular_IOR", 1), ("specular_anisotropy", 1), ("specular_rotation", 1),
+    ("transmission", 1), ("transmission_depth", 1), ("transmission_color", 3),
+    ("transmission_scatter_anisotropy", 1), ("transmission_scatter", 3),
+    ("transmission_dispersion", 1), ("transmission_extra_roughness", 1),
+    ("subsurface", 1), ("subsurface_scale", 1), ("subsurface_anisotropy", 1),
+    ("subsurface_color", 3), ("_pad0", 1), ("subsurface_radius", 3), ("sheen", 1),
+    ("sheen_color", 3), ("sheen_roughness", 1), ("coat", 1), ("coat_roughness", 1),
+    ("coat_anisotropy", 1), ("coat_rotation", 1), ("coat_IOR", 1),
+    ("coat_affect_color", 1), ("coat_affect_roughness", 1), ("_pad1", 1),
+    ("coat_color", 3), ("thin_film_thickness", 1), ("thin_film_IOR", 1),
+    ("emission", 1), ("emission_color", 3), ("_pad2", 1), ("opacity", 3),
+    ("thin_walled", 1), ("_pad3", 1), ("_pad4", 1),
+)
+assert sum(n for _, n in _STD_SURFACE_FIELDS) * 4 == STD_SURFACE_STRIDE
+
+
+def pack_std_surface_params_msl(
+    scalar: bytes, layout: dict[str, tuple[int, int]], stride: int
+) -> bytes:
+    """Relocate a scalar-packed `pack_std_surface_params` record (256 B, float3 =
+    12 B) into Metal's reflected MSL element layout for
+    `StructuredBuffer<StdSurfaceParams>` (binding 19), where Slang pads every
+    `float3` to 16 B and grows the element stride past 256 B (≈400). Each field's
+    bytes move from its scalar offset (the running sum over `_STD_SURFACE_FIELDS`)
+    to its reflected MSL offset (`layout[name]`). Same design-D3 repack the skin
+    params (`_pack_mtlx_skin_array_msl`) and per-graph SSBOs
+    (`_upload_graph_param_buffers`) get; without it every field after `base_color`
+    is misread on Metal (metalness reads specular, specular reads
+    specular_roughness, coat → 0, …).
+
+    FORWARD-LOOKING / currently inert: binding 19 is read only by
+    `preview_pass.slang` (the BXDF/std_surface visualiser), which is a Vulkan-only
+    `PreviewPipeline` — Vulkan reads the scalar layout directly, and the Metal
+    megakernel dead-strips binding 19 entirely (`loadStdSurfaceParams` is
+    uncalled), so on Metal this relocation only activates once a Metal pipeline
+    actually references `stdSurfaceParams`. It is the layout-correct path for that
+    future port, not a fix for any image today (the path-traced flat BSDF reads
+    the float4-wrapped, MSL-safe FlatMaterialParams at binding 13)."""
+    rec = bytearray(stride)
+    off = 0
+    for name, nfloats in _STD_SURFACE_FIELDS:
+        size = nfloats * 4
+        moff = layout.get(name)
+        if moff is not None:
+            rec[moff[0]:moff[0] + size] = scalar[off:off + size]
+        off += size
+    return bytes(rec)
+
+
 @dataclass
 class SkinParameters:
     """Physically-based skin parameters.
@@ -5099,16 +5157,45 @@ class Renderer:
         # Skin-typed slots get zeroed records (the shader dispatches to the
         # skin path before reading stdSurfaceParams); flat-typed slots get
         # the full standard_surface parameter set.
+        #
+        # Metal reads `StructuredBuffer<StdSurfaceParams>` MSL-padded (float3 →
+        # 16 B, element stride ≈400 B), so when a Metal pipeline references
+        # binding 19 the scalar `pack_std_surface_params` record (256 B) must be
+        # relocated into the reflected MSL layout and the buffer sized at the MSL
+        # stride — the same repack the skin params (`_pack_mtlx_skin_array_msl`)
+        # and per-graph SSBOs get (see `pack_std_surface_params_msl`). This is
+        # inert today: the only consumer of binding 19 is the Vulkan-only
+        # `preview_pass` (scalar-correct on Vulkan) and the Metal megakernel
+        # dead-strips it (`loadStdSurfaceParams` uncalled), so `std_surface_layout`
+        # is empty there and this falls through to the scalar path. It hardens the
+        # forthcoming Metal preview/raster port. Vulkan always reads scalar
+        # (stride 256, no relocation).
+        ss_layout = (getattr(self.pipeline, "std_surface_layout", None)
+                     if self.is_metal else None) or None
+        ss_stride = (getattr(self.pipeline, "std_surface_stride", 0)
+                     if ss_layout else 0) or STD_SURFACE_STRIDE
         ss_data = bytearray()
         for i, mat in enumerate(materials):
             if i < len(types) and types[i] == MATERIAL_TYPE_FLAT:
-                ss_data += pack_std_surface_params(mat)
+                rec = pack_std_surface_params(mat)
+                if ss_layout:
+                    rec = pack_std_surface_params_msl(rec, ss_layout, ss_stride)
+                ss_data += rec
             else:
-                ss_data += b"\x00" * STD_SURFACE_STRIDE
-        while len(ss_data) < self.material_capacity * STD_SURFACE_STRIDE:
-            ss_data += b"\x00" * STD_SURFACE_STRIDE
+                ss_data += b"\x00" * ss_stride
+        while len(ss_data) < self.material_capacity * ss_stride:
+            ss_data += b"\x00" * ss_stride
+        # On Metal the MSL stride outgrows the scalar-sized buffer allocated at
+        # init/realloc; grow it here. The Metal bind reads `.buffer` fresh at
+        # dispatch (Vulkan rebind helpers are no-ops on Metal), so the realloc is
+        # picked up without a descriptor rewrite. Vulkan keeps the 256 B stride,
+        # so this never grows there.
+        needed = self.material_capacity * ss_stride + 16
+        if self.std_surface_buffer.size < needed:
+            self.std_surface_buffer.destroy()
+            self.std_surface_buffer = self._gpu.StorageBuffer(self.ctx, needed)
         self.std_surface_buffer.upload_sync(
-            bytes(ss_data[: self.material_capacity * STD_SURFACE_STRIDE])
+            bytes(ss_data[: self.material_capacity * ss_stride])
         )
         # Per-graph MaterialX SSBOs (bindings GRAPH_BINDING_BASE+i). Each
         # distinct GraphFragment in `_scene_graph_fragments` owns a
