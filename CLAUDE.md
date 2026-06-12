@@ -152,6 +152,61 @@ explicit `--backend metal` on a host with no Metal device errors clearly.
 `--backend vulkan` forces the production MoltenVK-under-Vulkan path on every
 platform.
 
+## Compatibility matrix
+
+Cross-cutting view of backend × execution mode × neural × online training.
+Authoritative source for "does combo X actually run?". User-facing wording is
+in `README.md` → **Compatibility matrix**; keep the two in sync.
+
+**Backend × feature parity:**
+
+| Feature | Vulkan | Native Metal |
+|---------|--------|--------------|
+| Megakernel (`main_pass.slang`) | ✅ | ✅ |
+| Wavefront (path / BDPT / ReSTIR DI / neural) | ✅ | ✅ (`metal-wavefront-parity`, `metal-record-drain`) |
+| UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
+| Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
+| Neural-handoff `interop` | CUDA + `VK_KHR_external_memory` + timeline semaphore (`[interop]` extra) | UMA shared-storage in-place writes, no extra deps (`metal-neural-interop`) |
+
+**Neural directional proposal constraints** (independent of backend):
+
+| Constraint | Detail |
+|------------|--------|
+| Execution mode | **Wavefront only.** Megakernel strips the neural bit at runtime → analytic subset (`bsdf` / `bsdf,env` / `env`). |
+| Materials | **Flat only** (`UsdPreviewSurface` / `standard_surface` / `OpenPBR` / Python materials). Skin path untouched. |
+| Inference precision | fp32 default; fp16 (Metal mixed, fp32 fallback); fp8 e4m3 (in-shader decode, portable Vulkan/Metal/MoltenVK). |
+
+**Online-training (`--online-training`) combinations** — prereqs hard-checked
+at startup: `--execution-mode wavefront` (fixed for session) **and** a neural
+proposal active in the mixture (runtime-selectable on `skinny-gui`; loop arms
+the moment a neural proposal becomes active).
+
+| `--neural-trainer` | Vulkan host | Metal host (Apple-Silicon) |
+|--------------------|-------------|----------------------------|
+| `cpu` (numpy oracle, torch-free) | ✅ any host | ✅ recommended default on Mac |
+| `cuda` (torch) | ✅ when CUDA GPU present | n/a — raises |
+| `mlx` | reserved — raises | reserved — raises |
+| `auto` | → `cuda` if present, else numpy oracle | → numpy oracle |
+
+| `--neural-handoff` | Vulkan host | Metal host |
+|--------------------|-------------|------------|
+| `file` (NFW1 double-buffer round-trip) | ✅ any host | ✅ any host |
+| `interop` (GPU-side) | ✅ CUDA path | ✅ UMA shared-storage path |
+
+| `--train-precision` | Behavior |
+|---------------------|----------|
+| `fp32` (default) | always available |
+| `fp16` | torch autocast on CUDA; falls back to fp32 on numpy oracle / Mac |
+
+Training always bakes fp32 weights; inference precision (fp32/fp16/fp8) is
+selected independently — the handoff format is unchanged.
+
+**Supported Mac combo (no CUDA):**
+`--backend metal --execution-mode wavefront --proposals bsdf,neural
+--online-training --neural-trainer cpu --neural-handoff interop` — fully
+single-device on Apple Silicon; swap `interop` for `file` for the portable
+CPU-round-trip variant.
+
 ## Architecture
 
 ### Layers
@@ -165,7 +220,7 @@ platform.
 - Progressive accumulation — `accum_frame` increments while `_current_state_hash()` is unchanged. Any state change resets it to 0. The accumulation image is persistent across frames.
 - Mesh rebaking — triggered by source/subdivision/displacement changes. Displacement-slider changes are debounced to 300 ms to avoid per-drag bakes. Auto-subdivision reads frequency stats from the displacement and normal maps via `head_textures.compute_texture_stats`.
 
-**Metal plumbing (`metal_context.py`, `metal_compute.py`)** — `MetalContext` uses SlangPy/RHI with `DeviceType.metal`: a native Metal device, a surface from the GLFW Cocoa `NSWindow` (`WindowHandle(nswindow=…)` → slang-rhi `Surface`, no `CAMetalLayer`), and `present_clear`. `metal_compute.py` has minimal `StorageBuffer`/`StorageImage`/`ComputePipeline` wrappers (Slang→Metal compiled in-process). **Foundation phase**: a trivial compute dispatch + present are proven (entry points are `computeMain`, never `main`); it does **not** dispatch `main_pass.slang` yet — the full render port is a later phase. Pipeline params go via `set_data` byte blobs, never per-field `ShaderCursor` writes (fence-hang discipline). Capability flags are all `False` here.
+**Metal plumbing (`metal_context.py`, `metal_compute.py`)** — `MetalContext` stands up a **native** Metal device via SlangPy/RHI (`DeviceType.metal`, no MoltenVK, no PyObjC) with a surface bridged from the GLFW Cocoa `NSWindow` (`WindowHandle(nswindow=…)` → slang-rhi `Surface`, no manual `CAMetalLayer`). `metal_compute.py` exposes the **same public API** as `vk_compute` (`StorageBuffer`, `StorageImage`, `SampledImage`, `UniformBuffer`, `HostStorageBuffer`, `ComputePipeline`), so the renderer construction sites stay backend-agnostic (`self._gpu = resource_module(self.ctx)`). **Full-parity now**: the megakernel (`main_pass.slang` → `mainImage`) compiles in-process to Metal and dispatches by binding resources by name; the wavefront execution mode runs the staged path / BDPT integrators, ReSTIR DI, and the neural directional proposal (changes `metal-wavefront-parity`, `metal-neural-interop`, `metal-record-drain`). Pipeline parameters are bound as whole resources or via `set_data` byte blobs, **never per-field `ShaderCursor` writes** (a scalar cursor write around an open Metal encoder leaves the fence un-signalled). Trivial / foundation kernels name their entry `computeMain`, never `main` (Slang's Metal target reserves `main`). Metal-target shader adaptations are gated `#if defined(SKINNY_METAL)` so the Vulkan SPIR-V is byte-unchanged — see [Architecture.md § MetalContext](docs/Architecture.md#metalcontext-metal_contextpy-metal_computepy) for the bindless-pool split, 31-slot argument-table fold tricks, and the `SKINNY_METAL_NEURAL` / `SKINNY_METAL_RECORDS` build modes. Online training is fully single-device on Apple Silicon: `--neural-handoff interop` writes UMA shared-storage weight buffers in place at the frame boundary (no CUDA, no extra deps).
 
 **Vulkan plumbing (`vk_context.py`, `vk_compute.py`)** — `VulkanContext` owns instance, device, queues, swapchain, and command pool. `ComputePipeline` loads the pre-compiled SPIR-V and reflects the descriptor set layout. `StorageBuffer`, `StorageImage`, `SampledImage`, and `UniformBuffer` wrap GPU memory with synchronous upload helpers.
 

@@ -397,6 +397,67 @@ host with no Metal device fails with a clear message rather than degrading. See
 [docs/Architecture.md § Backend selection](docs/Architecture.md#backend-selection)
 and [docs/Wavefront.md § Metal wavefront backend](docs/Wavefront.md#metal-wavefront-backend).
 
+### Compatibility matrix
+
+What runs where. Authoritative cross-cutting view of backend × execution mode ×
+neural × interop.
+
+**Backend × feature parity** — `--backend metal` is at full parity with
+`--backend vulkan` for the renderer; non-renderer GPU work differs.
+
+| Feature | Vulkan | Metal (native, Apple-Silicon) |
+|---------|--------|-------------------------------|
+| Megakernel execution | ✅ | ✅ |
+| Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
+| Neural directional proposal (inference) | ✅ | ✅ |
+| MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
+| Per-lobe BSDF sampler registry | ✅ | ✅ |
+| UsdSkel GPU skinning + GPU BVH refit | ✅ | CPU fallback (deformation only) |
+| H264 encoder pool (web mode) | NVENC / QSV / AMF | VideoToolbox |
+| GPU indirect dispatch (wavefront slot counts) | ✅ | CPU readback fallback (slang-rhi gap) |
+
+**Neural directional proposal (`--proposals …,neural`)** — cross-cutting
+constraints, independent of GPU backend.
+
+| Aspect | Constraint |
+|--------|-----------|
+| Execution mode | **Wavefront only.** Megakernel strips the neural bit and falls back to its analytic subset (`bsdf` / `bsdf,env` / `env`). |
+| Materials | **Flat only** (`UsdPreviewSurface`, `standard_surface`, `OpenPBR`, Python materials). Skin path is untouched. |
+| Backends | Vulkan ✅, native Metal ✅ — same Slang sources, same MIS pdf accounting. |
+| Inference dtype | fp32 (default), fp16 (mixed on Metal w/ graceful fp32 fallback), fp8 e4m3 (in-shader decode, portable across Vulkan / Metal / MoltenVK). |
+
+**Online training (`--online-training`)** — combinations of
+`--neural-trainer` × `--neural-handoff` × host. Loop requires
+`--execution-mode wavefront` **and** a neural proposal in the mixture; both
+prereqs hard-checked at startup or at the moment a neural proposal is selected
+in the GUI.
+
+| Trainer | Vulkan host | Metal host (Apple-Silicon) |
+|---------|-------------|----------------------------|
+| `cpu` (torch-free numpy oracle) | ✅ on any host | ✅ — recommended default on Mac |
+| `cuda` (torch) | ✅ when a CUDA GPU is present | n/a (raises) |
+| `mlx` | reserved — raises clear error | reserved — raises clear error |
+| `auto` | → `cuda` if present, else numpy oracle | → numpy oracle |
+
+| Handoff | Vulkan host | Metal host |
+|---------|-------------|------------|
+| `file` (NFW1 double-buffer) | ✅ any host | ✅ any host — CPU round-trip, portable |
+| `interop` (GPU-side, no file) | ✅ requires CUDA + `VK_KHR_external_memory` + timeline semaphore (`pip install -e ".[interop]"`) | ✅ unified-memory shared-storage in-place writes, no extra deps |
+
+Train precision is independent of inference precision (training always bakes
+fp32 weights; the handoff format is unchanged).
+
+| `--train-precision` | Behavior |
+|---------------------|----------|
+| `fp32` (default) | always available, every backend / trainer |
+| `fp16` | torch autocast on CUDA; **falls back to fp32** on numpy oracle and on Mac |
+
+**Supported Mac (no CUDA) online-training combo:**
+`--execution-mode wavefront --proposals bsdf,neural --online-training
+--neural-trainer cpu --neural-handoff {file|interop}` — fully single-device
+on Apple Silicon when `interop` is selected (UMA write-in-place); `file`
+works identically with a CPU round-trip.
+
 ### Sampling
 
 Two integrators selectable at runtime:
