@@ -1804,11 +1804,16 @@ class Renderer:
         # pass (and its ReSTIR sub-pass) — the seam's pass-structural contract.
         reuse_mode = int(self._active_reuse().reuse_mode)
         _rcfg = getattr(self, "_restir_config", None)
+        # Record mode is part of the key so arming/disarming the wavefront
+        # record drain rebuilds the pass with SKINNY_METAL_RECORDS on/off
+        # (change metal-record-drain) — mirroring the Vulkan builder's wf_record
+        # key entry.
+        wf_record = bool(getattr(self, "_wf_record_active", False))
         key = (self.width, self.height, has_nonflat,
                self._graph_set_signature(), reuse_mode,
                int(self.restir_regime_index) if reuse_mode == 1 else None,
                tuple(sorted(_rcfg.items())) if _rcfg else None,
-               self._neural_active())
+               self._neural_active(), wf_record)
         if self._wavefront_path_pass is not None and self._wf_path_pass_dims == key:
             # Live ReSTIR tuning: refresh the config blob each frame so slider
             # changes (mLight/mBsdf/k/radius/mCap/biased) take effect without a
@@ -1829,9 +1834,11 @@ class Renderer:
         self._wavefront_path_pass = MetalWavefrontPathPass(
             self.ctx, self.shader_dir, stream_size, num_pixels,
             build_catchall=has_nonflat,
+            record_capacity=(stream_size if wf_record else 0),
             graph_fragments=list(self._scene_graph_fragments),
             neural_config=self._effective_neural_config(),
             neural_active=self._neural_active(),
+            records_active=wf_record,
         )
         # ReSTIR DI reuse plugin (phase 5): the pass owns the persistent
         # reservoir/G-buffer StorageBuffers and binds the path pass's
@@ -7602,14 +7609,22 @@ class Renderer:
         # wavefront render stays byte-identical (recordMode 0) and the drain
         # dispatches `mainImageRecord` as before.
         self._wf_record_active = (self._resolve_record_source() == "wavefront")
-        if self._wf_record_active and self.descriptor_sets is not None:
+        # Arm the wavefront drain on either backend (change metal-record-drain):
+        # Vulkan rebinds descriptor 36; Metal allocates the header+records drain
+        # target and routes it through the bind-by-name dict. Either way the
+        # records build flavor lands via the pass rebuild key (wf_record), and
+        # the accumulation restarts cleanly under the new pipeline.
+        if self._wf_record_active and (
+                self.descriptor_sets is not None or self.is_metal):
             self._ensure_wf_record_drain()
+        self._last_state_hash = None
         self._start_trainer_thread()
         return self._neural_publisher
 
     def disable_online_training(self) -> None:
         self._online_training = False
         self._wf_record_active = False
+        self._last_state_hash = None  # records-off pass rebuild → restart accum
         self._stop_trainer_thread()
 
     def _start_trainer_thread(self) -> None:
@@ -7684,7 +7699,10 @@ class Renderer:
             return 0
         # The drain reads GPU records, so the scene must be built; skip the frame
         # while it isn't (USD streams in async, a rebake transiently nulls these).
-        if self._scene_bindings is None or self.descriptor_sets is None:
+        # descriptor_sets is Vulkan-only; the Metal drain binds by name
+        # (change metal-record-drain).
+        if self._scene_bindings is None or (
+                self.descriptor_sets is None and not self.is_metal):
             return 0
         return self.online_drain()
 
@@ -9183,11 +9201,18 @@ class Renderer:
         return "megakernel"
 
     def _ensure_wf_record_drain(self, max_records_per_frame: int | None = None) -> int:
-        """Allocate + bind the persistent wavefront-native drain target (binding
-        36) and seed the counter (binding 37) to ``[0, capacity]``. Idempotent:
-        only (re)allocates when the capacity grows. Returns the capacity (in
-        records). The wavefront render's `emitRecord` appends here directly; the
-        drain reads it back without dispatching the megakernel."""
+        """Allocate + bind the persistent wavefront-native drain target.
+        Idempotent: only (re)allocates when the capacity grows. Returns the
+        capacity (in records). The wavefront render's `emitRecord` appends here
+        directly; the drain reads it back without dispatching the megakernel.
+
+        Backend layouts (change metal-record-drain): on Vulkan the target is
+        binding 36 (records from byte 0) with the counter in binding 37,
+        ``[count, capacity]``. On Metal the records build merges the counter
+        into the record buffer (slot cap): a 64-byte header — capacity (uint at
+        byte 0), atomic count (uint at byte 60) — with packed 64-byte records
+        from byte 64; the buffer replaces ``self.record_buffer`` so
+        ``_build_metal_binds`` routes it to the ``recordBuf`` global by name."""
         import struct as _struct
 
         from skinny.sampling.path_records import RECORD_STRIDE
@@ -9196,6 +9221,22 @@ class Renderer:
         capacity = int(self.width) * int(self.height) * rec_max_bounces
         cap_limit = (1 << 20) if max_records_per_frame is None else int(max_records_per_frame)
         capacity = max(1, min(capacity, cap_limit))
+        if self.is_metal:
+            size = 64 + capacity * RECORD_STRIDE   # header + records
+            if self._drain_buffer is None or self._drain_buffer.size < size:
+                if self._drain_buffer is not None:
+                    self._drain_buffer.destroy()
+                self._drain_buffer = self._gpu.StorageBuffer(self.ctx, size)
+                header = bytearray(64)
+                header[0:4] = _struct.pack("<I", capacity)   # capacity @ 0
+                self._drain_buffer.upload_sync(bytes(header))  # count @ 60 = 0
+                # Route through the bind-by-name dict: every dispatch binds
+                # `recordBuf` from self.record_buffer.
+                if self.record_buffer is not None:
+                    self.record_buffer.destroy()
+                self.record_buffer = self._drain_buffer
+            self._wf_record_capacity = capacity
+            return capacity
         if (self._drain_buffer is None
                 or self._drain_buffer.size < capacity * RECORD_STRIDE):
             if self._drain_buffer is not None:
@@ -9207,14 +9248,24 @@ class Renderer:
         return capacity
 
     def _drain_wavefront_records(self, replay, max_records_per_frame: int | None) -> int:
-        """Drain the records the wavefront render already produced into bindings
-        36/37 — no megakernel dispatch. Reads the counter, appends the records to
-        ``replay``, then resets the counter for the next frame's render."""
+        """Drain the records the wavefront render already produced — no
+        megakernel dispatch. Reads the counter, appends the records to
+        ``replay``, then resets the counter for the next frame's render. The
+        Metal branch reads the merged header+records layout (see
+        ``_ensure_wf_record_drain``) and resets only the 4-byte count word."""
         import struct as _struct
 
         from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
 
         cap = self._ensure_wf_record_drain(max_records_per_frame)
+        if self.is_metal:
+            header = self._drain_buffer.download_sync(64)
+            count = min(_struct.unpack("<I", header[60:64])[0], cap)
+            if count:
+                raw = self._drain_buffer.download_sync(64 + count * RECORD_STRIDE)[64:]
+                replay.add(records_from_buffer(raw, count))
+            self._drain_buffer.upload_range(_struct.pack("<I", 0), 60)
+            return count
         count = _struct.unpack("<I", self.record_counter.download_sync(4))[0]
         count = min(count, cap)
         if count:
@@ -9252,16 +9303,24 @@ class Renderer:
 
         from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
 
-        if self._scene_bindings is None or self.descriptor_sets is None:
+        if self._scene_bindings is None or (
+                self.descriptor_sets is None and not self.is_metal):
             raise RuntimeError(
                 "drain_path_records_to_replay: scene not built yet (pump update())")
 
         # Wavefront-native source: the normal wavefront render already appended
-        # this frame's records to bindings 36/37 (FrameConstants.recordMode on),
-        # so just read them back — no megakernel `mainImageRecord` dispatch (the
-        # 2 s-TDR / ~400 s-compile seam this change removes).
+        # this frame's records (FrameConstants.recordMode on), so just read them
+        # back — no megakernel `mainImageRecord` dispatch (the 2 s-TDR /
+        # ~400 s-compile seam this change removes). Works on both backends
+        # (change metal-record-drain).
         if self._resolve_record_source() == "wavefront":
             return self._drain_wavefront_records(replay, max_records_per_frame)
+
+        if self.is_metal:
+            raise RuntimeError(
+                "the megakernel record source is unavailable on the Metal "
+                "backend — use the wavefront path integrator (record source "
+                "'wavefront') for online training there")
 
         rec_max_bounces = 6  # lockstep with path_record.slang REC_MAX_BOUNCES
         capacity = int(self.width) * int(self.height) * rec_max_bounces

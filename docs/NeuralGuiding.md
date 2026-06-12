@@ -134,7 +134,10 @@ lifetimes:
   becomes active. On `skinny` GLFW the proposal is the `--proposals bsdf,neural`
   / `--proposals neural` flag (runtime-cycleable too).
 
-**Mac recipe** (no CUDA — the numpy reference oracle + the file handoff):
+**Mac recipe** (no CUDA — the numpy reference oracle; on the native Metal
+backend the whole loop runs on one device: wavefront records drain natively and
+`--neural-handoff interop` publishes weights through unified memory, change
+`metal-record-drain` + `metal-neural-interop`):
 
 ```bash
 # skinny-gui: launch armed, then select a neural proposal in the combobox.
@@ -730,10 +733,15 @@ identity-ish map and stays unbiased.
   (`metal_wavefront.MetalNeuralProposalPass` — fp32 on current slang-rhi, whose
   Metal fp16 probe under-reports; no exported-handle external memory, but the
   online weight handoff has its UMA shared-storage interop, change
-  `metal-neural-interop`). The wavefront **record drain** (online training)
-  remains Vulkan-only — its record buffers are compiled out under the Metal
-  slot cap (`wf_records.slang` stubs) — so a fully-on-Metal online loop is
-  still gated on the drain, not on the handoff.
+  `metal-neural-interop`). The wavefront **record drain** also runs on both
+  backends (change `metal-record-drain`): arming online training rebuilds the
+  Metal path pass with `SKINNY_METAL_RECORDS=1`, which un-stubs the
+  `wf_records.slang` emitters and fits the 31-slot argument table by compiling
+  out the splat/gizmo resolve globals (no gizmo overlay on training frames)
+  and folding both counters into their data buffers — so the **fully-on-Metal
+  online loop** (drain → trainer → UMA interop handoff → frame-end swap) works
+  end to end. The megakernel record *source* stays Vulkan-only; on Metal the
+  drain always reads the wavefront-native stream.
 - **Flat/python materials only.** Skin / MaterialX-graph lanes set
   `neuralValid = false` and pass through with `{bsdf, env}`.
 - **Frozen / offline.** Weights are trained per scene in `spline_flow` and loaded

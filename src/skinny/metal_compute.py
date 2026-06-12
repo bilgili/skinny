@@ -243,7 +243,19 @@ class StorageBuffer:
                 f"> buffer {self.size}B"
             )
         self._shadow[int(dst_offset):end] = bytes(data)
-        self._flush()
+        # Partial GPU write via the encoder upload — a full-shadow
+        # copy_from_numpy would re-upload the whole buffer per call, which the
+        # per-frame record-drain counter reset cannot afford on a multi-MB
+        # drain target (change metal-record-drain). Falls back to the full
+        # flush on builds without the entry point.
+        try:
+            enc = self.ctx.device.create_command_encoder()
+            enc.upload_buffer_data(
+                self.buffer, int(dst_offset),
+                np.frombuffer(bytes(data), dtype=np.uint8).copy())
+            self.ctx.device.submit_command_buffer(enc.finish())
+        except Exception:  # noqa: BLE001 — older slangpy: full flush still correct
+            self._flush()
 
     def download_sync(self, byte_count: int) -> bytes:
         self.ctx.device.wait_for_idle()

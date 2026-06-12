@@ -23,8 +23,11 @@ byte-identical to the render before this capability.
 #### Scenario: Metal and Vulkan record streams are equivalent
 - **WHEN** the same scene, proposal set, and sample budget are recorded once on
   the Metal wavefront path and once on the Vulkan wavefront path
-- **THEN** the two record sets are equivalent — the same vertices and
-  contributions, independent of emission order
+- **THEN** the two record sets are equivalent independent of emission order —
+  identical record counts per bounce depth and matching value distributions
+  within cross-backend float tolerance (MSL vs SPIR-V contraction drifts
+  individual values in the ~1e-4 range, the same reason shaded wavefront
+  parity is perceptual rather than bit-exact)
 
 #### Scenario: Records-off Metal render is unchanged
 - **WHEN** the Metal wavefront render runs without online training

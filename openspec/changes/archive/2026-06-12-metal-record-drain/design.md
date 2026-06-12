@@ -75,17 +75,27 @@ it, restoring the bit-identical default render.
 slots + per-lane stack register pressure on every wavefront render, and breaks
 the "default render unchanged" requirement headroom for future bindings.
 
-**D2 — Slot budget: keep the existing compile-outs, add an explicit reflected
-slot check.**
-Under `SKINNY_METAL && SKINNY_METAL_NEURAL && SKINNY_METAL_RECORDS`:
-`toolBuffer` stays compiled out (already dead in every wavefront kernel),
-36/37 come back, 33/34/35 stay. Estimated heaviest-kernel usage ≈29 of 31. If
-a kernel still exceeds the cap, compile out further wavefront-dead globals
-(`gizmoSegments` and `lightSplatBuffer` are dead in the path pass — candidates
-behind the same define) rather than touching live bindings. After session
-build, reflect each entry point's buffer count and raise a `RuntimeError`
-naming the kernel and its count when >31 — the empirical-probe discipline the
-backend already uses for indirect dispatch.
+**D2 — Slot budget: free 2, fold 2 (revised after the task-1 probe).**
+The probe showed the neural build uses **exactly 31** buffer slots (29 buffer
+resources + 2 uniform blocks), so records need 4 slots, not 2, and
+`gizmoSegments`/`lightSplatBuffer` turned out to be LIVE in the resolve kernel
+(`wf_display.slang`), not dead. Actual mechanism under
+`SKINNY_METAL && SKINNY_METAL_RECORDS`:
+- **Free 2**: compile out `lightSplatBuffer` (records are path-integrator-only,
+  where the splat composite is identically zero) and `gizmoSegments` (no gizmo
+  overlay on training frames — documented), with matching guards on their reads
+  in `wf_display.slang`.
+- **Fold 2**: the per-lane count buffer merges into the stack (element 0 of each
+  lane's stride-(REC_MAX_BOUNCES+1) region is a header whose `depth` holds the
+  count), and `recordCounter` merges into `recordBuf`, which becomes a
+  `RWByteAddressBuffer` — header in bytes [0,64) (capacity @0, atomic count
+  @60), records from byte 64 as manual packed-64 B stores. The byte-address
+  form also sidesteps MSL float3 padding (a typed `PathRecord` buffer would
+  reflect a 96 B stride ≠ the host reader's packed 64 B), so the drained bytes
+  are byte-for-byte the Vulkan stream and `records_from_buffer` is reused
+  unchanged.
+Pipeline-creation failures are wrapped with the kernel name + global count so a
+future overflow is actionable, not an opaque `SLANG_FAIL`.
 *Alternative:* Metal argument buffers (tier-2) to escape the cap. Rejected:
 slang-rhi 0.42 does not expose them; the cap workaround is established
 project practice.
@@ -131,6 +141,9 @@ and the converged mixture estimate stays unbiased vs `{bsdf}`.
   device memory buffers (`wfRecStack`/`wfRecCount`, already allocated); cost
   is bandwidth on training frames only — records are off outside training
   (D1). Measure path-pass frame time records-on vs records-off and note it.
+  **Measured (task 3.5, Apple M5 Pro, 128² Cornell):** 7.6–8.0 ms/frame
+  records-off vs 8.1 ms records-on ≈ 0.35 ms (~4.6%) overhead, within
+  run-to-run variance.
 - [Drain readback stalls the render thread each frame] → same cost structure
   the Vulkan drain already accepts (counter read + record bytes); on UMA the
   copy is cheap. The shared-storage zero-copy drain is the named follow-up if

@@ -377,7 +377,9 @@ live in a **per-lane VRAM vertex stack** instead of registers:
   *separate* set-1 buffers (bindings 9/10) — **not** inside `WavefrontPathState`,
   which is copied by value in every kernel (inlining a 6-deep stack there would
   spill to scratch and ~8× its bandwidth in every kernel). Full-size only while
-  recording; 1-element dummies otherwise.
+  recording; 1-element dummies otherwise. On the Metal records build the
+  per-lane count is folded into the stack as a header element (slot cap — see
+  the [Metal wavefront backend](#metal-wavefront-backend) records bullet).
 - **Push** (`wfPushRecord`, in `wfFinishShade`): on a guideable bounce
   (flat/python, reflective, sampled dir in the HitInfo-normal upper hemisphere)
   snapshot `(pos, N, wo, wiLocal, L_k, beta_in, depth)` **before** the throughput
@@ -605,9 +607,26 @@ of truth both backends drive. `vk_wavefront.py` supplies the Vulkan recorder
   program-wide in declaration order — the un-stubbed program fits because the
   three buffer globals dead in every wavefront kernel (`toolBuffer`,
   `recordBuf`, `recordCounter`) are compiled out under that define. Weights
-  upload via `set_data` (no external-memory interop); fp32 on current
-  slang-rhi (the Metal fp16 probe under-reports). The wavefront **record
-  drain** (online training) stays Vulkan-only (`wf_records.slang` stubs).
+  upload via `set_data`, or in place through the UMA shared-storage interop
+  publisher under `--neural-handoff interop` (change `metal-neural-interop`);
+  fp32 on current slang-rhi (the Metal fp16 probe under-reports).
+- **Records build (`SKINNY_METAL_RECORDS=1`, change `metal-record-drain`)** —
+  arming the wavefront record drain (online training) rebuilds the path pass
+  with the record emitters un-stubbed. The neural build already sits exactly
+  at the 31-slot cap, so the records flavor frees two slots by compiling out
+  the two resolve globals inert on a training render (`lightSplatBuffer` —
+  records are path-only, where the splat is zero — and `gizmoSegments` — no
+  gizmo overlay on training frames) and folds both counters into their data
+  buffers: the per-lane count lives in a stack header element
+  (stride `REC_MAX_BOUNCES + 1` per lane), and `recordBuf` becomes a
+  `RWByteAddressBuffer` whose 64-byte header carries capacity (byte 0) and the
+  atomic count (byte 60), with packed 64-byte records from byte 64 — the
+  byte-address form also keeps the drained stream byte-for-byte the Vulkan
+  layout despite MSL's float3 padding. Records-off renders are bit-identical
+  through an arm → disarm round-trip; records-on costs ≈0.35 ms (~4.6 %) per
+  128² Cornell frame. The megakernel record *source* stays Vulkan-only; the
+  Metal drain always reads the wavefront-native stream
+  (`tests/test_metal_record_drain_gpu.py`).
 - **One `MetalFrameEncoder` per frame** — every stage encodes into a single
   command encoder with a global compute barrier between stages (no per-stage
   `wait_for_idle`), submitted once.

@@ -330,6 +330,14 @@ Vulkan backend: exact agreement on the deterministic structural outputs and
 agreement within the established perceptual tolerance on the converged shaded
 color, for the same scene, sample budget, and configuration.
 
+The online neural-training loop SHALL run fully on the Metal backend: the
+wavefront path integrator emits training records the live drain reads each frame
+(capability `wavefront-native-path-records`), the trainer consumes them, and the
+trained weights publish back through the unified-memory interop handoff
+(capability `neural-online-training`) with the frame-end swap incrementing the
+network version — no Vulkan device, no megakernel record dispatch, and no file
+round-trip required anywhere in the loop.
+
 #### Scenario: Indirect dispatch drives the per-material shade
 
 - **WHEN** the wavefront bounce loop runs on the Metal backend with a constructible
@@ -352,4 +360,14 @@ color, for the same scene, sample budget, and configuration.
   Vulkan backend at an equal sample budget
 - **THEN** the structural outputs are exact across backends and the converged color
   agrees within the established perceptual tolerance
+
+#### Scenario: Fully-on-Metal online training loop
+
+- **WHEN** online training is enabled on the native Metal backend with the
+  wavefront path integrator, a neural proposal active, and
+  `--neural-handoff interop`
+- **THEN** path records drain into the replay buffer each frame, the trainer
+  publishes updated weights through the shared-storage handoff, the network
+  version increments at frame-end swaps, and the converged mixture estimate
+  remains unbiased — with no Vulkan device constructed and no NFW1 file written
 
