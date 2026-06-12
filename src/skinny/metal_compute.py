@@ -725,3 +725,89 @@ class ComputePipeline:
         self.pipeline = None
         self._default_tex = None
         self._kernel = None
+
+
+class MetalFrameEncoder:
+    """Single-frame, multi-pass compute command encoder (design D3) — the Metal
+    sibling of recording the whole wavefront bounce loop into one Vulkan command
+    buffer.
+
+    Accumulates a sequence of compute dispatches into **one** slang-rhi command
+    encoder, inserting a global compute-memory barrier between stages (so stage
+    N+1 observes stage N's buffer writes — the analogue of the Vulkan
+    ``COMPUTE→COMPUTE`` pipeline barrier), and submits + drains **once** at
+    :meth:`submit`. This replaces the per-stage ``wait_for_idle`` of the
+    single-shot :meth:`ComputePipeline.dispatch_kernel` so a 6-bounce loop is not
+    serialized on the GPU idle each stage.
+
+    Parameter binding stays ``set_data``-only for the uniform block (D4 fence-hang
+    discipline); resources bind by name on each stage's root object. The Metal
+    wavefront recorder (phase 3) drives the bounce loop through this surface;
+    :meth:`flush` lets it submit + drain mid-frame when the indirect CPU-readback
+    fallback (task 1.3) must read a GPU-written args buffer back to the host.
+    """
+
+    def __init__(self, ctx) -> None:
+        self.ctx = ctx
+        self._spy = ctx._spy
+        self._enc = ctx.device.create_command_encoder()
+        self._submitted = False
+
+    def _root(self, pipe: ComputePipeline, bindings, uniform_blob):
+        ro = self.ctx.device.create_root_shader_object(pipe.program)
+        cur = self._spy.ShaderCursor(ro)
+        if uniform_blob is not None:
+            cur["fc"].set_data(
+                np.frombuffer(bytes(uniform_blob), dtype=np.uint8).copy())
+        for name, res in (bindings or {}).items():
+            if res is None or name not in pipe.global_names:
+                continue
+            cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        return ro
+
+    def dispatch(self, pipe: ComputePipeline, groups, *, bindings=None,
+                 uniform_blob=None) -> None:
+        """Encode a direct dispatch of ``pipe`` over the ``(x, y, z)`` thread-group
+        count ``groups`` into the shared encoder (no submit)."""
+        ro = self._root(pipe, bindings, uniform_blob)
+        cpass = self._enc.begin_compute_pass()
+        cpass.bind_pipeline(pipe.pipeline, ro)
+        cpass.dispatch_compute(self._spy.math.uint3(*(int(g) for g in groups)))
+        cpass.end()
+
+    def dispatch_indirect(self, pipe: ComputePipeline, args_buffer, offset: int = 0,
+                          *, bindings=None, uniform_blob=None) -> None:
+        """Encode a native indirect dispatch of ``pipe`` into the shared encoder.
+
+        Native path only — the CPU-readback fallback needs a host round-trip on the
+        args buffer, which breaks single-encoder accumulation; the recorder reads
+        the count via :meth:`flush` and falls back to :meth:`dispatch` itself when
+        ``ctx.supports_indirect_dispatch`` is false (task 1.3)."""
+        ro = self._root(pipe, bindings, uniform_blob)
+        native_args = getattr(args_buffer, "buffer", args_buffer)
+        cpass = self._enc.begin_compute_pass()
+        cpass.bind_pipeline(pipe.pipeline, ro)
+        cpass.dispatch_compute_indirect(
+            self._spy.BufferOffsetPair(native_args, int(offset)))
+        cpass.end()
+
+    def barrier(self) -> None:
+        """Global compute-memory barrier between stages (design D3) — makes every
+        prior stage's writes visible to subsequent reads in this encoder."""
+        self._enc.global_barrier()
+
+    def flush(self) -> None:
+        """Submit + drain the accumulated work and reopen a fresh encoder, without
+        ending the frame. Used so a GPU-written args buffer is visible to a host
+        readback mid-frame (the indirect fallback)."""
+        self.ctx.device.submit_command_buffer(self._enc.finish())
+        self.ctx.device.wait_for_idle()
+        self._enc = self.ctx.device.create_command_encoder()
+
+    def submit(self) -> None:
+        """Submit the whole frame's encoder once and drain the device."""
+        if self._submitted:
+            return
+        self.ctx.device.submit_command_buffer(self._enc.finish())
+        self.ctx.device.wait_for_idle()
+        self._submitted = True

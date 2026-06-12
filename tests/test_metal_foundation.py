@@ -190,6 +190,42 @@ def test_metal_capability_flags_reflect_device():
         ctx.destroy()
 
 
+# ── 1.4 single-frame multi-pass encoder + barrier ────────────────────
+
+def test_metal_frame_encoder_multipass_barrier(shader_dir):
+    """Two compute stages encoded into ONE command encoder with a global barrier
+    between them and a SINGLE submit: stage 1 writes ``tid``, stage 2 adds 1000.
+    The result is ``arange(N) + 1000`` iff stage 2 observed stage 1's writes —
+    proving the multi-pass encoder + barrier replace per-stage ``wait_for_idle``."""
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    from skinny.metal_compute import ComputePipeline, MetalFrameEncoder, StorageBuffer
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext(window=None, width=64, height=64)
+    buf = write = bias = None
+    try:
+        buf = StorageBuffer(ctx, _N * 4)
+        write = ComputePipeline(ctx, shader_dir, _MODULE, _ENTRY)        # computeMain
+        bias = ComputePipeline(ctx, shader_dir, _MODULE, "addBias")
+        groups = (_N // 64, 1, 1)  # 64 threads/group
+
+        enc = MetalFrameEncoder(ctx)
+        enc.dispatch(write, groups, bindings={"result": buf})
+        enc.barrier()
+        enc.dispatch(bias, groups, bindings={"result": buf})
+        enc.submit()
+
+        out = np.frombuffer(buf.download_sync(_N * 4), dtype=np.uint32)[:_N]
+        np.testing.assert_array_equal(out, np.arange(_N, dtype=np.uint32) + 1000)
+    finally:
+        for obj in (write, bias, buf):
+            if obj is not None:
+                obj.destroy()
+        ctx.destroy()
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():
