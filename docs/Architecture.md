@@ -768,11 +768,17 @@ pipelines, queue buffers sized from the **reflected MSL strides**, one
 slot-count-readback fallback while slang-rhi's Metal indirect dispatch is a
 no-op — selected by the logged `supports_indirect_dispatch` probe). Metal caps
 a kernel's argument table at **31 buffer slots**, assigned program-wide in
-declaration order: the wavefront build compiles out the record-drain buffers
-(`wf_records.slang` stubs), and the neural-active build (`SKINNY_METAL_NEURAL=1`)
+declaration order: the default wavefront build stubs the record emitters
+(`wf_records.slang`), and the neural-active build (`SKINNY_METAL_NEURAL=1`)
 additionally compiles out `toolBuffer`/`recordBuf`/`recordCounter` (dead in
 every wavefront kernel) to fit the un-stubbed `neuralWeights/Biases/Layers`.
-See [Wavefront.md → Metal wavefront backend](Wavefront.md#metal-wavefront-backend).
+The records build (`SKINNY_METAL_RECORDS=1`, change `metal-record-drain` —
+armed only while online training runs) un-stubs the emitters and re-fits the
+cap by compiling out `lightSplatBuffer`/`gizmoSegments` (inert on a training
+render) and folding both record counters into their data buffers (the per-lane
+count into a stack header element; `recordCounter` into a 64-byte header of a
+byte-address `recordBuf`). See
+[Wavefront.md → Metal wavefront backend](Wavefront.md#metal-wavefront-backend).
 
 The capability flags `supports_external_memory` / `supports_external_semaphore`
 report `false` on Metal — there are no exported memory or semaphore handles. The
@@ -938,7 +944,13 @@ source-selectable (`_record_source`: `auto` → wavefront for the wavefront path
 integrator, else the megakernel dispatch): the wavefront source needs **no**
 megakernel dispatch — removing the ~400 s-compile / 2 s-TDR seam that loses the
 device on NVIDIA/Windows — and reads the buffers the render already filled via
-the shared `records_from_buffer` reader. See
+the shared `records_from_buffer` reader. The drain runs on both backends
+(change `metal-record-drain`): Vulkan rebinds descriptor 36 to the drain
+target with the `[count, capacity]` counter in 37; Metal routes a merged
+header+records byte-address buffer through the bind-by-name dict (capacity at
+byte 0, atomic count at byte 60, packed 64-byte records from byte 64 — the
+same record bytes as Vulkan), resetting only the 4-byte count word per frame.
+The megakernel record source is refused on Metal with a clear error. See
 [Online neural training](#online-neural-training).
 
 Light uniforms (part of UBO, not separate bindings):
@@ -997,11 +1009,11 @@ the frame-end weight swap; training itself happens off the render path.
    `PathRecord`s the producer appended to bindings 36 (append) / 37 (counter)
    into a recency-weighted `ReplayBuffer`
    (`sampling/neural_replay.py`), via the shared reader `records_from_buffer`
-   (`sampling/path_records.py`). The record producer is the `mainImageRecord`
-   **megakernel**, which device-losts under the 2 s TDR watchdog on
-   NVIDIA/Windows, so the live GPU drain is an NVIDIA-box seam (a follow-up
-   proposal `wavefront-native-path-records` moves emission onto the wavefront
-   path to remove it).
+   (`sampling/path_records.py`). The default record producer is the wavefront
+   path integrator itself (`wavefront-native-path-records` — no megakernel
+   dispatch, on either GPU backend; change `metal-record-drain` for the Metal
+   leg); the `mainImageRecord` **megakernel** stays an explicitly-selected
+   source on Vulkan hardware without the 2 s-TDR watchdog limitation.
 2. **Train** — `Renderer.online_train_and_publish()` runs one warm-started cycle
    of `NeuralTrainer.train_cycle` (`sampling/neural_trainer.py`):
    contribution-weighted MLE on the replay batch, reusing `spline_flow`'s

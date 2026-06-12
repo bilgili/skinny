@@ -492,7 +492,11 @@ skinny --execution-mode wavefront --proposals bsdf,neural \
 
 Training runs on a dedicated background thread, so a slow cycle (the numpy
 oracle is ~seconds) never stalls the viewport; the renderer drains GPU path
-records each frame and the frame-end swap promotes new weights. See
+records each frame and the frame-end swap promotes new weights. The whole loop
+runs on either GPU backend — on the native Metal backend the wavefront render
+emits the records natively (no megakernel) and `--neural-handoff interop`
+publishes weights through unified memory, so online training is fully
+single-device on Apple Silicon. See
 [docs/NeuralGuiding.md § Running online training](docs/NeuralGuiding.md#running-online-training).
 
 ### Furnace Mode

@@ -126,7 +126,23 @@ class _EntryPipeline:
         self.entry = entry
         self.program = session.link_program(
             [module], [module.entry_point(entry)])
-        self.pipeline = ctx.device.create_compute_pipeline(program=self.program)
+        try:
+            self.pipeline = ctx.device.create_compute_pipeline(program=self.program)
+        except Exception as exc:
+            # Metal caps a kernel's buffer argument table at 31 slots; an
+            # overflow surfaces here as an opaque SLANG_FAIL from pipeline
+            # creation. Name the kernel and the program's global count so the
+            # failure is actionable (change metal-record-drain, design D2):
+            # the fix is compiling wavefront-dead globals out of this build
+            # flavor (see bindings.slang / path_record_common.slang gates).
+            n_globals = len(list(self.program.layout.parameters))
+            raise RuntimeError(
+                f"Metal compute pipeline for wavefront kernel {entry!r} failed "
+                f"to build ({exc}). The program declares {n_globals} globals — "
+                f"if this flavor exceeds Metal's 31-buffer-slot argument table, "
+                f"compile out wavefront-dead buffer globals for it "
+                f"(see the SKINNY_METAL_RECORDS gates, change metal-record-drain)."
+            ) from exc
         self.global_names = {p.name for p in self.program.layout.parameters}
 
 
@@ -426,7 +442,7 @@ class MetalWavefrontPathPass:
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  build_catchall: bool = True, record_capacity: int = 0,
                  graph_fragments=None, neural_config=None,
-                 neural_active: bool = False) -> None:
+                 neural_active: bool = False, records_active: bool = False) -> None:
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
         self.stream_size = int(stream_size)
@@ -437,6 +453,7 @@ class MetalWavefrontPathPass:
         self._restir = None  # reuse plugin seam (phase 5)
         self._neural = None  # neural pre-pass seam (phase 6)
         self.neural_active = bool(neural_active)
+        self.records_active = bool(records_active)
 
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
@@ -450,9 +467,15 @@ class MetalWavefrontPathPass:
         # inverse pdf in the shade kernels (phase 6). Compiled in only when the
         # neural proposal is selected, so the default build stays under Metal's
         # 31-buffer-slot argument-table cap with the same headroom as phase 3.
+        # SKINNY_METAL_RECORDS (change metal-record-drain) un-stubs the
+        # wf_records emitters + the binding-36/37 record append, compiled in
+        # only while online training is armed — the default render stays
+        # byte-identical and keeps its slot headroom.
         defines = _defines_dict(neural_config.slang_defines())
         if self.neural_active:
             defines["SKINNY_METAL_NEURAL"] = "1"
+        if self.records_active:
+            defines["SKINNY_METAL_RECORDS"] = "1"
         session = _metal_slang_session(ctx, self.shader_dir, defines)
 
         src_path = self.shader_dir / "wavefront" / "wavefront_path.slang"
@@ -494,7 +517,11 @@ class MetalWavefrontPathPass:
         # memory is otherwise uninitialised and resolve/flat-shade read
         # wfState/wfNeural before the first full write cycle.
         n = self.stream_size
-        rec_stack_elems = max(1, self.record_capacity * self.MAX_BOUNCES)
+        # Records build: element 0 of each lane's region is the count header
+        # (wf_records.slang WF_REC_LANE = REC_MAX_BOUNCES + 1 — the per-lane
+        # count buffer is folded into the stack to save an argument slot).
+        rec_lane = self.MAX_BOUNCES + (1 if self.records_active else 0)
+        rec_stack_elems = max(1, self.record_capacity * rec_lane)
         rec_count_elems = max(1, self.record_capacity)
         self.buffers: dict[str, StorageBuffer] = {
             "state": StorageBuffer(ctx, n * self.state_stride),

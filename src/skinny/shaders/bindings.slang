@@ -47,8 +47,18 @@ uniform FrameConstants fc;
 [[vk::binding(19)]] StructuredBuffer<StdSurfaceParams> stdSurfaceParams;
 // BDPT light-tracer splat buffer: per-pixel R, G, B as fixed-point uint
 // (Q22.10). Indexed as [pixel.y * width * 3 + pixel.x * 3 + channel].
+// Metal records-build slot-cap gate (change metal-record-drain): the
+// neural wavefront program sits exactly at Metal's 31-buffer-slot argument
+// table, so the records build (SKINNY_METAL_RECORDS) frees the two slots the
+// record stream needs by compiling out the two globals that are inert in a
+// records render: the splat buffer (records are path-integrator-only, where
+// the splat is all zeros) and the gizmo overlay segments (no gizmo overlay on
+// training frames — documented). wf_display.slang guards their reads with the
+// same condition. The bdpt, megakernel, and Vulkan builds are unaffected.
+#if !(defined(SKINNY_METAL) && defined(SKINNY_METAL_RECORDS))
 [[vk::binding(21)]] RWStructuredBuffer<uint> lightSplatBuffer;
 [[vk::binding(22)]] StructuredBuffer<GizmoSegment> gizmoSegments;
+#endif
 [[vk::binding(23)]] StructuredBuffer<float4>       lensElements;
 [[vk::binding(24)]] StructuredBuffer<float4>       exitPupilBounds;
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:

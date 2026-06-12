@@ -9,6 +9,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Backend
 
+- **Metal record drain** (change `metal-record-drain`) — wavefront path-record
+  emission and the live online-training drain now run on the native Metal
+  backend, closing the loop that `metal-neural-interop` opened: online neural
+  training is **fully single-device on Apple Silicon** (records drain → numpy
+  trainer → UMA interop weight handoff → frame-end swap; no Vulkan device, no
+  megakernel record dispatch, no NFW1 file). Arming online training rebuilds
+  the Metal wavefront path pass with **`SKINNY_METAL_RECORDS=1`**, un-stubbing
+  the `wf_records.slang` emitters; the build re-fits Metal's 31-buffer-slot
+  argument table (the neural build sits exactly at it) by compiling out the
+  two resolve globals inert on a training render (`lightSplatBuffer`,
+  `gizmoSegments` — no gizmo overlay on training frames) and folding both
+  counters into their data buffers: the per-lane stack count into a header
+  element, and `recordCounter` into a 64-byte header of a byte-address
+  `recordBuf` (capacity @0, atomic count @60, packed 64-byte records from
+  byte 64 — byte-identical to the Vulkan record stream despite MSL float3
+  padding). The renderer drain is backend-neutral (Metal binds by name,
+  resets only the 4-byte count word per frame; `metal_compute` `upload_range`
+  now does a partial encoder upload instead of a full-shadow reflush); the
+  megakernel record source is refused on Metal with a clear error. Guarded
+  A/B: Metal and Vulkan record streams match (equal per-depth counts,
+  marginal distributions within cross-backend float tolerance), records-off
+  renders are bit-identical through an arm→disarm round-trip, and records-on
+  costs ≈0.35 ms (~4.6 %) per 128² Cornell frame
+  (`tests/test_metal_record_drain_gpu.py`).
 - **Metal neural interop** (change `metal-neural-interop`) — `--neural-handoff
   interop` now works on the native Metal backend: a new
   `MetalSharedWeightPublisher` stages freshly-trained weights host-side and the
@@ -26,8 +50,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NeuralPrecision` (fp32/fp16/fp8-e4m3); the staged in-place copy lands in
   ≤0.1 ms at the shipped fp32 size (Apple M5 Pro). The Metal
   `render`/`render_headless` paths now run the frame-end weight swap
-  (previously Vulkan-only). The wavefront record drain remains Vulkan-only — a
-  fully-on-Metal online loop is still gated on the drain, not the handoff.
+  (previously Vulkan-only). The wavefront record drain followed in the
+  `metal-record-drain` entry above, completing the fully-on-Metal online loop.
 - **Metal wavefront parity** (change `metal-wavefront-parity`) — the wavefront
   execution mode now runs on the native Metal backend at parity with Vulkan:
   staged **path** and **BDPT** integrators (all three walk modes), **ReSTIR DI**

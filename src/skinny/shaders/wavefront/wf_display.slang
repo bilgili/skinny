@@ -18,14 +18,18 @@ import bindings;  // fc, outputBuffer (1), hudMask (3), gizmoSegments (22), ligh
 
 void wfWriteDisplay(uint2 pixel, float3 accum)
 {
+#if !(defined(SKINNY_METAL) && defined(SKINNY_METAL_RECORDS))
     // s = 1 light-tracer (bdpt) composite. lightSplatBuffer accumulates
     // fixed-point Q22.10 radiance over all frames; divide by frames-so-far for
     // the running mean. Zero for the path integrator (buffer cleared on reset).
+    // Compiled out of the Metal records build (slot cap, metal-record-drain):
+    // records are path-only, where this term is identically zero.
     uint base = (pixel.y * fc.width + pixel.x) * 3u;
     float3 splatSum = float3(lightSplatBuffer[base + 0u],
                              lightSplatBuffer[base + 1u],
                              lightSplatBuffer[base + 2u]) * (1.0 / 1024.0);
     accum += splatSum / float(fc.accumFrame + 1u);
+#endif
 
     float3 exposed = accum * exp2(fc.exposure);
     float3 display = linearToSRGB(applyTonemap(exposed, fc.tonemapMode));
@@ -37,10 +41,13 @@ void wfWriteDisplay(uint2 pixel, float3 accum)
     else if (hud > 0.0)
         display = lerp(display, float3(0.02, 0.02, 0.03), hud);
 
+#if !(defined(SKINNY_METAL) && defined(SKINNY_METAL_RECORDS))
     // Transform-gizmo overlay (binding 22): same screen-space 2D line composite
     // as main_pass.slang so the editor gizmo draws in wavefront mode. The CPU
     // rebuilds + uploads the segment list (and fc.numGizmoSegments) every frame
     // regardless of execution mode, so the loop is a no-op when none is active.
+    // Compiled out of the Metal records build (slot cap, metal-record-drain):
+    // no gizmo overlay on online-training frames.
     float2 px = float2(float(pixel.x) + 0.5, float(pixel.y) + 0.5);
     for (uint gi = 0u; gi < fc.numGizmoSegments; ++gi)
     {
@@ -53,6 +60,7 @@ void wfWriteDisplay(uint2 pixel, float3 accum)
         float aa = clamp(seg.width + 1.0 - d, 0.0, 1.0);
         display = lerp(display, seg.color, aa);
     }
+#endif
 
     outputBuffer[pixel] = float4(display, 1.0);
 }
