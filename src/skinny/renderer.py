@@ -5973,9 +5973,13 @@ class Renderer:
         n_phi = max(1, min(n_phi, 128))
 
         # The BXDF/BSSRDF visualiser reuses the megakernel main_pass tool-mode
-        # dispatch, which is not compiled in wavefront mode. Degrade gracefully
-        # to a zeroed grid instead of dereferencing a None pipeline.
-        if self.pipeline is None:
+        # dispatch. In wavefront mode that pipeline isn't compiled; on Metal the
+        # one-shot readback below is Vulkan-only (command_pool / vkDeviceWaitIdle /
+        # descriptor_sets, none of which exist on the compute-only Metal context —
+        # and `self.pipeline` is non-None there, so the None check alone wouldn't
+        # catch it). Degrade gracefully to a zeroed grid in both cases instead of
+        # crashing. (A native Metal tool-dispatch sibling is a later phase.)
+        if self.pipeline is None or self.is_metal:
             try:
                 callback(np.zeros((n_theta, n_phi, 3), dtype=np.float32))
             except Exception as exc:

@@ -229,6 +229,28 @@ def test_debug_viewport_refuses_metal_cleanly():
     assert dv._open is False
 
 
+def test_bxdf_eval_degrades_on_metal():
+    """`request_bxdf_eval` (BXDF/BSSRDF visualiser) does a Vulkan-only one-shot
+    readback (`command_pool` / `vkDeviceWaitIdle` / `descriptor_sets`). On Metal
+    `self.pipeline` is non-None, so the old `pipeline is None` guard wouldn't catch
+    it and it crashed on `self.ctx.command_pool`. It must instead degrade to a
+    zeroed grid via the callback. Stub via `__new__`, pipeline non-None, is_metal
+    True — proves it never reaches the Vulkan path (no ctx needed)."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)
+    r.is_metal = True
+    r.pipeline = object()  # non-None: only the is_metal arm may divert control
+    got = []
+    r.request_bxdf_eval({"n_theta": 4, "n_phi": 3}, got.append)
+    assert len(got) == 1
+    assert got[0].shape == (4, 3, 3)
+    assert not got[0].any()  # all zeros — graceful empty grid
+
+
 # ── 3.3 windowed present smoke (display-gated) ───────────────────────
 
 def test_metal_windowed_present_no_hang():
