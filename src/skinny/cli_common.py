@@ -129,10 +129,12 @@ def add_render_flags(
             help="Weight-handoff backend for online neural-proposal training (+ "
                  "SKINNY_NEURAL_HANDOFF env). 'file' (default) double-buffers "
                  "through an NFW1 file the renderer hot-reloads — a CPU "
-                 "round-trip that runs on any platform; 'interop' writes weights "
-                 "straight into the Vulkan-exported buffer from CUDA "
-                 "(VK_KHR_external_memory) with no round-trip — the real-time "
-                 "path, CUDA-only (raises on platforms without it).",
+                 "round-trip that runs on any platform; 'interop' publishes "
+                 "weights GPU-side with no file round-trip — on Vulkan, CUDA "
+                 "writes the exported weight buffer (VK_KHR_external_memory); "
+                 "on the native Metal backend the unified-memory shared-storage "
+                 "buffers are written in place at the frame boundary. Raises on "
+                 "hosts with neither path.",
         )
     if neural_trainer:
         parser.add_argument(

@@ -117,6 +117,9 @@ kwarg on Metal).
   Bytes are small (typ. ≤ a few hundred KB for the MLP at fp32; less at
   fp16/fp8); copy is host-memcpy on UMA. Measure in the parity test; if visible,
   split weights/biases across two frame boundaries.
+  **Measured (task 4.2, Apple M5 Pro):** shipped-size fp32 weights+biases
+  (418 776 B) land in 0.04–0.09 ms per swap — invisible against a frame; no
+  split needed.
 - [A command buffer in flight could still read the shared buffer while swap()
   writes] → swap() runs at the renderer's frame-end point, after the frame's
   submit-and-wait; the Metal driver (`metal_wavefront.py`) synchronizes the frame
@@ -138,6 +141,14 @@ kwarg on Metal).
 - Does the pinned slangpy build expose a mapped pointer / persistent map for
   upload-heap buffers? (Determines whether `write_in_place` is zero-copy or one
   memcpy. Resolve in task 1; both satisfy the spec.)
+  **Resolved (task 1.1, slangpy 0.42.0, Apple M5 Pro):** no `map()`/`unmap()` on
+  the Python `Buffer` surface; `write_in_place` is one host memcpy via
+  `copy_from_numpy`. A `MemoryType.upload` buffer accepts full storage usage
+  (`shader_resource | unordered_access | copy_*`), binds to a compute kernel, and
+  dispatches observe host `copy_from_numpy` rewrites between submissions with no
+  staging call. `Buffer.native_handle` returns the raw `MTLBuffer`
+  (`NativeHandleType.MTLBuffer`), so a ctypes `contents()` zero-copy write stays
+  available later behind the same `write_in_place` signature.
 - Exact frame-end swap call-site ordering on the Metal wavefront driver — confirm
   the previous command buffer is complete before `swap()` (drives whether the
   `wait_for_idle()` guard is needed).

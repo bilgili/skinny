@@ -71,11 +71,18 @@ class MetalContext:
     backend_name = "metal"
     is_metal = True
 
-    # External-memory / -semaphore interop stays off on Metal: frozen neural
-    # weights load by buffer upload, not a GPU↔GPU handoff (design D6), so the
-    # renderer keeps its file-handoff path here.
+    # External-memory / -semaphore interop stays off on Metal: there are no
+    # exported memory or semaphore handles here. The Metal interop seam is
+    # unified memory instead (change metal-neural-interop): on a UMA device the
+    # neural weight handoff writes shared-storage buffers in place, so
+    # `supports_shared_memory` gates the interop publisher while the external
+    # flags stay False.
     supports_external_memory = False
     supports_external_semaphore = False
+    # Unified-memory shared-storage interop (host writes a shared buffer in
+    # place, dispatches read it — no staging). Class-level default; ``__init__``
+    # overrides it per device from ``_probe_shared_memory``.
+    supports_shared_memory = False
     # fp16 flags are class-level defaults; ``__init__`` overrides them per device
     # from the slang-rhi feature probe (``_probe_fp16``). They stay ``False`` until
     # a constructed device reports ``Feature.half``.
@@ -124,6 +131,15 @@ class MetalContext:
         fp16 = self._probe_fp16(self.device)
         self.supports_fp16_storage = fp16
         self.supports_fp16_compute = fp16
+
+        # Probe unified-memory shared-storage interop (change metal-neural-interop,
+        # design D5). The Apple-Silicon guard above already implies UMA hardware;
+        # the probe checks that THIS slang-rhi build accepts an upload-heap buffer
+        # carrying full storage usage (the combination the in-place weight handoff
+        # binds). Dispatch visibility of in-place writes was proven empirically on
+        # this combination (task 1.1); creation failure ⇒ conservative False and
+        # the neural interop publisher reports unavailable.
+        self.supports_shared_memory = self._probe_shared_memory(spy, self.device)
 
         # Probe GPU-driven indirect compute dispatch (design D2). A one-time,
         # logged result: the wavefront driver reads it to pick the native indirect
@@ -179,6 +195,25 @@ class MetalContext:
         try:
             return bool(device.has_feature(half))
         except Exception:  # noqa: BLE001 — unknown feature ⇒ treat as unsupported
+            return False
+
+    @staticmethod
+    def _probe_shared_memory(spy, device) -> bool:
+        """Whether this device + slang-rhi build supports host-visible
+        shared-storage buffers usable as compute storage (UMA interop, design D5).
+
+        Tries to create a small ``MemoryType.upload`` buffer with the same usage
+        the storage wrapper requests (``shader_resource | unordered_access |
+        copy_*``). Any failure ⇒ ``False`` — shared-mode ``StorageBuffer``
+        construction would fall back to staged uploads and the Metal interop
+        weight publisher reports itself unavailable."""
+        try:
+            usage = (spy.BufferUsage.unordered_access | spy.BufferUsage.shader_resource
+                     | spy.BufferUsage.copy_source | spy.BufferUsage.copy_destination)
+            device.create_buffer(
+                size=16, usage=usage, memory_type=spy.MemoryType.upload)
+            return True
+        except Exception:  # noqa: BLE001 — any probe failure ⇒ no shared interop
             return False
 
     @staticmethod

@@ -3357,12 +3357,23 @@ class Renderer:
         _nw = make_dummy_weights(_ncfg)
         _nwb = _nw.weight_bytes_for(_ncfg.precision)   # half bytes in the fp16 modes
         _nbb = _nw.bias_bytes_for(_ncfg.precision)
-        # Under `--neural-handoff interop` the weight buffers are CUDA-shareable
-        # (VK_KHR_external_memory, task 5.1); a guarded no-op on devices without
-        # the extension. The file handoff uses plain device-local buffers.
-        _ext_neural = (self._neural_handoff_kind == "interop")
-        self.neural_weights_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nwb), 4), external=_ext_neural)
-        self.neural_biases_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nbb), 4), external=_ext_neural)
+        # Under `--neural-handoff interop` the weight buffers are GPU-shareable,
+        # per backend (change metal-neural-interop, design D4): on Vulkan they
+        # are CUDA-exportable (VK_KHR_external_memory, task 5.1; a guarded no-op
+        # on devices without the extension); on Metal the weights+biases live in
+        # UMA shared storage the interop publisher writes in place at the
+        # frame-boundary swap. Binding 35 (layer headers) is immutable after
+        # build and stays device-local on Metal. The file handoff uses plain
+        # device-local buffers everywhere.
+        _interop_neural = (self._neural_handoff_kind == "interop")
+        _is_metal = bool(getattr(self.ctx, "is_metal", False))
+        _ext_neural = _interop_neural and not _is_metal
+        _shared_neural = (_interop_neural and _is_metal
+                          and getattr(self.ctx, "supports_shared_memory", False))
+        self.neural_weights_buffer = self._gpu.StorageBuffer(
+            self.ctx, max(len(_nwb), 4), external=_ext_neural, shared=_shared_neural)
+        self.neural_biases_buffer = self._gpu.StorageBuffer(
+            self.ctx, max(len(_nbb), 4), external=_ext_neural, shared=_shared_neural)
         self.neural_layers_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4), external=_ext_neural)
         self.neural_weights_buffer.upload_sync(_nwb)
         self.neural_biases_buffer.upload_sync(_nbb)
@@ -3370,10 +3381,11 @@ class Renderer:
         self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
         # Interop handoff (task 5.2): an exportable timeline semaphore orders the
         # CUDA weight-write vs the Vulkan read. Allocated only under
-        # `--neural-handoff interop`; a guarded no-op (export_handle()→None) on
-        # devices without external-semaphore support.
-        # Vulkan-only interop primitive — imported lazily so the Metal path (where
-        # `_ext_neural` is always False) never pulls in `vulkan` (task 2.3).
+        # `--neural-handoff interop` on Vulkan; a guarded no-op
+        # (export_handle()→None) on devices without external-semaphore support.
+        # Vulkan-only interop primitive — imported lazily so the Metal path
+        # (`_ext_neural` False there; its sync is the frame-boundary in-place
+        # write, no semaphore) never pulls in `vulkan` (task 2.3).
         if _ext_neural:
             from skinny.vk_compute import ExternalTimelineSemaphore
             self.neural_timeline_semaphore = ExternalTimelineSemaphore(self.ctx)
@@ -7564,10 +7576,14 @@ class Renderer:
                                     arch=cfg, backend=backend_kind,
                                     train_precision=precision), initial=init))
         kind = handoff or self._neural_handoff_kind
-        # The interop publisher (task 5.2) writes weights+biases straight into the
-        # CUDA-shared binding-33/34 buffers and signals the exported timeline
-        # semaphore; hand it the exported Vulkan objects so the CUDA import has the
-        # memory + semaphore handles, plus the active storage precision.
+        # The interop publisher writes weights+biases straight into the GPU-shared
+        # binding-33/34 buffers; hand it those buffers plus the active storage
+        # precision. `make_publisher` resolves the mechanism per backend (change
+        # metal-neural-interop, design D2): on Vulkan the CUDA publisher imports
+        # the exported memory and signals the exported timeline semaphore (task
+        # 5.2); on Metal the UMA publisher writes the shared-storage buffers in
+        # place at the frame-boundary swap (the semaphore kwarg is None here and
+        # dropped by the factory — no exported semaphores on Metal).
         if kind == "interop":
             publisher_kwargs.setdefault(
                 "weights_buffer", getattr(self, "neural_weights_buffer", None))
@@ -8377,6 +8393,14 @@ class Renderer:
             # Metal has no Vulkan swapchain/fence machinery — dispatch the
             # megakernel and blit the offscreen frame to the slang-rhi surface.
             self._render_windowed_metal()
+            # Frame-end double-buffer swap for online neural training (change
+            # metal-neural-interop, design D1): _render_windowed_metal drains
+            # the device before returning, so no in-flight command buffer reads
+            # bindings 33/34 while the interop publisher's swap writes the
+            # shared weight buffers in place (and the file publisher's
+            # upload_sync path is equally safe).
+            if self._online_training:
+                self._online_frame_end_swap()
             return
         f = self.current_frame
 
@@ -8618,7 +8642,13 @@ class Renderer:
             return b"\x00" * (self.width * self.height * 4)
         if self.is_metal:
             self.poll_pick_result()
-            return self._render_headless_metal()
+            frame = self._render_headless_metal()
+            # Frame-end swap (metal-neural-interop): the frame's readback has
+            # drained the device, so promoting pending weights now only affects
+            # the NEXT frame — render weights stayed frozen this frame.
+            if self._online_training:
+                self._online_frame_end_swap()
+            return frame
         f = self.current_frame
 
         # Drain BXDF visualiser scene-pick callbacks once their frame has
