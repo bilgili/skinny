@@ -83,11 +83,11 @@ two env importance-sampling CDF buffers into one.
 
 ## 5. Docs
 
-- [ ] 5.1 `docs/Architecture.md`: descriptor binding map — slot 25 is now the
+- [x] 5.1 `docs/Architecture.md`: descriptor binding map — slot 25 is now the
       single combined graph-param buffer (was 25..25+N−1).
-- [ ] 5.2 `docs/Wavefront.md` + `docs/Megakernel.md`: graph-param layout (one
+- [x] 5.2 `docs/Wavefront.md` + `docs/Megakernel.md`: graph-param layout (one
       byte-addressed buffer, per-graph compile-time offsets).
-- [ ] 5.3 `CHANGELOG.md` entry; CLAUDE.md compatibility note only if the
+- [x] 5.3 `CHANGELOG.md` entry; CLAUDE.md compatibility note only if the
       supported-combo wording changes (the reported combo now runs).
-- [ ] 5.4 `openspec validate combine-graph-param-buffers --strict`; archive after
+- [x] 5.4 `openspec validate combine-graph-param-buffers --strict`; archive after
       merge.
