@@ -544,6 +544,12 @@ def main() -> None:
     if ("--online-training" not in sys.argv
             and not os.environ.get("SKINNY_ONLINE_TRAINING")):
         online_training_requested = bool(saved.get("online_training", False))
+    # Display-only state for the startup configuration matrix (change
+    # online-training-observability): the resolved backend and the user's
+    # online-training intent (kept even if the gate below refuses, so the matrix
+    # shows REFUSED rather than OFF).
+    renderer._requested_backend = args.backend
+    renderer._online_training_requested = online_training_requested
 
     _apply_saved_params(renderer, saved.get("params", {}))
     _apply_saved_camera(renderer, saved.get("camera"))
@@ -579,10 +585,13 @@ def main() -> None:
     # --online-training prerequisite gate (change online-training-trigger). The
     # static prerequisites (wavefront + a neural proposal) are known now, so
     # refuse loudly up front; enabling itself waits until the scene is built.
+    # The refusal reason now surfaces in the configuration matrix's
+    # online-training row (REFUSED/WAITING), printed from the render loop's first
+    # update(); no separate one-shot line needed (change
+    # online-training-observability).
     if online_training_requested:
-        ok, reason = renderer.can_online_train()
+        ok, _reason = renderer.can_online_train()
         if not ok:
-            print(f"[skinny] --online-training refused: {reason}")
             online_training_requested = False
     online_training_enabled = False
 

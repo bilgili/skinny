@@ -128,14 +128,12 @@ class MainWindow(QMainWindow):
         # an offscreen Vulkan image and blits via QImage.
         self._debug_dock: DebugViewportDock | None = None
 
-        # Status bar.
+        # Status bar — GPU + accumulation, plus the online-training state polled
+        # from the renderer's lock-free snapshot (change
+        # online-training-observability) so training is visible without a console.
         sb = self.statusBar()
         sb.showMessage(f"GPU: {self.ctx.gpu_info.name}  |  accum: 0")
-        self.viewport.accum_changed.connect(
-            lambda n: sb.showMessage(
-                f"GPU: {self.ctx.gpu_info.name}  |  accum: {n}"
-            )
-        )
+        self.viewport.accum_changed.connect(self._update_status_bar)
 
         # Holders for the child docks — instantiated on first open so the
         # tree picks up scene graphs created after startup.
@@ -221,6 +219,25 @@ class MainWindow(QMainWindow):
         # title bars, etc. otherwise eat WASD/Space before our viewport's
         # keyPressEvent ever fires.
         QApplication.instance().installEventFilter(self)
+
+    # ── Online-training status (change online-training-observability) ──
+
+    def _neural_status_text(self) -> str:
+        """One-line online-training state for the status bar, or '' when off."""
+        st = self.renderer.online_training_status()
+        if not st["armed"]:
+            return ""
+        if st["active"]:
+            loss = st["last_loss"]
+            loss_s = f"{loss:.3f}" if loss is not None else "n/a"
+            return f"  |  neural: ACTIVE {st['cycles']}cyc loss={loss_s}"
+        return "  |  neural: armed (waiting)"
+
+    def _update_status_bar(self, n: int) -> None:
+        self.statusBar().showMessage(
+            f"GPU: {self.ctx.gpu_info.name}  |  accum: {n}"
+            + self._neural_status_text()
+        )
 
     # ── Key forwarding ────────────────────────────────────────────
 
@@ -638,6 +655,10 @@ def main() -> None:
                      reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers,
                      backend=backend)
+    # Display-only state for the startup configuration matrix (change
+    # online-training-observability).
+    win.renderer._requested_backend = args.backend
+    win.renderer._online_training_requested = bool(args.online_training)
     win.show()
     sys.exit(app.exec())
 

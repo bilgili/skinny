@@ -567,7 +567,16 @@ records each frame and the frame-end swap promotes new weights. The whole loop
 runs on either GPU backend — on the native Metal backend the wavefront render
 emits the records natively (no megakernel) and `--neural-handoff interop`
 publishes weights through unified memory, so online training is fully
-single-device on Apple Silicon. See
+single-device on Apple Silicon.
+
+Every front-end prints a `[skinny] configuration` matrix at startup (and
+reprints it when a selection flips approval) showing each axis's requested vs
+resolved value and the online-training row's `OFF`/`REFUSED`/`WAITING`/`APPROVED`
+status with its reason — so it's clear at a glance what's selected and whether
+training will run. When training actually starts you get a one-time `[neural]
+online training ACTIVE …` line, and on stop/exit a `[neural] online training
+STOPPED: ran … cycles … steps … final loss=…` summary; `skinny-gui` also shows
+the live state in its status bar. See
 [docs/NeuralGuiding.md § Running online training](docs/NeuralGuiding.md#running-online-training).
 
 ### Furnace Mode
