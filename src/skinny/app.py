@@ -18,9 +18,8 @@ import numpy as np
 import glfw
 
 from skinny.params import (
-    ParamSpec, STATIC_PARAMS, ALL_PARAMS, build_all_params,
+    ParamSpec, build_all_params,
     _get_nested, _set_nested, _snapshot_params, _apply_saved_params,
-    _GANGED_MTLX_FIELDS, _SKIN_TO_MTLX,
 )
 from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
 from skinny.backend_select import (
