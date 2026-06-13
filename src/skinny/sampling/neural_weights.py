@@ -297,20 +297,23 @@ def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
     return headers, w_off, b_off
 
 
-def load_neural_weights(path: str | Path,
-                        expect: tuple[int, int, int, int] | None = None) -> NeuralWeights:
-    """Parse an ``NFW1`` file. Raises on bad magic / version / truncation, and on
-    an architecture mismatch against ``expect`` (defaults to the shipped size when
-    None) — the loader assert is the size-mismatch guard for the configurable
-    build (study change neural-precision-size-study)."""
-    data = Path(path).read_bytes()
+def deserialize_neural_weights(data: bytes,
+                               expect: tuple[int, int, int, int] | None = None,
+                               *, src: str = "<bytes>") -> NeuralWeights:
+    """Parse ``NFW1`` bytes into a ``NeuralWeights`` (inverse of
+    ``serialize_neural_weights``). The in-memory core shared by
+    ``load_neural_weights`` (disk) and the ``shared`` weight-handoff backend
+    (process memory, change shared-neural-handoff) — no filesystem access.
+    ``src`` names the source in error messages. Raises on bad magic / version /
+    truncation, and on an architecture mismatch against ``expect`` (defaults to
+    the shipped size when None)."""
     o = 0
     magic, ver = struct.unpack_from("<II", data, o)
     o += 8
     if magic != MAGIC:
-        raise ValueError(f"{path}: bad magic 0x{magic:08X} (want 0x{MAGIC:08X})")
+        raise ValueError(f"{src}: bad magic 0x{magic:08X} (want 0x{MAGIC:08X})")
     if ver != VERSION:
-        raise ValueError(f"{path}: unsupported version {ver}")
+        raise ValueError(f"{src}: unsupported version {ver}")
     layers, bins, hidden, cond = struct.unpack_from("<IIII", data, o)
     o += 16
     (n_headers,) = struct.unpack_from("<I", data, o)
@@ -329,6 +332,15 @@ def load_neural_weights(path: str | Path,
                        headers, weights, biases)
     nw.assert_matches_shader(expect)
     return nw
+
+
+def load_neural_weights(path: str | Path,
+                        expect: tuple[int, int, int, int] | None = None) -> NeuralWeights:
+    """Parse an ``NFW1`` file. Raises on bad magic / version / truncation, and on
+    an architecture mismatch against ``expect`` (defaults to the shipped size when
+    None) — the loader assert is the size-mismatch guard for the configurable
+    build (study change neural-precision-size-study)."""
+    return deserialize_neural_weights(Path(path).read_bytes(), expect, src=str(path))
 
 
 def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights:
@@ -381,11 +393,14 @@ def bake_dummy_weights(path: str | Path,
                          np.array(headers, dtype="<u4"), weights, biases)
 
 
-def write_neural_weights(path: str | Path, nw: NeuralWeights) -> NeuralWeights:
-    """Serialise a ``NeuralWeights`` to an ``NFW1`` file (inverse of
-    ``load_neural_weights``). The online trainer (change ``neural-online-training``)
-    uses this to publish updated weights that the renderer hot-reloads via the
-    file-double-buffer handoff. NFW1 on disk is always fp32."""
+def serialize_neural_weights(nw: NeuralWeights) -> bytes:
+    """Serialise a ``NeuralWeights`` to ``NFW1`` bytes (inverse of
+    ``deserialize_neural_weights``). The in-memory core shared by
+    ``write_neural_weights`` (disk) and the ``shared`` weight-handoff backend
+    (process memory, change shared-neural-handoff). Applies the canonical
+    ``<f4`` / ``<u4`` casts, so a round-trip through serialize→deserialize yields
+    exactly the bytes the renderer would consume from a file publish. NFW1 is
+    always fp32."""
     buf = bytearray()
     buf += struct.pack("<II", MAGIC, VERSION)
     buf += struct.pack("<IIII", nw.layers, nw.bins, nw.hidden, nw.cond)
@@ -398,7 +413,15 @@ def write_neural_weights(path: str | Path, nw: NeuralWeights) -> NeuralWeights:
     buf += w.tobytes()
     buf += struct.pack("<I", len(b))
     buf += b.tobytes()
+    return bytes(buf)
+
+
+def write_neural_weights(path: str | Path, nw: NeuralWeights) -> NeuralWeights:
+    """Serialise a ``NeuralWeights`` to an ``NFW1`` file (inverse of
+    ``load_neural_weights``). The online trainer (change ``neural-online-training``)
+    uses this to publish updated weights that the renderer hot-reloads via the
+    file-double-buffer handoff. NFW1 on disk is always fp32."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(bytes(buf))
+    p.write_bytes(serialize_neural_weights(nw))
     return nw

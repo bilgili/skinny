@@ -1,12 +1,17 @@
 """Weight-handoff seam for online neural-proposal training (Stage 2).
 
 Change ``neural-online-training``. The async trainer publishes updated weights;
-the renderer swaps them in at a frame boundary. Two backends sit behind one
+the renderer swaps them in at a frame boundary. Three backends sit behind one
 ``NeuralWeightPublisher`` interface, selectable at runtime (``--neural-handoff``):
 
 * ``file``    — trainer writes an ``NFW1`` file; renderer hot-reloads via the
-                existing ``neural_weights`` loader; double-buffered, CPU round-trip.
-                Works on any platform (Mac-testable end to end).
+                existing ``neural_weights`` loader; double-buffered, CPU round-trip
+                through disk. Works on any platform (Mac-testable end to end).
+* ``shared``  — in-process CPU double-buffer held in RAM; the trainer (a
+                same-process daemon thread) hands a byte-faithful copy across with
+                no disk write and no CUDA / unified-memory device. Any platform, no
+                added dependency; renderer uploads via the normal post-swap path
+                (change shared-neural-handoff).
 * ``interop`` — CUDA writes weights straight into the Vulkan-exported weight
                 buffer (``VK_KHR_external_memory`` + ``cudaImportExternalMemory``),
                 no CPU round-trip. The real-time path; CUDA-only, guarded.
@@ -49,15 +54,21 @@ class NeuralWeightPublisher(abc.ABC):
 
 
 def make_publisher(kind: str, **kwargs) -> NeuralWeightPublisher:
-    """Factory for the ``--neural-handoff`` flag value (``file`` | ``interop``).
+    """Factory for the ``--neural-handoff`` flag value (``file`` | ``shared`` |
+    ``interop``).
 
-    ``interop`` resolves per GPU backend (change metal-neural-interop, design
-    D2): a Metal ``weights_buffer`` selects the UMA shared-storage publisher,
-    anything else the Vulkan↔CUDA external-memory publisher. The user intent is
-    "GPU handoff, no file"; which mechanism applies is a backend property."""
+    ``shared`` is the in-process CPU double-buffer (change shared-neural-handoff):
+    no disk, no GPU-interop requirement, any platform. ``interop`` resolves per
+    GPU backend (change metal-neural-interop, design D2): a Metal ``weights_buffer``
+    selects the UMA shared-storage publisher, anything else the Vulkan↔CUDA
+    external-memory publisher. The user intent is "GPU handoff, no file"; which
+    mechanism applies is a backend property."""
     if kind == "file":
         from .neural_handoff_file import FileWeightPublisher
         return FileWeightPublisher(**kwargs)
+    if kind == "shared":
+        from .neural_handoff_shared import SharedWeightPublisher
+        return SharedWeightPublisher(**kwargs)
     if kind == "interop":
         ctx = getattr(kwargs.get("weights_buffer"), "ctx", None)
         if getattr(ctx, "is_metal", False):
@@ -73,4 +84,5 @@ def make_publisher(kind: str, **kwargs) -> NeuralWeightPublisher:
                 "external memory, or the native Metal backend on a unified-memory "
                 f"device ({exc}). Use --neural-handoff file on this platform."
             ) from exc
-    raise ValueError(f"unknown neural handoff backend {kind!r} (want 'file' or 'interop')")
+    raise ValueError(
+        f"unknown neural handoff backend {kind!r} (want 'file', 'shared' or 'interop')")

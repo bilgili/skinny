@@ -238,6 +238,17 @@ trainer thread** that loops `online_train_and_publish` off the render thread;
 | `disable_online_training()` | `(self) -> None` | clears `_online_training` and stops + joins the trainer thread; safe when never enabled |
 | `online_training_active` (property) | `-> bool` | whether the loop is on |
 
+`sampling.neural_handoff.make_publisher(kind, **kwargs) -> NeuralWeightPublisher`
+is the factory behind the `handoff` value: `"file"` → `FileWeightPublisher`,
+`"shared"` → `SharedWeightPublisher` (in-process CPU double-buffer in RAM, no disk
+and no GPU-interop, any platform; change `shared-neural-handoff`), `"interop"` →
+the per-backend GPU publisher. `shared` takes only `initial` / `expect_arch` (no
+buffer/semaphore kwargs). The in-memory copy uses the new
+`sampling.neural_weights.serialize_neural_weights(nw) -> bytes` /
+`deserialize_neural_weights(data, expect=None) -> NeuralWeights` pair, which
+`write_neural_weights` / `load_neural_weights` now wrap (NFW1 on-disk format
+unchanged).
+
 ### Frame loop & output
 
 | Method | Signature | Notes |

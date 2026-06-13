@@ -159,6 +159,20 @@ interop` needs a GPU handoff path — CUDA + `VK_KHR_external_memory` on Vulkan,
 or the native Metal backend on a unified-memory device (`NotImplementedError`
 where neither exists).
 
+**Shared CPU handoff** (`--neural-handoff shared`, change `shared-neural-handoff`).
+Because the trainer runs as a same-process daemon thread, `shared` hands weights
+across the trainer→render boundary through an in-process CPU double-buffer held
+in RAM (`neural_handoff_shared.py`, `SharedWeightPublisher`) — no disk write
+(unlike `file`) and no CUDA / unified-memory device (unlike `interop`), available
+on **any** platform with no added dependency. `publish()` stores a byte-faithful
+private copy through the same `serialize`/`deserialize_neural_weights` path the
+`file` backend uses, minus the filesystem, so the bytes the renderer consumes are
+identical to a `file` publish (and a stale trainer mutation can never leak into
+the frozen render buffer); the renderer uploads the swapped weights to the GPU
+through the normal post-swap path. It does **not** write the GPU buffers directly
+— that is `interop`. Use it as the portable, low-overhead handoff when no
+GPU-interop path exists but the disk round-trip of `file` is unwanted.
+
 **Metal UMA interop** (change `metal-neural-interop`). On the native Metal
 backend `--neural-handoff interop` selects `MetalSharedWeightPublisher` instead
 of the CUDA publisher: bindings 33/34 are allocated as shared-storage

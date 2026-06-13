@@ -527,7 +527,7 @@ def main() -> None:
     # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
     if "--neural-handoff" not in sys.argv and not os.environ.get("SKINNY_NEURAL_HANDOFF"):
         saved_handoff = saved.get("neural_handoff")
-        if saved_handoff in ("file", "interop"):
+        if saved_handoff in ("file", "interop", "shared"):
             renderer._neural_handoff_kind = saved_handoff
     # Same precedence for --neural-trainer / --train-precision (change
     # neural-trainer-backends): CLI/env wins, else restore the persisted value.

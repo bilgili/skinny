@@ -190,7 +190,8 @@ the moment a neural proposal becomes active).
 
 | `--neural-handoff` | Vulkan host | Metal host |
 |--------------------|-------------|------------|
-| `file` (NFW1 double-buffer round-trip) | ✅ any host | ✅ any host |
+| `file` (NFW1 double-buffer disk round-trip) | ✅ any host | ✅ any host |
+| `shared` (in-process CPU double-buffer, RAM, no disk) | ✅ any host | ✅ any host |
 | `interop` (GPU-side) | ✅ CUDA path | ✅ UMA shared-storage path |
 
 | `--train-precision` | Behavior |
@@ -206,8 +207,9 @@ selected independently — the handoff format is unchanged.
 --online-training --neural-trainer mlx --neural-handoff interop` — fully
 single-device on Apple Silicon, training on the Metal GPU via Apple MLX (needs
 the `[mlx]` extra; `auto` already resolves to `mlx` on such a host). Swap
-`mlx` for `cpu` for the torch-free numpy oracle, or `interop` for `file` for the
-portable CPU-round-trip handoff variant.
+`mlx` for `cpu` for the torch-free numpy oracle, or `interop` for `file` (portable
+disk round-trip) or `shared` (in-process RAM double-buffer, no disk, no extra
+deps) for a non-GPU-interop handoff.
 
 ## Architecture
 
