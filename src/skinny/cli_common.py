@@ -32,6 +32,41 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def validate_render_flags(args) -> None:
+    """Reject render-flag combinations that cannot work, with a clear error +
+    exit (change bdpt-neural-incompatibility).
+
+    The neural directional proposal — and the online training that exists to
+    improve it — is consumed only by the **path** integrator (``path.slang``
+    imports ``sampling.proposal``). BDPT samples directions with native BSDF
+    sampling on every backend and execution mode (``bdpt.slang`` /
+    ``wavefront_bdpt.slang`` never import the proposal seam), so a neural
+    proposal or ``--online-training`` under ``--integrator bdpt`` would train /
+    select weights the bdpt render never reads — and the online-training record
+    drain has no wavefront source for bdpt (it would crash mid-frame on Metal).
+    Refuse up front rather than silently no-op or crash.
+
+    Raises ``SystemExit`` (a usage error) on the incompatible combo. Only an
+    explicit ``--integrator bdpt`` trips it; ``integrator=None`` (the
+    persisted/default path) does not. Tolerant of a ``Namespace`` without a
+    ``proposals`` attribute (the GUI/web front-ends suppress ``--proposals``)."""
+    if getattr(args, "integrator", None) != "bdpt":
+        return
+    proposals = getattr(args, "proposals", None) or ""
+    online = bool(getattr(args, "online_training", False))
+    neural = "neural" in proposals
+    if not (neural or online):
+        return
+    what = ("--online-training" if online
+            else "the neural proposal (--proposals …,neural)")
+    raise SystemExit(
+        f"skinny: {what} is incompatible with --integrator bdpt — BDPT does not "
+        "consume the neural directional proposal (it samples directions with "
+        "native BSDF sampling, on every backend and execution mode). Use "
+        "--integrator path for neural guiding / online training."
+    )
+
+
 def resolve_walk(value: str) -> str:
     """Normalize a bdpt-walk value, mapping the deprecated ``megakernel`` alias
     to ``fused``. Raises ``ValueError`` on a genuinely unknown value."""

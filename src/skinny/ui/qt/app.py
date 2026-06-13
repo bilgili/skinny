@@ -26,7 +26,12 @@ from PySide6.QtWidgets import (
 
 import numpy as np
 
-from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
+from skinny.cli_common import (
+    INTEGRATOR_INDEX,
+    add_render_flags,
+    resolve_walk,
+    validate_render_flags,
+)
 from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
 from skinny.renderer import Renderer
 from skinny.settings import (
@@ -632,6 +637,8 @@ def main() -> None:
     # the Proposals combobox owns proposal selection at runtime (and persists it).
     add_render_flags(parser, proposals=False)
     args = parser.parse_args()
+    # Reject impossible combos (e.g. bdpt + --online-training) up front.
+    validate_render_flags(args)
 
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s",

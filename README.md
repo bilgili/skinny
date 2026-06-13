@@ -538,8 +538,13 @@ switch that actually **starts** the loop on the interactive front-ends (`skinny`
 and `skinny-gui`) — the `--neural-handoff` / `--neural-trainer` /
 `--train-precision` flags above only *configure* it. It has two prerequisites:
 `--execution-mode wavefront` **and** a neural proposal active in the mixture.
-The wavefront prerequisite is fixed for the session, so a non-wavefront mode is
-refused with a clear one-line message at startup — never a silent no-op. The
+It also requires **`--integrator path`**: BDPT does not consume the neural
+proposal (it samples directions with native BSDF sampling on every backend), so
+`--integrator bdpt` with a neural proposal or `--online-training` is rejected —
+the CLI front-ends error-and-exit at startup, the GUI shows the online-training
+status as `REFUSED`. The wavefront prerequisite is fixed for the session, so a
+non-wavefront mode is refused with a clear one-line message at startup — never a
+silent no-op. The
 neural-proposal prerequisite is runtime-selectable, so on `skinny-gui` you can
 launch with `--online-training` and *then* pick a neural proposal in the
 **Proposals** combobox — the loop is armed and starts the moment a neural

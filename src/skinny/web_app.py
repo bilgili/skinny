@@ -29,7 +29,12 @@ from tornado.ioloop import IOLoop
 from tornado.web import RequestHandler
 from tornado.websocket import WebSocketHandler
 
-from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
+from skinny.cli_common import (
+    INTEGRATOR_INDEX,
+    add_render_flags,
+    resolve_walk,
+    validate_render_flags,
+)
 from skinny.params import _set_nested
 from skinny.backend_select import (
     make_context,
@@ -689,6 +694,8 @@ def main() -> None:
     # the in-app Proposals control owns proposal selection at runtime.
     add_render_flags(parser, proposals=False)
     args = parser.parse_args()
+    # Reject impossible combos (e.g. bdpt + --online-training) up front.
+    validate_render_flags(args)
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > auto). The
     # web server is multi-session and stateless across runs (no persisted
