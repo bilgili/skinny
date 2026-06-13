@@ -55,8 +55,11 @@ class _RenderWorker(QObject):
             return
         if not self._online_training_enabled:
             # Defer the prerequisite check until the scene is built (records can't
-            # drain before then).
-            if self.renderer.descriptor_sets is None:
+            # drain before then). `_backend_render_ready` is backend-aware: the
+            # native Metal backend never allocates Vulkan `descriptor_sets` (it
+            # binds by name), so gating on those left online training permanently
+            # disabled on Metal — use the scene-bindings readiness both set.
+            if not self.renderer._backend_render_ready:
                 return  # scene not built yet; retry next frame
             ok, _reason = self.renderer.can_online_train()
             if not ok:

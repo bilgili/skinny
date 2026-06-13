@@ -607,8 +607,12 @@ def main() -> None:
         renderer.update(dt)
         # Enable online training once the scene is built (enable_online_training
         # surfaces the existing mlx/interop errors); then drive the per-frame tick.
+        # `_backend_render_ready` is the backend-aware readiness signal: the
+        # native Metal backend never allocates Vulkan `descriptor_sets` (it binds
+        # by name), so gating on those left online training permanently disabled
+        # on Metal — use the scene-bindings readiness both backends set.
         if (online_training_requested and not online_training_enabled
-                and renderer.descriptor_sets is not None):
+                and renderer._backend_render_ready):
             renderer.enable_online_training()
             online_training_enabled = True
         renderer.online_training_tick()

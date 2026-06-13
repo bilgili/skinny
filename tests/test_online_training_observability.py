@@ -209,3 +209,30 @@ def test_online_training_status_snapshot():
     off = types.SimpleNamespace(_online_training=False, _neural_trainer=None)
     st2 = Renderer.online_training_status(off)
     assert st2["armed"] is False and st2["active"] is False and st2["cycles"] == 0
+
+
+# ── enable-gate readiness (change online-training-metal-enable-gate) ──
+
+def _ready(fake) -> bool:
+    return Renderer._backend_render_ready.fget(fake)
+
+
+def test_metal_wavefront_ready_without_descriptor_sets():
+    # The native Metal backend never allocates Vulkan descriptor_sets; readiness
+    # must come from the scene bindings, or online training never enables (the
+    # bug: the old gate tested descriptor_sets, permanently None on Metal).
+    fake = types.SimpleNamespace(
+        is_metal=True, effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        descriptor_sets=None, _scene_bindings=object(), pipeline=None)
+    assert _ready(fake) is True
+    fake._scene_bindings = None
+    assert _ready(fake) is False
+
+
+def test_vulkan_wavefront_still_requires_descriptor_sets():
+    fake = types.SimpleNamespace(
+        is_metal=False, effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        descriptor_sets=None, _scene_bindings=object(), pipeline=None)
+    assert _ready(fake) is False
+    fake.descriptor_sets = object()
+    assert _ready(fake) is True
