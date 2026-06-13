@@ -24,11 +24,18 @@ from skinny.sampling.neural_weights import (
 )
 from skinny.sampling.path_records import RECORD_DTYPE
 from skinny.sampling.training_backends import (
+    MlxTrainingBackend,
     NumpyTrainingBackend,
     TorchTrainingBackend,
+    _mlx_metal,
     build_dataset_np,
     make_training_backend,
 )
+
+# The MLX backend runs only on an Apple-Silicon Metal host with the optional
+# `[mlx]` extra installed; everywhere else these tests skip cleanly.
+_mlx_skip = pytest.mark.skipif(not _mlx_metal(),
+                               reason="mlx unavailable (Apple-Silicon Metal + [mlx] extra)")
 
 BOUNDS = (np.zeros(3, np.float32), np.ones(3, np.float32))
 
@@ -55,11 +62,16 @@ def _concentrated(n, rng, lobe=(0.3, 0.9, 0.2)):
 
 # ── §1.3 selection + capability gating ───────────────────────────────────
 
-def test_auto_picks_numpy_without_torch_cuda():
+def test_auto_precedence_cuda_then_mlx_then_numpy():
+    """§1.3 (modified by mlx-neural-trainer): auto precedence is cuda > mlx > cpu —
+    torch CUDA when present, else MLX on an Apple-Silicon Metal host, else numpy."""
+    import skinny.sampling.training_backends as tb
     be = make_training_backend("auto")
-    # numpy on a torch-free/CUDA-free host; torch+CUDA otherwise.
-    assert be.name in ("numpy", "torch")
-    if not _torch_spline_flow():
+    if tb._torch_cuda():
+        assert be.name == "torch"
+    elif tb._mlx_metal():
+        assert be.name == "mlx"
+    else:
         assert be.name == "numpy"
 
 
@@ -78,9 +90,37 @@ def test_explicit_cuda_without_torch_raises_clearly():
     assert "cuda" in msg and ("pytorch" in msg or "cuda device" in msg or "spline_flow" in msg)
 
 
-def test_mlx_reserved():
-    with pytest.raises(NotImplementedError):
+def test_mlx_unavailable_token_raises_clearly(monkeypatch):
+    """§1.3: an explicit `mlx` token on a host without mlx/Metal fails with a
+    clear message naming the missing piece (runs on every host)."""
+    import skinny.sampling.training_backends as tb
+    monkeypatch.setattr(tb, "_mlx_metal", lambda: False)
+    with pytest.raises(RuntimeError) as ei:
         make_training_backend("mlx")
+    msg = str(ei.value).lower()
+    assert "mlx" in msg and ("metal" in msg or "extra" in msg)
+
+
+@_mlx_skip
+def test_mlx_token_is_mlx():
+    be = make_training_backend("mlx")
+    assert be.name == "mlx" and be.is_available()
+
+
+@_mlx_skip
+def test_auto_prefers_mlx_on_metal_without_cuda():
+    import skinny.sampling.training_backends as tb
+    if tb._torch_cuda():
+        pytest.skip("CUDA present — auto resolves to cuda, not mlx")
+    assert make_training_backend("auto").name == "mlx"
+
+
+@_mlx_skip
+def test_mlx_supports_precision():
+    be = MlxTrainingBackend()
+    assert be.supports_precision("fp32")
+    assert be.supports_precision("fp16")               # float16 compute over fp32 masters
+    assert not be.supports_precision("bf16")
 
 
 def test_unknown_backend_raises():

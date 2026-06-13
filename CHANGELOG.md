@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **MLX neural trainer** (change `mlx-neural-trainer`) — the reserved
+  `--neural-trainer mlx` token is now a working GPU training backend: online
+  neural-proposal training runs on the Metal GPU of an Apple-Silicon host via
+  Apple MLX (optional `[mlx]` extra), no CUDA. `MlxTrainingBackend` mirrors the
+  numpy oracle's spline-flow math op-for-op on `mlx.core` arrays — the parity
+  target — but with MLX autodiff and a hand-rolled bias-corrected Adam (same
+  global grad-norm clip), so a one-step update from identical weights matches
+  the oracle for the bulk of the net within tolerance (the handful of outliers
+  are Adam sign-flips on near-zero-gradient weights). It bakes the same fp32
+  NFW1 weights and round-trips through both the `file` and `interop` handoffs
+  unchanged. `--train-precision fp16` runs the flow in `float16` over fp32
+  master weights with a runtime fall-back to fp32 (one-time warning) if a step's
+  loss or gradients go non-finite — the fp32 masters are never corrupted, and
+  the bake stays fp32. `--neural-trainer auto` precedence becomes
+  `cuda > mlx > cpu`: torch CUDA when present, else MLX when the `[mlx]` extra
+  is importable on a Metal host, else the numpy oracle; the supported Mac combo
+  is now `--neural-trainer mlx`. The numpy and torch backends, the dataset
+  contract, and the handoff format are unchanged; MLX is never imported
+  unconditionally, so hosts without the extra behave exactly as before.
+
 ### Backend
 
 - **Metal record drain** (change `metal-record-drain`) — wavefront path-record

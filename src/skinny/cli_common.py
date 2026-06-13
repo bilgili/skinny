@@ -141,12 +141,14 @@ def add_render_flags(
             "--neural-trainer", choices=("cpu", "cuda", "mlx", "auto"),
             default=os.environ.get("SKINNY_NEURAL_TRAINER", "auto"),
             help="Training-compute backend for online neural-proposal training "
-                 "(+ SKINNY_NEURAL_TRAINER env). 'auto' (default) picks the torch "
-                 "CUDA backend when torch + a CUDA device are present, else the "
-                 "torch-free numpy reference oracle. 'cpu' forces the numpy "
-                 "reference (always available); 'cuda' forces torch on CUDA "
-                 "(raises if torch/CUDA are absent); 'mlx' is reserved for a "
-                 "later change. Persisted on the interactive front-ends.",
+                 "(+ SKINNY_NEURAL_TRAINER env). 'auto' (default) precedence is "
+                 "cuda > mlx > cpu: the torch CUDA backend when torch + a CUDA "
+                 "device are present, else Apple MLX on an Apple-Silicon Metal "
+                 "host, else the torch-free numpy reference oracle. 'cpu' forces "
+                 "the numpy reference (always available); 'cuda' forces torch on "
+                 "CUDA (raises if torch/CUDA are absent); 'mlx' forces Apple MLX "
+                 "on the Metal GPU (needs the '[mlx]' extra on Apple Silicon; "
+                 "raises otherwise). Persisted on the interactive front-ends.",
         )
     if train_precision:
         parser.add_argument(
@@ -156,7 +158,8 @@ def add_render_flags(
                  "SKINNY_TRAIN_PRECISION env), independent of the inference "
                  "precision. 'fp32' (default) trains in full precision; 'fp16' "
                  "uses the framework's mixed precision where the device supports "
-                 "it (torch autocast on CUDA) and falls back to fp32 otherwise. "
+                 "it (torch autocast on CUDA; float16 compute over fp32 masters "
+                 "on Apple MLX) and falls back to fp32 otherwise. "
                  "Training always bakes fp32 weights, so the on-disk/handoff "
                  "format is unchanged. Persisted on the interactive front-ends.",
         )

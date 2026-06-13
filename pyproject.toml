@@ -59,6 +59,14 @@ web = [
 interop = [
     "cuda-python>=12.0",
 ]
+# Apple MLX training-compute backend (--neural-trainer mlx, change
+# mlx-neural-trainer): GPU-accelerated online training on the same Metal device
+# the renderer uses, no CUDA. Apple-Silicon-only wheel and opt-in — every other
+# trainer (numpy oracle, torch CUDA) needs none of it, and nothing imports mlx
+# unconditionally, so it stays out of the base install.
+mlx = [
+    "mlx>=0.30",
+]
 
 [project.scripts]
 skinny = "skinny.app:main"

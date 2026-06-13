@@ -18,6 +18,12 @@ swapped without touching the orchestrator:
   placeholder — and the independent numeric oracle the torch / future MLX
   backends are checked against.
 
+* :class:`MlxTrainingBackend` — an Apple MLX loop (change ``mlx-neural-trainer``)
+  that runs the same contribution-weighted MLE on the Metal GPU of an
+  Apple-Silicon host, via the optional ``[mlx]`` extra. It mirrors the numpy
+  oracle's flow math (the parity target) on ``mlx.core`` arrays with MLX
+  autodiff + a hand-rolled bias-corrected Adam, and bakes the same fp32 NFW1.
+
 All backends share one skinny-owned dataset contract
 :func:`build_dataset_np` (float32, contiguous), mirroring ``spline_flow``'s
 torch ``build_dataset`` so the torch wrap stays zero-copy and the numpy build
@@ -25,9 +31,10 @@ never drifts from the offline source of truth (guarded by a parity test).
 
 Backend selection mirrors the ``make_publisher`` / ``registry.py`` house style:
 ``make_training_backend(kind, ...)`` over the :data:`TRAINING_BACKENDS` token
-table — ``cpu`` → numpy, ``cuda`` → torch on CUDA, ``mlx`` → reserved for a
-later change. ``auto`` picks CUDA when torch + a CUDA device are present, else
-numpy. An unavailable explicit token raises clearly.
+table — ``cpu`` → numpy, ``cuda`` → torch on CUDA, ``mlx`` → MLX on Apple-Silicon
+Metal. ``auto`` precedence is ``cuda > mlx > cpu``: CUDA when torch + a CUDA
+device are present, else MLX when the ``[mlx]`` extra is importable on a Metal
+host, else the numpy oracle. An unavailable explicit token raises clearly.
 """
 
 from __future__ import annotations
@@ -51,6 +58,7 @@ __all__ = [
     "TrainingBackend",
     "TorchTrainingBackend",
     "NumpyTrainingBackend",
+    "MlxTrainingBackend",
     "TRAINING_BACKENDS",
     "make_training_backend",
     "build_dataset_np",
@@ -229,13 +237,35 @@ def _torch_cuda() -> bool:
         return False
 
 
+def _mlx_metal() -> bool:
+    """True when Apple MLX is importable on an Apple-Silicon Metal host — the gate
+    for the MLX training backend (mirrors ``_torch_cuda`` for the CUDA backend).
+    The ``import mlx.core`` stays inside the function so MLX is never a hard
+    dependency: a host without the optional ``[mlx]`` extra simply reports False."""
+    try:
+        import mlx.core as mx
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        import platform
+        if not (platform.system() == "Darwin" and platform.machine() == "arm64"):
+            return False
+        try:
+            return bool(mx.metal.is_available())
+        except AttributeError:
+            # newer MLX folds the Metal check into the unified device API
+            return bool(mx.default_device().type == mx.DeviceType.gpu)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Token → human description, mirroring registry.py's name-keyed plugin dicts.
 # The CLI exposes these tokens (--neural-trainer); they map onto the framework
 # backend classes inside make_training_backend.
 TRAINING_BACKENDS: dict[str, str] = {
     "cpu": "numpy reference oracle (torch-free, always available)",
     "cuda": "torch on CUDA (the training box)",
-    "mlx": "Apple MLX (reserved for a later change)",
+    "mlx": "Apple MLX on Apple-Silicon Metal (the Mac training GPU)",
 }
 
 
@@ -245,15 +275,33 @@ def make_training_backend(kind: str = "auto", *, device: str = "auto",
     """Build the training backend for a source token, mirroring ``make_publisher``.
 
     ``cpu`` → :class:`NumpyTrainingBackend`, ``cuda`` → :class:`TorchTrainingBackend`
-    on CUDA, ``mlx`` → reserved (raises). ``auto`` picks ``cuda`` when torch + a
-    CUDA device are available, else ``cpu``. An explicitly requested token the
-    host cannot provide raises a clear error rather than silently degrading.
+    on CUDA, ``mlx`` → :class:`MlxTrainingBackend` on an Apple-Silicon Metal host.
+    ``auto`` precedence is ``cuda > mlx > cpu``: it picks ``cuda`` when torch + a
+    CUDA device are present, else ``mlx`` when the optional ``mlx`` extra is
+    importable on an Apple-Silicon Metal host, else the always-available numpy
+    oracle. An explicitly requested token the host cannot provide raises a clear
+    error rather than silently degrading.
     """
     if kind == "auto":
-        kind = "cuda" if _torch_cuda() else "cpu"
+        kind = "cuda" if _torch_cuda() else "mlx" if _mlx_metal() else "cpu"
 
     if kind == "cpu":
         return NumpyTrainingBackend(train_precision=train_precision)
+
+    if kind == "mlx":
+        be = MlxTrainingBackend(train_precision=train_precision)
+        if not be.is_available():
+            try:
+                import mlx.core  # noqa: F401
+                has_mlx = True
+            except Exception:  # noqa: BLE001
+                has_mlx = False
+            missing = ("the mlx package (install the '[mlx]' extra)" if not has_mlx
+                       else "an Apple-Silicon Metal device")
+            raise RuntimeError(
+                f"--neural-trainer mlx requested but {missing} is unavailable; "
+                f"use 'cpu' (numpy reference) or 'auto'")
+        return be
 
     if kind == "cuda":
         be = TorchTrainingBackend(
@@ -272,11 +320,6 @@ def make_training_backend(kind: str = "auto", *, device: str = "auto",
                 f"--neural-trainer cuda requested but {missing} is unavailable; "
                 f"use 'cpu' (numpy reference) or 'auto'")
         return be
-
-    if kind == "mlx":
-        raise NotImplementedError(
-            "the 'mlx' training backend is reserved for a later change; "
-            "use 'cpu' (numpy reference) or 'cuda' (torch)")
 
     raise ValueError(
         f"unknown neural trainer backend {kind!r}; "
@@ -897,4 +940,287 @@ class NumpyTrainingBackend(TrainingBackend):
 
     def export(self) -> NeuralWeights:
         linears = [(W.value, B.value) for W, B in self._leaves]
+        return _weights_from_linears(linears, self._cfg.arch)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apple MLX backend (Metal GPU; change mlx-neural-trainer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MlxTrainingBackend(TrainingBackend):
+    """GPU training on Apple-Silicon Metal via Apple MLX. Warm-starts the shipped
+    flow from the current weights, runs ``steps_per_cycle`` Adam steps of the
+    contribution-weighted MLE on the Metal GPU, and bakes back to fp32 NFW1.
+
+    The flow math mirrors :class:`NumpyTrainingBackend` — the parity target —
+    op-for-op on ``mlx.core`` arrays, but lets MLX autodiff produce the gradients
+    (no hand-written backward) and applies a hand-rolled, bias-corrected Adam with
+    the same global grad-norm clip so a one-step update from identical weights
+    matches the numpy oracle within tolerance. At ``train_precision='fp16'`` the
+    flow runs in ``float16`` over fp32 master weights (D5): the loss accumulates
+    in fp32, gradients land back on the fp32 leaves, and a non-finite fp16 loss
+    falls the session back to fp32 with a one-time warning. ``export`` always
+    bakes fp32, so the handoff format is unchanged.
+    """
+
+    def __init__(self, *, train_precision: str = "fp32"):
+        self.name = "mlx"
+        self._train_precision = train_precision
+        self._mx = None
+        self._cfg = None
+        self._leaves: list = []            # flat [W0,b0,W1,b1,...] mx arrays, header order
+        self._m: list = []                 # Adam 1st moments, parallel to _leaves
+        self._v: list = []                 # Adam 2nd moments, parallel to _leaves
+        self._t = 0
+        self._fp16_disabled = False        # set once if fp16 loss goes non-finite
+        self.last_loss: float | None = None
+
+    # ── availability / capability ────────────────────────────────────────
+
+    def _import(self) -> bool:
+        if self._mx is not None:
+            return True
+        if not _mlx_metal():
+            return False
+        import mlx.core as mx
+        self._mx = mx
+        return True
+
+    def is_available(self) -> bool:
+        return _mlx_metal()
+
+    def supports_precision(self, precision: str, device: str | None = None) -> bool:
+        # fp32 always; fp16 runs as float16 compute over fp32 masters (D5), with a
+        # runtime fall back to fp32 if a step's loss becomes non-finite.
+        return precision in ("fp32", "fp16")
+
+    # ── warm model ───────────────────────────────────────────────────────
+
+    def warm_start(self, weights: NeuralWeights, cfg) -> None:
+        if not self._import():
+            raise RuntimeError("MlxTrainingBackend.warm_start: mlx unavailable "
+                               "(needs the '[mlx]' extra on an Apple-Silicon Metal host)")
+        mx = self._mx
+        self._cfg = cfg
+        arch = cfg.arch
+        if np.any(weights.weights):
+            linears = _linears_from_weights(weights)
+        else:
+            # all-zero dummy is a degenerate saddle (uniform spline → 0 grad);
+            # seed the same deterministic torch-style Linear init the numpy oracle
+            # uses so the first update actually moves and the two stay comparable.
+            rng = np.random.default_rng(0)
+            headers, _, _ = _layout(arch.layers, arch.bins, arch.hidden)
+            linears = []
+            for _w_off, _b_off, in_dim, out_dim in headers:
+                k = 1.0 / in_dim
+                b = np.sqrt(k)
+                linears.append((rng.uniform(-b, b, (out_dim, in_dim)),
+                                rng.uniform(-b, b, out_dim)))
+        # Flat leaf list in header order: [W0, b0, W1, b1, ...]; fp32 masters.
+        self._leaves = []
+        for w, b in linears:
+            self._leaves.append(mx.array(np.ascontiguousarray(w, np.float32)))
+            self._leaves.append(mx.array(np.ascontiguousarray(b, np.float32)))
+        self._m = [mx.zeros(p.shape, dtype=mx.float32) for p in self._leaves]
+        self._v = [mx.zeros(p.shape, dtype=mx.float32) for p in self._leaves]
+        self._t = 0
+        mx.eval(self._leaves, self._m, self._v)
+
+    # ── flow forward (log q) — mirrors NumpyTrainingBackend._log_pdf_square ──
+
+    def _gather1(self, src, idx):
+        """src[B,M] gathered along axis 1 by idx[B] (int) → [B]. idx is computed
+        in-graph from integer comparisons, so it carries no gradient — matching the
+        numpy oracle's stop-gradient on the spline-bin selection."""
+        mx = self._mx
+        return mx.take_along_axis(src, idx.reshape(-1, 1), axis=1).reshape(-1)
+
+    def _cumsum0(self, x):
+        """[B,K] → [B,K+1] with a leading zero column."""
+        mx = self._mx
+        B = x.shape[0]
+        return mx.concatenate([mx.zeros((B, 1), dtype=x.dtype), mx.cumsum(x, axis=1)],
+                              axis=1)
+
+    def _bin_index(self, q, knots, K):
+        """idx = (#{knots[:,j] <= q}) - 1, clipped to [0, K-1]. Integer, non-diff."""
+        mx = self._mx
+        ge = (q.reshape(-1, 1) >= knots).astype(mx.int32)
+        return mx.clip(mx.sum(ge, axis=1) - 1, 0, K - 1)
+
+    def _rqs_forward_logdet(self, x, widths, heights, derivs, K, eps=1e-8):
+        mx = self._mx
+        x = mx.clip(x, 0.0, 1.0)
+        xk = self._cumsum0(widths)
+        yk = self._cumsum0(heights)
+        idx = self._bin_index(x, xk, K)
+        x0, x1 = self._gather1(xk, idx), self._gather1(xk, idx + 1)
+        y0, y1 = self._gather1(yk, idx), self._gather1(yk, idx + 1)
+        d0, d1 = self._gather1(derivs, idx), self._gather1(derivs, idx + 1)
+        width = mx.maximum(x1 - x0, eps)
+        height = mx.maximum(y1 - y0, eps)
+        delta = height / width
+        theta = (x - x0) / width
+        one_m = 1.0 - theta
+        den = delta + (d0 + d1 - delta * 2.0) * theta * one_m
+        dnum = delta * delta * (d1 * theta * theta
+                                + delta * 2.0 * theta * one_m
+                                + d0 * one_m * one_m)
+        dydx = dnum / (mx.maximum(den, eps) ** 2)
+        return mx.log(mx.maximum(dydx, eps))
+
+    def _rqs_inverse(self, y, widths, heights, derivs, K, eps=1e-8):
+        """Analytic inverse of the monotone RQ spline — mirrors numpy
+        ``_rqs_inverse``. Returns ``(x, logdet)`` with ``logdet = log|dx/dy|``."""
+        mx = self._mx
+        y = mx.clip(y, 0.0, 1.0)
+        xk = self._cumsum0(widths)
+        yk = self._cumsum0(heights)
+        idx = self._bin_index(y, yk, K)
+        x0 = self._gather1(xk, idx)
+        y0, y1 = self._gather1(yk, idx), self._gather1(yk, idx + 1)
+        d0, d1 = self._gather1(derivs, idx), self._gather1(derivs, idx + 1)
+        width = mx.maximum(self._gather1(xk, idx + 1) - x0, eps)
+        height = mx.maximum(y1 - y0, eps)
+        delta = height / width
+        z = (y - y0) / height
+        a = d0 + d1 - delta * 2.0
+        A = z * a + delta - d0
+        Bc = d0 - z * a
+        C = -(delta * z)
+        disc = mx.maximum(Bc * Bc - A * C * 4.0, 0.0)
+        sqrt_disc = mx.sqrt(disc)
+        theta = (C * 2.0) / mx.minimum(-Bc - sqrt_disc, -eps)
+        theta = mx.clip(theta, 0.0, 1.0)
+        x = x0 + theta * width
+        logdet = -self._rqs_forward_logdet(x, widths, heights, derivs, K, eps)
+        return mx.clip(x, 0.0, 1.0), logdet
+
+    def _log_pdf_square(self, leaves, z, cond):
+        """log q on the unit square for the shipped dim=2 flow — the MLX mirror of
+        :meth:`NumpyTrainingBackend._log_pdf_square` (uniform base ⇒ log q = logdet)."""
+        mx = self._mx
+        cfg = self._cfg.arch
+        K = cfg.bins
+        cols = [z[:, 0], z[:, 1]]
+        logdet = None
+        for i in reversed(range(cfg.layers)):
+            mask_even = (i % 2 == 0)
+            cond_col = 0 if mask_even else 1
+            trans_col = 1 if mask_even else 0
+            W0, b0 = leaves[6 * i + 0], leaves[6 * i + 1]
+            W1, b1 = leaves[6 * i + 2], leaves[6 * i + 3]
+            W2, b2 = leaves[6 * i + 4], leaves[6 * i + 5]
+            x_in = mx.concatenate([cols[cond_col].reshape(-1, 1), cond], axis=1)
+            h = self._silu(x_in @ W0.T + b0)
+            h = self._silu(h @ W1.T + b1)
+            raw = h @ W2.T + b2                                  # [B, 3K+1]
+            wsm = mx.softmax(raw[:, 0:K], axis=1) + _MIN_BIN
+            widths = wsm / mx.sum(wsm, axis=1, keepdims=True)
+            hsm = mx.softmax(raw[:, K:2 * K], axis=1) + _MIN_BIN
+            heights = hsm / mx.sum(hsm, axis=1, keepdims=True)
+            derivs = self._softplus(raw[:, 2 * K:3 * K + 1]) + _DERIV_FLOOR
+            new_tr, ld = self._rqs_inverse(cols[trans_col], widths, heights, derivs, K)
+            cols[trans_col] = new_tr
+            logdet = ld if logdet is None else logdet + ld
+        return logdet
+
+    def _silu(self, x):
+        mx = self._mx
+        return x * mx.sigmoid(x)
+
+    def _softplus(self, x):
+        mx = self._mx
+        return mx.logaddexp(mx.zeros_like(x), x)
+
+    # ── update ───────────────────────────────────────────────────────────
+
+    def update(self, cond: np.ndarray, z: np.ndarray, w: np.ndarray) -> float | None:
+        mx = self._mx
+        cfg = self._cfg
+        n = cond.shape[0]
+        if n == 0:
+            return None
+        cond = np.ascontiguousarray(cond, np.float32)
+        z = np.ascontiguousarray(z, np.float32)
+        w = np.ascontiguousarray(w, np.float32)
+        bs = min(int(cfg.batch), n)
+        use_fp16 = (self._train_precision == "fp16" and not self._fp16_disabled)
+        cdt = mx.float16 if use_fp16 else mx.float32
+
+        def loss_fn(leaves, zb, cb, wb):
+            lv = [p.astype(cdt) for p in leaves] if use_fp16 else leaves
+            log_q = self._log_pdf_square(lv, zb.astype(cdt), cb.astype(cdt))
+            log_q = log_q.astype(mx.float32)
+            return -mx.sum(wb * log_q) / mx.maximum(mx.sum(wb), 1e-12)
+
+        grad_fn = mx.value_and_grad(loss_fn)
+        rng = np.random.default_rng(self._t + 1)
+        last = None
+        for _ in range(int(cfg.steps_per_cycle)):
+            idx = rng.integers(0, n, bs)
+            zb = mx.array(z[idx])
+            cb = mx.array(cond[idx])
+            wb = mx.array(w[idx])
+            loss, grads = grad_fn(self._leaves, zb, cb, wb)
+            # fp16 can overflow in the BACKWARD while the forward loss stays
+            # finite, so the step is gated on the gradients' global norm too —
+            # never apply a non-finite step (a 0·∞ in the grad-norm clip would
+            # poison the fp32 masters and make the fall-back unrecoverable).
+            gnorm = mx.sqrt(sum(mx.sum(g.astype(mx.float32) ** 2) for g in grads))
+            lf = float(loss.item())
+            step_finite = np.isfinite(lf) and bool(mx.isfinite(gnorm).item())
+            if not step_finite:
+                if use_fp16:
+                    # fp16 went non-finite — disable fp16 for the rest of the
+                    # session (D5) and retry in fp32 from the next iteration.
+                    self._fp16_disabled = True
+                    use_fp16 = False
+                    cdt = mx.float32
+                    grad_fn = mx.value_and_grad(loss_fn)
+                    print("[neural] mlx fp16 training step non-finite; "
+                          "falling back to fp32 for the rest of the session")
+                # fp32 non-finite is variance on a degenerate batch — drop the
+                # step (weights untouched) rather than corrupt the masters.
+                continue
+            self._adam_step(grads, gnorm=gnorm)
+            last = lf
+        if last is not None and np.isfinite(last):
+            self.last_loss = last
+            return last
+        return None
+
+    def _adam_step(self, grads, *, gnorm, beta1=0.9, beta2=0.999, eps=1e-8, clip=5.0):
+        """Hand-rolled bias-corrected Adam with a global grad-norm clip — matches
+        :meth:`NumpyTrainingBackend._adam_step` so MLX↔numpy stay comparable.
+        ``gnorm`` is the global L2 grad-norm the caller already computed (and
+        verified finite)."""
+        mx = self._mx
+        cfg = self._cfg
+        lr = cfg.lr
+        total = gnorm
+        scale = mx.minimum(clip / (total + 1e-6), 1.0)   # only shrinks when total>clip
+        self._t += 1
+        bc1 = 1.0 - beta1 ** self._t
+        bc2 = 1.0 - beta2 ** self._t
+        for i, g in enumerate(grads):
+            g = g.astype(mx.float32) * scale
+            m = beta1 * self._m[i] + (1.0 - beta1) * g
+            v = beta2 * self._v[i] + (1.0 - beta2) * (g * g)
+            self._m[i] = m
+            self._v[i] = v
+            mhat = m / bc1
+            vhat = v / bc2
+            self._leaves[i] = self._leaves[i] - lr * mhat / (mx.sqrt(vhat) + eps)
+        mx.eval(self._leaves, self._m, self._v)   # D2: pay the step cost here
+
+    # ── in-memory bake ───────────────────────────────────────────────────
+
+    def export(self) -> NeuralWeights:
+        linears = []
+        for k in range(len(self._leaves) // 2):
+            W = np.array(self._leaves[2 * k]).astype(np.float32)
+            b = np.array(self._leaves[2 * k + 1]).astype(np.float32)
+            linears.append((W, b))
         return _weights_from_linears(linears, self._cfg.arch)
