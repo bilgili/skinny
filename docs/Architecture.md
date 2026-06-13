@@ -1022,11 +1022,20 @@ the frame-end weight swap; training itself happens off the render path.
    fp16 on tensor cores, the RQ-spline math in fp32); torch-free venvs fall back
    to a placeholder. It bakes the new weights and `publish()`es them.
 3. **Publish** — a `NeuralWeightPublisher` (`sampling/neural_handoff.py`) stages
-   the pending weights through one of **two handoff backends**, selected by
+   the pending weights through one of **three handoff backends**, selected by
    `--neural-handoff` (env `SKINNY_NEURAL_HANDOFF`, persisted):
    - **`file`** (default, `neural_handoff_file.py`) — the trainer writes an NFW1
-     file, the renderer hot-reloads it: a CPU round-trip that works on **any**
-     platform.
+     file, the renderer hot-reloads it: a CPU round-trip through disk that works
+     on **any** platform.
+   - **`shared`** (`neural_handoff_shared.py`, `SharedWeightPublisher`, change
+     `shared-neural-handoff`) — an in-process CPU double-buffer held in RAM. The
+     trainer (a same-process daemon thread) `publish()`es a byte-faithful private
+     copy via `serialize`/`deserialize_neural_weights` (the `file` path minus the
+     filesystem, so the bytes match a `file` publish), and the frame-boundary
+     `swap()` promotes it. No disk write, no CUDA / unified-memory device, no
+     added dependency, **any** platform; the renderer uploads the swapped weights
+     to the GPU through the same post-swap path as `file`. This backend never
+     writes the GPU buffers directly (that is `interop`).
    - **`interop`** — the GPU handoff, resolved per backend by `make_publisher`
      (change `metal-neural-interop`). On **Vulkan**
      (`neural_handoff_interop.py`) CUDA writes weights (33) and biases (34)

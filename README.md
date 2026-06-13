@@ -441,7 +441,8 @@ in the GUI.
 
 | Handoff | Vulkan host | Metal host |
 |---------|-------------|------------|
-| `file` (NFW1 double-buffer) | ✅ any host | ✅ any host — CPU round-trip, portable |
+| `file` (NFW1 double-buffer) | ✅ any host | ✅ any host — CPU round-trip through disk, portable |
+| `shared` (in-process CPU double-buffer) | ✅ any host — RAM, no disk, no extra deps | ✅ any host — RAM, no disk, no extra deps |
 | `interop` (GPU-side, no file) | ✅ requires CUDA + `VK_KHR_external_memory` + timeline semaphore (`pip install -e ".[interop]"`) | ✅ unified-memory shared-storage in-place writes, no extra deps |
 
 Train precision is independent of inference precision (training always bakes
@@ -454,10 +455,11 @@ fp32 weights; the handoff format is unchanged).
 
 **Supported Mac (no CUDA) online-training combo:**
 `--execution-mode wavefront --proposals bsdf,neural --online-training
---neural-trainer mlx --neural-handoff {file|interop}` — fully single-device
+--neural-trainer mlx --neural-handoff {file|shared|interop}` — fully single-device
 on Apple Silicon, training on the Metal GPU via Apple MLX; `interop` keeps the
-weight handoff GPU-side (UMA write-in-place) and `file` works identically with a
-CPU round-trip. Swap `mlx` for `cpu` to use the torch-free numpy oracle instead.
+weight handoff GPU-side (UMA write-in-place), `shared` hands weights across in
+RAM (no disk, no extra deps), and `file` works identically with a CPU round-trip
+through disk. Swap `mlx` for `cpu` to use the torch-free numpy oracle instead.
 
 ### Sampling
 
@@ -496,11 +498,13 @@ see [docs/Wavefront.md § Neural size & precision](docs/Wavefront.md#neural-size
 
 **Online neural training.** The neural proposal can be trained *continuously*
 while the scene animates, so the net adapts instead of staying frozen on an
-offline bake. `--neural-handoff {file,interop}` (env `SKINNY_NEURAL_HANDOFF`,
+offline bake. `--neural-handoff {file,shared,interop}` (env `SKINNY_NEURAL_HANDOFF`,
 also GUI/persisted) selects how freshly-trained weights are handed from the
 async trainer back to the renderer: `file` (default) double-buffers through an
-NFW1 file the renderer hot-reloads — a CPU round-trip that works on **any**
-platform; `interop` publishes weights + biases GPU-side with no file round-trip,
+NFW1 file the renderer hot-reloads — a CPU round-trip through disk that works on
+**any** platform; `shared` is an in-process CPU double-buffer held in RAM — the
+same byte-faithful round-trip without the disk write, no CUDA / unified-memory
+device, on **any** platform; `interop` publishes weights + biases GPU-side with no file round-trip,
 resolved per backend: on **Vulkan**, CUDA writes the exported weight buffers via
 `VK_KHR_external_memory` + an exported timeline semaphore (needs the `interop`
 extra, `pip install -e ".[interop]"`); on the native **Metal** backend the

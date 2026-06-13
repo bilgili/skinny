@@ -9,6 +9,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Shared CPU neural handoff** (change `shared-neural-handoff`) — a third
+  `--neural-handoff` value, `shared` (env `SKINNY_NEURAL_HANDOFF`, persisted on
+  the front-ends). Since the online trainer runs as a same-process daemon thread,
+  `shared` hands freshly-trained weights across the trainer→render boundary
+  through an in-process CPU double-buffer held in RAM (`neural_handoff_shared.py`,
+  `SharedWeightPublisher`): no disk write (unlike `file`) and no CUDA /
+  unified-memory device (unlike `interop`), available on **any** platform with no
+  added dependency. `publish()` stores a byte-faithful private copy via the new
+  `serialize_neural_weights` / `deserialize_neural_weights` core (the same path
+  `write_neural_weights` / `load_neural_weights` now wrap — NFW1 on-disk format
+  unchanged), so the bytes the renderer consumes are identical to a `file` publish
+  and a post-publish trainer mutation can never leak into the frozen render
+  buffer. The renderer uploads swapped weights to the GPU through the normal
+  post-swap path; `shared` never writes the GPU buffers directly (that is
+  `interop`). Same frame-boundary swap + `networkVersion`-increment contract as
+  the other backends. `file` stays the default; existing runs are byte-identical.
+  (`tests/test_neural_handoff_shared.py`.)
 - **MLX neural trainer** (change `mlx-neural-trainer`) — the reserved
   `--neural-trainer mlx` token is now a working GPU training backend: online
   neural-proposal training runs on the Metal GPU of an Apple-Silicon host via

@@ -455,9 +455,10 @@ version stamp guarantees it), an asynchronous swap can only change *which*
 frozen net a given sample saw — never the consistency of its one-sample-MIS
 weight (`β ·= f·cos / p_mix`). A stale or freshly-swapped net therefore raises
 **variance only, never bias**; mixture-MIS unbiasedness is preserved across the
-swap exactly as it is across an untrained net. The two weight-handoff backends
-(`file` hot-reload vs CUDA↔Vulkan `interop`) differ only in *how* the pending
-weights reach the buffer, not in this swap discipline.
+swap exactly as it is across an untrained net. The three weight-handoff backends
+(`file` disk hot-reload, `shared` in-process RAM double-buffer, and CUDA↔Vulkan /
+UMA `interop`) differ only in *how* the pending weights reach the buffer, not in
+this swap discipline.
 
 ### Neural size & precision tuning (`neural-precision-size-study`)
 
