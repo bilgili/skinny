@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 
-from skinny.cli_common import add_render_flags, resolve_walk
+from skinny.cli_common import add_render_flags, resolve_walk, validate_render_flags
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -339,6 +339,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     ns = _build_parser().parse_args(argv)
+    # Reject impossible combos (e.g. bdpt + neural/online-training) up front.
+    validate_render_flags(ns)
     from skinny.backend_select import select_backend
 
     # skinny-render is non-interactive (no persisted setting): resolve the

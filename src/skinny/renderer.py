@@ -7662,6 +7662,16 @@ class Renderer:
         prerequisite when ``ok`` is False, and is empty when ``ok`` is True."""
         if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
             return (False, "online training requires --execution-mode wavefront")
+        # BDPT never consumes the neural proposal (bdpt.slang does not import the
+        # proposal seam) and has no wavefront record source, so training under it
+        # would guide nothing and the drain would fall back to the megakernel
+        # records (absent on Metal). Refuse so the GUI runtime path (where the
+        # integrator is selected after startup) reports it cleanly rather than
+        # crashing mid-frame (change bdpt-neural-incompatibility). The CLI
+        # front-ends additionally hard-exit on the flag combo at startup.
+        if self.integrator_index == 1:  # 1 = bdpt
+            return (False, "online training requires --integrator path — BDPT "
+                           "does not consume the neural proposal")
         if not self._neural_active():
             return (False, "online training requires a neural proposal in the "
                            "mixture (--proposals …,neural)")
@@ -7732,6 +7742,8 @@ class Renderer:
             ot_status = cr.OFF
         elif self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
             ot_status = cr.refused("requires --execution-mode wavefront")
+        elif self.integrator_index == 1:  # bdpt ignores the neural proposal
+            ot_status = cr.refused("requires --integrator path (bdpt ignores neural)")
         elif not self._neural_active():
             ot_status = cr.waiting("select a neural proposal")
         else:

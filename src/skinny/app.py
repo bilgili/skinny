@@ -21,7 +21,12 @@ from skinny.params import (
     ParamSpec, build_all_params,
     _get_nested, _set_nested, _snapshot_params, _apply_saved_params,
 )
-from skinny.cli_common import INTEGRATOR_INDEX, add_render_flags, resolve_walk
+from skinny.cli_common import (
+    INTEGRATOR_INDEX,
+    add_render_flags,
+    resolve_walk,
+    validate_render_flags,
+)
 from skinny.backend_select import (
     make_context,
     select_backend,
@@ -470,6 +475,8 @@ def main() -> None:
     )
     add_render_flags(parser)
     args = parser.parse_args()
+    # Reject impossible combos (e.g. bdpt + neural/online-training) up front.
+    validate_render_flags(args)
 
     scene_path: Path | None = args.scene or args.usd
 

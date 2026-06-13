@@ -236,3 +236,20 @@ def test_vulkan_wavefront_still_requires_descriptor_sets():
     assert _ready(fake) is False
     fake.descriptor_sets = object()
     assert _ready(fake) is True
+
+
+# ── bdpt × neural refusal (change bdpt-neural-incompatibility) ────────
+
+def test_can_online_train_refuses_bdpt():
+    fake = types.SimpleNamespace(
+        effective_execution_mode_index=EXECUTION_WAVEFRONT, integrator_index=1)
+    fake._neural_active = lambda: True
+    ok, reason = Renderer.can_online_train(fake)
+    assert ok is False and "--integrator path" in reason
+
+
+def test_matrix_online_training_refused_under_bdpt():
+    fake = _matrix_fake(integrator_index=1)
+    rows = _rows(fake)
+    assert rows["online-training"].status == cr.refused(
+        "requires --integrator path (bdpt ignores neural)")

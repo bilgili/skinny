@@ -166,3 +166,48 @@ def test_headless_parser_exposes_all_three_flags(monkeypatch):
     assert ns.integrator is None
     assert ns.execution_mode == "megakernel"
     assert resolve_walk(ns.bdpt_walk) == "fused"
+
+
+# ── validate_render_flags: bdpt × neural/online incompatibility ───────
+
+from skinny.cli_common import validate_render_flags  # noqa: E402
+
+
+def _ns(**kw):
+    base = dict(integrator=None, proposals=None, online_training=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_bdpt_plus_online_training_exits():
+    with pytest.raises(SystemExit) as ei:
+        validate_render_flags(_ns(integrator="bdpt", online_training=True))
+    assert "bdpt" in str(ei.value) and "--integrator path" in str(ei.value)
+
+
+def test_bdpt_plus_neural_proposal_exits():
+    with pytest.raises(SystemExit) as ei:
+        validate_render_flags(_ns(integrator="bdpt", proposals="bsdf,neural"))
+    assert "bdpt" in str(ei.value)
+
+
+def test_bdpt_without_neural_is_ok():
+    # bdpt alone, and bdpt + a non-neural proposal, are fine.
+    validate_render_flags(_ns(integrator="bdpt"))
+    validate_render_flags(_ns(integrator="bdpt", proposals="bsdf,env"))
+
+
+def test_path_plus_neural_is_ok():
+    validate_render_flags(_ns(integrator="path", proposals="bsdf,neural",
+                              online_training=True))
+
+
+def test_default_integrator_not_flagged():
+    # integrator=None (persisted/default path) must not trip the guard.
+    validate_render_flags(_ns(integrator=None, online_training=True))
+
+
+def test_missing_proposals_attr_ok():
+    # Front-ends without --proposals (skinny-gui / skinny-web) pass a Namespace
+    # with no `proposals` attribute; the guard must tolerate it.
+    validate_render_flags(argparse.Namespace(integrator="bdpt", online_training=False))
