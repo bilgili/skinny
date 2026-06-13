@@ -90,8 +90,8 @@ is swappable. `NeuralTrainer` stays the orchestrator (replay sampling →
 | --- | --- | --- |
 | `cpu` | `NumpyTrainingBackend` | torch-free reference oracle — forward **and** backward of the contribution-weighted MLE on the shipped flow via a tiny pure-numpy autodiff tape. The guaranteed-available fallback (a torch-free Mac trains for real, not a placeholder) and the independent numeric oracle the torch/MLX backends are checked against. fp32 only. |
 | `cuda` | `TorchTrainingBackend(device=cuda)` | the torch loop on the training box; autocast-fp16 GEMMs at `--train-precision fp16`. Raises clearly if torch/CUDA are absent. |
-| `mlx` | — | reserved for a later change (Apple Silicon). |
-| `auto` (default) | cuda if torch+CUDA, else cpu | — |
+| `mlx` | `MlxTrainingBackend` | GPU training on Apple-Silicon Metal via Apple MLX (change `mlx-neural-trainer`, optional `[mlx]` extra). Mirrors the numpy oracle's flow math op-for-op on `mlx.core` arrays — the parity target — but with MLX autodiff and a hand-rolled bias-corrected Adam (same global grad-norm clip), so a one-step update from identical weights matches the oracle for the bulk of the net (the few outliers are Adam sign-flips on dead weights). Bakes the same fp32 NFW1. `--train-precision fp16` runs the flow in `float16` over fp32 masters with a runtime fall-back to fp32 on a non-finite step. Raises clearly off an Apple-Silicon Metal host. |
+| `auto` (default) | precedence `cuda > mlx > cpu` | cuda if torch+CUDA, else mlx when the `[mlx]` extra is importable on an Apple-Silicon Metal host, else cpu (numpy oracle). |
 
 **Train vs. infer precision are independent dials** (post-training quantization).
 Training always bakes **fp32** weights — the on-disk/handoff format never changes —
@@ -103,7 +103,7 @@ so the inference precision is a separate upload-time cast + shader variant:
 | weight GPU bytes | ×1 | ×½ | ×½ | ×¼ |
 | device feature | — | 16-bit storage | `shaderFloat16` | **none** (manual decode) |
 | **Training** `--train-precision` | optimizer fp32 | — | — | — |
-| | fp16 | torch autocast on CUDA, else fp32 fallback | | |
+| | fp16 | torch autocast on CUDA; float16 compute over fp32 masters on Apple MLX (runtime fp32 fall-back on a non-finite step); else fp32 fallback | | |
 
 Reduced precision here is **variance, not bias**: the reported solid-angle pdf is
 full-precision float in every mode, so a lower-precision GEMM perturbs the
@@ -149,9 +149,12 @@ skinny --execution-mode wavefront --proposals bsdf,neural \
   --online-training --neural-trainer cpu --neural-handoff file
 ```
 
-`--neural-trainer auto` resolves to `cpu` on a torch-free Mac, so it works too.
+On an Apple-Silicon Metal host with the `[mlx]` extra installed,
+`--neural-trainer mlx` trains on the Metal GPU and `--neural-trainer auto`
+resolves to it automatically (falling back to `cpu`/numpy when MLX is absent).
 The unsupported combos surface their own errors rather than starting a broken loop:
-`--neural-trainer mlx` is reserved (`NotImplementedError`), and `--neural-handoff
+`--neural-trainer mlx` off an Apple-Silicon Metal host raises a clear error
+naming the missing piece (the `[mlx]` extra or a Metal device), and `--neural-handoff
 interop` needs a GPU handoff path — CUDA + `VK_KHR_external_memory` on Vulkan,
 or the native Metal backend on a unified-memory device (`NotImplementedError`
 where neither exists).

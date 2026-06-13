@@ -1226,7 +1226,7 @@ class Renderer:
         # enable_online_training; `_neural_handoff_kind` selects the publisher
         # backend (--neural-handoff: 'file' | 'interop'). `_neural_trainer_kind`
         # selects the training-compute backend (--neural-trainer: 'cpu' numpy |
-        # 'cuda' torch | 'mlx' | 'auto') and `_train_precision` the optimizer
+        # 'cuda' torch | 'mlx' Apple-MLX-on-Metal | 'auto') and `_train_precision` the optimizer
         # precision (--train-precision: 'fp32' | 'fp16'); both feed TrainerConfig
         # in enable_online_training (change neural-trainer-backends). Off until
         # enabled.

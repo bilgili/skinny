@@ -434,10 +434,10 @@ in the GUI.
 
 | Trainer | Vulkan host | Metal host (Apple-Silicon) |
 |---------|-------------|----------------------------|
-| `cpu` (torch-free numpy oracle) | ✅ on any host | ✅ — recommended default on Mac |
+| `cpu` (torch-free numpy oracle) | ✅ on any host | ✅ always available |
 | `cuda` (torch) | ✅ when a CUDA GPU is present | n/a (raises) |
-| `mlx` | reserved — raises clear error | reserved — raises clear error |
-| `auto` | → `cuda` if present, else numpy oracle | → numpy oracle |
+| `mlx` (Apple MLX on the Metal GPU, `pip install -e ".[mlx]"`) | n/a (raises) | ✅ — GPU trainer, the recommended Mac default |
+| `auto` | → `cuda` if present, else numpy oracle | → `mlx` if the `[mlx]` extra is importable, else numpy oracle |
 
 | Handoff | Vulkan host | Metal host |
 |---------|-------------|------------|
@@ -450,13 +450,14 @@ fp32 weights; the handoff format is unchanged).
 | `--train-precision` | Behavior |
 |---------------------|----------|
 | `fp32` (default) | always available, every backend / trainer |
-| `fp16` | torch autocast on CUDA; **falls back to fp32** on numpy oracle and on Mac |
+| `fp16` | torch autocast on CUDA; float16 compute over fp32 masters on Apple MLX (runtime fall-back to fp32 on a non-finite step); **falls back to fp32** on the numpy oracle |
 
 **Supported Mac (no CUDA) online-training combo:**
 `--execution-mode wavefront --proposals bsdf,neural --online-training
---neural-trainer cpu --neural-handoff {file|interop}` — fully single-device
-on Apple Silicon when `interop` is selected (UMA write-in-place); `file`
-works identically with a CPU round-trip.
+--neural-trainer mlx --neural-handoff {file|interop}` — fully single-device
+on Apple Silicon, training on the Metal GPU via Apple MLX; `interop` keeps the
+weight handoff GPU-side (UMA write-in-place) and `file` works identically with a
+CPU round-trip. Swap `mlx` for `cpu` to use the torch-free numpy oracle instead.
 
 ### Sampling
 
@@ -511,13 +512,18 @@ an async swap raises variance only, never bias. See
 [docs/Architecture.md § Online neural training](docs/Architecture.md#online-neural-training).
 
 `--neural-trainer {cpu,cuda,mlx,auto}` (env `SKINNY_NEURAL_TRAINER`, also
-persisted) selects the **training-compute** backend: `auto` (default) uses torch
-on CUDA when available, else the torch-free **numpy reference oracle**; `cpu`
-forces the numpy reference (always available — a torch-free Mac trains for real);
-`cuda` forces torch on CUDA (raises if absent); `mlx` is reserved for a later
-change. `--train-precision {fp32,fp16}` (env `SKINNY_TRAIN_PRECISION`, persisted)
+persisted) selects the **training-compute** backend with precedence
+`cuda > mlx > cpu`: `auto` (default) uses torch on CUDA when available, else
+Apple MLX on an Apple-Silicon Metal host (when the `[mlx]` extra is importable),
+else the torch-free **numpy reference oracle**; `cpu` forces the numpy reference
+(always available — a torch-free Mac trains for real); `cuda` forces torch on
+CUDA (raises if absent); `mlx` forces Apple MLX on the Metal GPU (`pip install
+-e ".[mlx]"`; raises off an Apple-Silicon Metal host).
+`--train-precision {fp32,fp16}` (env `SKINNY_TRAIN_PRECISION`, persisted)
 sets the optimizer precision independently of inference precision — `fp16` uses
-torch autocast on CUDA and falls back to fp32 elsewhere. Training always bakes
+torch autocast on CUDA, float16 compute over fp32 masters on Apple MLX (with a
+runtime fall-back to fp32 if a step goes non-finite), and fp32 elsewhere.
+Training always bakes
 fp32 weights, so the handoff format is unchanged. The inference precision adds an
 **fp8-storage** (e4m3) mode — quarter-size weights decoded in-shader with no
 device feature, portable across Vulkan/Metal/MoltenVK; see
@@ -538,8 +544,8 @@ backend/handoff combo (`--neural-trainer mlx`, or `--neural-handoff interop`
 with neither CUDA nor Metal UMA) surfaces its own error. Off by default:
 without the flag the renderer is
 byte-identical to before. The supported **Mac** combo (no CUDA) is
-`--neural-trainer cpu` (or `auto`, which picks the numpy oracle there) with
-`--neural-handoff file`; e.g.
+`--neural-trainer mlx` (or `auto`, which picks MLX there when the `[mlx]` extra
+is installed — `cpu`/numpy otherwise) with `--neural-handoff file`; e.g.
 
 ```bash
 # skinny-gui: launch armed, then select a neural proposal in the combobox.

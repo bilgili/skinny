@@ -183,10 +183,10 @@ the moment a neural proposal becomes active).
 
 | `--neural-trainer` | Vulkan host | Metal host (Apple-Silicon) |
 |--------------------|-------------|----------------------------|
-| `cpu` (numpy oracle, torch-free) | ✅ any host | ✅ recommended default on Mac |
+| `cpu` (numpy oracle, torch-free) | ✅ any host | ✅ always available |
 | `cuda` (torch) | ✅ when CUDA GPU present | n/a — raises |
-| `mlx` | reserved — raises | reserved — raises |
-| `auto` | → `cuda` if present, else numpy oracle | → numpy oracle |
+| `mlx` (Apple MLX on Metal, `[mlx]` extra) | n/a — raises | ✅ GPU trainer (`mlx-neural-trainer`) |
+| `auto` | → `cuda` if present, else numpy oracle | → `mlx` if `[mlx]` importable, else numpy oracle |
 
 | `--neural-handoff` | Vulkan host | Metal host |
 |--------------------|-------------|------------|
@@ -196,16 +196,18 @@ the moment a neural proposal becomes active).
 | `--train-precision` | Behavior |
 |---------------------|----------|
 | `fp32` (default) | always available |
-| `fp16` | torch autocast on CUDA; falls back to fp32 on numpy oracle / Mac |
+| `fp16` | torch autocast on CUDA; float16 compute over fp32 masters on Apple MLX (runtime fall-back to fp32 on a non-finite step); falls back to fp32 on the numpy oracle |
 
 Training always bakes fp32 weights; inference precision (fp32/fp16/fp8) is
 selected independently — the handoff format is unchanged.
 
 **Supported Mac combo (no CUDA):**
 `--backend metal --execution-mode wavefront --proposals bsdf,neural
---online-training --neural-trainer cpu --neural-handoff interop` — fully
-single-device on Apple Silicon; swap `interop` for `file` for the portable
-CPU-round-trip variant.
+--online-training --neural-trainer mlx --neural-handoff interop` — fully
+single-device on Apple Silicon, training on the Metal GPU via Apple MLX (needs
+the `[mlx]` extra; `auto` already resolves to `mlx` on such a host). Swap
+`mlx` for `cpu` for the torch-free numpy oracle, or `interop` for `file` for the
+portable CPU-round-trip handoff variant.
 
 ## Architecture
 

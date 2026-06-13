@@ -11,7 +11,8 @@ new ``NeuralWeights`` the publisher hands to the renderer.
 The orchestrator owns replay sampling, the dataset build (``build_dataset_np``),
 version/loss bookkeeping and publishing; the *per-cycle gradient step* runs
 behind a selectable :class:`~skinny.sampling.training_backends.TrainingBackend`
-(``cpu`` → numpy reference oracle, ``cuda`` → torch on CUDA, ``mlx`` → later).
+(``cpu`` → numpy reference oracle, ``cuda`` → torch on CUDA, ``mlx`` → Apple MLX
+on an Apple-Silicon Metal host).
 There is no longer a torch/placeholder two-tier branch: a torch-free host trains
 for real through the numpy backend.
 """
