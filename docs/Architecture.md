@@ -358,10 +358,13 @@ next-event estimation toward bright sky/sun directions instead of relying on a
 BSDF ray happening to land on them — the fix for specular environment
 fireflies. The distribution is built CPU-side in
 `environment.build_env_distribution()` (sin θ-weighted luminance) and uploaded
-as two CDF buffers:
+as **one** combined CDF buffer `envDistCdf` at binding 31 (change
+`combine-graph-param-buffers` — folding the former 31/32 pair frees a Metal
+buffer slot for the neural + online-training wavefront build):
 
-- binding 31 — `envMarginalCdf` (row marginal, `ENV_H + 1` floats)
-- binding 32 — `envCondCdf` (per-row conditional, `H × (W + 1)` floats)
+- elements `[0, ENV_H+1)` — row marginal CDF (`ENV_H + 1` floats)
+- elements `[ENV_COND_CDF_BASE, …)` — per-row conditional CDF
+  (`H × (W + 1)` floats), where `ENV_COND_CDF_BASE = ENV_H + 1`
 
 `sampleEnvDir(u, intensity)` importance-samples a direction + solid-angle PDF;
 `envPdf(dir)` returns the PDF of an arbitrary direction so BSDF-sampled
@@ -855,9 +858,9 @@ incrementally moved over.
 | 22 | StructuredBuffer | Transform-gizmo line segments | `gizmo.py` |
 | 23 | StructuredBuffer | Lens elements (thick-lens stack, float4) | `cameras/thick_lens.slang` |
 | 24 | StructuredBuffer | Per-radius exit-pupil bounds (float4) | `cameras/thick_lens.slang` |
+| 25 | ByteAddressBuffer | **Combined** MaterialX nodegraph params `graphParamsCombined` — ONE matId-major byte buffer shared by every scene graph, read `Load<GraphParams_X>(matId * GRAPH_PARAM_STRIDE)` (scalar layout, identical Metal/SPIR-V). Replaces the former one-`StructuredBuffer`-per-graph at 25..25+N−1, so graph count no longer grows the Metal argument table (change `combine-graph-param-buffers`) | `generated_materials.slang` |
 | 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe. *Metal slot-cap gate:* compiled out of the neural-active wavefront build (`SKINNY_METAL && SKINNY_METAL_NEURAL`), where it is dead, to fit 33–35 under Metal's 31-buffer argument table | `bindings.slang` |
-| 31 | StructuredBuffer | Env importance-sampling marginal CDF (ENV_H+1 floats) | `environment.slang` |
-| 32 | StructuredBuffer | Env importance-sampling conditional CDF (H×(W+1) floats) | `environment.slang` |
+| 31 | StructuredBuffer | Env importance-sampling distribution `envDistCdf` — **one** buffer = marginal CDF (`ENV_H+1` floats) then conditional CDF (`H×(W+1)` floats) at element offset `ENV_COND_CDF_BASE = ENV_H+1`. Folds the former 31/32 pair into one to free a Metal buffer slot for the neural + online-training build (change `combine-graph-param-buffers`); binding 32 retired | `environment.slang` |
 | 33 | StructuredBuffer | Neural-proposal flat Linear weights (`NF_WT`, row-major — `float` by default, `half` in the fp16 precision modes) | `sampling/neural_proposal.slang` |
 | 34 | StructuredBuffer | Neural-proposal flat Linear biases (`NF_WT` — `float`/`half`) | `sampling/neural_proposal.slang` |
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
@@ -881,9 +884,16 @@ correct default for the tiling material pool — clamp-V (the equirect env-map
 default) would clamp a `tiledimage` sampled past v=1 (e.g. a `uvtiling=4`
 material) to the edge row on Metal while Vulkan tiles it.
 
-Bindings **25–29** are reserved for the MaterialX nodegraph buffers
-(`GRAPH_BINDING_BASE = 25`), so the neural-proposal weight buffers sit at **33+**,
-above the graph range, the tool buffer (30), and the env CDFs (31/32). All three
+Binding **25** (`GRAPH_BINDING_BASE`) is the single combined MaterialX nodegraph
+param buffer — one byte buffer for any number of graphs (was one
+`StructuredBuffer` per graph at 25..25+N−1). On Metal, buffer argument-table
+indices are assigned by kernel-parameter order, not vk::binding, so the only
+deterministic way to keep the neural + online-training wavefront kernel under the
+31-slot cap is to **reduce the bound-buffer count**: collapsing the per-graph
+buffers to one (graph count no longer grows the table) and folding the two env
+CDFs into `envDistCdf` (binding 31) together free the slots that buffer. The
+neural-proposal weight buffers sit at **33+**, above the graph buffer (25), the
+tool buffer (30), and the env CDF (31). All three
 are **always bound** — the renderer seeds them with a full-sized all-zero ("dummy")
 net so the inline flow inverse referenced by `sampling/proposal.slang` has valid
 descriptors on every pipeline, **including the megakernel** (which never sets the

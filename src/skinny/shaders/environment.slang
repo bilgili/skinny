@@ -51,8 +51,14 @@ float3 sceneEnvRadiance(float3 dir, float intensity, uint furnaceMode)
 static const int ENV_DIST_W = 1024;   // must equal ENV_WIDTH  (environment.py)
 static const int ENV_DIST_H = 512;    // must equal ENV_HEIGHT (environment.py)
 
-[[vk::binding(31)]] StructuredBuffer<float> envMarginalCdf;  // ENV_DIST_H+1
-[[vk::binding(32)]] StructuredBuffer<float> envCondCdf;      // H*(W+1), row-major
+// Env importance-sampling CDFs share ONE buffer (change
+// combine-graph-param-buffers): the marginal occupies elements
+// [0, ENV_DIST_H+1) and the conditional follows at ENV_COND_CDF_BASE. Folding
+// the two StructuredBuffers into one frees a buffer slot so the neural +
+// online-training wavefront kernel fits Metal's 31-buffer argument table; the
+// host concatenates the same bytes (renderer._upload_env_distribution).
+[[vk::binding(31)]] StructuredBuffer<float> envDistCdf;  // [marginal | conditional]
+static const int ENV_COND_CDF_BASE = ENV_DIST_H + 1;     // conditional element offset
 
 // Piecewise-constant env radiance, consistent with the importance-sampling
 // distribution. The CDF is built per cell (nearest-resized luminance), but the
@@ -104,9 +110,9 @@ int envSearchCdf(StructuredBuffer<float> cdf, int base, int n, float u, out floa
 
 float envImagePdf(int iu, int iv)
 {
-    float mPdf = (envMarginalCdf[iv + 1] - envMarginalCdf[iv]) * float(ENV_DIST_H);
-    int   cb   = iv * (ENV_DIST_W + 1);
-    float cPdf = (envCondCdf[cb + iu + 1] - envCondCdf[cb + iu]) * float(ENV_DIST_W);
+    float mPdf = (envDistCdf[iv + 1] - envDistCdf[iv]) * float(ENV_DIST_H);
+    int   cb   = ENV_COND_CDF_BASE + iv * (ENV_DIST_W + 1);
+    float cPdf = (envDistCdf[cb + iu + 1] - envDistCdf[cb + iu]) * float(ENV_DIST_W);
     return mPdf * cPdf;
 }
 
@@ -134,10 +140,10 @@ EnvSample sampleEnvDir(float2 u, float intensity)
     es.pdf = 0.0;
 
     float fv;
-    int iv = envSearchCdf(envMarginalCdf, 0, ENV_DIST_H, u.x, fv);
-    int cb = iv * (ENV_DIST_W + 1);
+    int iv = envSearchCdf(envDistCdf, 0, ENV_DIST_H, u.x, fv);
+    int cb = ENV_COND_CDF_BASE + iv * (ENV_DIST_W + 1);
     float fu;
-    int iu = envSearchCdf(envCondCdf, cb, ENV_DIST_W, u.y, fu);
+    int iu = envSearchCdf(envDistCdf, cb, ENV_DIST_W, u.y, fu);
 
     float uImg = (float(iu) + fu) / float(ENV_DIST_W);
     float vImg = (float(iv) + fv) / float(ENV_DIST_H);
