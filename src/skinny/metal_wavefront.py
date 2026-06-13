@@ -572,13 +572,11 @@ class MetalWavefrontPathPass:
         ref = _reflect_element(flat, "stdSurfaceParams")
         if ref is not None:
             self.std_surface_layout, self.std_surface_stride = ref
+        # Empty since change combine-graph-param-buffers: graph params are read
+        # from the combined `ByteAddressBuffer graphParamsCombined` via `Load<T>`
+        # (scalar layout, identical Metal/SPIR-V), so there is no per-graph
+        # StructuredBuffer element layout to reflect.
         self.graph_param_layouts: dict = {}
-        for gf in self.graph_fragments:
-            for prog in ([flat] + ([catch.program] if catch else [])):
-                ref = _reflect_element(prog, f"graphParams_{gf.sanitized_name}")
-                if ref is not None and ref[0]:
-                    self.graph_param_layouts[gf.target_name] = ref
-                    break
 
         # Default 1×1 texture for unfilled bindless slots (Metal binds every
         # slot; mirrors the megakernel pipeline's `_default_tex`).
@@ -795,13 +793,10 @@ class MetalWavefrontBdptPass:
             if ref is not None and ref[0]:
                 self.std_surface_layout, self.std_surface_stride = ref
                 break
+        # Empty since change combine-graph-param-buffers (see the path-pass
+        # ctor): the combined byte buffer is read via `Load<T>` in scalar layout,
+        # so there is no per-graph element layout to reflect.
         self.graph_param_layouts: dict = {}
-        for gf in self.graph_fragments:
-            for prog in progs:
-                ref = _reflect_element(prog, f"graphParams_{gf.sanitized_name}")
-                if ref is not None and ref[0]:
-                    self.graph_param_layouts[gf.target_name] = ref
-                    break
 
         # Default 1×1 texture for unfilled bindless slots (Metal binds every
         # slot; mirrors the megakernel pipeline's `_default_tex`).

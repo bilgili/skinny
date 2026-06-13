@@ -20,11 +20,46 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# First descriptor binding for MaterialX nodegraph parameter SSBOs. Each
-# loaded graph gets its own StructuredBuffer<GraphParams_X> at
-# GRAPH_BINDING_BASE + graphIdx; idx 0 == graphId 2 in the dispatch (0=skin,
-# 1=flat are reserved). Keep clear of bindings 0..24 used by the renderer.
+# Descriptor binding for the combined MaterialX nodegraph parameter buffer.
+# ALL loaded graphs share ONE `ByteAddressBuffer graphParamsCombined` at this
+# single binding (was one `StructuredBuffer<GraphParams_X>` per graph at
+# GRAPH_BINDING_BASE + graphIdx). A single slot keeps the Metal buffer
+# argument table (cap 31) independent of the scene's graph-material count — the
+# neural + online-training wavefront build overflowed at ≥2 graph materials
+# (change combine-graph-param-buffers). Keep clear of bindings 0..24.
 GRAPH_BINDING_BASE = 25
+
+
+def _graph_scalar_stride(gf) -> int:
+    """Byte size of one graph's scalar (std430) `GraphParams_X` record.
+
+    Mirrors the host packer in `renderer._upload_graph_param_buffers`
+    (`max(f.offset + f.size) `, 4-aligned, min 4). `gf.uniform_block` is the
+    dead-stripped `used_uniforms` list — the exact fields the emitted struct
+    carries — so this equals the Slang struct's scalar element stride.
+    """
+    block = getattr(gf, "uniform_block", None) or []
+    stride = max((f.offset + f.size for f in block), default=0)
+    stride = (stride + 3) & ~3
+    return max(stride, 4)
+
+
+def graph_param_combined_stride(graph_fragments) -> int:
+    """Per-material slot stride (bytes) of the combined graph-param buffer.
+
+    The buffer is matId-major: slot `matId` holds that material's params,
+    addressed by `graphParamsCombined.Load<GraphParams_X>(matId * STRIDE)`. A
+    material maps to exactly one graph, so one fixed stride — the max scalar
+    `GraphParams` size over the scene's graphs, 16-aligned so every slot start
+    stays aligned for `Load<T>` of float4-bearing structs — covers every graph.
+
+    Capacity-independent: depends only on the scene's graph SET (which only
+    changes on a scene reload, and that re-emits the generated shaders), never
+    on `material_capacity` (which can grow at runtime without re-emitting). So
+    the value baked into the shader stays valid across a capacity resize.
+    """
+    stride = max((_graph_scalar_stride(gf) for gf in graph_fragments), default=16)
+    return (stride + 15) & ~15
 
 
 def _class_has_imaterial_conformance(cls_node) -> bool:
@@ -169,18 +204,27 @@ def emit_megakernel_aggregator(graph_fragments, graph_binding_base: int) -> str:
     param_helpers: list[str] = []
     apply_helpers: list[str] = []
     cases: list[str] = []
+    # One combined byte-addressed param buffer shared by every graph (see
+    # graph_param_combined_stride): slot `matId` holds that material's params.
+    # `Load<GraphParams_X>` reads a struct in scalar layout — identical on the
+    # SPIR-V and Metal targets — so a single binding replaces the former
+    # per-graph StructuredBuffer<GraphParams_X> array and the host packs one
+    # scalar blob for both backends.
+    if graph_fragments:
+        combined_stride = graph_param_combined_stride(graph_fragments)
+        ssbo_decls.append(
+            f"[[vk::binding({graph_binding_base}, 0)]]\n"
+            f"ByteAddressBuffer graphParamsCombined;\n"
+            f"static const uint GRAPH_PARAM_STRIDE = {combined_stride}u;\n"
+        )
     for idx, gf in enumerate(graph_fragments):
         module_name = f"{gf.sanitized_name}_graph"
         imports.append(f"import generated.{module_name};")
-        binding = graph_binding_base + idx
-        ssbo_decls.append(
-            f"[[vk::binding({binding}, 0)]]\n"
-            f"StructuredBuffer<{gf.struct_name}> graphParams_{gf.sanitized_name};\n"
-        )
         param_helpers.append(
             f"{gf.struct_name} _graphParams_{gf.sanitized_name}(uint matId)\n"
             f"{{\n"
-            f"    return graphParams_{gf.sanitized_name}[matId];\n"
+            f"    return graphParamsCombined.Load<{gf.struct_name}>("
+            f"matId * GRAPH_PARAM_STRIDE);\n"
             f"}}\n"
         )
 
@@ -346,10 +390,10 @@ def emit_generated_materials(shader_dir: Path, graph_fragments) -> dict[str, int
         aggregator, encoding="utf-8"
     )
 
-    return {
-        gf.target_name: GRAPH_BINDING_BASE + idx
-        for idx, gf in enumerate(graph_fragments)
-    }
+    # Every graph shares the one combined buffer at GRAPH_BINDING_BASE
+    # (change combine-graph-param-buffers); the map keeps a per-target entry so
+    # truthiness/lookup callers are unchanged, but all point to the single slot.
+    return {gf.target_name: GRAPH_BINDING_BASE for gf in graph_fragments}
 
 
 def emit_python_dispatcher(shader_dir: Path) -> list[str]:

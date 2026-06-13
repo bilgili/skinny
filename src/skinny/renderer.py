@@ -573,10 +573,11 @@ def pack_std_surface_params_msl(
     `float3` to 16 B and grows the element stride past 256 B (≈400). Each field's
     bytes move from its scalar offset (the running sum over `_STD_SURFACE_FIELDS`)
     to its reflected MSL offset (`layout[name]`). Same design-D3 repack the skin
-    params (`_pack_mtlx_skin_array_msl`) and per-graph SSBOs
-    (`_upload_graph_param_buffers`) get; without it every field after `base_color`
-    is misread on Metal (metalness reads specular, specular reads
-    specular_roughness, coat → 0, …).
+    params (`_pack_mtlx_skin_array_msl`) get; without it every field after
+    `base_color` is misread on Metal (metalness reads specular, specular reads
+    specular_roughness, coat → 0, …). (Graph params no longer need this — change
+    combine-graph-param-buffers reads them via `ByteAddressBuffer.Load<T>`, which
+    is scalar on both targets.)
 
     FORWARD-LOOKING / currently inert: binding 19 is read only by
     `preview_pass.slang` (the BXDF/std_surface visualiser), which is a Vulkan-only
@@ -1500,6 +1501,10 @@ class Renderer:
         self._scene_graph_fragments: list = []
         self._material_graph_ids: dict[int, int] = {}
         self._material_graph_overrides: dict[int, dict] = {}
+        # The single combined graph-param buffer (all graphs share one
+        # matId-major byte buffer at GRAPH_BINDING_BASE — change
+        # combine-graph-param-buffers). None until the first graph upload.
+        self._graph_params_combined = None
         # Signature (target_name, slang-content-hash) per fragment in the
         # currently-built pipeline. _gen_scene_materials compares against
         # `_graph_set_signature()` to decide whether
@@ -2032,11 +2037,11 @@ class Renderer:
     def build_wavefront_material_pass(self):
         """Build the per-material albedo wavefront pass (`wavefront_material`):
         camera ray → BVH → evalSceneGraphBaseColor → material base colour.
-        Binds the traceScene set + env (4) + every per-graph param SSBO (25+,
-        from `pipeline.graph_bindings`) + the bindless texture array (14, from
-        the texture pool). Over-providing graph bindings the kernel may not
-        reference is fine — the SPIR-V uses a subset of the layout."""
-        from skinny.vk_compute import BINDLESS_TEXTURE_CAPACITY
+        Binds the traceScene set + env (4) + the combined graph-param buffer
+        (single slot GRAPH_BINDING_BASE) + the bindless texture array (14, from
+        the texture pool). Over-providing bindings the kernel may not reference
+        is fine — the SPIR-V uses a subset of the layout."""
+        from skinny.vk_compute import BINDLESS_TEXTURE_CAPACITY, GRAPH_BINDING_BASE
         from skinny.vk_wavefront import BoundComputePass
         sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         specs = [
@@ -2054,12 +2059,10 @@ class Renderer:
             {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
             {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
         ]
-        graph_bindings = self._scene_graph_bindings
-        for target, binding in graph_bindings.items():
-            buf = self._graph_param_buffers.get(target)
-            if buf is not None:
-                specs.append({"binding": binding, "type": sb,
-                              "buffer": buf.buffer, "range": buf.size})
+        if self._graph_params_combined is not None:
+            specs.append({"binding": GRAPH_BINDING_BASE, "type": sb,
+                          "buffer": self._graph_params_combined.buffer,
+                          "range": self._graph_params_combined.size})
         slots = [(idx, s.sampler, s.view) for idx, s in self.texture_pool.filled_slots()]
         specs.append({
             "binding": 14, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -2093,6 +2096,7 @@ class Renderer:
             BINDLESS_TEXTURE_CAPACITY,
             GRAPH_BINDING_BASE,
             emit_wavefront_shade_module,
+            graph_param_combined_stride,
         )
         from skinny.vk_wavefront import (
             BoundComputePass,
@@ -2103,6 +2107,9 @@ class Renderer:
 
         sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         id_map = assign_graph_ids(self._scene_graph_fragments)
+        # Per-slot stride of the shared combined graph-param buffer — computed
+        # over ALL scene graphs so every shade pass indexes it identically.
+        combined_stride = graph_param_combined_stride(self._scene_graph_fragments)
         wf_dir = self.shader_dir / "wavefront"
         gen_dir = self.shader_dir / "generated"
         shared_hash = shared_shader_hash(self.shader_dir)
@@ -2112,7 +2119,8 @@ class Renderer:
         keys: dict[str, str] = {}
         for gf in self._scene_graph_fragments:
             name = gf.sanitized_name
-            src = emit_wavefront_shade_module(gf, id_map[gf.target_name], GRAPH_BINDING_BASE)
+            src = emit_wavefront_shade_module(
+                gf, id_map[gf.target_name], GRAPH_BINDING_BASE, combined_stride)
             (wf_dir / f"shade_{name}.slang").write_text(src, encoding="utf-8")
             # The module imports only this graph's generated module — fold its
             # bytes into the cache key so each material caches independently.
@@ -2136,10 +2144,10 @@ class Renderer:
                 {"binding": 13, "type": sb, "buffer": self.flat_material_buffer.buffer, "range": self.flat_material_buffer.size},
                 {"binding": 16, "type": sb, "buffer": self.material_types_buffer.buffer, "range": self.material_types_buffer.size},
             ]
-            buf = self._graph_param_buffers.get(gf.target_name)
-            if buf is not None:
+            if self._graph_params_combined is not None:
                 specs.append({"binding": GRAPH_BINDING_BASE, "type": sb,
-                              "buffer": buf.buffer, "range": buf.size})
+                              "buffer": self._graph_params_combined.buffer,
+                              "range": self._graph_params_combined.size})
             specs.append({
                 "binding": 14, "type": vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 "array_count": BINDLESS_TEXTURE_CAPACITY, "slots": slots,
@@ -3357,12 +3365,13 @@ class Renderer:
         # HDR environment texture (RGBA32F, equirectangular).
         from skinny.environment import ENV_HEIGHT, ENV_WIDTH
         self.env_image = self._gpu.SampledImage(self.ctx, ENV_WIDTH, ENV_HEIGHT)
-        # Environment importance-sampling CDFs (bindings 31/32). Sized for the
-        # full equirect resolution; uploaded by _ensure_env_uploaded whenever
-        # the env changes. Drives env NEE + MIS in path.slang.
-        self.env_marginal_buffer = self._gpu.StorageBuffer(self.ctx, (ENV_HEIGHT + 1) * 4)
-        self.env_cond_buffer = self._gpu.StorageBuffer(
-            self.ctx, ENV_HEIGHT * (ENV_WIDTH + 1) * 4)
+        # Environment importance-sampling CDFs — ONE combined buffer (binding 31,
+        # `envDistCdf`): the marginal CDF ([ENV_HEIGHT+1] floats) followed by the
+        # conditional CDF ([ENV_HEIGHT*(ENV_WIDTH+1)] floats) at element offset
+        # ENV_HEIGHT+1 (change combine-graph-param-buffers — frees a Metal buffer
+        # slot). Uploaded by _ensure_env_uploaded; drives env NEE + MIS.
+        self.env_dist_buffer = self._gpu.StorageBuffer(
+            self.ctx, ((ENV_HEIGHT + 1) + ENV_HEIGHT * (ENV_WIDTH + 1)) * 4)
         self._ensure_env_uploaded()
 
         # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
@@ -3747,19 +3756,19 @@ class Renderer:
         # Storage buffers per frame: vertices, indices, BVH nodes, TLAS
         # instances, flat-material params, material type codes,
         # per-material skin UBO array, sphere lights, emissive triangles,
-        # StdSurfaceParams, plus one slot per MaterialX nodegraph SSBO
-        # (binding GRAPH_BINDING_BASE+i).
-        n_graph_slots = len(getattr(self, "_scene_graph_fragments", []) or [])
+        # StdSurfaceParams, plus the ONE combined MaterialX graph-param buffer
+        # (binding GRAPH_BINDING_BASE) when the scene carries any graph.
+        graph_slot = 1 if (getattr(self, "_scene_graph_fragments", []) or []) else 0
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 18 fixed = vertices+indices+bvh+instances+flatMaterials+
+                # 17 fixed = vertices+indices+bvh+instances+flatMaterials+
                 #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
                 #      stdSurface+lightSplat+gizmoSegments+
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
-                #      envMarginalCdf+envCondCdf.
-                # +3 neural weights (33/34/35) +2 record dump (36/37) = 23.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (23 + n_graph_slots),
+                #      envDistCdf (one combined env CDF buffer).
+                # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (22 + graph_slot),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4101,9 +4110,9 @@ class Renderer:
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 pBufferInfo=[tool_info],
             ))
-            env_marg_info = vk.VkDescriptorBufferInfo(
-                buffer=self.env_marginal_buffer.buffer, offset=0,
-                range=self.env_marginal_buffer.size,
+            env_dist_info = vk.VkDescriptorBufferInfo(
+                buffer=self.env_dist_buffer.buffer, offset=0,
+                range=self.env_dist_buffer.size,
             )
             writes.append(vk.VkWriteDescriptorSet(
                 dstSet=ds,
@@ -4111,19 +4120,7 @@ class Renderer:
                 dstArrayElement=0,
                 descriptorCount=1,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pBufferInfo=[env_marg_info],
-            ))
-            env_cond_info = vk.VkDescriptorBufferInfo(
-                buffer=self.env_cond_buffer.buffer, offset=0,
-                range=self.env_cond_buffer.size,
-            )
-            writes.append(vk.VkWriteDescriptorSet(
-                dstSet=ds,
-                dstBinding=32,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pBufferInfo=[env_cond_info],
+                pBufferInfo=[env_dist_info],
             ))
             # Neural proposal weights (33/34/35). Always bound (dummy net when
             # inactive) so the inline flow inverse in proposal.slang has valid
@@ -5401,148 +5398,108 @@ class Renderer:
         self._update_texture_pool_descriptors()
 
     def _upload_graph_param_buffers(self) -> None:
-        """Pack + upload per-graph parameter SSBOs.
+        """Pack + upload the single combined graph-param buffer.
 
-        Bindings start at `GRAPH_BINDING_BASE` (vk_compute.py). The buffers
-        live on `self._graph_param_buffers[target_name]` and are allocated
-        on first call; subsequent calls reuse and overwrite contents.
-        Material slot index matches the materialTypes[matId] slot — only
-        slots whose graphId matches the buffer's graph receive packed bytes.
+        ALL scene MaterialX graphs share one matId-major byte buffer
+        (`self._graph_params_combined`) bound at `GRAPH_BINDING_BASE`
+        (change combine-graph-param-buffers). Slot `matId` holds that
+        material's params in scalar (std430) layout, read in-shader by
+        `graphParamsCombined.Load<GraphParams_X>(matId * GRAPH_PARAM_STRIDE)`.
+        `Load<T>` uses the same scalar layout on the SPIR-V and Metal targets,
+        so one scalar blob feeds both backends — no per-backend MSL repack and
+        no per-graph buffer. A material maps to exactly one graph, so a single
+        stride (`graph_param_combined_stride`, max over the scene's graphs)
+        covers every slot. The buffer is allocated on first call and grown with
+        `material_capacity`.
         """
         from skinny.materialx_runtime import pack_uniform_block
-        from skinny.megakernel_sources import GRAPH_BINDING_BASE
+        from skinny.megakernel_sources import (
+            GRAPH_BINDING_BASE,
+            graph_param_combined_stride,
+        )
 
-        if not getattr(self, "_graph_param_buffers", None):
-            self._graph_param_buffers = {}
+        fragments = self._scene_graph_fragments
+        if not fragments:
+            # No graphs: drop any stale combined buffer; nothing to bind.
+            if getattr(self, "_graph_params_combined", None) is not None:
+                self._graph_params_combined.destroy()
+                self._graph_params_combined = None
+            return
 
-        # Drop buffers whose graph no longer appears in the active scene.
-        active = {gf.target_name for gf in self._scene_graph_fragments}
-        for stale in list(self._graph_param_buffers):
-            if stale not in active:
-                self._graph_param_buffers[stale].destroy()
-                del self._graph_param_buffers[stale]
+        stride = graph_param_combined_stride(fragments)
+        buf_size = self.material_capacity * stride + 16
+        existing = getattr(self, "_graph_params_combined", None)
+        if existing is None or existing.size < buf_size:
+            if existing is not None:
+                existing.destroy()
+            self._graph_params_combined = self._gpu.StorageBuffer(self.ctx, buf_size)
 
-        pipeline_bindings = self._scene_graph_bindings
-        for idx, gf in enumerate(self._scene_graph_fragments):
-            scalar_stride = max(
-                (f.offset + f.size for f in gf.uniform_block), default=0
-            )
-            scalar_stride = (scalar_stride + 3) & ~3
-            scalar_stride = max(scalar_stride, 4)  # avoid zero-sized SSBO
-
-            # `pack_uniform_block` emits the scalar/std430 record (float3 = 12 B).
-            # On Metal the generated `GraphParams_*` struct is read with MSL layout
-            # (Slang pads every float3 to 16 B and 16-aligns it), so each field
-            # must be relocated from its scalar offset to its reflected MSL offset
-            # and the buffer sized at the MSL element stride — exactly the design-
-            # D3 repack the skin params get in `_pack_mtlx_skin_array_msl`. Without
-            # it every field after a leading float3 is misread; a purely-procedural
-            # graph (marble: no textures, colour entirely from `color_mix_*` params)
-            # then reads its colours as zero and renders black on Metal.
-            msl = None
-            if self.is_metal:
-                graph_layouts = getattr(
-                    self._msl_layout_source, "graph_param_layouts", None) or {}
-                msl = graph_layouts.get(gf.target_name)  # ({field:(off,size)}, stride)
-            upload_stride = msl[1] if msl is not None else scalar_stride
-
-            buf_size = self.material_capacity * upload_stride + 16
-            existing = self._graph_param_buffers.get(gf.target_name)
-            if existing is None or existing.size < buf_size:
-                if existing is not None:
-                    existing.destroy()
-                self._graph_param_buffers[gf.target_name] = self._gpu.StorageBuffer(
-                    self.ctx, buf_size
-                )
-            data = bytearray(self.material_capacity * upload_stride)
-            # Filename uniforms come from MaterialXGenSlang reflection with
-            # the `.mtlx`-authored path as their `default` (str). We pair
-            # each one with the resolved bindless texture-pool slot so
-            # pack_uniform_block writes a uint slot index rather than
-            # trying to pack the path string as an int.
-            filename_fields = [f for f in gf.uniform_block
-                               if f.type_name == "filename"]
-            for mat_idx, gid in self._material_graph_ids.items():
-                if gid != idx + 2:  # matches assign_graph_ids: GRAPH_ID_FIRST=2
-                    continue
-                if mat_idx >= self.material_capacity:
-                    continue
-                overrides = dict(self._material_graph_overrides.get(mat_idx, {}))
-                mat = (self._usd_scene.materials[mat_idx]
-                       if self._usd_scene is not None else None)
-                # Resolve each filename input → bindless slot. Source
-                # precedence per uniform:
-                #   1. mat.parameter_overrides[name] (slider override).
-                #   2. mat.texture_paths[name] (USD loader-decoded path).
-                #   3. UniformField.default (the .mtlx-authored value,
-                #      typically a path string).
-                # Relative paths resolve against the .mtlx document's
-                # source URI so the example `textures/foo.jpg` references
-                # work regardless of the renderer's CWD.
-                mtlx_dir: Optional[Path] = None
-                if mat is not None and mat.mtlx_document is not None:
-                    src_uri = mat.mtlx_document.getSourceUri()
-                    if src_uri:
-                        mtlx_dir = Path(src_uri).resolve().parent
-                for f in filename_fields:
-                    raw = overrides.get(f.name)
-                    if raw is None and mat is not None:
-                        raw = mat.texture_paths.get(f.name)
-                    if raw is None:
-                        raw = f.default
-                    if raw is None or raw == "":
-                        continue
-                    p = Path(str(raw))
-                    if not p.is_absolute() and mtlx_dir is not None:
-                        p = (mtlx_dir / p).resolve()
-                    try:
-                        slot = self.texture_pool.add_or_get(p, linear=False)
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[skinny] graph[{gf.target_name}] mat[{mat_idx}] "
-                              f"'{f.name}' texture load fail ({p}): {e}")
-                        slot = 0
-                    overrides[f.name] = slot
-                packed = pack_uniform_block(gf.uniform_block, overrides)
-                if msl is not None:
-                    layout, _ = msl
-                    rec = bytearray(upload_stride)
-                    for f in gf.uniform_block:
-                        moff = layout.get(f.name)
-                        if moff is None:
-                            continue  # field dead-stripped from the MSL struct
-                        rec[moff[0]:moff[0] + f.size] = packed[f.offset:f.offset + f.size]
-                    data[mat_idx * upload_stride:(mat_idx + 1) * upload_stride] = rec
-                else:
-                    data[mat_idx * scalar_stride:mat_idx * scalar_stride + len(packed)] = packed
-            self._graph_param_buffers[gf.target_name].upload_sync(bytes(data))
-
-            # Metal binds the graph SSBO at dispatch by name (no Vulkan descriptor
-            # set); the data upload above is all that's needed here.
-            if self.is_metal:
+        # Pack every graph's materials into the one matId-major blob.
+        data = bytearray(self.material_capacity * stride)
+        frag_by_gid = {idx + 2: gf for idx, gf in enumerate(fragments)}
+        for mat_idx, gid in self._material_graph_ids.items():
+            gf = frag_by_gid.get(gid)  # GRAPH_ID_FIRST = 2 (assign_graph_ids)
+            if gf is None or mat_idx >= self.material_capacity:
                 continue
+            overrides = dict(self._material_graph_overrides.get(mat_idx, {}))
+            mat = (self._usd_scene.materials[mat_idx]
+                   if self._usd_scene is not None else None)
+            # Resolve each filename input → bindless slot. Source precedence:
+            #   1. mat.parameter_overrides[name] (slider override).
+            #   2. mat.texture_paths[name] (USD loader-decoded path).
+            #   3. UniformField.default (the .mtlx-authored value, a path str).
+            # Relative paths resolve against the .mtlx document's source URI so
+            # `textures/foo.jpg` references work regardless of the CWD.
+            mtlx_dir: Optional[Path] = None
+            if mat is not None and mat.mtlx_document is not None:
+                src_uri = mat.mtlx_document.getSourceUri()
+                if src_uri:
+                    mtlx_dir = Path(src_uri).resolve().parent
+            for f in (u for u in gf.uniform_block if u.type_name == "filename"):
+                raw = overrides.get(f.name)
+                if raw is None and mat is not None:
+                    raw = mat.texture_paths.get(f.name)
+                if raw is None:
+                    raw = f.default
+                if raw is None or raw == "":
+                    continue
+                p = Path(str(raw))
+                if not p.is_absolute() and mtlx_dir is not None:
+                    p = (mtlx_dir / p).resolve()
+                try:
+                    slot = self.texture_pool.add_or_get(p, linear=False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[skinny] graph[{gf.target_name}] mat[{mat_idx}] "
+                          f"'{f.name}' texture load fail ({p}): {e}")
+                    slot = 0
+                overrides[f.name] = slot
+            packed = pack_uniform_block(gf.uniform_block, overrides)
+            data[mat_idx * stride:mat_idx * stride + len(packed)] = packed
+        self._graph_params_combined.upload_sync(bytes(data))
 
-            # Defensive: if rebuild fell back to an empty-graph pipeline
-            # (slangc failure), this fragment's binding may be absent.
-            # Skip rather than emit a Vulkan validation error.
-            if gf.target_name not in pipeline_bindings:
-                continue
+        # Metal binds the combined buffer at dispatch by name (no Vulkan
+        # descriptor set); the upload above is all that's needed there.
+        if self.is_metal:
+            return
 
-            binding = pipeline_bindings[gf.target_name]
-            info = vk.VkDescriptorBufferInfo(
-                buffer=self._graph_param_buffers[gf.target_name].buffer,
-                offset=0,
-                range=self._graph_param_buffers[gf.target_name].size,
+        # Defensive: a slangc empty-graph fallback may leave the binding absent.
+        if not self._scene_graph_bindings:
+            return
+        info = vk.VkDescriptorBufferInfo(
+            buffer=self._graph_params_combined.buffer,
+            offset=0,
+            range=self._graph_params_combined.size,
+        )
+        for ds in self.descriptor_sets:
+            write = vk.VkWriteDescriptorSet(
+                dstSet=ds,
+                dstBinding=GRAPH_BINDING_BASE,
+                dstArrayElement=0,
+                descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[info],
             )
-            for ds in self.descriptor_sets:
-                write = vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=binding,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[info],
-                )
-                vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
+            vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
 
     def _upload_material_types(self) -> None:
         """Pack per-material type+flags into binding 16.
@@ -7993,8 +7950,7 @@ class Renderer:
             "lensElements": self.lens_elements_buffer.buffer,
             "exitPupilBounds": self.lens_pupil_buffer.buffer,
             "toolBuffer": self.tool_buffer.buffer,
-            "envMarginalCdf": self.env_marginal_buffer.buffer,
-            "envCondCdf": self.env_cond_buffer.buffer,
+            "envDistCdf": self.env_dist_buffer.buffer,
             "neuralWeights": self.neural_weights_buffer.buffer,
             "neuralBiases": self.neural_biases_buffer.buffer,
             "neuralLayers": self.neural_layers_buffer.buffer,
@@ -8017,16 +7973,14 @@ class Renderer:
             b[name] = img.texture
             b[name + "Sampler"] = img.sampler
         # Per-graph MaterialX param SSBOs (globals `graphParams_<sanitized>`,
-        # bindings GRAPH_BINDING_BASE+i). Bind-by-name like every other resource;
-        # the pipeline filters to the graphs the compiled module references. These
-        # were previously unbound on the megakernel path, so any graph that reads
-        # its params (rather than a bindless texture) — e.g. the purely-procedural
-        # marble — saw a zeroed SSBO and rendered black. Contents are MSL-relocated
-        # in `_upload_graph_param_buffers`.
-        for gf in getattr(self, "_scene_graph_fragments", None) or []:
-            buf = (getattr(self, "_graph_param_buffers", None) or {}).get(gf.target_name)
-            if buf is not None:
-                b[f"graphParams_{gf.sanitized_name}"] = buf.buffer
+        # binding GRAPH_BINDING_BASE). Bind-by-name like every other resource;
+        # one combined buffer shared by every graph (the Slang global is
+        # `graphParamsCombined`, change combine-graph-param-buffers). Contents
+        # are scalar-packed in `_upload_graph_param_buffers` — `Load<T>` reads
+        # the same scalar layout on Metal and SPIR-V, so no MSL relocation.
+        combined = getattr(self, "_graph_params_combined", None)
+        if combined is not None:
+            b["graphParamsCombined"] = combined.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -8343,8 +8297,10 @@ class Renderer:
         # newly-uploaded env texture, so env NEE samples the right directions.
         from skinny.environment import build_env_distribution
         marg, cond = build_env_distribution(env_hdr_data)
-        self.env_marginal_buffer.upload_sync(marg)
-        self.env_cond_buffer.upload_sync(cond)
+        # Concatenate into the one combined buffer: marginal then conditional,
+        # matching envDistCdf's [marginal | conditional] layout (the shader reads
+        # the conditional at ENV_COND_CDF_BASE = ENV_DIST_H+1 elements in).
+        self.env_dist_buffer.upload_sync(marg + cond)
         self._last_env_index = cache_key
 
     @property
@@ -9515,8 +9471,9 @@ class Renderer:
         if self.descriptor_pool is not None:
             vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
         self.texture_pool.destroy()
-        for _buf in getattr(self, "_graph_param_buffers", {}).values():
-            _buf.destroy()
+        if getattr(self, "_graph_params_combined", None) is not None:
+            self._graph_params_combined.destroy()
+            self._graph_params_combined = None
         self.std_surface_buffer.destroy()
         self.emissive_tri_buffer.destroy()
         self.sphere_lights_buffer.destroy()
@@ -9535,8 +9492,7 @@ class Renderer:
         # Env importance-sampling CDFs (bindings 31/32) — allocated once in
         # _init_gpu; were previously never freed (surfaced by the record-dump's
         # clean-teardown check).
-        self.env_marginal_buffer.destroy()
-        self.env_cond_buffer.destroy()
+        self.env_dist_buffer.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
         self._offscreen_output.destroy()

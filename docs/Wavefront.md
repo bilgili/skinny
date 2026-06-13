@@ -611,10 +611,25 @@ of truth both backends drive. `vk_wavefront.py` supplies the Vulkan recorder
   upload via `set_data`, or in place through the UMA shared-storage interop
   publisher under `--neural-handoff interop` (change `metal-neural-interop`);
   fp32 on current slang-rhi (the Metal fp16 probe under-reports).
+- **Combined graph-param + env-CDF buffers (change `combine-graph-param-buffers`)**
+  — the per-graph `StructuredBuffer<GraphParams_X>` slots and the two env
+  importance-sampling CDF buffers were a scene-dependent, unbounded contributor
+  to the argument table: a neural + online-training render of any scene with ≥2
+  MaterialX graph materials overflowed the 31-slot cap (`wfPathShadeFlat` put the
+  neural buffers at 31/32/33). The fix collapses **all** scene graphs into one
+  matId-major `ByteAddressBuffer graphParamsCombined` (binding 25), read
+  `Load<GraphParams_X>(matId * GRAPH_PARAM_STRIDE)`, so graph count no longer
+  grows the table; and folds the two env CDFs into one `envDistCdf` (binding 31,
+  conditional at `ENV_COND_CDF_BASE`) to reclaim the last baseline slot. Metal
+  assigns argument-table indices by kernel-parameter order (not vk::binding), so
+  reducing the bound-buffer count is the only deterministic way under the cap.
+  `Load<T>` reads scalar layout identically on Metal and SPIR-V, so the host
+  packs one scalar blob for both backends (the former Metal MSL graph-param
+  repack is gone).
 - **Records build (`SKINNY_METAL_RECORDS=1`, change `metal-record-drain`)** —
   arming the wavefront record drain (online training) rebuilds the path pass
-  with the record emitters un-stubbed. The neural build already sits exactly
-  at the 31-slot cap, so the records flavor frees two slots by compiling out
+  with the record emitters un-stubbed. The neural build already sits near
+  the 31-slot cap, so the records flavor frees two slots by compiling out
   the two resolve globals inert on a training render (`lightSplatBuffer` —
   records are path-only, where the splat is zero — and `gizmoSegments` — no
   gizmo overlay on training frames) and folds both counters into their data

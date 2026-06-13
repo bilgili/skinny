@@ -271,6 +271,21 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Metal 31-buffer argument-table overflow** with neural online training on
+  multi-graph scenes (change `combine-graph-param-buffers`). `--backend metal
+  --execution-mode wavefront --neural-trainer mlx --neural-handoff interop
+  --online-training` on a scene with ≥2 MaterialX graph materials (e.g.
+  `three_materials_demo.usda`) crashed at pipeline creation
+  (`wfPathShadeFlat` … `'buffer' attribute parameter is out of bounds: must be
+  between 0 and 30` → `SLANG_FAIL`): each scene graph emitted its own
+  `StructuredBuffer<GraphParams_X>` slot, an unbounded contributor that pushed
+  the neural weight buffers past Metal's cap. Fix: collapse all scene graphs into
+  one matId-major `ByteAddressBuffer graphParamsCombined` (read
+  `Load<GraphParams_X>(matId * GRAPH_PARAM_STRIDE)`, scalar layout identical on
+  Metal/SPIR-V — also retires the per-backend MSL graph-param repack), and fold
+  the two env importance-sampling CDFs into one `envDistCdf` (binding 32 retired)
+  to reclaim the last baseline slot. Vulkan and the megakernel are functionally
+  unchanged (fewer descriptors).
 - Transform gizmo (and the HUD) never drew in **wavefront** execution mode (so
   with ReSTIR on, which forces wavefront). The gizmo overlay was composited only
   in `main_pass.slang`, which wavefront skips — the wavefront display tail

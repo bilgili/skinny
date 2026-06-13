@@ -58,6 +58,7 @@ from skinny.megakernel_sources import (  # noqa: E402, F401  (re-export)
     GRAPH_BINDING_BASE,
     emit_megakernel_aggregator,
     emit_megakernel_sources,
+    graph_param_combined_stride,
     python_material_ids,
     scan_python_materials,
 )
@@ -113,7 +114,8 @@ def emit_wavefront_material_modules(graph_fragments) -> str:
     return "".join(parts)
 
 
-def emit_wavefront_shade_module(graph_fragment, graph_id: int, binding: int) -> str:
+def emit_wavefront_shade_module(graph_fragment, graph_id: int, binding: int,
+                                combined_stride: int) -> str:
     """Per-material wavefront shade entry for ONE graph — the staged compile
     partition. Imports only this graph's module (generated.<name>_graph), so
     adding a material compiles one small kernel and leaves every other shade
@@ -126,6 +128,13 @@ def emit_wavefront_shade_module(graph_fragment, graph_id: int, binding: int) -> 
     gf = graph_fragment
     name = gf.sanitized_name
     assignments = "\n".join(f"    sp.{i} = g.{i};" for i, _ in gf.outputs)
+    # One combined byte-addressed param buffer (matId-major, scalar layout)
+    # shared with the megakernel aggregator and every other shade pass — bound
+    # at the single GRAPH_BINDING_BASE slot (change combine-graph-param-buffers).
+    # `binding` is GRAPH_BINDING_BASE for every graph; `combined_stride` is the
+    # buffer's per-slot stride computed over ALL scene graphs (the caller passes
+    # the same value to every shade module so they index the shared buffer
+    # identically).
     return (
         "// Auto-generated per-material wavefront shade entry — imports only this\n"
         "// graph, so it is an independent compilation unit (the compile-win).\n"
@@ -135,7 +144,8 @@ def emit_wavefront_shade_module(graph_fragment, graph_id: int, binding: int) -> 
         "import cameras.pinhole;\n"
         "import mtlx_std_surface;\n"
         f"import generated.{name}_graph;\n\n"
-        f"[[vk::binding({binding})]] StructuredBuffer<{gf.struct_name}> wfGraphParams_{name};\n\n"
+        f"[[vk::binding({binding})]] ByteAddressBuffer graphParamsCombined;\n"
+        f"static const uint GRAPH_PARAM_STRIDE = {combined_stride}u;\n\n"
         '[shader("compute")]\n'
         "[numthreads(8, 8, 1)]\n"
         f"void shadeSurface_{name}(uint3 tid: SV_DispatchThreadID)\n"
@@ -150,7 +160,8 @@ def emit_wavefront_shade_module(graph_fragment, graph_id: int, binding: int) -> 
         f"    if (materialGraphId(hit.materialId) != {graph_id}u) return;\n"
         f"    {gf.outputs_struct} g = {gf.func_name}(hit.positionObject, "
         "normalize(hit.normal), hit.tangent, hit.uv, "
-        f"wfGraphParams_{name}[hit.materialId]);\n"
+        f"graphParamsCombined.Load<{gf.struct_name}>("
+        f"hit.materialId * GRAPH_PARAM_STRIDE));\n"
         "    StdSurfaceParams sp = (StdSurfaceParams)0;\n"
         "    sp.base_color = float3(0.5);\n"
         f"{assignments}\n"
@@ -581,20 +592,14 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
-            # bindings 31/32: environment importance-sampling distribution.
-            # 31 = marginal CDF over rows (float[ENV_H+1]); 32 = conditional
-            # CDF over columns per row (float[ENV_H*(ENV_W+1)]). Built by
-            # environment.build_env_distribution, consumed by environment.slang
-            # sampleEnvDir/envPdf for env NEE + MIS. Above the graph range
-            # (25..29) and the tool buffer (30).
+            # binding 31: environment importance-sampling distribution — ONE
+            # combined buffer `envDistCdf` = marginal CDF (float[ENV_H+1]) then
+            # conditional CDF (float[ENV_H*(ENV_W+1)]) at element offset ENV_H+1
+            # (change combine-graph-param-buffers; binding 32 retired to free a
+            # Metal buffer slot). Built by environment.build_env_distribution,
+            # consumed by environment.slang sampleEnvDir/envPdf for env NEE + MIS.
             vk.VkDescriptorSetLayoutBinding(
                 binding=31,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                descriptorCount=1,
-                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
-            ),
-            vk.VkDescriptorSetLayoutBinding(
-                binding=32,
                 descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
@@ -642,15 +647,16 @@ class ComputePipeline:
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
         ]
-        # Bindings GRAPH_BINDING_BASE..(GRAPH_BINDING_BASE + N - 1): one
-        # storage buffer per MaterialX nodegraph compiled into this pipeline.
-        # Each holds an array of GraphParams_<sanitized> records indexed by
-        # material slot (matches the FlatMaterialParams / StdSurfaceParams
-        # pattern at bindings 13 / 19).
-        for idx in range(len(self.graph_fragments)):
+        # Binding GRAPH_BINDING_BASE: the single combined graph-param buffer
+        # (`ByteAddressBuffer graphParamsCombined`) shared by every MaterialX
+        # nodegraph compiled into this pipeline — one matId-major byte buffer,
+        # not one StructuredBuffer per graph (change combine-graph-param-buffers).
+        # A single slot keeps the Metal argument table independent of graph
+        # count; declared only when the scene carries at least one graph.
+        if self.graph_fragments:
             bindings.append(
                 vk.VkDescriptorSetLayoutBinding(
-                    binding=GRAPH_BINDING_BASE + idx,
+                    binding=GRAPH_BINDING_BASE,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     descriptorCount=1,
                     stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,

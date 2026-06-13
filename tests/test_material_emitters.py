@@ -15,7 +15,16 @@ from skinny.vk_compute import (
     GRAPH_BINDING_BASE,
     emit_megakernel_aggregator,
     emit_wavefront_material_modules,
+    graph_param_combined_stride,
 )
+
+
+@dataclass
+class _FakeField:
+    name: str
+    offset: int
+    size: int
+    type_name: str = "float"
 
 
 @dataclass
@@ -28,6 +37,8 @@ class _FakeGF:
     slang_source: str = "// graph source"
     # list of (std_surface input name, slang type) the graph drives
     outputs: list = field(default_factory=list)
+    # scalar-layout param fields (offset/size bytes) — drives the combined stride
+    uniform_block: list = field(default_factory=list)
 
 
 def _marble() -> _FakeGF:
@@ -38,6 +49,8 @@ def _marble() -> _FakeGF:
         outputs_struct="GraphOutputs_Marble_3D",
         target_name="Marble_3D",
         outputs=[("base_color", "float3"), ("specular_roughness", "float")],
+        # color3 base @0 + float rough @12 → scalar size 16
+        uniform_block=[_FakeField("base", 0, 12), _FakeField("rough", 12, 4)],
     )
 
 
@@ -50,6 +63,9 @@ def _brass() -> _FakeGF:
         outputs_struct="GraphOutputs_Tiled_Brass",
         target_name="Tiled_Brass",
         outputs=[("specular_roughness", "float"), ("coat_color", "float3")],
+        # bigger struct: two color3 + float → scalar size 28
+        uniform_block=[_FakeField("a", 0, 12), _FakeField("b", 16, 12),
+                       _FakeField("c", 28, 4)],
     )
 
 
@@ -66,12 +82,17 @@ def test_megakernel_empty_emits_noop_switch():
     assert "sp.base_color = float3(1.0, 0.0, 1.0);" in agg
 
 
-def test_megakernel_emits_graph_import_ssbo_and_case():
+def test_megakernel_emits_graph_import_combined_buffer_and_case():
     gf = _marble()
     agg = emit_megakernel_aggregator([gf], GRAPH_BINDING_BASE)
     assert "import generated.Marble_3D_graph;" in agg
+    # One combined byte-addressed buffer at the single binding.
     assert f"binding({GRAPH_BINDING_BASE}, 0)" in agg
-    assert "graphParams_Marble_3D" in agg
+    assert "ByteAddressBuffer graphParamsCombined;" in agg
+    # Accessor loads the struct by matId * stride, not StructuredBuffer indexing.
+    assert "graphParamsCombined.Load<GraphParams_Marble_3D>(" in agg
+    assert "matId * GRAPH_PARAM_STRIDE" in agg
+    assert "StructuredBuffer<GraphParams_Marble_3D>" not in agg
     assert "case 2u:" in agg
     assert "evalGraph_Marble_3D(P, N, T, UV, " in agg
     assert "applyGraphOutputs_Marble_3D(sp, g);" in agg
@@ -80,12 +101,37 @@ def test_megakernel_emits_graph_import_ssbo_and_case():
     assert "sp.specular_roughness = g.specular_roughness;" in agg
 
 
-def test_megakernel_binding_offsets_increment_per_graph():
+def test_megakernel_uses_one_binding_for_any_graph_count():
     agg = emit_megakernel_aggregator([_marble(), _brass()], GRAPH_BINDING_BASE)
+    # Exactly one graph-param binding regardless of graph count — the slot-cap
+    # fix (no per-graph binding 26, 27, …).
+    assert agg.count("ByteAddressBuffer graphParamsCombined;") == 1
     assert f"binding({GRAPH_BINDING_BASE}, 0)" in agg
-    assert f"binding({GRAPH_BINDING_BASE + 1}, 0)" in agg
+    assert f"binding({GRAPH_BINDING_BASE + 1}, 0)" not in agg
+    # Both graphs still get their accessor + dispatch case.
+    assert "graphParamsCombined.Load<GraphParams_Marble_3D>(" in agg
+    assert "graphParamsCombined.Load<GraphParams_Tiled_Brass>(" in agg
     assert "case 2u:" in agg
     assert "case 3u:" in agg
+
+
+def test_combined_stride_is_max_scalar_16_aligned():
+    # marble scalar size 16, brass scalar size 32 (max field end 32) → max 32,
+    # already 16-aligned.
+    assert graph_param_combined_stride([_marble()]) == 16
+    assert graph_param_combined_stride([_brass()]) == 32
+    assert graph_param_combined_stride([_marble(), _brass()]) == 32
+    # Empty scene → a non-zero stub stride (never indexed).
+    assert graph_param_combined_stride([]) == 16
+    # The aggregator bakes the combined (max) stride, shared by all accessors.
+    agg = emit_megakernel_aggregator([_marble(), _brass()], GRAPH_BINDING_BASE)
+    assert "static const uint GRAPH_PARAM_STRIDE = 32u;" in agg
+
+
+def test_megakernel_empty_emits_no_graph_buffer():
+    agg = emit_megakernel_aggregator([], GRAPH_BINDING_BASE)
+    assert "graphParamsCombined" not in agg
+    assert "GRAPH_PARAM_STRIDE" not in agg
 
 
 def test_megakernel_base_color_case_only_for_base_color_graphs():
