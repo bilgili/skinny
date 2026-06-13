@@ -38,6 +38,12 @@ class _RenderWorker(QObject):
         self._online_training_enabled = False
         self._online_training_refused = False
         self._online_training_waiting = False
+        # Mirror the user's intent onto the renderer for the configuration matrix
+        # (change online-training-observability); the matrix's online-training row
+        # carries the REFUSED/WAITING/APPROVED reason, so the worker no longer
+        # prints its own one-shot refused/armed lines.
+        if renderer is not None:
+            renderer._online_training_requested = bool(online_training)
 
     def stop(self) -> None:
         self._running = False
@@ -52,23 +58,19 @@ class _RenderWorker(QObject):
             # drain before then).
             if self.renderer.descriptor_sets is None:
                 return  # scene not built yet; retry next frame
-            ok, reason = self.renderer.can_online_train()
+            ok, _reason = self.renderer.can_online_train()
             if not ok:
                 # Two prerequisites with different lifetimes. The execution mode
                 # is fixed for the session, so a non-wavefront miss is permanent:
-                # refuse clearly once and give up. A missing *neural proposal* is
-                # transient — the Proposals combobox can activate one at runtime —
-                # so keep polling and start training the moment it does.
+                # give up. A missing *neural proposal* is transient — the
+                # Proposals combobox can activate one at runtime — so keep polling
+                # and start training the moment it does. The matrix's
+                # online-training row surfaces the REFUSED/WAITING reason.
                 if not self.renderer.online_train_execution_supported():
-                    if not self._online_training_refused:
-                        self._online_training_refused = True
-                        print(f"[skinny] --online-training refused: {reason}")
+                    self._online_training_refused = True
                     self._online_training_requested = False
                     return
-                if not self._online_training_waiting:
-                    self._online_training_waiting = True
-                    print("[skinny] --online-training armed; waiting for a "
-                          "neural proposal (select one in the Proposals combobox)")
+                self._online_training_waiting = True
                 return  # transient: retry next frame
             self.renderer.enable_online_training()
             self._online_training_enabled = True

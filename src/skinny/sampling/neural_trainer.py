@@ -44,6 +44,7 @@ class TrainerConfig:
     backend: str = "auto"              # cpu|cuda|mlx|auto (training-compute backend)
     device: str = "auto"              # torch sub-device cpu|mps|cuda|auto (cuda backend)
     train_precision: str = "fp32"      # fp32|fp16 — optimizer compute precision
+    handoff: str = "file"              # display-only: weight-handoff mechanism (ACTIVE log)
     # Scene AABB (bmin, bext) for the position condition — must match the
     # renderer's neuralCondition normalisation; None ⇒ unit cube (raw position).
     bounds: tuple | None = None
@@ -64,6 +65,11 @@ class NeuralTrainer:
         self._weights = initial or make_dummy_weights(self.config.arch)
         self._cycles = 0
         self.last_loss: float | None = None
+        # Lifecycle accounting (change online-training-observability): total
+        # samples trained on, and the monotonic clock at the first real cycle
+        # (the warm-start) — the run-duration anchor for summary().
+        self._total_samples = 0
+        self._started_t: float | None = None
         self._backend = backend or make_training_backend(
             self.config.backend, device=self.config.device,
             train_precision=self.config.train_precision,
@@ -137,8 +143,14 @@ class NeuralTrainer:
             t0 = time.perf_counter()
             self._backend.warm_start(self._weights, self.config)
             self._warm = True
+            self._started_t = time.perf_counter()
             print(f"[neural] warm-started {self._backend.name} flow from current "
-                  f"weights in {(time.perf_counter() - t0) * 1e3:.0f} ms")
+                  f"weights in {(self._started_t - t0) * 1e3:.0f} ms")
+            # One-time ACTIVE marker (change online-training-observability): the
+            # first real cycle means data is flowing and the loop is training.
+            print(f"[neural] online training ACTIVE (backend={self._backend.name}, "
+                  f"handoff={self.config.handoff}, "
+                  f"precision={self.config.train_precision})")
 
         t0 = time.perf_counter()
         loss = self._backend.update(cond, z, w)
@@ -153,6 +165,7 @@ class NeuralTrainer:
         self._trained_cycles += 1
         self._train_ms_acc += dt_ms
         self._sample_acc += int(cond.shape[0])
+        self._total_samples += int(cond.shape[0])
         now = time.perf_counter()
         if now - self._last_log_t >= self._LOG_INTERVAL_S:
             n = self._trained_cycles - self._logged_cycles
@@ -166,3 +179,18 @@ class NeuralTrainer:
             self._train_ms_acc = 0.0
             self._sample_acc = 0
         return self._weights
+
+    def summary(self) -> dict:
+        """Run statistics for the STOPPED summary (change
+        online-training-observability): wall-clock duration since the first real
+        cycle, total cycles / optimizer steps / samples, the final loss, and the
+        backend. ``duration_s`` is 0 and ``cycles`` is 0 if nothing ever trained."""
+        dur = 0.0 if self._started_t is None else (time.perf_counter() - self._started_t)
+        return {
+            "duration_s": dur,
+            "cycles": self._trained_cycles,
+            "steps": self._trained_cycles * self.config.steps_per_cycle,
+            "samples": self._total_samples,
+            "final_loss": self.last_loss,
+            "backend": self._backend.name,
+        }

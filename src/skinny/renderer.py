@@ -1234,6 +1234,17 @@ class Renderer:
         self._neural_trainer_kind = str(neural_trainer)
         self._train_precision = str(train_precision)
         self._online_training = False
+        # Observability (change online-training-observability). The startup
+        # configuration matrix is emitted from update() and dedup-reprinted on a
+        # status flip; the front-ends set `_requested_backend` /
+        # `_online_training_requested` for display (None ⇒ "auto" / current
+        # state). `_train_summary_printed` guards the one-shot STOPPED summary
+        # across the disable + atexit paths.
+        self._requested_backend = None
+        self._online_training_requested = None
+        self._last_config_sig = None
+        self._train_summary_printed = False
+        self._atexit_registered = False
         self._neural_replay = None
         self._neural_trainer = None
         self._neural_publisher = None
@@ -7578,11 +7589,12 @@ class Renderer:
         # (post-training quantization); both feed the trainer's TrainerConfig.
         backend_kind = trainer_backend or self._neural_trainer_kind
         precision = train_precision or self._train_precision
+        kind = handoff or self._neural_handoff_kind
         self._neural_trainer = (trainer if trainer is not None
                                 else NeuralTrainer(TrainerConfig(
                                     arch=cfg, backend=backend_kind,
-                                    train_precision=precision), initial=init))
-        kind = handoff or self._neural_handoff_kind
+                                    train_precision=precision, handoff=kind),
+                                    initial=init))
         # The interop publisher writes weights+biases straight into the GPU-shared
         # binding-33/34 buffers; hand it those buffers plus the active storage
         # precision. `make_publisher` resolves the mechanism per backend (change
@@ -7602,6 +7614,15 @@ class Renderer:
         self._neural_publisher = make_publisher(
             kind, initial=init, expect_arch=cfg.arch, **publisher_kwargs)
         self._online_training = True
+        # Reset the STOPPED-summary guard for this session and register an atexit
+        # fallback so a run summary still prints if the process exits while
+        # training is active (change online-training-observability). The guard is
+        # shared with disable_online_training so it fires at most once.
+        self._train_summary_printed = False
+        if not self._atexit_registered:
+            import atexit
+            atexit.register(self._print_train_summary)
+            self._atexit_registered = True
         # Resolve the record source. Wavefront-native emission removes the
         # megakernel record dispatch (the 2 s-TDR / ~400 s-compile seam on
         # NVIDIA/Windows): the normal wavefront render fills bindings 36/37 and
@@ -7622,6 +7643,7 @@ class Renderer:
         return self._neural_publisher
 
     def disable_online_training(self) -> None:
+        self._print_train_summary()
         self._online_training = False
         self._wf_record_active = False
         self._last_state_hash = None  # records-off pass rebuild → restart accum
@@ -7687,6 +7709,125 @@ class Renderer:
             return (False, "online training requires a neural proposal in the "
                            "mixture (--proposals …,neural)")
         return (True, "")
+
+    # ── Configuration matrix + lifecycle logging (change
+    #    online-training-observability) ──────────────────────────────────────
+
+    def _collect_config_rows(self) -> list:
+        """Assemble the configuration-matrix rows from the resolved render state.
+        Requested values come from the CLI/env/persisted selections; resolved
+        values are what the renderer actually runs; the online-training row's
+        status names the missing prerequisite when it is not approved."""
+        from skinny import config_report as cr
+
+        rows: list = []
+        # backend: requested (front-end-set, default "auto") vs resolved device.
+        req_b = self._requested_backend or "auto"
+        res_b = "metal" if self.is_metal else "vulkan"
+        rows.append(cr.ConfigRow("backend", req_b, res_b, cr.ON))
+
+        # execution mode: the Metal/bdpt capability gate can pin the resolved
+        # value away from the requested one.
+        req_e = str(self._requested_execution_mode)
+        res_e = ("wavefront"
+                 if self.effective_execution_mode_index == EXECUTION_WAVEFRONT
+                 else "megakernel")
+        est = (f"{cr.ON} (pinned from {req_e})"
+               if self.execution_mode_fallback_active else cr.ON)
+        rows.append(cr.ConfigRow("execution-mode", req_e, res_e, est))
+
+        # integrator.
+        integ = self.integrator_modes[self.integrator_index].lower()
+        rows.append(cr.ConfigRow("integrator", integ, integ, cr.ON))
+
+        # proposals: the active mixture, with whether the neural proposal is live.
+        idx = max(0, min(int(self.proposal_preset_index),
+                         len(self._PROPOSAL_PRESETS) - 1))
+        prop_tok = self._PROPOSAL_PRESETS[idx][1]
+        prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
+        rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
+
+        # The training stack rows only matter when online training is requested;
+        # mark them n/a otherwise so the matrix reads cleanly with the loop off.
+        ot_req = self._online_training_requested
+        requested_ot = (bool(ot_req) if ot_req is not None
+                        else bool(self._online_training))
+        train_status = cr.ON if requested_ot else cr.NA
+
+        tr = self._neural_trainer
+        res_trainer = tr.backend_name if tr is not None else self._neural_trainer_kind
+        rows.append(cr.ConfigRow("neural-trainer", self._neural_trainer_kind,
+                                 res_trainer, train_status))
+
+        res_handoff = self._neural_handoff_kind
+        if res_handoff == "interop":
+            res_handoff = "interop(UMA)" if self.is_metal else "interop(CUDA)"
+        rows.append(cr.ConfigRow("neural-handoff", self._neural_handoff_kind,
+                                 res_handoff, train_status))
+
+        res_prec = (tr.config.train_precision if tr is not None
+                    else self._train_precision)
+        rows.append(cr.ConfigRow("train-precision", self._train_precision,
+                                 res_prec, train_status))
+
+        # online-training: the payoff row — OFF / REFUSED / WAITING / APPROVED.
+        if not requested_ot:
+            ot_status = cr.OFF
+        elif self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+            ot_status = cr.refused("requires --execution-mode wavefront")
+        elif not self._neural_active():
+            ot_status = cr.waiting("select a neural proposal")
+        else:
+            ot_status = cr.APPROVED
+        rows.append(cr.ConfigRow("online-training",
+                                 "on" if requested_ot else "off", "—", ot_status))
+        return rows
+
+    def _emit_config_matrix(self, reason: str = "") -> None:
+        """Print the configuration matrix, but only when its status signature
+        differs from the last print (startup + every runtime flip). Cheap enough
+        to call once per frame from update(): it builds a few rows and dedups."""
+        from skinny import config_report as cr
+
+        rows = self._collect_config_rows()
+        sig = cr.matrix_signature(rows)
+        if sig == self._last_config_sig:
+            return
+        self._last_config_sig = sig
+        print(cr.build_config_matrix(rows))
+
+    def _print_train_summary(self) -> None:
+        """Emit the one-shot ``online training STOPPED`` run summary. Guarded so
+        the explicit-disable and atexit paths never double-print; a no-op if the
+        trainer never actually ran a cycle."""
+        if self._train_summary_printed:
+            return
+        tr = self._neural_trainer
+        if tr is None:
+            return
+        s = tr.summary()
+        if s["cycles"] == 0:
+            return  # armed but never trained — nothing worth summarizing
+        self._train_summary_printed = True
+        fl = f"{s['final_loss']:.4f}" if s["final_loss"] is not None else "n/a"
+        print(f"[neural] online training STOPPED: ran {s['duration_s']:.1f} s, "
+              f"{s['cycles']} cycles, {s['steps']} steps, {s['samples']} samples, "
+              f"final loss={fl}, backend={s['backend']}")
+
+    def online_training_status(self) -> dict:
+        """Cheap, lock-free snapshot of the online-training state for the GUI to
+        poll each frame (change online-training-observability). Plain attribute
+        reads — never blocks the render or trainer thread."""
+        tr = self._neural_trainer
+        active = bool(self._online_training and tr is not None
+                      and getattr(tr, "_started_t", None) is not None)
+        return {
+            "armed": bool(self._online_training),
+            "active": active,
+            "last_loss": getattr(tr, "last_loss", None) if tr is not None else None,
+            "cycles": getattr(tr, "_trained_cycles", 0) if tr is not None else 0,
+            "backend": tr.backend_name if tr is not None else None,
+        }
 
     def online_training_tick(self) -> int:
         """Per-frame driver the render loop calls once per frame (change
@@ -8324,6 +8465,12 @@ class Renderer:
     def update(self, dt: float) -> None:
         self.time_elapsed += dt
         self.frame_index += 1
+
+        # Emit the configuration matrix (change online-training-observability).
+        # Dedup-guarded, so this prints once at startup and again only when a
+        # status flips (e.g. selecting a neural proposal arms online training).
+        # Driven from the shared per-frame entry so every front-end gets it.
+        self._emit_config_matrix()
 
         if dt > 0:
             inst_fps = 1.0 / dt

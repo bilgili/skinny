@@ -198,6 +198,34 @@ once and then a throttled per-cycle progress line:
   M ms/cycle` — periodic progress; `ms/cycle` is the off-render-thread training
   cost (the numpy oracle is ~seconds; CUDA is fast), surfaced so it's visible.
 
+**Observability** (change `online-training-observability`). The throttled
+per-cycle line is easy to miss, so three extra surfaces make the loop's state
+explicit:
+
+- **Startup configuration matrix.** Every front-end prints a `[skinny]
+  configuration` table the moment the renderer is ready, one row per
+  render-selection axis — backend, execution-mode, integrator, proposals,
+  neural-trainer, neural-handoff, train-precision, online-training — with the
+  **requested** value (CLI/env/persisted), the **resolved** value actually in
+  use (`auto`→`metal`, `auto`→`mlx`, `interop`→`interop(UMA)`, precision after a
+  support fallback), and a **status**. The `online-training` row is the payoff:
+  `OFF`, `REFUSED (requires --execution-mode wavefront)`, `WAITING (select a
+  neural proposal)`, or `APPROVED`. The matrix **reprints only when a status
+  flips** — e.g. selecting a neural proposal in the `skinny-gui` Proposals
+  combobox moves it `WAITING`→`APPROVED` — so it answers "what's selected, what's
+  approved, and why not" at a glance. It subsumes the old one-shot
+  refused/armed console lines.
+- **Lifecycle markers.** `[neural] online training ACTIVE (backend=…, handoff=…,
+  precision=…)` prints once at the first real (warm-started) cycle — the
+  unambiguous "training is now running" signal — and `[neural] online training
+  STOPPED: ran <s>, <cycles> cycles, <steps> steps, <samples> samples, final
+  loss=…, backend=…` prints once when training is disabled or the process exits
+  while still active, answering "did it train, and for how long".
+- **GUI status line.** `skinny-gui` polls a lock-free
+  `renderer.online_training_status()` snapshot each frame and shows it in the
+  status bar (`… | neural: ACTIVE 410cyc loss=0.012`, or `armed (waiting)`), so
+  the state is visible without a terminal.
+
 **The async-trainer-thread model.** `enable_online_training` starts a daemon
 trainer thread that loops `online_train_and_publish` (sample the replay buffer →
 `train_cycle` → `publish`) with a short sleep between cycles. The **render thread**
