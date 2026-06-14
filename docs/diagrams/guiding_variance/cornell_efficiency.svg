@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 300" font-family="-apple-system, sans-serif" font-size="11">
+  <style>text{fill:var(--fg,#222)} .axis{stroke:var(--muted,#888);stroke-width:1} .bar{fill:var(--accent,#3b7dd8)} .curve{fill:none;stroke-width:1.8}</style>
+  <text x="260" y="18" text-anchor="middle" font-weight="600">Efficiency 1/(var·t) — cornell</text>
+  <text x="14" y="135" text-anchor="middle" transform="rotate(-90 14 135)">1/(var·s)</text>
+  <line class="axis" x1="56" y1="34" x2="56" y2="236"/>
+  <line class="axis" x1="56" y1="236" x2="504" y2="236"/>
+  <rect class="bar" x="62.7" y="34.0" width="31.4" height="202.0"><title>bsdf|V1/E0/fp32: 1.442e+06</title></rect>
+  <text x="78.4" y="250" text-anchor="end" transform="rotate(-35 78.4 250)">bsdf|V1/E0/fp32</text>
+  <text x="78.4" y="31.0" text-anchor="middle" font-size="9">1.44e+06</text>
+  <rect class="bar" x="107.5" y="36.9" width="31.4" height="199.1"><title>bsdf,env|V1/E0/fp32: 1.421e+06</title></rect>
+  <text x="123.2" y="250" text-anchor="end" transform="rotate(-35 123.2 250)">bsdf,env|V1/E0/fp32</text>
+  <text x="123.2" y="33.9" text-anchor="middle" font-size="9">1.42e+06</text>
+  <rect class="bar" x="152.3" y="229.7" width="31.4" height="6.3"><title>bsdf,neural|V1/E0/fp32: 4.499e+04</title></rect>
+  <text x="168.0" y="250" text-anchor="end" transform="rotate(-35 168.0 250)">bsdf,neural|V1/E0/fp32</text>
+  <text x="168.0" y="226.7" text-anchor="middle" font-size="9">4.50e+04</text>
+  <rect class="bar" x="197.1" y="233.9" width="31.4" height="2.1"><title>bsdf,neural|V1/E1/fp32: 1.511e+04</title></rect>
+  <text x="212.8" y="250" text-anchor="end" transform="rotate(-35 212.8 250)">bsdf,neural|V1/E1/fp32</text>
+  <text x="212.8" y="230.9" text-anchor="middle" font-size="9">1.51e+04</text>
+  <rect class="bar" x="241.9" y="232.9" width="31.4" height="3.1"><title>bsdf,neural|V1/E3/fp32: 2.185e+04</title></rect>
+  <text x="257.6" y="250" text-anchor="end" transform="rotate(-35 257.6 250)">bsdf,neural|V1/E3/fp32</text>
+  <text x="257.6" y="229.9" text-anchor="middle" font-size="9">2.18e+04</text>
+  <rect class="bar" x="286.7" y="228.0" width="31.4" height="8.0"><title>neural|V1/E0/fp32: 5.735e+04</title></rect>
+  <text x="302.4" y="250" text-anchor="end" transform="rotate(-35 302.4 250)">neural|V1/E0/fp32</text>
+  <text x="302.4" y="225.0" text-anchor="middle" font-size="9">5.74e+04</text>
+  <rect class="bar" x="331.5" y="233.2" width="31.4" height="2.8"><title>neural|V1/E1/fp32: 1.973e+04</title></rect>
+  <text x="347.2" y="250" text-anchor="end" transform="rotate(-35 347.2 250)">neural|V1/E1/fp32</text>
+  <text x="347.2" y="230.2" text-anchor="middle" font-size="9">1.97e+04</text>
+  <rect class="bar" x="376.3" y="231.9" width="31.4" height="4.1"><title>neural|V1/E3/fp32: 2.955e+04</title></rect>
+  <text x="392.0" y="250" text-anchor="end" transform="rotate(-35 392.0 250)">neural|V1/E3/fp32</text>
+  <text x="392.0" y="228.9" text-anchor="middle" font-size="9">2.96e+04</text>
+  <rect class="bar" x="421.1" y="60.3" width="31.4" height="175.7"><title>bsdf,env|V1/E0/fp32+restir-di: 1.255e+06</title></rect>
+  <text x="436.8" y="250" text-anchor="end" transform="rotate(-35 436.8 250)">bsdf,env|V1/E0/fp32+restir-di</text>
+  <text x="436.8" y="57.3" text-anchor="middle" font-size="9">1.25e+06</text>
+  <rect class="bar" x="465.9" y="224.0" width="31.4" height="12.0"><title>bsdf,neural|V1/E1/fp16: 8.559e+04</title></rect>
+  <text x="481.6" y="250" text-anchor="end" transform="rotate(-35 481.6 250)">bsdf,neural|V1/E1/fp16</text>
+  <text x="481.6" y="221.0" text-anchor="middle" font-size="9">8.56e+04</text>
+</svg>

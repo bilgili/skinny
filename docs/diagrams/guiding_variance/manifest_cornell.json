@@ -1,0 +1,464 @@
+{
+  "scene": "cornell",
+  "backend": "vulkan",
+  "config": {
+    "scenes": [
+      "cornell"
+    ],
+    "integrator": "path",
+    "seeds": 4,
+    "budgets": [
+      16,
+      64,
+      256
+    ],
+    "reference_spp": 512,
+    "resolution": 96,
+    "cells": [
+      {
+        "proposals": "bsdf",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E0",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,env",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E0",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E0",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E1",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E3",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E0",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E1",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E3",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,env",
+        "reuse": "restir-di",
+        "chart": "V1",
+        "encoding": "E0",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E1",
+        "temporal": "off",
+        "precision": "fp16"
+      },
+      {
+        "proposals": "bsdf,neural",
+        "reuse": "none",
+        "chart": "V2",
+        "encoding": "E0",
+        "temporal": "off",
+        "precision": "fp32"
+      },
+      {
+        "proposals": "bsdf,neural",
+        "reuse": "none",
+        "chart": "V1",
+        "encoding": "E0",
+        "temporal": "on",
+        "precision": "fp32"
+      }
+    ]
+  },
+  "reference": {
+    "spp": 512,
+    "witness_rel_err": 0.0001166975989631335,
+    "hash": "58e545881002f86b",
+    "mean": 0.0007900187292306382
+  },
+  "results": [
+    {
+      "label": "bsdf|V1/E0/fp32",
+      "proposals": "bsdf",
+      "chart": "V1",
+      "encoding": "E0",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.610487898012724e-07,
+      "equal_time_var_spread": 1.5904973107600978e-09,
+      "firefly_p999": 0.002300901363458255,
+      "equal_time_s": 0.8053265617490979,
+      "efficiency": 1442116.0682462875,
+      "eq_var_spp": 221.57992349058347,
+      "eq_var_time_s": 0.6987060619466154,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008383461754007527,
+          0.0517347079985484
+        ],
+        [
+          64,
+          4.223177283843552e-05,
+          0.2022896557537024
+        ],
+        [
+          256,
+          8.610487898012724e-07,
+          0.8053265617490979
+        ]
+      ]
+    },
+    {
+      "label": "bsdf,env|V1/E0/fp32",
+      "proposals": "bsdf,env",
+      "chart": "V1",
+      "encoding": "E0",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.620113424834671e-07,
+      "equal_time_var_spread": 1.2613054573324121e-09,
+      "firefly_p999": 0.0023470134754607084,
+      "equal_time_s": 0.8160988747513329,
+      "efficiency": 1421491.413146345,
+      "eq_var_spp": 221.58523616166028,
+      "eq_var_time_s": 0.7112258720923921,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008438638064918564,
+          0.053546156002994394
+        ],
+        [
+          64,
+          4.230632469565587e-05,
+          0.20681904150478658
+        ],
+        [
+          256,
+          8.620113424834671e-07,
+          0.8160988747513329
+        ]
+      ]
+    },
+    {
+      "label": "bsdf,neural|V1/E0/fp32",
+      "proposals": "bsdf,neural",
+      "chart": "V1",
+      "encoding": "E0",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.556003793189325e-07,
+      "equal_time_var_spread": 9.642919774392925e-10,
+      "firefly_p999": 0.0023018520597252092,
+      "equal_time_s": 25.977553104505205,
+      "efficiency": 44991.532906213666,
+      "eq_var_spp": 221.6093267445665,
+      "eq_var_time_s": 22.586786511720355,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008365374110752867,
+          1.6405897500007995
+        ],
+        [
+          64,
+          4.211506921707949e-05,
+          6.551581927251391
+        ],
+        [
+          256,
+          8.556003793189325e-07,
+          25.977553104505205
+        ]
+      ]
+    },
+    {
+      "label": "bsdf,neural|V1/E1/fp32",
+      "proposals": "bsdf,neural",
+      "chart": "V1",
+      "encoding": "E1",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.556002221385728e-07,
+      "equal_time_var_spread": 9.645419835839728e-10,
+      "firefly_p999": 0.0023018520597252092,
+      "equal_time_s": 77.3495776875061,
+      "efficiency": 15110.233112818869,
+      "eq_var_spp": 221.6093282518909,
+      "eq_var_time_s": 66.76251979187977,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008365374110752867,
+          4.767976166753215
+        ],
+        [
+          64,
+          4.211506921707949e-05,
+          19.224170656500064
+        ],
+        [
+          256,
+          8.556002221385728e-07,
+          77.3495776875061
+        ]
+      ]
+    },
+    {
+      "label": "bsdf,neural|V1/E3/fp32",
+      "proposals": "bsdf,neural",
+      "chart": "V1",
+      "encoding": "E3",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.556006554528522e-07,
+      "equal_time_var_spread": 9.638528587459914e-10,
+      "firefly_p999": 0.0023018520597252092,
+      "equal_time_s": 53.497267833256046,
+      "efficiency": 21847.275673254033,
+      "eq_var_spp": 221.60932409650448,
+      "eq_var_time_s": 46.3175433126925,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008365374110752867,
+          3.343534677002026
+        ],
+        [
+          64,
+          4.211506921707949e-05,
+          13.378373020754225
+        ],
+        [
+          256,
+          8.556006554528522e-07,
+          53.497267833256046
+        ]
+      ]
+    },
+    {
+      "label": "neural|V1/E0/fp32",
+      "proposals": "neural",
+      "chart": "V1",
+      "encoding": "E0",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.391902268327108e-07,
+      "equal_time_var_spread": 1.73551455198803e-09,
+      "firefly_p999": 0.002393826771149193,
+      "equal_time_s": 20.77642631324852,
+      "efficiency": 57354.66329131728,
+      "eq_var_spp": 221.69968340269884,
+      "eq_var_time_s": 17.975916182825205,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008469114638163834,
+          1.3004882290006208
+        ],
+        [
+          64,
+          4.176592981271602e-05,
+          5.184425479499623
+        ],
+        [
+          256,
+          8.391902268327108e-07,
+          20.77642631324852
+        ]
+      ]
+    },
+    {
+      "label": "neural|V1/E1/fp32",
+      "proposals": "neural",
+      "chart": "V1",
+      "encoding": "E1",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.391902268327108e-07,
+      "equal_time_var_spread": 1.73551455198803e-09,
+      "firefly_p999": 0.002393826771149193,
+      "equal_time_s": 60.401248760495946,
+      "efficiency": 19728.481778883164,
+      "eq_var_spp": 221.69968340269884,
+      "eq_var_time_s": 52.30258754596266,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008469114638163834,
+          3.7709506144965417
+        ],
+        [
+          64,
+          4.176592981271602e-05,
+          15.096984906249418
+        ],
+        [
+          256,
+          8.391902268327108e-07,
+          60.401248760495946
+        ]
+      ]
+    },
+    {
+      "label": "neural|V1/E3/fp32",
+      "proposals": "neural",
+      "chart": "V1",
+      "encoding": "E3",
+      "precision": "fp32",
+      "reuse": "none",
+      "equal_time_var": 8.391902268327108e-07,
+      "equal_time_var_spread": 1.73551455198803e-09,
+      "firefly_p999": 0.002393826771149193,
+      "equal_time_s": 40.32570608349852,
+      "efficiency": 29550.007955864472,
+      "eq_var_spp": 221.69968340269884,
+      "eq_var_time_s": 34.91553937568335,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008469114638163834,
+          2.520617270751245
+        ],
+        [
+          64,
+          4.176592981271602e-05,
+          10.077325947750069
+        ],
+        [
+          256,
+          8.391902268327108e-07,
+          40.32570608349852
+        ]
+      ]
+    },
+    {
+      "label": "bsdf,env|V1/E0/fp32+restir-di",
+      "proposals": "bsdf,env",
+      "chart": "V1",
+      "encoding": "E0",
+      "precision": "fp32",
+      "reuse": "restir-di",
+      "equal_time_var": 8.656615781838412e-07,
+      "equal_time_var_spread": 1.618842610511749e-09,
+      "firefly_p999": 0.002351206640276367,
+      "equal_time_s": 0.9207861769937153,
+      "efficiency": 1254564.7099447027,
+      "eq_var_spp": 221.5841628135741,
+      "eq_var_time_s": 0.8002355195612029,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008525907615925005,
+          0.060312708250421565
+        ],
+        [
+          64,
+          4.247992373134349e-05,
+          0.23206639549971442
+        ],
+        [
+          256,
+          8.656615781838412e-07,
+          0.9207861769937153
+        ]
+      ]
+    },
+    {
+      "label": "bsdf,neural|V1/E1/fp16",
+      "proposals": "bsdf,neural",
+      "chart": "V1",
+      "encoding": "E1",
+      "precision": "fp16",
+      "reuse": "none",
+      "equal_time_var": 8.556006554528522e-07,
+      "equal_time_var_spread": 9.638528587459914e-10,
+      "firefly_p999": 0.0023018520597252092,
+      "equal_time_s": 13.655800250253378,
+      "efficiency": 85587.77491618364,
+      "eq_var_spp": 221.60932409650448,
+      "eq_var_time_s": 11.822334960323799,
+      "eq_var_reached": true,
+      "budget_curve": [
+        [
+          16,
+          0.0008365374110752867,
+          0.8531878230060101
+        ],
+        [
+          64,
+          4.211506921707949e-05,
+          3.4145481565028604
+        ],
+        [
+          256,
+          8.556006554528522e-07,
+          13.655800250253378
+        ]
+      ]
+    }
+  ],
+  "skipped": [
+    {
+      "cell": "bsdf,neural|V2/E0/fp32",
+      "reason": "chart V2 not built (renderer-chart-selection not landed)"
+    },
+    {
+      "cell": "bsdf,neural|V1/E0/fp32/T",
+      "reason": "temporal=on not built (neural-temporal-conditioning not landed)"
+    }
+  ]
+}

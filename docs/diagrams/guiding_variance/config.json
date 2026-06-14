@@ -1,0 +1,113 @@
+{
+  "scenes": [
+    "cornell"
+  ],
+  "integrator": "path",
+  "seeds": 4,
+  "budgets": [
+    16,
+    64,
+    256
+  ],
+  "reference_spp": 512,
+  "resolution": 96,
+  "cells": [
+    {
+      "proposals": "bsdf",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E0",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,env",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E0",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E0",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E1",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E3",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E0",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E1",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E3",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,env",
+      "reuse": "restir-di",
+      "chart": "V1",
+      "encoding": "E0",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E1",
+      "temporal": "off",
+      "precision": "fp16"
+    },
+    {
+      "proposals": "bsdf,neural",
+      "reuse": "none",
+      "chart": "V2",
+      "encoding": "E0",
+      "temporal": "off",
+      "precision": "fp32"
+    },
+    {
+      "proposals": "bsdf,neural",
+      "reuse": "none",
+      "chart": "V1",
+      "encoding": "E0",
+      "temporal": "on",
+      "precision": "fp32"
+    }
+  ],
+  "_doc": "Checked-in declarative sweep matrix for neural-guiding-variance-harness. Scenes map via SCENES in scripts/guiding_variance_sweep.py. Non-default chart/temporal cells are intentionally retained so the skip log shows coverage gaps until renderer-chart-selection / neural-temporal-conditioning land."
+}
