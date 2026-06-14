@@ -139,6 +139,15 @@ consume the shared `build_dataset_np` arrays, retain warm model and Adam
 optimizer state across cycles, and `export` fp32 `NeuralWeights` identical in
 format to the numpy and torch backends.
 
+MLX arrays and GPU streams are thread-affine. The backend SHALL therefore
+**confine all of its MLX work to a single owned worker thread**: `warm_start`,
+`update`, and `export` SHALL execute their MLX operations on one dedicated
+thread the backend owns, so the leaf arrays are always created and evaluated on
+the same thread regardless of which caller thread invokes the backend. Driving
+the backend from more than one thread SHALL be serialized onto that worker and
+SHALL NOT raise `There is no Stream(gpu, N) in current thread.`. Single-thread
+(production) use SHALL be functionally unchanged.
+
 #### Scenario: MLX backend trains on the Metal GPU
 - **WHEN** a training cycle runs with `--neural-trainer mlx` on an Apple-Silicon
   Metal host with `mlx` installed
@@ -151,6 +160,14 @@ format to the numpy and torch backends.
   seed for one cycle
 - **THEN** their resulting weights agree within a documented numerical
   tolerance, guarding against drift in either implementation
+
+#### Scenario: Driven from multiple threads without a stream crash
+- **WHEN** the backend is invoked from a thread other than the one that
+  warm-started it (e.g. a direct call concurrent with the background daemon
+  trainer thread)
+- **THEN** the MLX work is marshaled onto the backend's single owned worker
+  thread and completes, rather than raising
+  `There is no Stream(gpu, N) in current thread.`
 
 #### Scenario: Absent MLX package leaves the system unaffected
 - **WHEN** skinny is installed without the `mlx` extra
