@@ -396,6 +396,17 @@ def emit(out_dir: Path, scene, cfg, ref, ref_witness, ref_hash,
           f"Seeds: **{cfg['seeds']}** independent; budgets {cfg['budgets']} spp; "
           f"variance = MSE vs reference over the linear-HDR accumulation image, "
           f"mean ± spread over seeds.", ""]
+    _trained = sorted({c["net"] for c in cfg["cells"] if c.get("net")})
+    if _trained:
+        md += [f"Neural cells use trained nets: {', '.join(Path(n).name for n in _trained)}.",
+               ""]
+    elif any("neural" in c["proposals"] for c in cfg["cells"]):
+        md += ["**Neural cells use the dummy (untrained, zero) net** — this slice "
+               "measures *cost + unbiasedness*, not a guiding win: the dummy net is a "
+               "valid-but-poor proposal, so mixture-MIS keeps it unbiased (same variance "
+               "as `bsdf`) while adding the MLP pre-pass cost. A guiding win needs a "
+               "trained `.nrec` (set `net:` per cell; produced by `spline_flow`), which "
+               "moves the variance column.", ""]
 
     md.append(markdown_table(
         rows,
