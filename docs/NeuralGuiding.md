@@ -481,24 +481,30 @@ forward draw's density on the square is the inverse Jacobian:
 
 ### 6. Solid-angle density
 
-The y-up square→hemisphere map (`φ = 2πu`, `cosθ = v`) has constant Jacobian
-`2π`, so the solid-angle density is
+The y-up square→hemisphere map is the **Lambert azimuthal equal-area** chart: a
+Shirley concentric square→disk (`nf_concentric_square_to_disk`, seam-free and
+area-preserving) followed by the lift `cosθ = 1 − r²` with `r = |disk|` (the pole
+sits at the disk centre, no azimuth seam). It is equal-area, so the Jacobian is
+the constant `2π` and the solid-angle density is
 
 ![q_ω(ω) = q_□(z) / 2π](diagrams/neural/pdf-omega.svg)
 
-The square→hemisphere map (`nf_square_to_hemi`) and the constant-2π conversion in
-`sampleNeural`:
+The Lambert square→hemisphere map (`nf_square_to_hemi`) and the constant-2π
+conversion in `sampleNeural`:
 
 <!-- CODE:pdf-omega map,pdf -->
 ```slang
 // from neural_flow.slang
 float3 nf_square_to_hemi(float2 z)
 {
-    float u = clamp(z.x, 0.0f, 1.0f);
-    float v = clamp(z.y, 0.0f, 1.0f);
-    float phi = 2.0f * NF_PI * u;
-    float st = sqrt(max(1.0f - v * v, 0.0f));
-    return float3(st * cos(phi), v, st * sin(phi));
+    float2 c = nf_concentric_square_to_disk(z);    // unit disk, radius r=|c|
+    float r2 = clamp(c.x * c.x + c.y * c.y, 0.0f, 1.0f);
+    float cos_t = 1.0f - r2;                        // Lambert lift: cosθ = 1 − r²
+    float sin_t = sqrt(max(1.0f - cos_t * cos_t, 0.0f));
+    float r = sqrt(r2);
+    float cphi = (r > NF_EPS) ? c.x / max(r, NF_EPS) : 1.0f;   // pole at r→0: ω = (0,1,0)
+    float sphi = (r > NF_EPS) ? c.y / max(r, NF_EPS) : 0.0f;
+    return float3(sin_t * cphi, cos_t, sin_t * sphi);
 }
     // …
     pdfOmega = exp(log_q_square - NF_LOG2PI);
@@ -507,11 +513,12 @@ float3 nf_square_to_hemi(float2 z)
 
 | symbol | code | meaning |
 | --- | --- | --- |
-| φ = 2πu | `phi` | azimuth from the first square coord |
-| cosθ = v | `v` | elevation from the second square coord |
+| (c_x, c_y) | `c` | unit-disk point from the Shirley concentric map |
+| r = \|c\|, cosθ = 1 − r² | `r`, `cos_t` | Lambert lift (pole at the disk centre, r→0) |
+| (cosφ, sinφ) = c / r | `cphi`, `sphi` | azimuth from the disk direction (seam-free) |
 | ω | return of `nf_square_to_hemi` | y-up hemisphere direction |
 | q_□(z) | `exp(log_q_square)` | density on the square |
-| q_ω(ω) = q_□/2π | `pdfOmega` | solid-angle density (`exp(log_q_square − log2π)`) |
+| q_ω(ω) = q_□/2π | `pdfOmega` | solid-angle density (`exp(log_q_square − log2π)`); equal-area ⟹ 2π |
 
 ### 7. Inverse density of an arbitrary direction
 

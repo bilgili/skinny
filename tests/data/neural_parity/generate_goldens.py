@@ -46,8 +46,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from train import ConditionalSplineFlow2D, square_to_hemisphere
+from train import ConditionalSplineFlow2D
 from export_weights import export_flow
+
+# Output chart for the baked net (change directional-flow-parameterization). The
+# renderer's neural_flow.slang uses the Lambert azimuthal equal-area chart (V1),
+# so the goldens — and the appended NFW1 chart tag — must be V1 too. V1 is
+# equal-area like V0 (|J| = 2π), so only the baked direction (wi) differs from the
+# retired V0 goldens; the solid-angle pdf is chart-independent and unchanged.
+CHART_NAME = "V1"
 
 # Architecture — MUST match shaders/sampling/neural_flow.slang (NF_* consts)
 # and src/skinny/sampling/neural_weights.py.
@@ -71,12 +78,15 @@ GOLDENS_NPZ = HERE / "goldens.npz"
 def main() -> None:
     torch.manual_seed(SEED_TORCH)
     model = ConditionalSplineFlow2D(
-        cond_dim=COND_DIM, num_layers=NUM_LAYERS, num_bins=NUM_BINS, hidden=HIDDEN
+        cond_dim=COND_DIM, num_layers=NUM_LAYERS, num_bins=NUM_BINS, hidden=HIDDEN,
+        chart=CHART_NAME,
     ).eval()
+    square_to_dir = model.chart.square_to_direction   # Lambert (V1) lift, y-up
 
-    meta = export_flow(model, str(WEIGHTS_BIN))
+    meta = export_flow(model, str(WEIGHTS_BIN))        # tags the NFW1 with chart=V1
     assert meta["layers"] == NUM_LAYERS and meta["bins"] == NUM_BINS, meta
     assert meta["hidden"] == HIDDEN and meta["cond"] == COND_DIM, meta
+    assert meta["chart"] == CHART_NAME, meta
 
     rng = np.random.default_rng(SEED_INPUTS)
 
@@ -87,7 +97,7 @@ def main() -> None:
         ct = torch.tensor(f_cond, dtype=torch.float32)
         ut = torch.tensor(f_u, dtype=torch.float32)
         zt, ld = model.forward(ut, ct)                       # [N,2], [N,1]
-        f_wi = square_to_hemisphere(zt).numpy().astype(np.float32)
+        f_wi = square_to_dir(zt).numpy().astype(np.float32)
         f_pdf = torch.exp(-ld.squeeze(-1) - LOG2PI).numpy().astype(np.float64)
 
     # ---- inverse / round-trip goldens ----
@@ -103,7 +113,7 @@ def main() -> None:
         ct = torch.tensor(i_cond, dtype=torch.float32)
         ut = torch.tensor(i_u, dtype=torch.float32)
         zt, _ = model.forward(ut, ct)
-        i_wi = square_to_hemisphere(zt).numpy().astype(np.float32)
+        i_wi = square_to_dir(zt).numpy().astype(np.float32)
         # PyTorch inverse pdf at the same direction (q_omega = q_square / 2pi).
         log_q_square = model.log_pdf_square(zt, ct).squeeze(-1)
         i_pdf = torch.exp(log_q_square - LOG2PI).numpy().astype(np.float64)

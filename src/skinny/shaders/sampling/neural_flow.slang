@@ -86,6 +86,7 @@ static const float NF_PI     = 3.14159265358979323846f;
 static const float NF_LOG2PI = 1.83787706640934548356f;   // log(2*pi)
 static const float NF_EPS    = 1e-8f;
 static const float NF_MINBIN = 1e-4f;
+static const float NF_ZEPS   = 1e-5f;     // chart-inverse boundary margin (== spline_flow _Z_EPS)
 
 static const int NF_PARAMS = 3 * NF_BINS + 1;   // widths(K)+heights(K)+derivs(K+1)
 static const int NF_MLP_IN = 1 + NF_COND;       // one pass-through coord + condition
@@ -235,23 +236,80 @@ float nf_rqs_inv(float y, float widths[NF_BINS], float heights[NF_BINS],
     return clamp(x, 0.0f, 1.0f);
 }
 
-// Square <-> hemisphere (y-up), matching the prototype.
-// DOC:pdf-omega#map start
-float3 nf_square_to_hemi(float2 z)
+// Square <-> hemisphere (y-up): Lambert azimuthal equal-area chart (V1), a
+// transliteration of spline_flow/train.py `_ChartV1` + `_square_to_disk` /
+// `_disk_to_square`. Shirley concentric square->disk (seam-free, area-preserving)
+// followed by the Lambert lift `cosθ = 1 − r²` (pole at the disk centre). The chart
+// is equal-area, so the square->solid-angle Jacobian is the SAME constant 2*pi as the
+// retired cylindrical map — `NF_LOG2PI` and the pdf path are unchanged.
+
+// Shirley concentric square [0,1]^2 -> unit disk (positive-radius, 4-wedge form).
+float2 nf_concentric_square_to_disk(float2 z)
 {
     float u = clamp(z.x, 0.0f, 1.0f);
     float v = clamp(z.y, 0.0f, 1.0f);
-    float phi = 2.0f * NF_PI * u;
-    float st = sqrt(max(1.0f - v * v, 0.0f));
-    return float3(st * cos(phi), v, st * sin(phi));
+    float a = 2.0f * u - 1.0f;
+    float b = 2.0f * v - 1.0f;
+    bool a_dom = abs(a) >= abs(b);
+    float r = a_dom ? abs(a) : abs(b);
+    float a_s = (a == 0.0f) ? 1.0f : a;            // safe divisors (centre: r=0, phi unused)
+    float b_s = (b == 0.0f) ? 1.0f : b;
+    float q = NF_PI / 4.0f;
+    bool right = a_dom && (a >= 0.0f);
+    bool left  = a_dom && (a <  0.0f);
+    bool top   = (!a_dom) && (b >= 0.0f);
+    float phi = 1.5f * NF_PI + q * (a / (-b_s));   // bottom wedge (default)
+    if (right)     phi = q * (b / a_s);
+    else if (left) phi = NF_PI - q * (b / (-a_s));
+    else if (top)  phi = 0.5f * NF_PI - q * (a / b_s);
+    return float2(r * cos(phi), r * sin(phi));
+}
+
+// Inverse of nf_concentric_square_to_disk. Unit disk -> z in [0,1]^2, clamped off the
+// exact boundary by NF_ZEPS so the RQ spline is evaluated on its open interior.
+float2 nf_disk_to_square(float2 c)
+{
+    float r = sqrt(c.x * c.x + c.y * c.y);
+    float phi = atan2(c.y, c.x);                   // (-pi, pi]
+    if (phi < -NF_PI / 4.0f) phi += 2.0f * NF_PI;  // [-pi/4, 7pi/4)
+    float fourpi = 4.0f / NF_PI;
+    bool w0 = phi < NF_PI / 4.0f;
+    bool w1 = (phi >= NF_PI / 4.0f) && (phi < 3.0f * NF_PI / 4.0f);
+    bool w2 = (phi >= 3.0f * NF_PI / 4.0f) && (phi < 5.0f * NF_PI / 4.0f);
+    float a; float b;
+    if (w0)      { a = r;                                 b = phi * r * fourpi; }
+    else if (w1) { a = (0.5f * NF_PI - phi) * r * fourpi; b = r; }
+    else if (w2) { a = -r;                                b = (NF_PI - phi) * r * fourpi; }
+    else         { a = (phi - 1.5f * NF_PI) * r * fourpi; b = -r; }
+    float u = (a + 1.0f) * 0.5f;
+    float v = (b + 1.0f) * 0.5f;
+    return float2(clamp(u, NF_ZEPS, 1.0f - NF_ZEPS),
+                  clamp(v, NF_ZEPS, 1.0f - NF_ZEPS));
+}
+
+// DOC:pdf-omega#map start
+float3 nf_square_to_hemi(float2 z)
+{
+    float2 c = nf_concentric_square_to_disk(z);    // unit disk, radius r=|c|
+    float r2 = clamp(c.x * c.x + c.y * c.y, 0.0f, 1.0f);
+    float cos_t = 1.0f - r2;                        // Lambert lift: cosθ = 1 − r²
+    float sin_t = sqrt(max(1.0f - cos_t * cos_t, 0.0f));
+    float r = sqrt(r2);
+    float cphi = (r > NF_EPS) ? c.x / max(r, NF_EPS) : 1.0f;   // pole at r→0: ω = (0,1,0)
+    float sphi = (r > NF_EPS) ? c.y / max(r, NF_EPS) : 0.0f;
+    return float3(sin_t * cphi, cos_t, sin_t * sphi);
 }
 // DOC:pdf-omega#map end
 
 float2 nf_hemi_to_square(float3 wld)
 {
-    float phi = atan2(wld.z, wld.x);
-    if (phi < 0.0f) phi += 2.0f * NF_PI;
-    return float2(phi / (2.0f * NF_PI), clamp(wld.y, 0.0f, 1.0f));
+    float3 w = normalize(wld);
+    float cos_t = clamp(w.y, -1.0f, 1.0f);
+    float r = sqrt(max(1.0f - cos_t, 0.0f));        // r² = 1 − cosθ
+    float sin_t = sqrt(max(1.0f - cos_t * cos_t, 0.0f));
+    float cphi = (sin_t > NF_EPS) ? w.x / max(sin_t, NF_EPS) : 1.0f;
+    float sphi = (sin_t > NF_EPS) ? w.z / max(sin_t, NF_EPS) : 0.0f;
+    return nf_disk_to_square(float2(r * cphi, r * sphi));
 }
 
 // Forward flow u -> z accumulating log|det dz/du| (coupling layers alternate the mask).

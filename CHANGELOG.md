@@ -46,6 +46,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract, and the handoff format are unchanged; MLX is never imported
   unconditionally, so hosts without the extra behave exactly as before.
 
+### Changed
+
+- **Neural-flow Lambert directional chart** (change
+  `directional-flow-parameterization`) — the neural directional proposal's
+  square↔direction map (`neural_flow.slang` `nf_square_to_hemi` /
+  `nf_hemi_to_square`) is now the **Lambert azimuthal equal-area** chart (Shirley
+  concentric square→disk + the lift `cosθ = 1 − r²`) in place of the cylindrical
+  equal-area map. It removes the azimuth seam and puts the pole at the disk
+  centre, making the guided lobe a strictly easier target for the same net (study
+  `directional-flow-param-study`: BRDF 1.23×, path 1.09–1.49× equal-time
+  efficiency). The chart is equal-area, so `|J| = 2π` is unchanged — `NF_LOG2PI`,
+  `sampleNeural` / `pdfNeural`, and the whole MIS pdf path are byte-identical;
+  only the baked direction differs, so a chart-matched (V1) `.nrec` is required
+  (the parity goldens are rebaked with `chart="V1"` and a chart-mismatch gate
+  guards against silently running a V0 net).
+
 ### Backend
 
 - **Metal record drain** (change `metal-record-drain`) — wavefront path-record

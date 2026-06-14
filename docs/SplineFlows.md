@@ -308,11 +308,14 @@ simplicity for a smooth, exact, conditional density.
 
 The flow's natural domain is a box; directions live on a hemisphere. skinny's flow
 warps the **unit square `[0,1]²`** and then maps the square to the upper hemisphere
-with the standard equal-area parameterization (`φ = 2πu`, `cosθ = v`), whose
-Jacobian is the constant `2π`. So the solid-angle density is just the square
-density over `2π` — no spline tails needed, the square maps onto itself. The full
-chain (`nf_square_to_hemi`, the `2π` factor, the inverse `nf_hemi_to_square`) is
-§6–§7 of NeuralGuiding.md.
+with the **Lambert azimuthal equal-area** chart (a Shirley concentric square→disk
+followed by the lift `cosθ = 1 − r²`, `r = |disk|`), whose Jacobian is the
+constant `2π`. Being equal-area, the solid-angle density is just the square
+density over `2π` — no spline tails needed, the square maps onto itself — and the
+chart is seam-free with the pole at the disk centre, an easier target than the
+cylindrical map it replaced (study `directional-flow-param-study`,
+`ParametrizationResults.md`). The full chain (`nf_square_to_hemi`, the `2π`
+factor, the inverse `nf_hemi_to_square`) is §6–§7 of NeuralGuiding.md.
 
 ### Unbiasedness: a wrong flow only costs variance
 

@@ -28,6 +28,7 @@ Run (CI-style, no torch/GPU)::
 from __future__ import annotations
 
 import math
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -247,22 +248,83 @@ def _flow_inverse(nw, zin, cond, prec=(False, False)):
     return z, logdet
 
 
-def _square_to_hemi(z):
-    """z in [0,1]^2 -> upper-hemisphere direction, y-up (mirrors
-    ``nf_square_to_hemi`` / ``square_to_hemisphere``)."""
+# Lambert azimuthal equal-area chart (V1) — mirrors neural_flow.slang exactly
+# (change directional-flow-parameterization). EPS / ZEPS match the shader's
+# NF_EPS / NF_ZEPS (== spline_flow EPS / _Z_EPS).
+_NF_EPS = 1e-8
+_NF_ZEPS = 1e-5
+
+
+def _concentric_square_to_disk(z):
+    """Shirley concentric square->disk (mirrors ``nf_concentric_square_to_disk``)."""
     u = min(max(z[0], 0.0), 1.0)
     v = min(max(z[1], 0.0), 1.0)
-    phi = 2.0 * math.pi * u
-    st = math.sqrt(max(1.0 - v * v, 0.0))
-    return np.array([st * math.cos(phi), v, st * math.sin(phi)], np.float64)
+    a = 2.0 * u - 1.0
+    b = 2.0 * v - 1.0
+    a_dom = abs(a) >= abs(b)
+    r = abs(a) if a_dom else abs(b)
+    a_s = 1.0 if a == 0.0 else a
+    b_s = 1.0 if b == 0.0 else b
+    q = math.pi / 4.0
+    right = a_dom and a >= 0.0
+    left = a_dom and a < 0.0
+    top = (not a_dom) and b >= 0.0
+    phi = 1.5 * math.pi + q * (a / (-b_s))          # bottom wedge (default)
+    if right:
+        phi = q * (b / a_s)
+    elif left:
+        phi = math.pi - q * (b / (-a_s))
+    elif top:
+        phi = 0.5 * math.pi - q * (a / b_s)
+    return np.array([r * math.cos(phi), r * math.sin(phi)], np.float64)
+
+
+def _disk_to_square(c):
+    """Inverse concentric disk->square (mirrors ``nf_disk_to_square``); clamps off
+    the exact [0,1] boundary by NF_ZEPS."""
+    cx, cy = float(c[0]), float(c[1])
+    r = math.sqrt(cx * cx + cy * cy)
+    phi = math.atan2(cy, cx)
+    if phi < -math.pi / 4.0:
+        phi += 2.0 * math.pi
+    fourpi = 4.0 / math.pi
+    if phi < math.pi / 4.0:
+        a, b = r, phi * r * fourpi
+    elif phi < 3.0 * math.pi / 4.0:
+        a, b = (0.5 * math.pi - phi) * r * fourpi, r
+    elif phi < 5.0 * math.pi / 4.0:
+        a, b = -r, (math.pi - phi) * r * fourpi
+    else:
+        a, b = (phi - 1.5 * math.pi) * r * fourpi, -r
+    u = (a + 1.0) * 0.5
+    v = (b + 1.0) * 0.5
+    return np.array([min(max(u, _NF_ZEPS), 1.0 - _NF_ZEPS),
+                     min(max(v, _NF_ZEPS), 1.0 - _NF_ZEPS)], np.float64)
+
+
+def _square_to_hemi(z):
+    """z in [0,1]^2 -> upper-hemisphere direction, y-up (mirrors
+    ``nf_square_to_hemi``: Lambert lift cosθ = 1 − r²)."""
+    c = _concentric_square_to_disk(z)
+    r2 = min(max(c[0] * c[0] + c[1] * c[1], 0.0), 1.0)
+    cos_t = 1.0 - r2
+    sin_t = math.sqrt(max(1.0 - cos_t * cos_t, 0.0))
+    r = math.sqrt(r2)
+    cphi = c[0] / max(r, _NF_EPS) if r > _NF_EPS else 1.0
+    sphi = c[1] / max(r, _NF_EPS) if r > _NF_EPS else 0.0
+    return np.array([sin_t * cphi, cos_t, sin_t * sphi], np.float64)
 
 
 def _hemi_to_square(wld):
     """Inverse of ``_square_to_hemi`` (mirrors ``nf_hemi_to_square``)."""
-    phi = math.atan2(wld[2], wld[0])
-    if phi < 0.0:
-        phi += 2.0 * math.pi
-    return np.array([phi / (2.0 * math.pi), min(max(wld[1], 0.0), 1.0)], np.float64)
+    w = np.asarray(wld, np.float64)
+    w = w / max(float(np.linalg.norm(w)), _NF_EPS)
+    cos_t = min(max(w[1], -1.0), 1.0)
+    r = math.sqrt(max(1.0 - cos_t, 0.0))
+    sin_t = math.sqrt(max(1.0 - cos_t * cos_t, 0.0))
+    cphi = w[0] / max(sin_t, _NF_EPS) if sin_t > _NF_EPS else 1.0
+    sphi = w[2] / max(sin_t, _NF_EPS) if sin_t > _NF_EPS else 0.0
+    return _disk_to_square(np.array([r * cphi, r * sphi], np.float64))
 
 
 def _sample_neural(nw, cond, u, prec=(False, False)):
@@ -378,6 +440,61 @@ def test_forward_then_inverse_pdf_consistent(weights, goldens):
     assert max_rel < PDF_REL_TOL, (
         f"forward/inverse pdf mismatch: max rel = {max_rel:.2e} (bar {PDF_REL_TOL:.0e})"
     )
+
+
+# ---------------------------------------------------------------------------
+# CHART GATE (change directional-flow-parameterization): the renderer now uses
+# the Lambert (V1) chart, so the committed goldens + record are V1. A net
+# trained/baked against the retired cylindrical (V0) chart is chart-mismatched
+# and would render a biased result — these tests assert the mismatch is caught.
+# ---------------------------------------------------------------------------
+
+def _square_to_hemi_v0(z):
+    """Retired cylindrical equal-area chart (V0): φ=2πu, cosθ=v. Used only to
+    synthesise a V0 net's intended directions for the negative gate below."""
+    u = min(max(z[0], 0.0), 1.0)
+    v = min(max(z[1], 0.0), 1.0)
+    phi = 2.0 * math.pi * u
+    st = math.sqrt(max(1.0 - v * v, 0.0))
+    return np.array([st * math.cos(phi), v, st * math.sin(phi)], np.float64)
+
+
+def test_v0_chart_fails_v1_parity(weights, goldens):
+    """3.3 negative: a network whose directions follow the cylindrical (V0) chart,
+    compared against the V1 reference, must FAIL the wi-parity gate. The flow
+    weights are chart-agnostic, so we reuse the committed net's flow and only swap
+    the output chart to V0; the directions then diverge from the V1 goldens far
+    beyond the parity bar — exactly the signal that a V1-trained record is required.
+    (The solid-angle pdf is chart-independent, so wi-parity, not pdf, is the gate.)"""
+    conds = goldens["forward_cond"]
+    us = goldens["forward_u"]
+    wi_ref = goldens["forward_wi"]
+
+    max_dwi = 0.0
+    for cond, u, wi_t in zip(conds, us, wi_ref):
+        z, _ = _flow_forward(weights, u.astype(np.float32), cond.astype(np.float32))
+        wi_v0 = _square_to_hemi_v0(z)
+        max_dwi = max(max_dwi, float(np.abs(wi_v0 - wi_t).max()))
+
+    assert max_dwi > WI_ABS_TOL, (
+        f"V0-chart directions unexpectedly matched the V1 goldens "
+        f"(max |Δwi| = {max_dwi:.2e} <= bar {WI_ABS_TOL:.0e}); the chart gate is blind"
+    )
+
+
+def test_committed_record_is_v1_tagged():
+    """3.3: the committed weights.bin carries the NFW1 parametrization tag chart=V1,
+    so a chart-mismatched (V0) record is distinguishable at the byte level. Parses
+    the PTG1 trailer appended by spline_flow/export_weights.export_flow."""
+    TAG_MAGIC = 0x50544731  # "PTG1"
+    data = WEIGHTS_BIN.read_bytes()
+    idx = data.rfind(struct.pack("<I", TAG_MAGIC))
+    assert idx >= 0, "no PTG1 parametrization tag in the committed record"
+    o = idx + 4
+    (clen,) = struct.unpack_from("<I", data, o)
+    o += 4
+    chart = data[o:o + clen].decode("utf-8")
+    assert chart == "V1", f"committed record tagged chart={chart!r}, expected 'V1'"
 
 
 # ---------------------------------------------------------------------------
