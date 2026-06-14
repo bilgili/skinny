@@ -89,7 +89,65 @@ static const float NF_MINBIN = 1e-4f;
 static const float NF_ZEPS   = 1e-5f;     // chart-inverse boundary margin (== spline_flow _Z_EPS)
 
 static const int NF_PARAMS = 3 * NF_BINS + 1;   // widths(K)+heights(K)+derivs(K+1)
-static const int NF_MLP_IN = 1 + NF_COND;       // one pass-through coord + condition
+
+// ---- conditioner positional encoding (axis 2; change renderer-conditioner-encoding) ----
+// NF_ENCODING selects the NeRF-γ feature map applied to the condition BEFORE the
+// conditioner MLP. It is a side input to the conditioner only — NEVER the u→z
+// measure transform — so |J|, NF_LOG2PI and the whole pdf path are unchanged
+// (axis 2 is Jacobian-free by construction). Build dim like NF_CHART / NF_HIDDEN:
+//   E0 (0, default) raw passthrough — byte-identical to the pre-encoding net
+//   E1 (1)          per-scalar γ(s, NF_L_POS); path regime ⇒ every condition
+//                   scalar is banded (matches spline_flow make_cond_encoding "path")
+//   E3 (3)          E1 + the full raw condition appended (the "encoded + raw
+//                   identity" variant, include_raw=True)
+// Byte-for-byte with spline_flow fourier_gamma / make_cond_encoding(regime="path"):
+// per scalar γ(s) = (sin(2⁰πs),cos(2⁰πs),…,sin(2^{L-1}πs),cos(2^{L-1}πs)), groups
+// emitted in condition order, E3's raw tail last. NF_L_POS == spline_flow L_pos (10).
+#ifndef NF_ENCODING
+#define NF_ENCODING 0
+#endif
+#ifndef NF_L_POS
+#define NF_L_POS 10     // position-group Fourier bands (spline_flow L_pos default)
+#endif
+
+#if NF_ENCODING == 0
+static const int NF_MLP_ENC = NF_COND;                          // raw passthrough
+#elif NF_ENCODING == 1
+static const int NF_MLP_ENC = NF_COND * (2 * NF_L_POS);         // γ bands, every scalar
+#elif NF_ENCODING == 3
+static const int NF_MLP_ENC = NF_COND * (2 * NF_L_POS) + NF_COND;  // E1 + raw identity tail
+#else
+#error "NF_ENCODING must be 0 (E0), 1 (E1) or 3 (E3)"
+#endif
+
+static const int NF_MLP_IN = 1 + NF_MLP_ENC;    // pass-through coord + encoded condition
+
+// Conditioner positional encoding: raw cond[NF_COND] → encoded[NF_MLP_ENC]. A
+// transliteration of spline_flow/train.py fourier_gamma + FourierEncoding for the
+// "path" regime — byte-for-byte with the trainer (the encoded condition the net
+// was fit on). E0 is the identity (compiles to a plain copy, unused at the call
+// site). NEVER feeds the u→z transform, so it cannot change the Jacobian.
+void nf_encode(float cond[NF_COND], out float enc[NF_MLP_ENC])
+{
+#if NF_ENCODING == 0
+    for (int i = 0; i < NF_COND; ++i) enc[i] = cond[i];
+#else
+    int o = 0;
+    for (int i = 0; i < NF_COND; ++i)
+    {
+        // γ(s, L) = (sin(2⁰πs),cos(2⁰πs),…,sin(2^{L-1}πs),cos(2^{L-1}πs)) ∈ ℝ^{2L}
+        for (int l = 0; l < NF_L_POS; ++l)
+        {
+            float ang = cond[i] * (exp2((float)l) * NF_PI);   // 2^l · π · s
+            enc[o++] = sin(ang);
+            enc[o++] = cos(ang);
+        }
+    }
+  #if NF_ENCODING == 3
+    for (int i = 0; i < NF_COND; ++i) enc[o++] = cond[i];      // raw identity tail
+  #endif
+#endif
+}
 
 // One Linear layer's location in the flat weight/bias buffers. Row-major weights
 // laid out [outDim, inDim]. There are 3*NF_LAYERS of these (3 Linear per coupling).
@@ -126,24 +184,47 @@ void nf_linear(
     }
 }
 
-// 3-layer conditioner MLP for one coupling layer: (pass-through coord, cond) ->
-// NF_PARAMS spline parameters. `base3` is the index of this coupling's first header.
+// First Linear of the conditioner: input is NF_MLP_IN wide — the encoded
+// condition (E1/E3) can exceed NF_HIDDEN, so the input array cannot share
+// nf_linear's NF_HIDDEN-sized signature. Identical math to nf_linear; only the
+// input array extent differs. For E0, NF_MLP_IN == 1 + NF_COND and this is
+// numerically identical to the pre-encoding first layer.
+void nf_linear_in(
+    StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, NfLayerHeader h,
+    NF_CT inp[NF_MLP_IN], int n_in, bool act, out NF_CT outp[NF_HIDDEN])
+{
+    for (int o = 0; o < (int)h.outDim; ++o)
+    {
+        NF_CT acc = nf_fetch(B, h.biasOffset + (uint)o);
+        uint row = h.weightOffset + (uint)o * h.inDim;
+        for (int i = 0; i < n_in; ++i)
+            acc += nf_fetch(W, row + (uint)i) * inp[i];
+        outp[o] = act ? nf_silu(acc) : acc;
+    }
+}
+
+// 3-layer conditioner MLP for one coupling layer: (pass-through coord, encoded
+// cond) -> NF_PARAMS spline parameters. `base3` is the index of this coupling's
+// first header. `cond` is the ALREADY-ENCODED condition (nf_encode applied at the
+// proposal call site, once per flow eval) of width NF_MLP_ENC — for E0 this is
+// the raw condition (NF_MLP_ENC == NF_COND), so the math is unchanged.
 void nf_mlp(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    int base3, float xcond, float cond[NF_COND], out float params[NF_PARAMS])
+    int base3, float xcond, float cond[NF_MLP_ENC], out float params[NF_PARAMS])
 {
-    NF_CT a[NF_HIDDEN];
+    NF_CT a[NF_MLP_IN];
     a[0] = xcond;
-    for (int i = 0; i < NF_COND; ++i) a[1 + i] = cond[i];
+    for (int i = 0; i < NF_MLP_ENC; ++i) a[1 + i] = cond[i];
 
     NF_CT b[NF_HIDDEN];
-    nf_linear(W, B, H[base3 + 0], a, NF_MLP_IN, true, b);   // in -> hidden, SiLU
-    nf_linear(W, B, H[base3 + 1], b, NF_HIDDEN, true, a);   // hidden -> hidden, SiLU
+    nf_linear_in(W, B, H[base3 + 0], a, NF_MLP_IN, true, b);   // in -> hidden, SiLU
+    NF_CT h2[NF_HIDDEN];
+    nf_linear(W, B, H[base3 + 1], b, NF_HIDDEN, true, h2);     // hidden -> hidden, SiLU
 
-    // hidden -> NF_PARAMS, linear. Reuse the wide local buffer then copy out.
-    // params stays `float` — the spline decode/eval below is full-precision.
+    // hidden -> NF_PARAMS, linear. params stays `float` — the spline decode/eval
+    // below is full-precision.
     NF_CT wide[NF_HIDDEN];
-    nf_linear(W, B, H[base3 + 2], a, NF_HIDDEN, false, wide);
+    nf_linear(W, B, H[base3 + 2], h2, NF_HIDDEN, false, wide);
     for (int p = 0; p < NF_PARAMS; ++p) params[p] = wide[p];
 }
 
@@ -316,7 +397,7 @@ float2 nf_hemi_to_square(float3 wld)
 // DOC:coupling#sig start
 float2 nf_flow_forward(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    float2 u, float cond[NF_COND], out float logdet)
+    float2 u, float cond[NF_MLP_ENC], out float logdet)
 // DOC:coupling#sig end
 {
     // DOC:coupling#core start
@@ -341,7 +422,7 @@ float2 nf_flow_forward(
 // Inverse flow z -> u accumulating log|det du/dz|.
 float2 nf_flow_inverse(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    float2 zin, float cond[NF_COND], out float logdet)
+    float2 zin, float cond[NF_MLP_ENC], out float logdet)
 {
     float2 z = zin; logdet = 0.0f;
     for (int L = NF_LAYERS - 1; L >= 0; --L)
@@ -363,7 +444,7 @@ float2 nf_flow_inverse(
 // PUBLIC: sample a hemisphere direction from the flow. base sample u in [0,1]^2.
 float3 sampleNeural(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    float cond[NF_COND], float2 u, out float pdfOmega)
+    float cond[NF_MLP_ENC], float2 u, out float pdfOmega)
 {
     // DOC:pdf-square#core start
     float logdet;
@@ -380,7 +461,7 @@ float3 sampleNeural(
 // DOC:pdf-inv#sig start
 float pdfNeural(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    float cond[NF_COND], float3 wi)
+    float cond[NF_MLP_ENC], float3 wi)
 // DOC:pdf-inv#sig end
 {
     // DOC:pdf-inv#core start

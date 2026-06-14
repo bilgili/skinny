@@ -14,7 +14,7 @@
 
 import common;        // FrameConstants fc (scene bounds)
 import bindings;      // fc
-import sampling.neural_flow;   // NfLayerHeader, sampleNeural, pdfNeural, NF_COND
+import sampling.neural_flow;   // NfLayerHeader, sampleNeural, pdfNeural, nf_encode, NF_COND, NF_MLP_ENC
 
 // Frozen offline-trained weights (sampling/neural_proposal.py → renderer upload).
 // Placed ABOVE the MaterialX nodegraph range (GRAPH_BINDING_BASE = 25..29), the
@@ -102,7 +102,13 @@ float3 neuralSampleWorld(float3 posWorld, float3 N, float3 T, float3 B,
 {
     float cond[NF_COND];
     neuralCondition(posWorld, N, woWorld, cond);
-    float3 loc = sampleNeural(neuralWeights, neuralBiases, neuralLayers, cond, u, pdfOmega);
+    // Axis-2 conditioner encoding (change renderer-conditioner-encoding): apply the
+    // NeRF-γ feature map ONCE here, at the conditioner call site, then feed the
+    // encoded vector to the flow. E0 is the identity (NF_MLP_ENC == NF_COND), so the
+    // default build is byte-identical. Jacobian-free — only the spline params shift.
+    float condEnc[NF_MLP_ENC];
+    nf_encode(cond, condEnc);
+    float3 loc = sampleNeural(neuralWeights, neuralBiases, neuralLayers, condEnc, u, pdfOmega);
     return neuralLocalToWorld(loc, N, T, B);
 }
 
@@ -112,7 +118,9 @@ float neuralPdfWorld(float3 posWorld, float3 N, float3 T, float3 B,
 {
     float cond[NF_COND];
     neuralCondition(posWorld, N, woWorld, cond);
+    float condEnc[NF_MLP_ENC];           // axis-2 encoding, applied once (see above)
+    nf_encode(cond, condEnc);
     float3 loc = neuralWorldToLocal(wiWorld, N, T, B);
-    return pdfNeural(neuralWeights, neuralBiases, neuralLayers, cond, loc);
+    return pdfNeural(neuralWeights, neuralBiases, neuralLayers, condEnc, loc);
 }
 #endif

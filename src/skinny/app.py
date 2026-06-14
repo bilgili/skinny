@@ -24,6 +24,7 @@ from skinny.params import (
 from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
+    neural_config_from_args,
     resolve_walk,
     validate_render_flags,
 )
@@ -516,6 +517,17 @@ def main() -> None:
     vk_ctx = make_context(backend, window, WINDOW_WIDTH, WINDOW_HEIGHT)
 
     repo_root = Path(__file__).resolve().parents[2]
+    # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):
+    # CLI/env wins; else restore the persisted value. It is a build dim, so it is
+    # threaded into the neural build config at construction (recompiles the neural
+    # .spv). E0 keeps neural_config=None → the renderer's default → byte-identical.
+    encoding_value = args.encoding
+    if "--encoding" not in sys.argv and not os.environ.get("SKINNY_ENCODING"):
+        saved_encoding = saved.get("encoding")
+        if saved_encoding in ("E0", "E1", "E3"):
+            encoding_value = saved_encoding
+    args.encoding = encoding_value
+    neural_cfg = neural_config_from_args(args)
     renderer = Renderer(
         vk_ctx=vk_ctx,
         shader_dir=Path(__file__).parent / "shaders",
@@ -528,6 +540,7 @@ def main() -> None:
         neural_handoff=args.neural_handoff,
         neural_trainer=args.neural_trainer,
         train_precision=args.train_precision,
+        neural_config=neural_cfg,
     )
 
     # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
@@ -639,6 +652,7 @@ def main() -> None:
             "neural_trainer": renderer._neural_trainer_kind,
             "train_precision": renderer._train_precision,
             "online_training": bool(online_training_requested),
+            "encoding": renderer._neural_config.encoding.value,
         }
         save_settings(out)
     except OSError:

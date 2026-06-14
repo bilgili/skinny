@@ -40,9 +40,82 @@ NF_BINS = 24
 NF_HIDDEN = 96
 NF_COND = 9
 NF_PARAMS = 3 * NF_BINS + 1          # widths(K) + heights(K) + derivs(K+1)
-NF_MLP_IN = 1 + NF_COND              # one pass-through coord + condition
+NF_MLP_IN = 1 + NF_COND              # one pass-through coord + condition (E0 default)
+NF_L_POS = 10                        # position-group Fourier bands (spline_flow L_pos)
 # One NfLayerHeader = 4 × uint32 (weightOffset, biasOffset, inDim, outDim).
 HEADER_STRIDE = 16
+
+
+class Encoding(enum.Enum):
+    """Conditioner positional encoding (axis 2; change renderer-conditioner-encoding).
+
+    Maps to the shader's ``NF_ENCODING`` build define. The encoding is a NeRF-γ
+    feature map applied to the condition BEFORE the conditioner MLP — a side input
+    only, never the u→z transform, so it is Jacobian-free. ``E0`` is the raw
+    passthrough (byte-identical to the pre-encoding net)."""
+
+    E0 = "E0"   # raw passthrough — no feature map (default, byte-identical)
+    E1 = "E1"   # per-scalar γ(s, L_pos); path regime ⇒ every condition scalar banded
+    E3 = "E3"   # E1 + the full raw condition appended (include_raw tail)
+
+    @property
+    def nf_define(self) -> int:
+        """The integer value the shader's ``-D NF_ENCODING=`` expects."""
+        return {Encoding.E0: 0, Encoding.E1: 1, Encoding.E3: 3}[self]
+
+
+def encoded_cond_dim(encoding: Encoding, cond: int = NF_COND,
+                     l_pos: int = NF_L_POS) -> int:
+    """Width of the encoded condition (the shader's ``NF_MLP_ENC``).
+
+    Byte-for-byte with ``neural_flow.slang`` and ``spline_flow``
+    ``make_cond_encoding(regime="path")``: ``E0`` is raw (``cond``); ``E1`` bands
+    every scalar (``cond·2·L_pos``); ``E3`` appends the raw condition tail."""
+    if encoding is Encoding.E0:
+        return cond
+    banded = cond * 2 * l_pos
+    return banded + cond if encoding is Encoding.E3 else banded
+
+
+def mlp_in_dim(encoding: Encoding, cond: int = NF_COND,
+               l_pos: int = NF_L_POS) -> int:
+    """First conditioner-layer input width = 1 (pass-through coord) + encoded
+    condition. Equals the shader's ``NF_MLP_IN`` and the NFW1 first header's
+    ``inDim`` — the value the loader's encoding/arch guard validates."""
+    return 1 + encoded_cond_dim(encoding, cond, l_pos)
+
+
+def fourier_gamma(p: np.ndarray, L: int) -> np.ndarray:
+    """NeRF positional encoding — host mirror of ``spline_flow.train.fourier_gamma``
+    and ``neural_flow.slang`` ``nf_encode``.
+
+    ``p: [..., k] -> [..., k·2L]``, per-scalar order ``(sin0,cos0,sin1,cos1,…)``
+    with frequencies ``2^l · π`` (``l = 0..L-1``)."""
+    p = np.asarray(p, np.float64)
+    freqs = (2.0 ** np.arange(L)) * np.pi
+    ang = p[..., None] * freqs
+    enc = np.stack([np.sin(ang), np.cos(ang)], axis=-1)
+    return enc.reshape(*p.shape[:-1], p.shape[-1] * 2 * L)
+
+
+def encode_condition(cond: np.ndarray, encoding: Encoding,
+                     l_pos: int = NF_L_POS) -> np.ndarray:
+    """Host reference for the shader ``nf_encode`` — apply the conditioner encoding
+    to a ``[B, NF_COND]`` condition batch, byte-for-byte with the trainer's
+    ``make_cond_encoding(regime="path")``.
+
+    ``E0`` is the identity. Path regime: every condition scalar is banded (groups
+    emitted in condition order); ``E3`` appends the raw condition as the tail."""
+    cond = np.asarray(cond, np.float64)
+    if cond.ndim != 2:
+        raise ValueError(f"cond must be [B, NF_COND], got shape {cond.shape}")
+    if encoding is Encoding.E0:
+        return cond.copy()
+    feats = [fourier_gamma(cond[:, i:i + 1], l_pos) for i in range(cond.shape[1])]
+    out = np.concatenate(feats, axis=-1)
+    if encoding is Encoding.E3:
+        out = np.concatenate([out, cond], axis=-1)
+    return out
 
 # e4m3 (OCP "E4M3FN") 8-bit float: 1 sign, 4 exponent (bias 7), 3 mantissa; no
 # inf, max finite magnitude 448. Used for the fp8 weight-STORAGE inference mode
@@ -172,31 +245,42 @@ class NeuralPrecision(enum.Enum):
 
 @dataclass(frozen=True)
 class NeuralBuildConfig:
-    """A point in the size×precision grid: the shader dims + the inference
-    precision. The single source of truth threaded into every neural ``.spv``
-    compile (its `-D` flags) and the weight upload (its dtype). The default
-    config emits NO `-D` flags, so its compiles are byte-identical to the
-    shipped proposal (study change neural-precision-size-study)."""
+    """A point in the size×precision×encoding grid: the shader dims, the inference
+    precision, and the conditioner encoding (axis 2). The single source of truth
+    threaded into every neural ``.spv`` compile (its `-D` flags) and the weight
+    upload (its dtype). The default config emits NO `-D` flags, so its compiles are
+    byte-identical to the shipped proposal (study change neural-precision-size-study;
+    encoding axis by change renderer-conditioner-encoding)."""
 
     layers: int = NF_LAYERS
     bins: int = NF_BINS
     hidden: int = NF_HIDDEN
     precision: NeuralPrecision = NeuralPrecision.FP32
+    encoding: Encoding = Encoding.E0
+    l_pos: int = NF_L_POS
 
     @property
     def arch(self) -> tuple[int, int, int, int]:
         """(layers, bins, hidden, cond) — the NFW1 architecture tuple the loader
-        validates a baked net against."""
+        validates a baked net against. Encoding-independent (cond is the RAW
+        condition dim); the encoding is validated separately via :attr:`mlp_in`."""
         return (self.layers, self.bins, self.hidden, NF_COND)
+
+    @property
+    def mlp_in(self) -> int:
+        """First conditioner-layer input width for this config's encoding — the
+        NFW1 first header's ``inDim``. The encoding/arch guard (the loader's
+        ``expect_mlp_in``) refuses a net whose first-layer width differs."""
+        return mlp_in_dim(self.encoding, NF_COND, self.l_pos)
 
     @property
     def is_default_size(self) -> bool:
         return (self.layers, self.bins, self.hidden) == (NF_LAYERS, NF_BINS, NF_HIDDEN)
 
     def slang_defines(self) -> tuple[str, ...]:
-        """Flat `-D name=value` tokens for slangc. Only non-default dims/precision
-        emit a flag, so the default config → empty tuple → unchanged cache key →
-        byte-identical SPIR-V."""
+        """Flat `-D name=value` tokens for slangc. Only non-default dims/precision/
+        encoding emit a flag, so the default config → empty tuple → unchanged cache
+        key → byte-identical SPIR-V."""
         d: list[str] = []
         if self.layers != NF_LAYERS:
             d += ["-D", f"NF_LAYERS={self.layers}"]
@@ -212,13 +296,22 @@ class NeuralBuildConfig:
             # e4m3 weights packed in uint words; NF_WT becomes the storage word
             # type and nf_fetch decodes byte→float (NF_CT stays float).
             d += ["-D", "NF_FP8=1", "-D", "NF_WT=uint"]
+        if self.encoding is not Encoding.E0:
+            # NF_ENCODING selects the in-shader NeRF-γ feature map; NF_L_POS sets
+            # the per-scalar band count (only meaningful when encoding is active).
+            d += ["-D", f"NF_ENCODING={self.encoding.nf_define}"]
+            if self.l_pos != NF_L_POS:
+                d += ["-D", f"NF_L_POS={self.l_pos}"]
         return tuple(d)
 
     @property
     def cache_tag(self) -> str:
         """Short slug uniquely identifying this config — folded into the wavefront
         `.spv` out-name so distinct configs never clobber each other's module."""
-        return f"L{self.layers}B{self.bins}H{self.hidden}_{self.precision.value}"
+        enc = "" if self.encoding is Encoding.E0 else (
+            f"_{self.encoding.value}"
+            + (f"P{self.l_pos}" if self.l_pos != NF_L_POS else ""))
+        return f"L{self.layers}B{self.bins}H{self.hidden}{enc}_{self.precision.value}"
 
 
 @dataclass
@@ -262,11 +355,19 @@ class NeuralWeights:
         dt = "<f2" if precision.weight_half else "<f4"
         return self.biases.astype(dt).tobytes()
 
-    def assert_matches_shader(self, expect: tuple[int, int, int, int] | None = None) -> None:
+    def assert_matches_shader(self, expect: tuple[int, int, int, int] | None = None,
+                              *, expect_mlp_in: int | None = None) -> None:
         """Raise if the file's architecture differs from the built dimensions — a
         mismatch would index the flat buffers wrong and corrupt inference. With no
         argument it checks the default (shipped) architecture; the renderer passes
-        the active NeuralBuildConfig.arch for an off-default size."""
+        the active NeuralBuildConfig.arch for an off-default size.
+
+        ``expect_mlp_in`` is the encoding/arch guard (change
+        renderer-conditioner-encoding): the conditioner encoding only changes the
+        first Linear's input width, which is encoding-independent in the
+        ``(layers, bins, hidden, cond)`` tuple, so a net trained under a different
+        ``--encoding`` is caught here — its first header's ``inDim`` differs from
+        the built ``NeuralBuildConfig.mlp_in``."""
         got = (self.layers, self.bins, self.hidden, self.cond)
         want = expect if expect is not None else (NF_LAYERS, NF_BINS, NF_HIDDEN, NF_COND)
         if got != want:
@@ -274,18 +375,31 @@ class NeuralWeights:
                 f"neural weights architecture {got} != shader "
                 f"(layers, bins, hidden, cond)={want}; rebake with the matching net"
             )
+        if expect_mlp_in is not None:
+            got_in = int(self.headers[0][2]) if len(self.headers) else -1
+            if got_in != expect_mlp_in:
+                raise ValueError(
+                    f"neural weights first-layer in_dim {got_in} != built encoding's "
+                    f"mlp_in {expect_mlp_in}; the network was trained with a different "
+                    f"--encoding (load it with the matching encoding, or rebake)"
+                )
 
 
 def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
-            hidden: int = NF_HIDDEN) -> tuple[list[tuple[int, int, int, int]], int, int]:
+            hidden: int = NF_HIDDEN, encoding: Encoding = Encoding.E0,
+            l_pos: int = NF_L_POS) -> tuple[list[tuple[int, int, int, int]], int, int]:
     """Header table + total (nWeights, nBiases) for the given architecture.
 
     Three Linear layers per coupling: (mlp_in→hidden), (hidden→hidden),
     (hidden→n_params). Row-major [out, in], matching the exporter + the Slang
     ``W[weightOffset + o*inDim + i]`` indexing. Defaults to the shipped size.
+
+    The first layer's ``mlp_in`` follows the conditioner ``encoding`` (change
+    renderer-conditioner-encoding): ``E0`` keeps ``1 + NF_COND``; ``E1``/``E3``
+    widen it to ``1 + NF_MLP_ENC``. The rest of the table is encoding-independent.
     """
     n_params = 3 * bins + 1
-    mlp_in = 1 + NF_COND
+    mlp_in = mlp_in_dim(encoding, NF_COND, l_pos)
     dims = [(mlp_in, hidden), (hidden, hidden), (hidden, n_params)]
     headers: list[tuple[int, int, int, int]] = []
     w_off = b_off = 0
@@ -299,14 +413,16 @@ def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
 
 def deserialize_neural_weights(data: bytes,
                                expect: tuple[int, int, int, int] | None = None,
-                               *, src: str = "<bytes>") -> NeuralWeights:
+                               *, src: str = "<bytes>",
+                               expect_mlp_in: int | None = None) -> NeuralWeights:
     """Parse ``NFW1`` bytes into a ``NeuralWeights`` (inverse of
     ``serialize_neural_weights``). The in-memory core shared by
     ``load_neural_weights`` (disk) and the ``shared`` weight-handoff backend
     (process memory, change shared-neural-handoff) — no filesystem access.
     ``src`` names the source in error messages. Raises on bad magic / version /
     truncation, and on an architecture mismatch against ``expect`` (defaults to
-    the shipped size when None)."""
+    the shipped size when None) or — when ``expect_mlp_in`` is given — a
+    first-layer input-width mismatch (the conditioner encoding guard)."""
     o = 0
     magic, ver = struct.unpack_from("<II", data, o)
     o += 8
@@ -330,17 +446,21 @@ def deserialize_neural_weights(data: bytes,
     biases = np.frombuffer(data, dtype="<f4", count=n_biases, offset=o).copy()
     nw = NeuralWeights(int(layers), int(bins), int(hidden), int(cond),
                        headers, weights, biases)
-    nw.assert_matches_shader(expect)
+    nw.assert_matches_shader(expect, expect_mlp_in=expect_mlp_in)
     return nw
 
 
 def load_neural_weights(path: str | Path,
-                        expect: tuple[int, int, int, int] | None = None) -> NeuralWeights:
+                        expect: tuple[int, int, int, int] | None = None,
+                        *, expect_mlp_in: int | None = None) -> NeuralWeights:
     """Parse an ``NFW1`` file. Raises on bad magic / version / truncation, and on
     an architecture mismatch against ``expect`` (defaults to the shipped size when
     None) — the loader assert is the size-mismatch guard for the configurable
-    build (study change neural-precision-size-study)."""
-    return deserialize_neural_weights(Path(path).read_bytes(), expect, src=str(path))
+    build (study change neural-precision-size-study). ``expect_mlp_in`` adds the
+    conditioner-encoding guard (change renderer-conditioner-encoding): a net whose
+    first-layer input width differs from the built ``--encoding`` is refused."""
+    return deserialize_neural_weights(Path(path).read_bytes(), expect, src=str(path),
+                                      expect_mlp_in=expect_mlp_in)
 
 
 def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights:
@@ -352,7 +472,8 @@ def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights
     off-default build.
     """
     cfg = config or NeuralBuildConfig()
-    headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden)
+    headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden,
+                                           cfg.encoding, cfg.l_pos)
     return NeuralWeights(
         cfg.layers, cfg.bins, cfg.hidden, NF_COND,
         np.array(headers, dtype="<u4"),
@@ -373,7 +494,8 @@ def bake_dummy_weights(path: str | Path,
     in every precision mode — the half cast happens at upload, not in the file.
     """
     cfg = config or NeuralBuildConfig()
-    headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden)
+    headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden,
+                                           cfg.encoding, cfg.l_pos)
     weights = np.zeros(n_weights, dtype="<f4")
     biases = np.zeros(n_biases, dtype="<f4")
     buf = bytearray()

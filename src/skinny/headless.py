@@ -137,14 +137,23 @@ class HeadlessRenderer:
                  backend: str = "vulkan",
                  execution_mode: str = "megakernel", bdpt_walk: str = "fused",
                  proposals: Optional[str] = None, reuse: Optional[str] = None,
-                 lobe_samplers: Optional[str] = None) -> None:
+                 lobe_samplers: Optional[str] = None,
+                 encoding: Optional[str] = None) -> None:
         import skinny
         from skinny.backend_select import make_context
+        from skinny.cli_common import resolve_encoding
         from skinny.renderer import Renderer
+        from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
 
         self.ctx = make_context(
             backend, window=None, width=width, height=height, gpu_preference=gpu
         )
+        # Conditioner encoding (axis 2, change renderer-conditioner-encoding): a
+        # build dim. E0/None keeps neural_config=None → the renderer's default →
+        # byte-identical SPIR-V; E1/E3 recompiles the neural .spv.
+        neural_cfg = None
+        if encoding is not None and resolve_encoding(encoding) is not Encoding.E0:
+            neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(encoding))
         try:
             self.renderer = Renderer(
                 vk_ctx=self.ctx,
@@ -153,6 +162,7 @@ class HeadlessRenderer:
                 tattoo_dir=_repo_root() / "tattoos",
                 execution_mode=execution_mode,
                 bdpt_walk=resolve_walk(bdpt_walk),
+                neural_config=neural_cfg,
             )
             # Scene-sampling seam selection (mirrors the interactive front-ends).
             if proposals is not None:
@@ -360,7 +370,8 @@ def main(argv: Optional[list] = None) -> int:
                               execution_mode=ns.execution_mode,
                               bdpt_walk=ns.bdpt_walk,
                               proposals=ns.proposals, reuse=ns.reuse,
-                              lobe_samplers=ns.lobe_samplers) as r:
+                              lobe_samplers=ns.lobe_samplers,
+                              encoding=ns.encoding) as r:
             if ns.animate:
                 frames = _parse_frames(ns.frames) if ns.frames else None
                 paths = r.render_animation(

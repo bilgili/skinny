@@ -575,6 +575,49 @@ def test_study_smoke():
     assert np.isfinite(m["unbiased_rel_mean"]) and m["unbiased_rel_mean"] < 0.06
 
 
+def test_encoding_e1_renders_finite():
+    """4.2 (GPU smoke): an E1-built {bsdf,neural} render (dummy net at E1 size)
+    builds the neural pre-pass and produces finite, non-black frames — the E1 GPU
+    path is sound. The lower-variance-vs-E0 win needs a TRAINED E1 net (the
+    training box) and is exercised by the neural-guiding-variance-harness change."""
+    from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
+
+    cfg = NeuralBuildConfig(encoding=Encoding.E1)
+    ctx, r = _load_study("bsdf,neural", neural_config=cfg)
+    try:
+        assert r._neural_active(), "neural should be active (wavefront + bit2)"
+        assert r._effective_neural_config().encoding is Encoding.E1
+        img = _converge(r, 48)
+        assert np.all(np.isfinite(img)), "E1 produced non-finite pixels"
+        assert _mean_luma(img) > 0.0, "E1 produced an all-black frame"
+    finally:
+        r.cleanup()
+        ctx.destroy()
+
+
+def test_encoding_dummy_net_invariant_across_encodings():
+    """4.2 / 3.3 (GPU): with the all-zero dummy net the encoding is invisible
+    (zero conditioner weights ⇒ identical spline params), so E0/E1/E3 converge to
+    the SAME image — a GPU witness that the encoding never touches the measure
+    transform (|J| / NF_LOG2PI unchanged; axis 2 is Jacobian-free)."""
+    from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
+
+    imgs = {}
+    for enc in (Encoding.E0, Encoding.E1, Encoding.E3):
+        ctx, r = _load_study("bsdf,neural",
+                             neural_config=NeuralBuildConfig(encoding=enc))
+        try:
+            imgs[enc] = _converge(r, 64)
+        finally:
+            r.cleanup()
+            ctx.destroy()
+    e0 = imgs[Encoding.E0]
+    for enc in (Encoding.E1, Encoding.E3):
+        rel = _rel_mean_diff(imgs[enc], e0)
+        print(f"\n[4.2] dummy-net {enc.value} vs E0 rel-mean-diff = {rel:.5f}")
+        assert rel < 0.02, f"{enc.value} dummy-net drifted from E0: rel={rel:.4f}"
+
+
 if __name__ == "__main__":  # pragma: no cover - manual harness
     import sys
     sys.exit(pytest.main([__file__, "-q", "-s"]))

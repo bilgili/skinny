@@ -495,6 +495,14 @@ variance changes. The neural network's **size and precision are build-time
 configurable** (`NeuralBuildConfig`; mixed fp16 on Apple-Silicon Metal with
 graceful fp32 fallback) — the default reproduces the shipped net byte-for-byte;
 see [docs/Wavefront.md § Neural size & precision](docs/Wavefront.md#neural-size--precision-tuning-neural-precision-size-study).
+`--encoding {E0,E1,E3}` (env `SKINNY_ENCODING`, persisted) selects the
+conditioner's positional encoding (axis 2): `E0` (default) feeds the raw
+condition — byte-identical to the shipped net; `E1` applies a NeRF-γ feature map
+to every condition scalar; `E3` is `E1` plus the raw condition appended. It is
+Jacobian-free (only the conditioner input changes — `|J|` and the pdf path are
+unchanged) and must match the loaded network's encoding — a first-layer-width
+mismatch is refused, not rendered mis-conditioned. See
+[docs/NeuralGuiding.md § Condition encoding](docs/NeuralGuiding.md#1-condition-encoding).
 
 **Online neural training.** The neural proposal can be trained *continuously*
 while the scene animates, so the net adapts instead of staying frozen on an

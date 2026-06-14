@@ -355,6 +355,35 @@ void neuralCondition(float3 posWorld, float3 N, float3 woWorld, out float cond[N
 | N | `cond[3..5]` | world shading normal |
 | ω_o | `cond[6..8]` | outgoing world direction |
 
+#### Positional encoding (`--encoding`, axis 2)
+
+The raw condition above is `E0`. The renderer can instead feed the conditioner a
+NeRF-style positional encoding of the condition, selected by `--encoding
+{E0,E1,E3}` (env `SKINNY_ENCODING`; build dim `-D NF_ENCODING`, persisted on the
+interactive front-ends). This is **axis 2** of the flow parameterization and is
+applied by `nf_encode` in `neural_flow.slang`, once per flow evaluation at the
+conditioner call site in `neural_proposal.slang`:
+
+- **`E0`** (default) — raw passthrough. Byte-identical to the shipped net; the
+  default config emits no `-D` flag, so the SPIR-V is unchanged.
+- **`E1`** — per-scalar Fourier feature map γ(s) =
+  (sin 2⁰πs, cos 2⁰πs, …, sin 2^{L−1}πs, cos 2^{L−1}πs) with `L = NF_L_POS`
+  (default 10) bands on every condition scalar (path regime). The conditioner
+  input widens from `1 + NF_COND` to `1 + NF_COND·2L`.
+- **`E3`** — `E1` with the raw condition appended (the "encoded + raw identity"
+  tail).
+
+The encoding is a **side input to the conditioner MLP only** — it changes the
+spline parameters the network emits but never the `u → z` measure transform — so
+the solid-angle Jacobian (the constant `2π`, `NF_LOG2PI`) and the whole pdf path
+are **identical** across `E0/E1/E3` (axis 2 is Jacobian-free by construction; see
+§6). It is part of the canonical, byte-for-byte trainer↔renderer contract: the
+shader's `nf_encode` reproduces `spline_flow`'s `make_cond_encoding(regime="path")`
+exactly (same band frequencies, `(sin,cos)` interleave, `include_raw` tail). The
+host mirror `neural_weights.encode_condition` pins that parity, and the loader
+refuses a network whose first-layer input width does not match the built
+`--encoding` (a mis-conditioned net is rejected, not rendered).
+
 ### 2. Forward draw
 
 A draw maps a uniform base sample through the conditional flow:
@@ -376,7 +405,7 @@ each layer transforms):
 // from neural_flow.slang
 float2 nf_flow_forward(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    float2 u, float cond[NF_COND], out float logdet)
+    float2 u, float cond[NF_MLP_ENC], out float logdet)
     // …
     float2 z = u; logdet = 0.0f;
     for (int L = 0; L < NF_LAYERS; ++L)
@@ -544,7 +573,7 @@ reverse, and accumulate the inverse log-det:
 // from neural_flow.slang
 float pdfNeural(
     StructuredBuffer<NF_WT> W, StructuredBuffer<NF_WT> B, StructuredBuffer<NfLayerHeader> H,
-    float cond[NF_COND], float3 wi)
+    float cond[NF_MLP_ENC], float3 wi)
     // …
     if (wi.y <= 0.0f) return 0.0f;
     float2 z = nf_hemi_to_square(wi);

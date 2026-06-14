@@ -56,6 +56,7 @@ _BDPT_WALK: str = "fused"
 _INTEGRATOR: str | None = None
 _REUSE: str | None = None
 _LOBE_SAMPLERS: str | None = None
+_ENCODING: str = "E0"   # axis-2 conditioner encoding (change renderer-conditioner-encoding)
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -102,6 +103,12 @@ class SkinnySession:
 
             self._log_init("Initializing renderer (shaders, meshes, materials)...")
             repo_root = Path(__file__).resolve().parents[2]
+            # Conditioner encoding (axis 2): a build dim. E0 → None → byte-identical.
+            from skinny.cli_common import resolve_encoding
+            from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
+            neural_cfg = None
+            if resolve_encoding(_ENCODING) is not Encoding.E0:
+                neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(_ENCODING))
             self.renderer = Renderer(
                 vk_ctx=self.ctx,
                 shader_dir=Path(__file__).parent / "shaders",
@@ -111,6 +118,7 @@ class SkinnySession:
                 use_usd_mtlx_plugin=_USE_USD_MTLX,
                 execution_mode=_EXECUTION_MODE,
                 bdpt_walk=_BDPT_WALK,
+                neural_config=neural_cfg,
             )
             if _INTEGRATOR is not None:
                 self.renderer.integrator_index = INTEGRATOR_INDEX[_INTEGRATOR]
@@ -707,7 +715,7 @@ def main() -> None:
         raise SystemExit(f"skinny-web: {exc}")
 
     global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
-    global _BDPT_WALK, _INTEGRATOR, _REUSE, _LOBE_SAMPLERS
+    global _BDPT_WALK, _INTEGRATOR, _REUSE, _LOBE_SAMPLERS, _ENCODING
     _BACKEND = resolved_backend
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
@@ -717,6 +725,7 @@ def main() -> None:
     _INTEGRATOR = args.integrator
     _REUSE = args.reuse
     _LOBE_SAMPLERS = args.lobe_samplers
+    _ENCODING = args.encoding
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

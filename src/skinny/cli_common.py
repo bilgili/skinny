@@ -94,12 +94,14 @@ def add_render_flags(
     neural_trainer: bool = True,
     train_precision: bool = True,
     online_training: bool = True,
+    encoding: bool = True,
 ) -> None:
     """Add the shared `--backend` / `--integrator` / `--execution-mode` /
     `--bdpt-walk` / `--proposals` / `--reuse` / `--lobe-samplers` /
     `--neural-handoff` / `--neural-trainer` / `--train-precision` /
-    `--online-training` flags to ``parser``. Each flag can be suppressed via its
-    keyword in the rare case a front-end must omit it (none currently does)."""
+    `--online-training` / `--encoding` flags to ``parser``. Each flag can be
+    suppressed via its keyword in the rare case a front-end must omit it (none
+    currently does)."""
     if backend:
         # `default=None` is a sentinel meaning "use env / persisted / auto",
         # resolved by skinny.backend_select.select_backend (precedence: explicit
@@ -138,6 +140,21 @@ def add_render_flags(
                  "MIS-mixes the learned neural spline-flow proposal "
                  "(wavefront-only, flat materials). Runtime-selectable + "
                  "persisted on the interactive front-ends.",
+        )
+    if encoding:
+        parser.add_argument(
+            "--encoding", choices=("E0", "E1", "E3"),
+            default=os.environ.get("SKINNY_ENCODING", "E0"),
+            help="Conditioner positional encoding for the neural directional "
+                 "proposal (axis 2; + SKINNY_ENCODING env). 'E0' (default) feeds "
+                 "the raw condition — byte-identical to the shipped net; 'E1' "
+                 "applies a NeRF-γ feature map to every condition scalar; 'E3' is "
+                 "E1 plus the raw condition appended. Jacobian-free (only the "
+                 "conditioner input changes — |J| and the pdf path are unchanged). "
+                 "Must match the loaded network's encoding — a first-layer-width "
+                 "mismatch is refused, not rendered mis-conditioned. Build dim "
+                 "(recompiles the neural .spv). Persisted on the interactive "
+                 "front-ends.",
         )
     if reuse:
         parser.add_argument(
@@ -237,3 +254,33 @@ def add_render_flags(
                  "All produce the identical image — this trades dispatch "
                  "overhead vs occupancy.",
         )
+
+
+def resolve_encoding(value: str | None):
+    """Map an ``--encoding`` string (``E0``/``E1``/``E3``, case-insensitive) to a
+    :class:`skinny.sampling.neural_weights.Encoding`. ``None``/empty → ``E0``."""
+    from skinny.sampling.neural_weights import Encoding
+
+    return Encoding((value or "E0").upper())
+
+
+def neural_config_from_args(args, *, base=None):
+    """Build the :class:`NeuralBuildConfig` for the neural directional proposal
+    from parsed render flags, or return ``base`` when every neural build axis is at
+    its default — so a default invocation keeps emitting NO ``-D`` flags and stays
+    byte-identical to the shipped proposal.
+
+    Today only the conditioner ``--encoding`` (axis 2) is wired through here; the
+    size/precision axes are constructed programmatically. ``base`` (default
+    ``None``) lets a caller thread a persisted/restored config in as the starting
+    point — its non-encoding axes are preserved.
+    """
+    from dataclasses import replace
+
+    from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
+
+    enc = resolve_encoding(getattr(args, "encoding", None))
+    if base is None:
+        # Default (E0) and no base → keep the renderer's own default config.
+        return None if enc is Encoding.E0 else NeuralBuildConfig(encoding=enc)
+    return replace(base, encoding=enc)

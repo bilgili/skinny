@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         reuse: str | None = None,
         lobe_samplers: str | None = None,
         backend: str = "vulkan",
+        encoding: str = "E0",
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -90,6 +92,13 @@ class MainWindow(QMainWindow):
         log.info("GPU: %s", self.ctx.gpu_info.name)
 
         repo_root = Path(__file__).resolve().parents[3]
+        # Conditioner encoding (axis 2, change renderer-conditioner-encoding): a
+        # build dim threaded into the neural config. E0 → None → byte-identical.
+        from skinny.cli_common import resolve_encoding
+        from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
+        neural_cfg = None
+        if resolve_encoding(encoding) is not Encoding.E0:
+            neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(encoding))
         self.renderer = Renderer(
             vk_ctx=self.ctx,
             shader_dir=Path(__file__).resolve().parents[1].parent / "shaders",
@@ -102,6 +111,7 @@ class MainWindow(QMainWindow):
             neural_handoff=neural_handoff,
             neural_trainer=neural_trainer,
             train_precision=train_precision,
+            neural_config=neural_cfg,
         )
 
         # Render viewport: hosted in a dock so the user can detach / re-
@@ -514,6 +524,7 @@ class MainWindow(QMainWindow):
         out["open_docks"] = open_docks
         out["last_dirs"] = last_dirs_snapshot()
         out["backend"] = self._backend_name
+        out["encoding"] = self.renderer._neural_config.encoding.value
         try:
             out["section_states"] = self._tree_builder.section_states()
         except Exception as exc:  # noqa: BLE001
@@ -647,10 +658,20 @@ def main() -> None:
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
     # > auto). auto resolves to Metal on Apple Silicon, else Vulkan; an explicit,
     # unavailable --backend metal errors clearly rather than crashing.
+    saved_settings = load_settings()
     try:
-        backend = select_backend(args.backend, persisted=load_settings().get("backend"))
+        backend = select_backend(args.backend, persisted=saved_settings.get("backend"))
     except RuntimeError as exc:
         raise SystemExit(f"skinny-gui: {exc}")
+
+    # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):
+    # CLI/env wins; else restore the persisted value (a build dim, fixed for the
+    # session).
+    encoding_value = args.encoding
+    if "--encoding" not in sys.argv and not os.environ.get("SKINNY_ENCODING"):
+        saved_encoding = saved_settings.get("encoding")
+        if saved_encoding in ("E0", "E1", "E3"):
+            encoding_value = saved_encoding
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
@@ -661,7 +682,8 @@ def main() -> None:
                      online_training=args.online_training,
                      reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers,
-                     backend=backend)
+                     backend=backend,
+                     encoding=encoding_value)
     # Display-only state for the startup configuration matrix (change
     # online-training-observability).
     win.renderer._requested_backend = args.backend
