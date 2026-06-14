@@ -239,6 +239,17 @@ often new weights appear, not the frame rate. The replay buffer guards its `add`
 call stays on the render thread. `disable_online_training` (called at shutdown)
 signals the thread to stop and joins it.
 
+The `mlx` backend adds one wrinkle: MLX arrays and GPU streams are **thread-affine**
+— a leaf array is bound to whichever thread created it, and touching it from
+another thread raises `There is no Stream(gpu, N) in current thread.`. In normal
+operation only the daemon trainer thread drives the backend, so this never bites;
+but a caller can legitimately drive `online_train_and_publish` directly (e.g. a
+test single-stepping the swap) while the daemon is also live. `MlxTrainingBackend`
+therefore **confines all of its MLX work to one single owned worker thread**:
+`warm_start` / `update` / `export` marshal their ops onto a private
+`max_workers=1` executor, so every leaf array is created and evaluated on the same
+thread regardless of caller, and multi-thread use serializes instead of crashing.
+
 ## Stages of rendering
 
 SplineFlow runs as a **pre-pass + seam** pair on the wavefront backend, mirroring

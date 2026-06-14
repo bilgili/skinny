@@ -290,3 +290,40 @@ def test_numpy_matches_torch_cpu_one_cycle():
     diff = np.abs(nw_np.weights - nw_t.weights).max()
     print(f"\n[7.1] numpy vs torch-cpu max |Δw| after one cycle = {diff:.2e}")
     assert diff < 5e-4, f"numpy/torch drift {diff:.2e} exceeds 5e-4"
+
+
+@_mlx_skip
+def test_mlx_backend_survives_multithread_access():
+    """Regression (change ``mlx-trainer-thread-confinement``): MLX arrays and GPU
+    streams are thread-affine. The backend confines all MLX work to one owned
+    worker thread, so warm-starting from one thread and then update/export from a
+    *different* thread — as a direct call concurrent with the background daemon
+    trainer would — must complete rather than raise
+    ``There is no Stream(gpu, N) in current thread.``"""
+    import threading
+
+    arch = NeuralBuildConfig()
+    init = make_dummy_weights(arch)
+    cond, z, w = build_dataset_np(_concentrated(2048, np.random.default_rng(7)), BOUNDS)
+    cfg = TrainerConfig(arch=arch, steps_per_cycle=4, batch=cond.shape[0], lr=1e-3,
+                        bounds=BOUNDS)
+
+    be = MlxTrainingBackend()
+    be.warm_start(init, cfg)                       # caller: the main test thread
+
+    errors: list = []
+    out: dict = {}
+
+    def worker():
+        try:
+            be.update(cond, z, w)                  # caller: a different thread
+            out["nw"] = be.export()
+        except Exception as exc:                   # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=worker, name="mlx-other-thread")
+    t.start()
+    t.join()
+
+    assert not errors, f"multi-thread MLX access raised: {errors!r}"
+    assert out["nw"].weights.shape == init.weights.shape

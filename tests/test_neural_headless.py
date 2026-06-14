@@ -281,6 +281,12 @@ def test_online_file_handoff_swap_unbiased(tmp_path):
         r.render_headless()                      # build the neural pre-pass
         assert r._neural_pass is not None
         pub = r.enable_online_training(handoff="file", weights_dir=str(tmp_path))
+        # `enable_online_training` auto-starts the background daemon trainer; this
+        # test drives `online_train_and_publish` manually for deterministic
+        # single-step swap assertions, so stop the daemon to keep the manual
+        # publishes the sole driver (a free-running daemon would coalesce extra
+        # publishes into the frame-end swap and bump the version past 1).
+        r._stop_trainer_thread()
         assert r._neural_network_version == 0 and pub.current_version() == 0
 
         recs = np.zeros(2048, dtype=RECORD_DTYPE)
