@@ -974,6 +974,15 @@ class MlxTrainingBackend(TrainingBackend):
         self._t = 0
         self._fp16_disabled = False        # set once if fp16 loss goes non-finite
         self.last_loss: float | None = None
+        # Single owned worker thread. MLX arrays + GPU streams are thread-affine:
+        # the leaf arrays are bound to whichever thread first creates them, and
+        # touching them from another thread raises "There is no Stream(gpu, N) in
+        # current thread." The backend can legitimately be driven from more than
+        # one thread (a direct call concurrent with the background daemon
+        # trainer), so every MLX-touching op is marshaled onto this one executor
+        # thread — created lazily, reused for the backend's lifetime, so all
+        # warm_start / update / export work lands on the same thread.
+        self._exec = None
 
     # ── availability / capability ────────────────────────────────────────
 
@@ -994,9 +1003,26 @@ class MlxTrainingBackend(TrainingBackend):
         # runtime fall back to fp32 if a step's loss becomes non-finite.
         return precision in ("fp32", "fp16")
 
+    # ── single-thread marshalling ─────────────────────────────────────────
+
+    def _run(self, fn, *args):
+        """Run ``fn`` on the backend's single owned worker thread and block for
+        its result, so all MLX work stays on one thread (see __init__). The
+        ``max_workers=1`` executor reuses the same worker across calls, and
+        exceptions raised inside ``fn`` re-raise here on the caller — preserving
+        the public methods' error contract."""
+        if self._exec is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._exec = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="mlx-backend")
+        return self._exec.submit(fn, *args).result()
+
     # ── warm model ───────────────────────────────────────────────────────
 
     def warm_start(self, weights: NeuralWeights, cfg) -> None:
+        return self._run(self._warm_start_impl, weights, cfg)
+
+    def _warm_start_impl(self, weights: NeuralWeights, cfg) -> None:
         if not self._import():
             raise RuntimeError("MlxTrainingBackend.warm_start: mlx unavailable "
                                "(needs the '[mlx]' extra on an Apple-Silicon Metal host)")
@@ -1137,6 +1163,9 @@ class MlxTrainingBackend(TrainingBackend):
     # ── update ───────────────────────────────────────────────────────────
 
     def update(self, cond: np.ndarray, z: np.ndarray, w: np.ndarray) -> float | None:
+        return self._run(self._update_impl, cond, z, w)
+
+    def _update_impl(self, cond: np.ndarray, z: np.ndarray, w: np.ndarray) -> float | None:
         mx = self._mx
         cfg = self._cfg
         n = cond.shape[0]
@@ -1218,6 +1247,9 @@ class MlxTrainingBackend(TrainingBackend):
     # ── in-memory bake ───────────────────────────────────────────────────
 
     def export(self) -> NeuralWeights:
+        return self._run(self._export_impl)
+
+    def _export_impl(self) -> NeuralWeights:
         linears = []
         for k in range(len(self._leaves) // 2):
             W = np.array(self._leaves[2 * k]).astype(np.float32)

@@ -247,6 +247,10 @@ def test_fully_on_metal_online_loop():
                            neural_handoff="interop", neural_trainer="cpu")
         pub = r.enable_online_training(capacity=200_000)
         assert isinstance(pub, MetalSharedWeightPublisher)
+        # This loop drives training itself (manual `online_train_and_publish` per
+        # frame), so stop the auto-started daemon trainer to keep the loop the
+        # sole, deterministic driver.
+        r._stop_trainer_thread()
         try:
             rng = np.random.default_rng(0)
             drained = 0

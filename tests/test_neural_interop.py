@@ -127,6 +127,10 @@ def test_renderer_interop_online_loop():
         assert r.neural_timeline_semaphore is not None
 
         r.enable_online_training(handoff="interop")
+        # Stop the auto-started daemon trainer: this test drives
+        # `online_train_and_publish` manually for deterministic version
+        # assertions (1 then 2), so the manual publishes must be the sole driver.
+        r._stop_trainer_thread()
         assert isinstance(r._neural_publisher, InteropWeightPublisher)
         assert r._neural_network_version == 0
 
