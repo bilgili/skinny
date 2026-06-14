@@ -792,6 +792,46 @@ Findings (see the RESULTS notes for the full reasoning):
   the smallest footprint (75 456 B, **18%** of the fp32 baseline) within 2% of the
   best NLL, unbiased and firefly-bounded.
 
+## Variance & efficiency harness
+
+The paper's renderer-side claims are variance-vs-time numbers on known scenes —
+**equal-time variance**, **equal-variance time**, and **`1/(var·t)` efficiency**
+(the headline metric, identical to `spline_flow`'s `ParametrizationResults §5`) —
+swept across the parameterization axes (chart, conditioner encoding, temporal)
+and the guiding baselines (BSDF-only, env proposal, ReSTIR DI). The
+`neural-guiding-variance-harness` change builds the reproducible headless sweep
+that produces them.
+
+- **Driver:** [`scripts/guiding_variance_sweep.py`](../scripts/guiding_variance_sweep.py)
+  enumerates the declarative matrix
+  `{scene × proposals × reuse × chart × encoding × temporal × precision × budget}`,
+  builds/selects the renderer per cell, and renders headless over **N independent
+  seeds** from the **linear-HDR accumulation image**.
+- **Metrics (off-GPU, unit-tested):**
+  [`tests/guiding_variance_metrics.py`](../tests/guiding_variance_metrics.py) —
+  the reference-convergence gate, seed-aggregated variance (mean ± spread +
+  firefly p99.9), the `1/(var·t)` efficiency, and the equal-variance inversion.
+  Gated by [`tests/test_guiding_variance_metrics.py`](../tests/test_guiding_variance_metrics.py)
+  and `tests/test_guiding_variance_emit.py` (incl. the task-3.5 estimator check:
+  a uniform image → ~0 variance).
+- **Outputs:** checked-in tables (`% source:` provenance for transcription) and
+  SVG plots (variance-vs-spp curves, equal-time / equal-variance / efficiency
+  bars) under [`docs/diagrams/guiding_variance/`](diagrams/guiding_variance/)
+  (see its `README.md` for the config + invocation).
+
+**MAX measurement rigor** (the outputs are paper claims): every reference is
+**asserted converged** (two independent high-spp references must agree within
+2 %) before any cell is compared against it; no number ships from a single seed;
+variance is read from the linear-HDR accumulation, not the tonemapped output.
+
+**Degrades gracefully.** The sweep runs whatever axes the build exposes —
+`--proposals`/`--reuse`/`--encoding` (E0/E1/E3)/`--precision` are live; the
+chart axis (`renderer-chart-selection`) and temporal axis
+(`neural-temporal-conditioning`) are fixed at their only buildable value (`V1`,
+`temporal=off`) and their other cells are **skipped and logged** so a coverage
+gap is always visible, never silent. Those cells activate as the two changes
+land.
+
 ## Controls
 
 SplineFlow is selected through the **proposal set**, consistent with the other
