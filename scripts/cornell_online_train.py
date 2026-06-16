@@ -32,15 +32,23 @@ def main():
     ap.add_argument("--trainer", default="auto",
                     help="training-compute backend: auto|cpu|cuda|mlx. 'auto' picks "
                          "MLX (Apple GPU) on this Mac; 'cpu' is the slow numpy oracle.")
+    ap.add_argument("--backend", default="vulkan", choices=("vulkan", "metal"),
+                    help="render backend. 'metal' = Apple-native (slangpy); 'vulkan' = "
+                         "MoltenVK here / native on the CUDA box.")
     args = ap.parse_args()
     SCENE = Path(args.scene) if "/" in args.scene else ROOT / "assets" / args.scene
     assert SCENE.exists(), f"scene not found: {SCENE}"
     print(f"[drive] scene: {SCENE.name}")
 
     from skinny.renderer import Renderer
-    from skinny.vk_context import VulkanContext
 
-    ctx = VulkanContext(window=None, width=args.res, height=args.res)
+    if args.backend == "metal":
+        from skinny.metal_context import MetalContext
+        ctx = MetalContext(window=None, width=args.res, height=args.res)
+    else:
+        from skinny.vk_context import VulkanContext
+        ctx = VulkanContext(window=None, width=args.res, height=args.res)
+    print(f"[drive] render backend: {args.backend}")
     r = Renderer(vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=ROOT / "hdrs",
                  tattoo_dir=ROOT / "tattoos", usd_scene_path=SCENE,
                  execution_mode="wavefront", neural_handoff="file")

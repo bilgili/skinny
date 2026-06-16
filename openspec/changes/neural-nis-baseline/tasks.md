@@ -17,7 +17,8 @@ the online net actually conditions on the scene.
 - [x] 0.2 Driver `scripts/cornell_online_train.py`: `--trainer` flag, default `auto` (→ MLX Apple GPU) instead of the hardcoded `cpu` numpy oracle
 - [x] 0.3 Diagnostics: `scripts/nis_bounds_ablation.py` (controlled A/B isolating the bounds bug: BROKEN test-NLL@infer +4.35 / no lobe tracking vs FIXED −3.68 / tracks), `nis_eval_net_density.py`, `nis_train_curve.py`
 - [x] 0.4 Confirmed on real nets: cornell_fixed vs glass_fixed now scene-specific (density L1≈0.8; pre-fix nets were ≈identical), concentrated (C≤0.68)
-- [ ] 0.5 OPEN: equal-SAMPLE variance still flat on cornell (weak-guiding) + glass (ratio ~1.0, firefly tail up) — the online MLE has no firefly/contribution clamping (`build_dataset_np` `w=luminance(contrib)`), so caustic nets chase fireflies. Clamp weights + retrain for a guiding win (tracked under §6 eval / future change)
+- [x] 0.5 Apple-native stack (Metal render + MLX trainer) validated end-to-end: online train (record drain + MLX + Metal neural inference) works; `--backend metal` driver flag + `scripts/nis_sweep_*_metal.json`. Metal sweep matches Vulkan — bsdf budget curves BIT-IDENTICAL across backends (cross-backend render parity), same equal-sample conclusion. Metal render + MLX contend for the Apple GPU → ~8× slower training cycles (5.5 vs 0.66 s/cyc). (Vulkan+CUDA on the 4090 deferred to the user.)
+- [ ] 0.6 OPEN: equal-SAMPLE variance flat on BOTH backends — cornell (weak-guiding) + glass (ratio ~1.0, firefly tail up: glass neural p99.9 2.7-2.9e-3 vs bsdf 2.5e-3). The online MLE has no firefly/contribution clamping (`build_dataset_np` `w=luminance(contrib)`), so caustic nets chase fireflies. Clamp weights + retrain for a guiding win (tracked under §6 eval / future change)
 
 ## 1. Shader piecewise-quadratic coupling (nf-coupling-shader)
 

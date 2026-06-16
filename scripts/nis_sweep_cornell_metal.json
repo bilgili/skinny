@@ -1,0 +1,12 @@
+{
+  "scenes": ["cornell"],
+  "integrator": "path",
+  "seeds": 3,
+  "budgets": [16, 64, 256],
+  "reference_spp": 384,
+  "resolution": 48,
+  "cells": [
+    {"proposals": "bsdf", "reuse": "none", "chart": "V1", "encoding": "E0", "temporal": "off", "precision": "fp32"},
+    {"proposals": "bsdf,neural", "reuse": "none", "chart": "V1", "encoding": "E0", "temporal": "off", "precision": "fp32", "net": "/Users/ahmetbilgili/projects/skinny/.skinny_neural/cornell_metal.nfw1"}
+  ]
+}
