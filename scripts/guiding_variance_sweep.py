@@ -193,7 +193,8 @@ def _neural_config(cell: dict):
     from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig, NeuralPrecision
     enc = Encoding[cell["encoding"]]
     prec = NeuralPrecision(_precision_value(cell["precision"]))
-    return NeuralBuildConfig(encoding=enc, precision=prec)
+    return NeuralBuildConfig(encoding=enc, precision=prec,
+                             coupling=cell.get("coupling", "rqs"))
 
 
 def _precision_value(p: str) -> str:
