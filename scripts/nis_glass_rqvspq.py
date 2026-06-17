@@ -50,9 +50,11 @@ def lum(i):
     return 0.2126 * i[..., 0] + 0.7152 * i[..., 1] + 0.0722 * i[..., 2]
 
 
+import os
+NETTAG = os.environ.get("NIS_NETTAG", "glass_off")   # glass_off (unclamped) | glass_offc99
 cells = [("bsdf", cell("bsdf")),
-         ("rqs",  cell("bsdf,neural", "rqs",    f"{NN}/glass_off_rqs.nfw1")),
-         ("pq",   cell("bsdf,neural", "nis-pq", f"{NN}/glass_off_pq.nfw1"))]
+         ("rqs",  cell("bsdf,neural", "rqs",    f"{NN}/{NETTAG}_rqs.nfw1")),
+         ("pq",   cell("bsdf,neural", "nis-pq", f"{NN}/{NETTAG}_pq.nfw1"))]
 
 ref = downsample(np.load(BDPT).astype(np.float64), RES)
 print(f"glass RQ-vs-PQ  res{RES} {SPP}spp direct-off  (var = MSE vs BDPT-1024 ref)\n")
@@ -72,5 +74,5 @@ exp = 0.45 / max(float(np.median(lum(ref))), 1e-8)
 for tag in imgs:
     srgb = np.clip(np.maximum(imgs[tag] * exp, 0) ** (1 / 2.2), 0, 1)
     import matplotlib.image as mpimg
-    mpimg.imsave(str(OUT / f"glass_{tag}_{SPP}spp.png"), srgb)
+    mpimg.imsave(str(OUT / f"glass_{NETTAG}_{tag}_{SPP}spp.png"), srgb)
 print(f"\nsaved images -> {OUT}")

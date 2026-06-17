@@ -29,7 +29,7 @@ def lum(c):
     return 0.2126 * c[:, 0] + 0.7152 * c[:, 1] + 0.0722 * c[:, 2]
 
 
-def build(nrec):
+def build(nrec, clamp_pct=0.0):
     recs, bmin, bext = read_records(nrec)
     ext = np.maximum(bext, 1e-6).astype(np.float32)
     p = (recs["pos"].astype(np.float32) - bmin) / ext * 2.0 - 1.0
@@ -39,6 +39,14 @@ def build(nrec):
     w = lum(recs["contrib"].astype(np.float32))
     keep = (np.isfinite(w) & (w > 0.0) & np.isfinite(wi).all(axis=1) & (wi[:, 1] > 1e-4))
     cond, wi, w = cond[keep], wi[keep], w[keep]
+    if clamp_pct > 0.0:
+        # Firefly/contribution clamp: cap the weight at a high percentile so the
+        # MLE doesn't over-concentrate on a few caustic spikes (the firefly-chasing
+        # that made the unclamped guides barely match bsdf).
+        cap = float(np.percentile(w, clamp_pct))
+        nclip = int((w > cap).sum())
+        w = np.minimum(w, cap)
+        print(f"[train] firefly clamp @ p{clamp_pct:g} cap={cap:.4g} clipped {nclip} recs", flush=True)
     w = w / max(float(w.mean()), 1e-12)
     # z via the renderer's V1 chart (NOT the V0 cylindrical map build_dataset_np uses)
     z = CHART["V1"].direction_to_square(torch.from_numpy(wi), None).numpy()
@@ -68,12 +76,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--nrec", required=True)
     ap.add_argument("--steps", type=int, default=4000)
+    ap.add_argument("--clamp-pct", type=float, default=0.0,
+                    help="firefly clamp percentile (e.g. 99); 0 = off")
+    ap.add_argument("--tag", default="glass_off", help="output net name prefix")
     ap.add_argument("--out-dir", default="/Users/ahmetbilgili/projects/skinny/.skinny_neural")
     args = ap.parse_args()
-    cond, z, w = build(args.nrec)
+    cond, z, w = build(args.nrec, args.clamp_pct)
     print(f"[train] kept {cond.shape[0]} records from {Path(args.nrec).name}", flush=True)
     out = Path(args.out_dir)
-    for coupling, tag in (("rqs", "glass_off_rqs"), ("nis-pq", "glass_off_pq")):
+    for coupling, suff in (("rqs", "rqs"), ("nis-pq", "pq")):
+        tag = f"{args.tag}_{suff}"
         print(f"[train] coupling={coupling}", flush=True)
         m = train(cond, z, w, coupling, args.steps)
         path = out / f"{tag}.nfw1"
