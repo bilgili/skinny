@@ -43,8 +43,12 @@ def _orient_z_to(direction) -> np.ndarray:
     return m
 
 
-def add_light(stage, parent_path: str, light, report) -> bool:
-    """Author one UsdLux light. Returns True if a light was created."""
+def add_light(stage, parent_path: str, light, report, asset_dir: str | None = None) -> bool:
+    """Author one UsdLux light. Returns True if a light was created.
+
+    *asset_dir* (when writing to disk) is where synthesized constant-environment
+    `.hdr` maps are written for textureless ``infinite`` lights.
+    """
     p = light.params
     ltype = light.type
     scale = p.float("scale", 1.0)
@@ -91,10 +95,20 @@ def add_light(stage, parent_path: str, light, report) -> bool:
                 report.exact(f"light:infinite {path}")
         else:
             rgb = spectra.param_to_rgb(p.get("L"), illuminant=True) or [1.0, 1.0, 1.0]
-            color, intensity = _color_intensity(rgb, scale)
-            prim.CreateColorAttr(tuple(color))
-            prim.CreateIntensityAttr(intensity)
-            report.approx(f"light:infinite {path}", "constant infinite (no map)")
+            rgb = [c * scale for c in rgb]
+            if asset_dir is not None:
+                # skinny's dome path needs an actual .hdr asset for a uniform env
+                from .hdr import write_constant_hdr
+
+                hdr_name = sanitize(f"{name}_const") + ".hdr"
+                write_constant_hdr(os.path.join(asset_dir, hdr_name), rgb)
+                prim.CreateTextureFileAttr().Set(Sdf.AssetPath(hdr_name))
+                report.exact(f"light:infinite {path}", "constant env baked to .hdr")
+            else:
+                color, intensity = _color_intensity(rgb)
+                prim.CreateColorAttr(tuple(color))
+                prim.CreateIntensityAttr(intensity)
+                report.approx(f"light:infinite {path}", "constant infinite (no map; in-memory)")
         return True
 
     report.skipped(f"light:{ltype}", "unsupported light type")

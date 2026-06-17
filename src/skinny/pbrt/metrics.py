@@ -74,25 +74,28 @@ def flip(a, b, exposure: float = 0.0) -> float:
 
 
 def read_exr(path: str) -> np.ndarray:
-    """Read a linear EXR to an (H, W, 3) float array. Lazy backend import."""
+    """Read a linear EXR to an (H, W, 3) float array. Lazy backend import.
+
+    Prefers the OpenEXR package (imageio's auto plugin selection mis-reads EXR);
+    falls back to imageio's EXR plugin only if OpenEXR is unavailable.
+    """
     try:
+        import Imath
+        import OpenEXR
+
+        exr = OpenEXR.InputFile(path)
+        header = exr.header()
+        win = header["dataWindow"]
+        w = win.max.x - win.min.x + 1
+        h = win.max.y - win.min.y + 1
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+        chans = []
+        for c in ("R", "G", "B"):
+            raw = exr.channel(c, pt)
+            chans.append(np.frombuffer(raw, dtype=np.float32).reshape(h, w))
+        return np.stack(chans, axis=-1).astype(np.float64)
+    except ImportError:
         import imageio.v3 as iio
 
-        img = iio.imread(path)
+        img = iio.imread(path, extension=".exr")
         return _as_rgb(np.asarray(img, dtype=np.float64))
-    except Exception:  # noqa: BLE001 - try OpenEXR next
-        pass
-    import Imath
-    import OpenEXR
-
-    exr = OpenEXR.InputFile(path)
-    header = exr.header()
-    win = header["dataWindow"]
-    w = win.max.x - win.min.x + 1
-    h = win.max.y - win.min.y + 1
-    pt = Imath.PixelType(Imath.PixelType.FLOAT)
-    chans = []
-    for c in ("R", "G", "B"):
-        raw = exr.channel(c, pt)
-        chans.append(np.frombuffer(raw, dtype=np.float32).reshape(h, w))
-    return np.stack(chans, axis=-1).astype(np.float64)

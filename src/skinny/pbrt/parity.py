@@ -45,33 +45,51 @@ class ParityResult:
 def load_manifest(corpus_dir: str) -> list[SceneSpec]:
     with open(os.path.join(corpus_dir, "manifest.json")) as fh:
         data = json.load(fh)
-    return [SceneSpec(**s) for s in data["scenes"]]
+    fields = set(SceneSpec.__dataclass_fields__)
+    return [SceneSpec(**{k: v for k, v in s.items() if k in fields}) for s in data["scenes"]]
+
+
+def scene_has_environment(scene_pbrt: str) -> bool:
+    """True if the pbrt scene defines an ``infinite`` light (an environment)."""
+    from .parser import parse_file
+    from .state import build_scene
+
+    scene = build_scene(parse_file(scene_pbrt))
+    return any(light.type == "infinite" for light in scene.lights)
 
 
 def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
-                  backend: str | None = None) -> np.ndarray:
+                  gpu: str | None = None, env_off: bool = False) -> np.ndarray:
     """Import a pbrt scene and render it in skinny; return linear-HDR (H,W,3).
 
+    *gpu* is the vendor preference (intel/nvidia/amd/discrete/auto); the rhi
+    backend (vulkan/metal) is chosen by ``SKINNY_BACKEND``/`backend_select`.
+    *env_off* zeroes skinny's default ambient environment so scenes with no pbrt
+    ``infinite`` light render against a black background as pbrt does.
     Requires a working GPU backend; raises if unavailable.
     """
-    from skinny.headless import HeadlessRenderer  # lazy: pulls in the renderer/GPU
+    from skinny.headless import HeadlessRenderer, RenderOptions  # lazy: renderer/GPU
 
     with tempfile.TemporaryDirectory() as tmp:
         usd = os.path.join(tmp, "scene.usda")
         import_pbrt(scene_pbrt, out=usd)
-        with HeadlessRenderer(width, height, gpu=backend) as r:
-            r.render_to_array(usd, samples=spp)
+        with HeadlessRenderer(width, height, gpu=gpu) as r:
+            r._prepare(usd, RenderOptions(samples=spp))
+            if env_off:
+                r.renderer.env_intensity = 0.0
+            r._accumulate(spp)
             arr, _samples = r.renderer.read_accumulation_hdr()
     return np.asarray(arr, dtype=np.float64)[..., :3]
 
 
-def evaluate(spec: SceneSpec, corpus_dir: str, backend: str | None = None) -> ParityResult:
+def evaluate(spec: SceneSpec, corpus_dir: str, gpu: str | None = None) -> ParityResult:
     """Render *spec* in skinny and compare to its reference EXR."""
     ref_path = os.path.join(corpus_dir, spec.ref)
     ref = metrics.read_exr(ref_path)
+    scene_path = os.path.join(corpus_dir, spec.file)
     img = render_linear(
-        os.path.join(corpus_dir, spec.file), spec.width, spec.height, spp=spec.spp,
-        backend=backend,
+        scene_path, spec.width, spec.height, spp=spec.spp,
+        gpu=gpu, env_off=not scene_has_environment(scene_path),
     )
     aligned = metrics.align_exposure(img, ref)
     rm = metrics.relmse(aligned, ref)

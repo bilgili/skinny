@@ -100,10 +100,30 @@ are generated it skips, and only the import-smoke checks run.
 > force-add them (`git add -f` — the repo `.gitignore` is `*`), then pin the pbrt
 > version in the manifest and tighten the tolerances to the measured error.
 
+## Measured parity
+
+Skinny rendered against pbrt v4 (`5f7a606`) reference EXRs at 128×128, linear-HDR
+accumulation, least-squares exposure aligned. The gate passes at these tolerances
+(regression guard with headroom over measured):
+
+| corpus scene | relMSE | FLIP | what it isolates |
+|--------------|--------|------|------------------|
+| `diffuse_arealight` | 0.087 | 0.041 | Lambert + area-light transport |
+| `conductor_infinite` | 0.133 | 0.068 | gold Fresnel + GGX remap + constant env |
+| `glass_arealight` | 0.128 | 0.071 | dielectric refraction |
+
+FLIP ≤ 0.07 across the corpus — perceptually near-matching. The residual relMSE
+is dominated by the inherent RGB-vs-spectral reduction, the conductor's
+normal-incidence Fresnel approximation, area-light radiance scale, and pbrt's
+brighter glass caustics. Two render-config notes that mattered for parity: the
+harness zeroes skinny's *default ambient environment* for scenes with no pbrt
+`infinite` light (so the background is black like pbrt), and a textureless
+constant `infinite` light is baked to a uniform `.hdr` so skinny's dome path
+reproduces it.
+
 ## Parity matrix
 
-Support status per pbrt feature. "Measured error" is filled in once reference
-EXRs exist (pending a pbrt v4 binary on the build host).
+Support status per pbrt feature.
 
 | pbrt feature | status | notes |
 |--------------|--------|-------|

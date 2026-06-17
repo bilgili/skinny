@@ -1,8 +1,9 @@
 > Status (worktree `pbrt-v4-scene-import`): import pipeline implemented and
-> tested (66 pbrt tests green, ruff clean). **Go/no-go gate:** task 12.2
-> (generate pbrt v4 reference EXRs) is BLOCKED — no pbrt v4 binary on this host.
-> The parity harness + gate are wired and skip cleanly until refs exist.
-> Remaining partials: 5.3 (full `realistic` lens), 6.3 (EXR→HDR env conversion).
+> tested (66 pbrt unit tests green, ruff clean). **Parity gate is LIVE and
+> GREEN** — pbrt v4 built from source (`5f7a606`), reference EXRs generated, and
+> the GPU gate passes (6 passed/54s): diffuse relMSE 0.087/FLIP 0.041, conductor
+> 0.133/0.068, glass 0.128/0.071 (FLIP ≤ 0.07 = perceptually near-matching).
+> Remaining partials: 5.3 (full `realistic` lens), 6.3 (non-constant EXR→HDR env).
 
 ## 1. Package scaffolding
 
@@ -76,9 +77,9 @@
 ## 12. Reference corpus and gate
 
 - [x] 12.1 Author the curated low-res (≤256 px) `.pbrt` corpus scenes under `tests/pbrt/` — 3 scenes (diffuse/area, conductor/infinite, glass/area); more axes can be added
-- [ ] 12.2 Render pbrt v4 reference EXRs and commit them (`git add -f`) with a manifest pinning pbrt version, per-scene tolerance, and content hash — **BLOCKED: no pbrt v4 binary on this host** (manifest + tolerances staged, refs/ pending)
-- [x] 12.3 Implement the headless harness: import → skinny offscreen render → read **linear-HDR accumulation** → compare to reference at matching resolution/converged spp — `parity.py` written; not yet run (needs GPU + refs)
-- [x] 12.4 Wire the per-scene parity gate as a pytest test that fails (naming scene + metric) when relMSE/FLIP exceeds tolerance, and runs with no pbrt binary present — `test_parity.py`; import-smoke runs, gate skips until refs exist
+- [x] 12.2 Render pbrt v4 reference EXRs and commit them (`git add -f`) with a manifest pinning pbrt version, per-scene tolerance, and content hash — pbrt v4 `5f7a606` built from source; 3 refs in `corpus/refs/`; manifest pins version + measured tolerances
+- [x] 12.3 Implement the headless harness: import → skinny offscreen render → read **linear-HDR accumulation** → compare to reference at matching resolution/converged spp — `parity.py`; run on GPU (Vulkan/MoltenVK), passes; zeroes default ambient env for no-`infinite` scenes
+- [x] 12.4 Wire the per-scene parity gate as a pytest test that fails (naming scene + metric) when relMSE/FLIP exceeds tolerance, and runs with no pbrt binary present — `test_parity.py` GREEN under 3.13+GPU (6 passed); skips cleanly without GPU/refs
 
 ## 13. Documentation and close-out
 

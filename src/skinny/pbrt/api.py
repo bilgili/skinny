@@ -7,6 +7,8 @@ and a :class:`~skinny.pbrt.report.Report`.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from pxr import Gf, Sdf, UsdGeom, UsdShade
 
@@ -42,8 +44,9 @@ def translate_scene(scene: PbrtScene, out: str | None = None):
     else:
         report.skipped("camera", "scene has no Camera")
 
+    asset_dir = os.path.dirname(os.path.abspath(out)) if out else None
     for light in scene.lights:
-        add_light(stage, world, light, report)
+        add_light(stage, world, light, report, asset_dir=asset_dir)
 
     if out is not None:
         stage.GetRootLayer().Export(out)
