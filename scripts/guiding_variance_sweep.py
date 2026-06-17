@@ -68,6 +68,24 @@ def log(msg: str) -> None:
     print(f"[var-harness] {msg}", flush=True)
 
 
+# --- optional image dump (visual double-check of the variance cells) ----------
+def _lum(img):
+    return 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+
+
+def _auto_exposure(ref, pct=50.0, target=0.45):
+    """Map the reference's median luminance to a mid value; shared across all
+    cells of a scene so the only visible difference is noise, not brightness."""
+    return target / max(float(np.percentile(_lum(ref), pct)), 1e-8)
+
+
+def _save_png(path, lin, exposure):
+    import matplotlib.image as mpimg
+    srgb = np.clip(np.maximum(np.asarray(lin, np.float64) * exposure, 0.0) ** (1.0 / 2.2),
+                   0.0, 1.0)
+    mpimg.imsave(str(path), srgb)
+
+
 # ---------------------------------------------------------------------------
 # Declarative config + axis availability (degrade gracefully, skip + log).
 # ---------------------------------------------------------------------------
@@ -205,7 +223,7 @@ def available_precisions(backend: str, res: int) -> set[str]:
     return out
 
 
-def _build_renderer(backend, scene_path, integrator, cell, res):
+def _build_renderer(backend, scene_path, integrator, cell, res, no_direct=False):
     from skinny.renderer import Renderer
     ctx = _make_context(backend, res)
     needs_neural = "neural" in cell["proposals"]
@@ -227,6 +245,12 @@ def _build_renderer(backend, scene_path, integrator, cell, res):
             break
     if r._scene_bindings is None:
         raise RuntimeError(f"scene bindings never built for {scene_path.name}")
+    if no_direct:
+        # Zero the analytic distant ("direct") light after USD load so the scene is
+        # lit only by the emissive panel (indirect-dominated). Applied to cells AND
+        # the reference so the MSE compares like-for-like lighting.
+        r.light_intensity = 0.0
+        r.direct_light_index = 1
     return ctx, r
 
 
@@ -240,7 +264,12 @@ def _accumulate_to(r, target_spp: int, frame_seed_base: int) -> np.ndarray:
         r.render_headless()
     img, samples = r.read_accumulation_hdr()
     assert samples > 0, "no samples accumulated"
-    return img[..., :3].astype(np.float64) / float(samples)
+    # read_accumulation_hdr returns the already-normalised running MEAN (verified:
+    # the raw image is spp-invariant — raw.mean ~const for N=1..128 — and the
+    # two-witness reference converges only because it is the mean). Dividing by
+    # `samples` again double-normalised to mean/spp, making every MSE dominated by
+    # a deterministic mean^2*(1/b-1/ref)^2 bias instead of estimator noise.
+    return img[..., :3].astype(np.float64)
 
 
 def _sweep_budgets(r, budgets, frame_seed_base):
@@ -264,16 +293,16 @@ def _sweep_budgets(r, budgets, frame_seed_base):
             done += 1
         elapsed += time.perf_counter() - t0
         img, samples = r.read_accumulation_hdr()
-        out[b] = (img[..., :3].astype(np.float64) / float(samples), elapsed)
+        out[b] = (img[..., :3].astype(np.float64), elapsed)  # already the mean
     return out
 
 
-def build_reference(backend, scene_path, integrator, res, ref_spp):
+def build_reference(backend, scene_path, integrator, res, ref_spp, no_direct=False):
     """High-spp converged reference, gated by two independent half-budget refs
     agreeing (design.md item 1). Returns (ref_image, witnessed_rel_err)."""
     cell = {"proposals": "bsdf", "reuse": "none", "chart": "V1",
             "encoding": "E0", "temporal": "off", "precision": "fp32"}
-    ctx, r = _build_renderer(backend, scene_path, integrator, cell, res)
+    ctx, r = _build_renderer(backend, scene_path, integrator, cell, res, no_direct=no_direct)
     try:
         a = _accumulate_to(r, ref_spp, 0 * SEED_STRIDE)
         b = _accumulate_to(r, ref_spp, 7 * SEED_STRIDE)
@@ -308,9 +337,14 @@ class CellResult:
     budget_curve: list  # [(spp, var, time_s)]
 
 
-def run_cell(backend, scene_path, integrator, cell, res, seeds, budgets, ref):
-    """Render one cell over N seeds across the budget grid; return a CellResult."""
-    ctx, r = _build_renderer(backend, scene_path, integrator, cell, res)
+def run_cell(backend, scene_path, integrator, cell, res, seeds, budgets, ref, dump=None,
+             no_direct=False):
+    """Render one cell over N seeds across the budget grid; return a CellResult.
+
+    ``dump`` (optional) = {"dir", "scene", "exposure"}: save this cell's seed-0
+    image at every budget as a tonemapped PNG (visual double-check of the cells).
+    """
+    ctx, r = _build_renderer(backend, scene_path, integrator, cell, res, no_direct=no_direct)
     try:
         if "neural" in cell["proposals"] and not r._neural_active():
             raise RuntimeError("neural proposal requested but pass not active")
@@ -322,6 +356,12 @@ def run_cell(backend, scene_path, integrator, cell, res, seeds, budgets, ref):
         ctx.destroy()
 
     top = max(budgets)
+    if dump is not None:
+        lab = (cell_label(cell).replace("/", "_").replace("|", "__")
+               .replace(",", "-").replace("+", "-"))
+        for b in sorted(budgets):
+            _save_png(Path(dump["dir"]) / f"{dump['scene']}_{lab}_{b}spp.png",
+                      per_seed_budget[0][b][0], dump["exposure"])
     # Equal-time (top budget): aggregate over seeds, with spread + firefly tail.
     top_imgs = [per_seed_budget[s][top][0] for s in range(seeds)]
     cv = variance_over_seeds(top_imgs, ref)
@@ -474,6 +514,12 @@ def main() -> int:
     ap.add_argument("--quick", action="store_true",
                     help="one-scene/two-cell low-spp smoke (task 5.2)")
     ap.add_argument("--out-dir", default=str(ROOT / "docs" / "diagrams" / "guiding_variance"))
+    ap.add_argument("--dump-images", action="store_true",
+                    help="save a tonemapped PNG per cell per budget (+ the reference) "
+                         "into --out-dir, shared exposure, for a visual double-check")
+    ap.add_argument("--no-direct", action="store_true",
+                    help="zero the analytic distant (direct) light for cells AND the "
+                         "reference (emissive-panel only; isolates the guided indirect)")
     args = ap.parse_args()
 
     cfg = (json.loads(Path(args.config).read_text()) if args.config
@@ -491,9 +537,17 @@ def main() -> int:
             continue
         log(f"=== scene {scene} ({scene_path.name}) ===")
         ref, witness = build_reference(args.backend, scene_path, cfg["integrator"],
-                                       res, cfg["reference_spp"])
+                                       res, cfg["reference_spp"], no_direct=args.no_direct)
         ref_hash = _hash_img(ref)
         log(f"reference converged (rel-err {witness:.4g}) hash={ref_hash}")
+
+        dump = None
+        if args.dump_images:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            exposure = _auto_exposure(ref)
+            _save_png(out_dir / f"{scene}_reference_{cfg['reference_spp']}spp.png", ref, exposure)
+            dump = {"dir": str(out_dir), "scene": scene, "exposure": exposure}
+            log(f"dump-images ON (exposure={exposure:.3f}) → {out_dir}")
 
         results, skipped = [], []
         for cell in cfg["cells"]:
@@ -506,7 +560,8 @@ def main() -> int:
             log(f"cell {lab} …")
             try:
                 results.append(run_cell(args.backend, scene_path, cfg["integrator"],
-                                        cell, res, cfg["seeds"], cfg["budgets"], ref))
+                                        cell, res, cfg["seeds"], cfg["budgets"], ref,
+                                        dump=dump, no_direct=args.no_direct))
                 rr = results[-1]
                 log(f"  -> var={rr.equal_time_var:.3e}±{rr.equal_time_var_spread:.1e} "
                     f"p99.9={rr.firefly_p999:.2e} {rr.equal_time_s:.2f}s "
