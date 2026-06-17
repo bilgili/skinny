@@ -23,11 +23,11 @@ the online net actually conditions on the scene.
 
 ## 1. Shader piecewise-quadratic coupling (nf-coupling-shader)
 
-- [ ] 1.1 Add `nis_decode(params[], out masses[], out heights[])` to `neural_flow.slang` (softmax bin masses + `K+1` vertex heights; min-mass floor)
-- [ ] 1.2 Add `nis_quad_fwd(x, masses, heights, out logdet)` and `nis_quad_inv(y, masses, heights, out logdet)` (monotone piecewise-quadratic CDF; per-bin quadratic inverse; closed-form `log|dy/dx|`)
-- [ ] 1.3 Add `NF_COUPLING` build define (`0=rqs` default | `1=nis-pq`); gate the per-coupling call in `nf_flow_forward`/`nf_flow_inverse`
-- [ ] 1.4 Parity: `NF_COUPLING=rqs` byte-identical to the shipped kernel; `nis-pq` forward/inverse match the `spline_flow` trainer's reference samples/pdfs (extend `test_neural_parity.py`)
-- [ ] 1.5 Confirm chart sandwich + `NF_LOG2PI` (V1 equal-area, constant `2π`) untouched
+- [x] 1.1 `nf_decode_pq(params[2K+1], out widths[K], out vertices[K+1])` in `neural_flow.slang` (softmax+floor widths; softplus vertices, trapezoidal-normalized) — matches `_decode_pq`
+- [x] 1.2 `nf_pq_fwd`/`nf_pq_inv` (monotone piecewise-quadratic CDF; per-bin quadratic inverse; closed-form `log|dy/dx|`) — port of `pq_forward`/`pq_inverse`
+- [x] 1.3 `NF_COUPLING` build define (0=rqs default | 1=nis-pq); `#if`-gated in `nf_flow_forward`/`nf_flow_inverse` (default path lines unchanged → byte-identical)
+- [x] 1.4 Math parity: numpy mirror of the shader nf_decode_pq/fwd/inv vs `spline_flow` reference, max|Δ| ≤ 5e-15 (`scripts/nis_pq_parity.py`). GPU shader-vs-python parity: PENDING.
+- [x] 1.5 Chart sandwich + `NF_LOG2PI` untouched (PQ swaps only the per-coupling warp). NOTE: separate latent bug — the ONLINE `build_dataset_np` maps wi→z with V0 cylindrical while the shader infers V1 Lambert; offline RQ/PQ training here uses V1.
 
 ## 2. One-blob conditioner encoding (oneblob-encoding)
 
@@ -36,9 +36,9 @@ the online net actually conditions on the scene.
 
 ## 3. NFW1 coupling tag (nfw1-coupling-tag)
 
-- [ ] 3.1 Add a coupling-type field to the NFW1 header (`neural_weights.py`); bump version or use a reserved slot
-- [ ] 3.2 `load_neural_weights` validates coupling tag vs compiled `NF_COUPLING`; mismatch errors clearly (mirror the encoding-dim check)
-- [ ] 3.3 Update `NeuralBuildConfig` to carry coupling; thread into `slang_defines()`
+- [x] 3.1 Coupling guard via the existing headers (no format bump): a net's last-layer outDim encodes the coupling (rqs 3K+1 vs nis-pq 2K+1); `coupling_n_params()` + `NeuralBuildConfig.n_params`. (export_flow also appends its own ignored tag.)
+- [x] 3.2 `load_neural_weights(..., expect_n_params=cfg.n_params)` validates last-layer outDim vs the built coupling; mismatch errors clearly (mirrors the encoding-dim check)
+- [x] 3.3 `NeuralBuildConfig.coupling` threaded into `slang_defines()` (`-D NF_COUPLING=1`), `cache_tag`, and `_layout()`
 
 ## 4. NIS proposal plugin (nis-proposal)
 

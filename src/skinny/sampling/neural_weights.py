@@ -85,6 +85,20 @@ def mlp_in_dim(encoding: Encoding, cond: int = NF_COND,
     return 1 + encoded_cond_dim(encoding, cond, l_pos)
 
 
+# Per-coordinate conditioner output width by coupling (the last Linear's outDim,
+# shader NF_PARAMS): rqs = 3K+1 (widths+heights+derivs), nis-pq = 2K+1
+# (widths + K+1 vertices), nis-pl = K (bin masses). Matches spline_flow
+# make_coupling_transform's n_params and the shader's NF_PARAMS define.
+def coupling_n_params(coupling: str, bins: int = NF_BINS) -> int:
+    if coupling == "rqs":
+        return 3 * bins + 1
+    if coupling == "nis-pq":
+        return 2 * bins + 1
+    if coupling == "nis-pl":
+        return bins
+    raise ValueError(f"unknown coupling {coupling!r}")
+
+
 def fourier_gamma(p: np.ndarray, L: int) -> np.ndarray:
     """NeRF positional encoding — host mirror of ``spline_flow.train.fourier_gamma``
     and ``neural_flow.slang`` ``nf_encode``.
@@ -258,6 +272,14 @@ class NeuralBuildConfig:
     precision: NeuralPrecision = NeuralPrecision.FP32
     encoding: Encoding = Encoding.E0
     l_pos: int = NF_L_POS
+    coupling: str = "rqs"          # rqs (default) | nis-pq (change neural-nis-baseline)
+
+    @property
+    def n_params(self) -> int:
+        """Per-coordinate conditioner output width (last Linear outDim = shader
+        NF_PARAMS) for this coupling: rqs 3K+1, nis-pq 2K+1. The loader's
+        coupling guard validates a baked net's last-layer outDim against this."""
+        return coupling_n_params(self.coupling, self.bins)
 
     @property
     def arch(self) -> tuple[int, int, int, int]:
@@ -302,6 +324,9 @@ class NeuralBuildConfig:
             d += ["-D", f"NF_ENCODING={self.encoding.nf_define}"]
             if self.l_pos != NF_L_POS:
                 d += ["-D", f"NF_L_POS={self.l_pos}"]
+        if self.coupling != "rqs":
+            # NF_COUPLING selects the in-shader warp: 1 = nis-pq (piecewise-quadratic).
+            d += ["-D", f"NF_COUPLING={ {'nis-pq': 1}[self.coupling] }"]
         return tuple(d)
 
     @property
@@ -311,7 +336,8 @@ class NeuralBuildConfig:
         enc = "" if self.encoding is Encoding.E0 else (
             f"_{self.encoding.value}"
             + (f"P{self.l_pos}" if self.l_pos != NF_L_POS else ""))
-        return f"L{self.layers}B{self.bins}H{self.hidden}{enc}_{self.precision.value}"
+        cpl = "" if self.coupling == "rqs" else f"_{self.coupling}"
+        return f"L{self.layers}B{self.bins}H{self.hidden}{enc}{cpl}_{self.precision.value}"
 
 
 @dataclass
@@ -356,7 +382,8 @@ class NeuralWeights:
         return self.biases.astype(dt).tobytes()
 
     def assert_matches_shader(self, expect: tuple[int, int, int, int] | None = None,
-                              *, expect_mlp_in: int | None = None) -> None:
+                              *, expect_mlp_in: int | None = None,
+                              expect_n_params: int | None = None) -> None:
         """Raise if the file's architecture differs from the built dimensions — a
         mismatch would index the flat buffers wrong and corrupt inference. With no
         argument it checks the default (shipped) architecture; the renderer passes
@@ -383,11 +410,21 @@ class NeuralWeights:
                     f"mlp_in {expect_mlp_in}; the network was trained with a different "
                     f"--encoding (load it with the matching encoding, or rebake)"
                 )
+        if expect_n_params is not None:
+            got_out = int(self.headers[-1][3]) if len(self.headers) else -1
+            if got_out != expect_n_params:
+                raise ValueError(
+                    f"neural weights last-layer out_dim {got_out} != built coupling's "
+                    f"n_params {expect_n_params}; the network was trained with a "
+                    f"different --coupling (rqs=3K+1 vs nis-pq=2K+1) — load it with the "
+                    f"matching coupling, or rebake"
+                )
 
 
 def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
             hidden: int = NF_HIDDEN, encoding: Encoding = Encoding.E0,
-            l_pos: int = NF_L_POS) -> tuple[list[tuple[int, int, int, int]], int, int]:
+            l_pos: int = NF_L_POS, coupling: str = "rqs",
+            ) -> tuple[list[tuple[int, int, int, int]], int, int]:
     """Header table + total (nWeights, nBiases) for the given architecture.
 
     Three Linear layers per coupling: (mlp_in→hidden), (hidden→hidden),
@@ -398,7 +435,7 @@ def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
     renderer-conditioner-encoding): ``E0`` keeps ``1 + NF_COND``; ``E1``/``E3``
     widen it to ``1 + NF_MLP_ENC``. The rest of the table is encoding-independent.
     """
-    n_params = 3 * bins + 1
+    n_params = coupling_n_params(coupling, bins)
     mlp_in = mlp_in_dim(encoding, NF_COND, l_pos)
     dims = [(mlp_in, hidden), (hidden, hidden), (hidden, n_params)]
     headers: list[tuple[int, int, int, int]] = []
@@ -414,7 +451,8 @@ def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
 def deserialize_neural_weights(data: bytes,
                                expect: tuple[int, int, int, int] | None = None,
                                *, src: str = "<bytes>",
-                               expect_mlp_in: int | None = None) -> NeuralWeights:
+                               expect_mlp_in: int | None = None,
+                               expect_n_params: int | None = None) -> NeuralWeights:
     """Parse ``NFW1`` bytes into a ``NeuralWeights`` (inverse of
     ``serialize_neural_weights``). The in-memory core shared by
     ``load_neural_weights`` (disk) and the ``shared`` weight-handoff backend
@@ -446,13 +484,15 @@ def deserialize_neural_weights(data: bytes,
     biases = np.frombuffer(data, dtype="<f4", count=n_biases, offset=o).copy()
     nw = NeuralWeights(int(layers), int(bins), int(hidden), int(cond),
                        headers, weights, biases)
-    nw.assert_matches_shader(expect, expect_mlp_in=expect_mlp_in)
+    nw.assert_matches_shader(expect, expect_mlp_in=expect_mlp_in,
+                             expect_n_params=expect_n_params)
     return nw
 
 
 def load_neural_weights(path: str | Path,
                         expect: tuple[int, int, int, int] | None = None,
-                        *, expect_mlp_in: int | None = None) -> NeuralWeights:
+                        *, expect_mlp_in: int | None = None,
+                        expect_n_params: int | None = None) -> NeuralWeights:
     """Parse an ``NFW1`` file. Raises on bad magic / version / truncation, and on
     an architecture mismatch against ``expect`` (defaults to the shipped size when
     None) — the loader assert is the size-mismatch guard for the configurable
@@ -460,7 +500,8 @@ def load_neural_weights(path: str | Path,
     conditioner-encoding guard (change renderer-conditioner-encoding): a net whose
     first-layer input width differs from the built ``--encoding`` is refused."""
     return deserialize_neural_weights(Path(path).read_bytes(), expect, src=str(path),
-                                      expect_mlp_in=expect_mlp_in)
+                                      expect_mlp_in=expect_mlp_in,
+                                      expect_n_params=expect_n_params)
 
 
 def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights:
@@ -473,7 +514,7 @@ def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights
     """
     cfg = config or NeuralBuildConfig()
     headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden,
-                                           cfg.encoding, cfg.l_pos)
+                                           cfg.encoding, cfg.l_pos, cfg.coupling)
     return NeuralWeights(
         cfg.layers, cfg.bins, cfg.hidden, NF_COND,
         np.array(headers, dtype="<u4"),
@@ -495,7 +536,7 @@ def bake_dummy_weights(path: str | Path,
     """
     cfg = config or NeuralBuildConfig()
     headers, n_weights, n_biases = _layout(cfg.layers, cfg.bins, cfg.hidden,
-                                           cfg.encoding, cfg.l_pos)
+                                           cfg.encoding, cfg.l_pos, cfg.coupling)
     weights = np.zeros(n_weights, dtype="<f4")
     biases = np.zeros(n_biases, dtype="<f4")
     buf = bytearray()
