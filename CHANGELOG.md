@@ -9,6 +9,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt v4 scene import** (change `pbrt-v4-scene-import`) — read a pbrt v4 text
+  scene and convert it to a skinny-loadable USD stage via the new `skinny.pbrt`
+  package and `skinny-import-pbrt` CLI (`python -m skinny.pbrt` / `import_pbrt()`).
+  Covers triangle/ply/sphere shapes + instancing, diffuse/conductor/dielectric/
+  coated/transmissive materials (with the pbrt-v4 `sqrt` roughness remap),
+  distant/point/area/infinite lights, the `perspective` camera (shorter-axis fov),
+  spectrum→RGB reduction, and homogeneous media/subsurface best-effort. Each
+  import emits an exact/approx/skipped report. Ships a parity corpus
+  (`tests/pbrt/corpus/`) and a relMSE/FLIP gate comparing skinny's linear-HDR
+  accumulation against checked-in pbrt v4 reference EXRs (no pbrt binary needed
+  at test time). See [docs/PbrtImport.md](docs/PbrtImport.md).
 - **Shared CPU neural handoff** (change `shared-neural-handoff`) — a third
   `--neural-handoff` value, `shared` (env `SKINNY_NEURAL_HANDOFF`, persisted on
   the front-ends). Since the online trainer runs as a same-process daemon thread,

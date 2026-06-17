@@ -1,0 +1,36 @@
+{
+  "pbrt_version": "UNPINNED - reference EXRs not yet generated (no pbrt v4 binary on this host)",
+  "notes": "Render each .pbrt with pbrt v4 at the listed resolution/spp to produce refs/<name>.exr, then pin the pbrt version and tighten tolerances.",
+  "scenes": [
+    {
+      "name": "diffuse_arealight",
+      "file": "diffuse_arealight.pbrt",
+      "ref": "refs/diffuse_arealight.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 256,
+      "relmse_tol": 0.02,
+      "flip_tol": 0.05
+    },
+    {
+      "name": "conductor_infinite",
+      "file": "conductor_infinite.pbrt",
+      "ref": "refs/conductor_infinite.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 256,
+      "relmse_tol": 0.05,
+      "flip_tol": 0.08
+    },
+    {
+      "name": "glass_arealight",
+      "file": "glass_arealight.pbrt",
+      "ref": "refs/glass_arealight.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 512,
+      "relmse_tol": 0.08,
+      "flip_tol": 0.10
+    }
+  ]
+}
