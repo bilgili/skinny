@@ -7482,7 +7482,8 @@ class Renderer:
         cfg = self._effective_neural_config()
         try:
             from skinny.sampling.neural_weights import load_neural_weights
-            nw = load_neural_weights(path, expect=cfg.arch, expect_mlp_in=cfg.mlp_in)
+            nw = load_neural_weights(path, expect=cfg.arch, expect_mlp_in=cfg.mlp_in,
+                                     expect_chart=cfg.chart)
         except Exception as exc:  # noqa: BLE001 - fall back to the dummy net
             print(f"[skinny] neural weights load failed for {path}: {exc}; "
                   "keeping the dummy net")
@@ -7512,7 +7513,8 @@ class Renderer:
         if path is not None:
             try:
                 return load_neural_weights(path, expect=cfg.arch,
-                                           expect_mlp_in=cfg.mlp_in)
+                                           expect_mlp_in=cfg.mlp_in,
+                                           expect_chart=cfg.chart)
             except Exception:  # noqa: BLE001 — fall back to the dummy net
                 pass
         # make_dummy_weights takes the build config itself; cfg.arch is the

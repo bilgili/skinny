@@ -97,10 +97,11 @@ SCENES = {
     "restir": ASSETS / "restir_variance_demo.usda",
 }
 
-# Only V1 (the shipped Lambert chart) is buildable today; the others await
-# renderer-chart-selection. Only temporal=off is buildable (neural-temporal-
-# conditioning not landed). These drive the skip+log, never a silent omission.
-AVAILABLE_CHARTS = {"V1"}
+# V0 (cylindrical), V1 (Lambert, default), V5 (equirectangular) are buildable
+# (change renderer-chart-selection). V2 is reserved but not buildable (needs the
+# flow-local wo the .nrec schema lacks). Only temporal=off is buildable (neural-
+# temporal-conditioning not landed). These drive the skip+log, never a silent omission.
+AVAILABLE_CHARTS = {"V0", "V1", "V5"}
 AVAILABLE_TEMPORAL = {"off"}
 
 
@@ -194,7 +195,8 @@ def _neural_config(cell: dict):
     enc = Encoding[cell["encoding"]]
     prec = NeuralPrecision(_precision_value(cell["precision"]))
     return NeuralBuildConfig(encoding=enc, precision=prec,
-                             coupling=cell.get("coupling", "rqs"))
+                             coupling=cell.get("coupling", "rqs"),
+                             chart=cell.get("chart", "V1"))
 
 
 def _precision_value(p: str) -> str:
