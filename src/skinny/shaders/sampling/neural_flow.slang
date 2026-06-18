@@ -88,7 +88,21 @@ static const float NF_EPS    = 1e-8f;
 static const float NF_MINBIN = 1e-4f;
 static const float NF_ZEPS   = 1e-5f;     // chart-inverse boundary margin (== spline_flow _Z_EPS)
 
-static const int NF_PARAMS = 3 * NF_BINS + 1;   // widths(K)+heights(K)+derivs(K+1)
+// ---- coupling warp (axis; change neural-nis-baseline) ----
+// NF_COUPLING selects the per-coupling 1-D warp: the shipped rational-quadratic
+// spline (0, default) or NIS's piecewise-quadratic warp (1, Müller et al. 2019).
+// Only the warp + its parameter count change; the conditioner MLP, the chart, the
+// constant-2π Jacobian and the coupling topology are identical. NF_COUPLING=0 keeps
+// the original code paths verbatim (#if-guarded) → byte-identical to the shipped net.
+#ifndef NF_COUPLING
+#define NF_COUPLING 0   // 0 = rqs (rational-quadratic spline), 1 = nis-pq (piecewise-quadratic)
+#endif
+
+#if NF_COUPLING == 1
+static const int NF_PARAMS = 2 * NF_BINS + 1;   // widths(K) + vertices(K+1)  [NIS-PQ]
+#else
+static const int NF_PARAMS = 3 * NF_BINS + 1;   // widths(K)+heights(K)+derivs(K+1)  [RQS]
+#endif
 
 // ---- conditioner positional encoding (axis 2; change renderer-conditioner-encoding) ----
 // NF_ENCODING selects the NeRF-γ feature map applied to the condition BEFORE the
@@ -317,6 +331,89 @@ float nf_rqs_inv(float y, float widths[NF_BINS], float heights[NF_BINS],
     return clamp(x, 0.0f, 1.0f);
 }
 
+// ---- NIS piecewise-quadratic coupling (Müller et al. 2019) ----
+// Faithful port of spline_flow nis-pq: _decode_pq + pq_forward + pq_inverse.
+// Compiled only under -D NF_COUPLING=1. The pdf is piecewise-LINEAR over K bins of
+// learned width (vertex pdf values at the K+1 boundaries) → the cdf is quadratic
+// per bin; the inverse is a per-bin quadratic solve.
+#if NF_COUPLING == 1
+// Decode raw MLP params[2K+1] -> K bin widths (softmax + floor + renormalize, same
+// as nf_decode's widths) and K+1 vertex pdf values (softplus, normalized so the
+// trapezoidal integral Σ W_k (V_k+V_{k+1})/2 = 1). Matches SplineCoupling._decode_pq.
+void nf_decode_pq(
+    float params[NF_PARAMS],
+    out float widths[NF_BINS], out float vertices[NF_BINS + 1])
+{
+    float mw = params[0];
+    for (int k = 1; k < NF_BINS; ++k) mw = max(mw, params[k]);
+    float sw = 0.0f;
+    for (int k = 0; k < NF_BINS; ++k) { widths[k] = exp(params[k] - mw); sw += widths[k]; }
+    float tw = 0.0f;
+    for (int k = 0; k < NF_BINS; ++k) { widths[k] = NF_MINBIN + widths[k] / sw; tw += widths[k]; }
+    for (int k = 0; k < NF_BINS; ++k) widths[k] /= tw;
+
+    float v[NF_BINS + 1];
+    for (int i = 0; i < NF_BINS + 1; ++i) v[i] = nf_softplus(params[NF_BINS + i]) + 1e-3f;
+    float area = 0.0f;
+    for (int k = 0; k < NF_BINS; ++k) area += widths[k] * 0.5f * (v[k] + v[k + 1]);
+    area = max(area, 1e-8f);
+    for (int i = 0; i < NF_BINS + 1; ++i) vertices[i] = v[i] / area;
+}
+
+// Piecewise-quadratic forward x -> y; outputs log|dy/dx|. (port of pq_forward)
+float nf_pq_fwd(float x, float widths[NF_BINS], float vertices[NF_BINS + 1], out float logdet)
+{
+    x = clamp(x, 0.0f, 1.0f);
+    float xk[NF_BINS + 1]; xk[0] = 0.0f;
+    float yk[NF_BINS + 1]; yk[0] = 0.0f;
+    for (int k = 0; k < NF_BINS; ++k)
+    {
+        xk[k + 1] = xk[k] + widths[k];
+        yk[k + 1] = yk[k] + widths[k] * 0.5f * (vertices[k] + vertices[k + 1]);
+    }
+    int idx = 0;
+    for (int k = 0; k <= NF_BINS; ++k) if (x >= xk[k]) idx = k;
+    idx = clamp(idx, 0, NF_BINS - 1);
+    float x0 = xk[idx];
+    float w  = max(widths[idx], NF_EPS);
+    float v0 = vertices[idx]; float v1 = vertices[idx + 1];
+    float t  = clamp((x - x0) / w, 0.0f, 1.0f);
+    float y  = yk[idx] + w * (v0 * t + 0.5f * (v1 - v0) * t * t);
+    float pdf = max(v0 + t * (v1 - v0), NF_EPS);
+    logdet = log(pdf);
+    return clamp(y, 0.0f, 1.0f);
+}
+
+// Piecewise-quadratic inverse y -> x; outputs log|dx/dy| = -log|dy/dx|. (port of pq_inverse)
+float nf_pq_inv(float y, float widths[NF_BINS], float vertices[NF_BINS + 1], out float logdet)
+{
+    y = clamp(y, 0.0f, 1.0f);
+    float xk[NF_BINS + 1]; xk[0] = 0.0f;
+    float yk[NF_BINS + 1]; yk[0] = 0.0f;
+    for (int k = 0; k < NF_BINS; ++k)
+    {
+        xk[k + 1] = xk[k] + widths[k];
+        yk[k + 1] = yk[k] + widths[k] * 0.5f * (vertices[k] + vertices[k + 1]);
+    }
+    int idx = 0;
+    for (int k = 0; k <= NF_BINS; ++k) if (y >= yk[k]) idx = k;
+    idx = clamp(idx, 0, NF_BINS - 1);
+    float x0 = xk[idx];
+    float w  = max(widths[idx], NF_EPS);
+    float v0 = vertices[idx]; float v1 = vertices[idx + 1];
+    float a = w * 0.5f * (v1 - v0);
+    float b = w * v0;
+    float c = -(y - yk[idx]);
+    float disc = max(b * b - 4.0f * a * c, 0.0f);
+    float t_quad = (2.0f * c) / min(-b - sqrt(disc), -NF_EPS);
+    float t_lin  = -c / max(b, NF_EPS);
+    float t = clamp((abs(a) < NF_EPS) ? t_lin : t_quad, 0.0f, 1.0f);
+    float pdf = max(v0 + t * (v1 - v0), NF_EPS);
+    logdet = -log(pdf);
+    return clamp(x0 + t * w, 0.0f, 1.0f);
+}
+#endif
+
 // Square <-> hemisphere (y-up): Lambert azimuthal equal-area chart (V1), a
 // transliteration of spline_flow/train.py `_ChartV1` + `_square_to_disk` /
 // `_disk_to_square`. Shirley concentric square->disk (seam-free, area-preserving)
@@ -409,9 +506,15 @@ float2 nf_flow_forward(
         float xtr   = even ? z.y : z.x;
         float params[NF_PARAMS];
         nf_mlp(W, B, H, L * 3, xcond, cond, params);
+#if NF_COUPLING == 1
+        float widths[NF_BINS]; float vertices[NF_BINS + 1];
+        nf_decode_pq(params, widths, vertices);
+        float ld; float ytr = nf_pq_fwd(xtr, widths, vertices, ld);
+#else
         float widths[NF_BINS]; float heights[NF_BINS]; float derivs[NF_BINS + 1];
         nf_decode(params, widths, heights, derivs);
         float ld; float ytr = nf_rqs_fwd(xtr, widths, heights, derivs, ld);
+#endif
         logdet += ld;
         if (even) z.y = ytr; else z.x = ytr;
     }
@@ -432,9 +535,15 @@ float2 nf_flow_inverse(
         float ytr   = even ? z.y : z.x;
         float params[NF_PARAMS];
         nf_mlp(W, B, H, L * 3, ycond, cond, params);
+#if NF_COUPLING == 1
+        float widths[NF_BINS]; float vertices[NF_BINS + 1];
+        nf_decode_pq(params, widths, vertices);
+        float ld; float xtr = nf_pq_inv(ytr, widths, vertices, ld);
+#else
         float widths[NF_BINS]; float heights[NF_BINS]; float derivs[NF_BINS + 1];
         nf_decode(params, widths, heights, derivs);
         float ld; float xtr = nf_rqs_inv(ytr, widths, heights, derivs, ld);
+#endif
         logdet += ld;
         if (even) z.y = xtr; else z.x = xtr;
     }

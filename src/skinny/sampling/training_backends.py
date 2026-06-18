@@ -145,7 +145,8 @@ def _weights_from_linears(linears: list[tuple[np.ndarray, np.ndarray]],
     ``NeuralWeights`` in memory — the single NFW1 layout shared with
     ``spline_flow/export_weights.export_flow`` and ``neural_weights._layout``,
     applied without any filesystem round-trip."""
-    headers, n_w, n_b = _layout(cfg.layers, cfg.bins, cfg.hidden)
+    headers, n_w, n_b = _layout(cfg.layers, cfg.bins, cfg.hidden,
+                                cfg.encoding, cfg.l_pos, cfg.coupling)
     weights = np.zeros(n_w, dtype="<f4")
     biases = np.zeros(n_b, dtype="<f4")
     for (w_off, b_off, in_dim, out_dim), (w, b) in zip(headers, linears):

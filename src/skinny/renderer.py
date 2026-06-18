@@ -7548,10 +7548,22 @@ class Renderer:
         backend_kind = trainer_backend or self._neural_trainer_kind
         precision = train_precision or self._train_precision
         kind = handoff or self._neural_handoff_kind
+        # Condition the online trainer on the SAME scene-AABB position
+        # normalisation the shader's neuralCondition uses (fc.sceneBoundsMin/
+        # Extent). Without this the trainer's TrainerConfig.bounds defaults to
+        # None -> _bounds() falls back to (0,1) raw world position, so the net is
+        # trained on a different position scale than inference queries it with
+        # (e.g. Cornell world coords ~[-0.7,4] -> train p~[-2.4,7] vs infer
+        # p~[-1,1]); the position channel becomes off-distribution at inference
+        # and the learned proposal collapses to a generic, scene-agnostic (near
+        # no-op) distribution. Same AABB as _pack_uniforms (inference) and
+        # dump_path_records (the offline training header).
+        train_bounds = tuple(self._neural_scene_bounds())
         self._neural_trainer = (trainer if trainer is not None
                                 else NeuralTrainer(TrainerConfig(
                                     arch=cfg, backend=backend_kind,
-                                    train_precision=precision, handoff=kind),
+                                    train_precision=precision, handoff=kind,
+                                    bounds=train_bounds),
                                     initial=init))
         # The interop publisher writes weights+biases straight into the GPU-shared
         # binding-33/34 buffers; hand it those buffers plus the active storage
