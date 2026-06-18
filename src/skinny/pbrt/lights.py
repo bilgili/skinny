@@ -45,12 +45,13 @@ def _orient_z_to(direction) -> np.ndarray:
 
 
 def add_light(stage, parent_path: str, light, report, asset_dir: str | None = None,
-              exposure_scale: float = 1.0) -> bool:
+              exposure_scale: float = 1.0, base_dir: str | None = None) -> bool:
     """Author one UsdLux light. Returns True if a light was created.
 
-    *asset_dir* (when writing to disk) is where synthesized constant-environment
-    `.hdr` maps are written for textureless ``infinite`` lights. *exposure_scale*
-    folds the pbrt film imagingRatio into the emitted radiance.
+    *asset_dir* (when writing to disk) is where synthesized / converted `.hdr`
+    maps are written for ``infinite`` lights; *base_dir* is the scene directory
+    used to resolve a referenced env map. *exposure_scale* folds the pbrt film
+    imagingRatio into the emitted radiance.
     """
     p = light.params
     ltype = light.type
@@ -94,12 +95,16 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
         fname = p.string("filename", None)
         if fname:
             ext = os.path.splitext(fname)[1].lower()
-            prim.CreateTextureFileAttr().Set(Sdf.AssetPath(fname))
-            if ext != ".hdr":
-                report.approx(f"light:infinite {path}",
-                              f"env map {ext} referenced; loader expects .hdr (convert)")
-            else:
+            if ext == ".hdr":
+                prim.CreateTextureFileAttr().Set(Sdf.AssetPath(fname))
                 report.exact(f"light:infinite {path}")
+            elif ext in (".exr", ".pfm") and asset_dir is not None:
+                converted = _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path)
+                prim.CreateTextureFileAttr().Set(Sdf.AssetPath(converted or fname))
+            else:
+                prim.CreateTextureFileAttr().Set(Sdf.AssetPath(fname))
+                report.approx(f"light:infinite {path}",
+                              f"env map {ext} referenced; loader expects .hdr")
         else:
             rgb = spectra.param_to_rgb(p.get("L"), illuminant=True) or [1.0, 1.0, 1.0]
             rgb = [c * scale for c in rgb]
@@ -120,6 +125,28 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
 
     report.skipped(f"light:{ltype}", "unsupported light type")
     return False
+
+
+def _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path):
+    """Resample a pbrt ``.exr``/``.pfm`` infinite-light map to an `.hdr` for skinny."""
+    src = fname if os.path.isabs(fname) else os.path.join(base_dir or "", fname)
+    try:
+        from .envmap import load_env_image
+
+        img = load_env_image(src)
+    except Exception as exc:  # noqa: BLE001 - missing libs / unreadable map
+        report.approx(f"light:infinite {path}",
+                      f"could not convert env {os.path.basename(fname)}: {exc}")
+        return None
+    if scale != 1.0:
+        img = img * scale
+    from .hdr import write_hdr
+
+    hdr_name = sanitize(f"{name}_env") + ".hdr"
+    write_hdr(os.path.join(asset_dir, hdr_name), img)
+    report.exact(f"light:infinite {path}",
+                 f"{os.path.splitext(fname)[1]} env converted to .hdr")
+    return hdr_name
 
 
 def _set_color_intensity(prim, rgb, scale) -> None:

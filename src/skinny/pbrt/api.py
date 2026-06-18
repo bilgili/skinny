@@ -55,7 +55,8 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
 
     asset_dir = os.path.dirname(os.path.abspath(out)) if out else None
     for light in scene.lights:
-        add_light(stage, world, light, report, asset_dir=asset_dir, exposure_scale=exposure_scale)
+        add_light(stage, world, light, report, asset_dir=asset_dir,
+                  exposure_scale=exposure_scale, base_dir=base_dir)
 
     # carry the exact pbrt scene config (integrator/sampler/film/colorspace)
     meta_mod.tag_stage(stage, meta_mod.scene_metadata(scene))

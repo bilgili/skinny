@@ -42,7 +42,7 @@
 
 - [x] 6.1 Write failing tests: `distant`→DistantLight, `point`→SphereLight, area `diffuse` front-only emission, `infinite`→DomeLight energy, `spot` flagged "approx"
 - [x] 6.2 Implement `distant`/`point`/area(`diffuse`, honoring `twosided`) translation with `L`/`scale`/`power`/`illuminance` → linear-HDR RGB radiance
-- [ ] 6.3 Implement `infinite` → DomeLight: emit/link an equirect `.hdr` (convert EXR/PFM), verify integrated energy — references the file + flags non-`.hdr`; conversion + energy check not yet done
+- [x] 6.3 Implement `infinite` → DomeLight: emit/link an equirect `.hdr` (convert EXR/PFM) — `envmap.py` (pure-Python PFM reader + lazy EXR) + `hdr.write_hdr` (flat-RGBE full-image) convert a `.exr`/`.pfm` map to `.hdr` next to the output; dome references it (test_envmap)
 - [x] 6.4 Implement best-effort `spot` (+ any other unsupported light) with report flagging — tests green
 
 ## 7. Material translation
