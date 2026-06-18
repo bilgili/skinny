@@ -28,14 +28,14 @@ def test_alpha_to_usd_roughness_inverts_skinny_square():
 
 
 def test_diffuse_passthrough():
-    inputs, status, _ = M.map_material(_mat('Material "diffuse" "rgb reflectance" [0.2 0.4 0.6]'))
+    inputs, _tex, status, _ = M.map_material(_mat('Material "diffuse" "rgb reflectance" [0.2 0.4 0.6]'))
     assert inputs["diffuseColor"] == [0.2, 0.4, 0.6]
     assert inputs["metallic"] == 0.0
     assert status == "exact"
 
 
 def test_conductor_is_metallic_with_remapped_roughness():
-    inputs, _, _ = M.map_material(
+    inputs, _tex, _, _ = M.map_material(
         _mat('Material "conductor" "spectrum eta" "metal-Au-eta" "float roughness" 0.25')
     )
     assert inputs["metallic"] == 1.0
@@ -45,21 +45,21 @@ def test_conductor_is_metallic_with_remapped_roughness():
 
 
 def test_remap_false_changes_roughness():
-    on, _, _ = M.map_material(_mat('Material "conductor" "float roughness" 0.25'))
-    off, _, _ = M.map_material(
+    on, _tex, _, _ = M.map_material(_mat('Material "conductor" "float roughness" 0.25'))
+    off, _tex, _, _ = M.map_material(
         _mat('Material "conductor" "float roughness" 0.25 "bool remaproughness" "false"')
     )
     assert on["roughness"] != pytest.approx(off["roughness"])
 
 
 def test_dielectric_opens_transmission_gate():
-    inputs, _, _ = M.map_material(_mat('Material "dielectric" "float eta" 1.5'))
+    inputs, _tex, _, _ = M.map_material(_mat('Material "dielectric" "float eta" 1.5'))
     assert inputs["opacity"] == 0.0
     assert inputs["ior"] == 1.5
 
 
 def test_anisotropy_is_flagged():
-    _, _, notes = M.map_material(
+    _, _, _, notes = M.map_material(
         _mat('Material "conductor" "float uroughness" 0.1 "float vroughness" 0.4')
     )
     assert any("anisotropic" in n for n in notes)

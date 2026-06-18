@@ -57,6 +57,35 @@ def test_camera_position_and_forward(tmp_path):
     assert np.allclose(cam.forward / np.linalg.norm(cam.forward), [0, 0, 1], atol=1e-4)
 
 
+TEX_SCENE = """
+WorldBegin
+Texture "kd" "spectrum" "imagemap" "string filename" "tex.png"
+Material "diffuse" "texture reflectance" "kd"
+Shape "trianglemesh" "point3 P" [ -1 -1 0  1 -1 0  0 1 0 ] "integer indices" [0 1 2]
+"""
+
+
+def test_imagemap_reflectance_wires_texture(tmp_path):
+    (tmp_path / "tex.png").write_bytes(b"\x89PNG\r\n")  # placeholder asset
+    src = tmp_path / "scene.pbrt"
+    src.write_text(TEX_SCENE)
+    stage, report = import_pbrt(str(src))
+
+    from pxr import UsdShade
+
+    uvtex = [
+        p for p in stage.Traverse()
+        if p.GetTypeName() == "Shader" and UsdShade.Shader(p).GetShaderId() == "UsdUVTexture"
+    ]
+    assert uvtex, "expected a UsdUVTexture shader"
+    asset = UsdShade.Shader(uvtex[0]).GetInput("file").Get()
+    assert str(asset.path).endswith("tex.png")
+
+    # the loader resolves the connection into a diffuseColor texture binding
+    scene = usd_loader.load_scene_from_stage(stage)
+    assert any("diffuseColor" in (m.texture_bindings or {}) for m in scene.materials)
+
+
 def test_exported_usda_file_loads(tmp_path):
     src = tmp_path / "scene.pbrt"
     src.write_text(SCENE)

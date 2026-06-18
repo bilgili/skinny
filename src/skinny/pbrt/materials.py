@@ -15,9 +15,43 @@ the geometric mean and flagged.
 from __future__ import annotations
 
 import math
+import os
 
 from . import spectra
 from .parser import ParamSet
+
+# pbrt material input -> (UsdPreviewSurface input, is_scalar)
+_TEXTURABLE = {
+    "reflectance": ("diffuseColor", False),
+    "roughness": ("roughness", True),
+}
+
+
+def resolve_texture(name: str, textures, base_dir=None, _depth: int = 0):
+    """Resolve a pbrt texture name to (abs_path, color_space) or None.
+
+    Handles ``imagemap`` directly and unwraps a ``scale`` texture to its inner
+    image. Other texture classes (checkerboard/mix/constant) are unsupported.
+    """
+    if textures is None or _depth > 4:
+        return None
+    tex = textures.get(name)
+    if tex is None:
+        return None
+    if tex.klass == "imagemap":
+        fname = tex.params.string("filename", None)
+        if not fname:
+            return None
+        if base_dir and not os.path.isabs(fname):
+            fname = os.path.join(base_dir, fname)
+        encoding = tex.params.string("encoding", None)
+        color_space = "raw" if (encoding == "linear" or tex.datatype == "float") else "sRGB"
+        return fname, color_space
+    if tex.klass == "scale":
+        inner = tex.params.get("tex")
+        if inner is not None and inner.type == "texture":
+            return resolve_texture(inner.string, textures, base_dir, _depth + 1)
+    return None
 
 
 def pbrt_roughness_to_alpha(roughness: float, remap: bool = True) -> float:
@@ -65,11 +99,13 @@ def _conductor_basecolor(params, notes: list[str]):
     return list(spectra.named_metal_reflectance_rgb("copper"))
 
 
-def map_material(pbrt_material, *, emissive_rgb=None) -> tuple[dict, str, list[str]]:
+def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None):
     """Map a pbrt material to UsdPreviewSurface inputs.
 
-    Returns (inputs, status, notes) where ``inputs`` keys are UsdPreviewSurface
-    input names and ``status`` is one of report.EXACT/APPROX/SKIPPED.
+    Returns (inputs, tex_inputs, status, notes): ``inputs`` are constant
+    UsdPreviewSurface inputs, ``tex_inputs`` maps a UsdPreviewSurface input name
+    to ``(image_path, color_space)`` for texture-connected inputs, and
+    ``status`` is one of report.EXACT/APPROX/SKIPPED.
     """
     from .report import APPROX, EXACT
 
@@ -131,4 +167,15 @@ def map_material(pbrt_material, *, emissive_rgb=None) -> tuple[dict, str, list[s
     if emissive_rgb is not None:
         inputs["emissiveColor"] = list(emissive_rgb)
 
-    return inputs, status, notes
+    # texture-connected inputs (imagemap reflectance/roughness)
+    tex_inputs: dict = {}
+    for pbrt_in, (usd_in, _scalar) in _TEXTURABLE.items():
+        pp = p.get(pbrt_in)
+        if pp is not None and pp.type == "texture":
+            res = resolve_texture(pp.string, textures, base_dir)
+            if res is not None:
+                tex_inputs[usd_in] = res
+            else:
+                notes.append(f"texture '{pp.string}' on {pbrt_in} unresolved/unsupported")
+
+    return inputs, tex_inputs, status, notes

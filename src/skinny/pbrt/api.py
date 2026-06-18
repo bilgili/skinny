@@ -28,16 +28,17 @@ from .state import PbrtScene, PbrtShape, build_scene
 def import_pbrt(path: str, out: str | None = None):
     """Parse a pbrt scene file and emit USD. Returns (stage, report)."""
     scene = build_scene(parse_file(path))
-    return translate_scene(scene, out)
+    base_dir = os.path.dirname(os.path.abspath(path))
+    return translate_scene(scene, out, base_dir=base_dir)
 
 
-def translate_scene(scene: PbrtScene, out: str | None = None):
+def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | None = None):
     report = Report()
     stage = emit.new_stage(out)
     world = "/World"
 
     for i, shp in enumerate(scene.shapes):
-        _emit_shape(stage, f"{world}/shape_{i}", shp, report, scene)
+        _emit_shape(stage, f"{world}/shape_{i}", shp, report, scene, base_dir)
 
     if scene.camera is not None:
         _emit_camera(stage, f"{world}/Camera", scene, report)
@@ -56,7 +57,7 @@ def translate_scene(scene: PbrtScene, out: str | None = None):
 # --------------------------------------------------------------------------- #
 # geometry
 # --------------------------------------------------------------------------- #
-def _shape_geometry(shp: PbrtShape, report):
+def _shape_geometry(shp: PbrtShape, report, base_dir=None):
     """Return (points_local (N,3), indices (M,3), normals|None, uvs|None) or None."""
     p = shp.params
     t = shp.type
@@ -77,6 +78,8 @@ def _shape_geometry(shp: PbrtShape, report):
         if not fname:
             report.skipped("shape:plymesh", "no filename")
             return None
+        if base_dir and not os.path.isabs(fname):
+            fname = os.path.join(base_dir, fname)
         try:
             mesh = read_ply(fname)
         except Exception as exc:  # noqa: BLE001
@@ -91,8 +94,8 @@ def _shape_geometry(shp: PbrtShape, report):
     return None
 
 
-def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene) -> None:
-    geo = _shape_geometry(shp, report)
+def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=None) -> None:
+    geo = _shape_geometry(shp, report, base_dir)
     if geo is None:
         return
     pts_local, idx_local, nrm_local, uvs = geo
@@ -116,7 +119,8 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene) -> None:
 
     overrides = _resolve_medium(shp, scene, report, path)
     _author_material(stage, f"{path}_mat", shp.material, mesh, report,
-                     emissive_rgb=emissive, extra_overrides=overrides)
+                     emissive_rgb=emissive, extra_overrides=overrides,
+                     textures=scene.textures, base_dir=base_dir)
 
 
 def _resolve_medium(shp: PbrtShape, scene: PbrtScene, report, path) -> dict | None:
@@ -133,8 +137,10 @@ def _resolve_medium(shp: PbrtShape, scene: PbrtScene, report, path) -> dict | No
 
 
 def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
-                     emissive_rgb=None, extra_overrides=None):
-    inputs, status, notes = materials_mod.map_material(pbrt_material, emissive_rgb=emissive_rgb)
+                     emissive_rgb=None, extra_overrides=None, textures=None, base_dir=None):
+    inputs, tex_inputs, status, notes = materials_mod.map_material(
+        pbrt_material, emissive_rgb=emissive_rgb, textures=textures, base_dir=base_dir
+    )
     overrides = dict(extra_overrides or {})
     if pbrt_material is not None and pbrt_material.type == "subsurface":
         overrides.update(media_mod.subsurface_overrides(pbrt_material.params))
@@ -142,10 +148,14 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     shader = UsdShade.Shader.Define(stage, mat_path + "/Surface")
     shader.CreateIdAttr("UsdPreviewSurface")
     for key, val in inputs.items():
+        if key in tex_inputs:
+            continue  # textured input is authored as a connection below
         if key in ("diffuseColor", "emissiveColor", "specularColor"):
             shader.CreateInput(key, Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*[float(c) for c in val]))
         else:
             shader.CreateInput(key, Sdf.ValueTypeNames.Float).Set(float(val))
+    for usd_in, (tex_path, color_space) in tex_inputs.items():
+        _author_texture(stage, shader, f"{mat_path}/{usd_in}_tex", usd_in, tex_path, color_space)
     mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
     if overrides:
         mat.GetPrim().SetCustomDataByKey("skinnyOverrides", overrides)
@@ -154,6 +164,30 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     mtype = pbrt_material.type if pbrt_material else "diffuse"
     detail = "; ".join(notes)
     report.add(f"material:{mtype} {mat_path}", status, detail)
+    if tex_inputs:
+        report.exact(f"textures {mat_path}", ", ".join(tex_inputs))
+
+
+_SCALAR_TEX_INPUTS = {"roughness", "metallic", "opacity"}
+
+
+def _author_texture(stage, shader, tex_prim_path, usd_in, image_path, color_space):
+    """Author a UsdUVTexture node and connect it to *usd_in* on *shader*."""
+    tex = UsdShade.Shader.Define(stage, tex_prim_path)
+    tex.CreateIdAttr("UsdUVTexture")
+    tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(image_path))
+    tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
+    tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+    tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set(color_space)
+    scalar = usd_in in _SCALAR_TEX_INPUTS
+    out = tex.CreateOutput(
+        "r" if scalar else "rgb",
+        Sdf.ValueTypeNames.Float if scalar else Sdf.ValueTypeNames.Float3,
+    )
+    si = shader.CreateInput(
+        usd_in, Sdf.ValueTypeNames.Float if scalar else Sdf.ValueTypeNames.Color3f
+    )
+    si.ConnectToSource(out)
 
 
 # --------------------------------------------------------------------------- #

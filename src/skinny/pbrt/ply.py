@@ -100,7 +100,7 @@ def _read_binary(body: bytes, elements, little: bool) -> PlyMesh:
     for name, count, props in elements:
         if name == "vertex" and all(pr[0] == "property" or True for pr in props):
             names = _vertex_columns(props)
-            dtype = np.dtype([(pr[-1], endian + _NUMPY_FMT[pr[1]]) for pr in props])
+            dtype = np.dtype([(pr[-1], endian + _NUMPY_FMT[pr[0]]) for pr in props])
             arr = np.frombuffer(body, dtype=dtype, count=count, offset=off)
             off += dtype.itemsize * count
             vals = np.stack([arr[n].astype(np.float64) for n in names], axis=1)
@@ -117,7 +117,7 @@ def _read_binary(body: bytes, elements, little: bool) -> PlyMesh:
                 indices.extend(_fan(idx))
         else:
             # skip unknown fixed-size element
-            dtype = np.dtype([(pr[-1], endian + _NUMPY_FMT[pr[1]]) for pr in props])
+            dtype = np.dtype([(pr[-1], endian + _NUMPY_FMT[pr[0]]) for pr in props])
             off += dtype.itemsize * count
     return PlyMesh(points, np.array(indices, dtype=np.int64), normals, uvs)
 
