@@ -36,7 +36,7 @@
 
 - [x] 5.1 Write failing tests for the `perspective` shorter-axis `fov` → vertical-FOV conversion across aspect ratios, and a `realistic` lens → ordered `LensElement`s
 - [x] 5.2 Implement `perspective` (fov-axis + `screenwindow` + DOF `lensradius`/`aperturediameter`/`focaldistance` → `fstop`/`focus_distance`) → `CameraOverride`
-- [ ] 5.3 Implement `realistic` lens description → `LensSystem`/`LensElement` (signed radius, thickness, IOR, aperture, aperture-stop) — currently a flagged perspective fallback only
+- [x] 5.3 Implement `realistic` lens description → `LensSystem`/`LensElement` (signed radius, thickness, IOR, aperture, aperture-stop) — parses the pbrt lens file, authors `skinny:lens:*` child prims; loader yields a `LensSystem` (test_camera)
 
 ## 6. Light translation
 

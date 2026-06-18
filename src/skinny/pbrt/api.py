@@ -49,7 +49,7 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
         _emit_shape(stage, f"{world}/shape_{i}", shp, report, scene, base_dir, exposure_scale)
 
     if scene.camera is not None:
-        _emit_camera(stage, f"{world}/Camera", scene, report)
+        _emit_camera(stage, f"{world}/Camera", scene, report, base_dir)
     else:
         report.skipped("camera", "scene has no Camera")
 
@@ -219,7 +219,7 @@ def _author_texture(stage, shader, tex_prim_path, usd_in, image_path, color_spac
 # --------------------------------------------------------------------------- #
 # camera
 # --------------------------------------------------------------------------- #
-def _emit_camera(stage, path, scene: PbrtScene, report) -> None:
+def _emit_camera(stage, path, scene: PbrtScene, report, base_dir=None) -> None:
     cam = scene.camera
     film = scene.film
     xres = film.float("xresolution", 1280.0) if film else 1280.0
@@ -227,15 +227,14 @@ def _emit_camera(stage, path, scene: PbrtScene, report) -> None:
     aspect = (xres / yres) if yres else (16.0 / 9.0)
 
     notes: list[str] = []
+    intr = camera_mod.perspective_to_camera(cam.params, aspect, notes)
+    lens = None
     if cam.type == "perspective":
-        intr = camera_mod.perspective_to_camera(cam.params, aspect, notes)
         status = "exact"
     elif cam.type == "realistic":
-        intr = camera_mod.perspective_to_camera(cam.params, aspect, notes)
-        notes.append("realistic lens not yet mapped; used a perspective fallback")
-        status = "approx"
+        lens = camera_mod.realistic_lens(cam.params, base_dir, notes)
+        status = "exact" if lens else "approx"
     else:
-        intr = camera_mod.perspective_to_camera(cam.params, aspect, notes)
         notes.append(f"camera type '{cam.type}' approximated as perspective")
         status = "approx"
 
@@ -250,5 +249,21 @@ def _emit_camera(stage, path, scene: PbrtScene, report) -> None:
     UsdGeom.Xformable(usd_cam).AddTransformOp().Set(
         emit.to_gf_matrix(T.to_skinny(cam.camera_to_world))
     )
+    if lens:
+        _author_lens(stage, path, lens)
+        notes.append(f"realistic lens: {len(lens)} elements")
     meta_mod.tag_prim(usd_cam.GetPrim(), meta_mod.camera_metadata(cam))
     report.add(f"camera:{cam.type} {path}", status, "; ".join(notes))
+
+
+def _author_lens(stage, cam_path, elements) -> None:
+    """Author one Xform child per lens surface with skinny:lens:* attributes."""
+    for el in elements:
+        child = UsdGeom.Xform.Define(stage, f"{cam_path}/lens_{el['order']}")
+        prim = child.GetPrim()
+        prim.CreateAttribute("skinny:lens:role", Sdf.ValueTypeNames.String).Set(el["role"])
+        prim.CreateAttribute("skinny:lens:radius", Sdf.ValueTypeNames.Float).Set(el["radius"])
+        prim.CreateAttribute("skinny:lens:thickness", Sdf.ValueTypeNames.Float).Set(el["thickness"])
+        prim.CreateAttribute("skinny:lens:ior", Sdf.ValueTypeNames.Float).Set(el["ior"])
+        prim.CreateAttribute("skinny:lens:aperture", Sdf.ValueTypeNames.Float).Set(el["aperture"])
+        prim.CreateAttribute("skinny:lens:order", Sdf.ValueTypeNames.Int).Set(el["order"])

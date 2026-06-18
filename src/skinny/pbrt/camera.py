@@ -8,8 +8,62 @@ framing for the film aspect ratio.
 from __future__ import annotations
 
 import math
+import os
 
 DEFAULT_VERTICAL_APERTURE_MM = 24.0
+
+
+def parse_lens_file(path: str) -> list[tuple[float, float, float, float]]:
+    """Parse a pbrt lens description: rows of ``radius thickness ior aperture`` (mm)."""
+    rows: list[tuple[float, float, float, float]] = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            r, t, n, a = (float(x) for x in parts[:4])
+            rows.append((r, t, n, a))
+    return rows
+
+
+def realistic_lens(params, base_dir, notes) -> list[dict] | None:
+    """Translate a pbrt ``realistic`` camera lens file to skinny lens elements.
+
+    skinny's LensElement already follows pbrt's §6.4 convention (front-to-rear,
+    signed radius, planar aperture stop), so rows map directly. Returns a list of
+    ``{role, radius, thickness, ior, aperture, order}`` or None.
+    """
+    lensfile = params.string("lensfile", None)
+    if not lensfile:
+        notes.append("realistic camera without lensfile")
+        return None
+    path = lensfile if os.path.isabs(lensfile) else os.path.join(base_dir or "", lensfile)
+    try:
+        rows = parse_lens_file(path)
+    except OSError as exc:
+        notes.append(f"lensfile unreadable: {exc}")
+        return None
+    if not rows:
+        notes.append("lensfile has no elements")
+        return None
+    aperture_override = params.float("aperturediameter", None)
+    elements: list[dict] = []
+    for i, (radius, thickness, ior, aperture) in enumerate(rows):
+        role = "aperture" if radius == 0.0 else "element"
+        if role == "aperture" and aperture_override:
+            aperture = aperture_override
+        elements.append({
+            "role": role,
+            "radius": radius,
+            "thickness": thickness,
+            "ior": ior if ior > 0.0 else 1.0,  # 0 in the n column = air
+            "aperture": aperture,
+            "order": i,
+        })
+    return elements
 
 
 def perspective_to_camera(params, aspect: float, notes: list[str]) -> dict:
