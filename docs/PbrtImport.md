@@ -174,11 +174,14 @@ Support status per pbrt feature.
 | `diffusetransmission` | approx | diffuse + partial opacity |
 | `subsurface` material | approx | dielectric + homogeneous interior via `customData` |
 | `perspective` camera | matched | shorter-axis fov conversion |
-| `realistic` camera | unsupported | lens mapping not yet implemented (perspective fallback) |
+| `realistic` camera | matched | lens file → `skinny:lens:*` (thick-lens `LensSystem`) |
+| negative-scale camera (`Scale -1`) | flagged | improper basis → image mirrored vs pbrt; `pbrt:mirrored` set, reported (needs renderer flip support) |
 | `distant` / `point` lights | matched / approx | point emitted as a small sphere |
 | `spot` light | unsupported | no skinny spotlight; flagged |
 | area (`diffuse`) light | approx | emissive mesh; sidedness may differ |
-| `infinite` light | approx | constant or `.hdr` map; EXR→HDR conversion pending |
+| `infinite` light | matched | constant baked to `.hdr`; `.exr`/`.pfm` maps resampled to `.hdr` |
+| film `iso` / exposure | matched | `imagingRatio = exposureTime·ISO/100` baked into emitters |
+| `imagemap` texture (reflectance/roughness) | matched | `UsdUVTexture`; needs mesh UVs to sample |
 | homogeneous medium | approx | coefficients via `customData` |
 | heterogeneous (grid/VDB) medium | unsupported | flagged, not emitted |
 | spectral rendering | unsupported | RGB reduction only (documented divergence) |

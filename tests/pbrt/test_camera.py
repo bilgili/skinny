@@ -73,6 +73,43 @@ def test_realistic_lens_loads_as_lenssystem(tmp_path):
     assert len(sc.camera_override.lens.elements) == 3
 
 
+def test_improper_camera_is_flagged_mirrored(tmp_path):
+    usd_loader = pytest.importorskip("skinny.usd_loader")  # noqa: F841
+    from pxr import UsdGeom
+
+    from skinny.pbrt.api import import_pbrt
+
+    scene = tmp_path / "s.pbrt"
+    scene.write_text(
+        "Scale -1 1 1\n"
+        "LookAt 0 0 5  0 0 0  0 1 0\n"
+        'Camera "perspective" "float fov" 40\n'
+        "WorldBegin\n"
+        'Shape "sphere" "float radius" 1\n'
+    )
+    stage, report = import_pbrt(str(scene), out=str(tmp_path / "s.usda"))
+    cams = [p.GetCustomDataByKey("pbrt") for p in stage.Traverse() if p.IsA(UsdGeom.Camera)]
+    assert cams and cams[0].get("mirrored") is True
+    assert any("mirrored" in (e.detail or "") for e in report.entries)
+
+
+def test_proper_camera_not_flagged(tmp_path):
+    from pxr import UsdGeom
+
+    from skinny.pbrt.api import import_pbrt
+
+    scene = tmp_path / "s.pbrt"
+    scene.write_text(
+        "LookAt 0 0 5  0 0 0  0 1 0\n"
+        'Camera "perspective" "float fov" 40\n'
+        "WorldBegin\n"
+        'Shape "sphere" "float radius" 1\n'
+    )
+    stage, _ = import_pbrt(str(scene), out=str(tmp_path / "s.usda"))
+    cams = [p.GetCustomDataByKey("pbrt") for p in stage.Traverse() if p.IsA(UsdGeom.Camera)]
+    assert cams and "mirrored" not in cams[0]
+
+
 def test_depth_of_field_sets_fstop():
     params = _cam_params('Camera "perspective" "float fov" 40 "float lensradius" 0.01 "float focaldistance" 3')
     notes = []

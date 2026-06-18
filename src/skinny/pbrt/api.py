@@ -253,7 +253,17 @@ def _emit_camera(stage, path, scene: PbrtScene, report, base_dir=None) -> None:
     if lens:
         _author_lens(stage, path, lens)
         notes.append(f"realistic lens: {len(lens)} elements")
-    meta_mod.tag_prim(usd_cam.GetPrim(), meta_mod.camera_metadata(cam))
+
+    camera_md = meta_mod.camera_metadata(cam)
+    if T.is_orientation_reversing(cam.camera_to_world):
+        # e.g. a `Scale -1 1 1` before LookAt makes the camera basis improper;
+        # skinny reconstructs a right-handed camera from position+forward, so the
+        # image comes out horizontally mirrored vs pbrt. Flag it (carry in
+        # metadata) rather than silently shipping a mirrored render.
+        camera_md["mirrored"] = True
+        notes.append("improper camera transform (e.g. Scale -1): image mirrored horizontally vs pbrt")
+        status = "approx"
+    meta_mod.tag_prim(usd_cam.GetPrim(), camera_md)
     report.add(f"camera:{cam.type} {path}", status, "; ".join(notes))
 
 
