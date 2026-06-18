@@ -27,9 +27,17 @@ Declared in `pyproject.toml` `[project.scripts]`:
 | `skinny-gui` | `skinny.ui.qt.app:main` | Qt desktop app |
 | `skinny-web` | `skinny.web_app:main` | Panel web app (per-session server render) |
 | `skinny-render` | `skinny.headless:main` (`headless.py:329`) | offscreen CLI renderer |
+| `skinny-import-pbrt` | `skinny.pbrt.cli:main` | convert a pbrt v4 scene to USD |
 
 The top-level `skinny` package defines no `__all__`; import submodules directly
 (`from skinny import headless`, `from skinny.renderer import Renderer`).
+
+### `skinny.pbrt` — pbrt v4 importer
+
+`import_pbrt(path, out=None) -> (Usd.Stage, Report)` parses a pbrt v4 scene and
+emits a USD stage loadable by `usd_loader`; `out` also writes a `.usda`/`.usd`.
+The returned `Report` classifies each construct as exact / approx / skipped. See
+[PbrtImport.md](PbrtImport.md) for the full mapping and the parity matrix.
 
 ---
 

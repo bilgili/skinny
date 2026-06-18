@@ -939,12 +939,25 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
 
         float3 L = escapedRadiance;
 
-        // (s ≥ 2, t = 0): emissive eye-vertex hits.
+        // (s ≥ 2, t = 0): emissive eye-vertex hits, MIS-gated against the t = 1
+        // NEE (connectT1) exactly as path.slang gates its BSDF-sampled emission.
+        // An emissive triangle reached by a non-delta eye bounce is ALSO sampled
+        // by connectT1's NEE from the previous eye vertex; adding the BSDF-hit at
+        // full weight here on top of the (already power-heuristic-weighted) NEE
+        // double-counts direct area-light illumination — BDPT read ~1.75× brighter
+        // than pbrt on diffuse area-light scenes. Take the BSDF hit at full weight
+        // only when no NEE partner exists: the primary/first hit (s == 2, analog
+        // of path.slang's bounce == 0), a delta/specular bounce into z
+        // (eye[s - 2].isDelta), or a scene with no emissive-triangle NEE.
         [loop]
         for (int s = 2; s <= eyeLen; s++)
         {
             BDPTVertex z = eye[s - 1];
-            if (z.onLight)
+            if (!z.onLight) continue;
+            bool noNeePartner = (s == 2)
+                              || (fc.numEmissiveTriangles == 0u)
+                              || eye[s - 2].isDelta;
+            if (noNeePartner)
                 L += z.throughput * z.emission;
         }
 

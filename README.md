@@ -310,6 +310,22 @@ interface, `Renderer`, parameters, scene loading, presets) is in
 [PythonAPI.md](docs/PythonAPI.md); `skinny.headless` internals are in
 [Architecture.md](docs/Architecture.md).
 
+### Importing pbrt v4 scenes (`skinny-import-pbrt`)
+
+Convert a [pbrt v4](https://pbrt.org) text scene into a skinny-loadable USD stage:
+
+```bash
+skinny-import-pbrt scene.pbrt -o scene.usda
+skinny-render scene.usda -o out/scene.png --samples 256
+```
+
+The importer covers triangle/ply/sphere geometry + instancing, the common pbrt
+materials/lights, the `perspective` camera, spectrum→RGB, and homogeneous
+media/subsurface (best-effort), emitting an exact/approx/skipped report. Image
+parity against pbrt v4 is validated by a relMSE/FLIP gate over a checked-in
+corpus. See [PbrtImport.md](docs/PbrtImport.md) for the full feature/parity
+matrix.
+
 ### Mesh heads (legacy)
 
 Place `.obj` files (with optional normal/roughness/displacement maps) in

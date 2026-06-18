@@ -1,0 +1,48 @@
+{
+  "pbrt_version": "pbrt-v4 5f7a606 (master, github.com/mmp/pbrt-v4, depth-1 build 2026-06-17)",
+  "notes": "Reference EXRs rendered with the pinned pbrt v4 above. Tolerances reflect current measured parity (skinny's own default key light disabled; residual = RGB-vs-spectral + path-tracer-vs-sppm caustics) as a regression guard with headroom. Regenerate refs deliberately if the pbrt version or a scene changes.",
+  "scenes": [
+    {
+      "name": "diffuse_arealight",
+      "file": "diffuse_arealight.pbrt",
+      "ref": "refs/diffuse_arealight.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 256,
+      "relmse_tol": 0.04,
+      "flip_tol": 0.04,
+      "measured": {
+        "relmse": 0.012,
+        "flip": 0.021
+      }
+    },
+    {
+      "name": "conductor_infinite",
+      "file": "conductor_infinite.pbrt",
+      "ref": "refs/conductor_infinite.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 256,
+      "relmse_tol": 0.04,
+      "flip_tol": 0.05,
+      "measured": {
+        "relmse": 0.006,
+        "flip": 0.024
+      }
+    },
+    {
+      "name": "glass_arealight",
+      "file": "glass_arealight.pbrt",
+      "ref": "refs/glass_arealight.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 512,
+      "relmse_tol": 0.1,
+      "flip_tol": 0.09,
+      "measured": {
+        "relmse": 0.058,
+        "flip": 0.058
+      }
+    }
+  ]
+}

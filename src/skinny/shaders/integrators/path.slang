@@ -140,6 +140,13 @@ struct PathTracer : IIntegrator
         // lobe, transmitted, or furnace) ⇒ take the env at full weight.
         float misBsdfPdf = -1.0;
 
+        // Was the current ray spawned by a delta/perfectly-specular bounce
+        // (pdf <= 0 — a smooth dielectric's mirror reflect/refract)? A delta lobe
+        // has no NEE partner, so an emissive triangle it lands on must be taken at
+        // full weight (mirrors the sphere-light delta branch + bdpt deltaBounce).
+        // False for the primary ray.
+        bool spawnedBySpecular = false;
+
         // Skip cutout-transparent surfaces before the bounce loop begins.
         // Offset along the ray direction (not -normal) so back-facing
         // double-sided quads are cleared correctly.
@@ -168,7 +175,7 @@ struct PathTracer : IIntegrator
 
             radiance += throughput * br.fullRadiance;
 
-            if (bounce == 0u || fc.numEmissiveTriangles == 0u)
+            if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)
                 radiance += throughput * br.bsdfSample.emission;
 
             radiance += throughput * br.directLight;
@@ -196,6 +203,11 @@ struct PathTracer : IIntegrator
             misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted
                           && br.bsdfSample.pdf > 0.0)
                        ? br.bsdfSample.pdf : -1.0;
+
+            // The ray spawned below carries this bounce's delta-ness to the next
+            // iteration's emissive-triangle gate (delta ⇒ no NEE partner ⇒ take
+            // emission at full weight).
+            spawnedBySpecular = (br.bsdfSample.pdf <= 0.0);
 
             float3 spawnOffset = br.bsdfSample.transmitted
                 ? -h.normal * 0.002

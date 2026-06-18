@@ -51,6 +51,10 @@ void estimateRadianceRecord(Ray ray, HitInfo firstHit, inout RNG rng)
     HitInfo h         = firstHit;
     Ray r             = ray;
     float misBsdfPdf  = -1.0;
+    // Delta-ness of the bounce that spawned the current ray (see path.slang):
+    // a delta lobe has no NEE partner, so an emissive triangle it hits is taken
+    // at full weight. False for the primary ray.
+    bool spawnedBySpecular = false;
 
     // Per-vertex stack: geometry + (radiance, beta_in) snapshots for the
     // backward attribution `contrib_k = (L_final - L_k)/beta_in_k`.
@@ -86,7 +90,7 @@ void estimateRadianceRecord(Ray ray, HitInfo firstHit, inout RNG rng)
         BounceResult br = evaluateBounce(h, r, bounce, rng);
 
         radiance += throughput * br.fullRadiance;
-        if (bounce == 0u || fc.numEmissiveTriangles == 0u)
+        if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)
             radiance += throughput * br.bsdfSample.emission;
         radiance += throughput * br.directLight;
 
@@ -126,6 +130,9 @@ void estimateRadianceRecord(Ray ray, HitInfo firstHit, inout RNG rng)
         bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
         misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
                    ? br.bsdfSample.pdf : -1.0;
+
+        // Carry this bounce's delta-ness to the next iteration's emission gate.
+        spawnedBySpecular = (br.bsdfSample.pdf <= 0.0);
 
         float3 spawnOffset = br.bsdfSample.transmitted ? -h.normal * 0.002 : h.normal * 0.002;
         r.origin    = h.position + spawnOffset;
