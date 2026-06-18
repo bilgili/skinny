@@ -414,6 +414,26 @@ float nf_pq_inv(float y, float widths[NF_BINS], float vertices[NF_BINS + 1], out
 }
 #endif
 
+// ---- hemisphere chart (axis; change renderer-chart-selection) ----
+// NF_CHART selects the square<->direction map sandwiched after the couplings:
+//   V1 (1, default) Lambert azimuthal equal-area — byte-identical to the shipped
+//                   net: the default build emits no -D NF_CHART and the V1 path +
+//                   sampleNeural/pdfNeural signatures below are unchanged.
+//   V0 (0)          cylindrical equal-area (φ=2πu, cosθ=v); |J| = 2π.
+//   V5 (5)          equirectangular (φ=2πu, θ=(π/2)v); NON-equal-area, |J| = π²·sinθ
+//                   (per-sample → nf_chart_logjac, not the constant NF_LOG2PI).
+// V2 (2) is reserved but NOT implemented: it needs the outgoing dir in flow-local
+// space (the .nrec schema lacks the tangent basis), so it cannot be trained to
+// match. V0/V1/V5 are z-only maps → no `wo` is threaded and the V1 build is
+// byte-identical. Transliterations of spline_flow/train.py _ChartV0/_ChartV1/_ChartV5.
+#define NF_CHART_V0 0
+#define NF_CHART_V1 1
+#define NF_CHART_V2 2
+#define NF_CHART_V5 5
+#ifndef NF_CHART
+#define NF_CHART NF_CHART_V1
+#endif
+
 // Square <-> hemisphere (y-up): Lambert azimuthal equal-area chart (V1), a
 // transliteration of spline_flow/train.py `_ChartV1` + `_square_to_disk` /
 // `_disk_to_square`. Shirley concentric square->disk (seam-free, area-preserving)
@@ -490,6 +510,66 @@ float2 nf_hemi_to_square(float3 wld)
     return nf_disk_to_square(float2(r * cphi, r * sphi));
 }
 
+// ---- chart dispatch (renderer-chart-selection) ----
+// nf_chart_square_to_dir / nf_chart_dir_to_square / nf_chart_logjac select the
+// active chart by NF_CHART. V1 (default) keeps using nf_square_to_hemi /
+// nf_hemi_to_square + the constant NF_LOG2PI directly in sampleNeural/pdfNeural
+// (no wrapper, no SPIR-V change), so these symbols are only defined for V0/V5.
+#if NF_CHART == NF_CHART_V0
+// V0 cylindrical equal-area: φ=2πu, cosθ=v. Transliterates spline_flow
+// square_to_hemisphere / hemisphere_to_square. The inverse does NOT clamp off the
+// [0,1] boundary (matches spline_flow hemisphere_to_square exactly). |J| = 2π.
+float3 nf_chart_square_to_dir(float2 z)
+{
+    float u = clamp(z.x, 0.0f, 1.0f);
+    float v = clamp(z.y, 0.0f, 1.0f);
+    float phi = 2.0f * NF_PI * u;
+    float cos_t = v;
+    float sin_t = sqrt(max(1.0f - cos_t * cos_t, 0.0f));
+    return float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
+}
+float2 nf_chart_dir_to_square(float3 wld)
+{
+    float3 w = normalize(wld);
+    float phi = atan2(w.z, w.x);
+    if (phi < 0.0f) phi += 2.0f * NF_PI;
+    return float2(phi / (2.0f * NF_PI), clamp(w.y, 0.0f, 1.0f));
+}
+float nf_chart_logjac(float2 z) { return NF_LOG2PI; }
+
+#elif NF_CHART == NF_CHART_V5
+// V5 spherical equirectangular: φ=2πu, θ=(π/2)v. NON-equal-area: |J| = π²·sinθ, so
+// q_ω = q_□ / (π²·sinθ). Transliterates spline_flow _ChartV5.
+static const float NF_LOGPI2 = 2.28946497f;        // log(π²)
+float3 nf_chart_square_to_dir(float2 z)
+{
+    float u = clamp(z.x, 0.0f, 1.0f);
+    float v = clamp(z.y, 0.0f, 1.0f);
+    float phi = 2.0f * NF_PI * u;
+    float theta = 0.5f * NF_PI * v;
+    float sin_t = sin(theta);
+    float cos_t = cos(theta);
+    return float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
+}
+float2 nf_chart_dir_to_square(float3 wld)
+{
+    float3 w = normalize(wld);
+    float theta = acos(clamp(w.y, -1.0f, 1.0f));
+    float phi = atan2(w.z, w.x);
+    if (phi < 0.0f) phi += 2.0f * NF_PI;
+    float u = phi / (2.0f * NF_PI);
+    float v = theta / (0.5f * NF_PI);
+    return float2(clamp(u, NF_ZEPS, 1.0f - NF_ZEPS),
+                  clamp(v, NF_ZEPS, 1.0f - NF_ZEPS));
+}
+float nf_chart_logjac(float2 z)
+{
+    float v = clamp(z.y, 0.0f, 1.0f);
+    float sin_t = max(sin(0.5f * NF_PI * v), NF_EPS);    // clamp the θ=0 pole
+    return NF_LOGPI2 + log(sin_t);
+}
+#endif
+
 // Forward flow u -> z accumulating log|det dz/du| (coupling layers alternate the mask).
 // DOC:coupling#sig start
 float2 nf_flow_forward(
@@ -561,9 +641,14 @@ float3 sampleNeural(
     float log_q_square = -logdet;                       // base pdf on unit square = 1
     // DOC:pdf-square#core end
     // DOC:pdf-omega#pdf start
-    pdfOmega = exp(log_q_square - NF_LOG2PI);
-    // DOC:pdf-omega#pdf end
+#if NF_CHART == NF_CHART_V1
+    pdfOmega = exp(log_q_square - NF_LOG2PI);            // V1 (default): constant 2π
     return nf_square_to_hemi(z);
+#else
+    pdfOmega = exp(log_q_square - nf_chart_logjac(z));   // V0 (2π) / V5 (π²·sinθ)
+    return nf_chart_square_to_dir(z);
+#endif
+    // DOC:pdf-omega#pdf end
 }
 
 // PUBLIC: exact solid-angle pdf the flow assigns to direction `wi` (for the MIS mix).
@@ -575,9 +660,16 @@ float pdfNeural(
 {
     // DOC:pdf-inv#core start
     if (wi.y <= 0.0f) return 0.0f;
+#if NF_CHART == NF_CHART_V1
     float2 z = nf_hemi_to_square(wi);
     float logdet;
     nf_flow_inverse(W, B, H, z, cond, logdet);          // log|det du/dz| = log q_square
-    return exp(logdet - NF_LOG2PI);
+    return exp(logdet - NF_LOG2PI);                      // V1 (default): constant 2π
+#else
+    float2 z = nf_chart_dir_to_square(wi);
+    float logdet;
+    nf_flow_inverse(W, B, H, z, cond, logdet);
+    return exp(logdet - nf_chart_logjac(z));             // V0 (2π) / V5 (π²·sinθ)
+#endif
     // DOC:pdf-inv#core end
 }

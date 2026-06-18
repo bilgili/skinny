@@ -86,8 +86,8 @@ def main():
                     help="firefly clamp percentile (e.g. 99); 0 = off")
     ap.add_argument("--encoding", default="E0", choices=("E0", "E1", "E3"),
                     help="conditioner encoding (renderer-supported subset)")
-    ap.add_argument("--chart", default="V1", choices=("V1",),
-                    help="hemisphere chart (renderer implements V1 only today)")
+    ap.add_argument("--chart", default="V1", choices=("V0", "V1", "V5"),
+                    help="hemisphere chart (renderer: V0 cylindrical | V1 Lambert | V5 equirect)")
     ap.add_argument("--tag", default="glass_off", help="output net name prefix")
     ap.add_argument("--enc-in-name", action="store_true",
                     help="append the encoding to the net name (e.g. _E1_rqs)")

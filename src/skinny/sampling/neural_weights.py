@@ -30,6 +30,7 @@ import numpy as np
 
 MAGIC = 0x4E465731
 VERSION = 1
+TAG_MAGIC = 0x50544731   # "PTG1" — optional parametrization-tag trailer (export_weights)
 
 # Default architecture — the shipped net + the shader's `#ifndef` defaults
 # (shaders/sampling/neural_flow.slang: NF_LAYERS/NF_BINS/NF_HIDDEN). The size is
@@ -97,6 +98,20 @@ def coupling_n_params(coupling: str, bins: int = NF_BINS) -> int:
     if coupling == "nis-pl":
         return bins
     raise ValueError(f"unknown coupling {coupling!r}")
+
+
+# Hemisphere chart -> shader NF_CHART define value (change renderer-chart-selection).
+# V1 is the shipped default (no -D flag). V2 is reserved but NOT implemented in the
+# shader (needs flow-local wo absent from the .nrec schema) — selecting it errors.
+NF_CHART_CODE = {"V0": 0, "V1": 1, "V5": 5}
+
+
+def chart_code(chart: str) -> int:
+    if chart not in NF_CHART_CODE:
+        raise ValueError(
+            f"unknown/unimplemented chart {chart!r}; renderer implements "
+            f"{sorted(NF_CHART_CODE)} (V2 reserved, not buildable)")
+    return NF_CHART_CODE[chart]
 
 
 def fourier_gamma(p: np.ndarray, L: int) -> np.ndarray:
@@ -273,6 +288,7 @@ class NeuralBuildConfig:
     encoding: Encoding = Encoding.E0
     l_pos: int = NF_L_POS
     coupling: str = "rqs"          # rqs (default) | nis-pq (change neural-nis-baseline)
+    chart: str = "V1"              # V1 (default) | V0 | V5 (change renderer-chart-selection)
 
     @property
     def n_params(self) -> int:
@@ -327,6 +343,10 @@ class NeuralBuildConfig:
         if self.coupling != "rqs":
             # NF_COUPLING selects the in-shader warp: 1 = nis-pq (piecewise-quadratic).
             d += ["-D", f"NF_COUPLING={ {'nis-pq': 1}[self.coupling] }"]
+        if self.chart != "V1":
+            # NF_CHART selects the square<->direction map: 0 = V0 (cylindrical),
+            # 5 = V5 (equirectangular). V1 (default) emits no flag → byte-identical.
+            d += ["-D", f"NF_CHART={chart_code(self.chart)}"]
         return tuple(d)
 
     @property
@@ -337,7 +357,8 @@ class NeuralBuildConfig:
             f"_{self.encoding.value}"
             + (f"P{self.l_pos}" if self.l_pos != NF_L_POS else ""))
         cpl = "" if self.coupling == "rqs" else f"_{self.coupling}"
-        return f"L{self.layers}B{self.bins}H{self.hidden}{enc}{cpl}_{self.precision.value}"
+        cht = "" if self.chart == "V1" else f"_{self.chart}"
+        return f"L{self.layers}B{self.bins}H{self.hidden}{enc}{cpl}{cht}_{self.precision.value}"
 
 
 @dataclass
@@ -351,6 +372,7 @@ class NeuralWeights:
     headers: np.ndarray   # uint32 [nHeaders, 4] — (weightOffset, biasOffset, inDim, outDim)
     weights: np.ndarray   # float32 [nWeights]
     biases: np.ndarray    # float32 [nBiases]
+    chart: str | None = None   # stamped chart from the PTG1 trailer (None if absent)
 
     @property
     def header_bytes(self) -> bytes:
@@ -383,7 +405,8 @@ class NeuralWeights:
 
     def assert_matches_shader(self, expect: tuple[int, int, int, int] | None = None,
                               *, expect_mlp_in: int | None = None,
-                              expect_n_params: int | None = None) -> None:
+                              expect_n_params: int | None = None,
+                              expect_chart: str | None = None) -> None:
         """Raise if the file's architecture differs from the built dimensions — a
         mismatch would index the flat buffers wrong and corrupt inference. With no
         argument it checks the default (shipped) architecture; the renderer passes
@@ -419,6 +442,16 @@ class NeuralWeights:
                     f"different --coupling (rqs=3K+1 vs nis-pq=2K+1) — load it with the "
                     f"matching coupling, or rebake"
                 )
+        if expect_chart is not None and self.chart is not None and self.chart != expect_chart:
+            # The chart is a post-coupling measure transform — it does NOT change the
+            # layer dims, so a chart mismatch is invisible to the arch/encoding/coupling
+            # guards above and would render a silently-wrong distribution (change
+            # renderer-chart-selection). Caught here via the PTG1 trailer's chart tag.
+            raise ValueError(
+                f"neural weights chart {self.chart!r} != built NF_CHART {expect_chart!r}; "
+                f"the network was trained on a different hemisphere chart — load it with "
+                f"the matching chart, or rebake"
+            )
 
 
 def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
@@ -448,11 +481,28 @@ def _layout(layers: int = NF_LAYERS, bins: int = NF_BINS,
     return headers, w_off, b_off
 
 
+def _read_chart_tag(data: bytes, offset: int) -> str | None:
+    """Best-effort read of the chart string from the optional PTG1 trailer that
+    follows the bias payload (export_weights writes chart/encoding/jacobian). Returns
+    None when the trailer is absent (older nets) — the chart guard then no-ops."""
+    o = offset
+    if o + 4 > len(data):
+        return None
+    (tag,) = struct.unpack_from("<I", data, o); o += 4
+    if tag != TAG_MAGIC or o + 4 > len(data):
+        return None
+    (n,) = struct.unpack_from("<I", data, o); o += 4
+    if o + n > len(data):
+        return None
+    return data[o:o + n].decode("utf-8", errors="replace")
+
+
 def deserialize_neural_weights(data: bytes,
                                expect: tuple[int, int, int, int] | None = None,
                                *, src: str = "<bytes>",
                                expect_mlp_in: int | None = None,
-                               expect_n_params: int | None = None) -> NeuralWeights:
+                               expect_n_params: int | None = None,
+                               expect_chart: str | None = None) -> NeuralWeights:
     """Parse ``NFW1`` bytes into a ``NeuralWeights`` (inverse of
     ``serialize_neural_weights``). The in-memory core shared by
     ``load_neural_weights`` (disk) and the ``shared`` weight-handoff backend
@@ -482,26 +532,34 @@ def deserialize_neural_weights(data: bytes,
     (n_biases,) = struct.unpack_from("<I", data, o)
     o += 4
     biases = np.frombuffer(data, dtype="<f4", count=n_biases, offset=o).copy()
+    o += n_biases * 4
+    chart = _read_chart_tag(data, o)        # optional PTG1 trailer (None if absent)
     nw = NeuralWeights(int(layers), int(bins), int(hidden), int(cond),
-                       headers, weights, biases)
+                       headers, weights, biases, chart=chart)
     nw.assert_matches_shader(expect, expect_mlp_in=expect_mlp_in,
-                             expect_n_params=expect_n_params)
+                             expect_n_params=expect_n_params,
+                             expect_chart=expect_chart)
     return nw
 
 
 def load_neural_weights(path: str | Path,
                         expect: tuple[int, int, int, int] | None = None,
                         *, expect_mlp_in: int | None = None,
-                        expect_n_params: int | None = None) -> NeuralWeights:
+                        expect_n_params: int | None = None,
+                        expect_chart: str | None = None) -> NeuralWeights:
     """Parse an ``NFW1`` file. Raises on bad magic / version / truncation, and on
     an architecture mismatch against ``expect`` (defaults to the shipped size when
     None) — the loader assert is the size-mismatch guard for the configurable
     build (study change neural-precision-size-study). ``expect_mlp_in`` adds the
     conditioner-encoding guard (change renderer-conditioner-encoding): a net whose
-    first-layer input width differs from the built ``--encoding`` is refused."""
+    first-layer input width differs from the built ``--encoding`` is refused.
+    ``expect_chart`` adds the chart guard (change renderer-chart-selection): a net
+    stamped with a different hemisphere chart is refused (the chart is invisible to
+    the dim guards)."""
     return deserialize_neural_weights(Path(path).read_bytes(), expect, src=str(path),
                                       expect_mlp_in=expect_mlp_in,
-                                      expect_n_params=expect_n_params)
+                                      expect_n_params=expect_n_params,
+                                      expect_chart=expect_chart)
 
 
 def make_dummy_weights(config: NeuralBuildConfig | None = None) -> NeuralWeights:
