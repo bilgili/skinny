@@ -59,22 +59,32 @@ def scene_has_environment(scene_pbrt: str) -> bool:
 
 
 def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
-                  gpu: str | None = None, env_off: bool = False) -> np.ndarray:
+                  gpu: str | None = None, env_off: bool = False,
+                  integrator: str = "path",
+                  execution_mode: str = "megakernel") -> np.ndarray:
     """Import a pbrt scene and render it in skinny; return linear-HDR (H,W,3).
 
     *gpu* is the vendor preference (intel/nvidia/amd/discrete/auto); the rhi
-    backend (vulkan/metal) is chosen by ``SKINNY_BACKEND``/`backend_select`.
+    backend (vulkan/metal) is resolved via :func:`skinny.backend_select.select_backend`
+    — ``auto`` → native Metal on a Metal-capable Apple-Silicon host (full parity
+    with Vulkan), else Vulkan; honours ``SKINNY_BACKEND``. So the parity /
+    convergence gates exercise the host's real default backend rather than always
+    MoltenVK-under-Vulkan.
     *env_off* zeroes skinny's default ambient environment so scenes with no pbrt
     ``infinite`` light render against a black background as pbrt does.
+    *integrator* selects ``"path"`` or ``"bdpt"``.
     Requires a working GPU backend; raises if unavailable.
     """
+    from skinny.backend_select import select_backend
     from skinny.headless import HeadlessRenderer, RenderOptions  # lazy: renderer/GPU
 
+    backend = select_backend()
     with tempfile.TemporaryDirectory() as tmp:
         usd = os.path.join(tmp, "scene.usda")
         import_pbrt(scene_pbrt, out=usd)
-        with HeadlessRenderer(width, height, gpu=gpu) as r:
-            r._prepare(usd, RenderOptions(samples=spp))
+        with HeadlessRenderer(width, height, gpu=gpu, backend=backend,
+                              execution_mode=execution_mode) as r:
+            r._prepare(usd, RenderOptions(samples=spp, integrator=integrator))
             if env_off:
                 r.renderer.env_intensity = 0.0
             # skinny injects a synthetic default DistantLight (/Skinny/DefaultLight)

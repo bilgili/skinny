@@ -121,6 +121,19 @@ stride** — `rayOrigin/rayDir/throughput/radiance` (4× float3) +
 `PATH_FLAG_ALIVE=1`, `PATH_FLAG_SPECULAR=2`. `tests/test_wavefront_state.py`
 locks the Slang struct ↔ Python table.
 
+`PATH_FLAG_SPECULAR` carries whether the bounce that spawned the lane's current
+ray was delta/perfectly-specular (`bsdfSample.pdf <= 0.0`). It is the wavefront
+equivalent of the megakernel's `spawnedBySpecular` register, surviving across the
+generate→trace→shade kernel boundaries in the per-lane state. `wfFinishShade`
+(`wf_shade_common.slang`) sets it on spawn and reads it at the emissive-triangle
+gate: `if (depth == 0u || fc.numEmissiveTriangles == 0u || pathSpecular(s))` adds
+the BSDF-hit area-light emission at **full weight** only for the primary ray or a
+delta bounce (which has no NEE partner) — exactly the specular→area-light MIS rule
+documented in `docs/Megakernel.md` §3.1. Without it the wavefront path dropped the
+area-light reflection in a smooth dielectric and the specular caustic leg (biased
+dark vs the pbrt reference, FLIP 0.061 → 0.032). Non-delta bounces continue to
+receive the area light via NEE only, so no double-count.
+
 > The record is intentionally AoS, **not** SoA (`wavefront_state.slang:8-9`):
 > convert hot fields to SoA only if profiling shows a bandwidth bottleneck. The
 > *queues* are SoA `uint` arrays; the per-lane path record is AoS.

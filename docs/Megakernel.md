@@ -117,6 +117,35 @@ persistent GPU buffers are output targets and tables: `accumBuffer`,
 `outputBuffer`, `lightSplatBuffer`, `toolBuffer`, `gizmoSegments`, `hudMask`,
 the UBO, material tables, lights, bindless textures, env CDFs (descriptor set 0).
 
+### 3.1 Area-light emission: BSDF-hit vs NEE, and the specular rule
+
+An emissive triangle (area light) can be reached two ways, and the path tracer
+must count it **exactly once**:
+
+- **Next-event estimation (NEE)** — at each surface, sample a point on the light
+  and evaluate the BSDF toward it (`br.directLight`, always added). This is the
+  primary, low-variance path for **non-delta** lobes.
+- **BSDF-sampled hit** — the bounce's sampled ray happens to land on the emitter
+  (`br.bsdfSample.emission`).
+
+The two must not double-count. The rule (`path.slang`, the
+`if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)` gate):
+
+- **bounce 0** (primary ray, no NEE counterpart yet) → add the BSDF-hit emission.
+- **non-delta bounce** (`pdf > 0`) → NEE already counted the light this direction,
+  so the BSDF-hit emission is **skipped** (avoids double-count).
+- **delta / perfectly-specular bounce** (`pdf <= 0` — a smooth dielectric's mirror
+  reflect/refract) → NEE evaluates the BSDF toward the light and gets **zero** for
+  a delta lobe (no NEE partner exists), so the BSDF-hit emission is added at
+  **full weight (w = 1)**. `spawnedBySpecular` carries the spawning bounce's
+  delta-ness forward. This is what makes the **reflection of an area light in a
+  glass surface** and the **specular leg of a caustic** (floor → BSDF ray → glass
+  refract → light) appear; without it they were dropped and the path tracer was
+  biased dark versus the pbrt reference. It mirrors the sphere-light branch
+  (`w_bsdf = 1` for `pdf == 0`/transmitted) and BDPT's `deltaBounce`. No power
+  heuristic is needed — a delta lobe owns the path. The wavefront path applies the
+  identical rule (see `docs/Wavefront.md`).
+
 ---
 
 ## 4. Selection: compile-time vs runtime

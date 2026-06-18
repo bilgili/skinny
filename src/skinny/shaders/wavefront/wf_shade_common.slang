@@ -86,7 +86,13 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
     uint   depth      = s.depth;
 
     radiance += throughput * br.fullRadiance;
-    if (depth == 0u || fc.numEmissiveTriangles == 0u)
+    // A delta/specular bounce spawned this ray (PATH_FLAG_SPECULAR, set below
+    // when the previous bounce sampled a pdf<=0 lobe): it has no NEE partner, so
+    // an emissive triangle it lands on must be taken at full weight — the
+    // wavefront mirror of path.slang's `spawnedBySpecular` gate. Without it the
+    // area-light reflection in a smooth dielectric and the specular caustic leg
+    // are dropped (path tracer biased dark vs the pbrt reference).
+    if (depth == 0u || fc.numEmissiveTriangles == 0u || pathSpecular(s))
         radiance += throughput * br.bsdfSample.emission;
     radiance += throughput * br.directLight;
 
@@ -157,6 +163,13 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
     s.radiance   = radiance;
     s.depth      = depth + 1u;
     s.bsdfPdf    = misBsdfPdf;
+    // Carry this bounce's delta-ness to the next iteration's emission gate (a
+    // delta lobe — pdf<=0 — has no NEE partner). Set/clear so a prior delta
+    // bounce doesn't leak into a later non-delta one.
+    if (br.bsdfSample.pdf <= 0.0)
+        s.flags |= PATH_FLAG_SPECULAR;
+    else
+        s.flags &= ~PATH_FLAG_SPECULAR;
     s.rngState   = rng.state;
     wfState[i] = s;
 }
