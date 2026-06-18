@@ -78,6 +78,42 @@ sRGB; named conductor spectra (`metal-Au-eta`/`-k`) map to a tabulated RGB IOR;
 inline sampled spectra integrate directly. The residual RGB-vs-spectral
 divergence is inherent and is absorbed by the per-scene parity tolerance.
 
+## pbrt metadata carry
+
+The UsdPreviewSurface / UsdLux output is a *portable approximation*. Alongside it
+the importer records the **exact pbrt source spec** as USD metadata, so skinny
+(or a pbrt round-trip) can recover information the USD schema loses — spectra,
+exact BxDF parameters, integrator, sensor — without affecting other USD
+consumers (the `pbrt` namespace is ignored by tools that don't know it).
+
+- **Stage-wide** `customLayerData["pbrt"]` — `integrator` (type + params, e.g.
+  `sppm` / `maxdepth` / `radius`), `sampler`, `film` (`iso`, resolution,
+  `maxcomponentvalue`), and `colorSpace`.
+- **Per Material / Light / Camera** `customData["pbrt"]` —
+  `{type, [name], params, paramTypes}`. `params` holds native USD-friendly
+  values; `paramTypes` records each pbrt parameter type (`float` / `rgb` /
+  `spectrum` / `blackbody` / `bool` / `string` / `texture` / …) so the value is
+  self-describing and reconstructable.
+- **Per emissive mesh** `customData["pbrtAreaLight"]` — the `AreaLightSource`
+  emission spec (`L` / `scale` / `twosided`), preserving e.g. a `blackbody`
+  temperature that the baked `emissiveColor` would otherwise discard.
+
+Example (a conductor whose UsdPreviewSurface is an RGB approximation, but whose
+exact named-spectrum IOR survives in metadata):
+
+```
+customData["pbrt"] = {
+    "type": "conductor",
+    "params":     { "eta": "metal-Ag-eta", "k": "metal-Ag-k", "roughness": 0.001 },
+    "paramTypes": { "eta": "spectrum",     "k": "spectrum",   "roughness": "float" },
+}
+```
+
+The encoder lives in `metadata.py`. This is **carriage only** — rendering the
+carried data faithfully (spectral IOR, measured BRDFs, `sppm`) requires the
+matching machinery in skinny's renderer; the loader can grow into the metadata
+incrementally.
+
 ## Parity validation
 
 The corpus under `tests/pbrt/corpus/` holds small (≤128 px) scenes, each

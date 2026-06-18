@@ -17,6 +17,7 @@ from pxr import Sdf, UsdLux
 from . import spectra
 from . import transform as T
 from .emit import sanitize, to_gf_matrix
+from .metadata import light_metadata
 
 
 def _color_intensity(rgb, scale: float = 1.0):
@@ -56,6 +57,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
     scale = p.float("scale", 1.0) * exposure_scale
     name = sanitize(f"light_{ltype}_{id(light) & 0xFFFF:x}")
     path = f"{parent_path}/{name}"
+    pbrt_md = light_metadata(light)
 
     if ltype == "distant":
         frm = np.array(p.floats("from", [0.0, 0.0, 0.0]))
@@ -64,6 +66,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
         dir_world = light.ctm[:3, :3] @ dir_local
         toward_source = -(T.B[:3, :3] @ dir_world)
         prim = UsdLux.DistantLight.Define(stage, path)
+        prim.GetPrim().SetCustomDataByKey("pbrt", pbrt_md)
         _set_color_intensity(prim, spectra.param_to_rgb(p.get("L"), illuminant=True)
                              or [1.0, 1.0, 1.0], scale)
         prim.AddTransformOp().Set(to_gf_matrix(_orient_z_to(toward_source)))
@@ -74,6 +77,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
         frm = np.array(p.floats("from", [0.0, 0.0, 0.0]))
         pos = T.B[:3, :3] @ (light.ctm[:3, :3] @ frm + light.ctm[:3, 3])
         prim = UsdLux.SphereLight.Define(stage, path)
+        prim.GetPrim().SetCustomDataByKey("pbrt", pbrt_md)
         prim.CreateRadiusAttr(0.05)
         _set_color_intensity(prim, spectra.param_to_rgb(p.get("I"), illuminant=True)
                              or [1.0, 1.0, 1.0], scale)
@@ -86,6 +90,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
 
     if ltype == "infinite":
         prim = UsdLux.DomeLight.Define(stage, path)
+        prim.GetPrim().SetCustomDataByKey("pbrt", pbrt_md)
         fname = p.string("filename", None)
         if fname:
             ext = os.path.splitext(fname)[1].lower()

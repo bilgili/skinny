@@ -16,6 +16,7 @@ from . import camera as camera_mod
 from . import emit
 from . import materials as materials_mod
 from . import media as media_mod
+from . import metadata as meta_mod
 from . import spectra
 from . import transform as T
 from .lights import add_light
@@ -55,6 +56,9 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
     asset_dir = os.path.dirname(os.path.abspath(out)) if out else None
     for light in scene.lights:
         add_light(stage, world, light, report, asset_dir=asset_dir, exposure_scale=exposure_scale)
+
+    # carry the exact pbrt scene config (integrator/sampler/film/colorspace)
+    meta_mod.tag_stage(stage, meta_mod.scene_metadata(scene))
 
     if out is not None:
         stage.GetRootLayer().Export(out)
@@ -135,6 +139,7 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
             f"arealight {path}",
             "two-sided emission" if twosided else "one-sided emission (skinny may differ)",
         )
+        meta_mod.tag_arealight(mesh.GetPrim(), meta_mod.arealight_metadata(shp.area_light))
 
     overrides = _resolve_medium(shp, scene, report, path)
     _author_material(stage, f"{path}_mat", shp.material, mesh, report,
@@ -178,6 +183,8 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
     if overrides:
         mat.GetPrim().SetCustomDataByKey("skinnyOverrides", overrides)
+    # carry the exact pbrt material spec (type + raw params) for lossless recovery
+    meta_mod.tag_prim(mat.GetPrim(), meta_mod.material_metadata(pbrt_material))
     UsdShade.MaterialBindingAPI.Apply(mesh_prim.GetPrim())
     UsdShade.MaterialBindingAPI(mesh_prim.GetPrim()).Bind(mat)
     mtype = pbrt_material.type if pbrt_material else "diffuse"
@@ -243,4 +250,5 @@ def _emit_camera(stage, path, scene: PbrtScene, report) -> None:
     UsdGeom.Xformable(usd_cam).AddTransformOp().Set(
         emit.to_gf_matrix(T.to_skinny(cam.camera_to_world))
     )
+    meta_mod.tag_prim(usd_cam.GetPrim(), meta_mod.camera_metadata(cam))
     report.add(f"camera:{cam.type} {path}", status, "; ".join(notes))
