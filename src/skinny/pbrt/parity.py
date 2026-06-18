@@ -77,6 +77,11 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
             r._prepare(usd, RenderOptions(samples=spp))
             if env_off:
                 r.renderer.env_intensity = 0.0
+            # skinny injects a synthetic default DistantLight (/Skinny/DefaultLight)
+            # onto every loaded scene; a pbrt scene is fully lit by its own lights,
+            # so disable the default key light to avoid a phantom extra shadow.
+            r.renderer.direct_light_index = 1
+            r.renderer._last_state_hash = None
             r._accumulate(spp)
             arr, _samples = r.renderer.read_accumulation_hdr()
     return np.asarray(arr, dtype=np.float64)[..., :3]
