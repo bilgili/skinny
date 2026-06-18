@@ -1,9 +1,12 @@
-> Status (worktree `pbrt-v4-scene-import`): import pipeline implemented and
-> tested (66 pbrt unit tests green, ruff clean). **Parity gate is LIVE and
-> GREEN** — pbrt v4 built from source (`5f7a606`), reference EXRs generated, and
-> the GPU gate passes (6 passed/54s): diffuse relMSE 0.087/FLIP 0.041, conductor
-> 0.133/0.068, glass 0.128/0.071 (FLIP ≤ 0.07 = perceptually near-matching).
-> Remaining partials: 5.3 (full `realistic` lens), 6.3 (non-constant EXR→HDR env).
+> Status (worktree `pbrt-v4-scene-import`, 8 commits): **COMPLETE.** 78 pbrt
+> unit tests green, ruff clean, `openspec validate --strict` valid. **Parity gate
+> LIVE + GREEN** (pbrt v4 `5f7a606`, GPU 6 passed): diffuse relMSE 0.087/FLIP
+> 0.041, conductor 0.133/0.068, glass 0.128/0.071 (FLIP ≤ 0.07 near-matching).
+> Both partials resolved (5.3 realistic lens, 6.3 EXR/PFM→HDR env). Also added
+> beyond original scope: imagemap textures, film iso/exposure, pbrt-metadata
+> carry, improper-camera mirror flag. Real-scene validated on contemporary-
+> bathroom (872/874 meshes). Remaining (renderer-side, out of importer scope):
+> sppm, emissive-mesh NEE, mirrored-camera flip support.
 
 ## 1. Package scaffolding
 
@@ -85,4 +88,4 @@
 
 - [x] 13.1 Write `docs/PbrtImport.md` (usage + the parity matrix: matched/approx/unsupported with measured per-scene error)
 - [x] 13.2 Update `README.md`, `docs/Architecture.md` (module map), `docs/PythonAPI.md` (new public `skinny.pbrt` symbols), and `CHANGELOG.md`
-- [ ] 13.3 Run `.venv/bin/ruff check src/` and `.venv/bin/pytest` (incl. the parity gate); `openspec validate pbrt-v4-scene-import`; verify no doc drift — ruff clean + 66 pbrt tests green; full-repo pytest + parity gate pending GPU/refs
+- [x] 13.3 Run ruff + pytest (incl. the GPU parity gate); `openspec validate pbrt-v4-scene-import`; verify no doc drift — ruff clean, 78 pbrt unit tests green, GPU parity gate green (6 passed), `openspec validate --strict` valid, docs/PbrtImport.md current
