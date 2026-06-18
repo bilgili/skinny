@@ -43,15 +43,17 @@ def _orient_z_to(direction) -> np.ndarray:
     return m
 
 
-def add_light(stage, parent_path: str, light, report, asset_dir: str | None = None) -> bool:
+def add_light(stage, parent_path: str, light, report, asset_dir: str | None = None,
+              exposure_scale: float = 1.0) -> bool:
     """Author one UsdLux light. Returns True if a light was created.
 
     *asset_dir* (when writing to disk) is where synthesized constant-environment
-    `.hdr` maps are written for textureless ``infinite`` lights.
+    `.hdr` maps are written for textureless ``infinite`` lights. *exposure_scale*
+    folds the pbrt film imagingRatio into the emitted radiance.
     """
     p = light.params
     ltype = light.type
-    scale = p.float("scale", 1.0)
+    scale = p.float("scale", 1.0) * exposure_scale
     name = sanitize(f"light_{ltype}_{id(light) & 0xFFFF:x}")
     path = f"{parent_path}/{name}"
 

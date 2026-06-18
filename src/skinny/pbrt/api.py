@@ -37,8 +37,15 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
     stage = emit.new_stage(out)
     world = "/World"
 
+    # pbrt film exposure (imagingRatio = exposureTime * ISO / 100, film.cpp) is a
+    # global linear scale on output radiance; for a linear path tracer it is
+    # equivalent to scaling every emitter, so bake it into light/emission values.
+    exposure_scale = _film_exposure_scale(scene)
+    if exposure_scale != 1.0:
+        report.exact("film:exposure", f"imagingRatio={exposure_scale:.4g} baked into emitters")
+
     for i, shp in enumerate(scene.shapes):
-        _emit_shape(stage, f"{world}/shape_{i}", shp, report, scene, base_dir)
+        _emit_shape(stage, f"{world}/shape_{i}", shp, report, scene, base_dir, exposure_scale)
 
     if scene.camera is not None:
         _emit_camera(stage, f"{world}/Camera", scene, report)
@@ -47,7 +54,7 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
 
     asset_dir = os.path.dirname(os.path.abspath(out)) if out else None
     for light in scene.lights:
-        add_light(stage, world, light, report, asset_dir=asset_dir)
+        add_light(stage, world, light, report, asset_dir=asset_dir, exposure_scale=exposure_scale)
 
     if out is not None:
         stage.GetRootLayer().Export(out)
@@ -94,7 +101,19 @@ def _shape_geometry(shp: PbrtShape, report, base_dir=None):
     return None
 
 
-def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=None) -> None:
+def _film_exposure_scale(scene: PbrtScene) -> float:
+    """pbrt imagingRatio = exposureTime * ISO / 100 (exposureTime from shutter)."""
+    iso = scene.film.float("iso", 100.0) if scene.film else 100.0
+    if scene.camera is not None:
+        cp = scene.camera.params
+        exposure_time = cp.float("shutterclose", 1.0) - cp.float("shutteropen", 0.0)
+    else:
+        exposure_time = 1.0
+    return max(exposure_time, 0.0) * iso / 100.0
+
+
+def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=None,
+                exposure_scale: float = 1.0) -> None:
     geo = _shape_geometry(shp, report, base_dir)
     if geo is None:
         return
@@ -109,7 +128,7 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
     emissive = None
     if shp.area_light is not None:
         emissive = spectra.param_to_rgb(shp.area_light.get("L"), illuminant=True) or [1, 1, 1]
-        scale = shp.area_light.float("scale", 1.0)
+        scale = shp.area_light.float("scale", 1.0) * exposure_scale
         emissive = [c * scale for c in emissive]
         twosided = shp.area_light.bool("twosided", False)
         report.approx(
