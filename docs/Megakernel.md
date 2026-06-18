@@ -146,6 +146,23 @@ The two must not double-count. The rule (`path.slang`, the
   heuristic is needed — a delta lobe owns the path. The wavefront path applies the
   identical rule (see `docs/Wavefront.md`).
 
+**BDPT obeys the same gate.** BDPT reaches an area light by three accumulated
+strategies: `t = 1` (`connectT1`, its NEE — power-heuristic weighted, mirrors the
+path tracer's NEE), `t = 0` (the eye/BSDF subpath lands on the emissive triangle,
+the `z.onLight` loop in `bdpt.slang`), and `t ≥ 2` (`connectGeneric` light-bounce
+connections with full `misWeight`). The `s = 1` light-tracer splat lands in a
+separate buffer and is not part of the accumulation. The `t = 0` emissive hit is
+the BDPT analog of the path tracer's BSDF-hit emission, so it carries the **same
+gate**: add `z.throughput * z.emission` at full weight only when no NEE partner
+exists — `s == 2` (z is the first hit, behind the delta camera ≡ `bounce == 0`),
+`eye[s - 2].isDelta` (a delta bounce reached z ≡ `spawnedBySpecular`), or
+`numEmissiveTriangles == 0`. Otherwise `connectT1` owns the light. Without this
+gate BDPT added the emissive hit at full weight on top of the already-weighted
+NEE, double-counting direct area-light transport and rendering **~1.7× brighter
+than pbrt** even on a purely diffuse scene (change `bdpt-energy-convergence`;
+guarded by `tests/pbrt/test_bdpt_energy.py`, which compares **un-aligned** mean
+energy because the parity gate's exposure alignment hides a uniform scale).
+
 ---
 
 ## 4. Selection: compile-time vs runtime

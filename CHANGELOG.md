@@ -319,6 +319,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   normalization bug tracked on its own; the pbrt parity / convergence harness now
   resolves the GPU backend via `select_backend` so it exercises native Metal on
   Apple Silicon, not only MoltenVK-under-Vulkan.)
+- **BDPT ~1.7× over-brightness vs pbrt** (change `bdpt-energy-convergence`) — the
+  separate BDPT normalization bug noted above. BDPT's `t = 0` strategy (the
+  eye/BSDF subpath landing on an emissive triangle) was accumulated at **full
+  weight** while `connectT1` (the `t = 1` NEE) already counted the same area light
+  power-heuristic-weighted, double-counting direct area-light transport — measured
+  `mean(bdpt)/mean(ref)` ×1.76 on a *purely diffuse* scene (no delta bounces) and
+  ×1.49 on `glass_arealight`. The corpus parity gate missed it because it
+  exposure-aligns before comparing, dividing out a uniform scale. Fixed by gating
+  the emissive eye hit exactly like the path tracer — full weight only at the
+  primary/first hit (`s == 2`), a delta bounce into the light (`eye[s - 2].isDelta`),
+  or a scene with no emissive-triangle NEE — in both `integrators/bdpt.slang` and
+  `wavefront/wavefront_bdpt.slang`. Post-fix BDPT tracks the path tracer (energy
+  ×0.88, `mean(bdpt)/mean(path)` ≈ 1.00) on Metal and Vulkan, megakernel and
+  wavefront; raw relMSE vs pbrt 0.346 → 0.017. New un-aligned absolute-energy gate
+  `tests/pbrt/test_bdpt_energy.py` locks it; the path tracer and corpus parity
+  gates are unchanged (no regression).
 - **Metal 31-buffer argument-table overflow** with neural online training on
   multi-graph scenes (change `combine-graph-param-buffers`). `--backend metal
   --execution-mode wavefront --neural-trainer mlx --neural-handoff interop

@@ -959,12 +959,23 @@ void wfBdptConnectLane(uint i, bool includeGeneric)
 
     float3 L = aux.escaped;
 
-    // (s ≥ 2, t = 0): emissive eye-vertex hits.
+    // (s ≥ 2, t = 0): emissive eye-vertex hits, MIS-gated against the t = 1 NEE
+    // (connectT1) exactly as the megakernel bdpt.slang / path.slang do. A
+    // non-delta eye bounce onto an emissive triangle is also sampled by NEE from
+    // the previous eye vertex, so adding the BSDF hit at full weight on top of
+    // the power-heuristic-weighted NEE double-counts direct area-light energy
+    // (~1.75× too bright vs pbrt). Full weight only with no NEE partner: the
+    // primary/first hit (s == 2), a delta bounce into z (eye[s - 2].isDelta),
+    // or no emissive-triangle NEE in the scene.
     [loop]
     for (int s = 2; s <= eyeLen; s++)
     {
         BDPTVertex z = eye[s - 1];
-        if (z.onLight)
+        if (!z.onLight) continue;
+        bool noNeePartner = (s == 2)
+                          || (fc.numEmissiveTriangles == 0u)
+                          || eye[s - 2].isDelta;
+        if (noNeePartner)
             L += z.throughput * z.emission;
     }
 

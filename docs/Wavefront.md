@@ -216,6 +216,16 @@ for NEE-only lanes. The s=1 light splat accumulates separately in
 `lightSplatBuffer` (composited only on display, never into `accumBuffer`), so
 headless A/B compares the eye-side estimate only (`:1042-1047`).
 
+Both connect slots share `wfBdptConnectLane`, whose `(s ≥ 2, t = 0)` emissive
+eye-vertex loop is **MIS-gated** like the megakernel `bdpt.slang` (and the path
+tracer's specular rule above): the eye/BSDF subpath landing on an emissive
+triangle adds `z.throughput * z.emission` at full weight only when no NEE partner
+exists — `s == 2` (first hit, behind the delta camera), `eye[s - 2].isDelta` (a
+delta bounce reached z), or `numEmissiveTriangles == 0`; otherwise `connectT1`
+(the `t = 1` NEE) owns it. Ungated, the emissive hit double-counted direct
+area-light transport on top of the weighted NEE — BDPT read ~1.7× brighter than
+pbrt (change `bdpt-energy-convergence`, gate `tests/pbrt/test_bdpt_energy.py`).
+
 ---
 
 ## 5. Material-sorted shading & codegen
