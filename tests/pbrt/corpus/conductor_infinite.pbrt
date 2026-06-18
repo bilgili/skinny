@@ -1,0 +1,15 @@
+# Corpus: a rough gold conductor sphere under a constant infinite light.
+# Isolates conductor Fresnel (named spectrum -> RGB) + GGX roughness remap.
+LookAt 0 0 4  0 0 0  0 1 0
+Camera "perspective" "float fov" 30
+Sampler "independent" "integer pixelsamples" 256
+Integrator "path" "integer maxdepth" 6
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "conductor_infinite.exr"
+WorldBegin
+
+LightSource "infinite" "rgb L" [1 1 1]
+
+AttributeBegin
+  Material "conductor" "spectrum eta" "metal-Au-eta" "spectrum k" "metal-Au-k" "float roughness" 0.1
+  Shape "sphere" "float radius" 1
+AttributeEnd

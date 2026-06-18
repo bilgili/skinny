@@ -1,0 +1,25 @@
+# Corpus: a smooth dielectric (glass) sphere over a floor, lit by an area light.
+# Isolates dielectric refraction (transmission -> skinny opacity/IOR gate).
+LookAt 0 1 5  0 0 0  0 1 0
+Camera "perspective" "float fov" 35
+Sampler "independent" "integer pixelsamples" 512
+Integrator "path" "integer maxdepth" 12
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "glass_arealight.exr"
+WorldBegin
+
+AttributeBegin
+  AreaLightSource "diffuse" "rgb L" [15 15 15]
+  Translate 0 4 0
+  Shape "trianglemesh" "point3 P" [ -1.5 0 -1.5  1.5 0 -1.5  1.5 0 1.5  -1.5 0 1.5 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+
+AttributeBegin
+  Material "dielectric" "float eta" 1.5
+  Shape "sphere" "float radius" 1
+AttributeEnd
+
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.4 0.45 0.5]
+  Translate 0 -1 0
+  Shape "trianglemesh" "point3 P" [ -6 0 -6  6 0 -6  6 0 6  -6 0 6 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd

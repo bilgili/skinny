@@ -224,8 +224,12 @@ Reservoir restirFillReservoir<TM : IMaterial>(
         else if (t < nSphere + nTri)
         {
             type = RLIGHT_TRI;
-            id = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
-                     fc.numEmissiveTriangles - 1u);
+            // Power-weighted draw (change emissive-mesh-nee): use the shared
+            // CDF selection so the actual index matches the power selectionPdf
+            // reported via loadEmissiveTriangleLightImpl — a uniform draw against
+            // a power pdf would bias the RIS estimate. Reservoir/RIS code below
+            // is unchanged.
+            id = sampleEmissiveTriangle(rng.next(), fc.numEmissiveTriangles);
         }
         else
         {

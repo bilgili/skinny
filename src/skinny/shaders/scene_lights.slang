@@ -9,6 +9,26 @@ import common;
 [[vk::binding(17)]] StructuredBuffer<SphereLight>      sphereLights;
 [[vk::binding(18)]] StructuredBuffer<EmissiveTriangle>  emissiveTriangles;
 
+// Power-weighted emissive-triangle selection (change emissive-mesh-nee). Binary
+// search over the inclusive cumulative-power CDF packed in each record's `cw`
+// lane: returns the smallest i with cw[i] > u (same upper-bound shape as the env
+// distribution's envSearchCdf). The per-triangle probability is then the
+// record's `pSel` lane, read by loadEmissiveTriangleLightImpl as selectionPdf,
+// so the actual draw and the reported pdf stay matched. Shared by NEE
+// (nee.slang / skin_direct.slang) and ReSTIR (light_ris.slang).
+uint sampleEmissiveTriangle(float u, uint n)
+{
+    int lo = 0;
+    int hi = int(n) - 1;
+    [loop] while (lo < hi)
+    {
+        int mid = (lo + hi) >> 1;
+        if (emissiveTriangles[mid].cw > u) hi = mid;
+        else                               lo = mid + 1;
+    }
+    return uint(lo);
+}
+
 struct SphereSample
 {
     float t;

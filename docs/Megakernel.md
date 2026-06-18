@@ -117,6 +117,63 @@ persistent GPU buffers are output targets and tables: `accumBuffer`,
 `outputBuffer`, `lightSplatBuffer`, `toolBuffer`, `gizmoSegments`, `hudMask`,
 the UBO, material tables, lights, bindless textures, env CDFs (descriptor set 0).
 
+### 3.1 Area-light emission: BSDF-hit vs NEE, and the specular rule
+
+An emissive triangle (area light) can be reached two ways, and the path tracer
+must count it **exactly once**:
+
+- **Next-event estimation (NEE)** — at each surface, sample a point on the light
+  and evaluate the BSDF toward it (`br.directLight`, always added). This is the
+  primary, low-variance path for **non-delta** lobes. The emissive triangle is
+  chosen **power-weighted** — probability `p_i = w_i / Σw`,
+  `w_i = area_i × Rec.709-luminance(emission_i)` — via a binary search over a
+  cumulative-power CDF packed inline in the `emissiveTriangles` records
+  (`sampleEmissiveTriangle` in `scene_lights.slang`), not uniformly by index, and
+  **every** emissive triangle participates (no 256-triangle cap). This is shared
+  by the megakernel and the wavefront path/BDPT integrators (one `nee.slang`
+  definition) and inherited by ReSTIR DI (change `emissive-mesh-nee`). The
+  selection probability only changes *which* triangle is sampled; `selectionPdf`,
+  the area→solid-angle conversion, and the MIS power-heuristic below all derive
+  from the same `p_i`, so NEE stays unbiased and the no-double-count gate is
+  untouched.
+- **BSDF-sampled hit** — the bounce's sampled ray happens to land on the emitter
+  (`br.bsdfSample.emission`).
+
+The two must not double-count. The rule (`path.slang`, the
+`if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)` gate):
+
+- **bounce 0** (primary ray, no NEE counterpart yet) → add the BSDF-hit emission.
+- **non-delta bounce** (`pdf > 0`) → NEE already counted the light this direction,
+  so the BSDF-hit emission is **skipped** (avoids double-count).
+- **delta / perfectly-specular bounce** (`pdf <= 0` — a smooth dielectric's mirror
+  reflect/refract) → NEE evaluates the BSDF toward the light and gets **zero** for
+  a delta lobe (no NEE partner exists), so the BSDF-hit emission is added at
+  **full weight (w = 1)**. `spawnedBySpecular` carries the spawning bounce's
+  delta-ness forward. This is what makes the **reflection of an area light in a
+  glass surface** and the **specular leg of a caustic** (floor → BSDF ray → glass
+  refract → light) appear; without it they were dropped and the path tracer was
+  biased dark versus the pbrt reference. It mirrors the sphere-light branch
+  (`w_bsdf = 1` for `pdf == 0`/transmitted) and BDPT's `deltaBounce`. No power
+  heuristic is needed — a delta lobe owns the path. The wavefront path applies the
+  identical rule (see `docs/Wavefront.md`).
+
+**BDPT obeys the same gate.** BDPT reaches an area light by three accumulated
+strategies: `t = 1` (`connectT1`, its NEE — power-heuristic weighted, mirrors the
+path tracer's NEE), `t = 0` (the eye/BSDF subpath lands on the emissive triangle,
+the `z.onLight` loop in `bdpt.slang`), and `t ≥ 2` (`connectGeneric` light-bounce
+connections with full `misWeight`). The `s = 1` light-tracer splat lands in a
+separate buffer and is not part of the accumulation. The `t = 0` emissive hit is
+the BDPT analog of the path tracer's BSDF-hit emission, so it carries the **same
+gate**: add `z.throughput * z.emission` at full weight only when no NEE partner
+exists — `s == 2` (z is the first hit, behind the delta camera ≡ `bounce == 0`),
+`eye[s - 2].isDelta` (a delta bounce reached z ≡ `spawnedBySpecular`), or
+`numEmissiveTriangles == 0`. Otherwise `connectT1` owns the light. Without this
+gate BDPT added the emissive hit at full weight on top of the already-weighted
+NEE, double-counting direct area-light transport and rendering **~1.7× brighter
+than pbrt** even on a purely diffuse scene (change `bdpt-energy-convergence`;
+guarded by `tests/pbrt/test_bdpt_energy.py`, which compares **un-aligned** mean
+energy because the parity gate's exposure alignment hides a uniform scale).
+
 ---
 
 ## 4. Selection: compile-time vs runtime

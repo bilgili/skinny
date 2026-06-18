@@ -83,8 +83,7 @@ float3 skinAllLightsEstimator(
 
     if (fc.numEmissiveTriangles > 0u)
     {
-        uint idx = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
-                       fc.numEmissiveTriangles - 1u);
+        uint idx = sampleEmissiveTriangle(rng.next(), fc.numEmissiveTriangles);
         EmissiveTriangleLightImpl el = loadEmissiveTriangleLightImpl(
             emissiveTriangles[idx], fc.numEmissiveTriangles);
         total += skinLightEstimator(el, h, N, V, ctx, fc, rng.next2());
