@@ -121,8 +121,8 @@ struct MtlxSkinParams
 // BvhNode/MeshVertex/FlatMaterialParams.)
 struct EmissiveTriangle
 {
-    float4 _v0;              // xyz = v0
-    float4 _v1;              // xyz = v1
+    float4 _v0;              // xyz = v0,  w = cw  (cumulative power CDF, inclusive)
+    float4 _v1;              // xyz = v1,  w = pSel (per-triangle selection prob p_i)
     float4 _v2;              // xyz = v2
     float4 _emissionArea;    // xyz = emission, w = area
 
@@ -131,6 +131,14 @@ struct EmissiveTriangle
     property float3 v2       { get { return _v2.xyz; } }
     property float3 emission { get { return _emissionArea.xyz; } }
     property float  area     { get { return _emissionArea.w; } }
+    // Power-weighted NEE selection (change emissive-mesh-nee). The host packs a
+    // normalized cumulative-power CDF inline into the otherwise-unused .w lanes
+    // (no separate buffer → no extra Metal argument-table slot). `cw` is the
+    // inclusive cumulative weight Σ_{j≤i} w_j / Σw (cw of the last triangle = 1),
+    // used for binary-search selection; `pSel` = w_i / Σw is the per-triangle
+    // selection probability consumed as the light's selectionPdf.
+    property float  cw       { get { return _v0.w; } }
+    property float  pSel     { get { return _v1.w; } }
 };
 
 // Distant (directional) light record. `direction` points TOWARD the light

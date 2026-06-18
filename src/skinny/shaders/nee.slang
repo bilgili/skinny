@@ -89,8 +89,7 @@ float3 allLightsNEE<TM : IMaterial>(
 
     if (fc.numEmissiveTriangles > 0u)
     {
-        uint idx = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
-                       fc.numEmissiveTriangles - 1u);
+        uint idx = sampleEmissiveTriangle(rng.next(), fc.numEmissiveTriangles);
         EmissiveTriangleLightImpl el = loadEmissiveTriangleLightImpl(
             emissiveTriangles[idx], fc.numEmissiveTriangles);
         total += neeLightEstimator(mat, el, h, N, T, B, wo, neuralActive, fc, rng.next2());

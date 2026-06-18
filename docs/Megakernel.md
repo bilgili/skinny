@@ -124,7 +124,18 @@ must count it **exactly once**:
 
 - **Next-event estimation (NEE)** — at each surface, sample a point on the light
   and evaluate the BSDF toward it (`br.directLight`, always added). This is the
-  primary, low-variance path for **non-delta** lobes.
+  primary, low-variance path for **non-delta** lobes. The emissive triangle is
+  chosen **power-weighted** — probability `p_i = w_i / Σw`,
+  `w_i = area_i × Rec.709-luminance(emission_i)` — via a binary search over a
+  cumulative-power CDF packed inline in the `emissiveTriangles` records
+  (`sampleEmissiveTriangle` in `scene_lights.slang`), not uniformly by index, and
+  **every** emissive triangle participates (no 256-triangle cap). This is shared
+  by the megakernel and the wavefront path/BDPT integrators (one `nee.slang`
+  definition) and inherited by ReSTIR DI (change `emissive-mesh-nee`). The
+  selection probability only changes *which* triangle is sampled; `selectionPdf`,
+  the area→solid-angle conversion, and the MIS power-heuristic below all derive
+  from the same `p_i`, so NEE stays unbiased and the no-double-count gate is
+  untouched.
 - **BSDF-sampled hit** — the bounce's sampled ray happens to land on the emitter
   (`br.bsdfSample.emission`).
 

@@ -59,6 +59,32 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Power-weighted emissive-mesh NEE, no triangle cap** (change
+  `emissive-mesh-nee`) — next-event estimation now selects an emissive (mesh)
+  area-light triangle with probability proportional to its power
+  `w_i = area_i × Rec.709-luminance(emission_i)` via a cumulative-power CDF, in
+  place of uniform-by-index, and **every** emissive triangle in the scene
+  participates (the silent 256-triangle cap in `_upload_emissive_triangles` is
+  gone — the buffer grows and rebinds to the actual count, like
+  `material_capacity`, and logs it). This fixes imported interiors that rendered
+  **dark** (high-poly emissive meshes lost energy past 256 triangles) and
+  **noisy** (uniform selection wastes most samples on dim/oversplit triangles).
+  The CDF is packed **inline** in each `EmissiveTriangle` record's spare `.w`
+  lanes (`cw`, `pSel`) — the same one-slot trick the environment distribution
+  uses — so no new descriptor binding is added (which would exceed native-Metal's
+  31-buffer argument-table cap). The selection probability flows through
+  `selectionPdf = p_i`; the area→solid-angle pdf and MIS power heuristic are
+  unchanged in form, so NEE stays unbiased and the no-double-count gate is
+  untouched. The shared `sampleEmissiveTriangle` helper covers the megakernel and
+  wavefront path/BDPT integrators (one `nee.slang`), the skin direct-lighting
+  path, and ReSTIR DI (whose emissive candidate draw now matches the power pdf it
+  reports — reservoir/RIS/GRIS code unchanged). Raising the NEE baseline narrowed
+  ReSTIR's variance-reduction margin on the demo scene (still a real reduction;
+  `test_restir_variance` threshold relaxed 0.85→0.90 accordingly). New GPU gate
+  `tests/pbrt/test_emissive_nee.py` (correctness/energy, equal-spp variance,
+  unbiasedness, `diffuse_arealight` no-regression). See
+  [docs/Megakernel.md](docs/Megakernel.md) § 3.1 and the
+  [docs/Architecture.md](docs/Architecture.md) binding map (18).
 - **Neural-flow Lambert directional chart** (change
   `directional-flow-parameterization`) — the neural directional proposal's
   square↔direction map (`neural_flow.slang` `nf_square_to_hemi` /

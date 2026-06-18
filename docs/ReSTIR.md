@@ -239,8 +239,13 @@ pdf for a candidate direction ωᵢ is the **mixture pdf** over both techniques:
   among the n_tech active ones (sphere count + a triangle slot + an env slot), so
   its pdf is divided by n_tech.
 - The area-light solid-angle pdf is the area pdf converted by the geometry term:
-  p_light^Ω = d²·p_area / cosθ_light. For the environment,
-  p_light^Ω = `envPdf(ωᵢ)` (the importance-sampling cell distribution).
+  p_light^Ω = d²·p_area / cosθ_light. Within the triangle technique the specific
+  emissive triangle is drawn **power-weighted** (`sampleEmissiveTriangle`, shared
+  with stock NEE — change `emissive-mesh-nee`), so `p_area = p_i / triArea`
+  (`p_i = w_i / Σw`); the candidate draw and the reported `p_area` use the same
+  `p_i`, keeping RIS unbiased (a uniform draw against a power pdf would bias it).
+  For the environment, p_light^Ω = `envPdf(ωᵢ)` (the importance-sampling cell
+  distribution).
 - p_bsdf(ωᵢ) is the proposal-mixture pdf (`mixtureProposalPdf`), and it is only
   included for candidates the BSDF technique can actually hit — **sphere and env**
   (`isSE`). Emissive triangles are NEE-only in the stock renderer (no BSDF-tri MIS

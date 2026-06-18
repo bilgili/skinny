@@ -61,7 +61,8 @@ def scene_has_environment(scene_pbrt: str) -> bool:
 def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
                   gpu: str | None = None, env_off: bool = False,
                   integrator: str = "path",
-                  execution_mode: str = "megakernel") -> np.ndarray:
+                  execution_mode: str = "megakernel",
+                  emissive_uniform: bool = False) -> np.ndarray:
     """Import a pbrt scene and render it in skinny; return linear-HDR (H,W,3).
 
     *gpu* is the vendor preference (intel/nvidia/amd/discrete/auto); the rhi
@@ -73,6 +74,9 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     *env_off* zeroes skinny's default ambient environment so scenes with no pbrt
     ``infinite`` light render against a black background as pbrt does.
     *integrator* selects ``"path"`` or ``"bdpt"``.
+    *emissive_uniform* (test hook) forces uniform-by-index emissive-triangle
+    selection instead of the default power-weighted distribution, so the same
+    binary can render the power-vs-uniform A/B for the emissive-mesh-nee gate.
     Requires a working GPU backend; raises if unavailable.
     """
     from skinny.backend_select import select_backend
@@ -84,6 +88,8 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
         import_pbrt(scene_pbrt, out=usd)
         with HeadlessRenderer(width, height, gpu=gpu, backend=backend,
                               execution_mode=execution_mode) as r:
+            # Set before the scene build so _upload_emissive_triangles sees it.
+            r.renderer._emissive_uniform_selection = bool(emissive_uniform)
             r._prepare(usd, RenderOptions(samples=spp, integrator=integrator))
             if env_off:
                 r.renderer.env_intensity = 0.0

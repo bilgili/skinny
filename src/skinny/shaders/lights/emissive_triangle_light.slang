@@ -11,7 +11,7 @@ struct EmissiveTriangleLightImpl : ILight
     float3 v2;
     float3 emissionColor;
     float  triArea;
-    float  selectionPdf;    // 1 / numEmissiveTriangles
+    float  selectionPdf;    // p_i = w_i / Σw (power-weighted; was 1 / numTriangles)
 
     LightSample samplePoint(float3 shadingPos, float2 u)
     {
@@ -68,6 +68,9 @@ EmissiveTriangleLightImpl loadEmissiveTriangleLightImpl(
     l.v2            = tri.v2;
     l.emissionColor = tri.emission;
     l.triArea       = tri.area;
-    l.selectionPdf  = 1.0 / float(max(numTriangles, 1u));
+    // Power-weighted selection (change emissive-mesh-nee): p_i is packed inline
+    // in the record (host-built cumulative-power CDF). numTriangles is retained
+    // for call-site compatibility but no longer drives the (uniform) pdf.
+    l.selectionPdf  = tri.pSel;
     return l;
 }

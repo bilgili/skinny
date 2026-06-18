@@ -1,11 +1,17 @@
 """ReSTIR DI variance reduction (spec: Requirement "Variance reduction").
 
 On a high-contrast many-light scene (a flat floor lit by a dim 128-triangle
-emissive grid plus 3 small very bright emissive spots), stock NEE samples one
-emissive triangle uniformly per pixel per frame — so it mostly picks a dim
-triangle and rarely the bright spots, giving high variance at low spp. ReSTIR DI
+emissive grid plus 3 small very bright emissive spots), ReSTIR DI
 reservoir-resamples M candidates weighted by the unshadowed target and keeps the
-important one, so its image has LOWER error than stock NEE at equal low spp.
+important one — selecting the per-pixel-best light and sharing it spatially — so
+its image has LOWER error than stock NEE at equal low spp.
+
+Note (change `emissive-mesh-nee`): stock NEE now selects emissive triangles
+power-weighted (∝ area × luminance) rather than uniform-by-index, so it already
+concentrates on the bright spots *globally*. That raised the NEE baseline on this
+scene and narrowed ReSTIR's margin (ReSTIR's remaining edge here is per-pixel
+target-awareness + spatial reuse, not NEE's old uniform-selection weakness), so
+the threshold below is looser than the pre-change value (was 0.85).
 
 The reservoir accumulation image is a running average, so the raw image (NOT
 divided by the sample count) is the mean radiance. The reference is the average of
@@ -102,9 +108,12 @@ def test_restir_reduces_variance_vs_nee():
             err_none = rmse(_render(renderer, REUSE_NONE, spp, 2000))
             err_restir = rmse(_render(renderer, REUSE_RESTIR, spp, 4000, SPATIAL_CFG))
             assert err_none > 0 and np.isfinite(err_restir)
-            assert err_restir < 0.85 * err_none, (
+            # 0.90: power-weighted NEE (change emissive-mesh-nee) raised the
+            # baseline on this scene; ReSTIR still reduces error (per-pixel target
+            # + spatial reuse) but by a narrower, still-real margin (~0.87).
+            assert err_restir < 0.90 * err_none, (
                 f"ReSTIR did not reduce variance: rmse {err_restir:.4f} vs NEE "
-                f"{err_none:.4f} (ratio {err_restir / err_none:.3f} ≥ 0.85)"
+                f"{err_none:.4f} (ratio {err_restir / err_none:.3f} ≥ 0.90)"
             )
         finally:
             renderer.cleanup()

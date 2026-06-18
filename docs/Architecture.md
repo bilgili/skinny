@@ -184,7 +184,7 @@ geometry-term conversion.
 | Implementation | File | Notes |
 |---|---|---|
 | `SphereLightImpl` | `lights/sphere_light.slang` | Uniform surface sample, ray-sphere for `pdfSolidAngle` |
-| `EmissiveTriangleLightImpl` | `lights/emissive_triangle_light.slang` | Barycentric sample, selection-weighted PDF |
+| `EmissiveTriangleLightImpl` | `lights/emissive_triangle_light.slang` | Barycentric sample; **power-weighted** selection PDF `p_i = w_i / Σw` (`w_i = area × Rec.709-luminance(emission)`) drawn via the inline cumulative-power CDF (change `emissive-mesh-nee`) |
 | `DirectionalLightImpl` | `lights/directional_light.slang` | Delta distribution adapter |
 
 ### IIntegrator
@@ -851,7 +851,7 @@ incrementally moved over.
 | 15 | StructuredBuffer | MtlxSkinParams (164 B each, scalar layout) | `materials/skin/skin_shading.slang` |
 | 16 | StructuredBuffer | Material type code + scatter + furnace + graph slot + python id (uint32 each) | `bindings.slang` |
 | 17 | StructuredBuffer | SphereLight (32 B each) | `scene_lights.slang` |
-| 18 | StructuredBuffer | EmissiveTriangle (64 B each) | `scene_lights.slang` |
+| 18 | StructuredBuffer | EmissiveTriangle (64 B each); **dynamically sized** to the actual emissive-triangle count (no 256 cap — grows + rebinds like `material_capacity`). The power-weighted NEE selection CDF is packed **inline** in each record's spare `.w` lanes (`cw` = cumulative-power CDF, `pSel` = per-triangle prob) — no separate buffer / Metal slot (change `emissive-mesh-nee`) | `scene_lights.slang` |
 | 19 | StructuredBuffer | StdSurfaceParams (256 B each) — raster `preview_pass` only; the path-traced / BDPT flat BSDF uses the `flat_lobes` model, not `evalStdSurfaceBSDF` | `bindings.slang` |
 | 20 | StructuredBuffer | DistantLight (analytic distant lights) | `scene_lights.slang` |
 | 21 | RWStructuredBuffer | BDPT light-splat buffer (Q22.10 uint per R/G/B) | `bindings.slang` |

@@ -3562,14 +3562,20 @@ class Renderer:
 
         # Emissive-triangle buffer (binding 18). Built from scene instances
         # whose material has non-zero emissiveColor. The shader samples one
-        # triangle per pixel per frame for next-event estimation.
+        # triangle per pixel per frame for next-event estimation. EMISSIVE_TRI_CAPACITY
+        # is only the initial capacity — _upload_emissive_triangles grows it to the
+        # actual emissive-triangle count (no silent 256-cap; change emissive-mesh-nee).
+        self.emissive_tri_capacity: int = EMISSIVE_TRI_CAPACITY
         self.emissive_tri_buffer = self._gpu.StorageBuffer(
-            self.ctx, EMISSIVE_TRI_CAPACITY * EMISSIVE_TRI_STRIDE + 16
+            self.ctx, self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE + 16
         )
         self.emissive_tri_buffer.upload_sync(
-            b"\x00" * (EMISSIVE_TRI_CAPACITY * EMISSIVE_TRI_STRIDE)
+            b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
         )
         self._num_emissive_tris: int = 0
+        # Test hook (change emissive-mesh-nee): force uniform-by-index emissive
+        # selection (build the inline CDF uniform) for the power-vs-uniform A/B.
+        self._emissive_uniform_selection: bool = False
 
         # StdSurfaceParams buffer (binding 19). One 256-byte record per
         # material slot, carrying the full MaterialX standard_surface input
@@ -4212,6 +4218,28 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     pBufferInfo=[ss_info],
+                ),
+            ]
+            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+
+    def _rebind_emissive_descriptors(self) -> None:
+        """Re-write descriptor binding 18 after the emissive-triangle buffer grows
+        (change emissive-mesh-nee)."""
+        # Vulkan-only (see `_rebind_scene_descriptors`): native Metal re-reads the
+        # live emissive_tri_buffer reference at dispatch, so this is a no-op there.
+        if self.is_metal:
+            return
+        emissive_tri_info = vk.VkDescriptorBufferInfo(
+            buffer=self.emissive_tri_buffer.buffer, offset=0,
+            range=self.emissive_tri_buffer.size,
+        )
+        for ds in self.descriptor_sets:
+            writes = [
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=18, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[emissive_tri_info],
                 ),
             ]
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
@@ -5104,23 +5132,72 @@ class Renderer:
                     continue
                 records.append((p0, p1, p2, emissive, area))
 
-        n = min(len(records), EMISSIVE_TRI_CAPACITY)
+        # Power-weighted importance sampling (change emissive-mesh-nee). Build a
+        # normalized cumulative-power CDF over every emissive triangle (no 256
+        # cap), weight w_i = area_i × Rec.709-luminance(emission_i). The CDF is
+        # packed *inline* into the record's spare .w lanes (cw = inclusive
+        # cumulative Σ_{j≤i} w_j / Σw in _v0.w; pSel = w_i / Σw in _v1.w) so it
+        # rides binding 18 — no separate buffer, no extra Metal slot. The shader
+        # binary-searches `cw` to select a triangle and reads `pSel` as the
+        # selection pdf. See lights/emissive_triangle_light.slang + scene_lights.slang.
+        n = len(records)
+        weights = [
+            area * (0.2126 * float(em[0]) + 0.7152 * float(em[1]) + 0.0722 * float(em[2]))
+            for (_p0, _p1, _p2, em, area) in records
+        ]
+        total_w = float(sum(weights))
+        if n == 0 or total_w <= 0.0:
+            # Degenerate (no emissive geometry, or zero total power): keep the
+            # numEmissiveTriangles == 0 early-out so the shader skips the path and
+            # the inline CDF is never read.
+            self._num_emissive_tris = 0
+            zeros = b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
+            self.emissive_tri_buffer.upload_sync(zeros)
+            return
+
+        # Grow (and rebind) the buffer to hold every emissive triangle, doubling
+        # capacity like material_capacity. Vulkan re-writes binding 18; native
+        # Metal re-reads the buffer reference fresh at dispatch (no-op rebind).
+        if n > self.emissive_tri_capacity:
+            self.emissive_tri_capacity = max(n, self.emissive_tri_capacity * 2)
+            self.emissive_tri_buffer.destroy()
+            self.emissive_tri_buffer = self._gpu.StorageBuffer(
+                self.ctx, self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE + 16
+            )
+            self._rebind_emissive_descriptors()
+
+        uniform = bool(getattr(self, "_emissive_uniform_selection", False))
         data = bytearray()
+        cum = 0.0
         for i in range(n):
             p0, p1, p2, em, area = records[i]
+            if uniform:
+                # Test A/B: uniform-by-index — the same shader path then
+                # reproduces exact 1/N selection.
+                p_sel = 1.0 / float(n)
+                cw = float(i + 1) / float(n)
+            else:
+                p_sel = weights[i] / total_w
+                cum += weights[i]
+                cw = cum / total_w
             data += struct.pack(
                 "fff f fff f fff f fff f",
-                float(p0[0]), float(p0[1]), float(p0[2]), 0.0,
-                float(p1[0]), float(p1[1]), float(p1[2]), 0.0,
+                float(p0[0]), float(p0[1]), float(p0[2]), float(cw),
+                float(p1[0]), float(p1[1]), float(p1[2]), float(p_sel),
                 float(p2[0]), float(p2[1]), float(p2[2]), 0.0,
                 float(em[0]), float(em[1]), float(em[2]), float(area),
             )
-        while len(data) < EMISSIVE_TRI_CAPACITY * EMISSIVE_TRI_STRIDE:
+        # Pin the final CDF entry to exactly 1.0 (guards float round-off so the
+        # binary search always resolves a valid index for u → 1⁻).
+        if not uniform and n > 0:
+            struct.pack_into("f", data, (n - 1) * EMISSIVE_TRI_STRIDE + 12, 1.0)
+        cap_bytes = self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE
+        while len(data) < cap_bytes:
             data += b"\x00" * EMISSIVE_TRI_STRIDE
-        self.emissive_tri_buffer.upload_sync(
-            bytes(data[: EMISSIVE_TRI_CAPACITY * EMISSIVE_TRI_STRIDE])
-        )
+        self.emissive_tri_buffer.upload_sync(bytes(data[:cap_bytes]))
         self._num_emissive_tris = n
+        print(f"[skinny] emissive triangles: {n}"
+              + (" (uniform selection)" if uniform else " (power-weighted NEE)"))
 
     def _upload_sphere_lights(self, lights: list) -> None:
         """Pack each LightSphere into binding 17. Active count goes to
