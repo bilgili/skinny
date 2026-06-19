@@ -24,6 +24,7 @@ from skinny.params import (
 from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
+    apply_sppm_glossy_roughness,
     neural_config_from_args,
     resolve_walk,
     validate_render_flags,
@@ -558,6 +559,15 @@ def main() -> None:
         saved_prec = saved.get("train_precision")
         if saved_prec in ("fp32", "fp16"):
             renderer._train_precision = saved_prec
+    # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
+    # otherwise restore the persisted override. The sys.argv/env guard keeps an
+    # explicit CLI value (applied below, after the other CLI overrides) from
+    # being clobbered — when set there, this restore is skipped.
+    if ("--sppm-glossy-roughness" not in sys.argv
+            and not os.environ.get("SKINNY_SPPM_GLOSSY_ROUGHNESS")):
+        _sgr = saved.get("sppm_glossy_roughness")
+        if _sgr is not None:
+            renderer._sppm_glossy_roughness_override = float(_sgr)
     # --online-training (change online-training-trigger): CLI/env wins, else
     # restore the persisted flag. Enabling waits until the scene is ready (below).
     online_training_requested = bool(args.online_training)
@@ -577,6 +587,9 @@ def main() -> None:
     # CLI --integrator (when given) wins over the persisted value for this launch.
     if args.integrator is not None:
         renderer.integrator_index = INTEGRATOR_INDEX[args.integrator]
+    # CLI/env --sppm-glossy-roughness override (only read under SPPM). A persisted
+    # value is restored above (before the Renderer overrides) with CLI/env winning.
+    apply_sppm_glossy_roughness(renderer, args)
     # CLI --proposals / --reuse likewise override the persisted sampling seam.
     if args.proposals is not None:
         renderer.proposal_preset_index = renderer.proposal_preset_from_token(args.proposals)
@@ -653,6 +666,8 @@ def main() -> None:
             "train_precision": renderer._train_precision,
             "online_training": bool(online_training_requested),
             "encoding": renderer._neural_config.encoding.value,
+            "sppm_glossy_roughness": getattr(
+                renderer, "_sppm_glossy_roughness_override", None),
         }
         save_settings(out)
     except OSError:

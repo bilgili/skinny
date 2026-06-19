@@ -287,6 +287,7 @@ struct FrameConstants
     float  sppmCellSize;        // spatial-hash cell size (== sppmInitialRadius)
     uint3  sppmGridRes;         // grid resolution per axis (sceneBoundsExtent/cellSize)
     uint   sppmPhotonsEmitted;  // photons emitted per pass (the 1/N estimator divisor)
+    float  sppmGlossyContinueRoughness;  // SPPM eye-walk: continue (don't store a VP) through a metallic lobe whose roughness is below this (change sppm-glossy-final-gather); 0 = delta-only (PM-1)
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

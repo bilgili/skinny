@@ -9,6 +9,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **SPPM glossy / near-specular reflector reconstruction** (change
+  `sppm-glossy-final-gather`) — a metallic-gated, roughness-thresholded eye-walk
+  continuation for the SPPM integrator. A metallic sample
+  (`metalness ≥ 0.5`) whose roughness is below the new
+  `--sppm-glossy-roughness` threshold (env `SKINNY_SPPM_GLOSSY_ROUGHNESS`;
+  default ≈ 0.5) is continued **one bounce** like the delta caustic carrier
+  instead of storing a visible point, so the visible point lands on the next
+  non-glossy surface and the sharp reflection is reconstructed there and averaged
+  across passes. The photon stage treats a glossy-continued vertex as specular
+  (no deposit), preserving the disjoint NEE-direct / photon-indirect split and the
+  energy ratio. PM-1 stored a VP at the first non-delta hit, so glossy metals
+  (e.g. the brass sphere in `three_materials_demo`) failed to reflect their
+  neighbours; a **threshold of 0 reproduces PM-1 exactly** (delta-only). The
+  metallic guard is required because `BSDFSample` carries no sampled-lobe id and
+  the shared flat BSDF stays byte-frozen (path / BDPT SPIR-V unchanged). A full
+  final-gather variant for mid-roughness glossy is deferred. See
+  [docs/PhotonMapping.md](docs/PhotonMapping.md).
 - **GPU SPPM integrator** (change `photon-mapping-sppm`, PM-1) — a Stochastic
   Progressive Photon Mapping integrator (`INTEGRATOR_SPPM = 2`), the
   caustic-efficient third integrator after `path` and `bdpt`. **Wavefront-only**,

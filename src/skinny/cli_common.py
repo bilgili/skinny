@@ -32,6 +32,20 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_float(name: str) -> float | None:
+    """Parse a float env var for a numeric flag default — unset/empty → ``None``
+    (the sentinel meaning "use the renderer's built-in default"). A malformed
+    value raises a clear, user-facing error naming the env var rather than a raw
+    ValueError at parser-construction time."""
+    v = os.environ.get(name)
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        raise SystemExit(f"invalid {name}={v!r}: expected a float")
+
+
 def validate_render_flags(args) -> None:
     """Reject render-flag combinations that cannot work, with a clear error +
     exit (change bdpt-neural-incompatibility).
@@ -96,6 +110,19 @@ def resolve_walk(value: str) -> str:
     return v
 
 
+def apply_sppm_glossy_roughness(renderer, args) -> None:
+    """Apply the parsed ``--sppm-glossy-roughness`` override onto ``renderer``.
+
+    A ``None`` value (flag/env unset) leaves the override at its sentinel so the
+    renderer falls back to the tuned built-in default; an explicit value (incl.
+    ``0.0`` for PM-1 delta-only) sets ``renderer._sppm_glossy_roughness_override``.
+    Call once, after the renderer is constructed and other CLI overrides applied.
+    """
+    v = getattr(args, "sppm_glossy_roughness", None)
+    if v is not None:
+        renderer._sppm_glossy_roughness_override = float(v)
+
+
 def add_render_flags(
     parser: argparse.ArgumentParser,
     *,
@@ -145,6 +172,14 @@ def add_render_flags(
                  "front-ends this sets the initial integrator and it remains "
                  "runtime-cycleable.",
         )
+        # SPPM glossy-continue threshold (always present; only read under SPPM).
+        parser.add_argument(
+            "--sppm-glossy-roughness", type=float,
+            default=_env_float("SKINNY_SPPM_GLOSSY_ROUGHNESS"),
+            help="SPPM eye-walk: continue (reflect, don't gather) through a metallic "
+                 "lobe whose roughness is below this threshold, so polished metals "
+                 "reconstruct sharp reflections. Default (unset) uses the tuned built-in "
+                 "(~0.5); 0 = PM-1 delta-only. SPPM + wavefront only.")
     if proposals:
         parser.add_argument(
             "--proposals",
