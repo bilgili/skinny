@@ -150,3 +150,35 @@ and offset-driven MSL packers relocate them; the import-time
   within-group pSel), matching `emissive_triangle_light.slang`.
 - Lock the parallel prefix-sum kernel against a CPU exclusive-scan in a unit test
   before wiring.
+
+## Authoring deltas (resolved during implementation)
+
+- **Typed buffers, not the ByteAddressBuffer fold.** The gpu-portability +
+  integration review confirmed a SPPM kernel touches ~15/31 Metal buffer slots
+  (it never compiles the neural weights), so SPPM uses 4 plain typed buffers —
+  `RWStructuredBuffer<VisiblePoint> sppmVisiblePoints`,
+  `RWStructuredBuffer<SppmAccum> sppmAccum`, `RWStructuredBuffer<uint> sppmGrid`
+  (the `gridCount|gridOffset|gridCursor|sortedIdx` sub-ranges over
+  `numCells = sppmGridCellCount(num_pixels)`), `RWStructuredBuffer<uint>
+  sppmScanScratch` — type-safe, no manual byte offsets, no `SKINNY_METAL_SPPM`
+  gate. Grid kernels (count / scan-block / scan-block-sums / scan-add / scatter)
+  authored in `shaders/integrators/wavefront_sppm.slang`, all slangc-verified
+  (SPIR-V + Metal). Spatial-hash helpers (`sppmGridCellCount`, `sppmCellCoord`,
+  `sppmCellHash`) live in `sppm_state.slang`, shared by all stages.
+- **The visible point embeds the EVALUATED flat BSDF**, not reconstruction
+  inputs. `fetchFlatHitData` re-applies the normal map (so storing the shading
+  normal would double-apply it) and re-runs the MaterialX graph (expensive per
+  deposit). So `VisiblePoint` will carry `FlatHitMat mat; float3 F0; float3 ns`
+  (ns = post-normal-map shading normal). The eye stage stores
+  `vp.mat = material.data.mat; vp.F0 = material.F0; vp.ns = material.data.N`; the
+  photon deposit reconstructs `FlatMaterial{ data:{mat:vp.mat, N:vp.ns}, F0 }`
+  and computes `f = mat.evaluate(woVP, wiVP).response / max(wiVP.z, 1e-4)` (bare
+  f_r). No refetch, no graph re-run, no double-normal-map (pbrt's
+  store-the-BSDF-at-the-visible-point approach). Memory cost (~80 B/pixel)
+  accepted for PM-1; a packed representation is a later optimization. This grows
+  `VisiblePoint` again when the eye stage lands — the layout-lock test +
+  `wavefront_layout` mirror move in lockstep.
+- **FrameConstants SPPM tail added** (`sppmInitialRadius`, `sppmCellSize`,
+  `sppmGridRes` uint3, `sppmPhotonsEmitted`) after `cameraMirror`, in
+  `common.slang` + `_FC_SCALAR_FIELDS` + `_pack_uniforms`; +24 B, well within the
+  768 B UBO (the import-time assert self-guards).

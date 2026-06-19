@@ -280,6 +280,13 @@ struct FrameConstants
     // byte-identical (ndc.x untouched). Scalar tail: _pack_uniforms appends it
     // last in this exact order.
     uint   cameraMirror;
+    // ── SPPM (change photon-mapping-sppm) ── per-pass photon-mapping params,
+    // read only by the wavefront SPPM kernels (integratorType == 2). Scalar tail
+    // appended last by _pack_uniforms in this exact order.
+    float  sppmInitialRadius;   // initial per-pixel search radius r_0
+    float  sppmCellSize;        // spatial-hash cell size (== sppmInitialRadius)
+    uint3  sppmGridRes;         // grid resolution per axis (sceneBoundsExtent/cellSize)
+    uint   sppmPhotonsEmitted;  // photons emitted per pass (the 1/N estimator divisor)
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for

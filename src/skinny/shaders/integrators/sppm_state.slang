@@ -17,6 +17,8 @@
 // tightly packed. MSL (Metal) pads float3 to 16 B, growing the stride.
 // tests/test_sppm_state.py locks both struct layouts to these declarations.
 
+import common;  // pcgHash for the spatial-hash helpers
+
 // VisiblePoint.flags bits (mirror skinny.wavefront_layout.VP_ACTIVE).
 static const uint VP_ACTIVE = 1u;  // a valid visible point was stored this pass
 
@@ -82,4 +84,33 @@ void sppmUpdate(inout VisiblePoint vp, float3 phi, uint m, float gamma)
     vp.tau = (vp.tau + phi) * ratio;
     vp.radius = vp.radius * sqrt(ratio);
     vp.n = nNew;
+}
+
+// ── Spatial-hash grid (shared by the eye/grid/photon SPPM kernels) ─────────
+// Cell count = next power of two >= 2*num_pixels, so the hash masks with
+// `& (numCells - 1)`. MUST match skinny.wavefront_layout.sppm_grid_cell_count.
+uint sppmGridCellCount(uint numPixels)
+{
+    let target = max(1u, 2u * numPixels);
+    uint cells = 1u;
+    [loop] while (cells < target)
+        cells <<= 1;
+    return cells;
+}
+
+// Integer cell coordinate of a world position. cellSize is fixed at the initial
+// search radius (a valid upper bound on every active VP's current radius), so a
+// 3x3x3 neighbour scan never misses a photon.
+int3 sppmCellCoord(float3 pos, float3 boundsMin, float cellSize)
+{
+    return int3(floor((pos - boundsMin) / max(cellSize, 1e-8)));
+}
+
+// Hash an (possibly offset) integer cell coordinate into [0, numCells). The
+// photon stage reuses this for the 3x3x3 neighbour cells (offset coords), so it
+// must be deterministic and offset-stable.
+uint sppmCellHash(int3 c, uint numCells)
+{
+    let h = pcgHash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u);
+    return h & (numCells - 1u);
 }

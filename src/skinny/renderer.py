@@ -87,6 +87,9 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     ("proposalMask", 4), ("reuseMode", 4), ("proposalAlpha", 16), ("flatLobeSamplers", 4),
     ("sceneBoundsMin", 12), ("sceneBoundsExtent", 12), ("neuralNetworkVersion", 4),
     ("recordMode", 4), ("cameraMirror", 4),
+    # SPPM per-pass photon-mapping tail (change photon-mapping-sppm).
+    ("sppmInitialRadius", 4), ("sppmCellSize", 4), ("sppmGridRes", 12),
+    ("sppmPhotonsEmitted", 4),
 )
 
 # Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
@@ -8398,6 +8401,16 @@ class Renderer:
         # matching FrameConstants.cameraMirror in common.slang.
         camera_mirror = 1 if getattr(self, "_camera_mirror", False) else 0
         data += struct.pack("I", int(camera_mirror))                 # 4 bytes
+        # SPPM per-pass photon-mapping tail (change photon-mapping-sppm). Zero
+        # unless the SPPM integrator is active; the SPPM render pass computes the
+        # initial radius (pbrt param or bbox heuristic), cell size, grid res, and
+        # photon count and stashes them on these attributes before packing.
+        sppm_radius = float(getattr(self, "_sppm_initial_radius", 0.0))
+        data += struct.pack("f", sppm_radius)                        # 4 bytes
+        data += struct.pack("f", float(getattr(self, "_sppm_cell_size", sppm_radius)))
+        grid_res = getattr(self, "_sppm_grid_res", (0, 0, 0))
+        data += struct.pack("III", int(grid_res[0]), int(grid_res[1]), int(grid_res[2]))
+        data += struct.pack("I", int(getattr(self, "_sppm_photons_emitted", 0)))
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
