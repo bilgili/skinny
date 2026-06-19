@@ -26,19 +26,25 @@ static const uint VP_ACTIVE = 1u;  // a valid visible point was stored this pass
 // sub-unit flux magnitudes SPPM accumulates; revisit if HDR emitters overflow.
 static const float SPPM_FLUX_FIXED_SCALE = 1048576.0;
 
-// Per-pixel visible point: this-pass eye geometry fused with the persistent
-// progressive estimator. Scalar = 76 B, MSL = 96 B.
+// Per-pixel visible point: this-pass eye geometry + per-pass direct radiance
+// fused with the persistent progressive estimator. Scalar = 88 B, MSL = 112 B.
+//
+// `ld` holds the FULL per-pass direct term (NEE at the visible point plus any
+// emitter/env reached through the eye specular chain) — computed once in the
+// eye stage so direct is added at exactly ONE site (the update stage reads it
+// and never re-traces NEE), keeping SPPM's photon term disjoint from direct.
 struct VisiblePoint
 {
     float3 pos;         // 0..12   world hit position (rewritten each pass)
     float3 ns;          // 12..24  world shading normal (rewritten each pass)
-    float3 beta;        // 24..36  path throughput reaching the point (this pass)
+    float3 beta;        // 24..36  eye throughput reaching the point, EXCLUDING the VP BSDF (this pass)
     float3 wo;          // 36..48  world outgoing dir toward the camera (this pass)
-    float3 tau;         // 48..60  accumulated reflected flux (persists)
-    uint   materialId;  // 60..64  flat material id at the hit
-    uint   flags;       // 64..68  bit0 = VP_ACTIVE
-    float  radius;      // 68..72  current search radius r_i (persists)
-    float  n;           // 72..76  accumulated photon count N_i (persists; float for gamma)
+    float3 ld;          // 48..60  per-pass direct radiance (NEE + specular-chain emitters)
+    float3 tau;         // 60..72  accumulated reflected flux (persists)
+    uint   materialId;  // 72..76  flat material id at the hit
+    uint   flags;       // 76..80  bit0 = VP_ACTIVE
+    float  radius;      // 80..84  current search radius r_i (persists)
+    float  n;           // 84..88  accumulated photon count N_i (persists; float for gamma)
 };
 
 // Per-pass photon-deposit accumulator (separate buffer, atomically written by

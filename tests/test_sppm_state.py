@@ -31,6 +31,8 @@ from skinny.wavefront_layout import (
     VP_ACTIVE,
     sppm_accum_size,
     sppm_buffer_sizes,
+    sppm_grid_buffer_sizes,
+    sppm_grid_cell_count,
     visible_point_size,
 )
 
@@ -56,12 +58,12 @@ def _parse_struct_fields(src: str, struct_name: str) -> list[tuple[str, str]]:
 
 # ── strides ──────────────────────────────────────────────────────────
 
-def test_visible_point_scalar_stride_is_76():
-    assert VISIBLE_POINT_STRIDE == 76
+def test_visible_point_scalar_stride_is_88():
+    assert VISIBLE_POINT_STRIDE == 88
 
 
-def test_visible_point_msl_stride_is_96():
-    assert VISIBLE_POINT_STRIDE_MSL == 96
+def test_visible_point_msl_stride_is_112():
+    assert VISIBLE_POINT_STRIDE_MSL == 112
 
 
 def test_sppm_accum_stride_is_16_both_layouts():
@@ -113,16 +115,42 @@ def test_vp_active_flag_matches_slang():
 
 # ── buffer sizing ────────────────────────────────────────────────────
 
-def test_sppm_buffer_sizes_scale_with_stream_size():
-    s = sppm_buffer_sizes(stream_size=1024)
+def test_sppm_buffer_sizes_scale_with_num_pixels():
+    s = sppm_buffer_sizes(num_pixels=1024)
     assert s["visible_points"] == 1024 * VISIBLE_POINT_STRIDE
     assert s["sppm_accum"] == 1024 * SPPM_ACCUM_STRIDE
 
 
 def test_sppm_buffer_sizes_msl_uses_metal_stride():
-    s = sppm_buffer_sizes(stream_size=256, msl=True)
+    s = sppm_buffer_sizes(num_pixels=256, msl=True)
     assert s["visible_points"] == 256 * VISIBLE_POINT_STRIDE_MSL
     assert s["sppm_accum"] == 256 * 16
+
+
+def test_sppm_grid_cell_count_is_next_pow2_of_twice_pixels():
+    # 1024 px -> 2*1024 = 2048 (already a power of two) -> 2048.
+    assert sppm_grid_cell_count(1024) == 2048
+    # 1000 px -> 2000 -> next pow2 = 2048.
+    assert sppm_grid_cell_count(1000) == 2048
+    # 1025 px -> 2050 -> next pow2 = 4096.
+    assert sppm_grid_cell_count(1025) == 4096
+
+
+def test_sppm_grid_cell_count_masking_invariant():
+    # numCells is a power of two so cell index can mask with & (numCells - 1).
+    for px in (1, 100, 1024, 1_000_000):
+        nc = sppm_grid_cell_count(px)
+        assert nc & (nc - 1) == 0
+        assert nc >= 2 * px
+
+
+def test_sppm_grid_buffer_sizes():
+    px = 4096
+    nc = sppm_grid_cell_count(px)
+    s = sppm_grid_buffer_sizes(px)
+    # gridCount | gridOffset | gridCursor (each nc) + sortedIdx (px), all uint.
+    assert s["grid_combined"] == (3 * nc + px) * 4
+    assert s["scan_scratch"] == ((nc + 255) // 256) * 4
 
 
 # ── slangc compile check (skipped without slangc) ────────────────────
