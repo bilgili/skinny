@@ -40,6 +40,8 @@ class RenderOptions:
     env_intensity: Optional[float] = None
     direct_light: bool = True
     time: object = None  # None | int | float | Usd.TimeCode
+    # SPPM glossy-continue threshold override; None → renderer's built-in default.
+    sppm_glossy_roughness: Optional[float] = None
 
     integrator_index: int = field(init=False)
     tonemap_index: int = field(init=False)
@@ -202,6 +204,11 @@ class HeadlessRenderer:
         self.renderer.direct_light_index = 0 if opts.direct_light else 1
         if opts.env_intensity is not None:
             self.renderer.env_intensity = float(opts.env_intensity)
+        # SPPM glossy-continue threshold override (only read under SPPM). None
+        # leaves the renderer's built-in default in place.
+        if opts.sppm_glossy_roughness is not None:
+            self.renderer._sppm_glossy_roughness_override = \
+                float(opts.sppm_glossy_roughness)
 
     def _accumulate(self, samples: int) -> bytes:
         raw = b""
@@ -364,6 +371,7 @@ def main(argv: Optional[list] = None) -> int:
         samples=ns.samples, integrator=ns.integrator or "path", tonemap=ns.tonemap,
         exposure=ns.exposure, env_intensity=ns.env_intensity,
         direct_light=not ns.no_direct,
+        sppm_glossy_roughness=ns.sppm_glossy_roughness,
     )
     try:
         with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu, backend=backend,

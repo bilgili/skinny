@@ -63,6 +63,14 @@ if TYPE_CHECKING:
 WORKGROUP_SIZE = 8
 MAX_FRAMES_IN_FLIGHT = 2
 
+# SPPM glossy/near-specular eye-walk continuation: default roughness threshold
+# (change sppm-glossy-final-gather). Tuned for polished metals — brass in
+# assets/three_materials_demo has roughness ~0.15 (p95 0.23); the metallic guard in
+# the shader keeps dielectrics on the gather side, so 0.5 catches metals with
+# headroom. Override per-render via renderer._sppm_glossy_roughness_override (None =
+# use this default; explicit 0.0 = PM-1 delta-only).
+_SPPM_GLOSSY_ROUGHNESS_DEFAULT = 0.5
+
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
 # matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
 # packer (`_pack_uniforms_msl`, design D3) to relocate each field from the Vulkan
@@ -90,6 +98,8 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     # SPPM per-pass photon-mapping tail (change photon-mapping-sppm).
     ("sppmInitialRadius", 4), ("sppmCellSize", 4), ("sppmGridRes", 12),
     ("sppmPhotonsEmitted", 4),
+    # Glossy / near-specular eye-walk continuation threshold (change sppm-glossy-final-gather).
+    ("sppmGlossyContinueRoughness", 4),
 )
 
 # Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
@@ -8524,14 +8534,18 @@ class Renderer:
                 or max(_diag * 0.001, 1e-4)
             sppm_photons = int(getattr(self, "_sppm_photons_override", 0)) \
                 or int(self.width * self.height)
+            _glossy = getattr(self, "_sppm_glossy_roughness_override", None)
+            sppm_glossy = float(_glossy) if _glossy is not None else _SPPM_GLOSSY_ROUGHNESS_DEFAULT
         else:
             sppm_radius = 0.0
             sppm_photons = 0
+            sppm_glossy = 0.0
         self._sppm_photons_emitted = sppm_photons
         data += struct.pack("f", sppm_radius)                        # sppmInitialRadius
         data += struct.pack("f", sppm_radius)                        # sppmCellSize
         data += struct.pack("III", 0, 0, 0)                          # sppmGridRes (unused)
         data += struct.pack("I", int(sppm_photons))                  # sppmPhotonsEmitted
+        data += struct.pack("f", sppm_glossy)                        # sppmGlossyContinueRoughness
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -8685,6 +8699,13 @@ class Renderer:
             tuple(sorted(
                 (k, _hashable_value(v)) for k, v in self.mtlx_overrides.items()
             )),
+            # SPPM per-pass tuning overrides (change sppm-glossy-final-gather):
+            # changing any resets accumulation so an A/B (e.g. glossy threshold 0
+            # vs the tuned default on one reused renderer) converges cleanly
+            # instead of accumulating across configurations.
+            getattr(self, "_sppm_radius_override", None),
+            getattr(self, "_sppm_photons_override", None),
+            getattr(self, "_sppm_glossy_roughness_override", None),
         )
         return hash(parts)
 

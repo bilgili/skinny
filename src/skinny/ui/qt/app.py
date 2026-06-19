@@ -30,6 +30,7 @@ import numpy as np
 from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
+    apply_sppm_glossy_roughness,
     resolve_walk,
     validate_render_flags,
 )
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         lobe_samplers: str | None = None,
         backend: str = "vulkan",
         encoding: str = "E0",
+        sppm_glossy_roughness: float | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -214,6 +216,13 @@ class MainWindow(QMainWindow):
             self.renderer.coat_sampler_index = c
             self.renderer.spec_sampler_index = s
             self.renderer.diff_sampler_index = d
+        # SPPM glossy-continue threshold (only read under SPPM). CLI/env value
+        # (resolved in main(), restored-from-snapshot when unset) wins over the
+        # persisted-params restore above. None leaves the built-in default.
+        apply_sppm_glossy_roughness(
+            self.renderer,
+            argparse.Namespace(sppm_glossy_roughness=sppm_glossy_roughness),
+        )
 
         # Keys the viewport responds to (camera mode toggle, focus reset,
         # HUD toggle, free-cam WASDQE). Forwarded from MainWindow when no
@@ -525,6 +534,8 @@ class MainWindow(QMainWindow):
         out["last_dirs"] = last_dirs_snapshot()
         out["backend"] = self._backend_name
         out["encoding"] = self.renderer._neural_config.encoding.value
+        out["sppm_glossy_roughness"] = getattr(
+            self.renderer, "_sppm_glossy_roughness_override", None)
         try:
             out["section_states"] = self._tree_builder.section_states()
         except Exception as exc:  # noqa: BLE001
@@ -673,6 +684,15 @@ def main() -> None:
         if saved_encoding in ("E0", "E1", "E3"):
             encoding_value = saved_encoding
 
+    # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
+    # else restore the persisted override. None leaves the renderer's built-in.
+    sppm_glossy_roughness_value = args.sppm_glossy_roughness
+    if ("--sppm-glossy-roughness" not in sys.argv
+            and not os.environ.get("SKINNY_SPPM_GLOSSY_ROUGHNESS")):
+        saved_sgr = saved_settings.get("sppm_glossy_roughness")
+        if saved_sgr is not None:
+            sppm_glossy_roughness_value = float(saved_sgr)
+
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
                      resolve_walk(args.bdpt_walk), args.integrator,
@@ -683,7 +703,8 @@ def main() -> None:
                      reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers,
                      backend=backend,
-                     encoding=encoding_value)
+                     encoding=encoding_value,
+                     sppm_glossy_roughness=sppm_glossy_roughness_value)
     # Display-only state for the startup configuration matrix (change
     # online-training-observability).
     win.renderer._requested_backend = args.backend

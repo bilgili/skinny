@@ -53,6 +53,16 @@ static const uint SPPM_SCAN_BLOCK = 256u;
 
 uint sppmNumPixels() { return fc.width * fc.height; }
 
+// Glossy / near-specular continuation predicate (change sppm-glossy-final-gather).
+// True => follow the BSDF-sampled lobe one bounce like a delta carrier instead of
+// storing a visible point. Metallic guard: BSDFSample carries no lobe id, so gate on
+// metalness to keep dielectric diffuse samples on the gather side. Threshold 0 => PM-1.
+bool sppmGlossyContinue(FlatMaterial mat, BSDFSample bs)
+{
+    let m = mat.data.mat;
+    return (bs.pdf > 0.0) && (m.roughness < fc.sppmGlossyContinueRoughness) && (m.metallic >= 0.5);
+}
+
 // Sub-range bases into sppmGrid.
 uint sppmGridCountBase()  { return 0u; }
 uint sppmGridOffsetBase(uint nc) { return nc; }
@@ -158,14 +168,16 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         if (!bs.valid)
             break;
 
-        if (bs.pdf > 0.0)
+        let glossyContinue = sppmGlossyContinue(mat, bs);
+        if (bs.pdf > 0.0 && !glossyContinue)
         {
-            // Non-delta flat surface ⇒ this is the visible point.
+            // Non-delta, non-glossy-continued surface ⇒ this is the visible point.
             sppmStoreVisiblePoint(lane, h.position, N, V, throughput, ld, mat);
             return;
         }
 
-        // Delta/specular lobe ⇒ caustic carrier: keep tracing.
+        // Delta OR glossy-continue ⇒ caustic carrier: keep tracing so the visible
+        // point lands on the next non-glossy surface and the reflection is rebuilt.
         bs.wi = tangentToWorld(bs.wi, T, B, N);
         throughput *= bs.weight;
         spawnedBySpecular = true;
@@ -500,7 +512,10 @@ void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
         BSDFSample bs = mat.sample(wo, rng);
         if (!bs.valid)
             break;
-        let specular = (bs.pdf <= 0.0);
+        // A glossy-continued vertex is treated like a specular vertex by the photon
+        // stage (no deposit), keeping the eye VP placement and photon deposit consistent
+        // and the direct(NEE)/indirect(photon) split disjoint (change sppm-glossy-final-gather).
+        let specular = (bs.pdf <= 0.0) || sppmGlossyContinue(mat, bs);
 
         // Deposit at a non-specular vertex only after >= 1 prior bounce, so the
         // deposited term is purely indirect/caustic and disjoint from the NEE

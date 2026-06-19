@@ -32,6 +32,7 @@ from tornado.websocket import WebSocketHandler
 from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
+    apply_sppm_glossy_roughness,
     resolve_walk,
     validate_render_flags,
 )
@@ -57,6 +58,7 @@ _INTEGRATOR: str | None = None
 _REUSE: str | None = None
 _LOBE_SAMPLERS: str | None = None
 _ENCODING: str = "E0"   # axis-2 conditioner encoding (change renderer-conditioner-encoding)
+_SPPM_GLOSSY_ROUGHNESS: float | None = None  # SPPM glossy-continue threshold (None → built-in)
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -131,6 +133,12 @@ class SkinnySession:
                 self.renderer.coat_sampler_index = c
                 self.renderer.spec_sampler_index = s
                 self.renderer.diff_sampler_index = d
+            # SPPM glossy-continue threshold (only read under SPPM). Stateless —
+            # CLI/env only, no persistence; threaded through the module global.
+            apply_sppm_glossy_roughness(
+                self.renderer,
+                argparse.Namespace(sppm_glossy_roughness=_SPPM_GLOSSY_ROUGHNESS),
+            )
 
             self._log_init("Setting up video encoder...")
             self.encoder = VideoEncoder(1280, 720, gpu_info=self.ctx.gpu_info)
@@ -716,6 +724,7 @@ def main() -> None:
 
     global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
     global _BDPT_WALK, _INTEGRATOR, _REUSE, _LOBE_SAMPLERS, _ENCODING
+    global _SPPM_GLOSSY_ROUGHNESS
     _BACKEND = resolved_backend
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
@@ -726,6 +735,7 @@ def main() -> None:
     _REUSE = args.reuse
     _LOBE_SAMPLERS = args.lobe_samplers
     _ENCODING = args.encoding
+    _SPPM_GLOSSY_ROUGHNESS = args.sppm_glossy_roughness
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

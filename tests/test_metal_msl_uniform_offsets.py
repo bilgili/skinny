@@ -3,7 +3,7 @@
 Two halves:
 
 * **Host invariants (always run, no GPU):** the Vulkan *scalar* ``FrameConstants``
-  blob is exactly 540 B — ``_FC_SCALAR_FIELDS`` (the relocation table the MSL packer
+  blob is exactly 544 B — ``_FC_SCALAR_FIELDS`` (the relocation table the MSL packer
   walks) covers it with no gap or overlap — and ``SkinParameters.pack()`` (the
   ``std140`` skin UBO) is byte-stable. These pin the Vulkan side "byte-unchanged".
 
@@ -50,17 +50,23 @@ except OSError as exc:  # pragma: no cover - environment dependent
 
 # Expected sizes — the Vulkan scalar FrameConstants blob and the std140 skin UBO.
 # If either struct grows, update the packer AND this pin in the same change.
-_VK_SCALAR_FC_BYTES = 540  # 516 + 24 SPPM tail (change photon-mapping-sppm):
-#   sppmInitialRadius + sppmCellSize + sppmGridRes(float3) + sppmPhotonsEmitted
+_VK_SCALAR_FC_BYTES = 544  # 516 + 28 SPPM tail (changes photon-mapping-sppm +
+#   sppm-glossy-final-gather): sppmInitialRadius + sppmCellSize + sppmGridRes(float3)
+#   + sppmPhotonsEmitted + sppmGlossyContinueRoughness
 _SKIN_PARAMS_BYTES = 80
 # Reflected MSL `fc` size on Metal (float3 padded to 16 B; design D3 / task 1.2).
-# Stays 592 B: the recordMode/cameraMirror scalar-tail uints land in the struct's
-# existing trailing padding, so adding them did not grow the reflected size.
-_MSL_FC_BYTES = 592
+# 592 -> 640 B (change sppm-glossy-final-gather): unlike recordMode/cameraMirror —
+# which landed in the struct's existing trailing padding and kept it at 592 — the
+# new 4-byte float sppmGlossyContinueRoughness (scalar blob 540 -> 544) tips the
+# reflected struct past that padding to the next alignment multiple. Verified live
+# under guarded Metal (RUN_METAL_MEGAKERNEL_COMPILE=1): MetalContext main_pass
+# reflects 640 B and _pack_uniforms_msl packs to exactly that (it sizes from the
+# reflection, so the Metal megakernel self-adapts; only this pin is hand-tracked).
+_MSL_FC_BYTES = 640
 
 
-def test_vulkan_scalar_fc_blob_is_540():
-    """`_FC_SCALAR_FIELDS` covers the whole 540 B scalar blob, no gap/overlap — this
+def test_vulkan_scalar_fc_blob_is_544():
+    """`_FC_SCALAR_FIELDS` covers the whole 544 B scalar blob, no gap/overlap — this
     is the table `_pack_uniforms_msl` walks to relocate each field into MSL."""
     total = sum(sz for _, sz in _FC_SCALAR_FIELDS)
     assert total == _VK_SCALAR_FC_BYTES, (

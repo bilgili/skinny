@@ -107,6 +107,70 @@ primitives (`push_tile`, `dispatch_full`, `dispatch_one`, `barrier`) plus
 the `clear_visible_points()` / `clear_grid()` / `clear_accum()` buffer clears
 (`vkCmdFillBuffer`).
 
+## Glossy / near-specular continuation
+
+PM-1 stored a visible point at the **first non-delta hit** (any flat surface
+with `bs.pdf > 0`). That is correct for diffuse and rough surfaces, but it breaks
+on a **glossy metal**: its narrow specular lobe makes the photon gather too
+sparse to rebuild the sharp reflection (few photons land inside the search disc
+along the mirror-like direction), and because a pure metal carries **no diffuse
+term**, the stored VP's bare-f_r evaluation washes the reflection out entirely.
+Concretely, the brass sphere in `three_materials_demo` failed to reflect the
+neighbouring wood/marble spheres — it rendered as a near-flat highlight instead
+of a mirror-with-roughness.
+
+The fix is a **roughness-thresholded, metallic-gated eye-walk continuation**.
+When the BSDF-sampled lobe at a hit is metallic (`metalness ≥ 0.5`) and its
+roughness is below `fc.sppmGlossyContinueRoughness`, the eye walk does **not**
+store a visible point there. Instead it follows the BSDF-sampled direction one
+more bounce — exactly the way the existing **delta caustic carrier** (glass /
+mirror) is continued — so the VP lands on the **next non-glossy surface**. The
+sharp reflection is then reconstructed at *that* surface and averaged across the
+progressive passes like any other VP. The predicate (identical in the eye and
+photon stages) is:
+
+```text
+bs.pdf > 0.0  &&  m.roughness < fc.sppmGlossyContinueRoughness  &&  m.metallic >= 0.5
+```
+
+The **photon stage** treats a glossy-continued vertex the same way it treats a
+delta vertex — **as specular, with no deposit** — so the disjoint
+direct(NEE)/indirect(photon) split is preserved and the SPPM energy ratio is
+unchanged: the photon that would otherwise have deposited onto the glossy VP
+instead continues to the surface the eye VP now lives on.
+
+**Threshold semantics.** A threshold of `0` reproduces PM-1 exactly
+(`m.roughness < 0` is never true, so nothing is continued and every glossy metal
+stores a VP at the first hit — delta-only behaviour). The default is `≈ 0.5`,
+set with `--sppm-glossy-roughness` (env `SKINNY_SPPM_GLOSSY_ROUGHNESS`); it is
+folded into `_current_state_hash` so changing it resets accumulation cleanly.
+
+**Why the metallic guard.** `BSDFSample` carries **no sampled-lobe id**, and the
+shared flat BSDF (`interfaces.slang` / `flat_material.slang`) is kept
+**byte-frozen** — so path / BDPT keep byte-identical BSDF sampling and
+evaluation. (Appending `sppmGlossyContinueRoughness` to the shared
+`FrameConstants` *does* perturb that struct's declaration in every consumer's
+SPIR-V — the same trailing-field effect PM-1's four SPPM tail fields had — but
+the field is **appended**, so no existing field offset moves, and path / BDPT
+never read it: their render output is unchanged.) The `metalness ≥ 0.5`
+guard is therefore an implementation proxy for "this sample is the sharp
+specular lobe": it keeps **dielectric diffuse samples** (e.g. the marble's
+`specular_roughness = 0.1`, the wood) on the **gather** side — they still store a
+VP and accumulate photons — while only **metals** (brass `metalness = 1`,
+`roughness ≈ 0.15`) continue. Without the guard, a low-roughness dielectric's
+*diffuse* sample would be wrongly continued and its surface would stop gathering.
+
+**Deferred — full final gather.** A lower-variance variant for **mid-roughness**
+glossy is a true *final gather*: store the glossy VP and, in a follow-up pass,
+shoot **one BSDF-sampled gather ray** per glossy VP that reads the photon
+estimate at *its* hit point (rather than walking the eye ray through). This trades
+the single-bounce continuation's reuse of the next surface's VP for an explicit
+importance-sampled gather, which is better-behaved across the full roughness
+range — but it needs an **extra wavefront ray pass** (gather-ray trace + photon
+lookup) and the attendant record buffers. It is recorded here as the natural next
+change against the `photon-mapping` capability and is **not built in this
+change**.
+
 ## Equations
 
 Notation: Le is a light's emitted radiance; f_r is the bare BSDF (response
@@ -327,21 +391,31 @@ tile layout the path pass uses.
 
 ### FrameConstants tail
 
-Four fields are appended to `FrameConstants` (`common.slang`), packed by both
+Five fields are appended to `FrameConstants` (`common.slang`), packed by both
 `_pack_uniforms` and `_pack_uniforms_msl` via `_FC_SCALAR_FIELDS`, read only by
-the SPPM kernels (`integratorType == 2`); +24 B, within the 768 B UBO (the
-import-time `_VK_UNIFORM_BUFFER_BYTES` assert self-guards):
+the SPPM kernels (`integratorType == 2`); +28 B, within the 768 B UBO (the
+import-time `_VK_UNIFORM_BUFFER_BYTES` assert self-guards). The scalar blob grows
+540 → 544 B; on Metal the new 4-byte float tips the reflected `fc` struct past its
+prior trailing padding, so the MSL `fc` size grows **592 → 640 B** (verified live
+under guarded Metal; `_pack_uniforms_msl` sizes from the reflection, so the Metal
+megakernel self-adapts — only the `_MSL_FC_BYTES` test pin is hand-tracked):
 
 | Field | Type | Meaning |
 |---|---|---|
 | `sppmInitialRadius` | `float` | initial per-pixel search radius r₀ — the pbrt `radius` param if imported, else ≈ **0.1 % of the scene bbox diagonal** (`max(diag·0.001, 1e-4)`) |
 | `sppmCellSize` | `float` | spatial-hash cell size (== `sppmInitialRadius`, a valid upper bound as radii shrink) |
 | `sppmGridRes` | `uint3` | per-axis grid resolution — packed but **unused** by the kernels (they hash from `width*height`) |
-| `sppmPhotonsEmitted` | `uint` | photons emitted per pass (the `1/N_emitted` estimator divisor); default `num_pixels` (one photon/pixel), or the `--sppm-photons-per-pass` / pbrt `photonsperiteration` override |
+| `sppmPhotonsEmitted` | `uint` | photons emitted per pass (the `1/N_emitted` estimator divisor); default `num_pixels` (one photon/pixel), or the `_sppm_photons_override` renderer attribute (set by the pbrt `photonsperiteration` import) |
+| `sppmGlossyContinueRoughness` | `float` | glossy / near-specular eye-walk continuation threshold (see [Glossy / near-specular continuation](#glossy--near-specular-continuation)). A metallic sample whose roughness is below this value is continued one bounce instead of storing a VP. **0** reproduces PM-1 (delta-only); default ≈ **0.5**, set via `--sppm-glossy-roughness` / `SKINNY_SPPM_GLOSSY_ROUGHNESS`. |
 
-The radius / photon tuning is added to `_current_state_hash` so changing it
-resets accumulation cleanly. `--sppm-radius` overrides r₀; `--sppm-photons-per-pass`
-overrides the photon count.
+All three SPPM tuning overrides (`_sppm_radius_override`,
+`_sppm_photons_override`, `_sppm_glossy_roughness_override`) are added to
+`_current_state_hash`, so changing any of them resets accumulation cleanly (an
+A/B that varies only the glossy threshold on one reused renderer converges from
+scratch rather than accumulating across configurations). Only the glossy
+threshold has a CLI flag — `--sppm-glossy-roughness` (env
+`SKINNY_SPPM_GLOSSY_ROUGHNESS`); the radius / photon overrides are renderer
+attributes set by the pbrt `sppm` importer (`api.sppm_selection`).
 
 ## Host wiring
 
