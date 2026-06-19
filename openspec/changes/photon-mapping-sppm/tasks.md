@@ -1,0 +1,64 @@
+## 1. Setup & selection seam
+
+- [ ] 1.1 Create a git worktree off `main` for this change (per CLAUDE.md workflow); set up the headless env (`./bin/python3.13`, `VULKAN_SDK`, `DYLD_LIBRARY_PATH`).
+- [ ] 1.2 Add `INTEGRATOR_SPPM = 2u` to `shaders/common.slang`; add `INTEGRATOR_INDEX["sppm"] = 2` and `"SPPM"` to the GUI integrator mode list (`renderer.py`).
+- [ ] 1.3 Extend `cli_common.py` `--integrator` choices to `(path, bdpt, sppm)`; wire selection in `app.py`, `web_app.py`, `ui/qt/app.py`.
+- [ ] 1.4 (test-first) Add render-cli tests for the new `sppm` choice and the `sppm + megakernel` startup-rejection (mirrors existing bdpt-gating tests); then implement the shared gating so `sppm` requires `--execution-mode wavefront`.
+- [ ] 1.5 Add `integrator_index == SPPM` to the accumulation state-hash inputs so switching to/from SPPM resets accumulation; add a test asserting the reset.
+
+## 2. SPPM shader core (backend-neutral Slang)
+
+- [ ] 2.1 Define the visible-point record + packed SPPM state (`pos, ns, beta, bsdf params, materialId, r, N, tau, Phi, M`) in a new `shaders/integrators/sppm_state.slang`; document its byte layout.
+- [ ] 2.2 Implement the **eye stage**: trace the camera path through specular/perfectly-glossy bounces to the first non-specular flat-material hit, store one stochastic visible point per pixel; inactive point on escape/death. Gate to flat materials only.
+- [ ] 2.3 Implement the **grid-build stage**: uniform spatial hash over visible points by counting sort (per-cell count → exclusive prefix sum → scatter). Keep atomics to integer adds (both targets).
+- [ ] 2.4 Implement the **photon stage**: emit photons from lights via the existing power-weighted emissive/light CDFs, trace with Russian roulette, grid-lookup and atomic flux deposit (`Phi`,`M`) into visible points within radius.
+- [ ] 2.5 Implement the **update stage**: SPPM radius/flux reduction (`N'=N+γM`, `r'=r·√(N'/(N+M))`, `tau'=(tau+Phi)·(r'/r)²`, γ=2/3); resolve pixel radiance `tau/(Nₑₘᵢₜₜₑₐ·π·r²)` and composite with the existing NEE direct term into the accumulation image.
+- [ ] 2.6 Gate all Metal-specific shader adaptations behind `#if defined(SKINNY_METAL)` so Vulkan SPIR-V stays byte-unchanged; keep modules small and shared via `common.slang`.
+
+## 3. Metal backend bring-up (first)
+
+- [ ] 3.1 Budget the new buffers against the Metal 31-slot argument-table cap: fold visible-point / grid / photon-record buffers into a minimal combined-buffer set (graph-param-fold lesson — reduce buffer *count*, not bindings). Record the budget in the binding map before wiring kernels.
+- [ ] 3.2 Wire the four SPPM stages into `metal_wavefront.py` / `metal_compute.py` via the staged wavefront driver; allocate buffers through the suballocator.
+- [ ] 3.3 Implement per-pass queue compaction on Metal via the existing CPU-readback fallback (indirect dispatch is a no-op on slang-rhi Metal today).
+- [ ] 3.4 (guarded, one Metal-compile process at a time — thermal rule) Smoke-test: SPPM active with ≥2 MaterialX graph materials compiles + dispatches without blowing the slot cap.
+- [ ] 3.5 Render the caustic scene under SPPM on Metal headless; confirm a visible caustic and finite energy before parity tuning.
+
+## 4. Vulkan backend parity
+
+- [ ] 4.1 Wire the four SPPM stages into `vk_wavefront.py` / `wavefront_driver.py`; use GPU indirect dispatch for slot counts and device atomics for flux deposit.
+- [ ] 4.2 Recompile `main_pass.spv` + the new wavefront `.spv` kernels with `slangc`; verify SPIR-V for path/bdpt is byte-unchanged (the `#if SKINNY_METAL` gating).
+- [ ] 4.3 Render the caustic scene under SPPM on Vulkan headless; confirm Metal and Vulkan agree within the parity tolerance.
+
+## 5. pbrt importer mapping
+
+- [ ] 5.1 (test-first) Add an importer test: a pbrt scene with `Integrator "sppm"` yields USD metadata carrying `numiterations`/`maxdepth`/`photonsperiteration`/`radius`/`seed` and selects the skinny SPPM integrator.
+- [ ] 5.2 Implement sppm recognition in `state.py`/`metadata.py`/`emit.py`: write params to USD metadata and record SPPM as the selected integrator on the stage.
+- [ ] 5.3 Seed the initial SPPM search radius from the pbrt `radius` param when present, else a scene-bounds default; add a test for both paths.
+- [ ] 5.4 Update `report.py` so `sppm` is reported as *mapped* (surface case); lift the "sppm / photon out of scope" note in the pbrt change/spec docs.
+
+## 6. Correctness verification (test-first where noted)
+
+- [ ] 6.1 Hash-grid build unit tests: counting-sort produces correct per-cell membership and is deterministic for a fixed visible-point set.
+- [ ] 6.2 SPPM consistency harness: radius-sweep trend shows the caustic estimate's error trending downward as radius shrinks (consistency, not single-frame equality).
+- [ ] 6.3 Energy/no-double-count test: direct via NEE + indirect via photons matches the reference energy within tolerance (no double-counted direct term).
+- [ ] 6.4 Regression: layered skin/BSSRDF and volume paths produce byte-identical path/bdpt output to pre-change (SPPM does not touch them).
+
+## 7. Caustic parity gate
+
+- [ ] 7.1 Author the caustic parity scene (glass object over a diffuse plane) and generate the pbrt v4 `sppm` reference EXR (pbrt-v4 build at `~/projects/pbrt-v4`).
+- [ ] 7.2 Wire the scene into the existing `parity.py` harness with relMSE / FLIP thresholds + energy-ratio guard at a fixed pass budget, gating on **both** Metal and Vulkan.
+- [ ] 7.3 Emit a labelled side-by-side image (reference · skinny SPPM) artifact and surface it (global image-comparison rule).
+
+## 8. Docs
+
+- [ ] 8.1 New `docs/PhotonMapping.md`: SPPM pipeline, the four stages, estimator equations as LaTeX→SVG, and an SVG pipeline diagram under `docs/diagrams/` (no ASCII art); wire any `// DOC:` markers + `embed_code.cjs` if excerpting shader slices.
+- [ ] 8.2 `docs/Wavefront.md`: add the four SPPM stages to the stage list.
+- [ ] 8.3 `docs/Architecture.md`: add the new visible-point / grid / photon descriptor bindings to the binding map (with the Metal fold noted).
+- [ ] 8.4 `README.md`: document `--integrator sppm` (wavefront-only) and add SPPM to the compatibility matrix (incl. Metal per-pass readback-compaction cost); `CHANGELOG.md` entry.
+- [ ] 8.5 Note the deferred PM-2 (skin/BSSRDF) and PM-3 (volumetric) phases as explicit future work in `docs/PhotonMapping.md` so they extend the same capability.
+
+## 9. Validate & close
+
+- [ ] 9.1 `openspec validate photon-mapping-sppm --strict`; `.venv/bin/ruff check src/`; `.venv/bin/pytest` (excluding `-m gpu` for sweeps per thermal rule, GPU gates run guarded).
+- [ ] 9.2 Run the parity gate on both backends; confirm thresholds green; attach the side-by-side image.
+- [ ] 9.3 Open the merge request from the worktree; archive the change after merge (`openspec archive`).
