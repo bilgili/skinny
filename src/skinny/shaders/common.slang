@@ -272,6 +272,14 @@ struct FrameConstants
     // path termination. Scalar tail: _pack_uniforms appends it last in this
     // exact order. Read only by the wavefront path kernels.
     uint   recordMode;
+    // ── Improper (mirrored) pbrt camera (change pbrt-mirrored-camera-flip) ──
+    // 1 ⇒ the camera-to-world transform was orientation-reversing (negative
+    // determinant, e.g. a `Scale -1 1 1` before LookAt). zoomedNDC negates
+    // ndc.x to reproduce pbrt's horizontal screen mirror; sampleWi mirrors the
+    // inverse pixel map to keep BDPT/light-tracing consistent. 0 ⇒ the render is
+    // byte-identical (ndc.x untouched). Scalar tail: _pack_uniforms appends it
+    // last in this exact order.
+    uint   cameraMirror;
 };
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for
@@ -285,6 +293,11 @@ float2 zoomedNDC(FrameConstants fc, uint2 pixel, float2 jitter)
     float2 sub = lerp(fc.zoomMin, fc.zoomMax, uv);
     float2 ndc = sub * 2.0 - 1.0;
     ndc.y = -ndc.y;
+    // Improper (mirrored) pbrt camera: reproduce pbrt's horizontal screen mirror
+    // (change pbrt-mirrored-camera-flip). Single chokepoint — every primary-ray
+    // generator (pinhole + thick_lens, megakernel + wavefront) calls zoomedNDC.
+    if (fc.cameraMirror != 0)
+        ndc.x = -ndc.x;
     return ndc;
 }
 

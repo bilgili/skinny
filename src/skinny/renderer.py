@@ -87,8 +87,20 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     ("pickPixel", 8), ("pickArmed", 4), ("exposure", 4), ("tonemapMode", 4),
     ("proposalMask", 4), ("reuseMode", 4), ("proposalAlpha", 16), ("flatLobeSamplers", 4),
     ("sceneBoundsMin", 12), ("sceneBoundsExtent", 12), ("neuralNetworkVersion", 4),
-    ("recordMode", 4),
+    ("recordMode", 4), ("cameraMirror", 4),
 )
+
+# Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
+# `UniformBuffer.upload` path memmoves min(len(data), size), so an undersized
+# buffer SILENTLY TRUNCATES the scalar blob's tail (this bit cameraMirror: a
+# 512 B buffer dropped the 513–516 B field on Vulkan while Metal, sized from
+# reflection, was fine). Kept 16-aligned with headroom so adding a few more
+# scalar-tail fields doesn't need another bump. The import-time assert below
+# ties it to the field table so it can never fall behind unnoticed.
+_VK_UNIFORM_BUFFER_BYTES = 768
+assert _VK_UNIFORM_BUFFER_BYTES >= sum(sz for _, sz in _FC_SCALAR_FIELDS), (
+    "Vulkan UBO too small for the FrameConstants scalar blob — bump "
+    "_VK_UNIFORM_BUFFER_BYTES")
 
 # Cap on lens elements packed into the binding-23 SSBO. PBRT lens designs
 # in the wild peak around 11-13 surfaces (Canon FD 200/1.8, double-Gauss
@@ -1101,6 +1113,9 @@ class Renderer:
         self._skeletal = None  # usd_loader.SkeletalScene when a skinned USD loads
         self._skinning_passes = None  # vk_skinning.SkinningPasses (Vulkan only)
         self._usd_camera_override = None
+        # Improper (mirrored) pbrt camera flag, set from CameraOverride.mirrored
+        # when an authored camera is applied; folded into FrameConstants.cameraMirror.
+        self._camera_mirror = False
         self._last_eval_time_code: float | None = None
         # USD-declared UI controls (skinny:ui:* prims). _usd_live_dirty is set
         # when a `usd:` control writes a stage attribute, prompting update() to
@@ -2302,6 +2317,11 @@ class Renderer:
         target = position + forward·focus_distance (or auto-distance when
         focusDistance is unauthored), yaw/pitch derived from forward.
         """
+        # Default off; an authored override re-asserts it from its `mirrored`
+        # flag below. Resetting here (not only in _clear_model_state) means a
+        # reused renderer loading an override-less scene after a mirrored one
+        # never keeps a stale mirror via the set_usd_scene path.
+        self._camera_mirror = False
         if scene.camera_override is not None:
             self._apply_camera_override(scene)
             return
@@ -2341,6 +2361,7 @@ class Renderer:
         ov = scene.camera_override
         if ov is None:
             return
+        self._camera_mirror = bool(ov.mirrored)
         self._override_to_orbit(self.orbit_camera, ov, scene)
         d = float(self.orbit_camera.focus_distance)
         self.free_camera.focal_length_mm = float(ov.focal_length_mm)
@@ -2440,6 +2461,7 @@ class Renderer:
         self._prim_to_instances = {}
         self._scene_graph = None
         self._usd_model_index = -1
+        self._camera_mirror = False
         self._usd_bake_done = None
         self._usd_uploaded_count = 0
         self._baked_source_idx = -1
@@ -3320,8 +3342,10 @@ class Renderer:
         self.descriptor_pool = None
         self.descriptor_sets = None
 
-        # Uniform buffer — FrameConstants + SkinParams + light
-        self.uniform_size = 512  # generous, std140 aligned
+        # Uniform buffer — FrameConstants + SkinParams + light. Sized with
+        # headroom over the scalar blob (see _VK_UNIFORM_BUFFER_BYTES): the
+        # upload path truncates silently, so this must stay ≥ len(_pack_uniforms()).
+        self.uniform_size = _VK_UNIFORM_BUFFER_BYTES
         self.uniform_buffer = self._gpu.UniformBuffer(self.ctx, self.uniform_size)
 
         # Per-material skin UBO array (binding 15). StructuredBuffer of
@@ -8368,6 +8392,12 @@ class Renderer:
         # FrameConstants.recordMode in common.slang.
         record_mode = 1 if getattr(self, "_wf_record_active", False) else 0
         data += struct.pack("I", int(record_mode))                   # 4 bytes
+        # Improper (mirrored) pbrt camera: 1 ⇒ zoomedNDC negates ndc.x for a
+        # horizontal screen-space mirror (change pbrt-mirrored-camera-flip).
+        # Default 0 ⇒ a non-mirrored render is byte-identical. Scalar tail
+        # matching FrameConstants.cameraMirror in common.slang.
+        camera_mirror = 1 if getattr(self, "_camera_mirror", False) else 0
+        data += struct.pack("I", int(camera_mirror))                 # 4 bytes
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -8507,6 +8537,8 @@ class Renderer:
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),
+            # Improper-camera mirror: changing it flips the image, so reset accum.
+            bool(self._camera_mirror),
             int(self.detail_maps_index),
             float(self.normal_map_strength),
             float(self.displacement_scale_mm),

@@ -175,7 +175,7 @@ Support status per pbrt feature.
 | `subsurface` material | approx | dielectric + homogeneous interior via `customData` |
 | `perspective` camera | matched | shorter-axis fov conversion |
 | `realistic` camera | matched | lens file → `skinny:lens:*` (thick-lens `LensSystem`) |
-| negative-scale camera (`Scale -1`) | flagged | improper basis → image mirrored vs pbrt; `pbrt:mirrored` set, reported (needs renderer flip support) |
+| negative-scale camera (`Scale -1`) | matched | improper basis flagged `pbrt:mirrored`; renderer mirrors at ray-gen (`FrameConstants.cameraMirror`) → relMSE 0.009 / FLIP 0.021 vs pbrt |
 | `distant` / `point` lights | matched / approx | point emitted as a small sphere |
 | `spot` light | unsupported | no skinny spotlight; flagged |
 | area (`diffuse`) light | approx | emissive mesh; sidedness may differ |

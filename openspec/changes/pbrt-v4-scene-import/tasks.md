@@ -6,7 +6,8 @@
 > beyond original scope: imagemap textures, film iso/exposure, pbrt-metadata
 > carry, improper-camera mirror flag. Real-scene validated on contemporary-
 > bathroom (872/874 meshes). Remaining (renderer-side, out of importer scope):
-> sppm, emissive-mesh NEE, mirrored-camera flip support.
+> sppm. (emissive-mesh NEE → change `emissive-mesh-nee`; mirrored-camera flip →
+> change `pbrt-mirrored-camera-flip` — both done.)
 
 ## 1. Package scaffolding
 

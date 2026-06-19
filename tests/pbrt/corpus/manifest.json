@@ -17,6 +17,20 @@
       }
     },
     {
+      "name": "mirrored_arealight",
+      "file": "mirrored_arealight.pbrt",
+      "ref": "refs/mirrored_arealight.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 256,
+      "relmse_tol": 0.04,
+      "flip_tol": 0.04,
+      "measured": {
+        "relmse": 0.009,
+        "flip": 0.021
+      }
+    },
+    {
       "name": "conductor_infinite",
       "file": "conductor_infinite.pbrt",
       "ref": "refs/conductor_infinite.exr",

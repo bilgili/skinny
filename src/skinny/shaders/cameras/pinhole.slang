@@ -42,6 +42,11 @@ struct PinholeCamera : ICamera
         if (clip.w <= 1e-4) return false;
         float3 ndc = clip.xyz / clip.w;
         if (any(abs(ndc.xy) > float2(1.0))) return false;
+        // Improper (mirrored) pbrt camera: land on the mirrored pixel so BDPT /
+        // light-tracing connections agree with the mirrored primary frame
+        // (zoomedNDC negates ndc.x there). Change pbrt-mirrored-camera-flip.
+        if (fc.cameraMirror != 0)
+            ndc.x = -ndc.x;
         float xs = (ndc.x * 0.5 + 0.5) * float(fc.width);
         float ys = (-ndc.y * 0.5 + 0.5) * float(fc.height);
         if (xs < 0.0 || ys < 0.0 || xs >= float(fc.width) || ys >= float(fc.height))

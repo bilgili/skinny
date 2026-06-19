@@ -39,25 +39,39 @@ _SHADER_DIR = _PROJECT_ROOT / "src" / "skinny" / "shaders"
 # when the Vulkan SDK is not on the dylib path (the host invariants still need the
 # module for the field table + packers).
 try:
-    from skinny.renderer import _FC_SCALAR_FIELDS, SkinParameters
+    from skinny.renderer import (
+        _FC_SCALAR_FIELDS,
+        _VK_UNIFORM_BUFFER_BYTES,
+        SkinParameters,
+    )
 except OSError as exc:  # pragma: no cover - environment dependent
     pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}",
                 allow_module_level=True)
 
 # Expected sizes — the Vulkan scalar FrameConstants blob and the std140 skin UBO.
 # If either struct grows, update the packer AND this pin in the same change.
-_VK_SCALAR_FC_BYTES = 512
+_VK_SCALAR_FC_BYTES = 516  # +4 for cameraMirror (change pbrt-mirrored-camera-flip)
 _SKIN_PARAMS_BYTES = 80
 # Reflected MSL `fc` size on Metal (float3 padded to 16 B; design D3 / task 1.2).
+# Stays 592 B: the recordMode/cameraMirror scalar-tail uints land in the struct's
+# existing trailing padding, so adding them did not grow the reflected size.
 _MSL_FC_BYTES = 592
 
 
-def test_vulkan_scalar_fc_blob_is_512():
-    """`_FC_SCALAR_FIELDS` covers the whole 512 B scalar blob, no gap/overlap — this
+def test_vulkan_scalar_fc_blob_is_516():
+    """`_FC_SCALAR_FIELDS` covers the whole 516 B scalar blob, no gap/overlap — this
     is the table `_pack_uniforms_msl` walks to relocate each field into MSL."""
     total = sum(sz for _, sz in _FC_SCALAR_FIELDS)
     assert total == _VK_SCALAR_FC_BYTES, (
         f"_FC_SCALAR_FIELDS covers {total} B, expected {_VK_SCALAR_FC_BYTES}")
+
+
+def test_vulkan_ubo_covers_scalar_blob():
+    """The Vulkan FrameConstants UBO must be ≥ the scalar blob or `upload` silently
+    truncates the tail (this dropped cameraMirror on Vulkan; Metal was fine)."""
+    total = sum(sz for _, sz in _FC_SCALAR_FIELDS)
+    assert _VK_UNIFORM_BUFFER_BYTES >= total, (
+        f"Vulkan UBO is {_VK_UNIFORM_BUFFER_BYTES} B but the scalar blob is {total} B")
 
 
 def test_skin_params_std140_pack_is_byte_stable():
