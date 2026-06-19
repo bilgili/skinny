@@ -327,6 +327,14 @@ class CameraOverride:
     optional thick-lens stack authored as child prims; when present and
     enabled the renderer's pinhole ray-gen path is replaced with a
     PBRT-style realistic camera trace.
+
+    `mirrored` marks an improper (orientation-reversing) pbrt camera — a
+    camera-to-world transform with negative determinant, e.g. a `Scale -1 1 1`
+    before `LookAt`. The importer reconstructs a right-handed camera and drops
+    the reflection, so the renderer reproduces it as a horizontal screen-space
+    mirror (negate `ndc.x` at ray-gen) to match the pbrt reference. It does not
+    change `position`/`forward`/the camera basis — only the image is mirrored
+    left↔right.
     """
 
     position: np.ndarray            # (3,) float32, world space
@@ -337,6 +345,7 @@ class CameraOverride:
     fstop: float = 0.0              # 0 ⇒ wide open; from USD `fStop` attr
     lens: Optional[LensSystem] = None
     enabled: bool = True
+    mirrored: bool = False          # improper pbrt camera ⇒ horizontal screen mirror
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, np.float32).reshape(3)

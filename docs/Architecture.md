@@ -1197,13 +1197,19 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | flatLobeSamplers — per-lobe flat-BSDF sampler ids, 8 bits/lobe (`coat \| spec<<8 \| diff<<16`; 0 = native). Unpacked by `flat_material.slang`; no new binding |
 | ... | float3 | sceneBoundsMin; float3 sceneBoundsExtent — scene AABB for the neural-proposal condition's position normalisation |
 | ... | uint | neuralNetworkVersion — active frozen-net version (baseline 0; per-sample network-version hook for future online training) |
+| ... | uint | recordMode — 1 while the wavefront training-record drain is active (else 0; default render byte-identical) |
+| ... | uint | cameraMirror — 1 for an improper (mirrored) pbrt camera; `zoomedNDC` negates ndc.x (+ `sampleWi` for BDPT) for a horizontal screen mirror, else 0 |
 
 `cameraType` was removed — camera selection is implied by `numLensElements`
 (0 ⇒ pinhole). `exposure` and `tonemapMode` are post-process knobs and do not
-reset accumulation. The neural-proposal scalar tail (`sceneBoundsMin` /
-`sceneBoundsExtent` / `neuralNetworkVersion`) brings the UBO to **508 B** (was
-480); it is read only when the neural proposal bit is active, so the default
-`{bsdf}` path stays bit-identical.
+reset accumulation. The scalar tail (`sceneBoundsMin` / `sceneBoundsExtent` /
+`neuralNetworkVersion` / `recordMode` / `cameraMirror`) brings the scalar UBO
+blob to **516 B**; the neural/record fields are read only when their feature is
+active and `cameraMirror` defaults 0, so the default `{bsdf}` path stays
+bit-identical. The Vulkan UBO is allocated with headroom
+(`_VK_UNIFORM_BUFFER_BYTES`, currently 768 B) because `UniformBuffer.upload`
+memmoves `min(len, size)` and would otherwise silently truncate the blob's
+tail.
 
 ---
 

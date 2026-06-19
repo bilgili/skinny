@@ -1252,6 +1252,11 @@ def _extract_camera(
         fstop_attr = cam.GetFStopAttr().Get(time)
         fstop = float(fstop_attr) if fstop_attr is not None else 0.0
         lens = _extract_lens_system(prim, time)
+        # Improper (orientation-reversing) pbrt cameras are flagged by the
+        # importer in customData["pbrt"]["mirrored"]; the renderer reproduces
+        # the reflection as a horizontal screen mirror at ray-gen.
+        pbrt_md = prim.GetCustomDataByKey("pbrt") or {}
+        mirrored = bool(pbrt_md.get("mirrored", False))
         return CameraOverride(
             position=position,
             forward=forward,
@@ -1260,6 +1265,7 @@ def _extract_camera(
             focus_distance=focus,
             fstop=fstop,
             lens=lens,
+            mirrored=mirrored,
         )
     return None
 

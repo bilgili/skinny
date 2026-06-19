@@ -1,0 +1,42 @@
+# Corpus: an IMPROPER (mirrored) camera — `Scale -1 1 1` before LookAt makes the
+# camera-to-world orientation-reversing (negative determinant). pbrt renders the
+# horizontal mirror of the proper-camera view. skinny reconstructs a right-handed
+# camera (dropping the reflection) and must reproduce the mirror at ray-gen
+# (FrameConstants.cameraMirror; change pbrt-mirrored-camera-flip).
+#
+# The scene is deliberately HORIZONTALLY ASYMMETRIC (red sphere on the left,
+# green on the right) so the mirror is observable: a wrong (un-mirrored) render
+# puts the colors on the wrong side and fails the gate.
+Scale -1 1 1
+LookAt 0 1 6  0 0 0  0 1 0
+Camera "perspective" "float fov" 35
+Sampler "independent" "integer pixelsamples" 256
+Integrator "path" "integer maxdepth" 8
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "mirrored_arealight.exr"
+WorldBegin
+
+AttributeBegin
+  AreaLightSource "diffuse" "rgb L" [12 12 12]
+  Translate 0 4 0
+  Shape "trianglemesh" "point3 P" [ -1.5 0 -1.5  1.5 0 -1.5  1.5 0 1.5  -1.5 0 1.5 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+
+# Red sphere on the LEFT (world -x).
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.8 0.1 0.1]
+  Translate -1.6 0 0
+  Shape "sphere" "float radius" 0.9
+AttributeEnd
+
+# Green sphere on the RIGHT (world +x).
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.1 0.8 0.1]
+  Translate 1.6 0 0
+  Shape "sphere" "float radius" 0.9
+AttributeEnd
+
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.5 0.5 0.5]
+  Translate 0 -1 0
+  Shape "trianglemesh" "point3 P" [ -6 0 -6  6 0 -6  6 0 6  -6 0 6 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd

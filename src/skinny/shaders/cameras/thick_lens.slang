@@ -334,6 +334,10 @@ struct ThickLensCamera : ICamera
         if (filmHalfW <= 0.0 || filmHalfH <= 0.0) return false;
         float2 ndc = float2(-pFilm.x / filmHalfW, pFilm.y / filmHalfH);
         if (any(abs(ndc) > float2(1.0))) return false;
+        // Improper (mirrored) pbrt camera: match the mirrored primary frame
+        // (zoomedNDC negates ndc.x). Change pbrt-mirrored-camera-flip.
+        if (fc.cameraMirror != 0)
+            ndc.x = -ndc.x;
         float xs = (ndc.x * 0.5 + 0.5) * float(fc.width);
         float ys = (ndc.y * 0.5 + 0.5) * float(fc.height);
         if (xs < 0.0 || ys < 0.0 || xs >= float(fc.width) || ys >= float(fc.height))

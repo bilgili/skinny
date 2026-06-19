@@ -19,6 +19,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `texture_quad` parity corpus scene (relMSE 0.0024 / FLIP 0.0119 vs pbrt v4) that
   validates end-to-end GPU texture sampling. See
   [docs/PbrtImport.md](docs/PbrtImport.md).
+- **Mirrored (improper) pbrt camera support** (change `pbrt-mirrored-camera-flip`)
+  — an orientation-reversing pbrt camera (negative-determinant camera-to-world,
+  e.g. `Scale -1 1 1` before `LookAt`) now renders matching pbrt instead of
+  horizontally mirrored. The importer already flagged it (`customData["pbrt"]
+  ["mirrored"]`); the renderer now honors the flag end-to-end: the loader threads
+  it to `CameraOverride.mirrored`, it rides `FrameConstants.cameraMirror`, and
+  `zoomedNDC` negates `ndc.x` (a single chokepoint covering pinhole + thick-lens,
+  megakernel + wavefront, Metal + Vulkan), with a matching `sampleWi` flip for
+  BDPT/light-tracing camera connections. New `mirrored_arealight` parity corpus
+  scene gated at relMSE 0.009 / FLIP 0.021 vs the pbrt v4 reference. Driven solely
+  by the imported metadata (no GUI/CLI knob).
+
+### Fixed
+
+- **Vulkan FrameConstants UBO silent truncation** — the Vulkan uniform buffer was
+  pinned to exactly 512 B (the then-current scalar-blob size) while
+  `UniformBuffer.upload` memmoves `min(len, size)`, so any scalar-tail field past
+  512 B was dropped on Vulkan (Metal, sized from reflection, was unaffected). The
+  buffer is now sized via `_VK_UNIFORM_BUFFER_BYTES` (768 B, with an import-time
+  guard tying it to the `_FC_SCALAR_FIELDS` table) so the tail can't be truncated
+  unnoticed. Surfaced while wiring `cameraMirror`.
+
 - **pbrt v4 scene import** (change `pbrt-v4-scene-import`) — read a pbrt v4 text
   scene and convert it to a skinny-loadable USD stage via the new `skinny.pbrt`
   package and `skinny-import-pbrt` CLI (`python -m skinny.pbrt` / `import_pbrt()`).
