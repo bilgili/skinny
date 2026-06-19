@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import io
 import math
-import struct
-from datetime import datetime
 from typing import Callable, Optional
 
 import numpy as np
@@ -24,7 +22,7 @@ except ImportError:  # pragma: no cover
 
 from skinny.bxdf_math import eval_grid, render_lobe_image
 from skinny.mtlx_graph_view import (
-    _ADDABLE_CATEGORIES, NodeGraphView, NodeView, build_view,
+    NodeGraphView, NodeView, build_view,
 )
 
 

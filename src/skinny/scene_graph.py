@@ -123,7 +123,7 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
     ``RendererRef`` back-pointers so property edits route to the right
     renderer method.
     """
-    from pxr import Gf, Usd, UsdGeom, UsdLux, UsdShade
+    from pxr import Usd, UsdGeom, UsdLux
 
     if time is None:
         time = Usd.TimeCode.Default()
@@ -344,7 +344,7 @@ def _decompose_matrix(gf_matrix) -> tuple[tuple, tuple, tuple]:
     if sx > 1e-8 and sy > 1e-8 and sz > 1e-8:
         r00 = m[0][0] / sx; r01 = m[0][1] / sx; r02 = m[0][2] / sx
         r10 = m[1][0] / sy; r11 = m[1][1] / sy; r12 = m[1][2] / sy
-        r20 = m[2][0] / sz; r21 = m[2][1] / sz; r22 = m[2][2] / sz
+        _r20 = m[2][0] / sz; _r21 = m[2][1] / sz; r22 = m[2][2] / sz
 
         # Euler angles (XYZ convention)
         if abs(r02) < 1.0 - 1e-6:
@@ -370,8 +370,6 @@ def _decompose_matrix(gf_matrix) -> tuple[tuple, tuple, tuple]:
 def _add_material_props(
     node: SceneGraphNode, prim, time, material_map: dict[str, int],
 ) -> None:
-    from pxr import UsdShade
-    mat = UsdShade.Material(prim)
     mat_name = prim.GetName()
     idx = material_map.get(mat_name)
 
@@ -510,7 +508,7 @@ def _classify_shader_input(
 
 
 def _add_light_props(node: SceneGraphNode, prim, time) -> None:
-    from pxr import Gf, UsdGeom, UsdLux
+    from pxr import UsdLux
 
     light_api = UsdLux.LightAPI(prim)
     if not light_api:

@@ -23,7 +23,6 @@ from skinny.head_textures import (
     blank_displacement_bytes,
     blank_normal_bytes,
     blank_roughness_bytes,
-    expected_bytes as detail_expected_bytes,
     load_texture_bytes,
 )
 from skinny.mesh import (
@@ -2278,7 +2277,7 @@ class Renderer:
         # Pigment overlay (today's tattoo) lives on the active material; the
         # selected Tattoo object's data is the source for the GPU upload, and
         # the slider modulates density.
-        active_tattoo = (
+        _active_tattoo = (
             self.tattoos[self.tattoo_index]
             if self.tattoos and 0 <= self.tattoo_index < len(self.tattoos)
             else None
@@ -2929,7 +2928,6 @@ class Renderer:
             return
 
         from skinny.materialx_runtime import (
-            GRAPH_ID_FIRST,
             assign_graph_ids,
         )
         self._mtlx_scene_materials.clear()
@@ -3078,7 +3076,7 @@ class Renderer:
         editor treats them identically to imported USD lights.
         """
         try:
-            from pxr import Sdf, Usd, UsdGeom, UsdLux
+            from pxr import Usd, UsdGeom, UsdLux
         except Exception:
             return
         try:

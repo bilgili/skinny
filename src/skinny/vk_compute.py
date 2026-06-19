@@ -8,7 +8,6 @@ import struct
 import subprocess
 from pathlib import Path
 
-import numpy as np
 import vulkan as vk
 
 from skinny.vk_context import VulkanContext
@@ -227,7 +226,7 @@ class ComputePipeline:
         self._shader_module = self._create_shader_module()
         self.descriptor_set_layout = self._create_descriptor_set_layout()
         self.pipeline_layout = self._create_pipeline_layout()
-        print(f"[skinny] driver pipeline compile …", flush=True)
+        print("[skinny] driver pipeline compile …", flush=True)
         self.pipeline = self._create_pipeline()
         print(f"[skinny] pipeline ready in {_time.perf_counter() - t0:.2f}s", flush=True)
 

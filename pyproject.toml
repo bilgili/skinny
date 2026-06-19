@@ -102,3 +102,22 @@ markers = [
 
 [tool.ruff]
 line-length = 100
+# The repo root carries a venv-generated `.gitignore` containing `*`, which
+# ruff otherwise honours — silently excluding the entire tree so `ruff check
+# src/` finds zero files and passes vacuously. Opt out of gitignore-based
+# discovery; the canonical command scopes itself to `src/` explicitly and
+# ruff's built-in excludes still skip caches / build / venv dirs.
+respect-gitignore = false
+
+[tool.ruff.lint]
+# Deliberately-aligned multi-statement lines are a house style throughout the
+# codebase: grouped matrix/vector row assignments and short single-line guard
+# clauses (`if cond: do()`). These are formatting choices, not lint debt, so we
+# don't flag colon/semicolon compound statements.
+ignore = ["E701", "E702"]
+
+[tool.ruff.lint.per-file-ignores]
+# usd_loader defines a module logger ahead of its heavy pxr/skinny imports
+# (E402, intentional ordering) and annotates a few returns with lazily-imported
+# types as forward-ref strings (F821) to avoid import cycles.
+"src/skinny/usd_loader.py" = ["E402", "F821"]

@@ -226,7 +226,7 @@ class PanelTreeBuilder:
 
         def pull() -> None:
             new_labels = list(node.choices())
-            new_opts = {l: i for i, l in enumerate(new_labels)} if new_labels else {"(none)": -1}
+            new_opts = {lbl: i for i, lbl in enumerate(new_labels)} if new_labels else {"(none)": -1}
             cur_idx = int(node.getter())
             with _Suppress(w, on_change):
                 if w.options != new_opts:
