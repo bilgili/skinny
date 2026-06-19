@@ -91,3 +91,33 @@ def test_sppm_energy_matches_path_tracer():
     assert built
     ratio = float(sppm.mean()) / max(float(path.mean()), 1e-6)
     assert 0.85 <= ratio <= 1.15, f"SPPM/path energy ratio {ratio:.3f} out of band"
+
+
+# ── caustic parity vs the pbrt reference (task 7) ──────────────────
+
+_CORPUS = PROJECT_ROOT / "tests" / "pbrt" / "corpus"
+_GLASS = _CORPUS / "glass_arealight.pbrt"
+_GLASS_REF = _CORPUS / "refs" / "glass_arealight.exr"
+needs_corpus = pytest.mark.skipif(
+    not (_GLASS.exists() and _GLASS_REF.exists()), reason="glass_arealight corpus absent")
+
+
+@needs_vulkan
+@needs_corpus
+def test_sppm_caustic_parity_vs_pbrt_reference():
+    # The glass-sphere-over-diffuse-floor area-light scene is a caustic: SPPM
+    # must converge to the same pbrt ground truth as the (converged) path
+    # reference. Compares skinny SPPM's linear-HDR output to the checked-in pbrt
+    # reference EXR via the parity harness (relMSE + FLIP), exposure-aligned.
+    from skinny.pbrt import metrics, parity
+    ref = metrics.read_exr(str(_GLASS_REF))
+    img = parity.render_linear(
+        str(_GLASS), 128, 128, spp=128, integrator="sppm",
+        env_off=not parity.scene_has_environment(str(_GLASS)))
+    aligned = metrics.align_exposure(img, ref)
+    rm = metrics.relmse(aligned, ref)
+    fl = metrics.flip(aligned, ref)
+    # SPPM matched the reference at relMSE 0.025 / FLIP ~0.03 on M5 Pro; gate
+    # with headroom for sampling noise across hosts.
+    assert rm <= 0.06, f"SPPM caustic relMSE {rm:.4f} vs pbrt reference too high"
+    assert fl <= 0.08, f"SPPM caustic FLIP {fl:.4f} vs pbrt reference too high"

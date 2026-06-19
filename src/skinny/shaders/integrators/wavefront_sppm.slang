@@ -553,10 +553,20 @@ void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
     float3 lIndirect = float3(0.0);
     if ((vp.flags & VP_ACTIVE) != 0u)
     {
-        sppmUpdate(vp, sppmDecodeFlux(acc), acc.m, 2.0 / 3.0);
-        sppmVisiblePoints[lane] = vp;  // persist tau / radius / n
-        let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * vp.radius * vp.radius;
-        lIndirect = vp.tau / max(denom, 1e-20);
+        // This pass's photon-map density estimate at the radius the photons
+        // actually gathered within (the radius BEFORE this pass's reduction):
+        //   L_indirect = Φ_thispass / (N_emitted · π · r²).
+        // The progressive averaging is done by the accumulation film's
+        // running mean over passes (each pass is an independent estimate at a
+        // shrinking radius), NOT by accumulating τ here — accumulating τ AND
+        // film-averaging would double-count. τ/N still advance the radius for
+        // the next pass (bias → 0 as r shrinks).
+        let phi = sppmDecodeFlux(acc);
+        let rGather = vp.radius;
+        let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * rGather * rGather;
+        lIndirect = phi / max(denom, 1e-20);
+        sppmUpdate(vp, phi, acc.m, 2.0 / 3.0);  // advance radius / N for the next pass
+        sppmVisiblePoints[lane] = vp;
     }
 
     float3 sample = vp.ld + lIndirect;

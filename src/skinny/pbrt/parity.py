@@ -82,6 +82,11 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     from skinny.backend_select import select_backend
     from skinny.headless import HeadlessRenderer, RenderOptions  # lazy: renderer/GPU
 
+    # SPPM is wavefront-only (no megakernel path) — force the execution mode so
+    # callers can pass integrator="sppm" without also threading execution_mode.
+    if integrator == "sppm":
+        execution_mode = "wavefront"
+
     backend = select_backend()
     with tempfile.TemporaryDirectory() as tmp:
         usd = os.path.join(tmp, "scene.usda")

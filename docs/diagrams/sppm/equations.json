@@ -4,7 +4,7 @@
   {"name": "update-N", "tex": "N' = N + \\gamma\\,M"},
   {"name": "update-r", "tex": "r' = r\\,\\sqrt{\\frac{N'}{N + M}}"},
   {"name": "update-tau", "tex": "\\tau' = (\\tau + \\Phi)\\left(\\frac{r'}{r}\\right)^{2} = (\\tau + \\Phi)\\,\\frac{N'}{N + M}"},
-  {"name": "radiance", "tex": "L_{\\text{indirect}} = \\frac{\\tau}{N_{\\text{emitted}}\\,\\pi\\,r^{2}}"},
+  {"name": "radiance", "tex": "L_{\\text{indirect}} = \\frac{\\Phi}{N_{\\text{emitted}}\\,\\pi\\,r^{2}}"},
   {"name": "sample", "tex": "L = L_d + L_{\\text{indirect}}"},
   {"name": "numcells", "tex": "n_{\\text{cells}} = 2^{\\lceil \\log_2 (2\\,WH) \\rceil}"}
 ]

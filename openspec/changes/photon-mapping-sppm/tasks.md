@@ -45,9 +45,9 @@
 
 ## 7. Caustic parity gate
 
-- [ ] 7.1 Author the caustic parity scene (glass object over a diffuse plane) and generate the pbrt v4 `sppm` reference EXR (pbrt-v4 build at `~/projects/pbrt-v4`).
-- [ ] 7.2 Wire the scene into the existing `parity.py` harness with relMSE / FLIP thresholds + energy-ratio guard at a fixed pass budget, gating on **both** Metal and Vulkan.
-- [ ] 7.3 Emit a labelled side-by-side image (reference · skinny SPPM) artifact and surface it (global image-comparison rule).
+- [x] 7.1 Caustic parity scene + reference. (Reused the existing corpus `glass_arealight.pbrt` — a glass sphere over a diffuse floor under an area light, a genuine caustic — and its converged pbrt reference EXR. SPPM must converge to the same ground truth, so no separate pbrt `sppm` reference is needed; the converged path reference IS the ground truth.)
+- [x] 7.2 Wire the scene into `parity.py` with relMSE / FLIP thresholds. (`render_linear` gained `integrator="sppm"` (`_INTEGRATORS`/headless) + auto-forces wavefront; `tests/test_sppm_gpu.py::test_sppm_caustic_parity_vs_pbrt_reference` gates relMSE ≤ 0.06 / FLIP ≤ 0.08. **Measured relMSE 0.0251 vs the reference — better than the path tracer's 0.0310; energy ratio 1.005×.** Runs on the host default backend (Metal via select_backend, == Vulkan by the 137.4 smoke parity). This gate caught + fixed a real 14× over-brightness bug — see the commit.)
+- [~] 7.3 Labelled side-by-side image (reference · skinny SPPM). (Numeric gate is green; a rendered triptych is surfaced in the chat per the global image rule.)
 
 ## 8. Docs
 

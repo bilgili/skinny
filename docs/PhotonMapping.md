@@ -83,7 +83,7 @@ CPU-readback stall**.
 | **EYE** | `wfSppmEye` (over num_pixels, tiled) | Trace the camera path through the flat **delta lobe** (glass/mirror are flat delta materials) to the first non-specular flat hit. Store **one** stochastic `VisiblePoint`/pixel `{pos, ns, wo, beta, the evaluated flat BSDF}`, plus the full per-pass **direct** term `ld` (NEE at the VP + any emitter/env reached through the specular chain). Persistent `radius`/`n`/`tau` are preserved; on first activation (`n == 0`) the radius inits to `fc.sppmInitialRadius`. A pixel that escapes leaves its VP **inactive** so a stale point can't sit in the grid. |
 | **GRID BUILD** | `wfSppmGridCount` → `wfSppmGridScanBlock` → `wfSppmGridScanBlockSums` → `wfSppmGridScanAdd` → `wfSppmGridScatter` | A uniform spatial **hash grid** built by **counting sort** over the active visible points: per-cell atomic count → blocked **exclusive prefix sum** (count → offset) → scatter pixel indices into their cell buckets. `numCells = next_pow2(2·num_pixels)`; `cellSize = sppmInitialRadius` (a valid upper bound on every active VP's radius, since radii only shrink — so the 3×3×3 neighbour scan never misses a photon). |
 | **PHOTON** | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`) | **Emit** power-weighted photons (emissive triangles via `sampleEmissiveTriangle` pSel, sphere lights, distant beam; `beta = Le·π / p_sel`), **trace** with Russian roulette, and **deposit** only at non-specular vertices with `depth ≥ 1` (so the photon term is disjoint from the NEE direct: `depth == 0` is light→VP direct that NEE owns; the SDS caustic carrier light→specular→VP still deposits). Deposit via a de-duplicated **3×3×3 neighbour-cell scan**, adding the **bare** f_r `= evaluate(woVP,wiVP).response / max(wiVP.z, 1e-4)` (no cosine — the photon-map density estimate) with portable **uint fixed-point** `InterlockedAdd` into `SppmAccum`. |
-| **UPDATE** | `wfSppmUpdate` (over num_pixels, tiled) | The SPPM reduction `N' = N + γM`, `r' = r·√(N'/(N+M))`, `τ' = (τ+Φ)(r'/r)²` (γ = 2/3); the per-pass indirect estimate `L_indirect = τ / (N_emitted · π · r²)`; `sample = vp.ld + L_indirect`; **running-mean composite** into the accumulation film (exactly like `wfPathResolve`) + display; clear the per-pass accumulator for the next pass. |
+| **UPDATE** | `wfSppmUpdate` (over num_pixels, tiled) | The per-pass indirect estimate `L_indirect = Φ / (N_emitted · π · r²)` — **this pass's** deposited flux Φ at the gather radius (the radius before this pass's reduction); `sample = vp.ld + L_indirect`; **running-mean composite** into the accumulation film (exactly like `wfPathResolve`), which is what averages the per-pass estimates into the progressive result. The SPPM reduction `N' = N + γM`, `r' = r·√(N'/(N+M))` (γ = 2/3) then **advances the radius** for the next pass so the per-pass bias shrinks; display + clear the accumulator. |
 
 ### Split dispatch order
 
@@ -198,11 +198,21 @@ photons (`M == 0`) leaves the estimator untouched.
 
 ### 4. The radiance estimate and composite
 
-The per-pass indirect radiance at a visible point is the standard SPPM density
-estimate — accumulated flux over the disc, normalized by the total photons
-emitted:
+The per-pass indirect radiance at a visible point is the photon-map density
+estimate — **this pass's** deposited flux Φ over the disc, normalized by the
+photons emitted this pass, at the radius the photons gathered within:
 
-![L_indirect = tau / (N_emitted · pi · r^2)](diagrams/sppm/radiance.svg)
+![L_indirect = Phi / (N_emitted · pi · r^2)](diagrams/sppm/radiance.svg)
+
+> **Why per-pass Φ, not accumulated τ.** skinny composites the per-pass estimate
+> into the accumulation film with a **running mean** (below), so the film is what
+> averages the passes into the progressive result. Using the *accumulated* τ here
+> *and* film-averaging would count the flux twice (an early bug that rendered
+> caustics ~14× too bright). So the displayed estimate is the **per-pass** Φ at
+> the **pre-reduction** gather radius; the SPPM `N`/`r` reduction still runs to
+> **advance the radius** each pass, which shrinks the per-pass bias (bias → 0 as
+> r → 0). This is consistent: each pass is an independent density estimate at a
+> shrinking radius, and the running mean both averages them and reduces variance.
 
 The composited per-pixel sample adds the per-pass direct (computed once in the
 eye stage — NEE at the VP plus any emitter/env through the specular chain) to the
@@ -214,16 +224,17 @@ indirect estimate:
 film with the same **running mean** every wavefront resolve kernel uses
 (`(prev·n + sample)/(n+1)`), then written to the display via `wfWriteDisplay`.
 
-> **Implements:** `wfSppmUpdate` in `wavefront_sppm.slang`
-> (`lIndirect = vp.tau / (max(fc.sppmPhotonsEmitted,1)·π·vp.radius²)`;
-> `sample = vp.ld + lIndirect`; running-mean composite into `accumBuffer`;
-> `wfWriteDisplay`).
+> **Implements:** `wfSppmUpdate` in `wavefront_sppm.slang` (`phi =
+> sppmDecodeFlux(acc)`; `lIndirect = phi / (max(fc.sppmPhotonsEmitted,1)·π·rGather²)`
+> with `rGather = vp.radius` before the reduction; `sppmUpdate(vp, phi, …)`
+> advances the radius; `sample = vp.ld + lIndirect`; running-mean composite into
+> `accumBuffer`; `wfWriteDisplay`).
 
 | symbol | code | meaning |
 | --- | --- | --- |
-| τ | `vp.tau` | persistent accumulated flux (post-reduction) |
+| Φ | `sppmDecodeFlux(acc)` | this pass's deposited flux (decoded from the fixed-point accumulator) |
 | N_emitted | `fc.sppmPhotonsEmitted` | photons emitted this pass (the estimator divisor) |
-| r | `vp.radius` | current search radius |
+| r | `vp.radius` | gather radius (before this pass's reduction) |
 | L_d | `vp.ld` | per-pass direct (NEE + specular-chain emitters) |
 | L_indirect | `lIndirect` | photon-map indirect estimate |
 
