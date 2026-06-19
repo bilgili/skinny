@@ -130,9 +130,38 @@ customData["pbrt"] = {
 ```
 
 The encoder lives in `metadata.py`. This is **carriage only** — rendering the
-carried data faithfully (spectral IOR, measured BRDFs, `sppm`) requires the
+carried data faithfully (spectral IOR, measured BRDFs) requires the
 matching machinery in skinny's renderer; the loader can grow into the metadata
 incrementally.
+
+## Integrator mapping
+
+The pbrt integrator is carried in `customLayerData["pbrt"]["integrator"]`
+(type + params). Two integrators are *actively mapped* onto a skinny renderer
+counterpart (the rest are carriage-only):
+
+| pbrt integrator | skinny | notes |
+|-----------------|--------|-------|
+| `path` / `volpath` | path tracer | the default renderer |
+| `sppm` / `photonmap` | **SPPM** (`INTEGRATOR_SPPM`) | wavefront-only, flat materials — see [PhotonMapping.md](PhotonMapping.md) |
+
+For an `sppm` / `photonmap` scene the importer additionally records a normalized
+skinny selection under `customLayerData["pbrt"]["skinny"]` and reports the
+integrator as **mapped** (`exact`, no longer `skipped`):
+
+```python
+customLayerData["pbrt"]["skinny"] = {
+    "integrator": "sppm",
+    "radius":  0.05,    # optional — pbrt `radius`, seeds the SPPM initial search radius r₀
+    "photons": 400000,  # optional — pbrt `photonsperiteration`, the photons-per-pass override
+}
+```
+
+`api.sppm_selection(stage)` reads this dict back (or returns `None` for any other
+integrator), so a loader or the parity harness can select skinny's SPPM
+integrator and seed its initial radius / photons-per-pass directly from the pbrt
+parameters — without re-parsing pbrt param names. Encoders live in
+`metadata.scene_metadata`; the reader is `api.sppm_selection`.
 
 ## Parity validation
 
@@ -207,3 +236,4 @@ Support status per pbrt feature.
 | heterogeneous (grid/VDB) medium | unsupported | flagged, not emitted |
 | spectral rendering | unsupported | RGB reduction only (documented divergence) |
 | `path` integrator | matched | renders with skinny's path tracer |
+| `sppm` / `photonmap` integrator | matched | mapped to skinny's SPPM integrator (wavefront, flat materials); `radius` → initial search radius, `photonsperiteration` → photons/pass (see [Integrator mapping](#integrator-mapping)) |

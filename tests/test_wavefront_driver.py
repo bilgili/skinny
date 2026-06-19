@@ -231,3 +231,126 @@ def test_bdpt_rejects_unknown_walk_mode():
     with pytest.raises(ValueError, match="walk_mode"):
         record_bdpt_loop(rec, num_pixels=64, stream_size=64, walk_mode="nope",
                          eye_bounces=5, light_bounces=6)
+
+
+# ── record_sppm_loop (change photon-mapping-sppm) ───────────────────
+
+from skinny.wavefront_driver import record_sppm_loop  # noqa: E402
+
+
+class _SppmStub:
+    """Records the primitive op sequence record_sppm_loop emits."""
+
+    def __init__(self, *, stream_size=64):
+        self._stream_size = stream_size
+        self.ops: list = []
+
+    @property
+    def stream_size(self):
+        return self._stream_size
+
+    def barrier(self):
+        self.ops.append(("barrier",))
+
+    def push_tile(self, stream_base):
+        self.ops.append(("push_tile", stream_base))
+
+    def dispatch_full(self, entry):
+        self.ops.append(("dispatch_full", entry))
+
+    def dispatch_one(self, entry):
+        self.ops.append(("dispatch_one", entry))
+
+    def dispatch_count(self, entry, count, group_size):
+        self.ops.append(("dispatch_count", entry, count, group_size))
+
+    def clear_visible_points(self):
+        self.ops.append(("clear_visible_points",))
+
+    def clear_grid(self):
+        self.ops.append(("clear_grid",))
+
+    def clear_accum(self):
+        self.ops.append(("clear_accum",))
+
+
+def _sppm_grid_photon(num_pixels, num_cells, photons):
+    """The single global grid-build + photon block shared by every pass."""
+    return [
+        ("clear_grid",),
+        ("barrier",),
+        ("dispatch_count", "wfSppmGridCount", num_pixels, 64),
+        ("barrier",),
+        ("dispatch_count", "wfSppmGridScanBlock", num_cells, 256),
+        ("barrier",),
+        ("dispatch_one", "wfSppmGridScanBlockSums"),
+        ("barrier",),
+        ("dispatch_count", "wfSppmGridScanAdd", num_cells, 256),
+        ("barrier",),
+        ("dispatch_count", "wfSppmGridScatter", num_pixels, 64),
+        ("barrier",),
+        ("clear_accum",),
+        ("barrier",),
+        ("dispatch_count", "wfSppmPhotonTrace", photons, 64),
+        ("barrier",),
+    ]
+
+
+def test_sppm_single_tile_first_frame():
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=100, first_frame=True)
+    assert rec.ops == [
+        ("clear_visible_points",),
+        ("barrier",),
+        ("push_tile", 0),
+        ("dispatch_full", "wfSppmEye"),
+        ("barrier",),
+        *_sppm_grid_photon(64, 256, 100),
+        ("push_tile", 0),
+        ("dispatch_full", "wfSppmUpdate"),
+        ("barrier",),
+    ]
+
+
+def test_sppm_later_frame_skips_vp_clear():
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=100, first_frame=False)
+    assert ("clear_visible_points",) not in rec.ops
+    assert rec.ops[0] == ("push_tile", 0)
+    assert rec.ops[1] == ("dispatch_full", "wfSppmEye")
+
+
+def test_sppm_grid_and_photon_run_once_globally():
+    # Grid build + photon pass must appear EXACTLY once regardless of tile count.
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=256, stream_size=64, num_cells=1024,
+                     photons=500, first_frame=False)
+    assert rec.ops.count(("clear_grid",)) == 1
+    assert rec.ops.count(("clear_accum",)) == 1
+    assert rec.ops.count(("dispatch_count", "wfSppmPhotonTrace", 500, 64)) == 1
+
+
+def test_sppm_split_order_all_eye_then_grid_then_all_update():
+    # 4 tiles: every eye tile precedes the grid build; every update tile follows
+    # the photon pass. No per-tile interleave (the multi-tile correctness fix).
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=256, stream_size=64, num_cells=1024,
+                     photons=500, first_frame=False)
+    eye_idx = [i for i, op in enumerate(rec.ops) if op == ("dispatch_full", "wfSppmEye")]
+    upd_idx = [i for i, op in enumerate(rec.ops) if op == ("dispatch_full", "wfSppmUpdate")]
+    grid_idx = rec.ops.index(("clear_grid",))
+    photon_idx = rec.ops.index(("dispatch_count", "wfSppmPhotonTrace", 500, 64))
+    assert len(eye_idx) == 4 and len(upd_idx) == 4   # 256 px / 64 stream
+    assert max(eye_idx) < grid_idx                   # all eye tiles before grid
+    assert min(upd_idx) > photon_idx                 # all update tiles after photon
+
+
+def test_sppm_eye_tiles_have_distinct_bases():
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=192, stream_size=64, num_cells=512,
+                     photons=10, first_frame=False)
+    bases = [op[1] for op in rec.ops if op[0] == "push_tile"]
+    # 3 eye tiles + 3 update tiles, bases 0/64/128 each phase.
+    assert bases == [0, 64, 128, 0, 64, 128]

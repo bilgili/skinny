@@ -61,9 +61,28 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
     # carry the exact pbrt scene config (integrator/sampler/film/colorspace)
     meta_mod.tag_stage(stage, meta_mod.scene_metadata(scene))
 
+    # Integrator mapping (change photon-mapping-sppm): pbrt's `sppm` maps onto
+    # skinny's SPPM integrator, so report it as mapped (not skipped) and the
+    # normalized skinny selection is recorded in the stage metadata above.
+    if scene.integrator is not None and scene.integrator[0] in ("sppm", "photonmap"):
+        report.exact("integrator:sppm",
+                     "mapped to skinny SPPM (wavefront, flat materials)")
+
     if out is not None:
         stage.GetRootLayer().Export(out)
     return stage, report
+
+
+def sppm_selection(stage):
+    """Return the normalized skinny SPPM selection written into an imported
+    stage's ``customLayerData["pbrt"]["skinny"]`` when the pbrt scene used
+    ``Integrator "sppm"`` / ``"photonmap"`` — a dict ``{"integrator": "sppm",
+    "radius"?: float, "photons"?: int}`` — or ``None`` for any other integrator.
+
+    A loader or the parity harness uses this to select skinny's SPPM integrator
+    and seed its initial radius / photons-per-pass from the pbrt parameters."""
+    pbrt = dict(stage.GetRootLayer().customLayerData).get("pbrt", {})
+    return pbrt.get("skinny")
 
 
 # --------------------------------------------------------------------------- #

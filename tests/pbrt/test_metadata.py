@@ -95,3 +95,71 @@ def test_camera_metadata(tmp_path):
     ]
     assert cams and cams[0]["type"] == "perspective"
     assert cams[0]["params"]["fov"] == pytest.approx(65)
+
+
+# ── SPPM integrator mapping (change photon-mapping-sppm) ────────────
+
+def test_sppm_records_skinny_selection(tmp_path):
+    # The SCENE above declares Integrator "sppm" ... "float radius" 0.02.
+    stage = _stage(tmp_path)
+    pbrt = stage.GetRootLayer().customLayerData["pbrt"]
+    assert pbrt["skinny"]["integrator"] == "sppm"
+    assert pbrt["skinny"]["radius"] == pytest.approx(0.02)
+    # No photonsperiteration in the scene → key absent (renderer defaults to W*H).
+    assert "photons" not in pbrt["skinny"]
+
+
+def test_sppm_selection_helper(tmp_path):
+    from skinny.pbrt.api import sppm_selection
+    stage = _stage(tmp_path)
+    sel = sppm_selection(stage)
+    assert sel is not None
+    assert sel["integrator"] == "sppm"
+    assert sel["radius"] == pytest.approx(0.02)
+
+
+def test_sppm_reported_mapped(tmp_path):
+    from skinny.pbrt.api import import_pbrt
+    src = tmp_path / "s.pbrt"
+    src.write_text(SCENE)
+    _stage_obj, report = import_pbrt(str(src), out=str(tmp_path / "s.usda"))
+    # The integrator is reported as mapped (exact), not skipped.
+    text = str(report)
+    constructs = [e.construct for e in report.entries]
+    assert any("integrator:sppm" in c for c in constructs), constructs
+    assert "skipped" not in [e.status for e in report.entries
+                             if "integrator" in e.construct]
+    assert text  # smoke
+
+
+def test_photonsperiteration_maps_to_photons(tmp_path):
+    from skinny.pbrt.api import import_pbrt, sppm_selection
+    from pxr import Usd
+    src = tmp_path / "p.pbrt"
+    src.write_text(
+        'Integrator "sppm" "integer photonsperiteration" 4096 "float radius" 0.05\n'
+        'Camera "perspective" "float fov" 50\nWorldBegin\n'
+        'Shape "sphere" "float radius" 1\n'
+    )
+    out = tmp_path / "p.usda"
+    import_pbrt(str(src), out=str(out))
+    sel = sppm_selection(Usd.Stage.Open(str(out)))
+    assert sel["integrator"] == "sppm"
+    assert sel["radius"] == pytest.approx(0.05)
+    assert sel["photons"] == 4096
+
+
+def test_non_sppm_integrator_has_no_skinny_selection(tmp_path):
+    from skinny.pbrt.api import import_pbrt, sppm_selection
+    from pxr import Usd
+    src = tmp_path / "path.pbrt"
+    src.write_text(
+        'Integrator "path" "integer maxdepth" 8\n'
+        'Camera "perspective" "float fov" 50\nWorldBegin\n'
+        'Shape "sphere" "float radius" 1\n'
+    )
+    out = tmp_path / "path.usda"
+    import_pbrt(str(src), out=str(out))
+    stage = Usd.Stage.Open(str(out))
+    assert sppm_selection(stage) is None
+    assert "skinny" not in stage.GetRootLayer().customLayerData["pbrt"]

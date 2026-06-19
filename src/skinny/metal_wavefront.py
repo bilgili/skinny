@@ -646,6 +646,183 @@ class MetalWavefrontPathPass:
         self.default_tex = None
 
 
+class _MetalSppmRecorder:
+    """Metal adapter for :func:`skinny.wavefront_driver.record_sppm_loop`.
+
+    Encodes the SPPM stage primitives into one :class:`MetalFrameEncoder`. SPPM
+    has no indirect dispatch (all counts are host-known), so every stage is a
+    plain ``enc.dispatch``; the grid / accumulator / visible-point clears are
+    whole-buffer ``enc.clear`` (the grid sub-ranges not touched by a clear are
+    fully overwritten by the scan / scatter stages, so a whole-buffer clear is
+    equivalent + simpler than the Vulkan sub-range fills)."""
+
+    def __init__(self, p, enc: MetalFrameEncoder, binds: dict, fc_blob: bytes, bindless) -> None:
+        self._p = p
+        self._enc = enc
+        self._binds = binds
+        self._fc = fc_blob
+        self._bindless = bindless
+        self._tile = (0, 0, p.stream_size)
+
+    @property
+    def stream_size(self) -> int:
+        return self._p.stream_size
+
+    def _tile_blob(self) -> bytes:
+        return struct.pack("3I", *(int(v) for v in self._tile))
+
+    def _dispatch(self, entry: str, groups) -> None:
+        self._enc.dispatch(
+            self._p._entries[entry], groups,
+            bindings=self._binds, uniform_blob=self._fc,
+            uniforms={"sppmTile": self._tile_blob()}, bindless=self._bindless)
+
+    def barrier(self) -> None:
+        self._enc.barrier()
+
+    def push_tile(self, stream_base: int) -> None:
+        self._tile = (int(stream_base), 0, self._p.stream_size)
+
+    def dispatch_full(self, entry: str) -> None:
+        groups = (self._p.stream_size + self._p._GROUP - 1) // self._p._GROUP
+        self._dispatch(entry, (max(groups, 1), 1, 1))
+
+    def dispatch_one(self, entry: str) -> None:
+        self._dispatch(entry, (1, 1, 1))
+
+    def dispatch_count(self, entry: str, count: int, group_size: int) -> None:
+        groups = (int(count) + group_size - 1) // group_size
+        self._dispatch(entry, (max(groups, 1), 1, 1))
+
+    def clear_visible_points(self) -> None:
+        self._enc.barrier()
+        self._enc.clear(self._p.buffers["visible_points"])
+        self._enc.barrier()
+
+    def clear_grid(self) -> None:
+        self._enc.barrier()
+        self._enc.clear(self._p.buffers["grid"])
+        self._enc.barrier()
+
+    def clear_accum(self) -> None:
+        self._enc.barrier()
+        self._enc.clear(self._p.buffers["accum"])
+        self._enc.barrier()
+
+
+class MetalWavefrontSppmPass:
+    """Native-Metal staged SPPM pass (change photon-mapping-sppm) — the Metal
+    sibling of :class:`skinny.vk_wavefront.WavefrontSppmPass`. Compiles the eight
+    ``integrators/wavefront_sppm.slang`` entries via SlangPy and owns four
+    backend-neutral ``StorageBuffer``s bound by Slang global name. SPPM never
+    compiles the neural weights, so no ``SKINNY_METAL_SPPM`` gate is needed (the
+    kernels sit well under Metal's 31-buffer-slot cap)."""
+
+    _GROUP = 64
+    STREAM_CAP = 1 << 20
+
+    _ENTRIES = ["wfSppmEye", "wfSppmGridCount", "wfSppmGridScanBlock",
+                "wfSppmGridScanBlockSums", "wfSppmGridScanAdd", "wfSppmGridScatter",
+                "wfSppmPhotonTrace", "wfSppmUpdate"]
+
+    def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
+                 graph_fragments=None, neural_config=None) -> None:
+        from skinny.wavefront_layout import (
+            SPPM_ACCUM_STRIDE,
+            VISIBLE_POINT_STRIDE_MSL,
+            sppm_grid_buffer_sizes,
+            sppm_grid_cell_count,
+        )
+        self.ctx = ctx
+        self.shader_dir = Path(shader_dir)
+        self.num_pixels = int(num_pixels)
+        self.stream_size = int(min(stream_size, self.STREAM_CAP))
+        self.num_cells = sppm_grid_cell_count(self.num_pixels)
+        self.graph_fragments = list(graph_fragments) if graph_fragments else []
+
+        if neural_config is None:
+            from skinny.sampling.neural_weights import NeuralBuildConfig
+            neural_config = NeuralBuildConfig()
+        defines = _defines_dict(neural_config.slang_defines())
+        session = _metal_slang_session(ctx, self.shader_dir, defines)
+        src_path = self.shader_dir / "integrators" / "wavefront_sppm.slang"
+        module = session.load_module_from_source(
+            "wavefront_sppm", src_path.read_text(encoding="utf-8"), str(src_path))
+        self._entries = {e: _EntryPipeline(ctx, session, module, e) for e in self._ENTRIES}
+
+        # Reflected VisiblePoint stride must match the host MSL mirror.
+        eye = self._entries["wfSppmEye"].program
+        vp_stride = (_reflect_element(eye, "sppmVisiblePoints") or (None, 0))[1]
+        if vp_stride and vp_stride != VISIBLE_POINT_STRIDE_MSL:
+            raise RuntimeError(
+                f"reflected Metal VisiblePoint stride {vp_stride}B != "
+                f"wavefront_layout.VISIBLE_POINT_STRIDE_MSL {VISIBLE_POINT_STRIDE_MSL}B")
+        self.vp_stride = vp_stride or VISIBLE_POINT_STRIDE_MSL
+
+        # MSL reflection surface for the renderer's relocators (the pass is the
+        # `_msl_layout_source` in wavefront mode — no megakernel is compiled). fc
+        # + the std_surface material params come from the eye program (it pulls
+        # the full flat-material tree). SPPM has no skin/catch-all kernel and
+        # reads graph params from the combined ByteAddressBuffer, so those layouts
+        # are empty.
+        self.uniform_layout, self.uniform_size = _reflect_uniform_layout(eye)
+        self.mtlx_skin_layout: dict = {}
+        self.mtlx_skin_stride = 0
+        self.std_surface_layout: dict = {}
+        self.std_surface_stride = 0
+        _ss = _reflect_element(eye, "stdSurfaceParams")
+        if _ss is not None:
+            self.std_surface_layout, self.std_surface_stride = _ss
+        self.graph_param_layouts: dict = {}
+
+        grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
+        self.buffers: dict[str, StorageBuffer] = {
+            "visible_points": StorageBuffer(ctx, self.num_pixels * self.vp_stride),
+            "accum": StorageBuffer(ctx, self.num_pixels * SPPM_ACCUM_STRIDE),
+            "grid": StorageBuffer(ctx, grid_sizes["grid_combined"]),
+            "scan": StorageBuffer(ctx, grid_sizes["scan_scratch"]),
+        }
+        for buf in self.buffers.values():
+            buf.fill_zero_sync()
+        self._bind_map = {
+            "sppmVisiblePoints": self.buffers["visible_points"],
+            "sppmAccum": self.buffers["accum"],
+            "sppmGrid": self.buffers["grid"],
+            "sppmScanScratch": self.buffers["scan"],
+        }
+
+        spy = ctx._spy
+        self.default_tex = ctx.device.create_texture(
+            type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
+            width=1, height=1,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            memory_type=spy.MemoryType.device_local, label="skinny.sppm_bindless_default")
+
+    def dispatch_frame(self, *, binds: dict, uniform_blob: bytes,
+                       bindless_textures=None, photons: int, first_frame: bool) -> None:
+        """Record + submit one SPPM pass over a fresh ``MetalFrameEncoder``."""
+        from skinny.wavefront_driver import record_sppm_loop
+        all_binds = dict(binds)
+        all_binds.update(self._bind_map)
+        bindless = None
+        if bindless_textures is not None:
+            bindless = ("flatMaterialTextures", bindless_textures, self.default_tex)
+        enc = MetalFrameEncoder(self.ctx)
+        rec = _MetalSppmRecorder(self, enc, all_binds, uniform_blob, bindless)
+        record_sppm_loop(
+            rec, num_pixels=self.num_pixels, stream_size=self.stream_size,
+            num_cells=self.num_cells, photons=int(photons), first_frame=bool(first_frame))
+        enc.submit()
+
+    def destroy(self) -> None:
+        for buf in self.buffers.values():
+            buf.destroy()
+        self.buffers = {}
+        self._bind_map = {}
+        self._entries = {}
+        self.default_tex = None
+
+
 class MetalWavefrontBdptPass:
     """Staged wavefront bidirectional path tracer on a :class:`~skinny.
     metal_context.MetalContext` — the Metal sibling of

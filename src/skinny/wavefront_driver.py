@@ -233,3 +233,83 @@ def record_bdpt_loop(
         rec.barrier()
         rec.dispatch_full("wfBdptResolve")
         stream_base += stream_size
+
+
+def record_sppm_loop(
+    rec,
+    *,
+    num_pixels: int,
+    stream_size: int,
+    num_cells: int,
+    photons: int,
+    first_frame: bool,
+) -> None:
+    """Record one SPPM pass (== one progressive-accumulation frame).
+
+    The mandated split ordering (an adversarial-review requirement): the grid +
+    photon stages are GLOBAL over every visible point, so they must run AFTER all
+    eye tiles and BEFORE any update tile — never interleaved per tile. ``tiles ==
+    1`` (num_pixels <= stream_size) is just the degenerate case of this order.
+
+        [frame 0 only] clear the persistent visible-point buffer
+        phase 1: all eye tiles            (write every pixel's visible point)
+        phase 2: grid build               (clear -> count -> scan -> scatter)
+        phase 3: photon pass              (clear accumulator -> emit/trace/deposit)
+        phase 4: all update tiles         (reduce + resolve + composite)
+
+    The recorder must supply, beyond the path-loop primitives (``stream_size``,
+    ``barrier``, ``push_tile``, ``dispatch_full``, ``dispatch_one``): ``dispatch_count(
+    entry, count, group_size)`` (dispatch ceil(count/group_size) workgroups over a
+    host-known count — grid/photon stages have no indirect dispatch),
+    ``clear_visible_points()``, ``clear_grid()`` (zero gridCount + gridCursor), and
+    ``clear_accum()`` (zero the per-pass SppmAccum region).
+    """
+    # frame 0: zero the persistent visible-point buffer so the n==0
+    # first-activation radius init in wfSppmEye is reliable.
+    if first_frame:
+        rec.clear_visible_points()
+        rec.barrier()
+
+    # phase 1 — all eye tiles.
+    stream_base = 0
+    first = True
+    while stream_base < num_pixels:
+        if not first:
+            rec.barrier()
+        first = False
+        rec.push_tile(stream_base)
+        rec.dispatch_full("wfSppmEye")
+        stream_base += stream_size
+    rec.barrier()
+
+    # phase 2 — single global grid build (counting sort).
+    rec.clear_grid()
+    rec.barrier()
+    rec.dispatch_count("wfSppmGridCount", num_pixels, 64)
+    rec.barrier()
+    rec.dispatch_count("wfSppmGridScanBlock", num_cells, 256)
+    rec.barrier()
+    rec.dispatch_one("wfSppmGridScanBlockSums")
+    rec.barrier()
+    rec.dispatch_count("wfSppmGridScanAdd", num_cells, 256)
+    rec.barrier()
+    rec.dispatch_count("wfSppmGridScatter", num_pixels, 64)
+    rec.barrier()
+
+    # phase 3 — single global photon pass.
+    rec.clear_accum()
+    rec.barrier()
+    rec.dispatch_count("wfSppmPhotonTrace", photons, 64)
+    rec.barrier()
+
+    # phase 4 — all update tiles.
+    stream_base = 0
+    first = True
+    while stream_base < num_pixels:
+        if not first:
+            rec.barrier()
+        first = False
+        rec.push_tile(stream_base)
+        rec.dispatch_full("wfSppmUpdate")
+        stream_base += stream_size
+    rec.barrier()

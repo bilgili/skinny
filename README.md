@@ -15,8 +15,9 @@ nodedefs, head geometry, presets, tattoos) is documented separately in
 [SkinRendering.md](docs/SkinRendering.md). Renderer internals are in
 [Architecture.md](docs/Architecture.md); the two GPU execution modes in
 [Megakernel.md](docs/Megakernel.md) / [Wavefront.md](docs/Wavefront.md); ReSTIR
-direct-lighting reuse in [ReSTIR.md](docs/ReSTIR.md); the SplineFlow neural path
-guiding proposal in [NeuralGuiding.md](docs/NeuralGuiding.md), with its
+direct-lighting reuse in [ReSTIR.md](docs/ReSTIR.md); the GPU SPPM photon-mapping
+integrator in [PhotonMapping.md](docs/PhotonMapping.md); the SplineFlow neural
+path guiding proposal in [NeuralGuiding.md](docs/NeuralGuiding.md), with its
 first-principles theory companion in [SplineFlows.md](docs/SplineFlows.md); the
 public Python API in [PythonAPI.md](docs/PythonAPI.md).
 
@@ -74,6 +75,11 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
   for caustics on flat materials; connections evaluate the real
   `standard_surface` BSDF, env importance sampling matched to the path tracer;
   Veach §10 MIS weighting
+- **Stochastic Progressive Photon Mapping** -- caustic-efficient SPPM integrator
+  (`--integrator sppm`): per-pass eye → spatial-hash grid → photon → radius/flux
+  update, with the per-pixel estimator persisting across accumulation frames;
+  wavefront-only, flat materials, Vulkan now (native Metal is a follow-up). See
+  [docs/PhotonMapping.md](docs/PhotonMapping.md)
 - **Furnace mode** -- unit-sphere + white-environment energy conservation test;
   violations tinted pink; supports per-material furnace probes
 - **Realistic lens camera** -- pinhole + PBRT-v3 thick-lens stack
@@ -425,6 +431,7 @@ neural × interop.
 |---------|--------|-------------------------------|
 | Megakernel execution | ✅ | ✅ |
 | Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
+| SPPM integrator (wavefront, flat materials) | ✅ | ✅ (`MetalWavefrontSppmPass`; caustic parity matches Vulkan) |
 | Neural directional proposal (inference) | ✅ | ✅ |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
@@ -479,12 +486,14 @@ through disk. Swap `mlx` for `cpu` to use the torch-free numpy oracle instead.
 
 ### Sampling
 
-Two integrators selectable at runtime:
+Three integrators selectable via `--integrator {path,bdpt,sppm}` across the
+front-ends:
 
 | Strategy | Description |
 |----------|-------------|
-| Path tracing | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
-| BDPT | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
+| Path tracing (`path`, default) | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
+| BDPT (`bdpt`) | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
+| SPPM (`sppm`) | **Stochastic Progressive Photon Mapping** — caustic-efficient eye/grid/photon/update pipeline; **wavefront-only**, **flat materials only**, on both Vulkan and native Metal (caustic parity matches across backends). Requires `--execution-mode wavefront` (refused under megakernel). One SPPM pass == one accumulation frame; the per-pixel estimator (radius / count / flux) persists across frames. `--sppm-radius` sets the initial search radius (default ≈ 0.1 % of the scene bbox diagonal); `--sppm-photons-per-pass` sets photons/pass (default one per pixel). See [docs/PhotonMapping.md](docs/PhotonMapping.md). |
 
 **Per-lobe BSDF samplers.** The flat / `standard_surface` BSDF draws each lobe
 (`coat`, `spec`, `diffuse`) from a runtime-selectable importance sampler. Native
@@ -707,6 +716,7 @@ per-material furnace probes.
 | `sampling/{neural_flow,neural_proposal}.slang` | Neural directional proposal — spline-flow inference (`neural_flow`) + renderer adapter (`neural_proposal`) |
 | `lights/{sphere,emissive_triangle,directional}_light.slang` | `ILight` implementations |
 | `integrators/{path,bdpt}.slang` | `IIntegrator` implementations |
+| `integrators/{wavefront_sppm,sppm_state}.slang` | GPU SPPM — the 8 per-pass kernels (`wavefront_sppm`) + `VisiblePoint`/`SppmAccum` state and the spatial-hash + reduction helpers (`sppm_state`) |
 
 ## Papers and References
 
@@ -715,6 +725,7 @@ per-material furnace probes.
 | MIS | `samplers/mis_combine.slang`, `integrators/bdpt.slang` | Veach, "Robust Monte Carlo Methods for Light Transport Simulation", PhD thesis, 1997 |
 | Bidirectional path tracing | `integrators/bdpt.slang` | Veach and Guibas, "Bidirectional Estimators for Light Transport", 1995 |
 | Bidirectional path tracing | `integrators/bdpt.slang` | Lafortune and Willems, "Bi-Directional Path Tracing", 1993 |
+| Stochastic progressive photon mapping | `integrators/wavefront_sppm.slang`, `integrators/sppm_state.slang` | Hachisuka and Jensen, "Stochastic Progressive Photon Mapping", SIGGRAPH Asia 2009 |
 | GGX microfacet | `materials/flat/flat_shading.slang` | Walter, Marschner, Li, Torrance, "Microfacet Models for Refraction through Rough Surfaces", EGSR 2007 |
 | Fresnel approximation | `materials/flat/flat_shading.slang` | Schlick, "An Inexpensive BRDF Model for Physically-Based Rendering", 1994 |
 | Realistic camera | `lens_optics.py`, `shaders/cameras/thick_lens.slang` | Pharr, Jakob, Humphreys, *Physically Based Rendering 3e*, Ch. 6 |

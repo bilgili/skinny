@@ -1003,6 +1003,26 @@ depthThresh, mCap, mBsdf`.
 The full ReSTIR DI reference — pipeline stages, equations, the equation→shader
 map, design choices, and GUI controls — is in **[ReSTIR.md](ReSTIR.md)**.
 
+**SPPM** (`WavefrontSppmPass`, `INTEGRATOR_SPPM = 2`) uses its **own** set-1
+layout — it does **not** share the path pass's stream state. Four **typed**
+structured buffers (no `ByteAddressBuffer` fold — a SPPM kernel sits ~15/31 Metal
+slots, so no `SKINNY_METAL_SPPM` gate is needed), each sized by **num_pixels**
+(the persistent per-pixel estimator, not `stream_size`):
+
+| Set 1 binding | Owner | Content |
+|---|---|---|
+| 0 | `WavefrontSppmPass` | `sppmVisiblePoints` — `VisiblePoint[]`, the persistent per-pixel estimator (eye geometry + evaluated flat BSDF + per-pass direct + τ/r/N) |
+| 1 | `WavefrontSppmPass` | `sppmAccum` — `SppmAccum[]`, per-pass fixed-point atomic flux accumulator (cleared each pass) |
+| 2 | `WavefrontSppmPass` | `sppmGrid` — `uint[]`, four sub-ranges over `numCells`: `gridCount` \| `gridOffset` \| `gridCursor` \| `sortedIdx` |
+| 3 | `WavefrontSppmPass` | `sppmScanScratch` — `uint[]`, `ceil(numCells/256)` block sums for the parallel prefix scan |
+
+SPPM's 12-byte push constant reuses the path pass's `{streamBase, shadeSlot
+(unused), streamSize}` tile layout. The `FrameConstants` SPPM tail
+(`sppmInitialRadius`, `sppmCellSize`, `sppmGridRes`, `sppmPhotonsEmitted`) is read
+only when `integratorType == 2`. The full SPPM reference — pipeline, equations,
+buffer layout, pbrt mapping, deferred phases — is in
+**[PhotonMapping.md](PhotonMapping.md)**.
+
 ---
 
 ## Online neural training

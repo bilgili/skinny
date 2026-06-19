@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="424.5" height="88.5" viewBox="0 0 424.5 88.5">
+  <rect x="0.5" y="0.5" width="423.5" height="87.5" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">φ</text>
+  <text x="20.8" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">j</text>
+  <text x="28.6" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> += β · f</text>
+  <text x="125.8" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">r</text>
+  <text x="133.6" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">,   f</text>
+  <text x="187.6" y="53.8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">r</text>
+  <text x="195.3" y="49.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = </text>
+  <text x="237.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">response(ω</text>
+  <text x="345.7" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">o</text>
+  <text x="353.5" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">, ω</text>
+  <text x="385.9" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i</text>
+  <text x="393.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">)</text>
+  <line x1="227.7" y1="44.2" x2="414.5" y2="44.2" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="244.6" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">max(ω</text>
+  <text x="298.6" y="74.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">i,z</text>
+  <text x="322.0" y="70.2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">, 1e-4)</text>
+</svg>

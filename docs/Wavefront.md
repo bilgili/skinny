@@ -110,6 +110,40 @@ per bounce. `clear_counts()` here adds an extra COMPUTE→TRANSFER WAR barrier
 (`vk_wavefront.py:981-986`) absent in the path pass, guarding prior
 indirect-dispatch reads of `slot_count` against the fill.
 
+### SPPM stages (`WavefrontSppmPass`, `vk_wavefront.py:847`)
+
+The third integrator (`INTEGRATOR_SPPM = 2`) is **Stochastic Progressive Photon
+Mapping** — wavefront-only, flat-materials-only, Vulkan working now (the
+native-Metal pass is a follow-up). One SPPM pass == one progressive-accumulation
+frame, and the per-pixel estimator (radius / count / flux) **persists** across
+frames. Eight kernels compiled from `integrators/wavefront_sppm.slang` (entries
+`wfSppm*`); every dispatch has a host-known count → plain dispatch, **no indirect
+dispatch** (no Metal readback stall). `record_sppm_loop` (`wavefront_driver.py:238`)
+encodes a **mandated split order** — the grid + photon stages are global over
+every visible point, so they run after all eye tiles and before any update tile:
+
+| Phase | Stage(s) | Work |
+|-------|----------|------|
+| 1 · eye | `wfSppmEye` (tiled, full stream) | trace the camera path through the flat delta lobe to the first non-specular flat hit; store one `VisiblePoint`/pixel + per-pass direct `ld` (NEE + specular-chain emission) + the evaluated flat BSDF |
+| 2 · grid | `wfSppmGridCount` → `wfSppmGridScanBlock` → `wfSppmGridScanBlockSums` → `wfSppmGridScanAdd` → `wfSppmGridScatter` | counting-sort spatial hash over active VPs: atomic per-cell count → exclusive prefix sum (count → offset) → scatter pixel indices into cell buckets |
+| 3 · photon | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`) | emit power-weighted photons (`beta = Le·π/p_sel`), RR-trace, deposit bare f_r at non-specular vertices (`depth ≥ 1`) via a 3×3×3 cell scan with uint fixed-point `InterlockedAdd` into `SppmAccum` |
+| 4 · update | `wfSppmUpdate` (tiled, full stream) | SPPM reduction `N'=N+γM`, `r'=r·√(N'/(N+M))`, `τ'=(τ+Φ)(r'/r)²`; `L_indirect = τ/(N_emitted·π·r²)`; `sample = ld + L_indirect`; running-mean composite into the film (like `wfPathResolve`) + display; clear the accumulator |
+
+```text
+[frame 0]  clear_visible_points → barrier
+phase 1    all wfSppmEye tiles                                            → barrier
+phase 2    clear_grid → Count → ScanBlock → ScanBlockSums → ScanAdd → Scatter → barrier
+phase 3    clear_accum → wfSppmPhotonTrace                               → barrier
+phase 4    all wfSppmUpdate tiles                                        → barrier
+```
+
+SPPM binds the scene set as set 0 and its own **set 1** (four typed buffers:
+`sppmVisiblePoints` / `sppmAccum` / `sppmGrid` / `sppmScanScratch`, sized by
+num_pixels — see [Architecture.md § SPPM set 1](Architecture.md#wavefront-pass-local-descriptor-sets-set-1)).
+The full SPPM reference — pipeline diagram, the estimator equations + the
+equation→shader map, the buffer/state layout, the pbrt mapping, and the deferred
+PM-2/PM-3 phases — is in **[PhotonMapping.md](PhotonMapping.md)**.
+
 ---
 
 ## 2. Stream state & material bucketing

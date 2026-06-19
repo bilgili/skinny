@@ -139,7 +139,12 @@ def test_flags_can_be_suppressed():
 
 
 def test_integrator_index_map():
-    assert INTEGRATOR_INDEX == {"path": 0, "bdpt": 1}
+    assert INTEGRATOR_INDEX == {"path": 0, "bdpt": 1, "sppm": 2}
+
+
+def test_integrator_choices_include_sppm():
+    ns = _parser().parse_args(["--integrator", "sppm", "--execution-mode", "wavefront"])
+    assert ns.integrator == "sppm"
 
 
 # ── front-end parity ─────────────────────────────────────────────────
@@ -211,3 +216,30 @@ def test_missing_proposals_attr_ok():
     # Front-ends without --proposals (skinny-gui / skinny-web) pass a Namespace
     # with no `proposals` attribute; the guard must tolerate it.
     validate_render_flags(argparse.Namespace(integrator="bdpt", online_training=False))
+
+
+# ── validate_render_flags: sppm requires wavefront ────────────────────
+
+def test_sppm_plus_megakernel_exits():
+    with pytest.raises(SystemExit) as ei:
+        validate_render_flags(_ns(integrator="sppm", execution_mode="megakernel"))
+    msg = str(ei.value)
+    assert "sppm" in msg.lower() and "wavefront" in msg
+
+
+def test_sppm_default_execution_mode_exits():
+    # `--integrator sppm` with no explicit --execution-mode defaults to megakernel,
+    # which SPPM cannot run on → must be refused naming the fix.
+    with pytest.raises(SystemExit) as ei:
+        validate_render_flags(_ns(integrator="sppm"))
+    assert "wavefront" in str(ei.value)
+
+
+def test_sppm_plus_wavefront_is_ok():
+    validate_render_flags(_ns(integrator="sppm", execution_mode="wavefront"))
+
+
+def test_non_sppm_not_flagged_by_sppm_gate():
+    # path/bdpt under megakernel must not trip the sppm gate.
+    validate_render_flags(_ns(integrator="path", execution_mode="megakernel"))
+    validate_render_flags(_ns(integrator=None, execution_mode="megakernel"))

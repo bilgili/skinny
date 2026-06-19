@@ -149,3 +149,109 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
         "material_offset": num_materials * _UINT,
         "indirect_args":   num_materials * INDIRECT_ARGS_STRIDE,
     }
+
+
+# ── SPPM per-pixel state buffers (change photon-mapping-sppm, PM-1) ─────────
+# Mirror of VisiblePoint / SppmAccum in
+# shaders/integrators/sppm_state.slang. Both are one-element-per-pixel
+# GPU-internal scratch the SPPM stages own; the host only SIZES them (never
+# packs). The renderer allocates the visible-point buffer as
+# `stream_size * VISIBLE_POINT_STRIDE` and the per-pass deposit accumulator as
+# `stream_size * SPPM_ACCUM_STRIDE`. `tests/test_sppm_state.py` locks these to
+# the Slang structs.
+
+# VisiblePoint.flags bits (mirror the static consts in sppm_state.slang).
+VP_ACTIVE = 1 << 0  # a valid visible point was stored this pass
+
+VISIBLE_POINT_FIELDS: list[tuple[str, str]] = [
+    ("pos",           "float3"),
+    ("ns",            "float3"),
+    ("wo",            "float3"),
+    ("beta",          "float3"),
+    ("ld",            "float3"),
+    ("albedo",        "float3"),
+    ("F0",            "float3"),
+    ("coatColor",     "float3"),
+    ("roughness",     "float"),
+    ("metallic",      "float"),
+    ("specular",      "float"),
+    ("ior",           "float"),
+    ("opacity",       "float"),
+    ("coat",          "float"),
+    ("coatRoughness", "float"),
+    ("coatIOR",       "float"),
+    ("tau",           "float3"),
+    ("flags",         "uint"),
+    ("radius",        "float"),
+    ("n",             "float"),
+]
+
+SPPM_ACCUM_FIELDS: list[tuple[str, str]] = [
+    ("phiR", "uint"),
+    ("phiG", "uint"),
+    ("phiB", "uint"),
+    ("m",    "uint"),
+]
+
+
+def visible_point_size(*, msl: bool = False) -> int:
+    """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``)."""
+    return _struct_stride(VISIBLE_POINT_FIELDS, msl=msl)
+
+
+def sppm_accum_size(*, msl: bool = False) -> int:
+    """Byte stride of SppmAccum — scalar (default) or MSL (``msl=True``). All
+    fields are uint, so the scalar and MSL strides are identical."""
+    return _struct_stride(SPPM_ACCUM_FIELDS, msl=msl)
+
+
+VISIBLE_POINT_STRIDE = visible_point_size()              # 152 B (scalar / Vulkan)
+VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 192 B (Metal)
+SPPM_ACCUM_STRIDE = sppm_accum_size()                    # 16 B (both layouts)
+SPPM_ACCUM_STRIDE_MSL = sppm_accum_size(msl=True)        # 16 B
+
+
+def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False) -> dict[str, int]:
+    """Byte sizes for the SPPM per-pixel buffers, the source of truth the SPPM
+    stage allocator sizes against.
+
+    CRITICAL: the SPPM visible-point estimator (radius/N/tau) is **per pixel**
+    and PERSISTS across passes, so these buffers MUST be sized by
+    ``num_pixels = width*height`` — NOT by the wavefront ``stream_size`` (which
+    aliases different pixels across tiles, and would undersize the buffer for any
+    frame that tiles, corrupting state after tile 0). The SPPM stages index by
+    the per-pixel lane, in ``[0, num_pixels)``.
+
+    ``msl=True`` uses the Metal struct stride so the Metal allocator does not
+    undersize the visible-point region."""
+    vp_stride = VISIBLE_POINT_STRIDE_MSL if msl else VISIBLE_POINT_STRIDE
+    acc_stride = SPPM_ACCUM_STRIDE_MSL if msl else SPPM_ACCUM_STRIDE
+    return {
+        "visible_points": num_pixels * vp_stride,
+        "sppm_accum":     num_pixels * acc_stride,
+    }
+
+
+def sppm_grid_cell_count(num_pixels: int) -> int:
+    """Number of spatial-hash cells for the SPPM grid: the next power of two
+    >= 2*num_pixels, so the cell index masks with ``& (numCells - 1)``."""
+    target = max(1, 2 * num_pixels)
+    cells = 1
+    while cells < target:
+        cells <<= 1
+    return cells
+
+
+def sppm_grid_buffer_sizes(num_pixels: int) -> dict[str, int]:
+    """Byte sizes for the SPPM counting-sort grid buffers (all uint → identical
+    scalar/MSL layout, no ``msl`` param). ``grid_combined`` holds four uint
+    sub-ranges — ``gridCount | gridOffset | gridCursor`` (each ``numCells``) and
+    ``sortedIdx`` (``num_pixels``); ``scan_scratch`` holds the per-block sums for
+    the two-level exclusive prefix sum (block size 256)."""
+    num_cells = sppm_grid_cell_count(num_pixels)
+    grid_uints = 3 * num_cells + num_pixels
+    scan_uints = (num_cells + 255) // 256
+    return {
+        "grid_combined": grid_uints * _UINT,
+        "scan_scratch":  scan_uints * _UINT,
+    }

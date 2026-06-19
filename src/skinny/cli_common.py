@@ -18,7 +18,7 @@ import argparse
 import os
 
 # path → integrator_index, mirroring the renderer's integrator ordering.
-INTEGRATOR_INDEX = {"path": 0, "bdpt": 1}
+INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2}
 
 # Advertised walk choices. `megakernel` is accepted as a deprecated alias but is
 # not listed, so only the execution axis owns that word.
@@ -47,10 +47,26 @@ def validate_render_flags(args) -> None:
     Refuse up front rather than silently no-op or crash.
 
     Raises ``SystemExit`` (a usage error) on the incompatible combo. Only an
-    explicit ``--integrator bdpt`` trips it; ``integrator=None`` (the
-    persisted/default path) does not. Tolerant of a ``Namespace`` without a
-    ``proposals`` attribute (the GUI/web front-ends suppress ``--proposals``)."""
-    if getattr(args, "integrator", None) != "bdpt":
+    explicit ``--integrator bdpt`` trips the bdpt×neural guard; ``integrator=None``
+    (the persisted/default path) does not. SPPM has no megakernel path, so an
+    explicit ``--integrator sppm`` under the megakernel execution mode (including
+    the default) is refused naming ``--execution-mode wavefront`` as the fix.
+    Tolerant of a ``Namespace`` without a ``proposals`` attribute (the GUI/web
+    front-ends suppress ``--proposals``)."""
+    integrator = getattr(args, "integrator", None)
+    if integrator == "sppm":
+        # SPPM is wavefront-only (no global photon map under the megakernel), like
+        # the neural directional proposal. `execution_mode` defaults to
+        # 'megakernel', so plain `--integrator sppm` trips this too.
+        if getattr(args, "execution_mode", "megakernel") != "wavefront":
+            raise SystemExit(
+                "skinny: --integrator sppm requires --execution-mode wavefront — "
+                "SPPM (Stochastic Progressive Photon Mapping) has no megakernel "
+                "path (its global visible-point / photon-grid structure is shared "
+                "across pixels). Add --execution-mode wavefront."
+            )
+        return
+    if integrator != "bdpt":
         return
     proposals = getattr(args, "proposals", None) or ""
     online = bool(getattr(args, "online_training", False))
@@ -119,12 +135,15 @@ def add_render_flags(
         )
     if integrator:
         parser.add_argument(
-            "--integrator", choices=("path", "bdpt"), default=None,
+            "--integrator", choices=("path", "bdpt", "sppm"), default=None,
             help="Light-transport integrator (default: 'path', or the persisted "
                  "value on the interactive front-ends). 'path' is the "
                  "unidirectional path tracer; 'bdpt' is the bidirectional path "
-                 "tracer. On the interactive front-ends this sets the initial "
-                 "integrator and it remains runtime-cycleable.",
+                 "tracer; 'sppm' is the Stochastic Progressive Photon Mapping "
+                 "integrator (caustic-efficient, flat materials, wavefront-only — "
+                 "requires --execution-mode wavefront). On the interactive "
+                 "front-ends this sets the initial integrator and it remains "
+                 "runtime-cycleable.",
         )
     if proposals:
         parser.add_argument(
