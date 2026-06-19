@@ -1199,8 +1199,10 @@ class Renderer:
         # Integrator selector. Index 0 = existing unidirectional path tracer
         # (untouched). Index 1 = BDPT, which only engages when the camera's
         # first hit is a FlatMaterial; skin / debug-normal first hits silently
-        # fall through to the path tracer in main_pass.slang.
-        self.integrator_modes: list[str] = ["Path", "BDPT"]
+        # fall through to the path tracer in main_pass.slang. Index 2 = SPPM
+        # (Stochastic Progressive Photon Mapping), wavefront-only and flat-material
+        # only; under the megakernel it falls through to the path tracer.
+        self.integrator_modes: list[str] = ["Path", "BDPT", "SPPM"]
         self.integrator_index = 0
 
         # Pluggable scene-sampling seam (sampling/proposal.slang). The active

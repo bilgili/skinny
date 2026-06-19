@@ -1,10 +1,10 @@
 ## 1. Setup & selection seam
 
-- [ ] 1.1 Create a git worktree off `main` for this change (per CLAUDE.md workflow); set up the headless env (`./bin/python3.13`, `VULKAN_SDK`, `DYLD_LIBRARY_PATH`).
-- [ ] 1.2 Add `INTEGRATOR_SPPM = 2u` to `shaders/common.slang`; add `INTEGRATOR_INDEX["sppm"] = 2` and `"SPPM"` to the GUI integrator mode list (`renderer.py`).
-- [ ] 1.3 Extend `cli_common.py` `--integrator` choices to `(path, bdpt, sppm)`; wire selection in `app.py`, `web_app.py`, `ui/qt/app.py`.
-- [ ] 1.4 (test-first) Add render-cli tests for the new `sppm` choice and the `sppm + megakernel` startup-rejection (mirrors existing bdpt-gating tests); then implement the shared gating so `sppm` requires `--execution-mode wavefront`.
-- [ ] 1.5 Add `integrator_index == SPPM` to the accumulation state-hash inputs so switching to/from SPPM resets accumulation; add a test asserting the reset.
+- [x] 1.1 Create a git worktree off `main` for this change (per CLAUDE.md workflow); set up the headless env (`./bin/python3.13`, `VULKAN_SDK`, `DYLD_LIBRARY_PATH`).
+- [x] 1.2 Add `INTEGRATOR_SPPM = 2u` to `shaders/common.slang`; add `INTEGRATOR_INDEX["sppm"] = 2` and `"SPPM"` to the GUI integrator mode list (`renderer.py`).
+- [x] 1.3 Extend `cli_common.py` `--integrator` choices to `(path, bdpt, sppm)`; wire selection in `app.py`, `web_app.py`, `ui/qt/app.py`. (Front-ends already route through `INTEGRATOR_INDEX[args.integrator]`, so the map update covers all four.)
+- [x] 1.4 (test-first) Add render-cli tests for the new `sppm` choice and the `sppm + megakernel` startup-rejection (mirrors existing bdpt-gating tests); then implement the shared gating so `sppm` requires `--execution-mode wavefront`.
+- [x] 1.5 Add `integrator_index == SPPM` to the accumulation state-hash inputs so switching to/from SPPM resets accumulation; add a test asserting the reset. (`integrator_index` was already hashed for BDPT; added a source-level regression guard in `test_sppm_selection.py`.)
 
 ## 2. SPPM shader core (backend-neutral Slang)
 

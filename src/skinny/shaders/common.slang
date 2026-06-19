@@ -202,7 +202,7 @@ struct FrameConstants
     uint   numInstances;         // size of the TLAS instance list; 0 disables mesh ray traversal
     uint   numSphereLights;      // active count in sphereLights buffer (binding 17)
     uint   numEmissiveTriangles; // active count in emissiveTriangles buffer (binding 18)
-    uint   integratorType;       // 0 = unidirectional path tracer, 1 = BDPT (flat first-hit only)
+    uint   integratorType;       // 0 = path tracer, 1 = BDPT (flat first-hit), 2 = SPPM (wavefront-only)
     uint   numGizmoSegments;     // active count in gizmoSegments buffer (binding 22)
     uint   numLensElements;      // active count in lensElements buffer (binding 23); 0 = pinhole
     float  filmDistance;         // world-space distance from film plane to rear lens surface
@@ -319,6 +319,7 @@ struct LensSurface
 
 static const uint INTEGRATOR_PATH = 0u;
 static const uint INTEGRATOR_BDPT = 1u;
+static const uint INTEGRATOR_SPPM = 2u;  // Stochastic Progressive Photon Mapping (wavefront-only)
 
 // ── Random number generation (PCG) ──────────────────────────────
 
