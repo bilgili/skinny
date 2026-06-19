@@ -12,8 +12,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **GPU SPPM integrator** (change `photon-mapping-sppm`, PM-1) — a Stochastic
   Progressive Photon Mapping integrator (`INTEGRATOR_SPPM = 2`), the
   caustic-efficient third integrator after `path` and `bdpt`. **Wavefront-only**,
-  **flat materials only**; Vulkan is working now (the native-Metal pass is a
-  follow-up — the kernels are Metal-portable). Selectable via `--integrator sppm`
+  **flat materials only**, on **both Vulkan and native Metal**
+  (`WavefrontSppmPass` / `MetalWavefrontSppmPass`). Selectable via `--integrator sppm`
   (requires `--execution-mode wavefront`; refused under megakernel with a clear
   message), the GUI "SPPM" mode, or the pbrt importer. One SPPM pass == one
   progressive-accumulation frame, a four-stage pipeline over eight kernels in
@@ -30,8 +30,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--sppm-photons-per-pass` the photons/pass (default one per pixel). The pbrt v4
   importer now **maps** `Integrator "sppm"` / `"photonmap"` (previously skipped)
   to the skinny SPPM selection (`customLayerData["pbrt"]["skinny"]`, read by
-  `api.sppm_selection`). Verified on Vulkan (Apple M5 Pro): Cornell-box SPPM/path
-  energy ratio 1.008. Skin/BSSRDF (PM-2) and volumetric (PM-3) photon transport
+  `api.sppm_selection`). Verified on both backends (Apple M5 Pro): Cornell-box
+  SPPM/path energy ratio 1.008 (Vulkan); glass caustic parity vs the pbrt
+  reference relMSE 0.025 (Vulkan and Metal). Skin/BSSRDF (PM-2) and volumetric (PM-3) photon transport
   are deferred. See [docs/PhotonMapping.md](docs/PhotonMapping.md).
 - **pbrt importer imagemap-texture UVs** (change `pbrt-imagemap-uv-parity`) —
   finish imagemap-texture UV support in the pbrt v4 importer. Explicit mesh UVs

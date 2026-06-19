@@ -431,7 +431,7 @@ neural × interop.
 |---------|--------|-------------------------------|
 | Megakernel execution | ✅ | ✅ |
 | Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
-| SPPM integrator (wavefront, flat materials) | ✅ | follow-up (kernels are Metal-portable; host pass not yet wired) |
+| SPPM integrator (wavefront, flat materials) | ✅ | ✅ (`MetalWavefrontSppmPass`; caustic parity matches Vulkan) |
 | Neural directional proposal (inference) | ✅ | ✅ |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
@@ -493,7 +493,7 @@ front-ends:
 |----------|-------------|
 | Path tracing (`path`, default) | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
 | BDPT (`bdpt`) | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
-| SPPM (`sppm`) | **Stochastic Progressive Photon Mapping** — caustic-efficient eye/grid/photon/update pipeline; **wavefront-only**, **flat materials only**, Vulkan now (native Metal is a follow-up). Requires `--execution-mode wavefront` (refused under megakernel). One SPPM pass == one accumulation frame; the per-pixel estimator (radius / count / flux) persists across frames. `--sppm-radius` sets the initial search radius (default ≈ 0.1 % of the scene bbox diagonal); `--sppm-photons-per-pass` sets photons/pass (default one per pixel). See [docs/PhotonMapping.md](docs/PhotonMapping.md). |
+| SPPM (`sppm`) | **Stochastic Progressive Photon Mapping** — caustic-efficient eye/grid/photon/update pipeline; **wavefront-only**, **flat materials only**, on both Vulkan and native Metal (caustic parity matches across backends). Requires `--execution-mode wavefront` (refused under megakernel). One SPPM pass == one accumulation frame; the per-pixel estimator (radius / count / flux) persists across frames. `--sppm-radius` sets the initial search radius (default ≈ 0.1 % of the scene bbox diagonal); `--sppm-photons-per-pass` sets photons/pass (default one per pixel). See [docs/PhotonMapping.md](docs/PhotonMapping.md). |
 
 **Per-lobe BSDF samplers.** The flat / `standard_surface` BSDF draws each lobe
 (`coat`, `spec`, `diffuse`) from a runtime-selectable importance sampler. Native

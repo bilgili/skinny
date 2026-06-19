@@ -3,7 +3,7 @@
 Two halves:
 
 * **Host invariants (always run, no GPU):** the Vulkan *scalar* ``FrameConstants``
-  blob is exactly 512 B — ``_FC_SCALAR_FIELDS`` (the relocation table the MSL packer
+  blob is exactly 540 B — ``_FC_SCALAR_FIELDS`` (the relocation table the MSL packer
   walks) covers it with no gap or overlap — and ``SkinParameters.pack()`` (the
   ``std140`` skin UBO) is byte-stable. These pin the Vulkan side "byte-unchanged".
 
@@ -50,7 +50,8 @@ except OSError as exc:  # pragma: no cover - environment dependent
 
 # Expected sizes — the Vulkan scalar FrameConstants blob and the std140 skin UBO.
 # If either struct grows, update the packer AND this pin in the same change.
-_VK_SCALAR_FC_BYTES = 516  # +4 for cameraMirror (change pbrt-mirrored-camera-flip)
+_VK_SCALAR_FC_BYTES = 540  # 516 + 24 SPPM tail (change photon-mapping-sppm):
+#   sppmInitialRadius + sppmCellSize + sppmGridRes(float3) + sppmPhotonsEmitted
 _SKIN_PARAMS_BYTES = 80
 # Reflected MSL `fc` size on Metal (float3 padded to 16 B; design D3 / task 1.2).
 # Stays 592 B: the recordMode/cameraMirror scalar-tail uints land in the struct's
@@ -58,8 +59,8 @@ _SKIN_PARAMS_BYTES = 80
 _MSL_FC_BYTES = 592
 
 
-def test_vulkan_scalar_fc_blob_is_516():
-    """`_FC_SCALAR_FIELDS` covers the whole 516 B scalar blob, no gap/overlap — this
+def test_vulkan_scalar_fc_blob_is_540():
+    """`_FC_SCALAR_FIELDS` covers the whole 540 B scalar blob, no gap/overlap — this
     is the table `_pack_uniforms_msl` walks to relocate each field into MSL."""
     total = sum(sz for _, sz in _FC_SCALAR_FIELDS)
     assert total == _VK_SCALAR_FC_BYTES, (

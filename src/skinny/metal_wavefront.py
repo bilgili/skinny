@@ -759,6 +759,22 @@ class MetalWavefrontSppmPass:
                 f"wavefront_layout.VISIBLE_POINT_STRIDE_MSL {VISIBLE_POINT_STRIDE_MSL}B")
         self.vp_stride = vp_stride or VISIBLE_POINT_STRIDE_MSL
 
+        # MSL reflection surface for the renderer's relocators (the pass is the
+        # `_msl_layout_source` in wavefront mode — no megakernel is compiled). fc
+        # + the std_surface material params come from the eye program (it pulls
+        # the full flat-material tree). SPPM has no skin/catch-all kernel and
+        # reads graph params from the combined ByteAddressBuffer, so those layouts
+        # are empty.
+        self.uniform_layout, self.uniform_size = _reflect_uniform_layout(eye)
+        self.mtlx_skin_layout: dict = {}
+        self.mtlx_skin_stride = 0
+        self.std_surface_layout: dict = {}
+        self.std_surface_stride = 0
+        _ss = _reflect_element(eye, "stdSurfaceParams")
+        if _ss is not None:
+            self.std_surface_layout, self.std_surface_stride = _ss
+        self.graph_param_layouts: dict = {}
+
         grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
         self.buffers: dict[str, StorageBuffer] = {
             "visible_points": StorageBuffer(ctx, self.num_pixels * self.vp_stride),

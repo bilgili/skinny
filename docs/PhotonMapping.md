@@ -63,7 +63,7 @@ double-count.
 | Property | Value |
 | --- | --- |
 | Integrator | **`INTEGRATOR_SPPM = 2`** (`common.slang`). The third integrator after `path` (0) and `bdpt` (1). |
-| Backend | **Wavefront only.** Vulkan is working now; the native-Metal SPPM pass is a follow-up (the kernels are Metal-portable — typed buffers, ~15/31 slots, no Metal-only gate — but the host pass is not yet wired). The megakernel has no global photon map, so `--integrator sppm` under megakernel is **refused** with a clear message (`cli_common._validate_integrator`). |
+| Backend | **Wavefront only**, on **both Vulkan and native Metal**. Vulkan uses `WavefrontSppmPass` (`vk_wavefront.py`); Metal uses `MetalWavefrontSppmPass` (`metal_wavefront.py`) — the kernels are Metal-portable (typed buffers, ~15/31 slots, no Metal-only gate) and the caustic parity matches across backends. The megakernel has no global photon map, so `--integrator sppm` under megakernel is **refused** with a clear message (`cli_common._validate_integrator`). |
 | Materials | **Flat only** — `UsdPreviewSurface` / `standard_surface` / `OpenPBR` / Python flat materials, same gating as ReSTIR DI and neural guiding. Glass / mirror **are** flat materials in skinny (a delta lobe), so the eye and photon walks pass through them as caustic carriers; skin / MaterialX-graph / python-graph / debug receivers terminate the walk (PM-1 is the surface case). |
 | Selection | `--integrator sppm` (requires `--execution-mode wavefront`; `cli_common.INTEGRATOR_INDEX["sppm"] = 2`) across the front-ends, or the pbrt importer when the scene used `Integrator "sppm"`/`"photonmap"`. |
 | Direct light | Reuses stock **NEE** (the eye stage); the photon term is the indirect/caustic complement only. |

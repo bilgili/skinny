@@ -1638,6 +1638,8 @@ class Renderer:
         fall through to their scalar defaults."""
         if self.pipeline is not None:
             return self.pipeline
+        if self._wavefront_sppm_pass is not None:
+            return self._wavefront_sppm_pass
         if self._wavefront_path_pass is not None:
             return self._wavefront_path_pass
         return self._wavefront_bdpt_pass
