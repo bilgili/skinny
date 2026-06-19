@@ -768,6 +768,223 @@ class WavefrontPathPass:
             buf.destroy()
 
 
+class _VkSppmRecorder:
+    """Vulkan adapter for :func:`skinny.wavefront_driver.record_sppm_loop`.
+
+    Records the SPPM stage primitives with ``vk`` commands. All SPPM dispatches
+    have host-known counts (num_pixels / num_cells / photons), so every stage is
+    a plain ``vkCmdDispatch`` — no indirect dispatch, hence no Metal-style
+    readback stall on either backend.
+    """
+
+    def __init__(self, p: "WavefrontSppmPass", cmd, scene_set) -> None:
+        self._p = p
+        self._cmd = cmd
+        self._scene = scene_set
+        self._cbarrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+
+    @property
+    def stream_size(self) -> int:
+        return self._p.stream_size
+
+    def barrier(self) -> None:
+        vk.vkCmdPipelineBarrier(
+            self._cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [self._cbarrier], 0, None, 0, None)
+
+    def _fill(self, buf, offset: int, size: int) -> None:
+        vk.vkCmdFillBuffer(self._cmd, buf.buffer, int(offset), int(size), 0)
+
+    def _transfer_barrier(self) -> None:
+        tb = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+        vk.vkCmdPipelineBarrier(
+            self._cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [tb], 0, None, 0, None)
+
+    def clear_visible_points(self) -> None:
+        # Zero the persistent visible-point buffer at frame 0 so the n==0
+        # first-activation radius init in wfSppmEye is reliable.
+        vp = self._p._buffers["visible_points"]
+        self._fill(vp, 0, vp.size)
+        self._transfer_barrier()
+
+    def clear_grid(self) -> None:
+        # Zero gridCount [0 .. nc) and gridCursor [2nc .. 3nc); gridOffset and
+        # sortedIdx are fully overwritten by the scan / scatter stages.
+        grid = self._p._buffers["grid"]
+        nc_bytes = self._p.num_cells * 4
+        self._fill(grid, 0, nc_bytes)               # gridCount
+        self._fill(grid, 2 * nc_bytes, nc_bytes)    # gridCursor
+        self._transfer_barrier()
+
+    def clear_accum(self) -> None:
+        acc = self._p._buffers["accum"]
+        self._fill(acc, 0, acc.size)
+        self._transfer_barrier()
+
+    def push_tile(self, stream_base: int) -> None:
+        self._p._push(self._cmd, 0, [stream_base, 0, self._p.stream_size])
+
+    def dispatch_full(self, entry: str) -> None:
+        self._p._bind(self._cmd, entry, self._scene)
+        groups = (self._p.stream_size + self._p._GROUP - 1) // self._p._GROUP
+        vk.vkCmdDispatch(self._cmd, max(groups, 1), 1, 1)
+
+    def dispatch_one(self, entry: str) -> None:
+        self._p._bind(self._cmd, entry, self._scene)
+        vk.vkCmdDispatch(self._cmd, 1, 1, 1)
+
+    def dispatch_count(self, entry: str, count: int, group_size: int) -> None:
+        self._p._bind(self._cmd, entry, self._scene)
+        groups = (int(count) + group_size - 1) // group_size
+        vk.vkCmdDispatch(self._cmd, max(groups, 1), 1, 1)
+
+
+class WavefrontSppmPass:
+    """Staged wavefront Stochastic Progressive Photon Mapping pass (change
+    photon-mapping-sppm). Owns eight compute pipelines compiled from
+    ``integrators/wavefront_sppm.slang`` and four set-1 buffers; ``record_dispatch``
+    records one SPPM pass (== one accumulation frame) via the backend-neutral
+    :func:`skinny.wavefront_driver.record_sppm_loop`.
+
+    Set 0 is the renderer's shared megakernel scene set (provides ``fc`` with the
+    SPPM tail + scene geometry / materials / lights). Set 1 binding 0..3 are the
+    visible-point, per-pass accumulator, grid, and scan-scratch buffers, sized by
+    ``num_pixels`` (the persistent per-pixel estimator), NOT ``stream_size``.
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] on the tiled eye/update kernels
+    STREAM_CAP = 1 << 20
+
+    _ENTRIES = [
+        ("wfSppmEye", "integrators/_wfsppm_eye"),
+        ("wfSppmGridCount", "integrators/_wfsppm_grid_count"),
+        ("wfSppmGridScanBlock", "integrators/_wfsppm_scan_block"),
+        ("wfSppmGridScanBlockSums", "integrators/_wfsppm_scan_sums"),
+        ("wfSppmGridScanAdd", "integrators/_wfsppm_scan_add"),
+        ("wfSppmGridScatter", "integrators/_wfsppm_scatter"),
+        ("wfSppmPhotonTrace", "integrators/_wfsppm_photon"),
+        ("wfSppmUpdate", "integrators/_wfsppm_update"),
+    ]
+
+    def __init__(self, ctx, shader_dir: Path, scene_set_layout,
+                 stream_size: int, num_pixels: int) -> None:
+        from skinny.wavefront_layout import (
+            SPPM_ACCUM_STRIDE,
+            VISIBLE_POINT_STRIDE,
+            sppm_grid_buffer_sizes,
+            sppm_grid_cell_count,
+        )
+
+        self.ctx = ctx
+        self.num_pixels = int(num_pixels)
+        self.stream_size = int(min(stream_size, self.STREAM_CAP))
+        self.num_cells = sppm_grid_cell_count(self.num_pixels)
+
+        modules = {}
+        for entry, out_name in self._ENTRIES:
+            spv = _compile_full_spv(shader_dir, "integrators/wavefront_sppm", entry, out_name)
+            code = spv.read_bytes()
+            modules[entry] = vk.vkCreateShaderModule(
+                ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+        self._modules = modules
+
+        grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
+        self._buffers = {}
+        self._buffers["visible_points"] = StorageBuffer(ctx, self.num_pixels * VISIBLE_POINT_STRIDE)
+        self._buffers["accum"] = StorageBuffer(ctx, self.num_pixels * SPPM_ACCUM_STRIDE)
+        self._buffers["grid"] = StorageBuffer(ctx, grid_sizes["grid_combined"])
+        self._buffers["scan"] = StorageBuffer(ctx, grid_sizes["scan_scratch"])
+
+        # Set 1: visiblePoints (0), accum (1), grid (2), scanScratch (3).
+        num_bindings = 4
+        set_bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=b, descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1, stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT)
+            for b in range(num_bindings)
+        ]
+        self._state_layout = vk.vkCreateDescriptorSetLayout(
+            ctx.device, vk.VkDescriptorSetLayoutCreateInfo(
+                bindingCount=num_bindings, pBindings=set_bindings), None)
+
+        # Pipeline layout: [scene set 0, sppm set 1] + 12-byte push constant
+        # {streamBase, shadeSlot(unused), streamSize}.
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=12)
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=2, pSetLayouts=[scene_set_layout, self._state_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
+
+        self._pipelines = {}
+        for entry, mod in modules.items():
+            stage = vk.VkPipelineShaderStageCreateInfo(
+                stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=mod, pName="main")
+            self._pipelines[entry] = vk.vkCreateComputePipelines(
+                ctx.device, vk.VK_NULL_HANDLE, 1,
+                [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+        self._pool = vk.vkCreateDescriptorPool(
+            ctx.device, vk.VkDescriptorPoolCreateInfo(
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[vk.VkDescriptorPoolSize(
+                    type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    descriptorCount=num_bindings)]), None)
+        self._state_set = vk.vkAllocateDescriptorSets(
+            ctx.device, vk.VkDescriptorSetAllocateInfo(
+                descriptorPool=self._pool, descriptorSetCount=1,
+                pSetLayouts=[self._state_layout]))[0]
+        bound = [self._buffers["visible_points"], self._buffers["accum"],
+                 self._buffers["grid"], self._buffers["scan"]]
+        writes = []
+        for b, buf in enumerate(bound):
+            info = vk.VkDescriptorBufferInfo(buffer=buf.buffer, offset=0, range=buf.size)
+            writes.append(vk.VkWriteDescriptorSet(
+                dstSet=self._state_set, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo=[info]))
+        vk.vkUpdateDescriptorSets(ctx.device, len(writes), writes, 0, None)
+
+    def _bind(self, cmd, entry, scene_set) -> None:
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 2, [scene_set, self._state_set], 0, None)
+
+    def _push(self, cmd, offset, values) -> None:
+        import struct
+
+        import cffi
+        data = struct.pack(f"{len(values)}I", *[int(v) for v in values])
+        buf = cffi.FFI().new("char[]", data)
+        vk.vkCmdPushConstants(
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, int(offset), len(data), buf)
+
+    def record_dispatch(self, cmd, scene_set, *, photons: int, first_frame: bool) -> None:
+        """Record one SPPM pass into ``cmd`` (the per-frame command buffer)."""
+        from skinny.wavefront_driver import record_sppm_loop
+
+        record_sppm_loop(
+            _VkSppmRecorder(self, cmd, scene_set),
+            num_pixels=self.num_pixels, stream_size=self.stream_size,
+            num_cells=self.num_cells, photons=int(photons), first_frame=bool(first_frame))
+
+    def destroy(self) -> None:
+        vk.vkDestroyDescriptorPool(self.ctx.device, self._pool, None)
+        for p in self._pipelines.values():
+            vk.vkDestroyPipeline(self.ctx.device, p, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        vk.vkDestroyDescriptorSetLayout(self.ctx.device, self._state_layout, None)
+        for m in self._modules.values():
+            vk.vkDestroyShaderModule(self.ctx.device, m, None)
+        for buf in self._buffers.values():
+            buf.destroy()
+
+
 class WavefrontNeuralProposalPass:
     """Neural directional-proposal pre-pass (wavefront-only).
 
