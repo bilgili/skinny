@@ -1854,9 +1854,27 @@ class Renderer:
         return self._wavefront_sppm_pass
 
     def _ensure_wavefront_sppm_pass_metal(self):
-        """Native-Metal SPPM pass — follow-up (group 3). Until then SPPM on Metal
-        falls back to the path tracer."""
-        return None
+        """Build (once) the native-Metal staged SPPM pass (change
+        photon-mapping-sppm). Returns it, or None before the scene bindings
+        exist (caller falls back to the path tracer). Mirrors
+        `_ensure_wavefront_path_pass_metal`; the graph-set signature is in the
+        rebuild key so a material-set change recompiles the pass."""
+        if self._scene_bindings is None:
+            return None
+        key = (self.width, self.height, self._graph_set_signature())
+        if self._wavefront_sppm_pass is not None and self._wf_sppm_pass_dims == key:
+            return self._wavefront_sppm_pass
+        self._destroy_wavefront_sppm_pass()
+        from skinny.metal_wavefront import MetalWavefrontSppmPass
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None) or MetalWavefrontSppmPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wavefront_sppm_pass = MetalWavefrontSppmPass(
+            self.ctx, self.shader_dir, stream_size, num_pixels,
+            graph_fragments=list(self._scene_graph_fragments),
+            neural_config=self._effective_neural_config())
+        self._wf_sppm_pass_dims = key
+        return self._wavefront_sppm_pass
 
     def _destroy_wavefront_sppm_pass(self):
         if self._wavefront_sppm_pass is not None:
@@ -8220,6 +8238,12 @@ class Renderer:
         buildable) — bdpt when the bidirectional integrator is active (phase
         4), else the path tracer — falling back to the megakernel."""
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+            if self.integrator_index == 2:  # SPPM → staged wavefront sppm
+                sppm = self._ensure_wavefront_sppm_pass()
+                if sppm is not None:
+                    self._render_wavefront_sppm_metal(sppm)
+                    return
+                # unbuildable → fall back to the path tracer below
             if self.integrator_index == 1:  # BDPT → staged wavefront bdpt
                 staged = self._ensure_wavefront_bdpt_pass()
             else:
@@ -8228,6 +8252,25 @@ class Renderer:
                 self._render_wavefront_metal(staged)
                 return
         self._render_megakernel_metal()
+
+    def _render_wavefront_sppm_metal(self, sppm) -> None:
+        """Dispatch one staged SPPM pass on the Metal backend (change
+        photon-mapping-sppm) — record_sppm_loop over one MetalFrameEncoder,
+        mirroring _render_wavefront_metal but with the per-frame photon count +
+        first-frame flag the SPPM pass needs."""
+        mtlx_bytes = self._pack_mtlx_skin_array_msl()
+        if mtlx_bytes:
+            self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+        sppm.dispatch_frame(
+            binds=self._build_metal_binds(),
+            uniform_blob=self._pack_uniforms_msl(),
+            bindless_textures=[
+                (s.texture if s is not None else None)
+                for s in self.texture_pool._slots
+            ],
+            photons=self._sppm_photons_emitted,
+            first_frame=(self.accum_frame == 0),
+        )
 
     def _render_headless_metal(self) -> bytes:
         """Metal headless render → raw RGBA8 bytes (the structural-parity test
