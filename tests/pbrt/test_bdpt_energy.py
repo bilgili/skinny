@@ -121,3 +121,56 @@ def test_diffuse_arealight_bdpt_energy_wavefront():
     emissive hit (wavefront_bdpt.slang); gate it too so both execution modes
     stay energy-correct."""
     _assert_bdpt_energy("diffuse_arealight", execution_mode="wavefront")
+
+
+# ── Display-energy gate (change bdpt-mis-unification) ────────────────────────
+#
+# The accum gates above read read_accumulation_hdr, which EXCLUDES the s=1
+# light-tracer splat (it is composited only on the display, main_pass.slang). So
+# they are blind to the splat double-count: before the splat-MIS + t=1-misWeight
+# unification, BDPT's *display* read ~1.12× the path tracer on the pure-diffuse
+# scene (no caustics ⇒ pure double-count); after, ≈1.02× (the residual is BDPT
+# legitimately including the s=1 strategy the path tracer lacks). This gate renders
+# the tonemapped display (what the app shows) and asserts BDPT tracks the path
+# tracer there.
+
+# mean(bdpt display)/mean(path display). Post-fix ≈ 1.02 on diffuse; the pre-fix
+# splat double-count sat at ≈ 1.12, so a 0.07 band fails it and passes the fix.
+DISPLAY_OVER_PATH_TOL = 0.07
+
+
+def _display_energy(name: str, integrator: str, spp: int) -> float:
+    import tempfile
+
+    from skinny.backend_select import select_backend
+    from skinny.headless import HeadlessRenderer
+    from skinny.pbrt.api import import_pbrt
+
+    scene = os.path.join(CORPUS_DIR, name + ".pbrt")
+    with tempfile.TemporaryDirectory() as tmp:
+        usd = os.path.join(tmp, "scene.usda")
+        import_pbrt(scene, out=usd)
+        with HeadlessRenderer(WIDTH, HEIGHT, backend=select_backend()) as r:
+            img = r.render_to_array(
+                usd, samples=spp, integrator=integrator,
+                env_intensity=0.0, direct_light=False,
+            )
+    return _mean_energy(img)  # tonemapped sRGB display, incl. splat for bdpt
+
+
+@pytest.mark.gpu
+def test_diffuse_arealight_bdpt_display_tracks_path():
+    """BDPT *display* (incl. the s=1 splat) must track the path tracer on a pure-
+    diffuse scene. Catches the splat double-count the accum gates cannot see."""
+    try:
+        e_path = _display_energy("diffuse_arealight", "path", SPP)
+        e_bdpt = _display_energy("diffuse_arealight", "bdpt", SPP)
+    except Exception as exc:  # noqa: BLE001 - GPU/backend unavailable in this env
+        pytest.skip(f"render backend unavailable: {exc}")
+
+    ratio = e_bdpt / e_path
+    assert abs(ratio - 1.0) <= DISPLAY_OVER_PATH_TOL, (
+        f"diffuse_arealight BDPT display mean(bdpt)/mean(path) = {ratio:.3f} "
+        f"(|1 - r| > {DISPLAY_OVER_PATH_TOL}). The s=1 splat is double-counting "
+        f"diffuse direct lighting (not MIS-weighted against the eye side?)."
+    )

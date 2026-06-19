@@ -393,6 +393,25 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wavefront; raw relMSE vs pbrt 0.346 → 0.017. New un-aligned absolute-energy gate
   `tests/pbrt/test_bdpt_energy.py` locks it; the path tracer and corpus parity
   gates are unchanged (no regression).
+- **BDPT display brighter than the path tracer** (change `bdpt-mis-unification`) —
+  the `bdpt-energy-convergence` fix corrected the accumulation, but the *display*
+  also composites the `s = 1` light-tracer splat (`main_pass.slang`), which was
+  added at full weight and double-counted every diffuse path the eye side already
+  had (displayed BDPT ~1.12× the path tracer on a pure-diffuse scene, ~1.19× on
+  `bathroom.usda`). Two changes put every BDPT strategy into one MIS partition:
+  `splatLightVertex` now MIS-weights each splat (`splatMisWeight`, with the camera
+  as the `s = 1` eye endpoint and the pinhole camera-importance reverse pdf), and
+  `connectT1` (`t = 1` NEE) now uses `misWeight` like the `t ≥ 2` connections
+  instead of a standalone 2-strategy power heuristic (it previously over-weighted
+  indirect transport ~2%). After both, BDPT tracks the path tracer (diffuse display
+  ×1.12 → ×1.02, accum ×1.02 → ×0.99; bathroom ×1.19 → ×1.14, the residual being
+  genuine caustic/glossy energy the path tracer is biased dark on). Both BDPT
+  surfaces (megakernel `bdpt.slang` + wavefront via the shared `splatLightWalk` /
+  `connectT1`). New **display** gate
+  `test_diffuse_arealight_bdpt_display_tracks_path` (the accum gates exclude the
+  splat); accum + convergence + corpus parity gates stay green. Splat camera
+  importance is the analytic pinhole `We`; abstracting it over `ICamera` for
+  thick-lens parity is a tracked follow-up.
 - **Metal 31-buffer argument-table overflow** with neural online training on
   multi-graph scenes (change `combine-graph-param-buffers`). `--backend metal
   --execution-mode wavefront --neural-trainer mlx --neural-handoff interop

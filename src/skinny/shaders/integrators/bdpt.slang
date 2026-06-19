@@ -701,6 +701,14 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
         total += z.throughput * b.response * ls.radiance * invPdfOmega * wNEE;
     }
 
+    // Emissive-triangle NEE — unified onto misWeight (the same MIS partition as
+    // the t≥2 generic connections AND the s=1 splat) rather than a standalone
+    // 2-strategy power heuristic. The heuristic ignored the t≥2 and s=1
+    // alternatives, so on indirect transport the t=1 strategy was over-weighted
+    // and BDPT's eye-side accumulation ran ~2% bright vs the path tracer. With
+    // misWeight every strategy that can generate the path shares one partition
+    // summing to 1, and connectT1 now also "knows about" the splat (the eye-side
+    // ratio term), so the two stop double-counting.
     if (fc.numEmissiveTriangles > 0u)
     {
         uint idx = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
@@ -723,9 +731,51 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
                 {
                     BSDFSample b = bdptEval(zs, z.N, woWorld, dir);
                     float invPdfOmega = cosLight / (d2 * ls.pdfArea);
-                    float pdfLightSA = d2 * ls.pdfArea / max(cosLight, 1e-12);
-                    float wNEE = powerHeuristic(pdfLightSA, b.pdf);
-                    total += z.throughput * b.response * ls.radiance * invPdfOmega * wNEE;
+
+                    // The sampled light point as the t=1 light subpath (lit[0]).
+                    BDPTVertex lit0;
+                    lit0.kind = BDPT_VK_LIGHT_AREA;
+                    lit0.position = ls.point;
+                    lit0.N = ls.normal;
+                    lit0.throughput = float3(0.0);
+                    lit0.emission = ls.radiance;
+                    lit0.pdfFwd = ls.pdfArea;     // light area-sampling pdf
+                    lit0.pdfRev = 0.0;
+                    lit0.isDelta = false;
+                    lit0.onLight = true;
+                    lit0.matId = 0u;
+                    lit0.uv = float2(0.0);
+                    lit0.posObject = float3(0.0);
+                    lit0.geoN = ls.normal;
+                    lit0.tangent = float3(1.0, 0.0, 0.0);
+                    lit0.hasTangent = false;
+                    BDPTVertex litArr[BDPT_MAX_VERTS];
+                    litArr[0] = lit0;
+
+                    // Endpoint reverse pdfs (area measure):
+                    //   ytm1 — eye BSDF at z toward the light, at lit[0].
+                    //   zsm1 — diffuse-emitter directional pdf (cosLight/π), at z
+                    //          (matches sampleLightOrigin's cosine-weighted emit).
+                    //   zsm2 — z's BSDF toward eye[s-2] viewed from the light dir.
+                    float pdf_ytm1_rev = b.pdf * cosLight / d2;
+                    float pdf_zsm1_rev = (cosLight / PI) * NdotL / d2;
+                    float pdf_zsm2_rev = 0.0;
+                    if (s >= 3)
+                    {
+                        float3 toPrev = eye[s - 2].position - z.position;
+                        float l2 = dot(toPrev, toPrev);
+                        if (l2 > 1e-20)
+                        {
+                            float3 dp = toPrev / sqrt(l2);
+                            float pr = bdptEval(zs, z.N, dir, dp).pdf;
+                            pdf_zsm2_rev = convertSAtoArea(pr, z.position, eye[s - 2]);
+                        }
+                    }
+
+                    float w = misWeight(eye, s, litArr, 1,
+                                        pdf_zsm1_rev, pdf_zsm2_rev,
+                                        pdf_ytm1_rev, 0.0);
+                    total += z.throughput * b.response * ls.radiance * invPdfOmega * w;
                 }
             }
         }
@@ -750,13 +800,51 @@ void atomicSplatRadiance(int2 pixel, float3 radiance)
     InterlockedAdd(lightSplatBuffer[base + 2u], uint(radiance.z * BDPT_SPLAT_SCALE), orig);
 }
 
-// Splat a single light-walk vertex onto the camera. Implements the s = 1
-// BDPT strategy: the camera vertex is the deterministic camera position,
-// connected to a non-delta light-walk surface vertex. The camera model
-// (`PinholeCamera` or `ThickLensCamera`) is supplied as a generic
-// parameter so dispatch is monomorphized at compile time.
-void splatLightVertex<TC : ICamera>(BDPTVertex y, float3 prevPos, inout RNG rng, TC cam)
+// MIS weight (power heuristic) for the s = 1 light-tracer splat connecting the
+// camera to light vertex lit[t-1]. The eye subpath is a single (camera) vertex,
+// so misWeight's eye-side ratio loop (i = s-1 … 1) is empty — only the light-side
+// ratios contribute. This is misWeight specialised to s = 1: it down-weights the
+// splat on any path the eye subpath could also reach (diffuse direct lighting,
+// where the camera-reverse pdf at the surface is large) and keeps it near full
+// weight only where the eye side is zero (specular caustics on a directly-seen
+// diffuse surface). Without it the splat is added at full weight and double-counts
+// every diffuse path the eye side already has — BDPT then reads brighter than the
+// path tracer in the display (the splat is composited there, not into accumBuffer).
+//   pdf_ytm1_rev — area pdf of the camera generating the direction to lit[t-1].
+//   pdf_ytm2_rev — lit[t-1]'s BSDF pdf toward lit[t-2], viewed from the camera.
+float splatMisWeight(
+    BDPTVertex lit[BDPT_MAX_VERTS], int t,
+    float pdf_ytm1_rev, float pdf_ytm2_rev)
 {
+    BDPTVertex litC[BDPT_MAX_VERTS];
+    [loop] for (int i = 0; i < int(BDPT_MAX_VERTS); i++) litC[i] = lit[i];
+    if (t >= 1) litC[t - 1].pdfRev = pdf_ytm1_rev;
+    if (t >= 2) litC[t - 2].pdfRev = pdf_ytm2_rev;
+
+    float sumRi = 0.0;
+    float ri = 1.0;
+    [loop]
+    for (int i = t - 1; i >= 0; i--)
+    {
+        ri *= remap0(litC[i].pdfRev) / remap0(litC[i].pdfFwd);
+        bool deltaLight = (i > 0) ? litC[i - 1].isDelta : false;
+        if (!litC[i].isDelta && !deltaLight)
+            sumRi += ri * ri;
+    }
+    return 1.0 / (1.0 + sumRi);
+}
+
+// Splat a single light-walk vertex (lightPath[i]) onto the camera. Implements the
+// s = 1 BDPT strategy: the camera vertex is the deterministic camera position,
+// connected to a non-delta light-walk surface vertex, MIS-weighted via
+// splatMisWeight. The camera model (`PinholeCamera` or `ThickLensCamera`) is
+// supplied as a generic parameter so dispatch is monomorphized at compile time.
+// (Camera importance is the analytic pinhole We here; abstracting We over the
+// camera model for thick-lens parity is a follow-up.)
+void splatLightVertex<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS], int i,
+                                    inout RNG rng, TC cam)
+{
+    BDPTVertex y = lightPath[i];
     if (y.isDelta || y.kind != BDPT_VK_SURFACE) return;
     int2 pixel;
     float cosCam;
@@ -770,11 +858,7 @@ void splatLightVertex<TC : ICamera>(BDPTVertex y, float3 prevPos, inout RNG rng,
 
     // Camera importance for a pinhole: We = 1 / (A · cos⁴θ) where A is the
     // image-plane area in normalized camera units (at distance 1 from camera
-    // along forward).  Slang uses degrees for the existing fov field elsewhere
-    // — but the perspective matrix is built with radians; check renderer's
-    // _perspective: takes degrees. The shader's existing ray-gen multiplies
-    // through the inverse projection, never reading fov, so we must convert
-    // degrees → radians ourselves.
+    // along forward). fov is in degrees (renderer's _perspective), so convert.
     float fovRad = fc.camera.fov * (PI / 180.0);
     float halfH = tan(fovRad * 0.5);
     float halfW = halfH * (float(fc.width) / float(fc.height));
@@ -782,15 +866,36 @@ void splatLightVertex<TC : ICamera>(BDPTVertex y, float3 prevPos, inout RNG rng,
     float cos4 = cosCam * cosCam * cosCam * cosCam;
     float We = 1.0 / max(A_image * cos4, 1e-12);
 
-    // Per-splat raw contribution (pbrt-v3 convention). main_pass.slang
-    // composites by dividing the cumulative splatBuffer by frame count, which
-    // averages the per-iteration light-path estimator across frames. The real
-    // std_surface BSDF at y replaces the Lambertian albedo/π; response already
-    // folds in cosY, so the geometry term drops to 1/distCam².
+    // Per-splat raw contribution (pbrt-v3 convention). main_pass.slang composites
+    // by dividing the cumulative splatBuffer by frame count. The real std_surface
+    // BSDF at y replaces the Lambertian albedo/π; response folds in cosY, so the
+    // geometry term drops to 1/distCam².
     BdptSurface ys = bdptSurface(y);
-    float3 woWorld = normalize(prevPos - y.position);
+    float3 woWorld = normalize(lightPath[i - 1].position - y.position);
     float3 respY = bdptEval(ys, y.N, woWorld, toCam).response;
-    float3 contrib = y.throughput * respY / (distCam * distCam) * We;
+    if (!any(respY > float3(0.0))) return;
+
+    // s = 1 MIS. Camera dir pdf (solid angle, pinhole) = We · cosCam; convert to
+    // an area pdf at y for the camera-reverse term. The light-side reverse pdf at
+    // lit[t-2] mirrors connectGeneric (y's BSDF pdf toward lit[i-1], viewed from
+    // the camera direction).
+    int t = i + 1;
+    float pdfCamDirSA = We * cosCam;
+    float pdf_ytm1_rev = pdfCamDirSA * cosY / (distCam * distCam);
+
+    float pdf_ytm2_rev = 0.0;
+    float3 toPrev = lightPath[i - 1].position - y.position;
+    float l2 = dot(toPrev, toPrev);
+    if (l2 > 1e-20)
+    {
+        float3 dp = toPrev / sqrt(l2);
+        float pr = bdptEval(ys, y.N, toCam, dp).pdf;
+        pdf_ytm2_rev = convertSAtoArea(pr, y.position, lightPath[i - 1]);
+    }
+
+    float w = splatMisWeight(lightPath, t, pdf_ytm1_rev, pdf_ytm2_rev);
+
+    float3 contrib = y.throughput * respY / (distCam * distCam) * We * w;
     atomicSplatRadiance(pixel, contrib);
 }
 
@@ -800,7 +905,7 @@ void splatLightWalk<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS],
     [loop]
     for (int i = 1; i < lightLen; i++)
     {
-        splatLightVertex<TC>(lightPath[i], lightPath[i - 1].position, rng, cam);
+        splatLightVertex<TC>(lightPath, i, rng, cam);
     }
 }
 

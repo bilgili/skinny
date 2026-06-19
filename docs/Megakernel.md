@@ -174,6 +174,26 @@ than pbrt** even on a purely diffuse scene (change `bdpt-energy-convergence`;
 guarded by `tests/pbrt/test_bdpt_energy.py`, which compares **un-aligned** mean
 energy because the parity gate's exposure alignment hides a uniform scale).
 
+**One MIS partition for the display (change `bdpt-mis-unification`).** The above
+fixes the *accumulation*; the *display* also composites the `s = 1` light-tracer
+splat (`main_pass.slang`, see §2), and that was added at full weight too —
+double-counting every diffuse path the eye side already had, so the displayed BDPT
+ran ~1.12× the path tracer on a pure-diffuse scene. Two changes put all strategies
+into one partition: (1) `splatLightVertex` now MIS-weights each splat
+(`splatMisWeight` = `misWeight` specialised to `s = 1`, light-side ratios only,
+with the camera as the eye endpoint and the camera-importance reverse pdf
+`We·cosCam·cosY/d²`) — full weight only where the eye side is zero (specular
+caustics on a directly-seen diffuse surface), ≈0 where the eye side owns the path;
+(2) `connectT1` (`t = 1` NEE) now uses `misWeight` like the `t ≥ 2` connections
+instead of a standalone 2-strategy power heuristic, so `t = 1` correctly divides
+by the `t ≥ 2` and `s = 1` alternatives (it previously over-weighted indirect
+transport, ~2% bright). After both, BDPT tracks the path tracer (diffuse display
+×1.12 → ×1.02; the small residual is BDPT legitimately including the `s = 1`
+strategy the path tracer lacks). Splat camera importance is the analytic pinhole
+`We`; abstracting it over `ICamera` for thick-lens parity is a follow-up. Guarded
+by `test_diffuse_arealight_bdpt_display_tracks_path` (compares the **display**, not
+the accumulation — the accum gates can't see the splat).
+
 ---
 
 ## 4. Selection: compile-time vs runtime

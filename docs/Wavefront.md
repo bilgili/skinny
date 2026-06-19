@@ -226,6 +226,13 @@ delta bounce reached z), or `numEmissiveTriangles == 0`; otherwise `connectT1`
 area-light transport on top of the weighted NEE — BDPT read ~1.7× brighter than
 pbrt (change `bdpt-energy-convergence`, gate `tests/pbrt/test_bdpt_energy.py`).
 
+The wavefront BDPT shares `connectT1` and `splatLightWalk` with the megakernel, so
+the `bdpt-mis-unification` change applies here too: each `s = 1` splat is now
+MIS-weighted (`splatMisWeight`) and `connectT1`'s `t = 1` NEE uses `misWeight`
+(one partition with `t ≥ 2` + the splat) instead of a 2-strategy heuristic. This
+only affects the splat composite (display) + the eye-side `t = 1` weight; the
+staged-walk structure (S1–S3) is unchanged. See `docs/Megakernel.md` §3.1.
+
 ---
 
 ## 5. Material-sorted shading & codegen
