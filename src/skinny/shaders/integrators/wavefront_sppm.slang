@@ -26,6 +26,7 @@ import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
 import cameras.pinhole;            // PinholeCamera
+import wavefront.wf_display;       // wfWriteDisplay (exposure + tonemap + present)
 import integrators.sppm_state;     // VisiblePoint, SppmAccum, VP_ACTIVE, grid helpers
 
 // Per-tile push constant — same 12-byte {streamBase, _, streamSize} layout the
@@ -527,4 +528,56 @@ void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
             h = traceScene(fc, r);
         }
     }
+}
+
+// ── Stage 6: update / resolve ───────────────────────────────────────────────
+// Apply the SPPM radius/flux reduction, resolve this pass's radiance estimate
+// (direct from the eye stage + photon-map indirect), composite into the
+// progressive-accumulation film exactly like wfPathResolve, then clear the
+// per-pass accumulator for the next pass.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
+{
+    let i = tid.x;
+    if (i >= sppmTile.streamSize)
+        return;
+    let lane = sppmTile.streamBase + i;
+    if (lane >= sppmNumPixels())
+        return;
+    let pixel = uint2(lane % fc.width, lane / fc.width);
+
+    VisiblePoint vp = sppmVisiblePoints[lane];
+    SppmAccum acc = sppmAccum[lane];
+
+    float3 lIndirect = float3(0.0);
+    if ((vp.flags & VP_ACTIVE) != 0u)
+    {
+        sppmUpdate(vp, sppmDecodeFlux(acc), acc.m, 2.0 / 3.0);
+        sppmVisiblePoints[lane] = vp;  // persist tau / radius / n
+        let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * vp.radius * vp.radius;
+        lIndirect = vp.tau / max(denom, 1e-20);
+    }
+
+    float3 sample = vp.ld + lIndirect;
+    if (any(sample != sample) || any(isinf(sample)))
+        sample = float3(0.0);
+    sample = max(sample, float3(0.0));
+
+    let n = fc.accumFrame;
+    float3 accum;
+    if (n == 0u)
+        accum = sample;
+    else
+    {
+        let prev = accumBuffer[pixel].rgb;
+        accum = (prev * float(n) + sample) / float(n + 1u);
+    }
+    accumBuffer[pixel] = float4(accum, 1.0);
+    wfWriteDisplay(pixel, accum);
+
+    // Reset the per-pass photon accumulator for the next pass.
+    SppmAccum z;
+    z.phiR = 0u; z.phiG = 0u; z.phiB = 0u; z.m = 0u;
+    sppmAccum[lane] = z;
 }
