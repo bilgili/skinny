@@ -58,12 +58,12 @@ def _parse_struct_fields(src: str, struct_name: str) -> list[tuple[str, str]]:
 
 # ── strides ──────────────────────────────────────────────────────────
 
-def test_visible_point_scalar_stride_is_88():
-    assert VISIBLE_POINT_STRIDE == 88
+def test_visible_point_scalar_stride_is_152():
+    assert VISIBLE_POINT_STRIDE == 152
 
 
-def test_visible_point_msl_stride_is_112():
-    assert VISIBLE_POINT_STRIDE_MSL == 112
+def test_visible_point_msl_stride_is_192():
+    assert VISIBLE_POINT_STRIDE_MSL == 192
 
 
 def test_sppm_accum_stride_is_16_both_layouts():

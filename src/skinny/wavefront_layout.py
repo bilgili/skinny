@@ -164,16 +164,26 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
 VP_ACTIVE = 1 << 0  # a valid visible point was stored this pass
 
 VISIBLE_POINT_FIELDS: list[tuple[str, str]] = [
-    ("pos",        "float3"),
-    ("ns",         "float3"),
-    ("beta",       "float3"),
-    ("wo",         "float3"),
-    ("ld",         "float3"),
-    ("tau",        "float3"),
-    ("materialId", "uint"),
-    ("flags",      "uint"),
-    ("radius",     "float"),
-    ("n",          "float"),
+    ("pos",           "float3"),
+    ("ns",            "float3"),
+    ("wo",            "float3"),
+    ("beta",          "float3"),
+    ("ld",            "float3"),
+    ("albedo",        "float3"),
+    ("F0",            "float3"),
+    ("coatColor",     "float3"),
+    ("roughness",     "float"),
+    ("metallic",      "float"),
+    ("specular",      "float"),
+    ("ior",           "float"),
+    ("opacity",       "float"),
+    ("coat",          "float"),
+    ("coatRoughness", "float"),
+    ("coatIOR",       "float"),
+    ("tau",           "float3"),
+    ("flags",         "uint"),
+    ("radius",        "float"),
+    ("n",             "float"),
 ]
 
 SPPM_ACCUM_FIELDS: list[tuple[str, str]] = [
@@ -195,8 +205,8 @@ def sppm_accum_size(*, msl: bool = False) -> int:
     return _struct_stride(SPPM_ACCUM_FIELDS, msl=msl)
 
 
-VISIBLE_POINT_STRIDE = visible_point_size()              # 88 B (scalar / Vulkan)
-VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 112 B (Metal)
+VISIBLE_POINT_STRIDE = visible_point_size()              # 152 B (scalar / Vulkan)
+VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 192 B (Metal)
 SPPM_ACCUM_STRIDE = sppm_accum_size()                    # 16 B (both layouts)
 SPPM_ACCUM_STRIDE_MSL = sppm_accum_size(msl=True)        # 16 B
 
