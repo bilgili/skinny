@@ -98,7 +98,21 @@ def scene_metadata(scene) -> dict:
     """Stage-wide pbrt config for ``customLayerData["pbrt"]``."""
     md: dict = {"colorSpace": scene.color_space}
     if scene.integrator is not None:
-        md["integrator"] = _entity_md(scene.integrator[0], scene.integrator[1])
+        itype = scene.integrator[0]
+        md["integrator"] = _entity_md(itype, scene.integrator[1])
+        # pbrt's SPPM maps 1:1 onto skinny's SPPM integrator (change
+        # photon-mapping-sppm). Record a normalized skinny selection so a loader
+        # / the parity harness can pick the integrator + seed its initial radius
+        # without re-parsing pbrt param names. `radius` seeds the SPPM search
+        # radius; `photonsperiteration` the photons-per-pass override.
+        if itype in ("sppm", "photonmap"):
+            iparams, _ = paramset_to_dicts(scene.integrator[1])
+            sel: dict = {"integrator": "sppm"}
+            if "radius" in iparams:
+                sel["radius"] = float(iparams["radius"])
+            if "photonsperiteration" in iparams:
+                sel["photons"] = int(iparams["photonsperiteration"])
+            md["skinny"] = sel
     if scene.sampler is not None:
         md["sampler"] = _entity_md(scene.sampler[0], scene.sampler[1])
     if scene.film is not None:

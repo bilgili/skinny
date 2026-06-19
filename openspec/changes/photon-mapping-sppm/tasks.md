@@ -31,10 +31,10 @@
 
 ## 5. pbrt importer mapping
 
-- [ ] 5.1 (test-first) Add an importer test: a pbrt scene with `Integrator "sppm"` yields USD metadata carrying `numiterations`/`maxdepth`/`photonsperiteration`/`radius`/`seed` and selects the skinny SPPM integrator.
-- [ ] 5.2 Implement sppm recognition in `state.py`/`metadata.py`/`emit.py`: write params to USD metadata and record SPPM as the selected integrator on the stage.
-- [ ] 5.3 Seed the initial SPPM search radius from the pbrt `radius` param when present, else a scene-bounds default; add a test for both paths.
-- [ ] 5.4 Update `report.py` so `sppm` is reported as *mapped* (surface case); lift the "sppm / photon out of scope" note in the pbrt change/spec docs.
+- [x] 5.1 (test-first) Add an importer test: a pbrt scene with `Integrator "sppm"` yields USD metadata carrying `numiterations`/`maxdepth`/`photonsperiteration`/`radius`/`seed` and selects the skinny SPPM integrator. (params already round-tripped via `scene_metadata`; added `test_metadata.py` cases for the skinny selection + helper + report.)
+- [x] 5.2 Implement sppm recognition in `state.py`/`metadata.py`/`emit.py`: write params to USD metadata and record SPPM as the selected integrator on the stage. (`metadata.scene_metadata` writes a normalized `customLayerData["pbrt"]["skinny"] = {integrator: "sppm", radius?, photons?}`; `api.sppm_selection(stage)` reads it.)
+- [x] 5.3 Seed the initial SPPM search radius from the pbrt `radius` param when present, else a scene-bounds default; add a test for both paths. (`radius`→`skinny.radius`, consumed by the renderer's `_sppm_radius_override`; bbox default when absent. Tests cover present/absent.)
+- [x] 5.4 Update `report.py` so `sppm` is reported as *mapped* (surface case); lift the "sppm / photon out of scope" note in the pbrt change/spec docs. (`api.import_pbrt` now `report.exact("integrator:sppm", "mapped to skinny SPPM")`.)
 
 ## 6. Correctness verification (test-first where noted)
 
