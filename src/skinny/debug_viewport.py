@@ -21,10 +21,8 @@ from __future__ import annotations
 
 import ctypes
 import shutil
-import struct
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import vulkan as vk

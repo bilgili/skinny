@@ -147,7 +147,6 @@ def compute_thick_lens_approximation(
     if not elements:
         return ((0.0, 0.0), (0.0, 0.0))
     front_z = -sum(e.thickness for e in elements)
-    rear_z = -elements[-1].thickness
     x = 0.001 * float(film_diagonal)
 
     # Trace a paraxial ray from scene at +infinity (well in front of

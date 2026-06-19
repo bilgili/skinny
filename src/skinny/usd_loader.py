@@ -25,10 +25,10 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel
+from pxr import Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel
 
-from skinny.environment import ENV_HEIGHT, ENV_WIDTH, _load_radiance_hdr, _resize_equirect
-from skinny.mesh import Mesh, MeshSource, bake_mesh, compute_source_hash
+from skinny.environment import _load_radiance_hdr, _resize_equirect
+from skinny.mesh import MeshSource, bake_mesh, compute_source_hash
 from skinny.usd_gprims import tessellate_gprim
 from skinny.mesh_cache import (
     load_cache_index,

@@ -19,7 +19,7 @@ from .registry import (
     register_extern,
     register_shader,
 )
-from .runtime import configure_runtime, load_compiled_module
+from .runtime import configure_runtime, load_compiled_module  # noqa: F401  (configure_runtime re-exported via slangpile/__init__.py)
 from .types import SlangType, is_slang_type
 
 

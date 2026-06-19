@@ -20,14 +20,13 @@ import numpy as np
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QFont, QImage, QMouseEvent, QPainter,
+    QAction, QBrush, QColor, QFont, QImage, QPainter,
     QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDockWidget,
+    QCheckBox, QColorDialog, QComboBox, QDockWidget,
     QDoubleSpinBox, QFileDialog, QGraphicsItem, QGraphicsPathItem,
-    QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsView, QGroupBox,
-    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsView, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
     QSplitter, QVBoxLayout, QWidget,
 )
 

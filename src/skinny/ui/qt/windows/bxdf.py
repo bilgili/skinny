@@ -189,7 +189,7 @@ class BXDFDock(QDockWidget):
             sl.valueChanged.connect(self._schedule_eval)
             row.addWidget(sl, stretch=1)
             val_lbl = QLabel(f"{init}")
-            sl.valueChanged.connect(lambda v, l=val_lbl: l.setText(str(v)))
+            sl.valueChanged.connect(lambda v, lbl=val_lbl: lbl.setText(str(v)))
             row.addWidget(val_lbl)
             dl.addLayout(row)
             setattr(self, attr, sl)

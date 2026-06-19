@@ -8,14 +8,12 @@ the various toggles the legacy GLFW window exposed.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
-import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import (
-    QDockWidget, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+    QDockWidget, QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout,
     QWidget,
 )
 
