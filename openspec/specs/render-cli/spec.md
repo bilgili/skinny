@@ -18,7 +18,9 @@ single shared source so they cannot drift. The flags are:
 
 - `--backend {auto,metal,vulkan}` — default `auto`, with a `SKINNY_BACKEND`
   environment fallback; selects the GPU backend, fixed for the session.
-- `--integrator {path,bdpt}` — default `path`.
+- `--integrator {path,bdpt,sppm}` — default `path`. `sppm` selects the
+  Stochastic Progressive Photon Mapping integrator and requires
+  `--execution-mode wavefront`.
 - `--execution-mode {megakernel,wavefront}` — default `megakernel`, with a
   `SKINNY_EXECUTION_MODE` environment fallback.
 - `--bdpt-walk {fused,eye,eye_light}` — default `fused`, with a
@@ -34,7 +36,8 @@ fixed for the session.
 - **WHEN** any of `skinny`, `skinny-gui`, `skinny-web`, `skinny-render` is run
   with `--help`
 - **THEN** all of `--backend`, `--integrator`, `--execution-mode`, `--bdpt-walk`
-  are present with identical choices and defaults
+  are present with identical choices and defaults, and `--integrator` lists
+  `path`, `bdpt`, and `sppm`
 
 #### Scenario: Interactive front-end launches into the chosen integrator
 
@@ -59,14 +62,21 @@ fixed for the session.
 
 The CLI front-ends SHALL validate the parsed render flags at startup and SHALL
 exit with a clear error when a combination cannot work, rather than crashing
-later or silently doing nothing. Specifically, when the integrator is explicitly
-`bdpt` AND either `--online-training` is set or the directional-proposal mixture
-includes the neural proposal, the front-ends SHALL raise a usage error naming
-the incompatible option and the fix (`--integrator path`), because BDPT does not
-consume the neural directional proposal on any backend or execution mode. The
-validation SHALL be shared across all front-ends (`skinny`, `skinny-gui`,
+later or silently doing nothing. Specifically:
+
+- When the integrator is explicitly `bdpt` AND either `--online-training` is set
+  or the directional-proposal mixture includes the neural proposal, the
+  front-ends SHALL raise a usage error naming the incompatible option and the fix
+  (`--integrator path`), because BDPT does not consume the neural directional
+  proposal on any backend or execution mode.
+- When the integrator is `sppm` AND `--execution-mode` is `megakernel`, the
+  front-ends SHALL raise a usage error stating that SPPM requires
+  `--execution-mode wavefront` and naming that fix, because SPPM has no
+  megakernel path.
+
+The validation SHALL be shared across all front-ends (`skinny`, `skinny-gui`,
 `skinny-web`, `skinny-render`) and SHALL NOT trip when the integrator is the
-default/persisted path (not explicitly `bdpt`).
+default/persisted path (not explicitly `bdpt` or `sppm`).
 
 #### Scenario: bdpt + online-training exits with an error
 
@@ -81,10 +91,17 @@ default/persisted path (not explicitly `bdpt`).
   bdpt --proposals bsdf,neural`
 - **THEN** it exits with the same clear error
 
+#### Scenario: sppm + megakernel exits with an error
+
+- **WHEN** a front-end is launched with `--integrator sppm --execution-mode megakernel`
+- **THEN** it prints a clear error stating that SPPM requires
+  `--execution-mode wavefront`, and exits without initializing the GPU
+
 #### Scenario: compatible combinations are unaffected
 
 - **WHEN** a front-end is launched with `--integrator path` (with or without a
   neural proposal / `--online-training`), or with `--integrator bdpt` and no
-  neural proposal and no `--online-training`, or with no explicit `--integrator`
+  neural proposal and no `--online-training`, or with `--integrator sppm
+  --execution-mode wavefront`, or with no explicit `--integrator`
 - **THEN** startup proceeds normally with no error
 
