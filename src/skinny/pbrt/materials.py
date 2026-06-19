@@ -54,6 +54,23 @@ def resolve_texture(name: str, textures, base_dir=None, _depth: int = 0):
     return None
 
 
+def references_texture(pbrt_material, textures, base_dir=None) -> bool:
+    """True if any of *pbrt_material*'s inputs resolves to an imagemap texture.
+
+    Used to decide whether a UV-less shape needs synthesized default UVs so the
+    bound texture can sample (matching pbrt) rather than read a constant point.
+    """
+    if pbrt_material is None or textures is None:
+        return False
+    p = pbrt_material.params
+    for pbrt_in in _TEXTURABLE:
+        pp = p.get(pbrt_in)
+        if (pp is not None and pp.type == "texture"
+                and resolve_texture(pp.string, textures, base_dir) is not None):
+            return True
+    return False
+
+
 def pbrt_roughness_to_alpha(roughness: float, remap: bool = True) -> float:
     """pbrt v4 roughness -> GGX alpha."""
     r = max(float(roughness), 0.0)

@@ -78,6 +78,26 @@ sRGB; named conductor spectra (`metal-Au-eta`/`-k`) map to a tabulated RGB IOR;
 inline sampled spectra integrate directly. The residual RGB-vs-spectral
 divergence is inherent and is absorbed by the per-scene parity tolerance.
 
+### Texture UVs
+
+`imagemap` textures are wired to a `UsdUVTexture` connected into the
+`UsdPreviewSurface`; the loader samples it through the mesh's `primvars:st`. UVs
+are emitted as follows:
+
+- **Explicit UVs pass through** to per-vertex `primvars:st`: a `trianglemesh`
+  `uv`/`st` parameter, or a PLY vertex `u/v`, `s/t`, or `texture_u/texture_v`
+  (ascii + binary little/big-endian). The orientation-reversing handedness bake
+  only reverses per-face index order, so per-vertex `st` stays aligned.
+- **Default UVs are synthesized** when a shape carries no source UV but its bound
+  material references a texture, matching pbrt's built-in parametrization so the
+  texture still samples (rather than reading one constant texel): a `sphere` gets
+  parametric per-vertex UVs (`u = φ/φmax`, `v = (θ−θmin)/(θmax−θmin)`); a
+  `trianglemesh`/`plymesh` gets pbrt's per-triangle `faceVarying`
+  `{(0,0),(1,0),(1,1)}`. Untextured UV-less meshes stay UV-free.
+
+End-to-end GPU sampling is gated by the `texture_quad` corpus scene (a UV-mapped
+quad with a gradient imagemap diffuse), which catches any UV flip/mirror/swap.
+
 ## pbrt metadata carry
 
 The UsdPreviewSurface / UsdLux output is a *portable approximation*. Alongside it
@@ -147,6 +167,7 @@ accumulation, least-squares exposure aligned. The gate passes at these tolerance
 | `diffuse_arealight` | 0.087 | 0.041 | Lambert + area-light transport |
 | `conductor_infinite` | 0.133 | 0.068 | gold Fresnel + GGX remap + constant env |
 | `glass_arealight` | 0.128 | 0.071 | dielectric refraction |
+| `texture_quad` | 0.0024 | 0.0119 | imagemap diffuse over explicit mesh UVs |
 
 FLIP ≤ 0.07 across the corpus — perceptually near-matching. The residual relMSE
 is dominated by the inherent RGB-vs-spectral reduction, the conductor's
@@ -181,7 +202,7 @@ Support status per pbrt feature.
 | area (`diffuse`) light | approx | emissive mesh; sidedness may differ |
 | `infinite` light | matched | constant baked to `.hdr`; `.exr`/`.pfm` maps resampled to `.hdr` |
 | film `iso` / exposure | matched | `imagingRatio = exposureTime·ISO/100` baked into emitters |
-| `imagemap` texture (reflectance/roughness) | matched | `UsdUVTexture`; needs mesh UVs to sample |
+| `imagemap` texture (reflectance/roughness) | matched | `UsdUVTexture` over `primvars:st`; explicit mesh UVs passed through, pbrt default UVs synthesized for UV-less textured shapes (see Texture UVs) |
 | homogeneous medium | approx | coefficients via `customData` |
 | heterogeneous (grid/VDB) medium | unsupported | flagged, not emitted |
 | spectral rendering | unsupported | RGB reduction only (documented divergence) |

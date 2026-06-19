@@ -43,6 +43,20 @@
         "relmse": 0.058,
         "flip": 0.058
       }
+    },
+    {
+      "name": "texture_quad",
+      "file": "texture_quad.pbrt",
+      "ref": "refs/texture_quad.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 256,
+      "relmse_tol": 0.02,
+      "flip_tol": 0.03,
+      "measured": {
+        "relmse": 0.0024,
+        "flip": 0.0119
+      }
     }
   ]
 }

@@ -9,6 +9,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt importer imagemap-texture UVs** (change `pbrt-imagemap-uv-parity`) —
+  finish imagemap-texture UV support in the pbrt v4 importer. Explicit mesh UVs
+  (`trianglemesh` `uv`/`st`, PLY `u/v`/`s/t`/`texture_u,texture_v`, ascii+binary)
+  pass through to per-vertex `primvars:st`, and pbrt-faithful default UVs are
+  synthesized for UV-less *textured* shapes — `sphere` parametric UVs and
+  per-triangle `faceVarying` `{(0,0),(1,0),(1,1)}` for `trianglemesh`/`plymesh` —
+  so a bound texture samples like pbrt instead of at a constant point. Adds a
+  `texture_quad` parity corpus scene (relMSE 0.0024 / FLIP 0.0119 vs pbrt v4) that
+  validates end-to-end GPU texture sampling. See
+  [docs/PbrtImport.md](docs/PbrtImport.md).
 - **pbrt v4 scene import** (change `pbrt-v4-scene-import`) — read a pbrt v4 text
   scene and convert it to a skinny-loadable USD stage via the new `skinny.pbrt`
   package and `skinny-import-pbrt` CLI (`python -m skinny.pbrt` / `import_pbrt()`).

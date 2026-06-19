@@ -100,8 +100,8 @@ def _shape_geometry(shp: PbrtShape, report, base_dir=None):
         return mesh.points, mesh.indices, mesh.normals, mesh.uvs
     if t == "sphere":
         radius = p.float("radius", 1.0)
-        pts, idx, nrm = emit.tessellate_sphere(radius)
-        return pts, idx, nrm, None
+        pts, idx, nrm, uvs = emit.tessellate_sphere(radius)
+        return pts, idx, nrm, uvs
     report.skipped(f"shape:{t}", "unsupported shape type")
     return None
 
@@ -127,7 +127,17 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
         pts_local, idx_local, shp.ctm, normals_local=nrm_local,
         reverse=shp.reverse_orientation,
     )
-    mesh = emit.add_mesh(stage, path, pts, idx, normals=nrm, uvs=uvs)
+    uv_interp = "vertex"
+    if uvs is None and materials_mod.references_texture(
+        shp.material, scene.textures, base_dir
+    ):
+        # pbrt assigns default UVs to every primitive; synthesize per-triangle
+        # faceVarying (0,0),(1,0),(1,1) so the bound texture samples like pbrt.
+        uvs = emit.default_triangle_uvs(idx.shape[0])
+        uv_interp = "faceVarying"
+        report.approx(f"uv:default {path}", "synthesized pbrt default UVs (no source UV)")
+    mesh = emit.add_mesh(stage, path, pts, idx, normals=nrm, uvs=uvs,
+                         uv_interpolation=uv_interp)
     report.exact(f"shape:{shp.type} {path}")
 
     emissive = None
