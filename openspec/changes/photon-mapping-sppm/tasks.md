@@ -8,7 +8,7 @@
 
 ## 2. SPPM shader core (backend-neutral Slang)
 
-- [ ] 2.1 Define the visible-point record + packed SPPM state (`pos, ns, beta, bsdf params, materialId, r, N, tau, Phi, M`) in a new `shaders/integrators/sppm_state.slang`; document its byte layout.
+- [x] 2.1 Define the visible-point record + packed SPPM state (`pos, ns, beta, bsdf params, materialId, r, N, tau, Phi, M`) in a new `shaders/integrators/sppm_state.slang`; document its byte layout. (Split into `VisiblePoint` (76 B scalar / 96 B MSL — geometry + persistent r/N/tau) and a separate per-pass `SppmAccum` (16 B — fixed-point atomic flux Φ + M); host mirror in `wavefront_layout.py`; locked + slangc-compile-checked by `tests/test_sppm_state.py`.)
 - [ ] 2.2 Implement the **eye stage**: trace the camera path through specular/perfectly-glossy bounces to the first non-specular flat-material hit, store one stochastic visible point per pixel; inactive point on escape/death. Gate to flat materials only.
 - [ ] 2.3 Implement the **grid-build stage**: uniform spatial hash over visible points by counting sort (per-cell count → exclusive prefix sum → scatter). Keep atomics to integer adds (both targets).
 - [ ] 2.4 Implement the **photon stage**: emit photons from lights via the existing power-weighted emissive/light CDFs, trace with Russian roulette, grid-lookup and atomic flux deposit (`Phi`,`M`) into visible points within radius.

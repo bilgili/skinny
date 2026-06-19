@@ -149,3 +149,64 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
         "material_offset": num_materials * _UINT,
         "indirect_args":   num_materials * INDIRECT_ARGS_STRIDE,
     }
+
+
+# ── SPPM per-pixel state buffers (change photon-mapping-sppm, PM-1) ─────────
+# Mirror of VisiblePoint / SppmAccum in
+# shaders/integrators/sppm_state.slang. Both are one-element-per-pixel
+# GPU-internal scratch the SPPM stages own; the host only SIZES them (never
+# packs). The renderer allocates the visible-point buffer as
+# `stream_size * VISIBLE_POINT_STRIDE` and the per-pass deposit accumulator as
+# `stream_size * SPPM_ACCUM_STRIDE`. `tests/test_sppm_state.py` locks these to
+# the Slang structs.
+
+# VisiblePoint.flags bits (mirror the static consts in sppm_state.slang).
+VP_ACTIVE = 1 << 0  # a valid visible point was stored this pass
+
+VISIBLE_POINT_FIELDS: list[tuple[str, str]] = [
+    ("pos",        "float3"),
+    ("ns",         "float3"),
+    ("beta",       "float3"),
+    ("wo",         "float3"),
+    ("tau",        "float3"),
+    ("materialId", "uint"),
+    ("flags",      "uint"),
+    ("radius",     "float"),
+    ("n",          "float"),
+]
+
+SPPM_ACCUM_FIELDS: list[tuple[str, str]] = [
+    ("phiR", "uint"),
+    ("phiG", "uint"),
+    ("phiB", "uint"),
+    ("m",    "uint"),
+]
+
+
+def visible_point_size(*, msl: bool = False) -> int:
+    """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``)."""
+    return _struct_stride(VISIBLE_POINT_FIELDS, msl=msl)
+
+
+def sppm_accum_size(*, msl: bool = False) -> int:
+    """Byte stride of SppmAccum — scalar (default) or MSL (``msl=True``). All
+    fields are uint, so the scalar and MSL strides are identical."""
+    return _struct_stride(SPPM_ACCUM_FIELDS, msl=msl)
+
+
+VISIBLE_POINT_STRIDE = visible_point_size()              # 76 B (scalar / Vulkan)
+VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 96 B (Metal)
+SPPM_ACCUM_STRIDE = sppm_accum_size()                    # 16 B (both layouts)
+SPPM_ACCUM_STRIDE_MSL = sppm_accum_size(msl=True)        # 16 B
+
+
+def sppm_buffer_sizes(stream_size: int, *, msl: bool = False) -> dict[str, int]:
+    """Byte sizes for the SPPM per-pixel buffers, the source of truth the SPPM
+    stage allocator sizes against. ``msl=True`` uses the Metal struct strides so
+    the Metal allocator does not undersize the visible-point buffer."""
+    vp_stride = VISIBLE_POINT_STRIDE_MSL if msl else VISIBLE_POINT_STRIDE
+    acc_stride = SPPM_ACCUM_STRIDE_MSL if msl else SPPM_ACCUM_STRIDE
+    return {
+        "visible_points": stream_size * vp_stride,
+        "sppm_accum":     stream_size * acc_stride,
+    }
