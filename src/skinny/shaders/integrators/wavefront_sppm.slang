@@ -286,3 +286,245 @@ void wfSppmGridScatter(uint3 tid: SV_DispatchThreadID)
     let dst = sppmGrid[sppmGridOffsetBase(nc) + cell] + slot;
     sppmGrid[sppmSortedIdxBase(nc) + dst] = i;
 }
+
+// ── Stage 5: photon pass (emit → trace → deposit) ───────────────────────────
+static const uint SPPM_PHOTON_MAX_DEPTH = 16u;
+
+// z-up cosine-weighted hemisphere direction.
+float3 sppmCosineHemisphere(float2 u)
+{
+    let r = sqrt(u.x);
+    let phi = 2.0 * PI * u.y;
+    return float3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u.x)));
+}
+
+// Rebuild the flat material stored in a visible point (no texture refetch / graph
+// re-run / double normal-map). Emission is omitted — it is direct, not BRDF.
+FlatMaterial sppmLoadMaterial(VisiblePoint vp)
+{
+    FlatHitMat m;
+    m.albedo = vp.albedo;
+    m.roughness = vp.roughness;
+    m.metallic = vp.metallic;
+    m.specular = vp.specular;
+    m.ior = vp.ior;
+    m.opacity = vp.opacity;
+    m.emission = float3(0.0);
+    m.coat = vp.coat;
+    m.coatRoughness = vp.coatRoughness;
+    m.coatIOR = vp.coatIOR;
+    m.coatColor = vp.coatColor;
+    FlatMaterial mat;
+    mat.data.mat = m;
+    mat.data.N = vp.ns;
+    mat.F0 = vp.F0;
+    return mat;
+}
+
+// Sample one photon from the scene lights. Group selection is uniform over the
+// present light groups; emissive triangles are power-weighted within the group
+// (pSel, folded into LightSample.pdfArea). beta carries the per-photon flux
+// (the 1/N_emitted normalization is applied in the update stage). For a diffuse
+// area emitter the emission cosine cancels the cosine-pdf, so beta = Le·π/selPdf.
+bool sppmEmitPhoton(inout RNG rng, out Ray ray, out float3 beta)
+{
+    ray.origin = float3(0.0);
+    ray.direction = float3(0.0, 0.0, 1.0);
+    beta = float3(0.0);
+
+    let hasE = (fc.numEmissiveTriangles > 0u) ? 1u : 0u;
+    let hasS = (fc.numSphereLights > 0u) ? 1u : 0u;
+    let hasD = (fc.numDistantLights > 0u) ? 1u : 0u;
+    let G = hasE + hasS + hasD;
+    if (G == 0u)
+        return false;
+    let gsel = 1.0 / float(G);
+
+    // Map a uniform draw to one of the present groups (order: emissive, sphere, distant).
+    uint pick = min(uint(rng.next() * float(G)), G - 1u);
+    uint gi = 0u;
+    uint chosen = 99u;
+    if (hasE == 1u) { if (gi == pick) chosen = 0u; gi++; }
+    if (chosen == 99u && hasS == 1u) { if (gi == pick) chosen = 1u; gi++; }
+    if (chosen == 99u && hasD == 1u) { if (gi == pick) chosen = 2u; gi++; }
+
+    if (chosen == 0u)
+    {
+        let idx = sampleEmissiveTriangle(rng.next(), fc.numEmissiveTriangles);
+        EmissiveTriangleLightImpl el =
+            loadEmissiveTriangleLightImpl(emissiveTriangles[idx], fc.numEmissiveTriangles);
+        LightSample ls = el.samplePoint(float3(0.0), rng.next2());
+        if (!ls.valid || ls.pdfArea <= 0.0)
+            return false;
+        let selA = gsel * ls.pdfArea;             // area-measure selection pdf
+        float3 t, b; buildBasis(ls.normal, t, b);
+        let d = sppmCosineHemisphere(rng.next2());
+        ray.direction = normalize(t * d.x + b * d.y + ls.normal * d.z);
+        ray.origin = ls.point + ls.normal * 0.002;
+        beta = ls.radiance * PI / max(selA, 1e-20);
+        return true;
+    }
+    if (chosen == 1u)
+    {
+        let i = min(uint(rng.next() * float(fc.numSphereLights)), fc.numSphereLights - 1u);
+        SphereLightImpl sl = loadSphereLightImpl(sphereLights[i]);
+        LightSample ls = sl.samplePoint(float3(0.0), rng.next2());
+        if (!ls.valid || ls.pdfArea <= 0.0)
+            return false;
+        let selA = gsel * (1.0 / float(fc.numSphereLights)) * ls.pdfArea;
+        float3 t, b; buildBasis(ls.normal, t, b);
+        let d = sppmCosineHemisphere(rng.next2());
+        ray.direction = normalize(t * d.x + b * d.y + ls.normal * d.z);
+        ray.origin = ls.point + ls.normal * 0.002;
+        beta = ls.radiance * PI / max(selA, 1e-20);
+        return true;
+    }
+    // Distant light: a parallel beam from a bbox-covering disk (pdfDir is a delta,
+    // no cosine). beta = L·A_disk / selPdf.
+    let i = min(uint(rng.next() * float(fc.numDistantLights)), fc.numDistantLights - 1u);
+    DirectionalLightImpl dl = loadDirectionalLightImpl(distantLights[i]);
+    let center = fc.sceneBoundsMin + 0.5 * fc.sceneBoundsExtent;
+    let R = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+    float3 t, b; buildBasis(dl.dir, t, b);
+    let u2 = rng.next2();
+    let rr = R * sqrt(u2.x);
+    let ph = 2.0 * PI * u2.y;
+    ray.origin = center + dl.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
+    ray.direction = -dl.dir;
+    let selPdf = gsel * (1.0 / float(fc.numDistantLights));
+    beta = dl.rad * (PI * R * R) / max(selPdf, 1e-20);
+    return true;
+}
+
+// Deposit a photon's flux into every active visible point within its radius,
+// using EACH visible point's own BSDF (bare f_r, no cosine — the photon-map
+// density estimate). The 3x3x3 neighbour cells are de-duplicated so a hash
+// collision can't double-deposit.
+void sppmDepositPhoton(float3 beta, float3 photonPos, float3 photonInDir)
+{
+    let nc = sppmGridCellCount(sppmNumPixels());
+    let base = sppmCellCoord(photonPos, fc.sceneBoundsMin, fc.sppmCellSize);
+    uint seen[27];
+    uint nSeen = 0u;
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        let cell = sppmCellHash(base + int3(dx, dy, dz), nc);
+        bool dup = false;
+        for (uint s = 0u; s < nSeen; s++)
+            if (seen[s] == cell) { dup = true; break; }
+        if (dup)
+            continue;
+        seen[nSeen++] = cell;
+
+        let start = sppmGrid[sppmGridOffsetBase(nc) + cell];
+        let cnt = sppmGrid[sppmGridCountBase() + cell];
+        for (uint k = 0u; k < cnt; k++)
+        {
+            let j = sppmGrid[sppmSortedIdxBase(nc) + start + k];
+            VisiblePoint vp = sppmVisiblePoints[j];
+            if ((vp.flags & VP_ACTIVE) == 0u)
+                continue;
+            let dp = photonPos - vp.pos;
+            if (dot(dp, dp) > vp.radius * vp.radius)
+                continue;
+            let toLight = -photonInDir;            // toward the photon's origin
+            if (dot(vp.ns, toLight) <= 0.0)
+                continue;
+            float3 t, b; buildBasis(vp.ns, t, b);
+            let woVP = worldToTangent(vp.wo, t, b, vp.ns);
+            let wiVP = worldToTangent(toLight, t, b, vp.ns);
+            if (wiVP.z <= 1e-4)
+                continue;
+            FlatMaterial mat = sppmLoadMaterial(vp);
+            let f = mat.evaluate(woVP, wiVP).response / max(wiVP.z, 1e-4);  // bare f_r
+            float3 phi = beta * f;
+            if (any(phi != phi) || any(isinf(phi)))
+                continue;
+            phi = max(phi, float3(0.0));
+            uint old;
+            InterlockedAdd(sppmAccum[j].phiR, uint(phi.x * SPPM_FLUX_FIXED_SCALE), old);
+            InterlockedAdd(sppmAccum[j].phiG, uint(phi.y * SPPM_FLUX_FIXED_SCALE), old);
+            InterlockedAdd(sppmAccum[j].phiB, uint(phi.z * SPPM_FLUX_FIXED_SCALE), old);
+            InterlockedAdd(sppmAccum[j].m, 1u, old);
+        }
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
+{
+    let pid = tid.x;
+    if (pid >= fc.sppmPhotonsEmitted)
+        return;
+    RNG rng = createRNG(uint2(pid & 0xFFFFu, pid >> 16), fc.frameIndex);
+
+    Ray r;
+    float3 beta;
+    if (!sppmEmitPhoton(rng, r, beta))
+        return;
+
+    HitInfo h = traceScene(fc, r);
+    for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
+    {
+        r.origin = h.position + r.direction * 0.002;
+        h = traceScene(fc, r);
+    }
+
+    uint depth = 0u;  // prior scatter count (specular or diffuse)
+    for (uint bounce = 0u; bounce < SPPM_PHOTON_MAX_DEPTH; bounce++)
+    {
+        if (!h.hit)
+            break;
+        if ((materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+            break;  // flat-only photon transport (PM-1)
+
+        FlatMaterial mat = loadFlatMaterial(h);
+        float3 N = mat.data.N;
+        float3 T, B;
+        if (h.hasTangent)
+        {
+            T = normalize(h.tangent - N * dot(h.tangent, N));
+            B = cross(N, T);
+        }
+        else
+        {
+            buildBasis(N, T, B);
+        }
+        let V = -r.direction;
+        let wo = worldToTangent(V, T, B, N);
+
+        BSDFSample bs = mat.sample(wo, rng);
+        if (!bs.valid)
+            break;
+        let specular = (bs.pdf <= 0.0);
+
+        // Deposit at a non-specular vertex only after >= 1 prior bounce, so the
+        // deposited term is purely indirect/caustic and disjoint from the NEE
+        // direct the eye stage already accumulated (depth==0 = light->VP direct).
+        if (!specular && depth >= 1u)
+            sppmDepositPhoton(beta, h.position, r.direction);
+
+        bs.wi = tangentToWorld(bs.wi, T, B, N);
+        beta *= bs.weight;
+        depth++;
+        if (depth > 1u)
+        {
+            let p = clamp(max(max(beta.x, beta.y), beta.z), 0.05, 0.95);
+            if (rng.next() > p)
+                break;
+            beta /= p;
+        }
+        let spawnOffset = bs.transmitted ? -h.normal * 0.002 : h.normal * 0.002;
+        r.origin = h.position + spawnOffset;
+        r.direction = bs.wi;
+        h = traceScene(fc, r);
+        for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
+        {
+            r.origin = h.position + r.direction * 0.002;
+            h = traceScene(fc, r);
+        }
+    }
+}
