@@ -711,8 +711,15 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
     // ratio term), so the two stop double-counting.
     if (fc.numEmissiveTriangles > 0u)
     {
-        uint idx = min(uint(rng.next() * float(fc.numEmissiveTriangles)),
-                       fc.numEmissiveTriangles - 1u);
+        // Power-weighted selection (change emissive-mesh-nee): pick the triangle
+        // through the cumulative-power CDF so the draw matches the pSel-based
+        // pdfArea that samplePoint reports. Uniform-by-index selection divided by
+        // that power-weighted pdf is BIASED — it systematically under-lights the
+        // emissive *fill* on meshes with many triangles of uneven power (e.g. a
+        // pbrt-imported room with ~1.5k emissive tris), leaving BDPT's indirect
+        // area-light transport far darker than the path tracer, whose nee.slang
+        // already selects via sampleEmissiveTriangle. (change bdpt-emissive-fill-gap)
+        uint idx = sampleEmissiveTriangle(rng.next(), fc.numEmissiveTriangles);
         EmissiveTriangleLightImpl L = loadEmissiveTriangleLightImpl(
             emissiveTriangles[idx], fc.numEmissiveTriangles);
         LightSample ls = L.samplePoint(z.position, rng.next2());

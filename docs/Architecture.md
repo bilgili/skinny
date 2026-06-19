@@ -205,8 +205,14 @@ Two implementations, selected by `fc.integratorType`:
   `standard_surface` BSDF (`FlatMaterial.evaluate`), environment
   importance sampling matched to the path tracer's env NEE, and
   light-tracer splatting (s=1) for caustics via atomic adds to
-  `lightSplatBuffer` (binding 21, Q22.10 fixed-point). Flat materials
-  only; skin hits fall through to PathTracer.
+  `lightSplatBuffer` (binding 21, Q22.10 fixed-point). Eye-side emissive
+  NEE (`connectT1`) selects the emissive triangle through the same
+  **power-weighted** `sampleEmissiveTriangle` cumulative-power CDF as the
+  path tracer's `nee.slang`, so the draw matches the `pSel`-based
+  `pdfArea`; selecting uniformly while dividing by that pdf biased the
+  indirect emissive *fill* dark on many-triangle meshes (change
+  `bdpt-emissive-fill-gap`). Flat materials only; skin hits fall through
+  to PathTracer.
 
 | Implementation | File | Mode |
 |---|---|---|
