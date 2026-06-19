@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="214.0" height="50.2" viewBox="0 0 214.0 50.2">
+  <rect x="0.5" y="0.5" width="213.0" height="49.2" rx="7" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="10.0" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a">n</text>
+  <text x="20.8" y="36.3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">cells</text>
+  <text x="59.7" y="32.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="18.0" fill="#0f172a"> = 2</text>
+  <text x="102.9" y="24.4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" fill="#0f172a">⌈log₂(2·W·H)⌉</text>
+</svg>

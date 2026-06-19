@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="470" viewBox="0 0 900 470" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <style>
+      .box{rx:8;ry:8;stroke-width:1.5;}
+      .lbl{font-size:13px;font-weight:600;fill:#0f172a;}
+      .sub{font-size:10.5px;fill:#475569;}
+      .buf{font-size:10.5px;font-weight:600;fill:#7c3aed;}
+      .flow{stroke:#475569;stroke-width:1.6;fill:none;}
+      .note{font-size:10.5px;fill:#64748b;}
+      .hdr{font-size:14px;font-weight:700;fill:#0f172a;}
+      .phase{font-size:11px;font-weight:700;fill:#0f172a;}
+    </style>
+  </defs>
+
+  <text x="20" y="26" class="hdr">GPU SPPM — one pass == one accumulation frame (wavefront, flat materials)</text>
+
+  <!-- Phase 1: EYE -->
+  <text x="20" y="56" class="phase">1 · EYE</text>
+  <rect x="20" y="64" width="180" height="100" class="box" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="110" y="86" text-anchor="middle" class="lbl">wfSppmEye</text>
+  <text x="110" y="103" text-anchor="middle" class="sub">camera path through the flat</text>
+  <text x="110" y="117" text-anchor="middle" class="sub">delta lobe → first non-spec hit</text>
+  <text x="110" y="131" text-anchor="middle" class="sub">store 1 VisiblePoint / pixel</text>
+  <text x="110" y="145" text-anchor="middle" class="sub">+ per-pass direct ld (NEE)</text>
+  <text x="110" y="159" text-anchor="middle" class="buf">→ sppmVisiblePoints (set1.0)</text>
+
+  <!-- Phase 2: GRID BUILD (counting sort) -->
+  <text x="230" y="56" class="phase">2 · GRID BUILD — counting sort</text>
+  <rect x="230" y="64" width="640" height="100" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1"/>
+
+  <rect x="244" y="80" width="120" height="68" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="304" y="102" text-anchor="middle" class="lbl">GridCount</text>
+  <text x="304" y="119" text-anchor="middle" class="sub">hash pos → cell</text>
+  <text x="304" y="133" text-anchor="middle" class="sub">atomic count/cell</text>
+
+  <rect x="380" y="80" width="180" height="68" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="470" y="100" text-anchor="middle" class="lbl">Scan (block / sums / add)</text>
+  <text x="470" y="117" text-anchor="middle" class="sub">exclusive prefix sum</text>
+  <text x="470" y="131" text-anchor="middle" class="sub">count → offset</text>
+
+  <rect x="576" y="80" width="120" height="68" class="box" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="636" y="102" text-anchor="middle" class="lbl">Scatter</text>
+  <text x="636" y="119" text-anchor="middle" class="sub">pixel idx into</text>
+  <text x="636" y="133" text-anchor="middle" class="sub">cell buckets</text>
+
+  <rect x="712" y="80" width="146" height="68" rx="8" ry="8" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="785" y="102" text-anchor="middle" class="buf">sppmGrid (set1.2)</text>
+  <text x="785" y="119" text-anchor="middle" class="sub">count | offset |</text>
+  <text x="785" y="133" text-anchor="middle" class="sub">cursor | sortedIdx</text>
+
+  <path class="flow" d="M364,114 L378,114" marker-end="url(#arr)"/>
+  <path class="flow" d="M560,114 L574,114" marker-end="url(#arr)"/>
+  <path class="flow" d="M696,114 L710,114" marker-end="url(#arr)"/>
+
+  <!-- Phase 3: PHOTON -->
+  <text x="20" y="216" class="phase">3 · PHOTON</text>
+  <rect x="20" y="224" width="400" height="116" class="box" fill="#fffbeb" stroke="#f59e0b"/>
+  <text x="220" y="246" text-anchor="middle" class="lbl">wfSppmPhotonTrace</text>
+  <text x="220" y="264" text-anchor="middle" class="sub">emit power-weighted photons (emissive tri / sphere / distant)</text>
+  <text x="220" y="279" text-anchor="middle" class="sub">β = Le·π / p_sel; Russian-roulette trace</text>
+  <text x="220" y="294" text-anchor="middle" class="sub">deposit at non-specular vertices, depth ≥ 1 (disjoint from NEE)</text>
+  <text x="220" y="309" text-anchor="middle" class="sub">3×3×3 cell scan; φ += β·f_r (bare BSDF, no cosine)</text>
+  <text x="220" y="326" text-anchor="middle" class="buf">uint fixed-point InterlockedAdd → sppmAccum (set1.1)</text>
+
+  <!-- Phase 4: UPDATE -->
+  <text x="450" y="216" class="phase">4 · UPDATE / RESOLVE</text>
+  <rect x="450" y="224" width="408" height="116" class="box" fill="#fef2f2" stroke="#ef4444"/>
+  <text x="654" y="246" text-anchor="middle" class="lbl">wfSppmUpdate</text>
+  <text x="654" y="264" text-anchor="middle" class="sub">N' = N + γM,  r' = r·√(N'/(N+M)),  τ' = (τ+Φ)(r'/r)²</text>
+  <text x="654" y="279" text-anchor="middle" class="sub">L_indirect = τ / (N_emitted · π · r²)</text>
+  <text x="654" y="294" text-anchor="middle" class="sub">sample = ld + L_indirect → running-mean composite</text>
+  <text x="654" y="309" text-anchor="middle" class="sub">into the accumulation film (like wfPathResolve) + display</text>
+  <text x="654" y="326" text-anchor="middle" class="buf">persist τ/r/N · clear sppmAccum for next pass</text>
+
+  <!-- main flow arrows between phases -->
+  <path class="flow" d="M110,164 C110,194 110,194 110,222" marker-end="url(#arr)"/>
+  <text x="150" y="196" class="note">all eye tiles → barrier</text>
+  <path class="flow" d="M540,164 C540,190 220,196 220,222" marker-end="url(#arr)"/>
+  <text x="560" y="186" class="note">grid (1× global) → barrier</text>
+  <path class="flow" d="M420,282 L448,282" marker-end="url(#arr)"/>
+  <text x="434" y="274" text-anchor="middle" class="note">barrier</text>
+
+  <!-- accumulation feedback (estimator persists across passes) -->
+  <path class="flow" d="M654,340 C654,372 110,372 110,224" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+  <rect x="300" y="356" width="300" height="40" rx="8" ry="8" fill="#faf5ff" stroke="#a855f7"/>
+  <text x="450" y="374" text-anchor="middle" class="sub">VisiblePoint estimator (τ, r, N) PERSISTS</text>
+  <text x="450" y="389" text-anchor="middle" class="sub">across passes; eye rewrites only the geometry</text>
+
+  <!-- dispatch-order note -->
+  <rect x="20" y="412" width="838" height="46" rx="8" ry="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="32" y="432" class="lbl">Split dispatch order (record_sppm_loop)</text>
+  <text x="32" y="450" class="sub">all eye tiles → one global grid build → one global photon pass → all update tiles. Grid + photon are global over every visible point, never interleaved per tile (tiles == 1 is the degenerate case).</text>
+</svg>

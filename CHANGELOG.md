@@ -9,6 +9,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GPU SPPM integrator** (change `photon-mapping-sppm`, PM-1) — a Stochastic
+  Progressive Photon Mapping integrator (`INTEGRATOR_SPPM = 2`), the
+  caustic-efficient third integrator after `path` and `bdpt`. **Wavefront-only**,
+  **flat materials only**; Vulkan is working now (the native-Metal pass is a
+  follow-up — the kernels are Metal-portable). Selectable via `--integrator sppm`
+  (requires `--execution-mode wavefront`; refused under megakernel with a clear
+  message), the GUI "SPPM" mode, or the pbrt importer. One SPPM pass == one
+  progressive-accumulation frame, a four-stage pipeline over eight kernels in
+  `integrators/wavefront_sppm.slang` — **eye** (one stochastic visible point per
+  pixel + per-pass NEE direct), **grid build** (counting-sort spatial hash:
+  count → exclusive prefix sum → scatter), **photon** (power-weighted emission,
+  RR trace, bare-f_r deposit at non-specular vertices `depth ≥ 1` via a 3×3×3 cell
+  scan with uint fixed-point atomics), and **update** (the SPPM radius/flux
+  reduction `N'=N+γM`, `r'=r·√(N'/(N+M))`, `τ'=(τ+Φ)(r'/r)²`, then
+  `L = ld + τ/(N_emitted·π·r²)` composited into the film). The per-pixel
+  estimator (radius / count / flux) persists across frames; direct reuses NEE so
+  the photon term is the disjoint indirect/caustic complement. `--sppm-radius`
+  sets the initial search radius (default ≈ 0.1 % of the scene bbox diagonal),
+  `--sppm-photons-per-pass` the photons/pass (default one per pixel). The pbrt v4
+  importer now **maps** `Integrator "sppm"` / `"photonmap"` (previously skipped)
+  to the skinny SPPM selection (`customLayerData["pbrt"]["skinny"]`, read by
+  `api.sppm_selection`). Verified on Vulkan (Apple M5 Pro): Cornell-box SPPM/path
+  energy ratio 1.008. Skin/BSSRDF (PM-2) and volumetric (PM-3) photon transport
+  are deferred. See [docs/PhotonMapping.md](docs/PhotonMapping.md).
 - **pbrt importer imagemap-texture UVs** (change `pbrt-imagemap-uv-parity`) —
   finish imagemap-texture UV support in the pbrt v4 importer. Explicit mesh UVs
   (`trianglemesh` `uv`/`st`, PLY `u/v`/`s/t`/`texture_u,texture_v`, ascii+binary)
