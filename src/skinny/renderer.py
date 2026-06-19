@@ -1375,6 +1375,12 @@ class Renderer:
         self._wf_path_state_buf = None
         self._wf_path_hit_buf = None
         self._wf_path_pass_dims = None
+        # Staged wavefront SPPM (change photon-mapping-sppm): owns its own set-1
+        # buffers, same lazy lifecycle as the path pass. Photon count for the
+        # current frame is stashed by _pack_uniforms for record_dispatch.
+        self._wavefront_sppm_pass = None
+        self._wf_sppm_pass_dims = None
+        self._sppm_photons_emitted = 0
         # Staged wavefront bdpt (Phase 3): subpath-vertex + aux buffers + pass,
         # same lazy lifecycle as the path pass.
         self._wavefront_bdpt_pass = None
@@ -1821,6 +1827,64 @@ class Renderer:
             self._wavefront_path_pass.set_neural(self._neural_pass)
         self._wf_path_pass_dims = key
         return self._wavefront_path_pass
+
+    def _ensure_wavefront_sppm_pass(self):
+        """Build (once) the staged wavefront SPPM pass (change
+        photon-mapping-sppm). Vulkan only for now; the native-Metal SPPM pass is
+        a follow-up, so this returns None on Metal and the caller falls back to
+        the path tracer. Reuses the megakernel scene set-0 layout + the
+        per-frame scene descriptor sets like the path pass."""
+        if self.is_metal:
+            return self._ensure_wavefront_sppm_pass_metal()
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self._scene_bindings is None or self.descriptor_sets is None:
+            return None
+        key = (self.width, self.height)
+        if self._wavefront_sppm_pass is not None and self._wf_sppm_pass_dims == key:
+            return self._wavefront_sppm_pass
+        self._destroy_wavefront_sppm_pass()
+        from skinny.vk_wavefront import WavefrontSppmPass
+        num_pixels = self.width * self.height
+        cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontSppmPass.STREAM_CAP)
+        stream_size = max(1, min(num_pixels, cap))
+        self._wavefront_sppm_pass = WavefrontSppmPass(
+            self.ctx, self.shader_dir, self._scene_set0_layout, stream_size, num_pixels)
+        self._wf_sppm_pass_dims = key
+        return self._wavefront_sppm_pass
+
+    def _ensure_wavefront_sppm_pass_metal(self):
+        """Native-Metal SPPM pass — follow-up (group 3). Until then SPPM on Metal
+        falls back to the path tracer."""
+        return None
+
+    def _destroy_wavefront_sppm_pass(self):
+        if self._wavefront_sppm_pass is not None:
+            self._wavefront_sppm_pass.destroy()
+            self._wavefront_sppm_pass = None
+        self._wf_sppm_pass_dims = None
+
+    def _record_wavefront_dispatch(self, cmd, scene_set):
+        """Record the active wavefront integrator's dispatch into ``cmd`` —
+        shared by the windowed + headless Vulkan seams. SPPM (integrator 2) needs
+        the per-frame photon count + first-frame flag; path/bdpt take the scene
+        set alone. SPPM falls back to the path tracer when its pass is
+        unbuildable (e.g. Metal, not yet wired)."""
+        if self.integrator_index == 2:  # INTEGRATOR_SPPM
+            sppm = self._ensure_wavefront_sppm_pass()
+            if sppm is not None:
+                sppm.record_dispatch(
+                    cmd, scene_set, photons=self._sppm_photons_emitted,
+                    first_frame=(self.accum_frame == 0))
+                return
+        if self.integrator_index == 1:
+            staged = self._ensure_wavefront_bdpt_pass()
+        else:
+            staged = self._ensure_wavefront_path_pass()
+        if staged is not None:
+            staged.record_dispatch(cmd, scene_set)
+        else:
+            self._ensure_wavefront_env_pass().record_dispatch(cmd)
 
     def _ensure_wavefront_path_pass_metal(self):
         """Build (once) the Metal staged wavefront path tracer (change
@@ -8402,15 +8466,27 @@ class Renderer:
         camera_mirror = 1 if getattr(self, "_camera_mirror", False) else 0
         data += struct.pack("I", int(camera_mirror))                 # 4 bytes
         # SPPM per-pass photon-mapping tail (change photon-mapping-sppm). Zero
-        # unless the SPPM integrator is active; the SPPM render pass computes the
-        # initial radius (pbrt param or bbox heuristic), cell size, grid res, and
-        # photon count and stashes them on these attributes before packing.
-        sppm_radius = float(getattr(self, "_sppm_initial_radius", 0.0))
-        data += struct.pack("f", sppm_radius)                        # 4 bytes
-        data += struct.pack("f", float(getattr(self, "_sppm_cell_size", sppm_radius)))
-        grid_res = getattr(self, "_sppm_grid_res", (0, 0, 0))
-        data += struct.pack("III", int(grid_res[0]), int(grid_res[1]), int(grid_res[2]))
-        data += struct.pack("I", int(getattr(self, "_sppm_photons_emitted", 0)))
+        # unless the SPPM integrator is active. Initial radius = the pbrt `radius`
+        # override when imported, else ~0.1% of the scene bbox diagonal; cell size
+        # tracks the initial radius (a valid upper bound as radii shrink).
+        # sppmGridRes is unused by the kernels (they hash from width*height) and
+        # is packed zero. Photons/pass default to one per pixel. The chosen photon
+        # count is stashed for the SPPM pass's record_dispatch this frame.
+        if self.integrator_index == 2:  # INTEGRATOR_SPPM
+            _bmin, _bext = self._neural_scene_bounds()
+            _diag = float(np.linalg.norm(_bext))
+            sppm_radius = float(getattr(self, "_sppm_radius_override", 0.0)) \
+                or max(_diag * 0.001, 1e-4)
+            sppm_photons = int(getattr(self, "_sppm_photons_override", 0)) \
+                or int(self.width * self.height)
+        else:
+            sppm_radius = 0.0
+            sppm_photons = 0
+        self._sppm_photons_emitted = sppm_photons
+        data += struct.pack("f", sppm_radius)                        # sppmInitialRadius
+        data += struct.pack("f", sppm_radius)                        # sppmCellSize
+        data += struct.pack("III", 0, 0, 0)                          # sppmGridRes (unused)
+        data += struct.pack("I", int(sppm_photons))                  # sppmPhotonsEmitted
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -8752,14 +8828,7 @@ class Renderer:
             if self._wavefront_debug_pass is not None:
                 self._wavefront_debug_pass.record_dispatch(cmd)
             else:
-                if self.integrator_index == 1:
-                    staged = self._ensure_wavefront_bdpt_pass()
-                else:
-                    staged = self._ensure_wavefront_path_pass()
-                if staged is not None:
-                    staged.record_dispatch(cmd, self.descriptor_sets[f])
-                else:
-                    self._ensure_wavefront_env_pass().record_dispatch(cmd)
+                self._record_wavefront_dispatch(cmd, self.descriptor_sets[f])
         else:
             # Bind pipeline and descriptors
             vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
@@ -8988,15 +9057,7 @@ class Renderer:
             if self._wavefront_debug_pass is not None:
                 self._wavefront_debug_pass.record_dispatch(cmd)
             else:
-                # BDPT → staged wavefront bdpt; otherwise the path tracer.
-                if self.integrator_index == 1:
-                    staged = self._ensure_wavefront_bdpt_pass()
-                else:
-                    staged = self._ensure_wavefront_path_pass()
-                if staged is not None:
-                    staged.record_dispatch(cmd, self.descriptor_sets[f])
-                else:
-                    self._ensure_wavefront_env_pass().record_dispatch(cmd)
+                self._record_wavefront_dispatch(cmd, self.descriptor_sets[f])
         else:
             vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
             vk.vkCmdBindDescriptorSets(
