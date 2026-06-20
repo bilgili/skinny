@@ -36,8 +36,8 @@ from skinny.backend_select import (
 from skinny.renderer import Renderer
 from skinny.settings import ensure_dirs, load_settings, save_settings
 
-WINDOW_WIDTH = 1280
-WINDOW_HEIGHT = 720
+# Render-area size comes from the shared --width/--height flags (default
+# 640x480, SKINNY_WIDTH/SKINNY_HEIGHT env fallbacks); see cli_common.
 
 
 def _snapshot_camera(renderer) -> dict:
@@ -503,7 +503,7 @@ def main() -> None:
 
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
     glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
-    window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "Skinny", None, None)
+    window = glfw.create_window(args.width, args.height, "Skinny", None, None)
     if not window:
         glfw.terminate()
         raise RuntimeError("Failed to create GLFW window")
@@ -515,7 +515,7 @@ def main() -> None:
         if isinstance(x, (int, float)) and isinstance(y, (int, float)):
             glfw.set_window_pos(window, int(x), int(y))
 
-    vk_ctx = make_context(backend, window, WINDOW_WIDTH, WINDOW_HEIGHT)
+    vk_ctx = make_context(backend, window, args.width, args.height)
 
     repo_root = Path(__file__).resolve().parents[2]
     # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):

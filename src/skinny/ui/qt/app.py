@@ -72,6 +72,8 @@ class MainWindow(QMainWindow):
         backend: str = "vulkan",
         encoding: str = "E0",
         sppm_glossy_roughness: float | None = None,
+        width: int = 640,
+        height: int = 480,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -87,9 +89,12 @@ class MainWindow(QMainWindow):
         # Renderer setup — synchronous on main thread (no per-user sessions
         # to worry about in the desktop entry). Headless mode: no GLFW
         # window, no surface, no swapchain. DebugViewport renders to an
-        # offscreen image and Qt blits it.
+        # offscreen image and Qt blits it. The render area size comes from the
+        # shared --width/--height flags (default 640x480); the Qt window and
+        # docks keep their own size (self.resize above).
         self.ctx = make_context(
-            backend, window=None, width=1280, height=720, gpu_preference=gpu_pref,
+            backend, window=None, width=width, height=height,
+            gpu_preference=gpu_pref,
         )
         log.info("GPU: %s", self.ctx.gpu_info.name)
 
@@ -704,7 +709,8 @@ def main() -> None:
                      lobe_samplers=args.lobe_samplers,
                      backend=backend,
                      encoding=encoding_value,
-                     sppm_glossy_roughness=sppm_glossy_roughness_value)
+                     sppm_glossy_roughness=sppm_glossy_roughness_value,
+                     width=args.width, height=args.height)
     # Display-only state for the startup configuration matrix (change
     # online-training-observability).
     win.renderer._requested_backend = args.backend

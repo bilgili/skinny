@@ -419,6 +419,18 @@ host with no Metal device fails with a clear message rather than degrading. See
 [docs/Architecture.md § Backend selection](docs/Architecture.md#backend-selection)
 and [docs/Wavefront.md § Metal wavefront backend](docs/Wavefront.md#metal-wavefront-backend).
 
+### Render resolution (`--width` / `--height`)
+
+`--width` and `--height` (env `SKINNY_WIDTH` / `SKINNY_HEIGHT`) set the
+render-area pixel size, exposed from the same shared definition by the
+interactive front-ends `skinny` and `skinny-gui`. Both default to **640×480**
+(precedence: flag > env > default); a non-positive value is rejected at startup.
+On `skinny` (windowed) they size the GLFW window and the GPU render target
+together; on `skinny-gui` they size the offscreen render area (the pixels the
+renderer computes) while the Qt window and dock layout keep their own size. The
+headless `skinny-render` keeps its own `--width` / `--height` (default
+`1024×1024`, offline-output size); `skinny-web` does not expose these flags.
+
 ### Compatibility matrix
 
 What runs where. Authoritative cross-cutting view of backend × execution mode ×

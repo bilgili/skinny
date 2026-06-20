@@ -708,7 +708,9 @@ def main() -> None:
     parser.add_argument("--usdMtlx", action="store_true", default=False)
     # No --proposals on the interactive front-ends (skinny-web / skinny-gui):
     # the in-app Proposals control owns proposal selection at runtime.
-    add_render_flags(parser, proposals=False)
+    # resolution=False: the web session render size is out of scope for the
+    # shared --width/--height render-area flags (would otherwise be a no-op flag).
+    add_render_flags(parser, proposals=False, resolution=False)
     args = parser.parse_args()
     # Reject impossible combos (e.g. bdpt + --online-training) up front.
     validate_render_flags(args)
