@@ -137,8 +137,10 @@ INSTANCE_STRIDE = 144
 #   80: coatColor (vec3, 12) + opacityThreshold
 #   96: normalScale (vec3, 12) + channelMask (uint, packed channel selectors)
 #  112: normalBias  (vec3, 12) + _pad (4 B)
-# 128 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 128
+#  128: transmissionColor (vec3, 12) + diffuseRoughness (float)  [Stage-2]
+#  144: specularColor (vec3, 12) + _pad1 (4 B)                   [Stage-2]
+# 160 B / record, naturally 16-byte aligned.
+FLAT_MATERIAL_STRIDE = 160
 FLAT_MATERIAL_CAPACITY_INIT = 16
 
 # Channel-selector codes packed into FlatMaterialParams.channelMask. Five
@@ -412,6 +414,15 @@ def pack_flat_material(
      108: channelMask             (uint; packed per-input channel selectors)
      112: normalBias.x/y/z        (vec3 → 12 B; UsdUVTexture inputs:bias.xyz)
      124: _pad                    (uint; reserved)
+     128: transmissionColor.r/g/b (vec3 → 12 B; Stage-2; fallback diffuseColor)
+     140: diffuseRoughness        (float; Stage-2 Oren-Nayar; 0 ⇒ Lambert)
+     144: specularColor.r/g/b     (vec3 → 12 B; Stage-2; fallback white)
+     156: _pad1                   (uint; reserved)
+
+    Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
+    override reproduces the prior behavior — transmissionColor defaults to
+    diffuseColor (so the delta-transmission weight is unchanged), specularColor
+    defaults to white, and diffuseRoughness defaults to 0 (exact Lambert).
     """
     overrides = material.parameter_overrides
     diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
@@ -427,8 +438,13 @@ def pack_flat_material(
     coat_ior = float(coat_ior_raw) if coat_ior_raw is not None else 1.5
     coat_color = _override_color3(overrides, "coat_color", (1.0, 1.0, 1.0))
     opacity_threshold = _override_float(overrides, "opacityThreshold", 0.0)
+    # Stage-2 rich inputs. transmission_color falls back to the diffuse albedo so
+    # the delta-transmission weight (was `albedo`) is byte-unchanged when absent.
+    transmission_color = _override_color3(overrides, "transmission_color", diffuse)
+    specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
+    diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I",
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -445,6 +461,10 @@ def pack_flat_material(
         float(normal_scale[0]), float(normal_scale[1]), float(normal_scale[2]),
         int(channel_mask) & 0xFFFFFFFF,
         float(normal_bias[0]), float(normal_bias[1]), float(normal_bias[2]),
+        0,
+        transmission_color[0], transmission_color[1], transmission_color[2],
+        diffuse_roughness,
+        specular_color[0], specular_color[1], specular_color[2],
         0,
     )
 

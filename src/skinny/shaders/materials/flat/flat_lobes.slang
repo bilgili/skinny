@@ -98,6 +98,34 @@ float flatLobePdf(uint lobeKind, uint samplerId, float roughness,
     return s.pdf(wi, wo);
 }
 
+// Oren-Nayar qualitative diffuse multiplier relative to Lambert (= 1 at σ=0).
+// Response-only: the diffuse lobe keeps cosine sampling, so multiplying f by this
+// factor leaves the pdf (NdotL/π) untouched — sample().pdf == evaluate().pdf.
+// Bounded by construction (cosβ floored like the other 1e-x domain guards), so
+// response/pdf = diffHue·ON stays finite — firefly-free without a clamp.
+// `sigma` is `diffuseRoughness`; wo/wi are tangent-space (N=+Z, z>0). σ=0 ⇒ exact
+// Lambert (early-out returns 1).
+float orenNayarFactor(float3 wo, float3 wi, float sigma)
+{
+    if (sigma <= 0.0)
+        return 1.0;
+    float s2 = sigma * sigma;
+    float A  = 1.0 - 0.5 * s2 / (s2 + 0.33);
+    float B  = 0.45 * s2 / (s2 + 0.09);
+    // Azimuthal cos(Δφ) from the tangent-plane projections of wo, wi.
+    float2 woT = wo.xy;
+    float2 wiT = wi.xy;
+    float  lo  = length(woT);
+    float  li  = length(wiT);
+    float  cosPhi = (lo > 1e-5 && li > 1e-5) ? dot(woT, wiT) / (lo * li) : 0.0;
+    // α = larger zenith angle (smaller cos), β = smaller angle (larger cos).
+    float cosA = min(wo.z, wi.z);
+    float cosB = max(wo.z, wi.z);
+    float sinA = sqrt(max(0.0, 1.0 - cosA * cosA));
+    float tanB = sqrt(max(0.0, 1.0 - cosB * cosB)) / max(cosB, 1e-4);
+    return A + B * max(0.0, cosPhi) * sinA * tanB;
+}
+
 // Lobe-selection probability from colored Fresnel / albedo balance.
 float flatLobePSpec(float NdotV, float3 albedo, float metallic, float3 F0)
 {
@@ -163,17 +191,22 @@ float3 flatBsdfResponse(float3 wo, float3 wi, FlatHitMat m, float3 F0)
         resp += pCoat * pdfC * (m.coatColor * (Fc * G1L));
     }
 
-    // Base spec lobe: f·cos = pdf_spec · (Fs · G₁(L)).
+    // Base spec lobe: f·cos = pdf_spec · (Fs · G₁(L) · specularColor). The
+    // specularColor tint is a response-only factor — pdf unchanged. White ⇒ no
+    // change.
     float3 Fs       = schlickFresnelColor(VdotH, F0);
     float  G1Ls     = ggxSmithG1(NdotL, m.roughness);
     float  pdfS     = flatLobePdf(LOBE_SPEC, FLAT_SAMPLER_NATIVE, m.roughness, wi, wo);
-    float3 specResp = pdfS * (Fs * G1Ls);
+    float3 specResp = pdfS * (Fs * G1Ls) * m.specularColor;
 
-    // Base diffuse lobe (Lambert): f·cos = pdf_diff · diffHue.
+    // Base diffuse lobe: f·cos = pdf_diff · diffHue · ON. Oren-Nayar (ON) is a
+    // response-only factor; cosine sampling is kept so pdfD is unchanged.
+    // diffuseRoughness = 0 ⇒ ON = 1 ⇒ exact Lambert.
     float3 Fview    = schlickFresnelColor(NdotV, F0);
     float3 diffHue  = m.albedo * (float3(1.0) - Fview) * (1.0 - m.metallic);
     float  pdfD     = flatLobePdf(LOBE_DIFFUSE, FLAT_SAMPLER_NATIVE, 0.0, wi, wo);
-    float3 diffResp = pdfD * diffHue;
+    float  on       = orenNayarFactor(wo, wi, m.diffuseRoughness);
+    float3 diffResp = pdfD * diffHue * on;
 
     // Base lobes are selected with probability (1 - pCoat) and attenuated by
     // the coat. The pSpec / (1-pSpec) within-base split cancels against

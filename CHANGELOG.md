@@ -9,6 +9,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Flat BSDF: colored glass, tinted speculars, Oren-Nayar diffuse** (change
+  `flat-lobes-rich-inputs`, Stage-2 Tier A of the pbrt-mtlx roadmap) — the
+  unified flat / `standard_surface` lobe BSDF now consumes three previously-dead
+  `standard_surface` inputs, filling the existing `{coat, spec, diffuse,
+  delta-transmission}` lobe set with **no** new lobe and **without** calling the
+  preview-only `evalStdSurfaceBSDF`: `transmission_color` tints the
+  delta-transmission branch (smooth colored glass; still a delta event, no
+  MIS/Jacobian change), `specular_color` scales the GGX spec response
+  (response-only, pdf unchanged), and `diffuse_roughness` drives an Oren-Nayar
+  diffuse response while keeping cosine sampling (`0` ⇒ exact Lambert; diffuse
+  pdf and `sample().pdf == evaluate().pdf` preserved). `FlatMaterialParams`
+  (binding 13) grows 128 → 160 B for the appended `transmissionColor` /
+  `diffuseRoughness` / `specularColor`. Back-compat: `pack_flat_material` falls
+  back to `transmission_color ← diffuseColor`, `specular_color ← white`,
+  `diffuse_roughness ← 0`, so absent inputs reproduce prior behavior exactly —
+  the pbrt parity corpus and existing UsdPreviewSurface renders are unchanged.
+
 - **pbrt importer: MaterialX sidecar export (`-mtlx`)** (change
   `pbrt-mtlx-export`) — `skinny-import-pbrt -mtlx` additionally writes a portable
   MaterialX `.mtlx` of `standard_surface` materials, referenced from the exported

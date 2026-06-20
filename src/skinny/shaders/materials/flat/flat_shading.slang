@@ -81,6 +81,11 @@ struct FlatHitMat
     float  coatRoughness;
     float  coatIOR;
     float3 coatColor;
+    // Stage-2 rich inputs. Defaults reproduce prior behavior:
+    // transmissionColor = albedo, specularColor = white, diffuseRoughness = 0.
+    float3 transmissionColor;
+    float3 specularColor;
+    float  diffuseRoughness;
 };
 
 struct FlatHitData
@@ -142,6 +147,9 @@ FlatHitData fetchFlatHitData(HitInfo h)
         out_.mat.coatRoughness = 0.0;
         out_.mat.coatIOR      = 1.5;
         out_.mat.coatColor    = float3(1.0);
+        out_.mat.transmissionColor = float3(0.7);   // = albedo fallback
+        out_.mat.specularColor     = float3(1.0);
+        out_.mat.diffuseRoughness  = 0.0;
         out_.N                = h.normal;
         return out_;
     }
@@ -202,6 +210,14 @@ FlatHitData fetchFlatHitData(HitInfo h)
     out_.mat.coatRoughness = clamp(p.coatRoughness, 0.04, 1.0);
     out_.mat.coatIOR = max(p.coatIOR, 1.0);
     out_.mat.coatColor = p.coatColor;
+
+    // Stage-2 rich inputs. The packer already resolves the fallbacks
+    // (transmissionColor ← transmission_color else diffuseColor; specularColor
+    // ← specular_color else white; diffuseRoughness ← diffuse_roughness else 0),
+    // so the lobe model reads them directly.
+    out_.mat.transmissionColor = p.transmissionColor;
+    out_.mat.specularColor     = p.specularColor;
+    out_.mat.diffuseRoughness  = clamp(p.diffuseRoughness, 0.0, 1.0);
 
     out_.mat.emission = p.emissiveColor;
     if (p.emissiveTextureIdx != 0xFFFFFFFFu)
