@@ -26,17 +26,38 @@ from .report import Report
 from .state import PbrtScene, PbrtShape, build_scene
 
 
-def import_pbrt(path: str, out: str | None = None):
-    """Parse a pbrt scene file and emit USD. Returns (stage, report)."""
+def import_pbrt(path: str, out: str | None = None, materialx: bool = False):
+    """Parse a pbrt scene file and emit USD. Returns (stage, report).
+
+    When *materialx* is true and *out* is set, rich ``standard_surface``
+    materials are written to a sidecar ``.mtlx`` next to the ``.usda`` and the
+    stage references it (instead of authoring UsdPreviewSurface shaders).
+    """
     scene = build_scene(parse_file(path))
     base_dir = os.path.dirname(os.path.abspath(path))
-    return translate_scene(scene, out, base_dir=base_dir)
+    return translate_scene(scene, out, base_dir=base_dir, materialx=materialx)
 
 
-def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | None = None):
+def translate_scene(
+    scene: PbrtScene,
+    out: str | None = None,
+    base_dir: str | None = None,
+    materialx: bool = False,
+):
     report = Report()
     stage = emit.new_stage(out)
     world = "/World"
+
+    # MaterialX sidecar export is path-anchored (the .mtlx lands next to the
+    # .usda and the stage references it by basename). With no output path there
+    # is nowhere to write the sidecar, so fall back to the UsdPreviewSurface
+    # authoring path for an in-memory stage.
+    emit_mtlx = bool(materialx and out is not None)
+    # surfacematerial element name (== Material prim leaf) -> standard_surface
+    # description package consumed by mtlx_emit.write_mtlx_document.
+    mtlx_materials: dict[str, dict] = {}
+    # (material_prim_path, surfacematerial_name) pairs to wire to the sidecar.
+    mtlx_refs: list[tuple[str, str]] = []
 
     # pbrt film exposure (imagingRatio = exposureTime * ISO / 100, film.cpp) is a
     # global linear scale on output radiance; for a linear path tracer it is
@@ -46,7 +67,10 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
         report.exact("film:exposure", f"imagingRatio={exposure_scale:.4g} baked into emitters")
 
     for i, shp in enumerate(scene.shapes):
-        _emit_shape(stage, f"{world}/shape_{i}", shp, report, scene, base_dir, exposure_scale)
+        _emit_shape(
+            stage, f"{world}/shape_{i}", shp, report, scene, base_dir, exposure_scale,
+            emit_mtlx=emit_mtlx, mtlx_materials=mtlx_materials, mtlx_refs=mtlx_refs,
+        )
 
     if scene.camera is not None:
         _emit_camera(stage, f"{world}/Camera", scene, report, base_dir)
@@ -67,6 +91,23 @@ def translate_scene(scene: PbrtScene, out: str | None = None, base_dir: str | No
     if scene.integrator is not None and scene.integrator[0] in ("sppm", "photonmap"):
         report.exact("integrator:sppm",
                      "mapped to skinny SPPM (wavefront, flat materials)")
+
+    # MaterialX sidecar: write the .mtlx document and author its references on
+    # the Material prims (downgrading the bound def-Materials to typeless overs)
+    # before exporting, so the reference specs are part of the exported layer.
+    if emit_mtlx and mtlx_materials:
+        from . import mtlx_emit
+
+        mtlx_out = os.path.splitext(out)[0] + ".mtlx"
+        mtlx_emit.write_mtlx_document(mtlx_materials, mtlx_out)
+        mtlx_asset = os.path.basename(mtlx_out)
+        for mat_path, sm_name in mtlx_refs:
+            mtlx_emit.author_mtlx_reference(stage, mat_path, mtlx_asset, sm_name)
+        report.exact(
+            "materialx:export",
+            f"wrote {os.path.basename(mtlx_out)} "
+            f"({len(mtlx_materials)} standard_surface material(s))",
+        )
 
     if out is not None:
         stage.GetRootLayer().Export(out)
@@ -137,7 +178,9 @@ def _film_exposure_scale(scene: PbrtScene) -> float:
 
 
 def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=None,
-                exposure_scale: float = 1.0) -> None:
+                exposure_scale: float = 1.0, *, emit_mtlx: bool = False,
+                mtlx_materials: dict | None = None,
+                mtlx_refs: list | None = None) -> None:
     geo = _shape_geometry(shp, report, base_dir)
     if geo is None:
         return
@@ -174,7 +217,9 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
     overrides = _resolve_medium(shp, scene, report, path)
     _author_material(stage, f"{path}_mat", shp.material, mesh, report,
                      emissive_rgb=emissive, extra_overrides=overrides,
-                     textures=scene.textures, base_dir=base_dir)
+                     textures=scene.textures, base_dir=base_dir,
+                     emit_mtlx=emit_mtlx, mtlx_materials=mtlx_materials,
+                     mtlx_refs=mtlx_refs)
 
 
 def _resolve_medium(shp: PbrtShape, scene: PbrtScene, report, path) -> dict | None:
@@ -191,7 +236,17 @@ def _resolve_medium(shp: PbrtShape, scene: PbrtScene, report, path) -> dict | No
 
 
 def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
-                     emissive_rgb=None, extra_overrides=None, textures=None, base_dir=None):
+                     emissive_rgb=None, extra_overrides=None, textures=None, base_dir=None,
+                     *, emit_mtlx: bool = False, mtlx_materials: dict | None = None,
+                     mtlx_refs: list | None = None):
+    if emit_mtlx:
+        _author_material_mtlx(
+            stage, mat_path, pbrt_material, mesh_prim, report,
+            emissive_rgb=emissive_rgb, extra_overrides=extra_overrides,
+            textures=textures, base_dir=base_dir,
+            mtlx_materials=mtlx_materials, mtlx_refs=mtlx_refs,
+        )
+        return
     inputs, tex_inputs, status, notes = materials_mod.map_material(
         pbrt_material, emissive_rgb=emissive_rgb, textures=textures, base_dir=base_dir
     )
@@ -218,6 +273,49 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     meta_mod.tag_prim(mat.GetPrim(), meta_mod.material_metadata(pbrt_material))
     UsdShade.MaterialBindingAPI.Apply(mesh_prim.GetPrim())
     UsdShade.MaterialBindingAPI(mesh_prim.GetPrim()).Bind(mat)
+    mtype = pbrt_material.type if pbrt_material else "diffuse"
+    detail = "; ".join(notes)
+    report.add(f"material:{mtype} {mat_path}", status, detail)
+    if tex_inputs:
+        report.exact(f"textures {mat_path}", ", ".join(tex_inputs))
+
+
+def _author_material_mtlx(stage, mat_path, pbrt_material, mesh_prim, report,
+                          emissive_rgb=None, extra_overrides=None, textures=None,
+                          base_dir=None, mtlx_materials=None, mtlx_refs=None):
+    """Author a Material bound to a sidecar ``.mtlx`` standard_surface.
+
+    Mirrors :func:`_author_material` but maps the pbrt material to the richer
+    ``standard_surface`` slots (:func:`materials.map_material_mtlx`), binds the
+    mesh, and records the standard_surface package + ``(prim_path, sm_name)``
+    pair for :func:`mtlx_emit.write_mtlx_document` /
+    :func:`mtlx_emit.author_mtlx_reference` (called once, after the stage is
+    built). Crucially it authors **no** UsdPreviewSurface shader on the prim —
+    per the loader contract the prim is later downgraded to a typeless ``over``
+    so the ``.mtlx`` fallback fires regardless of the usdMtlx plugin.
+    """
+    inputs, tex_inputs, status, notes = materials_mod.map_material_mtlx(
+        pbrt_material, emissive_rgb=emissive_rgb, textures=textures, base_dir=base_dir
+    )
+    overrides = dict(extra_overrides or {})
+    if pbrt_material is not None and pbrt_material.type == "subsurface":
+        overrides.update(media_mod.subsurface_overrides(pbrt_material.params))
+
+    mat = UsdShade.Material.Define(stage, mat_path)
+    # No UsdPreviewSurface shader, no surface output: ComputeBoundMaterial must
+    # not resolve a shader on this prim (so the .mtlx fallback fires).
+    if overrides:
+        mat.GetPrim().SetCustomDataByKey("skinnyOverrides", overrides)
+    meta_mod.tag_prim(mat.GetPrim(), meta_mod.material_metadata(pbrt_material))
+    UsdShade.MaterialBindingAPI.Apply(mesh_prim.GetPrim())
+    UsdShade.MaterialBindingAPI(mesh_prim.GetPrim()).Bind(mat)
+
+    sm_name = Sdf.Path(mat_path).name
+    if mtlx_materials is not None:
+        mtlx_materials[sm_name] = {"inputs": inputs, "tex_inputs": tex_inputs}
+    if mtlx_refs is not None:
+        mtlx_refs.append((mat_path, sm_name))
+
     mtype = pbrt_material.type if pbrt_material else "diffuse"
     detail = "; ".join(notes)
     report.add(f"material:{mtype} {mat_path}", status, detail)

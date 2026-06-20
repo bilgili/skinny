@@ -196,6 +196,207 @@ def _conductor_basecolor(params, notes: list[str]):
     return list(spectra.named_metal_reflectance_rgb("copper"))
 
 
+def _resolve_roughness_mtlx(params, notes: list[str], *, textures=None, base_dir=None):
+    """Resolve roughness for a standard_surface target.
+
+    Returns ``(roughness_pv, anisotropy)``:
+
+    * ``roughness_pv`` is a :class:`ParamValue` carrying the constant
+      ``specular_roughness`` (and an optional texture connection), calibrated
+      through the *exact same* chain as :func:`map_material`
+      (``pbrt_roughness_to_alpha`` → ``alpha_to_usd_roughness``).
+    * ``anisotropy`` is a ``specular_anisotropy`` in ``(-1, 1)`` derived from
+      ``uroughness``/``vroughness``; ``0.0`` when isotropic.
+
+    Unlike the UsdPreviewSurface path this does **not** collapse anisotropic
+    roughness to the isotropic geometric mean — standard_surface has a dedicated
+    ``specular_anisotropy`` slot, so the two axes are represented faithfully.
+    """
+    remap = params.bool("remaproughness", True)
+    rough = get_float_texture(params, "roughness", 0.0, textures=textures, base_dir=base_dir, notes=notes)
+    urough = get_float_texture(params, "uroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
+    vrough = get_float_texture(params, "vroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
+    tex = rough.tex or urough.tex or vrough.tex
+    if tex is not None:
+        notes.append(
+            "roughness texture connected; perceptual remap not applied to texture (approx)"
+        )
+        return ParamValue(0.5, tex), 0.0
+    if "uroughness" in params or "vroughness" in params:
+        ru = alpha_to_usd_roughness(pbrt_roughness_to_alpha(urough.const, remap))
+        rv = alpha_to_usd_roughness(pbrt_roughness_to_alpha(vrough.const, remap))
+        # standard_surface: specular_roughness is the mean perceptual roughness,
+        # specular_anisotropy in [0,1) encodes the axis ratio (0 == isotropic).
+        spec_rough = 0.5 * (ru + rv)
+        hi, lo = max(ru, rv), min(ru, rv)
+        anisotropy = 0.0 if hi <= 1e-8 else (1.0 - lo / hi)
+        return ParamValue(spec_rough), anisotropy
+    alpha = pbrt_roughness_to_alpha(rough.const, remap)
+    return ParamValue(alpha_to_usd_roughness(alpha)), 0.0
+
+
+def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None):
+    """Map a pbrt material to Autodesk ``standard_surface`` inputs.
+
+    Sibling of :func:`map_material`. Where ``map_material`` targets the
+    UsdPreviewSurface subset (base_color/roughness/metallic/opacity/ior),
+    this fills the richer ``standard_surface`` slots that
+    ``pack_std_surface_params`` / ``_STD_SURFACE_TO_FLAT`` /
+    ``_load_mtlx_materials`` read — ``transmission``/``transmission_color``,
+    ``coat``/``coat_color``/``coat_IOR``, ``subsurface``/``subsurface_color``/
+    ``subsurface_radius``, ``specular_anisotropy``, ``thin_walled`` — so the
+    exported ``.mtlx`` carries pbrt values UsdPreviewSurface drops.
+
+    Returns ``(inputs, tex_inputs, status, notes)`` with the **same shape** as
+    :func:`map_material`: ``inputs`` are constant standard_surface inputs,
+    ``tex_inputs`` maps a standard_surface input name to
+    ``(image_path, color_space, value_type)`` (``value_type`` in
+    {"color3f","float"}), ``status`` is one of report.EXACT/APPROX/SKIPPED.
+
+    The roughness calibration chain is bit-for-bit identical to
+    :func:`map_material` (``pbrt_roughness_to_alpha`` → ``alpha_to_usd_roughness``)
+    so ``-mtlx`` and the UsdPreviewSurface export agree on roughness; anisotropic
+    ``uroughness``/``vroughness`` map to ``specular_roughness`` +
+    ``specular_anisotropy`` instead of collapsing to the geometric mean.
+    """
+    from .report import APPROX, EXACT
+
+    notes: list[str] = []
+    inputs: dict = {
+        "base_color": [0.5, 0.5, 0.5],
+        "metalness": 0.0,
+        "specular_roughness": 0.5,
+    }
+    tex_inputs: dict = {}
+    status = EXACT
+    mtype = pbrt_material.type if pbrt_material else "diffuse"
+    p = pbrt_material.params if pbrt_material else ParamSet()
+
+    def put(std_in, pv):
+        """Apply a ParamValue: constant input + optional texture connection.
+
+        ``value_type`` follows the constant's kind (rgb -> color3f, scalar ->
+        float) so the connection matches map_material's tex_inputs shape.
+        """
+        inputs[std_in] = pv.const
+        if pv.is_tex:
+            path, color_space = pv.tex
+            value_type = "color3f" if isinstance(pv.const, (list, tuple)) else "float"
+            tex_inputs[std_in] = (path, color_space, value_type)
+
+    def reflectance(default):
+        return get_spectrum_texture(
+            p, "reflectance", default, textures=textures, base_dir=base_dir, notes=notes
+        )
+
+    def roughness():
+        return _resolve_roughness_mtlx(p, notes, textures=textures, base_dir=base_dir)
+
+    def scalar(name, default):
+        # standard_surface has no texture input for these (specular_IOR /
+        # coat_IOR); a texture binding degrades to the scalar default with a note.
+        pv = get_float_texture(p, name, default, textures=textures, base_dir=base_dir, notes=notes)
+        if pv.is_tex:
+            notes.append(f"{name} texture not supported on standard_surface input; used scalar default")
+        return pv.const
+
+    if mtype in ("", "none"):
+        inputs["base_color"] = [0.5, 0.5, 0.5]
+    elif mtype == "diffuse":
+        put("base_color", reflectance([0.5, 0.5, 0.5]))
+        inputs["specular_roughness"] = 1.0
+    elif mtype == "conductor":
+        inputs["metalness"] = 1.0
+        base = _conductor_basecolor(p, notes)
+        put("base_color", reflectance(base))
+        rv, aniso = roughness()
+        put("specular_roughness", rv)
+        if aniso != 0.0:
+            inputs["specular_anisotropy"] = aniso
+        # conductors carry a specular tint matching the base reflectance
+        inputs["specular_color"] = list(base)
+    elif mtype in ("dielectric", "thindielectric"):
+        inputs["base_color"] = [1.0, 1.0, 1.0]
+        inputs["transmission"] = 1.0
+        inputs["transmission_color"] = [1.0, 1.0, 1.0]
+        inputs["specular_IOR"] = scalar("eta", 1.5)
+        rv, aniso = roughness()
+        put("specular_roughness", rv)
+        if aniso != 0.0:
+            inputs["specular_anisotropy"] = aniso
+        if mtype == "thindielectric":
+            inputs["thin_walled"] = True
+            status = APPROX
+            notes.append("thindielectric approximated as thin-walled transmissive surface")
+    elif mtype == "coateddiffuse":
+        put("base_color", reflectance([0.5, 0.5, 0.5]))
+        inputs["specular_roughness"] = 1.0
+        inputs["coat"] = 1.0
+        inputs["coat_color"] = [1.0, 1.0, 1.0]
+        inputs["coat_IOR"] = scalar("interface.eta", 1.5)
+        # interface.roughness is the coat's own roughness slot, distinct from base
+        inputs["coat_roughness"] = scalar("interface.roughness", 0.0)
+    elif mtype == "coatedconductor":
+        inputs["metalness"] = 1.0
+        base = _conductor_basecolor(p, notes)
+        put("base_color", reflectance(base))
+        inputs["specular_color"] = list(base)
+        # conductor.roughness drives the metal base; interface.* drive the coat
+        rv = get_float_texture(p, "conductor.roughness", 0.0, textures=textures, base_dir=base_dir, notes=notes)
+        if rv.is_tex:
+            put("specular_roughness", ParamValue(0.5, rv.tex))
+            notes.append("roughness texture connected; perceptual remap not applied to texture (approx)")
+        else:
+            remap = p.bool("remaproughness", True)
+            inputs["specular_roughness"] = alpha_to_usd_roughness(
+                pbrt_roughness_to_alpha(rv.const, remap)
+            )
+        inputs["coat"] = 1.0
+        inputs["coat_color"] = [1.0, 1.0, 1.0]
+        inputs["coat_IOR"] = scalar("interface.eta", 1.5)
+        inputs["coat_roughness"] = scalar("interface.roughness", 0.0)
+    elif mtype == "diffusetransmission":
+        put("base_color", reflectance([0.25, 0.25, 0.25]))
+        inputs["transmission"] = 0.5
+        rt = get_spectrum_texture(
+            p, "transmittance", [0.25, 0.25, 0.25], textures=textures, base_dir=base_dir, notes=notes
+        )
+        inputs["transmission_color"] = rt.const
+        status = APPROX
+        notes.append("diffusetransmission approximated as base + partial transmission")
+    elif mtype == "subsurface":
+        inputs["base_color"] = [1.0, 1.0, 1.0]
+        inputs["subsurface"] = 1.0
+        inputs["specular_IOR"] = scalar("eta", 1.33)
+        ss = get_spectrum_texture(
+            p, "reflectance", [1.0, 1.0, 1.0], textures=textures, base_dir=base_dir, notes=notes
+        )
+        inputs["subsurface_color"] = ss.const
+        radius = p.rgb("radius", [1.0, 1.0, 1.0])
+        inputs["subsurface_radius"] = list(radius)
+        status = APPROX
+        notes.append("subsurface -> standard_surface subsurface (radius/color approximation)")
+    else:
+        status = APPROX
+        notes.append(f"unknown material '{mtype}' best-effort as diffuse grey")
+
+    if emissive_rgb is not None:
+        # standard_surface emission is weight(scalar) x emission_color; the
+        # round-trip (_load_mtlx_materials) recovers emissiveColor = emission *
+        # emission_color and ONLY when emission > 0. Author the unit weight too,
+        # else an area-light material's radiance is dropped and the scene renders
+        # black (emission_color alone never round-trips).
+        inputs["emission"] = 1.0
+        inputs["emission_color"] = list(emissive_rgb)
+
+    # an unresolved/unsupported texture binding degrades to its scalar/rgb default
+    # (handled in the accessors) -> surface as APPROX.
+    if status == EXACT and any("unresolved/unsupported" in n for n in notes):
+        status = APPROX
+
+    return inputs, tex_inputs, status, notes
+
+
 def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None):
     """Map a pbrt material to UsdPreviewSurface inputs.
 

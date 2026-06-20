@@ -332,6 +332,23 @@ parity against pbrt v4 is validated by a relMSE/FLIP gate over a checked-in
 corpus. See [PbrtImport.md](docs/PbrtImport.md) for the full feature/parity
 matrix.
 
+Pass `-mtlx` / `--materialx` to additionally write a portable MaterialX sidecar
+(`scene.mtlx`, referenced from the stage) carrying the materials as
+`standard_surface` networks:
+
+```bash
+skinny-import-pbrt scene.pbrt -o scene.usda -mtlx
+```
+
+The sidecar makes the export MaterialX-native for other MaterialX-aware tools and
+captures the richer pbrt parameters (`transmission`/`transmission_color`,
+separate `coat`/`coat_IOR`, `subsurface_radius`, `specular_anisotropy` from
+`uroughness`/`vroughness`, `thin_walled`) that UsdPreviewSurface cannot express.
+The skinny render is unchanged today — the production integrators consume the
+`FlatMaterial` subset of either export, so `-mtlx` and the UsdPreviewSurface
+output are pixel-identical for now; the richer slots are carried so a future
+unified-lobe extension can read them.
+
 ### Mesh heads (legacy)
 
 Place `.obj` files (with optional normal/roughness/displacement maps) in

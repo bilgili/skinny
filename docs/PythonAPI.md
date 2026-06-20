@@ -34,10 +34,21 @@ The top-level `skinny` package defines no `__all__`; import submodules directly
 
 ### `skinny.pbrt` — pbrt v4 importer
 
-`import_pbrt(path, out=None) -> (Usd.Stage, Report)` parses a pbrt v4 scene and
-emits a USD stage loadable by `usd_loader`; `out` also writes a `.usda`/`.usd`.
-The returned `Report` classifies each construct as exact / approx / skipped. See
-[PbrtImport.md](PbrtImport.md) for the full mapping and the parity matrix.
+`import_pbrt(path, out=None, materialx=False) -> (Usd.Stage, Report)` parses a
+pbrt v4 scene and emits a USD stage loadable by `usd_loader`; `out` also writes a
+`.usda`/`.usd`. With `materialx=True` it additionally writes a `<out>.mtlx`
+sidecar of `standard_surface` materials (referenced from the stage; the
+`skinny-import-pbrt -mtlx` flag). The returned `Report` classifies each construct
+as exact / approx / skipped. See [PbrtImport.md](PbrtImport.md) for the full
+mapping and the parity matrix.
+
+`skinny.pbrt.materials.map_material_mtlx(pbrt_material, *, emissive_rgb=None,
+textures=None, base_dir=None) -> (inputs, tex_inputs, status, notes)` is the
+sibling of `map_material` that targets Autodesk `standard_surface` input names
+(filling `transmission`/`coat`/`subsurface`/`specular_anisotropy`/`thin_walled`
+that UsdPreviewSurface drops). `skinny.pbrt.mtlx_emit.write_mtlx_document(...)` /
+`author_mtlx_reference(...)` author the `.mtlx` document and the stage reference
+the loader resolves.
 
 ---
 

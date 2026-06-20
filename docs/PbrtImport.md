@@ -119,6 +119,31 @@ are emitted as follows:
   `trianglemesh`/`plymesh` gets pbrt's per-triangle `faceVarying`
   `{(0,0),(1,0),(1,1)}`. Untextured UV-less meshes stay UV-free.
 
+## MaterialX sidecar export (`-mtlx`)
+
+`skinny-import-pbrt … -mtlx` writes, alongside the `.usda`, a portable MaterialX
+sidecar (`<out>.mtlx`) of `standard_surface` materials referenced from the stage
+(`materials.map_material_mtlx` + `mtlx_emit`). It targets the richer
+`standard_surface` slots UsdPreviewSurface cannot express —
+`transmission`/`transmission_color`, separate `coat`/`coat_color`/`coat_IOR`,
+`subsurface_radius`, `specular_anisotropy` from `uroughness`/`vroughness`,
+`thin_walled` — and the loader recovers them via `_load_mtlx_materials` (the
+usdMtlx-plugin-absent fallback) or `_extract_material('mtlx')` (plugin present).
+
+This is **interop + Stage-2-enabling, not a current in-skinny fidelity change**:
+the production integrators consume the `FlatMaterial` subset of either export, so
+`-mtlx` and the UsdPreviewSurface output render pixel-identically today (verified
+on `glass_arealight`: relMSE 0.0215 / FLIP 0.0270 vs pbrt for both, and 0.000000
+between them). The richer parameters are carried so a future unified-lobe
+extension can read them — see the change's `design.md` for the Stage-2 roadmap
+and the `flat-bsdf-lobes` (preview-only `evalStdSurfaceBSDF`) constraint.
+
+> **Area-light emission gotcha.** `standard_surface` emission is
+> `emission`(weight) × `emission_color`, and the round-trip recovers
+> `emissiveColor` **only when `emission` > 0**. The exporter authors the unit
+> weight, not `emission_color` alone — omitting it drops every area light and the
+> scene renders black.
+
 End-to-end GPU sampling is gated by the `texture_quad` corpus scene (a UV-mapped
 quad with a gradient imagemap diffuse), which catches any UV flip/mirror/swap.
 
