@@ -130,14 +130,25 @@ sidecar (`<out>.mtlx`) of `standard_surface` materials referenced from the stage
 `thin_walled` — and the loader recovers them via `_load_mtlx_materials` (the
 usdMtlx-plugin-absent fallback) or `_extract_material('mtlx')` (plugin present).
 
-This is **interop + Stage-2-enabling, not a current in-skinny fidelity change**:
-the production integrators consume the `FlatMaterial` subset of either export, so
-for **diffuse / conductor / dielectric** materials `-mtlx` and the
-UsdPreviewSurface output render pixel-identically today (verified on
+For **diffuse / conductor / dielectric** materials `-mtlx` and the
+UsdPreviewSurface output still render pixel-identically (verified on
 `glass_arealight`: relMSE 0.0215 / FLIP 0.0270 vs pbrt for both, and 0.000000
-between them). The richer parameters are carried so a future unified-lobe
-extension can read them — see the change's `design.md` for the Stage-2 roadmap
-and the `flat-bsdf-lobes` (preview-only `evalStdSurfaceBSDF`) constraint.
+between them) — the production integrators consume the `FlatMaterial` subset of
+either export.
+
+**Stage-2 Tier A (change `flat-lobes-rich-inputs`) closes the first slice of the
+gap:** `transmission_color`, `specular_color`, and `diffuse_roughness` are no
+longer inert. The unified flat / `standard_surface` lobe BSDF now reads them
+directly (the export's richer slots feed the existing `{coat, spec, diffuse,
+delta-transmission}` lobe set — still **without** the preview-only
+`evalStdSurfaceBSDF`), so **colored glass** (tinted transmission) and **tinted
+speculars** now actually render through the flat path, and `diffuse_roughness`
+drives an Oren-Nayar diffuse. See [Architecture.md → Flat Material
+BSDF](Architecture.md#flat-material-bsdf-materialsflatflat_materialslang--flat_lobesslang).
+The remainder of Stage-2 — `specular_anisotropy`, the rough-glass BTDF (rough
+transmission with MIS), and `subsurface`/`subsurface_radius` — stays future
+work; see the change's `design.md` for the Stage-2 roadmap and the
+`flat-bsdf-lobes` (preview-only `evalStdSurfaceBSDF`) constraint.
 
 > **`subsurface` and `coated*` `-mtlx` round-trip** (change
 > `pbrt-mtlx-roundtrip-fix`). UsdPreviewSurface maps `subsurface` to an

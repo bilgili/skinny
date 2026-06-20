@@ -62,16 +62,25 @@ struct FlatMaterialParams
     // _CHANNEL_SHIFT diffuse(0)/roughness(4)/metallic(8)/opacity(12)/emissive(16)).
     float4 _normalScaleChannelMask;   // 96..112 xyz=normalScale, w=channelMask
     float4 _normalBiasPad;            // 112..128 xyz=normalBias, w=_pad0
+    // Stage-2 rich inputs (flat-lobes-rich-inputs). float4-wrapped so the MSL
+    // and SPIR-V layouts stay byte-identical (no Metal repack). Defaults
+    // reproduce the prior behavior: transmissionColor falls back to diffuseColor
+    // in the packer, specularColor = white, diffuseRoughness = 0 ⇒ Lambert.
+    float4 _transmissionColorDiffuseRough; // 128..144 xyz=transmissionColor, w=diffuseRoughness
+    float4 _specularColorPad;              // 144..160 xyz=specularColor, w=_pad1
 
-    property float3 diffuseColor     { get { return _diffuseColorRoughness.xyz; } }
-    property float  roughness        { get { return _diffuseColorRoughness.w; } }
-    property float3 emissiveColor    { get { return _emissiveColorIor.xyz; } }
-    property float  ior              { get { return _emissiveColorIor.w; } }
-    property float3 coatColor        { get { return _coatColorOpacityThreshold.xyz; } }
-    property float  opacityThreshold { get { return _coatColorOpacityThreshold.w; } }
-    property float3 normalScale      { get { return _normalScaleChannelMask.xyz; } }
-    property uint   channelMask      { get { return asuint(_normalScaleChannelMask.w); } }
-    property float3 normalBias       { get { return _normalBiasPad.xyz; } }
+    property float3 diffuseColor      { get { return _diffuseColorRoughness.xyz; } }
+    property float  roughness         { get { return _diffuseColorRoughness.w; } }
+    property float3 emissiveColor     { get { return _emissiveColorIor.xyz; } }
+    property float  ior               { get { return _emissiveColorIor.w; } }
+    property float3 coatColor         { get { return _coatColorOpacityThreshold.xyz; } }
+    property float  opacityThreshold  { get { return _coatColorOpacityThreshold.w; } }
+    property float3 normalScale       { get { return _normalScaleChannelMask.xyz; } }
+    property uint   channelMask       { get { return asuint(_normalScaleChannelMask.w); } }
+    property float3 normalBias        { get { return _normalBiasPad.xyz; } }
+    property float3 transmissionColor { get { return _transmissionColorDiffuseRough.xyz; } }
+    property float  diffuseRoughness  { get { return _transmissionColorDiffuseRough.w; } }
+    property float3 specularColor     { get { return _specularColorPad.xyz; } }
 };
 
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang

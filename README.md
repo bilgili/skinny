@@ -62,7 +62,13 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
   `standard_surface`, or `OpenPBR` render alongside skin materials in the same
   scene, with opacity / refraction, clear coat, and cutout-vs-alpha-blend
   masking. UsdPreviewSurface textures honour per-input channel selection,
-  normal-map scale/bias (OpenGL vs DirectX Y), and wrap modes
+  normal-map scale/bias (OpenGL vs DirectX Y), and wrap modes. The flat path now
+  also consumes the richer `standard_surface` inputs **colored glass**
+  (`transmission_color` tints the refracted delta-transmission branch),
+  **tinted speculars** (`specular_color` scales the GGX spec response), and
+  **Oren-Nayar diffuse** (`diffuse_roughness` drives a rough-diffuse response,
+  `0` ⇒ exact Lambert) — all weight/response-only, so absent inputs reproduce the
+  prior render exactly
 - **Python-authored materials** -- SlangPile `python_materials/*.py` compile to
   GPU `IMaterial` structs, dispatched as material type 3; editable live in the
   Qt material editor
@@ -344,10 +350,13 @@ The sidecar makes the export MaterialX-native for other MaterialX-aware tools an
 captures the richer pbrt parameters (`transmission`/`transmission_color`,
 separate `coat`/`coat_IOR`, `subsurface_radius`, `specular_anisotropy` from
 `uroughness`/`vroughness`, `thin_walled`) that UsdPreviewSurface cannot express.
-The skinny render is unchanged today — the production integrators consume the
-`FlatMaterial` subset of either export, so `-mtlx` and the UsdPreviewSurface
-output are pixel-identical for now; the richer slots are carried so a future
-unified-lobe extension can read them.
+The production integrators consume the `FlatMaterial` subset of either export, so
+for diffuse / conductor / dielectric materials `-mtlx` and the UsdPreviewSurface
+output stay pixel-identical. The flat path now also reads
+`transmission_color` (colored glass), `specular_color` (tinted speculars), and
+`diffuse_roughness` (Oren-Nayar diffuse) from these richer slots, so those
+inputs render rather than being dropped (Stage-2 Tier A); `specular_anisotropy`,
+rough-glass transmission, and `subsurface` remain future work.
 
 ### Mesh heads (legacy)
 

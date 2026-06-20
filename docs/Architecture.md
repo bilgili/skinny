@@ -255,10 +255,28 @@ dispatch); `flat_material.slang` assembles it. BSDF layers:
 - Opacity / refraction (Fresnel-weighted reflect/refract split; delta lobe).
   Cutout vs alpha-blend opacity are split: cutout discards below
   `opacityThreshold`, alpha-blend attenuates — matching UsdPreviewSurface
-  semantics
+  semantics. The refracted (delta-transmission) branch tints throughput by
+  **`transmissionColor`** (colored smooth glass) rather than the base albedo;
+  it stays a delta event (`pdf = 0`), so there is no MIS/Jacobian change
 - Clear coat (GGX VNDF, coat-color tinting)
 - Specular / diffuse MIS split (Schlick F0, luminance-weighted probability) —
-  GGX specular uses VNDF sampling (`samplers/ggx.slang`), diffuse is Lambert
+  GGX specular uses VNDF sampling (`samplers/ggx.slang`), diffuse is Oren-Nayar
+  (Lambert when `diffuseRoughness = 0`). The GGX spec response is multiplied by
+  **`specularColor`** (a response-only tint; pdf unchanged, white ⇒ no change),
+  and the diffuse lobe scales its Lambert response by an Oren-Nayar factor
+  (`orenNayarFactor` in `flat_lobes.slang`) driven by **`diffuseRoughness`**.
+  The Oren-Nayar term modifies the *response only* — sampling stays cosine, so
+  the diffuse pdf (and hence `sample().pdf == evaluate().pdf`) is unchanged.
+  These three `standard_surface` inputs were previously dead; consuming them
+  fills the existing `{coat, spec, diffuse, delta-transmission}` lobe set
+  **without** adding a lobe and **without** calling `evalStdSurfaceBSDF` (still
+  preview-only). They are packed into `FlatMaterialParams` (binding 13) with
+  back-compat fallbacks in `pack_flat_material` — `transmission_color ←
+  diffuseColor`, `specular_color ← white`, `diffuse_roughness ← 0` — so an
+  absent input reproduces the prior behavior exactly (pbrt parity corpus and
+  existing UsdPreviewSurface renders are byte-unchanged). The flat-bsdf-lobes
+  invariants (single pdf, bounded weight, no clamp, unbiased mixture) hold by
+  construction since the changes are weight/response-only
 - **Per-lobe runtime-pluggable sampler seam** — each lobe resolves a sampler id
   to a draw/density strategy, defaulting to native (2023 spherical-cap VNDF for
   coat/spec, cosine for diffuse). The host registry (`sampling/lobe_samplers.py`)
@@ -852,7 +870,7 @@ incrementally moved over.
 | 10 | Sampler2D | Roughness detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 11 | Sampler2D | Displacement detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 12 | StructuredBuffer | TLAS instances (144 B each) | `mesh_head.slang` |
-| 13 | StructuredBuffer | FlatMaterialParams (128 B each, scalar layout) | `bindings.slang` |
+| 13 | StructuredBuffer | FlatMaterialParams (160 B each, scalar layout — `transmissionColor`@128, `diffuseRoughness`@140, `specularColor`@144 appended as two float4s for the Stage-2 rich-input lobes) | `bindings.slang` |
 | 14 | Sampler2D[128] | Bindless material textures (PARTIALLY_BOUND) | `bindings.slang` |
 | 15 | StructuredBuffer | MtlxSkinParams (164 B each, scalar layout) | `materials/skin/skin_shading.slang` |
 | 16 | StructuredBuffer | Material type code + scatter + furnace + graph slot + python id (uint32 each) | `bindings.slang` |

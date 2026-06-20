@@ -876,12 +876,18 @@ def _load_mtlx_materials(
                     )
 
             transmission = overrides.pop("transmission", None)
-            transmission_color = overrides.pop("transmission_color", None)
             if isinstance(transmission, (int, float)) and float(transmission) > 0:
                 overrides["opacity"] = max(0.0, 1.0 - float(transmission))
-                if isinstance(transmission_color, tuple) and len(transmission_color) >= 3:
-                    overrides["diffuseColor"] = transmission_color[:3]
-                elif overrides.get("diffuseColor") == (0.0, 0.0, 0.0):
+                # Stage-2 (flat-lobes-rich-inputs): keep transmission_color as a
+                # first-class override. pack_flat_material reads it into
+                # FlatHitMat.transmissionColor and the delta-transmission lobe
+                # tints by it — so it is NO LONGER folded into diffuseColor. The
+                # diffuse albedo stays decoupled from the transmission tint; a
+                # transmissive dielectric with no authored base color defaults to
+                # white so its reflection lobe is neutral. (White glass —
+                # transmission_color = (1,1,1) — stays byte-identical, since
+                # transmissionColor then equals the white albedo as before.)
+                if overrides.get("diffuseColor") in (None, (0.0, 0.0, 0.0)):
                     overrides["diffuseColor"] = (1.0, 1.0, 1.0)
 
             # Subsurface boundary: open the flat refraction gate, mirroring the

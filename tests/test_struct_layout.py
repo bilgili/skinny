@@ -23,7 +23,7 @@ class TestPythonPackingSizes:
     def test_flat_material_stride(self):
         from skinny.renderer import FLAT_MATERIAL_STRIDE
 
-        assert FLAT_MATERIAL_STRIDE == 128
+        assert FLAT_MATERIAL_STRIDE == 160
 
     def test_flat_material_pack_size(self):
         from skinny.renderer import pack_flat_material
@@ -31,7 +31,7 @@ class TestPythonPackingSizes:
 
         material = SimpleNamespace(parameter_overrides={})
         data = pack_flat_material(material)
-        assert len(data) == 128
+        assert len(data) == 160
 
     def test_openpbr_names_map_to_std_surface(self):
         """OpenPBR shader-input names (`transmission_weight`, `base_metalness`,
@@ -114,7 +114,7 @@ class TestPythonPackingSizes:
             channel_mask=channel_mask,
         )
 
-        assert len(data) == 128
+        assert len(data) == 160
         # opacityTextureIdx at byte 76 (uint)
         assert struct.unpack_from("I", data, 76)[0] == 7
         # opacityThreshold at byte 92 (float)
@@ -122,6 +122,37 @@ class TestPythonPackingSizes:
         # channelMask at byte 108 (uint); opacity slot is bits 12..16
         mask = struct.unpack_from("I", data, 108)[0]
         assert ((mask >> 12) & 0xF) == 4  # "a" code
+
+    def test_flat_material_rich_inputs_packing(self):
+        """Stage-2 rich inputs (flat-lobes-rich-inputs): transmissionColor@128,
+        diffuseRoughness@140, specularColor@144 — and the back-compat defaults
+        (transmissionColor ← diffuseColor, specularColor = white,
+        diffuseRoughness = 0) when the overrides are absent.
+        """
+        from types import SimpleNamespace
+        from skinny.renderer import pack_flat_material
+
+        # Explicit rich inputs land at the documented offsets.
+        material = SimpleNamespace(
+            parameter_overrides={
+                "diffuseColor": (0.1, 0.2, 0.3),
+                "transmission_color": (0.4, 0.5, 0.6),
+                "diffuse_roughness": 0.7,
+                "specular_color": (0.8, 0.9, 1.0),
+            }
+        )
+        data = pack_flat_material(material)
+        assert struct.unpack_from("fff", data, 128) == pytest.approx((0.4, 0.5, 0.6))
+        assert struct.unpack_from("f", data, 140)[0] == pytest.approx(0.7)
+        assert struct.unpack_from("fff", data, 144) == pytest.approx((0.8, 0.9, 1.0))
+
+        # Defaults: transmissionColor falls back to diffuseColor, specularColor
+        # is white, diffuseRoughness is 0 — so existing renders are unchanged.
+        bare = SimpleNamespace(parameter_overrides={"diffuseColor": (0.1, 0.2, 0.3)})
+        d2 = pack_flat_material(bare)
+        assert struct.unpack_from("fff", d2, 128) == pytest.approx((0.1, 0.2, 0.3))
+        assert struct.unpack_from("f", d2, 140)[0] == pytest.approx(0.0)
+        assert struct.unpack_from("fff", d2, 144) == pytest.approx((1.0, 1.0, 1.0))
 
 
 @pytest.mark.gpu

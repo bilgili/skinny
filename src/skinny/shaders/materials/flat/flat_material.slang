@@ -53,7 +53,12 @@ struct FlatMaterial : IMaterial
                 }
 
                 s.wi          = newDir;
-                s.weight      = m.albedo;
+                // Stage-2 colored glass: tint the delta-refracted throughput by
+                // transmissionColor instead of albedo. Stays a delta event
+                // (pdf = 0) — no MIS / hemisphere / Jacobian change. Back-compat:
+                // transmissionColor falls back to albedo when transmission_color
+                // is absent, so achromatic glass is byte-unchanged.
+                s.weight      = m.transmissionColor;
                 s.pdf         = 0.0;
                 s.valid       = true;
                 s.transmitted = newDir.z < 0.0;
@@ -132,7 +137,9 @@ struct FlatMaterial : IMaterial
             // ~1e16 throughput over six bounces).
             float3 F = schlickFresnelColor(VdotH, F0);
             float  G1L = ggxSmithG1(NdotL, roughness);
-            float3 specWeight = F * G1L;
+            // specularColor tints the spec response (pdf unchanged; white ⇒ no
+            // change). Bounded since specularColor ∈ [0,1].
+            float3 specWeight = F * G1L * m.specularColor;
             if (all(specWeight == float3(0.0)))
                 return s;
             bounceWeight = specWeight / pSpec;
@@ -144,11 +151,15 @@ struct FlatMaterial : IMaterial
             float3 Fview   = schlickFresnelColor(NdotV, F0);
             float3 diffHue = m.albedo * (float3(1.0) - Fview)
                            * (1.0 - m.metallic);
+            // Oren-Nayar response factor (= 1 when diffuseRoughness = 0 ⇒ exact
+            // Lambert). Response-only: cosine sampling is kept, so the diffuse
+            // pdf is unchanged and matches flatBsdfResponse's ON factor.
+            float on = orenNayarFactor(wo, wi, m.diffuseRoughness);
             // Cosine sampling importance-samples cos so it cancels
             // (weight = diffHue); uniform-hemisphere does not, leaving
             // f·cos/pdf = 2·NdotL·diffHue — still bounded (≤ 2·diffHue).
             float diffScale = (diffSId == FLAT_SAMPLER_UNIFORM) ? (2.0 * wi.z) : 1.0;
-            bounceWeight = diffScale * diffHue / max(1.0 - pSpec, 1e-6);
+            bounceWeight = diffScale * on * diffHue / max(1.0 - pSpec, 1e-6);
         }
 
         s.wi     = wi;
