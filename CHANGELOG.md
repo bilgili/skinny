@@ -19,11 +19,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the `FlatMaterial` subset of either export, so for **diffuse / conductor /
   dielectric** the `-mtlx` and UsdPreviewSurface renders are pixel-identical
   (`glass_arealight` relMSE 0.0215 vs pbrt for both, 0.000000 between them).
-  **Known limitation:** `subsurface` and `coateddiffuse`/`coatedconductor` do not
-  yet round-trip equivalently — the `.mtlx` fallback loader drops the
-  `subsurface→opacity` boundary, the `skinnyOverrides` SSS interior, and the
-  `coat`/`clearcoat` key bridge, so those materials render differently under
-  `-mtlx` (a follow-up will close the round-trip).
+
+- **pbrt importer: `subsurface` + `coated*` `-mtlx` round-trip** (change
+  `pbrt-mtlx-roundtrip-fix`) — closes the limitation flagged when `-mtlx` shipped.
+  The `.mtlx` fallback loader (`_load_mtlx_materials`) now bridges
+  `subsurface → opacity = 0` (the transmissive boundary, alongside the existing
+  `transmission`/`emission` bridges); `_resolve_material_binding` merges the bound
+  prim's `skinnyOverrides` customData (the homogeneous SSS interior) into the
+  loaded `Material`; the loader canonicalizes UsdPreviewSurface
+  `clearcoat`/`clearcoatRoughness` onto the `coat`/`coat_roughness` slots the
+  `FlatMaterial` packer reads (fixing a silent coat drop on the UsdPreviewSurface
+  path too); and `map_material_mtlx` `coateddiffuse` now reads the coat roughness
+  from pbrt `roughness` (mirroring `map_material`) instead of a non-existent
+  `interface.roughness`. The `-mtlx` and UsdPreviewSurface exports of
+  `sssdragon/dragon_10` (subsurface dragon + coateddiffuse floor) now render
+  equivalently on Metal wavefront (relMSE 0.0001 / FLIP 0.0002 between them, was
+  0.88 / FLIP 0.46 opaque-white). **Note:** `coateddiffuse`/`coatedconductor`
+  renders change
+  on **both** export paths — the coat lobe now actually contributes.
 
 - **pbrt importer: Loop subdivision surfaces** (change `pbrt-loopsubdiv-shape`) —
   `Shape "loopsubdiv"` is no longer skipped. The control cage (`P`, `indices`,

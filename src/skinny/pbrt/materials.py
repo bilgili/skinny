@@ -334,8 +334,13 @@ def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_d
         inputs["coat"] = 1.0
         inputs["coat_color"] = [1.0, 1.0, 1.0]
         inputs["coat_IOR"] = scalar("interface.eta", 1.5)
-        # interface.roughness is the coat's own roughness slot, distinct from base
-        inputs["coat_roughness"] = scalar("interface.roughness", 0.0)
+        # pbrt `coateddiffuse` carries its interface (coat) roughness in the
+        # top-level `roughness` param — the same source map_material reads for
+        # clearcoatRoughness. (The earlier `interface.roughness` lookup never
+        # matched, defaulting the coat roughness to 0 and diverging from the
+        # UsdPreviewSurface export.) Reuse the shared calibration chain.
+        rv, _aniso = roughness()
+        inputs["coat_roughness"] = rv.const
     elif mtype == "coatedconductor":
         inputs["metalness"] = 1.0
         base = _conductor_basecolor(p, notes)

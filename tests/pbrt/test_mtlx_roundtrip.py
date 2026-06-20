@@ -225,3 +225,169 @@ def test_glass_overrides_equivalent_via_usdmtlx_plugin(tmp_path):
     # Equivalent opacity (transmission bridge) and IOR across both paths.
     assert glass_a[0]["opacity"] == pytest.approx(glass_b[0]["opacity"])
     assert glass_a[0]["ior"] == pytest.approx(glass_b[0]["ior"])
+
+
+# ── subsurface + coated: -mtlx vs UsdPreviewSurface round-trip equivalence ──
+#
+# These two material types are NOT in the parity corpus, and they diverge
+# between the two export paths (the -mtlx dragon rendered opaque white). The
+# round-trip must yield equivalent FlatMaterial parameters whether the scene is
+# exported as UsdPreviewSurface or as -mtlx:
+#
+#   - subsurface  -> opacity == 0 (transmissive boundary) + the homogeneous
+#                    interior (volume_*) recovered from skinnyOverrides.
+#   - coateddiffuse -> coat weight + coat roughness land in the same FlatMaterial
+#                    slot regardless of clearcoat-vs-coat authoring.
+#
+# Pure loader/exporter test — no renderer/GPU import (pack_flat_material lives
+# in skinny.renderer, which eagerly imports vulkan). The projection below
+# mirrors the FlatMaterial fields pack_flat_material reads, with its defaults.
+
+_SUBSURFACE_COAT_SCENE = """\
+LookAt 0 1 5  0 0 0  0 1 0
+Camera "perspective" "float fov" 35
+Sampler "independent" "integer pixelsamples" 8
+Integrator "path" "integer maxdepth" 8
+Film "rgb" "integer xresolution" 16 "integer yresolution" 16 "string filename" "ss.exr"
+WorldBegin
+
+AttributeBegin
+  Material "subsurface" "float scale" 10 "float eta" 1.5
+  Shape "sphere" "float radius" 1
+AttributeEnd
+
+AttributeBegin
+  Material "coateddiffuse" "float roughness" 0.2
+  Translate 0 -1 0
+  Shape "trianglemesh" "point3 P" [ -6 0 -6  6 0 -6  6 0 6  -6 0 6 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+"""
+
+
+def _flat_view(ov: dict) -> dict:
+    """Project parameter_overrides onto the FlatMaterial fields pack_flat_material
+    reads, applying the same defaults. Reads CANONICAL keys (``coat``/
+    ``coat_roughness``) — so a UsdPreviewSurface material that only authored
+    ``clearcoat`` shows coat == 0 unless the loader canonicalized it."""
+    def f(key, default):
+        v = ov.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return default
+        return float(v)
+
+    def c3(key, default):
+        v = ov.get(key)
+        try:
+            return (float(v[0]), float(v[1]), float(v[2]))
+        except (TypeError, IndexError, ValueError):
+            return default
+
+    return {
+        "diffuseColor": c3("diffuseColor", (0.5, 0.5, 0.5)),
+        "roughness": f("roughness", 0.5),
+        "metallic": f("metallic", 0.0),
+        "specular": f("specular", 0.5),
+        "opacity": f("opacity", 1.0),
+        "ior": f("ior", 1.5),
+        "coat": f("coat", 0.0),
+        "coat_roughness": f("coat_roughness", 0.0),
+        "coat_IOR": f("coat_IOR", 1.5),
+        "coat_color": c3("coat_color", (1.0, 1.0, 1.0)),
+        "emissiveColor": c3("emissiveColor", (0.0, 0.0, 0.0)),
+    }
+
+
+def _assert_flat_equiv(a: dict, b: dict):
+    """Assert two FlatMaterial projections agree (float32 tolerance — USD stores
+    shader inputs as float32 while the .mtlx value strings parse as float64)."""
+    va, vb = _flat_view(a), _flat_view(b)
+    assert set(va) == set(vb)
+    for key in va:
+        assert va[key] == pytest.approx(vb[key], abs=1e-5), key
+
+
+def _bound_materials(out: str):
+    """Load *out* and return the materials bound to instances (fallback excluded)."""
+    stage = Usd.Stage.Open(out)
+    scene = usd_loader.load_scene_from_stage(stage)
+    return [scene.materials[i.material_id] for i in scene.instances]
+
+
+def _export_both(tmp_path):
+    """Write the subsurface+coat scene; export it UsdPreviewSurface and -mtlx.
+
+    Returns (preview_materials, mtlx_materials) — each a list of bound Materials,
+    classified below by base/diffuse colour (subsurface ~1.0, coat ~0.5)."""
+    scene_file = os.path.join(str(tmp_path), "ss_coat.pbrt")
+    with open(scene_file, "w") as fh:
+        fh.write(_SUBSURFACE_COAT_SCENE)
+
+    preview_out = os.path.join(str(tmp_path), "preview", "out.usda")
+    os.makedirs(os.path.dirname(preview_out), exist_ok=True)
+    import_pbrt(scene_file, out=preview_out, materialx=False)
+
+    mtlx_out = os.path.join(str(tmp_path), "mtlx", "out.usda")
+    os.makedirs(os.path.dirname(mtlx_out), exist_ok=True)
+    import_pbrt(scene_file, out=mtlx_out, materialx=True)
+
+    return _bound_materials(preview_out), _bound_materials(mtlx_out)
+
+
+def _classify(materials):
+    """Split bound materials into (subsurface, coat) by diffuse colour."""
+    subsurface = next(
+        m for m in materials
+        if _flat_view(m.parameter_overrides)["diffuseColor"][0] > 0.9
+    )
+    coat = next(
+        m for m in materials
+        if _flat_view(m.parameter_overrides)["diffuseColor"][0] < 0.7
+    )
+    return subsurface, coat
+
+
+def test_subsurface_roundtrip_equivalent(tmp_path):
+    """The -mtlx subsurface material must load with the same FlatMaterial params
+    as the UsdPreviewSurface export: opacity == 0 and the homogeneous interior."""
+    preview_mats, mtlx_mats = _export_both(tmp_path)
+    ss_p, _ = _classify(preview_mats)
+    ss_m, _ = _classify(mtlx_mats)
+
+    # FlatMaterial projection equivalent across both export paths.
+    _assert_flat_equiv(ss_m.parameter_overrides, ss_p.parameter_overrides)
+
+    # subsurface -> opacity 0 on the -mtlx path (the bug: it stayed opaque).
+    assert ss_m.parameter_overrides.get("opacity") == pytest.approx(0.0)
+
+    # SSS interior recovered from skinnyOverrides on the -mtlx path (the bug: it
+    # was dropped). volume_sigma_s default for scale=10 is 2.55*10 etc.
+    ovr_m = ss_m.parameter_overrides
+    assert "volume_sigma_s" in ovr_m, "SSS interior lost on -mtlx path"
+    assert "volume_sigma_a" in ovr_m
+    assert ovr_m["volume_sigma_s"] == pytest.approx(
+        ss_p.parameter_overrides["volume_sigma_s"]
+    )
+    assert ovr_m["ior"] == pytest.approx(ss_p.parameter_overrides["ior"])
+
+
+def test_coateddiffuse_roundtrip_equivalent(tmp_path):
+    """The coateddiffuse coat lobe must reach the same FlatMaterial slot on both
+    export paths, with the same coat roughness (from pbrt `roughness`)."""
+    preview_mats, mtlx_mats = _export_both(tmp_path)
+    _, coat_p = _classify(preview_mats)
+    _, coat_m = _classify(mtlx_mats)
+
+    # FlatMaterial projection equivalent across both export paths.
+    _assert_flat_equiv(coat_m.parameter_overrides, coat_p.parameter_overrides)
+
+    # coat weight present (> 0) on both — UsdPreviewSurface authored clearcoat,
+    # -mtlx authored coat; both must canonicalize to the coat slot.
+    assert _flat_view(coat_p.parameter_overrides)["coat"] > 0.0
+    assert _flat_view(coat_m.parameter_overrides)["coat"] > 0.0
+
+    # coat roughness derived from pbrt roughness 0.2 (remapped) agrees and is
+    # non-trivial (the -mtlx bug read a non-existent interface.roughness -> 0).
+    assert _flat_view(coat_m.parameter_overrides)["coat_roughness"] == pytest.approx(
+        _flat_view(coat_p.parameter_overrides)["coat_roughness"]
+    )
+    assert _flat_view(coat_m.parameter_overrides)["coat_roughness"] > 0.0

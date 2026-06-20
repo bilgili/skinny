@@ -17,7 +17,7 @@ an explicit material binding share it.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -400,6 +400,50 @@ def _derive_opacity_from_transmission(overrides: dict) -> None:
     overrides["opacity"] = max(0.0, 1.0 - float(t))
 
 
+def _derive_opacity_from_subsurface(overrides: dict) -> None:
+    """Open the flat refraction gate (`opacity = 0`) for a subsurface material.
+
+    standard_surface expresses subsurface scattering via a `subsurface` weight;
+    pbrt's `subsurface` material is a transmissive dielectric boundary around a
+    homogeneous interior. skinny's flat path only refracts through surfaces whose
+    `opacity < 1` (flat_material.slang), so a `subsurface` weight that never
+    lowers opacity leaves the boundary opaque (the SSS dragon rendered solid
+    white). Mirrors the UsdPreviewSurface export, which authors `opacity = 0` for
+    `subsurface` directly. No-op when `subsurface` is absent/zero or when an
+    explicit `opacity` was already authored (so it never perturbs a
+    standard_surface material that set its own opacity).
+    """
+    s = overrides.get("subsurface")
+    if not isinstance(s, (int, float)) or isinstance(s, bool):
+        return
+    if float(s) <= 0.0 or "opacity" in overrides:
+        return
+    overrides["opacity"] = 0.0
+
+
+def _canonicalize_coat(overrides: dict) -> None:
+    """Fold UsdPreviewSurface `clearcoat`/`clearcoatRoughness` onto the canonical
+    `coat`/`coat_roughness` slots the FlatMaterial packer reads.
+
+    `pack_flat_material` / `pack_std_surface_params` read `coat`/`coat_roughness`
+    (the standard_surface names). The UsdPreviewSurface export authors a coat as
+    `clearcoat`/`clearcoatRoughness`, so without this fold the coat lobe is
+    silently dropped on the UsdPreviewSurface load path while the `-mtlx` path
+    (which authors `coat` directly) keeps it — the two exports then disagree.
+    No-op when no clearcoat was authored, and never clobbers an explicit `coat`.
+    """
+    cc = overrides.get("clearcoat")
+    if isinstance(cc, (int, float)) and not isinstance(cc, bool) and "coat" not in overrides:
+        overrides["coat"] = float(cc)
+    ccr = overrides.get("clearcoatRoughness")
+    if (
+        isinstance(ccr, (int, float))
+        and not isinstance(ccr, bool)
+        and "coat_roughness" not in overrides
+    ):
+        overrides["coat_roughness"] = float(ccr)
+
+
 def _extract_material(shade_mat: UsdShade.Material) -> Material:
     """Build a skinny Material from a bound UsdShade.Material.
 
@@ -498,6 +542,13 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
     # the .mtlx fallback loader (`_load_mtlx_materials`). Skip when opacity is
     # already authored (e.g. OpenPBR `geometry_opacity` cutout alpha).
     _derive_opacity_from_transmission(overrides)
+    # Same gate for a standard_surface `subsurface` weight (the usdMtlx-plugin
+    # intake of a `-mtlx` subsurface material); idempotent when the
+    # UsdPreviewSurface export already authored `opacity = 0`.
+    _derive_opacity_from_subsurface(overrides)
+    # Fold UsdPreviewSurface clearcoat onto the canonical coat slot so a coated
+    # material's coat lobe survives the flat-material pack.
+    _canonicalize_coat(overrides)
 
     return Material(
         name=name,
@@ -833,6 +884,12 @@ def _load_mtlx_materials(
                 elif overrides.get("diffuseColor") == (0.0, 0.0, 0.0):
                     overrides["diffuseColor"] = (1.0, 1.0, 1.0)
 
+            # Subsurface boundary: open the flat refraction gate, mirroring the
+            # UsdPreviewSurface export (and _derive_opacity_from_subsurface on the
+            # plugin-present intake). Guarded so a non-subsurface standard_surface
+            # material is untouched and an explicit opacity is preserved.
+            _derive_opacity_from_subsurface(overrides)
+
             opacity_val = overrides.get("opacity")
             if isinstance(opacity_val, tuple):
                 overrides["opacity"] = float(opacity_val[0])
@@ -857,6 +914,29 @@ def _load_mtlx_materials(
             len(asset_paths),
         )
     return result
+
+
+def _merge_prim_overrides(
+    stage: Usd.Stage, material_path: "Sdf.Path", mtlx_mat: Material,
+) -> Material:
+    """Return *mtlx_mat* with the bound Material prim's `skinnyOverrides`
+    customData merged into its `parameter_overrides`.
+
+    Mirrors the `skinnyOverrides` merge `_extract_material` does on the
+    plugin-present intake. Returns a copy (never mutates the shared
+    `mtlx_materials` entry); a no-op when the prim carries no overrides.
+    """
+    target_prim = stage.GetPrimAtPath(material_path)
+    if not (target_prim and target_prim.IsValid()):
+        return mtlx_mat
+    cd = target_prim.GetCustomData()
+    skinny_overrides = cd.get("skinnyOverrides") if cd else None
+    if not hasattr(skinny_overrides, "items"):
+        return mtlx_mat
+    merged = dict(mtlx_mat.parameter_overrides)
+    for k, v in skinny_overrides.items():
+        merged[str(k)] = v
+    return replace(mtlx_mat, parameter_overrides=merged)
 
 
 def _resolve_material_binding(
@@ -895,6 +975,16 @@ def _resolve_material_binding(
                         leaf = target_path.name
                         mtlx_mat = mtlx_materials.get(leaf)
                         if mtlx_mat is not None:
+                            # The .mtlx document carries only the standard_surface
+                            # inputs; per-material state that can't be expressed as
+                            # a shader input (the homogeneous SSS interior) is
+                            # authored as `skinnyOverrides` customData on the bound
+                            # Material prim. _extract_material reads it on the
+                            # plugin-present path; merge it here for the fallback so
+                            # the `-mtlx` subsurface interior is not lost.
+                            mtlx_mat = _merge_prim_overrides(
+                                stage, target_path, mtlx_mat
+                            )
                             idx = len(materials)
                             material_index[target_str] = idx
                             materials.append(mtlx_mat)
