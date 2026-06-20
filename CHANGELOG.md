@@ -7,6 +7,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **pbrt importer: honor authored camera up/roll** (change `pbrt-camera-up-axis`)
+  — an imported camera whose up vector is not ≈ +Y (the pbrt Z-up convention,
+  e.g. `sssdragon`) previously rendered ~90° rolled because `_extract_camera`
+  dropped the up vector and the renderer hardcoded `world_up = (0,1,0)`. The
+  loader now carries the authored up on `CameraOverride.up`, and `_look_at` /
+  `OrbitCamera` build the view basis from `(position, forward, up)` (with a
+  degenerate up∥forward fallback), so Z-up scenes orient correctly. Y-up cameras
+  default to `(0,1,0)` ⇒ byte-identical; the pbrt parity corpus is unchanged.
+  Composes with the existing mirrored-camera (`Scale -1`) ndc.x flip.
+  (Scope: orientation only — env-light intensity and env-map rotation for Z-up
+  scenes remain follow-ups.)
+
 ### Added
 
 - **pbrt importer: MaterialX sidecar export (`-mtlx`)** (change

@@ -1335,6 +1335,15 @@ def _extract_camera(
         # apply via row-vector multiplication: world_dir = local_dir @ world.
         local_forward = np.array([0.0, 0.0, -1.0, 0.0], np.float32)
         forward = (local_forward @ world)[:3].astype(np.float32)
+        # Camera local +Y is up; transform to world like forward so the authored
+        # roll survives. The renderer builds the view basis from this instead of
+        # assuming world-up = +Y, fixing non-Y-up (pbrt Z-up) cameras. Mirrored
+        # cameras are handled separately (ndc.x flip); up comes from the same
+        # matrix, so both corrections compose.
+        local_up = np.array([0.0, 1.0, 0.0, 0.0], np.float32)
+        up = (local_up @ world)[:3].astype(np.float32)
+        un = float(np.linalg.norm(up))
+        up = up / un if un > 1e-6 else np.array([0.0, 1.0, 0.0], np.float32)
         focal = float(cam.GetFocalLengthAttr().Get(time) or 50.0)
         v_ap  = float(cam.GetVerticalApertureAttr().Get(time) or 24.0)
         focus_attr = cam.GetFocusDistanceAttr().Get(time)
@@ -1350,6 +1359,7 @@ def _extract_camera(
         return CameraOverride(
             position=position,
             forward=forward,
+            up=up,
             focal_length_mm=focal,
             vertical_aperture_mm=v_ap,
             focus_distance=focus,

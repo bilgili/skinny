@@ -727,7 +727,8 @@ def _perspective(
     return proj
 
 
-def _look_at(pos: np.ndarray, forward: np.ndarray) -> np.ndarray:
+def _look_at(pos: np.ndarray, forward: np.ndarray,
+             world_up: Optional[np.ndarray] = None) -> np.ndarray:
     """View matrix from camera position and forward direction (stored transposed).
 
     Math (camera basis via cross-product):
@@ -742,9 +743,24 @@ def _look_at(pos: np.ndarray, forward: np.ndarray) -> np.ndarray:
     _perspective — the GPU reads column-major and recovers V.
     """
     # Returns V^T — numpy row-major, GPU reads column-major → cancels back to V.
-    world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    # `world_up` is the reference up; an authored camera (CameraOverride.up) feeds
+    # its own up here so non-Y-up pbrt cameras keep their roll. Default +Y ⇒ the
+    # prior basis, byte-identical for Y-up / interactive cameras.
+    if world_up is None:
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    else:
+        world_up = np.asarray(world_up, dtype=np.float32).reshape(3)
     right = np.cross(forward, world_up)
-    right = right / max(np.linalg.norm(right), 1e-6)
+    rn = np.linalg.norm(right)
+    if rn < 1e-6:
+        # Degenerate: up ∥ forward. Fall back to a secondary world axis so the
+        # basis stays finite and orthonormal (no zero `right`).
+        alt = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        if abs(float(np.dot(forward, alt))) > 0.9:
+            alt = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        right = np.cross(forward, alt)
+        rn = np.linalg.norm(right)
+    right = right / max(rn, 1e-6)
     up = np.cross(right, forward)
     view = np.eye(4, dtype=np.float32)
     view[:3, 0] = right
@@ -839,6 +855,12 @@ class OrbitCamera(CameraBase):
     target: np.ndarray = field(
         default_factory=lambda: np.array([0.0, 0.1, 0.05], dtype=np.float32)
     )
+    # World-space up used to build the view basis. Defaults to +Y (the prior
+    # behavior); an authored camera (_override_to_orbit) sets this to its up so a
+    # non-Y-up pbrt camera keeps its roll.
+    up: np.ndarray = field(
+        default_factory=lambda: np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    )
     distance: float = 3.0
     yaw: float = 0.0
     pitch: float = 0.0
@@ -911,13 +933,14 @@ class OrbitCamera(CameraBase):
         return f / max(np.linalg.norm(f), 1e-6)
 
     def view_matrix(self) -> np.ndarray:
-        return _look_at(self.position, self.forward())
+        return _look_at(self.position, self.forward(), self.up)
 
     def state_signature(self) -> tuple:
         return (
             "orbit",
             float(self.yaw), float(self.pitch), float(self.distance),
             float(self.target[0]), float(self.target[1]), float(self.target[2]),
+            float(self.up[0]), float(self.up[1]), float(self.up[2]),
         ) + self._common_signature()
 
 
@@ -2517,6 +2540,9 @@ class Renderer:
         cam.distance = d
         cam.yaw = yaw
         cam.pitch = pitch
+        # Honor the authored up so a non-Y-up (e.g. pbrt Z-up) camera keeps its
+        # roll; the eye/yaw/pitch math above is unchanged. Defaults to +Y.
+        cam.up = np.asarray(getattr(ov, "up", (0.0, 1.0, 0.0)), np.float32).reshape(3)
         cam.fov = fov_v_deg
         cam.focal_length_mm = float(ov.focal_length_mm)
         cam.vertical_aperture_mm = float(ov.vertical_aperture_mm)

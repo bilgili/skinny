@@ -339,6 +339,10 @@ class CameraOverride:
 
     position: np.ndarray            # (3,) float32, world space
     forward: np.ndarray             # (3,) float32, unit length
+    # Authored world-space up (camera local +Y → world). Honored by the renderer
+    # so non-Y-up pbrt cameras (the Z-up convention) keep their roll. Defaults to
+    # +Y, so Y-up cameras and any override built without an up are byte-identical.
+    up: np.ndarray = field(default_factory=lambda: np.array([0.0, 1.0, 0.0], np.float32))
     focal_length_mm: float = 50.0
     vertical_aperture_mm: float = 24.0
     focus_distance: Optional[float] = None
@@ -353,6 +357,9 @@ class CameraOverride:
         n = float(np.linalg.norm(self.forward))
         if n > 1e-6:
             self.forward = self.forward / n
+        self.up = np.asarray(self.up, np.float32).reshape(3)
+        un = float(np.linalg.norm(self.up))
+        self.up = self.up / un if un > 1e-6 else np.array([0.0, 1.0, 0.0], np.float32)
 
 
 @dataclass
