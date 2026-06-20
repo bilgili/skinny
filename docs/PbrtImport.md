@@ -239,6 +239,7 @@ Support status per pbrt feature.
 |--------------|--------|-------|
 | `trianglemesh`, `sphere` shapes | matched | baked world-space meshes |
 | `plymesh` (ascii / binary PLY) | matched | minimal in-repo PLY reader |
+| `loopsubdiv` shape | matched | tessellated to the Loop limit surface at import (pbrt-exact: `levels` refinements + limit positions + limit normals), then baked as a triangle mesh |
 | `ObjectInstance` instancing | matched | duplicated baked meshes |
 | `diffuse` material | matched | Lambert reflectance |
 | `conductor` material | approx | complex IOR → RGB normal-incidence Fresnel |
