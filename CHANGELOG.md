@@ -9,6 +9,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Render-area resolution flags** (change `cli-render-resolution`) — `--width`
+  and `--height` (env `SKINNY_WIDTH` / `SKINNY_HEIGHT`) set the render-area pixel
+  size on the interactive front-ends `skinny` and `skinny-gui`, from one shared
+  definition. Both default to **640×480** (precedence flag > env > default); a
+  non-positive value is rejected at startup. On `skinny` they size the GLFW
+  window and the GPU render target; on `skinny-gui` they size the offscreen
+  render area while the Qt window and docks keep their own size. The headless
+  `skinny-render` keeps its own `--width` / `--height` (1024² offline-output
+  default); `skinny-web` does not expose the flags. **Note:** this changes the
+  interactive default render area from 1280×720 to 640×480 — pass
+  `--width 1280 --height 720` (or set the env vars) to restore the old size.
+
 - **SPPM glossy / near-specular reflector reconstruction** (change
   `sppm-glossy-final-gather`) — a metallic-gated, roughness-thresholded eye-walk
   continuation for the SPPM integrator. A metallic sample

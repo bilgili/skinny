@@ -46,6 +46,20 @@ def _env_float(name: str) -> float | None:
         raise SystemExit(f"invalid {name}={v!r}: expected a float")
 
 
+def _env_int(name: str) -> int | None:
+    """Parse an integer env var for a numeric flag default — unset/empty →
+    ``None`` (the sentinel meaning "use the built-in default"). A malformed value
+    raises a clear, user-facing error naming the env var rather than a raw
+    ValueError at parser-construction time."""
+    v = os.environ.get(name)
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        raise SystemExit(f"invalid {name}={v!r}: expected an integer")
+
+
 def validate_render_flags(args) -> None:
     """Reject render-flag combinations that cannot work, with a clear error +
     exit (change bdpt-neural-incompatibility).
@@ -66,7 +80,18 @@ def validate_render_flags(args) -> None:
     explicit ``--integrator sppm`` under the megakernel execution mode (including
     the default) is refused naming ``--execution-mode wavefront`` as the fix.
     Tolerant of a ``Namespace`` without a ``proposals`` attribute (the GUI/web
-    front-ends suppress ``--proposals``)."""
+    front-ends suppress ``--proposals``).
+
+    Also rejects a non-positive render-area ``--width``/``--height`` (flag or env
+    fallback) with a clear usage error, before any GPU init. Front-ends that do
+    not expose the shared resolution flags simply lack the attributes and are
+    skipped."""
+    for dim in ("width", "height"):
+        val = getattr(args, dim, None)
+        if val is not None and val <= 0:
+            raise SystemExit(
+                f"skinny: --{dim} must be a positive integer (got {val})."
+            )
     integrator = getattr(args, "integrator", None)
     if integrator == "sppm":
         # SPPM is wavefront-only (no global photon map under the megakernel), like
@@ -138,13 +163,39 @@ def add_render_flags(
     train_precision: bool = True,
     online_training: bool = True,
     encoding: bool = True,
+    resolution: bool = True,
 ) -> None:
     """Add the shared `--backend` / `--integrator` / `--execution-mode` /
     `--bdpt-walk` / `--proposals` / `--reuse` / `--lobe-samplers` /
     `--neural-handoff` / `--neural-trainer` / `--train-precision` /
     `--online-training` / `--encoding` flags to ``parser``. Each flag can be
-    suppressed via its keyword in the rare case a front-end must omit it (none
-    currently does)."""
+    suppressed via its keyword in the rare case a front-end must omit it.
+    ``resolution`` is suppressed by ``skinny-render`` (which defines its own
+    ``--width``/``--height`` for offline output size) and ``skinny-web`` (which
+    is out of scope for the render-area flags)."""
+    if resolution:
+        # Render-area pixel size. Defaults 640x480, with SKINNY_WIDTH /
+        # SKINNY_HEIGHT env fallbacks (precedence flag > env > default). On
+        # `skinny` these size the window and the GPU render target; on
+        # `skinny-gui` they size the offscreen render area (the Qt window and
+        # docks keep their own size).
+        _w_default = _env_int("SKINNY_WIDTH")
+        _h_default = _env_int("SKINNY_HEIGHT")
+        parser.add_argument(
+            "--width", type=int,
+            default=640 if _w_default is None else _w_default,
+            help="Render-area width in pixels (+ SKINNY_WIDTH env). Default 640. "
+                 "On 'skinny' sizes the window and the GPU render target; on "
+                 "'skinny-gui' sizes the offscreen render area (the Qt window "
+                 "and docks keep their own size). Precedence: flag > env > "
+                 "default.",
+        )
+        parser.add_argument(
+            "--height", type=int,
+            default=480 if _h_default is None else _h_default,
+            help="Render-area height in pixels (+ SKINNY_HEIGHT env). Default "
+                 "480. See --width.",
+        )
     if backend:
         # `default=None` is a sentinel meaning "use env / persisted / auto",
         # resolved by skinny.backend_select.select_backend (precedence: explicit

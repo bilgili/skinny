@@ -243,3 +243,98 @@ def test_non_sppm_not_flagged_by_sppm_gate():
     # path/bdpt under megakernel must not trip the sppm gate.
     validate_render_flags(_ns(integrator="path", execution_mode="megakernel"))
     validate_render_flags(_ns(integrator=None, execution_mode="megakernel"))
+
+
+# ── --width / --height (render-area resolution flags) ────────────────
+
+def test_resolution_defaults(monkeypatch):
+    monkeypatch.delenv("SKINNY_WIDTH", raising=False)
+    monkeypatch.delenv("SKINNY_HEIGHT", raising=False)
+    ns = _parser().parse_args([])
+    assert ns.width == 640
+    assert ns.height == 480
+
+
+def test_resolution_explicit(monkeypatch):
+    monkeypatch.delenv("SKINNY_WIDTH", raising=False)
+    monkeypatch.delenv("SKINNY_HEIGHT", raising=False)
+    ns = _parser().parse_args(["--width", "800", "--height", "600"])
+    assert ns.width == 800
+    assert ns.height == 600
+
+
+def test_resolution_env_fallback(monkeypatch):
+    monkeypatch.setenv("SKINNY_WIDTH", "1024")
+    monkeypatch.setenv("SKINNY_HEIGHT", "768")
+    ns = _parser().parse_args([])
+    assert ns.width == 1024
+    assert ns.height == 768
+
+
+def test_resolution_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv("SKINNY_WIDTH", "1024")
+    monkeypatch.setenv("SKINNY_HEIGHT", "768")
+    ns = _parser().parse_args(["--width", "320", "--height", "240"])
+    assert ns.width == 320
+    assert ns.height == 240
+
+
+def test_resolution_malformed_env_errors(monkeypatch):
+    monkeypatch.setenv("SKINNY_WIDTH", "wide")
+    with pytest.raises(SystemExit, match="SKINNY_WIDTH"):
+        _parser()
+
+
+def test_resolution_can_be_suppressed():
+    # skinny-render / skinny-web opt out (resolution=False) so they keep / omit
+    # their own width/height — the shared flags are absent.
+    p = _parser(resolution=False)
+    ns = p.parse_args([])
+    assert not hasattr(ns, "width")
+    assert not hasattr(ns, "height")
+
+
+def test_resolution_in_help(monkeypatch):
+    monkeypatch.delenv("SKINNY_WIDTH", raising=False)
+    monkeypatch.delenv("SKINNY_HEIGHT", raising=False)
+    help_text = _parser().format_help()
+    assert "--width" in help_text
+    assert "--height" in help_text
+
+
+@pytest.mark.parametrize("flag", ["--width", "--height"])
+def test_non_positive_resolution_rejected(flag):
+    ns = _ns(**{flag.lstrip("-"): 0})
+    with pytest.raises(SystemExit) as ei:
+        validate_render_flags(ns)
+    assert flag in str(ei.value)
+
+
+def test_negative_resolution_rejected():
+    with pytest.raises(SystemExit):
+        validate_render_flags(_ns(width=-1))
+    with pytest.raises(SystemExit):
+        validate_render_flags(_ns(height=-100))
+
+
+def test_positive_resolution_ok():
+    # A valid render area passes the guard.
+    validate_render_flags(_ns(width=640, height=480))
+
+
+def test_missing_resolution_attrs_ok():
+    # Front-ends that suppress the flags (skinny-render / skinny-web) pass a
+    # Namespace without width/height; the guard must tolerate it.
+    validate_render_flags(argparse.Namespace(integrator=None))
+
+
+def test_headless_keeps_own_resolution(monkeypatch):
+    # skinny-render opts out of the shared flags and keeps its own 1024^2
+    # default — no argparse conflict on parser construction.
+    monkeypatch.delenv("SKINNY_WIDTH", raising=False)
+    monkeypatch.delenv("SKINNY_HEIGHT", raising=False)
+    from skinny.headless import _build_parser
+
+    ns = _build_parser().parse_args(["scene.usd"])
+    assert ns.width == 1024
+    assert ns.height == 1024
