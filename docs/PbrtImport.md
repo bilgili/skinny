@@ -238,7 +238,7 @@ Support status per pbrt feature.
 | pbrt feature | status | notes |
 |--------------|--------|-------|
 | `trianglemesh`, `sphere` shapes | matched | baked world-space meshes |
-| `plymesh` (ascii / binary PLY) | matched | minimal in-repo PLY reader |
+| `plymesh` (ascii / binary PLY, incl. `.ply.gz`) | matched | minimal in-repo PLY reader; gzip-compressed PLY is gunzipped transparently (magic-byte sniff) |
 | `ObjectInstance` instancing | matched | duplicated baked meshes |
 | `diffuse` material | matched | Lambert reflectance |
 | `conductor` material | approx | complex IOR → RGB normal-incidence Fresnel |
