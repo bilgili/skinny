@@ -32,6 +32,10 @@ class SceneSpec:
     spp: int
     relmse_tol: float
     flip_tol: float
+    # When True the import goes through the ``-mtlx`` path (rich
+    # ``standard_surface`` sidecar) instead of authoring UsdPreviewSurface
+    # shaders. The same reference EXRs gate both export paths.
+    materialx: bool = False
 
 
 @dataclass
@@ -62,7 +66,8 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
                   gpu: str | None = None, env_off: bool = False,
                   integrator: str = "path",
                   execution_mode: str = "megakernel",
-                  emissive_uniform: bool = False) -> np.ndarray:
+                  emissive_uniform: bool = False,
+                  materialx: bool = False) -> np.ndarray:
     """Import a pbrt scene and render it in skinny; return linear-HDR (H,W,3).
 
     *gpu* is the vendor preference (intel/nvidia/amd/discrete/auto); the rhi
@@ -77,6 +82,10 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     *emissive_uniform* (test hook) forces uniform-by-index emissive-triangle
     selection instead of the default power-weighted distribution, so the same
     binary can render the power-vs-uniform A/B for the emissive-mesh-nee gate.
+    *materialx* imports through the ``-mtlx`` path (rich ``standard_surface``
+    sidecar) instead of UsdPreviewSurface, so the same reference EXRs gate both
+    export paths; the bound meshes resolve their rich overrides via the usd_loader
+    ``.mtlx`` intake.
     Requires a working GPU backend; raises if unavailable.
     """
     from skinny.backend_select import select_backend
@@ -90,7 +99,7 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     backend = select_backend()
     with tempfile.TemporaryDirectory() as tmp:
         usd = os.path.join(tmp, "scene.usda")
-        import_pbrt(scene_pbrt, out=usd)
+        import_pbrt(scene_pbrt, out=usd, materialx=materialx)
         with HeadlessRenderer(width, height, gpu=gpu, backend=backend,
                               execution_mode=execution_mode) as r:
             # Set before the scene build so _upload_emissive_triangles sees it.
@@ -109,19 +118,43 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
 
 
 def evaluate(spec: SceneSpec, corpus_dir: str, gpu: str | None = None) -> ParityResult:
-    """Render *spec* in skinny and compare to its reference EXR."""
+    """Render *spec* in skinny and compare to its reference EXR.
+
+    Honours ``spec.materialx`` to render the ``-mtlx`` export against the same
+    reference EXR as the UsdPreviewSurface export.
+    """
     ref_path = os.path.join(corpus_dir, spec.ref)
     ref = metrics.read_exr(ref_path)
     scene_path = os.path.join(corpus_dir, spec.file)
     img = render_linear(
         scene_path, spec.width, spec.height, spp=spec.spp,
         gpu=gpu, env_off=not scene_has_environment(scene_path),
+        materialx=spec.materialx,
     )
     aligned = metrics.align_exposure(img, ref)
     rm = metrics.relmse(aligned, ref)
     fl = metrics.flip(aligned, ref)
     passed = rm <= spec.relmse_tol and fl <= spec.flip_tol
     return ParityResult(spec.name, rm, fl, passed)
+
+
+def materialx_specs(specs: list[SceneSpec]) -> list[SceneSpec]:
+    """Return a parallel scene-set that imports each *spec* through ``-mtlx``.
+
+    Each returned spec shares the source ``.pbrt`` file, reference EXR, and
+    tolerances of its UsdPreviewSurface sibling but flips ``materialx=True`` and
+    suffixes its ``name`` with ``"_mtlx"`` (so the two sets coexist as distinct
+    parametrize ids). The intent: a ``-mtlx`` render must match the same pbrt v4
+    reference within the same tolerance — i.e. switching the export path is a
+    no-op on the rendered image for the supported material subset.
+    """
+    out: list[SceneSpec] = []
+    for s in specs:
+        fields = {k: getattr(s, k) for k in SceneSpec.__dataclass_fields__}
+        fields["name"] = f"{s.name}_mtlx"
+        fields["materialx"] = True
+        out.append(SceneSpec(**fields))
+    return out
 
 
 def reference_exists(spec: SceneSpec, corpus_dir: str) -> bool:
