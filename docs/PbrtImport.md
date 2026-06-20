@@ -307,6 +307,7 @@ Support status per pbrt feature.
 | `perspective` camera | matched | shorter-axis fov conversion |
 | `realistic` camera | matched | lens file → `skinny:lens:*` (thick-lens `LensSystem`) |
 | negative-scale camera (`Scale -1`) | matched | improper basis flagged `pbrt:mirrored`; renderer mirrors at ray-gen (`FrameConstants.cameraMirror`) → relMSE 0.009 / FLIP 0.021 vs pbrt |
+| non-Y-up camera up/roll (pbrt Z-up) | matched | the authored up (camera local +Y → world) rides `CameraOverride.up`; the renderer builds the view basis from `(position, forward, up)` via `_look_at(..., world_up)` instead of assuming `(0,1,0)`, so Z-up scenes (e.g. `sssdragon`) orient correctly. Y-up cameras default to `(0,1,0)` ⇒ byte-identical. Composes with the mirror flag |
 | `distant` / `point` lights | matched / approx | point emitted as a small sphere |
 | `spot` light | unsupported | no skinny spotlight; flagged |
 | area (`diffuse`) light | approx | emissive mesh; sidedness may differ |
