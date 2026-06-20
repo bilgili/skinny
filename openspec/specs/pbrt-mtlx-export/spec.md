@@ -72,6 +72,21 @@ SHALL produce equivalent `Material.parameter_overrides`. The exporter SHALL NOT
 author a UsdPreviewSurface material that shadows the MaterialX material for the
 same prim (which would cause `ComputeBoundMaterial` to bypass the `.mtlx`).
 
+For materials whose `FlatMaterial`-relevant state cannot be expressed by the
+standard_surface shader inputs alone, the `-mtlx` load path SHALL recover the
+same `FlatMaterial` parameters the UsdPreviewSurface export produces:
+
+- **`subsurface`** SHALL map to `opacity = 0` (the transmissive-boundary gate the
+  flat refraction path requires), and the homogeneous interior coefficients
+  authored as `skinnyOverrides` customData on the Material prim SHALL be merged
+  into the loaded `Material.parameter_overrides` — both on the
+  `_extract_material` path and on the `_load_mtlx_materials` /
+  `_resolve_material_binding` fallback path.
+- **`coateddiffuse` / `coatedconductor`** coat weight and coat roughness SHALL
+  reach the same `FlatMaterial` `coat` / `coat_roughness` slots regardless of
+  whether the export authored UsdPreviewSurface `clearcoat` / `clearcoatRoughness`
+  or standard_surface `coat` / `coat_roughness`.
+
 #### Scenario: fallback path loads the sidecar when usdMtlx is absent
 
 - **WHEN** the exported `out.usda` + `out.mtlx` are loaded on a host without the
@@ -87,6 +102,23 @@ same prim (which would cause `ComputeBoundMaterial` to bypass the `.mtlx`).
 - **THEN** the sidecar `.mtlx` authors a MaterialX `<image>` node whose `file`
   resolves via `_find_image_file_in_nodegraph` to the same path the
   UsdPreviewSurface `UsdUVTexture` export would use
+
+#### Scenario: subsurface round-trips opacity and interior on the -mtlx path
+
+- **WHEN** a `Material "subsurface"` is exported with `-mtlx` and loaded through
+  the `_load_mtlx_materials` / `_resolve_material_binding` fallback
+- **THEN** the bound `Material.parameter_overrides` carry `opacity = 0` and the
+  homogeneous interior coefficients (`volume_sigma_a` / `volume_sigma_s` /
+  `volume_g` / `ior`) from the prim's `skinnyOverrides`, matching the
+  UsdPreviewSurface export's overrides
+
+#### Scenario: coateddiffuse coat lobe is equivalent across export paths
+
+- **WHEN** a `Material "coateddiffuse" "float roughness" r` is exported both as
+  UsdPreviewSurface and as `-mtlx`, and both are loaded
+- **THEN** the two loaded materials' FlatMaterial-relevant overrides match: coat
+  weight is present (> 0) on both, and the coat roughness derived from pbrt
+  `roughness` agrees between the two paths
 
 ### Requirement: parity harness covers the MaterialX export
 
