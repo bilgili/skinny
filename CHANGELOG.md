@@ -9,6 +9,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt importer: MaterialX sidecar export (`-mtlx`)** (change
+  `pbrt-mtlx-export`) — `skinny-import-pbrt -mtlx` additionally writes a portable
+  MaterialX `.mtlx` of `standard_surface` materials, referenced from the exported
+  stage, capturing pbrt parameters UsdPreviewSurface cannot express
+  (`transmission`/`transmission_color`, separate `coat`/`coat_IOR`,
+  `subsurface_radius`, `specular_anisotropy` from `uroughness`/`vroughness`,
+  `thin_walled`). Interop + Stage-2-enabling: the production integrators consume
+  the `FlatMaterial` subset of either export, so for **diffuse / conductor /
+  dielectric** the `-mtlx` and UsdPreviewSurface renders are pixel-identical
+  (`glass_arealight` relMSE 0.0215 vs pbrt for both, 0.000000 between them).
+  **Known limitation:** `subsurface` and `coateddiffuse`/`coatedconductor` do not
+  yet round-trip equivalently — the `.mtlx` fallback loader drops the
+  `subsurface→opacity` boundary, the `skinnyOverrides` SSS interior, and the
+  `coat`/`clearcoat` key bridge, so those materials render differently under
+  `-mtlx` (a follow-up will close the round-trip).
+
 - **pbrt importer: Loop subdivision surfaces** (change `pbrt-loopsubdiv-shape`) —
   `Shape "loopsubdiv"` is no longer skipped. The control cage (`P`, `indices`,
   `levels`) is tessellated to triangles at import time exactly as pbrt does it:
