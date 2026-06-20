@@ -187,6 +187,59 @@ Shape "trianglemesh" "point3 P" [ -1 -1 0  1 -1 0  1 1 0  -1 1 0 ] \
     assert vals == _UV_TRI * 2
 
 
+def _surface(stage):
+    from pxr import UsdShade
+
+    for prim in stage.Traverse():
+        if prim.IsA(UsdShade.Shader):
+            sh = UsdShade.Shader(prim)
+            if sh.GetIdAttr().Get() == "UsdPreviewSurface":
+                return sh
+    raise AssertionError("no UsdPreviewSurface in stage")
+
+
+def test_textured_roughness_connects_to_roughness_input(tmp_path):
+    """A FloatTexture roughness maps to the USD roughness input (scalar .r), not
+    diffuseColor, and the UV-less mesh gets synthesized UVs."""
+    from pxr import UsdShade  # noqa: F401
+
+    scene = """
+WorldBegin
+Texture "r" "float" "imagemap" "string filename" "rough.png"
+Material "conductor" "texture roughness" "r"
+Shape "trianglemesh" "point3 P" [ -1 -1 0  1 -1 0  1 1 0 ] "integer indices" [0 1 2]
+"""
+    stage, _ = _import(tmp_path, scene, assets={"rough.png": b"\x89PNG\r\n"})
+    vals, _interp = _st(_first_mesh(stage))
+    assert vals is not None  # references_texture includes roughness -> default UVs
+    surf = _surface(stage)
+    rin = surf.GetInput("roughness")
+    assert rin and rin.HasConnectedSource()
+    api, out_name, _ = rin.GetConnectedSource()
+    assert out_name == "r"  # scalar channel
+    from pxr import UsdShade as _US
+
+    assert _US.Shader(api.GetPrim()).GetIdAttr().Get() == "UsdUVTexture"
+    din = surf.GetInput("diffuseColor")
+    assert not (din and din.HasConnectedSource())  # not assumed diffuse
+
+
+def test_textured_reflectance_connects_to_diffusecolor(tmp_path):
+    """A SpectrumTexture reflectance maps to diffuseColor (color .rgb)."""
+    scene = """
+WorldBegin
+Texture "kd" "spectrum" "imagemap" "string filename" "kd.png"
+Material "diffuse" "texture reflectance" "kd"
+Shape "trianglemesh" "point3 P" [ -1 -1 0  1 -1 0  1 1 0 ] "integer indices" [0 1 2]
+"""
+    stage, _ = _import(tmp_path, scene, assets={"kd.png": b"\x89PNG\r\n"})
+    surf = _surface(stage)
+    din = surf.GetInput("diffuseColor")
+    assert din and din.HasConnectedSource()
+    _api, out_name, _ = din.GetConnectedSource()
+    assert out_name == "rgb"  # color channel
+
+
 def test_untextured_uvless_trianglemesh_has_no_st(tmp_path):
     scene = """
 WorldBegin

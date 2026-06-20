@@ -78,6 +78,30 @@ sRGB; named conductor spectra (`metal-Au-eta`/`-k`) map to a tabulated RGB IOR;
 inline sampled spectra integrate directly. The residual RGB-vs-spectral
 divergence is inherent and is absorbed by the per-scene parity tolerance.
 
+### Texture-valued parameters
+
+pbrt lets any `FloatTexture`/`SpectrumTexture` material parameter (e.g.
+`roughness`, `reflectance`) be a constant **or** a named texture. The importer
+mirrors pbrt's `GetFloatTexture`/`GetSpectrumTexture`: a single promoting accessor
+(`get_float_texture`/`get_spectrum_texture`) resolves every textureable parameter
+to either a constant (pbrt wraps these in a `*ConstantTexture`) or a resolved
+texture, so material mapping never branches on float-vs-texture and never calls
+`float()` on a texture name. Each textured parameter maps to its **own** USD input
+via the `_TEXTURABLE` table (`reflectance → diffuseColor` as `.rgb`/Color3f,
+`roughness → roughness` as `.r`/Float) — nothing is assumed to be `diffuseColor`.
+`_TEXTURABLE`'s `value_type` is the one source of truth for the connected channel
+and is read by `_author_texture`.
+
+A `scale`-wrapped `imagemap` resolves to the inner image (the `scale` factor and
+the perceptual roughness remap are not applied to the connection — flagged
+`approx`). A texture class the importer does not support (`checkerboard`/`mix`/
+`constant`), an unresolvable name, or a textured parameter with no USD texture
+input (`eta`, `interface.roughness`) degrades to the parameter's scalar/rgb
+default with an `approx` note — pbrt would `ErrorExit`; skinny stays best-effort so
+a partly-unsupported scene still imports. This is what lets the `crown` scene
+(texture-valued roughness over hundreds of materials, including nested `scale`/
+`imagemap`) import.
+
 ### Texture UVs
 
 `imagemap` textures are wired to a `UsdUVTexture` connected into the
