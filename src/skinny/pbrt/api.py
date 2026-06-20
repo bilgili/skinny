@@ -14,6 +14,7 @@ from pxr import Gf, Sdf, UsdGeom, UsdShade
 
 from . import camera as camera_mod
 from . import emit
+from . import loopsubdiv as loopsubdiv_mod
 from . import materials as materials_mod
 from . import media as media_mod
 from . import metadata as meta_mod
@@ -162,6 +163,21 @@ def _shape_geometry(shp: PbrtShape, report, base_dir=None):
         radius = p.float("radius", 1.0)
         pts, idx, nrm, uvs = emit.tessellate_sphere(radius)
         return pts, idx, nrm, uvs
+    if t == "loopsubdiv":
+        # pbrt tessellates a Loop control cage to a triangle mesh (limit surface)
+        # before rendering; do the same at import and reuse the trianglemesh path.
+        cage_p = np.asarray(p.floats("P", []), dtype=np.float64)
+        cage_idx = np.asarray(p.ints("indices", []), dtype=np.int64)
+        if cage_p.size == 0 or cage_idx.size == 0 or cage_idx.size % 3 != 0:
+            report.skipped("shape:loopsubdiv", "missing or malformed P/indices")
+            return None
+        levels = p.int("levels", 3)  # pbrt default
+        try:
+            pts, idx, nrm = loopsubdiv_mod.subdivide(cage_p, cage_idx, levels)
+        except ValueError as exc:
+            report.skipped("shape:loopsubdiv", str(exc))
+            return None
+        return pts, idx, nrm, None
     report.skipped(f"shape:{t}", "unsupported shape type")
     return None
 

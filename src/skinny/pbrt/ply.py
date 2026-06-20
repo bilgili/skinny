@@ -7,6 +7,7 @@ the meshes pbrt scenes ship; not a general PLY library.
 
 from __future__ import annotations
 
+import gzip
 import struct
 from dataclasses import dataclass
 
@@ -37,6 +38,10 @@ class PlyMesh:
 def read_ply(path: str) -> PlyMesh:
     with open(path, "rb") as fh:
         data = fh.read()
+    # pbrt ships large meshes gzip-compressed (`*.ply.gz`) and gunzips them on
+    # load; sniff the gzip magic (independent of the filename) and do the same.
+    if data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
     nl = data.index(b"\n")
     if data[:nl].strip() != b"ply":
         raise ValueError(f"{path}: not a PLY file")

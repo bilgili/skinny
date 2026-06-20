@@ -9,6 +9,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt importer: Loop subdivision surfaces** (change `pbrt-loopsubdiv-shape`) —
+  `Shape "loopsubdiv"` is no longer skipped. The control cage (`P`, `indices`,
+  `levels`) is tessellated to triangles at import time exactly as pbrt does it:
+  Loop refinement applied `levels` times, then vertices pushed to the Loop limit
+  surface with per-vertex limit normals (tangent masks), routed through the
+  existing `trianglemesh` emit path. Unblocks the killeroo scenes, whose bodies
+  are `loopsubdiv` (`killeroo-simple` import goes from "2 skipped" to "0 skipped").
+
 - **pbrt importer: texture-valued material parameters** (change
   `pbrt-float-texture-params`) — a `FloatTexture`/`SpectrumTexture` parameter
   bound to a named texture (e.g. `"texture roughness" ["…"]`) is now resolved
