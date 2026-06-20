@@ -139,18 +139,24 @@ between them). The richer parameters are carried so a future unified-lobe
 extension can read them — see the change's `design.md` for the Stage-2 roadmap
 and the `flat-bsdf-lobes` (preview-only `evalStdSurfaceBSDF`) constraint.
 
-> **Known limitation — `subsurface` and `coated*` do not round-trip equivalently
-> yet.** UsdPreviewSurface maps `subsurface` to an `opacity = 0` boundary plus a
-> `skinnyOverrides` homogeneous interior, and `coated*` to `clearcoat`. The
-> `-mtlx` `.mtlx` fallback (`_load_mtlx_materials`) bridges only
-> `transmission → opacity`/`emission`, builds the `Material` from the document
-> alone (so the `over`-prim `skinnyOverrides` interior is never read), and emits
-> `coat` (not `clearcoat`). So a `-mtlx` subsurface dragon renders **opaque**
-> where the UsdPreviewSurface export renders translucent (sssdragon: `-mtlx`
-> relMSE 0.88 vs pbrt, UsdPreviewSurface 0.49). Closing this — `subsurface →
-> opacity` bridge + merging the `over`-prim `skinnyOverrides` in
-> `_resolve_material_binding` + a `coat`/`clearcoat` alias — is a tracked
-> follow-up.
+> **`subsurface` and `coated*` `-mtlx` round-trip** (change
+> `pbrt-mtlx-roundtrip-fix`). UsdPreviewSurface maps `subsurface` to an
+> `opacity = 0` boundary plus a `skinnyOverrides` homogeneous interior, and
+> `coated*` to `clearcoat`. The `-mtlx` `.mtlx` fallback once bridged only
+> `transmission → opacity`/`emission`, built the `Material` from the document
+> alone (so the `over`-prim `skinnyOverrides` interior was never read), and emitted
+> `coat` (not `clearcoat`) — so a `-mtlx` subsurface dragon rendered **opaque**
+> where the UsdPreviewSurface export rendered translucent (sssdragon `-mtlx`
+> relMSE 0.88 / FLIP 0.46, UsdPreviewSurface 0.49 / 0.13). Now the fallback
+> (`_load_mtlx_materials`) bridges `subsurface → opacity = 0`,
+> `_resolve_material_binding` merges the bound prim's `skinnyOverrides` interior,
+> the loader canonicalizes `clearcoat`/`clearcoatRoughness` →
+> `coat`/`coat_roughness` (the slots the `FlatMaterial` packer reads — this also
+> fixed a silent coat drop on the UsdPreviewSurface path), and
+> `map_material_mtlx` `coateddiffuse` reads the coat roughness from pbrt
+> `roughness`. The two exports of `dragon_10` now render equivalently (relMSE
+> 0.0001 / FLIP 0.0002 between them on Metal wavefront). **Both** export paths'
+> `coated*` renders change as a result — the coat lobe now contributes.
 
 > **Area-light emission gotcha.** `standard_surface` emission is
 > `emission`(weight) × `emission_color`, and the round-trip recovers
