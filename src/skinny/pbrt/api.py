@@ -208,8 +208,9 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
             shader.CreateInput(key, Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*[float(c) for c in val]))
         else:
             shader.CreateInput(key, Sdf.ValueTypeNames.Float).Set(float(val))
-    for usd_in, (tex_path, color_space) in tex_inputs.items():
-        _author_texture(stage, shader, f"{mat_path}/{usd_in}_tex", usd_in, tex_path, color_space)
+    for usd_in, (tex_path, color_space, value_type) in tex_inputs.items():
+        _author_texture(stage, shader, f"{mat_path}/{usd_in}_tex", usd_in, tex_path,
+                        color_space, value_type)
     mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
     if overrides:
         mat.GetPrim().SetCustomDataByKey("skinnyOverrides", overrides)
@@ -224,18 +225,19 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
         report.exact(f"textures {mat_path}", ", ".join(tex_inputs))
 
 
-_SCALAR_TEX_INPUTS = {"roughness", "metallic", "opacity"}
+def _author_texture(stage, shader, tex_prim_path, usd_in, image_path, color_space, value_type):
+    """Author a UsdUVTexture node and connect it to *usd_in* on *shader*.
 
-
-def _author_texture(stage, shader, tex_prim_path, usd_in, image_path, color_space):
-    """Author a UsdUVTexture node and connect it to *usd_in* on *shader*."""
+    Output channel and input type come from *value_type* (the `_TEXTURABLE` map's
+    single source of truth): "color3f" -> `.rgb`/Color3f, "float" -> `.r`/Float.
+    """
+    scalar = value_type == "float"
     tex = UsdShade.Shader.Define(stage, tex_prim_path)
     tex.CreateIdAttr("UsdUVTexture")
     tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(image_path))
     tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
     tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
     tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set(color_space)
-    scalar = usd_in in _SCALAR_TEX_INPUTS
     out = tex.CreateOutput(
         "r" if scalar else "rgb",
         Sdf.ValueTypeNames.Float if scalar else Sdf.ValueTypeNames.Float3,

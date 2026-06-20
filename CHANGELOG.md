@@ -9,6 +9,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt importer: texture-valued material parameters** (change
+  `pbrt-float-texture-params`) — a `FloatTexture`/`SpectrumTexture` parameter
+  bound to a named texture (e.g. `"texture roughness" ["…"]`) is now resolved
+  through a single promoting accessor that mirrors pbrt's
+  `GetFloatTexture`/`GetSpectrumTexture` (constants promoted, named textures
+  resolved), so material mapping never calls `float()` on a texture name. Each
+  textured parameter maps to its **own** USD input via the `_TEXTURABLE` table
+  (`roughness → roughness` `.r`, `reflectance → diffuseColor` `.rgb`) — the map's
+  `value_type` is the single source of truth (the duplicate `_SCALAR_TEX_INPUTS`
+  set is gone). Unsupported/unresolvable textures and inputs with no USD texture
+  slot degrade to the scalar/rgb default with an `approx` note instead of raising.
+  Fixes the `ValueError: could not convert string to float` crash importing the
+  `crown` scene (texture-valued roughness, nested `scale`/`imagemap`). See
+  [docs/PbrtImport.md](docs/PbrtImport.md).
 - **SPPM glossy / near-specular reflector reconstruction** (change
   `sppm-glossy-final-gather`) — a metallic-gated, roughness-thresholded eye-walk
   continuation for the SPPM integrator. A metallic sample

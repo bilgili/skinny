@@ -16,15 +16,21 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import dataclass
 
 from . import spectra
 from .parser import ParamSet
 
-# pbrt material input -> (UsdPreviewSurface input, is_scalar)
+# pbrt material input -> (UsdPreviewSurface input, value_type). ``value_type`` is
+# the single source of truth for how the texture connects: "color3f" drives the
+# UsdUVTexture ``.rgb`` output, "float" the scalar ``.r`` output.
 _TEXTURABLE = {
-    "reflectance": ("diffuseColor", False),
-    "roughness": ("roughness", True),
+    "reflectance": ("diffuseColor", "color3f"),
+    "roughness": ("roughness", "float"),
 }
+# UsdPreviewSurface input -> connection value_type, derived from _TEXTURABLE so
+# the map stays the one source of truth (consumed by api._author_texture).
+_USD_INPUT_KIND = {usd_in: vt for usd_in, vt in _TEXTURABLE.values()}
 
 
 def resolve_texture(name: str, textures, base_dir=None, _depth: int = 0):
@@ -52,6 +58,65 @@ def resolve_texture(name: str, textures, base_dir=None, _depth: int = 0):
         if inner is not None and inner.type == "texture":
             return resolve_texture(inner.string, textures, base_dir, _depth + 1)
     return None
+
+
+@dataclass(frozen=True)
+class ParamValue:
+    """A material parameter resolved the pbrt way: a constant, optionally with a
+    bound texture. Mirrors pbrt's ``GetFloatTexture``/``GetSpectrumTexture``, which
+    promote a constant to a ``*ConstantTexture`` so a material never branches on
+    "float or texture". ``const`` is the scalar/rgb fallback; ``tex`` is the
+    resolved ``(image_path, color_space)`` when the param is a supported texture.
+    """
+
+    const: object
+    tex: tuple | None = None
+
+    @property
+    def is_tex(self) -> bool:
+        return self.tex is not None
+
+
+def get_float_texture(params, name, default, *, textures=None, base_dir=None, notes=None):
+    """Resolve a FloatTexture-able parameter like pbrt's ``GetFloatTexture``.
+
+    Constant -> ``ParamValue(value)``; named texture -> ``ParamValue(default, tex)``;
+    absent -> ``ParamValue(default)``. Never raises on a texture-typed param: pbrt
+    ``ErrorExit``s on an unknown/unsupported texture, skinny falls back to the
+    default and records an APPROX note (best-effort translator).
+    """
+    p = params.get(name)
+    if p is None:
+        return ParamValue(float(default))
+    if p.type == "texture":
+        res = resolve_texture(p.string, textures, base_dir)
+        if res is not None:
+            return ParamValue(float(default), res)
+        if notes is not None:
+            notes.append(f"texture '{p.string}' on {name} unresolved/unsupported; used default")
+        return ParamValue(float(default))
+    return ParamValue(p.float)
+
+
+def get_spectrum_texture(params, name, default_rgb, *, textures=None, base_dir=None,
+                         notes=None, illuminant=False):
+    """Resolve a SpectrumTexture-able parameter like pbrt's ``GetSpectrumTexture``.
+
+    Constant spectrum -> ``ParamValue(rgb)``; named texture -> ``ParamValue(
+    default_rgb, tex)``; absent -> ``ParamValue(default_rgb)``. Texture-safe.
+    """
+    p = params.get(name)
+    if p is None:
+        return ParamValue(list(default_rgb))
+    if p.type == "texture":
+        res = resolve_texture(p.string, textures, base_dir)
+        if res is not None:
+            return ParamValue(list(default_rgb), res)
+        if notes is not None:
+            notes.append(f"texture '{p.string}' on {name} unresolved/unsupported; used default")
+        return ParamValue(list(default_rgb))
+    rgb = spectra.param_to_rgb(p, illuminant=illuminant)
+    return ParamValue(list(rgb) if rgb is not None else list(default_rgb))
 
 
 def references_texture(pbrt_material, textures, base_dir=None) -> bool:
@@ -82,18 +147,33 @@ def alpha_to_usd_roughness(alpha: float) -> float:
     return math.sqrt(max(alpha, 0.0))
 
 
-def _resolve_roughness(params, notes: list[str]) -> float:
+def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None) -> ParamValue:
+    """Resolve roughness as a ParamValue (const usd_roughness, optional texture).
+
+    A texture-bound ``roughness``/``uroughness``/``vroughness`` connects the
+    texture and uses a mid scalar fallback (the perceptual sqrt remap cannot be
+    applied to a USD texture connection without an extra node — flagged approx).
+    The all-constant path reproduces the prior isotropic/anisotropic chain.
+    """
     remap = params.bool("remaproughness", True)
+    # resolve all three via the texture-safe accessor (never float() a texture name)
+    rough = get_float_texture(params, "roughness", 0.0, textures=textures, base_dir=base_dir, notes=notes)
+    urough = get_float_texture(params, "uroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
+    vrough = get_float_texture(params, "vroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
+    tex = rough.tex or urough.tex or vrough.tex
+    if tex is not None:
+        notes.append(
+            "roughness texture connected; perceptual remap not applied to texture (approx)"
+        )
+        return ParamValue(0.5, tex)
     if "uroughness" in params or "vroughness" in params:
-        ur = params.float("uroughness", params.float("roughness", 0.0))
-        vr = params.float("vroughness", params.float("roughness", 0.0))
-        au = pbrt_roughness_to_alpha(ur, remap)
-        av = pbrt_roughness_to_alpha(vr, remap)
+        au = pbrt_roughness_to_alpha(urough.const, remap)
+        av = pbrt_roughness_to_alpha(vrough.const, remap)
         notes.append("anisotropic roughness reduced to isotropic (geometric mean)")
         alpha = math.sqrt(max(au, 1e-8) * max(av, 1e-8))
     else:
-        alpha = pbrt_roughness_to_alpha(params.float("roughness", 0.0), remap)
-    return alpha_to_usd_roughness(alpha)
+        alpha = pbrt_roughness_to_alpha(rough.const, remap)
+    return ParamValue(alpha_to_usd_roughness(alpha))
 
 
 def _conductor_basecolor(params, notes: list[str]):
@@ -121,8 +201,15 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
 
     Returns (inputs, tex_inputs, status, notes): ``inputs`` are constant
     UsdPreviewSurface inputs, ``tex_inputs`` maps a UsdPreviewSurface input name
-    to ``(image_path, color_space)`` for texture-connected inputs, and
-    ``status`` is one of report.EXACT/APPROX/SKIPPED.
+    to ``(image_path, color_space, value_type)`` for texture-connected inputs
+    (``value_type`` in {"color3f","float"}), and ``status`` is one of
+    report.EXACT/APPROX/SKIPPED.
+
+    Every textureable parameter is resolved through the promoting accessors
+    (``get_float_texture``/``get_spectrum_texture``, mirroring pbrt's
+    ``GetFloatTexture``/``GetSpectrumTexture``), so a texture-bound value yields a
+    connection on its *own* USD input while a constant yields a plain input -- one
+    uniform pass, no float-vs-texture branching, nothing assumed to be diffuse.
     """
     from .report import APPROX, EXACT
 
@@ -133,48 +220,75 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
         "roughness": 0.5,
         "opacity": 1.0,
     }
+    tex_inputs: dict = {}
     status = EXACT
     mtype = pbrt_material.type if pbrt_material else "diffuse"
     # an emissive shape may carry no material; use an empty set so reads default
     p = pbrt_material.params if pbrt_material else ParamSet()
 
+    def put(usd_in, pv):
+        """Apply a ParamValue: constant input + optional texture connection."""
+        inputs[usd_in] = pv.const
+        if pv.is_tex:
+            path, color_space = pv.tex
+            tex_inputs[usd_in] = (path, color_space, _USD_INPUT_KIND.get(usd_in, "float"))
+
+    def reflectance(default):
+        return get_spectrum_texture(
+            p, "reflectance", default, textures=textures, base_dir=base_dir, notes=notes
+        )
+
+    def roughness():
+        return _resolve_roughness(p, notes, textures=textures, base_dir=base_dir)
+
+    def scalar(name, default):
+        # USD has no texture input for these (ior / clearcoatRoughness); a texture
+        # binding degrades to the scalar default with a note.
+        pv = get_float_texture(p, name, default, textures=textures, base_dir=base_dir, notes=notes)
+        if pv.is_tex:
+            notes.append(f"{name} texture not supported on USD input; used scalar default")
+        return pv.const
+
     if mtype in ("", "none"):
         inputs["diffuseColor"] = [0.5, 0.5, 0.5]
     elif mtype == "diffuse":
-        inputs["diffuseColor"] = spectra.param_to_rgb(p.get("reflectance")) or [0.5, 0.5, 0.5]
+        put("diffuseColor", reflectance([0.5, 0.5, 0.5]))
         inputs["roughness"] = 1.0
     elif mtype == "conductor":
         inputs["metallic"] = 1.0
-        inputs["diffuseColor"] = _conductor_basecolor(p, notes)
-        inputs["roughness"] = _resolve_roughness(p, notes)
+        put("diffuseColor", reflectance(_conductor_basecolor(p, notes)))
+        put("roughness", roughness())
     elif mtype in ("dielectric", "thindielectric"):
         inputs["diffuseColor"] = [1.0, 1.0, 1.0]
         inputs["opacity"] = 0.0  # open skinny's transmission/refraction gate
-        inputs["ior"] = p.float("eta", 1.5) if p else 1.5
-        inputs["roughness"] = _resolve_roughness(p, notes) if p else 0.0
+        inputs["ior"] = scalar("eta", 1.5)
+        put("roughness", roughness())
         if mtype == "thindielectric":
             status = APPROX
             notes.append("thindielectric approximated as thin dielectric")
     elif mtype == "coateddiffuse":
-        inputs["diffuseColor"] = spectra.param_to_rgb(p.get("reflectance")) or [0.5, 0.5, 0.5]
+        put("diffuseColor", reflectance([0.5, 0.5, 0.5]))
         inputs["roughness"] = 1.0
         inputs["clearcoat"] = 1.0
-        inputs["clearcoatRoughness"] = _resolve_roughness(p, notes)
+        rv = roughness()
+        inputs["clearcoatRoughness"] = rv.const
+        if rv.is_tex:
+            notes.append("coat roughness texture not connected on USD clearcoatRoughness; used scalar")
     elif mtype == "coatedconductor":
         inputs["metallic"] = 1.0
-        inputs["diffuseColor"] = _conductor_basecolor(p, notes)
-        inputs["roughness"] = _resolve_roughness(p, notes)
+        put("diffuseColor", reflectance(_conductor_basecolor(p, notes)))
+        put("roughness", roughness())
         inputs["clearcoat"] = 1.0
-        inputs["clearcoatRoughness"] = p.float("interface.roughness", 0.0) if p else 0.0
+        inputs["clearcoatRoughness"] = scalar("interface.roughness", 0.0)
     elif mtype == "diffusetransmission":
-        inputs["diffuseColor"] = spectra.param_to_rgb(p.get("reflectance")) or [0.25, 0.25, 0.25]
+        put("diffuseColor", reflectance([0.25, 0.25, 0.25]))
         inputs["opacity"] = 0.5
         status = APPROX
         notes.append("diffusetransmission approximated as diffuse + partial opacity")
     elif mtype == "subsurface":
         inputs["diffuseColor"] = [1.0, 1.0, 1.0]
         inputs["opacity"] = 0.0
-        inputs["ior"] = p.float("eta", 1.33) if p else 1.33
+        inputs["ior"] = scalar("eta", 1.33)
         status = APPROX
         notes.append("subsurface -> dielectric boundary + homogeneous interior (customData)")
     else:
@@ -184,15 +298,9 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
     if emissive_rgb is not None:
         inputs["emissiveColor"] = list(emissive_rgb)
 
-    # texture-connected inputs (imagemap reflectance/roughness)
-    tex_inputs: dict = {}
-    for pbrt_in, (usd_in, _scalar) in _TEXTURABLE.items():
-        pp = p.get(pbrt_in)
-        if pp is not None and pp.type == "texture":
-            res = resolve_texture(pp.string, textures, base_dir)
-            if res is not None:
-                tex_inputs[usd_in] = res
-            else:
-                notes.append(f"texture '{pp.string}' on {pbrt_in} unresolved/unsupported")
+    # an unresolved/unsupported texture binding degrades to its scalar/rgb default
+    # (handled in the accessors) -> surface as APPROX.
+    if status == EXACT and any("unresolved/unsupported" in n for n in notes):
+        status = APPROX
 
     return inputs, tex_inputs, status, notes
