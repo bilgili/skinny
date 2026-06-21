@@ -23,10 +23,16 @@ import volume_render;                   // henyeyGreenstein, sampleHenyeyGreenst
 import environment;                     // sceneEnvRadiance
 
 #if defined(SKINNY_METAL)
-// Watchdog-safe caps — the whole walk runs in one megakernel dispatch per pixel
-// (see volume_render.slang); an unbounded march overruns the macOS GPU watchdog.
+// Watchdog-safe caps — the whole walk can run in one megakernel dispatch per
+// pixel (see volume_render.slang); an unbounded march overruns the macOS GPU
+// watchdog. The old `8` was far too low for high-optical-depth subsurface media:
+// a high-albedo random walk needs ~τ² scatter events to diffuse out, so a slab
+// of ~20 mean free paths truncated at 8 bounces dropped ~half its energy (the
+// sssdragon rendered far too dark). `64` conserves energy across the τ range
+// skin/dragon scenes hit while staying within the watchdog on wavefront (the
+// production path for large scenes; megakernel large scenes OOM first).
 static const int SSS_MAX_STEPS   = 24;
-static const int SSS_MAX_BOUNCES = 8;
+static const int SSS_MAX_BOUNCES = 64;
 #else
 static const int SSS_MAX_STEPS   = 256;
 static const int SSS_MAX_BOUNCES = 64;
@@ -175,13 +181,27 @@ float3 subsurfaceRadiance(
         throughput *= ss.transmittance;
         if (!ss.scattered)
         {
-            // Escaped through a boundary face: refract out and carry the
-            // environment in the travel direction. This is the walk's env term.
+            // Reached a boundary face. Fresnel-split the energy: with probability
+            // Ft transmit (carry the environment out), else TOTAL/partial internal
+            // reflection — bounce the ray back into the medium and keep walking.
+            // Importance-sampling the split keeps throughput unbiased (no Ft / 1−Ft
+            // weights). The old code added only the Ft transmitted part and dropped
+            // the (1−Ft) reflected part, which discards most of the interior
+            // multiple-scattering at a dielectric boundary (η=1.5 loses ~half) and
+            // makes the medium far too dark.
             float cosExit = max(abs(mu), 1e-3);
             float Ft = 1.0 - fresnelDielectric(cosExit, ior);
-            radiance += throughput
-                      * sceneEnvRadiance(cur.direction, envIntensity, furnaceMode) * Ft;
-            break;
+            if (rng.next() < Ft)
+            {
+                radiance += throughput
+                          * sceneEnvRadiance(cur.direction, envIntensity, furnaceMode);
+                break;
+            }
+            // Internal reflection: flip the boundary-normal component of the
+            // direction and resume from the face (zMM is already clamped to 0/Tmm).
+            cur.origin    = cur.origin + cur.direction * exitWorld;
+            cur.direction = cur.direction - 2.0 * dot(cur.direction, N) * N;
+            continue;
         }
 
         // Advance the perpendicular depth to the scatter vertex.
