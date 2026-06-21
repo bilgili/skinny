@@ -26,9 +26,14 @@ from skinny.wavefront_layout import queue_buffer_sizes
 
 
 def _slang_flags(shader_dir: Path, entry: str) -> tuple[str, ...]:
+    # SKINNY_WAVEFRONT marks every wavefront-pass compile so shared shader code
+    # (e.g. the subsurface dispatch in path.slang) can select the wavefront-only
+    # estimator — the 3D interior subsurface walk — while the megakernel
+    # (vk_compute.py, no such define) keeps the watchdog-safe 1D slab.
     return (
         "-target", "spirv", "-entry", entry, "-stage", "compute",
         "-I", str(shader_dir), "-fvk-use-scalar-layout",
+        "-D", "SKINNY_WAVEFRONT=1",
     )
 
 
@@ -460,7 +465,8 @@ def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
     cmd = [
         slangc, str(src), "-target", "spirv", "-entry", entry, "-stage", "compute",
         "-I", str(shader_dir), "-I", str(mtlx_genslang),
-        "-D", "SKINNY_COMPUTE_PIPELINE=1", *defines, "-fvk-use-scalar-layout",
+        "-D", "SKINNY_COMPUTE_PIPELINE=1", "-D", "SKINNY_WAVEFRONT=1",
+        *defines, "-fvk-use-scalar-layout",
         "-o", str(out),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
