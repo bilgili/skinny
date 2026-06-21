@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skinny"
-version = "0.1.0"
+version = "0.1.1"
 description = "Real-time physically-based human skin rendering using ray tracing and volume rendering"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [
     { name = "a_bil" },
@@ -23,15 +23,32 @@ dependencies = [
     # bindings; Radiance .hdr writes are done inline (RGBE, numpy-only).
     "imageio>=2.34",
     "OpenEXR>=3.3",
-    # MaterialX is required for skin material descriptions and (in Phase C)
-    # GPU shader generation. The PyPI 1.39.4 wheel ships GenGlsl/Mdl/Msl/Osl
-    # but not GenSlang yet — for full feature coverage build MaterialX from
-    # source with MATERIALX_BUILD_PYTHON=ON. Both the wheel and a from-source
-    # build satisfy this constraint.
-    "MaterialX>=1.39",
+    # MaterialX (incl. GenSlang) and OpenUSD+usdMtlx come from our own builds
+    # published as GitHub Release wheels (MaterialX 1.39.6 / OpenUSD v26.05), not
+    # PyPI's `MaterialX` / `usd-core`. materialx-python-standalone provides
+    # `import MaterialX`; openusd-materialx provides `pxr` with the usdMtlx plugin.
+    # Direct-URL wheels are platform+python specific, so one marked entry per
+    # (python, platform) the release ships (cp312/313/314 x macos-arm64/linux/win).
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp312-cp312-macosx_26_0_arm64.whl ; python_version == '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp313-cp313-macosx_26_0_arm64.whl ; python_version == '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp314-cp314-macosx_26_0_arm64.whl ; python_version == '3.14' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp314-cp314-linux_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp312-cp312-win_amd64.whl ; python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp313-cp313-win_amd64.whl ; python_version == '3.13' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "PySide6>=6.11.1",
     "zstandard>=0.25.0",
-    "usd-core>=26.5",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp312-cp312-macosx_26_0_arm64.whl ; python_version == '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp313-cp313-macosx_26_0_arm64.whl ; python_version == '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp314-cp314-macosx_26_0_arm64.whl ; python_version == '3.14' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp314-cp314-linux_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp312-cp312-win_amd64.whl ; python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp313-cp313-win_amd64.whl ; python_version == '3.13' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "panel>=1.9.3",
     "holoviews>=1.22.1",
     "OpenEXR>=3.4.11"
@@ -42,11 +59,10 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.4",
 ]
-# usd-core lands in Phase D and is opt-in until then; declaring it as an
-# extra keeps `pip install -e .` cheap for users who only want the renderer.
-usd = [
-    "usd-core>=26.5",
-]
+# OpenUSD now ships as a base dependency (openusd-materialx, from the GitHub
+# Release above) rather than PyPI usd-core, so this extra is a no-op kept only so
+# existing `pip install .[usd]` invocations still resolve.
+usd = []
 web = [
     "panel>=1.4",
     "bokeh>=3.4",
