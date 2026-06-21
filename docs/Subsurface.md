@@ -84,6 +84,18 @@ The `-mtlx` / `standard_surface` inputs map to the **same** coefficients —
 `subsurface_scale` → `1/mfp` scale, `subsurface_anisotropy` → `g` — so native-USD
 and `-mtlx` imports agree.
 
+**Unit storage.** pbrt media coefficients are mm⁻¹ interpreted *per scene unit*
+(optical depth `τ = σ·L`). The walk, however, computes
+`τ = σ_packed · L_world · mmPerUnit`, and an imported pbrt stage declares
+`metersPerUnit = 1.0` (`emit.PBRT_STAGE_METERS_PER_UNIT`) → loader
+`mm_per_unit = 1000`. So `media.subsurface_overrides` stores the coefficients
+**per world unit**: the pbrt mm⁻¹ values divided by `mm_per_unit` (1000), so
+`σ_packed · mmPerUnit` recovers pbrt's coefficients and the interior is at its
+true geometric optical depth. Without this the dragon is ~1000× too dense and
+renders opaque gold/brown instead of translucent. (Full pixel-mean parity with a
+pbrt reference additionally needs the env-light application and high-optical-depth
+walk fidelity — a separate follow-up.)
+
 The coefficients ride on `skinnyOverrides` customData (`subsurface_sigma_a`,
 `subsurface_sigma_s`, `subsurface_g`, and `ior` for the boundary η) → merged into
 `Material.parameter_overrides`. The renderer packs them **inline** into

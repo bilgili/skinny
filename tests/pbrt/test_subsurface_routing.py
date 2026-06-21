@@ -10,9 +10,15 @@ from __future__ import annotations
 import pytest
 
 from skinny.pbrt.api import import_pbrt
+from skinny.pbrt.emit import PBRT_STAGE_METERS_PER_UNIT
 from skinny.pbrt.subsurface import subsurface_coefficients
 
 usd_loader = pytest.importorskip("skinny.usd_loader")
+
+# Imported medium σ are stored per-world-unit: pbrt mm⁻¹ coefficients divided by
+# the stage's mm_per_unit (= metersPerUnit·1000) so the walk's σ·L·mm_per_unit
+# recovers pbrt's per-scene-unit optical depth (change pbrt-subsurface-unit-scale).
+_MM_PER_UNIT = PBRT_STAGE_METERS_PER_UNIT * 1000.0
 
 SKIN1 = (
     'WorldBegin\n'
@@ -42,8 +48,10 @@ def test_native_subsurface_import_does_not_crash_and_carries_coeffs(tmp_path):
     stage, _report = import_pbrt(str(src))
     cd = _skinny_overrides(stage)
     exp = subsurface_coefficients(name="Skin1")
-    assert list(cd["subsurface_sigma_a"]) == pytest.approx(list(exp["sigma_a"]))
-    assert list(cd["subsurface_sigma_s"]) == pytest.approx(list(exp["sigma_s"]))
+    exp_a = [c / _MM_PER_UNIT for c in exp["sigma_a"]]
+    exp_s = [c / _MM_PER_UNIT for c in exp["sigma_s"]]
+    assert list(cd["subsurface_sigma_a"]) == pytest.approx(exp_a)
+    assert list(cd["subsurface_sigma_s"]) == pytest.approx(exp_s)
     assert cd["subsurface_g"] == pytest.approx(exp["g"])
     # Boundary IOR reaches the renderer through `ior` (resolveMedium reads it).
     assert cd["ior"] == pytest.approx(exp["eta"])
@@ -56,8 +64,10 @@ def test_mtlx_subsurface_import_carries_same_coeffs(tmp_path):
     stage, _report = import_pbrt(str(src), out=str(out), materialx=True)
     cd = _skinny_overrides(stage)
     exp = subsurface_coefficients(name="Skin1")
-    assert list(cd["subsurface_sigma_a"]) == pytest.approx(list(exp["sigma_a"]))
-    assert list(cd["subsurface_sigma_s"]) == pytest.approx(list(exp["sigma_s"]))
+    exp_a = [c / _MM_PER_UNIT for c in exp["sigma_a"]]
+    exp_s = [c / _MM_PER_UNIT for c in exp["sigma_s"]]
+    assert list(cd["subsurface_sigma_a"]) == pytest.approx(exp_a)
+    assert list(cd["subsurface_sigma_s"]) == pytest.approx(exp_s)
 
 
 def test_renderer_detects_and_tags_subsurface():

@@ -23,11 +23,18 @@ from pxr import Gf, Sdf, Usd, UsdGeom
 
 from . import transform as T
 
+# Stage unit declared on every imported pbrt stage. The loader derives
+# `mm_per_unit = metersPerUnit * 1000`, so this fixes `mm_per_unit = 1000`. It is
+# the single source of truth for the stage unit: anything that must cancel that
+# factor (e.g. the subsurface medium optical density in `media.subsurface_overrides`)
+# multiplies by this constant rather than a bare literal.
+PBRT_STAGE_METERS_PER_UNIT = 1.0
+
 
 def new_stage(path: str | None = None) -> Usd.Stage:
     stage = Usd.Stage.CreateNew(path) if path else Usd.Stage.CreateInMemory()
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    UsdGeom.SetStageMetersPerUnit(stage, PBRT_STAGE_METERS_PER_UNIT)
     stage.SetDefaultPrim(stage.DefinePrim("/World", "Xform"))
     return stage
 
