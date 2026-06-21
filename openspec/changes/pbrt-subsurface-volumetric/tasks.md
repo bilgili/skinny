@@ -25,12 +25,12 @@
 
 ## 3. Volume random walk (null-collision) + density seam
 
-- [ ] 3.0 Density seam (the additive-extension contract): `densityAt(Medium m,
+- [x] 3.0 Density seam (the additive-extension contract): `densityAt(Medium m,
   float3 pWorld) -> float` and `mediumMajorant(Medium m, float3 pA, float3 pB)
   -> float3`, dispatched by `m.kind` (switch idiom, like `flatSampleLobe`). Implement
   `MEDIUM_HOMOGENEOUS` (densityAt ≡ 1, majorant = σ_a+σ_s). The walk SHALL read the
   medium ONLY through these two — adding a kind = one enum + two `case` bodies.
-- [ ] 3.1 `mediumWalk(rayIn, medium, boundaryMode, rng)` (new shader module):
+- [x] 3.1 `mediumWalk(rayIn, medium, boundaryMode, rng)` (new shader module):
   cross boundary by mode (*dielectric* Fresnel refract for subsurface; *index-
   matched* AABB pass-through stub for the free-standing case) → **null-collision
   (Woodcock) loop**: `σ_max = mediumMajorant(...)`; tentative collision, local
@@ -39,11 +39,11 @@
   mode (Fresnel split vs pass-through). Russian roulette; bounded (no clamp); exit
   applies the η² refraction radiance scaling (dielectric mode). The walk references
   the medium ONLY through `densityAt`/`mediumMajorant`.
-- [ ] 3.2 Reuse `volume_render.slang` (HG phase/sampling) + `flat_shading.slang`
+- [x] 3.2 Reuse `volume_render.slang` (HG phase/sampling) + `flat_shading.slang`
   Fresnel; throughput float3, pdf scalar. **No closed-form homogeneous-only
   transmittance path** (would block heterogeneous reuse) — homogeneous is the
   constant-density degenerate of the null-collision loop.
-- [ ] 3.3 Factor the null-collision **segment traversal** (the loop over
+- [x] 3.3 Factor the null-collision **segment traversal** (the loop over
   `densityAt`/`mediumMajorant`/HG/RR for one ray segment through a medium) as a
   standalone function that `mediumWalk` calls — separate from the "subsurface hit
   triggers it" caller. This is what lets a later free-standing-media change reuse
