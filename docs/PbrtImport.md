@@ -160,7 +160,12 @@ coefficients ride on `skinnyOverrides` `customData`
 (`subsurface_sigma_a`/`subsurface_sigma_s`/`subsurface_g`, plus `ior` for the
 boundary eta) → merged into `Material.parameter_overrides`; the renderer packs
 them inline into `FlatMaterialParams` (binding 13) and tags
-`MATERIAL_TYPE_SUBSURFACE` when `subsurface_sigma_*` is non-zero. pbrt's
+`MATERIAL_TYPE_SUBSURFACE` when `subsurface_sigma_*` is non-zero. The σ are
+stored **per world unit** — the pbrt mm⁻¹ values divided by the stage's
+`mm_per_unit` (1000, from `emit.PBRT_STAGE_METERS_PER_UNIT`) — so the walk's
+`σ·L·mmPerUnit` reproduces pbrt's per-scene-unit optical depth instead of a
+1000×-inflated, opaque one (change `pbrt-subsurface-unit-scale`; see
+`docs/Subsurface.md`). pbrt's
 tabulated dipole BSSRDF and skinny's 3D random walk agree qualitatively (both
 milky), not bit-for-bit — corpus scene `subsurface_infinite` gates at relMSE
 0.079. **Limitations:** the walk transports the environment (IBL) plus a single

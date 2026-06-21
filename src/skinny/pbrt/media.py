@@ -45,6 +45,7 @@ def subsurface_overrides(params) -> dict:
     (``subsurface_sigma_a/_s/_g``); the boundary IOR is carried as ``ior`` —
     ``resolveMedium`` reuses the flat ``ior`` slot for the medium eta.
     """
+    from .emit import PBRT_STAGE_METERS_PER_UNIT
     from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
 
     g_f = params.floats("g", [0.0])
@@ -60,9 +61,16 @@ def subsurface_overrides(params) -> dict:
         eta=float(eta_f[0]) if eta_f else ETA_DEFAULT,
         scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
     )
+    # pbrt media coefficients are mm⁻¹ interpreted per *scene unit* (τ = σ·L). The
+    # renderer's walk computes τ = σ_packed · L_world · mm_per_unit, and the loader
+    # derives mm_per_unit = metersPerUnit · 1000 = 1000 for an imported pbrt stage.
+    # Pre-divide σ by that factor so σ_packed · mm_per_unit recovers the original
+    # pbrt coefficients — otherwise the interior is ~1000× too dense (the sssdragon
+    # renders opaque gold/brown instead of translucent). g/eta/ior are unitless.
+    mm_per_unit = PBRT_STAGE_METERS_PER_UNIT * 1000.0
     return {
-        "subsurface_sigma_a": list(coeffs["sigma_a"]),
-        "subsurface_sigma_s": list(coeffs["sigma_s"]),
+        "subsurface_sigma_a": [c / mm_per_unit for c in coeffs["sigma_a"]],
+        "subsurface_sigma_s": [c / mm_per_unit for c in coeffs["sigma_s"]],
         "subsurface_g": float(coeffs["g"]),
         "subsurface_eta": float(coeffs["eta"]),
         "ior": float(coeffs["eta"]),
