@@ -221,6 +221,14 @@ MATERIAL_TYPE_PYTHON = 3  # Python-authored slangpile material (one of
                           # `shaders/python_materials_dispatcher.slang`.
                           # Python material index packed into upper byte of
                           # `materialTypes[matId]` (MATERIAL_PYMAT_SHIFT).
+MATERIAL_TYPE_SUBSURFACE = 4  # pbrt `subsurface`: a smooth dielectric boundary +
+                          # a homogeneous interior medium (σ_a, σ_s, HG g),
+                          # transported by the interior random walk
+                          # (`materials/subsurface/subsurface_walk.slang`). The
+                          # medium coefficients are packed inline into
+                          # FlatMaterialParams (binding 13) — no new buffer
+                          # (Metal 31-buffer cap) — and read via `resolveMedium`.
+                          # Detected from non-zero `subsurface_sigma_*` overrides.
 
 # Sphere-light record (binding 17): vec3 position, float radius, vec3
 # radiance, float pad. 32 B / record, naturally 16-byte aligned.
@@ -281,6 +289,22 @@ def _override_color3(overrides: dict, key: str, default: tuple) -> tuple:
         return float(val[0]), float(val[1]), float(val[2])
     except (TypeError, IndexError, ValueError):
         return tuple(float(c) for c in default)
+
+
+def _material_is_subsurface(material) -> bool:
+    """True when a material carries a non-zero subsurface interior medium
+    (`subsurface_sigma_a` / `subsurface_sigma_s`, mm⁻¹).
+
+    Such materials route to MATERIAL_TYPE_SUBSURFACE so the GPU runs the
+    volumetric interior random walk (`subsurface_walk.slang`) instead of the flat
+    opacity=0 delta-refraction (clear-glass) fallback. A free-standing fog
+    `MediumInterface` carries `volume_*` keys (not `subsurface_*`), so it is left
+    on the flat/dielectric path — only a pbrt `Material "subsurface"` matches.
+    """
+    overrides = getattr(material, "parameter_overrides", None) or {}
+    sa = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
+    ss = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
+    return any(c > 0.0 for c in sa) or any(c > 0.0 for c in ss)
 
 
 class TexturePool:
@@ -5519,6 +5543,12 @@ class Renderer:
             if mod and mod in py_ids:
                 types.append(MATERIAL_TYPE_PYTHON)
                 self._material_python_ids[i] = py_ids[mod]
+            elif _material_is_subsurface(mat):
+                # pbrt subsurface: a dielectric boundary + an inline homogeneous
+                # interior medium. Still packed as flat data (the medium fields
+                # ride in FlatMaterialParams 160..192); the type tag routes the
+                # GPU to the interior random walk instead of opacity=0 glass.
+                types.append(MATERIAL_TYPE_SUBSURFACE)
             else:
                 types.append(MATERIAL_TYPE_FLAT)
             indices: dict[str, int] = {

@@ -360,12 +360,14 @@ def test_subsurface_roundtrip_equivalent(tmp_path):
     assert ss_m.parameter_overrides.get("opacity") == pytest.approx(0.0)
 
     # SSS interior recovered from skinnyOverrides on the -mtlx path (the bug: it
-    # was dropped). volume_sigma_s default for scale=10 is 2.55*10 etc.
+    # was dropped). Carried under the renderer's medium keys (subsurface_sigma_*,
+    # mm⁻¹, via the pbrt-v4 precedence) so the renderer packs the inline medium
+    # and routes to MATERIAL_TYPE_SUBSURFACE; equal across both export paths.
     ovr_m = ss_m.parameter_overrides
-    assert "volume_sigma_s" in ovr_m, "SSS interior lost on -mtlx path"
-    assert "volume_sigma_a" in ovr_m
-    assert ovr_m["volume_sigma_s"] == pytest.approx(
-        ss_p.parameter_overrides["volume_sigma_s"]
+    assert "subsurface_sigma_s" in ovr_m, "SSS interior lost on -mtlx path"
+    assert "subsurface_sigma_a" in ovr_m
+    assert ovr_m["subsurface_sigma_s"] == pytest.approx(
+        ss_p.parameter_overrides["subsurface_sigma_s"]
     )
     assert ovr_m["ior"] == pytest.approx(ss_p.parameter_overrides["ior"])
 

@@ -23,6 +23,34 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt subsurface materials now render as a volumetric interior random walk**
+  (was clear glass) (change `pbrt-subsurface-volumetric`, Stage-2 Ch5 of the
+  pbrt-mtlx roadmap) — a pbrt `Material "subsurface"` imports to a new
+  `MATERIAL_TYPE_SUBSURFACE` instead of being lowered to the flat material with
+  `opacity = 0` (which rendered as clear glass). It is a smooth dielectric
+  boundary (`eta`) wrapping a homogeneous interior medium (`σ_a`, `σ_s`,
+  Henyey-Greenstein `g`), transported by a delta-tracked (Woodcock /
+  null-collision) 1D-slab volumetric random walk: refract in, march the interior
+  with HG scattering, NEE a single analytic distant light + the environment on
+  escape, refract out. Coefficients follow pbrt precedence — explicit
+  `sigma_a`/`sigma_s` (× `scale`) → named preset (`Skin1`, …, the measured
+  table) → `reflectance` + `mfp` via the Jensen diffuse-albedo inversion — and
+  the `-mtlx` `standard_surface` (`subsurface_color`/`radius`/`scale`/
+  `anisotropy`) maps to identical coefficients. Runs in **both execution modes**
+  (megakernel + wavefront) and **both backends** (Vulkan + native Metal): one
+  dispatch case in `integrators/path.slang` `evaluateBounce()` serves the
+  megakernel and the wavefront catch-all kernel (BDPT excludes it, flat-only eye
+  walk, like skin). The medium is packed **inline** into the existing
+  `FlatMaterialParams` buffer (binding 13) — no new SSBO, to respect Metal's
+  31-buffer cap. Energy-conserving: a furnace (`σ_a → 0`) returns ~unity
+  (measured 0.996); PT≡BDPT relMSE 0.0058, Metal↔Vulkan relMSE 0.0175,
+  true-glass back-compat unchanged, pbrt-v4 corpus `subsurface_infinite` relMSE
+  0.079 (dipole-vs-random-walk ⇒ milky, not bit-parity). Follow-ups: the walk
+  samples only a single distant light + the environment, so area/emissive lights
+  inside the medium, heterogeneous / NanoVDB grids, and free-standing
+  `MediumInterface` media remain future work (the majorant / null-collision
+  transport and handle-referenced medium let them slot in additively).
+
 - **Flat BSDF: colored glass, tinted speculars, Oren-Nayar diffuse** (change
   `flat-lobes-rich-inputs`, Stage-2 Tier A of the pbrt-mtlx roadmap) — the
   unified flat / `standard_surface` lobe BSDF now consumes three previously-dead

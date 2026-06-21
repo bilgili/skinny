@@ -71,6 +71,20 @@
         "relmse": 0.0024,
         "flip": 0.0119
       }
+    },
+    {
+      "name": "subsurface_infinite",
+      "file": "subsurface_infinite.pbrt",
+      "ref": "refs/subsurface_infinite.exr",
+      "width": 128,
+      "height": 128,
+      "spp": 512,
+      "relmse_tol": 0.13,
+      "flip_tol": 0.14,
+      "measured": {
+        "relmse": 0.0792,
+        "flip": 0.0894
+      }
     }
   ]
 }

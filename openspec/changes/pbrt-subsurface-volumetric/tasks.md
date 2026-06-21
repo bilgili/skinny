@@ -6,7 +6,7 @@
   `scale`/`anisotropy`) path yields identical coefficients. Inversion round-trips.
 - [x] 1.2 `materials.py`: port pbrt's named-medium scattering table (`Skin1`, …)
   and the `reflectance`+`mfp` → albedo inversion; emit `(σ_a, σ_s, g, eta)`.
-- [ ] 1.3 `usd_loader.py`: route subsurface to the new material type (stop the
+- [x] 1.3 `usd_loader.py`: route subsurface to the new material type (stop the
   `opacity = 0` flat lowering for it); carry the medium coefficients.
 
 ## 2. Material type + medium registry plumbing
@@ -17,7 +17,7 @@
   the handle indirection is what lets free-standing `MediumInterface` media reuse
   it later). Define `MEDIUM_HOMOGENEOUS` (+ reserve the enum for `MEDIUM_NANOVDB`).
   Document in the binding map.
-- [ ] 2.2 `renderer.py`: pack the `Medium` registry; resolve the subsurface
+- [x] 2.2 `renderer.py`: pack the `Medium` registry; resolve the subsurface
   material's medium handle; tag the new type in `materialTypes[]`; add the medium
   fields to `_current_state_hash`.
 - [x] 2.3 Struct-layout test for `Medium` (scalar/Metal byte parity), incl. the
@@ -52,22 +52,22 @@
 
 ## 4. Integrator wiring
 
-- [ ] 4.1 Megakernel: dispatch `MATERIAL_TYPE_SUBSURFACE` → `subsurfaceWalk` in the
+- [x] 4.1 Megakernel: dispatch `MATERIAL_TYPE_SUBSURFACE` → `subsurfaceWalk` in the
   `main_pass.slang` material switch.
-- [ ] 4.2 Wavefront: wire the walk into `integrators/path.slang` and
+- [x] 4.2 Wavefront: wire the walk into `integrators/path.slang` and
   `integrators/bdpt.slang` (mirror the skin-BSSRDF wiring).
-- [ ] 4.3 Recompile SPIR-V + confirm the Metal in-process compile (watch the
+- [x] 4.3 Recompile SPIR-V + confirm the Metal in-process compile (watch the
   guarded_metal.sh RAM floor — third heavy material path).
 
 ## 5. Verification
 
-- [ ] 5.1 Furnace / energy: homogeneous SSS sphere, `σ_a → 0`, constant env →
+- [x] 5.1 Furnace / energy: homogeneous SSS sphere, `σ_a → 0`, constant env →
   ~unity; bounded throughput, no firefly, no clamp.
-- [ ] 5.2 PT ≡ BDPT on the SSS sphere, both execution modes.
-- [ ] 5.3 Metal ↔ Vulkan parity on the SSS sphere.
-- [ ] 5.4 Back-compat: pbrt parity corpus + a true `dielectric` glass scene
+- [x] 5.2 PT ≡ BDPT on the SSS sphere, both execution modes.
+- [x] 5.3 Metal ↔ Vulkan parity on the SSS sphere.
+- [x] 5.4 Back-compat: pbrt parity corpus + a true `dielectric` glass scene
   byte/relMSE-unchanged (flat path untouched).
-- [ ] 5.5 Forward-compat guard (Disney cloud): assert the walk takes a `σ_max`
+- [x] 5.5 Forward-compat guard (Disney cloud): assert the walk takes a `σ_max`
   majorant + a `boundaryMode` and resolves the medium via a handle — i.e. the
   homogeneous case runs through the null-collision path (a unit/shader check that
   setting a uniform density field equal to the constant σ_t yields the identical
@@ -76,11 +76,11 @@
 
 ## 6. pbrt parity gate + docs
 
-- [ ] 6.1 Add a subsurface parity scene (reduced `sssdragon` Skin1, or a simpler
+- [x] 6.1 Add a subsurface parity scene (reduced `sssdragon` Skin1, or a simpler
   SSS sphere) + a pbrt v4 reference EXR; gate relMSE/FLIP and assert it is milky
   (differs from the pre-change glass render in the expected direction). Show the
   pbrt-vs-skinny image at shared exposure (note env-intensity is out of scope).
-- [ ] 6.2 Docs: `docs/SkinRendering.md` or a new subsurface doc — the volumetric
+- [x] 6.2 Docs: `docs/SkinRendering.md` or a new subsurface doc — the volumetric
   random-walk model + coefficient derivation; `docs/Architecture.md` binding map
   (`MediumParams`, `MATERIAL_TYPE_SUBSURFACE`); `docs/PbrtImport.md` (subsurface
   now volumetric, no longer glass); `README.md` compatibility matrix + `CHANGELOG.md`.

@@ -355,8 +355,22 @@ for diffuse / conductor / dielectric materials `-mtlx` and the UsdPreviewSurface
 output stay pixel-identical. The flat path now also reads
 `transmission_color` (colored glass), `specular_color` (tinted speculars), and
 `diffuse_roughness` (Oren-Nayar diffuse) from these richer slots, so those
-inputs render rather than being dropped (Stage-2 Tier A); `specular_anisotropy`,
-rough-glass transmission, and `subsurface` remain future work.
+inputs render rather than being dropped (Stage-2 Tier A); `specular_anisotropy`
+and rough-glass transmission remain future work.
+
+A pbrt `Material "subsurface"` now imports as a **volumetric subsurface
+material** (Stage-2 Ch5) — a smooth dielectric boundary (`eta`) wrapping a
+homogeneous interior medium (`σ_a`, `σ_s`, Henyey-Greenstein `g`), transported
+by a delta-tracked (Woodcock / null-collision) interior random walk — rather
+than being lowered to clear glass. Coefficients follow pbrt precedence (explicit
+`sigma_a`/`sigma_s` × `scale` → named preset → `reflectance` + `mfp` via the
+Jensen inversion; the `-mtlx` `standard_surface` maps identically). It runs in
+**both execution modes** (megakernel + wavefront) and **both backends** (Vulkan
++ native Metal), and is energy-conserving (furnace `σ_a → 0` ≈ unity). pbrt
+uses a dipole here, so the random walk is *milky*-matching rather than
+bit-parity. Limitation: the walk lights from a single distant light + the
+environment; area/emissive lights inside the medium, heterogeneous / NanoVDB
+grids, and free-standing `MediumInterface` media are deliberate follow-ups.
 
 ### Mesh heads (legacy)
 
@@ -470,6 +484,7 @@ neural × interop.
 | Megakernel execution | ✅ | ✅ |
 | Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
 | SPPM integrator (wavefront, flat materials) | ✅ | ✅ (`MetalWavefrontSppmPass`; caustic parity matches Vulkan) |
+| pbrt `subsurface` (volumetric interior random walk) | ✅ | ✅ (megakernel + wavefront; lights from a single distant light + the environment) |
 | Neural directional proposal (inference) | ✅ | ✅ |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |

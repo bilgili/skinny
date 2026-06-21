@@ -142,64 +142,64 @@ float3 subsurfaceRadiance(
 
     float3 throughput = float3(1.0 - Fr);
 
-    // Slab between the front hit and the back face along the refracted ray. Closed
-    // meshes (the parity targets — sssdragon, SSS sphere) always set hit.backT. The
-    // fallback for an open mesh is a generous several-mean-free-path span in world
-    // units (≈10·MFP = 10/σ_t/mmPerUnit); the medium extinction + RR bound the walk.
+    // 1D-slab random walk. The interior is modelled as a homogeneous slab of
+    // perpendicular thickness `Tmm` (mm) bounded by the front face (z=0) and the
+    // back face (z=Tmm); `zMM` is the perpendicular depth of the current vertex.
+    // Closed parity meshes (sssdragon, SSS sphere) set hit.backT; the open-mesh
+    // fallback is a several-MFP span. Each step marches to whichever face the ray
+    // heads toward, so the walk can actually *exit* (the prior full-slab tMax never
+    // took the escape branch ⇒ lost energy). Env is collected ONLY on escape and
+    // the analytic direct light ONLY via per-scatter NEE — disjoint sources, so the
+    // two never double-count, and σ_a→0 conserves energy (furnace ≈ unity).
     float sigmaTmax = max(medium.sigmaA.x + medium.sigmaS.x,
                       max(medium.sigmaA.y + medium.sigmaS.y,
                           medium.sigmaA.z + medium.sigmaS.z));
     float fallbackSlab = 10.0 / (max(sigmaTmax, 1e-4) * max(mmPerUnit, 1e-6));
     float slabWorld = (hit.backT > hit.t) ? (hit.backT - hit.t) : fallbackSlab;
+    float Tmm       = slabWorld * mmPerUnit;                      // slab thickness (mm)
+    float zMM       = 0.0;                                        // depth below front face
     Ray   cur; cur.origin = ray.origin + ray.direction * hit.t; cur.direction = wt;
-    float tMin = 0.0;
-    float tMax = slabWorld;
     bool  hasDirect = dot(lightRadiance, lightRadiance) > 1e-8;
+    float3 sigmaTmm = medium.sigmaA + medium.sigmaS;             // mm⁻¹ (homogeneous shadow)
 
     for (int b = 0; b < SSS_MAX_BOUNCES; b++)
     {
-        SegmentSample ss = traverseMediumSegment(cur, tMin, tMax, medium, mmPerUnit, rng);
+        // Perpendicular cosine: +deeper (toward back), −shallower (toward front).
+        float mu = dot(cur.direction, -N);
+        float exitWorld;                                          // ray distance to a face
+        if (mu > 1e-4)        exitWorld = ((Tmm - zMM) / mu)  / max(mmPerUnit, 1e-6);
+        else if (mu < -1e-4)  exitWorld = (zMM        / -mu)  / max(mmPerUnit, 1e-6);
+        else                  exitWorld = (8.0 * Tmm)         / max(mmPerUnit, 1e-6);
+
+        SegmentSample ss = traverseMediumSegment(cur, 0.0, exitWorld, medium, mmPerUnit, rng);
         throughput *= ss.transmittance;
         if (!ss.scattered)
-            break;                                                // exited the slab
+        {
+            // Escaped through a boundary face: refract out and carry the
+            // environment in the travel direction. This is the walk's env term.
+            float cosExit = max(abs(mu), 1e-3);
+            float Ft = 1.0 - fresnelDielectric(cosExit, ior);
+            radiance += throughput
+                      * sceneEnvRadiance(cur.direction, envIntensity, furnaceMode) * Ft;
+            break;
+        }
 
+        // Advance the perpendicular depth to the scatter vertex.
+        zMM = clamp(zMM + mu * ss.t * mmPerUnit, 0.0, Tmm);
         float3 scatterPos = cur.origin + cur.direction * ss.t;
-        // Perpendicular depth of the scatter below the boundary, in mm — the slant
-        // exit length toward an exit direction is depthMM / cos(exitDir, N), exactly
-        // as the proven volumeRenderSkin does (NOT the entry free-flight ss.t).
-        float depthMM = (ss.t - tMin) * mmPerUnit;
-        float3 sigmaTmm = medium.sigmaA + medium.sigmaS;   // mm⁻¹ (homogeneous shadow)
 
-        // NEE (a) — analytic directional light, refracting OUT through the boundary.
+        // NEE — analytic directional light, refracting OUT through the front face.
         if (hasDirect)
         {
             float cosL = dot(lightDir, N);
             if (cosL > 1e-3)
             {
                 float  phase     = henyeyGreenstein(dot(cur.direction, lightDir), medium.g);
-                float  shadowDist = depthMM / cosL;            // mm to the boundary
+                float  shadowDist = zMM / cosL;                  // mm to the front boundary
                 float3 shadowTr   = exp(-sigmaTmm * shadowDist);
-                // Exit Fresnel transmittance (D1): radiance must refract out; 1 on
-                // TIR ⇒ tap auto-zeros. Restores T_enter·T_exit reciprocity.
+                // Exit Fresnel transmittance (D1): 1 on TIR ⇒ tap auto-zeros.
                 float  Ft = 1.0 - fresnelDielectric(cosL, ior);
                 radiance += throughput * ss.scatterAlbedo * phase * lightRadiance * shadowTr * Ft;
-            }
-        }
-        // NEE (b) — environment, HG-importance-sampled (phase/pdf ≡ 1), exiting the
-        // boundary. NOTE: the closed-form exp(-σ_t·d) shadow transmittance assumes a
-        // homogeneous medium; a heterogeneous (grid) source would ratio-track this
-        // segment instead — a NEE follow-up (the primary segment walk is already
-        // seam-driven). For homogeneous it is exact.
-        {
-            float3 wEnv = sampleHenyeyGreenstein(cur.direction, medium.g, rng.next2());
-            float  cosN = dot(wEnv, N);
-            if (cosN > 1e-3)
-            {
-                float  shadowDist = depthMM / cosN;
-                float3 shadowTr   = exp(-sigmaTmm * shadowDist);
-                float3 envRad     = sceneEnvRadiance(wEnv, envIntensity, furnaceMode);
-                float  Ft = 1.0 - fresnelDielectric(cosN, ior);   // exit transmittance (D1)
-                radiance += throughput * ss.scatterAlbedo * envRad * shadowTr * Ft;
             }
         }
 
@@ -213,8 +213,6 @@ float3 subsurfaceRadiance(
         if (rng.next() > pCont)
             break;
         throughput /= max(pCont, 1e-6);
-        tMin = 0.0;
-        tMax = slabWorld;
     }
     return radiance;
 }
