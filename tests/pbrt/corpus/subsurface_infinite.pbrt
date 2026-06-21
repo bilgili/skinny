@@ -1,0 +1,20 @@
+# Corpus: a homogeneous subsurface sphere under a constant infinite light.
+# Exercises MATERIAL_TYPE_SUBSURFACE — the dielectric boundary + interior random
+# walk (skinny) vs pbrt's tabulated dipole BSSRDF. IBL-lit (the walk transports
+# environment illumination; area/emissive lights inside the medium are a follow-up),
+# so both see identical lighting. They agree qualitatively — both milky / light-
+# diffusing, replacing the pre-change clear-glass look — not bit-for-bit (dipole vs
+# random walk + RGB vs spectral), hence the loose tolerance.
+LookAt 0 0 4  0 0 0  0 1 0
+Camera "perspective" "float fov" 30
+Sampler "independent" "integer pixelsamples" 512
+Integrator "volpath" "integer maxdepth" 32
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "subsurface_infinite.exr"
+WorldBegin
+
+LightSource "infinite" "rgb L" [1 1 1]
+
+AttributeBegin
+  Material "subsurface" "rgb sigma_a" [0.02 0.06 0.12] "rgb sigma_s" [2 2 2] "float eta" 1.33
+  Shape "sphere" "float radius" 1
+AttributeEnd

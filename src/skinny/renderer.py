@@ -139,8 +139,10 @@ INSTANCE_STRIDE = 144
 #  112: normalBias  (vec3, 12) + _pad (4 B)
 #  128: transmissionColor (vec3, 12) + diffuseRoughness (float)  [Stage-2]
 #  144: specularColor (vec3, 12) + _pad1 (4 B)                   [Stage-2]
-# 160 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 160
+#  160: medium σ_a (vec3, 12) + medium g (float)                 [subsurface]
+#  176: medium σ_s (vec3, 12) + mediumKind (uint)                [subsurface]
+# 192 B / record, naturally 16-byte aligned.
+FLAT_MATERIAL_STRIDE = 192
 FLAT_MATERIAL_CAPACITY_INIT = 16
 
 # Channel-selector codes packed into FlatMaterialParams.channelMask. Five
@@ -219,6 +221,14 @@ MATERIAL_TYPE_PYTHON = 3  # Python-authored slangpile material (one of
                           # `shaders/python_materials_dispatcher.slang`.
                           # Python material index packed into upper byte of
                           # `materialTypes[matId]` (MATERIAL_PYMAT_SHIFT).
+MATERIAL_TYPE_SUBSURFACE = 4  # pbrt `subsurface`: a smooth dielectric boundary +
+                          # a homogeneous interior medium (σ_a, σ_s, HG g),
+                          # transported by the interior random walk
+                          # (`materials/subsurface/subsurface_walk.slang`). The
+                          # medium coefficients are packed inline into
+                          # FlatMaterialParams (binding 13) — no new buffer
+                          # (Metal 31-buffer cap) — and read via `resolveMedium`.
+                          # Detected from non-zero `subsurface_sigma_*` overrides.
 
 # Sphere-light record (binding 17): vec3 position, float radius, vec3
 # radiance, float pad. 32 B / record, naturally 16-byte aligned.
@@ -279,6 +289,22 @@ def _override_color3(overrides: dict, key: str, default: tuple) -> tuple:
         return float(val[0]), float(val[1]), float(val[2])
     except (TypeError, IndexError, ValueError):
         return tuple(float(c) for c in default)
+
+
+def _material_is_subsurface(material) -> bool:
+    """True when a material carries a non-zero subsurface interior medium
+    (`subsurface_sigma_a` / `subsurface_sigma_s`, mm⁻¹).
+
+    Such materials route to MATERIAL_TYPE_SUBSURFACE so the GPU runs the
+    volumetric interior random walk (`subsurface_walk.slang`) instead of the flat
+    opacity=0 delta-refraction (clear-glass) fallback. A free-standing fog
+    `MediumInterface` carries `volume_*` keys (not `subsurface_*`), so it is left
+    on the flat/dielectric path — only a pbrt `Material "subsurface"` matches.
+    """
+    overrides = getattr(material, "parameter_overrides", None) or {}
+    sa = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
+    ss = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
+    return any(c > 0.0 for c in sa) or any(c > 0.0 for c in ss)
 
 
 class TexturePool:
@@ -418,6 +444,10 @@ def pack_flat_material(
      140: diffuseRoughness        (float; Stage-2 Oren-Nayar; 0 ⇒ Lambert)
      144: specularColor.r/g/b     (vec3 → 12 B; Stage-2; fallback white)
      156: _pad1                   (uint; reserved)
+     160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface; mm⁻¹; 0 if not SSS)
+     172: medium g                (float; subsurface HG anisotropy)
+     176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface; mm⁻¹; 0 if not SSS)
+     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0; eta reuses ior)
 
     Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
     override reproduces the prior behavior — transmissionColor defaults to
@@ -443,8 +473,15 @@ def pack_flat_material(
     transmission_color = _override_color3(overrides, "transmission_color", diffuse)
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
+    # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
+    # Metal 31-buffer cap). σ in mm⁻¹; zero for non-subsurface materials. Boundary
+    # eta reuses `ior`. mediumKind = MEDIUM_HOMOGENEOUS (0) — the only kind now.
+    medium_sigma_a = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
+    medium_sigma_s = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
+    medium_g = _override_float(overrides, "subsurface_g", 0.0)
+    medium_kind = 0  # MEDIUM_HOMOGENEOUS
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I",
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -466,6 +503,10 @@ def pack_flat_material(
         diffuse_roughness,
         specular_color[0], specular_color[1], specular_color[2],
         0,
+        medium_sigma_a[0], medium_sigma_a[1], medium_sigma_a[2],
+        medium_g,
+        medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
+        int(medium_kind) & 0xFFFFFFFF,
     )
 
 
@@ -5502,6 +5543,12 @@ class Renderer:
             if mod and mod in py_ids:
                 types.append(MATERIAL_TYPE_PYTHON)
                 self._material_python_ids[i] = py_ids[mod]
+            elif _material_is_subsurface(mat):
+                # pbrt subsurface: a dielectric boundary + an inline homogeneous
+                # interior medium. Still packed as flat data (the medium fields
+                # ride in FlatMaterialParams 160..192); the type tag routes the
+                # GPU to the interior random walk instead of opacity=0 glass.
+                types.append(MATERIAL_TYPE_SUBSURFACE)
             else:
                 types.append(MATERIAL_TYPE_FLAT)
             indices: dict[str, int] = {

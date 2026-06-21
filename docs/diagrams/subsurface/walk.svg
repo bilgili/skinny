@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="14">
+  <defs>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#333"/>
+    </marker>
+    <marker id="al" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#c47f17"/>
+    </marker>
+  </defs>
+
+  <!-- medium body -->
+  <circle cx="380" cy="200" r="150" fill="#f0e6df" stroke="#b9a48f" stroke-width="2"/>
+  <text x="380" y="345" text-anchor="middle" fill="#8a7a68">homogeneous interior — σ_a, σ_s, HG g</text>
+
+  <!-- incoming + entry refraction -->
+  <line x1="60" y1="120" x2="232" y2="160" stroke="#333" stroke-width="2" marker-end="url(#ah)"/>
+  <text x="70" y="110" fill="#333">camera ray</text>
+  <circle cx="232" cy="160" r="4" fill="#333"/>
+  <text x="150" y="190" fill="#666">Fresnel refract in (1−Fr)</text>
+
+  <!-- null-collision random walk (zig-zag) -->
+  <polyline points="232,160 300,210 270,270 350,250 330,300 410,260"
+            fill="none" stroke="#1f6feb" stroke-width="2.2" marker-end="url(#ah)"/>
+  <g fill="#1f6feb">
+    <circle cx="300" cy="210" r="4.5"/>
+    <circle cx="270" cy="270" r="4.5"/>
+    <circle cx="350" cy="250" r="4.5"/>
+    <circle cx="330" cy="300" r="4.5"/>
+  </g>
+  <text x="300" y="235" fill="#1f6feb">scatter (HG)</text>
+
+  <!-- exit refraction -->
+  <line x1="410" y1="260" x2="540" y2="300" stroke="#333" stroke-width="2" marker-end="url(#ah)"/>
+  <text x="470" y="330" fill="#666">refract out, ×Ft</text>
+
+  <!-- NEE to env on escape -->
+  <line x1="350" y1="250" x2="560" y2="120" stroke="#c47f17" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#al)"/>
+  <text x="540" y="105" fill="#c47f17">env / distant light (NEE + escape)</text>
+
+  <!-- seam callout -->
+  <rect x="20" y="250" width="250" height="96" rx="8" fill="#fff" stroke="#ccc"/>
+  <text x="32" y="272" fill="#333" font-weight="600">density seam (per step)</text>
+  <text x="32" y="294" fill="#555">σ̄_t = mediumMajorant(m, a, b)</text>
+  <text x="32" y="314" fill="#555">σ_t(p) = (σ_a+σ_s)·densityAt(m, p)</text>
+  <text x="32" y="334" fill="#555">accept real scatter w.p. σ_t/σ̄_t</text>
+</svg>

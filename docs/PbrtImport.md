@@ -145,14 +145,38 @@ delta-transmission}` lobe set — still **without** the preview-only
 speculars** now actually render through the flat path, and `diffuse_roughness`
 drives an Oren-Nayar diffuse. See [Architecture.md → Flat Material
 BSDF](Architecture.md#flat-material-bsdf-materialsflatflat_materialslang--flat_lobesslang).
-The remainder of Stage-2 — `specular_anisotropy`, the rough-glass BTDF (rough
-transmission with MIS), and `subsurface`/`subsurface_radius` — stays future
-work; see the change's `design.md` for the Stage-2 roadmap and the
+**Stage-2 Ch5 (change `pbrt-subsurface-volumetric`) imports `subsurface` as a
+volumetric interior medium** rather than the old `opacity = 0` clear-glass
+lowering. A `subsurface` material becomes a smooth dielectric boundary (`eta`)
+wrapping a homogeneous interior medium (σ_a, σ_s, Henyey-Greenstein `g`),
+transported by a delta-tracked (Woodcock / null-collision) volumetric random
+walk — refract in, march the interior, refract out. Coefficients follow pbrt's
+precedence: explicit `sigma_a`/`sigma_s` (× `scale`) → named preset (`Skin1`, …,
+the pbrt measured table) → `reflectance` + `mfp` via the Jensen diffuse-albedo
+inversion. The `-mtlx` `standard_surface` inputs (`subsurface_color`,
+`subsurface_radius`, `subsurface_scale`, `subsurface_anisotropy`) map to the
+**same** (σ_a, σ_s, `g`), so native-USD and `-mtlx` imports agree. The
+coefficients ride on `skinnyOverrides` `customData`
+(`subsurface_sigma_a`/`subsurface_sigma_s`/`subsurface_g`, plus `ior` for the
+boundary eta) → merged into `Material.parameter_overrides`; the renderer packs
+them inline into `FlatMaterialParams` (binding 13) and tags
+`MATERIAL_TYPE_SUBSURFACE` when `subsurface_sigma_*` is non-zero. pbrt's
+tabulated dipole BSSRDF and skinny's 3D random walk agree qualitatively (both
+milky), not bit-for-bit — corpus scene `subsurface_infinite` gates at relMSE
+0.079. **Limitations:** the walk transports the environment (IBL) plus a single
+distant light; area/emissive lights *inside* the medium are a follow-up.
+Heterogeneous / NanoVDB grids and free-standing `MediumInterface` media stay out
+of scope (the transport is majorant / null-collision and the medium is
+handle-referenced, so they slot in additively). The remainder of Stage-2 —
+`specular_anisotropy` and the rough-glass BTDF (rough transmission with MIS) —
+stays future work; see the change's `design.md` for the Stage-2 roadmap and the
 `flat-bsdf-lobes` (preview-only `evalStdSurfaceBSDF`) constraint.
 
 > **`subsurface` and `coated*` `-mtlx` round-trip** (change
-> `pbrt-mtlx-roundtrip-fix`). UsdPreviewSurface maps `subsurface` to an
-> `opacity = 0` boundary plus a `skinnyOverrides` homogeneous interior, and
+> `pbrt-mtlx-roundtrip-fix`; the interior is now consumed as a volumetric
+> random walk per Stage-2 Ch5 above, not an `opacity = 0` clear boundary).
+> UsdPreviewSurface maps `subsurface` to a dielectric boundary plus a
+> `skinnyOverrides` homogeneous interior, and
 > `coated*` to `clearcoat`. The `-mtlx` `.mtlx` fallback once bridged only
 > `transmission → opacity`/`emission`, built the `Material` from the document
 > alone (so the `over`-prim `skinnyOverrides` interior was never read), and emitted
@@ -277,6 +301,7 @@ accumulation, least-squares exposure aligned. The gate passes at these tolerance
 | `conductor_infinite` | 0.133 | 0.068 | gold Fresnel + GGX remap + constant env |
 | `glass_arealight` | 0.128 | 0.071 | dielectric refraction |
 | `texture_quad` | 0.0024 | 0.0119 | imagemap diffuse over explicit mesh UVs |
+| `subsurface_infinite` | 0.079 | 0.089 | volumetric random-walk interior (dipole-vs-walk qualitative parity) |
 
 FLIP ≤ 0.07 across the corpus — perceptually near-matching. The residual relMSE
 is dominated by the inherent RGB-vs-spectral reduction, the conductor's
@@ -303,7 +328,7 @@ Support status per pbrt feature.
 | `coateddiffuse` / `coatedconductor` | approx | coat lobe + base |
 | `thindielectric` | approx | thin-glass approximation |
 | `diffusetransmission` | approx | diffuse + partial opacity |
-| `subsurface` material | approx | dielectric + homogeneous interior via `customData` |
+| `subsurface` material | approx | smooth dielectric boundary (`eta`) + homogeneous interior medium (σ_a, σ_s, Henyey-Greenstein `g`) via `skinnyOverrides` `customData`; rendered as a delta-tracked volumetric random walk (`MATERIAL_TYPE_SUBSURFACE`), not clear glass. pbrt's tabulated dipole BSSRDF vs skinny's 3D random walk agree qualitatively (both milky), not bit-for-bit |
 | `perspective` camera | matched | shorter-axis fov conversion |
 | `realistic` camera | matched | lens file → `skinny:lens:*` (thick-lens `LensSystem`) |
 | negative-scale camera (`Scale -1`) | matched | improper basis flagged `pbrt:mirrored`; renderer mirrors at ray-gen (`FrameConstants.cameraMirror`) → relMSE 0.009 / FLIP 0.021 vs pbrt |

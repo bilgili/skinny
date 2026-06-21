@@ -33,13 +33,37 @@ def homogeneous_overrides(medium) -> dict:
 
 
 def subsurface_overrides(params) -> dict:
-    """Coefficients for a pbrt ``subsurface`` material (homogeneous interior)."""
-    sigma_a = spectra.param_to_rgb(params.get("sigma_a")) or [0.0011, 0.0024, 0.014]
-    sigma_s = spectra.param_to_rgb(params.get("sigma_s")) or [2.55, 3.21, 3.77]
-    scale = params.float("scale", 1.0)
+    """Volumetric medium coefficients for a pbrt ``subsurface`` material.
+
+    Resolved via the pbrt-v4 precedence (:mod:`skinny.pbrt.subsurface`): explicit
+    ``sigma_a``/``sigma_s`` (× ``scale``); else a named preset (``Skin1`` …); else
+    ``reflectance`` + ``mfp`` diffuse-albedo inversion. Emitted onto
+    ``skinnyOverrides`` so the loader merges them into
+    ``Material.parameter_overrides``, where the renderer reads them to pack the
+    inline homogeneous medium and route the material to MATERIAL_TYPE_SUBSURFACE
+    (the interior random walk). Keys match the renderer's packer
+    (``subsurface_sigma_a/_s/_g``); the boundary IOR is carried as ``ior`` —
+    ``resolveMedium`` reuses the flat ``ior`` slot for the medium eta.
+    """
+    from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
+
+    g_f = params.floats("g", [0.0])
+    eta_f = params.floats("eta", [ETA_DEFAULT])
+    scale_f = params.floats("scale", [SCALE_DEFAULT])
+    coeffs = subsurface_coefficients(
+        name=params.string("name", None),
+        sigma_a=params.rgb("sigma_a", None),
+        sigma_s=params.rgb("sigma_s", None),
+        reflectance=params.rgb("reflectance", None),
+        mfp=params.rgb("mfp", None),
+        g=float(g_f[0]) if g_f else 0.0,
+        eta=float(eta_f[0]) if eta_f else ETA_DEFAULT,
+        scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
+    )
     return {
-        "volume_sigma_a": [c * scale for c in sigma_a],
-        "volume_sigma_s": [c * scale for c in sigma_s],
-        "volume_g": float(params.float("g", 0.0)),
-        "ior": float(params.float("eta", 1.33)),
+        "subsurface_sigma_a": list(coeffs["sigma_a"]),
+        "subsurface_sigma_s": list(coeffs["sigma_s"]),
+        "subsurface_g": float(coeffs["g"]),
+        "subsurface_eta": float(coeffs["eta"]),
+        "ior": float(coeffs["eta"]),
     }

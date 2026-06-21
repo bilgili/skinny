@@ -13,6 +13,8 @@ import scene_lights;
 import environment;
 import materials.flat.flat_material;
 import materials.skin.skin_material;
+import materials.subsurface.medium;            // Medium, resolveMedium
+import materials.subsurface.subsurface_walk;   // subsurfaceRadiance (interior walk)
 import materials.debug_normal_material;
 import python_materials_dispatcher;
 import lights.sphere_light;
@@ -113,6 +115,29 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
         {
             uint scatterBits = (matFlags >> 8) & 0x3u;
             br.fullRadiance = evalSkinRadiance(h, r, rng, scatterBits);
+            break;
+        }
+        case MATERIAL_TYPE_SUBSURFACE:
+        {
+            // pbrt subsurface: refract through the dielectric boundary and
+            // random-walk the homogeneous interior medium (subsurface_walk.slang).
+            // The medium is resolved by handle from the inline FlatMaterialParams
+            // pack (binding 13). Like the skin volume, the walk's NEE uses a
+            // single analytic direct light — the first distant light, or zero —
+            // plus the environment; it returns the full radiance and terminates
+            // the bounce loop (no BSDF continuation at this vertex).
+            Medium medium = resolveMedium(h.materialId);
+            float3 primaryDir = float3(0.0);
+            float3 primaryRad = float3(0.0);
+            if (fc.numDistantLights > 0u)
+            {
+                DistantLight L0 = distantLights[0];
+                primaryDir = L0.direction;
+                primaryRad = L0.radiance;
+            }
+            br.fullRadiance = subsurfaceRadiance(
+                r, h, medium, primaryDir, primaryRad,
+                fc.envIntensity, fc.furnaceMode, fc.mmPerUnit, rng);
             break;
         }
         default:

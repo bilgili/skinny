@@ -160,6 +160,7 @@ Skin uses its own 6-estimator chain and returns full radiance via
 | `FlatMaterial` | `materials/flat/flat_material.slang` | 1 — opacity/refraction, coat, spec/diff MIS, optional MaterialX graph eval |
 | `DebugNormalMaterial` | `materials/debug_normal_material.slang` | 2 — normal visualisation |
 | Python material | `mtlx/genslang/python_materials/*.py` → generated dispatch | 3 — SlangPile-authored `IMaterial`, id in bits 24–31, switch-dispatched by `vk_compute._emit_python_dispatcher` |
+| Subsurface (volumetric) | `materials/subsurface/{subsurface_walk.slang, medium.slang}` | 4 — pbrt `subsurface`: dielectric boundary + homogeneous interior medium, self-integrating volumetric random walk (returns full radiance, like skin) |
 
 Material type encoding in `materialTypes[id]` (binding 16):
 - bits 0–7: type code (0 skin, 1 flat, 2 debug-normal, 3 python)
@@ -870,7 +871,7 @@ incrementally moved over.
 | 10 | Sampler2D | Roughness detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 11 | Sampler2D | Displacement detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 12 | StructuredBuffer | TLAS instances (144 B each) | `mesh_head.slang` |
-| 13 | StructuredBuffer | FlatMaterialParams (160 B each, scalar layout — `transmissionColor`@128, `diffuseRoughness`@140, `specularColor`@144 appended as two float4s for the Stage-2 rich-input lobes) | `bindings.slang` |
+| 13 | StructuredBuffer | FlatMaterialParams (192 B each, scalar layout — `transmissionColor`@128, `diffuseRoughness`@140, `specularColor`@144 for the Stage-2 rich-input lobes; the subsurface medium is packed inline at `σ_a`@160, `g`@172, `σ_s`@176, `mediumKind`@188 — boundary `eta` reuses `ior`@60 — so `MATERIAL_TYPE_SUBSURFACE` needs **no new buffer** under Metal's 31-buffer cap, read via `resolveMedium(matId)`) | `bindings.slang` |
 | 14 | Sampler2D[128] | Bindless material textures (PARTIALLY_BOUND) | `bindings.slang` |
 | 15 | StructuredBuffer | MtlxSkinParams (164 B each, scalar layout) | `materials/skin/skin_shading.slang` |
 | 16 | StructuredBuffer | Material type code + scatter + furnace + graph slot + python id (uint32 each) | `bindings.slang` |
@@ -1363,6 +1364,7 @@ debug_line.slang
 cameras/{pinhole.slang, thick_lens.slang}
 materials/debug_normal_material.slang
 materials/flat/{flat_material.slang, flat_lobes.slang, flat_shading.slang}
+materials/subsurface/{subsurface_walk.slang, medium.slang}  // pbrt volumetric SSS
 materials/skin/{skin_material.slang, skin_bssrdf.slang, skin_shading.slang,
                 skin_direct.slang, skin_ibl_specular.slang, skin_ibl_diffuse.slang,
                 skin_volume.slang, skin_transmission.slang, skin_hair_sheen.slang,

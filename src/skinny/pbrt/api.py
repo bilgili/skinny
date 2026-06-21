@@ -26,6 +26,15 @@ from .ply import read_ply
 from .report import Report
 from .state import PbrtScene, PbrtShape, build_scene
 
+# Inputs that are carried as `skinnyOverrides` customData (merged into
+# Material.parameter_overrides by the loader), NOT authored as UsdPreviewSurface
+# shader inputs. The subsurface medium coefficients are list-valued (per-channel
+# σ) and consumed by the renderer's inline-medium packer, so authoring them as
+# scalar shader inputs both fails (`float([...])`) and is meaningless here.
+_OVERRIDE_ONLY_INPUTS = frozenset({
+    "subsurface_sigma_a", "subsurface_sigma_s", "subsurface_g", "subsurface_eta",
+})
+
 
 def import_pbrt(path: str, out: str | None = None, materialx: bool = False):
     """Parse a pbrt scene file and emit USD. Returns (stage, report).
@@ -275,6 +284,8 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     for key, val in inputs.items():
         if key in tex_inputs:
             continue  # textured input is authored as a connection below
+        if key in _OVERRIDE_ONLY_INPUTS:
+            continue  # medium coeffs ride on skinnyOverrides, not the shader
         if key in ("diffuseColor", "emissiveColor", "specularColor"):
             shader.CreateInput(key, Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*[float(c) for c in val]))
         else:

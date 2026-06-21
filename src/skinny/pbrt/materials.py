@@ -235,6 +235,39 @@ def _resolve_roughness_mtlx(params, notes: list[str], *, textures=None, base_dir
     return ParamValue(alpha_to_usd_roughness(alpha)), 0.0
 
 
+def _subsurface_overrides(p) -> dict:
+    """Resolve pbrt `subsurface` inputs → medium-coefficient override keys
+    (`subsurface_sigma_a/_s` mm⁻¹, `subsurface_g`, `subsurface_eta`) via the
+    pbrt-v4 precedence (skinny.pbrt.subsurface). These ride on parameter_overrides
+    for the renderer to pack into the volumetric medium; the boundary IOR is
+    `subsurface_eta`. Emitted by both the flat and mtlx mappers so the two import
+    paths produce identical coefficients.
+    """
+    from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
+
+    name = p.string("name", None)
+    sigma_a = p.rgb("sigma_a", None)
+    sigma_s = p.rgb("sigma_s", None)
+    reflectance = p.rgb("reflectance", None)
+    mfp = p.rgb("mfp", None)
+    g_f = p.floats("g", [0.0])
+    eta_f = p.floats("eta", [ETA_DEFAULT])
+    scale_f = p.floats("scale", [SCALE_DEFAULT])
+    coeffs = subsurface_coefficients(
+        name=name, sigma_a=sigma_a, sigma_s=sigma_s,
+        reflectance=reflectance, mfp=mfp,
+        g=float(g_f[0]) if g_f else 0.0,
+        eta=float(eta_f[0]) if eta_f else ETA_DEFAULT,
+        scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
+    )
+    return {
+        "subsurface_sigma_a": list(coeffs["sigma_a"]),
+        "subsurface_sigma_s": list(coeffs["sigma_s"]),
+        "subsurface_g": float(coeffs["g"]),
+        "subsurface_eta": float(coeffs["eta"]),
+    }
+
+
 def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None):
     """Map a pbrt material to Autodesk ``standard_surface`` inputs.
 
@@ -379,8 +412,13 @@ def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_d
         inputs["subsurface_color"] = ss.const
         radius = p.rgb("radius", [1.0, 1.0, 1.0])
         inputs["subsurface_radius"] = list(radius)
+        # Stage-2 (pbrt-subsurface-volumetric): carry the volumetric medium
+        # coefficients (σ_a, σ_s, g, eta) via the pbrt precedence, so the renderer
+        # can shade a real interior random walk. The std_surface weight/color/radius
+        # above stay for the preview closure + back-compat.
+        inputs.update(_subsurface_overrides(p))
         status = APPROX
-        notes.append("subsurface -> standard_surface subsurface (radius/color approximation)")
+        notes.append("subsurface -> standard_surface subsurface + volumetric medium coeffs (σ_a/σ_s/g)")
     else:
         status = APPROX
         notes.append(f"unknown material '{mtype}' best-effort as diffuse grey")
@@ -495,8 +533,13 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
         inputs["diffuseColor"] = [1.0, 1.0, 1.0]
         inputs["opacity"] = 0.0
         inputs["ior"] = scalar("eta", 1.33)
+        # Stage-2 (pbrt-subsurface-volumetric): carry the volumetric medium
+        # coefficients (σ_a, σ_s, g, eta) via the pbrt precedence. The renderer
+        # routes these to MATERIAL_TYPE_SUBSURFACE (interior random walk); the
+        # opacity=0 boundary above remains the transitional fallback.
+        inputs.update(_subsurface_overrides(p))
         status = APPROX
-        notes.append("subsurface -> dielectric boundary + homogeneous interior (customData)")
+        notes.append("subsurface -> dielectric boundary + volumetric medium coeffs (σ_a/σ_s/g)")
     else:
         status = APPROX
         notes.append(f"unknown material '{mtype}' best-effort as diffuse grey")
