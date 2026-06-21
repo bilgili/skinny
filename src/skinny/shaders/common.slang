@@ -68,6 +68,13 @@ struct FlatMaterialParams
     // in the packer, specularColor = white, diffuseRoughness = 0 ⇒ Lambert.
     float4 _transmissionColorDiffuseRough; // 128..144 xyz=transmissionColor, w=diffuseRoughness
     float4 _specularColorPad;              // 144..160 xyz=specularColor, w=_pad1
+    // Subsurface medium (pbrt-subsurface-volumetric), packed here to avoid a new
+    // SSBO (Metal 31-buffer cap). Only read when materialType == SUBSURFACE; zero
+    // for every other flat material. σ in mm⁻¹ (renderer converts to scene units).
+    // eta (boundary IOR) reuses `ior` (_emissiveColorIor.w). float4-wrapped for
+    // Metal/Vulkan byte parity.
+    float4 _mediumSigmaA_g;                // 160..176 xyz=σ_a, w=g
+    float4 _mediumSigmaS_kind;             // 176..192 xyz=σ_s, w=asfloat(mediumKind)
 
     property float3 diffuseColor      { get { return _diffuseColorRoughness.xyz; } }
     property float  roughness         { get { return _diffuseColorRoughness.w; } }
@@ -81,6 +88,24 @@ struct FlatMaterialParams
     property float3 transmissionColor { get { return _transmissionColorDiffuseRough.xyz; } }
     property float  diffuseRoughness  { get { return _transmissionColorDiffuseRough.w; } }
     property float3 specularColor     { get { return _specularColorPad.xyz; } }
+    property float3 mediumSigmaA      { get { return _mediumSigmaA_g.xyz; } }
+    property float  mediumG           { get { return _mediumSigmaA_g.w; } }
+    property float3 mediumSigmaS      { get { return _mediumSigmaS_kind.xyz; } }
+    property uint   mediumKind        { get { return asuint(_mediumSigmaS_kind.w); } }
+};
+
+// Homogeneous (or, later, heterogeneous) participating medium resolved at a hit.
+// The interior random walk reads the medium ONLY through this + the density seam
+// (densityAt / mediumMajorant), so adding a kind is purely additive. `gridHandle`
+// is reserved for a future density-field source (NanoVDB); unused for HOMOGENEOUS.
+struct Medium
+{
+    float3 sigmaA;     // mm⁻¹ × scene mm-per-unit at pack time
+    float3 sigmaS;     // mm⁻¹
+    float  g;          // Henyey-Greenstein anisotropy
+    float  eta;        // boundary relative IOR
+    uint   kind;       // MEDIUM_HOMOGENEOUS | MEDIUM_NANOVDB (reserved)
+    uint   gridHandle; // density-field resource index (reserved; 0 = none)
 };
 
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang

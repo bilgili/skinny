@@ -139,8 +139,10 @@ INSTANCE_STRIDE = 144
 #  112: normalBias  (vec3, 12) + _pad (4 B)
 #  128: transmissionColor (vec3, 12) + diffuseRoughness (float)  [Stage-2]
 #  144: specularColor (vec3, 12) + _pad1 (4 B)                   [Stage-2]
-# 160 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 160
+#  160: medium σ_a (vec3, 12) + medium g (float)                 [subsurface]
+#  176: medium σ_s (vec3, 12) + mediumKind (uint)                [subsurface]
+# 192 B / record, naturally 16-byte aligned.
+FLAT_MATERIAL_STRIDE = 192
 FLAT_MATERIAL_CAPACITY_INIT = 16
 
 # Channel-selector codes packed into FlatMaterialParams.channelMask. Five
@@ -418,6 +420,10 @@ def pack_flat_material(
      140: diffuseRoughness        (float; Stage-2 Oren-Nayar; 0 ⇒ Lambert)
      144: specularColor.r/g/b     (vec3 → 12 B; Stage-2; fallback white)
      156: _pad1                   (uint; reserved)
+     160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface; mm⁻¹; 0 if not SSS)
+     172: medium g                (float; subsurface HG anisotropy)
+     176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface; mm⁻¹; 0 if not SSS)
+     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0; eta reuses ior)
 
     Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
     override reproduces the prior behavior — transmissionColor defaults to
@@ -443,8 +449,15 @@ def pack_flat_material(
     transmission_color = _override_color3(overrides, "transmission_color", diffuse)
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
+    # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
+    # Metal 31-buffer cap). σ in mm⁻¹; zero for non-subsurface materials. Boundary
+    # eta reuses `ior`. mediumKind = MEDIUM_HOMOGENEOUS (0) — the only kind now.
+    medium_sigma_a = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
+    medium_sigma_s = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
+    medium_g = _override_float(overrides, "subsurface_g", 0.0)
+    medium_kind = 0  # MEDIUM_HOMOGENEOUS
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I",
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -466,6 +479,10 @@ def pack_flat_material(
         diffuse_roughness,
         specular_color[0], specular_color[1], specular_color[2],
         0,
+        medium_sigma_a[0], medium_sigma_a[1], medium_sigma_a[2],
+        medium_g,
+        medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
+        int(medium_kind) & 0xFFFFFFFF,
     )
 
 

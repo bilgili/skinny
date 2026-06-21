@@ -107,6 +107,18 @@ static const uint MATERIAL_TYPE_SKIN         = 0u;
 static const uint MATERIAL_TYPE_FLAT         = 1u;
 static const uint MATERIAL_TYPE_DEBUG_NORMAL = 2u;
 static const uint MATERIAL_TYPE_PYTHON       = 3u;
+// Volumetric subsurface (pbrt-subsurface-volumetric): a dielectric boundary + a
+// homogeneous interior medium, transported by an interior random walk. The medium
+// coefficients are packed into FlatMaterialParams (binding 13) — no new buffer, to
+// respect the Metal 31-buffer cap (see design.md) — and read via resolveMedium.
+static const uint MATERIAL_TYPE_SUBSURFACE   = 4u;
+
+// Medium source kinds — the density-seam dispatch tag. HOMOGENEOUS is the only
+// kind implemented now (densityAt ≡ 1, majorant = σ_t); NANOVDB is reserved so a
+// future heterogeneous free-standing medium (Disney cloud) is a new case, not a
+// transport rewrite.
+static const uint MEDIUM_HOMOGENEOUS = 0u;
+static const uint MEDIUM_NANOVDB     = 1u;   // reserved (not implemented)
 
 static const uint MATERIAL_FURNACE_BIT = 10u;
 

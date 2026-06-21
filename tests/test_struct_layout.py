@@ -23,7 +23,7 @@ class TestPythonPackingSizes:
     def test_flat_material_stride(self):
         from skinny.renderer import FLAT_MATERIAL_STRIDE
 
-        assert FLAT_MATERIAL_STRIDE == 160
+        assert FLAT_MATERIAL_STRIDE == 192
 
     def test_flat_material_pack_size(self):
         from skinny.renderer import pack_flat_material
@@ -31,7 +31,7 @@ class TestPythonPackingSizes:
 
         material = SimpleNamespace(parameter_overrides={})
         data = pack_flat_material(material)
-        assert len(data) == 160
+        assert len(data) == 192
 
     def test_openpbr_names_map_to_std_surface(self):
         """OpenPBR shader-input names (`transmission_weight`, `base_metalness`,
@@ -114,7 +114,7 @@ class TestPythonPackingSizes:
             channel_mask=channel_mask,
         )
 
-        assert len(data) == 160
+        assert len(data) == 192
         # opacityTextureIdx at byte 76 (uint)
         assert struct.unpack_from("I", data, 76)[0] == 7
         # opacityThreshold at byte 92 (float)
@@ -153,6 +153,32 @@ class TestPythonPackingSizes:
         assert struct.unpack_from("fff", d2, 128) == pytest.approx((0.1, 0.2, 0.3))
         assert struct.unpack_from("f", d2, 140)[0] == pytest.approx(0.0)
         assert struct.unpack_from("fff", d2, 144) == pytest.approx((1.0, 1.0, 1.0))
+
+    def test_flat_material_subsurface_medium_packing(self):
+        """Subsurface medium (pbrt-subsurface-volumetric): σ_a@160, g@172,
+        σ_s@176, mediumKind@188 (uint, MEDIUM_HOMOGENEOUS=0). Zero for a
+        non-subsurface material so the inline pack is inert."""
+        from types import SimpleNamespace
+        from skinny.renderer import pack_flat_material
+
+        mat = SimpleNamespace(parameter_overrides={
+            "subsurface_sigma_a": (0.032, 0.17, 0.48),
+            "subsurface_sigma_s": (0.74, 0.88, 1.01),
+            "subsurface_g": 0.0,
+            "subsurface_eta": 1.33,
+            "ior": 1.33,
+        })
+        data = pack_flat_material(mat)
+        assert struct.unpack_from("fff", data, 160) == pytest.approx((0.032, 0.17, 0.48))
+        assert struct.unpack_from("f", data, 172)[0] == pytest.approx(0.0)
+        assert struct.unpack_from("fff", data, 176) == pytest.approx((0.74, 0.88, 1.01))
+        assert struct.unpack_from("I", data, 188)[0] == 0  # MEDIUM_HOMOGENEOUS
+
+        # Non-subsurface material: medium is zero (inert).
+        bare = SimpleNamespace(parameter_overrides={"diffuseColor": (0.5, 0.5, 0.5)})
+        d2 = pack_flat_material(bare)
+        assert struct.unpack_from("fff", d2, 160) == pytest.approx((0.0, 0.0, 0.0))
+        assert struct.unpack_from("fff", d2, 176) == pytest.approx((0.0, 0.0, 0.0))
 
 
 @pytest.mark.gpu

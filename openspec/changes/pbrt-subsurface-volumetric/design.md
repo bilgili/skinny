@@ -34,6 +34,17 @@ diffusion BSSRDF the skin path uses (kept as a possible fast follow-up).
    free-standing `MediumInterface` can register a named medium and attach it to an
    instance/camera without reworking transport (see Forward compatibility). For a
    homogeneous interior, `densityFieldHandle = none` and `σ_max = max-channel σ_t`.
+
+   **Storage (refined during implementation — Metal 31-buffer cap):** the megakernel
+   already sits in the low-20s of distinct buffer args against slang-rhi's hard
+   31-buffer Metal limit (the codebase has repeatedly folded to fit). Adding a new
+   SSBO registry risks re-breaching it when neural+graph stack. So — following the
+   emissive-mesh-NEE precedent (CDF packed inline, no new buffer) — the homogeneous
+   medium is **packed into the existing `FlatMaterialParams` buffer (binding 13)**
+   that every non-skin/python material already owns; `resolveMedium(handle)` reads
+   it from `flatMaterials[matId]`. The seam is unchanged — a future free-standing
+   `MediumInterface` adds a dedicated registry buffer (folding to fit) *then*,
+   behind the same `resolveMedium`. No new buffer now.
 3. **The medium random walk** — a shared `mediumWalk(rayIn, medium, boundaryMode,
    rng)`: cross the boundary (mode *dielectric* ⇒ Fresnel refract, the subsurface
    case; mode *index-matched* ⇒ enter the bounding AABB unrefracted, the

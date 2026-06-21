@@ -11,7 +11,7 @@
 
 ## 2. Material type + medium registry plumbing
 
-- [ ] 2.1 `bindings.slang`: add `MATERIAL_TYPE_SUBSURFACE`; a `Medium` registry
+- [x] 2.1 `bindings.slang`: add `MATERIAL_TYPE_SUBSURFACE`; a `Medium` registry
   struct `(σ_a, σ_s, g, eta, uint kind, uint gridHandle, sigmaMaxScale)` + a
   registry SSBO referenced by a **medium handle** (NOT hardwired material-indexed —
   the handle indirection is what lets free-standing `MediumInterface` media reuse
@@ -20,7 +20,7 @@
 - [ ] 2.2 `renderer.py`: pack the `Medium` registry; resolve the subsurface
   material's medium handle; tag the new type in `materialTypes[]`; add the medium
   fields to `_current_state_hash`.
-- [ ] 2.3 Struct-layout test for `Medium` (scalar/Metal byte parity), incl. the
+- [x] 2.3 Struct-layout test for `Medium` (scalar/Metal byte parity), incl. the
   density-handle + majorant fields (present, `none`/`σ_t` for homogeneous).
 
 ## 3. Volume random walk (null-collision) + density seam
