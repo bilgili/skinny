@@ -9,6 +9,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **pbrt importer: reproject equal-area env maps** (change
+  `pbrt-env-equiarea-projection`) — pbrt v4 `infinite` light images use the
+  equal-area octahedral parameterization, but the importer copied the `.exr`/`.pfm`
+  pixels verbatim into the `.hdr` that skinny samples equirectangularly, scrambling
+  every incoming direction. Square image maps are now reprojected equal-area →
+  equirectangular (`src/skinny/pbrt/equiarea.py`, ports pbrt's
+  `EqualAreaSquareToSphere`/`SphereToSquare`, `Rx(+90)` axis map for pbrt Z-up →
+  skinny +y-up). This is the dominant cause of `sss_dragon_small.pbrt` looking
+  wrong as `dragon_sss.usda` — the subsurface dragon is lit almost entirely by the
+  environment. Non-square maps are assumed lat-long and passed through; constant
+  and uniform infinite lights are byte-unchanged.
+
 - **pbrt importer: honor authored camera up/roll** (change `pbrt-camera-up-axis`)
   — an imported camera whose up vector is not ≈ +Y (the pbrt Z-up convention,
   e.g. `sssdragon`) previously rendered ~90° rolled because `_extract_camera`

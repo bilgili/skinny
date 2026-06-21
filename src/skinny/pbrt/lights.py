@@ -138,14 +138,25 @@ def _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path):
         report.approx(f"light:infinite {path}",
                       f"could not convert env {os.path.basename(fname)}: {exc}")
         return None
+    ext = os.path.splitext(fname)[1]
+    # pbrt v4 infinite-light images are equal-area octahedral (always square).
+    # Reproject to skinny's equirectangular convention so directions match; a
+    # non-square map is already lat-long and is passed through.
+    if img.ndim == 3 and img.shape[0] == img.shape[1]:
+        from .equiarea import equiarea_to_equirect
+
+        edge = img.shape[0]
+        img = equiarea_to_equirect(img, height=edge)
+        note = f"{ext} equal-area env reprojected to equirect .hdr"
+    else:
+        note = f"{ext} env converted to .hdr (non-square; equirect assumed)"
     if scale != 1.0:
         img = img * scale
     from .hdr import write_hdr
 
     hdr_name = sanitize(f"{name}_env") + ".hdr"
     write_hdr(os.path.join(asset_dir, hdr_name), img)
-    report.exact(f"light:infinite {path}",
-                 f"{os.path.splitext(fname)[1]} env converted to .hdr")
+    report.exact(f"light:infinite {path}", note)
     return hdr_name
 
 

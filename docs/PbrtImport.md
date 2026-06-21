@@ -336,7 +336,7 @@ Support status per pbrt feature.
 | `distant` / `point` lights | matched / approx | point emitted as a small sphere |
 | `spot` light | unsupported | no skinny spotlight; flagged |
 | area (`diffuse`) light | approx | emissive mesh; sidedness may differ |
-| `infinite` light | matched | constant baked to `.hdr`; `.exr`/`.pfm` maps resampled to `.hdr` |
+| `infinite` light | matched | constant baked to `.hdr`; **square** `.exr`/`.pfm` image maps are pbrt's equal-area octahedral layout and are **reprojected** to skinny's equirectangular `.hdr` (`equiarea.py`, `Rx(+90)` axis map: pbrt Z-up sky → skinny +y-up); non-square maps assumed already lat-long and passed through |
 | film `iso` / exposure | matched | `imagingRatio = exposureTime·ISO/100` baked into emitters |
 | `imagemap` texture (reflectance/roughness) | matched | `UsdUVTexture` over `primvars:st`; explicit mesh UVs passed through, pbrt default UVs synthesized for UV-less textured shapes (see Texture UVs) |
 | homogeneous medium | approx | coefficients via `customData` |
