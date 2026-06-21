@@ -13,28 +13,32 @@ the shader samples for a direction matches the radiance pbrt's
 pbrt's `EqualAreaSquareToSphere` / `EqualAreaSphereToSquare` and invert skinny's
 `directionToEquirectUV` (`u = atan2(dx,dz)/2π + 0.5`, `v = acos(dy)/π`, `+y` up).
 
+The reprojection's skinny↔pbrt direction map SHALL be the **same change-of-basis
+the geometry import uses** — `pbrt.transform.B = diag(1, 1, -1, 1)`, i.e.
+`(x, y, z) → (x, y, -z)` — so the baked env is oriented consistently with the
+world the camera and meshes occupy (`skinny_env(d) == pbrt_env(B·d)` for every
+direction). It SHALL NOT apply an up-axis rotation that the geometry import does
+not, which would rotate the env relative to the scene.
+
 #### Scenario: square image map is reprojected
 
 - **WHEN** a `LightSource "infinite"` references a **square** `.exr`/`.pfm` image
   map (equal-area octahedral, as pbrt v4 always authors)
-- **THEN** the emitted `.hdr` is the equirectangular reprojection of that map (not
-  a verbatim pixel copy), at height = source edge and width = 2·height, and the
-  conversion is reported as an equal-area→equirect resample
+- **THEN** the emitted `.hdr` is the equirectangular reprojection of that map
 
-#### Scenario: a source texel lands at the matching equirect direction
+#### Scenario: env orientation is consistent with the imported geometry
 
-- **WHEN** a single bright texel at square-uv `s` is reprojected
-- **THEN** its energy appears at the equirect pixel whose shader direction
-  `directionToEquirectUV⁻¹` maps to a direction that `EqualAreaSphereToSquare`
-  returns to `s` (within one texel), confirming directional consistency
+- **WHEN** the reprojection maps a skinny world direction `d` to the pbrt
+  light-space direction it samples
+- **THEN** it applies `B = diag(1, 1, -1)` (the geometry import's basis), so the
+  same direction the camera and meshes use indexes the env pbrt would return —
+  the sssdragon sky/ground reflect the HDRI's blue sky, not a neutral band
 
-#### Scenario: non-square / constant maps pass through unchanged
+#### Scenario: orientation map is an involution
 
-- **WHEN** the infinite light has a **non-square** image map (already lat-long) or
-  no map (constant `rgb L`)
-- **THEN** the importer does not reproject — non-square maps are written as
-  equirectangular as before (with a note that equirect is assumed), constant
-  lights are unchanged, and the existing parity corpus output is byte-identical
+- **WHEN** the forward (`_apply_axis`) and inverse (`_apply_axis_inv`) direction
+  maps are applied
+- **THEN** they coincide and round-trip to identity (`B` is its own inverse)
 
 ### Requirement: Equal-area chart math is exact and isolated
 
