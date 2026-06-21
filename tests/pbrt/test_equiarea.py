@@ -37,6 +37,33 @@ def test_round_trip_sphere_square_sphere():
     assert np.allclose(d, d2, atol=1e-6)
 
 
+def test_apply_axis_matches_geometry_basis_B():
+    # The env reprojection MUST use the same pbrt<->skinny change-of-basis the
+    # geometry import uses (`transform.B = diag(1,1,-1,1)`), otherwise the baked
+    # env is rotated relative to the world the camera/meshes live in (the
+    # sssdragon ground reflected a neutral band instead of the blue sky). This
+    # pins _apply_axis == B[:3,:3] and guards against a regression to the old
+    # Rx(+90) rotation.
+    from skinny.pbrt.transform import B
+
+    rng = np.random.default_rng(0)
+    d = rng.standard_normal((64, 3))
+    d /= np.linalg.norm(d, axis=-1, keepdims=True)
+    expect = d @ B[:3, :3].T            # B is symmetric/diagonal, so M·dᵀ
+    assert np.allclose(equiarea._apply_axis(d), expect, atol=1e-12)
+    # up-axis preserved (Y stays Y), handedness flipped on Z:
+    assert np.allclose(equiarea._apply_axis(np.array([[0.0, 1.0, 0.0]]))[0], [0, 1, 0])
+    assert np.allclose(equiarea._apply_axis(np.array([[0.0, 0.0, 1.0]]))[0], [0, 0, -1])
+
+
+def test_apply_axis_is_involution():
+    # B is its own inverse, so the forward and inverse maps coincide.
+    rng = np.random.default_rng(1)
+    d = rng.standard_normal((32, 3))
+    assert np.allclose(equiarea._apply_axis(d), equiarea._apply_axis_inv(d))
+    assert np.allclose(equiarea._apply_axis(equiarea._apply_axis(d)), d)
+
+
 def test_axis_directions_map_to_known_square_points():
     # center of the square is +z; the four corners are -z; edge midpoints are ±x/±y
     center = equiarea.equal_area_square_to_sphere(np.array([[0.5, 0.5]]))[0]

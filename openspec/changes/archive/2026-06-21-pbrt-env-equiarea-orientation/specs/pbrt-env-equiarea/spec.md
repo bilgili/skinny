@@ -1,8 +1,5 @@
-# pbrt-env-equiarea Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change pbrt-env-equiarea-projection. Update Purpose after archive.
-## Requirements
 ### Requirement: Equal-area octahedral env maps are reprojected to equirectangular
 
 The pbrt importer SHALL reproject an `infinite` light's image map from pbrt v4's
@@ -39,34 +36,3 @@ not, which would rotate the env relative to the scene.
 - **WHEN** the forward (`_apply_axis`) and inverse (`_apply_axis_inv`) direction
   maps are applied
 - **THEN** they coincide and round-trip to identity (`B` is its own inverse)
-
-### Requirement: Equal-area chart math is exact and isolated
-
-The square↔sphere chart functions SHALL live in a dependency-free module
-(`src/skinny/pbrt/equiarea.py`, numpy only, no USD/torch/GPU) so they are
-unit-testable under `.venv`, and `EqualAreaSphereToSquare` SHALL be the exact
-inverse of `EqualAreaSquareToSphere`.
-
-#### Scenario: round-trip is identity
-
-- **WHEN** a square-uv `p ∈ [0,1]²` is mapped sphere→square→sphere (and
-  square→sphere→square)
-- **THEN** the result equals `p` (resp. the unit direction) to floating-point
-  tolerance, and the six axis directions map to the expected square corners and
-  edge midpoints
-
-### Requirement: Imported equal-area env renders at pbrt orientation
-
-A pbrt scene whose `infinite` light uses a non-uniform equal-area map SHALL,
-after import, render with environment lighting at the pbrt v4 orientation and
-radiance, not a scrambled lat-long misread.
-
-#### Scenario: sss_dragon environment matches pbrt reference
-
-- **WHEN** `sss_dragon_small.pbrt` (infinite light
-  `small_rural_road_equiarea.exr`) is imported and rendered headless
-- **THEN** the env-lit result aligns with the pbrt-v4 reference in orientation
-  (feature/silhouette alignment under shared exposure) and falls within the parity
-  corpus relMSE/FLIP tolerance, improving markedly over the pre-change verbatim
-  copy
-

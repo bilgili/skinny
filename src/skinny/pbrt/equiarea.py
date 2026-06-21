@@ -25,24 +25,31 @@ import numpy as np
 def _apply_axis(d: np.ndarray) -> np.ndarray:
     """skinny world direction -> pbrt light-space direction (permutation P).
 
-    P = Rx(+90deg): (x, y, z) -> (x, -z, y). pbrt env scenes are Z-up, so the
-    equal-area square's center (+z) is the zenith; skinny is +y-up. This rotation
-    maps skinny +y (equirect top) onto pbrt +z (square center / sky), giving a
-    flat horizon band. Confirmed visually against `small_rural_road_equiarea.exr`
-    (P0/identity put sky on the horizon; P2/Rx-90 was upside down).
+    P = B = diag(1, 1, -1): (x, y, z) -> (x, y, -z). The env reprojection MUST use
+    the same pbrt<->skinny change-of-basis the geometry import uses
+    (`pbrt.transform.B = diag(1, 1, -1, 1)`), otherwise the baked env is rotated
+    relative to the world the camera and meshes live in. The geometry import does
+    NOT rotate the up-axis (Y stays Y); it flips handedness on Z. An earlier
+    `Rx(+90)` here put the env's sky at skinny +y, which *looks* upright when the
+    env is viewed in isolation under a +y-up assumption, but is rotated 90° about
+    X away from the actual imported geometry frame — so a ground plane reflected a
+    neutral/ground band of the map instead of the sky pbrt shows. Matching B makes
+    `skinny_env(d) == pbrt_env(B·d)` for every direction (verified against
+    `small_rural_road_equiarea.exr` at the sssdragon camera).
     """
     x = d[..., 0]
     y = d[..., 1]
     z = d[..., 2]
-    return np.stack([x, -z, y], axis=-1)
+    return np.stack([x, y, -z], axis=-1)
 
 
 def _apply_axis_inv(d: np.ndarray) -> np.ndarray:
-    """pbrt light-space direction -> skinny world direction (P^-1 = Rx(-90))."""
+    """pbrt light-space direction -> skinny world direction (P^-1 = P; B is an
+    involution: (x, y, z) -> (x, y, -z))."""
     x = d[..., 0]
     y = d[..., 1]
     z = d[..., 2]
-    return np.stack([x, z, -y], axis=-1)
+    return np.stack([x, y, -z], axis=-1)
 
 
 def equal_area_square_to_sphere(p: np.ndarray) -> np.ndarray:
