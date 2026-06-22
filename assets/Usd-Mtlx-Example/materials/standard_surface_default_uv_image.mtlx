@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<materialx version="1.38" colorspace="lin_rec709">
+  <!-- Minimal repro of the default-UV image form: an <image> node with no
+       explicit texture-coordinate input. MaterialXGenSlang emits the default
+       UV set as `vd.texcoord_0`, which the per-material graph emitter must
+       rewrite to the `UV_in` fragment parameter (regression for change
+       mtlx-graph-texcoord-uv). Mirrors bathroom.mtlx's base_color graphs. -->
+  <nodegraph name="NG_DefaultUV_Image">
+    <image name="img_base_color" type="color3">
+      <input name="file" type="filename" value="textures/missing.png" />
+    </image>
+    <output name="out_base_color" type="color3" nodename="img_base_color" />
+  </nodegraph>
+  <standard_surface name="DefaultUV_Image_surface" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="NG_DefaultUV_Image" output="out_base_color" />
+    <input name="specular_roughness" type="float" value="1.0" />
+  </standard_surface>
+  <surfacematerial name="DefaultUV_Image" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="DefaultUV_Image_surface" />
+  </surfacematerial>
+</materialx>

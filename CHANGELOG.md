@@ -9,6 +9,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MaterialX graph codegen: rewrite the default `<texcoord>` UV input** (change
+  `mtlx-graph-texcoord-uv`) — a graph driven by a bare `<image>` node on the
+  default UV set (e.g. every `base_color` image in `bathroom.usda`) made
+  `MaterialXGenSlang` emit `vd.texcoord_0`, which `_emit_graph_fragment` did not
+  rewrite (it handled only the `<geompropvalue geomprop="UVMap">` form). The
+  leftover `vd` is undefined in the per-material fragment, so the generated
+  module failed to compile and took down every pipeline that imports it —
+  surfacing as `skinny --integrator sppm assets/bathroom.usda --execution-mode
+  wavefront` aborting with `undefined identifier 'vd'`. The emitter now maps both
+  UV forms to `UV_in`, and falls back to the flat / std_surface path (instead of
+  emitting an uncompilable module) for any `vd.*` vertex input it does not pipe.
 - **pbrt importer: reproject equal-area env maps** (change
   `pbrt-env-equiarea-projection`) — pbrt v4 `infinite` light images use the
   equal-area octahedral parameterization, but the importer copied the `.exr`/`.pfm`
