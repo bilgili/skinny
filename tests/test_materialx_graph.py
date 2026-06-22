@@ -107,6 +107,23 @@ def test_texture_bound_graph_supported(lib):
     assert "internal void NG_tiledimage_color3" in gf.slang_source
 
 
+def test_default_uv_image_rewrites_texcoord(lib):
+    """A bare `<image>` node on the default UV set: MaterialXGenSlang emits the
+    coordinate as `vd.texcoord_0`. The emitter must rewrite it to the `UV_in`
+    fragment parameter, leaving no bare `vd.` identifier that would fail to
+    compile (regression for change mtlx-graph-texcoord-uv — bathroom.mtlx)."""
+    _import_asset(lib, "standard_surface_default_uv_image.mtlx")
+    gf = lib.generate_for_compute("DefaultUV_Image", write_to_disk=False)
+    assert gf is not None, "default-UV image graph must produce a fragment"
+    # base_color is texture-driven through the graph.
+    assert "base_color" in {name for name, _ in gf.outputs}
+    # The default-UV lookup is piped from the mesh UVs …
+    assert "UV_in" in gf.slang_source
+    # … and no raw vertex-data identifier survives (would be undefined in the
+    # fragment scope and abort the whole module's compilation).
+    assert "vd." not in gf.slang_source
+
+
 # ─── pack_uniform_block ────────────────────────────────────────────────
 
 

@@ -369,6 +369,17 @@ Key invariants:
 - **`makeBSDF` + dual-author overrides**: `standard_surface` parameters
   authored both as nodes and as direct inputs are merged so graph-uniform
   sliders in the sidebar drive both code paths.
+- **Vertex-input (`vd.*`) rewrite**: `MaterialXGenSlang` reads geometry from a
+  `vd` vertex-data struct that the per-material fragment does not have, so
+  `_emit_graph_fragment` rewrites each `vd.*` reference to the fragment's
+  parameters: `P_in` (position), `N_in` (normal), `T_in` (tangent), and the
+  default UV set → `UV_in`. The default UV set appears in two forms — the
+  explicit `<geompropvalue geomprop="UVMap">` (`vd.i_geomprop_UVMap`) and the
+  default `<texcoord>` (`vd.texcoord_0`, emitted when an `<image>` has no
+  explicit texcoord input) — both map to `UV_in`. Any `vd.*` left unhandled
+  (secondary UV sets, vertex colors) makes the emitter return no fragment so the
+  material falls back to the flat / std_surface path, rather than emitting a
+  module with an undefined identifier that aborts compilation.
 
 `MaterialLibrary` (`materialx_runtime.py`) owns the document, the
 `MaterialXGenSlang` shadergen instance, the per-material reflection of

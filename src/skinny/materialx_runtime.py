@@ -641,7 +641,23 @@ class MaterialLibrary:
         body = body.replace("vd.normalWorld",    "N_in")
         body = body.replace("vd.tangentWorld",   "T_in")
         body = body.replace("vd.positionWorld",  "P_in")  # fallback
+        # Default UV set: the `<geompropvalue geomprop="UVMap">` form is
+        # `vd.i_geomprop_UVMap`; the default `<texcoord>` form MaterialXGenSlang
+        # emits when an `<image>` has no explicit texcoord input is
+        # `vd.texcoord_0`. Both map to the mesh UVs the caller passes as `UV_in`
+        # (the trailing `.xy` swizzle stays valid on the float2 parameter).
         body = body.replace("vd.i_geomprop_UVMap", "UV_in")
+        body = body.replace("vd.texcoord_0", "UV_in")
+        # Any `vd.*` vertex input still left here is one we do not pipe
+        # (a secondary UV set, a vertex-color set, …). Emitting it would
+        # produce an undefined identifier that aborts the whole module's
+        # compilation, so fall back to the flat / std_surface path instead.
+        leftover = re.findall(r"\bvd\.[A-Za-z0-9_]+", body)
+        if leftover:
+            print(
+                f"[skinny] graph {target_name!r} references unhandled vertex "
+                f"input(s) {sorted(set(leftover))} — falling back to flat path")
+            return None
         # MaterialXGenSlang emits raw `pow(x, y)` for the `power` node.
         # HLSL `pow` is undefined on negative bases (typically NaN); the
         # marble example graph chains sin → multiply → add → power, so
