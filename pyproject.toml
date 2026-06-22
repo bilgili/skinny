@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skinny"
-version = "0.1.1"
+version = "0.1.2"
 description = "Real-time physically-based human skin rendering using ray tracing and volume rendering"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,26 +29,26 @@ dependencies = [
     # `import MaterialX`; openusd-materialx provides `pxr` with the usdMtlx plugin.
     # Direct-URL wheels are platform+python specific, so one marked entry per
     # (python, platform) the release ships (cp312/313/314 x macos-arm64/linux/win).
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp312-cp312-macosx_26_0_arm64.whl ; python_version == '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp313-cp313-macosx_26_0_arm64.whl ; python_version == '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp314-cp314-macosx_26_0_arm64.whl ; python_version == '3.14' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp314-cp314-linux_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp312-cp312-win_amd64.whl ; python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp313-cp313-win_amd64.whl ; python_version == '3.13' and sys_platform == 'win32' and platform_machine == 'AMD64'",
-    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/materialx_python_standalone-1.0.5-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp312-cp312-macosx_26_0_arm64.whl ; python_version == '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp313-cp313-macosx_26_0_arm64.whl ; python_version == '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp314-cp314-macosx_26_0_arm64.whl ; python_version == '3.14' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp314-cp314-linux_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp312-cp312-win_amd64.whl ; python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp313-cp313-win_amd64.whl ; python_version == '3.13' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "materialx-python-standalone @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/materialx_python_standalone-1.0.11-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "PySide6>=6.11.1",
     "zstandard>=0.25.0",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp312-cp312-macosx_26_0_arm64.whl ; python_version == '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp313-cp313-macosx_26_0_arm64.whl ; python_version == '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp314-cp314-macosx_26_0_arm64.whl ; python_version == '3.14' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp314-cp314-linux_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp312-cp312-win_amd64.whl ; python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp313-cp313-win_amd64.whl ; python_version == '3.13' and sys_platform == 'win32' and platform_machine == 'AMD64'",
-    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.5/openusd_materialx-1.0.5-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp312-cp312-macosx_26_0_arm64.whl ; python_version == '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp313-cp313-macosx_26_0_arm64.whl ; python_version == '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp314-cp314-macosx_26_0_arm64.whl ; python_version == '3.14' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp314-cp314-linux_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp312-cp312-win_amd64.whl ; python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp313-cp313-win_amd64.whl ; python_version == '3.13' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "openusd-materialx @ https://github.com/bilgili/openusd-materialx/releases/download/v1.0.11/openusd_materialx-1.0.11-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "panel>=1.9.3",
     "holoviews>=1.22.1",
     "OpenEXR>=3.4.11"
