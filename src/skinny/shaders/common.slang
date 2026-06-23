@@ -322,7 +322,29 @@ struct FrameConstants
     uint3  sppmGridRes;         // grid resolution per axis (sceneBoundsExtent/cellSize)
     uint   sppmPhotonsEmitted;  // photons emitted per pass (the 1/N estimator divisor)
     float  sppmGlossyContinueRoughness;  // SPPM eye-walk: continue (don't store a VP) through a metallic lobe whose roughness is below this (change sppm-glossy-final-gather); 0 = delta-only (PM-1)
+    // ── Film per-sample radiance clamp (change film-maxcomponent-clamp) ──
+    // pbrt `Film "float maxcomponentvalue"`: each sample's radiance is scaled
+    // before accumulation so its largest RGB component does not exceed this
+    // threshold (hue-preserving), matching pbrt's RGBFilm firefly suppression.
+    // 0 = disabled (the clamp is a no-op and the render is byte-identical).
+    // Scalar tail appended last by _pack_uniforms in this exact order.
+    float  filmMaxComponent;
 };
+
+/// Per-sample radiance clamp matching pbrt `RGBFilm::AddSample`. When
+/// `maxc > 0` and the sample's largest RGB component `m` exceeds it, scale the
+/// whole triple by `maxc / m` (hue-preserving). `maxc <= 0` ⇒ unchanged, so the
+/// default render path is byte-identical. The `!(m > maxc)` guard also leaves a
+/// NaN sample untouched (it is sanitised by the accumulator as before).
+float3 clampSampleRadiance(float3 L, float maxc)
+{
+    if (maxc <= 0.0)
+        return L;
+    float m = max(L.x, max(L.y, L.z));
+    if (!(m > maxc))
+        return L;
+    return L * (maxc / m);
+}
 
 /// Remap an integer pixel coordinate to NDC ∈ [-1, +1]² accounting for
 /// the current zoom-rect. When the zoom rect is the full frame this

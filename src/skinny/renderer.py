@@ -100,6 +100,9 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     ("sppmPhotonsEmitted", 4),
     # Glossy / near-specular eye-walk continuation threshold (change sppm-glossy-final-gather).
     ("sppmGlossyContinueRoughness", 4),
+    # Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
+    # film-maxcomponent-clamp). 0 = disabled.
+    ("filmMaxComponent", 4),
 )
 
 # Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
@@ -1517,6 +1520,12 @@ class Renderer:
         # Scene-scale bridge between mm-valued skin params and world-unit
         # ray distances. 1 world unit = mm_per_unit millimetres. The SDF
         self.mm_per_unit = 1000.0
+
+        # Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
+        # film-maxcomponent-clamp). 0 = disabled (no clamp; byte-identical render).
+        # Set from the imported pbrt film by usd_loader; clamps each sample's
+        # radiance proportionally before accumulation (FrameConstants.filmMaxComponent).
+        self.film_max_component = 0.0
 
         import queue as _queue
 
@@ -4575,6 +4584,9 @@ class Renderer:
             self._inject_default_lights_into_scene_graph()
             if scene.mm_per_unit != 120.0:
                 self.mm_per_unit = scene.mm_per_unit
+            # Film per-sample radiance clamp from the imported pbrt film
+            # (change film-maxcomponent-clamp); 0 = disabled (no-op).
+            self.film_max_component = float(getattr(scene, "film_max_component", 0.0) or 0.0)
             if scene.instances:
                 self._upload_usd_scene()
                 self._usd_uploaded_count = len(scene.instances)
@@ -5044,6 +5056,11 @@ class Renderer:
         self.model_index = self._usd_model_index
 
         self._usd_scene = scene
+        # Film per-sample radiance clamp from the imported pbrt film (change
+        # film-maxcomponent-clamp); 0 = disabled (no-op). Applied on the
+        # synchronous scene-swap path (headless / parity harness) — the streaming
+        # interactive path sets it in _poll_usd_streaming.
+        self.film_max_component = float(getattr(scene, "film_max_component", 0.0) or 0.0)
         # When the caller owns a stage (headless editing entry, design D9), take
         # ownership and attach the non-destructive edit layer so the runtime
         # scene-graph editing API (add_model/remove_node/set_transform) works.
@@ -8639,6 +8656,7 @@ class Renderer:
         data += struct.pack("III", 0, 0, 0)                          # sppmGridRes (unused)
         data += struct.pack("I", int(sppm_photons))                  # sppmPhotonsEmitted
         data += struct.pack("f", sppm_glossy)                        # sppmGlossyContinueRoughness
+        data += struct.pack("f", float(self.film_max_component))      # filmMaxComponent
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by
@@ -8778,6 +8796,9 @@ class Renderer:
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),
+            # Film per-sample radiance clamp (change film-maxcomponent-clamp):
+            # changing it changes every pixel, so reset accumulation.
+            float(self.film_max_component),
             # Improper-camera mirror: changing it flips the image, so reset accum.
             bool(self._camera_mirror),
             int(self.detail_maps_index),

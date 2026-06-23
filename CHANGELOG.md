@@ -31,6 +31,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Film per-sample radiance clamp (`maxcomponentvalue`)** (change
+  `film-maxcomponent-clamp`) — skinny imported the pbrt film `iso` exposure but
+  not its `maxcomponentvalue` firefly clamp, so scenes with tiny ultra-bright
+  emitters threw fireflies the pbrt reference never has. On `bathroom.usda` (a
+  window area light + four `scale 7000` bulb filaments) this was the entire
+  parity divergence: **9 firefly pixels carried 99.7 %** of the path-vs-pbrt
+  relMSE (232.8) and **100 %** of the BDPT-vs-path relMSE (6612, FLIP only
+  0.085 — structurally identical). The renderer now reads `maxcomponentvalue`
+  from the imported film and clamps each sample's radiance proportionally
+  (hue-preserving, `max(r,g,b) ≤ C`) before accumulation — matching pbrt
+  `RGBFilm::AddSample` — across the megakernel and the wavefront path / BDPT /
+  SPPM accumulation sites (`FrameConstants.filmMaxComponent`; 0 = disabled, so
+  scenes without the clamp render byte-identically). Result: bathroom
+  path-vs-pbrt **232.8 → 0.36**, BDPT-vs-path **6612 → 0.36** (MSE 0.017 —
+  structurally identical, the documented BDPT divergence gone), skinny max
+  **7985 → 50**. The bathroom reference is regenerated with pbrt's `path`
+  integrator (apples-to-apples with skinny's path anchor; `regen_refs.py
+  --integrator path`) and the recorded bathroom baselines drop ~500×. The scene
+  **stays `known_divergent`** for two residuals left as separate follow-ups: the
+  RGB-vs-spectral / blackbody-emitter-normalization pbrt-truth mismatch (~0.34),
+  and the sppm-vs-path / dark-region-`/b²`-amplified self-consistency relMSE on
+  this noisy caustic scene (not loosened here). `megakernel ≡ wavefront` is
+  reconfirmed exactly (path relMSE `0.0000`).
+
 - **MaterialX graph codegen: rewrite the default `<texcoord>` UV input** (change
   `mtlx-graph-texcoord-uv`) — a graph driven by a bare `<image>` node on the
   default UV set (e.g. every `base_color` image in `bathroom.usda`) made

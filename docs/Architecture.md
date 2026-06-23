@@ -1295,14 +1295,18 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | neuralNetworkVersion — active frozen-net version (baseline 0; per-sample network-version hook for future online training) |
 | ... | uint | recordMode — 1 while the wavefront training-record drain is active (else 0; default render byte-identical) |
 | ... | uint | cameraMirror — 1 for an improper (mirrored) pbrt camera; `zoomedNDC` negates ndc.x (+ `sampleWi` for BDPT) for a horizontal screen mirror, else 0 |
+| ... | (sppm) | sppmInitialRadius, sppmCellSize, sppmGridRes, sppmPhotonsEmitted, sppmGlossyContinueRoughness — per-pass SPPM params, read only when `integratorType == 2` |
+| ... | float | filmMaxComponent — pbrt `Film "maxcomponentvalue"` per-sample radiance clamp; each sample is scaled so `max(r,g,b) ≤ filmMaxComponent` (hue-preserving) before accumulation, matching pbrt `RGBFilm::AddSample`. 0 = disabled (no-op; render byte-identical). Set from the imported pbrt film by `usd_loader` |
 
 `cameraType` was removed — camera selection is implied by `numLensElements`
 (0 ⇒ pinhole). `exposure` and `tonemapMode` are post-process knobs and do not
 reset accumulation. The scalar tail (`sceneBoundsMin` / `sceneBoundsExtent` /
-`neuralNetworkVersion` / `recordMode` / `cameraMirror`) brings the scalar UBO
-blob to **516 B**; the neural/record fields are read only when their feature is
-active and `cameraMirror` defaults 0, so the default `{bsdf}` path stays
-bit-identical. The Vulkan UBO is allocated with headroom
+`neuralNetworkVersion` / `recordMode` / `cameraMirror`, the SPPM per-pass fields,
+and `filmMaxComponent`) brings the scalar UBO blob to **548 B**; the
+neural/record/sppm fields are read only when their feature is active, and
+`cameraMirror` / `filmMaxComponent` default 0, so the default `{bsdf}` path stays
+bit-identical. `filmMaxComponent` is part of the accumulation state-hash (changing
+it resets accumulation). The Vulkan UBO is allocated with headroom
 (`_VK_UNIFORM_BUFFER_BYTES`, currently 768 B) because `UniformBuffer.upload`
 memmoves `min(len, size)` and would otherwise silently truncate the blob's
 tail.

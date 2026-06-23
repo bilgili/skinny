@@ -1049,6 +1049,9 @@ void wfBdptResolve(uint3 tid: SV_DispatchThreadID)
     bool3 bad = isnan(sample) | isinf(sample);
     sample = select(bad, float3(0.0), sample);
     sample = max(sample, float3(0.0));
+    // Film per-sample radiance clamp (change film-maxcomponent-clamp); no-op
+    // when fc.filmMaxComponent == 0. Matches main_pass.slang / wavefront_path.
+    sample = clampSampleRadiance(sample, fc.filmMaxComponent);
 
     // Running mean of the eye-side estimator. main_pass.slang writes exactly
     // this to accumBuffer (binding 2 = what read_accumulation reads); the s=1
