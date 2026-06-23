@@ -588,6 +588,9 @@ void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
     if (any(sample != sample) || any(isinf(sample)))
         sample = float3(0.0);
     sample = max(sample, float3(0.0));
+    // Film per-sample radiance clamp (change film-maxcomponent-clamp); no-op
+    // when fc.filmMaxComponent == 0. Matches main_pass.slang / wavefront_path.
+    sample = clampSampleRadiance(sample, fc.filmMaxComponent);
 
     let n = fc.accumFrame;
     float3 accum;

@@ -105,6 +105,10 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
     sample = select(bad, float3(0.0), sample);
     sample = max(sample, float3(0.0));
 
+    // Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
+    // film-maxcomponent-clamp). No-op when fc.filmMaxComponent == 0.
+    sample = clampSampleRadiance(sample, fc.filmMaxComponent);
+
     // Progressive accumulation — running mean in linear HDR.
     uint n = fc.accumFrame;
     float3 accum;

@@ -49,18 +49,31 @@ HEAVY_SOURCES = {
 _RES_X = re.compile(r'("integer xresolution"\s*)\[?\s*\d+\s*\]?')
 _RES_Y = re.compile(r'("integer yresolution"\s*)\[?\s*\d+\s*\]?')
 _SPP = re.compile(r'("integer pixelsamples"\s*)\[?\s*\d+\s*\]?')
+# The whole Integrator statement: the `Integrator "type" ...` line plus any
+# following indented parameter continuation lines (pbrt params often wrap). Used
+# only when an integrator override is requested (e.g. rendering a heavy scene's
+# reference with pbrt's `path` integrator to match skinny's path-tracer anchor
+# instead of the scene's authored `sppm`).
+_INTEGRATOR = re.compile(r'Integrator\b[^\n]*(?:\n[ \t]+[^\n]*)*')
 
 
-def patch_scene(text: str, width: int, height: int, spp: int | None) -> str:
+def patch_scene(text: str, width: int, height: int, spp: int | None,
+                integrator: str | None = None) -> str:
     text = _RES_X.sub(rf'\1[ {width} ]', text)
     text = _RES_Y.sub(rf'\1[ {height} ]', text)
     if spp is not None:
         text = _SPP.sub(rf'\1[ {spp} ]', text)
+    if integrator is not None:
+        # Replace the authored integrator with the override (maxdepth 5 mirrors the
+        # corpus scenes' bounce budget). The Film `maxcomponentvalue` clamp is left
+        # intact so reference and skinny render under the same firefly suppression.
+        text = _INTEGRATOR.sub(f'Integrator "{integrator}" "integer maxdepth" 5',
+                               text, count=1)
     return text
 
 
 def render_ref(name: str, src_pbrt: str, width: int, height: int,
-               spp: int | None, pbrt: str) -> str:
+               spp: int | None, pbrt: str, integrator: str | None = None) -> str:
     if not os.path.isfile(pbrt):
         raise SystemExit(f"pbrt binary not found: {pbrt}")
     if not os.path.isfile(src_pbrt):
@@ -68,7 +81,7 @@ def render_ref(name: str, src_pbrt: str, width: int, height: int,
     os.makedirs(REFS, exist_ok=True)
     scene_dir = os.path.dirname(src_pbrt)
     dst = os.path.join(REFS, f"{name}.exr")
-    patched = patch_scene(open(src_pbrt).read(), width, height, spp)
+    patched = patch_scene(open(src_pbrt).read(), width, height, spp, integrator)
     # temp scene beside the source so relative includes resolve
     fd, tmp = tempfile.mkstemp(suffix=".pbrt", prefix=f"_regen_{name}_", dir=scene_dir)
     try:
@@ -77,7 +90,8 @@ def render_ref(name: str, src_pbrt: str, width: int, height: int,
         # --outfile overrides the Film filename without touching geometry refs.
         subprocess.run([pbrt, "--outfile", dst, os.path.basename(tmp)],
                        cwd=scene_dir, check=True)
-        print(f"wrote {dst}  ({width}x{height}, spp={spp or 'scene'})")
+        print(f"wrote {dst}  ({width}x{height}, spp={spp or 'scene'}"
+              f"{', integrator=' + integrator if integrator else ''})")
         return dst
     finally:
         os.remove(tmp)
@@ -89,11 +103,16 @@ def main() -> None:
                     help="bathroom | dragon | <corpus-name> | all")
     ap.add_argument("--res", type=int, default=256, help="square resolution (default 256)")
     ap.add_argument("--spp", type=int, default=None, help="override pixelsamples")
+    ap.add_argument("--integrator", default=None,
+                    help="override the scene's Integrator (e.g. 'path' to render a "
+                         "heavy scene's reference with the path tracer matching "
+                         "skinny's parity anchor instead of the authored sppm)")
     ap.add_argument("--pbrt", default=DEFAULT_PBRT)
     ns = ap.parse_args()
 
     if ns.scene in HEAVY_SOURCES:
-        render_ref(ns.scene, HEAVY_SOURCES[ns.scene], ns.res, ns.res, ns.spp, ns.pbrt)
+        render_ref(ns.scene, HEAVY_SOURCES[ns.scene], ns.res, ns.res, ns.spp,
+                   ns.pbrt, ns.integrator)
     elif ns.scene == "all":
         for f in sorted(os.listdir(CORPUS)):
             if f.endswith(".pbrt"):

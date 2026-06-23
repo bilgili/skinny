@@ -397,6 +397,12 @@ class Scene:
     # volume march.
     mm_per_unit: float = 120.0
 
+    # Film per-sample radiance clamp (pbrt `Film "maxcomponentvalue"`, change
+    # film-maxcomponent-clamp). 0 = disabled. When >0 the renderer clamps each
+    # sample's radiance proportionally before accumulation, matching pbrt's
+    # RGBFilm firefly suppression so an imported pbrt scene reproduces its EXR.
+    film_max_component: float = 0.0
+
     # Furnace probe: when True the renderer swaps the scene for a unit
     # sphere + white-1 environment + analytic light off, and tints any
     # pixel whose accumulated radiance exceeds 1.0 per channel pink.

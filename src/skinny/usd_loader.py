@@ -17,6 +17,7 @@ an explicit material binding share it.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
@@ -1522,6 +1523,28 @@ def _apply_up_axis_correction(
 _USD_POOL_SIZE = 4
 
 
+def _film_max_component(stage: "Usd.Stage") -> float:
+    """The pbrt film `maxcomponentvalue` carried in stage metadata, or 0.0.
+
+    The pbrt→USD importer (`pbrt/metadata.scene_metadata`) preserves the whole
+    film verbatim under `customLayerData["pbrt"]["film"]["params"]`. A positive
+    value arms the renderer's per-sample radiance clamp (change
+    film-maxcomponent-clamp), matching pbrt's `RGBFilm` firefly suppression so an
+    imported pbrt scene reproduces its reference EXR. 0.0 (default / absent /
+    non-finite / non-positive) leaves the clamp disabled. Any read failure is
+    non-fatal — the clamp simply stays off.
+    """
+    try:
+        cld = dict(stage.GetRootLayer().customLayerData)
+        params = cld.get("pbrt", {}).get("film", {}).get("params", {})
+        val = float(params.get("maxcomponentvalue", 0.0))
+    except Exception:  # noqa: BLE001 - metadata is best-effort; never block a load
+        return 0.0
+    if not math.isfinite(val) or val <= 0.0:
+        return 0.0
+    return val
+
+
 def _read_open_stage(
     stage: "Usd.Stage",
     *,
@@ -1580,6 +1603,7 @@ def _read_open_stage(
 
     meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
     mm_per_unit = max(meters_per_unit * 1000.0, 1e-6)
+    film_max_component = _film_max_component(stage)
 
     partial_scene = Scene(
         instances=list(emissive_instances),
@@ -1589,6 +1613,7 @@ def _read_open_stage(
         environment=environment,
         camera_override=camera_override,
         mm_per_unit=mm_per_unit,
+        film_max_component=film_max_component,
     )
     up_axis = str(UsdGeom.GetStageUpAxis(stage))
     prim_data = _apply_up_axis_correction(prim_data, partial_scene, up_axis)

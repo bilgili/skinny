@@ -273,6 +273,9 @@ void wfPathResolve(uint3 tid: SV_DispatchThreadID)
     bool3 bad = isnan(sample) | isinf(sample);
     sample = select(bad, float3(0.0), sample);
     sample = max(sample, float3(0.0));
+    // Film per-sample radiance clamp (change film-maxcomponent-clamp); no-op
+    // when fc.filmMaxComponent == 0. Matches main_pass.slang.
+    sample = clampSampleRadiance(sample, fc.filmMaxComponent);
 
     // Progressive accumulation — running mean in linear HDR (main_pass.slang).
     uint n = fc.accumFrame;

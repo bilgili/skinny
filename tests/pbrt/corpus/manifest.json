@@ -99,9 +99,22 @@
       "material_class": "flat",
       "megakernel_ok": true,
       "known_divergent": true,
-      "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): measured on Metal 256/48spp — path|wavefront vs pbrt relMSE=232.8 FLIP=0.387 fireflies=0.024; path megakernel==wavefront (relMSE 0.0000); bdpt|megakernel diverges from path (relMSE 6611). Two follow-up fixes: bathroom-vs-pbrt mismatch, and BDPT-vs-path on bathroom.",
-      "measured": {"path|wavefront": {"relmse": 232.8, "flip": 0.387}},
-      "baselines": {}
+      "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped — max~2120, bypassing maxcomponentvalue — and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) — a metric-robustness follow-up.",
+      "measured": {
+        "path|wavefront": {"relmse": 0.342, "flip": 0.222},
+        "bdpt|megakernel": {"relmse": 0.366, "flip": 0.202},
+        "sppm|wavefront": {"relmse": 0.364, "flip": 0.254},
+        "self_consistency": {"bdpt_vs_path": {"relmse": 0.363, "flip": 0.081, "mse": 0.017}, "sppm_vs_path": {"relmse": 64.97, "flip": 0.109, "mse": 10.42}}
+      },
+      "baselines": {
+        "path|wavefront": {"relmse": 0.342, "flip": 0.222},
+        "path|megakernel": {"relmse": 0.342, "flip": 0.222},
+        "bdpt|megakernel": {"relmse": 0.366, "flip": 0.202},
+        "bdpt|wavefront": {"relmse": 0.366, "flip": 0.202},
+        "path|wavefront|neural": {"relmse": 0.336, "flip": 0.219},
+        "path|wavefront|restir-di": {"relmse": 0.342, "flip": 0.202},
+        "sppm|wavefront": {"relmse": 0.364, "flip": 0.254}
+      }
     },
     {
       "name": "dragon",
