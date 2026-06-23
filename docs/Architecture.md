@@ -644,6 +644,46 @@ with no window or event loop. Key symbols:
 
 ---
 
+## Parity Matrix Harness (`pbrt/parity.py`, `pbrt/metrics.py`, `tests/pbrt/`)
+
+A standing regression that renders every supported renderer **combination**
+against a reference and against itself, so adding a feature re-tests all
+renderers automatically.
+
+**Validity table (one source of truth).** A `RenderCombo(integrator,
+execution_mode, proposals, reuse)` is a point in the matrix; `combo_is_valid`
+prunes it per the [Compatibility matrix](../README.md#compatibility-matrix):
+SPPM is wavefront-only; the neural directional proposal is wavefront + path +
+flat-material only (BDPT ignores it); ReSTIR DI direct-light reuse is path +
+wavefront; a scene flagged `megakernel_ok: false` (e.g. the 28.8M-tri dragon,
+which OOMs the megakernel) is wavefront-only. Every skip carries an explicit
+reason; `enumerate_combos(scene)` yields the valid set, anchor-first. A coverage
+meta-test fails if an integrator the app exposes (`renderer.integrator_modes`)
+has no table entry — a new integrator without a matrix row breaks the build.
+
+**Dual gate.** Each valid combo renders once (linear-HDR accumulation) and feeds
+two gates: **pbrt-truth** (`pbrt_truth_result` — exposure-aligned relMSE/FLIP vs
+the checked-in pbrt v4 reference EXR, relaxed to a per-combo `baseline` when a
+known mismatch is recorded) and **self-consistency** (`self_consistency_result`
+— each combo vs the `(Path, wavefront)` anchor image at a per-axis tolerance:
+tight for a pure `megakernel ≡ wavefront` mode change, looser for BDPT/SPPM,
+unbiasedness for the neural/ReSTIR axes). Self-consistency never uses a baseline
+escape, so a shared material bug (which makes both modes wrong identically) stays
+green there while pbrt-truth records the delta.
+
+**Standard metric battery.** `metrics.compute_metrics(img, ref=None) ->
+ImageMetrics` is the single place a number is computed: error vs reference (MSE,
+RMSE, MAE, relMSE, PSNR, FLIP) plus single-image stats (variance, Immerkær
+noise-σ, firefly outlier fraction). No call-site invents its own error formula.
+
+**Corpus & references.** `tests/pbrt/corpus/manifest.json` lists scenes (pbrt
+sources imported at gate time, or `.usda` assets loaded directly for the heavy
+bathroom/dragon); `tests/pbrt/regen_refs.py` regenerates the reference EXRs
+offline from the pinned pbrt v4. Tiers: `not gpu` (matrix construction + scene
+import, runs anywhere), `gpu` (the full sweep), `slow` (higher-spp confirmation).
+
+---
+
 ## Web Application Architecture
 
 ### Overview

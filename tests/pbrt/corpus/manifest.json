@@ -85,6 +85,39 @@
         "relmse": 0.0792,
         "flip": 0.0894
       }
+    },
+    {
+      "name": "bathroom",
+      "file": "bathroom.pbrt",
+      "usd": "assets/bathroom.usda",
+      "ref": "refs/bathroom.exr",
+      "width": 256,
+      "height": 256,
+      "spp": 128,
+      "relmse_tol": 0.1,
+      "flip_tol": 0.1,
+      "material_class": "flat",
+      "megakernel_ok": true,
+      "known_divergent": true,
+      "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): measured on Metal 256/48spp — path|wavefront vs pbrt relMSE=232.8 FLIP=0.387 fireflies=0.024; path megakernel==wavefront (relMSE 0.0000); bdpt|megakernel diverges from path (relMSE 6611). Two follow-up fixes: bathroom-vs-pbrt mismatch, and BDPT-vs-path on bathroom.",
+      "measured": {"path|wavefront": {"relmse": 232.8, "flip": 0.387}},
+      "baselines": {}
+    },
+    {
+      "name": "dragon",
+      "file": "dragon.pbrt",
+      "usd": "assets/dragon_sss.usda",
+      "ref": "refs/dragon.exr",
+      "width": 256,
+      "height": 256,
+      "spp": 64,
+      "relmse_tol": 0.25,
+      "flip_tol": 0.2,
+      "material_class": "subsurface",
+      "megakernel_ok": false,
+      "known_divergent": true,
+      "notes": "Heavy subsurface dragon (28.8M tris → wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
+      "baselines": {}
     }
   ]
 }
