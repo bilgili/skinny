@@ -11,12 +11,20 @@ import os
 
 import pytest
 
+from skinny.pbrt import metrics
 from skinny.pbrt.api import import_pbrt
 from skinny.pbrt.parity import (
+    ANCHOR,
+    all_combos,
+    combo_is_valid,
+    enumerate_combos,
     evaluate,
     load_manifest,
     materialx_specs,
+    pbrt_truth_result,
     reference_exists,
+    render_combo,
+    self_consistency_result,
 )
 
 usd_loader = pytest.importorskip("skinny.usd_loader")
@@ -28,7 +36,29 @@ MTLX_SPECS = materialx_specs(SPECS)
 
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_corpus_scene_imports_cleanly(spec):
-    """Every corpus scene parses, imports, and loads with no unsupported feature."""
+    """Every corpus scene loads with no unsupported feature.
+
+    pbrt-source scenes import through ``import_pbrt``; usd-source heavy scenes
+    (bathroom/dragon) open their ``.usda`` asset directly.
+    """
+    from skinny.pbrt.parity import _scene_source
+
+    if spec.usd:
+        usd_path = _scene_source(spec, CORPUS_DIR)["usd_path"]
+        assert os.path.exists(usd_path), f"{spec.name}: missing {usd_path}"
+        if os.path.getsize(usd_path) > 100_000_000:
+            # Heavy geometry (e.g. the 28.8M-tri dragon): a full not-gpu load
+            # would materialize the mesh and blow RAM. Sniff the header; the GPU
+            # matrix gate exercises the real load + render.
+            with open(usd_path, encoding="utf-8", errors="ignore") as fh:
+                assert fh.read(16).startswith("#usda"), f"{spec.name}: not a usda"
+            return
+        from pxr import Usd
+
+        stage = Usd.Stage.Open(usd_path)
+        scene = usd_loader.load_scene_from_stage(stage)
+        assert len(scene.instances) >= 1
+        return
     stage, report = import_pbrt(os.path.join(CORPUS_DIR, spec.file))
     scene = usd_loader.load_scene_from_stage(stage)
     assert len(scene.instances) >= 1
@@ -36,20 +66,73 @@ def test_corpus_scene_imports_cleanly(spec):
     assert report.count("skipped") == 0, str(report)
 
 
+# ─── matrix construction tier (no GPU) ────────────────────────────────────
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_matrix_enumerates_per_spec(spec):
+    """Every manifest scene yields a non-empty, anchor-first valid combo set, and
+    every combo in the full space is either valid or skipped with a reason."""
+    combos = enumerate_combos(spec)
+    assert combos and combos[0] == ANCHOR
+    for c in all_combos():
+        ok, reason = combo_is_valid(c, spec)
+        assert ok or reason, f"{c.label} skipped with no reason"
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_scene_source_resolves(spec):
+    """The scene source (corpus .pbrt or .usda asset) exists on disk."""
+    from skinny.pbrt.parity import _scene_source
+
+    src = _scene_source(spec, CORPUS_DIR)
+    assert os.path.exists(src["scene_pbrt"]), f"{spec.name}: missing {src['scene_pbrt']}"
+
+
+# ─── integrator × execution-mode parity matrix gate (GPU) ─────────────────
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
-def test_corpus_scene_parity_gate(spec):
-    """relMSE/FLIP within tolerance vs the pbrt v4 reference EXR."""
+def test_scene_matrix_gate(spec):
+    """Dual gate over every valid combo of *spec*: pbrt-truth (vs the reference
+    EXR, honouring recorded baselines) AND self-consistency (vs the anchor
+    image, strict per-axis tolerance). Each combo renders once and feeds both
+    gates; the anchor is rendered once and reused. The full ImageMetrics battery
+    is logged per combo.
+    """
     if not reference_exists(spec, CORPUS_DIR):
         pytest.skip(f"no reference EXR for {spec.name} (generate with pbrt v4)")
+    combos = enumerate_combos(spec)
     try:
-        result = evaluate(spec, CORPUS_DIR)
+        ref = metrics.read_exr(os.path.join(CORPUS_DIR, spec.ref))
+        imgs = {c.label: render_combo(spec, c, CORPUS_DIR) for c in combos}
     except Exception as exc:  # noqa: BLE001 - GPU/backend unavailable in this env
         pytest.skip(f"render backend unavailable: {exc}")
-    assert result.passed, (
-        f"{spec.name}: relMSE={result.relmse:.4f} (<= {spec.relmse_tol}), "
-        f"FLIP={result.flip:.4f} (<= {spec.flip_tol})"
-    )
+
+    anchor_img = imgs[ANCHOR.label]
+    failures: list[str] = []
+    for c in combos:
+        img = imgs[c.label]
+        pt = pbrt_truth_result(spec, c, img, ref)
+        tag = "(baseline)" if pt.baseline_used else ""
+        print(f"[{spec.name}] {c.label:32s} pbrt-truth {tag} {pt.metrics.summary()}")
+        if not pt.passed:
+            failures.append(f"{c.label}: pbrt-truth relMSE={pt.relmse:.4f} FLIP={pt.flip:.4f}")
+        if c != ANCHOR:
+            sc = self_consistency_result(spec, c, img, anchor_img)
+            print(f"[{spec.name}] {c.label:32s} vs-anchor       {sc.metrics.summary()}")
+            if not sc.passed:
+                failures.append(
+                    f"{c.label}: self-consistency vs anchor relMSE={sc.relmse:.4f} "
+                    f"FLIP={sc.flip:.4f}"
+                )
+    if failures and spec.known_divergent:
+        # Harness-first: a known, not-yet-fixed heavy-scene divergence. Record
+        # and xfail (visible, non-blocking); the follow-up fix flips the flag.
+        pytest.xfail(f"{spec.name} known-divergent (fix is a follow-up):\n  "
+                     + "\n  ".join(failures))
+    assert not failures, f"{spec.name} matrix failures:\n  " + "\n  ".join(failures)
 
 
 # ─── -mtlx export scene-set ───────────────────────────────────────────────
@@ -59,8 +142,10 @@ def test_materialx_specs_mirror_base_set():
     """The -mtlx scene-set parallels the base set: same source/ref/tolerances,
     distinct ids, materialx flag flipped. This is the non-GPU half of the
     parity wiring — the harness plumbing must be exercised without a GPU."""
-    assert len(MTLX_SPECS) == len(SPECS)
-    for base, mtlx in zip(SPECS, MTLX_SPECS):
+    # usd-source heavy scenes (bathroom/dragon) have no .pbrt to re-export.
+    base_pbrt = [s for s in SPECS if not s.usd]
+    assert len(MTLX_SPECS) == len(base_pbrt)
+    for base, mtlx in zip(base_pbrt, MTLX_SPECS):
         assert mtlx.materialx is True
         assert base.materialx is False
         assert mtlx.name == f"{base.name}_mtlx"

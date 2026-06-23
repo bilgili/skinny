@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Integrator × execution-mode parity matrix** (change `integrator-parity-matrix`)
+  — a data-driven regression harness that sweeps `{Path, BDPT, SPPM}` ×
+  `{megakernel, wavefront}` plus the **ReSTIR DI** and **neural directional
+  proposal** axes, pruned by one validity table that mirrors the compatibility
+  matrix (SPPM is wavefront-only; the neural proposal is wavefront + path +
+  flat-material only; ReSTIR DI is path + wavefront). Each valid combo is gated
+  two ways: **pbrt-truth** (relMSE/FLIP vs the checked-in pbrt v4 reference EXR,
+  honouring per-combo recorded baselines for known mismatches) and
+  **self-consistency** (every combo must match the `(Path, wavefront)` anchor
+  image within a per-axis tolerance, so `megakernel ≡ wavefront` and a one-combo
+  divergence are both caught). `bathroom.usda` (pbrt `contemporary-bathroom`) and
+  the SSS dragon join the corpus as heavy reference scenes; a coverage meta-test
+  fails if a renderer combo the app exposes has no matrix entry. `tests/pbrt/
+  regen_refs.py` regenerates the reference EXRs offline from the pinned pbrt v4.
+- **Standardized image-metric battery** (`skinny.pbrt.metrics.ImageMetrics` +
+  `compute_metrics`) — one canonical entry point for every reported number: error
+  vs a reference (MSE, RMSE, MAE, relMSE, PSNR, FLIP) plus single-image quality
+  stats (variance, an Immerkær noise-σ estimate, and a firefly outlier fraction),
+  all pure-numpy. The parity gates report and log the full battery.
+
 ### Fixed
 
 - **MaterialX graph codegen: rewrite the default `<texcoord>` UV input** (change

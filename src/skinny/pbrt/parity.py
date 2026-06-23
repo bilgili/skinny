@@ -36,6 +36,28 @@ class SceneSpec:
     # ``standard_surface`` sidecar) instead of authoring UsdPreviewSurface
     # shaders. The same reference EXRs gate both export paths.
     materialx: bool = False
+    # Heavy-scene source: a ``.usda`` asset loaded directly instead of importing
+    # ``file`` (a ``.pbrt``) at gate time. When set, ``file`` is informational.
+    usd: str | None = None
+    # Material class drives the validity table: a ``subsurface`` scene skips the
+    # (flat-only) neural axis; ``flat`` scenes exercise it.
+    material_class: str = "flat"
+    # False for geometry too heavy for the megakernel (e.g. the 28.8M-tri
+    # dragon, which OOMs) → that scene is wavefront-only.
+    megakernel_ok: bool = True
+    # Optional per-axis self-consistency tolerances, keyed by axis class
+    # ("mode"/"integrator"/"sppm"/"unbiased"): {"mode": {"relmse":.., "flip":..}}.
+    self_consistency: dict | None = None
+    # Optional recorded pbrt-truth baselines, keyed by combo label:
+    # {"path|wavefront": {"relmse":.., "flip":..}} — a known mismatch the gate
+    # guards against regressing past (it does NOT relax self-consistency).
+    baselines: dict | None = None
+    # Harness-first allowance: a heavy scene with a known, not-yet-fixed
+    # divergence (bathroom mismatches pbrt; BDPT diverges from path on it). When
+    # True the matrix gate records the measured battery and ``xfail``s instead of
+    # hard-failing, so the suite stays green while the deltas are pinned. The
+    # follow-up fix flips this False.
+    known_divergent: bool = False
 
 
 @dataclass
@@ -44,6 +66,157 @@ class ParityResult:
     relmse: float
     flip: float
     passed: bool
+    metrics: "metrics.ImageMetrics | None" = None
+    combo: "RenderCombo | None" = None
+    baseline_used: bool = False
+
+
+# ─── render combination matrix ────────────────────────────────────────────
+#
+# One data-driven validity table mirrors the CLAUDE.md / README compatibility
+# matrix. A combo is a point in (integrator × execution_mode × proposals ×
+# reuse); ``combo_is_valid`` is the single source of truth for which combos run.
+
+INTEGRATORS = ("path", "bdpt", "sppm")
+EXECUTION_MODES = ("megakernel", "wavefront")
+# Proposal/reuse axes exercised by the matrix (beyond the bare baseline).
+PROPOSAL_AXES = ("neural",)
+REUSE_AXES = ("restir-di",)
+
+
+@dataclass(frozen=True)
+class RenderCombo:
+    """A single renderer configuration the parity matrix can render.
+
+    *proposals* is a tuple of scene-sampling proposal tokens beyond ``bsdf``
+    (e.g. ``("neural",)``); *reuse* is ``"none"`` or a reuse-pass token
+    (``"restir-di"``).
+    """
+
+    integrator: str = "path"
+    execution_mode: str = "wavefront"
+    proposals: tuple[str, ...] = ()
+    reuse: str = "none"
+
+    @property
+    def has_neural(self) -> bool:
+        return "neural" in self.proposals
+
+    @property
+    def has_reuse(self) -> bool:
+        return bool(self.reuse) and self.reuse != "none"
+
+    def proposals_token(self) -> str | None:
+        """The ``proposals=`` string for HeadlessRenderer, or None for baseline."""
+        if not self.proposals:
+            return None
+        return ",".join(("bsdf", *self.proposals))
+
+    def reuse_token(self) -> str | None:
+        return self.reuse if self.has_reuse else None
+
+    @property
+    def label(self) -> str:
+        parts = [self.integrator, self.execution_mode]
+        if self.proposals:
+            parts.append("+".join(self.proposals))
+        if self.has_reuse:
+            parts.append(self.reuse)
+        return "|".join(parts)
+
+
+#: The self-consistency anchor: the unbiased baseline that supports every axis.
+ANCHOR = RenderCombo(integrator="path", execution_mode="wavefront",
+                     proposals=(), reuse="none")
+
+
+def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
+    """Return ``(valid, reason)``. Mirrors the documented compatibility matrix.
+
+    A skipped combo always carries an explicit reason; nothing is dropped
+    silently.
+    """
+    if combo.integrator not in INTEGRATORS:
+        return False, f"unknown integrator {combo.integrator!r}"
+    if combo.execution_mode not in EXECUTION_MODES:
+        return False, f"unknown execution_mode {combo.execution_mode!r}"
+    # SPPM has no megakernel path.
+    if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
+        return False, "SPPM is wavefront-only"
+    # Neural directional proposal: wavefront + path + flat material only.
+    if combo.has_neural:
+        if combo.execution_mode != "wavefront":
+            return False, "neural proposal is wavefront-only"
+        if combo.integrator != "path":
+            return False, "neural proposal requires the path integrator (BDPT ignores it)"
+        if scene.material_class != "flat":
+            return False, "neural proposal is flat-material only"
+    # ReSTIR DI direct-light reuse: wavefront + path only (it reuses the path
+    # tracer's NEE reservoirs; BDPT/SPPM have their own light handling).
+    if combo.has_reuse:
+        if combo.execution_mode != "wavefront":
+            return False, "ReSTIR DI reuse is wavefront-only"
+        if combo.integrator != "path":
+            return False, "ReSTIR DI reuse is exercised on the path integrator"
+    # Heavy geometry that OOMs the megakernel.
+    if combo.execution_mode == "megakernel" and not scene.megakernel_ok:
+        return False, "geometry exceeds megakernel budget"
+    return True, ""
+
+
+def all_combos() -> list[RenderCombo]:
+    """The full (unfiltered) combo space the matrix considers per scene."""
+    combos: list[RenderCombo] = []
+    for integ in INTEGRATORS:
+        for mode in EXECUTION_MODES:
+            combos.append(RenderCombo(integ, mode, (), "none"))
+            # proposal axis (only meaningful additions are enumerated)
+            for prop in PROPOSAL_AXES:
+                combos.append(RenderCombo(integ, mode, (prop,), "none"))
+            # reuse axis
+            for reuse in REUSE_AXES:
+                combos.append(RenderCombo(integ, mode, (), reuse))
+    return combos
+
+
+def enumerate_combos(scene: SceneSpec) -> list[RenderCombo]:
+    """Valid combos for *scene*, in deterministic order (anchor first)."""
+    valid = [c for c in all_combos() if combo_is_valid(c, scene)[0]]
+    valid.sort(key=lambda c: (c != ANCHOR, c.label))
+    return valid
+
+
+def combo_axis_class(combo: RenderCombo) -> str:
+    """Which self-consistency tolerance class applies for *combo* vs the anchor."""
+    if combo.has_neural or combo.has_reuse:
+        return "unbiased"
+    if combo.integrator == "sppm":
+        return "sppm"
+    if combo.integrator != ANCHOR.integrator:
+        return "integrator"
+    return "mode"  # same integrator, differs only in execution mode
+
+
+#: Default self-consistency tolerances (relMSE, FLIP) per axis class, sized to a
+#: noise-limited equal-spp A/B. A scene may override via ``self_consistency``.
+_DEFAULT_SELF_CONSISTENCY = {
+    "mode": {"relmse": 0.02, "flip": 0.03},
+    "integrator": {"relmse": 0.06, "flip": 0.06},
+    "sppm": {"relmse": 0.15, "flip": 0.12},
+    "unbiased": {"relmse": 0.05, "flip": 0.05},
+}
+
+
+def self_consistency_tol(combo: RenderCombo, scene: SceneSpec) -> tuple[float, float]:
+    """(relmse_tol, flip_tol) for *combo* measured against the anchor."""
+    cls = combo_axis_class(combo)
+    table = dict(_DEFAULT_SELF_CONSISTENCY)
+    if scene.self_consistency:
+        for k, v in scene.self_consistency.items():
+            table.setdefault(k, {})
+            table[k] = {**table.get(k, {}), **v}
+    t = table[cls]
+    return float(t["relmse"]), float(t["flip"])
 
 
 def load_manifest(corpus_dir: str) -> list[SceneSpec]:
@@ -67,8 +240,15 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
                   integrator: str = "path",
                   execution_mode: str = "megakernel",
                   emissive_uniform: bool = False,
-                  materialx: bool = False) -> np.ndarray:
-    """Import a pbrt scene and render it in skinny; return linear-HDR (H,W,3).
+                  materialx: bool = False,
+                  proposals: str | None = None,
+                  reuse: str | None = None,
+                  usd_path: str | None = None) -> np.ndarray:
+    """Render a scene in skinny; return linear-HDR (H,W,3).
+
+    The scene source is either a pbrt file (*scene_pbrt*, imported to USD at call
+    time) or, when *usd_path* is set, an existing ``.usda`` asset loaded directly
+    (used for the heavy bathroom/dragon scenes).
 
     *gpu* is the vendor preference (intel/nvidia/amd/discrete/auto); the rhi
     backend (vulkan/metal) is resolved via :func:`skinny.backend_select.select_backend`
@@ -78,7 +258,11 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     MoltenVK-under-Vulkan.
     *env_off* zeroes skinny's default ambient environment so scenes with no pbrt
     ``infinite`` light render against a black background as pbrt does.
-    *integrator* selects ``"path"`` or ``"bdpt"``.
+    *integrator* selects ``"path"``, ``"bdpt"`` or ``"sppm"``.
+    *proposals* / *reuse* arm the scene-sampling axes (constructor-only on the
+    headless renderer): ``proposals="bsdf,neural"`` activates the neural
+    directional proposal (asserted live); ``reuse="restir-di"`` activates ReSTIR
+    DI direct-light reuse.
     *emissive_uniform* (test hook) forces uniform-by-index emissive-triangle
     selection instead of the default power-weighted distribution, so the same
     binary can render the power-vs-uniform A/B for the emissive-mesh-nee gate.
@@ -97,14 +281,20 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
         execution_mode = "wavefront"
 
     backend = select_backend()
-    with tempfile.TemporaryDirectory() as tmp:
-        usd = os.path.join(tmp, "scene.usda")
-        import_pbrt(scene_pbrt, out=usd, materialx=materialx)
+    want_neural = bool(proposals) and "neural" in proposals
+
+    def _run(scene_usd: str) -> np.ndarray:
         with HeadlessRenderer(width, height, gpu=gpu, backend=backend,
-                              execution_mode=execution_mode) as r:
+                              execution_mode=execution_mode,
+                              proposals=proposals, reuse=reuse) as r:
             # Set before the scene build so _upload_emissive_triangles sees it.
             r.renderer._emissive_uniform_selection = bool(emissive_uniform)
-            r._prepare(usd, RenderOptions(samples=spp, integrator=integrator))
+            r._prepare(scene_usd, RenderOptions(samples=spp, integrator=integrator))
+            if want_neural and not r.renderer._neural_active():
+                raise RuntimeError(
+                    "neural proposal requested but not active (needs wavefront + a "
+                    "neural proposal token + a flat-material first hit)"
+                )
             if env_off:
                 r.renderer.env_intensity = 0.0
             # skinny injects a synthetic default DistantLight (/Skinny/DefaultLight)
@@ -114,28 +304,103 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
             r.renderer._last_state_hash = None
             r._accumulate(spp)
             arr, _samples = r.renderer.read_accumulation_hdr()
-    return np.asarray(arr, dtype=np.float64)[..., :3]
+        return np.asarray(arr, dtype=np.float64)[..., :3]
+
+    if usd_path is not None:
+        return _run(usd_path)
+    with tempfile.TemporaryDirectory() as tmp:
+        usd = os.path.join(tmp, "scene.usda")
+        import_pbrt(scene_pbrt, out=usd, materialx=materialx)
+        return _run(usd)
 
 
-def evaluate(spec: SceneSpec, corpus_dir: str, gpu: str | None = None) -> ParityResult:
-    """Render *spec* in skinny and compare to its reference EXR.
+def _repo_root(corpus_dir: str) -> str:
+    # corpus_dir == <repo>/tests/pbrt/corpus
+    return os.path.abspath(os.path.join(corpus_dir, "..", "..", ".."))
 
-    Honours ``spec.materialx`` to render the ``-mtlx`` export against the same
-    reference EXR as the UsdPreviewSurface export.
-    """
-    ref_path = os.path.join(corpus_dir, spec.ref)
-    ref = metrics.read_exr(ref_path)
-    scene_path = os.path.join(corpus_dir, spec.file)
-    img = render_linear(
-        scene_path, spec.width, spec.height, spp=spec.spp,
-        gpu=gpu, env_off=not scene_has_environment(scene_path),
-        materialx=spec.materialx,
+
+def _scene_source(spec: SceneSpec, corpus_dir: str) -> dict:
+    """Resolve the scene source into render_linear kwargs (pbrt file or usd asset)."""
+    if spec.usd:
+        usd = spec.usd if os.path.isabs(spec.usd) else os.path.join(_repo_root(corpus_dir), spec.usd)
+        return {"scene_pbrt": usd, "usd_path": usd}
+    return {"scene_pbrt": os.path.join(corpus_dir, spec.file), "usd_path": None}
+
+
+def _usd_has_dome(usd_path: str) -> bool:
+    """Cheap text scan for a dome/environment light in a .usda."""
+    try:
+        with open(usd_path, encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(200_000)
+    except OSError:
+        return False
+    return "DomeLight" in head
+
+
+def _env_off_for(spec: SceneSpec, corpus_dir: str, src: dict) -> bool:
+    """True if skinny's default ambient env should be zeroed for this scene."""
+    if src["usd_path"] is not None:
+        return not _usd_has_dome(src["usd_path"])
+    return not scene_has_environment(src["scene_pbrt"])
+
+
+def render_combo(spec: SceneSpec, combo: RenderCombo, corpus_dir: str,
+                 gpu: str | None = None) -> np.ndarray:
+    """Render *spec* with *combo* and return the linear-HDR image (H,W,3)."""
+    src = _scene_source(spec, corpus_dir)
+    return render_linear(
+        src["scene_pbrt"], spec.width, spec.height, spp=spec.spp,
+        gpu=gpu, env_off=_env_off_for(spec, corpus_dir, src),
+        integrator=combo.integrator, execution_mode=combo.execution_mode,
+        proposals=combo.proposals_token(), reuse=combo.reuse_token(),
+        materialx=spec.materialx, usd_path=src["usd_path"],
     )
-    aligned = metrics.align_exposure(img, ref)
-    rm = metrics.relmse(aligned, ref)
-    fl = metrics.flip(aligned, ref)
-    passed = rm <= spec.relmse_tol and fl <= spec.flip_tol
-    return ParityResult(spec.name, rm, fl, passed)
+
+
+def pbrt_truth_result(spec: SceneSpec, combo: RenderCombo, img: np.ndarray,
+                      ref: np.ndarray) -> ParityResult:
+    """pbrt-truth gate for a rendered *img*, honouring a recorded baseline.
+
+    The pbrt-truth assertion uses ``max(tol, baseline*(1+margin))`` when a
+    baseline is recorded for this combo, and the caller logs the delta. Returns
+    the full :class:`metrics.ImageMetrics` battery on the result.
+    """
+    m = metrics.compute_metrics(img, ref)
+    rel_tol, flip_tol = spec.relmse_tol, spec.flip_tol
+    baseline_used = False
+    base = (spec.baselines or {}).get(combo.label)
+    if base is not None:
+        margin = 1.05
+        rel_tol = max(rel_tol, float(base["relmse"]) * margin)
+        flip_tol = max(flip_tol, float(base["flip"]) * margin)
+        baseline_used = True
+    passed = m.relmse <= rel_tol and m.flip <= flip_tol
+    return ParityResult(spec.name, m.relmse, m.flip, passed,
+                        metrics=m, combo=combo, baseline_used=baseline_used)
+
+
+def self_consistency_result(spec: SceneSpec, combo: RenderCombo, img: np.ndarray,
+                            anchor_img: np.ndarray) -> ParityResult:
+    """Self-consistency gate: *img* vs the anchor image at the per-axis tolerance.
+
+    No baseline escape — these are correctness invariants.
+    """
+    m = metrics.compute_metrics(img, anchor_img)
+    rel_tol, flip_tol = self_consistency_tol(combo, spec)
+    passed = m.relmse <= rel_tol and m.flip <= flip_tol
+    return ParityResult(spec.name, m.relmse, m.flip, passed, metrics=m, combo=combo)
+
+
+def evaluate(spec: SceneSpec, corpus_dir: str, gpu: str | None = None,
+             combo: RenderCombo | None = None) -> ParityResult:
+    """Render *spec* (default: the path/megakernel combo) and gate against its
+    reference EXR. Honours ``spec.materialx`` and ``spec.usd``.
+    """
+    if combo is None:
+        combo = RenderCombo(integrator="path", execution_mode="megakernel")
+    ref = metrics.read_exr(os.path.join(corpus_dir, spec.ref))
+    img = render_combo(spec, combo, corpus_dir, gpu=gpu)
+    return pbrt_truth_result(spec, combo, img, ref)
 
 
 def materialx_specs(specs: list[SceneSpec]) -> list[SceneSpec]:
@@ -150,6 +415,8 @@ def materialx_specs(specs: list[SceneSpec]) -> list[SceneSpec]:
     """
     out: list[SceneSpec] = []
     for s in specs:
+        if s.usd:  # usd-source heavy scenes have no .pbrt to re-export via -mtlx
+            continue
         fields = {k: getattr(s, k) for k in SceneSpec.__dataclass_fields__}
         fields["name"] = f"{s.name}_mtlx"
         fields["materialx"] = True

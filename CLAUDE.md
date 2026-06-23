@@ -211,6 +211,60 @@ the `[mlx]` extra; `auto` already resolves to `mlx` on such a host). Swap
 disk round-trip) or `shared` (in-process RAM double-buffer, no disk, no extra
 deps) for a non-GPU-interop handoff.
 
+### Parity matrix harness — test every renderer combo
+
+`tests/pbrt/` is the **standing regression for all renderers**:
+`src/skinny/pbrt/parity.py` (matrix + dual gate), `src/skinny/pbrt/metrics.py`
+(the `ImageMetrics` battery), `tests/pbrt/test_parity.py` (gates),
+`tests/pbrt/test_matrix.py` (validity + coverage), `tests/pbrt/test_metrics.py`.
+Authoritative design lives in **[Architecture.md](docs/Architecture.md) → Parity
+Matrix Harness** and the openspec `render-parity-matrix` spec.
+
+**When you add or change a renderer feature, wire it into the matrix — do not
+ship it untested across combos:**
+
+- **New integrator** → add it to `parity.INTEGRATORS` and the `combo_is_valid`
+  rules (mirror this file's Compatibility matrix above). The coverage meta-test
+  (`test_coverage_meta_app_integrators_covered`) **fails the build** if
+  `renderer.integrator_modes` exposes an integrator with no validity entry, so
+  this is enforced, not optional.
+- **New execution mode / proposal / reuse axis** → extend `EXECUTION_MODES` /
+  `PROPOSAL_AXES` / `REUSE_AXES` + `combo_is_valid`; keep the wording in sync
+  with the Compatibility matrix table above and README.
+- **New BSDF lobe / sampler / material / shader change** → it is already swept by
+  every existing combo; run the gate (below) and, if a combo legitimately shifts,
+  re-measure and update the manifest `measured`/`baseline`, never loosen a
+  self-consistency tolerance to hide a real divergence.
+- **New reference scene** → add it to `tests/pbrt/corpus/manifest.json` (pbrt
+  `file` or a `.usda` `usd` asset) and generate its EXR with
+  `python tests/pbrt/regen_refs.py --scene <name> --res 256 --spp <n>` (uses the
+  pinned pbrt v4 at `~/projects/pbrt-v4/build/pbrt`).
+
+**Two gates, always:** *pbrt-truth* (vs the checked-in pbrt v4 EXR, relaxed to a
+per-combo `baseline` only for a recorded known mismatch) **and**
+*self-consistency* (every combo matches the `(Path, wavefront)` anchor image —
+this is how `megakernel ≡ wavefront` and integrator≡integrator are enforced).
+Every reported number comes from `metrics.compute_metrics` (relMSE/PSNR/FLIP/MSE/
+MAE + variance/noise-σ/firefly) — **never hand-roll an error/noise formula** at a
+call-site.
+
+**Running it** (headless GPU rules from the Commands section apply — Metal
+backend, `VULKAN_SDK`+`DYLD_LIBRARY_PATH` exported even on Metal because
+`renderer.py` imports `vulkan` at module load; one Metal megakernel compile at a
+time):
+
+```bash
+# hostless: matrix construction + metric battery + scene import (no GPU)
+.venv/bin/python -m pytest tests/pbrt/test_matrix.py tests/pbrt/test_metrics.py \
+  tests/pbrt/test_parity.py -m "not gpu"
+# full GPU sweep (uses ./bin/python3.13 + the SDK env vars)
+PYTHONPATH=src SKINNY_BACKEND=metal ./bin/python3.13 -m pytest tests/pbrt/test_parity.py -k matrix
+```
+
+A bathroom/dragon pbrt-truth mismatch is recorded as a `baseline` (harness-first);
+the actual fixes are separate OpenSpec changes that must **lower** the baseline,
+never raise it.
+
 ## Architecture
 
 ### Layers
