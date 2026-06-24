@@ -31,6 +31,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Megakernel SPIR-V had an invalid negative array index in the BDPT path**
+  (`fix-bdpt-negative-index`) — when a BDPT MIS helper
+  (`misWeight`/`splatMisWeight` in `integrators/bdpt.slang`) is inlined with a
+  compile-time `t == 1` (e.g. the `t = 1` NEE/splat strategies), index
+  expressions like `litC[t - 2]` and the guarded `litC[i - 1]` fold to a constant
+  `litC[-1]`, emitting `OpAccessChain ... %int_n1` into `main_pass.spv`.
+  spirv-val rejects it (`VUID-VkShaderModuleCreateInfo-pCode-08737`, "Index … may
+  not have a negative value"), so the megakernel module printed a validation error
+  on every load — even under `--integrator path` (the megakernel compiles all
+  integrators). The guarded neighbour indices are now clamped with `max(…, 0)` so
+  the folded index is `0`, never `-1` — behaviour-preserving, since the value is
+  always discarded by the surrounding `i > 0` / `t >= 2` guard. New gated
+  regression test compiles the megakernel and asserts spirv-val is clean
+  (`tests/test_megakernel_spirv_valid.py`).
 - **Marble in the three-materials demo rendered as broken clear glass** (change
   `marble-subsurface-opacity-gate`) — the demo marble is a plain
   `standard_surface` with a `subsurface = 0.4` *weight* (no interior medium). The
