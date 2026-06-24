@@ -31,6 +31,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Marble in the three-materials demo rendered as broken clear glass** (change
+  `marble-subsurface-opacity-gate`) — the demo marble is a plain
+  `standard_surface` with a `subsurface = 0.4` *weight* (no interior medium). The
+  loader's subsurface→opacity bridge (added for pbrt `Material "subsurface"`)
+  fired on any `subsurface > 0` and forced `opacity = 0`, so the flat path
+  refracted the marble as a clear dielectric — a dark, near-black, blue-tinted,
+  speckled ball that ignored the lights, on every backend / execution mode /
+  integrator. `_derive_opacity_from_subsurface` now opens the refraction gate
+  **only** when a genuine interior medium is present (`subsurface_sigma_a/σ_s`,
+  via the new `_has_subsurface_medium`, mirroring `_material_is_subsurface`); a
+  bare subsurface weight stays opaque diffuse. Genuine pbrt subsurface materials
+  (which carry σ_a/σ_s) are unchanged. Host-side material-loading fix — no shader
+  change.
 - **Film per-sample radiance clamp (`maxcomponentvalue`)** (change
   `film-maxcomponent-clamp`) — skinny imported the pbrt film `iso` exposure but
   not its `maxcomponentvalue` firefly clamp, so scenes with tiny ultra-bright

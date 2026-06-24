@@ -105,6 +105,16 @@ The coefficients ride on `skinnyOverrides` customData (`subsurface_sigma_a`,
 is non-zero. True `dielectric` glass (no `subsurface_sigma_*`) stays on the flat
 path, untouched.
 
+The loader's subsurface→opacity bridge (`_derive_opacity_from_subsurface`, which
+drops `opacity` to `0` so the flat refraction branch fires for a pbrt subsurface
+boundary) is gated on the **same** `subsurface_sigma_*` test
+(`_has_subsurface_medium`, mirroring `_material_is_subsurface`). A plain Autodesk
+`standard_surface` `subsurface` *weight* with no interior medium — e.g. the
+`three_materials_demo` marble (`subsurface = 0.4`, no σ) — is a diffuse-SSS
+shading term, so it keeps `opacity = 1` and renders as an opaque lit diffuse
+surface. Without this gate it was forced to `opacity = 0` and refracted the
+environment as clear glass (the "marble totally broken" regression).
+
 ## Verification
 
 | Gate | Result |

@@ -188,7 +188,11 @@ stays future work; see the change's `design.md` for the Stage-2 roadmap and the
 > `coat` (not `clearcoat`) — so a `-mtlx` subsurface dragon rendered **opaque**
 > where the UsdPreviewSurface export rendered translucent (sssdragon `-mtlx`
 > relMSE 0.88 / FLIP 0.46, UsdPreviewSurface 0.49 / 0.13). Now the fallback
-> (`_load_mtlx_materials`) bridges `subsurface → opacity = 0`,
+> (`_load_mtlx_materials`) bridges `subsurface → opacity = 0` **only when an
+> interior medium is present** (`subsurface_sigma_*`, via `_has_subsurface_medium`,
+> matching `_material_is_subsurface`) — a bare `standard_surface` `subsurface`
+> weight with no medium (e.g. the `three_materials_demo` marble) stays opaque
+> instead of refracting as clear glass,
 > `_resolve_material_binding` merges the bound prim's `skinnyOverrides` interior,
 > the loader canonicalizes `clearcoat`/`clearcoatRoughness` →
 > `coat`/`coat_roughness` (the slots the `FlatMaterial` packer reads — this also
