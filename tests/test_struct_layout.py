@@ -95,6 +95,57 @@ class TestPythonPackingSizes:
         _derive_opacity_from_transmission(o4)
         assert abs(float(o4["opacity"]) - 0.3) < 1e-6
 
+    def test_subsurface_opacity_gate_requires_medium(self):
+        """Only a genuine volumetric subsurface medium (pbrt `Material
+        "subsurface"`, carrying σ_a/σ_s and routed to MATERIAL_TYPE_SUBSURFACE)
+        may open the flat refraction gate via `opacity = 0`.
+
+        A plain Autodesk standard_surface `subsurface` *weight* (e.g. the
+        three_materials_demo marble) is a diffuse-SSS shading term, NOT a
+        transmissive boundary — forcing opacity=0 there turns it into clear
+        glass that refracts the environment (the "marble totally broken" bug).
+        The gate must mirror renderer._material_is_subsurface (σ_a/σ_s present).
+        """
+        from skinny.usd_loader import _derive_opacity_from_subsurface
+
+        # Plain standard_surface subsurface weight, NO medium → opacity untouched.
+        marble: dict[str, object] = {
+            "subsurface": 0.4,
+            "subsurface_color": (0.45, 0.45, 0.55),
+            "diffuseColor": (0.45, 0.45, 0.55),
+        }
+        _derive_opacity_from_subsurface(marble)
+        assert "opacity" not in marble, (
+            "a standard_surface subsurface weight with no medium must stay opaque"
+        )
+
+        # Genuine pbrt subsurface (σ_a/σ_s present) → opacity 0 (refraction gate).
+        sss: dict[str, object] = {
+            "subsurface": 1.0,
+            "subsurface_sigma_a": (0.032, 0.17, 0.48),
+            "subsurface_sigma_s": (0.74, 0.88, 1.01),
+        }
+        _derive_opacity_from_subsurface(sss)
+        assert float(sss["opacity"]) == 0.0
+
+        # σ present but all-zero is not a medium → opacity untouched.
+        zero_sigma: dict[str, object] = {
+            "subsurface": 1.0,
+            "subsurface_sigma_a": (0.0, 0.0, 0.0),
+            "subsurface_sigma_s": (0.0, 0.0, 0.0),
+        }
+        _derive_opacity_from_subsurface(zero_sigma)
+        assert "opacity" not in zero_sigma
+
+        # Explicitly authored opacity always wins, even with a medium.
+        authored: dict[str, object] = {
+            "subsurface": 1.0,
+            "subsurface_sigma_s": (0.74, 0.88, 1.01),
+            "opacity": 0.3,
+        }
+        _derive_opacity_from_subsurface(authored)
+        assert abs(float(authored["opacity"]) - 0.3) < 1e-6
+
     def test_flat_material_cutout_packing(self):
         """Cutout opacity config: threshold, opacity texture idx, and
         channelMask opacity=a must land at the documented offsets.

@@ -401,23 +401,51 @@ def _derive_opacity_from_transmission(overrides: dict) -> None:
     overrides["opacity"] = max(0.0, 1.0 - float(t))
 
 
+def _has_subsurface_medium(overrides: dict) -> bool:
+    """True when a non-zero subsurface interior medium (σ_a/σ_s, mm⁻¹) is set.
+
+    Mirrors ``renderer._material_is_subsurface`` so the opacity-bridge and the
+    MATERIAL_TYPE_SUBSURFACE routing agree on what a "subsurface material" is.
+    """
+    def _nonzero(v: object) -> bool:
+        if v is None or isinstance(v, bool):
+            return False
+        if isinstance(v, (int, float)):
+            return float(v) > 0.0
+        try:
+            return any(float(c) > 0.0 for c in v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+
+    return (_nonzero(overrides.get("subsurface_sigma_a"))
+            or _nonzero(overrides.get("subsurface_sigma_s")))
+
+
 def _derive_opacity_from_subsurface(overrides: dict) -> None:
     """Open the flat refraction gate (`opacity = 0`) for a subsurface material.
 
-    standard_surface expresses subsurface scattering via a `subsurface` weight;
     pbrt's `subsurface` material is a transmissive dielectric boundary around a
-    homogeneous interior. skinny's flat path only refracts through surfaces whose
-    `opacity < 1` (flat_material.slang), so a `subsurface` weight that never
-    lowers opacity leaves the boundary opaque (the SSS dragon rendered solid
-    white). Mirrors the UsdPreviewSurface export, which authors `opacity = 0` for
-    `subsurface` directly. No-op when `subsurface` is absent/zero or when an
-    explicit `opacity` was already authored (so it never perturbs a
-    standard_surface material that set its own opacity).
+    homogeneous interior; it routes to MATERIAL_TYPE_SUBSURFACE (the volumetric
+    interior walk) and carries σ_a/σ_s coefficients. skinny's flat path only
+    refracts through surfaces whose `opacity < 1` (flat_material.slang), so the
+    boundary must drop to opacity 0 or it renders solid (the SSS dragon was
+    opaque white). Mirrors the UsdPreviewSurface export, which authors
+    `opacity = 0` for such a material directly.
+
+    Crucially this fires ONLY for a genuine volumetric medium (σ_a/σ_s present).
+    A plain Autodesk standard_surface `subsurface` *weight* (e.g. the
+    three_materials_demo marble: `subsurface = 0.4` with no medium) is a
+    diffuse-SSS shading term routed to MATERIAL_TYPE_FLAT — forcing opacity=0
+    there would turn it into clear glass that refracts the environment (the
+    "marble totally broken" regression). No-op when `subsurface` is absent/zero,
+    when no interior medium is set, or when an explicit `opacity` was authored.
     """
     s = overrides.get("subsurface")
     if not isinstance(s, (int, float)) or isinstance(s, bool):
         return
     if float(s) <= 0.0 or "opacity" in overrides:
+        return
+    if not _has_subsurface_medium(overrides):
         return
     overrides["opacity"] = 0.0
 
