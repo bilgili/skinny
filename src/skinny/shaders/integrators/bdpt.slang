@@ -522,10 +522,10 @@ float misWeight(
     [loop] for (int i = 0; i < int(BDPT_MAX_VERTS); i++) eyeC[i] = eye[i];
     [loop] for (int i = 0; i < int(BDPT_MAX_VERTS); i++) litC[i] = lit[i];
 
-    if (s >= 1) eyeC[s - 1].pdfRev = pdf_zsm1_rev;
-    if (s >= 2) eyeC[s - 2].pdfRev = pdf_zsm2_rev;
-    if (t >= 1) litC[t - 1].pdfRev = pdf_ytm1_rev;
-    if (t >= 2) litC[t - 2].pdfRev = pdf_ytm2_rev;
+    if (s >= 1) eyeC[max(s - 1, 0)].pdfRev = pdf_zsm1_rev;
+    if (s >= 2) eyeC[max(s - 2, 0)].pdfRev = pdf_zsm2_rev;
+    if (t >= 1) litC[max(t - 1, 0)].pdfRev = pdf_ytm1_rev;
+    if (t >= 2) litC[max(t - 2, 0)].pdfRev = pdf_ytm2_rev;
 
     float sumRi = 0.0;
     float ri = 1.0;
@@ -543,7 +543,13 @@ float misWeight(
     for (int i = t - 1; i >= 0; i--)
     {
         ri *= remap0(litC[i].pdfRev) / remap0(litC[i].pdfFwd);
-        bool deltaLight = (i > 0) ? litC[i - 1].isDelta : false;
+        // Clamp the neighbour index so it can never be -1: when this loop is
+        // inlined with a compile-time `t == 1`, `i` folds to 0 and the bare
+        // `litC[i - 1]` becomes a constant `litC[-1]` access chain — invalid
+        // SPIR-V (`OpAccessChain ... %int_n1`, flagged by spirv-val) even though
+        // the `i > 0` guard discards the value. `max(i - 1, 0)` reads `litC[0]`
+        // in that discarded case: identical result, valid index.
+        bool deltaLight = (i > 0) ? litC[max(i - 1, 0)].isDelta : false;
         if (!litC[i].isDelta && !deltaLight)
             sumRi += ri * ri;
     }
@@ -825,8 +831,8 @@ float splatMisWeight(
 {
     BDPTVertex litC[BDPT_MAX_VERTS];
     [loop] for (int i = 0; i < int(BDPT_MAX_VERTS); i++) litC[i] = lit[i];
-    if (t >= 1) litC[t - 1].pdfRev = pdf_ytm1_rev;
-    if (t >= 2) litC[t - 2].pdfRev = pdf_ytm2_rev;
+    if (t >= 1) litC[max(t - 1, 0)].pdfRev = pdf_ytm1_rev;
+    if (t >= 2) litC[max(t - 2, 0)].pdfRev = pdf_ytm2_rev;
 
     float sumRi = 0.0;
     float ri = 1.0;
@@ -834,7 +840,13 @@ float splatMisWeight(
     for (int i = t - 1; i >= 0; i--)
     {
         ri *= remap0(litC[i].pdfRev) / remap0(litC[i].pdfFwd);
-        bool deltaLight = (i > 0) ? litC[i - 1].isDelta : false;
+        // Clamp the neighbour index so it can never be -1: when this loop is
+        // inlined with a compile-time `t == 1`, `i` folds to 0 and the bare
+        // `litC[i - 1]` becomes a constant `litC[-1]` access chain — invalid
+        // SPIR-V (`OpAccessChain ... %int_n1`, flagged by spirv-val) even though
+        // the `i > 0` guard discards the value. `max(i - 1, 0)` reads `litC[0]`
+        // in that discarded case: identical result, valid index.
+        bool deltaLight = (i > 0) ? litC[max(i - 1, 0)].isDelta : false;
         if (!litC[i].isDelta && !deltaLight)
             sumRi += ri * ri;
     }
