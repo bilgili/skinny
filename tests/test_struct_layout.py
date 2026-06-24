@@ -95,6 +95,46 @@ class TestPythonPackingSizes:
         _derive_opacity_from_transmission(o4)
         assert abs(float(o4["opacity"]) - 0.3) < 1e-6
 
+    def test_transmission_opacity_gate_ignores_default_opaque(self):
+        """A `standard_surface`/OpenPBR shader ALWAYS authors `opacity` (its
+        MaterialX default is the fully-opaque `(1, 1, 1)`). That default must NOT
+        block the `transmission → opacity` refraction bridge — only a genuine
+        cutout (`opacity < 1`) should win over transmission.
+
+        Regression: the MaterialX `standard_surface` glass in
+        `assets/glass_caustics_test.usda` (`transmission = 1`, default
+        `opacity = (1, 1, 1)`) rendered OPAQUE because the bridge skipped on the
+        mere presence of the default-opaque authored opacity.
+        """
+        from skinny.usd_loader import _derive_opacity_from_transmission
+
+        # Default-opaque SCALAR opacity (1.0) must not block transmission.
+        scal: dict[str, object] = {"transmission": 1.0, "opacity": 1.0}
+        _derive_opacity_from_transmission(scal)
+        assert abs(float(scal["opacity"]) - 0.0) < 1e-6, (
+            "default-opaque scalar opacity must not block the transmission bridge"
+        )
+
+        # Default-opaque PER-CHANNEL opacity (1, 1, 1) — the standard_surface
+        # default — must not block transmission (the glass_caustics_test bug).
+        col: dict[str, object] = {"transmission": 1.0, "opacity": (1.0, 1.0, 1.0)}
+        _derive_opacity_from_transmission(col)
+        assert float(col["opacity"]) < 1.0, (
+            "default-opaque (1,1,1) opacity must not block the transmission bridge"
+        )
+
+        # Partial transmission with a default-opaque opacity still bridges.
+        part: dict[str, object] = {"transmission": 0.25, "opacity": (1.0, 1.0, 1.0)}
+        _derive_opacity_from_transmission(part)
+        assert abs(float(part["opacity"]) - 0.75) < 1e-6
+
+        # A GENUINE cutout (some channel < 1) is preserved over transmission.
+        cutout: dict[str, object] = {"transmission": 1.0, "opacity": (1.0, 1.0, 0.5)}
+        _derive_opacity_from_transmission(cutout)
+        assert cutout["opacity"] == (1.0, 1.0, 0.5), (
+            "a genuine cutout opacity (channel < 1) must win over transmission"
+        )
+
     def test_subsurface_opacity_gate_requires_medium(self):
         """Only a genuine volumetric subsurface medium (pbrt `Material
         "subsurface"`, carrying σ_a/σ_s and routed to MATERIAL_TYPE_SUBSURFACE)

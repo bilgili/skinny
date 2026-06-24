@@ -31,6 +31,27 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MaterialX `standard_surface` glass rendered opaque** (change
+  `glass-transmission-opacity-gate`) — the right sphere of
+  `assets/glass_caustics_test.usda` (a MaterialX `standard_surface` with
+  `transmission = 1`) rendered as a solid opaque ball while the left
+  UsdPreviewSurface glass (`opacity = 0`) refracted correctly. skinny's flat path
+  only refracts surfaces whose `opacity < 1` (`flat_material.slang`), so the
+  loader bridges `transmission → opacity = 1 − transmission`
+  (`_derive_opacity_from_transmission`). That bridge skipped whenever **any**
+  `opacity` was authored, but a `standard_surface` shader always authors `opacity`
+  (its MaterialX default is the fully-opaque `(1, 1, 1)`) — so on the
+  usdMtlx-plugin intake path the default blocked the bridge and the glass stayed
+  opaque. The bridge now skips only for a **genuine cutout** (`opacity < 1`, via
+  the new `_opacity_is_fully_opaque`); a default-opaque opacity is overwritten by
+  `1 − transmission`, so the two material-intake paths agree and the glass
+  refracts. Host-side material-loading fix — no shader change, so every backend /
+  execution mode / integrator inherits it. New
+  `test_transmission_opacity_gate_ignores_default_opaque`
+  (`tests/test_struct_layout.py`) and scene-level
+  `test_glass_caustics_both_spheres_transparent`
+  (`tests/test_glass_caustics_test.py`); GPU-verified on Metal + path tracer
+  (megakernel) — both spheres now render as glass.
 - **Megakernel SPIR-V had an invalid negative array index in the BDPT path**
   (`fix-bdpt-negative-index`) — when a BDPT MIS helper
   (`misWeight`/`splatMisWeight` in `integrators/bdpt.slang`) is inlined with a
