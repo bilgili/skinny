@@ -87,6 +87,26 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   always discarded by the surrounding `i > 0` / `t >= 2` guard. New gated
   regression test compiles the megakernel and asserts spirv-val is clean
   (`tests/test_megakernel_spirv_valid.py`).
+- **Area lights rendered dim — emissive-triangle MIS under-count** (change
+  `emissive-triangle-bsdf-mis`) — the path tracer weighted its emissive-triangle
+  NEE sample with the power heuristic (`wNEE < 1`) but **dropped** the
+  complementary BSDF-sampled hit on the same light, so it lost a `(1 − wNEE)`
+  fraction of every area light — a dim bias that grows with the light's solid
+  angle (a large window lost far more than a small bulb). The fix adds the
+  BSDF-hit **MIS complement** in both the megakernel (`path.slang`) and wavefront
+  (`wf_shade_common.slang`) path tracers, reconstructing the NEE solid-angle pdf
+  at the hit without the triangle index (`pdfLightSA = lum·d² /
+  (emissiveTotalPower·cosLight)`; the per-triangle area cancels under
+  power-weighted selection). New `FrameConstants.emissiveTotalPower` reuses the
+  retired `irisZ` slot (no UBO layout change). On the contemporary-bathroom corpus
+  scene the path render's mean-vs-pbrt ratio goes 1.36 → 0.97 and FLIP 0.222 →
+  0.155, with `megakernel ≡ wavefront` (self-consistency relMSE 0.0000); the path
+  bathroom FLIP baselines are lowered accordingly. The investigation also
+  **disproved** the original hypothesis that the dimness was a `blackbody`
+  emitter-normalisation error: pbrt's peak normalisation cancels in
+  `scale /= SpectrumToPhotometric`, and skinny's emitted luminance already matches
+  pbrt's `s·imagingRatio` exactly (direct-view ratio 1.0000). Scope: the Path
+  tracer on Metal; BDPT, SPPM and Vulkan are follow-ups.
 - **Marble in the three-materials demo rendered as broken clear glass** (change
   `marble-subsurface-opacity-gate`) — the demo marble is a plain
   `standard_surface` with a `subsurface = 0.4` *weight* (no interior medium). The

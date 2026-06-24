@@ -182,6 +182,12 @@ struct PathTracer : IIntegrator
         // False for the primary ray.
         bool spawnedBySpecular = false;
 
+        // BSDF pdf (solid-angle) of the bounce that spawned the current ray —
+        // the MIS companion for an emissive triangle this ray lands on. -1 ⇒ no
+        // NEE partner (primary ray or delta lobe) ⇒ take the emission at full
+        // weight. Distinct from misBsdfPdf, which is additionally gated on env NEE.
+        float prevBsdfPdf = -1.0;
+
         // Skip cutout-transparent surfaces before the bounce loop begins.
         // Offset along the ray direction (not -normal) so back-facing
         // double-sided quads are cleared correctly.
@@ -210,8 +216,32 @@ struct PathTracer : IIntegrator
 
             radiance += throughput * br.fullRadiance;
 
+            // Emission at the current hit. Bounce 0 (camera ray), a delta-spawned
+            // ray, or a scene with no emissive triangles has no NEE partner ⇒ full
+            // weight. Otherwise a non-delta bounce landed on an emissive triangle
+            // that allLightsNEE (power heuristic) also sampled, so add only the
+            // BSDF-sampling strategy's MIS complement — otherwise this energy is
+            // double-counted (old code dropped it entirely, biasing area lights
+            // dim by a solid-angle-dependent factor). The NEE solid-angle pdf for
+            // this hit is reconstructed without the triangle index: the per-tri
+            // area cancels in the power-weighted (area·lum) CDF, leaving
+            //   pdfLightSA = Rec709-lum(emission)·d² / (emissiveTotalPower·cosLight).
+            // See emissive-triangle-bsdf-hit-mis.
             if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)
+            {
                 radiance += throughput * br.bsdfSample.emission;
+            }
+            else if (any(br.bsdfSample.emission > 0.0))
+            {
+                float cosLight = max(dot(h.normal, -r.direction), 0.0);
+                float lum      = dot(br.bsdfSample.emission,
+                                     float3(0.2126, 0.7152, 0.0722));
+                float pdfLightSA = (cosLight > 1e-6 && fc.emissiveTotalPower > 0.0)
+                    ? lum * (h.t * h.t) / (fc.emissiveTotalPower * cosLight)
+                    : 1e30;   // grazing / degenerate ⇒ NEE owns it ⇒ wBSDF → 0
+                float wBSDF = powerHeuristic(prevBsdfPdf, pdfLightSA);
+                radiance += throughput * br.bsdfSample.emission * wBSDF;
+            }
 
             radiance += throughput * br.directLight;
 
@@ -241,8 +271,10 @@ struct PathTracer : IIntegrator
 
             // The ray spawned below carries this bounce's delta-ness to the next
             // iteration's emissive-triangle gate (delta ⇒ no NEE partner ⇒ take
-            // emission at full weight).
+            // emission at full weight). prevBsdfPdf carries the companion pdf for
+            // the emissive-hit MIS weight (−1 for a delta lobe ⇒ full weight).
             spawnedBySpecular = (br.bsdfSample.pdf <= 0.0);
+            prevBsdfPdf = spawnedBySpecular ? -1.0 : br.bsdfSample.pdf;
 
             float3 spawnOffset = br.bsdfSample.transmitted
                 ? -h.normal * 0.002

@@ -246,7 +246,11 @@ struct FrameConstants
                                  // the lens so its front element sits at fc.camera.position
     float  filmHalfH;            // half the sensor height in world units (verticalAperture/2);
                                  // governs framing in the lens path (camera.fov is ignored there)
-    float  irisZ;                // [unused; reserved] kept so UBO byte layout matches Python
+    float  emissiveTotalPower;   // Σ(area · Rec709-luminance(emission)) over all emissive
+                                 // triangles. The path tracer's BSDF-hit MIS weight reads it to
+                                 // reconstruct the NEE solid-angle pdf at a light hit without the
+                                 // triangle index (area cancels): pdfLightSA = lum·d² / (Σ·cosLight).
+                                 // Reuses the retired `irisZ` slot ⇒ no UBO byte-layout change.
     uint   numPupilBounds;       // active count in exitPupilBounds buffer (binding 24)
     float  filmDiagRadiusW;      // half of the film-plane diagonal in world units; bin index =
                                  //   floor(length(pFilm.xy) / filmDiagRadiusW · numPupilBounds)

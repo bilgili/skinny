@@ -88,7 +88,7 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     ("displacementScaleMM", 4), ("numInstances", 4), ("numSphereLights", 4),
     ("numEmissiveTriangles", 4), ("integratorType", 4), ("numGizmoSegments", 4),
     ("numLensElements", 4), ("filmDistance", 4), ("rearZ", 4), ("rearAperture", 4),
-    ("frontZ", 4), ("filmHalfH", 4), ("irisZ", 4), ("numPupilBounds", 4),
+    ("frontZ", 4), ("filmHalfH", 4), ("emissiveTotalPower", 4), ("numPupilBounds", 4),
     ("filmDiagRadiusW", 4), ("focusOverlay", 4), ("focusPlaneOrigin", 12),
     ("focusPlaneNormal", 12), ("zoomMin", 8), ("zoomMax", 8), ("lensVignetteDebug", 4),
     ("pickPixel", 8), ("pickArmed", 4), ("exposure", 4), ("tonemapMode", 4),
@@ -3823,6 +3823,9 @@ class Renderer:
             b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
         )
         self._num_emissive_tris: int = 0
+        # Σ(area·Rec709-lum) over emissive triangles → FrameConstants.emissiveTotalPower
+        # (the path tracer's BSDF-hit MIS weight). Set in _upload_emissive_triangles.
+        self._emissive_total_power: float = 0.0
         # Test hook (change emissive-mesh-nee): force uniform-by-index emissive
         # selection (build the inline CDF uniform) for the power-vs-uniform A/B.
         self._emissive_uniform_selection: bool = False
@@ -5404,11 +5407,15 @@ class Renderer:
             for (_p0, _p1, _p2, em, area) in records
         ]
         total_w = float(sum(weights))
+        # Σ(area·Rec709-lum) → FrameConstants.emissiveTotalPower; the path tracer's
+        # BSDF-hit MIS weight reconstructs the NEE solid-angle pdf from it.
+        self._emissive_total_power = total_w
         if n == 0 or total_w <= 0.0:
             # Degenerate (no emissive geometry, or zero total power): keep the
             # numEmissiveTriangles == 0 early-out so the shader skips the path and
             # the inline CDF is never read.
             self._num_emissive_tris = 0
+            self._emissive_total_power = 0.0
             zeros = b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
             self.emissive_tri_buffer.upload_sync(zeros)
             return
@@ -8569,7 +8576,9 @@ class Renderer:
             ratio = self._lens_film_distance_world / (focal_mm / mm_per_unit)
             film_half_h_world *= ratio
         data += struct.pack("f", film_half_h_world)                        # 4 bytes
-        data += struct.pack("f", float(self._lens_iris_z_world))           # 4 bytes
+        # emissiveTotalPower (reuses the retired irisZ slot): Σ(area·Rec709-lum)
+        # over emissive triangles, read by the path tracer's BSDF-hit MIS weight.
+        data += struct.pack("f", float(getattr(self, "_emissive_total_power", 0.0)))  # 4 bytes
         data += struct.pack("I", int(self._lens_num_pupil_bounds))         # 4 bytes
         data += struct.pack("f", float(self._lens_film_diag_world * 0.5))  # 4 bytes
         # Focal-plane visualiser: a translucent infinite plane main_pass.slang

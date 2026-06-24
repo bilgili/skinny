@@ -93,7 +93,26 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
     // area-light reflection in a smooth dielectric and the specular caustic leg
     // are dropped (path tracer biased dark vs the pbrt reference).
     if (depth == 0u || fc.numEmissiveTriangles == 0u || pathSpecular(s))
+    {
         radiance += throughput * br.bsdfSample.emission;
+    }
+    else if (any(br.bsdfSample.emission > float3(0.0)))
+    {
+        // Non-delta bounce landed on an emissive triangle that allLightsNEE
+        // (power heuristic) also sampled ⇒ add only the BSDF-sampling MIS
+        // complement. Mirror of path.slang's emissive-triangle-bsdf-hit-mis: the
+        // NEE solid-angle pdf is reconstructed without the triangle index (area
+        // cancels) — pdfLightSA = lum·d² / (emissiveTotalPower·cosLight).
+        // s.bsdfPdf carries the spawning bounce's pdf (== the bare bsdf pdf for a
+        // flat non-delta non-transmitted lobe, matching the megakernel).
+        float cosLight = max(dot(h.normal, -s.rayDir), 0.0);
+        float lum      = dot(br.bsdfSample.emission, float3(0.2126, 0.7152, 0.0722));
+        float pdfLightSA = (cosLight > 1e-6 && fc.emissiveTotalPower > 0.0)
+            ? lum * (h.t * h.t) / (fc.emissiveTotalPower * cosLight)
+            : 1e30;   // grazing / degenerate ⇒ NEE owns it ⇒ wBSDF → 0
+        float wBSDF = powerHeuristic(s.bsdfPdf, pdfLightSA);
+        radiance += throughput * br.bsdfSample.emission * wBSDF;
+    }
     radiance += throughput * br.directLight;
 
     if (!br.bsdfSample.valid)

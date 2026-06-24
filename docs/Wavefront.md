@@ -161,12 +161,20 @@ equivalent of the megakernel's `spawnedBySpecular` register, surviving across th
 generate→trace→shade kernel boundaries in the per-lane state. `wfFinishShade`
 (`wf_shade_common.slang`) sets it on spawn and reads it at the emissive-triangle
 gate: `if (depth == 0u || fc.numEmissiveTriangles == 0u || pathSpecular(s))` adds
-the BSDF-hit area-light emission at **full weight** only for the primary ray or a
-delta bounce (which has no NEE partner) — exactly the specular→area-light MIS rule
-documented in `docs/Megakernel.md` §3.1. Without it the wavefront path dropped the
-area-light reflection in a smooth dielectric and the specular caustic leg (biased
-dark vs the pbrt reference, FLIP 0.061 → 0.032). Non-delta bounces continue to
-receive the area light via NEE only, so no double-count.
+the BSDF-hit area-light emission at **full weight** for the primary ray or a delta
+bounce (which has no NEE partner) — the specular→area-light rule documented in
+`docs/Megakernel.md` §3.1. Without it the wavefront path dropped the area-light
+reflection in a smooth dielectric and the specular caustic leg (biased dark vs the
+pbrt reference, FLIP 0.061 → 0.032). A **non-delta** bounce that lands on an
+emissive triangle takes the `else` branch and adds the **BSDF-sampling MIS
+complement** `throughput · emission · powerHeuristic(s.bsdfPdf, pdfLightSA)` (change
+`emissive-triangle-bsdf-mis`), using the carried `s.bsdfPdf` (the spawning bounce's
+pdf) and `s.rayDir` (the incoming direction for `cosLight`/`d²`). This is the
+wavefront mirror of the megakernel's emissive-hit MIS complement — for a flat,
+non-delta, non-transmitted lobe `s.bsdfPdf` equals the bare BSDF pdf the megakernel
+uses, so `megakernel ≡ wavefront` (bathroom self-consistency relMSE 0.0000).
+Previously non-delta bounces took the area light via NEE only, which dropped the
+`(1 − wNEE)` BSDF-strategy share and biased area lights dim.
 
 > The record is intentionally AoS, **not** SoA (`wavefront_state.slang:8-9`):
 > convert hot fields to SoA only if profiling shows a bandwidth bottleneck. The

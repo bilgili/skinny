@@ -139,23 +139,35 @@ must count it **exactly once**:
 - **BSDF-sampled hit** — the bounce's sampled ray happens to land on the emitter
   (`br.bsdfSample.emission`).
 
-The two must not double-count. The rule (`path.slang`, the
-`if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)` gate):
+The two are combined with **multiple importance sampling** so the light is counted
+once, in full, regardless of its solid angle (`path.slang`, the
+`if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular) … else …`
+block):
 
-- **bounce 0** (primary ray, no NEE counterpart yet) → add the BSDF-hit emission.
-- **non-delta bounce** (`pdf > 0`) → NEE already counted the light this direction,
-  so the BSDF-hit emission is **skipped** (avoids double-count).
+- **bounce 0** (primary ray, no NEE counterpart yet) → add the BSDF-hit emission at
+  full weight.
+- **non-delta bounce** (`pdf > 0`) → NEE sampled this light with the power heuristic
+  (`wNEE < 1`), so the BSDF-hit emission is added with the **complementary** weight
+  `wBSDF = powerHeuristic(prevBsdfPdf, pdfLightSA)` (change
+  `emissive-triangle-bsdf-mis`). `prevBsdfPdf` is the spawning bounce's solid-angle
+  pdf; `pdfLightSA` is the NEE solid-angle pdf for this hit, reconstructed **without
+  the emissive-buffer index** — under power-weighted selection the per-triangle area
+  cancels (`p_i = area_i·lum_i / ΣW` × uniform-area `1/area_i` ⇒ area-pdf
+  `lum_i / ΣW`), leaving
+  `pdfLightSA = Rec.709-lum(emission)·d² / (emissiveTotalPower·cosLight)` with
+  `emissiveTotalPower = ΣW` carried in `FrameConstants` (the retired `irisZ` slot).
+  Previously this term was **dropped**, which biased area lights dim by `(1 − wNEE)`
+  — a deficit that grows with the light's solid angle (a large window lost far more
+  than a small bulb). It mirrors the sphere-light branch (`intersectSphereLights`,
+  `w_bsdf = powerHeuristic(bsdfPdf, pdf_light_sa)`).
 - **delta / perfectly-specular bounce** (`pdf <= 0` — a smooth dielectric's mirror
   reflect/refract) → NEE evaluates the BSDF toward the light and gets **zero** for
   a delta lobe (no NEE partner exists), so the BSDF-hit emission is added at
   **full weight (w = 1)**. `spawnedBySpecular` carries the spawning bounce's
   delta-ness forward. This is what makes the **reflection of an area light in a
   glass surface** and the **specular leg of a caustic** (floor → BSDF ray → glass
-  refract → light) appear; without it they were dropped and the path tracer was
-  biased dark versus the pbrt reference. It mirrors the sphere-light branch
-  (`w_bsdf = 1` for `pdf == 0`/transmitted) and BDPT's `deltaBounce`. No power
-  heuristic is needed — a delta lobe owns the path. The wavefront path applies the
-  identical rule (see `docs/Wavefront.md`).
+  refract → light) appear. The wavefront path applies the identical rule (see
+  `docs/Wavefront.md`).
 
 **BDPT obeys the same gate.** BDPT reaches an area light by three accumulated
 strategies: `t = 1` (`connectT1`, its NEE — power-heuristic weighted, mirrors the
