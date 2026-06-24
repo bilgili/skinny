@@ -384,19 +384,48 @@ def _store_shader_override(overrides: dict, name: str, value: object) -> None:
         overrides[flat_key] = value
 
 
+def _opacity_is_fully_opaque(value: object) -> bool:
+    """True when an authored `opacity` is the default fully-opaque 1.
+
+    A `standard_surface`/OpenPBR shader ALWAYS authors `opacity` — its MaterialX
+    default is the fully-opaque `1` (scalar) / `(1, 1, 1)` (color3). That default
+    must not be mistaken for a genuine cutout, so the transmission→opacity bridge
+    can still fire on it. A scalar `>= 1`, or a per-channel value whose every
+    channel is `>= 1`, counts as fully opaque; any channel `< 1` is a cutout.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return float(value) >= 1.0
+    try:
+        return all(float(c) >= 1.0 for c in value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
 def _derive_opacity_from_transmission(overrides: dict) -> None:
     """Lower `opacity` to `1 - transmission` when a material is transmissive.
 
     The flat/std-surface render path only refracts through surfaces whose
     `opacity < 1` (flat_material.slang). standard_surface / OpenPBR express
     glass via a `transmission` weight instead, so without this bridge the
-    surface stays opaque. No-op when `transmission` is absent/zero or when an
-    explicit `opacity` was already authored.
+    surface stays opaque. No-op when `transmission` is absent/zero.
+
+    A `standard_surface` shader ALWAYS authors `opacity` (its MaterialX default
+    is the fully-opaque `(1, 1, 1)`), so the bridge must NOT skip on the mere
+    presence of an authored opacity — that default would block every glass
+    (the MaterialX `glass_caustics_test` sphere rendered opaque). It skips only
+    when a GENUINE cutout opacity is authored (some channel `< 1`, e.g. an
+    OpenPBR `geometry_opacity` alpha): that cutout wins over transmission. A
+    default-opaque opacity is overwritten by `1 - transmission`.
     """
     t = overrides.get("transmission")
     if not isinstance(t, (int, float)) or isinstance(t, bool):
         return
-    if float(t) <= 0.0 or "opacity" in overrides:
+    if float(t) <= 0.0:
+        return
+    existing = overrides.get("opacity")
+    if existing is not None and not _opacity_is_fully_opaque(existing):
         return
     overrides["opacity"] = max(0.0, 1.0 - float(t))
 

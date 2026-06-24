@@ -130,6 +130,19 @@ sidecar (`<out>.mtlx`) of `standard_surface` materials referenced from the stage
 `thin_walled` — and the loader recovers them via `_load_mtlx_materials` (the
 usdMtlx-plugin-absent fallback) or `_extract_material('mtlx')` (plugin present).
 
+> **Transmission→opacity refraction gate vs the default-opaque opacity.** skinny's
+> flat path only refracts through surfaces whose `opacity < 1`
+> (`flat_material.slang`), so the loader bridges a `standard_surface`/OpenPBR
+> `transmission` weight to `opacity = 1 − transmission`
+> (`_derive_opacity_from_transmission`). A `standard_surface` shader **always**
+> authors `opacity` — its MaterialX default is the fully-opaque `(1, 1, 1)` — so
+> the bridge must ignore that default (it now skips only when a *genuine* cutout
+> `opacity < 1` is authored, via `_opacity_is_fully_opaque`). Before this gate the
+> default-opaque opacity blocked the bridge on the plugin-parse path and a
+> MaterialX glass rendered **opaque** (the right sphere of
+> `assets/glass_caustics_test.usda`); the `.mtlx` fallback path already let
+> `transmission` win, so the two intake paths now agree.
+
 For **diffuse / conductor / dielectric** materials `-mtlx` and the
 UsdPreviewSurface output still render pixel-identically (verified on
 `glass_arealight`: relMSE 0.0215 / FLIP 0.0270 vs pbrt for both, and 0.000000
