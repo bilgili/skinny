@@ -60,3 +60,24 @@ float test_oren_nayar(float3 wo, float3 wi, float sigma)
 {
     return orenNayarFactor(wo, wi, sigma);
 }
+
+// f·cos (response) for a grey diffuse base under a dielectric coat of the given
+// weight/roughness/IOR. Exercises the coat lobe-selection Fresnel
+// (fix-flat-coat-fresnel-eta): the view ray enters the coat from air, so the
+// coat term must use the entering eta = 1/coatIOR. The earlier bug passed
+// coatIOR raw — the coat→air direction — which gives spurious total internal
+// reflection past ~42° (NdotV < 0.745), driving pCoat → 1 and zeroing the base
+// diffuse/spec lobes. A unit-weight dielectric coat must instead only mildly
+// attenuate the base (≈ Fresnel), so the coated response must NOT collapse.
+float3 test_flat_coat_response(float3 wo, float3 wi, float coat,
+                               float coatRoughness, float coatIOR)
+{
+    FlatHitMat m = _mkFlat(float3(0.5), /*roughness*/ 1.0, /*metallic*/ 0.0,
+                           /*specularColor*/ float3(1.0), /*diffuseRoughness*/ 0.0);
+    m.coat          = coat;
+    m.coatRoughness = coatRoughness;
+    m.coatIOR       = coatIOR;
+    m.coatColor     = float3(1.0);
+    float3 F0 = schlickF0(m.albedo, m.metallic, m.specular, m.ior);
+    return flatBsdfResponse(wo, wi, m, F0);
+}

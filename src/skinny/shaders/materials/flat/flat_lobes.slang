@@ -173,7 +173,8 @@ float3 flatBsdfResponse(float3 wo, float3 wi, FlatHitMat m, float3 F0)
     float  VdotH = max(dot(wo, H), 0.0);
 
     // Lobe-selection probabilities — identical to FlatMaterial.sample().
-    float  coatFresnel = (m.coat > 0.0) ? fresnelDielectric(NdotV, m.coatIOR) : 0.0;
+    // Entering eta = 1/coatIOR (view ray enters coat from air); see sample().
+    float  coatFresnel = (m.coat > 0.0) ? fresnelDielectric(NdotV, 1.0 / m.coatIOR) : 0.0;
     float  pCoat       = m.coat * coatFresnel;
     float  pSpec       = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
     float3 coatAtten   = (m.coat > 0.0) ? m.coatColor : float3(1.0);

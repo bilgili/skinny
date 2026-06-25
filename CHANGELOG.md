@@ -31,6 +31,27 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Coated diffuse rendered with a dark region** (change
+  `fix-flat-coat-fresnel-eta`) — `assets/dragon_removed.usda` (a pbrt
+  `coateddiffuse` floor exported as a `UsdPreviewSurface` with `clearcoat = 1`)
+  rendered ~2.4× too dark with a large dark region instead of a near-uniform
+  diffuse. The flat coat lobe's selection probability
+  `pCoat = coat · fresnelDielectric(NdotV, coatIOR)` passed `coatIOR` raw, but
+  `fresnelDielectric`'s convention is `eta = η_incident / η_transmitted` — for a
+  view ray entering the coat from air the correct ratio is `1/coatIOR`. The raw
+  IOR computes the *exiting* (coat→air) direction, which triggers spurious total
+  internal reflection past ~42° from normal: `pCoat` saturates to 1 over most of
+  the surface, zeroing the base diffuse/spec lobes (attenuated by `1 − pCoat`)
+  while only the correct (small, `F0 = 0.04`) coat reflection survives — a large
+  energy loss. Fixed at the three coat-selection sites
+  (`FlatMaterial.sample()`/`evaluate()`, `flatBsdfResponse()`) to use
+  `1/coatIOR`, matching the glass-refraction branch and the subsurface boundary.
+  The bug was latent until `pbrt-mtlx-roundtrip-fix` (`eb1a0f2`) folded
+  UsdPreviewSurface `clearcoat → coat`, turning the coat lobe on for such
+  materials. Coat is gated `coat > 0`, so non-coated flat materials are
+  byte-unchanged; no coated scene is in the parity corpus, so the dual gate is
+  unperturbed. New Vulkan harness gate `tests/test_flat_coat_fresnel.py` pins the
+  entering-eta convention.
 - **MaterialX `standard_surface` glass rendered opaque** (change
   `glass-transmission-opacity-gate`) — the right sphere of
   `assets/glass_caustics_test.usda` (a MaterialX `standard_surface` with
