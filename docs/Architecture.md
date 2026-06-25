@@ -259,7 +259,14 @@ dispatch); `flat_material.slang` assembles it. BSDF layers:
   semantics. The refracted (delta-transmission) branch tints throughput by
   **`transmissionColor`** (colored smooth glass) rather than the base albedo;
   it stays a delta event (`pdf = 0`), so there is no MIS/Jacobian change
-- Clear coat (GGX VNDF, coat-color tinting)
+- Clear coat (GGX VNDF, coat-color tinting). The coat lobe-selection
+  probability `pCoat = coat · fresnelDielectric(NdotV, 1/coatIOR)` takes the
+  **entering** relative index (the view ray meets the coat from air), matching
+  the opacity/refraction branch (`entering ? 1/ior : ior`) and the subsurface
+  boundary. Passing `coatIOR` raw is the coat→air direction and triggers
+  spurious total internal reflection past ~42° from normal — `pCoat` saturates
+  to 1 and zeroes the base lobes, cratering a coated diffuse to a dark region
+  (fixed in `fix-flat-coat-fresnel-eta`)
 - Specular / diffuse MIS split (Schlick F0, luminance-weighted probability) —
   GGX specular uses VNDF sampling (`samplers/ggx.slang`), diffuse is Oren-Nayar
   (Lambert when `diffuseRoughness = 0`). The GGX spec response is multiplied by

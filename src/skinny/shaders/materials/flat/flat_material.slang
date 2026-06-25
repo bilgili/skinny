@@ -67,8 +67,13 @@ struct FlatMaterial : IMaterial
         }
 
         // ── Lobe-selection probabilities ──
+        // The view ray enters the coat from air, so the dielectric Fresnel takes
+        // the entering eta = 1/coatIOR (matches the glass-refraction branch above
+        // and the subsurface boundary). Passing coatIOR raw computes the exiting
+        // (coat→air) reflectance — spurious TIR past ~42° that saturates pCoat to
+        // 1 and zeroes the base lobes.
         float coatFresnel  = (m.coat > 0.0)
-                           ? fresnelDielectric(NdotV, m.coatIOR) : 0.0;
+                           ? fresnelDielectric(NdotV, 1.0 / m.coatIOR) : 0.0;
         float pCoat        = m.coat * coatFresnel;
         float roughness    = m.roughness;
         float pSpec        = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
@@ -197,7 +202,8 @@ struct FlatMaterial : IMaterial
         // selected ids (the diffuse density differs cosine vs uniform).
         FlatHitMat m       = data.mat;
         float NdotV        = max(wo.z, 1e-6);
-        float coatFresnel  = (m.coat > 0.0) ? fresnelDielectric(NdotV, m.coatIOR) : 0.0;
+        // Entering eta = 1/coatIOR (view ray enters coat from air); see sample().
+        float coatFresnel  = (m.coat > 0.0) ? fresnelDielectric(NdotV, 1.0 / m.coatIOR) : 0.0;
         float pCoat        = m.coat * coatFresnel;
         float pSpec        = flatLobePSpec(NdotV, m.albedo, m.metallic, F0);
 
