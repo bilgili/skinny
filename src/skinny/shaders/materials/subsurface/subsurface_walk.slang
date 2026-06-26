@@ -21,19 +21,38 @@ import materials.flat.flat_shading;     // fresnelDielectric
 import materials.subsurface.medium;     // Medium, densityAt, mediumMajorant, resolveMedium
 import volume_render;                   // henyeyGreenstein, sampleHenyeyGreenstein
 import environment;                     // sceneEnvRadiance
+import scene_trace;                     // traceScene (3D-walk prototype)
 
-#if defined(SKINNY_METAL)
-// Watchdog-safe caps — the whole walk can run in one megakernel dispatch per
-// pixel (see volume_render.slang); an unbounded march overruns the macOS GPU
-// watchdog. The old `8` was far too low for high-optical-depth subsurface media:
-// a high-albedo random walk needs ~τ² scatter events to diffuse out, so a slab
-// of ~20 mean free paths truncated at 8 bounces dropped ~half its energy (the
-// sssdragon rendered far too dark). `64` conserves energy across the τ range
-// skin/dragon scenes hit while staying within the watchdog on wavefront (the
-// production path for large scenes; megakernel large scenes OOM first).
+#if defined(SKINNY_WAVEFRONT)
+// 3D interior walk — the production wavefront path for large scenes. Each interior
+// segment traces the real mesh boundary (`traceScene`), so per-bounce cost carries
+// a BVH traversal. The bounce cap was swept (task 3.2) on the furnace sphere and
+// the 28.8M-tri sssdragon (Metal wavefront):
+//   cap   furnace η=1.0/1.2/1.5 @τ20     dragon mean   dragon wall   watchdog
+//   16    (proto)                        0.108         83 s          safe
+//   32    0.842 / 0.781 / 0.656          —             —             —
+//   48    —                              0.111         86 s          safe
+//   96    0.974 / 0.960 / 0.911          0.111         84 s          safe
+// A high-albedo random walk needs ~τ² scatter events to diffuse out of a thick
+// medium, so energy rises steeply with the cap; the η-spread (boundary internal
+// reflection traps η>1 paths longer) collapses 0.186→0.063 from cap 32→96. The
+// dragon is cap-INSENSITIVE (its medium is far thinner than the τ20 furnace, most
+// pixels escape in <16 bounces) — wall-time and mean are flat 16→96, and 96 never
+// trips the watchdog. So 96 is nearly free on real scenes yet near-unity on the
+// furnace. (Headroom: 96 stayed watchdog-safe; the energy ceiling at τ200 is still
+// ~0.85 — fundamental to a bounded-cap brute-force walk, not closable cheaply.)
+static const int SSS_MAX_STEPS   = 256;
+static const int SSS_MAX_BOUNCES = 96;
+#elif defined(SKINNY_METAL)
+// megakernel slab on Metal — the whole walk runs in ONE dispatch per pixel, so an
+// unbounded march overruns the macOS GPU watchdog. The slab is cheap (no per-step
+// trace); the old `8` dropped ~half the energy of a high-optical-depth medium
+// (a high-albedo random walk needs ~τ² scatter events to diffuse out). 16 bounces
+// / 24 steps conserves energy on the slab while staying watchdog-safe.
 static const int SSS_MAX_STEPS   = 24;
-static const int SSS_MAX_BOUNCES = 64;
+static const int SSS_MAX_BOUNCES = 16;
 #else
+// megakernel slab on Vulkan — no single-dispatch watchdog headroom issue here.
 static const int SSS_MAX_STEPS   = 256;
 static const int SSS_MAX_BOUNCES = 64;
 #endif
@@ -220,6 +239,133 @@ float3 subsurfaceRadiance(
                 // Exit Fresnel transmittance (D1): 1 on TIR ⇒ tap auto-zeros.
                 float  Ft = 1.0 - fresnelDielectric(cosL, ior);
                 radiance += throughput * ss.scatterAlbedo * phase * lightRadiance * shadowTr * Ft;
+            }
+        }
+
+        // HG continuation.
+        cur.origin    = scatterPos;
+        cur.direction = sampleHenyeyGreenstein(cur.direction, medium.g, rng.next2());
+        throughput   *= ss.scatterAlbedo;
+
+        // Russian roulette.
+        float pCont = max(throughput.x, max(throughput.y, throughput.z));
+        if (rng.next() > pCont)
+            break;
+        throughput /= max(pCont, 1e-6);
+    }
+    return radiance;
+}
+
+// True 3D interior walk (wavefront path). Trace each scattered direction to the
+// real mesh boundary (`traceScene`) instead of a flat slab, so path length follows
+// the geometry — the slab over-estimated path length on curved/complex meshes and
+// rendered the sssdragon too dark/red. Distant-light NEE is shadow-traced through
+// the real boundary at each scatter; the environment is collected on escape with a
+// Snell-refracted exit direction (env and the delta distant light are disjoint
+// sources, so they never double-count). Unbiased: single-pdf, bounded throughput
+// (no clamp), Russian-roulette-terminated — the path/BDPT/ReSTIR invariants hold.
+float3 subsurfaceRadiance3D(
+    Ray ray, HitInfo hit, Medium medium, FrameConstants fc,
+    float3 lightDir, float3 lightRadiance,
+    float envIntensity, uint furnaceMode, float mmPerUnit, inout RNG rng)
+{
+    if (!hit.hit)
+        return float3(0.0);
+
+    float3 N     = hit.normal;
+    float  ior   = max(medium.eta, 1.0);
+    float  NdotV = max(dot(-ray.direction, N), 1e-4);
+    float  Fr    = fresnelDielectric(NdotV, 1.0 / ior);
+    float3 radiance = float3(0.0);
+
+    // Surface specular (entry reflection).
+    {
+        float3 wr = reflect(ray.direction, N);
+        radiance += Fr * sceneEnvRadiance(wr, envIntensity, furnaceMode);
+    }
+
+    float3 wt;
+    if (!refractInto(ray.direction, N, 1.0 / ior, wt))
+        return radiance;
+    float3 throughput = float3(1.0 - Fr);
+
+    const float kEps = 1e-4;
+    Ray   cur;
+    cur.origin    = hit.position;
+    cur.direction = wt;
+    bool  hasDirect = dot(lightRadiance, lightRadiance) > 1e-8;
+    float3 sigmaTmm = medium.sigmaA + medium.sigmaS;             // mm⁻¹ (homogeneous shadow)
+
+    for (int b = 0; b < SSS_MAX_BOUNCES; b++)
+    {
+        Ray seg;
+        seg.origin    = cur.origin + cur.direction * kEps;
+        seg.direction = cur.direction;
+        HitInfo bhit  = traceScene(fc, seg);
+        float exitWorld = bhit.hit ? max(bhit.t, kEps) : 1e8;
+
+        SegmentSample ss = traverseMediumSegment(seg, 0.0, exitWorld, medium, mmPerUnit, rng);
+        throughput *= ss.transmittance;
+
+        if (!ss.scattered)
+        {
+            if (!bhit.hit)
+            {
+                // No boundary ahead (open mesh / degenerate) — leave along the raw
+                // interior direction.
+                radiance += throughput
+                          * sceneEnvRadiance(cur.direction, envIntensity, furnaceMode);
+                break;
+            }
+            // Reached a real boundary face. Fresnel-split: with probability Ft
+            // transmit (carry the environment out), else internally reflect and
+            // keep walking. Importance-sampling the split keeps throughput unbiased.
+            float3 bn      = bhit.normal;
+            // Orient the face normal against the incident interior direction so the
+            // exit refraction is well-posed (`refractInto` expects n on the inbound
+            // side: dot(-cur.direction, nFace) > 0).
+            float3 nFace   = (dot(cur.direction, bn) < 0.0) ? bn : -bn;
+            float  cosExit = max(abs(dot(cur.direction, nFace)), 1e-3);
+            float  Ft      = 1.0 - fresnelDielectric(cosExit, ior);
+            if (rng.next() < Ft)
+            {
+                // Snell-refract the escape direction (medium→vacuum, η = ior) for
+                // the env lookup instead of the raw interior direction. Ft > 0 ⇒ not
+                // TIR ⇒ refractInto succeeds; guard the degenerate case anyway.
+                float3 wExit;
+                if (!refractInto(cur.direction, nFace, ior, wExit))
+                    wExit = cur.direction;
+                radiance += throughput
+                          * sceneEnvRadiance(wExit, envIntensity, furnaceMode);
+                break;
+            }
+            // Internal reflection off the real boundary; resume inside.
+            cur.origin    = bhit.position;
+            cur.direction = cur.direction - 2.0 * dot(cur.direction, bn) * bn;
+            continue;
+        }
+
+        float3 scatterPos = seg.origin + cur.direction * ss.t;
+
+        // NEE — distant light, shadow-traced through the real boundary. The light is
+        // a delta direction (the walk can never randomly hit it), so NEE is the only
+        // way to capture it. Trace toward `lightDir` to the first boundary, attenuate
+        // by the in-medium transmittance over that distance × exit Fresnel × HG phase.
+        if (hasDirect)
+        {
+            Ray sray;
+            sray.origin    = scatterPos + lightDir * kEps;
+            sray.direction = lightDir;
+            HitInfo shit   = traceScene(fc, sray);
+            if (shit.hit)
+            {
+                float  dMm    = shit.t * mmPerUnit;                 // in-medium dist (mm)
+                float3 shTr   = exp(-sigmaTmm * dMm);
+                float  cosL   = max(abs(dot(lightDir, shit.normal)), 1e-3);
+                float  Ft     = 1.0 - fresnelDielectric(cosL, ior); // exit transmittance
+                float  phase  = henyeyGreenstein(dot(cur.direction, lightDir), medium.g);
+                radiance += throughput * ss.scatterAlbedo * phase
+                          * lightRadiance * shTr * Ft;
             }
         }
 

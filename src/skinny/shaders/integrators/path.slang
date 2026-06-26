@@ -135,9 +135,19 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
                 primaryDir = L0.direction;
                 primaryRad = L0.radiance;
             }
+#if defined(SKINNY_WAVEFRONT)
+            // Wavefront: 3D interior walk — per-segment `traceScene` to the real
+            // mesh boundary, so the path length follows the geometry.
+            br.fullRadiance = subsurfaceRadiance3D(
+                r, h, medium, fc, primaryDir, primaryRad,
+                fc.envIntensity, fc.furnaceMode, fc.mmPerUnit, rng);
+#else
+            // Megakernel: 1D-slab approximation — the whole walk runs in one
+            // dispatch, where a per-segment BVH trace would risk the GPU watchdog.
             br.fullRadiance = subsurfaceRadiance(
                 r, h, medium, primaryDir, primaryRad,
                 fc.envIntensity, fc.furnaceMode, fc.mmPerUnit, rng);
+#endif
             break;
         }
         default:

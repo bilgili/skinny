@@ -109,7 +109,11 @@ def _metal_slang_session(ctx, shader_dir: Path, extra_defines: dict | None = Non
     mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
     opts = spy.SlangCompilerOptions()
     opts.include_paths = [shader_dir, mtlx_genslang]
-    defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+    # SKINNY_WAVEFRONT mirrors the Vulkan wavefront compile (vk_wavefront.py): it
+    # selects the wavefront-only 3D interior subsurface walk in shared shader code
+    # (path.slang). The Metal megakernel (metal_compute.py) omits it → 1D slab.
+    defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1",
+               "SKINNY_WAVEFRONT": "1"}
     defines.update(extra_defines or {})
     opts.defines = defines
     opts.matrix_layout = spy.SlangMatrixLayout.column_major

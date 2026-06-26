@@ -40,49 +40,56 @@ produce identical `(σ_a, σ_s, g)`.
 
 The estimator SHALL transport light through the interior as a random walk: refract
 at the dielectric boundary, delta-track (Woodcock) the medium with per-channel
-`σ_t` and HG scattering, and Fresnel-split internal-reflection vs refraction on
-boundary hits — **at both the entry boundary and at every interior face the walk
-reaches**: on reaching a face the walk SHALL transmit with probability `Ft` (carry
-the environment out) and otherwise internally reflect back into the medium and
-continue, rather than discarding the reflected fraction. It SHALL be a single-pdf,
-bounded-throughput (no clamp), Russian-roulette-terminated estimator, so the path
-/ BDPT / ReSTIR invariants hold. It SHALL run in both megakernel and wavefront
-execution modes and on both the Vulkan and native Metal backends.
+`σ_t` and HG scattering, and Fresnel-split internal-reflection vs refraction at the
+entry boundary and at every interior face the walk reaches (transmit with
+probability `Ft` carrying the environment out, else internally reflect back into
+the medium and continue). It SHALL be a single-pdf, bounded-throughput (no clamp),
+Russian-roulette-terminated estimator, so the path / BDPT / ReSTIR invariants hold.
+
+On the **wavefront** path the walk SHALL find each segment's boundary by tracing
+the actual scene geometry (`traceScene`) from the scatter vertex, so the path
+length follows the real mesh rather than a flat-slab approximation. On the
+**megakernel** path — where the whole walk runs in one dispatch and a per-segment
+trace would risk the GPU watchdog — the walk MAY use the 1D-slab approximation
+(perpendicular depth bounded by `hit.backT`). Both modes SHALL conserve energy in
+the furnace test and SHALL run on both the Vulkan and native Metal backends.
 
 The interior bounce cap SHALL be large enough to conserve energy across the
-optical-depth range typical subsurface scenes hit (a high-albedo walk needs on the
-order of `τ²` scatter events to escape a medium of optical depth `τ`), subject to
-the platform GPU-watchdog limit on the Metal single-dispatch path.
+optical-depth range typical subsurface scenes hit, subject to the platform
+GPU-watchdog limit on the single-dispatch path.
+
+#### Scenario: wavefront walk follows the real geometry
+
+- **WHEN** a curved/complex subsurface object (the sssdragon, a sphere) is rendered
+  in wavefront mode
+- **THEN** each scattered segment is traced to the actual mesh boundary, and the
+  converged radiance is closer to a brute-force / pbrt reference than the flat-slab
+  estimator (which over-estimates path length and renders too dark/red)
 
 #### Scenario: energy conservation (furnace) across optical depth
 
 - **WHEN** a homogeneous subsurface sphere with `σ_a → 0` is rendered in a constant
-  environment, at thin **and** thick optical depth (e.g. `τ ≈ 1`, `20`, `200`)
-- **THEN** the converged result is ~unity at every depth (energy is neither created
-  nor lost) — it does NOT collapse at high `τ` — and the albedo inversion
-  round-trips within tolerance
+  environment, at thin and thick optical depth (`τ ≈ 1`, `20`, `200`) and across η
+- **THEN** the converged result is ~unity at every depth and is η-independent
 
-#### Scenario: boundary energy is conserved, not discarded
+#### Scenario: distant-lit subsurface uses NEE
 
-- **WHEN** a subsurface object with a dielectric boundary (`η > 1`) is rendered
-- **THEN** the internally-reflected fraction at each boundary escape is reflected
-  back into the medium (not dropped), so the converged radiance is independent of
-  whether the path happens to reach a face at a high-Fresnel / total-internal-
-  reflection angle
+- **WHEN** a subsurface object is lit by a distant light (not only the environment)
+- **THEN** the walk adds a per-scatter next-event-estimation term — shadow-traced to
+  the boundary, attenuated by the in-medium transmittance and the exit Fresnel — so
+  the directly-lit response is present and unbiased
 
-#### Scenario: path tracer and BDPT agree
+#### Scenario: megakernel stays watchdog-safe
 
-- **WHEN** a subsurface sphere is rendered under the path tracer and BDPT, in both
-  execution modes
-- **THEN** both converge to the same radiance per pixel within noise, on both
-  backends
+- **WHEN** a subsurface scene is rendered in megakernel mode
+- **THEN** the walk uses the slab approximation (no per-segment trace) and does not
+  trip the macOS GPU watchdog
 
 #### Scenario: non-subsurface scenes are unchanged
 
 - **WHEN** a scene with no subsurface material (the pbrt parity corpus, or a true
   `dielectric` glass) is rendered
-- **THEN** the result is byte/behaviour-identical to the pre-change renderer — the
-  flat opacity/refraction path is untouched and the corpus parity is unchanged
+- **THEN** the result is byte/behaviour-identical to the pre-change renderer
 
 ### Requirement: Volume transport is forward-compatible with heterogeneous free-standing media
 

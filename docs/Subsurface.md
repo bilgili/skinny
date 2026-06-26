@@ -16,19 +16,17 @@ closely but is **not bit-parity** with the dipole — see [Verification](#verifi
 
 ## The interior random walk
 
-`subsurfaceRadiance(...)` in `materials/subsurface/subsurface_walk.slang` is
-self-integrating (returns full radiance and terminates the bounce loop, like the
-skin path). At a hit it:
+`materials/subsurface/subsurface_walk.slang` is self-integrating (returns full
+radiance and terminates the bounce loop, like the skin path). At a hit it:
 
 1. **Boundary (Fresnel split).** Reflectance `Fr = fresnelDielectric(N·V, 1/η)`.
    The reflected fraction `Fr` samples the environment in the mirror direction
    (surface specular); the refracted fraction `1−Fr` enters the interior with the
    ray bent by `refractInto`.
-2. **1-D slab random walk.** The interior is modelled as a homogeneous slab of
-   perpendicular thickness `T` (from `hit.backT`, the closed-mesh back face).
-   `zMM` tracks the perpendicular depth of the current vertex. Each step marches
-   to **whichever face the ray heads toward** (`mu = dot(dir, −N)`), so the walk
-   can actually *exit* the slab.
+2. **Interior random walk — geometry depends on the execution mode** (see
+   [The slab vs the 3-D walk](#the-slab-vs-the-3-d-walk) below). Each segment
+   marches a homogeneous medium and either scatters (continue) or reaches a
+   boundary (Fresnel-split escape/internal-reflection).
 3. **Null-collision (Woodcock) tracking** per segment, in
    `traverseMediumSegment`: free-flight against the majorant `σ̄_t`, then accept a
    real scatter with probability `σ_t(p)/σ̄_t` (throughput `σ_s/σ_t`, a
@@ -36,18 +34,56 @@ skin path). At a hit it:
    through the density seam** (see below).
 4. **Lighting.** Direct light from a single analytic distant light via per-scatter
    NEE (refracted out through the boundary, `Ft = 1 − Fresnel`); the **environment
-   on escape** — when a segment leaves the slab the ray carries `throughput ·
-   env(dir) · Ft`. Direct (NEE) and environment (escape) are disjoint sources, so
-   they never double-count and the walk is **energy-conserving** (furnace
-   `σ_a → 0` returns ~unity).
+   on escape** — when a segment leaves the medium the ray carries `throughput ·
+   env(wExit) · Ft`, where `wExit` is the **Snell-refracted** exit direction
+   (medium→vacuum, `refractInto` with `η = ior`), not the raw interior direction.
+   Direct (NEE) and environment (escape) are disjoint sources — the distant light
+   is a delta direction the env lookup never returns — so they never double-count
+   and the walk is **energy-conserving** (furnace `σ_a → 0` returns ~unity).
 5. **Russian roulette** bounds the walk; throughput is `float3` (per-channel σ),
    the pdf scalar.
 
 It runs in **both execution modes** (megakernel + wavefront) and on **both
 backends** (Vulkan + native Metal): a single `case MATERIAL_TYPE_SUBSURFACE` in
 `integrators/path.slang` `evaluateBounce()` serves the megakernel **and** the
-wavefront catch-all kernel. BDPT excludes it (flat-only eye walk), exactly like
-skin.
+wavefront catch-all kernel, branching on the `SKINNY_WAVEFRONT` compile define.
+BDPT excludes it (flat-only eye walk — non-flat first hits bail, so BDPT never
+invokes the subsurface walk), exactly like skin; render subsurface with the path
+tracer (megakernel or wavefront).
+
+### The slab vs the 3-D walk
+
+The interior segment length is found two different ways, gated by execution mode
+(`SKINNY_WAVEFRONT`):
+
+- **Wavefront → true 3-D walk** (`subsurfaceRadiance3D`). Each segment traces the
+  **actual scene geometry** (`traceScene` from the scatter vertex) to find the
+  real mesh boundary, so the path length follows the curved/complex surface. NEE
+  is shadow-traced the same way — `traceScene` toward `lightDir` to the boundary,
+  attenuated by `exp(−σ_t · dist)` over the in-medium distance × the exit Fresnel.
+  This is the production path for large scenes (the sssdragon).
+- **Megakernel → 1-D slab** (`subsurfaceRadiance`). The interior is a homogeneous
+  slab of perpendicular thickness `T` (from `hit.backT`); `zMM` tracks the
+  perpendicular depth and each step marches to whichever face the ray heads
+  toward. The whole walk runs in **one dispatch** per pixel, where a per-segment
+  BVH trace would risk the macOS GPU watchdog — so the megakernel keeps the cheap
+  slab. (Large scenes OOM the megakernel first anyway; the slab is its safe path.)
+
+**Why the slab is not enough on real geometry.** The slab models the medium as a
+flat slab of perpendicular thickness, which over-estimates the path length on a
+curved/complex mesh — paths travel too far through the blue-absorbing interior, so
+the sssdragon renders darker and redder than pbrt. The 3-D walk follows the real
+boundary, so it is brighter and closer to the reference (see
+[Verification](#verification)).
+
+**Bounce cap.** A high-albedo random walk needs ~`τ²` scatter events to diffuse
+out of a thick medium, so energy rises steeply with the interior bounce cap
+`SSS_MAX_BOUNCES`. The cap was swept on the furnace sphere and the 28.8 M-tri
+sssdragon: the dragon is **cap-insensitive** (its medium is far thinner than the
+furnace's `τ ≈ 20`; mean and wall-time are flat from 16→96 and never trip the
+watchdog), while the furnace energy climbs from 0.84 (cap 32) to **0.97** (cap 96,
+`τ ≈ 20`). So the wavefront path uses **cap 96** — near-free on real scenes yet
+near-unity on the furnace. The megakernel slab stays at 16 (Metal) / 64 (Vulkan).
 
 ### The density seam (forward compatibility)
 
@@ -119,12 +155,20 @@ environment as clear glass (the "marble totally broken" regression).
 
 | Gate | Result |
 |---|---|
-| Furnace / energy (`σ_a → 0`, constant env → unity) | 0.996 |
-| PT ≡ BDPT (SSS sphere) | relMSE 0.0058 |
-| Metal ↔ Vulkan (wavefront) | relMSE 0.0175 |
-| Back-compat (true `dielectric` glass stays flat) | unchanged |
+| Furnace / energy, 3-D walk, cap 96 (`σ_a → 0`, white env → unity), `τ ≈ 20`, η = 1.0 / 1.2 / 1.5 | 0.974 / 0.960 / 0.911 |
+| Distant-lit subsurface NEE (sphere, env off) — non-zero, isolated (light off → 0) | wired |
+| PT ≡ BDPT (SSS sphere, megakernel slab — BDPT falls through to PathTracer) | relMSE 0.0000 |
+| Metal ↔ Vulkan (wavefront 3-D walk, SSS sphere) | relMSE 0.000000 |
+| Back-compat (`SKINNY_WAVEFRONT` gate has no effect off-subsurface — glass on vs off) | maxAbsDiff 0.0 (byte-identical) |
+| sssdragon: 3-D walk **closer to pbrt than the slab** (exposure-matched) | relMSE 0.134 < 0.162; FLIP 0.067 < 0.071 |
 | pbrt-v4 corpus `subsurface_infinite` (dipole vs walk, IBL-lit) | relMSE 0.079 |
 
 pbrt's `subsurface` is a tabulated dipole BSSRDF and skinny's is a 3-D random
 walk, so the corpus parity is qualitative (both milky), with a loose tolerance —
-see `tests/pbrt/corpus/manifest.json`.
+see `tests/pbrt/corpus/manifest.json`. On the sssdragon the 3-D walk is structurally
+closer to pbrt than the slab (lower exposure-matched relMSE **and** FLIP); the
+remaining ~2× absolute brightness (env-HDRI intensity + film ISO/exposure
+calibration) is a separate, deferred follow-up — not a 3-D-walk correctness gap.
+BDPT excludes subsurface in the **wavefront** path (non-flat first hits render
+black — a pre-existing wavefront-BDPT limitation), so PT ≡ BDPT is gated in the
+megakernel where BDPT falls through to the path tracer.
