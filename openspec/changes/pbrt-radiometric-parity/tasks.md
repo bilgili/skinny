@@ -102,6 +102,8 @@ subsurface 1.245 (known SSS residual, out of scope). Full diagnosis below.
   gate + the two-component area-light note; `docs/Subsurface.md` brightness note
   links here + scopes the SSS residual; `docs/PythonAPI.md` documents `Renderer.film`.
 - [x] 6.2 `openspec validate pbrt-radiometric-parity --strict` valid; ruff clean.
-- [ ] 6.3 Commit → archive → merge → push (worktree `.gitignore` is `*` →
-  `git add -f`; `main` usually not checked out → merge via temp
-  `git worktree add ../skinny-main-merge main`).
+- [x] 6.3 Commit (a422db3) → archive → merge → push. Worktree `.gitignore` is `*`
+  (`git add -f` everything, even tracked files). `main` is checked out at the
+  primary `~/projects/skinny`, so merge there directly (cannot `git worktree add`
+  an already-checked-out branch). Follow-up proposal `pbrt-env-float-precision`
+  committed separately (2208b3d).
