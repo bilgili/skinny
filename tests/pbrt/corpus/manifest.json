@@ -14,6 +14,13 @@
       "measured": {
         "relmse": 0.012,
         "flip": 0.021
+      },
+      "absolute": {
+        "mean_ratio_tol": 0.1,
+        "relmse_tol": 0.04,
+        "baselines": {
+          "path|wavefront": { "mean_ratio": 0.866, "relmse": 0.018 }
+        }
       }
     },
     {
@@ -42,6 +49,13 @@
       "measured": {
         "relmse": 0.006,
         "flip": 0.024
+      },
+      "absolute": {
+        "mean_ratio_tol": 0.1,
+        "relmse_tol": 0.04,
+        "baselines": {
+          "path|wavefront": { "mean_ratio": 0.957, "relmse": 0.009 }
+        }
       }
     },
     {

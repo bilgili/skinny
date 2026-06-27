@@ -164,6 +164,12 @@ STATIC_PARAMS: list[ParamSpec] = [
     _cont("Light color R",      "light_color_r",               0.05, 0.0,  1.0),
     _cont("Light color G",      "light_color_g",               0.05, 0.0,  1.0),
     _cont("Light color B",      "light_color_b",               0.05, 0.0,  1.0),
+
+    # pbrt film exposure controls (change pbrt-radiometric-parity). Retuning ISO
+    # or exposure time rescales output radiance live (imaging ratio
+    # exposure_time·iso/100) and resets accumulation; resolves on renderer.film.
+    _cont("Film ISO",           "film.iso",                    10.0, 10.0, 6400.0),
+    _cont("Film exposure time", "film.exposure_time",          0.05, 0.0,  10.0),
 ]
 
 # Backward-compat alias. New code should call build_all_params(renderer)

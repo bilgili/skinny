@@ -58,6 +58,12 @@ class SceneSpec:
     # hard-failing, so the suite stays green while the deltas are pinned. The
     # follow-up fix flips this False.
     known_divergent: bool = False
+    # Absolute-radiance gate (change pbrt-radiometric-parity). Opt-in per scene:
+    # {"mean_ratio_tol": 0.1, "relmse_tol": 0.05, "baselines": {combo.label:
+    # {"mean_ratio":.., "relmse":..}}}. Unlike the exposure-blind gate this is NOT
+    # alignment-invariant — it catches a global brightness drift (the 1.6×
+    # area-light offset). Absent ⇒ the absolute gate is skipped for the scene.
+    absolute: dict | None = None
 
 
 @dataclass
@@ -304,7 +310,15 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
             r.renderer._last_state_hash = None
             r._accumulate(spp)
             arr, _samples = r.renderer.read_accumulation_hdr()
-        return np.asarray(arr, dtype=np.float64)[..., :3]
+            # Apply the pbrt film imaging ratio (exposure_time·iso/100) read from the
+            # authored camera as a linear output scale, so the headless A/B sees
+            # pbrt-equivalent absolute radiance (change pbrt-radiometric-parity). The
+            # ratio is no longer baked into emitters at import; it rides the camera
+            # film params (FilmParameters), set by _apply_camera_override. ratio 1.0
+            # for a default-film scene ⇒ unchanged.
+            ratio = float(r.renderer.film.imaging_ratio())
+            out = np.asarray(arr, dtype=np.float64)[..., :3]
+            return out * ratio if ratio != 1.0 else out
 
     if usd_path is not None:
         return _run(usd_path)
@@ -376,6 +390,45 @@ def pbrt_truth_result(spec: SceneSpec, combo: RenderCombo, img: np.ndarray,
         baseline_used = True
     passed = m.relmse <= rel_tol and m.flip <= flip_tol
     return ParityResult(spec.name, m.relmse, m.flip, passed,
+                        metrics=m, combo=combo, baseline_used=baseline_used)
+
+
+def absolute_radiance_result(spec: SceneSpec, combo: RenderCombo, img: np.ndarray,
+                             ref: np.ndarray) -> ParityResult | None:
+    """Absolute (un-exposure-aligned) radiance gate for *img* vs the pbrt *ref*.
+
+    Runs only when ``spec.absolute`` is set. Unlike :func:`pbrt_truth_result`
+    (which aligns exposure and so is blind to a global brightness offset) this
+    measures the un-aligned mean-luminance ratio and the un-aligned relMSE, so a
+    scene that drifts globally brighter/dimmer than pbrt fails even though its
+    exposure-blind structure matches. A recorded per-combo ``baselines`` entry
+    relaxes the gate to the known offset (harness-first), never tighter than the
+    scene tolerance. Returns ``None`` when the scene opts out.
+
+    The returned :class:`ParityResult` carries the un-aligned relMSE in ``relmse``
+    and the mean-luminance ratio in ``flip`` (reused slot) so the matrix can log
+    both without a new result type.
+    """
+    cfg = spec.absolute
+    if not cfg:
+        return None
+    m = metrics.compute_metrics(img, ref, align=False)
+    ratio = metrics.mean_ratio(img, ref)
+    mean_tol = float(cfg.get("mean_ratio_tol", 0.1))
+    rel_tol = float(cfg.get("relmse_tol", spec.relmse_tol))
+    baseline_used = False
+    base = (cfg.get("baselines") or {}).get(combo.label)
+    if base is not None:
+        margin = 1.05
+        rel_tol = max(rel_tol, float(base["relmse"]) * margin)
+        # Center the mean-ratio window on the recorded offset rather than 1.0.
+        base_ratio = float(base["mean_ratio"])
+        passed_ratio = abs(ratio - base_ratio) <= mean_tol * max(base_ratio, 1.0)
+        baseline_used = True
+    else:
+        passed_ratio = abs(ratio - 1.0) <= mean_tol
+    passed = passed_ratio and m.relmse <= rel_tol
+    return ParityResult(spec.name, m.relmse, ratio, passed,
                         metrics=m, combo=combo, baseline_used=baseline_used)
 
 

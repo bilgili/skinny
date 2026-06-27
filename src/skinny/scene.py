@@ -350,6 +350,12 @@ class CameraOverride:
     lens: Optional[LensSystem] = None
     enabled: bool = True
     mirrored: bool = False          # improper pbrt camera ⇒ horizontal screen mirror
+    # pbrt film exposure controls (change pbrt-radiometric-parity). The imaging
+    # ratio exposure_time·iso/100 is a live linear output scale applied by the
+    # renderer (NOT baked into emitters at import), so ISO/exposure retune on the
+    # fly. Defaults (iso=100, exposure_time=1) ⇒ ratio 1.0 ⇒ byte-identical render.
+    iso: float = 100.0
+    exposure_time: float = 1.0
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, np.float32).reshape(3)

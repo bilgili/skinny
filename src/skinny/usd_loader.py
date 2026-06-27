@@ -1420,6 +1420,23 @@ def _extract_camera(
         # the reflection as a horizontal screen mirror at ray-gen.
         pbrt_md = prim.GetCustomDataByKey("pbrt") or {}
         mirrored = bool(pbrt_md.get("mirrored", False))
+        # pbrt film exposure controls (change pbrt-radiometric-parity). ISO and
+        # exposure time live on the camera prim as custom skinny:film:* attrs; the
+        # renderer derives the imaging ratio exposure_time·iso/100 and applies it as
+        # a live output scale. exposure_time falls back to the standard UsdGeom
+        # `exposure` attr (interpreted as seconds here, NOT 2^EV stops) when the
+        # skinny attr is absent. Defaults (100 / 1.0) ⇒ ratio 1.0 ⇒ unchanged.
+        iso = _read_float(prim, "skinny:film:iso", time, 100.0)
+        exp_attr = prim.GetAttribute("skinny:film:exposureTime")
+        if exp_attr and exp_attr.IsValid() and exp_attr.HasAuthoredValue():
+            exposure_time = float(exp_attr.Get(time) or 1.0)
+        else:
+            # Fallback: the standard UsdGeom `exposure` attr is a log2 (stops)
+            # gain, so 2^exposure is the equivalent linear ratio. Fold it into
+            # exposure_time (iso stays at its own default) so the imaging ratio
+            # exposure_time·iso/100 reproduces the authored brightness.
+            std_exp = cam.GetExposureAttr().Get(time)
+            exposure_time = float(2.0 ** float(std_exp)) if std_exp is not None else 1.0
         return CameraOverride(
             position=position,
             forward=forward,
@@ -1430,6 +1447,8 @@ def _extract_camera(
             fstop=fstop,
             lens=lens,
             mirrored=mirrored,
+            iso=iso,
+            exposure_time=exposure_time,
         )
     return None
 

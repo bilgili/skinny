@@ -124,6 +124,20 @@ def luminance(img) -> np.ndarray:
     return _as_rgb(img) @ _LUMA_W
 
 
+def mean_ratio(img, ref) -> float:
+    """Absolute mean-luminance ratio mean(L(img)) / mean(L(ref)).
+
+    The exposure-blind gate aligns *img* to *ref* before measuring error, so it
+    is insensitive to a global brightness offset. This ratio is the un-aligned
+    absolute-radiance check: 1.0 is a perfect match, >1 too bright, <1 too dim.
+    Returns ``inf`` if the reference has ~zero mean luminance.
+    """
+    ref_mean = float(np.mean(luminance(ref)))
+    if abs(ref_mean) < 1e-12:
+        return float("inf")
+    return float(np.mean(luminance(img))) / ref_mean
+
+
 def mse(a, b) -> float:
     """Mean squared error on linear RGB (no exposure alignment)."""
     a, b = _as_rgb(a), _as_rgb(b)

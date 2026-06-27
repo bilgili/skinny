@@ -7,6 +7,7 @@ and a :class:`~skinny.pbrt.report.Report`.
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -70,15 +71,22 @@ def translate_scene(
     mtlx_refs: list[tuple[str, str]] = []
 
     # pbrt film exposure (imagingRatio = exposureTime * ISO / 100, film.cpp) is a
-    # global linear scale on output radiance; for a linear path tracer it is
-    # equivalent to scaling every emitter, so bake it into light/emission values.
+    # global linear scale on output radiance. It is NOT baked into emitters anymore
+    # (change pbrt-radiometric-parity): it is authored on the camera prim as
+    # skinny:film:iso / skinny:film:exposureTime and applied live by the renderer
+    # as an output scale, so ISO/exposure retune on the fly and a .hdr-direct env's
+    # own pbrt `scale` is never lost. For a linear path tracer scaling the output
+    # is algebraically identical to scaling every emitter, so a default-film render
+    # is radiometrically unchanged. Emitters/env therefore carry only their own
+    # per-light pbrt `scale` (exposure_scale=1.0 below).
     exposure_scale = _film_exposure_scale(scene)
     if exposure_scale != 1.0:
-        report.exact("film:exposure", f"imagingRatio={exposure_scale:.4g} baked into emitters")
+        report.exact("film:exposure",
+                     f"imagingRatio={exposure_scale:.4g} authored on camera (live output scale)")
 
     for i, shp in enumerate(scene.shapes):
         _emit_shape(
-            stage, f"{world}/shape_{i}", shp, report, scene, base_dir, exposure_scale,
+            stage, f"{world}/shape_{i}", shp, report, scene, base_dir, 1.0,
             emit_mtlx=emit_mtlx, mtlx_materials=mtlx_materials, mtlx_refs=mtlx_refs,
         )
 
@@ -90,7 +98,7 @@ def translate_scene(
     asset_dir = os.path.dirname(os.path.abspath(out)) if out else None
     for light in scene.lights:
         add_light(stage, world, light, report, asset_dir=asset_dir,
-                  exposure_scale=exposure_scale, base_dir=base_dir)
+                  exposure_scale=1.0, base_dir=base_dir)
 
     # carry the exact pbrt scene config (integrator/sampler/film/colorspace)
     meta_mod.tag_stage(stage, meta_mod.scene_metadata(scene))
@@ -399,6 +407,26 @@ def _emit_camera(stage, path, scene: PbrtScene, report, base_dir=None) -> None:
     usd_cam.CreateFocalLengthAttr(float(intr["focal_length_mm"]))
     usd_cam.CreateVerticalApertureAttr(float(intr["vertical_aperture_mm"]))
     usd_cam.CreateHorizontalApertureAttr(float(intr["horizontal_aperture_mm"]))
+    # pbrt film exposure controls (change pbrt-radiometric-parity): author ISO and
+    # exposure time on the camera prim so the renderer applies the imaging ratio
+    # exposure_time·iso/100 as a live output scale (instead of baking it into
+    # emitters). The standard UsdGeom `exposure` attr mirrors exposure_time so a
+    # non-skinny USD consumer still sees a film exposure. usd_loader._extract_camera
+    # reads these back into CameraOverride.iso / .exposure_time.
+    film_iso = film.float("iso", 100.0) if film else 100.0
+    exposure_time = (cam.params.float("shutterclose", 1.0)
+                     - cam.params.float("shutteropen", 0.0))
+    exposure_time = max(exposure_time, 0.0)
+    imaging_ratio = exposure_time * film_iso / 100.0
+    cam_prim = usd_cam.GetPrim()
+    cam_prim.CreateAttribute("skinny:film:iso", Sdf.ValueTypeNames.Float).Set(float(film_iso))
+    cam_prim.CreateAttribute(
+        "skinny:film:exposureTime", Sdf.ValueTypeNames.Float).Set(float(exposure_time))
+    # The standard UsdGeom `exposure` attr is a log2 (stops) gain, so author
+    # log2(imaging_ratio) — a generic USD consumer with no skinny:film:* support
+    # still reproduces the same brightness. Skipped when the ratio is non-positive.
+    if imaging_ratio > 0.0:
+        usd_cam.CreateExposureAttr(float(math.log2(imaging_ratio)))
     if "fstop" in intr:
         usd_cam.CreateFStopAttr(float(intr["fstop"]))
     if "focus_distance" in intr:
