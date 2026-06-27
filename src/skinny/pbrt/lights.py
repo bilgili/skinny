@@ -97,7 +97,14 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
             ext = os.path.splitext(fname)[1].lower()
             if ext == ".hdr":
                 prim.CreateTextureFileAttr().Set(Sdf.AssetPath(fname))
-                report.exact(f"light:infinite {path}")
+                # A direct .hdr reference can't bake `scale` into the pixels (the
+                # file is shared by reference), so carry it on the DomeLight
+                # intensity — the loader collapses color×intensity×2^exposure into
+                # the env scalar (change pbrt-radiometric-parity). Without this the
+                # pbrt `scale` (and any film imaging ratio) was silently dropped.
+                prim.CreateIntensityAttr(float(scale))
+                report.exact(f"light:infinite {path}",
+                             "" if scale == 1.0 else f"scale={scale:.4g} → DomeLight intensity")
             elif ext in (".exr", ".pfm") and asset_dir is not None:
                 converted = _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path)
                 prim.CreateTextureFileAttr().Set(Sdf.AssetPath(converted or fname))

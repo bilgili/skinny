@@ -301,6 +301,15 @@ and compares it to a checked-in pbrt v4 reference EXR with two metrics:
   global scale and to Monte-Carlo noise; a least-squares exposure scalar is
   applied first).
 - **FLIP** — a FLIP-style perceptual difference on identically-tonemapped copies.
+- **absolute radiance** — an *un*-exposure-aligned mean-luminance ratio +
+  un-aligned relMSE (`parity.absolute_radiance_result`, change
+  `pbrt-radiometric-parity`), gated on the anchor combo beside the exposure-blind
+  gate above. Because relMSE/FLIP align exposure first they are blind to a global
+  brightness offset; this gate catches one. Configured per scene via
+  `SceneSpec.absolute` with recorded per-combo baselines (it does not relax the
+  exposure-blind gate). Current baselines: `diffuse_arealight` mean-ratio 0.866,
+  `conductor_infinite` 0.957 — see the area-light note in the feature table for the
+  two-component cause (fixable BSDF-MIS complement + inherent RGB-vs-spectral).
 
 The gate runs with **no pbrt binary** present — it relies solely on the committed
 reference EXRs (`tests/pbrt/test_parity.py`, marked `gpu`). Until the references
@@ -357,9 +366,9 @@ Support status per pbrt feature.
 | non-Y-up camera up/roll (pbrt Z-up) | matched | the authored up (camera local +Y → world) rides `CameraOverride.up`; the renderer builds the view basis from `(position, forward, up)` via `_look_at(..., world_up)` instead of assuming `(0,1,0)`, so Z-up scenes (e.g. `sssdragon`) orient correctly. Y-up cameras default to `(0,1,0)` ⇒ byte-identical. Composes with the mirror flag |
 | `distant` / `point` lights | matched / approx | point emitted as a small sphere |
 | `spot` light | unsupported | no skinny spotlight; flagged |
-| area (`diffuse`) light | approx | emissive mesh; sidedness may differ |
-| `infinite` light | matched | constant baked to `.hdr`; **square** `.exr`/`.pfm` image maps are pbrt's equal-area octahedral layout and are **reprojected** to skinny's equirectangular `.hdr` (`equiarea.py`, `Rx(+90)` axis map: pbrt Z-up sky → skinny +y-up); non-square maps assumed already lat-long and passed through |
-| film `iso` / exposure | matched | `imagingRatio = exposureTime·ISO/100` baked into emitters |
+| area (`diffuse`) light | approx | emissive mesh; sidedness may differ. Absolute radiance runs ~0.87× pbrt: a fixable part (the emissive-triangle BSDF-sampling MIS complement, change `emissive-triangle-bsdf-mis`) plus an inherent ~0.875 RGB-vs-spectral residual (pbrt builds an `RGBIlluminantSpectrum`; skinny emits literal RGB). The absolute-radiance gate (below) records this |
+| `infinite` light | matched | constant baked to `.hdr`; **square** `.exr`/`.pfm` image maps are pbrt's equal-area octahedral layout and are **reprojected** to skinny's equirectangular `.hdr` (`equiarea.py`, `Rx(+90)` axis map: pbrt Z-up sky → skinny +y-up); non-square maps assumed already lat-long and passed through. A `.hdr`-direct map's pbrt `scale` is carried on the `DomeLight` intensity (change `pbrt-radiometric-parity`) — no longer dropped |
+| film `iso` / exposure | matched | authored **live on the camera** as `skinny:film:iso` / `skinny:film:exposureTime` (+ standard `exposure` = log2(ratio)); the renderer applies `imagingRatio = exposureTime·ISO/100` as an output scale (`Renderer.film`, multiplies the linear-HDR read + folded into display exposure), **not baked into emitters** — so ISO/exposure retune on the fly (`film.iso` / `film.exposure_time` UI params) and the `.hdr`-direct env keeps its `scale`. Output-equivalent for a default-film scene (change `pbrt-radiometric-parity`) |
 | `imagemap` texture (reflectance/roughness) | matched | `UsdUVTexture` over `primvars:st`; explicit mesh UVs passed through, pbrt default UVs synthesized for UV-less textured shapes (see Texture UVs) |
 | homogeneous medium | approx | coefficients via `customData` |
 | heterogeneous (grid/VDB) medium | unsupported | flagged, not emitted |

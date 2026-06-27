@@ -167,8 +167,14 @@ pbrt's `subsurface` is a tabulated dipole BSSRDF and skinny's is a 3-D random
 walk, so the corpus parity is qualitative (both milky), with a loose tolerance —
 see `tests/pbrt/corpus/manifest.json`. On the sssdragon the 3-D walk is structurally
 closer to pbrt than the slab (lower exposure-matched relMSE **and** FLIP); the
-remaining ~2× absolute brightness (env-HDRI intensity + film ISO/exposure
-calibration) is a separate, deferred follow-up — not a 3-D-walk correctness gap.
+remaining absolute brightness is a separate, deferred follow-up — not a 3-D-walk
+correctness gap. Note the film ISO/exposure half of that calibration is now
+addressed by change `pbrt-radiometric-parity` (film params are authored live on the
+camera as `skinny:film:*` and applied as an output imaging ratio, not baked); see
+[PbrtImport.md](PbrtImport.md). The corpus `subsurface_infinite` measured at
+mean-ratio ~1.25 vs pbrt — a subsurface-walk-specific residual (env-HDRI intensity +
+high-τ walk energy), distinct from the area-light ~0.87× offset and out of scope for
+the radiometric change.
 BDPT excludes subsurface in the **wavefront** path (non-flat first hits render
 black — a pre-existing wavefront-BDPT limitation), so PT ≡ BDPT is gated in the
 megakernel where BDPT falls through to the path tracer.

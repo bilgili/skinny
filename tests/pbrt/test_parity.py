@@ -17,6 +17,7 @@ from skinny.pbrt.parity import (
     ANCHOR,
     all_combos,
     combo_is_valid,
+    absolute_radiance_result,
     enumerate_combos,
     evaluate,
     load_manifest,
@@ -119,6 +120,21 @@ def test_scene_matrix_gate(spec):
         print(f"[{spec.name}] {c.label:32s} pbrt-truth {tag} {pt.metrics.summary()}")
         if not pt.passed:
             failures.append(f"{c.label}: pbrt-truth relMSE={pt.relmse:.4f} FLIP={pt.flip:.4f}")
+        if c == ANCHOR:
+            # Absolute-radiance gate (change pbrt-radiometric-parity): un-exposure-
+            # aligned mean-ratio + relMSE, beside the exposure-blind pbrt-truth gate.
+            # Anchor-only — self-consistency already ties the other combos to it.
+            # Skips silently when the scene has no `absolute` config.
+            ab = absolute_radiance_result(spec, c, img, ref)
+            if ab is not None:
+                atag = "(baseline)" if ab.baseline_used else ""
+                print(f"[{spec.name}] {c.label:32s} abs-radiance {atag} "
+                      f"ratio={ab.flip:.4f} relMSE={ab.relmse:.4f}")
+                if not ab.passed:
+                    failures.append(
+                        f"{c.label}: absolute-radiance ratio={ab.flip:.4f} "
+                        f"relMSE={ab.relmse:.4f}"
+                    )
         if c != ANCHOR:
             sc = self_consistency_result(spec, c, img, anchor_img)
             print(f"[{spec.name}] {c.label:32s} vs-anchor       {sc.metrics.summary()}")

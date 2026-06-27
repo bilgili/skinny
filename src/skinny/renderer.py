@@ -1113,6 +1113,26 @@ def _write_hdr_rgbe(path: str, rgb: np.ndarray) -> None:
         fh.write(rgbe.tobytes())
 
 
+@dataclass
+class FilmParameters:
+    """pbrt film exposure controls, live on the renderer (change
+    pbrt-radiometric-parity).
+
+    `iso` and `exposure_time` are read from the authored camera
+    (`skinny:film:iso` / `skinny:film:exposureTime`) and define the imaging
+    ratio `exposure_time · iso / 100`, a global linear output scale on the
+    rendered radiance (applied to the linear-HDR readback and folded into the
+    display exposure). Defaults (100 / 1.0) ⇒ ratio 1.0 ⇒ a byte-identical render.
+    Exposed in the UI as `film.iso` / `film.exposure_time` so they retune live.
+    """
+
+    iso: float = 100.0
+    exposure_time: float = 1.0
+
+    def imaging_ratio(self) -> float:
+        return float(self.exposure_time) * float(self.iso) / 100.0
+
+
 class Renderer:
     """Sets up Vulkan resources and dispatches Slang compute shaders each frame."""
 
@@ -1493,6 +1513,14 @@ class Renderer:
         self.tonemap_modes: list[str] = ["ACES", "Reinhard", "Hable", "Linear"]
         self.tonemap_index = 0
         self.exposure = 0.0
+
+        # pbrt film exposure controls (change pbrt-radiometric-parity). The imaging
+        # ratio exposure_time·iso/100 is a live linear output scale: it multiplies
+        # the linear-HDR readback (EXR/HDR save + the parity render_linear) and is
+        # folded into the packed display exposure for the on-screen path. Set from
+        # the authored camera by `_apply_camera_override`; retunable live via the
+        # `film.iso` / `film.exposure_time` UI params (resets accumulation).
+        self.film = FilmParameters()
 
 
         # Scalar applied to every sampleEnvironment() lookup. With many HDR
@@ -2560,6 +2588,11 @@ class Renderer:
         self.free_camera.fstop = float(ov.fstop)
         self.free_camera.focus_distance = float(d)
         self.free_camera.lens = ov.lens
+        # pbrt film exposure (change pbrt-radiometric-parity): the authored camera
+        # carries ISO + exposure time; the renderer applies their imaging ratio as a
+        # live output scale instead of having it baked into emitters at import.
+        self.film.iso = float(getattr(ov, "iso", 100.0))
+        self.film.exposure_time = float(getattr(ov, "exposure_time", 1.0))
 
     def _override_to_orbit(
         self, cam: "OrbitCamera", ov: "CameraOverride", scene: "Scene"
@@ -8562,8 +8595,15 @@ class Renderer:
         data += struct.pack("I", pick_armed)                          # 4 bytes
         # Display exposure (EV stops, applied as 2^EV multiplier before
         # tonemapping) and tonemap operator selector consumed by
-        # main_pass.slang::applyTonemap.
-        data += struct.pack("f", float(self.exposure))                # 4 bytes
+        # main_pass.slang::applyTonemap. The pbrt film imaging ratio
+        # (exposure_time·iso/100, change pbrt-radiometric-parity) is a linear
+        # output gain; fold it in as log2(ratio) stops so the on-screen path
+        # reproduces it with no shader/UBO change. The linear-HDR readback applies
+        # the same ratio multiplicatively (read_accumulation_hdr consumers), so
+        # display and linear stay consistent. ratio 1.0 ⇒ +0 stops ⇒ unchanged.
+        ratio = self.film.imaging_ratio()
+        exposure_ev = float(self.exposure) + (math.log2(ratio) if ratio > 0.0 else 0.0)
+        data += struct.pack("f", exposure_ev)                         # 4 bytes
         data += struct.pack("I", int(self.tonemap_index))             # 4 bytes
         # Pluggable scene-sampling seam — proposalMask + reuseMode + the
         # float4 one-sample-MIS selection weights. Scalar layout: these append
@@ -8801,6 +8841,9 @@ class Renderer:
             float(self.film_max_component),
             # Improper-camera mirror: changing it flips the image, so reset accum.
             bool(self._camera_mirror),
+            # pbrt film exposure controls (change pbrt-radiometric-parity): retuning
+            # ISO / exposure time rescales every pixel, so reset accumulation.
+            float(self.film.iso), float(self.film.exposure_time),
             int(self.detail_maps_index),
             float(self.normal_map_strength),
             float(self.displacement_scale_mm),
@@ -9541,7 +9584,11 @@ class Renderer:
 
         if fmt in ("exr", "hdr"):
             arr, samples = self.read_accumulation_hdr()
-            rgb = (arr[..., :3] / float(samples)).astype(np.float32)
+            # Apply the pbrt film imaging ratio as a linear output scale so the
+            # saved linear-HDR carries pbrt-equivalent absolute radiance (change
+            # pbrt-radiometric-parity). ratio 1.0 ⇒ unchanged.
+            ratio = self.film.imaging_ratio()
+            rgb = (arr[..., :3] / float(samples) * ratio).astype(np.float32)
             writer = _write_exr if fmt == "exr" else _write_hdr_rgbe
             ext = ".exr" if fmt == "exr" else ".hdr"
             if hasattr(path_or_file, "write"):

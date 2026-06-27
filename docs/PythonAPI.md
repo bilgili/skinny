@@ -328,7 +328,12 @@ def list_nodes(self) -> list[dict]                                      # :4398
 
 `integrator_index` (0 path / 1 bdpt), `tonemap_index` (0 ACES…3 linear),
 `exposure` (EV), `direct_light_index` (0 on / 1 off), `env_intensity`,
-`proposal_preset_index`, `reuse_index`. Mode lists:
+`proposal_preset_index`, `reuse_index`. `film` is a `FilmParameters` dataclass
+(`film.iso=100`, `film.exposure_time=1.0`, change `pbrt-radiometric-parity`): the
+pbrt film exposure controls read from the authored camera (`skinny:film:*`); their
+imaging ratio `exposure_time·iso/100` is a live linear output scale (multiplies the
+linear-HDR read; folded into the display exposure). Retunable via the `film.iso` /
+`film.exposure_time` params; a change resets accumulation. Mode lists:
 `integrator_modes = ["Path","BDPT"]`, `tonemap_modes = ["ACES","Reinhard","Hable","Linear"]`,
 `proposal_preset_modes`, `reuse_modes = ["None"]`.
 
