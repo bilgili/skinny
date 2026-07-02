@@ -133,5 +133,5 @@ shown to the user (SendUserFile + clickable path).
 - [x] 7.2 Docs: `docs/Architecture.md` binding map + volume module notes; README + CLAUDE.md
       compatibility matrix (volume × integrator/backend rows); CHANGELOG; `docs/Wavefront.md` /
       `docs/Megakernel.md` where the march caps land
-- [ ] 7.3 Final review pass (`/code-review` on the branch), then merge flow per
+- [x] 7.3 Final review pass (`/code-review` on the branch), then merge flow per
       finishing-a-development-branch; archive change after merge
