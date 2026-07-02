@@ -1624,6 +1624,202 @@ class SampledImage:
         vk.vkFreeMemory(self.ctx.device, self.staging_memory, None)
 
 
+class SampledImage3D:
+    """Device-local 3D image + trilinear sampler, uploadable from host
+    (nanovdb-volume-rendering, design D3).
+
+    R16F single-channel density field for the heterogeneous-medium walk
+    (binding 26, ``volumeDensity``). Mirrors :class:`SampledImage` with
+    ``VK_IMAGE_TYPE_3D`` / ``VK_IMAGE_VIEW_TYPE_3D``, linear min/mag filtering,
+    and clamp-to-edge on all three axes (the shader additionally zeroes samples
+    outside [0,1]³ so edge clamping cannot smear boundary density outward).
+    Upload takes a ``(depth, height, width)`` float16/float32 numpy array
+    (float32 converted to float16 on upload). Public surface matches
+    ``metal_compute.SampledImage3D`` (texture/sampler attrs there; combined
+    view+sampler here)."""
+
+    def __init__(self, ctx: VulkanContext, width: int, height: int, depth: int) -> None:
+        self.ctx = ctx
+        self.width = int(width)
+        self.height = int(height)
+        self.depth = int(depth)
+        self.format = vk.VK_FORMAT_R16_SFLOAT
+        self._byte_count = self.width * self.height * self.depth * 2  # R16F
+
+        # Host-visible staging buffer (persistent — uploads are per-scene-load).
+        buf_info = vk.VkBufferCreateInfo(
+            size=self._byte_count,
+            usage=vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+        )
+        self.staging_buffer = vk.vkCreateBuffer(ctx.device, buf_info, None)
+        mem_reqs = vk.vkGetBufferMemoryRequirements(ctx.device, self.staging_buffer)
+        mem_props = vk.vkGetPhysicalDeviceMemoryProperties(ctx.physical_device)
+        self._staging_size = mem_reqs.size
+        staging_type = UniformBuffer._find_memory_type(
+            mem_reqs.memoryTypeBits,
+            vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            mem_props,
+        )
+        self.staging_memory = vk.vkAllocateMemory(
+            ctx.device,
+            vk.VkMemoryAllocateInfo(
+                allocationSize=mem_reqs.size, memoryTypeIndex=staging_type),
+            None,
+        )
+        vk.vkBindBufferMemory(ctx.device, self.staging_buffer, self.staging_memory, 0)
+
+        img_info = vk.VkImageCreateInfo(
+            imageType=vk.VK_IMAGE_TYPE_3D,
+            format=self.format,
+            extent=vk.VkExtent3D(width=self.width, height=self.height, depth=self.depth),
+            mipLevels=1,
+            arrayLayers=1,
+            samples=vk.VK_SAMPLE_COUNT_1_BIT,
+            tiling=vk.VK_IMAGE_TILING_OPTIMAL,
+            usage=vk.VK_IMAGE_USAGE_SAMPLED_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+            initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        )
+        self.image = vk.vkCreateImage(ctx.device, img_info, None)
+        img_reqs = vk.vkGetImageMemoryRequirements(ctx.device, self.image)
+        img_type = UniformBuffer._find_memory_type(
+            img_reqs.memoryTypeBits, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_props,
+        )
+        self.image_memory = vk.vkAllocateMemory(
+            ctx.device,
+            vk.VkMemoryAllocateInfo(
+                allocationSize=img_reqs.size, memoryTypeIndex=img_type),
+            None,
+        )
+        vk.vkBindImageMemory(ctx.device, self.image, self.image_memory, 0)
+
+        view_info = vk.VkImageViewCreateInfo(
+            image=self.image,
+            viewType=vk.VK_IMAGE_VIEW_TYPE_3D,
+            format=self.format,
+            components=vk.VkComponentMapping(
+                r=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                g=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                b=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                a=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+            ),
+            subresourceRange=vk.VkImageSubresourceRange(
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                baseMipLevel=0, levelCount=1,
+                baseArrayLayer=0, layerCount=1,
+            ),
+        )
+        self.view = vk.vkCreateImageView(ctx.device, view_info, None)
+
+        sampler_info = vk.VkSamplerCreateInfo(
+            magFilter=vk.VK_FILTER_LINEAR,
+            minFilter=vk.VK_FILTER_LINEAR,
+            mipmapMode=vk.VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            addressModeU=vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            addressModeV=vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            addressModeW=vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            anisotropyEnable=vk.VK_FALSE,
+            maxAnisotropy=1.0,
+            compareEnable=vk.VK_FALSE,
+            compareOp=vk.VK_COMPARE_OP_ALWAYS,
+            minLod=0.0,
+            maxLod=0.0,
+            borderColor=vk.VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+            unnormalizedCoordinates=vk.VK_FALSE,
+        )
+        self.sampler = vk.vkCreateSampler(ctx.device, sampler_info, None)
+
+        self._run_one_shot(self._record_to_shader_read)
+
+    # One-shot submit + initial layout transition are identical to SampledImage.
+    _run_one_shot = SampledImage._run_one_shot
+    _record_to_shader_read = SampledImage._record_to_shader_read
+
+    def upload_sync(self, voxels) -> None:
+        """Copy a ``(depth, height, width)`` float16/float32 numpy array into
+        the image (float32 converted to float16 on upload). Synchronous."""
+        import numpy as _np
+
+        arr = _np.ascontiguousarray(voxels)
+        if arr.dtype != _np.float16:
+            arr = arr.astype(_np.float16)
+        expected = (self.depth, self.height, self.width)
+        if arr.shape != expected:
+            raise ValueError(
+                f"volume upload: got shape {arr.shape}, expected (D,H,W)={expected}")
+        data = arr.tobytes()
+
+        ptr = vk.vkMapMemory(self.ctx.device, self.staging_memory, 0, self._staging_size, 0)
+        import cffi
+        ffi = cffi.FFI()
+        ffi.memmove(ptr, data, len(data))
+        vk.vkUnmapMemory(self.ctx.device, self.staging_memory)
+
+        subresource = vk.VkImageSubresourceRange(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel=0, levelCount=1,
+            baseArrayLayer=0, layerCount=1,
+        )
+
+        def record(cmd) -> None:
+            to_dst = vk.VkImageMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                oldLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                image=self.image,
+                subresourceRange=subresource,
+            )
+            vk.vkCmdPipelineBarrier(
+                cmd,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, None, 0, None, 1, [to_dst],
+            )
+            region = vk.VkBufferImageCopy(
+                bufferOffset=0,
+                bufferRowLength=0,
+                bufferImageHeight=0,
+                imageSubresource=vk.VkImageSubresourceLayers(
+                    aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                    mipLevel=0, baseArrayLayer=0, layerCount=1,
+                ),
+                imageOffset=vk.VkOffset3D(x=0, y=0, z=0),
+                imageExtent=vk.VkExtent3D(
+                    width=self.width, height=self.height, depth=self.depth),
+            )
+            vk.vkCmdCopyBufferToImage(
+                cmd, self.staging_buffer, self.image,
+                vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, [region],
+            )
+            to_read = vk.VkImageMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
+                oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                newLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                image=self.image,
+                subresourceRange=subresource,
+            )
+            vk.vkCmdPipelineBarrier(
+                cmd,
+                vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 0, None, 0, None, 1, [to_read],
+            )
+
+        self._run_one_shot(record)
+
+    def destroy(self) -> None:
+        vk.vkDestroySampler(self.ctx.device, self.sampler, None)
+        vk.vkDestroyImageView(self.ctx.device, self.view, None)
+        vk.vkDestroyImage(self.ctx.device, self.image, None)
+        vk.vkFreeMemory(self.ctx.device, self.image_memory, None)
+        vk.vkDestroyBuffer(self.ctx.device, self.staging_buffer, None)
+        vk.vkFreeMemory(self.ctx.device, self.staging_memory, None)
+
+
 class StorageBuffer:
     """Device-local VK_BUFFER_USAGE_STORAGE buffer with host staging for uploads.
 

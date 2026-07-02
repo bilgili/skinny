@@ -144,6 +144,12 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
     bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
     float misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted && br.bsdfSample.pdf > 0.0)
                      ? br.bsdfSample.pdf : -1.0;
+    // Volume zero-scatter pass-through (nanovdb-volume-rendering): the SAME ray
+    // continues, only attenuated — keep the record's spawning-bounce MIS state
+    // (bsdfPdf + PATH_FLAG_SPECULAR) instead of re-deriving delta-ness here
+    // (which took the env sun-disk at full weight → ground fireflies).
+    if (br.preserveMisState)
+        misBsdfPdf = s.bsdfPdf;
 
     Ray r;
     float3 spawnOffset = br.bsdfSample.transmitted ? -h.normal * 0.002 : h.normal * 0.002;
@@ -184,11 +190,18 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
     s.bsdfPdf    = misBsdfPdf;
     // Carry this bounce's delta-ness to the next iteration's emission gate (a
     // delta lobe — pdf<=0 — has no NEE partner). Set/clear so a prior delta
-    // bounce doesn't leak into a later non-delta one.
-    if (br.bsdfSample.pdf <= 0.0)
-        s.flags |= PATH_FLAG_SPECULAR;
-    else
-        s.flags &= ~PATH_FLAG_SPECULAR;
+    // bounce doesn't leak into a later non-delta one. A MATERIAL_TYPE_VOLUME
+    // escape continuation (nanovdb-volume-rendering) rides this same flag: its
+    // pdf = 0 delta sample marks the lane specular so the env on the next miss
+    // is taken at full weight (env is never collected inside the medium walk).
+    if (!br.preserveMisState)
+    {
+        if (br.bsdfSample.pdf <= 0.0)
+            s.flags |= PATH_FLAG_SPECULAR;
+        else
+            s.flags &= ~PATH_FLAG_SPECULAR;
+    }
+    // else: pass-through — the stored flag from the spawning bounce stands.
     s.rngState   = rng.state;
     wfState[i] = s;
 }

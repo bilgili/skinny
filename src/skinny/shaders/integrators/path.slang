@@ -15,6 +15,7 @@ import materials.flat.flat_material;
 import materials.skin.skin_material;
 import materials.subsurface.medium;            // Medium, resolveMedium
 import materials.subsurface.subsurface_walk;   // subsurfaceRadiance (interior walk)
+import materials.subsurface.volume_walk;       // volumeWalkRadiance (free-standing medium)
 import materials.debug_normal_material;
 import python_materials_dispatcher;
 import lights.sphere_light;
@@ -33,8 +34,15 @@ import sampling.reuse;
 static const uint MAX_BOUNCES = 6;
 
 // ── Per-bounce material dispatch ────────────────────────────────
+//
+// `h` is inout for ONE consumer: the free-standing-volume case rewrites
+// h.position/h.normal to the walk's boundary EXIT point + escape direction, so
+// the caller's standard `h.position + h.normal * 0.002` spawn continues the
+// path from the far side of the medium (a volume is the only material whose
+// continuation does not leave from the entry hit). Every other case leaves `h`
+// untouched — behavior there is byte-identical.
 
-BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
+BounceResult evaluateBounce(inout HitInfo h, Ray r, uint bounce, inout RNG rng)
 {
     uint matFlags = materialTypes[h.materialId];
     uint matType  = matFlags & 0xFFu;
@@ -43,6 +51,7 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
     BounceResult br;
     br.directLight  = float3(0.0);
     br.fullRadiance = float3(0.0);
+    br.preserveMisState       = false;
     br.bsdfSample.valid       = false;
     br.bsdfSample.transmitted = false;
     br.bsdfSample.pdf         = 0.0;
@@ -148,6 +157,53 @@ BounceResult evaluateBounce(HitInfo h, Ray r, uint bounce, inout RNG rng)
                 r, h, medium, primaryDir, primaryRad,
                 fc.envIntensity, fc.furnaceMode, fc.mmPerUnit, rng);
 #endif
+            break;
+        }
+        case MATERIAL_TYPE_VOLUME:
+        {
+            // Free-standing heterogeneous medium (nanovdb-volume-rendering):
+            // index-matched pass-through boundary — no Fresnel, no refraction,
+            // no BSDF. The walk returns its in-walk NEE radiance (distant +
+            // env, MIS-weighted) plus an escape ray; the loop applies its
+            // running throughput to br.fullRadiance and continues along the
+            // escape. The continuation pdf is the walk's last HG phase pdf —
+            // the loop's env-miss powerHeuristic(bsdfPdf, envPdf) is then the
+            // exact MIS complement of the in-walk env NEE. A zero-scatter
+            // pass-through carries pdf 0 (delta ⇒ env at full weight; no env
+            // NEE ran for it). Both execution modes share this one case
+            // (megakernel + wavefront catch-all shade), the subsurface
+            // phase-4 precedent; only the scatter caps differ.
+            Medium medium = resolveMedium(h.materialId);
+            float3 primaryDir = float3(0.0);
+            float3 primaryRad = float3(0.0);
+            if (fc.numDistantLights > 0u)
+            {
+                DistantLight L0 = distantLights[0];
+                primaryDir = L0.direction;
+                primaryRad = L0.radiance;
+            }
+            VolumeWalkResult vw = volumeWalkRadiance(
+                r, h, medium, fc, primaryDir, primaryRad, fc.mmPerUnit, rng);
+            br.fullRadiance = vw.radiance;
+            if (vw.escaped)
+            {
+                // Rewrite the hit so the caller's spawn (h.position +
+                // h.normal * 0.002) leaves from the boundary exit point along
+                // the escape direction. Emission stays 0 so the caller's
+                // emissive-MIS block (which reads h.normal/h.t) never fires.
+                h.position = vw.escapeRay.origin;
+                h.normal   = vw.escapeRay.direction;
+                br.bsdfSample.valid       = true;
+                br.bsdfSample.wi          = vw.escapeRay.direction; // world space
+                br.bsdfSample.weight      = vw.throughput;
+                br.bsdfSample.pdf         = vw.lastPhasePdf;
+                br.bsdfSample.transmitted = false; // offset along +h.normal (= wi)
+                // Zero-scatter pass-through (lastPhasePdf == 0): the SAME ray
+                // continues, only attenuated — keep the spawning bounce's MIS
+                // state instead of turning it into a delta (which took the env
+                // sun-disk at full weight → ground fireflies).
+                br.preserveMisState       = (vw.lastPhasePdf == 0.0);
+            }
             break;
         }
         default:
@@ -265,16 +321,22 @@ struct PathTracer : IIntegrator
             // the lobe is non-delta (pdf > 0), and the ray reflected (not
             // transmitted — env NEE only samples the upper hemisphere).
             bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
-            misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted
-                          && br.bsdfSample.pdf > 0.0)
-                       ? br.bsdfSample.pdf : -1.0;
+            if (!br.preserveMisState)
+            {
+                misBsdfPdf = (envNeeActive && !br.bsdfSample.transmitted
+                              && br.bsdfSample.pdf > 0.0)
+                           ? br.bsdfSample.pdf : -1.0;
 
-            // The ray spawned below carries this bounce's delta-ness to the next
-            // iteration's emissive-triangle gate (delta ⇒ no NEE partner ⇒ take
-            // emission at full weight). prevBsdfPdf carries the companion pdf for
-            // the emissive-hit MIS weight (−1 for a delta lobe ⇒ full weight).
-            spawnedBySpecular = (br.bsdfSample.pdf <= 0.0);
-            prevBsdfPdf = spawnedBySpecular ? -1.0 : br.bsdfSample.pdf;
+                // The ray spawned below carries this bounce's delta-ness to the
+                // next iteration's emissive-triangle gate (delta ⇒ no NEE partner
+                // ⇒ take emission at full weight). prevBsdfPdf carries the
+                // companion pdf for the emissive-hit MIS weight (−1 for a delta
+                // lobe ⇒ full weight).
+                spawnedBySpecular = (br.bsdfSample.pdf <= 0.0);
+                prevBsdfPdf = spawnedBySpecular ? -1.0 : br.bsdfSample.pdf;
+            }
+            // else: volume zero-scatter pass-through — same ray, attenuated;
+            // misBsdfPdf / spawnedBySpecular / prevBsdfPdf carry over unchanged.
 
             float3 spawnOffset = br.bsdfSample.transmitted
                 ? -h.normal * 0.002

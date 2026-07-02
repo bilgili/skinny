@@ -84,10 +84,14 @@ def translate_scene(
         report.exact("film:exposure",
                      f"imagingRatio={exposure_scale:.4g} authored on camera (live output scale)")
 
+    # Medium names for which a UsdVol.Volume prim has already been authored
+    # (one prim per named medium, however many shapes reference it).
+    emitted_volumes: set[str] = set()
     for i, shp in enumerate(scene.shapes):
         _emit_shape(
             stage, f"{world}/shape_{i}", shp, report, scene, base_dir, 1.0,
             emit_mtlx=emit_mtlx, mtlx_materials=mtlx_materials, mtlx_refs=mtlx_refs,
+            emitted_volumes=emitted_volumes,
         )
 
     if scene.camera is not None:
@@ -180,6 +184,15 @@ def _shape_geometry(shp: PbrtShape, report, base_dir=None):
         radius = p.float("radius", 1.0)
         pts, idx, nrm, uvs = emit.tessellate_sphere(radius)
         return pts, idx, nrm, uvs
+    if t == "disk":
+        radius = p.float("radius", 1.0)
+        height = p.float("height", 0.0)
+        inner_radius = p.float("innerradius", 0.0)
+        phi_max = p.float("phimax", 360.0)
+        pts, idx, nrm, uvs = emit.tessellate_disk(
+            radius, height=height, inner_radius=inner_radius, phi_max=phi_max,
+        )
+        return pts, idx, nrm, uvs
     if t == "loopsubdiv":
         # pbrt tessellates a Loop control cage to a triangle mesh (limit surface)
         # before rendering; do the same at import and reuse the trianglemesh path.
@@ -213,7 +226,8 @@ def _film_exposure_scale(scene: PbrtScene) -> float:
 def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=None,
                 exposure_scale: float = 1.0, *, emit_mtlx: bool = False,
                 mtlx_materials: dict | None = None,
-                mtlx_refs: list | None = None) -> None:
+                mtlx_refs: list | None = None,
+                emitted_volumes: set | None = None) -> None:
     geo = _shape_geometry(shp, report, base_dir)
     if geo is None:
         return
@@ -247,7 +261,12 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
         )
         meta_mod.tag_arealight(mesh.GetPrim(), meta_mod.arealight_metadata(shp.area_light))
 
-    overrides = _resolve_medium(shp, scene, report, path)
+    overrides = _resolve_medium(stage, shp, scene, report, path, base_dir, emitted_volumes)
+    if shp.material is not None and shp.material.type == "interface":
+        # Null/boundary material: mark the routing key explicitly so the
+        # renderer-side predicate does not have to sniff lobe values (D2/3.2).
+        overrides = dict(overrides or {})
+        overrides["volume_interface"] = True
     _author_material(stage, f"{path}_mat", shp.material, mesh, report,
                      emissive_rgb=emissive, extra_overrides=overrides,
                      textures=scene.textures, base_dir=base_dir,
@@ -255,17 +274,43 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
                      mtlx_refs=mtlx_refs)
 
 
-def _resolve_medium(shp: PbrtShape, scene: PbrtScene, report, path) -> dict | None:
+def _resolve_medium(stage, shp: PbrtShape, scene: PbrtScene, report, path, base_dir=None,
+                    emitted_volumes: set | None = None) -> dict | None:
     if not shp.inside_medium:
         return None
     medium = scene.media.get(shp.inside_medium)
     if medium is None:
         return None
+    if media_mod.is_supported_heterogeneous(medium):
+        report.exact(f"medium:{medium.type} {path}", "grid coefficients carried via customData")
+        overrides = media_mod.heterogeneous_overrides(medium, base_dir)
+        _emit_volume_once(stage, scene, medium, overrides, report, emitted_volumes)
+        return overrides
     if media_mod.is_heterogeneous(medium):
         report.skipped(f"medium:{medium.type} {path}", "heterogeneous media unsupported")
         return None
     report.approx(f"medium:homogeneous {path}", "coefficients carried via customData")
     return media_mod.homogeneous_overrides(medium)
+
+
+def _emit_volume_once(stage, scene: PbrtScene, medium, overrides: dict, report,
+                      emitted_volumes: set | None) -> None:
+    """Author the one ``UsdVol.Volume`` prim for *medium*, the first time any
+    shape references it (multiple shapes may share the same named medium)."""
+    if emitted_volumes is None or medium.name in emitted_volumes:
+        return
+    emitted_volumes.add(medium.name)
+    grid_asset = overrides.get("volume_grid_asset")
+    if not grid_asset:
+        return
+    vol_path = f"/World/volume_{emit.sanitize(medium.name)}"
+    emit.add_volume(
+        stage, vol_path, medium.ctm,
+        grid_asset=grid_asset, field_name=overrides.get("volume_grid_field", "density"),
+    )
+    vol_prim = stage.GetPrimAtPath(vol_path)
+    vol_prim.SetCustomDataByKey("skinnyOverrides", dict(overrides))
+    report.exact(f"volume:{medium.type} {vol_path}", f"UsdVol.Volume referencing {grid_asset}")
 
 
 def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,

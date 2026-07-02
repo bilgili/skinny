@@ -142,10 +142,13 @@ INSTANCE_STRIDE = 144
 #  112: normalBias  (vec3, 12) + _pad (4 B)
 #  128: transmissionColor (vec3, 12) + diffuseRoughness (float)  [Stage-2]
 #  144: specularColor (vec3, 12) + _pad1 (4 B)                   [Stage-2]
-#  160: medium σ_a (vec3, 12) + medium g (float)                 [subsurface]
-#  176: medium σ_s (vec3, 12) + mediumKind (uint)                [subsurface]
-# 192 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 192
+#  160: medium σ_a (vec3, 12) + medium g (float)                 [subsurface/volume]
+#  176: medium σ_s (vec3, 12) + mediumKind (uint)                [subsurface/volume]
+#  192: worldToUvw row 0 (vec4)                                  [volume]
+#  208: worldToUvw row 1 (vec4)                                  [volume]
+#  224: worldToUvw row 2 (vec4)                                  [volume]
+# 240 B / record, naturally 16-byte aligned.
+FLAT_MATERIAL_STRIDE = 240
 FLAT_MATERIAL_CAPACITY_INIT = 16
 
 # Channel-selector codes packed into FlatMaterialParams.channelMask. Five
@@ -232,6 +235,20 @@ MATERIAL_TYPE_SUBSURFACE = 4  # pbrt `subsurface`: a smooth dielectric boundary 
                           # FlatMaterialParams (binding 13) — no new buffer
                           # (Metal 31-buffer cap) — and read via `resolveMedium`.
                           # Detected from non-zero `subsurface_sigma_*` overrides.
+MATERIAL_TYPE_VOLUME = 5  # Free-standing participating medium bounded by a pbrt
+                          # `Material "interface"` shape (nanovdb-volume-rendering):
+                          # index-matched pass-through boundary + the medium walk
+                          # (`materials/subsurface/volume_walk.slang`). Detected
+                          # from the importer's explicit `volume_interface` marker
+                          # (`_material_is_volume`); σ/g/worldToUvw are packed
+                          # inline into FlatMaterialParams (160..240), mediumKind
+                          # = MEDIUM_NANOVDB (1) when a density grid is present
+                          # (else MEDIUM_HOMOGENEOUS for a homogeneous interior).
+
+# Medium source kinds (bindings.slang MEDIUM_*): the density-seam dispatch tag
+# packed into FlatMaterialParams.mediumKind.
+MEDIUM_HOMOGENEOUS = 0
+MEDIUM_NANOVDB = 1
 
 # Sphere-light record (binding 17): vec3 position, float radius, vec3
 # radiance, float pad. 32 B / record, naturally 16-byte aligned.
@@ -308,6 +325,19 @@ def _material_is_subsurface(material) -> bool:
     sa = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
     ss = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
     return any(c > 0.0 for c in sa) or any(c > 0.0 for c in ss)
+
+
+def _material_is_volume(material) -> bool:
+    """True for a free-standing medium boundary (pbrt ``Material "interface"``).
+
+    Keys off the importer's explicit ``volume_interface: True`` marker
+    (`pbrt/api.py` sets it only for interface-typed materials carrying a
+    `MediumInterface`), never lobe-value sniffing — so genuine cutout/glass
+    materials can't be captured. Such materials route to MATERIAL_TYPE_VOLUME:
+    the index-matched pass-through medium walk (`volume_walk.slang`).
+    """
+    overrides = getattr(material, "parameter_overrides", None) or {}
+    return bool(overrides.get("volume_interface"))
 
 
 class TexturePool:
@@ -417,8 +447,12 @@ def pack_flat_material(
     normal_scale: tuple[float, float, float] = (2.0, 2.0, 2.0),
     normal_bias: tuple[float, float, float] = (-1.0, -1.0, -1.0),
     channel_mask: int = 0,
+    volume_world_to_uvw=None,
+    volume_value_max: float = 1.0,
+    mm_per_unit: float = 1.0,
 ) -> bytes:
-    """Pack a Material's overrides into 128 bytes (FlatMaterialParams).
+    """Pack a Material's overrides into FLAT_MATERIAL_STRIDE bytes
+    (FlatMaterialParams).
 
     Layout (scalar/std430 compatible — `float3` packs at 4-byte alignment):
        0: diffuseColor.r/g/b      (vec3 → 12 B)
@@ -447,15 +481,25 @@ def pack_flat_material(
      140: diffuseRoughness        (float; Stage-2 Oren-Nayar; 0 ⇒ Lambert)
      144: specularColor.r/g/b     (vec3 → 12 B; Stage-2; fallback white)
      156: _pad1                   (uint; reserved)
-     160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface; mm⁻¹; 0 if not SSS)
-     172: medium g                (float; subsurface HG anisotropy)
-     176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface; mm⁻¹; 0 if not SSS)
-     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0; eta reuses ior)
+     160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
+     172: medium g                (float; medium HG anisotropy)
+     176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
+     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0 / MEDIUM_NANOVDB=1;
+                                   eta reuses ior)
+     192: worldToUvw row 0        (vec4; volume; identity row (1,0,0,0) else)
+     208: worldToUvw row 1        (vec4; volume; identity row (0,1,0,0) else)
+     224: worldToUvw row 2        (vec4; volume; identity row (0,0,1,0) else)
 
     Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
     override reproduces the prior behavior — transmissionColor defaults to
     diffuseColor (so the delta-transmission weight is unchanged), specularColor
     defaults to white, and diffuseRoughness defaults to 0 (exact Lambert).
+
+    Volume materials (nanovdb-volume-rendering; `_material_is_volume`) pack the
+    free-standing medium in the same 160..192 slots plus the world→uvw rows:
+    `volume_world_to_uvw` is the loader's (3, 4) math-convention affine
+    (VolumeGrid.world_to_uvw); non-volume materials get identity rows, so the
+    pre-existing 0..192 prefix bytes are only ever *extended*, never shifted.
     """
     overrides = material.parameter_overrides
     diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
@@ -477,14 +521,44 @@ def pack_flat_material(
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
     # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
-    # Metal 31-buffer cap). σ in mm⁻¹; zero for non-subsurface materials. Boundary
-    # eta reuses `ior`. mediumKind = MEDIUM_HOMOGENEOUS (0) — the only kind now.
+    # Metal 31-buffer cap). σ in mm⁻¹; zero for non-medium materials. Boundary
+    # eta reuses `ior`.
     medium_sigma_a = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
     medium_sigma_s = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
     medium_g = _override_float(overrides, "subsurface_g", 0.0)
-    medium_kind = 0  # MEDIUM_HOMOGENEOUS
+    medium_kind = MEDIUM_HOMOGENEOUS
+    # World→uvw rows (volume; identity elsewhere so the bytes are inert).
+    w2u = ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))
+    if _material_is_volume(material):
+        # Free-standing medium (nanovdb-volume-rendering). TWO folds on σ:
+        #  * `volume_value_max` — the density texture is normalized to [0,1] by
+        #    dividing by the grid's value max at upload, so folding value_max
+        #    into σ here makes the normalized texel exactly the density
+        #    multiplier (and the global majorant exactly the packed σ_t).
+        #  * `1 / mm_per_unit` — the walk's convention is σ in mm⁻¹ with world
+        #    distances × mmPerUnit (traverseMediumSegment), while the importer
+        #    carries pbrt σ per *scene unit*; pre-dividing makes the walk's
+        #    optical depth σ_packed·d_world·mmPerUnit == σ_pbrt·d_world.
+        # NOTE: σ is folded at pack time with the renderer's live mm_per_unit;
+        # a later mm_per_unit change re-packs via the material upload path.
+        mmu = max(float(mm_per_unit), 1e-6)
+        fold = float(volume_value_max) / mmu
+        vs_a = _override_color3(overrides, "volume_sigma_a", (0.0, 0.0, 0.0))
+        vs_s = _override_color3(overrides, "volume_sigma_s", (0.0, 0.0, 0.0))
+        medium_sigma_a = tuple(c * fold for c in vs_a)
+        medium_sigma_s = tuple(c * fold for c in vs_s)
+        medium_g = _override_float(overrides, "volume_g", 0.0)
+        # Grid-backed media dispatch to the density texture; a homogeneous
+        # free-standing interior (no grid asset) keeps densityAt ≡ 1.
+        medium_kind = (MEDIUM_NANOVDB if overrides.get("volume_grid_asset")
+                       else MEDIUM_HOMOGENEOUS)
+        ior = 1.0  # index-matched pass-through boundary (eta reuses the ior slot)
+        if volume_world_to_uvw is not None:
+            m = np.asarray(volume_world_to_uvw, np.float32).reshape(3, 4)
+            w2u = tuple(tuple(float(v) for v in row) for row in m)
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I",
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I"
+        " ffff ffff ffff",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -510,6 +584,9 @@ def pack_flat_material(
         medium_g,
         medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
         int(medium_kind) & 0xFFFFFFFF,
+        w2u[0][0], w2u[0][1], w2u[0][2], w2u[0][3],
+        w2u[1][0], w2u[1][1], w2u[1][2], w2u[1][3],
+        w2u[2][0], w2u[2][1], w2u[2][2], w2u[2][3],
     )
 
 
@@ -1548,6 +1625,15 @@ class Renderer:
         # Scene-scale bridge between mm-valued skin params and world-unit
         # ray distances. 1 world unit = mm_per_unit millimetres. The SDF
         self.mm_per_unit = 1000.0
+
+        # Heterogeneous-medium density grid state (nanovdb-volume-rendering).
+        # `_volume_grid_key` identifies the uploaded grid ((asset, value_max);
+        # None = the always-bound 1×1×1 zero fallback) and feeds
+        # `_current_state_hash` so a grid swap resets accumulation.
+        # `_volume_world_to_uvw` / `_volume_value_max` feed pack_flat_material.
+        self._volume_grid_key: "Optional[tuple]" = None
+        self._volume_world_to_uvw = None   # (3, 4) float32 or None (identity)
+        self._volume_value_max: float = 1.0
 
         # Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
         # film-maxcomponent-clamp). 0 = disabled (no clamp; byte-identical render).
@@ -3615,6 +3701,15 @@ class Renderer:
         # HDR environment texture (RGBA32F, equirectangular).
         from skinny.environment import ENV_HEIGHT, ENV_WIDTH
         self.env_image = self._gpu.SampledImage(self.ctx, ENV_WIDTH, ENV_HEIGHT)
+
+        # Heterogeneous-medium density grid (binding 26, `volumeDensity`,
+        # nanovdb-volume-rendering). ALWAYS bound — PARTIALLY_BOUND-style gating
+        # is not available for a single binding, so a 1×1×1 zero texture stands
+        # in until a scene with a UsdVol.Volume grid loads (same always-bound
+        # pattern as the env/tattoo maps); densityAt then reads 0 everywhere.
+        # Replaced (destroy + re-create + rebind) per scene by _sync_volume_grid.
+        self.volume_density_image = self._gpu.SampledImage3D(self.ctx, 1, 1, 1)
+        self.volume_density_image.upload_sync(np.zeros((1, 1, 1), np.float16))
         # Environment importance-sampling CDFs — ONE combined buffer (binding 31,
         # `envDistCdf`): the marginal CDF ([ENV_HEIGHT+1] floats) followed by the
         # conditional CDF ([ENV_HEIGHT*(ENV_WIDTH+1)] floats) at element offset
@@ -4008,8 +4103,9 @@ class Renderer:
         pool_sizes.append(
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                # env + tattoo + n/r/d (5) + bindless flat-material array.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (5 + self._gpu.BINDLESS_TEXTURE_CAPACITY),
+                # env + tattoo + n/r/d + volume density grid (6)
+                # + bindless flat-material array.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT * (6 + self._gpu.BINDLESS_TEXTURE_CAPACITY),
             )
         )
         # Storage buffers per frame: vertices, indices, BVH nodes, TLAS
@@ -4091,6 +4187,14 @@ class Renderer:
             disp_info = vk.VkDescriptorImageInfo(
                 sampler=self.displacement_image.sampler,
                 imageView=self.displacement_image.view,
+                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            )
+            # Heterogeneous-medium density grid (binding 26, always bound —
+            # the 1×1×1 zero fallback until a scene grid uploads; per-scene
+            # swaps re-write via _rebind_volume_descriptor).
+            volume_info = vk.VkDescriptorImageInfo(
+                sampler=self.volume_density_image.sampler,
+                imageView=self.volume_density_image.view,
                 imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             )
             vtx_info = vk.VkDescriptorBufferInfo(
@@ -4248,6 +4352,14 @@ class Renderer:
                     descriptorCount=1,
                     descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                     pImageInfo=[disp_info],
+                ),
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds,
+                    dstBinding=26,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    pImageInfo=[volume_info],
                 ),
                 vk.VkWriteDescriptorSet(
                     dstSet=ds,
@@ -4623,6 +4735,10 @@ class Renderer:
             # Film per-sample radiance clamp from the imported pbrt film
             # (change film-maxcomponent-clamp); 0 = disabled (no-op).
             self.film_max_component = float(getattr(scene, "film_max_component", 0.0) or 0.0)
+            # Heterogeneous-medium density grid (nanovdb-volume-rendering):
+            # upload once per scene, after mm_per_unit is final and before the
+            # material upload below packs the volume σ folds.
+            self._sync_volume_grid(scene)
             if scene.instances:
                 self._upload_usd_scene()
                 self._usd_uploaded_count = len(scene.instances)
@@ -5103,6 +5219,10 @@ class Renderer:
         if stage is not None:
             self._usd_stage = stage
             self._attach_edit_layer()
+        # Density grid before the material upload (the volume σ folds read the
+        # grid state + the live self.mm_per_unit — the same source the walk's
+        # fc.mmPerUnit is packed from, so fold and walk always agree).
+        self._sync_volume_grid(scene)
         self._gen_scene_materials()           # guarded: rebuilds pipeline only on graph-set change
         if first:
             self._apply_usd_lights(scene)     # once: appends env + seeds sliders
@@ -5157,6 +5277,8 @@ class Renderer:
         scene.lights_dir = new_scene.lights_dir
         scene.lights_sphere = new_scene.lights_sphere
         scene.camera_override = new_scene.camera_override
+        scene.volume_grid = getattr(new_scene, "volume_grid", None)
+        self._sync_volume_grid(scene)
         self._gen_scene_materials()
         self._upload_usd_scene()  # also uploads distant + sphere lights
         self._material_version += 1
@@ -5600,6 +5722,12 @@ class Renderer:
             if mod and mod in py_ids:
                 types.append(MATERIAL_TYPE_PYTHON)
                 self._material_python_ids[i] = py_ids[mod]
+            elif _material_is_volume(mat):
+                # Free-standing medium boundary (nanovdb-volume-rendering):
+                # pbrt `Material "interface"` with a MediumInterface. Packed as
+                # flat data (medium fields at 160..240); the type tag routes the
+                # GPU to the index-matched pass-through medium walk.
+                types.append(MATERIAL_TYPE_VOLUME)
             elif _material_is_subsurface(mat):
                 # pbrt subsurface: a dielectric boundary + an inline homogeneous
                 # interior medium. Still packed as flat data (the medium fields
@@ -5683,6 +5811,12 @@ class Renderer:
                 normal_scale=n_scale,
                 normal_bias=n_bias,
                 channel_mask=channel_mask,
+                # Volume-material folds (nanovdb-volume-rendering): the loaded
+                # grid's world→uvw + value max (`_sync_volume_grid`) and the
+                # live scene scale — inert (identity/1.0) for other materials.
+                volume_world_to_uvw=self._volume_world_to_uvw,
+                volume_value_max=self._volume_value_max,
+                mm_per_unit=float(self.mm_per_unit),
             )
         if not data:
             data += b"\x00" * FLAT_MATERIAL_STRIDE
@@ -7206,6 +7340,77 @@ class Renderer:
         if writes:
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
+    def _sync_volume_grid(self, scene) -> None:
+        """Upload the scene's density grid (nanovdb-volume-rendering) once per
+        scene load — NOT per frame.
+
+        Normalizes the grid to [0, 1] by dividing by its value max (skipped when
+        already 1.0 — e.g. the wdas cloud; mandatory for bunny_cloud's 2.792),
+        converts to float16, and uploads in the GPU's (depth, height, width) =
+        (nz, ny, nx) order. The previous texture is destroyed and replaced; a
+        scene with no grid restores the 1×1×1 zero fallback. Also caches the
+        world→uvw rows + value max for `pack_flat_material`'s σ folds, and the
+        grid identity key for `_current_state_hash` (accumulation reset).
+        Call BEFORE the scene's material upload so volume materials pack against
+        the fresh grid state.
+        """
+        vg = getattr(scene, "volume_grid", None) if scene is not None else None
+        key = (str(vg.asset_path), float(vg.value_max)) if vg is not None else None
+        if key == self._volume_grid_key:
+            return
+        self._volume_grid_key = key
+        if self.volume_density_image is not None:
+            self.volume_density_image.destroy()
+        if vg is None:
+            self.volume_density_image = self._gpu.SampledImage3D(self.ctx, 1, 1, 1)
+            self.volume_density_image.upload_sync(np.zeros((1, 1, 1), np.float16))
+            self._volume_world_to_uvw = None
+            self._volume_value_max = 1.0
+        else:
+            nx, ny, nz = vg.dims
+            dens = vg.density
+            vmax = float(vg.value_max) if vg.value_max > 0.0 else 1.0
+            if vmax != 1.0:
+                dens = dens / np.float32(vmax)
+            # Reader layout is (nx, ny, nz); GPU upload wants (D, H, W) = (nz, ny, nx).
+            voxels = np.ascontiguousarray(
+                np.transpose(dens, (2, 1, 0)).astype(np.float16))
+            self.volume_density_image = self._gpu.SampledImage3D(self.ctx, nx, ny, nz)
+            self.volume_density_image.upload_sync(voxels)
+            self._volume_world_to_uvw = np.asarray(vg.world_to_uvw, np.float32)
+            self._volume_value_max = vmax
+            print(
+                f"[skinny] volume grid uploaded: {nx}x{ny}x{nz} R16F "
+                f"({nx * ny * nz * 2 / 1e6:.0f} MB), value_max {vmax:.4g}"
+            )
+        self._rebind_volume_descriptor()
+
+    def _rebind_volume_descriptor(self) -> None:
+        """Vulkan-only: rewrite binding 26 (volumeDensity) after the 3D texture
+        was replaced. Metal binds the live `volume_density_image` by name at
+        every dispatch (`_build_metal_binds`), so a swap is picked up
+        automatically there; before the Vulkan descriptor sets exist the initial
+        `_create_descriptors` writes the binding against the current image."""
+        if self.is_metal or self.descriptor_sets is None:
+            return
+        info = vk.VkDescriptorImageInfo(
+            sampler=self.volume_density_image.sampler,
+            imageView=self.volume_density_image.view,
+            imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        )
+        writes = [
+            vk.VkWriteDescriptorSet(
+                dstSet=ds,
+                dstBinding=26,
+                dstArrayElement=0,
+                descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                pImageInfo=[info],
+            )
+            for ds in self.descriptor_sets
+        ]
+        vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+
     # Shared-buffer element strides (bytes). Must match the packers in mesh.py
     # and the grow math in _ensure_mesh_buffer_capacity.
     _SLAB_V_STRIDE = 32  # vertex
@@ -8338,12 +8543,17 @@ class Renderer:
             # Shared bindless-pool sampler (binding 38, design D8).
             "commonSampler": self._metal_common_sampler,
         }
-        # Discrete maps: combined `Sampler2D` is unsupported on Metal, so each is a
-        # `Texture2D` + its own `SamplerState` (bindings 4/8-11 + 39-43, design D8).
+        # Discrete maps: combined `Sampler2D`/`Sampler3D` is unsupported on Metal,
+        # so each is a `Texture2D`/`Texture3D` + its own `SamplerState`
+        # (bindings 4/8-11/26 + 39-44, design D8). `volumeDensity` is the
+        # heterogeneous-medium density grid (nanovdb-volume-rendering) — always
+        # bound (1×1×1 zero fallback), re-read fresh here every dispatch so a
+        # per-scene texture swap needs no descriptor bookkeeping on Metal.
         for name, img in (
             ("envMap", self.env_image), ("tattooMap", self.tattoo_image),
             ("normalMap", self.normal_image), ("roughnessMap", self.roughness_image),
             ("displacementMap", self.displacement_image),
+            ("volumeDensity", self.volume_density_image),
         ):
             b[name] = img.texture
             b[name + "Sampler"] = img.sampler
@@ -8845,6 +9055,11 @@ class Renderer:
             float(self.env_intensity),
             int(self.furnace_index),
             float(self.mm_per_unit),
+            # Heterogeneous-medium grid identity (nanovdb-volume-rendering):
+            # swapping the density grid (scene change) changes every volume
+            # pixel, so reset accumulation. Material σ/g edits ride on
+            # `_material_version` like every other override edit.
+            self._volume_grid_key,
             # Film per-sample radiance clamp (change film-maxcomponent-clamp):
             # changing it changes every pixel, so reset accumulation.
             float(self.film_max_component),
@@ -9935,6 +10150,10 @@ class Renderer:
         self.normal_image.destroy()
         self.tattoo_image.destroy()
         self.env_image.destroy()
+        # Heterogeneous-medium density grid (binding 26).
+        if getattr(self, "volume_density_image", None) is not None:
+            self.volume_density_image.destroy()
+            self.volume_density_image = None
         # Env importance-sampling CDFs (bindings 31/32) — allocated once in
         # _init_gpu; were previously never freed (surfaced by the record-dump's
         # clean-teardown check).

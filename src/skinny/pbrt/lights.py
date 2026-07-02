@@ -93,10 +93,20 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
         prim = UsdLux.DomeLight.Define(stage, path)
         prim.GetPrim().SetCustomDataByKey("pbrt", pbrt_md)
         fname = p.string("filename", None)
+        # Authored light CTM rotation (e.g. bunny-cloud's `Rotate 10 1 0 0`
+        # around the LightSource): pbrt evaluates the env image in LIGHT space
+        # and rotates light->world with this CTM, so the resample must go
+        # world->light via its inverse. Baked into the reprojection below;
+        # None = identity (no note, no cost).
+        world_to_light = _env_world_to_light(getattr(light, "ctm", None))
         if fname:
             ext = os.path.splitext(fname)[1].lower()
             if ext == ".hdr":
                 prim.CreateTextureFileAttr().Set(Sdf.AssetPath(fname))
+                if world_to_light is not None:
+                    report.approx(f"light:infinite {path}",
+                                  "env rotation (light CTM) dropped: direct .hdr "
+                                  "reference is shared, rotation not baked")
                 # A direct .hdr reference can't bake `scale` into the pixels (the
                 # file is shared by reference), so carry it on the DomeLight
                 # intensity — the loader collapses color×intensity×2^exposure into
@@ -106,7 +116,8 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
                 report.exact(f"light:infinite {path}",
                              "" if scale == 1.0 else f"scale={scale:.4g} → DomeLight intensity")
             elif ext in (".exr", ".pfm") and asset_dir is not None:
-                converted = _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path)
+                converted = _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report,
+                                                path, world_to_light=world_to_light)
                 prim.CreateTextureFileAttr().Set(Sdf.AssetPath(converted or fname))
             else:
                 prim.CreateTextureFileAttr().Set(Sdf.AssetPath(fname))
@@ -134,7 +145,26 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
     return False
 
 
-def _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path):
+def _env_world_to_light(ctm) -> "np.ndarray | None":
+    """Inverse of the light CTM's rotation part, or None when identity/absent.
+
+    pbrt light CTMs are rigid (rotations; translation is meaningless for an
+    infinite light) — normalize the columns anyway so a stray uniform scale
+    cannot skew the inverse."""
+    if ctm is None:
+        return None
+    R = np.asarray(ctm, np.float64)[:3, :3].copy()
+    norms = np.linalg.norm(R, axis=0)
+    if np.any(norms < 1e-12):
+        return None
+    R /= norms
+    if np.allclose(R, np.eye(3), atol=1e-9):
+        return None
+    return np.linalg.inv(R)
+
+
+def _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path,
+                        world_to_light=None):
     """Resample a pbrt ``.exr``/``.pfm`` infinite-light map to an `.hdr` for skinny."""
     src = fname if os.path.isabs(fname) else os.path.join(base_dir or "", fname)
     try:
@@ -153,10 +183,14 @@ def _convert_env_to_hdr(fname, base_dir, asset_dir, name, scale, report, path):
         from .equiarea import equiarea_to_equirect
 
         edge = img.shape[0]
-        img = equiarea_to_equirect(img, height=edge)
+        img = equiarea_to_equirect(img, height=edge, world_to_light=world_to_light)
         note = f"{ext} equal-area env reprojected to equirect .hdr"
+        if world_to_light is not None:
+            note += " (light CTM rotation baked)"
     else:
         note = f"{ext} env converted to .hdr (non-square; equirect assumed)"
+        if world_to_light is not None:
+            note += "; env rotation (light CTM) dropped for lat-long input"
     if scale != 1.0:
         img = img * scale
     from .hdr import write_hdr

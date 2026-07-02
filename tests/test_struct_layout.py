@@ -21,9 +21,11 @@ class TestPythonPackingSizes:
         assert len(data) == 80
 
     def test_flat_material_stride(self):
+        # 192 → 240 (nanovdb-volume-rendering): three float4 worldToUvw rows
+        # appended at 192/208/224. The 0..192 prefix layout is unchanged.
         from skinny.renderer import FLAT_MATERIAL_STRIDE
 
-        assert FLAT_MATERIAL_STRIDE == 192
+        assert FLAT_MATERIAL_STRIDE == 240
 
     def test_flat_material_pack_size(self):
         from skinny.renderer import pack_flat_material
@@ -31,7 +33,7 @@ class TestPythonPackingSizes:
 
         material = SimpleNamespace(parameter_overrides={})
         data = pack_flat_material(material)
-        assert len(data) == 192
+        assert len(data) == 240
 
     def test_openpbr_names_map_to_std_surface(self):
         """OpenPBR shader-input names (`transmission_weight`, `base_metalness`,
@@ -205,7 +207,7 @@ class TestPythonPackingSizes:
             channel_mask=channel_mask,
         )
 
-        assert len(data) == 192
+        assert len(data) == 240
         # opacityTextureIdx at byte 76 (uint)
         assert struct.unpack_from("I", data, 76)[0] == 7
         # opacityThreshold at byte 92 (float)

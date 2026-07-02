@@ -50,6 +50,14 @@ struct BounceResult
     float3 directLight;    // NEE contribution
     float3 fullRadiance;   // self-integrating materials (skin, debug)
     BSDFSample bsdfSample; // wi converted to world space by evaluateBounce
+    // MATERIAL_TYPE_VOLUME zero-scatter pass-through (nanovdb-volume-rendering):
+    // the continuation is the SAME ray, only attenuated, so the loop must keep
+    // the PREVIOUS bounce's MIS state (misBsdfPdf / delta-ness) instead of
+    // re-deriving it from this bounce's pdf. Without this, a ground-diffuse ray
+    // crossing the volume unscattered became a delta continuation and took the
+    // env sun-disk at full weight — 10 pixels carried 93% of bunny-cloud's
+    // relMSE as ~280-radiance fireflies.
+    bool preserveMisState;
 };
 
 // Per-lane forward sample produced by the wavefront neural-proposal pre-pass

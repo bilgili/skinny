@@ -335,6 +335,12 @@ def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_d
 
     if mtype in ("", "none"):
         inputs["base_color"] = [0.5, 0.5, 0.5]
+    elif mtype == "interface":
+        # See map_material's "interface" branch: null boundary, no BSDF lobes.
+        inputs["base_color"] = [0.0, 0.0, 0.0]
+        inputs["metalness"] = 0.0
+        inputs["specular_roughness"] = 1.0
+        notes.append("interface -> null boundary material (no BSDF lobes); routes to volume path")
     elif mtype == "diffuse":
         put("base_color", reflectance([0.5, 0.5, 0.5]))
         inputs["specular_roughness"] = 1.0
@@ -495,6 +501,18 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
 
     if mtype in ("", "none"):
         inputs["diffuseColor"] = [0.5, 0.5, 0.5]
+    elif mtype == "interface":
+        # pbrt null/boundary material: no BSDF lobes at all, the shape exists
+        # only to bound a MediumInterface. Encode as a lobe-less flat material
+        # (zero diffuse, fully opaque so the flat opacity=0 glass/refraction
+        # branch does NOT fire). api._author_material additionally sets the
+        # "volume_interface" skinnyOverrides marker so the renderer-side
+        # routing predicate does not have to sniff lobe values.
+        inputs["diffuseColor"] = [0.0, 0.0, 0.0]
+        inputs["metallic"] = 0.0
+        inputs["roughness"] = 1.0
+        inputs["opacity"] = 1.0
+        notes.append("interface -> null boundary material (no BSDF lobes); routes to volume path")
     elif mtype == "diffuse":
         put("diffuseColor", reflectance([0.5, 0.5, 0.5]))
         inputs["roughness"] = 1.0

@@ -26,7 +26,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-from pxr import Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel
+from pxr import Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel, UsdVol
 
 from skinny.environment import _load_radiance_hdr, _resize_equirect
 from skinny.mesh import MeshSource, bake_mesh, compute_source_hash
@@ -46,6 +46,7 @@ from skinny.scene import (
     MeshInstance,
     Scene,
     TextureBinding,
+    VolumeGrid,
 )
 
 try:
@@ -1621,6 +1622,138 @@ def _film_max_component(stage: "Usd.Stage") -> float:
     return val
 
 
+# ─── UsdVol.Volume ingest (nanovdb-volume-rendering) ─────────────────
+
+# pbrt→USD point change of basis. The importer authors a Volume prim's xform as
+# `to_skinny(ctm) = B @ ctm @ B` (pbrt/emit.add_volume), i.e. the prim transform
+# maps *B-converted* medium-space points to USD world:
+#   p_usd = primXform @ (B @ p_medium),   p_medium = M_grid @ ijk.
+# The grid's own map (`NanoVdbGrid.index_to_world`) lives in pbrt/medium axes,
+# so composing the full index→USD-world chain needs one explicit B between the
+# prim xform and the grid map — the same convention the geometry bake uses
+# (`bake_world_mesh` transforms points by `B @ CTM`; here
+# primXform @ B @ M_grid == B @ ctm @ M_grid, the identical point chain).
+_PBRT_TO_USD_B = np.diag([1.0, 1.0, -1.0, 1.0])
+
+
+def compute_volume_world_to_uvw(
+    prim_transform_stored: np.ndarray,
+    index_to_world: np.ndarray,
+    index_min: tuple[int, int, int],
+    dims: tuple[int, int, int],
+) -> np.ndarray:
+    """Fold the whole world→texture chain into one (3, 4) affine map.
+
+    `prim_transform_stored` is the Volume prim's local-to-world in this
+    codebase's *stored* (row-vector / math-transpose) form, as returned by
+    `_world_transform` (with any up-axis correction already right-multiplied
+    on, like every mesh instance transform). `index_to_world` is the grid's
+    math-convention map of ijk voxel centers to medium space
+    (`NanoVdbGrid.index_to_world`, world = M @ ijk).
+
+    Returns rows 0..2 of the math (column-vector) matrix A with
+    ``uvw = A @ [p_world, 1]`` where ``uvw = ((X⁻¹ @ p) − index_min + 0.5) / dims``
+    and ``X = primXform_math @ B @ index_to_world`` — so the shader does one
+    affine transform per density lookup and samples the texture at the exact
+    voxel centers (`density[a, b, c]` ↔ uvw = ((a,b,c) + 0.5) / dims).
+    """
+    prim_math = np.asarray(prim_transform_stored, np.float64).T
+    x = prim_math @ _PBRT_TO_USD_B @ np.asarray(index_to_world, np.float64)
+    world_to_index = np.linalg.inv(x)
+    shift = np.eye(4, dtype=np.float64)
+    shift[:3, 3] = 0.5 - np.asarray(index_min, np.float64)
+    scale = np.diag([1.0 / dims[0], 1.0 / dims[1], 1.0 / dims[2], 1.0])
+    a = scale @ shift @ world_to_index
+    return a[:3, :].astype(np.float32)
+
+
+def _resolve_volume_asset_path(file_path_attr, stage: "Usd.Stage") -> Optional[str]:
+    """Resolve an OpenVDBAsset ``filePath`` to an on-disk path string."""
+    if file_path_attr is None:
+        return None
+    resolved = getattr(file_path_attr, "resolvedPath", "") or ""
+    if resolved:
+        return str(resolved)
+    raw = getattr(file_path_attr, "path", None)
+    if raw is None:
+        raw = str(file_path_attr)
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        real = stage.GetRootLayer().realPath
+        if real:
+            p = Path(real).parent / p
+    return str(p)
+
+
+def _extract_volume_grid(
+    stage: "Usd.Stage", time: Usd.TimeCode,
+) -> "Optional[tuple[object, np.ndarray, str, str, str]]":
+    """Find the stage's ``UsdVol.Volume`` prim and decode its density grid.
+
+    Returns ``(NanoVdbGrid, stored_prim_transform, prim_path, asset_path,
+    field_name)`` or None when the stage has no volume. Exactly ONE grid per
+    scene is supported: additional Volume prims are warned about and skipped.
+    Decode failures (unsupported codec / grid class / missing file) propagate —
+    the nanovdb reader's errors name the file and feature, and a loud failure
+    is required over silently rendering an empty medium (heterogeneous-media
+    spec).
+    """
+    from skinny.pbrt.nanovdb import read_nanovdb
+
+    found = None
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        if not prim.IsActive() or prim.IsAbstract() or not prim.IsA(UsdVol.Volume):
+            continue
+        if found is not None:
+            log.warning(
+                "multiple UsdVol.Volume prims; only one grid per scene is "
+                "supported — keeping %s, skipping %s",
+                found[2], prim.GetPath(),
+            )
+            print(
+                f"[skinny] WARNING: multiple UsdVol.Volume prims — keeping "
+                f"{found[2]}, skipping {prim.GetPath()}"
+            )
+            continue
+        volume = UsdVol.Volume(prim)
+        # GetFieldPathMap is missing from some usd-core builds (the repo runs two
+        # venvs with different pxr versions) — fall back to the raw `field:*`
+        # relationships, which every build exposes.
+        if hasattr(volume, "GetFieldPathMap"):
+            field_map = volume.GetFieldPathMap()
+        else:
+            field_map = {}
+            for rel in prim.GetRelationships():
+                rel_name = rel.GetName()
+                if not rel_name.startswith("field:"):
+                    continue
+                targets = rel.GetTargets()
+                if targets:
+                    field_map[rel_name.split(":", 1)[1]] = targets[0]
+        asset_path = None
+        field_name = "density"
+        for _token, field_path in field_map.items():
+            field_prim = stage.GetPrimAtPath(field_path)
+            if not field_prim or not field_prim.IsA(UsdVol.OpenVDBAsset):
+                continue
+            vdb = UsdVol.OpenVDBAsset(field_prim)
+            asset_path = _resolve_volume_asset_path(vdb.GetFilePathAttr().Get(), stage)
+            name_attr = vdb.GetFieldNameAttr().Get()
+            if name_attr:
+                field_name = str(name_attr)
+            break
+        if not asset_path:
+            log.warning("UsdVol.Volume %s has no resolvable OpenVDBAsset field; skipped",
+                        prim.GetPath())
+            continue
+        grid = read_nanovdb(asset_path, field=field_name)
+        xf = _world_transform(prim, time)
+        found = (grid, xf, str(prim.GetPath()), asset_path, field_name)
+    return found
+
+
 def _read_open_stage(
     stage: "Usd.Stage",
     *,
@@ -1693,6 +1826,35 @@ def _read_open_stage(
     )
     up_axis = str(UsdGeom.GetStageUpAxis(stage))
     prim_data = _apply_up_axis_correction(prim_data, partial_scene, up_axis)
+
+    # UsdVol.Volume ingest (nanovdb-volume-rendering): decode the density grid
+    # and fold the full index→world chain (prim xform, up-axis correction, B,
+    # grid map, index_min, voxel-center offset) into one world→uvw affine map.
+    vol = _extract_volume_grid(stage, eval_time)
+    if vol is not None:
+        grid, vol_xf, vol_prim_path, asset_path, field_name = vol
+        rt = _up_axis_rt(up_axis)
+        if rt is not None:
+            rt4 = np.eye(4, dtype=np.float32)
+            rt4[:3, :3] = rt
+            vol_xf = vol_xf @ rt4  # same stored-form correction as prim_data
+        dims = tuple(int(d) for d in grid.density.shape)
+        vmax = float(grid.value_max) if grid.value_max > 0.0 else 1.0
+        partial_scene.volume_grid = VolumeGrid(
+            density=grid.density,
+            value_max=vmax,
+            index_min=tuple(int(i) for i in grid.index_min),
+            dims=dims,
+            world_to_uvw=compute_volume_world_to_uvw(
+                vol_xf, grid.index_to_world, grid.index_min, dims),
+            asset_path=str(asset_path),
+            field_name=field_name,
+            prim_path=vol_prim_path,
+        )
+        print(
+            f"[skinny] USD volume {vol_prim_path}: grid {grid.grid_name!r} "
+            f"{dims[0]}x{dims[1]}x{dims[2]} value_max {vmax:.4g} ({asset_path})"
+        )
     return partial_scene, prim_data, (stage if keep_stage else None)
 
 

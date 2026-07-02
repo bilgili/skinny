@@ -942,6 +942,7 @@ incrementally moved over.
 | 23 | StructuredBuffer | Lens elements (thick-lens stack, float4) | `cameras/thick_lens.slang` |
 | 24 | StructuredBuffer | Per-radius exit-pupil bounds (float4) | `cameras/thick_lens.slang` |
 | 25 | ByteAddressBuffer | **Combined** MaterialX nodegraph params `graphParamsCombined` — ONE matId-major byte buffer shared by every scene graph, read `Load<GraphParams_X>(matId * GRAPH_PARAM_STRIDE)` (scalar layout, identical Metal/SPIR-V). Replaces the former one-`StructuredBuffer`-per-graph at 25..25+N−1, so graph count no longer grows the Metal argument table (change `combine-graph-param-buffers`) | `generated_materials.slang` |
+| 26 | Sampler3D&lt;float&gt; (Vulkan) / Texture3D&lt;float&gt; (Metal) | Heterogeneous-medium density grid `volumeDensity` — ONE R16F 3D texture, normalized to [0,1] (value-max folded into the packed σ so the texel is the density multiplier). Sampled by `densityAt`'s `MEDIUM_NANOVDB` case through the folded world→uvw affine in `FlatMaterialParams`. Always bound (1×1×1 zero fallback when no volume). On Metal splits into `Texture3D` + `SamplerState volumeDensitySampler` at **binding 44** (design D8); a texture, not a buffer, so the 31-slot buffer table is unaffected (change `nanovdb-volume-rendering`) | `materials/subsurface/medium.slang` |
 | 30 | RWStructuredBuffer | Tool readback (float4) — scene pick / BXDF / BSSRDF probe. *Metal slot-cap gate:* compiled out of the neural-active wavefront build (`SKINNY_METAL && SKINNY_METAL_NEURAL`), where it is dead, to fit 33–35 under Metal's 31-buffer argument table | `bindings.slang` |
 | 31 | StructuredBuffer | Env importance-sampling distribution `envDistCdf` — **one** buffer = marginal CDF (`ENV_H+1` floats) then conditional CDF (`H×(W+1)` floats) at element offset `ENV_COND_CDF_BASE = ENV_H+1`. Folds the former 31/32 pair into one to free a Metal buffer slot for the neural + online-training build (change `combine-graph-param-buffers`); binding 32 retired | `environment.slang` |
 | 33 | StructuredBuffer | Neural-proposal flat Linear weights (`NF_WT`, row-major — `float` by default, `half` in the fp16 precision modes) | `sampling/neural_proposal.slang` |
@@ -959,6 +960,15 @@ through a shared `commonSampler` at **binding 38**, and the five discrete maps
 (env 4, tattoo 8, normal 9, roughness 10, displacement 11) keep their texture slot
 but gain a per-map `SamplerState` at **bindings 39–43** (5 + `commonSampler` =
 6 ≤ 16). The buffer/image slots (0–37) are identical on both backends.
+
+The heterogeneous-volume density grid (`volumeDensity`, binding 26) adds a sixth
+discrete `Texture3D` + a `SamplerState` at **binding 44** (change
+`nanovdb-volume-rendering`). To stay under Apple's **128-texture** compute-argument
+limit the bindless flat-material pool is trimmed **`Texture2D[120]` → `[119]`**
+(`BINDLESS_TEXTURE_CAPACITY`): 119 pool + 5 discrete 2D maps + the 3D grid +
+output/accum/hudMask exactly fills the table. Before the trim the pool filled it to
+128 and the added 3D texture silently failed every Metal pipeline (all-black
+frames).
 
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared
@@ -1426,7 +1436,7 @@ debug_line.slang
 cameras/{pinhole.slang, thick_lens.slang}
 materials/debug_normal_material.slang
 materials/flat/{flat_material.slang, flat_lobes.slang, flat_shading.slang}
-materials/subsurface/{subsurface_walk.slang, medium.slang}  // pbrt volumetric SSS
+materials/subsurface/{subsurface_walk.slang, medium.slang, volume_walk.slang}  // pbrt volumetric SSS + free-standing NanoVDB media
 materials/skin/{skin_material.slang, skin_bssrdf.slang, skin_shading.slang,
                 skin_direct.slang, skin_ibl_specular.slang, skin_ibl_diffuse.slang,
                 skin_volume.slang, skin_transmission.slang, skin_hair_sheen.slang,

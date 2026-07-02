@@ -30,7 +30,12 @@ uniform FrameConstants fc;
 // auto-assigned base == 0 in every kernel, dead-strip or not. The megakernel
 // keeps every preceding texture live, which is why it never hit this.
 #if defined(SKINNY_METAL)
-[[vk::binding(14)]] Texture2D<float4> flatMaterialTextures[120];
+// Pool trimmed 120 -> 119 (nanovdb-volume-rendering): the Metal compute
+// argument table caps at 128 textures, and 120 (pool) + 5 discrete maps +
+// output/accum/hudMask filled it EXACTLY — adding the `volumeDensity` 3D
+// grid at 129 made every Metal pipeline fail silently (all-black frames).
+// MUST equal metal_compute.BINDLESS_TEXTURE_CAPACITY.
+[[vk::binding(14)]] Texture2D<float4> flatMaterialTextures[119];
 [[vk::binding(38)]] SamplerState commonSampler;
 #endif
 
@@ -61,6 +66,22 @@ uniform FrameConstants fc;
 #endif
 [[vk::binding(23)]] StructuredBuffer<float4>       lensElements;
 [[vk::binding(24)]] StructuredBuffer<float4>       exitPupilBounds;
+// Heterogeneous-medium density grid (nanovdb-volume-rendering, design D3): ONE
+// R16F 3D texture, normalized to [0,1] on the CPU (divide by the grid's value
+// max — folded into the packed σ so the texel IS the density multiplier).
+// Sampled by densityAt's MEDIUM_NANOVDB case through the folded world→uvw
+// affine in FlatMaterialParams. ALWAYS bound: the renderer seeds a 1×1×1 zero
+// fallback so the descriptor is valid with no volume in the scene. Binding 26
+// is the next free Vulkan slot (25 = graphParamsCombined, 30/31/33..37 taken);
+// on Metal the combined Sampler3D splits into Texture3D + SamplerState like the
+// discrete 2D maps (design D8), with the sampler at 44 (after 39–43). This is a
+// texture, not a buffer — Metal's 31-slot buffer argument table is unaffected.
+#if defined(SKINNY_METAL)
+[[vk::binding(26)]] Texture3D<float> volumeDensity;
+[[vk::binding(44)]] SamplerState volumeDensitySampler;
+#else
+[[vk::binding(26)]] Sampler3D<float> volumeDensity;
+#endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)
 //             [0] = (toolMode, lockMode, nTheta, nPhi) as uint bits
@@ -112,13 +133,21 @@ static const uint MATERIAL_TYPE_PYTHON       = 3u;
 // coefficients are packed into FlatMaterialParams (binding 13) — no new buffer, to
 // respect the Metal 31-buffer cap (see design.md) — and read via resolveMedium.
 static const uint MATERIAL_TYPE_SUBSURFACE   = 4u;
+// Free-standing participating medium (nanovdb-volume-rendering): a pbrt
+// `Material "interface"` boundary shape with a MediumInterface. Index-matched
+// pass-through boundary (no Fresnel, no refraction, no BSDF) + the medium walk
+// (materials/subsurface/volume_walk.slang). Medium coefficients + the world→uvw
+// grid transform ride inline in FlatMaterialParams (binding 13), the density
+// field in the volumeDensity texture (binding 26).
+static const uint MATERIAL_TYPE_VOLUME       = 5u;
 
-// Medium source kinds — the density-seam dispatch tag. HOMOGENEOUS is the only
-// kind implemented now (densityAt ≡ 1, majorant = σ_t); NANOVDB is reserved so a
-// future heterogeneous free-standing medium (Disney cloud) is a new case, not a
-// transport rewrite.
+// Medium source kinds — the density-seam dispatch tag. HOMOGENEOUS: densityAt ≡ 1,
+// majorant = σ_t (the dielectric-bounded subsurface interior AND a homogeneous
+// free-standing interior). NANOVDB: densityAt = trilinear sample of the
+// normalized density grid (binding 26); the global majorant is still the packed
+// σ_t because the grid's value max is folded into σ on the CPU.
 static const uint MEDIUM_HOMOGENEOUS = 0u;
-static const uint MEDIUM_NANOVDB     = 1u;   // reserved (not implemented)
+static const uint MEDIUM_NANOVDB     = 1u;
 
 static const uint MATERIAL_FURNACE_BIT = 10u;
 

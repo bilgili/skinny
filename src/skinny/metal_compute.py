@@ -45,8 +45,10 @@ from skinny.megakernel_sources import (  # noqa: F401  (re-export)
 # Metal trims the bindless flat-material texture pool to fit Apple Metal's
 # 128-texture compute-argument limit alongside the discrete maps (design D8).
 # MUST equal the array dimension in `shaders/bindings.slang`'s `#if SKINNY_METAL`
-# branch (`Texture2D<float4> flatMaterialTextures[120]`).
-BINDLESS_TEXTURE_CAPACITY = 120
+# branch (`Texture2D<float4> flatMaterialTextures[119]`). 119, not 120: the
+# 128-texture argument table is otherwise exactly full, and the volumeDensity
+# 3D grid (binding 26, nanovdb-volume-rendering) needs the last slot.
+BINDLESS_TEXTURE_CAPACITY = 119
 
 # Slang globals for the shared sampler + the per-map samplers added on the Metal
 # target (design D8). Used by the renderer to bind them by name.
@@ -101,6 +103,7 @@ _FORMAT_TOKENS = {
     "rgba8_srgb": "rgba8_unorm_srgb",
     "r8_unorm": "r8_unorm",
     "r32_float": "r32_float",
+    "r16_float": "r16_float",
 }
 _VKFORMAT_INTS = {  # VkFormat enum values → slangpy.Format name
     9: "r8_unorm", 37: "rgba8_unorm", 43: "rgba8_unorm_srgb", 109: "rgba32_float",
@@ -453,6 +456,53 @@ class SampledImage:
             arr = arr.reshape(self.height, self.width)
         else:
             arr = arr.reshape(self.height, self.width, self._channels)
+        self.texture.copy_from_numpy(arr)
+
+    def destroy(self) -> None:
+        self.texture = None
+        self.sampler = None
+
+
+class SampledImage3D:
+    """Device-local sampled 3D image + sampler — sibling of
+    ``vk_compute.SampledImage3D`` (nanovdb-volume-rendering, design D3).
+
+    R16F single-channel density field. Trilinear min/mag filtering, clamp-to-edge
+    on all three axes (the shader additionally zeroes samples outside [0,1]³ so
+    edge clamping cannot smear boundary density outward). Like the 2D
+    ``SampledImage``, the Metal target splits the combined sampler:
+    :attr:`texture` binds the ``Texture3D`` global (``volumeDensity``) and
+    :attr:`sampler` the paired ``SamplerState`` (``volumeDensitySampler``)."""
+
+    def __init__(self, ctx, width: int, height: int, depth: int) -> None:
+        self.ctx = ctx
+        spy = ctx._spy
+        self.width = int(width)
+        self.height = int(height)
+        self.depth = int(depth)
+        self.format = spy.Format.r16_float
+        self.texture = ctx.device.create_texture(
+            type=spy.TextureType.texture_3d,
+            format=self.format,
+            width=self.width,
+            height=self.height,
+            depth=self.depth,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            memory_type=spy.MemoryType.device_local,
+            label="skinny.sampled_image_3d",
+        )
+        self.sampler = _make_sampler(ctx, address_u="clamp", address_v="clamp")
+
+    def upload_sync(self, voxels: np.ndarray) -> None:
+        """Copy a ``(depth, height, width)`` float16/float32 array into the
+        texture (float32 is converted to float16 on upload)."""
+        arr = np.ascontiguousarray(voxels)
+        if arr.dtype != np.float16:
+            arr = arr.astype(np.float16)
+        expected = (self.depth, self.height, self.width)
+        if arr.shape != expected:
+            raise ValueError(
+                f"volume upload: got shape {arr.shape}, expected (D,H,W)={expected}")
         self.texture.copy_from_numpy(arr)
 
     def destroy(self) -> None:

@@ -973,8 +973,12 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         }
         if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
         {
-            // Non-flat first hit after skip — bail back to env (path
-            // tracer covers the skin/python material paths).
+            // Non-flat first hit after skip — bail to black (path tracer
+            // covers the skin/python material paths). This is also the
+            // defensive no-op for MATERIAL_TYPE_VOLUME: BDPT has NO medium
+            // support (recorded parity-matrix exclusion, change
+            // nanovdb-volume-rendering) — a volume hit renders black here
+            // instead of crashing or mis-shading.
             return float3(0.0);
         }
 

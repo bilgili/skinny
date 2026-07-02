@@ -42,6 +42,7 @@ class PbrtMedium:
     name: str
     type: str
     params: ParamSet
+    ctm: np.ndarray = field(default_factory=T.identity)  # CTM at MakeNamedMedium, pbrt space
 
 
 @dataclass
@@ -202,7 +203,7 @@ def build_scene(directives: list[Directive]) -> PbrtScene:
         elif name == "MakeNamedMedium":
             mname = d.type_arg() or ""
             mtype = d.params.string("type", "homogeneous")
-            scene.media[mname] = PbrtMedium(mname, mtype, d.params)
+            scene.media[mname] = PbrtMedium(mname, mtype, d.params, ctm=state.ctm.copy())
         elif name == "MediumInterface":
             strs = [a for a in d.args if isinstance(a, str)]
             state.inside_medium = strs[0] if len(strs) > 0 else ""

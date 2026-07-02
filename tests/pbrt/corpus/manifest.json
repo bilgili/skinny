@@ -1,150 +1,233 @@
 {
-  "pbrt_version": "pbrt-v4 5f7a606 (master, github.com/mmp/pbrt-v4, depth-1 build 2026-06-17)",
-  "notes": "Reference EXRs rendered with the pinned pbrt v4 above. Tolerances reflect current measured parity (skinny's own default key light disabled; residual = RGB-vs-spectral + path-tracer-vs-sppm caustics) as a regression guard with headroom. Regenerate refs deliberately if the pbrt version or a scene changes.",
-  "scenes": [
-    {
-      "name": "diffuse_arealight",
-      "file": "diffuse_arealight.pbrt",
-      "ref": "refs/diffuse_arealight.exr",
-      "width": 128,
-      "height": 128,
-      "spp": 256,
-      "relmse_tol": 0.04,
-      "flip_tol": 0.04,
-      "measured": {
-        "relmse": 0.012,
-        "flip": 0.021
-      },
-      "absolute": {
-        "mean_ratio_tol": 0.1,
-        "relmse_tol": 0.04,
-        "baselines": {
-          "path|wavefront": { "mean_ratio": 0.8745, "relmse": 0.0177 }
-        }
-      }
-    },
-    {
-      "name": "mirrored_arealight",
-      "file": "mirrored_arealight.pbrt",
-      "ref": "refs/mirrored_arealight.exr",
-      "width": 128,
-      "height": 128,
-      "spp": 256,
-      "relmse_tol": 0.04,
-      "flip_tol": 0.04,
-      "measured": {
-        "relmse": 0.009,
-        "flip": 0.021
-      }
-    },
-    {
-      "name": "conductor_infinite",
-      "file": "conductor_infinite.pbrt",
-      "ref": "refs/conductor_infinite.exr",
-      "width": 128,
-      "height": 128,
-      "spp": 256,
-      "relmse_tol": 0.04,
-      "flip_tol": 0.05,
-      "measured": {
-        "relmse": 0.006,
-        "flip": 0.024
-      },
-      "absolute": {
-        "mean_ratio_tol": 0.1,
-        "relmse_tol": 0.04,
-        "baselines": {
-          "path|wavefront": { "mean_ratio": 0.957, "relmse": 0.009 }
-        }
-      }
-    },
-    {
-      "name": "glass_arealight",
-      "file": "glass_arealight.pbrt",
-      "ref": "refs/glass_arealight.exr",
-      "width": 128,
-      "height": 128,
-      "spp": 512,
-      "relmse_tol": 0.1,
-      "flip_tol": 0.09,
-      "measured": {
-        "relmse": 0.058,
-        "flip": 0.058
-      }
-    },
-    {
-      "name": "texture_quad",
-      "file": "texture_quad.pbrt",
-      "ref": "refs/texture_quad.exr",
-      "width": 128,
-      "height": 128,
-      "spp": 256,
-      "relmse_tol": 0.02,
-      "flip_tol": 0.03,
-      "measured": {
-        "relmse": 0.0024,
-        "flip": 0.0119
-      }
-    },
-    {
-      "name": "subsurface_infinite",
-      "file": "subsurface_infinite.pbrt",
-      "ref": "refs/subsurface_infinite.exr",
-      "width": 128,
-      "height": 128,
-      "spp": 512,
-      "relmse_tol": 0.13,
-      "flip_tol": 0.14,
-      "measured": {
-        "relmse": 0.0792,
-        "flip": 0.0894
-      }
-    },
-    {
-      "name": "bathroom",
-      "file": "bathroom.pbrt",
-      "usd": "assets/bathroom.usda",
-      "ref": "refs/bathroom.exr",
-      "width": 256,
-      "height": 256,
-      "spp": 128,
-      "relmse_tol": 0.1,
-      "flip_tol": 0.1,
-      "material_class": "flat",
-      "megakernel_ok": true,
-      "known_divergent": true,
-      "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped — max~2120, bypassing maxcomponentvalue — and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) — a metric-robustness follow-up. emissive-triangle-bsdf-mis (2026-06-24): path BSDF-hit MIS complement fixes area-light dim bias; bathroom mean 1.36->0.97, path FLIP 0.222->0.155 (megakernel==wavefront relMSE 0.0000). relMSE baseline 0.342 unchanged (exposure-aligned gate is brightness-blind; residual = RGB-vs-spectral). BDPT/SPPM/neural/restir baselines re-measure in their own changes (Path anchor moved brighter).",
-      "measured": {
-        "path|wavefront": {"relmse": 0.342, "flip": 0.155},
-        "bdpt|megakernel": {"relmse": 0.366, "flip": 0.202},
-        "sppm|wavefront": {"relmse": 0.364, "flip": 0.254},
-        "self_consistency": {"bdpt_vs_path": {"relmse": 0.363, "flip": 0.081, "mse": 0.017}, "sppm_vs_path": {"relmse": 64.97, "flip": 0.109, "mse": 10.42}}
-      },
-      "baselines": {
-        "path|wavefront": {"relmse": 0.342, "flip": 0.155},
-        "path|megakernel": {"relmse": 0.342, "flip": 0.155},
-        "bdpt|megakernel": {"relmse": 0.366, "flip": 0.202},
-        "bdpt|wavefront": {"relmse": 0.366, "flip": 0.202},
-        "path|wavefront|neural": {"relmse": 0.336, "flip": 0.219},
-        "path|wavefront|restir-di": {"relmse": 0.342, "flip": 0.202},
-        "sppm|wavefront": {"relmse": 0.364, "flip": 0.254}
-      }
-    },
-    {
-      "name": "dragon",
-      "file": "dragon.pbrt",
-      "usd": "assets/dragon_sss.usda",
-      "ref": "refs/dragon.exr",
-      "width": 256,
-      "height": 256,
-      "spp": 64,
-      "relmse_tol": 0.25,
-      "flip_tol": 0.2,
-      "material_class": "subsurface",
-      "megakernel_ok": false,
-      "known_divergent": true,
-      "notes": "Heavy subsurface dragon (28.8M tris → wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
-      "baselines": {}
+ "pbrt_version": "pbrt-v4 5f7a606 (master, github.com/mmp/pbrt-v4, depth-1 build 2026-06-17)",
+ "notes": "Reference EXRs rendered with the pinned pbrt v4 above. Tolerances reflect current measured parity (skinny's own default key light disabled; residual = RGB-vs-spectral + path-tracer-vs-sppm caustics) as a regression guard with headroom. Regenerate refs deliberately if the pbrt version or a scene changes.",
+ "scenes": [
+  {
+   "name": "diffuse_arealight",
+   "file": "diffuse_arealight.pbrt",
+   "ref": "refs/diffuse_arealight.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.04,
+   "flip_tol": 0.04,
+   "measured": {
+    "relmse": 0.012,
+    "flip": 0.021
+   },
+   "absolute": {
+    "mean_ratio_tol": 0.1,
+    "relmse_tol": 0.04,
+    "baselines": {
+     "path|wavefront": {
+      "mean_ratio": 0.8745,
+      "relmse": 0.0177
+     }
     }
-  ]
+   }
+  },
+  {
+   "name": "mirrored_arealight",
+   "file": "mirrored_arealight.pbrt",
+   "ref": "refs/mirrored_arealight.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.04,
+   "flip_tol": 0.04,
+   "measured": {
+    "relmse": 0.009,
+    "flip": 0.021
+   }
+  },
+  {
+   "name": "conductor_infinite",
+   "file": "conductor_infinite.pbrt",
+   "ref": "refs/conductor_infinite.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.04,
+   "flip_tol": 0.05,
+   "measured": {
+    "relmse": 0.006,
+    "flip": 0.024
+   },
+   "absolute": {
+    "mean_ratio_tol": 0.1,
+    "relmse_tol": 0.04,
+    "baselines": {
+     "path|wavefront": {
+      "mean_ratio": 0.957,
+      "relmse": 0.009
+     }
+    }
+   }
+  },
+  {
+   "name": "glass_arealight",
+   "file": "glass_arealight.pbrt",
+   "ref": "refs/glass_arealight.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.1,
+   "flip_tol": 0.09,
+   "measured": {
+    "relmse": 0.058,
+    "flip": 0.058
+   }
+  },
+  {
+   "name": "texture_quad",
+   "file": "texture_quad.pbrt",
+   "ref": "refs/texture_quad.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.02,
+   "flip_tol": 0.03,
+   "measured": {
+    "relmse": 0.0024,
+    "flip": 0.0119
+   }
+  },
+  {
+   "name": "subsurface_infinite",
+   "file": "subsurface_infinite.pbrt",
+   "ref": "refs/subsurface_infinite.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.13,
+   "flip_tol": 0.14,
+   "measured": {
+    "relmse": 0.0792,
+    "flip": 0.0894
+   }
+  },
+  {
+   "name": "bathroom",
+   "file": "bathroom.pbrt",
+   "usd": "assets/bathroom.usda",
+   "ref": "refs/bathroom.exr",
+   "width": 256,
+   "height": 256,
+   "spp": 128,
+   "relmse_tol": 0.1,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "known_divergent": true,
+   "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped \u2014 max~2120, bypassing maxcomponentvalue \u2014 and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) \u2014 a metric-robustness follow-up. emissive-triangle-bsdf-mis (2026-06-24): path BSDF-hit MIS complement fixes area-light dim bias; bathroom mean 1.36->0.97, path FLIP 0.222->0.155 (megakernel==wavefront relMSE 0.0000). relMSE baseline 0.342 unchanged (exposure-aligned gate is brightness-blind; residual = RGB-vs-spectral). BDPT/SPPM/neural/restir baselines re-measure in their own changes (Path anchor moved brighter).",
+   "measured": {
+    "path|wavefront": {
+     "relmse": 0.342,
+     "flip": 0.155
+    },
+    "bdpt|megakernel": {
+     "relmse": 0.366,
+     "flip": 0.202
+    },
+    "sppm|wavefront": {
+     "relmse": 0.364,
+     "flip": 0.254
+    },
+    "self_consistency": {
+     "bdpt_vs_path": {
+      "relmse": 0.363,
+      "flip": 0.081,
+      "mse": 0.017
+     },
+     "sppm_vs_path": {
+      "relmse": 64.97,
+      "flip": 0.109,
+      "mse": 10.42
+     }
+    }
+   },
+   "baselines": {
+    "path|wavefront": {
+     "relmse": 0.342,
+     "flip": 0.155
+    },
+    "path|megakernel": {
+     "relmse": 0.342,
+     "flip": 0.155
+    },
+    "bdpt|megakernel": {
+     "relmse": 0.366,
+     "flip": 0.202
+    },
+    "bdpt|wavefront": {
+     "relmse": 0.366,
+     "flip": 0.202
+    },
+    "path|wavefront|neural": {
+     "relmse": 0.336,
+     "flip": 0.219
+    },
+    "path|wavefront|restir-di": {
+     "relmse": 0.342,
+     "flip": 0.202
+    },
+    "sppm|wavefront": {
+     "relmse": 0.364,
+     "flip": 0.254
+    }
+   }
+  },
+  {
+   "name": "dragon",
+   "file": "dragon.pbrt",
+   "usd": "assets/dragon_sss.usda",
+   "ref": "refs/dragon.exr",
+   "width": 256,
+   "height": 256,
+   "spp": 64,
+   "relmse_tol": 0.25,
+   "flip_tol": 0.2,
+   "material_class": "subsurface",
+   "megakernel_ok": false,
+   "known_divergent": true,
+   "notes": "Heavy subsurface dragon (28.8M tris \u2192 wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
+   "baselines": {}
+  },
+  {
+   "name": "disney_cloud",
+   "file": "disney_cloud.pbrt",
+   "ref": "refs/disney_cloud.exr",
+   "usd": "assets/disney_cloud.usda",
+   "width": 256,
+   "height": 256,
+   "spp": 256,
+   "relmse_tol": 0.13,
+   "flip_tol": 0.1,
+   "material_class": "volume",
+   "megakernel_ok": true,
+   "notes": "nanovdb heterogeneous volume (WDAS cloud). CLEAN dual gate: mega\u2261wave EXACT (0.0), pbrt-truth relMSE 0.077 / mean 0.87\u00d7 (RGB-vs-spectral + scatter-cap floor). Distant sun + constant sky env. Refs = pbrt v4 volpath maxdepth 100, 256 spp, 256x256.",
+   "measured": {
+    "relmse": 0.077,
+    "flip": 0.057
+   }
+  },
+  {
+   "name": "bunny_cloud",
+   "file": "bunny_cloud.pbrt",
+   "ref": "refs/bunny_cloud.exr",
+   "usd": "assets/bunny_cloud.usda",
+   "width": 256,
+   "height": 256,
+   "spp": 256,
+   "relmse_tol": 0.15,
+   "flip_tol": 0.14,
+   "material_class": "volume",
+   "megakernel_ok": true,
+   "notes": "nanovdb heterogeneous volume (Stanford bunny, sky.exr HDR env). CLEAN dual gate: mega\u2261wave EXACT (0.0). pbrt-truth relMSE 0.117 / mean 0.735\u00d7 \u2014 the dimness is the bounded multi-scatter cap (VOLUME_MAX_SCATTERS=64 Metal vs pbrt volpath maxdepth 50) + RGB-vs-spectral, recorded not hidden. Refs = pbrt v4 volpath maxdepth 50, 256 spp, 256x256; nikon_d850 sensor approximated by film exposure; env `Rotate 10` baked into the equiarea reprojection.",
+   "measured": {
+    "relmse": 0.117,
+    "flip": 0.113
+   }
+  }
+ ]
 }

@@ -9,6 +9,32 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **NanoVDB heterogeneous volume rendering** (change `nanovdb-volume-rendering`) —
+  pbrt `MakeNamedMedium "nanovdb"` + `Material "interface"` scenes (the WDAS
+  `disney-cloud` and `bunny-cloud`) import to `.usda` as a `UsdVol.Volume` with an
+  `OpenVDBAsset` field and render as free-standing heterogeneous participating
+  media on both backends and both execution modes (path integrator). A pure-Python
+  `.nvdb` reader (`pbrt/nanovdb.py`, FloatGrid/FogVolume, NONE/ZIP codecs — no new
+  native dependency) decodes the density grid to one R16F `Texture3D` (binding 26);
+  the `MEDIUM_NANOVDB` kind slots into the existing `densityAt`/`mediumMajorant`
+  seam (`materials/subsurface/{medium,volume_walk}.slang`) as majorant/null-
+  collision (Woodcock) delta-tracking with an index-matched pass-through boundary,
+  HG phase, distant + environment NEE (delta-tracked shadow transmittance), and an
+  escape-ray continuation so geometry behind the volume still shades. BDPT and SPPM
+  have no volume transport (recorded parity-matrix exclusions). On Metal the
+  bindless flat-material texture pool is trimmed 120→119 to fit the 3D grid under
+  Apple's 128-texture compute-argument limit. Parity: `disney_cloud` clean dual
+  gate (megakernel ≡ wavefront, relMSE 0.077 vs pbrt); `bunny_cloud` relMSE 0.117
+  (megakernel) with megakernel ≡ wavefront recorded known-divergent (pre-existing
+  HDR-env execution-mode brightness difference + env-NEE firefly variance; follow-up
+  `nanovdb-volume-wavefront-parity`).
+- **Metal dispatch hygiene** (change `metal-dispatch-hygiene`) — `MetalContext`
+  guarantees GPU teardown on every process-exit path (idempotent `destroy()`,
+  context-manager, one weakref-registry `atexit` + chained SIGINT/SIGTERM handler
+  set) so abandoned compute work can no longer wedge the GPU until reboot; a
+  gpu-marked kill harness (`tests/test_metal_cleanup.py`) proves a SIGKILLed render
+  leaves the device usable.
+
 - **Integrator × execution-mode parity matrix** (change `integrator-parity-matrix`)
   — a data-driven regression harness that sweeps `{Path, BDPT, SPPM}` ×
   `{megakernel, wavefront}` plus the **ReSTIR DI** and **neural directional
