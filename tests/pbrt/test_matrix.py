@@ -60,6 +60,27 @@ def test_heavy_scene_is_wavefront_only():
     assert parity.combo_is_valid(RenderCombo("path", "wavefront"), sss)[0]
 
 
+def _volume_scene(**kw) -> SceneSpec:
+    return _flat_scene(name="disney_cloud", material_class="volume", **kw)
+
+
+def test_volume_scene_is_path_only():
+    vol = _volume_scene()
+    # Path runs in both execution modes.
+    assert parity.combo_is_valid(RenderCombo("path", "megakernel"), vol)[0]
+    assert parity.combo_is_valid(RenderCombo("path", "wavefront"), vol)[0]
+    # BDPT/SPPM have no volume transport — recorded exclusions.
+    ok, reason = parity.combo_is_valid(RenderCombo("bdpt", "wavefront"), vol)
+    assert not ok and "volume transport" in reason
+    ok, reason = parity.combo_is_valid(RenderCombo("sppm", "wavefront"), vol)
+    assert not ok and "volume transport" in reason
+    # ReSTIR reuse untested with media; neural is flat-only (existing rule).
+    ok, reason = parity.combo_is_valid(RenderCombo("path", "wavefront", (), "restir-di"), vol)
+    assert not ok and "volume" in reason
+    ok, reason = parity.combo_is_valid(RenderCombo("path", "wavefront", ("neural",)), vol)
+    assert not ok and "flat-material" in reason
+
+
 def test_anchor_is_valid_everywhere():
     assert parity.combo_is_valid(parity.ANCHOR, _flat_scene())[0]
     assert parity.combo_is_valid(parity.ANCHOR, _sss_scene())[0]

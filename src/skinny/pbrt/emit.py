@@ -19,7 +19,7 @@ column-vector matrices are transposed by :func:`to_gf_matrix`.
 from __future__ import annotations
 
 import numpy as np
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdVol
 
 from . import transform as T
 
@@ -113,6 +113,30 @@ def default_triangle_uvs(num_tris: int) -> np.ndarray:
     return np.tile(_DEFAULT_TRI_UV, (int(num_tris), 1))
 
 
+def add_volume(stage, path, ctm: np.ndarray, *, grid_asset: str, field_name: str = "density"
+               ) -> UsdVol.Volume:
+    """Author a ``UsdVol.Volume`` + ``OpenVDBAsset`` field prim for a nanovdb medium.
+
+    *ctm* is the medium's pbrt-space CTM (captured at ``MakeNamedMedium``,
+    :attr:`~skinny.pbrt.state.PbrtMedium.ctm`); it is converted to skinny/USD
+    space through :func:`skinny.pbrt.transform.to_skinny` (``B @ M @ B``), the
+    same helper the camera transform uses — never hand-rolled (see the
+    module docstring and :func:`bake_world_mesh`, which uses the point-bake
+    variant ``B @ CTM`` since it transforms baked points, not a standalone
+    matrix). *grid_asset* is the absolute ``.nvdb`` path (already resolved
+    against the scene directory by
+    :func:`skinny.pbrt.media.heterogeneous_overrides`).
+    """
+    volume = UsdVol.Volume.Define(stage, path)
+    UsdGeom.Xformable(volume).AddTransformOp().Set(to_gf_matrix(T.to_skinny(ctm)))
+    field_path = f"{path}/{field_name}"
+    field = UsdVol.OpenVDBAsset.Define(stage, field_path)
+    field.CreateFilePathAttr(Sdf.AssetPath(grid_asset))
+    field.CreateFieldNameAttr(field_name)
+    volume.CreateFieldRelationship(field_name, field.GetPath())
+    return volume
+
+
 def tessellate_sphere(radius: float, *, segments: int = 32, rings: int = 16):
     """UV-sphere -> (points (N,3), tri-indices (M,3), normals (N,3), uvs (N,2)).
 
@@ -140,4 +164,43 @@ def tessellate_sphere(radius: float, *, segments: int = 32, rings: int = 16):
             b = a + row
             idx.append([a, b, a + 1])
             idx.append([a + 1, b, b + 1])
+    return np.array(pts), np.array(idx, dtype=np.int64), np.array(nrm), np.array(uvs)
+
+
+def tessellate_disk(radius: float, *, height: float = 0.0, inner_radius: float = 0.0,
+                    phi_max: float = 360.0, segments: int = 64):
+    """pbrt ``Shape "disk"`` -> (points (N,3), tri-indices (M,3), normals (N,3),
+    uvs (N,2)), tessellated in the object-space ``z = height`` plane.
+
+    Two concentric rings of ``segments + 1`` vertices (outer at *radius*, inner
+    at *inner_radius*) are quad-stripped, matching pbrt's disk parametrization
+    (shapes.h ``Disk::InteractionFromIntersection``): ``u = phi / phiMax``,
+    ``v = (radius - r) / (radius - innerRadius)`` (``v = 0`` at the outer rim,
+    ``v = 1`` at the inner rim / centre). The plain-disk case (``inner_radius ==
+    0``) still emits two rings — the inner one collapsed to a single point
+    repeated *segments + 1* times — so the winding/index pattern and per-vertex
+    UVs stay uniform between the disk and annulus cases; the degenerate
+    zero-area wedge triangles this creates are harmless. Object-space normal is
+    ``+z`` (pbrt's convention; :func:`bake_world_mesh` applies
+    ``reverseOrientation``/handedness flips downstream, same as every other
+    shape here)."""
+    phi_max_rad = np.radians(np.clip(phi_max, 0.0, 360.0))
+    pts = []
+    nrm = []
+    uvs = []
+    n = np.array([0.0, 0.0, 1.0])
+    for ring_radius, v in ((radius, 0.0), (inner_radius, 1.0)):
+        for j in range(segments + 1):
+            phi = phi_max_rad * j / segments
+            pts.append([ring_radius * np.cos(phi), ring_radius * np.sin(phi), height])
+            nrm.append(n)
+            uvs.append([j / segments, v])
+    idx = []
+    row = segments + 1
+    for j in range(segments):
+        a = j            # outer ring
+        b = row + j      # inner ring
+        # CCW as seen from +z (outward +z normal): (a, a+1, b) not (a, b, a+1).
+        idx.append([a, a + 1, b])
+        idx.append([a + 1, b + 1, b])
     return np.array(pts), np.array(idx, dtype=np.int64), np.array(nrm), np.array(uvs)

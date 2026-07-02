@@ -27,6 +27,11 @@ BounceResult evaluateFlatBounce(HitInfo h, Ray r, uint bounce, inout RNG rng,
     BounceResult br;
     br.directLight            = float3(0.0);
     br.fullRadiance           = float3(0.0);
+    // Flat materials never pass through a medium — but the field MUST be
+    // initialized (Slang leaves struct locals undefined; wfFinishShade branches
+    // on it). Omitting this made the flat wavefront path read garbage and
+    // diverge from the megakernel (nanovdb-volume-rendering review finding).
+    br.preserveMisState       = false;
     br.bsdfSample.valid       = false;
     br.bsdfSample.transmitted = false;
     br.bsdfSample.pdf         = 0.0;

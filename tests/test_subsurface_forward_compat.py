@@ -33,18 +33,23 @@ def test_density_seam_dispatches_by_kind():
 
 def test_medium_kind_enum_reserves_nanovdb():
     assert "MEDIUM_HOMOGENEOUS" in BINDINGS
-    # The grid kind is reserved (the additive extension point) even though it is
-    # not implemented in this change.
+    # Formerly the reserved additive extension point; nanovdb-volume-rendering
+    # discharged it — the grid kind is now implemented (see densityAt's case).
     assert "MEDIUM_NANOVDB" in BINDINGS
 
 
-def test_medium_is_handle_referenced_with_grid_handle():
-    # Medium carries a kind tag + a resource handle (not hardwired to a material
-    # interior) so a free-standing MediumInterface can register one later.
+def test_medium_is_handle_referenced_with_grid_transform():
+    # Medium carries a kind tag + the grid resource reference (not hardwired to
+    # a material interior). nanovdb-volume-rendering DISCHARGED the reserved
+    # `gridHandle`: the concrete reference is now the folded world→uvw rows
+    # (the density texture itself is the single always-bound binding 26), and
+    # a free-standing MediumInterface registers through the same resolveMedium.
     assert "struct Medium" in COMMON
     struct = COMMON.split("struct Medium", 1)[1].split("};", 1)[0]
-    assert "kind" in struct and "gridHandle" in struct
+    assert "kind" in struct and "worldToUvw0" in struct
     assert "Medium resolveMedium(uint materialId)" in MEDIUM
+    # The grid kind is a real case body in the seam, no longer a comment.
+    assert "case MEDIUM_NANOVDB:" in MEDIUM
 
 
 def test_walk_reads_medium_only_through_the_seam():
@@ -61,10 +66,15 @@ def test_walk_reads_medium_only_through_the_seam():
 def test_homogeneous_density_is_the_constant_degenerate_case():
     # densityAt(MEDIUM_HOMOGENEOUS) ≡ 1 and majorant = sigma_a+sigma_s, so a
     # uniform density field equal to the constant sigma_t yields the identical
-    # walk — proving a grid lookup slots in behind the same seam.
-    density_body = MEDIUM.split("float densityAt(Medium m", 1)[1].split("}", 1)[0]
-    homo_case = density_body.split("MEDIUM_HOMOGENEOUS:", 1)[1].split("case", 1)[0]
+    # walk — proving a grid lookup slots in behind the same seam (and now DOES:
+    # the MEDIUM_NANOVDB case bodies live beside these). Function bodies are
+    # sliced at the next declaration, not the first '}' — the grid case has a
+    # braced body of its own.
+    density_body = (MEDIUM.split("float densityAt(Medium m", 1)[1]
+                    .split("float3 mediumMajorant", 1)[0])
+    homo_case = density_body.split("MEDIUM_HOMOGENEOUS:", 1)[1].split("default", 1)[0]
     assert "return 1.0" in homo_case
-    majorant_body = MEDIUM.split("float3 mediumMajorant(Medium m", 1)[1].split("}", 1)[0]
+    majorant_body = (MEDIUM.split("float3 mediumMajorant(Medium m", 1)[1]
+                     .split("Medium resolveMedium", 1)[0])
     homo_maj = majorant_body.split("MEDIUM_HOMOGENEOUS:", 1)[1].split("default", 1)[0]
     assert "sigmaA + m.sigmaS" in homo_maj  # majorant = constant σ_t

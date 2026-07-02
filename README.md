@@ -485,6 +485,7 @@ neural × interop.
 | Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
 | SPPM integrator (wavefront, flat materials) | ✅ | ✅ (`MetalWavefrontSppmPass`; caustic parity matches Vulkan) |
 | pbrt `subsurface` (volumetric interior random walk) | ✅ | ✅ (megakernel + wavefront; lights from a single distant light + the environment) |
+| Heterogeneous volumes — NanoVDB `MakeNamedMedium` (path integrator, megakernel + wavefront) | ✅ | ✅ (`disney-cloud` / `bunny-cloud`; distant + env NEE; BDPT/SPPM excluded) |
 | Neural directional proposal (inference) | ✅ | ✅ |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |

@@ -72,8 +72,15 @@ struct SegmentSample
     bool   scattered;
 };
 
+// `maxSteps` is the null-collision budget for THIS segment. It defaults to the
+// subsurface tuning (SSS_MAX_STEPS); the free-standing volume walk passes its
+// own much larger budget (volume_walk.slang VOLUME_MAX_STEPS) because a sparse
+// production cloud needs thousands of majorant steps per crossing (σ̄·d ≫ the
+// skin slab) — with the small cap the loop exhausted silently and the segment
+// read as transparent (the invisible-disney-cloud bug).
 SegmentSample traverseMediumSegment(
-    Ray ray, float tMin, float tMax, Medium medium, float mmPerUnit, inout RNG rng)
+    Ray ray, float tMin, float tMax, Medium medium, float mmPerUnit, inout RNG rng,
+    int maxSteps = SSS_MAX_STEPS)
 {
     SegmentSample s;
     s.transmittance = float3(1.0);
@@ -91,7 +98,7 @@ SegmentSample traverseMediumSegment(
     float3 sigmaTbase = medium.sigmaA + medium.sigmaS;             // base σ_t (mm⁻¹)
     float  invMm = 1.0 / max(mmPerUnit, 1e-6);
     float  t = tMin;
-    for (int i = 0; i < SSS_MAX_STEPS; i++)
+    for (int i = 0; i < maxSteps; i++)
     {
         // Free-flight from the majorant: -ln(u)/σ̄_t in mm → /mmPerUnit to world.
         float dt = (-log(max(rng.next(), 1e-10)) / majMax) * invMm;
@@ -112,7 +119,17 @@ SegmentSample traverseMediumSegment(
             s.scatterAlbedo = medium.sigmaS * dens / max(sigmaT, float3(1e-6));  // σ_s/σ_t
             return s;
         }
-        s.transmittance *= (1.0 - pReal);                         // null collision
+        // Null collision — analog delta tracking: the null branch was SAMPLED
+        // with probability (1 − pRealMax), so the per-channel weight is the
+        // ratio (1 − pReal)/(1 − pRealMax), which is exactly 1 for grey σ. The
+        // old `*= (1 − pReal)` alone double-counted the attenuation (sampled
+        // AND multiplied) — invisible for homogeneous media, whose exact
+        // majorant makes every tentative collision real (pReal ≡ 1, this
+        // branch unreachable), but it squared the transmittance of every
+        // dens < 1 grid voxel and rendered the WDAS cloud several× too dark.
+        // Same estimator serves shadow rays: E[step] = pRealMax·0 +
+        // (1 − pRealMax)·(1 − pReal)/(1 − pRealMax) = (1 − pReal) → e^(−τ).
+        s.transmittance *= (float3(1.0) - pReal) / max(1.0 - pRealMax, 1e-6);
     }
     return s;
 }

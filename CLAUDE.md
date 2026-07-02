@@ -134,8 +134,11 @@ comparison read the accumulation image instead. See `tests/test_headless.py`
 **Compile the Slang shader manually (requires `slangc` on PATH):**
 ```bash
 slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute \
-  -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders
+  -o src/skinny/shaders/main_pass.spv -I src/skinny/shaders -I src/skinny/mtlx/genslang
 ```
+The second `-I src/skinny/mtlx/genslang` is required — the megakernel imports the
+generated skin BSDF (`skinny_skin_layered_bsdf_genslang.slang`); without it the
+compile fails with `cannot open file 'skinny_skin_layered_bsdf_genslang.slang'`.
 
 `--backend {auto,metal,vulkan}` (env `SKINNY_BACKEND`, persisted on the
 interactive front-ends) selects the GPU backend via the shared resolver in
@@ -192,9 +195,19 @@ in `README.md` → **Compatibility matrix**; keep the two in sync.
 |---------|--------|--------------|
 | Megakernel (`main_pass.slang`) | ✅ | ✅ |
 | Wavefront (path / BDPT / ReSTIR DI / neural) | ✅ | ✅ (`metal-wavefront-parity`, `metal-record-drain`) |
+| Heterogeneous volumes (NanoVDB) — path only, mega+wave | ✅ | ✅ (`nanovdb-volume-rendering`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
 | Neural-handoff `interop` | CUDA + `VK_KHR_external_memory` + timeline semaphore (`[interop]` extra) | UMA shared-storage in-place writes, no extra deps (`metal-neural-interop`) |
+
+**Heterogeneous participating media (NanoVDB), independent of backend:**
+
+| Constraint | Detail |
+|------------|--------|
+| Integrator | **Path only.** BDPT (connection strategies) and SPPM (photon pass) have no volume transport — recorded parity-matrix exclusions (`combo_is_valid`), follow-ups. |
+| Import | pbrt `MakeNamedMedium "nanovdb"` + `Material "interface"` → `UsdVol.Volume` + `OpenVDBAsset` field; `.nvdb` FloatGrid/FogVolume decoded by the pure-Python reader (`pbrt/nanovdb.py`, NONE/ZIP codecs, no native dep). |
+| Transport | Majorant/null-collision (Woodcock) delta-tracking through the `MEDIUM_NANOVDB` density seam (`materials/subsurface/medium.slang` + `volume_walk.slang`); density = one R16F `Texture3D` (binding 26); index-matched pass-through boundary; HG phase; distant+env NEE; escape-ray continuation shades geometry behind the volume. Metal watchdog caps: `VOLUME_MAX_SCATTERS`=64, `VOLUME_MAX_STEPS`=4096 under `SKINNY_METAL`. |
+| Metal argument table | The bindless flat-material texture pool is trimmed **120→119** (`BINDLESS_TEXTURE_CAPACITY`) so the `volumeDensity` 3D texture fits under Apple's 128-texture compute-argument limit (120 pool + 5 discrete maps + output/accum/hud filled it exactly). |
 
 **Neural directional proposal constraints** (independent of backend):
 

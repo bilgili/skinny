@@ -378,6 +378,36 @@ class LightEnvHDR:
     enabled: bool = True
 
 
+# ─── Volumes ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class VolumeGrid:
+    """One dense density grid decoded from a ``UsdVol.Volume`` prim
+    (nanovdb-volume-rendering).
+
+    ``density`` keeps the reader's ``(nx, ny, nz)`` layout (``density[a, b, c]``
+    is the voxel at grid index ``index_min + (a, b, c)``); the renderer
+    transposes to the GPU's ``(depth, height, width) = (nz, ny, nx)`` order at
+    upload. ``world_to_uvw`` is the fully folded affine map — rows 0..2 of the
+    math-convention (column-vector) matrix taking a skinny world-space point to
+    normalized ``[0, 1]³`` texture coordinates of the density texture:
+    ``uvw[r] = dot(world_to_uvw[r, :3], p) + world_to_uvw[r, 3]``. It already
+    composes prim-xform⁻¹, the pbrt→USD axis flip B, the grid's index→medium
+    map, the ``index_min`` origin shift, and the +0.5 voxel-center offset — the
+    shader does a single affine transform per density lookup.
+    """
+
+    density: np.ndarray                  # float32 (nx, ny, nz), values >= 0
+    value_max: float                     # decode-time max; normalizer for R16F upload
+    index_min: tuple[int, int, int]      # grid ijk of density[0, 0, 0]
+    dims: tuple[int, int, int]           # (nx, ny, nz) == density.shape
+    world_to_uvw: np.ndarray             # (3, 4) float32, math (column-vector) rows
+    asset_path: str = ""                 # resolved .nvdb path (state-hash identity)
+    field_name: str = "density"
+    prim_path: str = ""
+
+
 # ─── Scene ────────────────────────────────────────────────────────────
 
 
@@ -408,6 +438,12 @@ class Scene:
     # sample's radiance proportionally before accumulation, matching pbrt's
     # RGBFilm firefly suppression so an imported pbrt scene reproduces its EXR.
     film_max_component: float = 0.0
+
+    # Heterogeneous participating medium (nanovdb-volume-rendering): the ONE
+    # density grid decoded from the stage's `UsdVol.Volume` prim, or None.
+    # Exactly one grid per scene is supported for now (loader warns and keeps
+    # the first when a stage authors several).
+    volume_grid: Optional[VolumeGrid] = None
 
     # Furnace probe: when True the renderer swaps the scene for a unit
     # sphere + white-1 environment + analytic light off, and tints any

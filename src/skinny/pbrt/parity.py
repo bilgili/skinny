@@ -40,7 +40,10 @@ class SceneSpec:
     # ``file`` (a ``.pbrt``) at gate time. When set, ``file`` is informational.
     usd: str | None = None
     # Material class drives the validity table: a ``subsurface`` scene skips the
-    # (flat-only) neural axis; ``flat`` scenes exercise it.
+    # (flat-only) neural axis; ``flat`` scenes exercise it; a ``volume`` scene
+    # (heterogeneous participating media, nanovdb-volume-rendering) is
+    # path-integrator-only — BDPT/SPPM have no volume transport, and the ReSTIR
+    # reuse axis is untested with media (both recorded exclusions, follow-ups).
     material_class: str = "flat"
     # False for geometry too heavy for the megakernel (e.g. the 28.8M-tri
     # dragon, which OOMs) → that scene is wavefront-only.
@@ -164,6 +167,15 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
             return False, "ReSTIR DI reuse is wavefront-only"
         if combo.integrator != "path":
             return False, "ReSTIR DI reuse is exercised on the path integrator"
+    # Heterogeneous participating media (nanovdb-volume-rendering): the volume
+    # walk is wired into the Path integrator only. BDPT's connection strategies
+    # and SPPM's photon pass have no medium transport (recorded exclusions,
+    # follow-up changes), and the ReSTIR reuse axis is untested with media.
+    if scene.material_class == "volume":
+        if combo.integrator != "path":
+            return False, f"{combo.integrator.upper()} has no volume transport (follow-up)"
+        if combo.has_reuse:
+            return False, "ReSTIR DI reuse untested with volume media (follow-up)"
     # Heavy geometry that OOMs the megakernel.
     if combo.execution_mode == "megakernel" and not scene.megakernel_ok:
         return False, "geometry exceeds megakernel budget"
@@ -303,10 +315,17 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
                 )
             if env_off:
                 r.renderer.env_intensity = 0.0
-            # skinny injects a synthetic default DistantLight (/Skinny/DefaultLight)
-            # onto every loaded scene; a pbrt scene is fully lit by its own lights,
-            # so disable the default key light to avoid a phantom extra shadow.
-            r.renderer.direct_light_index = 1
+            # skinny synthesizes a default DistantLight for scenes that author no
+            # directional light (the per-frame mirror falls back to the slider
+            # light only when `_usd_scene.lights_dir` is empty); a pbrt scene is
+            # fully lit by its own lights, so disable that default to avoid a
+            # phantom extra shadow. `direct_light_index` is a GLOBAL off switch —
+            # it also zeroes AUTHORED distant lights (`_upload_distant_lights`) —
+            # so it must stay 0 for scenes that author one (disney-cloud's sun
+            # rendered black under the unconditional disable;
+            # nanovdb-volume-rendering).
+            authored_dir = bool(getattr(r.renderer._usd_scene, "lights_dir", None))
+            r.renderer.direct_light_index = 0 if authored_dir else 1
             r.renderer._last_state_hash = None
             r._accumulate(spp)
             arr, _samples = r.renderer.read_accumulation_hdr()

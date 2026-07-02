@@ -75,6 +75,17 @@ struct FlatMaterialParams
     // Metal/Vulkan byte parity.
     float4 _mediumSigmaA_g;                // 160..176 xyz=σ_a, w=g
     float4 _mediumSigmaS_kind;             // 176..192 xyz=σ_s, w=asfloat(mediumKind)
+    // World→uvw affine for the heterogeneous density grid
+    // (nanovdb-volume-rendering): rows 0..2 of the math (column-vector) matrix
+    // taking a world-space point to normalized [0,1]³ texture coords of the
+    // volumeDensity texture (binding 26) — uvw[r] = dot(row[r].xyz, p) + row[r].w.
+    // The CPU folds prim-xform⁻¹, the pbrt→USD axis flip, the grid's index→world
+    // map, index_min, and the +0.5 voxel-center offset into these 12 floats.
+    // Identity rows for every non-volume material (bytes only appended, never
+    // shifted — the 0..192 prefix is byte-identical to before this change).
+    float4 _worldToUvw0;                   // 192..208
+    float4 _worldToUvw1;                   // 208..224
+    float4 _worldToUvw2;                   // 224..240
 
     property float3 diffuseColor      { get { return _diffuseColorRoughness.xyz; } }
     property float  roughness         { get { return _diffuseColorRoughness.w; } }
@@ -92,20 +103,27 @@ struct FlatMaterialParams
     property float  mediumG           { get { return _mediumSigmaA_g.w; } }
     property float3 mediumSigmaS      { get { return _mediumSigmaS_kind.xyz; } }
     property uint   mediumKind        { get { return asuint(_mediumSigmaS_kind.w); } }
+    property float4 worldToUvw0       { get { return _worldToUvw0; } }
+    property float4 worldToUvw1       { get { return _worldToUvw1; } }
+    property float4 worldToUvw2       { get { return _worldToUvw2; } }
 };
 
-// Homogeneous (or, later, heterogeneous) participating medium resolved at a hit.
-// The interior random walk reads the medium ONLY through this + the density seam
-// (densityAt / mediumMajorant), so adding a kind is purely additive. `gridHandle`
-// is reserved for a future density-field source (NanoVDB); unused for HOMOGENEOUS.
+// Participating medium resolved at a hit (homogeneous subsurface interior or a
+// heterogeneous free-standing grid). The random walk reads the medium ONLY
+// through this + the density seam (densityAt / mediumMajorant), so adding a
+// kind is purely additive. `worldToUvw0..2` are the folded world→texture rows
+// for MEDIUM_NANOVDB (identity for HOMOGENEOUS, where densityAt never reads
+// them) — they replaced the formerly reserved `gridHandle`.
 struct Medium
 {
-    float3 sigmaA;     // mm⁻¹ × scene mm-per-unit at pack time
-    float3 sigmaS;     // mm⁻¹
-    float  g;          // Henyey-Greenstein anisotropy
-    float  eta;        // boundary relative IOR
-    uint   kind;       // MEDIUM_HOMOGENEOUS | MEDIUM_NANOVDB (reserved)
-    uint   gridHandle; // density-field resource index (reserved; 0 = none)
+    float3 sigmaA;       // mm⁻¹ (scene scale + grid value max folded at pack time)
+    float3 sigmaS;       // mm⁻¹
+    float  g;            // Henyey-Greenstein anisotropy
+    float  eta;          // boundary relative IOR (1 = index-matched pass-through)
+    uint   kind;         // MEDIUM_HOMOGENEOUS | MEDIUM_NANOVDB
+    float4 worldToUvw0;  // uvw.x = dot(.xyz, p) + .w  (MEDIUM_NANOVDB)
+    float4 worldToUvw1;  // uvw.y
+    float4 worldToUvw2;  // uvw.z
 };
 
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang

@@ -229,9 +229,18 @@ void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 }
 
 // Per-material shade — catch-all for the non-flat material types (skin BSSRDF,
-// python materials, debug). Imports the full integrator/material tree via
-// evaluateBounce, so it is the heavy kernel — built (and dispatched) only when
-// the scene actually contains a non-flat material.
+// subsurface + free-standing volume walks, python materials, debug). Imports
+// the full integrator/material tree via evaluateBounce, so it is the heavy
+// kernel — built (and dispatched) only when the scene actually contains a
+// non-flat material.
+//
+// MATERIAL_TYPE_VOLUME (nanovdb-volume-rendering) is wired HERE, through the
+// shared evaluateBounce case (the subsurface phase-4 precedent — one case,
+// both execution modes): the walk (volume_walk.slang, wavefront scatter cap)
+// rewrites `h` to the boundary exit point + escape direction and returns a
+// pdf = 0 delta continuation, which wfFinishShade turns into the standard
+// PATH_FLAG_SPECULAR spawn — the next miss then takes the env at full weight
+// and geometry behind the volume shades normally.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void wfPathShade(uint3 tid: SV_DispatchThreadID)
@@ -245,6 +254,9 @@ void wfPathShade(uint3 tid: SV_DispatchThreadID)
 
     RNG rng; rng.state = s.rngState;
     Ray r; r.origin = s.rayOrigin; r.direction = s.rayDir;
+    // evaluateBounce takes `h` inout: the volume case rewrites position/normal
+    // to the medium's exit point/escape direction, consumed by wfFinishShade's
+    // spawn (`h.position + h.normal * 0.002`) below.
     BounceResult br = evaluateBounce(h, r, s.depth, rng);
     wfFinishShade(i, s, rng, h, br);
 }

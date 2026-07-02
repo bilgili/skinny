@@ -139,12 +139,20 @@ def _bilinear_clamped(img: np.ndarray, col: np.ndarray, row: np.ndarray) -> np.n
     return top * (1.0 - fr) + bot * fr
 
 
-def equiarea_to_equirect(src: np.ndarray, height: int | None = None) -> np.ndarray:
+def equiarea_to_equirect(src: np.ndarray, height: int | None = None,
+                         world_to_light: np.ndarray | None = None) -> np.ndarray:
     """Reproject an equal-area octahedral square `src` (E,E,C) to equirectangular.
 
     Returns (H, 2H, C) with H = `height` (default = source edge). Each output
     pixel's skinny shader direction is mapped through P then the equal-area chart
     and bilinearly sampled from `src`.
+
+    `world_to_light` (3×3, pbrt space) bakes an authored light CTM rotation into
+    the resample: pbrt evaluates an infinite light's image in LIGHT space and
+    rotates light→world with the CTM captured at `LightSource` time, so sampling
+    goes world → light via the inverse rotation. `None`/identity = no rotation
+    (the pre-existing behavior). Dropping this rotated bunny-cloud's `Rotate 10`
+    sky by ~11° of horizon (nanovdb-volume-rendering).
     """
     src = np.asarray(src, dtype=np.float64)
     edge = src.shape[0]
@@ -155,7 +163,9 @@ def equiarea_to_equirect(src: np.ndarray, height: int | None = None) -> np.ndarr
     uu, vv = np.meshgrid(js, is_)  # (H, W)
     uv = np.stack([uu, vv], axis=-1)
     d = equirect_uv_to_direction(uv)            # skinny world dirs
-    dp = _apply_axis(d)                          # -> pbrt light space
+    dp = _apply_axis(d)                          # -> pbrt world space
+    if world_to_light is not None:
+        dp = dp @ np.asarray(world_to_light, np.float64).T   # -> pbrt light space
     sq = sphere_to_equal_area_square(dp)         # (H, W, 2) in [0,1]
     col = sq[..., 0] * edge - 0.5
     row = sq[..., 1] * edge - 0.5
