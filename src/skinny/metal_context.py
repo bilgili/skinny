@@ -25,11 +25,121 @@ pointer (``glfw.get_cocoa_window`` → ``WindowHandle(nswindow=…)``); a
 
 from __future__ import annotations
 
+import atexit
+import os
 import platform
+import signal
 import sys
+import threading
+import weakref
 from dataclasses import dataclass
 
 import numpy as np
+
+# ── Teardown hooks (change nanovdb-volume-rendering, design D5.2) ────
+#
+# Guaranteed teardown on every exit path: normal exit, exception propagation,
+# interpreter shutdown (atexit), and SIGINT/SIGTERM. One module-level registry
+# of live contexts is serviced by ONE atexit hook and ONE set of chained signal
+# handlers (installed when the first context registers, removed when the last
+# one is destroyed cleanly) — per-instance handler stacking would re-save our
+# own handler as "previous" and loop. The registry is a ``WeakSet`` so the
+# hooks never hold a hard reference: a hard ref in ``atexit`` would keep the
+# Metal device alive and reorder interpreter teardown.
+
+_LIVE_CONTEXTS: "weakref.WeakSet[MetalContext]" = weakref.WeakSet()
+_PREV_SIGNAL_HANDLERS: dict[int, object] = {}
+_ATEXIT_REGISTERED = False
+_TEARDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+# Env var → the atexit hook prints this marker after draining live contexts
+# (kill-harness probe: proves the atexit path ran on normal interpreter exit).
+_TEARDOWN_MARKER_ENV = "SKINNY_METAL_TEARDOWN_MARKER"
+_TEARDOWN_MARKER = "SKINNY_METAL_TEARDOWN_RAN"
+
+
+def _drain_live_contexts() -> None:
+    """Destroy every still-live context (idempotent per context)."""
+    for ctx in list(_LIVE_CONTEXTS):
+        try:
+            ctx.destroy()
+        except Exception:  # noqa: BLE001 — teardown must never raise from a hook
+            pass
+
+
+def _atexit_teardown() -> None:
+    had_live = len(list(_LIVE_CONTEXTS)) > 0
+    _drain_live_contexts()
+    if had_live and os.environ.get(_TEARDOWN_MARKER_ENV):
+        print(_TEARDOWN_MARKER, flush=True)
+
+
+def _handle_teardown_signal(signum, frame) -> None:
+    """Chained SIGINT/SIGTERM handler: drain + close, then delegate.
+
+    Never terminal by itself — after the (idempotent) teardown it re-raises /
+    delegates to the saved previous handler so KeyboardInterrupt semantics and
+    the app's own signal handling are preserved.
+    """
+    # Capture the previous handler BEFORE draining: destroying the last live
+    # context uninstalls the hooks and clears the saved-handler map.
+    prev = _PREV_SIGNAL_HANDLERS.get(signum, signal.SIG_DFL)
+    _drain_live_contexts()
+    if callable(prev):
+        prev(signum, frame)
+    elif prev == signal.SIG_DFL:
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+    # SIG_IGN (or unknown) → return, preserving the ignore semantics.
+
+
+def _install_teardown_hooks() -> None:
+    global _ATEXIT_REGISTERED
+    if not _ATEXIT_REGISTERED:
+        atexit.register(_atexit_teardown)
+        _ATEXIT_REGISTERED = True
+    # signal.signal raises ValueError off the main thread — never install there.
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for signum in _TEARDOWN_SIGNALS:
+        try:
+            prev = signal.getsignal(signum)
+            if prev is _handle_teardown_signal:
+                continue  # already installed (e.g. re-registration mid-session)
+            _PREV_SIGNAL_HANDLERS[signum] = prev
+            signal.signal(signum, _handle_teardown_signal)
+        except (ValueError, OSError):  # non-main thread race / exotic signal
+            _PREV_SIGNAL_HANDLERS.pop(signum, None)
+
+
+def _uninstall_teardown_hooks() -> None:
+    global _ATEXIT_REGISTERED
+    if _ATEXIT_REGISTERED:
+        atexit.unregister(_atexit_teardown)
+        _ATEXIT_REGISTERED = False
+    if threading.current_thread() is not threading.main_thread():
+        return  # cannot restore handlers here; they stay chained (harmless no-op)
+    for signum, prev in list(_PREV_SIGNAL_HANDLERS.items()):
+        try:
+            # Only restore if the handler is still ours — never clobber a
+            # handler the app installed after us.
+            if signal.getsignal(signum) is _handle_teardown_signal:
+                signal.signal(signum, prev)
+            del _PREV_SIGNAL_HANDLERS[signum]
+        except (ValueError, OSError):
+            pass
+
+
+def _register_context(ctx: "MetalContext") -> None:
+    first = len(list(_LIVE_CONTEXTS)) == 0
+    _LIVE_CONTEXTS.add(ctx)
+    if first:
+        _install_teardown_hooks()
+
+
+def _unregister_context(ctx: "MetalContext") -> None:
+    _LIVE_CONTEXTS.discard(ctx)
+    if len(list(_LIVE_CONTEXTS)) == 0:
+        _uninstall_teardown_hooks()
 
 
 @dataclass
@@ -114,12 +224,31 @@ class MetalContext:
         self.width = int(width)
         self.height = int(height)
         self._headless = window is None
+        # Teardown state first, so ``destroy()`` is safe even when device
+        # construction below half-fails (design D5.2).
+        self._destroyed = False
+        self.device = None
+        self.surface = None
+        self.swapchain_info = None
         # gpu_preference / enable_validation are accepted for surface parity with
         # VulkanContext; slang-rhi picks the system default Metal device and owns
         # its own validation, so they are no-ops here in P1.
 
         self.device = spy.create_device(type=spy.DeviceType.metal)
+        # Register with the module-level teardown registry (atexit + chained
+        # SIGINT/SIGTERM) the moment a real device exists; a construction
+        # failure past this point tears it down via the except below.
+        _register_context(self)
 
+        try:
+            self._finish_init(spy, window)
+        except BaseException:
+            # Half-failed construction (probe/surface raised): drain + close the
+            # device we already own instead of leaking queued work.
+            self.destroy()
+            raise
+
+    def _finish_init(self, spy, window) -> None:
         # Probe fp16 support on the real device (design D6 / task 1.1). slang-rhi
         # exposes a single ``Feature.half`` covering half-precision storage +
         # compute, so both flags follow it. NOTE: slang-rhi 0.42's Metal backend
@@ -364,19 +493,40 @@ class MetalContext:
 
     # ── Cleanup ──────────────────────────────────────────────────
 
+    def __enter__(self) -> "MetalContext":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Teardown on scope exit; never swallow the in-flight exception.
+        self.destroy()
+        return False
+
     def destroy(self) -> None:
-        try:
-            self.device.wait_for_idle()
-        except Exception:  # noqa: BLE001 — best-effort drain before teardown
-            pass
-        if self.surface is not None:
+        """Drain the queue and close the device. Idempotent: repeated calls
+        (explicit, context-manager, atexit, signal — in any order) are safe
+        no-ops after the first; also safe when construction half-failed."""
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
+        device = getattr(self, "device", None)
+        if device is not None:
             try:
-                self.surface.unconfigure()
+                device.wait_for_idle()
+            except Exception:  # noqa: BLE001 — best-effort drain before teardown
+                pass
+        surface = getattr(self, "surface", None)
+        if surface is not None:
+            try:
+                surface.unconfigure()
             except Exception:  # noqa: BLE001
                 pass
             self.surface = None
         self.swapchain_info = None
-        try:
-            self.device.close()
-        except Exception:  # noqa: BLE001 — device may already be torn down
-            pass
+        if device is not None:
+            try:
+                device.close()
+            except Exception:  # noqa: BLE001 — device may already be torn down
+                pass
+        # Clean destroy: leave the registry; the last context out unregisters
+        # the atexit hook and restores the previous signal handlers.
+        _unregister_context(self)

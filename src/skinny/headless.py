@@ -190,8 +190,12 @@ class HeadlessRenderer:
         self.cleanup()
 
     def cleanup(self) -> None:
-        self.renderer.cleanup()
-        self.ctx.destroy()
+        try:
+            self.renderer.cleanup()
+        finally:
+            # Context teardown must run even if renderer cleanup raises (change
+            # nanovdb-volume-rendering, D5.2 — teardown on every exit path).
+            self.ctx.destroy()
 
     def _prepare(self, source: Source, opts: RenderOptions) -> None:
         scene = _load_scene(source, opts.time)

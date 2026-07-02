@@ -152,6 +152,34 @@ explicit `--backend metal` on a host with no Metal device errors clearly.
 `--backend vulkan` forces the production MoltenVK-under-Vulkan path on every
 platform.
 
+## Metal dispatch hygiene (required for ALL GPU work)
+
+macOS cannot cancel another process's GPU work: an abandoned over-long kernel wedges
+the GPU until reboot. The `metal-dispatch-hygiene` capability
+(openspec/specs/metal-dispatch-hygiene/) makes cleanup structural — **every piece of
+GPU work, in code or in tests, must go through it**:
+
+- **Acquire `MetalContext` through a managed scope.** Use it as a context manager, or
+  guarantee `ctx.destroy()` in a `finally` (what `app.py` and `headless.py` do).
+  `destroy()` is idempotent; an `atexit` hook + chained SIGINT/SIGTERM handlers
+  (registered automatically at construction) are the backstop, not the primary path.
+  Never bypass `destroy()`; never hold a context you don't tear down.
+- **No unbounded command buffers.** No single committed command buffer may exceed the
+  macOS GPU watchdog budget. Long per-pixel loops (volume marches, SSS walks) must be
+  capped per dispatch under `SKINNY_METAL` and continued across accumulation frames;
+  prefer the wavefront mode (naturally short staged kernels) for heavy work.
+- **Run the kill harness when you touch GPU dispatch or kernel length.** Any change
+  that adds a kernel, lengthens one, or alters context lifecycle must pass
+  `tests/test_metal_cleanup.py` before merge — 13 hostless tests via plain pytest, and
+  the gpu-marked harness (clean-exit probe, SIGKILL-mid-render → GPU-usable probe,
+  atexit teardown) under the guarded runner:
+  ```bash
+  PYTHONPATH=src SKINNY_BACKEND=metal ./bin/python3.13 -m pytest \
+    tests/test_metal_cleanup.py -m gpu -q
+  ```
+- The standing thermal rule applies: **one guarded Metal process at a time**; gpu
+  tests never run in the default `pytest` sweep (ZERO-SWAP).
+
 ## Compatibility matrix
 
 Cross-cutting view of backend × execution mode × neural × online training.

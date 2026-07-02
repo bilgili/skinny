@@ -516,168 +516,173 @@ def main() -> None:
             glfw.set_window_pos(window, int(x), int(y))
 
     vk_ctx = make_context(backend, window, args.width, args.height)
-
-    repo_root = Path(__file__).resolve().parents[2]
-    # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):
-    # CLI/env wins; else restore the persisted value. It is a build dim, so it is
-    # threaded into the neural build config at construction (recompiles the neural
-    # .spv). E0 keeps neural_config=None → the renderer's default → byte-identical.
-    encoding_value = args.encoding
-    if "--encoding" not in sys.argv and not os.environ.get("SKINNY_ENCODING"):
-        saved_encoding = saved.get("encoding")
-        if saved_encoding in ("E0", "E1", "E3"):
-            encoding_value = saved_encoding
-    args.encoding = encoding_value
-    neural_cfg = neural_config_from_args(args)
-    renderer = Renderer(
-        vk_ctx=vk_ctx,
-        shader_dir=Path(__file__).parent / "shaders",
-        hdr_dir=repo_root / "hdrs",
-        tattoo_dir=repo_root / "tattoos",
-        usd_scene_path=scene_path,
-        use_usd_mtlx_plugin=args.usdMtlx,
-        execution_mode=args.execution_mode,
-        bdpt_walk=resolve_walk(args.bdpt_walk),
-        neural_handoff=args.neural_handoff,
-        neural_trainer=args.neural_trainer,
-        train_precision=args.train_precision,
-        neural_config=neural_cfg,
-    )
-
-    # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
-    if "--neural-handoff" not in sys.argv and not os.environ.get("SKINNY_NEURAL_HANDOFF"):
-        saved_handoff = saved.get("neural_handoff")
-        if saved_handoff in ("file", "interop", "shared"):
-            renderer._neural_handoff_kind = saved_handoff
-    # Same precedence for --neural-trainer / --train-precision (change
-    # neural-trainer-backends): CLI/env wins, else restore the persisted value.
-    if "--neural-trainer" not in sys.argv and not os.environ.get("SKINNY_NEURAL_TRAINER"):
-        saved_trainer = saved.get("neural_trainer")
-        if saved_trainer in ("cpu", "cuda", "mlx", "auto"):
-            renderer._neural_trainer_kind = saved_trainer
-    if "--train-precision" not in sys.argv and not os.environ.get("SKINNY_TRAIN_PRECISION"):
-        saved_prec = saved.get("train_precision")
-        if saved_prec in ("fp32", "fp16"):
-            renderer._train_precision = saved_prec
-    # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
-    # otherwise restore the persisted override. The sys.argv/env guard keeps an
-    # explicit CLI value (applied below, after the other CLI overrides) from
-    # being clobbered — when set there, this restore is skipped.
-    if ("--sppm-glossy-roughness" not in sys.argv
-            and not os.environ.get("SKINNY_SPPM_GLOSSY_ROUGHNESS")):
-        _sgr = saved.get("sppm_glossy_roughness")
-        if _sgr is not None:
-            renderer._sppm_glossy_roughness_override = float(_sgr)
-    # --online-training (change online-training-trigger): CLI/env wins, else
-    # restore the persisted flag. Enabling waits until the scene is ready (below).
-    online_training_requested = bool(args.online_training)
-    if ("--online-training" not in sys.argv
-            and not os.environ.get("SKINNY_ONLINE_TRAINING")):
-        online_training_requested = bool(saved.get("online_training", False))
-    # Display-only state for the startup configuration matrix (change
-    # online-training-observability): the resolved backend and the user's
-    # online-training intent (kept even if the gate below refuses, so the matrix
-    # shows REFUSED rather than OFF).
-    renderer._requested_backend = args.backend
-    renderer._online_training_requested = online_training_requested
-
-    _apply_saved_params(renderer, saved.get("params", {}))
-    _apply_saved_camera(renderer, saved.get("camera"))
-    _apply_saved_gizmo_mode(renderer, saved.get("gizmo_mode"))
-    # CLI --integrator (when given) wins over the persisted value for this launch.
-    if args.integrator is not None:
-        renderer.integrator_index = INTEGRATOR_INDEX[args.integrator]
-    # CLI/env --sppm-glossy-roughness override (only read under SPPM). A persisted
-    # value is restored above (before the Renderer overrides) with CLI/env winning.
-    apply_sppm_glossy_roughness(renderer, args)
-    # CLI --proposals / --reuse likewise override the persisted sampling seam.
-    if args.proposals is not None:
-        renderer.proposal_preset_index = renderer.proposal_preset_from_token(args.proposals)
-    if args.reuse is not None:
-        renderer.reuse_index = renderer._REUSE_TOKENS.index(args.reuse)
-    # CLI --lobe-samplers overrides the persisted per-lobe sampler selection.
-    if getattr(args, "lobe_samplers", None) is not None:
-        from skinny.sampling import parse_lobe_samplers
-
-        c, s, d = parse_lobe_samplers(args.lobe_samplers)
-        renderer.coat_sampler_index = c
-        renderer.spec_sampler_index = s
-        renderer.diff_sampler_index = d
-    renderer._update_light()
-
-    from skinny.debug_viewport import DebugViewport
-    debug_viewport = DebugViewport(
-        vk_ctx=vk_ctx,
-        shader_dir=Path(__file__).parent / "shaders",
-    )
-    renderer.debug_viewport = debug_viewport
-    debug_viewport.attach_renderer(renderer)
-
-    input_handler = InputHandler(window, renderer)
-
-    # --online-training prerequisite gate (change online-training-trigger). The
-    # static prerequisites (wavefront + a neural proposal) are known now, so
-    # refuse loudly up front; enabling itself waits until the scene is built.
-    # The refusal reason now surfaces in the configuration matrix's
-    # online-training row (REFUSED/WAITING), printed from the render loop's first
-    # update(); no separate one-shot line needed (change
-    # online-training-observability).
-    if online_training_requested:
-        ok, _reason = renderer.can_online_train()
-        if not ok:
-            online_training_requested = False
-    online_training_enabled = False
-
-    prev_time = time.perf_counter()
-    while not glfw.window_should_close(window):
-        glfw.poll_events()
-
-        now = time.perf_counter()
-        dt = now - prev_time
-        prev_time = now
-
-        input_handler.update(dt)
-        renderer.update(dt)
-        # Enable online training once the scene is built (enable_online_training
-        # surfaces the existing mlx/interop errors); then drive the per-frame tick.
-        # `_backend_render_ready` is the backend-aware readiness signal: the
-        # native Metal backend never allocates Vulkan `descriptor_sets` (it binds
-        # by name), so gating on those left online training permanently disabled
-        # on Metal — use the scene-bindings readiness both backends set.
-        if (online_training_requested and not online_training_enabled
-                and renderer._backend_render_ready):
-            renderer.enable_online_training()
-            online_training_enabled = True
-        renderer.online_training_tick()
-        renderer.hud_text_lines = input_handler.build_hud_lines()
-        renderer.render()
-        debug_viewport.update(dt)
-        debug_viewport.render(renderer)
-
     try:
-        out: dict = {
-            "backend": backend,
-            "vulkan_window": _window_pos_dict(window),
-            "params": _snapshot_params(renderer, input_handler.params),
-            "camera": _snapshot_camera(renderer),
-            "gizmo_mode": int(renderer.gizmo.mode),
-            "neural_handoff": renderer._neural_handoff_kind,
-            "neural_trainer": renderer._neural_trainer_kind,
-            "train_precision": renderer._train_precision,
-            "online_training": bool(online_training_requested),
-            "encoding": renderer._neural_config.encoding.value,
-            "sppm_glossy_roughness": getattr(
-                renderer, "_sppm_glossy_roughness_override", None),
-        }
-        save_settings(out)
-    except OSError:
-        pass
 
-    # Stop + join the background trainer thread before tearing down the GPU.
-    renderer.disable_online_training()
-    debug_viewport.destroy()
-    renderer.cleanup()
-    vk_ctx.destroy()
+        repo_root = Path(__file__).resolve().parents[2]
+        # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):
+        # CLI/env wins; else restore the persisted value. It is a build dim, so it is
+        # threaded into the neural build config at construction (recompiles the neural
+        # .spv). E0 keeps neural_config=None → the renderer's default → byte-identical.
+        encoding_value = args.encoding
+        if "--encoding" not in sys.argv and not os.environ.get("SKINNY_ENCODING"):
+            saved_encoding = saved.get("encoding")
+            if saved_encoding in ("E0", "E1", "E3"):
+                encoding_value = saved_encoding
+        args.encoding = encoding_value
+        neural_cfg = neural_config_from_args(args)
+        renderer = Renderer(
+            vk_ctx=vk_ctx,
+            shader_dir=Path(__file__).parent / "shaders",
+            hdr_dir=repo_root / "hdrs",
+            tattoo_dir=repo_root / "tattoos",
+            usd_scene_path=scene_path,
+            use_usd_mtlx_plugin=args.usdMtlx,
+            execution_mode=args.execution_mode,
+            bdpt_walk=resolve_walk(args.bdpt_walk),
+            neural_handoff=args.neural_handoff,
+            neural_trainer=args.neural_trainer,
+            train_precision=args.train_precision,
+            neural_config=neural_cfg,
+        )
+
+        # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
+        if "--neural-handoff" not in sys.argv and not os.environ.get("SKINNY_NEURAL_HANDOFF"):
+            saved_handoff = saved.get("neural_handoff")
+            if saved_handoff in ("file", "interop", "shared"):
+                renderer._neural_handoff_kind = saved_handoff
+        # Same precedence for --neural-trainer / --train-precision (change
+        # neural-trainer-backends): CLI/env wins, else restore the persisted value.
+        if "--neural-trainer" not in sys.argv and not os.environ.get("SKINNY_NEURAL_TRAINER"):
+            saved_trainer = saved.get("neural_trainer")
+            if saved_trainer in ("cpu", "cuda", "mlx", "auto"):
+                renderer._neural_trainer_kind = saved_trainer
+        if "--train-precision" not in sys.argv and not os.environ.get("SKINNY_TRAIN_PRECISION"):
+            saved_prec = saved.get("train_precision")
+            if saved_prec in ("fp32", "fp16"):
+                renderer._train_precision = saved_prec
+        # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
+        # otherwise restore the persisted override. The sys.argv/env guard keeps an
+        # explicit CLI value (applied below, after the other CLI overrides) from
+        # being clobbered — when set there, this restore is skipped.
+        if ("--sppm-glossy-roughness" not in sys.argv
+                and not os.environ.get("SKINNY_SPPM_GLOSSY_ROUGHNESS")):
+            _sgr = saved.get("sppm_glossy_roughness")
+            if _sgr is not None:
+                renderer._sppm_glossy_roughness_override = float(_sgr)
+        # --online-training (change online-training-trigger): CLI/env wins, else
+        # restore the persisted flag. Enabling waits until the scene is ready (below).
+        online_training_requested = bool(args.online_training)
+        if ("--online-training" not in sys.argv
+                and not os.environ.get("SKINNY_ONLINE_TRAINING")):
+            online_training_requested = bool(saved.get("online_training", False))
+        # Display-only state for the startup configuration matrix (change
+        # online-training-observability): the resolved backend and the user's
+        # online-training intent (kept even if the gate below refuses, so the matrix
+        # shows REFUSED rather than OFF).
+        renderer._requested_backend = args.backend
+        renderer._online_training_requested = online_training_requested
+
+        _apply_saved_params(renderer, saved.get("params", {}))
+        _apply_saved_camera(renderer, saved.get("camera"))
+        _apply_saved_gizmo_mode(renderer, saved.get("gizmo_mode"))
+        # CLI --integrator (when given) wins over the persisted value for this launch.
+        if args.integrator is not None:
+            renderer.integrator_index = INTEGRATOR_INDEX[args.integrator]
+        # CLI/env --sppm-glossy-roughness override (only read under SPPM). A persisted
+        # value is restored above (before the Renderer overrides) with CLI/env winning.
+        apply_sppm_glossy_roughness(renderer, args)
+        # CLI --proposals / --reuse likewise override the persisted sampling seam.
+        if args.proposals is not None:
+            renderer.proposal_preset_index = renderer.proposal_preset_from_token(args.proposals)
+        if args.reuse is not None:
+            renderer.reuse_index = renderer._REUSE_TOKENS.index(args.reuse)
+        # CLI --lobe-samplers overrides the persisted per-lobe sampler selection.
+        if getattr(args, "lobe_samplers", None) is not None:
+            from skinny.sampling import parse_lobe_samplers
+
+            c, s, d = parse_lobe_samplers(args.lobe_samplers)
+            renderer.coat_sampler_index = c
+            renderer.spec_sampler_index = s
+            renderer.diff_sampler_index = d
+        renderer._update_light()
+
+        from skinny.debug_viewport import DebugViewport
+        debug_viewport = DebugViewport(
+            vk_ctx=vk_ctx,
+            shader_dir=Path(__file__).parent / "shaders",
+        )
+        renderer.debug_viewport = debug_viewport
+        debug_viewport.attach_renderer(renderer)
+
+        input_handler = InputHandler(window, renderer)
+
+        # --online-training prerequisite gate (change online-training-trigger). The
+        # static prerequisites (wavefront + a neural proposal) are known now, so
+        # refuse loudly up front; enabling itself waits until the scene is built.
+        # The refusal reason now surfaces in the configuration matrix's
+        # online-training row (REFUSED/WAITING), printed from the render loop's first
+        # update(); no separate one-shot line needed (change
+        # online-training-observability).
+        if online_training_requested:
+            ok, _reason = renderer.can_online_train()
+            if not ok:
+                online_training_requested = False
+        online_training_enabled = False
+
+        prev_time = time.perf_counter()
+        while not glfw.window_should_close(window):
+            glfw.poll_events()
+
+            now = time.perf_counter()
+            dt = now - prev_time
+            prev_time = now
+
+            input_handler.update(dt)
+            renderer.update(dt)
+            # Enable online training once the scene is built (enable_online_training
+            # surfaces the existing mlx/interop errors); then drive the per-frame tick.
+            # `_backend_render_ready` is the backend-aware readiness signal: the
+            # native Metal backend never allocates Vulkan `descriptor_sets` (it binds
+            # by name), so gating on those left online training permanently disabled
+            # on Metal — use the scene-bindings readiness both backends set.
+            if (online_training_requested and not online_training_enabled
+                    and renderer._backend_render_ready):
+                renderer.enable_online_training()
+                online_training_enabled = True
+            renderer.online_training_tick()
+            renderer.hud_text_lines = input_handler.build_hud_lines()
+            renderer.render()
+            debug_viewport.update(dt)
+            debug_viewport.render(renderer)
+
+        try:
+            out: dict = {
+                "backend": backend,
+                "vulkan_window": _window_pos_dict(window),
+                "params": _snapshot_params(renderer, input_handler.params),
+                "camera": _snapshot_camera(renderer),
+                "gizmo_mode": int(renderer.gizmo.mode),
+                "neural_handoff": renderer._neural_handoff_kind,
+                "neural_trainer": renderer._neural_trainer_kind,
+                "train_precision": renderer._train_precision,
+                "online_training": bool(online_training_requested),
+                "encoding": renderer._neural_config.encoding.value,
+                "sppm_glossy_roughness": getattr(
+                    renderer, "_sppm_glossy_roughness_override", None),
+            }
+            save_settings(out)
+        except OSError:
+            pass
+
+        # Stop + join the background trainer thread before tearing down the GPU.
+        renderer.disable_online_training()
+        debug_viewport.destroy()
+        renderer.cleanup()
+    finally:
+        # Teardown on every exit path (change nanovdb-volume-rendering, D5.2):
+        # an exception anywhere in setup or the render loop still drains and
+        # closes the GPU context before the process exits.
+        vk_ctx.destroy()
     glfw.terminate()
 
 
