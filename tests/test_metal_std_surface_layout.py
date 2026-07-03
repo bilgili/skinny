@@ -28,12 +28,14 @@ Two halves:
   read fields back on the GPU, and assert they match the scalar (Vulkan-correct)
   values. The ``[1]`` index exercises the per-element MSL stride.
 
-Run the Metal half:
+Run the Metal half (gpu-marked — kept out of the default sweep, one Metal
+process at a time; the raw probe device is torn down by the ``metal_probe_device``
+fixture):
 
     export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS
     export DYLD_LIBRARY_PATH=$VULKAN_SDK/lib
     PYTHONPATH=$PWD/src <repo>/bin/python3.13 -m pytest \
-        tests/test_metal_std_surface_layout.py -q
+        tests/test_metal_std_surface_layout.py -m gpu -q
 """
 
 from __future__ import annotations
@@ -122,18 +124,12 @@ def test_std_surface_msl_relocation_places_fields():
     assert rd(0) == pytest.approx(0.8)     # base_color.x (float3 aligned at 0)
 
 
-def test_metal_reads_relocated_std_surface_params():
+@pytest.mark.gpu
+def test_metal_reads_relocated_std_surface_params(metal_probe_device):
     """On a real Metal device, the relocated record reads back field-for-field
     correct through `StructuredBuffer<StdSurfaceParams>` (the `[1]` index exercises
     the per-element MSL stride) — proves the relocation is layout-correct for a
     future Metal pipeline that reads binding 19. Cheap: one tiny probe kernel."""
-    try:
-        from skinny.backend_select import metal_available
-    except OSError as exc:  # pragma: no cover
-        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
-    ok, reason = metal_available()
-    if not ok:
-        pytest.skip(f"native Metal unavailable: {reason}")
     spy = pytest.importorskip("slangpy")
 
     kernel_src = _STD_SURFACE_STRUCT + """
@@ -147,7 +143,7 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
     outBuf[6]=p.coat_IOR; outBuf[7]=p.base_color.x;
 }
 """
-    dev = spy.create_device(type=spy.DeviceType.metal)
+    dev = metal_probe_device
     opts = spy.SlangCompilerOptions()
     opts.matrix_layout = spy.SlangMatrixLayout.column_major
     sess = dev.create_slang_session(compiler_options=opts)
