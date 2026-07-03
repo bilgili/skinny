@@ -316,6 +316,30 @@ the Metal-target texture/sampler split (`commonSampler`, the discrete-map
 samplers, `NRI`) see
 [Architecture.md § MetalContext](Architecture.md#metalcontext-metal_contextpy-metal_computepy).
 
+**Metal watchdog tiling (change `metal-megakernel-watchdog-tiling`).** macOS
+cannot cancel another process's GPU work, so a single full-frame megakernel
+command buffer that runs too long wedges the device until reboot (the
+`metal-dispatch-hygiene` rule). The megakernel has no per-pixel loop to cap the
+way a volume march does — its cost blows up in *breadth*: **BDPT** builds an eye
+subpath and a light subpath and evaluates the full `s × t` connection matrix per
+pixel (each connection a BSDF eval at both endpoints plus a shadow ray), and on a
+scene bound to inlined MaterialX **graph materials** each of those evals is a
+large shader. That combination tipped a full-frame 720p dispatch past the
+watchdog and hung the GPU. The fix is spatial, not temporal: under `SKINNY_METAL`
+the Metal megakernel frame is committed as a sequence of screen-space **row
+bands** — one command buffer per band (`metal_compute.ComputePipeline.dispatch`
+loops the bands; `mainImage`/`mainImageRecord` add `fc.tileOriginY`, a Metal-only
+`FrameConstants` field, to the dispatch thread's `y`). Each buffer is bounded to
+`width × bandHeight` pixels. The accumulation image persists across the bands of
+a frame and each pixel is written once, so N-band output is **bit-identical** to
+one dispatch. The band count comes from `renderer._metal_megakernel_bands()` — an
+integrator-aware per-pixel budget (`_METAL_MEGAKERNEL_BAND_PIXELS`: BDPT gets a
+far smaller budget than Path/SPPM) scaled by resolution, overridable via
+`SKINNY_METAL_MEGAKERNEL_BANDS`. Ordinary scenes at ≤256² stay a single band, so
+the parity corpus is unaffected. Vulkan always dispatches the full frame in one
+buffer; the `tileOriginY` field and its read are `#if defined(SKINNY_METAL)`
+gated, so the Vulkan `FrameConstants` struct and SPIR-V are byte-unchanged.
+
 ---
 
 ## Key files

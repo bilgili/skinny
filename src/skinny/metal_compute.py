@@ -793,7 +793,8 @@ class ComputePipeline:
     # ── Dispatch ─────────────────────────────────────────────────
 
     def dispatch(self, width: int, height: int, *, uniform_blob: bytes,
-                 binds: dict, bindless=None) -> None:
+                 binds: dict, bindless=None, bands: int = 1,
+                 tile_origin_offset: int | None = None) -> None:
         """Bind ``fc`` (via ``set_data``), every resource in ``binds`` (name → native
         SlangPy ``Buffer``/``Texture``/``Sampler``), and the optional bindless texture
         array, then dispatch ``main_pass`` over ``width × height`` threads.
@@ -801,14 +802,27 @@ class ComputePipeline:
         ``bindless`` is ``(global_name, [native_texture | None, …])``; ``None`` slots
         bind the default 1×1 texture (Metal requires every array slot bound). Only
         names present in the reflected globals are bound (unused ones are
-        dead-stripped). No per-field scalar cursor writes anywhere (design D4)."""
+        dead-stripped). No per-field scalar cursor writes anywhere (design D4).
+
+        ``bands`` (change metal-megakernel-watchdog-tiling): split the frame into
+        this many screen-space row bands and commit ONE command buffer per band, so
+        no single buffer covers the full frame. macOS cannot cancel another
+        process's GPU work, so a full-frame BDPT dispatch over heavy (graph-material)
+        pixels can exceed the GPU watchdog and wedge the device; tiling bounds each
+        command buffer to ``width × bandHeight`` pixels. The band Y origin is patched
+        into the ``tileOriginY`` u32 of the fc blob at ``tile_origin_offset`` (its
+        reflected MSL byte offset; falls back to the final u32 when ``None``). The
+        shader adds it to the dispatch thread's y under ``SKINNY_METAL``. The resource
+        + bindless binds are set once on the shared root object and reused across
+        bands. ``bands == 1`` reproduces the original single full-frame dispatch
+        exactly (origin patched to 0)."""
         spy = self._spy
         dev = self.ctx.device
         ro = dev.create_root_shader_object(self.program)
         cur = spy.ShaderCursor(ro)
 
         blob = np.frombuffer(bytes(uniform_blob), dtype=np.uint8).copy()
-        cur["fc"].set_data(blob)
+        toff = len(blob) - 4 if tile_origin_offset is None else int(tile_origin_offset)
 
         for name, native in binds.items():
             if native is None or name not in self.global_names:
@@ -824,13 +838,22 @@ class ComputePipeline:
                         else self._default_tex
                     slot_cur[i] = tex
 
-        enc = dev.create_command_encoder()
-        cpass = enc.begin_compute_pass()
-        cpass.bind_pipeline(self.pipeline, ro)
-        cpass.dispatch([int(width), int(height), 1])
-        cpass.end()
-        dev.submit_command_buffer(enc.finish())
-        dev.wait_for_idle()
+        n_bands = max(1, int(bands))
+        band_h = (int(height) + n_bands - 1) // n_bands
+        for y0 in range(0, int(height), band_h):
+            h = min(band_h, int(height) - y0)
+            # Patch only the tileOriginY u32 per band rather than re-pack the whole
+            # blob; the shader offsets pixel.y by it (change
+            # metal-megakernel-watchdog-tiling).
+            blob[toff:toff + 4] = np.frombuffer(np.uint32(y0).tobytes(), dtype=np.uint8)
+            cur["fc"].set_data(blob)
+            enc = dev.create_command_encoder()
+            cpass = enc.begin_compute_pass()
+            cpass.bind_pipeline(self.pipeline, ro)
+            cpass.dispatch([int(width), int(h), 1])
+            cpass.end()
+            dev.submit_command_buffer(enc.finish())
+            dev.wait_for_idle()
 
     def dispatch_kernel(self, thread_count, *, buffers=None, vars=None) -> None:
         """Generic low-level dispatch for non-megakernel kernels (the foundation

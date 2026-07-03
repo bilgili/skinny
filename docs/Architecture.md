@@ -44,15 +44,30 @@ the spec lights it up in both UIs.
 
 ### Per-Frame Render Loop (Qt desktop)
 
-1. `MainWindow.QTimer` ticks at the swap interval → `renderer.update(dt)`
-   → `renderer.render_offscreen()` → `RenderViewport` blits the latest
-   image with `QImage::QImage(..., RGBA8888)`.
-2. `renderer.update(dt)` detects dirty state (camera, params, env, scene
-   graph), reuploads affected buffers, resets accumulation on change.
-3. `renderer.render_offscreen()` packs FrameConstants + SkinParams + light
-   + per-material data into the UBO, updates descriptor sets, dispatches
-   `ceil(W/8) × ceil(H/8)`, and copies the storage image into a
-   readback buffer for Qt.
+1. `MainWindow` creates a `RenderCommandQueue` plus a `QtRendererProxy`, then
+   starts `RenderViewport`. The proxy is the only renderer-shaped object the GUI
+   thread reads; it is backed by immutable snapshots and local optimistic state.
+2. `RenderViewport` starts a Qt worker thread (`_RenderWorker`). That worker
+   constructs the GPU context with `make_context(...)`, constructs `Renderer`,
+   applies startup flags/restored settings, and owns cleanup (`disable_online_training`,
+   `renderer.cleanup()`, `ctx.destroy()`).
+3. Each worker frame drains queued commands, then calls `renderer.update(dt)` →
+   online-training tick (when armed) → `renderer.render_headless()`.
+4. GUI events post common renderer mutations (camera input, zoom/focus toggles,
+   scene loads, parameter edits, and render-target resize) into the command queue
+   instead of waiting for a render lock while a frame is in flight. High-rate
+   commands such as resize and camera movement are coalesced.
+5. `renderer.update(dt)` detects dirty state (camera, params, env, scene graph),
+   reuploads affected buffers, and resets accumulation on change.
+6. `renderer.render_headless()` packs FrameConstants + SkinParams + light +
+   per-material data into the UBO, dispatches `ceil(W/8) × ceil(H/8)`, copies the
+   storage image into a readback buffer, and emits raw RGBA bytes plus status
+   snapshots. The Qt main thread stores those bytes in a `QImage` and paints the
+   latest frame.
+
+Deep inspector/editor docks that still require live renderer internals are gated
+in this mode until their snapshot-backed ports are implemented; they must not
+receive the worker-owned renderer object.
 
 ### Per-Frame Render Loop (GLFW debug)
 
@@ -880,6 +895,22 @@ weight handoff writes at the frame boundary (`MetalSharedWeightPublisher`).
 weights load fp32 via `_effective_neural_config()`'s graceful downgrade.
 `supports_indirect_dispatch` is probed **empirically** (a real indirect
 dispatch + sentinel readback; a structural `hasattr` check would lie).
+
+**Megakernel watchdog tiling** (change `metal-megakernel-watchdog-tiling`): the
+megakernel dispatch (`ComputePipeline.dispatch`) commits one command buffer per
+screen-space **row band** under `SKINNY_METAL`, so no single buffer covers the
+full frame. This closes the same `metal-dispatch-hygiene` "no unbounded command
+buffers" hole that the volume caps close for per-pixel loops — but for integrator
+*breadth*: a full-frame **BDPT** megakernel over inlined graph materials (eye ×
+light subpaths + `s × t` connections, each a graph-shader BSDF eval) exceeded the
+watchdog and wedged the GPU. `renderer._metal_megakernel_bands()` picks the band
+count from an integrator-aware per-pixel budget (`_METAL_MEGAKERNEL_BAND_PIXELS`)
+scaled by resolution, overridable via `SKINNY_METAL_MEGAKERNEL_BANDS`; the band Y
+origin rides a Metal-only `FrameConstants.tileOriginY` (`#if defined(SKINNY_METAL)`
+gated ⇒ Vulkan SPIR-V byte-unchanged) that `mainImage` adds to the thread's `y`.
+The accumulation image persists across a frame's bands, so N-band output is
+bit-identical to one dispatch, and ≤256² scenes stay a single band (parity corpus
+unaffected). See [Megakernel.md → Backends](Megakernel.md#backends-vulkan-and-metal).
 
 ## Backend Abstraction (`gfx/`)
 

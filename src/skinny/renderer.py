@@ -103,7 +103,29 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     # Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
     # film-maxcomponent-clamp). 0 = disabled.
     ("filmMaxComponent", 4),
+    # Metal megakernel watchdog tiling (change metal-megakernel-watchdog-tiling):
+    # row-band Y origin for this dispatch. 0 from the base packer (Vulkan always
+    # dispatches the full frame); the Metal megakernel path patches it per band.
+    ("tileOriginY", 4),
 )
+
+# Byte offset of the `tileOriginY` u32 at the tail of the `_pack_uniforms` scalar
+# blob, so the Metal band loop can patch it in place without a full re-pack.
+_TILE_ORIGIN_Y_OFFSET = sum(sz for _, sz in _FC_SCALAR_FIELDS) - 4
+
+# Target pixels per Metal megakernel command buffer, per integrator, before the
+# frame is split into more row bands (change metal-megakernel-watchdog-tiling).
+# BDPT does the widest per-pixel work (eye × light subpaths + full s×t connection
+# matrix, each connection a BSDF eval at both ends), so it needs a far smaller
+# budget than the path tracer to stay under the macOS GPU watchdog on heavy
+# (graph-material) scenes. Path/SPPM are cheap enough to keep the single
+# full-frame dispatch on ordinary scenes. `_metal_megakernel_bands` reads these.
+_METAL_MEGAKERNEL_BAND_PIXELS_DEFAULT = 8_000_000
+_METAL_MEGAKERNEL_BAND_PIXELS = {
+    0: 8_000_000,   # Path — effectively one band until very large frames
+    1: 200_000,     # BDPT — the wedging case; ~1280×720 → ~5 bands
+    2: 8_000_000,   # SPPM eye pass — cheap per pixel
+}
 
 # Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
 # `UniformBuffer.upload` path memmoves min(len(data), size), so an undersized
@@ -8579,11 +8601,35 @@ class Renderer:
             "flatMaterialTextures",
             [(s.texture if s is not None else None) for s in self.texture_pool._slots],
         )
+        # Row-band tiling bounds each committed command buffer under the macOS GPU
+        # watchdog (change metal-megakernel-watchdog-tiling). The tileOriginY u32 is
+        # patched at its reflected MSL offset per band.
+        tile_off, _ = self._msl_layout_source.uniform_layout["tileOriginY"]
         self.pipeline.dispatch(
             self.width, self.height,
             uniform_blob=self._pack_uniforms_msl(),
             binds=binds, bindless=bindless,
+            bands=self._metal_megakernel_bands(),
+            tile_origin_offset=tile_off,
         )
+
+    def _metal_megakernel_bands(self) -> int:
+        """Row-band count for the Metal megakernel dispatch so no single command
+        buffer exceeds the GPU watchdog budget. Integrator-aware and resolution-
+        scaled; `SKINNY_METAL_MEGAKERNEL_BANDS` overrides for tuning. Vulkan never
+        calls this (it dispatches the full frame in one buffer)."""
+        import os
+        override = os.environ.get("SKINNY_METAL_MEGAKERNEL_BANDS")
+        if override:
+            try:
+                return max(1, int(override))
+            except ValueError:
+                pass
+        budget = _METAL_MEGAKERNEL_BAND_PIXELS.get(
+            int(self.integrator_index), _METAL_MEGAKERNEL_BAND_PIXELS_DEFAULT)
+        pixels = int(self.width) * int(self.height)
+        bands = (pixels + budget - 1) // budget
+        return max(1, min(int(self.height), bands))
 
     def _render_wavefront_metal(self, staged) -> None:
         """Dispatch one staged wavefront frame on the Metal backend (change
@@ -8916,6 +8962,7 @@ class Renderer:
         data += struct.pack("I", int(sppm_photons))                  # sppmPhotonsEmitted
         data += struct.pack("f", sppm_glossy)                        # sppmGlossyContinueRoughness
         data += struct.pack("f", float(self.film_max_component))      # filmMaxComponent
+        data += struct.pack("I", 0)                                  # tileOriginY (Metal band loop patches)
 
         # Directional lights are no longer in the UBO — they live in the
         # `distantLights` SSBO at binding 20 (uploaded by

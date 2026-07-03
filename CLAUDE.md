@@ -170,7 +170,12 @@ GPU work, in code or in tests, must go through it**:
 - **No unbounded command buffers.** No single committed command buffer may exceed the
   macOS GPU watchdog budget. Long per-pixel loops (volume marches, SSS walks) must be
   capped per dispatch under `SKINNY_METAL` and continued across accumulation frames;
-  prefer the wavefront mode (naturally short staged kernels) for heavy work.
+  prefer the wavefront mode (naturally short staged kernels) for heavy work. The
+  **megakernel** dispatch is bounded by *breadth* the same way: under `SKINNY_METAL`
+  it is committed as row bands (one command buffer each, `SKINNY_METAL_MEGAKERNEL_BANDS`
+  overridable) so a full-frame BDPT-over-graph-materials frame can't wedge the GPU
+  (`metal-megakernel-watchdog-tiling`; band count in `renderer._metal_megakernel_bands`,
+  tiling is bit-identical to one dispatch).
 - **Run the kill harness when you touch GPU dispatch or kernel length.** Any change
   that adds a kernel, lengthens one, or alters context lifecycle must pass
   `tests/test_metal_cleanup.py` before merge — 13 hostless tests via plain pytest, and
