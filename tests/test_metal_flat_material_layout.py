@@ -73,16 +73,9 @@ struct FlatMaterialParams {
 """
 
 
-def test_metal_flat_material_stride_and_volume_fields():
+def test_metal_flat_material_stride_and_volume_fields(metal_probe_device):
     """MSL stride == scalar stride (256) and the appended worldToUvw rows +
     medium + cloud fields read back exactly from the scalar-packed record."""
-    try:
-        from skinny.backend_select import metal_available
-    except OSError as exc:  # pragma: no cover
-        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
-    ok, reason = metal_available()
-    if not ok:
-        pytest.skip(f"native Metal unavailable: {reason}")
     spy = pytest.importorskip("slangpy")
 
     kernel_src = _FLAT_MATERIAL_STRUCT + """
@@ -102,7 +95,7 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
     outBuf[11] = p._cloudDensityWispinessFrequency.z;
 }
 """
-    dev = spy.create_device(type=spy.DeviceType.metal)
+    dev = metal_probe_device
     opts = spy.SlangCompilerOptions()
     opts.matrix_layout = spy.SlangMatrixLayout.column_major
     sess = dev.create_slang_session(compiler_options=opts)

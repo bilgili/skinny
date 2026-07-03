@@ -216,14 +216,7 @@ def test_zero_density_scale_zeroes_fbm_term():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.gpu
-def test_slang_cloud_density_matches_numpy_mirror():
-    try:
-        from skinny.backend_select import metal_available
-    except OSError as exc:  # pragma: no cover
-        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
-    ok, reason = metal_available()
-    if not ok:
-        pytest.skip(f"native Metal unavailable: {reason}")
+def test_slang_cloud_density_matches_numpy_mirror(metal_probe_device):
     spy = pytest.importorskip("slangpy")
 
     pts = _grid_points(10)                              # 1000 points, negatives too
@@ -241,7 +234,7 @@ void computeMain(uint3 t : SV_DispatchThreadID) {{
     outDensity[t.x] = cloudDensity(p, 2.0, 1.0, 5.0);
 }}
 """
-    dev = spy.create_device(type=spy.DeviceType.metal)
+    dev = metal_probe_device
     sess = dev.create_slang_session(compiler_options=spy.SlangCompilerOptions())
     mod = sess.load_module_from_source("cloud_probe", kernel_src, "cloud_probe.slang")
     prog = sess.link_program([mod], [mod.entry_point("computeMain")])

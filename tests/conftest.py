@@ -25,6 +25,41 @@ def harness_dir():
     return HARNESS_DIR
 
 
+@pytest.fixture
+def metal_probe_device():
+    """A raw slangpy Metal device for isolated struct/kernel probe tests.
+
+    These probes (cloud-noise, flat-material / std-surface layout) don't need a
+    full ``MetalContext`` — no surface, no megakernel — but they still fall under
+    the repo's Metal dispatch-hygiene rule: *every* piece of GPU work must
+    guarantee device teardown so a killed run can't abandon a live device + its
+    committed command buffer and wedge the GPU. This fixture drains
+    (``wait_for_idle``) and closes the device in its finalizer on every exit path
+    — normal return, assertion failure, or error — mirroring
+    ``MetalContext.destroy``. Skips when native Metal isn't available.
+    """
+    try:
+        from skinny.backend_select import metal_available
+    except OSError as exc:  # pragma: no cover — Vulkan SDK missing from dylib path
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+    ok, reason = metal_available()
+    if not ok:
+        pytest.skip(f"native Metal unavailable: {reason}")
+    spy = pytest.importorskip("slangpy")
+    dev = spy.create_device(type=spy.DeviceType.metal)
+    try:
+        yield dev
+    finally:
+        try:
+            dev.wait_for_idle()
+        except Exception:  # noqa: BLE001 — best-effort drain before teardown
+            pass
+        try:
+            dev.close()
+        except Exception:  # noqa: BLE001 — device may already be torn down
+            pass
+
+
 @pytest.fixture(scope="session")
 def device(shader_dir, mtlx_dir, harness_dir):
     spy = pytest.importorskip("slangpy")
