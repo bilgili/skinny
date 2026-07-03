@@ -44,6 +44,32 @@ def test_homogeneous_medium_carried_via_customdata(tmp_path):
     assert any("medium:homogeneous" in e.construct for e in report.entries)
 
 
+CONSTANT_SPECTRUM = """
+WorldBegin
+MakeNamedMedium "fog" "string type" "homogeneous" "spectrum sigma_s" [200 10 900 10] "spectrum sigma_a" [200 .01 900 .01]
+AttributeBegin
+  MediumInterface "fog" ""
+  Material "dielectric" "float eta" 1.33
+  Shape "sphere" "float radius" 1
+AttributeEnd
+"""
+
+
+def test_constant_spectrum_sigma_is_achromatic(tmp_path):
+    # "spectrum sigma_s" [200 10 900 10] is constant -> exactly [10, 10, 10]
+    src = tmp_path / "c.pbrt"
+    src.write_text(CONSTANT_SPECTRUM)
+    stage, _report = import_pbrt(str(src))
+    found = False
+    for prim in stage.Traverse():
+        cd = prim.GetCustomDataByKey("skinnyOverrides")
+        if cd and "volume_sigma_s" in cd:
+            found = True
+            assert list(cd["volume_sigma_s"]) == pytest.approx([10.0, 10.0, 10.0])
+            assert list(cd["volume_sigma_a"]) == pytest.approx([0.01, 0.01, 0.01])
+    assert found
+
+
 def test_heterogeneous_medium_flagged(tmp_path):
     src = tmp_path / "h.pbrt"
     src.write_text(HETEROGENEOUS)
