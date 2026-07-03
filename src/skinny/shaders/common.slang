@@ -86,6 +86,12 @@ struct FlatMaterialParams
     float4 _worldToUvw0;                   // 192..208
     float4 _worldToUvw1;                   // 208..224
     float4 _worldToUvw2;                   // 224..240
+    // Procedural cloud medium (pbrt-cloud-procedural-medium): pbrt CloudMedium
+    // params, read only when mediumKind == MEDIUM_CLOUD (zeros elsewhere —
+    // bytes appended, never shifted; the 0..240 prefix is byte-identical).
+    // For the cloud the worldToUvw rows map world → medium-local [0,1]³
+    // (identical semantics to the grid's texel space; no texture involved).
+    float4 _cloudDensityWispinessFrequency; // 240..256 x=density y=wispiness z=frequency w=pad
 
     property float3 diffuseColor      { get { return _diffuseColorRoughness.xyz; } }
     property float  roughness         { get { return _diffuseColorRoughness.w; } }
@@ -106,6 +112,7 @@ struct FlatMaterialParams
     property float4 worldToUvw0       { get { return _worldToUvw0; } }
     property float4 worldToUvw1       { get { return _worldToUvw1; } }
     property float4 worldToUvw2       { get { return _worldToUvw2; } }
+    property float3 cloudParams       { get { return _cloudDensityWispinessFrequency.xyz; } }
 };
 
 // Participating medium resolved at a hit (homogeneous subsurface interior or a
@@ -120,10 +127,11 @@ struct Medium
     float3 sigmaS;       // mm⁻¹
     float  g;            // Henyey-Greenstein anisotropy
     float  eta;          // boundary relative IOR (1 = index-matched pass-through)
-    uint   kind;         // MEDIUM_HOMOGENEOUS | MEDIUM_NANOVDB
-    float4 worldToUvw0;  // uvw.x = dot(.xyz, p) + .w  (MEDIUM_NANOVDB)
-    float4 worldToUvw1;  // uvw.y
+    uint   kind;         // MEDIUM_HOMOGENEOUS | MEDIUM_NANOVDB | MEDIUM_CLOUD
+    float4 worldToUvw0;  // uvw.x = dot(.xyz, p) + .w  (MEDIUM_NANOVDB: texel
+    float4 worldToUvw1;  // uvw.y   space; MEDIUM_CLOUD: medium-local [0,1]³)
     float4 worldToUvw2;  // uvw.z
+    float3 cloudParams;  // MEDIUM_CLOUD: x=density y=wispiness z=frequency
 };
 
 // Gen-reflected skin material UBO — layout produced by MaterialXGenSlang

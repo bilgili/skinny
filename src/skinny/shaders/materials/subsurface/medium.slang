@@ -16,7 +16,8 @@
 // folded world→uvw rows for the grid kind.
 
 import common;     // Medium, FlatMaterialParams
-import bindings;   // MEDIUM_HOMOGENEOUS / MEDIUM_NANOVDB, flatMaterials, volumeDensity
+import bindings;   // MEDIUM_HOMOGENEOUS / MEDIUM_NANOVDB / MEDIUM_CLOUD, flatMaterials, volumeDensity
+import materials.subsurface.cloud_noise;  // pbrt Perlin fBm cloudDensity (MEDIUM_CLOUD)
 
 // slang-rhi's Metal backend cannot bind a combined `Sampler3D`, so on the Metal
 // target the density grid is a plain `Texture3D` + a discrete `SamplerState`
@@ -48,6 +49,22 @@ float densityAt(Medium m, float3 pWorld)
             return 0.0;
         return VOLUME_SAMPLE_LEVEL(uvw);
     }
+    case MEDIUM_CLOUD:
+    {
+        // Same folded affine, but the rows map world → medium-local [0,1]³
+        // (importer-folded medium CTM). pbrt clips cloud transport to the
+        // medium bounds (default unit cube) in SampleRay; the outside-zero
+        // here is that clip — and it also kills the altitude floor term
+        // (2·max(0, 0.5−y)) below the cube, which is unbounded otherwise.
+        float3 pLocal = float3(
+            dot(m.worldToUvw0.xyz, pWorld) + m.worldToUvw0.w,
+            dot(m.worldToUvw1.xyz, pWorld) + m.worldToUvw1.w,
+            dot(m.worldToUvw2.xyz, pWorld) + m.worldToUvw2.w);
+        if (any(pLocal < float3(0.0)) || any(pLocal > float3(1.0)))
+            return 0.0;
+        // pbrt CloudMedium::Density (cloud_noise.slang) — already in [0,1].
+        return cloudDensity(pLocal, m.cloudParams.x, m.cloudParams.y, m.cloudParams.z);
+    }
     case MEDIUM_HOMOGENEOUS:
         return 1.0;
     default:
@@ -68,6 +85,11 @@ float3 mediumMajorant(Medium m, float3 a, float3 b)
         // for correctness (macrocell/DDA local majorants are a noted follow-up
         // for convergence, not unbiasedness).
         return m.sigmaA + m.sigmaS;
+    case MEDIUM_CLOUD:
+        // pbrt CloudMedium::Density clamps to [0,1], so the packed σ_t is the
+        // exact global majorant — the same argument (and pbrt's own
+        // SampleRay homogeneous-majorant choice) as the grid case.
+        return m.sigmaA + m.sigmaS;
     case MEDIUM_HOMOGENEOUS:
         return m.sigmaA + m.sigmaS;
     default:
@@ -86,8 +108,9 @@ Medium resolveMedium(uint materialId)
     m.g           = p.mediumG;
     m.eta         = p.ior;            // boundary IOR reuses the flat `ior` slot
     m.kind        = p.mediumKind;
-    m.worldToUvw0 = p.worldToUvw0;    // folded grid transform (identity if none)
+    m.worldToUvw0 = p.worldToUvw0;    // folded grid/medium transform (identity if none)
     m.worldToUvw1 = p.worldToUvw1;
     m.worldToUvw2 = p.worldToUvw2;
+    m.cloudParams = p.cloudParams;    // density/wispiness/frequency (MEDIUM_CLOUD)
     return m;
 }

@@ -25,7 +25,7 @@ from .lights import add_light
 from .parser import parse_file
 from .ply import read_ply
 from .report import Report
-from .state import PbrtScene, PbrtShape, build_scene
+from .state import PbrtMaterial, PbrtScene, PbrtShape, build_scene
 
 # Inputs that are carried as `skinnyOverrides` customData (merged into
 # Material.parameter_overrides by the loader), NOT authored as UsdPreviewSurface
@@ -262,12 +262,22 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
         meta_mod.tag_arealight(mesh.GetPrim(), meta_mod.arealight_metadata(shp.area_light))
 
     overrides = _resolve_medium(stage, shp, scene, report, path, base_dir, emitted_volumes)
-    if shp.material is not None and shp.material.type == "interface":
+    material = shp.material
+    if material is not None and material.type == "" and shp.inside_medium:
+        # pbrt `Material ""` on a shape carrying a MediumInterface is the
+        # null/interface material (pbrt-volume-import spec) — route it through
+        # the exact same encoding as `Material "interface"` instead of the
+        # grey-diffuse fallback. `Material ""` WITHOUT a medium keeps the
+        # default-material behavior (the substitution is gated on both).
+        material = PbrtMaterial("interface", material.params)
+        report.exact(f"material:null {path}",
+                     'Material "" + MediumInterface -> null boundary (interface)')
+    if material is not None and material.type == "interface":
         # Null/boundary material: mark the routing key explicitly so the
         # renderer-side predicate does not have to sniff lobe values (D2/3.2).
         overrides = dict(overrides or {})
         overrides["volume_interface"] = True
-    _author_material(stage, f"{path}_mat", shp.material, mesh, report,
+    _author_material(stage, f"{path}_mat", material, mesh, report,
                      emissive_rgb=emissive, extra_overrides=overrides,
                      textures=scene.textures, base_dir=base_dir,
                      emit_mtlx=emit_mtlx, mtlx_materials=mtlx_materials,
@@ -286,6 +296,14 @@ def _resolve_medium(stage, shp: PbrtShape, scene: PbrtScene, report, path, base_
         overrides = media_mod.heterogeneous_overrides(medium, base_dir)
         _emit_volume_once(stage, scene, medium, overrides, report, emitted_volumes)
         return overrides
+    if media_mod.is_supported_cloud(medium):
+        # pbrt's built-in procedural cloud (analytic fBm density) — no grid
+        # file, no Volume prim: the density parameters + world→medium-local
+        # rows ride the bound material's skinnyOverrides and the renderer
+        # evaluates pbrt's CloudMedium::Density in-shader (MEDIUM_CLOUD).
+        report.exact(f"medium:{medium.type} {path}",
+                     "procedural cloud parameters carried via customData")
+        return media_mod.cloud_overrides(medium)
     if media_mod.is_heterogeneous(medium):
         report.skipped(f"medium:{medium.type} {path}", "heterogeneous media unsupported")
         return None

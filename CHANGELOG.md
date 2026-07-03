@@ -9,6 +9,25 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pbrt procedural `cloud` medium** (change `pbrt-cloud-procedural-medium`) —
+  `MakeNamedMedium "cloud"` (pbrt's built-in analytic cloud, `clouds.pbrt`) now
+  imports and renders: a new `MEDIUM_CLOUD` kind fills the existing
+  `densityAt`/`mediumMajorant` seam with pbrt's exact `CloudMedium::Density`
+  (256-entry `NoisePerm` classic Perlin, 5-octave fBm, 2-iteration wispiness
+  domain warp, altitude falloff — new `materials/subsurface/cloud_noise.slang`,
+  validated against a numpy mirror of the identical constants on the GPU). No
+  texture, no new binding: density is analytic in medium-local `[0,1]³` (zero
+  outside — pbrt's bounds clip), the packed σ_t is the exact global majorant,
+  and `FlatMaterialParams` grows 240→256 B (one appended float4:
+  density/wispiness/frequency). `Material ""` on a `MediumInterface` shape now
+  routes to the interface null boundary (per the living `pbrt-volume-import`
+  spec) instead of grey diffuse. Corpus gains `clouds` with a pbrt v4 reference:
+  dual gate CLEAN — megakernel ≡ wavefront EXACT (relMSE 0.0), pbrt-truth
+  relMSE 0.094 / FLIP 0.091 / mean ratio 1.012 (constant-σ spectrum tint +
+  RGB-vs-spectral + scatter-cap floor, recorded); zero-σ cloud ≡ no-sphere at
+  MC-noise level (relMSE 7e-7). Note: pbrt `density 0` is NOT an empty medium
+  (the altitude floor term survives) — the port matches pbrt exactly.
+
 - **NanoVDB heterogeneous volume rendering** (change `nanovdb-volume-rendering`) —
   pbrt `MakeNamedMedium "nanovdb"` + `Material "interface"` scenes (the WDAS
   `disney-cloud` and `bunny-cloud`) import to `.usda` as a `UsdVol.Volume` with an

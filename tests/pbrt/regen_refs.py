@@ -41,6 +41,9 @@ HEAVY_SOURCES = {
     # sssdragon variant matching assets/dragon_sss.usda; pick the variant the
     # USD was imported from if a follow-up needs an exact match.
     "dragon": os.path.join(SCENES_ROOT, "sssdragon", "dragon_const.pbrt"),
+    # pbrt procedural cloud medium (pbrt-cloud-procedural-medium): analytic fBm
+    # density, MEDIUM_CLOUD; usda regenerates locally like the nanovdb clouds.
+    "clouds": os.path.join(SCENES_ROOT, "clouds", "clouds.pbrt"),
 }
 
 # xresolution/yresolution/pixelsamples each appear ONLY in the Film/Sampler

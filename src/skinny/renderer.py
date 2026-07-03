@@ -147,8 +147,9 @@ INSTANCE_STRIDE = 144
 #  192: worldToUvw row 0 (vec4)                                  [volume]
 #  208: worldToUvw row 1 (vec4)                                  [volume]
 #  224: worldToUvw row 2 (vec4)                                  [volume]
-# 240 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 240
+#  240: cloud density + wispiness + frequency + pad (vec4)       [MEDIUM_CLOUD]
+# 256 B / record, naturally 16-byte aligned.
+FLAT_MATERIAL_STRIDE = 256
 FLAT_MATERIAL_CAPACITY_INIT = 16
 
 # Channel-selector codes packed into FlatMaterialParams.channelMask. Five
@@ -249,6 +250,7 @@ MATERIAL_TYPE_VOLUME = 5  # Free-standing participating medium bounded by a pbrt
 # packed into FlatMaterialParams.mediumKind.
 MEDIUM_HOMOGENEOUS = 0
 MEDIUM_NANOVDB = 1
+MEDIUM_CLOUD = 2  # pbrt procedural cloud: analytic fBm density, no texture
 
 # Sphere-light record (binding 17): vec3 position, float radius, vec3
 # radiance, float pad. 32 B / record, naturally 16-byte aligned.
@@ -484,11 +486,15 @@ def pack_flat_material(
      160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
      172: medium g                (float; medium HG anisotropy)
      176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
-     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0 / MEDIUM_NANOVDB=1;
-                                   eta reuses ior)
+     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0 / MEDIUM_NANOVDB=1
+                                   / MEDIUM_CLOUD=2; eta reuses ior)
      192: worldToUvw row 0        (vec4; volume; identity row (1,0,0,0) else)
      208: worldToUvw row 1        (vec4; volume; identity row (0,1,0,0) else)
      224: worldToUvw row 2        (vec4; volume; identity row (0,0,1,0) else)
+     240: cloudDensity            (float; MEDIUM_CLOUD only; else 0)
+     244: cloudWispiness          (float; MEDIUM_CLOUD only; else 0)
+     248: cloudFrequency          (float; MEDIUM_CLOUD only; else 0)
+     252: _pad2                   (float; reserved)
 
     Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
     override reproduces the prior behavior — transmissionColor defaults to
@@ -500,6 +506,14 @@ def pack_flat_material(
     `volume_world_to_uvw` is the loader's (3, 4) math-convention affine
     (VolumeGrid.world_to_uvw); non-volume materials get identity rows, so the
     pre-existing 0..192 prefix bytes are only ever *extended*, never shifted.
+
+    Procedural cloud media (pbrt-cloud-procedural-medium; overrides carry
+    `volume_cloud: True`) pack `mediumKind = MEDIUM_CLOUD` plus the appended
+    240..256 float4 (density/wispiness/frequency — pbrt `CloudMedium` params,
+    evaluated analytically in-shader); the world→uvw rows come from the
+    material's own `volume_world_to_uvw` override (world→medium-local, folded
+    by the importer from the medium CTM) rather than the scene grid, and no
+    grid `value_max` fold applies (there is no density texture).
     """
     overrides = material.parameter_overrides
     diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
@@ -527,6 +541,8 @@ def pack_flat_material(
     medium_sigma_s = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
     medium_g = _override_float(overrides, "subsurface_g", 0.0)
     medium_kind = MEDIUM_HOMOGENEOUS
+    # Cloud scalars (MEDIUM_CLOUD only; zeros keep the bytes inert elsewhere).
+    cloud_density = cloud_wispiness = cloud_frequency = 0.0
     # World→uvw rows (volume; identity elsewhere so the bytes are inert).
     w2u = ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))
     if _material_is_volume(material):
@@ -542,23 +558,40 @@ def pack_flat_material(
         # NOTE: σ is folded at pack time with the renderer's live mm_per_unit;
         # a later mm_per_unit change re-packs via the material upload path.
         mmu = max(float(mm_per_unit), 1e-6)
-        fold = float(volume_value_max) / mmu
+        # Grid-backed media dispatch to the density texture; the procedural
+        # cloud evaluates pbrt's fBm density analytically in-shader; a
+        # homogeneous free-standing interior (no grid asset) keeps densityAt ≡ 1.
+        if overrides.get("volume_cloud"):
+            medium_kind = MEDIUM_CLOUD
+            cloud_density = _override_float(overrides, "cloud_density", 1.0)
+            cloud_wispiness = _override_float(overrides, "cloud_wispiness", 1.0)
+            cloud_frequency = _override_float(overrides, "cloud_frequency", 5.0)
+        elif overrides.get("volume_grid_asset"):
+            medium_kind = MEDIUM_NANOVDB
+        else:
+            medium_kind = MEDIUM_HOMOGENEOUS
+        # `volume_value_max` is a *grid* normalization fold (texels divided by
+        # the grid max at upload) — it must not scale the analytic kinds.
+        fold = (float(volume_value_max) if medium_kind == MEDIUM_NANOVDB
+                else 1.0) / mmu
         vs_a = _override_color3(overrides, "volume_sigma_a", (0.0, 0.0, 0.0))
         vs_s = _override_color3(overrides, "volume_sigma_s", (0.0, 0.0, 0.0))
         medium_sigma_a = tuple(c * fold for c in vs_a)
         medium_sigma_s = tuple(c * fold for c in vs_s)
         medium_g = _override_float(overrides, "volume_g", 0.0)
-        # Grid-backed media dispatch to the density texture; a homogeneous
-        # free-standing interior (no grid asset) keeps densityAt ≡ 1.
-        medium_kind = (MEDIUM_NANOVDB if overrides.get("volume_grid_asset")
-                       else MEDIUM_HOMOGENEOUS)
         ior = 1.0  # index-matched pass-through boundary (eta reuses the ior slot)
-        if volume_world_to_uvw is not None:
+        # Cloud media carry their own world→medium-local rows (importer-folded
+        # medium CTM); the grid kind uses the loader's per-scene grid affine.
+        own_rows = overrides.get("volume_world_to_uvw")
+        if own_rows is not None and medium_kind == MEDIUM_CLOUD:
+            m = np.asarray([float(v) for v in own_rows], np.float32).reshape(3, 4)
+            w2u = tuple(tuple(float(v) for v in row) for row in m)
+        elif volume_world_to_uvw is not None:
             m = np.asarray(volume_world_to_uvw, np.float32).reshape(3, 4)
             w2u = tuple(tuple(float(v) for v in row) for row in m)
     return struct.pack(
         "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I"
-        " ffff ffff ffff",
+        " ffff ffff ffff ffff",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
         int(diffuse_texture_idx) & 0xFFFFFFFF,
@@ -587,6 +620,7 @@ def pack_flat_material(
         w2u[0][0], w2u[0][1], w2u[0][2], w2u[0][3],
         w2u[1][0], w2u[1][1], w2u[1][2], w2u[1][3],
         w2u[2][0], w2u[2][1], w2u[2][2], w2u[2][3],
+        float(cloud_density), float(cloud_wispiness), float(cloud_frequency), 0.0,
     )
 
 

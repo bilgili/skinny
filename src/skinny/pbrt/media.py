@@ -5,16 +5,22 @@ Homogeneous media carry their coefficients onto the bound material as
 ``Material.parameter_overrides``); skinny's volume path can consume them where
 supported. Heterogeneous (grid/VDB) media are detected; ``nanovdb`` grids are
 supported (imported as a UsdVol volume, see :mod:`skinny.pbrt.emit`) and carry
-their own override set (:func:`heterogeneous_overrides`). Other heterogeneous
-types (``uniformgrid``, ``rgbgrid``, …) are flagged unsupported rather than
-emitted as a wrong homogeneous stand-in.
+their own override set (:func:`heterogeneous_overrides`); pbrt's procedural
+``cloud`` medium is supported analytically (:func:`cloud_overrides` — no grid
+file, the renderer evaluates pbrt's fBm density in-shader, change
+pbrt-cloud-procedural-medium). Other heterogeneous types (``uniformgrid``,
+``rgbgrid``, …) are flagged unsupported rather than emitted as a wrong
+homogeneous stand-in.
 """
 
 from __future__ import annotations
 
 import os
 
+import numpy as np
+
 from . import spectra
+from . import transform as T
 
 _HETEROGENEOUS = {"uniformgrid", "grid", "nanovdb", "vdb", "cloud", "rgbgrid"}
 
@@ -39,6 +45,52 @@ def is_supported_heterogeneous(medium) -> bool:
         and medium.type.lower() in _SUPPORTED_HETEROGENEOUS
         and bool(medium.params.string("filename", None))
     )
+
+
+def is_supported_cloud(medium) -> bool:
+    """True for pbrt's built-in procedural ``cloud`` medium with the default
+    ``[0,1]³`` bounds (``p0``/``p1`` unauthored or default).
+
+    The shader's ``MEDIUM_CLOUD`` case clips density to medium-local ``[0,1]³``
+    (matching pbrt's ``SampleRay`` bounds intersection for the default cube);
+    non-default authored bounds would need a separate clip volume, so they stay
+    on the recorded unsupported-skip path.
+    """
+    if medium is None or medium.type.lower() != "cloud":
+        return False
+    p0 = [float(v) for v in medium.params.floats("p0", [0.0, 0.0, 0.0])]
+    p1 = [float(v) for v in medium.params.floats("p1", [1.0, 1.0, 1.0])]
+    return p0 == [0.0, 0.0, 0.0] and p1 == [1.0, 1.0, 1.0]
+
+
+def cloud_overrides(medium) -> dict:
+    """Return a skinnyOverrides dict for pbrt's procedural ``cloud`` medium.
+
+    Carries the RGB-resolved σ (pbrt ``CloudMedium::Create`` has **no**
+    ``scale`` param — unlike the grid media), the HG ``g``, and the procedural
+    density parameters (``density``, ``wispiness`` default 1, ``frequency``
+    default 5). ``volume_world_to_uvw`` is the world→medium-local affine —
+    rows 0..2 of ``ctm⁻¹ @ B`` (the inverse of the point bake ``B @ CTM``,
+    see :func:`skinny.pbrt.emit.bake_world_mesh`) — the same row convention
+    the nanovdb grid packs, so the renderer/shader consume both identically.
+    pbrt evaluates ``Density`` in medium-local space and clips to the default
+    ``[0,1]³`` bounds; for those bounds medium-local coords ≡ normalized uvw.
+    """
+    p = medium.params
+    sigma_a = spectra.param_to_rgb(p.get("sigma_a")) or [1.0, 1.0, 1.0]
+    sigma_s = spectra.param_to_rgb(p.get("sigma_s")) or [1.0, 1.0, 1.0]
+    world_to_local = np.linalg.inv(np.asarray(medium.ctm, np.float64)) @ T.B
+    return {
+        "pbrt_medium": medium.name,
+        "volume_sigma_a": [float(c) for c in sigma_a],
+        "volume_sigma_s": [float(c) for c in sigma_s],
+        "volume_g": float(p.float("g", 0.0)),
+        "volume_cloud": True,
+        "cloud_density": float(p.float("density", 1.0)),
+        "cloud_wispiness": float(p.float("wispiness", 1.0)),
+        "cloud_frequency": float(p.float("frequency", 5.0)),
+        "volume_world_to_uvw": [float(v) for v in world_to_local[:3, :].ravel()],
+    }
 
 
 def homogeneous_overrides(medium) -> dict:
