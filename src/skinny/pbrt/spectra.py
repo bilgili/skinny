@@ -8,7 +8,8 @@ skinny is an RGB renderer, so every pbrt spectrum is reduced to linear RGB:
   (chromaticity only; magnitude comes from the light's ``L``/``scale``).
 * sampled ``spectrum [l v l v ...]`` -> integrated to XYZ -> linear RGB
   (illuminant: direct; reflectance: under an equal-energy whitepoint —
-  a documented simplification).
+  a documented simplification). A constant SPD short-circuits to the
+  achromatic ``[v, v, v]``, matching pbrt's achromatic treatment.
 * named conductor spectra (``metal-Au-eta`` / ``-k``) -> tabulated RGB IOR.
 
 The CIE CMFs use the Wyman-Sloan-Shirley (JCGT 2013) analytic multi-Gaussian
@@ -95,11 +96,16 @@ def blackbody_rgb(temperature_k: float) -> np.ndarray:
 def sampled_spectrum_to_rgb(pairs, *, illuminant: bool = False) -> np.ndarray:
     """Reduce a pbrt sampled spectrum ``[l v l v ...]`` to linear RGB.
 
-    Reflectance spectra are evaluated under an equal-energy whitepoint
-    (documented simplification); illuminant spectra are integrated directly.
+    A constant SPD (all sample values exactly equal) is achromatic in pbrt, so
+    it maps straight to ``[v, v, v]`` — projecting it through XYZ would tint it
+    because the equal-energy whitepoint is not the sRGB (D65) white. Colored
+    spectra are integrated to XYZ: reflectance under an equal-energy whitepoint
+    (documented simplification), illuminants directly.
     """
     pairs = np.asarray(pairs, dtype=np.float64).reshape(-1, 2)
     lam, val = pairs[:, 0], pairs[:, 1]
+    if np.all(val == val[0]):
+        return np.full(3, max(val[0], 0.0))
     sampled = np.interp(_LAMBDA, lam, val, left=val[0], right=val[-1])
     xyz = spd_to_xyz(sampled)
     if not illuminant and _Y_INTEGRAL > 0:

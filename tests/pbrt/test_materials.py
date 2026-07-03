@@ -34,6 +34,14 @@ def test_diffuse_passthrough():
     assert status == "exact"
 
 
+def test_constant_spectrum_reflectance_is_achromatic():
+    # "spectrum reflectance" [200 0.2 900 0.2] is constant -> exactly [0.2]*3
+    inputs, _tex, _status, _ = M.map_material(
+        _mat('Material "diffuse" "spectrum reflectance" [200 0.2 900 0.2]')
+    )
+    assert inputs["diffuseColor"] == pytest.approx([0.2, 0.2, 0.2])
+
+
 def test_conductor_is_metallic_with_remapped_roughness():
     inputs, _tex, _, _ = M.map_material(
         _mat('Material "conductor" "spectrum eta" "metal-Au-eta" "float roughness" 0.25')

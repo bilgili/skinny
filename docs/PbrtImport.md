@@ -75,8 +75,12 @@ skinny is an RGB renderer, so every spectrum is reduced to linear RGB: `rgb`
 params pass through; `blackbody [T]` integrates a Planckian SPD against the CIE
 XYZ colour-matching functions (Wyman–Sloan–Shirley analytic fit) then XYZ → linear
 sRGB; named conductor spectra (`metal-Au-eta`/`-k`) map to a tabulated RGB IOR;
-inline sampled spectra integrate directly. The residual RGB-vs-spectral
-divergence is inherent and is absorbed by the per-scene parity tolerance.
+inline sampled spectra integrate directly. A **constant** sampled spectrum (all
+sample values equal, e.g. `"spectrum sigma_s" [200 10 900 10]`) is achromatic in
+pbrt, so it short-circuits to `[v, v, v]` — projecting it through the CIE path
+would tint it, because the equal-energy whitepoint is not the sRGB (D65) white.
+For genuinely coloured spectra the residual RGB-vs-spectral divergence is
+inherent and is absorbed by the per-scene parity tolerance.
 
 ### Texture-valued parameters
 

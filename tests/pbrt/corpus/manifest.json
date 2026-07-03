@@ -205,10 +205,10 @@
    "flip_tol": 0.1,
    "material_class": "volume",
    "megakernel_ok": true,
-   "notes": "nanovdb heterogeneous volume (WDAS cloud). CLEAN dual gate: mega\u2261wave EXACT (0.0), pbrt-truth relMSE 0.077 / mean 0.87\u00d7 (RGB-vs-spectral + scatter-cap floor). Distant sun + constant sky env. Refs = pbrt v4 volpath maxdepth 100, 256 spp, 256x256.",
+   "notes": "nanovdb heterogeneous volume (WDAS cloud). CLEAN dual gate: mega\u2261wave EXACT (0.0), pbrt-truth relMSE 0.075 / mean 0.88\u00d7 (residual = scatter-cap floor + RGB-vs-spectral on sun/env; constant sigma is now achromatic per constant-spectrum-achromatic-rgb, previously 0.077 / 0.87\u00d7 when sigma was sRGB-tinted). Distant sun + constant sky env. Refs = pbrt v4 volpath maxdepth 100, 256 spp, 256x256.",
    "measured": {
-    "relmse": 0.077,
-    "flip": 0.057
+    "relmse": 0.075,
+    "flip": 0.055
    }
   },
   {
@@ -223,7 +223,7 @@
    "flip_tol": 0.14,
    "material_class": "volume",
    "megakernel_ok": true,
-   "notes": "nanovdb heterogeneous volume (Stanford bunny, sky.exr HDR env). CLEAN dual gate: mega\u2261wave EXACT (0.0). pbrt-truth relMSE 0.117 / mean 0.735\u00d7 \u2014 the dimness is the bounded multi-scatter cap (VOLUME_MAX_SCATTERS=64 Metal vs pbrt volpath maxdepth 50) + RGB-vs-spectral, recorded not hidden. Refs = pbrt v4 volpath maxdepth 50, 256 spp, 256x256; nikon_d850 sensor approximated by film exposure; env `Rotate 10` baked into the equiarea reprojection.",
+   "notes": "nanovdb heterogeneous volume (Stanford bunny, sky.exr HDR env). CLEAN dual gate: mega\u2261wave EXACT (0.0). pbrt-truth relMSE 0.117 / mean 0.737\u00d7 \u2014 the dimness is the bounded multi-scatter cap (VOLUME_MAX_SCATTERS=64 Metal vs pbrt volpath maxdepth 50), recorded not hidden; constant sigma is now achromatic per constant-spectrum-achromatic-rgb (relMSE flat, mean 0.735\u21920.737\u00d7). Refs = pbrt v4 volpath maxdepth 50, 256 spp, 256x256; nikon_d850 sensor approximated by film exposure; env `Rotate 10` baked into the equiarea reprojection.",
    "measured": {
     "relmse": 0.117,
     "flip": 0.113

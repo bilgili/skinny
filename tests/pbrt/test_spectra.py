@@ -51,7 +51,44 @@ def test_fresnel_conductor_monotone():
 
 
 def test_sampled_reflectance_grey_is_neutral():
-    # a flat 0.5 reflectance spectrum -> near-neutral grey
+    # a flat 0.5 reflectance spectrum is achromatic: exactly [0.5, 0.5, 0.5]
     pairs = [400, 0.5, 500, 0.5, 600, 0.5, 700, 0.5]
     rgb = spectra.sampled_spectrum_to_rgb(pairs)
-    assert max(rgb) / max(min(rgb), 1e-6) < 1.5
+    assert np.array_equal(rgb, [0.5, 0.5, 0.5])
+
+
+def test_constant_spectrum_is_achromatic():
+    # pbrt "spectrum sigma_s" [200 10 900 10] -> exactly [10, 10, 10]
+    rgb = spectra.sampled_spectrum_to_rgb([200, 10, 900, 10])
+    assert np.array_equal(rgb, [10.0, 10.0, 10.0])
+
+
+def test_constant_illuminant_is_achromatic():
+    rgb = spectra.sampled_spectrum_to_rgb([200, 3, 900, 3], illuminant=True)
+    assert np.array_equal(rgb, [3.0, 3.0, 3.0])
+
+
+def _projected_rgb(pairs, *, illuminant=False):
+    # the pre-shortcut projection path, spelled out
+    pairs = np.asarray(pairs, dtype=np.float64).reshape(-1, 2)
+    lam, val = pairs[:, 0], pairs[:, 1]
+    sampled = np.interp(spectra._LAMBDA, lam, val, left=val[0], right=val[-1])
+    xyz = spectra.spd_to_xyz(sampled)
+    if not illuminant:
+        xyz = xyz / spectra._Y_INTEGRAL
+    return np.clip(spectra.xyz_to_linear_srgb(xyz), 0.0, None)
+
+
+def test_colored_spectrum_keeps_projection():
+    # unequal values -> bit-identical to the XYZ->sRGB projection
+    pairs = [400, 0.1, 700, 0.9]
+    rgb = spectra.sampled_spectrum_to_rgb(pairs)
+    assert np.array_equal(rgb, _projected_rgb(pairs))
+    assert not np.array_equal(rgb, [rgb[0]] * 3)
+
+
+def test_near_constant_spectrum_takes_projection_path():
+    # any nonzero difference is a colored spectrum, not the shortcut
+    pairs = [200, 10, 900, 10.000001]
+    rgb = spectra.sampled_spectrum_to_rgb(pairs)
+    assert np.array_equal(rgb, _projected_rgb(pairs))
