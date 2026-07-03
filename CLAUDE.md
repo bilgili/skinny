@@ -201,17 +201,20 @@ in `README.md` → **Compatibility matrix**; keep the two in sync.
 | Megakernel (`main_pass.slang`) | ✅ | ✅ |
 | Wavefront (path / BDPT / ReSTIR DI / neural) | ✅ | ✅ (`metal-wavefront-parity`, `metal-record-drain`) |
 | Heterogeneous volumes (NanoVDB) — path only, mega+wave | ✅ | ✅ (`nanovdb-volume-rendering`) |
+| Procedural `cloud` medium (pbrt analytic fBm) — path only, mega+wave | ✅ | ✅ (`pbrt-cloud-procedural-medium`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
 | Neural-handoff `interop` | CUDA + `VK_KHR_external_memory` + timeline semaphore (`[interop]` extra) | UMA shared-storage in-place writes, no extra deps (`metal-neural-interop`) |
 
-**Heterogeneous participating media (NanoVDB), independent of backend:**
+**Heterogeneous participating media (NanoVDB + procedural cloud), independent of backend:**
 
 | Constraint | Detail |
 |------------|--------|
 | Integrator | **Path only.** BDPT (connection strategies) and SPPM (photon pass) have no volume transport — recorded parity-matrix exclusions (`combo_is_valid`), follow-ups. |
 | Import | pbrt `MakeNamedMedium "nanovdb"` + `Material "interface"` → `UsdVol.Volume` + `OpenVDBAsset` field; `.nvdb` FloatGrid/FogVolume decoded by the pure-Python reader (`pbrt/nanovdb.py`, NONE/ZIP codecs, no native dep). |
-| Transport | Majorant/null-collision (Woodcock) delta-tracking through the `MEDIUM_NANOVDB` density seam (`materials/subsurface/medium.slang` + `volume_walk.slang`); density = one R16F `Texture3D` (binding 26); index-matched pass-through boundary; HG phase; distant+env NEE; escape-ray continuation shades geometry behind the volume. Metal watchdog caps: `VOLUME_MAX_SCATTERS`=64, `VOLUME_MAX_STEPS`=4096 under `SKINNY_METAL`. |
+| Import (procedural cloud) | pbrt `MakeNamedMedium "cloud"` (default `[0,1]³` bounds) → density/wispiness/frequency + σ + world→medium-local rows on the interface material's `skinnyOverrides` — no grid file, no `UsdVol.Volume` prim. `Material ""` on a `MediumInterface` shape = null boundary like `Material "interface"`. Non-default `p0`/`p1` bounds stay recorded skips. |
+| Transport | Majorant/null-collision (Woodcock) delta-tracking through the `MEDIUM_NANOVDB` / `MEDIUM_CLOUD` density seam (`materials/subsurface/medium.slang` + `volume_walk.slang`); density = one R16F `Texture3D` (binding 26); index-matched pass-through boundary; HG phase; distant+env NEE; escape-ray continuation shades geometry behind the volume. Metal watchdog caps: `VOLUME_MAX_SCATTERS`=64, `VOLUME_MAX_STEPS`=4096 under `SKINNY_METAL`. |
+| Transport (procedural cloud) | `MEDIUM_CLOUD` = an analytic `densityAt` case: pbrt's exact `CloudMedium::Density` (256-entry `NoisePerm` classic Perlin, 5-octave fBm, 2-iteration wispiness warp, altitude falloff — `materials/subsurface/cloud_noise.slang`, numpy-mirror-verified) evaluated in medium-local `[0,1]³`; zero outside the cube (pbrt's bounds clip). No texture, no new binding; packed σ_t is the exact global majorant (density clamps to [0,1]). `FlatMaterialParams` grew 240→256 B (one float4: density/wispiness/frequency). |
 | Metal argument table | The bindless flat-material texture pool is trimmed **120→119** (`BINDLESS_TEXTURE_CAPACITY`) so the `volumeDensity` 3D texture fits under Apple's 128-texture compute-argument limit (120 pool + 5 discrete maps + output/accum/hud filled it exactly). |
 
 **Neural directional proposal constraints** (independent of backend):

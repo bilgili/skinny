@@ -17,7 +17,7 @@ Covers, with no GPU:
   (same precedent as tests/test_sppm_selection.py) that the volume grid key is
   hashed.
 
-The MSL stride half (Metal reads the 240 B record at the same stride) lives in
+The MSL stride half (Metal reads the 256 B record at the same stride) lives in
 tests/test_metal_flat_material_layout.py (gpu-marked).
 """
 
@@ -78,7 +78,7 @@ class TestVolumePacking:
             "diffuseColor": (0.1, 0.2, 0.3), "roughness": 0.4, "ior": 1.5,
         })
         data = pack_flat_material(mat)
-        assert len(data) == FLAT_MATERIAL_STRIDE == 240
+        assert len(data) == FLAT_MATERIAL_STRIDE == 256
         # Spot-check documented prefix offsets are where they always were.
         assert struct.unpack_from("fff", data, 0) == pytest.approx((0.1, 0.2, 0.3))
         assert struct.unpack_from("f", data, 12)[0] == pytest.approx(0.4)
@@ -234,3 +234,74 @@ class TestStateHashCoverage:
         assert "self._volume_grid_key" in body, (
             "_current_state_hash must hash _volume_grid_key "
             "(accumulation reset on density-grid swap)")
+
+
+class TestCloudPacking:
+    """MEDIUM_CLOUD pack lanes (pbrt-cloud-procedural-medium, task 3.2)."""
+
+    def _cloud_material(self, **extra):
+        overrides = {
+            "volume_interface": True,
+            "volume_cloud": True,
+            "volume_sigma_a": (0.01, 0.01, 0.01),
+            "volume_sigma_s": (10.0, 10.0, 10.0),
+            "volume_g": 0.0,
+            "cloud_density": 2.0,
+            "cloud_wispiness": 1.0,
+            "cloud_frequency": 5.0,
+            "volume_world_to_uvw": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0],
+        }
+        overrides.update(extra)
+        return SimpleNamespace(parameter_overrides=overrides)
+
+    def test_cloud_kind_and_scalars(self):
+        from skinny.renderer import MEDIUM_CLOUD
+
+        data = pack_flat_material(self._cloud_material(), mm_per_unit=1000.0)
+        assert len(data) == FLAT_MATERIAL_STRIDE == 256
+        assert struct.unpack_from("I", data, 188)[0] == MEDIUM_CLOUD
+        d, w, f, pad = struct.unpack_from("ffff", data, 240)
+        assert (d, w, f) == pytest.approx((2.0, 1.0, 5.0))
+        assert pad == 0.0
+
+    def test_cloud_rows_come_from_material_override_not_scene_grid(self):
+        """A cloud material's world->local rows are its own override even when
+        a scene grid affine is passed (they'd be the grid's otherwise)."""
+        grid_rows = np.full((3, 4), 7.0, np.float32)
+        data = pack_flat_material(
+            self._cloud_material(), volume_world_to_uvw=grid_rows,
+            volume_value_max=2.792, mm_per_unit=1000.0)
+        rows = _rows_at(data)
+        assert rows[0] == pytest.approx((1.0, 0.0, 0.0, 0.0))
+        assert rows[1] == pytest.approx((0.0, 1.0, 0.0, 0.0))
+        assert rows[2] == pytest.approx((0.0, 0.0, -1.0, 0.0))
+
+    def test_cloud_sigma_folds_mm_per_unit_but_not_value_max(self):
+        """value_max is a grid-texel normalization; the analytic cloud must
+        only get the 1/mm_per_unit walk-convention fold."""
+        data = pack_flat_material(
+            self._cloud_material(), volume_value_max=2.792, mm_per_unit=1000.0)
+        sigma_a = struct.unpack_from("fff", data, 160)
+        sigma_s = struct.unpack_from("fff", data, 176)
+        assert sigma_a == pytest.approx((0.01e-3, 0.01e-3, 0.01e-3), rel=1e-5)
+        assert sigma_s == pytest.approx((10e-3, 10e-3, 10e-3), rel=1e-5)
+
+    def test_cloud_eta_is_index_matched(self):
+        data = pack_flat_material(self._cloud_material(), mm_per_unit=1000.0)
+        assert struct.unpack_from("f", data, 60)[0] == pytest.approx(1.0)
+
+    def test_non_cloud_materials_zero_the_cloud_lanes(self):
+        flat = SimpleNamespace(parameter_overrides={"diffuseColor": (0.1, 0.2, 0.3)})
+        grid = _volume_material()
+        for mat in (flat, grid):
+            data = pack_flat_material(mat, mm_per_unit=1000.0)
+            assert struct.unpack_from("ffff", data, 240) == (0.0, 0.0, 0.0, 0.0)
+
+    def test_grid_material_still_folds_value_max(self):
+        """Regression: the NANOVDB value_max fold is unchanged by the gate."""
+        data = pack_flat_material(
+            _volume_material(), volume_value_max=2.0, mm_per_unit=1000.0)
+        sigma_s = struct.unpack_from("fff", data, 176)
+        assert sigma_s == pytest.approx((1.0 * 2.0 / 1000.0,
+                                         2.0 * 2.0 / 1000.0,
+                                         4.0 * 2.0 / 1000.0), rel=1e-5)

@@ -61,18 +61,22 @@ static const int VOLUME_RR_START = 3;
 // boundary exits by this much so interior geometry is re-hit, not tunnelled).
 static const float VOLUME_SPAWN_EPS = 0.002;
 
-// Clip a world-space segment [0, tMax] to the density grid's support: the
-// [0,1]³ box in uvw space (an affine slab test through the SAME worldToUvw
-// rows the density lookup uses). Outside the box the medium is exactly vacuum
-// (densityAt's outside-guard), so marching there only burns null-collision
-// budget — on disney-cloud the bounding sphere is ~40% empty margin. Returns
-// false when the segment misses the grid entirely (pure pass-through).
-// Homogeneous free-standing media have no grid: the whole segment stands.
+// Clip a world-space segment [0, tMax] to the medium's [0,1]³ support box in
+// uvw / medium-local space (an affine slab test through the SAME worldToUvw
+// rows the density lookup uses). BOTH box-supported kinds share this: the
+// nanovdb grid (uvw texture coords) and the procedural cloud (medium-local
+// coords, pbrt's default unit-cube bounds) — densityAt returns exactly 0
+// outside the box for both, so marching there only burns null-collision budget
+// (on clouds.pbrt the radius-1 bounding sphere is ~76% empty margin, and an
+// escape/shadow ray toward the open sky runs to tMax≈1e8 — the whole budget
+// spent in vacuum, which silently reads as a transparent segment). Returns
+// false when the segment misses the box entirely (pure pass-through).
+// Homogeneous free-standing media have no support box: the whole segment stands.
 bool clipSegmentToGrid(Medium m, Ray seg, float tMax, out float t0, out float t1)
 {
     t0 = 0.0;
     t1 = tMax;
-    if (m.kind != MEDIUM_NANOVDB)
+    if (m.kind != MEDIUM_NANOVDB && m.kind != MEDIUM_CLOUD)
         return true;
     float3 o = float3(dot(m.worldToUvw0.xyz, seg.origin) + m.worldToUvw0.w,
                       dot(m.worldToUvw1.xyz, seg.origin) + m.worldToUvw1.w,

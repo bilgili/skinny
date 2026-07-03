@@ -145,9 +145,13 @@ static const uint MATERIAL_TYPE_VOLUME       = 5u;
 // majorant = σ_t (the dielectric-bounded subsurface interior AND a homogeneous
 // free-standing interior). NANOVDB: densityAt = trilinear sample of the
 // normalized density grid (binding 26); the global majorant is still the packed
-// σ_t because the grid's value max is folded into σ on the CPU.
+// σ_t because the grid's value max is folded into σ on the CPU. CLOUD: pbrt's
+// procedural CloudMedium — analytic Perlin-fBm density (cloud_noise.slang), no
+// texture; density clamps to [0,1] so the packed σ_t is again the exact
+// global majorant.
 static const uint MEDIUM_HOMOGENEOUS = 0u;
 static const uint MEDIUM_NANOVDB     = 1u;
+static const uint MEDIUM_CLOUD       = 2u;
 
 static const uint MATERIAL_FURNACE_BIT = 10u;
 

@@ -119,7 +119,7 @@
    "material_class": "flat",
    "megakernel_ok": true,
    "known_divergent": true,
-   "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped \u2014 max~2120, bypassing maxcomponentvalue \u2014 and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) \u2014 a metric-robustness follow-up. emissive-triangle-bsdf-mis (2026-06-24): path BSDF-hit MIS complement fixes area-light dim bias; bathroom mean 1.36->0.97, path FLIP 0.222->0.155 (megakernel==wavefront relMSE 0.0000). relMSE baseline 0.342 unchanged (exposure-aligned gate is brightness-blind; residual = RGB-vs-spectral). BDPT/SPPM/neural/restir baselines re-measure in their own changes (Path anchor moved brighter).",
+   "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped — max~2120, bypassing maxcomponentvalue — and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) — a metric-robustness follow-up. emissive-triangle-bsdf-mis (2026-06-24): path BSDF-hit MIS complement fixes area-light dim bias; bathroom mean 1.36->0.97, path FLIP 0.222->0.155 (megakernel==wavefront relMSE 0.0000). relMSE baseline 0.342 unchanged (exposure-aligned gate is brightness-blind; residual = RGB-vs-spectral). BDPT/SPPM/neural/restir baselines re-measure in their own changes (Path anchor moved brighter).",
    "measured": {
     "path|wavefront": {
      "relmse": 0.342,
@@ -190,7 +190,7 @@
    "material_class": "subsurface",
    "megakernel_ok": false,
    "known_divergent": true,
-   "notes": "Heavy subsurface dragon (28.8M tris \u2192 wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
+   "notes": "Heavy subsurface dragon (28.8M tris → wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
    "baselines": {}
   },
   {
@@ -227,6 +227,24 @@
    "measured": {
     "relmse": 0.117,
     "flip": 0.113
+   }
+  },
+  {
+   "name": "clouds",
+   "file": "clouds.pbrt",
+   "ref": "refs/clouds.exr",
+   "usd": "assets/clouds.usda",
+   "width": 256,
+   "height": 256,
+   "spp": 256,
+   "relmse_tol": 0.13,
+   "flip_tol": 0.12,
+   "material_class": "volume",
+   "megakernel_ok": true,
+   "notes": "pbrt procedural cloud medium (MEDIUM_CLOUD, change pbrt-cloud-procedural-medium): MakeNamedMedium \"cloud\" — analytic 5-octave Perlin fBm + wispiness warp + altitude falloff evaluated in-shader (cloud_noise.slang), no grid. Material \"\" null boundary. CLEAN dual gate: mega==wave EXACT (0.0), pbrt-truth relMSE 0.094 / FLIP 0.091 / mean 1.012x (constant-sigma spectrum tint via sampled_spectrum_to_rgb + RGB-vs-spectral + scatter-cap floor, recorded). sky.exr equal-area env reprojected at import. Refs = pbrt v4 volpath maxdepth 50, 256 spp, 256x256.",
+   "measured": {
+    "relmse": 0.094,
+    "flip": 0.091
    }
   }
  ]

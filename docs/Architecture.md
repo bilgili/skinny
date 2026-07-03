@@ -960,7 +960,7 @@ incrementally moved over.
 | 10 | Sampler2D | Roughness detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 11 | Sampler2D | Displacement detail map (2048²) | `materials/skin/skin_shading.slang` |
 | 12 | StructuredBuffer | TLAS instances (144 B each) | `mesh_head.slang` |
-| 13 | StructuredBuffer | FlatMaterialParams (192 B each, scalar layout — `transmissionColor`@128, `diffuseRoughness`@140, `specularColor`@144 for the Stage-2 rich-input lobes; the subsurface medium is packed inline at `σ_a`@160, `g`@172, `σ_s`@176, `mediumKind`@188 — boundary `eta` reuses `ior`@60 — so `MATERIAL_TYPE_SUBSURFACE` needs **no new buffer** under Metal's 31-buffer cap, read via `resolveMedium(matId)`) | `bindings.slang` |
+| 13 | StructuredBuffer | FlatMaterialParams (256 B each, scalar layout — `transmissionColor`@128, `diffuseRoughness`@140, `specularColor`@144 for the Stage-2 rich-input lobes; the subsurface/volume medium is packed inline at `σ_a`@160, `g`@172, `σ_s`@176, `mediumKind`@188 — `MEDIUM_HOMOGENEOUS`/`MEDIUM_NANOVDB`/`MEDIUM_CLOUD`, boundary `eta` reuses `ior`@60 — the world→uvw affine rows at 192..240 (`nanovdb-volume-rendering`), and the procedural-cloud density/wispiness/frequency float4 at 240..256 (`pbrt-cloud-procedural-medium`) — so neither medium kind needs a new buffer under Metal's 31-buffer cap, read via `resolveMedium(matId)`) | `bindings.slang` |
 | 14 | Sampler2D[128] | Bindless material textures (PARTIALLY_BOUND) | `bindings.slang` |
 | 15 | StructuredBuffer | MtlxSkinParams (164 B each, scalar layout) | `materials/skin/skin_shading.slang` |
 | 16 | StructuredBuffer | Material type code + scatter + furnace + graph slot + python id (uint32 each) | `bindings.slang` |
@@ -1467,7 +1467,9 @@ debug_line.slang
 cameras/{pinhole.slang, thick_lens.slang}
 materials/debug_normal_material.slang
 materials/flat/{flat_material.slang, flat_lobes.slang, flat_shading.slang}
-materials/subsurface/{subsurface_walk.slang, medium.slang, volume_walk.slang}  // pbrt volumetric SSS + free-standing NanoVDB media
+materials/subsurface/{subsurface_walk.slang, medium.slang, volume_walk.slang,
+                      cloud_noise.slang}  // pbrt volumetric SSS + free-standing NanoVDB media
+                                          // + procedural cloud (classic Perlin fBm, MEDIUM_CLOUD)
 materials/skin/{skin_material.slang, skin_bssrdf.slang, skin_shading.slang,
                 skin_direct.slang, skin_ibl_specular.slang, skin_ibl_diffuse.slang,
                 skin_volume.slang, skin_transmission.slang, skin_hair_sheen.slang,

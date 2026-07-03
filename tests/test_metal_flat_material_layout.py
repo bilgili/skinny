@@ -1,6 +1,9 @@
-"""FlatMaterialParams (binding 13) Metal-stride pin — nanovdb-volume-rendering.
+"""FlatMaterialParams (binding 13) Metal-stride pin — nanovdb-volume-rendering
++ pbrt-cloud-procedural-medium.
 
-The 192 → 240 B growth (three appended float4 worldToUvw rows) must keep the
+The 192 → 240 B growth (three appended float4 worldToUvw rows) and the
+240 → 256 B growth (one appended float4 of cloud density/wispiness/frequency)
+must keep the
 scalar CPU pack byte-compatible with what Metal reads through
 ``StructuredBuffer<FlatMaterialParams>``. Unlike StdSurfaceParams (loose
 float3s → MSL repack), FlatMaterialParams is deliberately float4-wrapped, so
@@ -65,13 +68,14 @@ struct FlatMaterialParams {
     float4 _worldToUvw0;
     float4 _worldToUvw1;
     float4 _worldToUvw2;
+    float4 _cloudDensityWispinessFrequency;
 };
 """
 
 
 def test_metal_flat_material_stride_and_volume_fields():
-    """MSL stride == scalar stride (240) and the appended worldToUvw rows +
-    medium fields read back exactly from the scalar-packed record."""
+    """MSL stride == scalar stride (256) and the appended worldToUvw rows +
+    medium + cloud fields read back exactly from the scalar-packed record."""
     try:
         from skinny.backend_select import metal_available
     except OSError as exc:  # pragma: no cover
@@ -94,6 +98,8 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
     outBuf[6] = p._worldToUvw1.y;  outBuf[7] = p._worldToUvw2.z;
     outBuf[8] = p._emissiveColorIor.w;                    // ior slot (eta = 1)
     outBuf[9] = p._diffuseColorRoughness.x;
+    outBuf[10] = p._cloudDensityWispinessFrequency.x;
+    outBuf[11] = p._cloudDensityWispinessFrequency.z;
 }
 """
     dev = spy.create_device(type=spy.DeviceType.metal)
@@ -105,13 +111,14 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
     par = {p.name: p for p in prog.layout.parameters}["flatMaterials"]
     etl = par.type_layout.element_type_layout
     stride = int(getattr(etl, "stride", 0) or etl.size)
-    assert stride == FLAT_MATERIAL_STRIDE == 240, (
+    assert stride == FLAT_MATERIAL_STRIDE == 256, (
         f"FlatMaterialParams must stay float4-wrapped: MSL stride {stride} != "
         f"scalar {FLAT_MATERIAL_STRIDE} — a padding-sensitive field was added")
     offsets = {f.name: int(f.offset) for f in etl.fields}
     assert offsets["_worldToUvw0"] == 192
     assert offsets["_worldToUvw1"] == 208
     assert offsets["_worldToUvw2"] == 224
+    assert offsets["_cloudDensityWispinessFrequency"] == 240
 
     rows = np.array([[0.5, 0.0, 0.0, 0.25],
                      [0.0, 0.5, 0.0, 0.75],
@@ -122,27 +129,29 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
         "volume_sigma_s": (2.0, 1.0, 0.5),
         "volume_g": 0.877,
         "volume_grid_asset": "/x/cloud.nvdb",
+        "cloud_density": 2.0,        # ignored: not a volume_cloud material
+        "cloud_frequency": 5.0,
         "diffuseColor": (0.25, 0.25, 0.25),
     })
     rec = pack_flat_material(
         mat, volume_world_to_uvw=rows, volume_value_max=2.0, mm_per_unit=1000.0)
-    assert len(rec) == 240
-    data = (b"\x00" * 240) + rec  # slot 0 zeroed, volume material in slot 1
+    assert len(rec) == 256
+    data = (b"\x00" * 256) + rec  # slot 0 zeroed, volume material in slot 1
 
     buf = dev.create_buffer(
-        element_count=2, struct_size=240,
+        element_count=2, struct_size=256,
         usage=spy.BufferUsage.shader_resource,
         data=np.frombuffer(data, np.uint8).copy(),
         memory_type=spy.MemoryType.device_local, label="fm")
     out = dev.create_buffer(
-        element_count=10, struct_size=4,
+        element_count=12, struct_size=4,
         usage=spy.BufferUsage.unordered_access | spy.BufferUsage.shader_resource,
         memory_type=spy.MemoryType.device_local, label="o")
     kernel = dev.create_compute_kernel(prog)
     kernel.dispatch(thread_count=[1, 1, 1],
                     vars={"flatMaterials": buf, "outBuf": out})
     dev.wait_for_idle()
-    g = out.to_numpy().view(np.float32)[:10]
+    g = out.to_numpy().view(np.float32)[:12]
 
     fold = 2.0 / 1000.0  # value_max / mm_per_unit
     assert g[0] == pytest.approx(0.125 * fold, rel=1e-4)   # σ_a.x folded
@@ -155,3 +164,5 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
     assert g[7] == pytest.approx(0.5)
     assert g[8] == pytest.approx(1.0)                      # index-matched eta
     assert g[9] == pytest.approx(0.25)                     # untouched prefix
+    assert g[10] == pytest.approx(0.0)                     # cloud lanes zero for grid
+    assert g[11] == pytest.approx(0.0)
