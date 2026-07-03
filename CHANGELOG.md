@@ -26,7 +26,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   relMSE 0.094 / FLIP 0.091 / mean ratio 1.012 (constant-σ spectrum tint +
   RGB-vs-spectral + scatter-cap floor, recorded); zero-σ cloud ≡ no-sphere at
   MC-noise level (relMSE 7e-7). Note: pbrt `density 0` is NOT an empty medium
-  (the altitude floor term survives) — the port matches pbrt exactly.
+  (the altitude floor term survives) — the port matches pbrt exactly. The
+  segment clip (`clipSegmentToGrid`, `volume_walk.slang`) now bounds
+  `MEDIUM_CLOUD` to the same `[0,1]³` support box as the grid kind, so an
+  escape/shadow ray toward the open sky no longer spends the whole
+  null-collision budget marching vacuum past the cube (result unchanged,
+  faster + watchdog-safe). `Material ""` is treated as a null boundary for a
+  shape with *either* an inside or an outside `MediumInterface` (cavity
+  boundaries too), matching pbrt's empty-material semantics.
 
 - **NanoVDB heterogeneous volume rendering** (change `nanovdb-volume-rendering`) —
   pbrt `MakeNamedMedium "nanovdb"` + `Material "interface"` scenes (the WDAS

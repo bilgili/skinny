@@ -263,12 +263,15 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
 
     overrides = _resolve_medium(stage, shp, scene, report, path, base_dir, emitted_volumes)
     material = shp.material
-    if material is not None and material.type == "" and shp.inside_medium:
+    if (material is not None and material.type == ""
+            and (shp.inside_medium or shp.outside_medium)):
         # pbrt `Material ""` on a shape carrying a MediumInterface is the
         # null/interface material (pbrt-volume-import spec) — route it through
         # the exact same encoding as `Material "interface"` instead of the
-        # grey-diffuse fallback. `Material ""` WITHOUT a medium keeps the
-        # default-material behavior (the substitution is gated on both).
+        # grey-diffuse fallback. Gated on the shape having a MediumInterface
+        # (inside OR outside medium — a cavity boundary `MediumInterface "" "m"`
+        # is still a null boundary, just with no importer-supported interior);
+        # `Material ""` with no MediumInterface keeps the default material.
         material = PbrtMaterial("interface", material.params)
         report.exact(f"material:null {path}",
                      'Material "" + MediumInterface -> null boundary (interface)')

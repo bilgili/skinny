@@ -64,5 +64,5 @@ out of default `pytest`. Every render shown to the user. slangc needs
       pbrt-cloud-procedural-medium`
 - [x] 6.2 Docs: `docs/Architecture.md` medium-kind list (`MEDIUM_CLOUD`) + `cloud_noise.slang`
       module note; README + CLAUDE.md compatibility matrix (procedural cloud row); CHANGELOG
-- [ ] 6.3 Code-review pass on the diff (adversarial — Perlin parity + pack lanes are the risk),
+- [x] 6.3 Code-review pass on the diff (adversarial — Perlin parity + pack lanes are the risk),
       then merge flow per finishing-a-development-branch; archive after merge

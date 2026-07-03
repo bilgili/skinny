@@ -568,8 +568,8 @@ def pack_flat_material(
             cloud_frequency = _override_float(overrides, "cloud_frequency", 5.0)
         elif overrides.get("volume_grid_asset"):
             medium_kind = MEDIUM_NANOVDB
-        else:
-            medium_kind = MEDIUM_HOMOGENEOUS
+        # else: homogeneous free-standing interior (medium_kind already
+        # MEDIUM_HOMOGENEOUS from the initializer above).
         # `volume_value_max` is a *grid* normalization fold (texels divided by
         # the grid max at upload) — it must not scale the analytic kinds.
         fold = (float(volume_value_max) if medium_kind == MEDIUM_NANOVDB
@@ -580,14 +580,13 @@ def pack_flat_material(
         medium_sigma_s = tuple(c * fold for c in vs_s)
         medium_g = _override_float(overrides, "volume_g", 0.0)
         ior = 1.0  # index-matched pass-through boundary (eta reuses the ior slot)
-        # Cloud media carry their own world→medium-local rows (importer-folded
-        # medium CTM); the grid kind uses the loader's per-scene grid affine.
-        own_rows = overrides.get("volume_world_to_uvw")
-        if own_rows is not None and medium_kind == MEDIUM_CLOUD:
-            m = np.asarray([float(v) for v in own_rows], np.float32).reshape(3, 4)
-            w2u = tuple(tuple(float(v) for v in row) for row in m)
-        elif volume_world_to_uvw is not None:
-            m = np.asarray(volume_world_to_uvw, np.float32).reshape(3, 4)
+        # World→[0,1]³ rows: the cloud carries its own importer-folded
+        # medium-local affine on the material overrides; the grid kind uses the
+        # loader's per-scene grid affine (`volume_world_to_uvw` arg).
+        rows = overrides.get("volume_world_to_uvw") if medium_kind == MEDIUM_CLOUD \
+            else volume_world_to_uvw
+        if rows is not None:
+            m = np.asarray([float(v) for v in np.ravel(rows)], np.float32).reshape(3, 4)
             w2u = tuple(tuple(float(v) for v in row) for row in m)
     return struct.pack(
         "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I"

@@ -29,6 +29,22 @@ import materials.subsurface.cloud_noise;  // pbrt Perlin fBm cloudDensity (MEDIU
 #define VOLUME_SAMPLE_LEVEL(UVW) volumeDensity.SampleLevel(UVW, 0.0)
 #endif
 
+// World → medium support box: the folded affine (rows packed CPU-side) mapping
+// a world point to the medium's [0,1]³ box — uvw texture coords for the nanovdb
+// grid, medium-local coords for the procedural cloud (both share the row
+// convention and the unit-box support). Returns false (and leaves `uvw`
+// computed) when the point is outside the box, where every box-supported kind
+// is exactly vacuum. `clipSegmentToGrid` (volume_walk.slang) clips segments to
+// the same box through the same rows.
+bool mediumBoxPoint(Medium m, float3 pWorld, out float3 uvw)
+{
+    uvw = float3(
+        dot(m.worldToUvw0.xyz, pWorld) + m.worldToUvw0.w,
+        dot(m.worldToUvw1.xyz, pWorld) + m.worldToUvw1.w,
+        dot(m.worldToUvw2.xyz, pWorld) + m.worldToUvw2.w);
+    return !(any(uvw < float3(0.0)) || any(uvw > float3(1.0)));
+}
+
 // Local density multiplier in [0,1] applied to the base extinction σ_t. The whole
 // transport is written against this so the grid lookup is just a new case.
 float densityAt(Medium m, float3 pWorld)
@@ -37,30 +53,24 @@ float densityAt(Medium m, float3 pWorld)
     {
     case MEDIUM_NANOVDB:
     {
-        // One folded affine world → [0,1]³ texture coords (rows packed CPU-side).
-        float3 uvw = float3(
-            dot(m.worldToUvw0.xyz, pWorld) + m.worldToUvw0.w,
-            dot(m.worldToUvw1.xyz, pWorld) + m.worldToUvw1.w,
-            dot(m.worldToUvw2.xyz, pWorld) + m.worldToUvw2.w);
-        // Explicit outside-grid zero: the sampler clamps to edge, and without
-        // this guard a boundary texel's density would smear outward to every
-        // point between the grid AABB and the bounding shape.
-        if (any(uvw < float3(0.0)) || any(uvw > float3(1.0)))
+        // One folded affine world → [0,1]³ texture coords. The explicit
+        // outside-box zero matters: the sampler clamps to edge, so without it a
+        // boundary texel's density would smear across the empty margin between
+        // the grid AABB and the bounding shape.
+        float3 uvw;
+        if (!mediumBoxPoint(m, pWorld, uvw))
             return 0.0;
         return VOLUME_SAMPLE_LEVEL(uvw);
     }
     case MEDIUM_CLOUD:
     {
-        // Same folded affine, but the rows map world → medium-local [0,1]³
-        // (importer-folded medium CTM). pbrt clips cloud transport to the
-        // medium bounds (default unit cube) in SampleRay; the outside-zero
-        // here is that clip — and it also kills the altitude floor term
-        // (2·max(0, 0.5−y)) below the cube, which is unbounded otherwise.
-        float3 pLocal = float3(
-            dot(m.worldToUvw0.xyz, pWorld) + m.worldToUvw0.w,
-            dot(m.worldToUvw1.xyz, pWorld) + m.worldToUvw1.w,
-            dot(m.worldToUvw2.xyz, pWorld) + m.worldToUvw2.w);
-        if (any(pLocal < float3(0.0)) || any(pLocal > float3(1.0)))
+        // Same folded affine, rows map world → medium-local [0,1]³ (folded
+        // medium CTM). pbrt clips cloud transport to the medium bounds (default
+        // unit cube) in SampleRay; this outside-zero is that clip — and it also
+        // kills the altitude floor term (2·max(0, 0.5−y)) below the cube, which
+        // is otherwise unbounded.
+        float3 pLocal;
+        if (!mediumBoxPoint(m, pWorld, pLocal))
             return 0.0;
         // pbrt CloudMedium::Density (cloud_noise.slang) — already in [0,1].
         return cloudDensity(pLocal, m.cloudParams.x, m.cloudParams.y, m.cloudParams.z);
@@ -73,28 +83,16 @@ float densityAt(Medium m, float3 pWorld)
 }
 
 // Majorant extinction σ̄_t ≥ σ_t(x) over the segment [a,b], for the null-collision
-// accept probability σ_t/σ̄_t. Homogeneous ⇒ the constant σ_t.
+// accept probability σ_t/σ̄_t. Every current kind uses the same GLOBAL majorant =
+// the packed σ_t: homogeneous is constant σ_t; the nanovdb grid normalizes its
+// texels to [0,1] (value max folded into the packed σ on the CPU) so densityAt ≤
+// 1; and pbrt's CloudMedium::Density clamps to [0,1]. So σ_t bounds σ_t·density
+// exactly for all of them — no per-segment max needed for unbiasedness
+// (macrocell/DDA local majorants are a convergence-only follow-up). pbrt itself
+// takes this homogeneous-majorant choice in both grid and cloud `SampleRay`.
 float3 mediumMajorant(Medium m, float3 a, float3 b)
 {
-    switch (m.kind)
-    {
-    case MEDIUM_NANOVDB:
-        // Global majorant. The grid's value max is folded into the packed σ on
-        // the CPU (texels are normalized to [0,1]), so densityAt(x) ≤ 1 and the
-        // packed σ_t IS the exact global majorant — no per-segment max needed
-        // for correctness (macrocell/DDA local majorants are a noted follow-up
-        // for convergence, not unbiasedness).
-        return m.sigmaA + m.sigmaS;
-    case MEDIUM_CLOUD:
-        // pbrt CloudMedium::Density clamps to [0,1], so the packed σ_t is the
-        // exact global majorant — the same argument (and pbrt's own
-        // SampleRay homogeneous-majorant choice) as the grid case.
-        return m.sigmaA + m.sigmaS;
-    case MEDIUM_HOMOGENEOUS:
-        return m.sigmaA + m.sigmaS;
-    default:
-        return m.sigmaA + m.sigmaS;
-    }
+    return m.sigmaA + m.sigmaS;
 }
 
 // Handle → Medium. Handle = material id (material-attached medium: the

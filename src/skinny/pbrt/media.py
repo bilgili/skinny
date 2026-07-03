@@ -63,28 +63,39 @@ def is_supported_cloud(medium) -> bool:
     return p0 == [0.0, 0.0, 0.0] and p1 == [1.0, 1.0, 1.0]
 
 
-def cloud_overrides(medium) -> dict:
-    """Return a skinnyOverrides dict for pbrt's procedural ``cloud`` medium.
-
-    Carries the RGB-resolved σ (pbrt ``CloudMedium::Create`` has **no**
-    ``scale`` param — unlike the grid media), the HG ``g``, and the procedural
-    density parameters (``density``, ``wispiness`` default 1, ``frequency``
-    default 5). ``volume_world_to_uvw`` is the world→medium-local affine —
-    rows 0..2 of ``ctm⁻¹ @ B`` (the inverse of the point bake ``B @ CTM``,
-    see :func:`skinny.pbrt.emit.bake_world_mesh`) — the same row convention
-    the nanovdb grid packs, so the renderer/shader consume both identically.
-    pbrt evaluates ``Density`` in medium-local space and clips to the default
-    ``[0,1]³`` bounds; for those bounds medium-local coords ≡ normalized uvw.
+def _base_overrides(medium, scale: float = 1.0) -> dict:
+    """Shared skinnyOverrides skeleton for every medium kind: the RGB-resolved
+    σ_a/σ_s (× *scale*), the HG ``g``, and the medium name. The homogeneous and
+    grid media fold pbrt's ``scale`` param here; the procedural cloud has no
+    ``scale`` (pbrt ``CloudMedium::Create`` omits it) and passes ``scale=1.0``.
     """
     p = medium.params
     sigma_a = spectra.param_to_rgb(p.get("sigma_a")) or [1.0, 1.0, 1.0]
     sigma_s = spectra.param_to_rgb(p.get("sigma_s")) or [1.0, 1.0, 1.0]
-    world_to_local = np.linalg.inv(np.asarray(medium.ctm, np.float64)) @ T.B
     return {
         "pbrt_medium": medium.name,
-        "volume_sigma_a": [float(c) for c in sigma_a],
-        "volume_sigma_s": [float(c) for c in sigma_s],
+        "volume_sigma_a": [float(c) * scale for c in sigma_a],
+        "volume_sigma_s": [float(c) * scale for c in sigma_s],
         "volume_g": float(p.float("g", 0.0)),
+    }
+
+
+def cloud_overrides(medium) -> dict:
+    """Return a skinnyOverrides dict for pbrt's procedural ``cloud`` medium.
+
+    Extends :func:`_base_overrides` (no ``scale`` — pbrt ``CloudMedium::Create``
+    has none) with the procedural density parameters (``density``, ``wispiness``
+    default 1, ``frequency`` default 5) and the world→medium-local affine —
+    rows 0..2 of ``ctm⁻¹ @ B`` (the inverse of the point bake ``B @ CTM``, see
+    :func:`skinny.pbrt.emit.bake_world_mesh`) — the same row convention the
+    nanovdb grid packs, so the renderer/shader consume both identically. pbrt
+    evaluates ``Density`` in medium-local space and clips to the default
+    ``[0,1]³`` bounds; for those bounds medium-local coords ≡ normalized uvw.
+    """
+    p = medium.params
+    world_to_local = np.linalg.inv(np.asarray(medium.ctm, np.float64)) @ T.B
+    return {
+        **_base_overrides(medium),
         "volume_cloud": True,
         "cloud_density": float(p.float("density", 1.0)),
         "cloud_wispiness": float(p.float("wispiness", 1.0)),
@@ -95,40 +106,25 @@ def cloud_overrides(medium) -> dict:
 
 def homogeneous_overrides(medium) -> dict:
     """Return a skinnyOverrides dict for a homogeneous medium."""
-    p = medium.params
-    scale = p.float("scale", 1.0)
-    sigma_a = spectra.param_to_rgb(p.get("sigma_a")) or [1.0, 1.0, 1.0]
-    sigma_s = spectra.param_to_rgb(p.get("sigma_s")) or [1.0, 1.0, 1.0]
-    return {
-        "pbrt_medium": medium.name,
-        "volume_sigma_a": [c * scale for c in sigma_a],
-        "volume_sigma_s": [c * scale for c in sigma_s],
-        "volume_g": float(p.float("g", 0.0)),
-    }
+    return _base_overrides(medium, scale=medium.params.float("scale", 1.0))
 
 
 def heterogeneous_overrides(medium, scene_dir: str | None = None) -> dict:
     """Return a skinnyOverrides dict for a supported (``nanovdb``) medium.
 
-    Mirrors :func:`homogeneous_overrides`: ``scale`` folds into both σ (the
-    grid's own density value is a separate multiplier the renderer applies at
-    sample time, same convention as pbrt's ``GridMedium``). Adds the grid asset
-    path (resolved against *scene_dir*, absolute POSIX) and the grid field name
-    the renderer/loader reads back.
+    Extends :func:`_base_overrides` (``scale`` folds into both σ — the grid's own
+    density value is a separate multiplier the renderer applies at sample time,
+    same convention as pbrt's ``GridMedium``) with the grid asset path (resolved
+    against *scene_dir*, absolute POSIX) and the grid field name the
+    renderer/loader reads back.
     """
     p = medium.params
-    scale = p.float("scale", 1.0)
-    sigma_a = spectra.param_to_rgb(p.get("sigma_a")) or [1.0, 1.0, 1.0]
-    sigma_s = spectra.param_to_rgb(p.get("sigma_s")) or [1.0, 1.0, 1.0]
     filename = p.string("filename", "")
     if scene_dir and filename and not os.path.isabs(filename):
         filename = os.path.join(scene_dir, filename)
     grid_path = os.path.abspath(filename).replace(os.sep, "/") if filename else ""
     return {
-        "pbrt_medium": medium.name,
-        "volume_sigma_a": [c * scale for c in sigma_a],
-        "volume_sigma_s": [c * scale for c in sigma_s],
-        "volume_g": float(p.float("g", 0.0)),
+        **_base_overrides(medium, scale=p.float("scale", 1.0)),
         "volume_grid_asset": grid_path,
         "volume_grid_field": p.string("gridname", "density"),
     }

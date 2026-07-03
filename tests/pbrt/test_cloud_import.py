@@ -202,6 +202,31 @@ def test_empty_material_without_medium_keeps_default(tmp_path):
     assert ov is None
 
 
+def test_empty_material_outside_medium_is_null_boundary(tmp_path):
+    """A cavity boundary `MediumInterface "" "m"` (outside medium only) with
+    `Material ""` is still a null boundary, not grey diffuse — pbrt treats an
+    empty material on ANY MediumInterface shape as the null material."""
+    scene = """
+WorldBegin
+MakeNamedMedium "c" "string type" "cloud" "float density" 2
+AttributeBegin
+  MediumInterface "" "c"
+  Material ""
+  Shape "sphere" "float radius" 1
+AttributeEnd
+"""
+    stage, report = _import(tmp_path, scene)
+    from pxr import UsdShade
+    shader = None
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == "Shader":
+            shader = UsdShade.Shader(prim)
+    assert shader is not None
+    diffuse = shader.GetInput("diffuseColor").Get()
+    assert tuple(diffuse) == pytest.approx((0.0, 0.0, 0.0))  # null, not grey 0.5
+    assert any("material:null" in e.construct for e in report.entries)
+
+
 def test_rgbgrid_still_skips(tmp_path):
     _stage, report = _import(tmp_path, RGBGRID_SCENE)
     assert any(
