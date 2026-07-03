@@ -152,7 +152,7 @@ def _add_param(ui: UIBuilder, renderer, p: ParamSpec) -> None:
         ui.slider(
             p.name,
             getter=lambda path=p.path: float(_get_nested(renderer, path)),
-            setter=lambda v, path=p.path: _set_nested(renderer, path, float(v)),
+            setter=lambda v, path=p.path: _set_param_value(renderer, path, float(v)),
             lo=p.lo, hi=p.hi, step=p.step,
         )
         return
@@ -164,18 +164,26 @@ def _add_param(ui: UIBuilder, renderer, p: ParamSpec) -> None:
 
     if p.path == "preset_index":
         def _set(idx: int, path: str = "preset_index") -> None:
-            _set_nested(renderer, path, int(idx))
+            _set_param_value(renderer, path, int(idx))
             presets = getattr(renderer, "presets", [])
             if 0 <= idx < len(presets):
                 apply_preset(renderer, presets[idx])
     else:
         def _set(idx: int, path: str = p.path) -> None:
-            _set_nested(renderer, path, int(idx))
+            _set_param_value(renderer, path, int(idx))
 
     ui.combo(
         p.name, getter=_get, setter=_set,
         choices=lambda src=p.choice_source: _choice_labels(renderer, src),
     )
+
+
+def _set_param_value(renderer, path: str, value) -> None:
+    setter = getattr(renderer, "set_path", None)
+    if callable(setter):
+        setter(path, value)
+    else:
+        _set_nested(renderer, path, value)
 
 
 # ── Light helpers ──────────────────────────────────────────────────

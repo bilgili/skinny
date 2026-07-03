@@ -11,6 +11,7 @@ Layout:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import TimeoutError
 import logging
 import os
 import sys
@@ -28,14 +29,11 @@ from PySide6.QtWidgets import (
 import numpy as np
 
 from skinny.cli_common import (
-    INTEGRATOR_INDEX,
     add_render_flags,
-    apply_sppm_glossy_roughness,
     resolve_walk,
     validate_render_flags,
 )
 from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
-from skinny.renderer import Renderer
 from skinny.settings import (
     ensure_dirs,
     get_last_dir,
@@ -47,14 +45,11 @@ from skinny.settings import (
 from skinny.ui.build_app_ui import AppCallbacks, build_main_ui
 from skinny.ui.qt.backend import QtTreeBuilder
 from skinny.ui.qt.viewport import RenderViewport
-from skinny.ui.qt.windows.bxdf import BXDFDock
-from skinny.ui.qt.windows.debug_viewport import DebugViewportDock
-from skinny.ui.qt.windows.material_graph import MaterialGraphDock
-from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
-from skinny.ui.qt.windows.scene_graph import SceneGraphDock
-from skinny.backend_select import (
-    make_context,
-    select_backend,
+from skinny.backend_select import select_backend
+from skinny.ui.qt.render_session import (
+    QtRendererConfig,
+    QtRendererProxy,
+    RenderCommandQueue,
 )
 
 log = logging.getLogger(__name__)
@@ -70,6 +65,7 @@ class MainWindow(QMainWindow):
         reuse: str | None = None,
         lobe_samplers: str | None = None,
         backend: str = "vulkan",
+        requested_backend: str = "auto",
         encoding: str = "E0",
         sppm_glossy_roughness: float | None = None,
         width: int = 640,
@@ -79,46 +75,38 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Skinny")
         self.resize(1600, 900)
 
-        # Resolved GPU backend, persisted in the session snapshot. The Qt GUI is
-        # offscreen-rendered (no GLFW window) via make_context(window=None) — the
-        # headless path both backends support at full parity, so auto→Metal on
-        # Apple Silicon works here too. main() resolves the backend (an explicit,
-        # unavailable --backend metal errors) before constructing this window.
+        # Resolved GPU backend, persisted in the session snapshot. The render
+        # worker creates the actual GPU context; MainWindow keeps only a
+        # GUI-thread proxy and a command queue.
         self._backend_name = backend
-
-        # Renderer setup — synchronous on main thread (no per-user sessions
-        # to worry about in the desktop entry). Headless mode: no GLFW
-        # window, no surface, no swapchain. DebugViewport renders to an
-        # offscreen image and Qt blits it. The render area size comes from the
-        # shared --width/--height flags (default 640x480); the Qt window and
-        # docks keep their own size (self.resize above).
-        self.ctx = make_context(
-            backend, window=None, width=width, height=height,
-            gpu_preference=gpu_pref,
+        self._commands = RenderCommandQueue()
+        self.renderer = QtRendererProxy(
+            self._commands,
+            width=width,
+            height=height,
+            backend=backend,
+            encoding=encoding,
+            sppm_glossy_roughness=sppm_glossy_roughness,
         )
-        log.info("GPU: %s", self.ctx.gpu_info.name)
-
-        repo_root = Path(__file__).resolve().parents[3]
-        # Conditioner encoding (axis 2, change renderer-conditioner-encoding): a
-        # build dim threaded into the neural config. E0 → None → byte-identical.
-        from skinny.cli_common import resolve_encoding
-        from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
-        neural_cfg = None
-        if resolve_encoding(encoding) is not Encoding.E0:
-            neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(encoding))
-        self.renderer = Renderer(
-            vk_ctx=self.ctx,
-            shader_dir=Path(__file__).resolve().parents[1].parent / "shaders",
-            hdr_dir=repo_root / "hdrs",
-            tattoo_dir=repo_root / "tattoos",
-            usd_scene_path=scene_path,
-            use_usd_mtlx_plugin=use_usd_mtlx,
+        config = QtRendererConfig(
+            scene_path=scene_path,
+            gpu_pref=gpu_pref,
+            use_usd_mtlx=use_usd_mtlx,
             execution_mode=execution_mode,
             bdpt_walk=bdpt_walk,
+            initial_integrator=initial_integrator,
             neural_handoff=neural_handoff,
             neural_trainer=neural_trainer,
             train_precision=train_precision,
-            neural_config=neural_cfg,
+            online_training=online_training,
+            reuse=reuse,
+            lobe_samplers=lobe_samplers,
+            backend=backend,
+            encoding=encoding,
+            sppm_glossy_roughness=sppm_glossy_roughness,
+            width=width,
+            height=height,
+            requested_backend=requested_backend,
         )
 
         # Render viewport: hosted in a dock so the user can detach / re-
@@ -137,7 +125,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(placeholder)
 
         self.viewport = RenderViewport(
-            self.renderer, parent=self, online_training=online_training)
+            config, self.renderer, self._commands, parent=self)
         render_dock = QDockWidget("Render", self)
         # objectName is required by QMainWindow.saveState/restoreState.
         render_dock.setObjectName("render")
@@ -148,21 +136,21 @@ class MainWindow(QMainWindow):
 
         # Debug viewport: embedded dock built on first open. Renders into
         # an offscreen Vulkan image and blits via QImage.
-        self._debug_dock: DebugViewportDock | None = None
+        self._debug_dock = None
 
         # Status bar — GPU + accumulation, plus the online-training state polled
         # from the renderer's lock-free snapshot (change
         # online-training-observability) so training is visible without a console.
         sb = self.statusBar()
-        sb.showMessage(f"GPU: {self.ctx.gpu_info.name}  |  accum: 0")
+        sb.showMessage("GPU: starting  |  accum: 0")
         self.viewport.accum_changed.connect(self._update_status_bar)
 
         # Holders for the child docks — instantiated on first open so the
         # tree picks up scene graphs created after startup.
-        self._scene_graph_dock: SceneGraphDock | None = None
-        self._bxdf_dock: BXDFDock | None = None
-        self._material_graph_dock: MaterialGraphDock | None = None
-        self._python_material_dock: PythonMaterialEditorDock | None = None
+        self._scene_graph_dock = None
+        self._bxdf_dock = None
+        self._material_graph_dock = None
+        self._python_material_dock = None
 
         # Sidebar built from the shared spec tree.
         cb = AppCallbacks(
@@ -206,31 +194,6 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             self._saved_settings = {}
         self._restore_session_state()
-        # CLI --integrator (when given) wins over the persisted value for this launch.
-        if initial_integrator is not None:
-            self.renderer.integrator_index = INTEGRATOR_INDEX[initial_integrator]
-        # CLI --reuse / --lobe-samplers override the persisted sampling seam
-        # (mirrors app.py GLFW). skinny-gui has no --proposals: the Proposals
-        # combobox owns proposal selection at runtime, and the online-training
-        # gate polls lazily until a neural proposal becomes active, so no
-        # startup seed is needed.
-        if reuse is not None:
-            self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
-        if lobe_samplers is not None:
-            from skinny.sampling import parse_lobe_samplers
-
-            c, s, d = parse_lobe_samplers(lobe_samplers)
-            self.renderer.coat_sampler_index = c
-            self.renderer.spec_sampler_index = s
-            self.renderer.diff_sampler_index = d
-        # SPPM glossy-continue threshold (only read under SPPM). CLI/env value
-        # (resolved in main(), restored-from-snapshot when unset) wins over the
-        # persisted-params restore above. None leaves the built-in default.
-        apply_sppm_glossy_roughness(
-            self.renderer,
-            argparse.Namespace(sppm_glossy_roughness=sppm_glossy_roughness),
-        )
-
         # Keys the viewport responds to (camera mode toggle, focus reset,
         # HUD toggle, free-cam WASDQE). Forwarded from MainWindow when no
         # text-editing widget is focused.
@@ -255,18 +218,21 @@ class MainWindow(QMainWindow):
 
     def _neural_status_text(self) -> str:
         """One-line online-training state for the status bar, or '' when off."""
-        st = self.renderer.online_training_status()
-        if not st["armed"]:
+        frame = self.viewport.latest_frame()
+        st = frame.online_training if frame is not None else {}
+        if not st.get("armed"):
             return ""
-        if st["active"]:
-            loss = st["last_loss"]
+        if st.get("active"):
+            loss = st.get("last_loss")
             loss_s = f"{loss:.3f}" if loss is not None else "n/a"
-            return f"  |  neural: ACTIVE {st['cycles']}cyc loss={loss_s}"
+            return f"  |  neural: ACTIVE {st.get('cycles', 0)}cyc loss={loss_s}"
         return "  |  neural: armed (waiting)"
 
     def _update_status_bar(self, n: int) -> None:
+        frame = self.viewport.latest_frame()
+        gpu_name = frame.gpu_name if frame is not None else self.renderer.gpu_name
         self.statusBar().showMessage(
-            f"GPU: {self.ctx.gpu_info.name}  |  accum: {n}"
+            f"GPU: {gpu_name}  |  accum: {n}"
             + self._neural_status_text()
         )
 
@@ -321,15 +287,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{name}: not yet ported (Phase 7)", 3000)
 
     def _open_scene_graph(self) -> None:
-        if self._scene_graph_dock is None:
-            self._scene_graph_dock = SceneGraphDock(
-                self.renderer, parent=self,
-                on_open_python_material=self._open_python_material_in_editor,
-            )
-            self._scene_graph_dock.setObjectName("scene_graph")
-            self.addDockWidget(Qt.BottomDockWidgetArea, self._scene_graph_dock)
-        self._scene_graph_dock.show()
-        self._scene_graph_dock.raise_()
+        self.statusBar().showMessage(
+            "Scene Graph dock needs the snapshot-backed port for render-thread mode",
+            5000,
+        )
 
     def _open_python_material_in_editor(self, module_name: str) -> None:
         """Open the editor dock (creating it if needed) and load
@@ -340,44 +301,25 @@ class MainWindow(QMainWindow):
             self._python_material_dock.set_active_module(module_name)
 
     def _open_bxdf(self) -> None:
-        if self._bxdf_dock is None:
-            self._bxdf_dock = BXDFDock(self.renderer, self.viewport, parent=self)
-            self._bxdf_dock.setObjectName("bxdf")
-            self.addDockWidget(Qt.RightDockWidgetArea, self._bxdf_dock)
-        self._bxdf_dock.show()
-        self._bxdf_dock.raise_()
+        self.statusBar().showMessage(
+            "BXDF visualizer needs the snapshot-backed port for render-thread mode",
+            5000,
+        )
 
     def _open_material_graph(self) -> None:
-        if self._material_graph_dock is None:
-            self._material_graph_dock = MaterialGraphDock(self.renderer, parent=self)
-            self._material_graph_dock.setObjectName("material_graph")
-            self.addDockWidget(Qt.BottomDockWidgetArea, self._material_graph_dock)
-        self._material_graph_dock.show()
-        self._material_graph_dock.raise_()
+        self.statusBar().showMessage(
+            "Material Graph dock needs the snapshot-backed port for render-thread mode",
+            5000,
+        )
 
     def _open_python_material_editor(self) -> None:
-        if self._python_material_dock is None:
-            self._python_material_dock = PythonMaterialEditorDock(
-                self.renderer, self.viewport._render_lock, parent=self,
-            )
-            self._python_material_dock.setObjectName("python_material_editor")
-            self.addDockWidget(
-                Qt.RightDockWidgetArea, self._python_material_dock,
-            )
-        self._python_material_dock.refresh_from_renderer()
-        self._python_material_dock.show()
-        self._python_material_dock.raise_()
-
-    def _ensure_debug_dock(self) -> DebugViewportDock:
-        if self._debug_dock is not None:
-            return self._debug_dock
-        self._debug_dock = DebugViewportDock(
-            ctx=self.ctx, renderer=self.renderer,
-            main_lock=self.viewport._render_lock, parent=self,
+        self.statusBar().showMessage(
+            "Python Material Editor needs the command-backed port for render-thread mode",
+            5000,
         )
-        self._debug_dock.setObjectName("debug_viewport")
-        self.addDockWidget(Qt.BottomDockWidgetArea, self._debug_dock)
-        return self._debug_dock
+
+    def _ensure_debug_dock(self):
+        raise RuntimeError("debug viewport is not yet snapshot-backed in render-thread mode")
 
     def _show_render_viewport(self) -> None:
         self._render_dock.show()
@@ -465,21 +407,30 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to apply saved params: %s", exc)
 
-        cam = data.get("camera")
-        if isinstance(cam, dict):
+        def restore_renderer(renderer, data=data) -> None:
             try:
-                _apply_camera_snapshot(self.renderer, cam)
-                self.renderer._update_light()
+                _apply_saved_params(
+                    renderer, data.get("params", {}),
+                    build_all_params(renderer),
+                )
             except Exception as exc:  # noqa: BLE001
-                log.warning("Failed to apply saved camera: %s", exc)
+                log.warning("Failed to apply saved params on render thread: %s", exc)
+            cam = data.get("camera")
+            if isinstance(cam, dict):
+                try:
+                    _apply_camera_snapshot(renderer, cam)
+                    renderer._update_light()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Failed to apply saved camera on render thread: %s", exc)
+            gm = data.get("gizmo_mode")
+            if gm is not None:
+                try:
+                    from skinny.gizmo import GizmoMode
+                    renderer.gizmo.mode = GizmoMode(int(gm))
+                except (TypeError, ValueError):
+                    pass
 
-        gm = data.get("gizmo_mode")
-        if gm is not None:
-            try:
-                from skinny.gizmo import GizmoMode
-                self.renderer.gizmo.mode = GizmoMode(int(gm))
-            except (TypeError, ValueError):
-                pass
+        self.viewport.post_render_command(restore_renderer)
 
         # Recreate child docks the user had open last session — needs to
         # happen before restoreState so the named docks exist.
@@ -520,19 +471,20 @@ class MainWindow(QMainWindow):
         """Capture params, camera, open docks, and Qt dock geometry."""
         out: dict = {}
         try:
-            out["params"] = _snapshot_params(
-                self.renderer, build_all_params(self.renderer),
-            )
+            future = self.renderer.request(lambda renderer: {
+                "params": _snapshot_params(renderer, build_all_params(renderer)),
+                "camera": _snapshot_camera(renderer),
+                "gizmo_mode": int(renderer.gizmo.mode),
+                "encoding": renderer._neural_config.encoding.value,
+                "sppm_glossy_roughness": getattr(
+                    renderer, "_sppm_glossy_roughness_override", None),
+            })
+            render_state = future.result(timeout=2.0)
+            out.update(render_state)
+        except TimeoutError:
+            log.warning("Timed out waiting for renderer settings snapshot")
         except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to snapshot params: %s", exc)
-        try:
-            out["camera"] = _snapshot_camera(self.renderer)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to snapshot camera: %s", exc)
-        try:
-            out["gizmo_mode"] = int(self.renderer.gizmo.mode)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to snapshot gizmo mode: %s", exc)
+            log.warning("Failed to snapshot renderer-owned state: %s", exc)
         open_docks: list[str] = []
         for name, dock in (
             ("scene_graph", self._scene_graph_dock),
@@ -546,9 +498,11 @@ class MainWindow(QMainWindow):
         out["open_docks"] = open_docks
         out["last_dirs"] = last_dirs_snapshot()
         out["backend"] = self._backend_name
-        out["encoding"] = self.renderer._neural_config.encoding.value
-        out["sppm_glossy_roughness"] = getattr(
-            self.renderer, "_sppm_glossy_roughness_override", None)
+        out.setdefault("encoding", getattr(self.renderer, "_encoding", "E0"))
+        out.setdefault(
+            "sppm_glossy_roughness",
+            getattr(self.renderer, "_sppm_glossy_roughness", None),
+        )
         try:
             out["section_states"] = self._tree_builder.section_states()
         except Exception as exc:  # noqa: BLE001
@@ -578,14 +532,6 @@ class MainWindow(QMainWindow):
                 self._debug_dock.close()
             except Exception:
                 pass
-        try:
-            self.renderer.cleanup()
-        except Exception:
-            pass
-        try:
-            self.ctx.destroy()
-        except Exception:
-            pass
         super().closeEvent(event)
 
 
@@ -716,13 +662,10 @@ def main() -> None:
                      reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers,
                      backend=backend,
+                     requested_backend=args.backend,
                      encoding=encoding_value,
                      sppm_glossy_roughness=sppm_glossy_roughness_value,
                      width=args.width, height=args.height)
-    # Display-only state for the startup configuration matrix (change
-    # online-training-observability).
-    win.renderer._requested_backend = args.backend
-    win.renderer._online_training_requested = bool(args.online_training)
     win.show()
     sys.exit(app.exec())
 

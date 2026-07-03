@@ -1,7 +1,11 @@
 # qt-render-threading Specification
 
 ## Purpose
-TBD - created by archiving change qt-render-thread-separation. Update Purpose after archive.
+Keep `skinny-gui` responsive while the renderer is accumulating by confining GPU
+context and `Renderer` ownership to the Qt render worker thread. The GUI thread
+interacts through queued commands and immutable snapshots, never through direct
+calls into renderer operations that can upload resources, dispatch GPU work, wait
+for backend fences, or tear down GPU state.
 ## Requirements
 ### Requirement: Qt renderer ownership is confined to the render thread
 
@@ -67,4 +71,3 @@ backdoor into the live renderer.
 - **THEN** the GUI requests a renderer snapshot from the render thread, receives
   immutable data, and serializes that data without reading renderer-owned objects
   directly
-

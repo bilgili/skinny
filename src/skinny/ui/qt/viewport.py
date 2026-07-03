@@ -8,16 +8,31 @@ frame into a ``QImage`` and paints. Mirrors the loop shape used by
 
 from __future__ import annotations
 
+import argparse
 import time
-from threading import Lock
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter, QWheelEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+from skinny.backend_select import make_context
+from skinny.cli_common import INTEGRATOR_INDEX, apply_sppm_glossy_roughness, resolve_encoding
+from skinny.params import _snapshot_params, build_all_params
+from skinny.renderer import Renderer
+from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
+from skinny.sampling import parse_lobe_samplers
 from skinny.ui.gizmo_input import GizmoMouseController
 from skinny.ui.qt.camera_input import CameraDispatcher
-from skinny.ui.qt.render_session import RenderCommandQueue
+from skinny.ui.qt.render_session import (
+    FrameSnapshot,
+    QtRendererConfig,
+    QtRendererProxy,
+    RenderCommandQueue,
+    RendererStateSnapshot,
+    choice_names_from_renderer,
+    renderer_online_status,
+)
 
 
 class _RenderWorker(QObject):
@@ -25,24 +40,24 @@ class _RenderWorker(QObject):
     the most recent frame. Owns no Qt widgets — pure Vulkan + bytes.
     """
 
-    frame_ready = Signal(bytes, int, int, int)  # pixels, w, h, accum_frame
+    frame_ready = Signal(object)  # FrameSnapshot
+    state_ready = Signal(object)  # RendererStateSnapshot
     error = Signal(str)
 
     def __init__(
         self,
-        renderer,
-        lock: Lock,
+        config: QtRendererConfig,
         command_queue: RenderCommandQueue,
-        online_training: bool = False,
     ) -> None:
         super().__init__()
-        self.renderer = renderer
-        self._lock = lock
+        self.renderer = None
+        self.ctx = None
+        self._config = config
         self._commands = command_queue
         self._running = True
         # --online-training (change online-training-trigger): enable lazily once
         # the scene is built, then drive the per-frame tick on this render thread.
-        self._online_training_requested = bool(online_training)
+        self._online_training_requested = bool(config.online_training)
         self._online_training_enabled = False
         self._online_training_refused = False
         self._online_training_waiting = False
@@ -50,8 +65,69 @@ class _RenderWorker(QObject):
         # (change online-training-observability); the matrix's online-training row
         # carries the REFUSED/WAITING/APPROVED reason, so the worker no longer
         # prints its own one-shot refused/armed lines.
-        if renderer is not None:
-            renderer._online_training_requested = bool(online_training)
+    def _build_renderer(self):
+        cfg = self._config
+        ctx = make_context(
+            cfg.backend, window=None, width=cfg.width, height=cfg.height,
+            gpu_preference=cfg.gpu_pref,
+        )
+        repo_root = Path(__file__).resolve().parents[3]
+        neural_cfg = None
+        if resolve_encoding(cfg.encoding) is not Encoding.E0:
+            neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(cfg.encoding))
+        renderer = Renderer(
+            vk_ctx=ctx,
+            shader_dir=Path(__file__).resolve().parents[1].parent / "shaders",
+            hdr_dir=repo_root / "hdrs",
+            tattoo_dir=repo_root / "tattoos",
+            usd_scene_path=cfg.scene_path,
+            use_usd_mtlx_plugin=cfg.use_usd_mtlx,
+            execution_mode=cfg.execution_mode,
+            bdpt_walk=cfg.bdpt_walk,
+            neural_handoff=cfg.neural_handoff,
+            neural_trainer=cfg.neural_trainer,
+            train_precision=cfg.train_precision,
+            neural_config=neural_cfg,
+        )
+        renderer._requested_backend = cfg.requested_backend
+        renderer._online_training_requested = bool(cfg.online_training)
+        if cfg.initial_integrator is not None:
+            renderer.integrator_index = INTEGRATOR_INDEX[cfg.initial_integrator]
+        if cfg.reuse is not None:
+            renderer.reuse_index = renderer._REUSE_TOKENS.index(cfg.reuse)
+        if cfg.lobe_samplers is not None:
+            c, s, d = parse_lobe_samplers(cfg.lobe_samplers)
+            renderer.coat_sampler_index = c
+            renderer.spec_sampler_index = s
+            renderer.diff_sampler_index = d
+        apply_sppm_glossy_roughness(
+            renderer,
+            argparse.Namespace(sppm_glossy_roughness=cfg.sppm_glossy_roughness),
+        )
+        return ctx, renderer
+
+    def _snapshot_state(self) -> RendererStateSnapshot:
+        renderer = self.renderer
+        if renderer is None or self.ctx is None:
+            return RendererStateSnapshot(
+                width=self._config.width,
+                height=self._config.height,
+                gpu_name="starting",
+            )
+        params = _snapshot_params(renderer, build_all_params(renderer))
+        return RendererStateSnapshot(
+            width=int(renderer.width),
+            height=int(renderer.height),
+            gpu_name=self.ctx.gpu_info.name,
+            params=params,
+            camera={},
+            gizmo_mode=int(renderer.gizmo.mode),
+            encoding=renderer._neural_config.encoding.value,
+            sppm_glossy_roughness=getattr(
+                renderer, "_sppm_glossy_roughness_override", None),
+            online_training=renderer_online_status(renderer),
+            choices=choice_names_from_renderer(renderer),
+        )
 
     def stop(self) -> None:
         self._running = False
@@ -90,30 +166,38 @@ class _RenderWorker(QObject):
     def run(self) -> None:
         prev = time.perf_counter()
         try:
+            self.ctx, self.renderer = self._build_renderer()
+            self.state_ready.emit(self._snapshot_state())
             while self._running:
                 now = time.perf_counter()
                 dt = now - prev
                 prev = now
 
-                with self._lock:
-                    for command in self._commands.drain():
-                        try:
-                            result = command.callback(self.renderer)
-                        except Exception as exc:  # noqa: BLE001
-                            if command.reply is not None:
-                                command.reply.set_exception(exc)
-                            self.error.emit(repr(exc))
-                        else:
-                            if command.reply is not None:
-                                command.reply.set_result(result)
-                    self.renderer.update(dt)
-                    self._maybe_online_training(dt)
-                    pixels = self.renderer.render_headless()
-                    w = int(self.renderer.width)
-                    h = int(self.renderer.height)
-                    accum = int(self.renderer.accum_frame)
+                for command in self._commands.drain():
+                    try:
+                        result = command.callback(self.renderer)
+                    except Exception as exc:  # noqa: BLE001
+                        if command.reply is not None:
+                            command.reply.set_exception(exc)
+                        self.error.emit(repr(exc))
+                    else:
+                        if command.reply is not None:
+                            command.reply.set_result(result)
+                self.renderer.update(dt)
+                self._maybe_online_training(dt)
+                pixels = self.renderer.render_headless()
+                w = int(self.renderer.width)
+                h = int(self.renderer.height)
+                accum = int(self.renderer.accum_frame)
 
-                self.frame_ready.emit(pixels, w, h, accum)
+                self.frame_ready.emit(FrameSnapshot(
+                    pixels=pixels,
+                    width=w,
+                    height=h,
+                    accum_frame=accum,
+                    gpu_name=self.ctx.gpu_info.name,
+                    online_training=renderer_online_status(self.renderer),
+                ))
 
                 # Same throttle ladder web_app uses once accumulation
                 # converges — keeps GPU + CPU idle when the image is done.
@@ -126,10 +210,20 @@ class _RenderWorker(QObject):
         except Exception as exc:  # noqa: BLE001
             self.error.emit(repr(exc))
         finally:
-            try:
-                self.renderer.disable_online_training()
-            except Exception as exc:  # noqa: BLE001
-                self.error.emit(repr(exc))
+            if self.renderer is not None:
+                try:
+                    self.renderer.disable_online_training()
+                except Exception as exc:  # noqa: BLE001
+                    self.error.emit(repr(exc))
+                try:
+                    self.renderer.cleanup()
+                except Exception as exc:  # noqa: BLE001
+                    self.error.emit(repr(exc))
+            if self.ctx is not None:
+                try:
+                    self.ctx.destroy()
+                except Exception as exc:  # noqa: BLE001
+                    self.error.emit(repr(exc))
 
 
 class RenderViewport(QWidget):
@@ -142,17 +236,23 @@ class RenderViewport(QWidget):
     show the current accumulation count.
     """
 
-    def __init__(self, renderer, parent=None, online_training: bool = False) -> None:
+    def __init__(
+        self,
+        config: QtRendererConfig,
+        proxy: QtRendererProxy,
+        command_queue: RenderCommandQueue,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
-        self.renderer = renderer
-        self._render_lock = Lock()
-        self._commands = RenderCommandQueue()
+        self.renderer = proxy
+        self._commands = command_queue
         self._image: QImage | None = None
+        self._last_frame: FrameSnapshot | None = None
         # Hold the raw bytes so QImage's no-copy view stays valid until the
         # next frame replaces it.
         self._image_buffer: bytes | None = None
 
-        self._camera = CameraDispatcher(renderer)
+        self._camera = CameraDispatcher(proxy)
 
         # Rotate-gizmo interaction. The controller arbitrates gizmo-vs-camera on
         # press and owns the drag lifecycle; hit-tests are best-effort so the GUI
@@ -185,11 +285,12 @@ class RenderViewport(QWidget):
         # Start the worker thread.
         self._thread = QThread(self)
         self._worker = _RenderWorker(
-            renderer, self._render_lock, self._commands, online_training,
+            config, self._commands,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.frame_ready.connect(self._on_frame_ready)
+        self._worker.state_ready.connect(self._on_state_ready)
         self._worker.error.connect(self._on_render_error)
         self._thread.start()
 
@@ -209,27 +310,32 @@ class RenderViewport(QWidget):
         """Run ``callback(renderer)`` on the render worker before a later frame."""
         self._commands.post(callback, coalesce_key=coalesce_key)
 
+    def latest_frame(self) -> FrameSnapshot | None:
+        return self._last_frame
+
     def _try_with_renderer(self, callback, default=None):
         """Best-effort immediate renderer read for hit-tests that need a result.
 
         These paths used to block the GUI while waiting for the render lock. If a
         frame is in flight, keep the UI responsive and let the gesture miss.
         """
-        if not self._render_lock.acquire(blocking=False):
-            return default
-        try:
-            return callback(self.renderer)
-        finally:
-            self._render_lock.release()
+        return default
 
     # ── Frame plumbing ─────────────────────────────────────────────
 
-    def _on_frame_ready(self, pixels: bytes, w: int, h: int, accum: int) -> None:
+    def _on_state_ready(self, snapshot: RendererStateSnapshot) -> None:
+        self.renderer.apply_snapshot(snapshot)
+
+    def _on_frame_ready(self, frame: FrameSnapshot) -> None:
         # Hold both the bytes and the QImage view; QImage(bytes, …) is a
         # zero-copy view and the buffer must outlive every paint.
-        self._image_buffer = pixels
-        self._image = QImage(pixels, w, h, 4 * w, QImage.Format_RGBA8888)
-        self.accum_changed.emit(accum)
+        self._last_frame = frame
+        self._image_buffer = frame.pixels
+        self._image = QImage(
+            frame.pixels, frame.width, frame.height,
+            4 * frame.width, QImage.Format_RGBA8888,
+        )
+        self.accum_changed.emit(frame.accum_frame)
         self.update()
 
     def _on_render_error(self, msg: str) -> None:
@@ -305,15 +411,14 @@ class RenderViewport(QWidget):
         # gizmo is grabbable and never shadowed by the camera (or vice versa).
         mapped = self._widget_to_render_pixel(pos.x(), pos.y())
         shift = bool(event.modifiers() & Qt.ShiftModifier)
-        action = self._try_with_renderer(
-            lambda renderer: self._gizmo.on_press(
-                renderer, mapped,
-                shift=shift,
-                pick_armed=self._pick_armed,
-                zoom_arming=self._zoom_arming,
-            ),
-            default="camera",
-        )
+        if shift:
+            action = "autofocus"
+        elif self._pick_armed:
+            action = "pick"
+        elif self._zoom_arming:
+            action = "zoom"
+        else:
+            action = "camera"
 
         if action == "autofocus":
             if mapped is not None:
@@ -377,12 +482,7 @@ class RenderViewport(QWidget):
             self._zoom_arming = False
             return
         if event.button() == Qt.LeftButton:
-            ended = self._try_with_renderer(
-                lambda renderer: self._gizmo.on_release(renderer),
-                default=False,
-            )
-            if ended:
-                return
+            self.post_render_command(lambda renderer: self._gizmo.on_release(renderer))
             self._left = False
         elif event.button() == Qt.RightButton:
             self._right = False
@@ -404,19 +504,17 @@ class RenderViewport(QWidget):
             return
 
         x, y = event.position().x(), event.position().y()
-        # Gizmo drag (consumes the move) or, when idle, ring hover highlight.
+        # Gizmo hover/drag is posted to the render thread; camera input stays
+        # responsive even while a frame is in flight.
         mapped = self._widget_to_render_pixel(x, y)
         any_button = self._left or self._right or self._middle
-        consumed = self._try_with_renderer(
-            lambda renderer: self._gizmo.on_move(
+        self.post_render_command(
+            lambda renderer, mapped=mapped, any_button=any_button: self._gizmo.on_move(
                 renderer, mapped,
                 any_button_down=any_button, zoom_dragging=False,
             ),
-            default=False,
+            coalesce_key="gizmo-move",
         )
-        if consumed:
-            self._last_pos = (x, y)
-            return
 
         if self._last_pos is None:
             self._last_pos = (x, y)
@@ -427,7 +525,7 @@ class RenderViewport(QWidget):
         if self._left or self._right or self._middle:
             self.post_render_command(
                 lambda _renderer, dx=dx, dy=dy, left=self._left,
-                right=self._right, middle=self._middle: self._camera.drag(
+                right=self._right, middle=self._middle: CameraDispatcher(_renderer).drag(
                     dx, dy, left=left, right=right, middle=middle,
                 ),
                 coalesce_key="camera-drag",
@@ -438,7 +536,7 @@ class RenderViewport(QWidget):
         # GLFW yoff is 1/-1 per notch — match that.
         notches = event.angleDelta().y() / 120.0
         self.post_render_command(
-            lambda _renderer, notches=notches: self._camera.zoom(notches),
+            lambda renderer, notches=notches: CameraDispatcher(renderer).zoom(notches),
             coalesce_key="camera-zoom",
         )
 
@@ -448,9 +546,9 @@ class RenderViewport(QWidget):
             self._wasd[key] = True
             return
         if key == Qt.Key_C:
-            self.post_render_command(lambda _renderer: self._camera.toggle_mode())
+            self.post_render_command(lambda renderer: CameraDispatcher(renderer).toggle_mode())
         elif key == Qt.Key_F:
-            self.post_render_command(lambda _renderer: self._camera.reset())
+            self.post_render_command(lambda renderer: CameraDispatcher(renderer).reset())
         elif key == Qt.Key_F1:
             self.post_render_command(
                 lambda renderer: setattr(renderer, "show_hud", not renderer.show_hud),
@@ -502,7 +600,7 @@ class RenderViewport(QWidget):
         if f or r or u:
             def move(renderer, f=f, r=r, u=u) -> None:
                 if getattr(renderer, "camera_mode", "orbit") == "free":
-                    self._camera.move(f, r, u, 0.016)
+                    CameraDispatcher(renderer).move(f, r, u, 0.016)
             self.post_render_command(move, coalesce_key="camera-move")
 
     # ── Resize / shutdown ──────────────────────────────────────────
