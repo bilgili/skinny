@@ -225,7 +225,10 @@ class HeadlessRenderer:
                         time: object = None, **opts) -> np.ndarray:
         ro = RenderOptions(samples=samples, time=time, **opts)
         self._prepare(source, ro)
-        if self.renderer.pipeline is None:
+        # Backend/execution-mode-aware readiness: in wavefront mode the
+        # megakernel pipeline is never built (`scene_bindings_only`), so a
+        # `pipeline is None` check would reject every valid wavefront render.
+        if not self.renderer._backend_render_ready:
             raise RuntimeError(
                 "render pipeline failed to build — scene has no usable materials"
             )
@@ -241,7 +244,9 @@ class HeadlessRenderer:
         fmt = _fmt_for_output(out, format)
         ro = RenderOptions(samples=samples, time=time, **opts)
         self._prepare(source, ro)
-        if self.renderer.pipeline is None:
+        # Same execution-mode-aware gate as render_to_array (wavefront builds
+        # no megakernel pipeline by design).
+        if not self.renderer._backend_render_ready:
             raise RuntimeError(
                 "render pipeline failed to build — scene has no usable materials"
             )

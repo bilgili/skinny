@@ -170,6 +170,58 @@ class TestHeadlessRender:
         assert np.abs(a.astype(int) - b.astype(int)).mean() > 1.0
 
 
+class TestHeadlessReadinessGate:
+    """The pre-accumulate readiness gate must be execution-mode-aware.
+
+    Regression for `skinny-render --execution-mode wavefront` (change
+    headless-wavefront-readiness-gate): wavefront builds `scene_bindings_only`,
+    so `renderer.pipeline` is None BY DESIGN and a pipeline-presence check
+    rejects every wavefront render with the misleading "no usable materials"
+    error. The gate is `renderer._backend_render_ready`, the same
+    backend/execution-mode-aware signal the interactive front-ends use.
+    Hostless: the renderer/context are stand-ins, no GPU is touched.
+    """
+
+    def _make(self, monkeypatch, tmp_path, *, ready):
+        from types import SimpleNamespace
+
+        from skinny.headless import HeadlessRenderer
+
+        hr = object.__new__(HeadlessRenderer)
+        written = []
+        # Wavefront-shaped renderer: megakernel pipeline absent by design.
+        hr.renderer = SimpleNamespace(
+            pipeline=None,
+            _backend_render_ready=ready,
+            save_screenshot=lambda path, fmt: written.append((path, fmt)),
+        )
+        hr.ctx = SimpleNamespace(width=4, height=4)
+        monkeypatch.setattr(hr, "_prepare", lambda source, opts: None)
+        monkeypatch.setattr(
+            hr, "_accumulate", lambda samples: b"\x7f" * (4 * 4 * 4)
+        )
+        return hr, written
+
+    def test_wavefront_render_to_array_passes_gate(self, monkeypatch, tmp_path):
+        hr, _ = self._make(monkeypatch, tmp_path, ready=True)
+        arr = hr.render_to_array("scene.usda", samples=1)
+        assert arr.shape == (4, 4, 4)
+
+    def test_wavefront_render_scene_passes_gate(self, monkeypatch, tmp_path):
+        hr, written = self._make(monkeypatch, tmp_path, ready=True)
+        out = tmp_path / "frame.png"
+        hr.render_scene("scene.usda", out, samples=1)
+        assert written == [(str(out), "png")]
+
+    def test_unready_backend_still_raises(self, monkeypatch, tmp_path):
+        hr, written = self._make(monkeypatch, tmp_path, ready=False)
+        with pytest.raises(RuntimeError, match="no usable materials"):
+            hr.render_to_array("scene.usda", samples=1)
+        with pytest.raises(RuntimeError, match="no usable materials"):
+            hr.render_scene("scene.usda", tmp_path / "frame.png", samples=1)
+        assert written == []
+
+
 class TestFrameRange:
     def test_parse_start_end(self):
         from skinny.headless import _parse_frames

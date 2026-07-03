@@ -7,6 +7,21 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`skinny-render --execution-mode wavefront` no longer fails on every
+  invocation** (change `headless-wavefront-readiness-gate`) —
+  `HeadlessRenderer.render_to_array`/`render_scene` gated readiness on
+  `renderer.pipeline is None`, but wavefront intentionally never builds the
+  megakernel pipeline (`scene_bindings_only`), so every wavefront headless
+  render was rejected with the misleading
+  `render pipeline failed to build — scene has no usable materials` even though
+  the scene built fine. Both entry points now gate on
+  `renderer._backend_render_ready`, the backend- and execution-mode-aware
+  readiness signal the interactive front-ends already use; a genuinely unready
+  scene still raises the same error. Hostless regression tests in
+  `tests/test_headless_api.py` (`TestHeadlessReadinessGate`).
+
 ### Added
 
 - **pbrt procedural `cloud` medium** (change `pbrt-cloud-procedural-medium`) —
