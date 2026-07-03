@@ -265,6 +265,11 @@ Layout:
 - View menu: BXDF visualiser, MaterialX graph editor, scene graph
   inspector, camera debug viewport (each a `QDockWidget`)
 
+The render viewport runs the frame loop on a Qt worker thread and the GUI posts
+common renderer mutations (camera input, zoom/focus toggles, scene loads, and
+render-target resize) through a command queue. The main Qt thread paints the
+latest emitted frame and stays responsive while the renderer is accumulating.
+
 Any `.usda` / `.usdc` / `.usdz` file with MaterialX-bound or
 `UsdPreviewSurface`-bound materials will load. The renderer has been tested
 with the [Usd-Mtlx-Example](https://github.com/pablode/Usd-Mtlx-Example)
@@ -734,6 +739,7 @@ per-material furnace probes.
 | `ui/direction_math.py` | Light-direction picker math (shared math, no UI deps) |
 | `ui/qt/backend.py` | Walks the spec tree, instantiates Qt widgets |
 | `ui/qt/viewport.py` | `RenderViewport` Qt widget — embeds the renderer's offscreen image |
+| `ui/qt/render_session.py` | Thread-safe command queue drained by the Qt render worker |
 | `ui/qt/camera_input.py` | Mouse → camera mapping for the viewport |
 | `ui/qt/direction_picker.py` | Hemisphere widget |
 | `ui/qt/windows/scene_graph.py` | Scene graph inspector dock (tree above, properties below) |

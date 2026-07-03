@@ -15,8 +15,9 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter, QWheelEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from skinny.ui.qt.camera_input import CameraDispatcher
 from skinny.ui.gizmo_input import GizmoMouseController
+from skinny.ui.qt.camera_input import CameraDispatcher
+from skinny.ui.qt.render_session import RenderCommandQueue
 
 
 class _RenderWorker(QObject):
@@ -27,10 +28,17 @@ class _RenderWorker(QObject):
     frame_ready = Signal(bytes, int, int, int)  # pixels, w, h, accum_frame
     error = Signal(str)
 
-    def __init__(self, renderer, lock: Lock, online_training: bool = False) -> None:
+    def __init__(
+        self,
+        renderer,
+        lock: Lock,
+        command_queue: RenderCommandQueue,
+        online_training: bool = False,
+    ) -> None:
         super().__init__()
         self.renderer = renderer
         self._lock = lock
+        self._commands = command_queue
         self._running = True
         # --online-training (change online-training-trigger): enable lazily once
         # the scene is built, then drive the per-frame tick on this render thread.
@@ -88,6 +96,16 @@ class _RenderWorker(QObject):
                 prev = now
 
                 with self._lock:
+                    for command in self._commands.drain():
+                        try:
+                            result = command.callback(self.renderer)
+                        except Exception as exc:  # noqa: BLE001
+                            if command.reply is not None:
+                                command.reply.set_exception(exc)
+                            self.error.emit(repr(exc))
+                        else:
+                            if command.reply is not None:
+                                command.reply.set_result(result)
                     self.renderer.update(dt)
                     self._maybe_online_training(dt)
                     pixels = self.renderer.render_headless()
@@ -107,6 +125,11 @@ class _RenderWorker(QObject):
                     time.sleep(0.03)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(repr(exc))
+        finally:
+            try:
+                self.renderer.disable_online_training()
+            except Exception as exc:  # noqa: BLE001
+                self.error.emit(repr(exc))
 
 
 class RenderViewport(QWidget):
@@ -123,6 +146,7 @@ class RenderViewport(QWidget):
         super().__init__(parent)
         self.renderer = renderer
         self._render_lock = Lock()
+        self._commands = RenderCommandQueue()
         self._image: QImage | None = None
         # Hold the raw bytes so QImage's no-copy view stays valid until the
         # next frame replaces it.
@@ -131,8 +155,8 @@ class RenderViewport(QWidget):
         self._camera = CameraDispatcher(renderer)
 
         # Rotate-gizmo interaction. The controller arbitrates gizmo-vs-camera on
-        # press and owns the drag lifecycle; this widget only maps coordinates
-        # and holds the render lock around its renderer calls.
+        # press and owns the drag lifecycle; hit-tests are best-effort so the GUI
+        # never waits for an in-flight render.
         self._gizmo = GizmoMouseController()
 
         self._left = self._right = self._middle = False
@@ -160,7 +184,9 @@ class RenderViewport(QWidget):
 
         # Start the worker thread.
         self._thread = QThread(self)
-        self._worker = _RenderWorker(renderer, self._render_lock, online_training)
+        self._worker = _RenderWorker(
+            renderer, self._render_lock, self._commands, online_training,
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.frame_ready.connect(self._on_frame_ready)
@@ -173,6 +199,28 @@ class RenderViewport(QWidget):
         self._move_timer.setInterval(16)
         self._move_timer.timeout.connect(self._poll_wasd)
         self._move_timer.start()
+
+    def post_render_command(
+        self,
+        callback,
+        *,
+        coalesce_key: str | None = None,
+    ) -> None:
+        """Run ``callback(renderer)`` on the render worker before a later frame."""
+        self._commands.post(callback, coalesce_key=coalesce_key)
+
+    def _try_with_renderer(self, callback, default=None):
+        """Best-effort immediate renderer read for hit-tests that need a result.
+
+        These paths used to block the GUI while waiting for the render lock. If a
+        frame is in flight, keep the UI responsive and let the gesture miss.
+        """
+        if not self._render_lock.acquire(blocking=False):
+            return default
+        try:
+            return callback(self.renderer)
+        finally:
+            self._render_lock.release()
 
     # ── Frame plumbing ─────────────────────────────────────────────
 
@@ -257,20 +305,24 @@ class RenderViewport(QWidget):
         # gizmo is grabbable and never shadowed by the camera (or vice versa).
         mapped = self._widget_to_render_pixel(pos.x(), pos.y())
         shift = bool(event.modifiers() & Qt.ShiftModifier)
-        with self._render_lock:
-            action = self._gizmo.on_press(
-                self.renderer, mapped,
+        action = self._try_with_renderer(
+            lambda renderer: self._gizmo.on_press(
+                renderer, mapped,
                 shift=shift,
                 pick_armed=self._pick_armed,
                 zoom_arming=self._zoom_arming,
-            )
+            ),
+            default="camera",
+        )
 
         if action == "autofocus":
             if mapped is not None:
-                with self._render_lock:
-                    self.renderer.autofocus_at_pixel(
+                self.post_render_command(
+                    lambda renderer, mapped=mapped: renderer.autofocus_at_pixel(
                         float(mapped[0]), float(mapped[1]),
-                    )
+                    ),
+                    coalesce_key="autofocus",
+                )
             self.setFocus(Qt.MouseFocusReason)
             return
         if action == "pick":
@@ -280,20 +332,23 @@ class RenderViewport(QWidget):
             cb = self._pick_cb
             self._pick_armed = False
             self._pick_cb = None
-            with self._render_lock:
-                self.renderer.request_scene_pick(
+            self.post_render_command(
+                lambda renderer, mapped=mapped, cb=cb: renderer.request_scene_pick(
                     float(mapped[0]), float(mapped[1]), cb,
-                )
+                ),
+            )
             self.setFocus(Qt.MouseFocusReason)
             return
         if action == "zoom":
             if mapped is not None:
                 self._zoom_dragging = True
                 self._zoom_start_px = (float(mapped[0]), float(mapped[1]))
-                with self._render_lock:
-                    self.renderer.set_zoom_drag_overlay(
+                self.post_render_command(
+                    lambda renderer, mapped=mapped: renderer.set_zoom_drag_overlay(
                         (mapped[0], mapped[1], mapped[0], mapped[1]),
-                    )
+                    ),
+                    coalesce_key="zoom-overlay",
+                )
             self.setFocus(Qt.MouseFocusReason)
             return
         if action == "gizmo":
@@ -311,18 +366,21 @@ class RenderViewport(QWidget):
         if event.button() == Qt.LeftButton and self._zoom_dragging:
             pos = event.position()
             mapped = self._widget_to_render_pixel(pos.x(), pos.y())
-            with self._render_lock:
+            def commit(renderer, mapped=mapped) -> None:
                 if mapped is not None:
-                    self.renderer.commit_zoom_rect(
+                    renderer.commit_zoom_rect(
                         self._zoom_start_px, (float(mapped[0]), float(mapped[1])),
                     )
-                self.renderer.set_zoom_drag_overlay(None)
+                renderer.set_zoom_drag_overlay(None)
+            self.post_render_command(commit, coalesce_key="zoom-overlay")
             self._zoom_dragging = False
             self._zoom_arming = False
             return
         if event.button() == Qt.LeftButton:
-            with self._render_lock:
-                ended = self._gizmo.on_release(self.renderer)
+            ended = self._try_with_renderer(
+                lambda renderer: self._gizmo.on_release(renderer),
+                default=False,
+            )
             if ended:
                 return
             self._left = False
@@ -336,22 +394,26 @@ class RenderViewport(QWidget):
             pos = event.position()
             mapped = self._widget_to_render_pixel(pos.x(), pos.y())
             if mapped is not None:
-                with self._render_lock:
-                    self.renderer.set_zoom_drag_overlay((
+                self.post_render_command(
+                    lambda renderer, mapped=mapped: renderer.set_zoom_drag_overlay((
                         self._zoom_start_px[0], self._zoom_start_px[1],
                         float(mapped[0]), float(mapped[1]),
-                    ))
+                    )),
+                    coalesce_key="zoom-overlay",
+                )
             return
 
         x, y = event.position().x(), event.position().y()
         # Gizmo drag (consumes the move) or, when idle, ring hover highlight.
         mapped = self._widget_to_render_pixel(x, y)
         any_button = self._left or self._right or self._middle
-        with self._render_lock:
-            consumed = self._gizmo.on_move(
-                self.renderer, mapped,
+        consumed = self._try_with_renderer(
+            lambda renderer: self._gizmo.on_move(
+                renderer, mapped,
                 any_button_down=any_button, zoom_dragging=False,
-            )
+            ),
+            default=False,
+        )
         if consumed:
             self._last_pos = (x, y)
             return
@@ -363,17 +425,22 @@ class RenderViewport(QWidget):
         dy = y - self._last_pos[1]
         self._last_pos = (x, y)
         if self._left or self._right or self._middle:
-            with self._render_lock:
-                self._camera.drag(
-                    dx, dy, left=self._left, right=self._right, middle=self._middle,
-                )
+            self.post_render_command(
+                lambda _renderer, dx=dx, dy=dy, left=self._left,
+                right=self._right, middle=self._middle: self._camera.drag(
+                    dx, dy, left=left, right=right, middle=middle,
+                ),
+                coalesce_key="camera-drag",
+            )
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         # Qt wheel deltas are in eighths of a degree; one notch = 120.
         # GLFW yoff is 1/-1 per notch — match that.
         notches = event.angleDelta().y() / 120.0
-        with self._render_lock:
-            self._camera.zoom(notches)
+        self.post_render_command(
+            lambda _renderer, notches=notches: self._camera.zoom(notches),
+            coalesce_key="camera-zoom",
+        )
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
@@ -381,36 +448,40 @@ class RenderViewport(QWidget):
             self._wasd[key] = True
             return
         if key == Qt.Key_C:
-            with self._render_lock:
-                self._camera.toggle_mode()
+            self.post_render_command(lambda _renderer: self._camera.toggle_mode())
         elif key == Qt.Key_F:
-            with self._render_lock:
-                self._camera.reset()
+            self.post_render_command(lambda _renderer: self._camera.reset())
         elif key == Qt.Key_F1:
-            self.renderer.show_hud = not self.renderer.show_hud
-        elif key == Qt.Key_Space:
-            with self._render_lock:
-                mode = self.renderer.gizmo_cycle_mode()
-            print(f"[Gizmo mode: {mode.name}]")
-        elif key == Qt.Key_L:
-            with self._render_lock:
-                self.renderer.show_focus_overlay = not self.renderer.show_focus_overlay
-            print(f"[Focus overlay: {'on' if self.renderer.show_focus_overlay else 'off'}]")
-        elif key == Qt.Key_V:
-            with self._render_lock:
-                self.renderer.lens_vignette_debug = not self.renderer.lens_vignette_debug
-                self.renderer._material_version += 1
-            print(
-                f"[Lens vignette debug: {'on' if self.renderer.lens_vignette_debug else 'off'}"
-                " — green=ray succeeds, red=clipped]"
+            self.post_render_command(
+                lambda renderer: setattr(renderer, "show_hud", not renderer.show_hud),
             )
+        elif key == Qt.Key_Space:
+            def cycle(renderer) -> None:
+                mode = renderer.gizmo_cycle_mode()
+                print(f"[Gizmo mode: {mode.name}]")
+            self.post_render_command(cycle)
+        elif key == Qt.Key_L:
+            def toggle_focus(renderer) -> None:
+                renderer.show_focus_overlay = not renderer.show_focus_overlay
+                print(f"[Focus overlay: {'on' if renderer.show_focus_overlay else 'off'}]")
+            self.post_render_command(toggle_focus)
+        elif key == Qt.Key_V:
+            def toggle_vignette(renderer) -> None:
+                renderer.lens_vignette_debug = not renderer.lens_vignette_debug
+                renderer._material_version += 1
+                print(
+                    f"[Lens vignette debug: {'on' if renderer.lens_vignette_debug else 'off'}"
+                    " — green=ray succeeds, red=clipped]"
+                )
+            self.post_render_command(toggle_vignette)
         elif key == Qt.Key_Z:
             self._zoom_arming = True
             print("[Zoom: drag a rectangle, release to apply]")
         elif key == Qt.Key_X:
-            with self._render_lock:
-                self.renderer.reset_zoom_rect()
-                self.renderer.set_zoom_drag_overlay(None)
+            def reset_zoom(renderer) -> None:
+                renderer.reset_zoom_rect()
+                renderer.set_zoom_drag_overlay(None)
+            self.post_render_command(reset_zoom, coalesce_key="zoom-overlay")
             self._zoom_arming = False
             self._zoom_dragging = False
             print("[Zoom: reset]")
@@ -425,14 +496,14 @@ class RenderViewport(QWidget):
         super().keyReleaseEvent(event)
 
     def _poll_wasd(self) -> None:
-        if getattr(self.renderer, "camera_mode", "orbit") != "free":
-            return
         f = (1.0 if self._wasd.get(Qt.Key_W) else 0.0) - (1.0 if self._wasd.get(Qt.Key_S) else 0.0)
         r = (1.0 if self._wasd.get(Qt.Key_D) else 0.0) - (1.0 if self._wasd.get(Qt.Key_A) else 0.0)
         u = (1.0 if self._wasd.get(Qt.Key_E) else 0.0) - (1.0 if self._wasd.get(Qt.Key_Q) else 0.0)
         if f or r or u:
-            with self._render_lock:
-                self._camera.move(f, r, u, 0.016)
+            def move(renderer, f=f, r=r, u=u) -> None:
+                if getattr(renderer, "camera_mode", "orbit") == "free":
+                    self._camera.move(f, r, u, 0.016)
+            self.post_render_command(move, coalesce_key="camera-move")
 
     # ── Resize / shutdown ──────────────────────────────────────────
 
@@ -440,13 +511,13 @@ class RenderViewport(QWidget):
         """Resize the underlying renderer, return the actual ``(W, H)``
         it settled on after workgroup-multiple rounding.
         """
-        with self._render_lock:
-            self.renderer.resize(int(w), int(h))
-            return int(self.renderer.width), int(self.renderer.height)
+        self.post_render_command(
+            lambda renderer, w=int(w), h=int(h): renderer.resize(w, h),
+            coalesce_key="resize",
+        )
+        return int(w), int(h)
 
     def shutdown(self) -> None:
         self._worker.stop()
         self._thread.quit()
         self._thread.wait(2000)
-        # Stop + join the background trainer thread (no-op when not training).
-        self.renderer.disable_online_training()

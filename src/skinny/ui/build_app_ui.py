@@ -88,6 +88,7 @@ class AppCallbacks:
     capture_screenshot: Callable[[str], bytes] | None = None
     load_model: Callable[[Path], None] | None = None
     load_hdr: Callable[[Path], None] | None = None
+    resize_render_target: Callable[[int, int], tuple[int, int]] | None = None
 
 
 # ── Param grouping ─────────────────────────────────────────────────
@@ -311,8 +312,10 @@ def _add_scene_controls(ui: UIBuilder, renderer) -> None:
 # ── Resolution + capture ───────────────────────────────────────────
 
 
-def _add_resolution(ui: UIBuilder, renderer) -> None:
+def _add_resolution(ui: UIBuilder, renderer, resize_fn=None) -> None:
     def _apply(w: int, h: int) -> tuple[int, int]:
+        if resize_fn is not None:
+            return resize_fn(int(w), int(h))
         renderer.resize(int(w), int(h))
         return int(renderer.width), int(renderer.height)
 
@@ -575,7 +578,7 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
     with ui.section("Scene"):
         _add_scene_loader(ui, renderer, load_model_fn=cb.load_model)
     with ui.section("Resolution"):
-        _add_resolution(ui, renderer)
+        _add_resolution(ui, renderer, resize_fn=cb.resize_render_target)
     with ui.section("Capture"):
         _add_capture(ui, renderer, capture_fn=cb.capture_screenshot)
 

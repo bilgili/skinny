@@ -44,15 +44,20 @@ the spec lights it up in both UIs.
 
 ### Per-Frame Render Loop (Qt desktop)
 
-1. `MainWindow.QTimer` ticks at the swap interval → `renderer.update(dt)`
-   → `renderer.render_offscreen()` → `RenderViewport` blits the latest
-   image with `QImage::QImage(..., RGBA8888)`.
-2. `renderer.update(dt)` detects dirty state (camera, params, env, scene
-   graph), reuploads affected buffers, resets accumulation on change.
-3. `renderer.render_offscreen()` packs FrameConstants + SkinParams + light
-   + per-material data into the UBO, updates descriptor sets, dispatches
-   `ceil(W/8) × ceil(H/8)`, and copies the storage image into a
-   readback buffer for Qt.
+1. `RenderViewport` starts a Qt worker thread (`_RenderWorker`) that owns the
+   per-frame loop. The worker drains `ui/qt/render_session.py` commands, then
+   calls `renderer.update(dt)` → online-training tick (when armed) →
+   `renderer.render_headless()`.
+2. GUI events post common renderer mutations (camera input, zoom/focus toggles,
+   scene loads, and render-target resize) into the command queue instead of
+   waiting for the render lock while a frame is in flight. High-rate commands
+   such as resize and camera movement are coalesced.
+3. `renderer.update(dt)` detects dirty state (camera, params, env, scene graph),
+   reuploads affected buffers, and resets accumulation on change.
+4. `renderer.render_headless()` packs FrameConstants + SkinParams + light +
+   per-material data into the UBO, dispatches `ceil(W/8) × ceil(H/8)`, copies the
+   storage image into a readback buffer, and emits raw RGBA bytes. The Qt main
+   thread stores those bytes in a `QImage` and paints the latest frame.
 
 ### Per-Frame Render Loop (GLFW debug)
 

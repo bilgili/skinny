@@ -170,6 +170,8 @@ class MainWindow(QMainWindow):
             open_material_graph=self._open_material_graph,
             open_bxdf_visualizer=self._open_bxdf,
             open_debug_viewport=self._toggle_debug_viewport,
+            load_model=self._queue_load_model,
+            resize_render_target=self.viewport.request_resize,
         )
         tree = build_main_ui(self.renderer, callbacks=cb)
 
@@ -437,9 +439,15 @@ class MainWindow(QMainWindow):
         )
         if path:
             record_last_dir("model", Path(path).parent)
-            self.renderer.load_model_from_path(Path(path))
-            if self._python_material_dock is not None:
-                self._python_material_dock.refresh_from_renderer()
+            self._queue_load_model(Path(path))
+
+    def _queue_load_model(self, path: Path) -> None:
+        def load(renderer, path=Path(path)) -> None:
+            renderer.load_model_from_path(path)
+
+        self.viewport.post_render_command(load, coalesce_key="load-model")
+        if self._python_material_dock is not None:
+            QTimer.singleShot(250, self._python_material_dock.refresh_from_renderer)
 
     # ── State persistence ────────────────────────────────────────
 
