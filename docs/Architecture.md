@@ -896,6 +896,22 @@ weights load fp32 via `_effective_neural_config()`'s graceful downgrade.
 `supports_indirect_dispatch` is probed **empirically** (a real indirect
 dispatch + sentinel readback; a structural `hasattr` check would lie).
 
+**Megakernel watchdog tiling** (change `metal-megakernel-watchdog-tiling`): the
+megakernel dispatch (`ComputePipeline.dispatch`) commits one command buffer per
+screen-space **row band** under `SKINNY_METAL`, so no single buffer covers the
+full frame. This closes the same `metal-dispatch-hygiene` "no unbounded command
+buffers" hole that the volume caps close for per-pixel loops — but for integrator
+*breadth*: a full-frame **BDPT** megakernel over inlined graph materials (eye ×
+light subpaths + `s × t` connections, each a graph-shader BSDF eval) exceeded the
+watchdog and wedged the GPU. `renderer._metal_megakernel_bands()` picks the band
+count from an integrator-aware per-pixel budget (`_METAL_MEGAKERNEL_BAND_PIXELS`)
+scaled by resolution, overridable via `SKINNY_METAL_MEGAKERNEL_BANDS`; the band Y
+origin rides a Metal-only `FrameConstants.tileOriginY` (`#if defined(SKINNY_METAL)`
+gated ⇒ Vulkan SPIR-V byte-unchanged) that `mainImage` adds to the thread's `y`.
+The accumulation image persists across a frame's bands, so N-band output is
+bit-identical to one dispatch, and ≤256² scenes stay a single band (parity corpus
+unaffected). See [Megakernel.md → Backends](Megakernel.md#backends-vulkan-and-metal).
+
 ## Backend Abstraction (`gfx/`)
 
 > Note: the `gfx/` ABC below is **distinct** from the live Metal backend in

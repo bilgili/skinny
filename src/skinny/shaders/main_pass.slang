@@ -419,6 +419,11 @@ void runFrameRecord<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
 void mainImageRecord(uint3 dispatchThreadID: SV_DispatchThreadID)
 {
     uint2 pixel = dispatchThreadID.xy;
+#if defined(SKINNY_METAL)
+    // Metal megakernel watchdog tiling: this command buffer covers one row band
+    // starting at fc.tileOriginY (change metal-megakernel-watchdog-tiling).
+    pixel.y += fc.tileOriginY;
+#endif
     if (pixel.x >= fc.width || pixel.y >= fc.height)
         return;
 
@@ -441,6 +446,13 @@ void mainImageRecord(uint3 dispatchThreadID: SV_DispatchThreadID)
 void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 {
     uint2 pixel = dispatchThreadID.xy;
+#if defined(SKINNY_METAL)
+    // Metal megakernel watchdog tiling: this command buffer covers one row band
+    // starting at fc.tileOriginY (change metal-megakernel-watchdog-tiling). The
+    // tool branches below are pixel-cell dispatches over their own grids and are
+    // never tiled (host dispatches them full-grid with tileOriginY == 0).
+    pixel.y += fc.tileOriginY;
+#endif
 
     // BXDF visualizer tool branch. When the host has armed an eval the
     // dispatch grid threads compute one lobe cell each; the regular

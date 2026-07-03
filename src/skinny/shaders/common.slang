@@ -351,6 +351,19 @@ struct FrameConstants
     // 0 = disabled (the clamp is a no-op and the render is byte-identical).
     // Scalar tail appended last by _pack_uniforms in this exact order.
     float  filmMaxComponent;
+    // ── Metal megakernel watchdog tiling (change metal-megakernel-watchdog-tiling) ──
+    // Screen-space Y offset of the row band this megakernel command buffer covers.
+    // Under `SKINNY_METAL` the megakernel frame is committed as a sequence of row
+    // bands (one command buffer each) so no single buffer exceeds the macOS GPU
+    // watchdog budget; `mainImage`/`mainImageRecord` add this to the dispatch
+    // thread's y so the band addresses the right pixels. The field itself is
+    // `#if defined(SKINNY_METAL)`-gated so the Vulkan `FrameConstants` struct is
+    // unchanged and the SPIR-V stays byte-identical; the Python `_pack_uniforms`
+    // still appends a trailing u32 (0) on both backends, which lands harmlessly in
+    // the oversized Vulkan UBO and at the reflected offset on Metal.
+#if defined(SKINNY_METAL)
+    uint   tileOriginY;
+#endif
 };
 
 /// Per-sample radiance clamp matching pbrt `RGBFilm::AddSample`. When
