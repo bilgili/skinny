@@ -1,0 +1,12 @@
+LookAt 0 0 3.2  0 0 0  0 1 0
+Camera "perspective" "float fov" 40
+Sampler "independent" "integer pixelsamples" 256
+Integrator "path" "integer maxdepth" 5
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "mat_textured.exr"
+WorldBegin
+LightSource "infinite" "rgb L" [1 1 1]
+Texture "uvtex" "spectrum" "imagemap" "string filename" "texture_uv.png"
+AttributeBegin
+  Material "diffuse" "texture reflectance" "uvtex"
+  Shape "trianglemesh" "point3 P" [ -1.20000 -1.20000 0.00000 1.20000 -1.20000 0.00000 1.20000 1.20000 0.00000 -1.20000 1.20000 0.00000 ] "integer indices" [ 0 1 2 0 2 3 ] "point2 uv" [ 0.00000 0.00000 1.00000 0.00000 1.00000 1.00000 0.00000 1.00000 ]
+AttributeEnd

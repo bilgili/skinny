@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <standard_surface name="shape_0_mat_surface" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.18, 0.18, 0.18" />
+    <input name="metalness" type="float" value="0" />
+    <input name="specular_roughness" type="float" value="1" />
+  </standard_surface>
+  <surfacematerial name="shape_0_mat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="shape_0_mat_surface" />
+  </surfacematerial>
+  <standard_surface name="shape_1_mat_surface" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.912235, 0.91388, 0.919621" />
+    <input name="metalness" type="float" value="1" />
+    <input name="specular_roughness" type="float" value="0.707107" />
+    <input name="specular_color" type="color3" value="0.912235, 0.91388, 0.919621" />
+  </standard_surface>
+  <surfacematerial name="shape_1_mat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="shape_1_mat_surface" />
+  </surfacematerial>
+</materialx>

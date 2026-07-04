@@ -119,7 +119,7 @@
    "material_class": "flat",
    "megakernel_ok": true,
    "known_divergent": true,
-   "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped — max~2120, bypassing maxcomponentvalue — and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) — a metric-robustness follow-up. emissive-triangle-bsdf-mis (2026-06-24): path BSDF-hit MIS complement fixes area-light dim bias; bathroom mean 1.36->0.97, path FLIP 0.222->0.155 (megakernel==wavefront relMSE 0.0000). relMSE baseline 0.342 unchanged (exposure-aligned gate is brightness-blind; residual = RGB-vs-spectral). BDPT/SPPM/neural/restir baselines re-measure in their own changes (Path anchor moved brighter). SPPM BLACK-WALLS FIXED (change fix-sppm-bathroom-black-walls, 2026-07-04): sppmLoadMaterial rebuilt the deposit-time FlatMaterial without the Stage-2 rich inputs (transmissionColor/specularColor/diffuseRoughness, added to FlatHitMat by flat-lobes-rich-inputs AFTER PM-1 shipped) -> undefined values zeroed EVERY photon deposit (tau==0 scene-wide, indirect term dead, walls black). VisiblePoint now stores the three fields (scalar 152->180 B, MSL 192->240 B) and sppmLoadMaterial rebuilds them; test_sppm_state.py locks FlatHitMat-subset-of-VisiblePoint so a future FlatHitMat field cannot silently break the deposit again. measured sppm_vs_path relMSE 64.97 -> 2.59 (MSE 10.42 -> 0.297), linear-mean ratio sppm/path = 1.007 at 128 spp. measured sppm|wavefront pbrt-truth moved 0.364 -> 1.71: the OLD number was an artifact of the bug (black walls contribute 0/(ref^2) exactly where the noisy-dark /b^2 amplification lives; a lit-but-noisy wall scores worse than a black one) and the path anchor itself measures 0.83 vs its 0.342 record under the current code (anchor drift is a separate follow-up; sppm baseline left at the aspirational 0.364, scene stays known_divergent/xfail).",
+   "notes": "Heavy scene from pbrt contemporary-bathroom. ref via: python tests/pbrt/regen_refs.py --scene bathroom --res 256 --spp 256 --integrator path (rendered with pbrt's PATH integrator to match skinny's path anchor; the authored sppm EXR is unclamped \u2014 max~2120, bypassing maxcomponentvalue \u2014 and pbrt's own path-vs-sppm differ by relMSE~0.63 on this caustic scene). FIREFLY CATASTROPHE FIXED (change film-maxcomponent-clamp): skinny now applies the pbrt film maxcomponentvalue=50 per-sample radiance clamp, so path|wavefront vs pbrt dropped 232.8 -> ~0.34 and bdpt-vs-path dropped 6612 -> 0.36 (MSE 0.017, structurally identical); skinny max 7985 -> 50; path megakernel==wavefront still 0.0000. STILL KNOWN-DIVERGENT for two residuals (each a separate follow-up that must LOWER these baselines): (1) pbrt-truth ~0.34 relMSE = RGB-vs-spectral / blackbody-emitter-normalization (skinny normalizes blackbody to unit-luminance, pbrt to peak-spectral-1); (2) self-consistency relMSE vs the path anchor stays large from dark-pixel /b^2 amplification on this noisy scene (BDPT MSE 0.017 but relMSE 0.36) plus a genuine sppm-vs-path estimator difference (sppm MSE 10.4, relMSE 65) \u2014 a metric-robustness follow-up. emissive-triangle-bsdf-mis (2026-06-24): path BSDF-hit MIS complement fixes area-light dim bias; bathroom mean 1.36->0.97, path FLIP 0.222->0.155 (megakernel==wavefront relMSE 0.0000). relMSE baseline 0.342 unchanged (exposure-aligned gate is brightness-blind; residual = RGB-vs-spectral). BDPT/SPPM/neural/restir baselines re-measure in their own changes (Path anchor moved brighter). SPPM BLACK-WALLS FIXED (change fix-sppm-bathroom-black-walls, 2026-07-04): sppmLoadMaterial rebuilt the deposit-time FlatMaterial without the Stage-2 rich inputs (transmissionColor/specularColor/diffuseRoughness, added to FlatHitMat by flat-lobes-rich-inputs AFTER PM-1 shipped) -> undefined values zeroed EVERY photon deposit (tau==0 scene-wide, indirect term dead, walls black). VisiblePoint now stores the three fields (scalar 152->180 B, MSL 192->240 B) and sppmLoadMaterial rebuilds them; test_sppm_state.py locks FlatHitMat-subset-of-VisiblePoint so a future FlatHitMat field cannot silently break the deposit again. measured sppm_vs_path relMSE 64.97 -> 2.59 (MSE 10.42 -> 0.297), linear-mean ratio sppm/path = 1.007 at 128 spp. measured sppm|wavefront pbrt-truth moved 0.364 -> 1.71: the OLD number was an artifact of the bug (black walls contribute 0/(ref^2) exactly where the noisy-dark /b^2 amplification lives; a lit-but-noisy wall scores worse than a black one) and the path anchor itself measures 0.83 vs its 0.342 record under the current code (anchor drift is a separate follow-up; sppm baseline left at the aspirational 0.364, scene stays known_divergent/xfail).",
    "measured": {
     "path|wavefront": {
      "relmse": 0.342,
@@ -190,7 +190,7 @@
    "material_class": "subsurface",
    "megakernel_ok": false,
    "known_divergent": true,
-   "notes": "Heavy subsurface dragon (28.8M tris → wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
+   "notes": "Heavy subsurface dragon (28.8M tris \u2192 wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
    "baselines": {}
   },
   {
@@ -241,11 +241,825 @@
    "flip_tol": 0.12,
    "material_class": "volume",
    "megakernel_ok": true,
-   "notes": "pbrt procedural cloud medium (MEDIUM_CLOUD, change pbrt-cloud-procedural-medium): MakeNamedMedium \"cloud\" — analytic 5-octave Perlin fBm + wispiness warp + altitude falloff evaluated in-shader (cloud_noise.slang), no grid. Material \"\" null boundary. CLEAN dual gate: mega==wave EXACT (0.0), pbrt-truth relMSE 0.094 / FLIP 0.091 / mean 1.012x (constant-sigma spectrum tint via sampled_spectrum_to_rgb + RGB-vs-spectral + scatter-cap floor, recorded). sky.exr equal-area env reprojected at import. Refs = pbrt v4 volpath maxdepth 50, 256 spp, 256x256.",
+   "notes": "pbrt procedural cloud medium (MEDIUM_CLOUD, change pbrt-cloud-procedural-medium): MakeNamedMedium \"cloud\" \u2014 analytic 5-octave Perlin fBm + wispiness warp + altitude falloff evaluated in-shader (cloud_noise.slang), no grid. Material \"\" null boundary. CLEAN dual gate: mega==wave EXACT (0.0), pbrt-truth relMSE 0.094 / FLIP 0.091 / mean 1.012x (constant-sigma spectrum tint via sampled_spectrum_to_rgb + RGB-vs-spectral + scatter-cap floor, recorded). sky.exr equal-area env reprojected at import. Refs = pbrt v4 volpath maxdepth 50, 256 spp, 256x256.",
    "measured": {
     "relmse": 0.094,
     "flip": 0.091
    }
+  },
+  {
+   "name": "mat_diffuse",
+   "suite": true,
+   "file": "suite/mat_diffuse/mat_diffuse.pbrt",
+   "usd": "tests/assets/suite/mat_diffuse/mat_diffuse.usda",
+   "ref": "refs/suite_mat_diffuse.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_diffuse); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "mat_diffuse_mtlx",
+   "suite": true,
+   "file": "suite/mat_diffuse/mat_diffuse.pbrt",
+   "usd": "tests/assets/suite/mat_diffuse/mat_diffuse_mtlx.usda",
+   "ref": "refs/suite_mat_diffuse.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_diffuse",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of mat_diffuse; equivalence vs plain sibling"
+  },
+  {
+   "name": "mat_conductor",
+   "suite": true,
+   "file": "suite/mat_conductor/mat_conductor.pbrt",
+   "usd": "tests/assets/suite/mat_conductor/mat_conductor.usda",
+   "ref": "refs/suite_mat_conductor.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_conductor); pbrt-gated + self-consistency",
+   "baselines": {
+    "path|wavefront|restir-di": {
+     "relmse": 0.4064,
+     "flip": 0.2474
+    },
+    "sppm|wavefront": {
+     "relmse": 0.0955,
+     "flip": 0.0738
+    }
+   },
+   "self_consistency": {
+    "unbiased": {
+     "relmse": 0.4176,
+     "flip": 0.2629
+    }
+   }
+  },
+  {
+   "name": "mat_conductor_mtlx",
+   "suite": true,
+   "file": "suite/mat_conductor/mat_conductor.pbrt",
+   "usd": "tests/assets/suite/mat_conductor/mat_conductor_mtlx.usda",
+   "ref": "refs/suite_mat_conductor.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_conductor",
+    "relmse": 0.0295,
+    "flip": 0.0467,
+    "note": "UsdPreviewSurface metallic vs standard_surface Au conductor differ slightly (different material models)"
+   },
+   "notes": "MaterialX authoring of mat_conductor; equivalence vs plain sibling",
+   "baselines": {
+    "path|wavefront|restir-di": {
+     "relmse": 0.3921,
+     "flip": 0.2389
+    },
+    "sppm|wavefront": {
+     "relmse": 0.1051,
+     "flip": 0.0843
+    }
+   },
+   "self_consistency": {
+    "unbiased": {
+     "relmse": 0.3895,
+     "flip": 0.2561
+    }
+   }
+  },
+  {
+   "name": "mat_dielectric",
+   "suite": true,
+   "file": "suite/mat_dielectric/mat_dielectric.pbrt",
+   "usd": "tests/assets/suite/mat_dielectric/mat_dielectric.usda",
+   "ref": "refs/suite_mat_dielectric.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_dielectric); pbrt-gated + self-consistency",
+   "baselines": {
+    "sppm|wavefront": {
+     "relmse": 0.1151,
+     "flip": 0.085
+    }
+   }
+  },
+  {
+   "name": "mat_dielectric_mtlx",
+   "suite": true,
+   "file": "suite/mat_dielectric/mat_dielectric.pbrt",
+   "usd": "tests/assets/suite/mat_dielectric/mat_dielectric_mtlx.usda",
+   "ref": "refs/suite_mat_dielectric.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_dielectric",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of mat_dielectric; equivalence vs plain sibling",
+   "baselines": {
+    "sppm|wavefront": {
+     "relmse": 0.1151,
+     "flip": 0.085
+    }
+   }
+  },
+  {
+   "name": "mat_plastic",
+   "suite": true,
+   "file": "suite/mat_plastic/mat_plastic.pbrt",
+   "usd": "tests/assets/suite/mat_plastic/mat_plastic.usda",
+   "ref": "refs/suite_mat_plastic.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_plastic); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "mat_plastic_mtlx",
+   "suite": true,
+   "file": "suite/mat_plastic/mat_plastic.pbrt",
+   "usd": "tests/assets/suite/mat_plastic/mat_plastic_mtlx.usda",
+   "ref": "refs/suite_mat_plastic.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_plastic",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of mat_plastic; equivalence vs plain sibling"
+  },
+  {
+   "name": "mat_emissive",
+   "suite": true,
+   "file": "suite/mat_emissive/mat_emissive.pbrt",
+   "usd": "tests/assets/suite/mat_emissive/mat_emissive.usda",
+   "ref": "refs/suite_mat_emissive.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_emissive); pbrt-gated + self-consistency",
+   "baselines": {
+    "bdpt|megakernel": {
+     "relmse": 0.1292,
+     "flip": 0.1217
+    },
+    "bdpt|wavefront": {
+     "relmse": 0.1292,
+     "flip": 0.1217
+    },
+    "sppm|wavefront": {
+     "relmse": 0.1292,
+     "flip": 0.1217
+    }
+   }
+  },
+  {
+   "name": "mat_emissive_mtlx",
+   "suite": true,
+   "file": "suite/mat_emissive/mat_emissive.pbrt",
+   "usd": "tests/assets/suite/mat_emissive/mat_emissive_mtlx.usda",
+   "ref": "refs/suite_mat_emissive.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_emissive",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of mat_emissive; equivalence vs plain sibling",
+   "baselines": {
+    "bdpt|megakernel": {
+     "relmse": 0.1292,
+     "flip": 0.1217
+    },
+    "bdpt|wavefront": {
+     "relmse": 0.1292,
+     "flip": 0.1217
+    },
+    "sppm|wavefront": {
+     "relmse": 0.1292,
+     "flip": 0.1217
+    }
+   }
+  },
+  {
+   "name": "mat_subsurface",
+   "suite": true,
+   "file": "suite/mat_subsurface/mat_subsurface.pbrt",
+   "usd": "tests/assets/suite/mat_subsurface/mat_subsurface.usda",
+   "ref": "refs/suite_mat_subsurface.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.1,
+   "flip_tol": 0.1,
+   "material_class": "subsurface",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_subsurface); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "mat_subsurface_mtlx",
+   "suite": true,
+   "file": "suite/mat_subsurface/mat_subsurface.pbrt",
+   "usd": "tests/assets/suite/mat_subsurface/mat_subsurface_mtlx.usda",
+   "ref": "refs/suite_mat_subsurface.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.1,
+   "flip_tol": 0.1,
+   "material_class": "subsurface",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_subsurface",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of mat_subsurface; equivalence vs plain sibling"
+  },
+  {
+   "name": "int_caustic",
+   "suite": true,
+   "file": "suite/int_caustic/int_caustic.pbrt",
+   "usd": "tests/assets/suite/int_caustic/int_caustic.usda",
+   "ref": "refs/suite_int_caustic.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (int_caustic); pbrt-gated + self-consistency",
+   "self_consistency": {
+    "integrator": {
+     "relmse": 0.082,
+     "flip": 0.06
+    },
+    "unbiased": {
+     "relmse": 0.0825,
+     "flip": 0.05
+    }
+   }
+  },
+  {
+   "name": "int_caustic_mtlx",
+   "suite": true,
+   "file": "suite/int_caustic/int_caustic.pbrt",
+   "usd": "tests/assets/suite/int_caustic/int_caustic_mtlx.usda",
+   "ref": "refs/suite_int_caustic.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "int_caustic",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of int_caustic; equivalence vs plain sibling",
+   "self_consistency": {
+    "integrator": {
+     "relmse": 0.082,
+     "flip": 0.06
+    },
+    "unbiased": {
+     "relmse": 0.0825,
+     "flip": 0.05
+    }
+   }
+  },
+  {
+   "name": "furnace_lambert",
+   "suite": true,
+   "file": "suite/furnace_lambert/furnace_lambert.pbrt",
+   "usd": "tests/assets/suite/furnace_lambert/furnace_lambert.usda",
+   "ref": "refs/suite_furnace_lambert.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 128,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "white-furnace closure (lambert)",
+   "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
+   "furnace": {
+    "material": "lambert",
+    "uniformity_tol": 0.2,
+    "note": "edge-darkening residual (center 1.0 -> grazing 0.40) baselined; closing to uniform is a follow-up"
+   }
+  },
+  {
+   "name": "furnace_conductor",
+   "suite": true,
+   "file": "suite/furnace_conductor/furnace_conductor.pbrt",
+   "usd": "tests/assets/suite/furnace_conductor/furnace_conductor.usda",
+   "ref": "refs/suite_furnace_conductor.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 128,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "white-furnace closure (conductor)",
+   "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
+   "furnace": {
+    "material": "conductor",
+    "uniformity_tol": 0.2,
+    "note": "furnace mode overrides BSDF to white lambert; identical to furnace_lambert"
+   }
+  },
+  {
+   "name": "furnace_dielectric",
+   "suite": true,
+   "file": "suite/furnace_dielectric/furnace_dielectric.pbrt",
+   "usd": "tests/assets/suite/furnace_dielectric/furnace_dielectric.usda",
+   "ref": "refs/suite_furnace_dielectric.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 128,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "white-furnace closure (dielectric)",
+   "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
+   "furnace": {
+    "material": "dielectric",
+    "uniformity_tol": 0.2
+   }
+  },
+  {
+   "name": "furnace_rough_conductor",
+   "suite": true,
+   "file": "suite/furnace_rough_conductor/furnace_rough_conductor.pbrt",
+   "usd": "tests/assets/suite/furnace_rough_conductor/furnace_rough_conductor.usda",
+   "ref": "refs/suite_furnace_rough_conductor.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 128,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "white-furnace closure (rough_conductor)",
+   "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
+   "furnace": {
+    "material": "rough_conductor",
+    "uniformity_tol": 0.2
+   }
+  },
+  {
+   "name": "furnace_per_material",
+   "suite": true,
+   "file": "suite/furnace_per_material/furnace_per_material.pbrt",
+   "usd": "tests/assets/suite/furnace_per_material/furnace_per_material.usda",
+   "ref": "refs/suite_furnace_per_material.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 128,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "white-furnace closure (lambert)",
+   "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
+   "furnace": {
+    "material": "lambert",
+    "per_material": true,
+    "furnace_material": 1,
+    "min_divergence": 0.1
+   }
+  },
+  {
+   "name": "mat_textured",
+   "suite": true,
+   "file": "suite/mat_textured/mat_textured.pbrt",
+   "usd": "tests/assets/suite/mat_textured/mat_textured.usda",
+   "ref": "refs/suite_mat_textured.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.03,
+   "flip_tol": 0.04,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_textured); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "mat_textured_mtlx",
+   "suite": true,
+   "file": "suite/mat_textured/mat_textured.pbrt",
+   "usd": "tests/assets/suite/mat_textured/mat_textured_mtlx.usda",
+   "ref": "refs/suite_mat_textured.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.03,
+   "flip_tol": 0.04,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_textured",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of mat_textured; equivalence vs plain sibling | KNOWN BUG: MaterialX imagemap path renders wrong (plain UsdPreviewSurface is exact); follow-up fix flips known_divergent.",
+   "known_divergent": true
+  },
+  {
+   "name": "int_indirect_box",
+   "suite": true,
+   "file": "suite/int_indirect_box/int_indirect_box.pbrt",
+   "usd": "tests/assets/suite/int_indirect_box/int_indirect_box.usda",
+   "ref": "refs/suite_int_indirect_box.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.14,
+   "flip_tol": 0.12,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (int_indirect_box); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "int_indirect_box_mtlx",
+   "suite": true,
+   "file": "suite/int_indirect_box/int_indirect_box.pbrt",
+   "usd": "tests/assets/suite/int_indirect_box/int_indirect_box_mtlx.usda",
+   "ref": "refs/suite_int_indirect_box.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.14,
+   "flip_tol": 0.12,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "int_indirect_box",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of int_indirect_box; equivalence vs plain sibling"
+  },
+  {
+   "name": "int_bleed",
+   "suite": true,
+   "file": "suite/int_bleed/int_bleed.pbrt",
+   "usd": "tests/assets/suite/int_bleed/int_bleed.usda",
+   "ref": "refs/suite_int_bleed.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (int_bleed); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "int_bleed_mtlx",
+   "suite": true,
+   "file": "suite/int_bleed/int_bleed.pbrt",
+   "usd": "tests/assets/suite/int_bleed/int_bleed_mtlx.usda",
+   "ref": "refs/suite_int_bleed.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "int_bleed",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of int_bleed; equivalence vs plain sibling"
+  },
+  {
+   "name": "samp_many_lights",
+   "suite": true,
+   "file": "suite/samp_many_lights/samp_many_lights.pbrt",
+   "usd": "tests/assets/suite/samp_many_lights/samp_many_lights.usda",
+   "ref": "refs/suite_samp_many_lights.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.14,
+   "flip_tol": 0.12,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (samp_many_lights); pbrt-gated + self-consistency"
+  },
+  {
+   "name": "samp_many_lights_mtlx",
+   "suite": true,
+   "file": "suite/samp_many_lights/samp_many_lights.pbrt",
+   "usd": "tests/assets/suite/samp_many_lights/samp_many_lights_mtlx.usda",
+   "ref": "refs/suite_samp_many_lights.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.14,
+   "flip_tol": 0.12,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "samp_many_lights",
+    "relmse": 0.04,
+    "flip": 0.05
+   },
+   "notes": "MaterialX authoring of samp_many_lights; equivalence vs plain sibling"
+  },
+  {
+   "name": "samp_env_glossy",
+   "suite": true,
+   "file": "suite/samp_env_glossy/samp_env_glossy.pbrt",
+   "usd": "tests/assets/suite/samp_env_glossy/samp_env_glossy.usda",
+   "ref": "refs/suite_samp_env_glossy.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (samp_env_glossy); pbrt-gated + self-consistency",
+   "baselines": {
+    "sppm|wavefront": {
+     "relmse": 0.2608,
+     "flip": 0.1468
+    }
+   },
+   "self_consistency": {
+    "sppm": {
+     "relmse": 0.2565,
+     "flip": 0.1501
+    }
+   }
+  },
+  {
+   "name": "samp_env_glossy_mtlx",
+   "suite": true,
+   "file": "suite/samp_env_glossy/samp_env_glossy.pbrt",
+   "usd": "tests/assets/suite/samp_env_glossy/samp_env_glossy_mtlx.usda",
+   "ref": "refs/suite_samp_env_glossy.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 512,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "samp_env_glossy",
+    "relmse": 0.04,
+    "flip": 0.05
+   },
+   "notes": "MaterialX authoring of samp_env_glossy; equivalence vs plain sibling",
+   "baselines": {
+    "sppm|wavefront": {
+     "relmse": 0.2643,
+     "flip": 0.1486
+    }
+   },
+   "self_consistency": {
+    "sppm": {
+     "relmse": 0.254,
+     "flip": 0.1477
+    }
+   }
+  },
+  {
+   "name": "mat_pbr_gold",
+   "suite": true,
+   "file": "suite/mat_pbr_gold/mat_pbr_gold.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_gold/mat_pbr_gold_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_gold.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Gold_OPBR_MAT_PBM.usda",
+   "self_consistency": {
+    "integrator": {
+     "relmse": 0.1222,
+     "flip": 0.06
+    },
+    "unbiased": {
+     "relmse": 0.1795,
+     "flip": 0.1233
+    }
+   }
+  },
+  {
+   "name": "mat_pbr_copper",
+   "suite": true,
+   "file": "suite/mat_pbr_copper/mat_pbr_copper.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_copper/mat_pbr_copper_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_copper.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Copper_OPBR_MAT_PBM.usda",
+   "self_consistency": {
+    "integrator": {
+     "relmse": 0.1282,
+     "flip": 0.06
+    },
+    "unbiased": {
+     "relmse": 0.1803,
+     "flip": 0.1229
+    }
+   }
+  },
+  {
+   "name": "mat_pbr_glass",
+   "suite": true,
+   "file": "suite/mat_pbr_glass/mat_pbr_glass.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_glass/mat_pbr_glass_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_glass.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Glass_OPBR_MAT_PBM.usda"
+  },
+  {
+   "name": "mat_pbr_plastic_pc",
+   "suite": true,
+   "file": "suite/mat_pbr_plastic_pc/mat_pbr_plastic_pc.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_plastic_pc/mat_pbr_plastic_pc_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_plastic_pc.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Plastic__PC__OPBR_MAT_PBM.usda"
+  },
+  {
+   "name": "mat_pbr_skin1",
+   "suite": true,
+   "file": "suite/mat_pbr_skin1/mat_pbr_skin1.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_skin1/mat_pbr_skin1_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_skin1.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "subsurface",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Skin_I_OPBR_MAT_PBM.usda"
+  },
+  {
+   "name": "mat_pbr_graycard",
+   "suite": true,
+   "file": "suite/mat_pbr_graycard/mat_pbr_graycard.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_graycard/mat_pbr_graycard_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_graycard.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Gray_Card_OPBR_MAT_PBM.usda"
+  },
+  {
+   "name": "mat_pbr_musou_black",
+   "suite": true,
+   "file": "suite/mat_pbr_musou_black/mat_pbr_musou_black.pbrt",
+   "usd": "tests/assets/suite/mat_pbr_musou_black/mat_pbr_musou_black_mtlx.usda",
+   "ref": "refs/suite_mat_pbr_musou_black.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "pbrt_skip": "OpenPBR material has no pbrt counterpart (metal/glass/skin OpenPBR card)",
+   "equivalence": {
+    "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
+   },
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Musou_Black_OPBR_MAT_PBM.usda"
   }
  ]
 }

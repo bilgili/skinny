@@ -32,10 +32,15 @@ usd_loader = pytest.importorskip("skinny.usd_loader")
 
 CORPUS_DIR = os.path.join(os.path.dirname(__file__), "corpus")
 SPECS = load_manifest(CORPUS_DIR)
-MTLX_SPECS = materialx_specs(SPECS)
+# The confirming-scene suite (change confirming-test-scenes) shares this manifest
+# but is gated by tests/pbrt/test_suite.py (its own equivalence + furnace gate
+# classes). Keep the legacy corpus tests on the non-suite scenes so suite scenes
+# aren't double-rendered here.
+LEGACY_SPECS = [s for s in SPECS if not s.suite]
+MTLX_SPECS = materialx_specs(LEGACY_SPECS)
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", LEGACY_SPECS, ids=[s.name for s in LEGACY_SPECS])
 def test_corpus_scene_imports_cleanly(spec):
     """Every corpus scene loads with no unsupported feature.
 
@@ -70,7 +75,7 @@ def test_corpus_scene_imports_cleanly(spec):
 # ─── matrix construction tier (no GPU) ────────────────────────────────────
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", LEGACY_SPECS, ids=[s.name for s in LEGACY_SPECS])
 def test_matrix_enumerates_per_spec(spec):
     """Every manifest scene yields a non-empty, anchor-first valid combo set, and
     every combo in the full space is either valid or skipped with a reason."""
@@ -81,7 +86,7 @@ def test_matrix_enumerates_per_spec(spec):
         assert ok or reason, f"{c.label} skipped with no reason"
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", LEGACY_SPECS, ids=[s.name for s in LEGACY_SPECS])
 def test_scene_source_resolves(spec):
     """The scene source (corpus .pbrt or .usda asset) exists on disk."""
     from skinny.pbrt.parity import _scene_source
@@ -94,7 +99,7 @@ def test_scene_source_resolves(spec):
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", LEGACY_SPECS, ids=[s.name for s in LEGACY_SPECS])
 def test_scene_matrix_gate(spec):
     """Dual gate over every valid combo of *spec*: pbrt-truth (vs the reference
     EXR, honouring recorded baselines) AND self-consistency (vs the anchor
@@ -159,7 +164,7 @@ def test_materialx_specs_mirror_base_set():
     distinct ids, materialx flag flipped. This is the non-GPU half of the
     parity wiring — the harness plumbing must be exercised without a GPU."""
     # usd-source heavy scenes (bathroom/dragon) have no .pbrt to re-export.
-    base_pbrt = [s for s in SPECS if not s.usd]
+    base_pbrt = [s for s in LEGACY_SPECS if not s.usd]
     assert len(MTLX_SPECS) == len(base_pbrt)
     for base, mtlx in zip(base_pbrt, MTLX_SPECS):
         assert mtlx.materialx is True

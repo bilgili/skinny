@@ -67,6 +67,32 @@ class SceneSpec:
     # alignment-invariant — it catches a global brightness drift (the 1.6×
     # area-light offset). Absent ⇒ the absolute gate is skipped for the scene.
     absolute: dict | None = None
+    # ─── confirming-scene-suite fields (change confirming-test-scenes) ──────
+    # True marks a scene as a member of the tests/assets/suite/ discriminating
+    # corpus (vs the legacy pbrt corpus). Drives the suite coverage meta-tests.
+    suite: bool = False
+    # A recorded reason this scene has NO pbrt reference EXR (e.g. a MaterialX-
+    # only OpenPBR material with no pbrt counterpart, or a furnace scene whose
+    # reference is the analytic value 1.0). When set, the pbrt-truth gate is
+    # skipped for the scene instead of silently missing.
+    pbrt_skip: str | None = None
+    # Authoring-equivalence disposition for a MaterialX (_mtlx) variant:
+    #   {"pair": "<plain_scene_name>", "relmse":.., "flip":..}  — compare this
+    #     scene's anchor render against the named plain-USD sibling's, OR
+    #   {"skip": "<reason>"}  — no plain-USD counterpart (OpenPBR-only material).
+    # Absent on a plain-USD or single-authoring scene.
+    equivalence: dict | None = None
+    # Furnace-closure disposition (change confirming-test-scenes / furnace-closure).
+    # When set, the scene is a white-furnace energy-closure probe rendered with
+    # furnace mode on:
+    #   {"material":"lambert"|"conductor"|"dielectric"|"rough_conductor",
+    #    "closure":1.0, "tol":0.02}                — asserts mean ≈ closure±tol, or
+    #   {..., "baseline":0.85}                     — a recorded legitimate energy
+    #     loss (e.g. rough conductor w/o multiple-scattering compensation); the
+    #     gate asserts against the baseline (tighten-only).
+    #   {..., "per_material":true, "furnace_material":1}  — per-material furnace:
+    #     only material index `furnace_material` carries the furnace bit.
+    furnace: dict | None = None
 
 
 @dataclass
@@ -261,7 +287,9 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
                   materialx: bool = False,
                   proposals: str | None = None,
                   reuse: str | None = None,
-                  usd_path: str | None = None) -> np.ndarray:
+                  usd_path: str | None = None,
+                  furnace: bool = False,
+                  furnace_material: int | None = None) -> np.ndarray:
     """Render a scene in skinny; return linear-HDR (H,W,3).
 
     The scene source is either a pbrt file (*scene_pbrt*, imported to USD at call
@@ -288,6 +316,11 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     sidecar) instead of UsdPreviewSurface, so the same reference EXRs gate both
     export paths; the bound meshes resolve their rich overrides via the usd_loader
     ``.mtlx`` intake.
+    *furnace* enables white-furnace energy-closure mode (constant-white
+    environment, analytic lights disabled) by setting ``renderer.furnace_index``
+    before accumulation; *furnace_material*, when given, arms the *per-material*
+    furnace bit (bit 10) on that material index only instead of the global mode
+    (change confirming-test-scenes / furnace-closure).
     Requires a working GPU backend; raises if unavailable.
     """
     from skinny.backend_select import select_backend
@@ -326,6 +359,15 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
             # nanovdb-volume-rendering).
             authored_dir = bool(getattr(r.renderer._usd_scene, "lights_dir", None))
             r.renderer.direct_light_index = 0 if authored_dir else 1
+            # White-furnace closure (change confirming-test-scenes): global
+            # furnace swaps in the constant-white env + disables lights; the
+            # per-material path arms only one material's furnace bit and leaves
+            # the scene's own lighting so the flagged object closes while the
+            # rest renders normally.
+            if furnace and furnace_material is None:
+                r.renderer.furnace_index = 1
+            elif furnace_material is not None:
+                r.renderer.toggle_material_furnace(furnace_material, True)
             r.renderer._last_state_hash = None
             r._accumulate(spp)
             arr, _samples = r.renderer.read_accumulation_hdr()
@@ -461,6 +503,27 @@ def self_consistency_result(spec: SceneSpec, combo: RenderCombo, img: np.ndarray
     rel_tol, flip_tol = self_consistency_tol(combo, spec)
     passed = m.relmse <= rel_tol and m.flip <= flip_tol
     return ParityResult(spec.name, m.relmse, m.flip, passed, metrics=m, combo=combo)
+
+
+def authoring_equivalence_result(spec: SceneSpec, plain_img: np.ndarray,
+                                 mtlx_img: np.ndarray) -> ParityResult:
+    """Authoring-equivalence gate: a MaterialX (_mtlx) variant's render must match
+    its plain-USD sibling within the recorded tolerance (change
+    confirming-test-scenes / render-parity-matrix delta).
+
+    The two authorings drive different codegen paths (UsdPreviewSurface vs the
+    MaterialX standard_surface/OpenPBR intake), so bit-equality is not expected;
+    the tolerance is measured and pinned per scene in ``spec.equivalence``. No
+    baseline escape — divergence here means the two authorings disagree, which is
+    a real defect. Called with *spec* being the ``_mtlx`` variant (it carries the
+    ``equivalence`` disposition).
+    """
+    cfg = spec.equivalence or {}
+    m = metrics.compute_metrics(mtlx_img, plain_img)
+    rel_tol = float(cfg.get("relmse", 0.02))
+    flip_tol = float(cfg.get("flip", 0.03))
+    passed = m.relmse <= rel_tol and m.flip <= flip_tol
+    return ParityResult(spec.name, m.relmse, m.flip, passed, metrics=m)
 
 
 def evaluate(spec: SceneSpec, corpus_dir: str, gpu: str | None = None,

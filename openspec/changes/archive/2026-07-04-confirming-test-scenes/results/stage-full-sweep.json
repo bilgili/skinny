@@ -1,0 +1,1562 @@
+{
+ "pbrt_truth": {
+  "mat_diffuse": {
+   "path|wavefront": [
+    0.005094,
+    0.01119
+   ],
+   "bdpt|megakernel": [
+    0.004937,
+    0.01095
+   ],
+   "bdpt|wavefront": [
+    0.004937,
+    0.01095
+   ],
+   "path|megakernel": [
+    0.005094,
+    0.01119
+   ],
+   "path|wavefront|neural": [
+    0.00512,
+    0.01129
+   ],
+   "path|wavefront|restir-di": [
+    0.005344,
+    0.01156
+   ],
+   "sppm|wavefront": [
+    0.006013,
+    0.01294
+   ]
+  },
+  "mat_diffuse_mtlx": {
+   "path|wavefront": [
+    0.005094,
+    0.01119
+   ],
+   "bdpt|megakernel": [
+    0.004937,
+    0.01095
+   ],
+   "bdpt|wavefront": [
+    0.004937,
+    0.01095
+   ],
+   "path|megakernel": [
+    0.005094,
+    0.01119
+   ],
+   "path|wavefront|neural": [
+    0.00512,
+    0.01129
+   ],
+   "path|wavefront|restir-di": [
+    0.005344,
+    0.01156
+   ],
+   "sppm|wavefront": [
+    0.006013,
+    0.01294
+   ]
+  },
+  "mat_conductor": {
+   "path|wavefront": [
+    0.02688,
+    0.02775
+   ],
+   "bdpt|megakernel": [
+    0.01714,
+    0.0308
+   ],
+   "bdpt|wavefront": [
+    0.01714,
+    0.0308
+   ],
+   "path|megakernel": [
+    0.02688,
+    0.02775
+   ],
+   "path|wavefront|neural": [
+    0.03333,
+    0.03249
+   ],
+   "path|wavefront|restir-di": [
+    0.4064,
+    0.2474
+   ],
+   "sppm|wavefront": [
+    0.09554,
+    0.07376
+   ]
+  },
+  "mat_conductor_mtlx": {
+   "path|wavefront": [
+    0.04276,
+    0.04197
+   ],
+   "bdpt|megakernel": [
+    0.04047,
+    0.05039
+   ],
+   "bdpt|wavefront": [
+    0.04047,
+    0.05039
+   ],
+   "path|megakernel": [
+    0.04276,
+    0.04197
+   ],
+   "path|wavefront|neural": [
+    0.04776,
+    0.04421
+   ],
+   "path|wavefront|restir-di": [
+    0.3921,
+    0.2389
+   ],
+   "sppm|wavefront": [
+    0.1051,
+    0.08429
+   ]
+  },
+  "mat_dielectric": {
+   "path|wavefront": [
+    0.0439,
+    0.0491
+   ],
+   "bdpt|megakernel": [
+    0.04492,
+    0.04959
+   ],
+   "bdpt|wavefront": [
+    0.04492,
+    0.04959
+   ],
+   "path|megakernel": [
+    0.0439,
+    0.0491
+   ],
+   "path|wavefront|neural": [
+    0.04706,
+    0.0511
+   ],
+   "path|wavefront|restir-di": [
+    0.0444,
+    0.04909
+   ],
+   "sppm|wavefront": [
+    0.1151,
+    0.08497
+   ]
+  },
+  "mat_dielectric_mtlx": {
+   "path|wavefront": [
+    0.0439,
+    0.0491
+   ],
+   "bdpt|megakernel": [
+    0.04492,
+    0.04959
+   ],
+   "bdpt|wavefront": [
+    0.04492,
+    0.04959
+   ],
+   "path|megakernel": [
+    0.0439,
+    0.0491
+   ],
+   "path|wavefront|neural": [
+    0.04706,
+    0.0511
+   ],
+   "path|wavefront|restir-di": [
+    0.0444,
+    0.04909
+   ],
+   "sppm|wavefront": [
+    0.1151,
+    0.08497
+   ]
+  },
+  "mat_plastic": {
+   "path|wavefront": [
+    0.01921,
+    0.02558
+   ],
+   "bdpt|megakernel": [
+    0.01869,
+    0.02506
+   ],
+   "bdpt|wavefront": [
+    0.01869,
+    0.02506
+   ],
+   "path|megakernel": [
+    0.01921,
+    0.02558
+   ],
+   "path|wavefront|neural": [
+    0.01918,
+    0.02551
+   ],
+   "path|wavefront|restir-di": [
+    0.01964,
+    0.02597
+   ],
+   "sppm|wavefront": [
+    0.01939,
+    0.0259
+   ]
+  },
+  "mat_plastic_mtlx": {
+   "path|wavefront": [
+    0.01921,
+    0.02558
+   ],
+   "bdpt|megakernel": [
+    0.01869,
+    0.02506
+   ],
+   "bdpt|wavefront": [
+    0.01869,
+    0.02506
+   ],
+   "path|megakernel": [
+    0.01921,
+    0.02558
+   ],
+   "path|wavefront|neural": [
+    0.01918,
+    0.02551
+   ],
+   "path|wavefront|restir-di": [
+    0.01964,
+    0.02597
+   ],
+   "sppm|wavefront": [
+    0.01939,
+    0.0259
+   ]
+  },
+  "mat_emissive": {
+   "path|wavefront": [
+    0.05222,
+    0.06376
+   ],
+   "bdpt|megakernel": [
+    0.1292,
+    0.1217
+   ],
+   "bdpt|wavefront": [
+    0.1292,
+    0.1217
+   ],
+   "path|megakernel": [
+    0.05222,
+    0.06376
+   ],
+   "path|wavefront|neural": [
+    0.05414,
+    0.06415
+   ],
+   "path|wavefront|restir-di": [
+    0.0518,
+    0.06348
+   ],
+   "sppm|wavefront": [
+    0.1292,
+    0.1217
+   ]
+  },
+  "mat_emissive_mtlx": {
+   "path|wavefront": [
+    0.05222,
+    0.06376
+   ],
+   "bdpt|megakernel": [
+    0.1292,
+    0.1217
+   ],
+   "bdpt|wavefront": [
+    0.1292,
+    0.1217
+   ],
+   "path|megakernel": [
+    0.05222,
+    0.06376
+   ],
+   "path|wavefront|neural": [
+    0.05414,
+    0.06415
+   ],
+   "path|wavefront|restir-di": [
+    0.0518,
+    0.06348
+   ],
+   "sppm|wavefront": [
+    0.1292,
+    0.1217
+   ]
+  },
+  "mat_subsurface": {
+   "path|wavefront": [
+    0.02599,
+    0.02997
+   ],
+   "bdpt|megakernel": [
+    0.02599,
+    0.02999
+   ],
+   "bdpt|wavefront": [
+    0.02599,
+    0.02999
+   ],
+   "path|megakernel": [
+    0.02599,
+    0.02997
+   ],
+   "path|wavefront|restir-di": [
+    0.02617,
+    0.03016
+   ],
+   "sppm|wavefront": [
+    0.02598,
+    0.02996
+   ]
+  },
+  "mat_subsurface_mtlx": {
+   "path|wavefront": [
+    0.02599,
+    0.02997
+   ],
+   "bdpt|megakernel": [
+    0.02599,
+    0.02999
+   ],
+   "bdpt|wavefront": [
+    0.02599,
+    0.02999
+   ],
+   "path|megakernel": [
+    0.02599,
+    0.02997
+   ],
+   "path|wavefront|restir-di": [
+    0.02617,
+    0.03016
+   ],
+   "sppm|wavefront": [
+    0.02598,
+    0.02996
+   ]
+  },
+  "int_caustic": {
+   "path|wavefront": [
+    0.1062,
+    0.05212
+   ],
+   "bdpt|megakernel": [
+    0.1115,
+    0.05352
+   ],
+   "bdpt|wavefront": [
+    0.1115,
+    0.05352
+   ],
+   "path|megakernel": [
+    0.1062,
+    0.05212
+   ],
+   "path|wavefront|neural": [
+    0.1078,
+    0.0532
+   ],
+   "path|wavefront|restir-di": [
+    0.1102,
+    0.05238
+   ],
+   "sppm|wavefront": [
+    0.08753,
+    0.04651
+   ]
+  },
+  "int_caustic_mtlx": {
+   "path|wavefront": [
+    0.1062,
+    0.05212
+   ],
+   "bdpt|megakernel": [
+    0.1115,
+    0.05352
+   ],
+   "bdpt|wavefront": [
+    0.1115,
+    0.05352
+   ],
+   "path|megakernel": [
+    0.1062,
+    0.05212
+   ],
+   "path|wavefront|neural": [
+    0.1078,
+    0.0532
+   ],
+   "path|wavefront|restir-di": [
+    0.1102,
+    0.05238
+   ],
+   "sppm|wavefront": [
+    0.08753,
+    0.04651
+   ]
+  },
+  "mat_textured": {
+   "path|wavefront": [
+    0.0008371,
+    0.009084
+   ],
+   "bdpt|megakernel": [
+    0.0008371,
+    0.009084
+   ],
+   "bdpt|wavefront": [
+    0.0008371,
+    0.009084
+   ],
+   "path|megakernel": [
+    0.0008371,
+    0.009084
+   ],
+   "path|wavefront|neural": [
+    0.001196,
+    0.01096
+   ],
+   "path|wavefront|restir-di": [
+    0.0008363,
+    0.009121
+   ],
+   "sppm|wavefront": [
+    0.004946,
+    0.02046
+   ]
+  },
+  "mat_textured_mtlx": {
+   "path|wavefront": [
+    0.6958,
+    0.1481
+   ],
+   "bdpt|megakernel": [
+    0.6958,
+    0.1481
+   ],
+   "bdpt|wavefront": [
+    0.6958,
+    0.1481
+   ],
+   "path|megakernel": [
+    0.6958,
+    0.1481
+   ],
+   "path|wavefront|neural": [
+    0.6948,
+    0.1483
+   ],
+   "path|wavefront|restir-di": [
+    0.695,
+    0.148
+   ],
+   "sppm|wavefront": [
+    0.7028,
+    0.1504
+   ]
+  },
+  "int_indirect_box": {
+   "path|wavefront": [
+    0.02742,
+    0.04031
+   ],
+   "bdpt|megakernel": [
+    0.02776,
+    0.03943
+   ],
+   "bdpt|wavefront": [
+    0.02776,
+    0.03943
+   ],
+   "path|megakernel": [
+    0.02742,
+    0.04031
+   ],
+   "path|wavefront|neural": [
+    0.02953,
+    0.04182
+   ],
+   "path|wavefront|restir-di": [
+    0.02738,
+    0.04021
+   ],
+   "sppm|wavefront": [
+    0.07253,
+    0.06532
+   ]
+  },
+  "int_indirect_box_mtlx": {
+   "path|wavefront": [
+    0.02742,
+    0.04031
+   ],
+   "bdpt|megakernel": [
+    0.02776,
+    0.03943
+   ],
+   "bdpt|wavefront": [
+    0.02776,
+    0.03943
+   ],
+   "path|megakernel": [
+    0.02742,
+    0.04031
+   ],
+   "path|wavefront|neural": [
+    0.02953,
+    0.04182
+   ],
+   "path|wavefront|restir-di": [
+    0.02738,
+    0.04021
+   ],
+   "sppm|wavefront": [
+    0.07253,
+    0.06532
+   ]
+  },
+  "int_bleed": {
+   "path|wavefront": [
+    0.01855,
+    0.03486
+   ],
+   "bdpt|megakernel": [
+    0.01754,
+    0.03403
+   ],
+   "bdpt|wavefront": [
+    0.01754,
+    0.03403
+   ],
+   "path|megakernel": [
+    0.01855,
+    0.03486
+   ],
+   "path|wavefront|neural": [
+    0.01976,
+    0.03626
+   ],
+   "path|wavefront|restir-di": [
+    0.01849,
+    0.03488
+   ],
+   "sppm|wavefront": [
+    0.05191,
+    0.06043
+   ]
+  },
+  "int_bleed_mtlx": {
+   "path|wavefront": [
+    0.01855,
+    0.03486
+   ],
+   "bdpt|megakernel": [
+    0.01754,
+    0.03403
+   ],
+   "bdpt|wavefront": [
+    0.01754,
+    0.03403
+   ],
+   "path|megakernel": [
+    0.01855,
+    0.03486
+   ],
+   "path|wavefront|neural": [
+    0.01976,
+    0.03626
+   ],
+   "path|wavefront|restir-di": [
+    0.01849,
+    0.03488
+   ],
+   "sppm|wavefront": [
+    0.05191,
+    0.06043
+   ]
+  },
+  "samp_many_lights": {
+   "path|wavefront": [
+    0.01389,
+    0.01754
+   ],
+   "bdpt|megakernel": [
+    0.01449,
+    0.01798
+   ],
+   "bdpt|wavefront": [
+    0.01449,
+    0.01798
+   ],
+   "path|megakernel": [
+    0.01389,
+    0.01754
+   ],
+   "path|wavefront|neural": [
+    0.01382,
+    0.0175
+   ],
+   "path|wavefront|restir-di": [
+    0.01305,
+    0.01678
+   ],
+   "sppm|wavefront": [
+    0.01727,
+    0.01885
+   ]
+  },
+  "samp_many_lights_mtlx": {
+   "path|wavefront": [
+    0.01389,
+    0.01754
+   ],
+   "bdpt|megakernel": [
+    0.01449,
+    0.01798
+   ],
+   "bdpt|wavefront": [
+    0.01449,
+    0.01798
+   ],
+   "path|megakernel": [
+    0.01389,
+    0.01754
+   ],
+   "path|wavefront|neural": [
+    0.01382,
+    0.0175
+   ],
+   "path|wavefront|restir-di": [
+    0.01305,
+    0.01678
+   ],
+   "sppm|wavefront": [
+    0.01727,
+    0.01885
+   ]
+  },
+  "samp_env_glossy": {
+   "path|wavefront": [
+    0.009276,
+    0.01744
+   ],
+   "bdpt|megakernel": [
+    0.009277,
+    0.01744
+   ],
+   "bdpt|wavefront": [
+    0.009277,
+    0.01744
+   ],
+   "path|megakernel": [
+    0.009276,
+    0.01744
+   ],
+   "path|wavefront|neural": [
+    0.01362,
+    0.02349
+   ],
+   "path|wavefront|restir-di": [
+    0.009289,
+    0.01802
+   ],
+   "sppm|wavefront": [
+    0.2608,
+    0.1468
+   ]
+  },
+  "samp_env_glossy_mtlx": {
+   "path|wavefront": [
+    0.01118,
+    0.02088
+   ],
+   "bdpt|megakernel": [
+    0.01118,
+    0.02088
+   ],
+   "bdpt|wavefront": [
+    0.01118,
+    0.02088
+   ],
+   "path|megakernel": [
+    0.01118,
+    0.02088
+   ],
+   "path|wavefront|neural": [
+    0.01656,
+    0.02716
+   ],
+   "path|wavefront|restir-di": [
+    0.01142,
+    0.0215
+   ],
+   "sppm|wavefront": [
+    0.2643,
+    0.1486
+   ]
+  }
+ },
+ "self_cons": {
+  "mat_diffuse": {
+   "bdpt|megakernel": [
+    0.0003725,
+    0.002971
+   ],
+   "bdpt|wavefront": [
+    0.0003725,
+    0.002971
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    6.727e-05,
+    0.001295
+   ],
+   "path|wavefront|restir-di": [
+    0.0003987,
+    0.003238
+   ],
+   "sppm|wavefront": [
+    0.0009177,
+    0.003581
+   ]
+  },
+  "mat_diffuse_mtlx": {
+   "bdpt|megakernel": [
+    0.0003725,
+    0.002971
+   ],
+   "bdpt|wavefront": [
+    0.0003725,
+    0.002971
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    6.727e-05,
+    0.001295
+   ],
+   "path|wavefront|restir-di": [
+    0.0003987,
+    0.003238
+   ],
+   "sppm|wavefront": [
+    0.0009177,
+    0.003581
+   ]
+  },
+  "mat_conductor": {
+   "bdpt|megakernel": [
+    0.01102,
+    0.02311
+   ],
+   "bdpt|wavefront": [
+    0.01102,
+    0.02311
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.00445,
+    0.01038
+   ],
+   "path|wavefront|restir-di": [
+    0.3631,
+    0.2286
+   ],
+   "sppm|wavefront": [
+    0.04855,
+    0.05189
+   ]
+  },
+  "mat_conductor_mtlx": {
+   "bdpt|megakernel": [
+    0.009228,
+    0.02058
+   ],
+   "bdpt|wavefront": [
+    0.009228,
+    0.02058
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.003523,
+    0.009844
+   ],
+   "path|wavefront|restir-di": [
+    0.3387,
+    0.2227
+   ],
+   "sppm|wavefront": [
+    0.04212,
+    0.05022
+   ]
+  },
+  "mat_dielectric": {
+   "bdpt|megakernel": [
+    0.01395,
+    0.01203
+   ],
+   "bdpt|wavefront": [
+    0.01395,
+    0.01203
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.01119,
+    0.01065
+   ],
+   "path|wavefront|restir-di": [
+    0.01406,
+    0.01184
+   ],
+   "sppm|wavefront": [
+    0.04906,
+    0.04386
+   ]
+  },
+  "mat_dielectric_mtlx": {
+   "bdpt|megakernel": [
+    0.01395,
+    0.01203
+   ],
+   "bdpt|wavefront": [
+    0.01395,
+    0.01203
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.01119,
+    0.01065
+   ],
+   "path|wavefront|restir-di": [
+    0.01406,
+    0.01184
+   ],
+   "sppm|wavefront": [
+    0.04906,
+    0.04386
+   ]
+  },
+  "mat_plastic": {
+   "bdpt|megakernel": [
+    0.0003286,
+    0.002754
+   ],
+   "bdpt|wavefront": [
+    0.0003286,
+    0.002754
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    5.514e-05,
+    0.001081
+   ],
+   "path|wavefront|restir-di": [
+    0.0003548,
+    0.003
+   ],
+   "sppm|wavefront": [
+    0.0006447,
+    0.003006
+   ]
+  },
+  "mat_plastic_mtlx": {
+   "bdpt|megakernel": [
+    0.0003286,
+    0.002754
+   ],
+   "bdpt|wavefront": [
+    0.0003286,
+    0.002754
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    5.514e-05,
+    0.001081
+   ],
+   "path|wavefront|restir-di": [
+    0.0003548,
+    0.003
+   ],
+   "sppm|wavefront": [
+    0.0006447,
+    0.003006
+   ]
+  },
+  "mat_emissive": {
+   "bdpt|megakernel": [
+    0.05865,
+    0.05813
+   ],
+   "bdpt|wavefront": [
+    0.05865,
+    0.05813
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.002786,
+    0.007822
+   ],
+   "path|wavefront|restir-di": [
+    0.005133,
+    0.009884
+   ],
+   "sppm|wavefront": [
+    0.05865,
+    0.05813
+   ]
+  },
+  "mat_emissive_mtlx": {
+   "bdpt|megakernel": [
+    0.05865,
+    0.05813
+   ],
+   "bdpt|wavefront": [
+    0.05865,
+    0.05813
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.002786,
+    0.007822
+   ],
+   "path|wavefront|restir-di": [
+    0.005133,
+    0.009884
+   ],
+   "sppm|wavefront": [
+    0.05865,
+    0.05813
+   ]
+  },
+  "mat_subsurface": {
+   "bdpt|megakernel": [
+    0.0003013,
+    0.001899
+   ],
+   "bdpt|wavefront": [
+    0.0003013,
+    0.001899
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|restir-di": [
+    0.0003827,
+    0.002332
+   ],
+   "sppm|wavefront": [
+    4.684e-06,
+    0.0002393
+   ]
+  },
+  "mat_subsurface_mtlx": {
+   "bdpt|megakernel": [
+    0.0003013,
+    0.001899
+   ],
+   "bdpt|wavefront": [
+    0.0003013,
+    0.001899
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|restir-di": [
+    0.0003827,
+    0.002332
+   ],
+   "sppm|wavefront": [
+    4.684e-06,
+    0.0002393
+   ]
+  },
+  "int_caustic": {
+   "bdpt|megakernel": [
+    0.07128,
+    0.02337
+   ],
+   "bdpt|wavefront": [
+    0.07128,
+    0.02337
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.05493,
+    0.01864
+   ],
+   "path|wavefront|restir-di": [
+    0.07176,
+    0.02342
+   ],
+   "sppm|wavefront": [
+    0.03159,
+    0.02062
+   ]
+  },
+  "int_caustic_mtlx": {
+   "bdpt|megakernel": [
+    0.07128,
+    0.02337
+   ],
+   "bdpt|wavefront": [
+    0.07128,
+    0.02337
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.05493,
+    0.01864
+   ],
+   "path|wavefront|restir-di": [
+    0.07176,
+    0.02342
+   ],
+   "sppm|wavefront": [
+    0.03159,
+    0.02062
+   ]
+  },
+  "mat_textured": {
+   "bdpt|megakernel": [
+    4.169e-15,
+    5.582e-09
+   ],
+   "bdpt|wavefront": [
+    4.169e-15,
+    5.582e-09
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.0005245,
+    0.006574
+   ],
+   "path|wavefront|restir-di": [
+    0.0006421,
+    0.007266
+   ],
+   "sppm|wavefront": [
+    0.003043,
+    0.01511
+   ]
+  },
+  "mat_textured_mtlx": {
+   "bdpt|megakernel": [
+    3.802e-15,
+    5.185e-09
+   ],
+   "bdpt|wavefront": [
+    3.802e-15,
+    5.185e-09
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.0005278,
+    0.006384
+   ],
+   "path|wavefront|restir-di": [
+    0.0006543,
+    0.007081
+   ],
+   "sppm|wavefront": [
+    0.002984,
+    0.01479
+   ]
+  },
+  "int_indirect_box": {
+   "bdpt|megakernel": [
+    0.007022,
+    0.01783
+   ],
+   "bdpt|wavefront": [
+    0.007022,
+    0.01783
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.00926,
+    0.01997
+   ],
+   "path|wavefront|restir-di": [
+    0.00983,
+    0.02075
+   ],
+   "sppm|wavefront": [
+    0.05833,
+    0.05138
+   ]
+  },
+  "int_indirect_box_mtlx": {
+   "bdpt|megakernel": [
+    0.007022,
+    0.01783
+   ],
+   "bdpt|wavefront": [
+    0.007022,
+    0.01783
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.00926,
+    0.01997
+   ],
+   "path|wavefront|restir-di": [
+    0.00983,
+    0.02075
+   ],
+   "sppm|wavefront": [
+    0.05833,
+    0.05138
+   ]
+  },
+  "int_bleed": {
+   "bdpt|megakernel": [
+    0.005164,
+    0.01749
+   ],
+   "bdpt|wavefront": [
+    0.005164,
+    0.01749
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.007126,
+    0.0192
+   ],
+   "path|wavefront|restir-di": [
+    0.007839,
+    0.02044
+   ],
+   "sppm|wavefront": [
+    0.03977,
+    0.04912
+   ]
+  },
+  "int_bleed_mtlx": {
+   "bdpt|megakernel": [
+    0.005164,
+    0.01749
+   ],
+   "bdpt|wavefront": [
+    0.005164,
+    0.01749
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.007126,
+    0.0192
+   ],
+   "path|wavefront|restir-di": [
+    0.007839,
+    0.02044
+   ],
+   "sppm|wavefront": [
+    0.03977,
+    0.04912
+   ]
+  },
+  "samp_many_lights": {
+   "bdpt|megakernel": [
+    0.00254,
+    0.008147
+   ],
+   "bdpt|wavefront": [
+    0.00254,
+    0.008147
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.0001804,
+    0.0015
+   ],
+   "path|wavefront|restir-di": [
+    0.001756,
+    0.006781
+   ],
+   "sppm|wavefront": [
+    0.003036,
+    0.004412
+   ]
+  },
+  "samp_many_lights_mtlx": {
+   "bdpt|megakernel": [
+    0.00254,
+    0.008147
+   ],
+   "bdpt|wavefront": [
+    0.00254,
+    0.008147
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.0001804,
+    0.0015
+   ],
+   "path|wavefront|restir-di": [
+    0.001756,
+    0.006781
+   ],
+   "sppm|wavefront": [
+    0.003036,
+    0.004412
+   ]
+  },
+  "samp_env_glossy": {
+   "bdpt|megakernel": [
+    4.553e-09,
+    7.108e-07
+   ],
+   "bdpt|wavefront": [
+    4.553e-09,
+    7.108e-07
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.001791,
+    0.007558
+   ],
+   "path|wavefront|restir-di": [
+    0.001226,
+    0.005285
+   ],
+   "sppm|wavefront": [
+    0.223,
+    0.1305
+   ]
+  },
+  "samp_env_glossy_mtlx": {
+   "bdpt|megakernel": [
+    3.653e-09,
+    5.904e-07
+   ],
+   "bdpt|wavefront": [
+    3.653e-09,
+    5.904e-07
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.001774,
+    0.007361
+   ],
+   "path|wavefront|restir-di": [
+    0.001207,
+    0.005176
+   ],
+   "sppm|wavefront": [
+    0.2209,
+    0.1284
+   ]
+  },
+  "mat_pbr_gold": {
+   "bdpt|megakernel": [
+    0.1063,
+    0.04681
+   ],
+   "bdpt|wavefront": [
+    0.1063,
+    0.04681
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.00317,
+    0.004
+   ],
+   "path|wavefront|restir-di": [
+    0.1561,
+    0.1072
+   ],
+   "sppm|wavefront": [
+    0.001504,
+    0.003898
+   ]
+  },
+  "mat_pbr_copper": {
+   "bdpt|megakernel": [
+    0.1115,
+    0.04761
+   ],
+   "bdpt|wavefront": [
+    0.1115,
+    0.04761
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.003273,
+    0.00392
+   ],
+   "path|wavefront|restir-di": [
+    0.1568,
+    0.1069
+   ],
+   "sppm|wavefront": [
+    0.001565,
+    0.003829
+   ]
+  },
+  "mat_pbr_glass": {
+   "bdpt|megakernel": [
+    0.02209,
+    0.01554
+   ],
+   "bdpt|wavefront": [
+    0.02209,
+    0.01554
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.01771,
+    0.01233
+   ],
+   "path|wavefront|restir-di": [
+    0.02211,
+    0.01557
+   ],
+   "sppm|wavefront": [
+    0.01059,
+    0.01373
+   ]
+  },
+  "mat_pbr_plastic_pc": {
+   "bdpt|megakernel": [
+    0.02052,
+    0.0145
+   ],
+   "bdpt|wavefront": [
+    0.02052,
+    0.0145
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    0.0166,
+    0.01165
+   ],
+   "path|wavefront|restir-di": [
+    0.01974,
+    0.01461
+   ],
+   "sppm|wavefront": [
+    0.01009,
+    0.01331
+   ]
+  },
+  "mat_pbr_skin1": {
+   "bdpt|megakernel": [
+    0.0004843,
+    0.003327
+   ],
+   "bdpt|wavefront": [
+    0.0004843,
+    0.003327
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|restir-di": [
+    0.0005095,
+    0.003593
+   ],
+   "sppm|wavefront": [
+    0.001929,
+    0.004416
+   ]
+  },
+  "mat_pbr_graycard": {
+   "bdpt|megakernel": [
+    0.000232,
+    0.002466
+   ],
+   "bdpt|wavefront": [
+    0.000232,
+    0.002466
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    4.03e-05,
+    0.0009643
+   ],
+   "path|wavefront|restir-di": [
+    0.0002931,
+    0.002756
+   ],
+   "sppm|wavefront": [
+    0.0003297,
+    0.002625
+   ]
+  },
+  "mat_pbr_musou_black": {
+   "bdpt|megakernel": [
+    0.0001325,
+    0.001601
+   ],
+   "bdpt|wavefront": [
+    0.0001325,
+    0.001601
+   ],
+   "path|megakernel": [
+    0.0,
+    0.0
+   ],
+   "path|wavefront|neural": [
+    2.919e-06,
+    0.0003365
+   ],
+   "path|wavefront|restir-di": [
+    0.0001852,
+    0.001936
+   ],
+   "sppm|wavefront": [
+    5.042e-06,
+    0.000667
+   ]
+  }
+ },
+ "equivalence": {
+  "mat_diffuse_mtlx": [
+   0.0,
+   0.0
+  ],
+  "mat_conductor_mtlx": [
+   0.02457,
+   0.03888
+  ],
+  "mat_dielectric_mtlx": [
+   0.0,
+   0.0
+  ],
+  "mat_plastic_mtlx": [
+   4.603e-16,
+   8.975e-10
+  ],
+  "mat_emissive_mtlx": [
+   0.0,
+   0.0
+  ],
+  "mat_subsurface_mtlx": [
+   0.0,
+   0.0
+  ],
+  "int_caustic_mtlx": [
+   0.0,
+   0.0
+  ],
+  "mat_textured_mtlx": [
+   0.6417,
+   0.144
+  ],
+  "int_indirect_box_mtlx": [
+   0.0,
+   0.0
+  ],
+  "int_bleed_mtlx": [
+   0.0,
+   0.0
+  ],
+  "samp_many_lights_mtlx": [
+   1.352e-14,
+   5.835e-09
+  ],
+  "samp_env_glossy_mtlx": [
+   0.0008457,
+   0.004519
+  ]
+ }
+}
