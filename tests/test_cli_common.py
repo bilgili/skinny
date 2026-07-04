@@ -12,10 +12,13 @@ from pathlib import Path
 import pytest
 
 from skinny.cli_common import (
+    DEFAULT_EXECUTION_FOR_INTEGRATOR,
     INTEGRATOR_INDEX,
     WALK_CHOICES,
     add_render_flags,
+    resolve_execution_mode,
     resolve_walk,
+    startup_integrator_name,
 )
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "skinny"
@@ -58,7 +61,9 @@ def test_defaults(monkeypatch):
     ns = _parser().parse_args([])
     # integrator defaults to None (sentinel = "use persisted / renderer default").
     assert ns.integrator is None
-    assert ns.execution_mode == "megakernel"
+    # execution-mode defaults to 'auto' (derives from the integrator; see
+    # resolve_execution_mode) — mirroring --backend auto.
+    assert ns.execution_mode == "auto"
     assert resolve_walk(ns.bdpt_walk) == "fused"
 
 
@@ -96,6 +101,73 @@ def test_megakernel_walk_alias_accepted_on_cli(monkeypatch):
 def test_choice_flags_reject_bad(flag, bad):
     with pytest.raises(SystemExit):
         _parser().parse_args([flag, bad])
+
+
+@pytest.mark.parametrize("mode", ["auto", "megakernel", "wavefront"])
+def test_execution_mode_accepts_auto_and_pins(mode):
+    ns = _parser().parse_args(["--execution-mode", mode])
+    assert ns.execution_mode == mode
+
+
+# ── resolve_execution_mode (integrator → execution mode) ─────────────
+
+def test_default_execution_map():
+    assert DEFAULT_EXECUTION_FOR_INTEGRATOR == {
+        "path": "megakernel", "bdpt": "megakernel", "sppm": "wavefront"}
+
+
+@pytest.mark.parametrize("integrator,expected", [
+    ("path", "megakernel"),
+    ("bdpt", "megakernel"),
+    ("sppm", "wavefront"),
+])
+def test_resolve_auto_derives_from_integrator(integrator, expected):
+    assert resolve_execution_mode("auto", integrator) == expected
+
+
+def test_resolve_auto_none_integrator_is_megakernel():
+    # The persisted/default path (integrator=None) derives megakernel.
+    assert resolve_execution_mode("auto", None) == "megakernel"
+
+
+@pytest.mark.parametrize("integrator", ["path", "bdpt", "sppm"])
+def test_resolve_explicit_mode_overrides_derivation(integrator):
+    # An explicit megakernel/wavefront wins over the integrator-derived default.
+    assert resolve_execution_mode("megakernel", integrator) == "megakernel"
+    assert resolve_execution_mode("wavefront", integrator) == "wavefront"
+
+
+def test_resolve_explicit_megakernel_wins_over_sppm():
+    # sppm would derive wavefront, but an explicit megakernel pins megakernel
+    # (validate_render_flags then rejects that impossible combo separately).
+    assert resolve_execution_mode("megakernel", "sppm") == "megakernel"
+
+
+def test_env_counts_as_explicit(monkeypatch):
+    # SKINNY_EXECUTION_MODE=megakernel makes the flag default a concrete mode, so
+    # even --integrator sppm resolves to megakernel (and is then rejected).
+    monkeypatch.setenv("SKINNY_EXECUTION_MODE", "megakernel")
+    ns = _parser().parse_args(["--integrator", "sppm"])
+    assert ns.execution_mode == "megakernel"
+    assert resolve_execution_mode(ns.execution_mode, ns.integrator) == "megakernel"
+
+
+# ── startup_integrator_name (interactive persisted-integrator fallback) ──
+
+def test_startup_integrator_cli_wins():
+    assert startup_integrator_name("bdpt", 2) == "bdpt"
+
+
+def test_startup_integrator_uses_persisted_index_when_no_cli():
+    # Persisted integrator_index 2 == sppm → drives sppm → wavefront next launch.
+    assert startup_integrator_name(None, 2) == "sppm"
+    assert resolve_execution_mode("auto", startup_integrator_name(None, 2)) == "wavefront"
+
+
+@pytest.mark.parametrize("bad", [None, "nope", 99, {}])
+def test_startup_integrator_falls_back_to_path(bad):
+    # Missing / out-of-range / malformed persisted index → 'path'.
+    assert startup_integrator_name(None, bad) == "path"
 
 
 # ── --neural-handoff (online-training weight handoff backend) ─────────
@@ -147,6 +219,15 @@ def test_integrator_choices_include_sppm():
     assert ns.integrator == "sppm"
 
 
+def test_execution_mode_choices_and_default_in_help(monkeypatch):
+    monkeypatch.delenv("SKINNY_EXECUTION_MODE", raising=False)
+    help_text = _parser().format_help()
+    # All three choices advertised, and 'auto' is the default the front-ends share.
+    for choice in ("auto", "megakernel", "wavefront"):
+        assert choice in help_text
+    assert _parser().parse_args([]).execution_mode == "auto"
+
+
 # ── front-end parity ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("module", [
@@ -169,7 +250,7 @@ def test_headless_parser_exposes_all_three_flags(monkeypatch):
 
     ns = _build_parser().parse_args(["scene.usd"])
     assert ns.integrator is None
-    assert ns.execution_mode == "megakernel"
+    assert ns.execution_mode == "auto"
     assert resolve_walk(ns.bdpt_walk) == "fused"
 
 
@@ -218,21 +299,24 @@ def test_missing_proposals_attr_ok():
     validate_render_flags(argparse.Namespace(integrator="bdpt", online_training=False))
 
 
-# ── validate_render_flags: sppm requires wavefront ────────────────────
+# ── validate_render_flags: sppm has no megakernel path ────────────────
+# The execution mode is resolved (auto → per-integrator) BEFORE validation on
+# every front-end, so validate sees a concrete mode. sppm auto-derives wavefront,
+# so the guard trips only on an explicit megakernel override.
 
-def test_sppm_plus_megakernel_exits():
+def test_sppm_plus_explicit_megakernel_exits():
     with pytest.raises(SystemExit) as ei:
         validate_render_flags(_ns(integrator="sppm", execution_mode="megakernel"))
     msg = str(ei.value)
     assert "sppm" in msg.lower() and "wavefront" in msg
 
 
-def test_sppm_default_execution_mode_exits():
-    # `--integrator sppm` with no explicit --execution-mode defaults to megakernel,
-    # which SPPM cannot run on → must be refused naming the fix.
-    with pytest.raises(SystemExit) as ei:
-        validate_render_flags(_ns(integrator="sppm"))
-    assert "wavefront" in str(ei.value)
+def test_sppm_auto_resolves_wavefront_then_validates_ok():
+    # `--integrator sppm` with no explicit mode: resolution turns auto → wavefront
+    # (before validate on every front-end), so validation passes — no error.
+    mode = resolve_execution_mode("auto", "sppm")
+    assert mode == "wavefront"
+    validate_render_flags(_ns(integrator="sppm", execution_mode=mode))
 
 
 def test_sppm_plus_wavefront_is_ok():

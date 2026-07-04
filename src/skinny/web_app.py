@@ -33,6 +33,7 @@ from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
     apply_sppm_glossy_roughness,
+    resolve_execution_mode,
     resolve_walk,
     validate_render_flags,
 )
@@ -712,6 +713,11 @@ def main() -> None:
     # shared --width/--height render-area flags (would otherwise be a no-op flag).
     add_render_flags(parser, proposals=False, resolution=False)
     args = parser.parse_args()
+    # Derive the execution mode from the integrator when 'auto' (the default); an
+    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. The web server
+    # is stateless across runs, so the startup integrator is --integrator (else
+    # 'path'). Fixed for the session.
+    args.execution_mode = resolve_execution_mode(args.execution_mode, args.integrator or "path")
     # Reject impossible combos (e.g. bdpt + --online-training) up front.
     validate_render_flags(args)
 

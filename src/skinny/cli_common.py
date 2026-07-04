@@ -20,6 +20,16 @@ import os
 # path → integrator_index, mirroring the renderer's integrator ordering.
 INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2}
 
+# Execution mode `auto` derives from the integrator: `path`/`bdpt` run under the
+# megakernel; `sppm` has no megakernel path and runs under the wavefront backend.
+# An explicit `--execution-mode` (flag or env) overrides this (see
+# :func:`resolve_execution_mode`).
+DEFAULT_EXECUTION_FOR_INTEGRATOR = {
+    "path": "megakernel",
+    "bdpt": "megakernel",
+    "sppm": "wavefront",
+}
+
 # Advertised walk choices. `megakernel` is accepted as a deprecated alias but is
 # not listed, so only the execution axis owns that word.
 WALK_CHOICES = ("fused", "eye", "eye_light")
@@ -76,9 +86,11 @@ def validate_render_flags(args) -> None:
 
     Raises ``SystemExit`` (a usage error) on the incompatible combo. Only an
     explicit ``--integrator bdpt`` trips the bdpt×neural guard; ``integrator=None``
-    (the persisted/default path) does not. SPPM has no megakernel path, so an
-    explicit ``--integrator sppm`` under the megakernel execution mode (including
-    the default) is refused naming ``--execution-mode wavefront`` as the fix.
+    (the persisted/default path) does not. SPPM has no megakernel path; the
+    execution mode defaults to ``auto`` which derives ``wavefront`` for ``sppm``
+    (see :func:`resolve_execution_mode`, run before this validator), so this guard
+    trips **only** when the user explicitly forced ``--execution-mode megakernel``
+    — the fix is to drop that flag or use ``--execution-mode wavefront``.
     Tolerant of a ``Namespace`` without a ``proposals`` attribute (the GUI/web
     front-ends suppress ``--proposals``).
 
@@ -94,15 +106,17 @@ def validate_render_flags(args) -> None:
             )
     integrator = getattr(args, "integrator", None)
     if integrator == "sppm":
-        # SPPM is wavefront-only (no global photon map under the megakernel), like
-        # the neural directional proposal. `execution_mode` defaults to
-        # 'megakernel', so plain `--integrator sppm` trips this too.
-        if getattr(args, "execution_mode", "megakernel") != "wavefront":
+        # SPPM is wavefront-only (no global photon map under the megakernel). The
+        # execution mode is resolved before this validator, so plain `--integrator
+        # sppm` already derived `wavefront` (auto) — this only trips when the user
+        # explicitly forced `--execution-mode megakernel`.
+        if getattr(args, "execution_mode", "megakernel") == "megakernel":
             raise SystemExit(
-                "skinny: --integrator sppm requires --execution-mode wavefront — "
-                "SPPM (Stochastic Progressive Photon Mapping) has no megakernel "
-                "path (its global visible-point / photon-grid structure is shared "
-                "across pixels). Add --execution-mode wavefront."
+                "skinny: --integrator sppm has no megakernel path — SPPM "
+                "(Stochastic Progressive Photon Mapping) shares a global "
+                "visible-point / photon-grid structure across pixels. Drop the "
+                "explicit --execution-mode megakernel (sppm auto-selects "
+                "wavefront) or pass --execution-mode wavefront."
             )
         return
     if integrator != "bdpt":
@@ -133,6 +147,36 @@ def resolve_walk(value: str) -> str:
             f"(expected one of {WALK_CHOICES} or the deprecated alias 'megakernel')"
         )
     return v
+
+
+def resolve_execution_mode(execution_mode: str | None, integrator: str | None) -> str:
+    """Resolve the concrete execution mode (`megakernel` / `wavefront`).
+
+    ``auto`` (the default) — meaning neither ``--execution-mode`` nor
+    ``SKINNY_EXECUTION_MODE`` pinned a concrete mode — derives the mode from the
+    startup ``integrator`` via :data:`DEFAULT_EXECUTION_FOR_INTEGRATOR`
+    (``path``/``bdpt`` → ``megakernel``, ``sppm`` → ``wavefront``). An explicit
+    ``megakernel``/``wavefront`` wins. Precedence: explicit mode > integrator
+    default. Called once at startup, before ``validate_render_flags`` and before
+    the renderer is constructed; the result is fixed for the session. A ``None``
+    integrator (the persisted/default path) derives ``megakernel``."""
+    if execution_mode and execution_mode != "auto":
+        return execution_mode
+    return DEFAULT_EXECUTION_FOR_INTEGRATOR.get(integrator or "path", "megakernel")
+
+
+def startup_integrator_name(cli_integrator: str | None, persisted_index=None) -> str:
+    """Resolve the integrator name active at launch on the interactive front-ends,
+    for deriving the ``auto`` execution mode: an explicit ``--integrator`` wins,
+    else the persisted ``integrator_index`` (mapped back through
+    :data:`INTEGRATOR_INDEX`), else ``'path'``. A missing/malformed persisted
+    index falls back to ``'path'``."""
+    if cli_integrator is not None:
+        return cli_integrator
+    try:
+        return {v: k for k, v in INTEGRATOR_INDEX.items()}.get(int(persisted_index), "path")
+    except (TypeError, ValueError):
+        return "path"
 
 
 def apply_sppm_glossy_roughness(renderer, args) -> None:
@@ -337,13 +381,16 @@ def add_render_flags(
         )
     if execution:
         parser.add_argument(
-            "--execution-mode", choices=("megakernel", "wavefront"),
-            default=os.environ.get("SKINNY_EXECUTION_MODE", "megakernel"),
+            "--execution-mode", choices=("auto", "megakernel", "wavefront"),
+            default=os.environ.get("SKINNY_EXECUTION_MODE", "auto"),
             help="GPU execution backend, fixed for the session (+ "
-                 "SKINNY_EXECUTION_MODE env). 'megakernel' (default) is the "
+                 "SKINNY_EXECUTION_MODE env). 'auto' (default) derives the mode "
+                 "from the startup integrator — path/bdpt → megakernel, sppm → "
+                 "wavefront (mirroring --backend auto). 'megakernel' is the "
                  "single main_pass dispatch; 'wavefront' is the staged "
-                 "per-material backend (Vulkan only — pinned to megakernel on "
-                 "Metal). Only the selected backend is compiled.",
+                 "per-material backend. An explicit megakernel/wavefront (flag "
+                 "or env) overrides the derived default. Only the selected "
+                 "backend is compiled.",
         )
     if walk:
         # Free string (not `choices=`) so the deprecated `megakernel` alias is

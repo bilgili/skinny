@@ -30,7 +30,9 @@ import numpy as np
 
 from skinny.cli_common import (
     add_render_flags,
+    resolve_execution_mode,
     resolve_walk,
+    startup_integrator_name,
     validate_render_flags,
 )
 from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
@@ -651,6 +653,14 @@ def main() -> None:
         saved_sgr = saved_settings.get("sppm_glossy_roughness")
         if saved_sgr is not None:
             sppm_glossy_roughness_value = float(saved_sgr)
+
+    # Execution mode 'auto' (the default) derives from the startup integrator —
+    # explicit --integrator, else the persisted integrator, else 'path'. An
+    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Fixed for the
+    # session.
+    _startup_integrator = startup_integrator_name(
+        args.integrator, saved_settings.get("params", {}).get("integrator_index"))
+    args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,

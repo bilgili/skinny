@@ -9,10 +9,17 @@ resolve), and lanes are bucketed by material so each shade dispatch hits one
 coherent material branch.
 
 It is one of two execution modes (`EXECUTION_WAVEFRONT = 1`, `params.py:65`),
-selected once at startup with `--execution-mode wavefront`
-(`cli_common.py:85`) and **fixed for the session**. Both modes run on Vulkan
-(MoltenVK on macOS) — "wavefront" is an execution strategy, not a separate
-graphics API. The implementation lives in `vk_wavefront.py`,
+selected once at startup with `--execution-mode wavefront` and **fixed for the
+session**. `--execution-mode {auto,megakernel,wavefront}` defaults to `auto`,
+which **derives the mode from the startup integrator** (`resolve_execution_mode`
+in `cli_common.py`): `path`/`bdpt` → `megakernel`, `sppm` → `wavefront` (SPPM
+has no megakernel path). An explicit `megakernel`/`wavefront` — flag or
+`SKINNY_EXECUTION_MODE` env — overrides the derived default and pins the mode.
+The resolution runs once at startup, from the integrator active at launch
+(explicit `--integrator`, else the persisted integrator on the interactive
+front-ends, else `path`); the mode is not runtime-switchable. Both modes run on
+Vulkan (MoltenVK on macOS) — "wavefront" is an execution strategy, not a
+separate graphics API. The implementation lives in `vk_wavefront.py`,
 `wavefront_layout.py`, and `shaders/wavefront/`.
 
 For the high-level contrast with the megakernel see

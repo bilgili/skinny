@@ -7,6 +7,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Execution mode follows the integrator** (change
+  `integrator-default-execution-mode`) — `--execution-mode` gains an `auto`
+  value, now the default (env `SKINNY_EXECUTION_MODE`, mirroring `--backend
+  auto`). `auto` derives the mode from the startup integrator — `path`/`bdpt`
+  → `megakernel`, `sppm` → `wavefront` — so `--integrator sppm` alone runs
+  under wavefront instead of erroring, and a persisted `sppm` integrator no
+  longer relaunches into the "SPPM requires wavefront" error. An explicit
+  `--execution-mode megakernel`/`wavefront` (flag or env) still overrides the
+  derived default and pins the mode for the session; the only impossible combo,
+  `sppm` + explicit `megakernel`, is still refused at startup. Resolution is
+  shared across all four front-ends (`skinny`, `skinny-gui`, `skinny-web`,
+  `skinny-render`) via `cli_common.resolve_execution_mode` /
+  `startup_integrator_name`. The mode remains fixed for the session (not
+  runtime-switchable or persisted); no shader, binding, or accumulation-hash
+  change.
+
 ### Fixed
 
 - **SPPM photon term restored — bathroom walls no longer render black**
