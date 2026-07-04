@@ -4840,6 +4840,10 @@ class Renderer:
             from skinny.scene_graph import populate_instance_refs
             updated = populate_instance_refs(self._scene_graph, self._usd_scene)
             if updated:
+                # In-place ref/metadata update — bump the version so the dock's
+                # open property panel doesn't go stale (same tree object).
+                self._scene_graph_version = getattr(
+                    self, "_scene_graph_version", 0) + 1
                 print(
                     f"[skinny] scene graph: attached {updated} instance ref(s)"
                 )
@@ -7309,6 +7313,11 @@ class Renderer:
             return
         from skinny.scene_graph import inject_renderer_camera
         inject_renderer_camera(self._scene_graph, self.camera, self.camera_mode)
+        # In-place mutation of the existing tree — bump the version so the Scene
+        # Graph dock repopulates (its change gate is version + live-tree id; a
+        # reshape of the same tree object changes neither id nor content hash).
+        # reset_camera / toggle_camera_mode / apply_camera_lens_file rely on this.
+        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
 
     def _inject_default_lights_into_scene_graph(self) -> None:
         """Append synthetic ``/Skinny/DefaultLight`` / ``/Skinny/DefaultDome``
@@ -7322,10 +7331,9 @@ class Renderer:
         self._sync_default_dome_prim()
         from skinny.scene_graph import inject_default_lights
         inject_default_lights(self._scene_graph, self._default_light_stage)
-        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
-        # Bump the version so scene_graph_window.tick() repopulates its tree
-        # — the graph object itself is mutated in place, so an `id()`
-        # comparison alone wouldn't trigger a redraw.
+        # Bump the version so the Scene Graph dock repopulates its tree — the
+        # graph object is mutated in place, so an `id()` comparison alone
+        # wouldn't trigger a redraw.
         self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
 
     def apply_camera_param(self, key: str, value: object) -> None:

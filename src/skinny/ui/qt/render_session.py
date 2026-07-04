@@ -16,6 +16,7 @@ from typing import Any
 
 from skinny.params import STATIC_PARAMS, _set_nested
 from skinny.playback import PlaybackClock
+from skinny.scene_graph import copy_scene_graph
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,11 @@ class SceneStateSnapshot:
     handle."""
     scene_graph: Any = None
     scene_graph_version: int = 0
+    # `id()` of the LIVE renderer-owned tree (captured before copying), stable
+    # across polls while that object is unchanged. The dock keys structural-change
+    # detection off this + the version, not `id(scene_graph)` — the latter is a
+    # fresh copy every refresh (see `copy_scene_graph`) and would trip every tick.
+    scene_graph_id: int = 0
     usd_scene: _UsdSceneProj | None = None
     scene: _UsdSceneProj | None = None
     usd_scene_id: int = 0
@@ -162,9 +168,15 @@ def build_scene_state(renderer) -> SceneStateSnapshot:
         )
     usd_scene = getattr(renderer, "_usd_scene", None)
     cm_map = getattr(renderer, "_mtlx_scene_materials", {}) or {}
+    live_graph = getattr(renderer, "scene_graph", None)
     return SceneStateSnapshot(
-        scene_graph=getattr(renderer, "scene_graph", None),
+        # Copy the tree, don't leak the live renderer-owned one: the worker keeps
+        # mutating/reassigning `renderer.scene_graph` on its thread while the GUI
+        # reads the snapshot (data race). The snapshot must be a detached copy;
+        # `scene_graph_id` carries the LIVE tree's identity for change detection.
+        scene_graph=copy_scene_graph(live_graph),
         scene_graph_version=int(getattr(renderer, "_scene_graph_version", 0)),
+        scene_graph_id=id(live_graph) if live_graph is not None else 0,
         usd_scene=_proj_scene(usd_scene, cm_map),
         scene=_proj_scene(getattr(renderer, "scene", None)),
         usd_scene_id=id(usd_scene) if usd_scene is not None else 0,
@@ -267,6 +279,7 @@ class QtRendererProxy:
         object.__setattr__(self, "_usd_controls", [])
         object.__setattr__(self, "scene_graph", None)
         object.__setattr__(self, "_scene_graph_version", 0)
+        object.__setattr__(self, "_scene_graph_id", 0)
         object.__setattr__(self, "clock", PlaybackClock(has_animation=False))
         object.__setattr__(self, "film", _AttrBag())
         self.film.iso = 100.0
@@ -346,6 +359,7 @@ class QtRendererProxy:
     def apply_scene_state(self, state: SceneStateSnapshot) -> None:
         self.scene_graph = state.scene_graph
         self._scene_graph_version = state.scene_graph_version
+        self._scene_graph_id = state.scene_graph_id
         self._usd_scene = state.usd_scene
         self.scene = state.scene if state.scene is not None else state.usd_scene
         self._usd_stage = _SCENE_STATE_PRESENT if state.has_usd_stage else None
