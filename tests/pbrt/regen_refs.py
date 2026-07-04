@@ -30,6 +30,11 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus")
 REFS = os.path.join(CORPUS, "refs")
+# Confirming-scene suite lives under tests/assets/suite/<scene>/<scene>.pbrt
+# (change confirming-test-scenes); its refs share the corpus refs/ dir under a
+# ``suite_`` prefix so the single manifest/gate consumes them uniformly.
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+SUITE_ROOT = os.path.join(REPO_ROOT, "tests", "assets", "suite")
 HOME = os.path.expanduser("~")
 DEFAULT_PBRT = os.path.join(HOME, "projects", "pbrt-v4", "build", "pbrt")
 SCENES_ROOT = os.path.join(HOME, "projects", "pbrt-v4-scenes")
@@ -100,10 +105,33 @@ def render_ref(name: str, src_pbrt: str, width: int, height: int,
         os.remove(tmp)
 
 
+def _suite_pbrt_scenes() -> list[tuple[str, str]]:
+    """Discover suite pbrt counterparts as (ref_name, src_pbrt) pairs.
+
+    ``tests/assets/suite/<scene>/<scene>.pbrt`` → ref ``suite_<scene>.exr``. A
+    scene folder with no ``.pbrt`` (MaterialX-only / furnace scene) is skipped
+    silently — the manifest records its ``pbrt_skip`` reason.
+    """
+    out: list[tuple[str, str]] = []
+    if not os.path.isdir(SUITE_ROOT):
+        return out
+    for scene in sorted(os.listdir(SUITE_ROOT)):
+        # Furnace scenes are gated against the analytic value 1.0 (rendered under
+        # skinny's furnace mode), not a pbrt reference — pbrt has no furnace mode,
+        # so a pbrt render of them would be meaningless. Skip.
+        if scene.startswith("furnace_"):
+            continue
+        src = os.path.join(SUITE_ROOT, scene, f"{scene}.pbrt")
+        if os.path.isfile(src):
+            out.append((f"suite_{scene}", src))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scene", required=True,
-                    help="bathroom | dragon | <corpus-name> | all")
+                    help="bathroom | dragon | <corpus-name> | all | suite | "
+                         "suite:<scene>")
     ap.add_argument("--res", type=int, default=256, help="square resolution (default 256)")
     ap.add_argument("--spp", type=int, default=None, help="override pixelsamples")
     ap.add_argument("--integrator", default=None,
@@ -113,7 +141,17 @@ def main() -> None:
     ap.add_argument("--pbrt", default=DEFAULT_PBRT)
     ns = ap.parse_args()
 
-    if ns.scene in HEAVY_SOURCES:
+    if ns.scene == "suite":
+        pairs = _suite_pbrt_scenes()
+        if not pairs:
+            raise SystemExit(f"no suite .pbrt scenes under {SUITE_ROOT}")
+        for name, src in pairs:
+            render_ref(name, src, ns.res, ns.res, ns.spp, ns.pbrt, ns.integrator)
+    elif ns.scene.startswith("suite:"):
+        scene = ns.scene.split(":", 1)[1]
+        src = os.path.join(SUITE_ROOT, scene, f"{scene}.pbrt")
+        render_ref(f"suite_{scene}", src, ns.res, ns.res, ns.spp, ns.pbrt, ns.integrator)
+    elif ns.scene in HEAVY_SOURCES:
         render_ref(ns.scene, HEAVY_SOURCES[ns.scene], ns.res, ns.res, ns.spp,
                    ns.pbrt, ns.integrator)
     elif ns.scene == "all":
