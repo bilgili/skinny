@@ -838,10 +838,35 @@ class DebugViewport:
         if self._metal_raster is None:
             return None
         line_floats, tri_floats = self._generate_streams(renderer)
+        # Cap the streams to the same vertex budgets the Vulkan `_upload_stream`
+        # enforces — the AABB branch (unlike mesh-wires) is not bounded during
+        # generation, so a many-instance scene could otherwise dispatch an
+        # unbounded `depthLines`/`colorLines` (metal-dispatch-hygiene, codex).
+        line_floats = self._cap_stream(
+            line_floats, _MAX_LINE_VERTICES, even=True, tri_align=False)
+        tri_floats = self._cap_stream(
+            tri_floats, _MAX_TRI_VERTICES, even=False, tri_align=True)
         vp = self._metal_view_proj()
         return self._metal_raster.render(
             line_floats, tri_floats, vp, self._width, self._height,
         )
+
+    @staticmethod
+    def _cap_stream(floats: list, max_vertices: int, *, even: bool,
+                    tri_align: bool) -> list:
+        """Truncate a vertex-float stream to `max_vertices` (mirrors the vertex
+        clamp `_upload_stream` applies on the Vulkan path): `even` rounds down to
+        a whole line, `tri_align` to a whole triangle."""
+        vert_count = len(floats) // _VERTEX_FLOATS
+        if vert_count > max_vertices:
+            vert_count = max_vertices
+        if even:
+            vert_count &= ~1
+        if tri_align:
+            vert_count -= vert_count % 3
+        if vert_count <= 0:
+            return []
+        return floats[: vert_count * _VERTEX_FLOATS]
 
     def _metal_view_proj(self) -> np.ndarray:
         """Math-form viewProj (`proj_math @ view_math`, row-major) for the debug

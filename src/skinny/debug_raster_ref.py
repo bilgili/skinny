@@ -28,9 +28,15 @@ rasteriser — the two backends are independent):
   `viewProj @ [x, y, z, 1]`.
 - NDC→pixel: `px = (ndc.x*0.5 + 0.5) * W`, `py = (0.5 - ndc.y*0.5) * H`
   (row 0 = top, +y_ndc up).
-- Depth: `d01 = clip.z/clip.w * 0.5 + 0.5` clamped to [0,1] (near→0 wins);
-  HUD sentinels use `d01 = 0` so they stay on top. Packed to uint via
-  `DEPTH_SCALE`; nearest = smallest.
+- Depth key: `d01 = clip.z/clip.w * 0.5 + 0.5` clamped to [0,1] (near→0 wins),
+  quantised to 24 bits (`pack_depth`) and stored as `depth24 << 8 | (line_idx &
+  0xFF)`. atomic_min orders primarily by depth (nearest wins) and, at equal
+  depth, by the low-byte line tag (smallest line index wins) — a deterministic
+  tie-break that matches the Vulkan `VK_COMPARE_OP_LESS` "earlier draw wins".
+  HUD sentinels use `d01 = 0` so they stay on top.
+- Triangles are depth-tested strictly against the winning **depth** (high 24
+  bits), occluding on equal depth — same as the Vulkan transparent pipeline's
+  `VK_COMPARE_OP_LESS` (an equal-depth fill does not blend over its outline).
 - A primitive is dropped if any vertex has `clip.w <= 0` (behind the eye) — no
   near-plane clipping in these phases.
 - Background clear = (13, 13, 18, 255) = round(255 * (0.05, 0.05, 0.07, 1.0)).
@@ -42,8 +48,8 @@ import numpy as np
 
 VERTEX_FLOATS = 7
 CLEAR_RGBA8 = (13, 13, 18, 255)  # round(255 * (0.05, 0.05, 0.07, 1.0))
-DEPTH_CLEAR = 0xFFFFFFFF
-DEPTH_SCALE = 4294967040.0  # 0xFFFFFF00 — avoids float→uint overflow at d01=1
+DEPTH_CLEAR = 0xFFFFFFFF  # depth24 0xFFFFFF (far) | tag 0xFF
+DEPTH_SCALE = 16777215.0  # 0xFFFFFF — 24-bit depth (low byte reserved for the tag)
 _W_EPS = 1e-6
 
 
@@ -54,7 +60,9 @@ def _to_rgba8(c) -> tuple[int, int, int, int]:
 
 
 def pack_depth(d01: float) -> int:
-    return int(min(max(d01, 0.0), 1.0) * DEPTH_SCALE) & 0xFFFFFFFF
+    """24-bit depth quant (near→0). The full depth key is `pack_depth(d) << 8 |
+    (line_tag & 0xFF)`; triangles compare against this 24-bit depth alone."""
+    return int(min(max(d01, 0.0), 1.0) * DEPTH_SCALE) & 0xFFFFFF
 
 
 def project_vertex(vert, view_proj: np.ndarray, width: int, height: int):
@@ -78,14 +86,15 @@ def project_vertex(vert, view_proj: np.ndarray, width: int, height: int):
     return px, py, d01, True
 
 
-def _raster_line_depth(img, depth, x0, y0, d0, x1, y1, d1, rgba,
+def _raster_line_depth(img, depth, x0, y0, d0, x1, y1, d1, rgba, tag: int,
                        max_steps: int = 1 << 16) -> None:
-    """DDA line with depth test + write (opaque). Bounded by `max_steps` (the MSL
-    kernel caps identically for the GPU watchdog)."""
+    """DDA line, opaque, depth-tested + writing the `depth24<<8 | tag` key.
+    Bounded by `max_steps` (the MSL kernel caps identically for the watchdog)."""
     h, w, _ = img.shape
     dx = x1 - x0
     dy = y1 - y0
     dd = d1 - d0
+    lo = tag & 0xFF
     steps = int(np.ceil(max(abs(dx), abs(dy))))
     steps = max(steps, 0)
     n = min(steps, max_steps)
@@ -96,9 +105,9 @@ def _raster_line_depth(img, depth, x0, y0, d0, x1, y1, d1, rgba,
         y = int(np.floor(y0 + dy * t + 0.5))
         if not (0 <= x < w and 0 <= y < h):
             continue
-        packed = pack_depth(d0 + dd * t)
-        if packed <= int(depth[y, x]):
-            depth[y, x] = packed
+        key = (pack_depth(d0 + dd * t) << 8) | lo
+        if key < int(depth[y, x]):
+            depth[y, x] = key
             img[y, x, 0], img[y, x, 1], img[y, x, 2], img[y, x, 3] = rgba
 
 
@@ -127,8 +136,10 @@ def _blend_tri(img, depth, p0, p1, p2, color) -> None:
             if w0 < 0.0 or w1 < 0.0 or w2 < 0.0:
                 continue  # outside (cullMode NONE → inv_area sign normalises winding)
             d01 = w0 * z0 + w1 * z1 + w2 * z2
-            if pack_depth(d01) > int(depth[y, x]):
-                continue  # occluded by opaque geometry
+            # Strict depth test against the opaque line depth (high 24 bits),
+            # occluding on equal depth — Vulkan VK_COMPARE_OP_LESS.
+            if pack_depth(d01) >= (int(depth[y, x]) >> 8):
+                continue
             dst = img[y, x, :3].astype(np.float64) / 255.0
             out = np.clip(src * alpha + dst * (1.0 - alpha), 0.0, 1.0)
             img[y, x, 0] = int(out[0] * 255.0 + 0.5)
@@ -152,7 +163,8 @@ def rasterise(line_floats, tri_floats, view_proj: np.ndarray,
         bx, by, bd, bv = project_vertex(b, view_proj, width, height)
         if not (av and bv):
             continue
-        _raster_line_depth(img, depth, ax, ay, ad, bx, by, bd, _to_rgba8(a[3:7]))
+        _raster_line_depth(img, depth, ax, ay, ad, bx, by, bd,
+                           _to_rgba8(a[3:7]), li)
 
     tv = np.asarray(tri_floats, np.float64).reshape(-1, VERTEX_FLOATS) \
         if len(tri_floats) else np.zeros((0, VERTEX_FLOATS))

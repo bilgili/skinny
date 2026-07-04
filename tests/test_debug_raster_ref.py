@@ -148,3 +148,30 @@ def test_transparent_triangle_occluded_by_nearer_line():
     yellow = np.array([255, 255, 0, 255], np.uint8)
     assert np.any(np.all(img[row] == yellow, axis=-1)), \
         "opaque line in front of the transparent tri must survive un-blended"
+
+
+def test_equal_depth_line_tie_is_deterministic():
+    # Two coincident lines at the SAME depth (z=0): the earlier one (lower line
+    # index → smaller tag) wins, regardless of draw order (codex fix #3).
+    W = H = 32
+    first = _line((-0.5, 0.0, 0.0), (1, 0, 0, 1), (0.5, 0.0, 0.0), (1, 0, 0, 1))
+    second = _line((-0.5, 0.0, 0.0), (0, 0, 1, 1), (0.5, 0.0, 0.0), (0, 0, 1, 1))
+    img = rasterise(first + second, [], _IDENTITY, W, H)
+    row = H // 2
+    red = np.array([255, 0, 0, 255], np.uint8)
+    blue = np.array([0, 0, 255, 255], np.uint8)
+    assert np.any(np.all(img[row] == red, axis=-1)), "line index 0 must win the tie"
+    assert not np.any(np.all(img[row] == blue, axis=-1)), "later equal-depth line must not win"
+
+
+def test_equal_depth_triangle_does_not_blend_over_line():
+    # A transparent tri at the SAME depth as an opaque line must NOT blend over
+    # the line's pixels (strict depth test, Vulkan LESS — codex fix #2).
+    W = H = 32
+    line = _line((-0.7, 0.0, 0.0), (1, 1, 0, 1), (0.7, 0.0, 0.0), (1, 1, 0, 1))
+    tri = _tri((-0.6, -0.6, 0.0), (0.6, -0.6, 0.0), (0.0, 0.6, 0.0), (1.0, 0.0, 0.0, 0.5))
+    img = rasterise(line, tri, _IDENTITY, W, H)
+    row = H // 2
+    yellow = np.array([255, 255, 0, 255], np.uint8)
+    assert np.any(np.all(img[row] == yellow, axis=-1)), \
+        "equal-depth transparent tri must not blend over the opaque line"
