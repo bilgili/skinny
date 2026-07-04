@@ -961,6 +961,13 @@ class PreviewPipelineMetal:
         self._spy = ctx._spy
         self.shader_dir = Path(shader_dir)
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
+        # Reflected MSL layout of this program's `fc` uniform block (see
+        # `_reflect_uniform_layout`) — the renderer packs the `fc` blob against
+        # this so the preview never depends on the megakernel/wavefront layout
+        # source existing yet. Duck-typed like `ComputePipeline` so
+        # `_pack_uniforms_msl` can consume either.
+        self.uniform_layout: dict[str, tuple[int, int]] = {}
+        self.uniform_size = 0
         # Emit the generated material/dispatcher Slang preview_pass imports.
         # Idempotent: the scene `ComputePipeline` already wrote the same files
         # for this fragment set; re-emitting keeps this pipeline self-contained.
@@ -990,6 +997,14 @@ class PreviewPipelineMetal:
         # Only bind names the compiled module actually references (dead-stripped
         # ones are skipped) — same discipline as ComputePipeline.dispatch.
         self.global_names = {p.name for p in self.program.layout.parameters}
+        # Reflect this program's OWN `fc` uniform layout so the preview packs the
+        # `fc` blob against its own reflection — independent of whether a
+        # megakernel / wavefront pass has compiled yet. In Metal wavefront mode
+        # the scene bindings are `scene_bindings_only` (no reflection) and
+        # `_msl_layout_source` may be None until a pass builds, so relying on it
+        # here would crash. `fc` is the same struct in every program, so the
+        # renderer can pack its scalar blob against this layout identically.
+        self._reflect_uniform_layout()
         # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
         self._default_tex = dev.create_texture(
             type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
@@ -997,6 +1012,35 @@ class PreviewPipelineMetal:
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
             memory_type=spy.MemoryType.device_local, label="skinny.preview_bindless_default",
         )
+
+    def _reflect_uniform_layout(self) -> None:
+        """Reflect the MSL field offsets/size of the ``fc`` uniform block from
+        THIS program (mirrors ``ComputePipeline._reflect_uniform_layout``).
+        ``uniform_layout`` maps a flattened field name → (offset, size); the
+        embedded ``camera`` struct is flattened as ``camera.<field>``. Lets the
+        renderer's ``_pack_uniforms_msl`` relocate the scalar ``fc`` blob into
+        the preview program's MSL layout without a megakernel/wavefront source."""
+        fc = next((p for p in self.program.layout.parameters if p.name == "fc"), None)
+        if fc is None:
+            return
+        tl = fc.type_layout
+        self.uniform_size = int(tl.size)
+        layout: dict[str, tuple[int, int]] = {}
+
+        def walk(type_layout, base: int, prefix: str) -> None:
+            fields = getattr(type_layout, "fields", None)
+            if not fields:
+                return
+            for f in fields:
+                off = base + int(f.offset)
+                ftl = f.type_layout
+                name = f"{prefix}{f.name}"
+                layout[name] = (off, int(getattr(ftl, "size", 0)))
+                if getattr(ftl, "fields", None):
+                    walk(ftl, off, f"{name}.")
+
+        walk(tl, 0, "")
+        self.uniform_layout = layout
 
     def dispatch(self, size: int, *, push_bytes: bytes, uniform_blob: bytes,
                  binds: dict, output_image, bindless=None) -> None:

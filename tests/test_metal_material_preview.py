@@ -136,6 +136,17 @@ def test_metal_material_preview_renders():
         assert result2 is not None
         assert result2[1] == 64
         assert len(result2[0]) == 64 * 64 * 16
+
+        # Watchdog clamp (codex #2): an over-large request is bounded to
+        # _METAL_PREVIEW_MAX_SIZE, and the returned size reflects the clamp so
+        # the dock reshape stays consistent.
+        from skinny.renderer import _METAL_PREVIEW_MAX_SIZE
+        result3 = renderer.render_material_preview(
+            mid, 0, size=_METAL_PREVIEW_MAX_SIZE * 3)
+        assert result3 is not None
+        clamped = result3[1]
+        assert clamped == _METAL_PREVIEW_MAX_SIZE, clamped
+        assert len(result3[0]) == clamped * clamped * 16
     finally:
         if renderer is not None:
             renderer.cleanup()

@@ -127,6 +127,16 @@ _METAL_MEGAKERNEL_BAND_PIXELS = {
     2: 8_000_000,   # SPPM eye pass — cheap per pixel
 }
 
+# Watchdog-safe upper bound for the Metal material-preview dispatch (codex #2).
+# The preview commits ONE command buffer over `size×size` and can run per-pixel
+# MaterialX graph evaluation, so `size` (a public `render_material_preview`
+# parameter) must be bounded on Metal — macOS cannot cancel an over-long GPU
+# kernel. 512² = 262 144 px of single-bounce thumbnail shading is far lighter
+# than a full BDPT-over-graph frame (200 000 px/band) and comfortably clears the
+# UI's 256 preview; larger requests clamp (the returned `size` reflects the
+# clamp, and the dock reshapes against it). Vulkan is unbounded — it can cancel.
+_METAL_PREVIEW_MAX_SIZE = 512
+
 # Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
 # `UniformBuffer.upload` path memmoves min(len(data), size), so an undersized
 # buffer SILENTLY TRUNCATES the scalar blob's tail (this bit cameraMirror: a
@@ -6218,6 +6228,11 @@ class Renderer:
         Returns None when the renderer is not ready (no scene loaded, or
         slangc failed on preview_pass.slang).
         """
+        if self.is_metal:
+            # Bound the single-command-buffer Metal preview dispatch under the
+            # GPU watchdog (codex #2) — clamp before allocating the output image
+            # so image size, push `size`, and the returned size stay consistent.
+            size = min(int(size), _METAL_PREVIEW_MAX_SIZE)
         if not self._ensure_preview_resources(size):
             return None
         if self._usd_scene is None:
@@ -6367,7 +6382,10 @@ class Renderer:
         self._preview_pipeline.dispatch(
             size,
             push_bytes=push_bytes,
-            uniform_blob=self._pack_uniforms_msl(),
+            # Pack `fc` against the preview program's own reflected layout so the
+            # preview works before any megakernel/wavefront layout source exists
+            # (Metal wavefront mode, codex #1).
+            uniform_blob=self._pack_uniforms_msl(self._preview_pipeline),
             binds=binds,
             output_image=self._preview_image.texture,
             bindless=bindless,
@@ -8589,7 +8607,7 @@ class Renderer:
         bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
         return bmin, bext
 
-    def _pack_uniforms_msl(self) -> bytes:
+    def _pack_uniforms_msl(self, layout_source=None) -> bytes:
         """Pack the `fc` uniform block to the Metal Shading Language struct layout
         (design D3). Reuses `_pack_uniforms` (the Vulkan scalar blob) verbatim and
         relocates every field to its reflected MSL offset, so the field *values*
@@ -8597,10 +8615,16 @@ class Renderer:
         `float3` to 16 B on Metal, making the struct 592 B vs the 512 B scalar
         blob). Offsets come from the compiled module's reflection
         (`pipeline.uniform_layout`), never a hand-maintained table. Uploaded via
-        `set_data` byte blobs only (design D4)."""
+        `set_data` byte blobs only (design D4).
+
+        `layout_source` overrides the default `_msl_layout_source` — the material
+        preview passes its own `PreviewPipelineMetal` so it packs against that
+        program's reflected `fc` layout, independent of whether the megakernel /
+        wavefront layout source exists yet (wavefront-mode preview, codex #1)."""
         scalar = self._pack_uniforms()
-        layout = self._msl_layout_source.uniform_layout
-        size = self._msl_layout_source.uniform_size
+        src = layout_source if layout_source is not None else self._msl_layout_source
+        layout = src.uniform_layout
+        size = src.uniform_size
         out = bytearray(size)
         off = 0
         for name, sz in _FC_SCALAR_FIELDS:
