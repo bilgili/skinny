@@ -100,6 +100,31 @@ def test_build_scene_state_detaches_the_scene_graph_tree() -> None:
     assert snap.scene_graph.children[0].properties[0].metadata["k"] == 1
 
 
+def test_scene_graph_id_is_stable_across_snapshots_of_the_same_tree() -> None:
+    # The dock keys structural-change detection off `scene_graph_id` (the LIVE
+    # tree's identity), which must stay stable across polls of an unchanged tree —
+    # otherwise the detached copy would trip a full tree rebuild every 200 ms
+    # (codex review of the leak fix).
+    root = SceneGraphNode(path="/World", name="World", type_name="Xform")
+
+    class _R:
+        scene_graph = root
+        _scene_graph_version = 3
+
+    r = _R()
+    s1 = build_scene_state(r)
+    s2 = build_scene_state(r)
+    assert s1.scene_graph_id == s2.scene_graph_id == id(root)
+    assert s1.scene_graph is not s2.scene_graph  # distinct copies, same live id
+
+    r.scene_graph = SceneGraphNode(path="/World", name="World", type_name="Xform")
+    assert build_scene_state(r).scene_graph_id != s1.scene_graph_id  # reassigned → rebuild
+
+    # No live tree → id 0.
+    r.scene_graph = None
+    assert build_scene_state(r).scene_graph_id == 0
+
+
 def test_apply_scene_state_exposes_reads_the_dock_uses() -> None:
     queue = RenderCommandQueue()
     proxy = _proxy(queue)

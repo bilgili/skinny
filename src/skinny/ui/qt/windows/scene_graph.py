@@ -142,7 +142,9 @@ class SceneGraphDock(QDockWidget):
         self.tree.clear()
         if graph is None:
             return
-        self._last_graph_id = id(graph)
+        # Record the LIVE tree's identity (from the snapshot), not the copy's —
+        # see the poll-side change check.
+        self._last_graph_id = getattr(self.renderer, "_scene_graph_id", 0)
         self._last_graph_version = getattr(self.renderer, "_scene_graph_version", 0)
         root_item = self._insert_node(None, graph)
         if root_item is not None and 0 < len(graph.children) <= 8:
@@ -762,8 +764,12 @@ class SceneGraphDock(QDockWidget):
 
         graph = self.renderer.scene_graph
         version = getattr(self.renderer, "_scene_graph_version", 0)
+        # `graph` is a fresh detached copy every refresh (copy_scene_graph), so
+        # `id(graph)` would trip every poll — compare the LIVE tree's identity the
+        # snapshot carries (`_scene_graph_id`) instead, plus the version.
+        graph_id = getattr(self.renderer, "_scene_graph_id", 0)
         if graph is not None and (
-            id(graph) != self._last_graph_id
+            graph_id != self._last_graph_id
             or version != self._last_graph_version
         ):
             self._populate_tree()
