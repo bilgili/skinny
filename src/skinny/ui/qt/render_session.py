@@ -89,6 +89,7 @@ class _MaterialProj:
     python_module: str | None = None
     name: str | None = None
     mtlx_target_name: str | None = None
+    mtlx_scene_target: str | None = None
     parameter_overrides: dict = field(default_factory=dict)
 
 
@@ -114,19 +115,22 @@ class SceneStateSnapshot:
     mtlx_overrides: dict = field(default_factory=dict)
 
 
-def _proj_scene(scene) -> "_UsdSceneProj | None":
+def _proj_scene(scene, cm_map=None) -> "_UsdSceneProj | None":
     if scene is None:
         return None
+    cm_map = cm_map or {}
     mats = getattr(scene, "materials", None) or []
-    return _UsdSceneProj(materials=tuple(
-        _MaterialProj(
+    out = []
+    for i, m in enumerate(mats):
+        cm = cm_map.get(i)
+        out.append(_MaterialProj(
             python_module=getattr(m, "python_module", None),
             name=getattr(m, "name", None),
             mtlx_target_name=getattr(m, "mtlx_target_name", None),
+            mtlx_scene_target=getattr(cm, "target_name", None) if cm else None,
             parameter_overrides=dict(getattr(m, "parameter_overrides", {}) or {}),
-        )
-        for m in mats
-    ))
+        ))
+    return _UsdSceneProj(materials=tuple(out))
 
 
 def build_scene_state(renderer) -> SceneStateSnapshot:
@@ -149,10 +153,11 @@ def build_scene_state(renderer) -> SceneStateSnapshot:
             lens=_LensProj(bool(lens.enabled)) if lens is not None else None,
         )
     usd_scene = getattr(renderer, "_usd_scene", None)
+    cm_map = getattr(renderer, "_mtlx_scene_materials", {}) or {}
     return SceneStateSnapshot(
         scene_graph=getattr(renderer, "scene_graph", None),
         scene_graph_version=int(getattr(renderer, "_scene_graph_version", 0)),
-        usd_scene=_proj_scene(usd_scene),
+        usd_scene=_proj_scene(usd_scene, cm_map),
         scene=_proj_scene(getattr(renderer, "scene", None)),
         usd_scene_id=id(usd_scene) if usd_scene is not None else 0,
         has_usd_stage=getattr(renderer, "_usd_stage", None) is not None,
@@ -432,6 +437,20 @@ class QtRendererProxy:
                     raise
                 on_error(exc)  # worker-thread CPU fallback
         return run
+
+    # ── Material Graph dock ───────────────────────────────────────────────
+
+    def render_material_preview(self, material_id, prim, size) -> "Future[Any]":
+        return self.request(
+            lambda r, m=material_id, p=prim, s=size:
+                r.render_material_preview(m, p, size=s),
+        )
+
+    def ensure_env_uploaded(self) -> None:
+        def run(r) -> None:
+            r._ensure_env_uploaded()
+            r._material_version += 1
+        self.post(run, coalesce_key="ensure_env_uploaded")
 
     def online_training_status(self) -> dict[str, Any]:
         return {}

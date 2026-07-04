@@ -179,6 +179,67 @@ def test_apply_scene_state_exposes_material_state() -> None:
     assert proxy._usd_scene.materials[0].name == "brass"
 
 
+def test_material_graph_combo_target_is_projected() -> None:
+    class _CM:
+        target_name = "brass_ND"
+
+    class _MatNoTarget:
+        name = "brass"
+        mtlx_target_name = None
+        parameter_overrides = {}
+        python_module = None
+
+    class _Scene:
+        materials = [_MatNoTarget()]
+
+    class _R:
+        scene_graph = None
+        _scene_graph_version = 0
+        _usd_scene = _Scene()
+        scene = None
+        _usd_stage = None
+        _usd_edit_layer = None
+        camera = None
+        _material_version = 0
+        mtlx_overrides = {}
+        _mtlx_scene_materials = {0: _CM()}
+
+    state = build_scene_state(_R())
+    assert state.usd_scene.materials[0].mtlx_scene_target == "brass_ND"
+
+
+def test_render_material_preview_returns_future() -> None:
+    queue = RenderCommandQueue()
+    proxy = _proxy(queue)
+
+    class Target:
+        def render_material_preview(self, material_id, prim, size) -> tuple:
+            return (b"px", size)
+
+    fut = proxy.render_material_preview(3, 0, 256)
+    command = queue.drain()[0]
+    command.reply.set_result(command.callback(Target()))
+    assert fut.result(timeout=0) == (b"px", 256)
+
+
+def test_ensure_env_uploaded_posts_and_bumps_version() -> None:
+    queue = RenderCommandQueue()
+    proxy = _proxy(queue)
+    calls: list[str] = []
+
+    class Target:
+        _material_version = 5
+
+        def _ensure_env_uploaded(self) -> None:
+            calls.append("uploaded")
+
+    proxy.ensure_env_uploaded()
+    target = Target()
+    queue.drain()[0].callback(target)
+    assert calls == ["uploaded"]
+    assert target._material_version == 6
+
+
 def test_request_bxdf_eval_posts_worker_command_with_callback() -> None:
     queue = RenderCommandQueue()
     proxy = _proxy(queue)

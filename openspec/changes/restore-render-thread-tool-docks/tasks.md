@@ -90,18 +90,35 @@ needs them.
       worker and the lobe pixmap renders (`[GPU | log]`). Interactive GPU
       click-through remains manual.
 
-## 4. Material Graph (hard)
-- [ ] 4.1 Construct `MaterialGraphDock` with the proxy; material list + env from
-      snapshot; node graph reads `_mtlx_scene_materials` projection.
-- [ ] 4.2 Topology edits (add/delete/connect) → `proxy.post()` chain
-      (`_gen_scene_materials` → `_upload_graph_param_buffers` → version bump) on the
-      worker; flat-material edits via `apply_material_override`; env via mirrored
-      `env_index`.
-- [ ] 4.3 `render_material_preview` via `proxy.request()`; debounce on GUI, set the
-      preview pixmap from the resolved `Future`.
-- [ ] 4.4 Unstub `app.py._open_material_graph`; restore session-restore reopen.
-- [ ] 4.5 Verify: open, edit graph topology + params, preview updates; show the
-      preview image back.
+## 4. Material Graph (hard) — DONE (edit path source-verified only)
+- [x] 4.1 `MaterialGraphDock` takes the proxy; material combo reads the cached
+      projection (`_MaterialProj` += `mtlx_scene_target`), env combo reads the
+      mirrored `environments`/`env_index`; `_poll_scene_swap` drives
+      `refresh_scene_state()` and keys off the stable `_usd_scene_id`.
+- [x] 4.2 The whole edit+regen+rebuild sequence moved to the worker atomically:
+      `_run_edit(mutate, …)` posts a `request()` whose worker closure runs the doc
+      mutation, then `build_view`+`validate`+`_gen_scene_materials`+
+      `_upload_graph_param_buffers`+version bump, and returns
+      `(status, new_view, valid, msg)`. Doc helpers relocated to module-level
+      worker functions (`_worker_doc`/`_worker_mtlx_node`/`_set_mtlx_input`) taking
+      the real renderer. Flat edits → `apply_material_override`; env → mirrored
+      `env_index` + `proxy.ensure_env_uploaded()`. `_on_material_picked`'s
+      `build_view` runs on the worker (`_build_view_on_worker`).
+- [x] 4.3 `proxy.render_material_preview(mid, prim, size)` → `request()`; debounced
+      on the GUI, blitted from the resolved future via `_resolve_to_gui` (no
+      GUI-thread `.result()`).
+- [x] 4.4 Unstub `app.py._open_material_graph` (+ import); session-restore reopen
+      functional.
+- [x] 4.5 Verified: ruff + py_compile clean; 36 hostless tests (3 new proxy-surface
+      TDD + 6 dock guards in `test_qt_material_graph_dock.py`); offscreen-Qt smoke —
+      material + env combos populate from the worker, preview dispatches to the
+      worker and blits. **Verification gap (recorded):** the MaterialX-doc topology
+      edits (`_apply_connect`/`_disconnect`/`_delete_node`/`_add_node`/graph value
+      edits) are **source + compile verified only** — `build_view`/`mx.Color3`/
+      `doc.getNodeGraph` need a loaded MaterialX document (PyMaterialXGenSlang, the
+      repo-root py3.13 venv) and interactive GPU to exercise end-to-end. A subtle
+      relocation bug in the edit closures would not be caught by the offscreen
+      smoke; interactive confirm required.
 
 ## 5. Camera Debug viewport (hard)
 - [ ] 5.1 Worker owns the `DebugViewport(ctx, …)`, constructed on first open via a
