@@ -393,3 +393,90 @@ def test_coateddiffuse_roundtrip_equivalent(tmp_path):
         _flat_view(coat_p.parameter_overrides)["coat_roughness"]
     )
     assert _flat_view(coat_m.parameter_overrides)["coat_roughness"] > 0.0
+
+
+# ── imagemap texture intake: standard_surface base_color -> flat binder key ──
+#
+# The renderer's flat-material texture binder (renderer._upload_flat_materials)
+# looks up Material.texture_paths by UsdPreviewSurface keys ONLY
+# (diffuseColor/roughness/metallic/normal/emissiveColor/opacity). On the
+# usdMtlx-plugin-present path, _extract_material reads a composed
+# standard_surface whose texture-bound input is named `base_color` (etc.) — the
+# MaterialX name. If it stores the texture under that raw name, the flat binder
+# never finds it and base_color silently falls back to the constant default
+# grey (the "mat_textured_mtlx renders ~0.70 relMSE off" bug). Constants already
+# remap through _store_shader_override; the texture branch must remap too.
+
+
+def _std_surface_with_image_texture(base_color_file="checker.png"):
+    """Compose a standard_surface UsdShade network with an <image>-driven
+    base_color, exactly like the usdMtlx plugin yields for a `-mtlx` imagemap
+    material. Returns the UsdShade.Material for _extract_material()."""
+    from pxr import Sdf, UsdShade
+
+    stage = Usd.Stage.CreateInMemory()
+    mat = UsdShade.Material.Define(stage, "/M")
+    ss = UsdShade.Shader.Define(stage, "/M/ss")
+    ss.CreateIdAttr("ND_standard_surface_surfaceshader")
+    mat.CreateSurfaceOutput("mtlx").ConnectToSource(ss.ConnectableAPI(), "out")
+
+    img = UsdShade.Shader.Define(stage, "/M/img")
+    img.CreateIdAttr("ND_image_color3")
+    img.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(base_color_file)
+    img_out = img.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+    ss.CreateInput("base_color", Sdf.ValueTypeNames.Color3f).ConnectToSource(img_out)
+
+    # A constant alongside, to confirm scalar remap still works.
+    ss.CreateInput("specular_roughness", Sdf.ValueTypeNames.Float).Set(0.9)
+    # Return the stage too — an in-memory stage that goes out of scope is
+    # garbage-collected, invalidating every prim it owns.
+    return stage, mat
+
+
+def test_std_surface_image_base_color_binds_under_flat_key():
+    """_extract_material must store a standard_surface `base_color` image texture
+    under the flat/UsdPreviewSurface key `diffuseColor` so the renderer's flat
+    binder applies it — not under the raw MaterialX name `base_color`, which the
+    binder ignores (dropping the texture -> grey fallback)."""
+    _stage, mat = _std_surface_with_image_texture("checker.png")
+    m = usd_loader._extract_material(mat)
+
+    # The functional assertion: the flat binder reads these keys only.
+    flat_keys = {
+        "diffuseColor", "roughness", "metallic",
+        "normal", "emissiveColor", "opacity",
+    }
+    assert flat_keys & set(m.texture_paths), (
+        "standard_surface base_color image dropped: texture_paths keys "
+        f"{sorted(m.texture_paths)} carry no flat-binder key"
+    )
+    assert "diffuseColor" in m.texture_paths
+    assert str(m.texture_paths["diffuseColor"]).endswith("checker.png")
+    # texture_bindings must be keyed the same way (scene.py invariant).
+    assert "diffuseColor" in (m.texture_bindings or {})
+
+
+def test_std_surface_image_texture_key_matches_usd_preview():
+    """The MaterialX (standard_surface) intake and the UsdPreviewSurface intake
+    must land a diffuse image texture under the SAME key, so the two authorings
+    render identically (the suite's plain-vs-mtlx equivalence gate)."""
+    from pxr import Sdf, UsdShade
+
+    # UsdPreviewSurface authoring of the same textured diffuse.
+    pstage = Usd.Stage.CreateInMemory()
+    stage = pstage
+    pmat = UsdShade.Material.Define(stage, "/P")
+    ps = UsdShade.Shader.Define(stage, "/P/ps")
+    ps.CreateIdAttr("UsdPreviewSurface")
+    pmat.CreateSurfaceOutput().ConnectToSource(ps.ConnectableAPI(), "surface")
+    ptex = UsdShade.Shader.Define(stage, "/P/tex")
+    ptex.CreateIdAttr("UsdUVTexture")
+    ptex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set("checker.png")
+    ptex_out = ptex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+    ps.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(ptex_out)
+
+    preview = usd_loader._extract_material(pmat)
+    _mstage, mmat = _std_surface_with_image_texture("checker.png")
+    mtlx = usd_loader._extract_material(mmat)
+
+    assert set(preview.texture_paths) == set(mtlx.texture_paths) == {"diffuseColor"}

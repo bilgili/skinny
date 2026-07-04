@@ -124,6 +124,34 @@ def test_default_uv_image_rewrites_texcoord(lib):
     assert "vd." not in gf.slang_source
 
 
+@pytest.mark.parametrize("asset,target", [
+    ("standard_surface_default_uv_image.mtlx", "DefaultUV_Image"),
+    ("standard_surface_wood_tiled.mtlx", "Tiled_Wood"),
+    ("standard_surface_marble_solid.mtlx", "Marble_3D"),
+])
+def test_graph_uniform_offsets_are_dense(lib, asset, target):
+    """A graph fragment's `uniform_block` offsets MUST be dense-from-0 (each
+    field at the aligned end of the previous one), because `_emit_param_struct`
+    emits ONLY the kept uniforms and Slang's `Load<GraphParams_*>` reads them
+    contiguously, while `pack_uniform_block` writes at `u.offset`. If the gen's
+    full-block offsets leak through (a dropped unused uniform leaves a hole),
+    every field skews by that gap — an `<image>` graph then misreads `uv_scale`
+    as (0,1) and collapses the U coordinate, sampling a single texture column
+    (imagemap base_color rendered as a flat smear). Regression for that skew."""
+    _import_asset(lib, asset)
+    gf = lib.generate_for_compute(target, write_to_disk=False)
+    assert gf is not None and gf.uniform_block
+    dense = 0
+    for u in gf.uniform_block:
+        align = 4  # scalar layout: every component is 4-byte aligned
+        if dense % align:
+            dense += align - (dense % align)
+        assert u.offset == dense, (
+            f"{target}: uniform {u.name!r} at offset {u.offset}, expected "
+            f"{dense} — non-dense offsets skew Slang's Load<GraphParams>")
+        dense += u.size
+
+
 # ─── pack_uniform_block ────────────────────────────────────────────────
 
 

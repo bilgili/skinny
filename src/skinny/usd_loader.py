@@ -548,8 +548,21 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
                 if inp.HasConnectedSource():
                     binding = _resolve_texture_binding(inp)
                     if binding is not None:
-                        textures[base] = binding.path
-                        bindings[base] = binding
+                        # Remap the shader-input name to the flat/UsdPreviewSurface
+                        # key the renderer's flat texture binder reads. A composed
+                        # standard_surface (usdMtlx-plugin path) names its inputs
+                        # `base_color`/`specular_roughness`/… (MaterialX), but
+                        # `_upload_flat_materials` only looks up `diffuseColor`/
+                        # `roughness`/… — so an unremapped texture is silently
+                        # dropped and the input falls back to its constant default
+                        # (a diffuse imagemap rendered as flat grey). Mirror the
+                        # OpenPBR→std→flat fold `_store_shader_override` applies to
+                        # constants. Plain UsdPreviewSurface names aren't in either
+                        # table, so `.get(name, name)` leaves them untouched.
+                        std_name = _OPENPBR_TO_STD_SURFACE.get(base, base)
+                        flat_key = _STD_SURFACE_TO_FLAT.get(std_name, std_name)
+                        textures[flat_key] = binding.path
+                        bindings[flat_key] = binding
                         continue
                     # Non-texture connection: the shader input is wired up to
                     # a Material-level interface input that carries the
