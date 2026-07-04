@@ -1095,6 +1095,120 @@ class PreviewPipelineMetal:
         self._default_tex = None
 
 
+class DebugRasterMetal:
+    """Metal Camera Debug software rasteriser host (change metal-tool-dock-render
+    P2, task 3.1). The native Metal backend has no graphics pipeline, so the
+    debug viewport's line vertex stream is scan-converted in a compute kernel.
+
+    Phase-1 slice: a DDA line rasteriser with **no depth** yet (opaque
+    last-writer-wins). Compiles ``debug_raster.slang`` and drives two compute
+    kernels — ``clearImage`` (fill the packed-RGBA8 output with the background)
+    then ``rasterLines`` (one thread per line). The output is a width*height
+    ``uint`` buffer packed ``r | g<<8 | b<<16 | a<<24``; :meth:`render` returns it
+    as a little-endian RGBA8 byte stream. Kernel math mirrors
+    :mod:`skinny.debug_raster_ref` so it is host-checkable and GPU-diffable.
+
+    Buffers are reused across frames (grown as needed) so a steady debug view
+    does not churn allocations. Each dispatch is bounded (clear = one thread per
+    pixel; lines = one thread per line, per-line pixel loop capped at
+    ``max_steps``) so no single command buffer can exceed the macOS GPU watchdog.
+    """
+
+    _VERTEX_FLOATS = 7
+
+    def __init__(self, ctx, shader_dir) -> None:
+        self.ctx = ctx
+        self._spy = ctx._spy
+        self.shader_dir = Path(shader_dir)
+        dev = ctx.device
+        spy = self._spy
+        opts = spy.SlangCompilerOptions()
+        opts.include_paths = [self.shader_dir]
+        opts.defines = {"SKINNY_METAL": "1"}
+        session = dev.create_slang_session(compiler_options=opts)
+        src = self.shader_dir / "debug_raster.slang"
+        module = session.load_module_from_source(
+            "debug_raster", src.read_text(encoding="utf-8"), str(src))
+        self._clear_kernel = dev.create_compute_kernel(
+            session.link_program([module], [module.entry_point("clearImage")]))
+        self._lines_kernel = dev.create_compute_kernel(
+            session.link_program([module], [module.entry_point("rasterLines")]))
+        self._color = None   # packed-RGBA8 output (uint per pixel)
+        self._color_px = 0
+        self._verts = None   # line vertex StorageBuffer (float32)
+
+    def _ensure_color(self, px: int) -> None:
+        need = px * 4
+        if self._color is None or self._color.size < need:
+            if self._color is not None:
+                self._color.destroy()
+            self._color = StorageBuffer(self.ctx, need)
+        self._color_px = px
+
+    def _ensure_verts(self, nbytes: int) -> None:
+        nbytes = max(int(nbytes), 16)
+        if self._verts is None or self._verts.size < nbytes:
+            if self._verts is not None:
+                self._verts.destroy()
+            self._verts = StorageBuffer(self.ctx, nbytes)
+
+    def render(self, line_floats, view_proj, width: int, height: int, *,
+               max_steps: int = 1 << 16) -> bytes:
+        """Rasterise the line stream → RGBA8 bytes (``width*height*4``, row 0 =
+        top). ``view_proj`` is the math-form 4x4 (row-major, clip = VP·[x,y,z,1])
+        the reference uses; ``line_floats`` is a flat float sequence
+        (``_VERTEX_FLOATS`` per vertex, 2 per line)."""
+        from skinny.debug_raster_ref import CLEAR_RGBA8
+        dev = self.ctx.device
+        w, h = int(width), int(height)
+        px = w * h
+        self._ensure_color(px)
+        r, g, b, a = CLEAR_RGBA8
+        clear_packed = int(r | (g << 8) | (b << 16) | (a << 24)) & 0xFFFFFFFF
+        clear_vec = [clear_packed, 0, 0, 0]
+
+        self._clear_kernel.dispatch(
+            thread_count=[w, h, 1],
+            vars={
+                "colorOut": self._color.buffer,
+                "gWidth": w, "gHeight": h,
+                "gClearPacked": clear_vec,
+            },
+        )
+        dev.wait_for_idle()
+
+        verts = np.ascontiguousarray(line_floats, dtype=np.float32).ravel()
+        n_lines = int(verts.size // (self._VERTEX_FLOATS * 2))
+        if n_lines > 0:
+            self._ensure_verts(verts.nbytes)
+            self._verts.upload_sync(verts.tobytes())
+            vp = np.ascontiguousarray(view_proj, dtype=np.float32).reshape(4, 4)
+            self._lines_kernel.dispatch(
+                thread_count=[n_lines, 1, 1],
+                vars={
+                    "lineVerts": self._verts.buffer,
+                    "colorOut": self._color.buffer,
+                    "gVP0": vp[0].tolist(), "gVP1": vp[1].tolist(),
+                    "gVP2": vp[2].tolist(), "gVP3": vp[3].tolist(),
+                    "gWidth": w, "gHeight": h, "gLineCount": n_lines,
+                    "gMaxSteps": int(max_steps),
+                },
+            )
+            dev.wait_for_idle()
+
+        return self._color.download_sync(px * 4)
+
+    def destroy(self) -> None:
+        if self._color is not None:
+            self._color.destroy()
+            self._color = None
+        if self._verts is not None:
+            self._verts.destroy()
+            self._verts = None
+        self._clear_kernel = None
+        self._lines_kernel = None
+
+
 class MetalFrameEncoder:
     """Single-frame, multi-pass compute command encoder (design D3) — the Metal
     sibling of recording the whole wavefront bounce loop into one Vulkan command

@@ -39,18 +39,26 @@
       by P2 (task 3.9).
 
 ## 3. P2 — Metal Camera Debug compute rasteriser (XL, phased)
-- [ ] 3.1 `debug_raster.slang`: line rasteriser (DDA/Bresenham) — transform
-      `float3 pos + float4 color` vertices by the view·proj UBO, scan-convert to the
-      RGBA8 output; no depth yet. `DebugRasterMetal` host in `metal_compute.py`
-      (upload vertex buffer, dispatch, readback).
+- [x] 3.1 `debug_raster.slang`: line rasteriser (DDA) — transforms
+      `float3 pos + float4 color` vertices (7 floats) via explicit view·proj rows,
+      scan-converts to a packed-RGBA8 `colorOut` buffer; **no depth** (opaque
+      last-writer-wins). `clearImage` + `rasterLines` kernels. `DebugRasterMetal`
+      host in `metal_compute.py` (reused/grown vertex + color buffers, two bounded
+      dispatches, readback → RGBA8 bytes). GPU cross-check vs the numpy reference
+      PASSED (`tests/test_metal_debug_raster.py`, gated `RUN_METAL_DEBUG_RASTER`).
 - [ ] 3.2 Triangle rasteriser (edge-function + barycentric) into the same output.
 - [ ] 3.3 Depth buffer: `uint` UAV `w×h`, `atomic_min` packed depth; opaque
       lines/tris depth-test-and-write.
 - [ ] 3.4 Alpha blend pass for transparent planes (`color.a < 1`), depth-test-no-
       write, ordered after opaque (mirrors the Vulkan two-pipeline split).
-- [ ] 3.5 Screen-space HUD text (`color.a > 1.5` sentinel bypasses view·proj).
-- [ ] 3.6 Numpy/host parity harness for the rasteriser (transform + a few
-      line/tri/blend cases) so the kernel is checkable without a GPU.
+- [x] 3.5 Screen-space HUD text (`color.a > 1.5` sentinel bypasses view·proj) —
+      implemented in `projectVertex` (kernel treats sentinel `xy` as NDC),
+      mirrored in the reference; HUD glyph lines render (demo grid+AABB+HUD frame).
+- [x] 3.6 Numpy/host parity harness (`src/skinny/debug_raster_ref.py` +
+      `tests/test_debug_raster_ref.py`, 7 hostless tests): transform (projected +
+      HUD sentinel + behind-eye drop), DDA line raster, NDC→pixel, RGBA8 pack —
+      the authoritative CPU mirror the MSL kernel matches. Tri/blend cases extend
+      this as those phases land.
 - [ ] 3.7 `DebugViewport` Metal branch: where the guard raises, construct the Metal
       rasteriser instead; `render_embedded(renderer)` fills the (unchanged) CPU
       vertex streams, uploads, dispatches, returns RGBA8 — same signature the worker
