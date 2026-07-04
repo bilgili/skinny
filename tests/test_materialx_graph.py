@@ -171,20 +171,21 @@ def test_assign_graph_ids_starts_at_first(lib):
 # ─── aggregator emission ──────────────────────────────────────────────
 
 
-def test_aggregator_emits_all_graphs(lib):
-    """ComputePipeline._emit_generated_materials wires Marble + Wood +
-    Brass into one generated_materials.slang with one binding per
-    graph, the right dispatch switch, and per-graph apply functions
-    covering each driven std_surface input."""
-    from skinny.vk_compute import ComputePipeline, GRAPH_BINDING_BASE
-
-    # Write into the real shader tree — the file is .gitignored and gets
-    # rewritten on every renderer scene-load, so this just exercises the
-    # same path the renderer uses.
-    shader_dir = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "skinny" / "shaders"
+def test_aggregator_emits_all_graphs(lib, tmp_path):
+    """`megakernel_sources.emit_generated_materials` wires Marble + Wood + Brass
+    into one generated_materials.slang: an import + param helper + apply function
+    per graph, all sharing the one combined param buffer at GRAPH_BINDING_BASE
+    (change combine-graph-param-buffers)."""
+    from skinny.megakernel_sources import (
+        GRAPH_BINDING_BASE,
+        emit_generated_materials,
     )
+
+    # Emit into an isolated dir — the emitter takes the target shader dir as an
+    # argument, so `tmp_path` exercises the same code path the renderer uses
+    # without clobbering the real shader tree's generated_materials.slang (which
+    # test_megakernel_spirv_valid recompiles).
+    shader_dir = tmp_path
 
     frags = []
     for asset, target in [
@@ -197,25 +198,20 @@ def test_aggregator_emits_all_graphs(lib):
         assert gf is not None
         frags.append(gf)
 
-    class Stub:
-        pass
-    stub = Stub()
-    stub.shader_dir = shader_dir
-    stub.graph_fragments = frags
-    ComputePipeline._emit_generated_materials(stub)
+    graph_bindings = emit_generated_materials(shader_dir, frags)
 
     agg = (shader_dir / "generated_materials.slang").read_text(encoding="utf-8")
-    # One import per fragment.
+    # One combined byte-addressed param buffer shared by every graph.
+    assert f"binding({GRAPH_BINDING_BASE}, 0)" in agg
+    assert "ByteAddressBuffer graphParamsCombined;" in agg
     for gf in frags:
+        # One import + param helper per fragment.
         assert f"import generated.{gf.sanitized_name}_graph;" in agg
-        # SSBO declaration at the right binding.
-        assert f"binding({GRAPH_BINDING_BASE + frags.index(gf)}, 0)" in agg
-        assert f"graphParams_{gf.sanitized_name}" in agg
+        assert f"_graphParams_{gf.sanitized_name}(uint matId)" in agg
         # Per-graph apply function references each driven std_surface input.
         for input_name, _ in gf.outputs:
             assert f"sp.{input_name} = g.{input_name};" in agg
-    # Mapping graph_bindings exposed for the renderer to write descriptors.
-    assert stub.graph_bindings == {
-        gf.target_name: GRAPH_BINDING_BASE + idx
-        for idx, gf in enumerate(frags)
+    # Every graph maps to the single combined slot at GRAPH_BINDING_BASE.
+    assert graph_bindings == {
+        gf.target_name: GRAPH_BINDING_BASE for gf in frags
     }
