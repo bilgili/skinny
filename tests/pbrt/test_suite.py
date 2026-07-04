@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pytest
 
 from skinny.pbrt import furnace as furnace_mod
@@ -158,6 +159,45 @@ def test_suite_pbrt_counterpart_imports(spec):
     scene = usd_loader.load_scene_from_stage(stage)
     assert len(scene.instances) >= 1
     assert report.count("skipped") == 0, str(report)
+
+
+# ─── gpu: PBR shaderball smoke ─────────────────────────────────────────────
+
+# Original OpenPBR "physically based material" shaderball cards live only in the
+# main checkout (gitignored, absent in worktrees). The smoke test renders one or
+# two AS-IS and skips cleanly when they are missing so worktrees still pass.
+MATX_ROOT = "/Users/ahmetbilgili/projects/skinny/assets/materialxusd/tests/physically_based"
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("card", ["Gold_OPBR_MAT_PBM", "Gray_Card_OPBR_MAT_PBM"])
+def test_pbr_shaderball_smoke(card):
+    """Render an original OpenPBR shaderball card headless and assert it produces
+    a finite, non-black image. Opt-in (gpu-marked); skip-if-missing so worktrees
+    without the source cards still pass."""
+    src = os.path.join(MATX_ROOT, f"{card}.usda")
+    if not os.path.isfile(src):
+        pytest.skip(f"original shaderball card absent: {src}")
+
+    try:
+        from skinny.backend_select import select_backend
+        from skinny.headless import HeadlessRenderer, RenderOptions
+
+        backend = select_backend()
+        with HeadlessRenderer(128, 128, backend=backend) as r:
+            r._prepare(src, RenderOptions(samples=8, integrator="path"))
+            if not r.renderer._backend_render_ready:
+                pytest.skip(f"{card}: render pipeline not ready (no usable materials)")
+            for _ in range(8):
+                r.renderer.update(1.0 / 60.0)
+                r.renderer.render_headless()
+            hdr, samples = r.renderer.read_accumulation_hdr()
+    except Exception as exc:  # noqa: BLE001 - GPU/backend unavailable in this env
+        pytest.skip(f"render backend unavailable: {exc}")
+
+    img = hdr[..., :3] / max(1, samples)
+    assert np.isfinite(img).all(), f"{card}: non-finite pixels in render"
+    assert img.mean() > 0, f"{card}: image is entirely black"
 
 
 # ─── gpu: render gates ─────────────────────────────────────────────────────

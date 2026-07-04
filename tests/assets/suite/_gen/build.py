@@ -63,13 +63,13 @@ def _sphere_block(material: str, cx=0.0, cy=0.7, cz=0.0, r=0.7,
 
 
 def _scene(name: str, material: str, *, spp=256, integrator="path", maxdepth=8,
-           env: str | None = None, area_light="12 12 12",
+           env: str | None = None, area_light: str | None = "12 12 12",
            emissive_sphere: str | None = None, extra: str = "") -> str:
-    lr, lg, lb = area_light.split()
     parts = [_HEADER.format(spp=spp, integrator=integrator, maxdepth=maxdepth, name=name)]
     if env is not None:
         parts.append(f'LightSource "infinite" "rgb L" [{env}]\n')
-    if emissive_sphere is None:
+    if emissive_sphere is None and area_light is not None:
+        lr, lg, lb = area_light.split()
         parts.append(_AREA_LIGHT.format(
             lr=lr, lg=lg, lb=lb,
             light_geom=geom.trianglemesh(*geom.ceiling_light())))
@@ -98,6 +98,75 @@ def _two_spheres(name: str, mat_a: str, mat_b: str, *, spp=256, env=None,
     return "".join(parts)
 
 
+def _diffuse(r: float, g: float, b: float) -> str:
+    return f'Material "diffuse" "rgb reflectance" [{r} {g} {b}]'
+
+
+def _wall(pts, idx, material: str, emissive: str | None = None) -> str:
+    inner = ""
+    if emissive is not None:
+        inner += f"  AreaLightSource \"diffuse\" \"rgb L\" [{emissive}]\n"
+    inner += f"  {material}\n  {geom.trianglemesh(pts, idx)}\n"
+    return f"AttributeBegin\n{inner}AttributeEnd\n"
+
+
+def _cornell_box(name: str, *, left="0.63 0.06 0.05", right="0.14 0.45 0.09",
+                 neutral="0.73 0.73 0.73", spp=256, maxdepth=8,
+                 emitter="16 16 16", baffle=False, center_obj: str | None = None) -> str:
+    """A [-2,2]×[0,4]×[-2,2] Cornell box; camera looks in along -Z."""
+    A, B = -2.0, 2.0
+    parts = [_HEADER.format(spp=spp, integrator="path", maxdepth=maxdepth, name=name)]
+    # emitter: small downward quad recessed at the ceiling
+    parts.append(_wall(*geom.ceiling_light(half=0.7, y=3.95), material=_diffuse(0.0, 0.0, 0.0),
+                       emissive=emitter))
+    if baffle:  # opaque lip below the emitter → direct light blocked, indirect dominates
+        parts.append(_wall(*geom.ceiling_light(half=1.1, y=3.5), material=_diffuse(0.5, 0.5, 0.5)))
+    # floor, ceiling, back (neutral)
+    parts.append(_wall(*geom.quad((A, 0, B), (B, 0, B), (B, 0, A), (A, 0, A)), _diffuse(*neutral.split())))
+    parts.append(_wall(*geom.quad((A, 4, A), (B, 4, A), (B, 4, B), (A, 4, B)), _diffuse(*neutral.split())))
+    parts.append(_wall(*geom.quad((A, 0, A), (B, 0, A), (B, 4, A), (A, 4, A)), _diffuse(*neutral.split())))
+    # left (red), right (green)
+    parts.append(_wall(*geom.quad((A, 0, B), (A, 0, A), (A, 4, A), (A, 4, B)), _diffuse(*left.split())))
+    parts.append(_wall(*geom.quad((B, 0, A), (B, 0, B), (B, 4, B), (B, 4, A)), _diffuse(*right.split())))
+    if center_obj is not None:
+        parts.append(_sphere_block(center_obj, cx=0.0, cy=1.0, cz=0.0, r=1.0))
+    return "".join(parts)
+
+
+def _light_grid(name: str, floor_mat: str, *, n=4, spp=256) -> str:
+    """A glossy floor under an n×n grid of small emissive quads (ReSTIR DI)."""
+    parts = [_HEADER.format(spp=spp, integrator="path", maxdepth=8, name=name)]
+    parts.append(_wall(*geom.ground(size=4.0), floor_mat))
+    span, y, h = 3.0, 3.0, 0.18
+    for i in range(n):
+        for j in range(n):
+            cx = -span + 2 * span * (i / (n - 1))
+            cz = -span + 2 * span * (j / (n - 1))
+            q = geom.quad((cx - h, y, cz - h), (cx + h, y, cz - h),
+                          (cx + h, y, cz + h), (cx - h, y, cz + h))
+            parts.append(_wall(*q, _diffuse(0, 0, 0), emissive="40 40 40"))
+    parts.append(_sphere_block(_diffuse(0.5, 0.5, 0.5), cx=0.0, cy=0.7, cz=0.0, r=0.7))
+    return "".join(parts)
+
+
+_CHECKER_QUAD = geom.trianglemesh(
+    [(-1.2, -1.2, 0), (1.2, -1.2, 0), (1.2, 1.2, 0), (-1.2, 1.2, 0)],
+    [0, 1, 2, 0, 2, 3], uv=[(0, 0), (1, 0), (1, 1), (0, 1)])
+
+_TEXTURED = f"""LookAt 0 0 3.2  0 0 0  0 1 0
+Camera "perspective" "float fov" 40
+Sampler "independent" "integer pixelsamples" 256
+Integrator "path" "integer maxdepth" 5
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "mat_textured.exr"
+WorldBegin
+LightSource "infinite" "rgb L" [1 1 1]
+Texture "uvtex" "spectrum" "imagemap" "string filename" "texture_uv.png"
+AttributeBegin
+  Material "diffuse" "texture reflectance" "uvtex"
+  {_CHECKER_QUAD}
+AttributeEnd
+"""
+
 SCENES: dict[str, str] = {
     # ── materials (one lobe family each) ──
     "mat_diffuse": _scene("mat_diffuse",
@@ -120,10 +189,26 @@ SCENES: dict[str, str] = {
         "mat_subsurface",
         'Material "subsurface" "rgb sigma_a" [0.02 0.04 0.06] "rgb sigma_s" [2.5 2.5 3.0] "float eta" 1.33',
         integrator="volpath", maxdepth=32),
+    # ── textured material ──
+    "mat_textured": _TEXTURED,
     # ── integrators (transport discriminators) ──
     "int_caustic": _scene(
         "int_caustic",
         'Material "dielectric" "float eta" 1.5', maxdepth=16, area_light="30 30 30"),
+    "int_indirect_box": _cornell_box(
+        "int_indirect_box", left="0.73 0.73 0.73", right="0.73 0.73 0.73",
+        emitter="40 40 40", baffle=True, maxdepth=12),
+    "int_bleed": _cornell_box(
+        "int_bleed", emitter="16 16 16", maxdepth=10,
+        center_obj=_diffuse(0.73, 0.73, 0.73)),
+    # ── sampling modes ──
+    "samp_many_lights": _light_grid(
+        "samp_many_lights",
+        'Material "coateddiffuse" "rgb reflectance" [0.2 0.2 0.2] "float roughness" 0.05'),
+    "samp_env_glossy": _scene(
+        "samp_env_glossy",
+        'Material "conductor" "spectrum eta" "metal-Al-eta" "spectrum k" "metal-Al-k" "float roughness" 0.25',
+        env="0.8 0.8 0.9", area_light=None),
     # ── furnace closure (lossless materials; reference is the analytic 1.0) ──
     "furnace_lambert": _scene(
         "furnace_lambert", 'Material "diffuse" "rgb reflectance" [1 1 1]', spp=128),

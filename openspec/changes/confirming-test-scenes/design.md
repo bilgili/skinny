@@ -194,3 +194,37 @@ repo workflow; suite files are committed with `git add -f` (`.gitignore` is `*`)
   manifest (start from the existing corpus's 256 spp and tighten from measurements).
 - SPPM × furnace and SPPM × subsurface validity — decided at the validity table with a
   recorded reason either way.
+
+## Implementation notes (as-built)
+
+Decisions locked while wiring the harness against the real code (refine D2/D3):
+
+- **Scenes register as `usd:`-source entries in the existing manifest.** `SceneSpec.usd`
+  already resolves relative to the repo root (`parity._repo_root`), so
+  `usd: "tests/assets/suite/<scene>/<scene>.usda"` loads directly with no harness change to
+  the source resolver. Dual authoring = two entries (`<scene>` plain, `<scene>_mtlx`)
+  sharing one `ref`; the `_mtlx` entry carries the `equivalence` disposition.
+- **`SceneSpec` grew four optional fields** (`suite`, `pbrt_skip`, `equivalence`, `furnace`),
+  all defaulting to off — purely additive, legacy scenes unaffected.
+- **Geometry parity via generation, not hand-authoring.** `usd_loader` ingests only
+  `UsdGeom.Mesh` (no analytic sphere), while pbrt renders analytic `Shape "sphere"`. To kill
+  the silhouette/radiometry mismatch, every pbrt-expressible scene is authored as a
+  tessellated `trianglemesh` in a hand-written `.pbrt`, and its committed `.usda` (plain) and
+  `_mtlx.usda`+`.mtlx` are **generated from that `.pbrt` by `import_pbrt`** — skinny's own
+  proven pbrt→USD bridge. The generator lives at `tests/assets/suite/_gen/{geom,build}.py`;
+  outputs are committed. This makes the three authorings provably the same scene.
+- **OpenPBR PBR-material scenes** (`mat_pbr_*`) are MaterialX-only (no pbrt, no plain-USD):
+  the OpenPBR inputs are extracted from the main-checkout cards and re-emitted as a
+  `standard_surface` `.mtlx` on the shared mini-shaderball geometry, with recorded
+  `pbrt_skip` + `equivalence.skip` dispositions.
+- **Suite scenes are scoped out of the legacy `test_parity.py` parametrization**
+  (`LEGACY_SPECS = [s for s in SPECS if not s.suite]`) so they aren't double-rendered; all
+  suite gating lives in `tests/pbrt/test_suite.py`.
+- **Furnace scenes ship a `.pbrt`** (for geometry generation) but are *not* pbrt-gated —
+  `regen_refs --scene suite` skips `furnace_*`, and their disposition is the analytic
+  closure value, not a reference EXR.
+- **Coverage keys on the `.pbrt` counterpart's existence, not the EXR**, so authoring is
+  complete without running pbrt; the reference EXR is a separate, deliberate regen step and
+  the pbrt-truth gate skips when it is absent.
+- **Constant environments** import as a tiny generated `light_infinite_*_const.hdr` + a
+  `DomeLight`; only the currently-referenced HDR per folder is kept (orphans pruned).

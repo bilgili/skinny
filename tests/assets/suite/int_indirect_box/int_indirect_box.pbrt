@@ -1,0 +1,35 @@
+LookAt 0 1.5 6  0 0.7 0  0 1 0
+Camera "perspective" "float fov" 30
+Sampler "independent" "integer pixelsamples" 256
+Integrator "path" "integer maxdepth" 12
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "int_indirect_box.exr"
+WorldBegin
+AttributeBegin
+  AreaLightSource "diffuse" "rgb L" [40 40 40]
+  Material "diffuse" "rgb reflectance" [0.0 0.0 0.0]
+  Shape "trianglemesh" "point3 P" [ -0.70000 3.95000 -0.70000 0.70000 3.95000 -0.70000 0.70000 3.95000 0.70000 -0.70000 3.95000 0.70000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.5 0.5 0.5]
+  Shape "trianglemesh" "point3 P" [ -1.10000 3.50000 -1.10000 1.10000 3.50000 -1.10000 1.10000 3.50000 1.10000 -1.10000 3.50000 1.10000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.73 0.73 0.73]
+  Shape "trianglemesh" "point3 P" [ -2.00000 0.00000 2.00000 2.00000 0.00000 2.00000 2.00000 0.00000 -2.00000 -2.00000 0.00000 -2.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.73 0.73 0.73]
+  Shape "trianglemesh" "point3 P" [ -2.00000 4.00000 -2.00000 2.00000 4.00000 -2.00000 2.00000 4.00000 2.00000 -2.00000 4.00000 2.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.73 0.73 0.73]
+  Shape "trianglemesh" "point3 P" [ -2.00000 0.00000 -2.00000 2.00000 0.00000 -2.00000 2.00000 4.00000 -2.00000 -2.00000 4.00000 -2.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.73 0.73 0.73]
+  Shape "trianglemesh" "point3 P" [ -2.00000 0.00000 2.00000 -2.00000 0.00000 -2.00000 -2.00000 4.00000 -2.00000 -2.00000 4.00000 2.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.73 0.73 0.73]
+  Shape "trianglemesh" "point3 P" [ 2.00000 0.00000 -2.00000 2.00000 0.00000 2.00000 2.00000 4.00000 2.00000 2.00000 4.00000 -2.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd

@@ -1,0 +1,137 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary pbrt = {
+            string colorSpace = "srgb"
+            dictionary film = {
+                dictionary paramTypes = {
+                    string filename = "string"
+                    string xresolution = "integer"
+                    string yresolution = "integer"
+                }
+                dictionary params = {
+                    string filename = "mat_textured.exr"
+                    int xresolution = 128
+                    int yresolution = 128
+                }
+            }
+            dictionary integrator = {
+                dictionary paramTypes = {
+                    string maxdepth = "integer"
+                }
+                dictionary params = {
+                    int maxdepth = 5
+                }
+                string type = "path"
+            }
+            dictionary sampler = {
+                dictionary paramTypes = {
+                    string pixelsamples = "integer"
+                }
+                dictionary params = {
+                    int pixelsamples = 256
+                }
+                string type = "independent"
+            }
+        }
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Mesh "shape_0" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [2, 1, 0, 3, 2, 0]
+        rel material:binding = </World/shape_0_mat>
+        point3f[] points = [(-1.2, -1.2, 0), (1.2, -1.2, 0), (1.2, 1.2, 0), (-1.2, 1.2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Material "shape_0_mat" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string reflectance = "texture"
+                }
+                dictionary params = {
+                    string reflectance = "uvtex"
+                }
+                string type = "diffuse"
+            }
+        }
+    )
+    {
+        token outputs:surface.connect = </World/shape_0_mat/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/shape_0_mat/diffuseColor_tex.outputs:rgb>
+            float inputs:metallic = 0
+            float inputs:opacity = 1
+            float inputs:roughness = 1
+            token outputs:surface
+        }
+
+        def Shader "diffuseColor_tex"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @/Users/ahmetbilgili/projects/skinny/.claude/worktrees/confirming-test-scenes/tests/assets/suite/mat_textured/texture_uv.png@
+            token inputs:sourceColorSpace = "sRGB"
+            token inputs:wrapS = "repeat"
+            token inputs:wrapT = "repeat"
+            float3 outputs:rgb
+        }
+    }
+
+    def Camera "Camera" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string fov = "float"
+                }
+                dictionary params = {
+                    double fov = 40
+                }
+                string type = "perspective"
+            }
+        }
+    )
+    {
+        float exposure = 0
+        float focalLength = 32.96973
+        float horizontalAperture = 24
+        custom float skinny:film:exposureTime = 1
+        custom float skinny:film:iso = 100
+        float verticalAperture = 24
+        matrix4d xformOp:transform = ( (-1, 0, 0, 0), (0, 1, 0, 0), (0, 0, -1, 0), (0, 0, -3.2, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def DomeLight "light_infinite_6240" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string L = "rgb"
+                }
+                dictionary params = {
+                    double[] L = [1, 1, 1]
+                }
+                string type = "infinite"
+            }
+        }
+    )
+    {
+        asset inputs:texture:file = @light_infinite_6240_const.hdr@
+    }
+}
+

@@ -17,29 +17,29 @@ are reported as before/after deltas with rendered images shown.
 ## 2. Core material scenes
 
 - [x] 2.1 Author `mat_diffuse`, `mat_conductor`, `mat_dielectric`, `mat_plastic` — each: `<scene>.usda` + `<scene>_mtlx.usda`/`.mtlx` + `<scene>.pbrt`
-- [ ] 2.2 Author `mat_emissive`, `mat_textured`, `mat_subsurface` the same way (texture scene reuses the existing `texture_uv.png` pattern approach)
+- [x] 2.2 Author `mat_emissive`, `mat_textured`, `mat_subsurface` the same way (texture scene reuses the existing `texture_uv.png` pattern approach)
 - [ ] 2.3 Generate pbrt reference EXRs via `tests/pbrt/regen_refs.py` (pinned pbrt, 128×128); verify each `.pbrt` runs unmodified with the user-facing pbrt invocation
 - [ ] 2.4 Add manifest entries (spp, tolerances measured-then-pinned, equivalence tolerances); hostless tests green
 - [ ] 2.5 Stage checkpoint: hostless tier auto; **ask user** before GPU sweep (matrix over the 7 scenes, both variants, mega+wave); persist `results/stage-2.json`, report deltas + images
 
 ## 3. PBR material scenes from assets
 
-- [ ] 3.1 Extract the selected OpenPBR Material prims (Gold, Copper, Glass, Plastic PC, Skin I, Gray Card, Musou Black) from `assets/materialxusd/tests/physically_based/*_OPBR_MAT_PBM.usda` into scene dirs as single self-contained prims (no 71-material library, no shaderball/HDR payloads, no `assets/` dependency; record source file per scene)
-- [ ] 3.2 Author the seven `mat_pbr_*` mini-shaderball scenes (MaterialX-authored variants; plain-USD variant = recorded skip with reason, pbrt gate = recorded skip)
-- [ ] 3.3 Add the opt-in `pbr_shaderball_smoke` gpu test: render 1–2 original shaderball scenes as-is from `assets/materialxusd/` (skip-if-missing so worktrees pass)
-- [ ] 3.4 Manifest entries + hostless tests; verify suite scenes load in a worktree without `assets/`
+- [x] 3.1 Extract the selected OpenPBR Material prims (Gold, Copper, Glass, Plastic PC, Skin I, Gray Card, Musou Black) from `assets/materialxusd/tests/physically_based/*_OPBR_MAT_PBM.usda` into scene dirs as single self-contained prims (no 71-material library, no shaderball/HDR payloads, no `assets/` dependency; record source file per scene)
+- [x] 3.2 Author the seven `mat_pbr_*` mini-shaderball scenes (MaterialX-authored variants; plain-USD variant = recorded skip with reason, pbrt gate = recorded skip)
+- [x] 3.3 Add the opt-in `pbr_shaderball_smoke` gpu test: render 1–2 original shaderball scenes as-is from `assets/materialxusd/` (skip-if-missing so worktrees pass)
+- [x] 3.4 Manifest entries + hostless tests; verify suite scenes load in a worktree without `assets/`
 - [ ] 3.5 Stage checkpoint: hostless auto; **ask user** before GPU sweep (self-consistency over the 7 scenes + smoke render); persist `results/stage-3.json`, report deltas + images
 
 ## 4. Integrator scenes
 
-- [ ] 4.1 Author `int_indirect_box`, `int_caustic`, `int_bleed` (usda + mtlx variant + pbrt counterpart each)
+- [x] 4.1 Author `int_indirect_box`, `int_caustic`, `int_bleed` (usda + mtlx variant + pbrt counterpart each)
 - [ ] 4.2 Generate pbrt refs; add manifest entries; record any legitimate integrator exclusions through `combo_is_valid` (e.g. SPPM × subsurface) with reasons
 - [ ] 4.3 Hostless tests green (scene validity + coverage meta-test)
 - [ ] 4.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (path/bdpt/sppm × mega/wave over the 3 scenes vs pbrt refs + anchor); persist `results/stage-4.json`, report deltas + images
 
 ## 5. Sampling-mode scenes
 
-- [ ] 5.1 Author `samp_many_lights` (16 emissive quads, glossy floor) + `samp_env_glossy` (rough conductor, high-contrast env, no analytic lights), dual variants + pbrt counterparts
+- [x] 5.1 Author `samp_many_lights` (16 emissive quads, glossy floor) + `samp_env_glossy` (rough conductor, high-contrast env, no analytic lights), dual variants + pbrt counterparts
 - [ ] 5.2 Wire ReSTIR DI and proposal/neural axes for these scenes into the matrix (statistical unbiasedness vs analytic anchor, not image equality, for the neural axis)
 - [ ] 5.3 Generate pbrt refs; manifest entries; hostless tests green
 - [ ] 5.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (sampling axes over the 2 scenes); persist `results/stage-5.json`, report deltas + images
