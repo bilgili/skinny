@@ -1,96 +1,102 @@
 // Camera Debug software rasteriser (change metal-tool-dock-render P2).
 //
 // The native Metal backend has no graphics pipeline, so the debug viewport's
-// line/triangle vertex streams are scan-converted in a compute kernel. This is
-// the phase-1 slice: a DDA line rasteriser with NO depth buffer yet (opaque
-// last-writer-wins). Triangles, depth, alpha-blend, and HUD text land in later
-// phases. The math mirrors `skinny.debug_raster_ref` byte-for-byte so the kernel
-// is checkable on the host without a GPU (task 3.6) and diffable against the GPU
-// output (task 3.8).
+// line/triangle vertex streams are scan-converted in a compute kernel. The math
+// mirrors `skinny.debug_raster_ref` byte-for-byte so the kernel is checkable on
+// the host without a GPU (task 3.6) and diffable against the GPU output (3.8).
 //
 // Vertex stream: 7 floats per vertex — `x y z r g b a` (debug_viewport
-// _VERTEX_FLOATS). Lines are a vertex list, 2 per line. `a > 1.5` marks a
-// screen-space HUD sentinel whose `xy` is already NDC (bypasses viewProj).
+// _VERTEX_FLOATS). Lines are a vertex list (2/line); triangles a vertex list
+// (3/tri). `a > 1.5` marks a screen-space HUD sentinel whose `xy` is already NDC
+// (bypasses viewProj, depth 0 = on top).
 //
-// Output: `colorOut` is a width*height packed-RGBA8 buffer (`r | g<<8 | b<<16 |
-// a<<24`); the host reads it back little-endian as an r,g,b,a byte stream.
+// Pipeline (design D4, host serialises the passes via wait-idle):
+//   clearImage + clearDepth → depthLines (atomic_min) → colorLines (write where
+//   this pixel owns the winning depth) → blendTris (alpha-blend, depth-test, no
+//   depth write; ordered after opaque lines).
 //
-// Entry names are NOT `main` (Slang's Metal target reserves it).
+// Output: `colorOut` = width*height packed-RGBA8 (`r | g<<8 | b<<16 | a<<24`),
+// read back little-endian as an r,g,b,a byte stream. `depthOut` = width*height
+// packed uint depth (nearest = smallest). Entry names are NOT `main` (Slang's
+// Metal target reserves it).
+//
+// Watchdog: lines = one thread/line, per-line DDA capped at gMaxSteps; tris = one
+// thread per (triangle, screen-row) so each thread walks at most one scanline
+// (<= width iterations). No single dispatch has an unbounded per-thread loop.
 
 static const uint VERTEX_FLOATS = 7u;
+static const float DEPTH_SCALE = 4294967040.0;  // 0xFFFFFF00
 
-// viewProj as four row-major math rows (clip = viewProj * [x,y,z,1]); passing
-// explicit rows avoids any Slang matrix-layout ambiguity between backends.
+// viewProj as four row-major math rows (clip = viewProj * [x,y,z,1]); explicit
+// rows avoid any Slang matrix-layout ambiguity between backends.
 uniform float4 gVP0;
 uniform float4 gVP1;
 uniform float4 gVP2;
 uniform float4 gVP3;
 uniform uint   gWidth;
 uniform uint   gHeight;
-uniform uint   gLineCount;
-uniform uint   gMaxSteps;      // per-line step cap (GPU watchdog bound)
+uniform uint   gCount;         // line count (line kernels) or tri count (blendTris)
+uniform uint   gMaxSteps;      // per-line DDA cap (GPU watchdog bound)
 uniform uint4  gClearPacked;   // .x = packed RGBA8 background
 
 StructuredBuffer<float> lineVerts;
+StructuredBuffer<float> triVerts;
 RWStructuredBuffer<uint> colorOut;
+RWStructuredBuffer<uint> depthOut;
 
 uint packRGBA(float4 c)
 {
     float4 v = clamp(c, 0.0, 1.0) * 255.0 + 0.5;
-    uint r = (uint)v.x;
-    uint g = (uint)v.y;
-    uint b = (uint)v.z;
-    uint a = (uint)v.w;
-    return r | (g << 8) | (b << 16) | (a << 24);
+    return (uint)v.x | ((uint)v.y << 8) | ((uint)v.z << 16) | ((uint)v.w << 24);
 }
 
-float3 loadPos(uint vi)
+float4 unpackRGBA(uint p)
+{
+    return float4(float(p & 0xFFu), float((p >> 8) & 0xFFu),
+                  float((p >> 16) & 0xFFu), float((p >> 24) & 0xFFu)) / 255.0;
+}
+
+uint packDepth(float d01)
+{
+    return (uint)(clamp(d01, 0.0, 1.0) * DEPTH_SCALE);
+}
+
+// Project vertex `vi` of `verts` → screen `pxy` + `d01`; false when behind eye.
+bool projectVertex(StructuredBuffer<float> verts, uint vi,
+                   out float2 pxy, out float d01)
 {
     uint base = vi * VERTEX_FLOATS;
-    return float3(lineVerts[base + 0], lineVerts[base + 1], lineVerts[base + 2]);
-}
-
-float4 loadColor(uint vi)
-{
-    uint base = vi * VERTEX_FLOATS;
-    return float4(lineVerts[base + 3], lineVerts[base + 4],
-                  lineVerts[base + 5], lineVerts[base + 6]);
-}
-
-// Project one vertex → (px, py) float pixel coords; `visible` false when behind
-// the eye. HUD sentinel (a > 1.5) treats xy as NDC directly.
-bool projectVertex(uint vi, out float2 pxy)
-{
-    float3 pos = loadPos(vi);
-    float alpha = lineVerts[vi * VERTEX_FLOATS + 6];
+    float3 pos = float3(verts[base + 0], verts[base + 1], verts[base + 2]);
+    float alpha = verts[base + 6];
     float ndcx, ndcy;
     if (alpha > 1.5)
     {
-        ndcx = pos.x;
-        ndcy = pos.y;
+        ndcx = pos.x; ndcy = pos.y; d01 = 0.0;
     }
     else
     {
         float4 posH = float4(pos, 1.0);
         float4 clip = float4(dot(gVP0, posH), dot(gVP1, posH),
                              dot(gVP2, posH), dot(gVP3, posH));
-        if (clip.w <= 1e-6)
-        {
-            pxy = float2(0.0, 0.0);
-            return false;
-        }
+        if (clip.w <= 1e-6) { pxy = float2(0.0, 0.0); d01 = 0.0; return false; }
         ndcx = clip.x / clip.w;
         ndcy = clip.y / clip.w;
+        d01 = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
     }
     pxy = float2((ndcx * 0.5 + 0.5) * float(gWidth),
                  (0.5 - ndcy * 0.5) * float(gHeight));
     return true;
 }
 
-void plot(int x, int y, uint packed)
+float4 loadColor(StructuredBuffer<float> verts, uint vi)
 {
-    if (x < 0 || y < 0 || x >= int(gWidth) || y >= int(gHeight)) return;
-    colorOut[uint(y) * gWidth + uint(x)] = packed;
+    uint base = vi * VERTEX_FLOATS;
+    return float4(verts[base + 3], verts[base + 4], verts[base + 5], verts[base + 6]);
+}
+
+bool inBounds(int x, int y)
+{
+    return x >= 0 && y >= 0 && x < int(gWidth) && y < int(gHeight);
 }
 
 [shader("compute")]
@@ -102,36 +108,114 @@ void clearImage(uint3 tid : SV_DispatchThreadID)
 }
 
 [shader("compute")]
+[numthreads(8, 8, 1)]
+void clearDepth(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= gWidth || tid.y >= gHeight) return;
+    depthOut[tid.y * gWidth + tid.x] = 0xFFFFFFFFu;
+}
+
+// Pass 1: deposit line depth via atomic_min (opaque, depth-writing).
+[shader("compute")]
 [numthreads(64, 1, 1)]
-void rasterLines(uint3 tid : SV_DispatchThreadID)
+void depthLines(uint3 tid : SV_DispatchThreadID)
 {
     uint li = tid.x;
-    if (li >= gLineCount) return;
+    if (li >= gCount) return;
+    float2 pa, pb; float da, db;
+    if (!projectVertex(lineVerts, li * 2u, pa, da)) return;
+    if (!projectVertex(lineVerts, li * 2u + 1u, pb, db)) return;
 
-    uint va = li * 2u;
-    uint vb = va + 1u;
-    float2 pa, pb;
-    if (!projectVertex(va, pa) || !projectVertex(vb, pb)) return;
-
-    uint packed = packRGBA(loadColor(va));
-
-    float dx = pb.x - pa.x;
-    float dy = pb.y - pa.y;
-    float adx = abs(dx);
-    float ady = abs(dy);
-    int steps = int(ceil(max(adx, ady)));
-    if (steps <= 0)
-    {
-        plot(int(floor(pa.x + 0.5)), int(floor(pa.y + 0.5)), packed);
-        return;
-    }
+    float dx = pb.x - pa.x, dy = pb.y - pa.y, dd = db - da;
+    int steps = int(ceil(max(abs(dx), abs(dy))));
+    if (steps < 0) steps = 0;
     if (uint(steps) > gMaxSteps) steps = int(gMaxSteps);
-    float inv = 1.0 / float(steps);
+    float inv = steps > 0 ? 1.0 / float(steps) : 0.0;
     for (int i = 0; i <= steps; ++i)
     {
         float t = float(i) * inv;
         int x = int(floor(pa.x + dx * t + 0.5));
         int y = int(floor(pa.y + dy * t + 0.5));
-        plot(x, y, packed);
+        if (!inBounds(x, y)) continue;
+        uint idx = uint(y) * gWidth + uint(x);
+        uint packed = packDepth(da + dd * t);
+        uint prev;
+        InterlockedMin(depthOut[idx], packed, prev);
+    }
+}
+
+// Pass 2: write line colour where this pixel owns the winning depth.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void colorLines(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = tid.x;
+    if (li >= gCount) return;
+    float2 pa, pb; float da, db;
+    if (!projectVertex(lineVerts, li * 2u, pa, da)) return;
+    if (!projectVertex(lineVerts, li * 2u + 1u, pb, db)) return;
+
+    uint packedCol = packRGBA(loadColor(lineVerts, li * 2u));
+    float dx = pb.x - pa.x, dy = pb.y - pa.y, dd = db - da;
+    int steps = int(ceil(max(abs(dx), abs(dy))));
+    if (steps < 0) steps = 0;
+    if (uint(steps) > gMaxSteps) steps = int(gMaxSteps);
+    float inv = steps > 0 ? 1.0 / float(steps) : 0.0;
+    for (int i = 0; i <= steps; ++i)
+    {
+        float t = float(i) * inv;
+        int x = int(floor(pa.x + dx * t + 0.5));
+        int y = int(floor(pa.y + dy * t + 0.5));
+        if (!inBounds(x, y)) continue;
+        uint idx = uint(y) * gWidth + uint(x);
+        if (depthOut[idx] == packDepth(da + dd * t))
+            colorOut[idx] = packedCol;
+    }
+}
+
+// Blend pass: one thread per (triangle, screen-row). Alpha-blend over the opaque
+// scene, depth-tested against the line depth, no depth write.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void blendTris(uint3 tid : SV_DispatchThreadID)
+{
+    uint ti = tid.x;
+    int row = int(tid.y);
+    if (ti >= gCount || row >= int(gHeight)) return;
+
+    float2 p0, p1, p2; float z0, z1, z2;
+    if (!projectVertex(triVerts, ti * 3u, p0, z0)) return;
+    if (!projectVertex(triVerts, ti * 3u + 1u, p1, z1)) return;
+    if (!projectVertex(triVerts, ti * 3u + 2u, p2, z2)) return;
+
+    float minYf = min(min(p0.y, p1.y), p2.y);
+    float maxYf = max(max(p0.y, p1.y), p2.y);
+    if (float(row) + 0.5 < floor(minYf) || float(row) > ceil(maxYf)) return;
+
+    float area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+    if (abs(area) < 1e-9) return;
+    float invArea = 1.0 / area;
+
+    int minX = max(int(floor(min(min(p0.x, p1.x), p2.x))), 0);
+    int maxX = min(int(ceil(max(max(p0.x, p1.x), p2.x))), int(gWidth) - 1);
+
+    float4 col = loadColor(triVerts, ti * 3u);
+    float3 src = clamp(col.rgb, 0.0, 1.0);
+    float alpha = clamp(col.a, 0.0, 1.0);
+    float py = float(row) + 0.5;
+
+    for (int x = minX; x <= maxX; ++x)
+    {
+        float px = float(x) + 0.5;
+        float w0 = ((p1.x - px) * (p2.y - py) - (p2.x - px) * (p1.y - py)) * invArea;
+        float w1 = ((p2.x - px) * (p0.y - py) - (p0.x - px) * (p2.y - py)) * invArea;
+        float w2 = 1.0 - w0 - w1;
+        if (w0 < 0.0 || w1 < 0.0 || w2 < 0.0) continue;
+        float d01 = w0 * z0 + w1 * z1 + w2 * z2;
+        uint idx = uint(row) * gWidth + uint(x);
+        if (packDepth(d01) > depthOut[idx]) continue;
+        float3 dst = unpackRGBA(colorOut[idx]).rgb;
+        float3 outc = clamp(src * alpha + dst * (1.0 - alpha), 0.0, 1.0);
+        colorOut[idx] = packRGBA(float4(outc, 1.0));
     }
 }

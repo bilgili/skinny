@@ -1129,84 +1129,105 @@ class DebugRasterMetal:
         src = self.shader_dir / "debug_raster.slang"
         module = session.load_module_from_source(
             "debug_raster", src.read_text(encoding="utf-8"), str(src))
-        self._clear_kernel = dev.create_compute_kernel(
-            session.link_program([module], [module.entry_point("clearImage")]))
-        self._lines_kernel = dev.create_compute_kernel(
-            session.link_program([module], [module.entry_point("rasterLines")]))
+
+        def _kernel(entry):
+            return dev.create_compute_kernel(
+                session.link_program([module], [module.entry_point(entry)]))
+
+        self._clear_color = _kernel("clearImage")
+        self._clear_depth = _kernel("clearDepth")
+        self._depth_lines = _kernel("depthLines")
+        self._color_lines = _kernel("colorLines")
+        self._blend_tris = _kernel("blendTris")
+
         self._color = None   # packed-RGBA8 output (uint per pixel)
+        self._depth = None   # packed depth (uint per pixel)
         self._color_px = 0
-        self._verts = None   # line vertex StorageBuffer (float32)
+        self._lverts = None  # line vertex StorageBuffer (float32)
+        self._tverts = None  # triangle vertex StorageBuffer (float32)
 
-    def _ensure_color(self, px: int) -> None:
-        need = px * 4
-        if self._color is None or self._color.size < need:
-            if self._color is not None:
-                self._color.destroy()
-            self._color = StorageBuffer(self.ctx, need)
-        self._color_px = px
-
-    def _ensure_verts(self, nbytes: int) -> None:
+    @staticmethod
+    def _grow(buf, nbytes, ctx):
         nbytes = max(int(nbytes), 16)
-        if self._verts is None or self._verts.size < nbytes:
-            if self._verts is not None:
-                self._verts.destroy()
-            self._verts = StorageBuffer(self.ctx, nbytes)
+        if buf is None or buf.size < nbytes:
+            if buf is not None:
+                buf.destroy()
+            return StorageBuffer(ctx, nbytes)
+        return buf
 
-    def render(self, line_floats, view_proj, width: int, height: int, *,
-               max_steps: int = 1 << 16) -> bytes:
-        """Rasterise the line stream → RGBA8 bytes (``width*height*4``, row 0 =
-        top). ``view_proj`` is the math-form 4x4 (row-major, clip = VP·[x,y,z,1])
-        the reference uses; ``line_floats`` is a flat float sequence
-        (``_VERTEX_FLOATS`` per vertex, 2 per line)."""
+    def render(self, line_floats, tri_floats, view_proj, width: int, height: int,
+               *, max_steps: int = 1 << 16) -> bytes:
+        """Rasterise the line + triangle streams → RGBA8 bytes (``width*height*4``,
+        row 0 = top). ``view_proj`` is the math-form 4x4 (row-major, clip =
+        VP·[x,y,z,1]); ``line_floats`` / ``tri_floats`` are flat float sequences
+        (``_VERTEX_FLOATS`` per vertex; 2/line, 3/triangle). Lines are opaque and
+        depth-ordered; triangles alpha-blend over them (depth-tested, no depth
+        write), mirroring :func:`skinny.debug_raster_ref.rasterise`."""
         from skinny.debug_raster_ref import CLEAR_RGBA8
         dev = self.ctx.device
         w, h = int(width), int(height)
         px = w * h
-        self._ensure_color(px)
+        self._color = self._grow(self._color, px * 4, self.ctx)
+        self._depth = self._grow(self._depth, px * 4, self.ctx)
+        self._color_px = px
         r, g, b, a = CLEAR_RGBA8
         clear_packed = int(r | (g << 8) | (b << 16) | (a << 24)) & 0xFFFFFFFF
-        clear_vec = [clear_packed, 0, 0, 0]
+        vp = np.ascontiguousarray(view_proj, dtype=np.float32).reshape(4, 4)
+        vp_vars = {"gVP0": vp[0].tolist(), "gVP1": vp[1].tolist(),
+                   "gVP2": vp[2].tolist(), "gVP3": vp[3].tolist()}
 
-        self._clear_kernel.dispatch(
+        # Clear colour + depth.
+        self._clear_color.dispatch(
             thread_count=[w, h, 1],
-            vars={
-                "colorOut": self._color.buffer,
-                "gWidth": w, "gHeight": h,
-                "gClearPacked": clear_vec,
-            },
-        )
+            vars={"colorOut": self._color.buffer, "gWidth": w, "gHeight": h,
+                  "gClearPacked": [clear_packed, 0, 0, 0]})
+        self._clear_depth.dispatch(
+            thread_count=[w, h, 1],
+            vars={"depthOut": self._depth.buffer, "gWidth": w, "gHeight": h})
         dev.wait_for_idle()
 
-        verts = np.ascontiguousarray(line_floats, dtype=np.float32).ravel()
-        n_lines = int(verts.size // (self._VERTEX_FLOATS * 2))
+        lverts = np.ascontiguousarray(line_floats, dtype=np.float32).ravel()
+        n_lines = int(lverts.size // (self._VERTEX_FLOATS * 2))
         if n_lines > 0:
-            self._ensure_verts(verts.nbytes)
-            self._verts.upload_sync(verts.tobytes())
-            vp = np.ascontiguousarray(view_proj, dtype=np.float32).reshape(4, 4)
-            self._lines_kernel.dispatch(
-                thread_count=[n_lines, 1, 1],
-                vars={
-                    "lineVerts": self._verts.buffer,
-                    "colorOut": self._color.buffer,
-                    "gVP0": vp[0].tolist(), "gVP1": vp[1].tolist(),
-                    "gVP2": vp[2].tolist(), "gVP3": vp[3].tolist(),
-                    "gWidth": w, "gHeight": h, "gLineCount": n_lines,
-                    "gMaxSteps": int(max_steps),
-                },
-            )
+            self._lverts = self._grow(self._lverts, lverts.nbytes, self.ctx)
+            self._lverts.upload_sync(lverts.tobytes())
+            common = {"lineVerts": self._lverts.buffer,
+                      "colorOut": self._color.buffer, "depthOut": self._depth.buffer,
+                      "gWidth": w, "gHeight": h, "gCount": n_lines,
+                      "gMaxSteps": int(max_steps), **vp_vars}
+            # Pass 1 (depth) then pass 2 (colour) — depth must be complete before
+            # the colour pass re-reads the winning depth.
+            self._depth_lines.dispatch(thread_count=[n_lines, 1, 1], vars=common)
+            dev.wait_for_idle()
+            self._color_lines.dispatch(thread_count=[n_lines, 1, 1], vars=common)
+            dev.wait_for_idle()
+
+        tverts = np.ascontiguousarray(tri_floats, dtype=np.float32).ravel()
+        n_tris = int(tverts.size // (self._VERTEX_FLOATS * 3))
+        if n_tris > 0:
+            self._tverts = self._grow(self._tverts, tverts.nbytes, self.ctx)
+            self._tverts.upload_sync(tverts.tobytes())
+            # One thread per (triangle, screen-row): each walks <= width pixels.
+            self._blend_tris.dispatch(
+                thread_count=[n_tris, h, 1],
+                vars={"triVerts": self._tverts.buffer,
+                      "colorOut": self._color.buffer, "depthOut": self._depth.buffer,
+                      "gWidth": w, "gHeight": h, "gCount": n_tris, **vp_vars})
             dev.wait_for_idle()
 
         return self._color.download_sync(px * 4)
 
     def destroy(self) -> None:
-        if self._color is not None:
-            self._color.destroy()
-            self._color = None
-        if self._verts is not None:
-            self._verts.destroy()
-            self._verts = None
-        self._clear_kernel = None
-        self._lines_kernel = None
+        for name in ("_color", "_depth", "_lverts", "_tverts"):
+            buf = getattr(self, name, None)
+            if buf is not None:
+                buf.destroy()
+                setattr(self, name, None)
+        self._clear_color = None
+        self._clear_depth = None
+        self._depth_lines = None
+        self._color_lines = None
+        self._blend_tris = None
 
 
 class MetalFrameEncoder:

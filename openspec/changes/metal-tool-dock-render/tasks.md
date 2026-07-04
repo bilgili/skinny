@@ -46,11 +46,20 @@
       host in `metal_compute.py` (reused/grown vertex + color buffers, two bounded
       dispatches, readback → RGBA8 bytes). GPU cross-check vs the numpy reference
       PASSED (`tests/test_metal_debug_raster.py`, gated `RUN_METAL_DEBUG_RASTER`).
-- [ ] 3.2 Triangle rasteriser (edge-function + barycentric) into the same output.
-- [ ] 3.3 Depth buffer: `uint` UAV `w×h`, `atomic_min` packed depth; opaque
-      lines/tris depth-test-and-write.
-- [ ] 3.4 Alpha blend pass for transparent planes (`color.a < 1`), depth-test-no-
-      write, ordered after opaque (mirrors the Vulkan two-pipeline split).
+- [x] 3.2 Triangle rasteriser (`blendTris`): edge-function + barycentric,
+      one thread per (triangle, screen-row) so each thread walks ≤ width pixels
+      (watchdog-safe); flat vertex-A colour. Mirrored in the reference.
+- [x] 3.3 Depth buffer: `uint` UAV `w×h` (`depthOut`), `InterlockedMin` packed
+      depth (near→0). Lines are opaque and depth-ordered via a two-pass
+      `depthLines` (atomic_min) → `colorLines` (write where the pixel owns the
+      winning depth). `clearDepth` kernel resets it each frame.
+- [x] 3.4 Alpha blend: `blendTris` composes transparent planes src-alpha over,
+      depth-tested against the opaque line depth, NO depth write, ordered after
+      the opaque passes — mirrors the Vulkan two-pipeline split. Verified: nearer
+      line occludes farther, translucent panel blends (GPU cross-check +
+      hostless: `test_opaque_triangle_fills_interior`, `test_alpha_blend_over_
+      background`, `test_nearer_line_wins_depth`, `test_transparent_triangle_
+      occluded_by_nearer_line`).
 - [x] 3.5 Screen-space HUD text (`color.a > 1.5` sentinel bypasses view·proj) —
       implemented in `projectVertex` (kernel treats sentinel `xy` as NDC),
       mirrored in the reference; HUD glyph lines render (demo grid+AABB+HUD frame).
