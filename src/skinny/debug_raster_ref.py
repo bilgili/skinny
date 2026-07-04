@@ -89,7 +89,7 @@ def project_vertex(vert, view_proj: np.ndarray, width: int, height: int):
 
 def _raster_line_depth(img, depth, x0, y0, d0, x1, y1, d1, rgba, tag: int,
                        max_steps: int = 1 << 16) -> None:
-    """DDA line, opaque, depth-tested + writing the `depth24<<8 | tag` key.
+    """DDA line, opaque, depth-tested + writing the `depth16<<16 | tag` key.
     Bounded by `max_steps` (the MSL kernel caps identically for the watchdog)."""
     h, w, _ = img.shape
     dx = x1 - x0

@@ -219,7 +219,7 @@ void blendTris(uint3 tid : SV_DispatchThreadID)
         if (w0 < 0.0 || w1 < 0.0 || w2 < 0.0) continue;
         float d01 = w0 * z0 + w1 * z1 + w2 * z2;
         uint idx = uint(row) * gWidth + uint(x);
-        // Strict depth test against the opaque line depth (high 24 bits),
+        // Strict depth test against the opaque line depth (high 16 bits),
         // occluding on equal depth — Vulkan VK_COMPARE_OP_LESS.
         if (packDepth(d01) >= (depthOut[idx] >> 16)) continue;
         float3 dst = unpackRGBA(colorOut[idx]).rgb;
