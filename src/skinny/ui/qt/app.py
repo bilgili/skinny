@@ -30,6 +30,7 @@ import numpy as np
 
 from skinny.cli_common import (
     add_render_flags,
+    reject_sppm_without_wavefront,
     resolve_execution_mode,
     resolve_walk,
     startup_integrator_name,
@@ -661,6 +662,11 @@ def main() -> None:
     _startup_integrator = startup_integrator_name(
         args.integrator, saved_settings.get("params", {}).get("integrator_index"))
     args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
+    # validate_render_flags (above) is keyed on the CLI --integrator and ran before
+    # the persisted integrator was known, so re-check the resolved mode against the
+    # effective startup integrator: a persisted sppm under an explicitly-forced
+    # --execution-mode megakernel must still be refused before the GPU comes up.
+    reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,

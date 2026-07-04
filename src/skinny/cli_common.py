@@ -109,15 +109,10 @@ def validate_render_flags(args) -> None:
         # SPPM is wavefront-only (no global photon map under the megakernel). The
         # execution mode is resolved before this validator, so plain `--integrator
         # sppm` already derived `wavefront` (auto) — this only trips when the user
-        # explicitly forced `--execution-mode megakernel`.
-        if getattr(args, "execution_mode", "megakernel") == "megakernel":
-            raise SystemExit(
-                "skinny: --integrator sppm has no megakernel path — SPPM "
-                "(Stochastic Progressive Photon Mapping) shares a global "
-                "visible-point / photon-grid structure across pixels. Drop the "
-                "explicit --execution-mode megakernel (sppm auto-selects "
-                "wavefront) or pass --execution-mode wavefront."
-            )
+        # explicitly forced `--execution-mode megakernel`. The interactive
+        # front-ends additionally re-check the *persisted* sppm case (which this
+        # CLI-integrator-keyed guard cannot see) via reject_sppm_without_wavefront.
+        reject_sppm_without_wavefront(integrator, getattr(args, "execution_mode", "megakernel"))
         return
     if integrator != "bdpt":
         return
@@ -177,6 +172,24 @@ def startup_integrator_name(cli_integrator: str | None, persisted_index=None) ->
         return {v: k for k, v in INTEGRATOR_INDEX.items()}.get(int(persisted_index), "path")
     except (TypeError, ValueError):
         return "path"
+
+
+def reject_sppm_without_wavefront(integrator: str | None, execution_mode: str | None) -> None:
+    """Refuse an ``sppm`` integrator under the megakernel — SPPM has no megakernel
+    path. Checks the **effective** startup integrator against the **resolved**
+    execution mode, so it catches both the explicit ``--integrator sppm`` case
+    (via :func:`validate_render_flags`) and the interactive case where ``sppm``
+    comes from the persisted setting while ``--execution-mode megakernel`` was
+    explicitly forced — which ``validate_render_flags`` (keyed on the CLI
+    ``--integrator``) cannot see. Raises ``SystemExit``; a no-op otherwise."""
+    if integrator == "sppm" and (execution_mode or "megakernel") == "megakernel":
+        raise SystemExit(
+            "skinny: --integrator sppm has no megakernel path — SPPM "
+            "(Stochastic Progressive Photon Mapping) shares a global "
+            "visible-point / photon-grid structure across pixels. Drop the "
+            "explicit --execution-mode megakernel (sppm auto-selects "
+            "wavefront) or pass --execution-mode wavefront."
+        )
 
 
 def apply_sppm_glossy_roughness(renderer, args) -> None:

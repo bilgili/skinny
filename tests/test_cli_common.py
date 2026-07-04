@@ -16,6 +16,7 @@ from skinny.cli_common import (
     INTEGRATOR_INDEX,
     WALK_CHOICES,
     add_render_flags,
+    reject_sppm_without_wavefront,
     resolve_execution_mode,
     resolve_walk,
     startup_integrator_name,
@@ -168,6 +169,49 @@ def test_startup_integrator_uses_persisted_index_when_no_cli():
 def test_startup_integrator_falls_back_to_path(bad):
     # Missing / out-of-range / malformed persisted index → 'path'.
     assert startup_integrator_name(None, bad) == "path"
+
+
+# ── reject_sppm_without_wavefront (effective-integrator guard) ────────
+
+def test_reject_sppm_megakernel_raises():
+    with pytest.raises(SystemExit) as ei:
+        reject_sppm_without_wavefront("sppm", "megakernel")
+    assert "sppm" in str(ei.value).lower() and "wavefront" in str(ei.value)
+
+
+def test_reject_sppm_none_mode_raises():
+    # A missing resolved mode defaults to megakernel → still refused.
+    with pytest.raises(SystemExit):
+        reject_sppm_without_wavefront("sppm", None)
+
+
+@pytest.mark.parametrize("integrator,mode", [
+    ("sppm", "wavefront"),
+    ("path", "megakernel"),
+    ("bdpt", "megakernel"),
+    (None, "megakernel"),
+])
+def test_reject_sppm_noop_on_valid(integrator, mode):
+    reject_sppm_without_wavefront(integrator, mode)  # no raise
+
+
+def test_interactive_persisted_sppm_plus_explicit_megakernel_refused():
+    # The escaped combo: no CLI --integrator, persisted integrator_index 2 (sppm),
+    # explicit --execution-mode megakernel. validate_render_flags (CLI-keyed) can't
+    # see it; the interactive front-ends re-check the effective startup integrator.
+    startup = startup_integrator_name(None, 2)          # persisted sppm
+    mode = resolve_execution_mode("megakernel", startup)  # explicit wins → megakernel
+    assert startup == "sppm" and mode == "megakernel"
+    with pytest.raises(SystemExit):
+        reject_sppm_without_wavefront(startup, mode)
+
+
+def test_interactive_persisted_sppm_auto_is_ok():
+    # Same persisted sppm, but auto (no explicit mode) → wavefront → no error.
+    startup = startup_integrator_name(None, 2)
+    mode = resolve_execution_mode("auto", startup)
+    assert mode == "wavefront"
+    reject_sppm_without_wavefront(startup, mode)  # no raise
 
 
 # ── --neural-handoff (online-training weight handoff backend) ─────────
