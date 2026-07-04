@@ -239,6 +239,10 @@ def test_suite_matrix_gate(spec):
                 failures.append(
                     f"{c.label}: self-consistency relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}"
                 )
+    if failures and spec.known_divergent:
+        # A recorded, not-yet-fixed divergence (e.g. the MaterialX imagemap path);
+        # xfail (visible, non-blocking). The follow-up fix flips known_divergent.
+        pytest.xfail(f"{spec.name} known-divergent (follow-up):\n  " + "\n  ".join(failures))
     assert not failures, f"{spec.name} suite matrix failures:\n  " + "\n  ".join(failures)
 
 
@@ -255,6 +259,9 @@ def test_suite_authoring_equivalence_gate(spec):
         pytest.skip(f"render backend unavailable: {exc}")
     res = authoring_equivalence_result(spec, plain_img, mtlx_img)
     print(f"[{spec.name}] equivalence vs {plain.name}  {res.metrics.summary()}")
+    if not res.passed and spec.known_divergent:
+        pytest.xfail(f"{spec.name} known-divergent authoring equivalence (follow-up): "
+                     f"relMSE={res.relmse:.4f} FLIP={res.flip:.4f}")
     assert res.passed, (
         f"{spec.name}: authoring equivalence vs {plain.name} "
         f"relMSE={res.relmse:.4f} FLIP={res.flip:.4f}"

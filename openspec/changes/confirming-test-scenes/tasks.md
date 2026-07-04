@@ -19,8 +19,8 @@ are reported as before/after deltas with rendered images shown.
 - [x] 2.1 Author `mat_diffuse`, `mat_conductor`, `mat_dielectric`, `mat_plastic` — each: `<scene>.usda` + `<scene>_mtlx.usda`/`.mtlx` + `<scene>.pbrt`
 - [x] 2.2 Author `mat_emissive`, `mat_textured`, `mat_subsurface` the same way (texture scene reuses the existing `texture_uv.png` pattern approach)
 - [x] 2.3 Generate pbrt reference EXRs via `tests/pbrt/regen_refs.py` (pinned pbrt, 128×128); verify each `.pbrt` runs unmodified with the user-facing pbrt invocation
-- [ ] 2.4 Add manifest entries (spp, tolerances measured-then-pinned, equivalence tolerances); hostless tests green
-- [ ] 2.5 Stage checkpoint: hostless tier auto; **ask user** before GPU sweep (matrix over the 7 scenes, both variants, mega+wave); persist `results/stage-2.json`, report deltas + images
+- [x] 2.4 Add manifest entries (spp, tolerances measured-then-pinned, equivalence tolerances); hostless tests green
+- [x] 2.5 Stage checkpoint: hostless tier auto; **ask user** before GPU sweep (matrix over the 7 scenes, both variants, mega+wave); persist `results/stage-2.json`, report deltas + images
 
 ## 3. PBR material scenes from assets
 
@@ -34,15 +34,15 @@ are reported as before/after deltas with rendered images shown.
 
 - [x] 4.1 Author `int_indirect_box`, `int_caustic`, `int_bleed` (usda + mtlx variant + pbrt counterpart each)
 - [x] 4.2 Generate pbrt refs; add manifest entries; record any legitimate integrator exclusions through `combo_is_valid` (e.g. SPPM × subsurface) with reasons
-- [ ] 4.3 Hostless tests green (scene validity + coverage meta-test)
-- [ ] 4.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (path/bdpt/sppm × mega/wave over the 3 scenes vs pbrt refs + anchor); persist `results/stage-4.json`, report deltas + images
+- [x] 4.3 Hostless tests green (scene validity + coverage meta-test)
+- [x] 4.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (path/bdpt/sppm × mega/wave over the 3 scenes vs pbrt refs + anchor); persist `results/stage-4.json`, report deltas + images
 
 ## 5. Sampling-mode scenes
 
 - [x] 5.1 Author `samp_many_lights` (16 emissive quads, glossy floor) + `samp_env_glossy` (rough conductor, high-contrast env, no analytic lights), dual variants + pbrt counterparts
-- [ ] 5.2 Wire ReSTIR DI and proposal/neural axes for these scenes into the matrix (statistical unbiasedness vs analytic anchor, not image equality, for the neural axis)
+- [x] 5.2 Wire ReSTIR DI and proposal/neural axes for these scenes into the matrix (statistical unbiasedness vs analytic anchor, not image equality, for the neural axis)
 - [x] 5.3 Generate pbrt refs; manifest entries; hostless tests green
-- [ ] 5.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (sampling axes over the 2 scenes); persist `results/stage-5.json`, report deltas + images
+- [x] 5.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (sampling axes over the 2 scenes); persist `results/stage-5.json`, report deltas + images
 
 ## 6. Furnace closure
 
@@ -55,7 +55,7 @@ are reported as before/after deltas with rendered images shown.
 
 ## 7. Final regression + docs + validation
 
-- [ ] 7.1 Full regression comparison: **ask user**, then run the complete matrix (existing corpus + all new scenes) and diff every metric against pre-change values; flag any regression in existing scenes
+- [x] 7.1 Full regression comparison: **ask user**, then run the complete matrix (existing corpus + all new scenes) and diff every metric against pre-change values; flag any regression in existing scenes
 - [x] 7.2 Update `docs/Architecture.md` (Parity Matrix Harness: suite location, equivalence + furnace gate classes), `CLAUDE.md` (parity harness section pointer), `README.md` if user-facing
-- [ ] 7.3 `.venv/bin/ruff check src/` clean; full hostless `pytest` green; kill-harness check not needed (no dispatch-length changes) — confirm and note
-- [ ] 7.4 `openspec validate confirming-test-scenes` passes; results dir committed; ready for archive
+- [x] 7.3 `.venv/bin/ruff check src/` clean; full hostless `pytest` green; kill-harness check not needed (no dispatch-length changes) — confirm and note
+- [x] 7.4 `openspec validate confirming-test-scenes` passes; results dir committed; ready for archive
