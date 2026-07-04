@@ -25,7 +25,7 @@
 // (<= width iterations). No single dispatch has an unbounded per-thread loop.
 
 static const uint VERTEX_FLOATS = 7u;
-static const float DEPTH_SCALE = 16777215.0;  // 0xFFFFFF — 24-bit depth (low byte = line tag)
+static const float DEPTH_SCALE = 65535.0;  // 0xFFFF — 16-bit depth (low 16 bits = line tag)
 
 // viewProj as four row-major math rows (clip = viewProj * [x,y,z,1]); explicit
 // rows avoid any Slang matrix-layout ambiguity between backends.
@@ -56,9 +56,11 @@ float4 unpackRGBA(uint p)
                   float((p >> 16) & 0xFFu), float((p >> 24) & 0xFFu)) / 255.0;
 }
 
-// 24-bit depth (near→0). The full key is `packDepth(d) << 8 | (lineTag & 0xFF)`,
-// so atomic_min orders by depth then by the smallest line index at equal depth
-// (deterministic tie-break ≈ Vulkan VK_COMPARE_OP_LESS "earlier draw wins").
+// 16-bit depth (near→0). The full key is `packDepth(d) << 16 | (lineTag &
+// 0xFFFF)`, so atomic_min orders by depth then by the smallest line index at
+// equal depth (deterministic tie-break ≈ Vulkan VK_COMPARE_OP_LESS "earlier draw
+// wins"; the host caps the stream to ≤ 65535 lines so the 16-bit tag never
+// collides).
 uint packDepth(float d01)
 {
     return (uint)(clamp(d01, 0.0, 1.0) * DEPTH_SCALE);
@@ -141,7 +143,7 @@ void depthLines(uint3 tid : SV_DispatchThreadID)
         int y = int(floor(pa.y + dy * t + 0.5));
         if (!inBounds(x, y)) continue;
         uint idx = uint(y) * gWidth + uint(x);
-        uint key = (packDepth(da + dd * t) << 8) | (li & 0xFFu);
+        uint key = (packDepth(da + dd * t) << 16) | (li & 0xFFFFu);
         uint prev;
         InterlockedMin(depthOut[idx], key, prev);
     }
@@ -171,7 +173,7 @@ void colorLines(uint3 tid : SV_DispatchThreadID)
         int y = int(floor(pa.y + dy * t + 0.5));
         if (!inBounds(x, y)) continue;
         uint idx = uint(y) * gWidth + uint(x);
-        uint key = (packDepth(da + dd * t) << 8) | (li & 0xFFu);
+        uint key = (packDepth(da + dd * t) << 16) | (li & 0xFFFFu);
         if (depthOut[idx] == key)
             colorOut[idx] = packedCol;
     }
@@ -219,7 +221,7 @@ void blendTris(uint3 tid : SV_DispatchThreadID)
         uint idx = uint(row) * gWidth + uint(x);
         // Strict depth test against the opaque line depth (high 24 bits),
         // occluding on equal depth — Vulkan VK_COMPARE_OP_LESS.
-        if (packDepth(d01) >= (depthOut[idx] >> 8)) continue;
+        if (packDepth(d01) >= (depthOut[idx] >> 16)) continue;
         float3 dst = unpackRGBA(colorOut[idx]).rgb;
         float3 outc = clamp(src * alpha + dst * (1.0 - alpha), 0.0, 1.0);
         colorOut[idx] = packRGBA(float4(outc, 1.0));

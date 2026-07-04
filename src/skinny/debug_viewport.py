@@ -40,6 +40,13 @@ _MAX_LINE_VERTICES = _LINE_BUFFER_BYTES // _VERTEX_STRIDE_BYTES
 # 1 MiB / 28 B = ~37k vertices for the triangle stream.
 _TRI_BUFFER_BYTES = 1 * 1024 * 1024
 _MAX_TRI_VERTICES = _TRI_BUFFER_BYTES // _VERTEX_STRIDE_BYTES
+# Metal compute rasteriser only: the depth key is `depth16 << 16 | (lineIdx &
+# 0xFFFF)`, so the line stream is capped to a 16-bit index space (≤ 65535 lines)
+# to keep the equal-depth tie-break collision-free and deterministic. Well above
+# any real debug scene (grid + frustum + wireframes are ~hundreds–thousands of
+# lines), and below the `_MAX_LINE_VERTICES` (~74.9k line) buffer budget.
+_METAL_MAX_DEBUG_LINES = 0xFFFF
+_METAL_MAX_LINE_VERTICES = min(_MAX_LINE_VERTICES, 2 * _METAL_MAX_DEBUG_LINES)
 
 _DEFAULT_WIDTH = 960
 _DEFAULT_HEIGHT = 720
@@ -838,12 +845,13 @@ class DebugViewport:
         if self._metal_raster is None:
             return None
         line_floats, tri_floats = self._generate_streams(renderer)
-        # Cap the streams to the same vertex budgets the Vulkan `_upload_stream`
-        # enforces — the AABB branch (unlike mesh-wires) is not bounded during
-        # generation, so a many-instance scene could otherwise dispatch an
-        # unbounded `depthLines`/`colorLines` (metal-dispatch-hygiene, codex).
+        # Cap the streams — the AABB branch (unlike mesh-wires) is not bounded
+        # during generation, so a many-instance scene could otherwise dispatch an
+        # unbounded `depthLines`/`colorLines` (metal-dispatch-hygiene, codex). The
+        # line cap is the 16-bit-tag limit (`_METAL_MAX_LINE_VERTICES`), keeping
+        # the equal-depth tie-break collision-free; triangles use the full budget.
         line_floats = self._cap_stream(
-            line_floats, _MAX_LINE_VERTICES, even=True, tri_align=False)
+            line_floats, _METAL_MAX_LINE_VERTICES, even=True, tri_align=False)
         tri_floats = self._cap_stream(
             tri_floats, _MAX_TRI_VERTICES, even=False, tri_align=True)
         vp = self._metal_view_proj()

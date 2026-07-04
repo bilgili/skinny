@@ -29,12 +29,13 @@ rasteriser — the two backends are independent):
 - NDC→pixel: `px = (ndc.x*0.5 + 0.5) * W`, `py = (0.5 - ndc.y*0.5) * H`
   (row 0 = top, +y_ndc up).
 - Depth key: `d01 = clip.z/clip.w * 0.5 + 0.5` clamped to [0,1] (near→0 wins),
-  quantised to 24 bits (`pack_depth`) and stored as `depth24 << 8 | (line_idx &
-  0xFF)`. atomic_min orders primarily by depth (nearest wins) and, at equal
-  depth, by the low-byte line tag (smallest line index wins) — a deterministic
-  tie-break that matches the Vulkan `VK_COMPARE_OP_LESS` "earlier draw wins".
-  HUD sentinels use `d01 = 0` so they stay on top.
-- Triangles are depth-tested strictly against the winning **depth** (high 24
+  quantised to 16 bits (`pack_depth`) and stored as `depth16 << 16 | (line_idx &
+  0xFFFF)`. atomic_min orders primarily by depth (nearest wins) and, at equal
+  depth, by the 16-bit line tag (smallest line index wins) — a deterministic
+  tie-break that matches the Vulkan `VK_COMPARE_OP_LESS` "earlier draw wins". The
+  Metal line stream is capped to `≤ 65535` lines (`_METAL_MAX_DEBUG_LINES`) so
+  the tag never collides. HUD sentinels use `d01 = 0` so they stay on top.
+- Triangles are depth-tested strictly against the winning **depth** (high 16
   bits), occluding on equal depth — same as the Vulkan transparent pipeline's
   `VK_COMPARE_OP_LESS` (an equal-depth fill does not blend over its outline).
 - A primitive is dropped if any vertex has `clip.w <= 0` (behind the eye) — no
@@ -48,8 +49,8 @@ import numpy as np
 
 VERTEX_FLOATS = 7
 CLEAR_RGBA8 = (13, 13, 18, 255)  # round(255 * (0.05, 0.05, 0.07, 1.0))
-DEPTH_CLEAR = 0xFFFFFFFF  # depth24 0xFFFFFF (far) | tag 0xFF
-DEPTH_SCALE = 16777215.0  # 0xFFFFFF — 24-bit depth (low byte reserved for the tag)
+DEPTH_CLEAR = 0xFFFFFFFF  # depth16 0xFFFF (far) | tag 0xFFFF
+DEPTH_SCALE = 65535.0     # 0xFFFF — 16-bit depth (low 16 bits reserved for the line tag)
 _W_EPS = 1e-6
 
 
@@ -60,9 +61,9 @@ def _to_rgba8(c) -> tuple[int, int, int, int]:
 
 
 def pack_depth(d01: float) -> int:
-    """24-bit depth quant (near→0). The full depth key is `pack_depth(d) << 8 |
-    (line_tag & 0xFF)`; triangles compare against this 24-bit depth alone."""
-    return int(min(max(d01, 0.0), 1.0) * DEPTH_SCALE) & 0xFFFFFF
+    """16-bit depth quant (near→0). The full depth key is `pack_depth(d) << 16 |
+    (line_tag & 0xFFFF)`; triangles compare against this 16-bit depth alone."""
+    return int(min(max(d01, 0.0), 1.0) * DEPTH_SCALE) & 0xFFFF
 
 
 def project_vertex(vert, view_proj: np.ndarray, width: int, height: int):
@@ -94,7 +95,7 @@ def _raster_line_depth(img, depth, x0, y0, d0, x1, y1, d1, rgba, tag: int,
     dx = x1 - x0
     dy = y1 - y0
     dd = d1 - d0
-    lo = tag & 0xFF
+    lo = tag & 0xFFFF
     steps = int(np.ceil(max(abs(dx), abs(dy))))
     steps = max(steps, 0)
     n = min(steps, max_steps)
@@ -105,7 +106,7 @@ def _raster_line_depth(img, depth, x0, y0, d0, x1, y1, d1, rgba, tag: int,
         y = int(np.floor(y0 + dy * t + 0.5))
         if not (0 <= x < w and 0 <= y < h):
             continue
-        key = (pack_depth(d0 + dd * t) << 8) | lo
+        key = (pack_depth(d0 + dd * t) << 16) | lo
         if key < int(depth[y, x]):
             depth[y, x] = key
             img[y, x, 0], img[y, x, 1], img[y, x, 2], img[y, x, 3] = rgba
@@ -136,9 +137,9 @@ def _blend_tri(img, depth, p0, p1, p2, color) -> None:
             if w0 < 0.0 or w1 < 0.0 or w2 < 0.0:
                 continue  # outside (cullMode NONE → inv_area sign normalises winding)
             d01 = w0 * z0 + w1 * z1 + w2 * z2
-            # Strict depth test against the opaque line depth (high 24 bits),
+            # Strict depth test against the opaque line depth (high 16 bits),
             # occluding on equal depth — Vulkan VK_COMPARE_OP_LESS.
-            if pack_depth(d01) >= (int(depth[y, x]) >> 8):
+            if pack_depth(d01) >= (int(depth[y, x]) >> 16):
                 continue
             dst = img[y, x, :3].astype(np.float64) / 255.0
             out = np.clip(src * alpha + dst * (1.0 - alpha), 0.0, 1.0)
