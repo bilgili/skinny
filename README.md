@@ -31,6 +31,14 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
 <p align="center">
   <img src="docs/skinny_lens.png" alt="Skinny render output — realistic thick-lens camera depth of field" width="48%">
 </p>
+<p align="center">
+  These images are rendered from PBRT v4 scenes.
+</p>
+<p align="center">
+  <img src="docs/bunny.png" alt="Skinny render output - PBRT v4 bunny scene" width="32%">
+  <img src="docs/dragon.png" alt="Skinny render output - PBRT v4 dragon scene" width="32%">
+  <img src="docs/bathroom.png" alt="Skinny render output - PBRT v4 bathroom scene" width="32%">
+</p>
 
 ## Features
 
