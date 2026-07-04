@@ -72,16 +72,26 @@ SHALL produce equivalent `Material.parameter_overrides`. The exporter SHALL NOT
 author a UsdPreviewSurface material that shadows the MaterialX material for the
 same prim (which would cause `ComputeBoundMaterial` to bypass the `.mtlx`).
 
+The sidecar `.mtlx` SHALL author **only** real `standard_surface` shader inputs.
+Per-material state that is not a `standard_surface` input — in particular the
+subsurface medium coefficients (`subsurface_sigma_a` / `subsurface_sigma_s` /
+`subsurface_g` / `subsurface_eta`) — SHALL NOT be authored as
+`standard_surface` `<input>` elements, because the `usdMtlx` file-format plugin
+rejects unknown inputs and drops the shader's surface output (losing the whole
+material on the plugin-present path). This state SHALL instead be carried as
+`skinnyOverrides` customData on the exported Material prim.
+
 For materials whose `FlatMaterial`-relevant state cannot be expressed by the
 standard_surface shader inputs alone, the `-mtlx` load path SHALL recover the
-same `FlatMaterial` parameters the UsdPreviewSurface export produces:
+same `FlatMaterial` parameters the UsdPreviewSurface export produces, on **both**
+intake paths:
 
 - **`subsurface`** SHALL map to `opacity = 0` (the transmissive-boundary gate the
   flat refraction path requires), and the homogeneous interior coefficients
   authored as `skinnyOverrides` customData on the Material prim SHALL be merged
   into the loaded `Material.parameter_overrides` — both on the
-  `_extract_material` path and on the `_load_mtlx_materials` /
-  `_resolve_material_binding` fallback path.
+  `_extract_material` (plugin-present) path and on the `_load_mtlx_materials` /
+  `_resolve_material_binding` (plugin-absent) fallback path.
 - **`coateddiffuse` / `coatedconductor`** coat weight and coat roughness SHALL
   reach the same `FlatMaterial` `coat` / `coat_roughness` slots regardless of
   whether the export authored UsdPreviewSurface `clearcoat` / `clearcoatRoughness`
@@ -111,6 +121,16 @@ same `FlatMaterial` parameters the UsdPreviewSurface export produces:
   homogeneous interior coefficients (`volume_sigma_a` / `volume_sigma_s` /
   `volume_g` / `ior`) from the prim's `skinnyOverrides`, matching the
   UsdPreviewSurface export's overrides
+
+#### Scenario: subsurface interior survives the usdMtlx plugin composition
+
+- **WHEN** a `Material "subsurface"` is exported with `-mtlx` and loaded with
+  `use_usd_mtlx_plugin=True` on a host where the `usdMtlx` plugin resolves the
+  sidecar reference
+- **THEN** the composed `standard_surface` surface output resolves (the sidecar
+  authored no unknown inputs), and the bound `Material.parameter_overrides` carry
+  `opacity == 0` and the medium coefficients (`subsurface_sigma_s` /
+  `subsurface_eta`) equal to the plugin-absent fallback path's values
 
 #### Scenario: coateddiffuse coat lobe is equivalent across export paths
 
