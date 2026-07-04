@@ -180,6 +180,9 @@ VISIBLE_POINT_FIELDS: list[tuple[str, str]] = [
     ("coat",          "float"),
     ("coatRoughness", "float"),
     ("coatIOR",       "float"),
+    ("transmissionColor", "float3"),
+    ("specularColor",     "float3"),
+    ("diffuseRoughness",  "float"),
     ("tau",           "float3"),
     ("flags",         "uint"),
     ("radius",        "float"),
@@ -205,8 +208,8 @@ def sppm_accum_size(*, msl: bool = False) -> int:
     return _struct_stride(SPPM_ACCUM_FIELDS, msl=msl)
 
 
-VISIBLE_POINT_STRIDE = visible_point_size()              # 152 B (scalar / Vulkan)
-VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 192 B (Metal)
+VISIBLE_POINT_STRIDE = visible_point_size()              # 180 B (scalar / Vulkan)
+VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 240 B (Metal)
 SPPM_ACCUM_STRIDE = sppm_accum_size()                    # 16 B (both layouts)
 SPPM_ACCUM_STRIDE_MSL = sppm_accum_size(msl=True)        # 16 B
 

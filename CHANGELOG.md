@@ -9,6 +9,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SPPM photon term restored — bathroom walls no longer render black**
+  (change `fix-sppm-bathroom-black-walls`) — the SPPM photon deposit rebuilt
+  its `FlatMaterial` from `VisiblePoint` fields that predated the Stage-2 rich
+  inputs (`transmissionColor` / `specularColor` / `diffuseRoughness`, added to
+  `FlatHitMat` by `flat-lobes-rich-inputs` after PM-1 shipped), feeding
+  undefined values into `evaluate()` at every deposit: deposited flux was
+  exactly zero scene-wide (`τ == 0` at 100% of visible points on bathroom AND
+  cornell_box_sphere) while the photon count kept shrinking the search radius,
+  so SPPM rendered its eye-pass direct term only and indirect-lit surfaces
+  (bathroom walls/ceiling/tub) went black. The `VisiblePoint` now stores the
+  three fields (scalar 152→180 B, MSL 192→240 B; `wavefront_layout` mirror in
+  lockstep) and `sppmLoadMaterial` rebuilds them, so the deposit evaluates the
+  exact eye-pass BSDF. New hostless parse-locks in `tests/test_sppm_state.py`
+  fail the build if `FlatHitMat` ever grows a field without a VP slot + store +
+  rebuild. The re-armed cornell energy gate passes on both backends (its
+  `xfail(strict)` marker is removed); bathroom `sppm_vs_path` measured relMSE
+  64.97 → 2.59 (MSE 10.42 → 0.297, linear-mean ratio 1.007 at 128 spp).
 - **`skinny-render --execution-mode wavefront` no longer fails on every
   invocation** (change `headless-wavefront-readiness-gate`) —
   `HeadlessRenderer.render_to_array`/`render_scene` gated readiness on

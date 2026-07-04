@@ -326,7 +326,7 @@ packed by the host (like the wavefront records). `tests/test_sppm_state.py` lock
 both struct layouts.
 
 ```slang
-// integrators/sppm_state.slang  (scalar = 152 B Vulkan, MSL = 192 B)
+// integrators/sppm_state.slang  (scalar = 180 B Vulkan, MSL = 240 B)
 struct VisiblePoint {
     float3 pos;            // world hit position           (rewritten each pass)
     float3 ns;             // world shading normal, post normal-map (each pass)
@@ -344,6 +344,9 @@ struct VisiblePoint {
     float  coat;
     float  coatRoughness;
     float  coatIOR;
+    float3 transmissionColor;  // Stage-2 rich inputs (flat-lobes-rich-inputs) —
+    float3 specularColor;      // stored like every FlatHitMat field the lobe
+    float  diffuseRoughness;   // model reads (fix-sppm-bathroom-black-walls)
     float3 tau;            // accumulated reflected flux   (PERSISTS)
     uint   flags;          // bit0 = VP_ACTIVE
     float  radius;         // current search radius r_i    (PERSISTS)
@@ -357,8 +360,9 @@ struct SppmAccum {        // scalar = 16 B, MSL = 16 B
 };
 ```
 
-The visible point embeds the **evaluated** flat BSDF (the `albedo..coatIOR` block
-mirrors `FlatHitMat` minus emission, plus `F0`), not reconstruction inputs:
+The visible point embeds the **evaluated** flat BSDF (the
+`albedo..diffuseRoughness` block mirrors `FlatHitMat` minus emission, plus
+`F0`), not reconstruction inputs:
 `fetchFlatHitData` re-applies the normal map and re-runs the MaterialX graph, so
 storing the shading normal alone would double-apply the normal map and re-running
 the graph per deposit would be expensive. `sppmStoreVisiblePoint` (eye stage)
@@ -367,6 +371,19 @@ stores the evaluated material; `sppmLoadMaterial` (photon stage) rebuilds the
 flux into a separate `SppmAccum` keeps the deposit portable (uint fixed-point —
 neither backend guarantees fp atomics) and keeps the hot `VisiblePoint` free of
 atomically-mutated fields.
+
+**The mirror is a correctness contract, enforced hostlessly.** Every
+`FlatHitMat` field the lobe model reads must have a `VisiblePoint` slot, be
+written by `sppmStoreVisiblePoint`, and be rebuilt by `sppmLoadMaterial`
+(`emission` is the one documented exemption — direct, not BRDF). When
+`flat-lobes-rich-inputs` grew `FlatHitMat` by three fields after PM-1 shipped,
+the un-slotted rebuild fed **undefined values** into `evaluate()` at deposit
+time and zeroed every photon's flux (`τ == 0` scene-wide while `m` kept
+shrinking the radius): SPPM silently degraded to its eye-pass direct term, and
+indirect-lit surfaces rendered black (bathroom walls). Fixed in change
+`fix-sppm-bathroom-black-walls`; two parse-lock tests in
+`tests/test_sppm_state.py` now fail the build if `FlatHitMat` ever grows a
+field without the full VP slot + store + rebuild chain.
 
 ## GPU buffers and bindings
 

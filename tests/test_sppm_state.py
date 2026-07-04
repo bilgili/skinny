@@ -58,12 +58,12 @@ def _parse_struct_fields(src: str, struct_name: str) -> list[tuple[str, str]]:
 
 # ── strides ──────────────────────────────────────────────────────────
 
-def test_visible_point_scalar_stride_is_152():
-    assert VISIBLE_POINT_STRIDE == 152
+def test_visible_point_scalar_stride_is_180():
+    assert VISIBLE_POINT_STRIDE == 180
 
 
-def test_visible_point_msl_stride_is_192():
-    assert VISIBLE_POINT_STRIDE_MSL == 192
+def test_visible_point_msl_stride_is_240():
+    assert VISIBLE_POINT_STRIDE_MSL == 240
 
 
 def test_sppm_accum_stride_is_16_both_layouts():
@@ -111,6 +111,51 @@ def test_vp_active_flag_matches_slang():
     m = re.search(r"VP_ACTIVE\s*=\s*(\d+)u", src)
     assert m, "VP_ACTIVE constant not found in sppm_state.slang"
     assert int(m.group(1)) == VP_ACTIVE
+
+
+# ── FlatHitMat ⊆ VisiblePoint completeness (fix-sppm-bathroom-black-walls) ──
+# The photon deposit rebuilds the FlatMaterial from VP-stored fields
+# (sppmLoadMaterial). A FlatHitMat field with no VP slot / no store / no
+# rebuild feeds UNDEFINED values into evaluate() at deposit time — the Stage-2
+# rich inputs did exactly that and zeroed the SPPM photon term scene-wide.
+# `emission` is the one documented exception (direct, not BRDF; rebuilt as 0).
+
+_FLAT_SHADING = _SHADERS / "materials" / "flat" / "flat_shading.slang"
+_WF_SPPM = _SHADERS / "integrators" / "wavefront_sppm.slang"
+_VP_EXEMPT_FLAT_FIELDS = {"emission"}
+
+
+def _flat_hit_mat_fields() -> list[str]:
+    src = _FLAT_SHADING.read_text(encoding="utf-8")
+    return [name for _t, name in _parse_struct_fields(src, "FlatHitMat")]
+
+
+def test_every_flat_hit_mat_field_has_a_visible_point_slot():
+    vp_names = {n for n, _t in VISIBLE_POINT_FIELDS}
+    missing = [f for f in _flat_hit_mat_fields()
+               if f not in _VP_EXEMPT_FLAT_FIELDS and f not in vp_names]
+    assert not missing, (
+        f"FlatHitMat field(s) {missing} have no VisiblePoint slot — the SPPM "
+        f"photon deposit would evaluate the BSDF with undefined values. Add "
+        f"slots to sppm_state.slang + wavefront_layout.VISIBLE_POINT_FIELDS "
+        f"and wire them through sppmStoreVisiblePoint/sppmLoadMaterial."
+    )
+
+
+def test_sppm_store_and_load_cover_every_flat_hit_mat_field():
+    src = _WF_SPPM.read_text(encoding="utf-8")
+    store = re.search(
+        r"void\s+sppmStoreVisiblePoint\s*\([^)]*\)\s*\{(.*?)\n\}", src, re.DOTALL)
+    load = re.search(
+        r"FlatMaterial\s+sppmLoadMaterial\s*\([^)]*\)\s*\{(.*?)\n\}", src, re.DOTALL)
+    assert store and load, "sppmStoreVisiblePoint / sppmLoadMaterial not found"
+    for f in _flat_hit_mat_fields():
+        if f in _VP_EXEMPT_FLAT_FIELDS:
+            continue
+        assert re.search(rf"vp\.{f}\s*=", store.group(1)), (
+            f"sppmStoreVisiblePoint never writes vp.{f}")
+        assert re.search(rf"m\.{f}\s*=\s*vp\.{f}", load.group(1)), (
+            f"sppmLoadMaterial never rebuilds m.{f} from vp.{f}")
 
 
 # ── buffer sizing ────────────────────────────────────────────────────

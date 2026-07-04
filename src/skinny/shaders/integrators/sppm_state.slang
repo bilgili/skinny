@@ -30,7 +30,7 @@ static const float SPPM_FLUX_FIXED_SCALE = 1048576.0;
 
 // Per-pixel visible point: this-pass eye geometry + per-pass direct radiance +
 // the EVALUATED flat BSDF, fused with the persistent progressive estimator.
-// Scalar = 152 B, MSL = 192 B. All fields are scalar (no nested struct) so the
+// Scalar = 180 B, MSL = 240 B. All fields are scalar (no nested struct) so the
 // host layout mirror + parse-lock test stay simple, and so sppm_state.slang need
 // not import the material tree.
 //
@@ -39,10 +39,14 @@ static const float SPPM_FLUX_FIXED_SCALE = 1048576.0;
 // eye stage so direct is added at exactly ONE site (the update stage reads it
 // and never re-traces NEE), keeping SPPM's photon term disjoint from direct.
 //
-// The albedo..coatIOR block mirrors FlatHitMat (minus emission, which is direct
-// not BRDF) + F0, so the photon deposit rebuilds the FlatMaterial and evaluates
-// f_r at the visible point with no texture refetch, graph re-run, or
-// double normal-map (pbrt's store-the-BSDF approach).
+// The albedo..diffuseRoughness block mirrors FlatHitMat (minus emission, which
+// is direct not BRDF) + F0, so the photon deposit rebuilds the FlatMaterial and
+// evaluates f_r at the visible point with no texture refetch, graph re-run, or
+// double normal-map (pbrt's store-the-BSDF approach). EVERY FlatHitMat field
+// the lobe model reads must have a slot here: a field added to FlatHitMat but
+// not stored/rebuilt feeds undefined values into the deposit-time evaluate()
+// (the Stage-2 rich inputs did exactly that — zeroed photon flux scene-wide,
+// change fix-sppm-bathroom-black-walls).
 struct VisiblePoint
 {
     float3 pos;            // world hit position (rewritten each pass)
@@ -61,6 +65,9 @@ struct VisiblePoint
     float  coat;           // FlatHitMat.coat
     float  coatRoughness;  // FlatHitMat.coatRoughness
     float  coatIOR;        // FlatHitMat.coatIOR
+    float3 transmissionColor;  // FlatHitMat.transmissionColor (Stage-2 rich input)
+    float3 specularColor;      // FlatHitMat.specularColor (Stage-2 rich input)
+    float  diffuseRoughness;   // FlatHitMat.diffuseRoughness (Stage-2 rich input)
     float3 tau;            // accumulated reflected flux (persists)
     uint   flags;          // bit0 = VP_ACTIVE
     float  radius;         // current search radius r_i (persists)
