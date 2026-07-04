@@ -1001,6 +1001,18 @@ output/accum/hudMask exactly fills the table. Before the trim the pool filled it
 128 and the added 3D texture silently failed every Metal pipeline (all-black
 frames).
 
+On **Vulkan**, binding 26 must also be declared in the shared set-0 layout
+(`ComputePipeline._create_descriptor_set_layout`, `vk_compute.py`) as a combined
+image sampler — the megakernel SPIR-V references `volumeDensity` unconditionally
+(the medium walk is compiled in), so an undeclared binding is undefined behaviour
+on desktop Vulkan and a hard `SPIR-V to MSL conversion error: nullptr` pipeline
+build failure on MoltenVK (`VUID-VkComputePipelineCreateInfo-layout-07988`). This
+layout is shared by the megakernel and every wavefront stage pipeline (via
+`scene_bindings_only`), so one entry covers all of them. The hostless audit
+`tests/test_vk_binding_layout.py` asserts every Vulkan-branch `[[vk::binding(N)]]`
+in `bindings.slang` has a matching layout entry, so a new shared scene binding
+cannot ship without its declaration (change `fix-vulkan-volume-density-binding`).
+
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared
 sampler cannot honour per-texture USD `wrapS`/`wrapT`, so repeat/repeat is the
