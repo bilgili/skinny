@@ -28,7 +28,7 @@ are reported as before/after deltas with rendered images shown.
 - [x] 3.2 Author the seven `mat_pbr_*` mini-shaderball scenes (MaterialX-authored variants; plain-USD variant = recorded skip with reason, pbrt gate = recorded skip)
 - [x] 3.3 Add the opt-in `pbr_shaderball_smoke` gpu test: render 1–2 original shaderball scenes as-is from `assets/materialxusd/` (skip-if-missing so worktrees pass)
 - [x] 3.4 Manifest entries + hostless tests; verify suite scenes load in a worktree without `assets/`
-- [ ] 3.5 Stage checkpoint: hostless auto; **ask user** before GPU sweep (self-consistency over the 7 scenes + smoke render); persist `results/stage-3.json`, report deltas + images
+- [x] 3.5 Stage checkpoint: hostless auto; **ask user** before GPU sweep (self-consistency over the 7 scenes + smoke render); persist `results/stage-3.json`, report deltas + images
 
 ## 4. Integrator scenes
 
