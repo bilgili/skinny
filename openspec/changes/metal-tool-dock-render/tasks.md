@@ -68,16 +68,22 @@
       HUD sentinel + behind-eye drop), DDA line raster, NDC→pixel, RGBA8 pack —
       the authoritative CPU mirror the MSL kernel matches. Tri/blend cases extend
       this as those phases land.
-- [ ] 3.7 `DebugViewport` Metal branch: where the guard raises, construct the Metal
-      rasteriser instead; `render_embedded(renderer)` fills the (unchanged) CPU
-      vertex streams, uploads, dispatches, returns RGBA8 — same signature the worker
-      `_maybe_render_debug` already calls. Vulkan graphics path untouched.
-- [ ] 3.8 Verify: headless Metal — `DebugViewport` embedded render returns a
-      non-empty RGBA8 frame with the grid/frustum visible; then `skinny-gui
-      --backend metal` → Camera Debug shows the live debug scene, orbit/pan/zoom +
-      overlays work.
-- [ ] 3.9 Remove the interim Metal notice (task 2.1); Camera Debug renders on both
-      backends.
+- [x] 3.7 `DebugViewport` Metal branch: `open()` builds `DebugRasterMetal` instead
+      of the Vulkan graphics pipeline (embedded only); `render_embedded` →
+      `_render_embedded_metal` fills the CPU vertex streams via the extracted
+      backend-agnostic `_generate_streams` (unchanged `_gen_*`), computes the
+      math-form viewProj (`_metal_view_proj`), dispatches, returns RGBA8 — the same
+      signature the worker `_maybe_render_debug` calls. `resize_embedded`/`destroy`
+      Metal-branched. Vulkan graphics path untouched (`_build_geometry` now uploads
+      the streams `_generate_streams` returns).
+- [x] 3.8 Verify: headless Metal — `tests/test_metal_debug_viewport.py`
+      (`DebugViewport(embedded=True).open()` → `render_embedded`) returns a
+      non-empty RGBA8 frame (grid/frustum/glyph/focus-plane), PASSED rc=0; full
+      embedded demo frame captured. **Live `skinny-gui --backend metal` orbit/
+      pan/zoom + overlay-toggle check remains a manual GUI step.**
+- [x] 3.9 Removed the interim Camera Debug Metal notice (`_backend_name=="metal"`
+      early-return in the dock `showEvent`); the dock now posts the same
+      create/render path on both backends.
 
 ## 4. Docs + close-out
 - [ ] 4.1 Update the CLAUDE.md / README Compatibility matrix: material preview +

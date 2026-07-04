@@ -262,17 +262,9 @@ class DebugViewportDock(QDockWidget):
         return max(int(sz.width()), 64), max(int(sz.height()), 64)
 
     def showEvent(self, event) -> None:
-        # The DebugViewport is a Vulkan graphics rasteriser; the native Metal
-        # backend is compute-only (metal-tool-dock-render P2 ports it via a
-        # compute rasteriser). Until then, show a notice instead of posting the
-        # create/render — which would raise on the worker every frame.
-        if getattr(self.renderer, "_backend_name", "") == "metal":
-            self._canvas.set_notice(
-                "Camera Debug view renders on the Vulkan backend only.\n"
-                "(Metal compute-rasteriser port pending.)"
-            )
-            super().showEvent(event)
-            return
+        # Renders on both backends now: Vulkan graphics rasteriser, or the native
+        # Metal compute rasteriser (change metal-tool-dock-render P2) — the worker
+        # create/render path is backend-agnostic (DebugViewport branches on Metal).
         w, h = self._canvas_size()
         sd = self._shader_dir
         self.renderer.post(
