@@ -65,9 +65,19 @@ the spec lights it up in both UIs.
    snapshots. The Qt main thread stores those bytes in a `QImage` and paints the
    latest frame.
 
-Deep inspector/editor docks that still require live renderer internals are gated
-in this mode until their snapshot-backed ports are implemented; they must not
-receive the worker-owned renderer object.
+All five **View**-menu tool docks — Scene Graph, Material Graph, Python Material
+Editor, BXDF Visualizer, and Camera Debug — are proxy-backed under this model
+(change `restore-render-thread-tool-docks`): they receive the `QtRendererProxy`,
+never the worker-owned `Renderer`. Reads come from a worker-built projection
+(`build_scene_state` → `SceneStateSnapshot`, refreshed via `proxy.refresh_scene_state()`),
+mutations post to the command queue, and each dock's GPU-producing work runs on
+the worker and is marshalled back to the GUI thread by a per-dock `Signal`:
+the BXDF/BSSRDF lobe evaluation (`proxy.request_bxdf_eval`), the Material Graph
+preview (`proxy.render_material_preview`) and MaterialX-doc topology edits (relocated
+into worker closures over `_worker_doc`/`_worker_mtlx_node`), and the Camera Debug
+viewport (owned on the worker as `renderer.debug_viewport`, emitting a `DebugFrame`
+each frame via `RenderViewport.debug_frame_ready`). No dock issues a GPU call or
+blocks on a `Future` from the GUI thread.
 
 ### Per-Frame Render Loop (GLFW debug)
 

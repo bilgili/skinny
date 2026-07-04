@@ -144,19 +144,12 @@ needs them.
       confirm required (toggle the view, orbit/pan/zoom, overlays).
 
 ## 6. Docs + close-out
-- [ ] 6.1 Update `docs/Architecture.md` (Qt/render-thread + MetalContext sections)
-      to state the tool docks are proxy-backed; update `AGENTS.md`/`CLAUDE.md` Qt
-      notes.
+- [x] 6.1 `docs/Architecture.md` → **Per-Frame Render Loop (Qt desktop)** now states
+      all five tool docks are proxy-backed and describes the read (SceneStateSnapshot)
+      / write (post) / GPU-marshal (Signal) model + the Camera Debug `DebugFrame`
+      path. (The per-dock feature sections and `AGENTS.md` carry no threading claims.)
 - [x] 6.2 `ruff check src/` clean; grep confirms zero GUI-thread live-renderer GPU
       calls in the five docks (all reads via cache/request, writes/GPU via post).
-- [ ] 6.3 `openspec validate restore-render-thread-tool-docks --strict` passes;
-      archive on completion.
-
-## 6. Docs + close-out
-- [ ] 6.1 Update `docs/Architecture.md` (Qt/render-thread + MetalContext sections)
-      to state the tool docks are proxy-backed; update `AGENTS.md`/`CLAUDE.md` Qt
-      notes.
-- [ ] 6.2 `ruff check src/` clean; grep confirms zero GUI-thread live-renderer GPU
-      calls in the five docks.
-- [ ] 6.3 `openspec validate restore-render-thread-tool-docks --strict` passes;
-      archive on completion.
+- [ ] 6.3 `openspec validate --strict` passes (it does); **archive deferred** until
+      the two interactive-verification gaps (Material Graph topology edits, Camera
+      Debug GPU render) are confirmed in a real `skinny-gui` on a display host.
