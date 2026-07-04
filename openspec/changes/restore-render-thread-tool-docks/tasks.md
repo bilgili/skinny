@@ -69,15 +69,26 @@ needs them.
       worker refresh, camera proj reaches the proxy, node-select posts
       `set_gizmo_target` to the worker. Interactive GPU click-through remains manual.
 
-## 3. BXDF Visualizer (hard)
-- [ ] 3.1 Construct `BXDFDock` with the proxy + viewport; combo from snapshot
-      `materials`; material hash from `_material_version`/`mtlx_overrides`.
-- [ ] 3.2 Route `request_bxdf_eval` / `request_bssrdf_eval` through a worker
-      command; deliver the numpy grid to the GUI via the D4 `Signal` helper.
-- [ ] 3.3 Scene pick via `viewport.arm_scene_pick(cb)`; result marshalled to GUI.
-- [ ] 3.4 Unstub `app.py._open_bxdf`; restore session-restore reopen.
-- [ ] 3.5 Verify: open, pick a material/surface, eval renders the lobe grid; show
-      the produced image back.
+## 3. BXDF Visualizer (hard) — DONE
+- [x] 3.1 `BXDFDock` takes the proxy + viewport. The material projection was
+      extended (`_MaterialProj` += name/mtlx_target_name/parameter_overrides;
+      `SceneStateSnapshot` += material_version/mtlx_overrides/usd_scene_id) so the
+      combo + material hash read the worker-refreshed cache; poll drives
+      `refresh_scene_state()` and scene-swap keys off the stable `_usd_scene_id`.
+- [x] 3.2 `proxy.request_bxdf_eval`/`request_bssrdf_eval(req, cb, on_error=)` post
+      the eval to the worker; the grid is delivered by a worker callback that
+      emits `_eval_ready` → `_on_eval_ready` (GUI). The CPU fallback (pure-numpy
+      `eval_grid`) runs in the worker's `on_error` hook and is delivered through
+      the same signal (carrying its own dirs).
+- [x] 3.3 `_arm_pick` wraps the pick callback so the worker-invoked
+      `request_scene_pick` result is marshalled to the GUI via `_run_on_gui`
+      before `_on_pick_result`/`_on_entrance_pick_result` touch widgets.
+- [x] 3.4 Unstub `app.py._open_bxdf` (+ import); session-restore reopen functional.
+- [x] 3.5 Verified: ruff + py_compile clean; 27 hostless tests (3 new proxy-surface
+      TDD + 4 dock guards in `test_qt_bxdf_dock.py`); offscreen-Qt smoke — combo
+      populates from the worker, pick marshals to GUI, eval dispatches to the
+      worker and the lobe pixmap renders (`[GPU | log]`). Interactive GPU
+      click-through remains manual.
 
 ## 4. Material Graph (hard)
 - [ ] 4.1 Construct `MaterialGraphDock` with the proxy; material list + env from

@@ -54,6 +54,7 @@ from skinny.ui.qt.render_session import (
     QtRendererProxy,
     RenderCommandQueue,
 )
+from skinny.ui.qt.windows.bxdf import BXDFDock
 from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
 from skinny.ui.qt.windows.scene_graph import SceneGraphDock
 
@@ -311,10 +312,12 @@ class MainWindow(QMainWindow):
             self._python_material_dock.set_active_module(module_name)
 
     def _open_bxdf(self) -> None:
-        self.statusBar().showMessage(
-            "BXDF visualizer needs the snapshot-backed port for render-thread mode",
-            5000,
-        )
+        if self._bxdf_dock is None:
+            self._bxdf_dock = BXDFDock(self.renderer, self.viewport, parent=self)
+            self._bxdf_dock.setObjectName("bxdf")
+            self.addDockWidget(Qt.RightDockWidgetArea, self._bxdf_dock)
+        self._bxdf_dock.show()
+        self._bxdf_dock.raise_()
 
     def _open_material_graph(self) -> None:
         self.statusBar().showMessage(

@@ -130,3 +130,67 @@ def test_add_model_returns_future_resolved_by_worker() -> None:
     command.reply.set_result(command.callback(Target()))
 
     assert fut.result(timeout=0) == "/World/dragon.usda"
+
+
+# ── BXDF material-state projection (Phase 3) ──────────────────────────────
+
+class _RichMat:
+    name = "brass"
+    mtlx_target_name = "brass_mtlx"
+    parameter_overrides = {"metallic": 1.0}
+    python_module = None
+
+
+class _RichScene:
+    materials = [_RichMat()]
+
+
+class _RichRenderer:
+    scene_graph = None
+    _scene_graph_version = 0
+    _usd_scene = _RichScene()
+    scene = None
+    _usd_stage = None
+    _usd_edit_layer = None
+    camera = None
+    _material_version = 4
+    mtlx_overrides = {"brass:metallic": 0.9}
+
+
+def test_build_scene_state_projects_material_fields_and_version() -> None:
+    state = build_scene_state(_RichRenderer())
+
+    mat = state.usd_scene.materials[0]
+    assert mat.name == "brass"
+    assert mat.mtlx_target_name == "brass_mtlx"
+    assert mat.parameter_overrides == {"metallic": 1.0}
+    assert state.material_version == 4
+    assert state.mtlx_overrides == {"brass:metallic": 0.9}
+    assert state.usd_scene_id == id(_RichRenderer._usd_scene)
+
+
+def test_apply_scene_state_exposes_material_state() -> None:
+    queue = RenderCommandQueue()
+    proxy = _proxy(queue)
+    proxy.apply_scene_state(build_scene_state(_RichRenderer()))
+
+    assert proxy._material_version == 4
+    assert proxy.mtlx_overrides == {"brass:metallic": 0.9}
+    assert proxy._usd_scene.materials[0].name == "brass"
+
+
+def test_request_bxdf_eval_posts_worker_command_with_callback() -> None:
+    queue = RenderCommandQueue()
+    proxy = _proxy(queue)
+    delivered: list = []
+    req = {"material_id": 3}
+
+    class Target:
+        def request_bxdf_eval(self, req, callback) -> None:
+            callback(("grid", req["material_id"]))
+
+    proxy.request_bxdf_eval(req, lambda g: delivered.append(g))
+    commands = queue.drain()
+    assert len(commands) == 1
+    commands[0].callback(Target())
+    assert delivered == [("grid", 3)]

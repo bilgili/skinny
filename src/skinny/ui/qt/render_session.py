@@ -87,6 +87,9 @@ class _CameraProj:
 @dataclass(frozen=True)
 class _MaterialProj:
     python_module: str | None = None
+    name: str | None = None
+    mtlx_target_name: str | None = None
+    parameter_overrides: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -96,15 +99,19 @@ class _UsdSceneProj:
 
 @dataclass(frozen=True)
 class SceneStateSnapshot:
-    """Immutable projection of renderer-owned scene state the Scene Graph dock
-    reads on the GUI thread — built on the render worker, never a live handle."""
+    """Immutable projection of renderer-owned scene state the Scene Graph and
+    BXDF docks read on the GUI thread — built on the render worker, never a live
+    handle."""
     scene_graph: Any = None
     scene_graph_version: int = 0
     usd_scene: _UsdSceneProj | None = None
     scene: _UsdSceneProj | None = None
+    usd_scene_id: int = 0
     has_usd_stage: bool = False
     has_usd_edit_layer: bool = False
     camera: _CameraProj | None = None
+    material_version: int = 0
+    mtlx_overrides: dict = field(default_factory=dict)
 
 
 def _proj_scene(scene) -> "_UsdSceneProj | None":
@@ -112,7 +119,12 @@ def _proj_scene(scene) -> "_UsdSceneProj | None":
         return None
     mats = getattr(scene, "materials", None) or []
     return _UsdSceneProj(materials=tuple(
-        _MaterialProj(python_module=getattr(m, "python_module", None))
+        _MaterialProj(
+            python_module=getattr(m, "python_module", None),
+            name=getattr(m, "name", None),
+            mtlx_target_name=getattr(m, "mtlx_target_name", None),
+            parameter_overrides=dict(getattr(m, "parameter_overrides", {}) or {}),
+        )
         for m in mats
     ))
 
@@ -136,14 +148,18 @@ def build_scene_state(renderer) -> SceneStateSnapshot:
             max_distance=float(getattr(cam, "max_distance", 0.0)),
             lens=_LensProj(bool(lens.enabled)) if lens is not None else None,
         )
+    usd_scene = getattr(renderer, "_usd_scene", None)
     return SceneStateSnapshot(
         scene_graph=getattr(renderer, "scene_graph", None),
         scene_graph_version=int(getattr(renderer, "_scene_graph_version", 0)),
-        usd_scene=_proj_scene(getattr(renderer, "_usd_scene", None)),
+        usd_scene=_proj_scene(usd_scene),
         scene=_proj_scene(getattr(renderer, "scene", None)),
+        usd_scene_id=id(usd_scene) if usd_scene is not None else 0,
         has_usd_stage=getattr(renderer, "_usd_stage", None) is not None,
         has_usd_edit_layer=getattr(renderer, "_usd_edit_layer", None) is not None,
         camera=camera,
+        material_version=int(getattr(renderer, "_material_version", 0)),
+        mtlx_overrides=dict(getattr(renderer, "mtlx_overrides", {}) or {}),
     )
 
 
@@ -248,6 +264,8 @@ class QtRendererProxy:
         object.__setattr__(self, "camera", None)
         object.__setattr__(self, "_usd_stage", None)
         object.__setattr__(self, "_usd_edit_layer", None)
+        object.__setattr__(self, "_material_version", 0)
+        object.__setattr__(self, "_usd_scene_id", 0)
 
     def _default_values(self, width: int, height: int) -> dict[str, Any]:
         values: dict[str, Any] = {
@@ -322,6 +340,9 @@ class QtRendererProxy:
             _SCENE_STATE_PRESENT if state.has_usd_edit_layer else None
         )
         self.camera = state.camera
+        self._material_version = state.material_version
+        self._usd_scene_id = state.usd_scene_id
+        self.mtlx_overrides = dict(state.mtlx_overrides)
 
     def set_gizmo_target(self, index: int) -> None:
         self.post(
@@ -389,6 +410,28 @@ class QtRendererProxy:
 
     def apply_camera_lens_file(self, path) -> "Future[Any]":
         return self.request(lambda r, p=path: r.apply_camera_lens_file(p))
+
+    # ── BXDF dock GPU eval ────────────────────────────────────────────────
+    # The renderer computes the lobe/BSSRDF grid and invokes `callback(grid)`;
+    # under render-thread ownership that runs on the worker, so the dock passes a
+    # callback that marshals the grid onto the GUI thread.
+
+    def request_bxdf_eval(self, req, callback, on_error=None) -> None:
+        self.post(self._eval_runner("request_bxdf_eval", req, callback, on_error))
+
+    def request_bssrdf_eval(self, req, callback, on_error=None) -> None:
+        self.post(self._eval_runner("request_bssrdf_eval", req, callback, on_error))
+
+    @staticmethod
+    def _eval_runner(method: str, req, callback, on_error):
+        def run(r) -> None:
+            try:
+                getattr(r, method)(req, callback)
+            except Exception as exc:  # noqa: BLE001
+                if on_error is None:
+                    raise
+                on_error(exc)  # worker-thread CPU fallback
+        return run
 
     def online_training_status(self) -> dict[str, Any]:
         return {}
