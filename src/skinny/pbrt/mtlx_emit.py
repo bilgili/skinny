@@ -45,11 +45,16 @@ from pxr import Sdf, Usd  # noqa: F401  (Usd used in type-hint strings)
 __all__ = ["write_mtlx_document", "author_mtlx_reference"]
 
 
-# standard_surface 3-component inputs authored as MaterialX ``vector3`` rather
-# than ``color3``. Any other 3-component constant (``base_color``,
+# standard_surface 3-component inputs that the node definition declares as
+# ``vector3`` (as opposed to ``color3``). The Autodesk ``standard_surface`` node
+# has NO ``vector3``-typed 3-component *value* inputs we author — notably
+# ``subsurface_radius`` is ``color3`` (per-channel scattering radius), so
+# authoring it as ``vector3`` mismatches the node definition and makes the
+# usdMtlx file-format plugin reject the node and drop the shader's surface
+# output entirely. Every 3-component constant we author (``base_color``,
 # ``transmission_color``, ``coat_color``, ``specular_color``, ``emission_color``,
-# ``subsurface_color``, …) is authored as ``color3``.
-_VECTOR3_INPUTS = frozenset({"subsurface_radius"})
+# ``subsurface_color``, ``subsurface_radius``, …) is therefore a ``color3``.
+_VECTOR3_INPUTS: frozenset[str] = frozenset()
 
 # tex_inputs value_type (USD-flavoured, as produced by map_material_mtlx) ->
 # MaterialX node/output/connection type.
@@ -233,7 +238,16 @@ def author_mtlx_reference(
     prim_spec.specifier = Sdf.SpecifierOver
     prim_spec.typeName = ""
 
-    ref = Sdf.Reference(mtlx_asset_path)
+    # Target the composed Material prim path explicitly. When the usdMtlx
+    # file-format plugin reads the sidecar, it exposes each material at
+    # `/MaterialX/Materials/<surfacematerial_name>` and authors NO defaultPrim,
+    # so a whole-layer reference (`Sdf.Reference(asset)`) is unresolvable — the
+    # plugin-present path recovered nothing. Referencing the material prim path
+    # directly makes the reference compose (plugin-present); when the plugin is
+    # absent the sidecar can't be read at all, the reference stays unresolved,
+    # and the typeless `over` still falls through to `_load_mtlx_materials`.
+    mtlx_material_prim = f"/MaterialX/Materials/{surfacematerial_name}"
+    ref = Sdf.Reference(mtlx_asset_path, primPath=mtlx_material_prim)
     existing = list(prim_spec.referenceList.prependedItems)
     if ref not in existing:
         prim_spec.referenceList.prependedItems.append(ref)

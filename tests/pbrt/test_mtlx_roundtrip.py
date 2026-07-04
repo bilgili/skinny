@@ -372,6 +372,61 @@ def test_subsurface_roundtrip_equivalent(tmp_path):
     assert ovr_m["ior"] == pytest.approx(ss_p.parameter_overrides["ior"])
 
 
+def _classify_by_subsurface(materials):
+    """Split bound materials by the presence of a subsurface medium override
+    (robust across both intake paths, which agree on skinnyOverrides)."""
+    ss = next(m for m in materials if "subsurface_sigma_s" in m.parameter_overrides)
+    coat = next(m for m in materials if "subsurface_sigma_s" not in m.parameter_overrides)
+    return ss, coat
+
+
+@pytest.mark.skipif(
+    not _USDMTLX_PLUGIN,
+    reason="usdMtlx file-format plugin absent; .mtlx reference cannot compose "
+    "(fallback path covers the round-trip)",
+)
+def test_subsurface_interior_survives_usdmtlx_plugin(tmp_path):
+    """When the usdMtlx plugin is present, a `-mtlx` subsurface material's
+    composed standard_surface must resolve a surface output and recover the
+    same interior as the fallback path.
+
+    Regression: the exporter authored the medium coefficients
+    (subsurface_sigma_a/_s/_g/_eta) as standard_surface `<input>` elements —
+    not real standard_surface inputs — so the plugin rejected them and dropped
+    the shader's surface output entirely, and _extract_material recovered no
+    subsurface interior. The interior must ride skinnyOverrides customData
+    instead, so both intake paths agree."""
+    scene_file = os.path.join(str(tmp_path), "ss.pbrt")
+    with open(scene_file, "w") as fh:
+        fh.write(_SUBSURFACE_COAT_SCENE)
+    out = os.path.join(str(tmp_path), "out.usda")
+    import_pbrt(scene_file, out=out, materialx=True)
+
+    # Fallback path (plugin bypassed): the sidecar table is authoritative.
+    scene_fb = usd_loader.load_scene_from_stage(Usd.Stage.Open(out))
+    ss_fb, _ = _classify_by_subsurface(
+        [scene_fb.materials[i.material_id] for i in scene_fb.instances]
+    )
+
+    # Plugin-present path: ComputeBoundMaterial resolves the composed
+    # standard_surface -> _extract_material('mtlx').
+    scene_pl = usd_loader.load_scene_from_stage(
+        Usd.Stage.Open(out), use_usd_mtlx_plugin=True
+    )
+    ss_pl, _ = _classify_by_subsurface(
+        [scene_pl.materials[i.material_id] for i in scene_pl.instances]
+    )
+
+    ovr_pl, ovr_fb = ss_pl.parameter_overrides, ss_fb.parameter_overrides
+    # Composed surface resolved -> subsurface weight recovered (the bug dropped it).
+    assert ovr_pl.get("subsurface") == pytest.approx(1.0)
+    # subsurface -> opacity 0 transmissive boundary gate on the plugin path.
+    assert ovr_pl.get("opacity") == pytest.approx(0.0)
+    # Interior coefficients from skinnyOverrides equal the fallback path.
+    assert ovr_pl["subsurface_sigma_s"] == pytest.approx(ovr_fb["subsurface_sigma_s"])
+    assert ovr_pl["subsurface_eta"] == pytest.approx(ovr_fb["subsurface_eta"])
+
+
 def test_coateddiffuse_roundtrip_equivalent(tmp_path):
     """The coateddiffuse coat lobe must reach the same FlatMaterial slot on both
     export paths, with the same coat roughness (from pbrt `roughness`)."""

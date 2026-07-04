@@ -413,7 +413,17 @@ def _author_material_mtlx(stage, mat_path, pbrt_material, mesh_prim, report,
 
     sm_name = Sdf.Path(mat_path).name
     if mtlx_materials is not None:
-        mtlx_materials[sm_name] = {"inputs": inputs, "tex_inputs": tex_inputs}
+        # Author ONLY real standard_surface inputs in the sidecar .mtlx. The
+        # subsurface medium coefficients (subsurface_sigma_a/_s/_g/_eta) are
+        # skinny-invented keys, not standard_surface inputs; the usdMtlx plugin
+        # rejects them and drops the whole surface output (losing the material on
+        # the plugin-present path). They ride the Material prim's skinnyOverrides
+        # customData instead (authored above via media.subsurface_overrides),
+        # mirroring the UsdPreviewSurface path's _OVERRIDE_ONLY_INPUTS filter.
+        shader_inputs = {
+            k: v for k, v in inputs.items() if k not in _OVERRIDE_ONLY_INPUTS
+        }
+        mtlx_materials[sm_name] = {"inputs": shader_inputs, "tex_inputs": tex_inputs}
     if mtlx_refs is not None:
         mtlx_refs.append((mat_path, sm_name))
 

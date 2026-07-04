@@ -1014,7 +1014,81 @@ def _merge_prim_overrides(
     merged = dict(mtlx_mat.parameter_overrides)
     for k, v in skinny_overrides.items():
         merged[str(k)] = v
+    # The subsurface medium coefficients (subsurface_sigma_*) live in
+    # skinnyOverrides, not the .mtlx shader, so the transmissive-boundary gate
+    # cannot be derived until the customData is merged here — `_load_mtlx_materials`
+    # ran `_derive_opacity_from_subsurface` before the medium was available.
+    # Re-derive now that the interior is present (no-op when already opaque-gated
+    # or when there is no medium). Mirrors `_extract_material`, which merges the
+    # customData first and then derives.
+    _derive_opacity_from_subsurface(merged)
     return replace(mtlx_mat, parameter_overrides=merged)
+
+
+def _prim_has_mtlx_reference(stage: Usd.Stage, prim_path: "Sdf.Path") -> bool:
+    """True when the root-layer spec at *prim_path* carries a `.mtlx` reference.
+
+    Identifies an exporter-authored MaterialX-backed material `over` (the
+    exporter authors the `.mtlx` reference on the root layer — see
+    `mtlx_emit.author_mtlx_reference`). Used to scope the preloaded-table
+    preemption so a coincidentally same-named plain-USD material is never
+    shadowed by an unrelated sidecar entry.
+    """
+    spec = stage.GetRootLayer().GetPrimAtPath(prim_path)
+    if spec is None:
+        return False
+    ref_list = spec.referenceList
+    for ref in (
+        list(ref_list.prependedItems)
+        + list(ref_list.appendedItems)
+        + list(ref_list.explicitItems)
+    ):
+        if ref.assetPath.endswith(".mtlx"):
+            return True
+    return False
+
+
+def _resolve_binding_from_mtlx_table(
+    prim: Usd.Prim,
+    materials: list[Material],
+    material_index: dict[str, int],
+    mtlx_materials: dict[str, Material],
+) -> Optional[int]:
+    """Resolve *prim*'s material binding against the preloaded `.mtlx` table.
+
+    Walks the prim and its ancestors for a `material:binding` relationship and
+    matches each target's leaf name against *mtlx_materials* (the sidecar
+    table). A leaf-name hit is accepted ONLY when the bound target prim actually
+    carries a `.mtlx` reference (`_prim_has_mtlx_reference`) — so a plain-USD
+    material that coincidentally shares a leaf name with a sidecar entry is left
+    to `ComputeBoundMaterial` instead of being shadowed. On an accepted hit,
+    merges the bound Material prim's `skinnyOverrides` customData (the
+    homogeneous SSS interior that is not a standard_surface input) and appends
+    the Material, returning its `Scene.materials` index. Returns a cached index
+    for an already-resolved target, or None when no ancestor binding maps to an
+    exported `.mtlx` material.
+    """
+    stage = prim.GetStage()
+    ancestor = prim
+    while ancestor and ancestor != stage.GetPseudoRoot():
+        binding_rel = ancestor.GetRelationship("material:binding")
+        if binding_rel:
+            for target_path in binding_rel.GetTargets():
+                target_str = str(target_path)
+                cached = material_index.get(target_str)
+                if cached is not None:
+                    return cached
+                mtlx_mat = mtlx_materials.get(target_path.name)
+                if mtlx_mat is not None and _prim_has_mtlx_reference(
+                    stage, target_path
+                ):
+                    mtlx_mat = _merge_prim_overrides(stage, target_path, mtlx_mat)
+                    idx = len(materials)
+                    material_index[target_str] = idx
+                    materials.append(mtlx_mat)
+                    return idx
+        ancestor = ancestor.GetParent()
+    return None
 
 
 def _resolve_material_binding(
@@ -1036,6 +1110,23 @@ def _resolve_material_binding(
     if not prim.HasAPI(UsdShade.MaterialBindingAPI):
         UsdShade.MaterialBindingAPI.Apply(prim)
     binding_api = UsdShade.MaterialBindingAPI(prim)
+
+    # Preloaded `.mtlx` sidecar table is authoritative when populated. It is
+    # loaded only when the caller did NOT opt into use_usd_mtlx_plugin, so
+    # resolving against it FIRST keeps the default load path on the sidecar
+    # fallback even on a host where the usdMtlx plugin IS present and
+    # ComputeBoundMaterial would otherwise compose the referenced `.mtlx`
+    # material. Without this the intake path would silently differ by host
+    # plugin availability (the exported reference now composes explicitly —
+    # `/MaterialX/Materials/<name>`). The plugin-present opt-in path keeps this
+    # table empty and falls through to ComputeBoundMaterial below.
+    if mtlx_materials:
+        idx = _resolve_binding_from_mtlx_table(
+            prim, materials, material_index, mtlx_materials
+        )
+        if idx is not None:
+            return idx
+
     bound, _relationship = binding_api.ComputeBoundMaterial()
 
     if not bound:

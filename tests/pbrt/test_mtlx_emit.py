@@ -22,7 +22,7 @@ mx = pytest.importorskip("MaterialX")
 usd_pxr = pytest.importorskip("pxr")
 usd_loader = pytest.importorskip("skinny.usd_loader")
 
-from pxr import Usd, UsdGeom, UsdShade  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade  # noqa: E402
 
 from skinny.pbrt import mtlx_emit  # noqa: E402
 
@@ -203,17 +203,70 @@ def test_no_shadowing_preview_surface(tmp_path):
 
 
 def test_material_prim_is_typeless_over_for_plugin_absent_fallback(tmp_path):
-    # The Material prim must be a typeless `over` so ComputeBoundMaterial fails
-    # without the usdMtlx plugin and the rich .mtlx fallback fires. A `def`-typed
-    # Material would make ComputeBoundMaterial succeed (empty) and bypass it.
+    # The Material prim must be authored as a typeless `over` in the exported
+    # layer so ComputeBoundMaterial fails without the usdMtlx plugin and the rich
+    # .mtlx fallback fires. A `def`-typed Material would make ComputeBoundMaterial
+    # succeed (empty) and bypass it. Assert on the ROOT-LAYER spec — this is
+    # plugin-independent, whereas the COMPOSED prim type depends on whether the
+    # usdMtlx plugin is present to resolve the reference.
     usd_path = _build_stage_with_glass(tmp_path)
-    stage = Usd.Stage.Open(str(usd_path))
-    prim = stage.GetPrimAtPath("/Materials/M_Glass")
-    assert prim.IsValid()
-    assert prim.GetTypeName() == "", "material prim must stay typeless (plugin absent)"
+    root = Sdf.Layer.FindOrOpen(str(usd_path))
+    spec = root.GetPrimAtPath("/Materials/M_Glass")
+    assert spec is not None
+    assert spec.specifier == Sdf.SpecifierOver, "material prim must be an `over`"
+    assert spec.typeName == "", "material prim spec must be authored typeless"
+    # Consequence observable only without the usdMtlx plugin: the reference
+    # cannot compose, so ComputeBoundMaterial fails and the fallback fires. With
+    # the plugin present the reference composes to a Material (the plugin-present
+    # intake path, covered by test_mtlx_roundtrip.py).
+    if Sdf.FileFormat.FindByExtension("mtlx") is None:
+        stage = Usd.Stage.Open(str(usd_path))
+        mesh = stage.GetPrimAtPath("/World/mesh")
+        bound, _rel = UsdShade.MaterialBindingAPI(mesh).ComputeBoundMaterial()
+        assert not bound, "ComputeBoundMaterial must fail so the .mtlx fallback fires"
+
+
+def test_mtlx_table_does_not_shadow_plain_material_with_same_leaf():
+    """Regression: the preloaded `.mtlx` table preempts `ComputeBoundMaterial`
+    only for prims that actually carry a `.mtlx` reference. A plain-USD
+    `def Material` that coincidentally shares a leaf name with a sidecar entry
+    (a mixed stage) must NOT be shadowed by the unrelated `.mtlx` material.
+    """
+    from skinny.usd_loader import (  # noqa: E402
+        Material,
+        _resolve_binding_from_mtlx_table,
+        _resolve_material_binding,
+    )
+
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Mesh.Define(stage, "/World/mesh")
+    # Plain UsdPreviewSurface material at a DIFFERENT path but the SAME leaf
+    # name as a sidecar table entry; no `.mtlx` reference authored on it.
+    plain = UsdShade.Material.Define(stage, "/Looks/M_Foo")
+    ps = UsdShade.Shader.Define(stage, "/Looks/M_Foo/ps")
+    ps.CreateIdAttr("UsdPreviewSurface")
+    ps.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+        Gf.Vec3f(0.1, 0.2, 0.3)
+    )
+    plain.CreateSurfaceOutput().ConnectToSource(ps.ConnectableAPI(), "surface")
     mesh = stage.GetPrimAtPath("/World/mesh")
-    bound, _rel = UsdShade.MaterialBindingAPI(mesh).ComputeBoundMaterial()
-    assert not bound, "ComputeBoundMaterial must fail so the .mtlx fallback fires"
+    UsdShade.MaterialBindingAPI.Apply(mesh)
+    UsdShade.MaterialBindingAPI(mesh).Bind(plain)
+
+    # A sidecar table with the SAME leaf name, distinct (white) diffuse.
+    table = {"M_Foo": Material(name="M_Foo", parameter_overrides={"diffuseColor": (0.9, 0.9, 0.9)})}
+
+    # The early table resolver must NOT match: /Looks/M_Foo has no .mtlx ref.
+    assert _resolve_binding_from_mtlx_table(mesh, [], {}, table) is None
+
+    # Full resolution returns the PLAIN material (its authored diffuseColor),
+    # not the coincidentally-named sidecar entry.
+    materials = [Material(name="default")]
+    idx = _resolve_material_binding(mesh, materials, {}, table)
+    resolved = materials[idx].parameter_overrides.get("diffuseColor")
+    assert resolved is not None and resolved[0] == pytest.approx(0.1), (
+        f"plain material shadowed by same-named .mtlx table entry: {resolved}"
+    )
 
 
 def test_author_reference_downgrades_existing_def(tmp_path):
