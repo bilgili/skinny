@@ -27,6 +27,35 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MaterialX imagemap `base_color` textures now render** (change
+  `confirming-test-scenes` follow-up) — a `standard_surface` whose `base_color`
+  is driven by an `<image>` node (what `import_pbrt --mtlx` emits for a pbrt
+  `"texture reflectance"` imagemap) rendered as a flat colour instead of the
+  texture. Two independent defects, one per intake path:
+  1. **Graph-param offset skew** (`materialx_runtime.generate_for_compute`) —
+     when the emitted `GraphParams_*` struct dropped an unused leading gen
+     uniform, `pack_uniform_block` kept the gen's original offsets (with the
+     hole) while Slang's `Load<GraphParams_*>` reads the emitted struct
+     contiguously. Every field skewed by the gap; an `<image>` graph misread
+     `uv_scale` as `(0,1)`, collapsing the U coordinate so the texture sampled a
+     single column (a flat smear). The kept uniforms' offsets are now
+     re-compacted dense-from-0 to match the struct Slang emits. Marble/wood
+     graphs were unaffected (their kept uniforms already started at 0). This is
+     the path `import_pbrt --mtlx` scenes take (via the `_load_mtlx_materials`
+     fallback → graph render). Regression: `test_graph_uniform_offsets_are_dense`
+     in `tests/test_materialx_graph.py`.
+  2. **Texture-key not remapped** (`usd_loader._extract_material`) — on the
+     usdMtlx-plugin-present path a composed `standard_surface` names its
+     texture-bound input `base_color`, but the renderer's flat texture binder
+     only looks up UsdPreviewSurface keys (`diffuseColor`/…). The texture was
+     stored under `base_color` and dropped, so the input fell back to the
+     `standard_surface` default grey. `_extract_material` now folds the input
+     name through `_OPENPBR_TO_STD_SURFACE`/`_STD_SURFACE_TO_FLAT` before storing
+     the texture (mirroring `_store_shader_override` for constants and the
+     `_load_mtlx_materials` fallback). Regressions in
+     `tests/pbrt/test_mtlx_roundtrip.py`. Both paths now match the plain
+     UsdPreviewSurface authoring (A/B relMSE 2.3/2.1 → ~0.00 on Metal).
+
 - **SPPM photon term restored — bathroom walls no longer render black**
   (change `fix-sppm-bathroom-black-walls`) — the SPPM photon deposit rebuilt
   its `FlatMaterial` from `VisiblePoint` fields that predated the Stage-2 rich

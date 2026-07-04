@@ -134,6 +134,17 @@ sidecar (`<out>.mtlx`) of `standard_surface` materials referenced from the stage
 `thin_walled` — and the loader recovers them via `_load_mtlx_materials` (the
 usdMtlx-plugin-absent fallback) or `_extract_material('mtlx')` (plugin present).
 
+> **`standard_surface` texture inputs are remapped to the flat binder's keys.**
+> The renderer's flat texture binder looks up `Material.texture_paths` by
+> UsdPreviewSurface names only (`diffuseColor`/`roughness`/`metallic`/`normal`/…).
+> A composed `standard_surface` names its texture-bound inputs `base_color`/
+> `specular_roughness`/… (MaterialX), so both intake paths fold the input name
+> through `_OPENPBR_TO_STD_SURFACE` → `_STD_SURFACE_TO_FLAT` before storing the
+> texture — otherwise an imagemap `base_color` is dropped and the input renders
+> as the `standard_surface` default. `_load_mtlx_materials` did this already;
+> `_extract_material('mtlx')` now matches it (its texture branch previously stored
+> the raw MaterialX name).
+
 > **Transmission→opacity refraction gate vs the default-opaque opacity.** skinny's
 > flat path only refracts through surfaces whose `opacity < 1`
 > (`flat_material.slang`), so the loader bridges a `standard_surface`/OpenPBR

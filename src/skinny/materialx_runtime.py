@@ -27,7 +27,7 @@ import re
 import shutil
 import struct
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -681,6 +681,28 @@ class MaterialLibrary:
                 used_uniforms.append(u)
         # Preserve original (offset-sorted) order for struct emission.
         used_uniforms.sort(key=lambda u: u.offset)
+
+        # Re-pack the kept uniforms' offsets densely from 0. `cm.uniform_block`
+        # carries the gen's full-block offsets, which leave a hole wherever an
+        # *unused* uniform (dropped above because it never appears in `body`)
+        # preceded a kept one. `_emit_param_struct` emits only the kept fields,
+        # so Slang lays the struct out contiguously and `Load<GraphParams>`
+        # reads each field at its dense offset — but `pack_uniform_block` writes
+        # at `u.offset`. Any leading hole then skews every field by that gap
+        # (e.g. an `<image>` graph, whose uniforms follow a dropped global,
+        # misreads `uv_scale` as (0,1) and collapses U → the texture samples a
+        # single column). Compact the offsets so packed bytes and the emitted
+        # struct agree. (Marble/wood escaped this only because their kept
+        # uniforms happened to start at offset 0.)
+        compacted: list[UniformField] = []
+        dense = 0
+        for u in used_uniforms:
+            align, _size = _SCALAR_LAYOUT.get(u.type_name, (4, u.size or 4))
+            if dense % align:
+                dense += align - (dense % align)
+            compacted.append(replace(u, offset=dense))
+            dense += u.size
+        used_uniforms = compacted
 
         struct_src = _emit_param_struct(struct_name, used_uniforms,
                                         type_map=self._SLANG_TYPES,
