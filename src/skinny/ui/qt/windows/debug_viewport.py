@@ -43,6 +43,7 @@ class _DebugCanvas(QWidget):
         self._on_release = on_release
         self._image: QImage | None = None
         self._buffer: bytes | None = None
+        self._notice: str | None = None
         self._last_pos: tuple[float, float] | None = None
         self._left = self._right = False
 
@@ -53,10 +54,20 @@ class _DebugCanvas(QWidget):
         self._image = QImage(pixels, w, h, 4 * w, QImage.Format_RGBA8888)
         self.update()
 
+    def set_notice(self, text: str) -> None:
+        self._notice = text
+        self._image = None
+        self.update()
+
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         if self._image is None:
             painter.fillRect(self.rect(), Qt.black)
+            if self._notice:
+                painter.setPen(Qt.gray)
+                painter.drawText(
+                    self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self._notice,
+                )
             return
         target = self.rect()
         sw, sh = self._image.width(), self._image.height()
@@ -251,6 +262,17 @@ class DebugViewportDock(QDockWidget):
         return max(int(sz.width()), 64), max(int(sz.height()), 64)
 
     def showEvent(self, event) -> None:
+        # The DebugViewport is a Vulkan graphics rasteriser; the native Metal
+        # backend is compute-only (metal-tool-dock-render P2 ports it via a
+        # compute rasteriser). Until then, show a notice instead of posting the
+        # create/render — which would raise on the worker every frame.
+        if getattr(self.renderer, "_backend_name", "") == "metal":
+            self._canvas.set_notice(
+                "Camera Debug view renders on the Vulkan backend only.\n"
+                "(Metal compute-rasteriser port pending.)"
+            )
+            super().showEvent(event)
+            return
         w, h = self._canvas_size()
         sd = self._shader_dir
         self.renderer.post(
