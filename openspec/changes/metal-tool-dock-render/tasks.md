@@ -86,8 +86,9 @@
       create/render path on both backends.
 
 ## 4. Docs + close-out
-- [ ] 4.1 Update the CLAUDE.md / README Compatibility matrix: material preview +
-      Camera Debug now ✅ on Metal (was Vulkan-only); update `docs/Architecture.md`
-      Metal sections.
-- [ ] 4.2 `ruff check src/` clean; `openspec validate metal-tool-dock-render
-      --strict` passes; archive on completion.
+- [x] 4.1 Compatibility matrix rows added for Material Graph preview + Camera
+      Debug viewport (now ✅ on Metal) in `README.md` and `CLAUDE.md`; new
+      "Tool-dock render paths" subsection in `docs/Architecture.md` (MetalContext)
+      covering `PreviewPipelineMetal` + `DebugRasterMetal`.
+- [x] 4.2 `ruff check src/` clean; `openspec validate metal-tool-dock-render
+      --strict` passes. **Archive deferred to merge** (post codex pre-merge gate).

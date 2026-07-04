@@ -950,6 +950,32 @@ The accumulation image persists across a frame's bands, so N-band output is
 bit-identical to one dispatch, and ≤256² scenes stay a single band (parity corpus
 unaffected). See [Megakernel.md → Backends](Megakernel.md#backends-vulkan-and-metal).
 
+**Tool-dock render paths** (change `metal-tool-dock-render`): the two View-menu
+tool docks whose render paths were Vulkan-only now run on Metal via compute.
+- **Material Graph preview** — `PreviewPipelineMetal` compiles `preview_pass.slang`
+  (`previewMain`) in-process (same session config as the megakernel
+  `ComputePipeline`, linking the emit-time `generated_materials` so it shades
+  identically) and dispatches by binding the scene material resources + the output
+  image **by name** — no Vulkan descriptor sets. `Renderer.render_material_preview`
+  branches on `is_metal`, reuses `_build_metal_binds` + `_pack_uniforms_msl` (packed
+  against the preview program's own reflected `fc` layout so it works in wavefront
+  mode too), and reads the RGBA32F float image back directly. The preview `size` is
+  clamped to `_METAL_PREVIEW_MAX_SIZE` (one bounded command buffer). The Metal-only
+  `pc` push block is a plain `uniform` (slang-rhi rejects `set_data` on a
+  `[[vk::push_constant]]` ConstantBuffer; `#if defined(SKINNY_METAL)` ⇒ Vulkan SPIR-V
+  unchanged).
+- **Camera Debug viewport** — the native backend has no graphics pipeline, so
+  `DebugRasterMetal` (`debug_raster.slang`) is a **software line/triangle
+  rasteriser** in compute: `clearImage`/`clearDepth` → `depthLines` (`InterlockedMin`
+  into a uint depth UAV) → `colorLines` (opaque, depth-owned pixels) → `blendTris`
+  (edge-function fill, src-alpha over, depth-tested no-write; one thread per
+  triangle×screen-row so no unbounded per-thread loop). `DebugViewport` on Metal
+  builds this instead of the Vulkan render pass; `render_embedded` runs the
+  unchanged `_generate_streams` `_gen_*` generators, dispatches, and returns RGBA8
+  through the same worker `DebugFrame` path. `debug_raster_ref.py` is the numpy
+  mirror the kernel is diffed against (host-checkable, no GPU). The Vulkan graphics
+  rasteriser is untouched.
+
 ## Backend Abstraction (`gfx/`)
 
 > Note: the `gfx/` ABC below is **distinct** from the live Metal backend in

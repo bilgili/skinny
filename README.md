@@ -507,6 +507,8 @@ neural × interop.
 | Neural directional proposal (inference) | ✅ | ✅ |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
+| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal`, bind-by-name; `metal-tool-dock-render`) |
+| Camera Debug viewport | ✅ (graphics rasteriser) | ✅ (`DebugRasterMetal` compute rasteriser; `metal-tool-dock-render`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ | CPU fallback (deformation only) |
 | H264 encoder pool (web mode) | NVENC / QSV / AMF | VideoToolbox |
 | GPU indirect dispatch (wavefront slot counts) | ✅ | CPU readback fallback (slang-rhi gap) |
