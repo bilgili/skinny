@@ -56,6 +56,6 @@ are reported as before/after deltas with rendered images shown.
 ## 7. Final regression + docs + validation
 
 - [ ] 7.1 Full regression comparison: **ask user**, then run the complete matrix (existing corpus + all new scenes) and diff every metric against pre-change values; flag any regression in existing scenes
-- [ ] 7.2 Update `docs/Architecture.md` (Parity Matrix Harness: suite location, equivalence + furnace gate classes), `CLAUDE.md` (parity harness section pointer), `README.md` if user-facing
+- [x] 7.2 Update `docs/Architecture.md` (Parity Matrix Harness: suite location, equivalence + furnace gate classes), `CLAUDE.md` (parity harness section pointer), `README.md` if user-facing
 - [ ] 7.3 `.venv/bin/ruff check src/` clean; full hostless `pytest` green; kill-harness check not needed (no dispatch-length changes) — confirm and note
 - [ ] 7.4 `openspec validate confirming-test-scenes` passes; results dir committed; ready for archive
