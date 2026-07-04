@@ -92,6 +92,7 @@ def test_can_online_train_requires_wavefront():
 def test_can_online_train_requires_neural_proposal():
     fake = types.SimpleNamespace(
         effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        integrator_index=0,  # path — BDPT (1) is refused before the neural check
         _neural_active=lambda: False,
     )
     ok, reason = Renderer.can_online_train(fake)
@@ -102,11 +103,26 @@ def test_can_online_train_requires_neural_proposal():
 def test_can_online_train_true_when_both_hold():
     fake = types.SimpleNamespace(
         effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        integrator_index=0,  # path
         _neural_active=lambda: True,
     )
     ok, reason = Renderer.can_online_train(fake)
     assert ok is True
     assert reason == ""
+
+
+def test_can_online_train_refuses_bdpt():
+    # BDPT never consumes the neural proposal and has no wavefront record
+    # source, so training under it is refused even with a neural proposal active
+    # (change bdpt-neural-incompatibility).
+    fake = types.SimpleNamespace(
+        effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        integrator_index=1,  # bdpt
+        _neural_active=lambda: True,
+    )
+    ok, reason = Renderer.can_online_train(fake)
+    assert ok is False
+    assert "bdpt" in reason.lower()
 
 
 def test_online_train_execution_supported_tracks_wavefront_only():

@@ -74,7 +74,11 @@ def test_homogeneous_density_is_the_constant_degenerate_case():
                     .split("float3 mediumMajorant", 1)[0])
     homo_case = density_body.split("MEDIUM_HOMOGENEOUS:", 1)[1].split("default", 1)[0]
     assert "return 1.0" in homo_case
+    # `mediumMajorant` is now a single GLOBAL majorant σ̄_t = σ_a + σ_s for every
+    # kind (nanovdb/cloud both normalise density ≤ 1, so the packed σ_t bounds
+    # σ_t·density) — no per-case switch. For MEDIUM_HOMOGENEOUS that majorant is
+    # exactly the constant σ_t, so density≡1 · majorant reproduces the closed
+    # form and a uniform grid slots in behind the same seam.
     majorant_body = (MEDIUM.split("float3 mediumMajorant(Medium m", 1)[1]
                      .split("Medium resolveMedium", 1)[0])
-    homo_maj = majorant_body.split("MEDIUM_HOMOGENEOUS:", 1)[1].split("default", 1)[0]
-    assert "sigmaA + m.sigmaS" in homo_maj  # majorant = constant σ_t
+    assert "sigmaA + m.sigmaS" in majorant_body  # majorant = constant σ_t

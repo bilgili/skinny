@@ -456,13 +456,20 @@ class RenderViewport(QWidget):
                 )
             self.setFocus(Qt.MouseFocusReason)
             return
-        if action == "gizmo":
-            # Drag is live (controller began it). Do not arm the camera.
-            self._last_pos = (pos.x(), pos.y())
-            self.setFocus(Qt.MouseFocusReason)
-            return
-
-        # action == "camera"
+        # action == "camera": non-modal left-press. Renderer access is async
+        # under render-thread ownership (commit 382786f), so we can't decide
+        # gizmo-vs-camera synchronously here — post the gizmo controller's
+        # on_press to the render thread (mirroring on_move/on_release) and arm
+        # the camera as the fallback. A successful ring grab sets
+        # `_gizmo.is_dragging`, and the camera-drag command in mouseMoveEvent
+        # early-outs on it, so the grab is never shadowed by camera rotation.
+        if mapped is not None:
+            self.post_render_command(
+                lambda renderer, mapped=mapped: self._gizmo.on_press(
+                    renderer, mapped,
+                    shift=False, pick_armed=False, zoom_arming=False,
+                ),
+            )
         self._left = True
         self._last_pos = (pos.x(), pos.y())
         self.setFocus(Qt.MouseFocusReason)
@@ -523,13 +530,16 @@ class RenderViewport(QWidget):
         dy = y - self._last_pos[1]
         self._last_pos = (x, y)
         if self._left or self._right or self._middle:
-            self.post_render_command(
-                lambda _renderer, dx=dx, dy=dy, left=self._left,
-                right=self._right, middle=self._middle: CameraDispatcher(_renderer).drag(
+            def _camera_drag(renderer, dx=dx, dy=dy, left=self._left,
+                             right=self._right, middle=self._middle) -> None:
+                # A live gizmo grab (begun by on_press on this same thread)
+                # consumes the left-drag; don't also rotate the camera.
+                if left and self._gizmo.is_dragging:
+                    return
+                CameraDispatcher(renderer).drag(
                     dx, dy, left=left, right=right, middle=middle,
-                ),
-                coalesce_key="camera-drag",
-            )
+                )
+            self.post_render_command(_camera_drag, coalesce_key="camera-drag")
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         # Qt wheel deltas are in eighths of a degree; one notch = 120.
