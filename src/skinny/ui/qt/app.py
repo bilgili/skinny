@@ -632,6 +632,20 @@ def main() -> None:
     # > auto). auto resolves to Metal on Apple Silicon, else Vulkan; an explicit,
     # unavailable --backend metal errors clearly rather than crashing.
     saved_settings = load_settings()
+
+    # Execution mode 'auto' (the default) derives from the startup integrator —
+    # explicit --integrator, else the persisted integrator, else 'path'. An
+    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Fixed for the
+    # session. Resolve + guard this BEFORE select_backend (which probes the GPU):
+    # validate_render_flags (above) is keyed on the CLI --integrator and ran
+    # before the persisted integrator was known, so a persisted sppm under an
+    # explicitly-forced --execution-mode megakernel must be refused here, before
+    # the backend probe touches the GPU.
+    _startup_integrator = startup_integrator_name(
+        args.integrator, saved_settings.get("params", {}).get("integrator_index"))
+    args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
+    reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
+
     try:
         backend = select_backend(args.backend, persisted=saved_settings.get("backend"))
     except RuntimeError as exc:
@@ -654,19 +668,6 @@ def main() -> None:
         saved_sgr = saved_settings.get("sppm_glossy_roughness")
         if saved_sgr is not None:
             sppm_glossy_roughness_value = float(saved_sgr)
-
-    # Execution mode 'auto' (the default) derives from the startup integrator —
-    # explicit --integrator, else the persisted integrator, else 'path'. An
-    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Fixed for the
-    # session.
-    _startup_integrator = startup_integrator_name(
-        args.integrator, saved_settings.get("params", {}).get("integrator_index"))
-    args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
-    # validate_render_flags (above) is keyed on the CLI --integrator and ran before
-    # the persisted integrator was known, so re-check the resolved mode against the
-    # effective startup integrator: a persisted sppm under an explicitly-forced
-    # --execution-mode megakernel must still be refused before the GPU comes up.
-    reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
