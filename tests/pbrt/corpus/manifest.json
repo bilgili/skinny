@@ -730,8 +730,8 @@
     "relmse": 0.02,
     "flip": 0.03
    },
-   "notes": "MaterialX authoring of mat_textured; equivalence vs plain sibling | KNOWN BUG: MaterialX imagemap path renders wrong (plain UsdPreviewSurface is exact); follow-up fix flips known_divergent.",
-   "known_divergent": true
+   "notes": "MaterialX authoring of mat_textured; equivalence vs plain sibling. Imagemap base_color intake fixed (graph-param offset compaction + _extract_material texture-key remap); renders identically to the plain UsdPreviewSurface sibling.",
+   "known_divergent": false
   },
   {
    "name": "int_indirect_box",

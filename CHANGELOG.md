@@ -54,7 +54,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
      the texture (mirroring `_store_shader_override` for constants and the
      `_load_mtlx_materials` fallback). Regressions in
      `tests/pbrt/test_mtlx_roundtrip.py`. Both paths now match the plain
-     UsdPreviewSurface authoring (A/B relMSE 2.3/2.1 → ~0.00 on Metal).
+     UsdPreviewSurface authoring (A/B relMSE 2.3/2.1 → ~0.00 on Metal). The suite
+  scene `mat_textured_mtlx` (`tests/pbrt/test_suite.py`) is now un-`xfail`ed
+  (`known_divergent: false`) — its strict pbrt-truth + authoring-equivalence
+  gates pass on every integrator. (Also repaired the two `mat_textured` assets,
+  whose imagemap `file` was an absolute path into the now-removed
+  `confirming-test-scenes` worktree — the dead path broke BOTH the plain and
+  mtlx renders; both now use a layer-relative `texture_uv.png`.)
 
 - **SPPM photon term restored — bathroom walls no longer render black**
   (change `fix-sppm-bathroom-black-walls`) — the SPPM photon deposit rebuilt

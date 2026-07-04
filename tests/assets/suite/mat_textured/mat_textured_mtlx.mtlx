@@ -7,7 +7,7 @@
   </standard_surface>
   <nodegraph name="NG_shape_0_mat">
     <image name="img_base_color" type="color3">
-      <input name="file" type="filename" value="/Users/ahmetbilgili/projects/skinny/.claude/worktrees/confirming-test-scenes/tests/assets/suite/mat_textured/texture_uv.png" />
+      <input name="file" type="filename" value="texture_uv.png" />
     </image>
     <output name="out_base_color" type="color3" nodename="img_base_color" />
   </nodegraph>
