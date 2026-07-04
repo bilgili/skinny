@@ -55,6 +55,7 @@ from skinny.ui.qt.render_session import (
     RenderCommandQueue,
 )
 from skinny.ui.qt.windows.bxdf import BXDFDock
+from skinny.ui.qt.windows.debug_viewport import DebugViewportDock
 from skinny.ui.qt.windows.material_graph import MaterialGraphDock
 from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
 from skinny.ui.qt.windows.scene_graph import SceneGraphDock
@@ -341,8 +342,15 @@ class MainWindow(QMainWindow):
         self._python_material_dock.show()
         self._python_material_dock.raise_()
 
-    def _ensure_debug_dock(self):
-        raise RuntimeError("debug viewport is not yet snapshot-backed in render-thread mode")
+    def _ensure_debug_dock(self) -> DebugViewportDock:
+        if self._debug_dock is not None:
+            return self._debug_dock
+        self._debug_dock = DebugViewportDock(
+            self.renderer, self.viewport, parent=self,
+        )
+        self._debug_dock.setObjectName("debug_viewport")
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._debug_dock)
+        return self._debug_dock
 
     def _show_render_viewport(self) -> None:
         self._render_dock.show()

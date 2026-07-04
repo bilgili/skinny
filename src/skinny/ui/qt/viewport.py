@@ -25,6 +25,7 @@ from skinny.sampling import parse_lobe_samplers
 from skinny.ui.gizmo_input import GizmoMouseController
 from skinny.ui.qt.camera_input import CameraDispatcher
 from skinny.ui.qt.render_session import (
+    DebugFrame,
     FrameSnapshot,
     QtRendererConfig,
     QtRendererProxy,
@@ -42,6 +43,7 @@ class _RenderWorker(QObject):
 
     frame_ready = Signal(object)  # FrameSnapshot
     state_ready = Signal(object)  # RendererStateSnapshot
+    debug_frame_ready = Signal(object)  # DebugFrame (Camera Debug viewport)
     error = Signal(str)
 
     def __init__(
@@ -129,6 +131,26 @@ class _RenderWorker(QObject):
             choices=choice_names_from_renderer(renderer),
         )
 
+    def _maybe_render_debug(self) -> bool:
+        """Render the embedded Camera Debug viewport (if the dock created + opened
+        it and is showing) and emit its frame. Runs on the render worker — the
+        single owner of the renderer + GPU context, so no lock is needed."""
+        r = self.renderer
+        dv = getattr(r, "debug_viewport", None)
+        if dv is None or not getattr(dv, "is_open", False):
+            return False
+        if not getattr(r, "_debug_viewport_active", False):
+            return False
+        try:
+            pixels = dv.render_embedded(r)
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"debug viewport render failed: {exc!r}")
+            return False
+        if pixels is None:
+            return True
+        self.debug_frame_ready.emit(DebugFrame(pixels, dv._width, dv._height))
+        return True
+
     def stop(self) -> None:
         self._running = False
 
@@ -199,12 +221,16 @@ class _RenderWorker(QObject):
                     online_training=renderer_online_status(self.renderer),
                 ))
 
+                debug_active = self._maybe_render_debug()
+
                 # Same throttle ladder web_app uses once accumulation
-                # converges — keeps GPU + CPU idle when the image is done.
+                # converges — keeps GPU + CPU idle when the image is done. The
+                # Camera Debug viewport needs a responsive cadence for
+                # orbit/pan, so cap the idle sleep to ~30 Hz while it is active.
                 if accum > 200:
-                    time.sleep(0.5)
+                    time.sleep(0.033 if debug_active else 0.5)
                 elif accum > 50:
-                    time.sleep(0.1)
+                    time.sleep(0.033 if debug_active else 0.1)
                 elif accum > 10:
                     time.sleep(0.03)
         except Exception as exc:  # noqa: BLE001
@@ -234,6 +260,11 @@ class RenderViewport(QWidget):
     accum_changed = Signal(int)
     """Emitted every time a new frame arrives so the status bar can
     show the current accumulation count.
+    """
+
+    debug_frame_ready = Signal(object)
+    """Forwards the render worker's embedded Camera-Debug-viewport frames
+    (``DebugFrame``) to the Camera Debug dock.
     """
 
     def __init__(
@@ -291,6 +322,7 @@ class RenderViewport(QWidget):
         self._thread.started.connect(self._worker.run)
         self._worker.frame_ready.connect(self._on_frame_ready)
         self._worker.state_ready.connect(self._on_state_ready)
+        self._worker.debug_frame_ready.connect(self.debug_frame_ready)
         self._worker.error.connect(self._on_render_error)
         self._thread.start()
 

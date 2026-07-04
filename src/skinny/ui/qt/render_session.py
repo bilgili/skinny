@@ -51,6 +51,14 @@ class FrameSnapshot:
 
 
 @dataclass(frozen=True)
+class DebugFrame:
+    """One embedded Camera-Debug-viewport frame, produced on the render worker."""
+    pixels: bytes
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
 class RendererStateSnapshot:
     width: int
     height: int

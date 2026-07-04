@@ -120,17 +120,37 @@ needs them.
       relocation bug in the edit closures would not be caught by the offscreen
       smoke; interactive confirm required.
 
-## 5. Camera Debug viewport (hard)
-- [ ] 5.1 Worker owns the `DebugViewport(ctx, …)`, constructed on first open via a
-      `post()`/`request`; remove `main_lock`/`ctx` from the dock constructor.
-- [ ] 5.2 Worker renders the embedded view each frame when open and emits its RGBA8
-      in the snapshot (`debug_frame`); dock blits via `QImage`.
-- [ ] 5.3 Camera/display input (`orbit`/`pan`/`zoom`/`toggle_cam_mode`/`show_grid`/
-      wires) + open/resize/destroy lifecycle → `proxy.post()` commands.
-- [ ] 5.4 Unstub `app.py._toggle_debug_viewport` + `_ensure_debug_dock`; restore
-      session-restore reopen + close/destroy on the worker.
-- [ ] 5.5 Verify: toggle debug view, orbit/pan/zoom, toggle overlays; frame updates
-      live; GUI responsive; show a debug frame back.
+## 5. Camera Debug viewport (hard) — DONE (GPU render source-verified only)
+- [x] 5.1 The `DebugViewport` GPU object lives on the render worker as
+      `renderer.debug_viewport`, built + opened on first show via a worker command
+      (`_worker_debug_create`, uses `renderer.ctx`). Dock constructor takes
+      `(renderer=proxy, viewport)` — `ctx`/`main_lock` removed.
+- [x] 5.2 The worker (`_RenderWorker._maybe_render_debug`) renders the embedded
+      view each frame when active + open and emits a `DebugFrame` via
+      `debug_frame_ready`; `RenderViewport` forwards it; the dock blits it. The
+      idle-sleep ladder caps to ~30 Hz while the debug view is active.
+- [x] 5.3 Camera/display input (drag→orbit/pan/look, wheel→zoom, WASD→free-cam
+      move, view presets, display toggles) + show/hide(active)/resize/close(destroy)
+      lifecycle → `proxy.post()` closures over module-level worker helpers
+      (`_worker_debug_*`). Mode checks run on the worker.
+- [x] 5.4 Unstub `app.py._ensure_debug_dock` (proxy+viewport, no ctx/lock) +
+      `_toggle_debug_viewport` (+ import); session-restore reopen functional.
+- [x] 5.5 Verified: ruff + py_compile clean; 42 hostless tests (6 dock guards in
+      `test_qt_debug_viewport_dock.py` + a worker-loop guard); offscreen-Qt smoke —
+      dock creates/opens the viewport on the worker, blits an emitted DebugFrame,
+      and a mouse drag posts an orbit command to the worker viewport. **Verification
+      gap (recorded):** the actual embedded GPU render (`render_embedded`) needs a
+      real context + GPU; it is **source + compile verified only** — interactive
+      confirm required (toggle the view, orbit/pan/zoom, overlays).
+
+## 6. Docs + close-out
+- [ ] 6.1 Update `docs/Architecture.md` (Qt/render-thread + MetalContext sections)
+      to state the tool docks are proxy-backed; update `AGENTS.md`/`CLAUDE.md` Qt
+      notes.
+- [x] 6.2 `ruff check src/` clean; grep confirms zero GUI-thread live-renderer GPU
+      calls in the five docks (all reads via cache/request, writes/GPU via post).
+- [ ] 6.3 `openspec validate restore-render-thread-tool-docks --strict` passes;
+      archive on completion.
 
 ## 6. Docs + close-out
 - [ ] 6.1 Update `docs/Architecture.md` (Qt/render-thread + MetalContext sections)
