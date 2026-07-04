@@ -19,11 +19,14 @@
       unchanged. Then `skinny-gui --backend metal` → Material Graph preview panel
       shows the material.
 
-## 2. Interim — Camera Debug Metal notice
-- [ ] 2.1 On Metal (`proxy._backend_name == "metal"`), the Camera Debug dock shows
-      a "Camera Debug view renders on the Vulkan backend only" notice and does not
-      post the create/render commands (stops the per-frame `[render error]`).
-      Removed by task 3.9 when P2 lands.
+## 2. Interim — Camera Debug Metal notice — DONE (883ef3e)
+- [x] 2.1 On Metal (`proxy._backend_name == "metal"`), both gap docks show a
+      "renders on the Vulkan backend only" notice and skip the render attempt
+      (Camera Debug: `_DebugCanvas.set_notice` + showEvent skips create; Material
+      Graph: `_render_preview` early notice). Stops the per-frame `[render error]`.
+      Verified ruff + 12 guards + offscreen (metal→notice+no-post, vulkan→normal).
+      Material Graph notice removed by P1 (task 1.2); Camera Debug notice removed
+      by P2 (task 3.9).
 
 ## 3. P2 — Metal Camera Debug compute rasteriser (XL, phased)
 - [ ] 3.1 `debug_raster.slang`: line rasteriser (DDA/Bresenham) — transform
