@@ -84,6 +84,9 @@ void sppmStoreVisiblePoint(uint idx, float3 pos, float3 ns, float3 wo,
     vp.roughness = m.roughness; vp.metallic = m.metallic; vp.specular = m.specular;
     vp.ior = m.ior; vp.opacity = m.opacity; vp.coat = m.coat;
     vp.coatRoughness = m.coatRoughness; vp.coatIOR = m.coatIOR;
+    vp.transmissionColor = m.transmissionColor;
+    vp.specularColor = m.specularColor;
+    vp.diffuseRoughness = m.diffuseRoughness;
     if (vp.n == 0.0)                              // first activation → init estimator
     {
         vp.radius = fc.sppmInitialRadius;
@@ -327,6 +330,13 @@ FlatMaterial sppmLoadMaterial(VisiblePoint vp)
     m.coatRoughness = vp.coatRoughness;
     m.coatIOR = vp.coatIOR;
     m.coatColor = vp.coatColor;
+    // Stage-2 rich inputs: stored in the VP like every other FlatHitMat field
+    // the lobe model reads — an unset field here feeds undefined values into
+    // evaluate() at photon deposit (zeroed photon flux scene-wide when
+    // flat-lobes-rich-inputs landed after PM-1 without a VP slot).
+    m.transmissionColor = vp.transmissionColor;
+    m.specularColor = vp.specularColor;
+    m.diffuseRoughness = vp.diffuseRoughness;
     FlatMaterial mat;
     mat.data.mat = m;
     mat.data.N = vp.ns;
