@@ -8,6 +8,7 @@ applied to the `QtRendererProxy`, and the writes are posted to the render worker
 """
 from __future__ import annotations
 
+from skinny.scene_graph import RendererRef, SceneGraphNode, SceneGraphProperty
 from skinny.ui.qt.render_session import (
     QtRendererProxy,
     RenderCommandQueue,
@@ -44,7 +45,7 @@ class _Scene:
 
 
 class _FakeRenderer:
-    scene_graph = object()
+    scene_graph = SceneGraphNode(path="/World", name="World", type_name="Xform")
     _scene_graph_version = 7
     _usd_scene = _Scene()
     scene = _Scene()
@@ -63,6 +64,40 @@ def test_build_scene_state_projects_renderer_fields() -> None:
     assert state.camera.distance == 4.0
     assert state.camera.lens is None
     assert state.usd_scene.materials[0].python_module == "python_materials.foo"
+
+
+def test_build_scene_state_detaches_the_scene_graph_tree() -> None:
+    # The snapshot crosses to the GUI thread while the render worker keeps
+    # mutating renderer.scene_graph — it must be a detached copy, never the live
+    # tree (codex stop-review: scene graph snapshot leaks a live mutable tree).
+    child = SceneGraphNode(
+        path="/World/Mesh", name="Mesh", type_name="Mesh",
+        properties=[SceneGraphProperty("p", "P", "float", 1.0, True, {"k": 1})],
+        renderer_ref=RendererRef("instance", 3),
+    )
+    root = SceneGraphNode(path="/World", name="World", type_name="Xform",
+                          children=[child])
+
+    class _R:
+        scene_graph = root
+        _scene_graph_version = 9
+
+    snap = build_scene_state(_R())
+
+    # Distinct objects at every level.
+    assert snap.scene_graph is not root
+    assert snap.scene_graph.children[0] is not child
+    assert snap.scene_graph.children[0].properties[0] is not child.properties[0]
+    assert snap.scene_graph.children[0].renderer_ref is not child.renderer_ref
+    # Same data.
+    assert snap.scene_graph.children[0].renderer_ref.index == 3
+    assert snap.scene_graph_version == 9
+
+    # Worker-side mutation of the live tree does not leak into the snapshot.
+    root.children.append(SceneGraphNode(path="/World/B", name="B", type_name="Mesh"))
+    child.properties[0].metadata["k"] = 2
+    assert len(snap.scene_graph.children) == 1
+    assert snap.scene_graph.children[0].properties[0].metadata["k"] == 1
 
 
 def test_apply_scene_state_exposes_reads_the_dock_uses() -> None:

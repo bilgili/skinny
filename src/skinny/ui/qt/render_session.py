@@ -16,6 +16,7 @@ from typing import Any
 
 from skinny.params import STATIC_PARAMS, _set_nested
 from skinny.playback import PlaybackClock
+from skinny.scene_graph import copy_scene_graph
 
 
 @dataclass(frozen=True)
@@ -163,7 +164,10 @@ def build_scene_state(renderer) -> SceneStateSnapshot:
     usd_scene = getattr(renderer, "_usd_scene", None)
     cm_map = getattr(renderer, "_mtlx_scene_materials", {}) or {}
     return SceneStateSnapshot(
-        scene_graph=getattr(renderer, "scene_graph", None),
+        # Copy the tree, don't leak the live renderer-owned one: the worker keeps
+        # mutating/reassigning `renderer.scene_graph` on its thread while the GUI
+        # reads the snapshot (data race). The snapshot must be a detached copy.
+        scene_graph=copy_scene_graph(getattr(renderer, "scene_graph", None)),
         scene_graph_version=int(getattr(renderer, "_scene_graph_version", 0)),
         usd_scene=_proj_scene(usd_scene, cm_map),
         scene=_proj_scene(getattr(renderer, "scene", None)),

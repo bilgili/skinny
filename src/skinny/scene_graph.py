@@ -50,6 +50,43 @@ class SceneGraphNode:
     renderer_ref: Optional[RendererRef] = None
 
 
+def copy_scene_graph(node: Optional[SceneGraphNode]) -> Optional[SceneGraphNode]:
+    """Return an independent copy of the node structure — new `SceneGraphNode`,
+    `SceneGraphProperty`, `RendererRef`, and `metadata`/`children`/`properties`
+    containers all the way down.
+
+    Used to hand the Scene Graph / BXDF docks a tree the render worker no longer
+    owns: the renderer keeps mutating (and reassigning) `renderer.scene_graph` on
+    its own thread, so passing the live tree into a cross-thread snapshot is a
+    data race. Leaf `SceneGraphProperty.value` objects are carried by reference —
+    the renderer rebuilds whole nodes on any change and never mutates a value in
+    place, so they are effectively immutable snapshots (and may be USD `Gf`
+    values that do not deep-copy cleanly)."""
+    if node is None:
+        return None
+    return SceneGraphNode(
+        path=node.path,
+        name=node.name,
+        type_name=node.type_name,
+        children=[copy_scene_graph(c) for c in node.children],
+        properties=[
+            SceneGraphProperty(
+                name=p.name,
+                display_name=p.display_name,
+                type_name=p.type_name,
+                value=p.value,
+                editable=p.editable,
+                metadata=dict(p.metadata),
+            )
+            for p in node.properties
+        ],
+        renderer_ref=(
+            RendererRef(node.renderer_ref.kind, node.renderer_ref.index)
+            if node.renderer_ref is not None else None
+        ),
+    )
+
+
 # ─── Type icons for display ─────────────────────────────────────────
 
 _TYPE_ICONS: dict[str, str] = {
