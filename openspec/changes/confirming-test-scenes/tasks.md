@@ -18,7 +18,7 @@ are reported as before/after deltas with rendered images shown.
 
 - [x] 2.1 Author `mat_diffuse`, `mat_conductor`, `mat_dielectric`, `mat_plastic` — each: `<scene>.usda` + `<scene>_mtlx.usda`/`.mtlx` + `<scene>.pbrt`
 - [x] 2.2 Author `mat_emissive`, `mat_textured`, `mat_subsurface` the same way (texture scene reuses the existing `texture_uv.png` pattern approach)
-- [ ] 2.3 Generate pbrt reference EXRs via `tests/pbrt/regen_refs.py` (pinned pbrt, 128×128); verify each `.pbrt` runs unmodified with the user-facing pbrt invocation
+- [x] 2.3 Generate pbrt reference EXRs via `tests/pbrt/regen_refs.py` (pinned pbrt, 128×128); verify each `.pbrt` runs unmodified with the user-facing pbrt invocation
 - [ ] 2.4 Add manifest entries (spp, tolerances measured-then-pinned, equivalence tolerances); hostless tests green
 - [ ] 2.5 Stage checkpoint: hostless tier auto; **ask user** before GPU sweep (matrix over the 7 scenes, both variants, mega+wave); persist `results/stage-2.json`, report deltas + images
 
@@ -33,7 +33,7 @@ are reported as before/after deltas with rendered images shown.
 ## 4. Integrator scenes
 
 - [x] 4.1 Author `int_indirect_box`, `int_caustic`, `int_bleed` (usda + mtlx variant + pbrt counterpart each)
-- [ ] 4.2 Generate pbrt refs; add manifest entries; record any legitimate integrator exclusions through `combo_is_valid` (e.g. SPPM × subsurface) with reasons
+- [x] 4.2 Generate pbrt refs; add manifest entries; record any legitimate integrator exclusions through `combo_is_valid` (e.g. SPPM × subsurface) with reasons
 - [ ] 4.3 Hostless tests green (scene validity + coverage meta-test)
 - [ ] 4.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (path/bdpt/sppm × mega/wave over the 3 scenes vs pbrt refs + anchor); persist `results/stage-4.json`, report deltas + images
 
@@ -41,17 +41,17 @@ are reported as before/after deltas with rendered images shown.
 
 - [x] 5.1 Author `samp_many_lights` (16 emissive quads, glossy floor) + `samp_env_glossy` (rough conductor, high-contrast env, no analytic lights), dual variants + pbrt counterparts
 - [ ] 5.2 Wire ReSTIR DI and proposal/neural axes for these scenes into the matrix (statistical unbiasedness vs analytic anchor, not image equality, for the neural axis)
-- [ ] 5.3 Generate pbrt refs; manifest entries; hostless tests green
+- [x] 5.3 Generate pbrt refs; manifest entries; hostless tests green
 - [ ] 5.4 Stage checkpoint: hostless auto; **ask user** before GPU sweep (sampling axes over the 2 scenes); persist `results/stage-5.json`, report deltas + images
 
 ## 6. Furnace closure
 
 - [x] 6.1 Implement the furnace gate harness: headless render with `furnace_index=1`, read linear accumulation image, closure assertion helper (reuses `metrics` battery, no hand-rolled formulas)
 - [x] 6.2 Author furnace material variants (Lambert 1.0, smooth conductor 1.0, clear dielectric, rough conductor) as suite scenes with furnace dispositions in the manifest
-- [ ] 6.3 Sweep furnace × integrator × execution mode through `combo_is_valid`; record exclusions (SPPM decision) with reasons
+- [x] 6.3 Sweep furnace × integrator × execution mode through `combo_is_valid`; record exclusions (SPPM decision) with reasons
 - [x] 6.4 Per-material furnace test: two-sphere scene, flag bit 10 on one material; flagged closes to 1.0, unflagged matches non-furnace reference
-- [ ] 6.5 Measure closure values; pin tolerances; record any legitimate energy-loss baselines (rough conductor) — baselines tighten-only
-- [ ] 6.6 Stage checkpoint: hostless auto; **ask user** before GPU furnace sweep; persist `results/stage-6.json`, report closure table + images
+- [x] 6.5 Measure closure values; pin tolerances; record any legitimate energy-loss baselines (rough conductor) — baselines tighten-only
+- [x] 6.6 Stage checkpoint: hostless auto; **ask user** before GPU furnace sweep; persist `results/stage-6.json`, report closure table + images
 
 ## 7. Final regression + docs + validation
 

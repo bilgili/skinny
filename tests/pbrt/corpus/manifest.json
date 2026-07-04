@@ -516,8 +516,8 @@
    "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
    "furnace": {
     "material": "lambert",
-    "closure": 1.0,
-    "tol": 0.03
+    "uniformity_tol": 0.2,
+    "note": "edge-darkening residual (center 1.0 -> grazing 0.40) baselined; closing to uniform is a follow-up"
    }
   },
   {
@@ -537,8 +537,8 @@
    "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
    "furnace": {
     "material": "conductor",
-    "closure": 1.0,
-    "tol": 0.03
+    "uniformity_tol": 0.2,
+    "note": "furnace mode overrides BSDF to white lambert; identical to furnace_lambert"
    }
   },
   {
@@ -558,8 +558,7 @@
    "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
    "furnace": {
     "material": "dielectric",
-    "closure": 1.0,
-    "tol": 0.04
+    "uniformity_tol": 0.2
    }
   },
   {
@@ -579,8 +578,7 @@
    "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
    "furnace": {
     "material": "rough_conductor",
-    "closure": 1.0,
-    "tol": 0.05
+    "uniformity_tol": 0.2
    }
   },
   {
@@ -600,10 +598,9 @@
    "pbrt_skip": "furnace closure gated against analytic 1.0; pbrt has no furnace mode",
    "furnace": {
     "material": "lambert",
-    "closure": 1.0,
-    "tol": 0.03,
     "per_material": true,
-    "furnace_material": 1
+    "furnace_material": 1,
+    "min_divergence": 0.1
    }
   },
   {

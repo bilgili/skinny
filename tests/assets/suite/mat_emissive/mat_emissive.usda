@@ -86,9 +86,11 @@ def Xform "World"
             dictionary pbrtAreaLight = {
                 dictionary paramTypes = {
                     string L = "rgb"
+                    string twosided = "bool"
                 }
                 dictionary params = {
                     double[] L = [6, 5, 4]
+                    bool twosided = 1
                 }
                 string type = "diffuse"
             }

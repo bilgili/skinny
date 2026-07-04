@@ -80,7 +80,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -119,7 +119,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -158,7 +158,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -197,7 +197,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -236,7 +236,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -275,7 +275,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -314,7 +314,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -353,7 +353,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -392,7 +392,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -431,7 +431,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -470,7 +470,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -509,7 +509,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -548,7 +548,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -587,7 +587,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -626,7 +626,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -665,7 +665,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }

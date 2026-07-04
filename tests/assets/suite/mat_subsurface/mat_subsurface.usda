@@ -50,7 +50,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [12, 12, 12]
+                    double[] L = [26, 26, 26]
                 }
                 string type = "diffuse"
             }
@@ -78,7 +78,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
-            color3f inputs:emissiveColor = (12, 12, 12)
+            color3f inputs:emissiveColor = (26, 26, 26)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -146,7 +146,7 @@ def Xform "World"
                 dictionary params = {
                     double eta = 1.33
                     double[] sigma_a = [0.02, 0.04, 0.06]
-                    double[] sigma_s = [2.5, 2.5, 3]
+                    double[] sigma_s = [1, 1, 1.2]
                 }
                 string type = "subsurface"
             }
@@ -155,7 +155,7 @@ def Xform "World"
                 double subsurface_eta = 1.33
                 double subsurface_g = 0
                 double[] subsurface_sigma_a = [0.00002, 0.00004, 0.000059999999999999995]
-                double[] subsurface_sigma_s = [0.0025, 0.0025, 0.003]
+                double[] subsurface_sigma_s = [0.001, 0.001, 0.0012]
             }
         }
     )

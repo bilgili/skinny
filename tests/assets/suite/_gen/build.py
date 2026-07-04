@@ -55,7 +55,10 @@ def _sphere_block(material: str, cx=0.0, cy=0.7, cz=0.0, r=0.7,
     pts, idx = geom.uv_sphere(cx, cy, cz, r)
     inner = ""
     if emissive is not None:
-        inner += f"  AreaLightSource \"diffuse\" \"rgb L\" [{emissive}]\n"
+        # twosided: the tessellated-sphere winding can point normals inward, which
+        # would make a one-sided pbrt area light emit into the sphere (a black
+        # ball). Emitting both sides makes the emissive sphere robust to winding.
+        inner += f"  AreaLightSource \"diffuse\" \"bool twosided\" true \"rgb L\" [{emissive}]\n"
     if material:
         inner += f"  {material}\n"
     inner += f"  {geom.trianglemesh(pts, idx)}\n"
@@ -83,6 +86,46 @@ def _scene(name: str, material: str, *, spp=256, integrator="path", maxdepth=8,
 # ─── scene table ────────────────────────────────────────────────────────────
 # Each entry: (folder, pbrt-text). material_class / spp / integrator captured in
 # the pbrt itself; the manifest (written by hand) records tolerances + gates.
+
+def _furnace_scene(name: str, material: str, *, spp=128, maxdepth=12) -> str:
+    """A single test sphere, no ground, no authored light. Under skinny's furnace
+    mode the constant-white environment lights it AND forms the background, so a
+    lossless material is indistinguishable from the 1.0 background — the cleanest
+    closure probe (no 0.18 floor to confound the frame mean)."""
+    pts, idx = geom.uv_sphere(0.0, 0.0, 0.0, 1.5)
+    return (f"""LookAt 0 0 3.6  0 0 0  0 1 0
+Camera "perspective" "float fov" 45
+Sampler "independent" "integer pixelsamples" {spp}
+Integrator "path" "integer maxdepth" {maxdepth}
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "{name}.exr"
+WorldBegin
+AttributeBegin
+  {material}
+  {geom.trianglemesh(pts, idx)}
+AttributeEnd
+""")
+
+
+def _furnace_two(name: str, mat_a: str, mat_b: str, *, spp=128) -> str:
+    """Two spheres for the per-material furnace probe (no ground/light)."""
+    pa, ia = geom.uv_sphere(-1.0, 0.0, 0.0, 0.85)
+    pb, ib = geom.uv_sphere(1.0, 0.0, 0.0, 0.85)
+    return (f"""LookAt 0 0 4.2  0 0 0  0 1 0
+Camera "perspective" "float fov" 45
+Sampler "independent" "integer pixelsamples" {spp}
+Integrator "path" "integer maxdepth" 8
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "{name}.exr"
+WorldBegin
+AttributeBegin
+  {mat_a}
+  {geom.trianglemesh(pa, ia)}
+AttributeEnd
+AttributeBegin
+  {mat_b}
+  {geom.trianglemesh(pb, ib)}
+AttributeEnd
+""")
+
 
 def _two_spheres(name: str, mat_a: str, mat_b: str, *, spp=256, env=None,
                  area_light="12 12 12") -> str:
@@ -144,7 +187,7 @@ def _light_grid(name: str, floor_mat: str, *, n=4, spp=256) -> str:
             cz = -span + 2 * span * (j / (n - 1))
             q = geom.quad((cx - h, y, cz - h), (cx + h, y, cz - h),
                           (cx + h, y, cz + h), (cx - h, y, cz + h))
-            parts.append(_wall(*q, _diffuse(0, 0, 0), emissive="40 40 40"))
+            parts.append(_wall(*q, _diffuse(0, 0, 0), emissive="120 120 120"))
     parts.append(_sphere_block(_diffuse(0.5, 0.5, 0.5), cx=0.0, cy=0.7, cz=0.0, r=0.7))
     return "".join(parts)
 
@@ -187,8 +230,8 @@ SCENES: dict[str, str] = {
         emissive_sphere="6 5 4"),
     "mat_subsurface": _scene(
         "mat_subsurface",
-        'Material "subsurface" "rgb sigma_a" [0.02 0.04 0.06] "rgb sigma_s" [2.5 2.5 3.0] "float eta" 1.33',
-        integrator="volpath", maxdepth=32),
+        'Material "subsurface" "rgb sigma_a" [0.02 0.04 0.06] "rgb sigma_s" [1.0 1.0 1.2] "float eta" 1.33',
+        integrator="volpath", maxdepth=32, area_light="26 26 26"),
     # ── textured material ──
     "mat_textured": _TEXTURED,
     # ── integrators (transport discriminators) ──
@@ -197,7 +240,8 @@ SCENES: dict[str, str] = {
         'Material "dielectric" "float eta" 1.5', maxdepth=16, area_light="30 30 30"),
     "int_indirect_box": _cornell_box(
         "int_indirect_box", left="0.73 0.73 0.73", right="0.73 0.73 0.73",
-        emitter="40 40 40", baffle=True, maxdepth=12),
+        emitter="18 18 18", baffle=False, maxdepth=12,
+        center_obj=_diffuse(0.73, 0.73, 0.73)),
     "int_bleed": _cornell_box(
         "int_bleed", emitter="16 16 16", maxdepth=10,
         center_obj=_diffuse(0.73, 0.73, 0.73)),
@@ -210,20 +254,20 @@ SCENES: dict[str, str] = {
         'Material "conductor" "spectrum eta" "metal-Al-eta" "spectrum k" "metal-Al-k" "float roughness" 0.25',
         env="0.8 0.8 0.9", area_light=None),
     # ── furnace closure (lossless materials; reference is the analytic 1.0) ──
-    "furnace_lambert": _scene(
-        "furnace_lambert", 'Material "diffuse" "rgb reflectance" [1 1 1]', spp=128),
-    "furnace_conductor": _scene(
+    "furnace_lambert": _furnace_scene(
+        "furnace_lambert", 'Material "diffuse" "rgb reflectance" [1 1 1]'),
+    "furnace_conductor": _furnace_scene(
         "furnace_conductor",
-        'Material "conductor" "float roughness" 0 "rgb reflectance" [1 1 1]', spp=128),
-    "furnace_dielectric": _scene(
-        "furnace_dielectric", 'Material "dielectric" "float eta" 1.5', spp=128, maxdepth=16),
-    "furnace_rough_conductor": _scene(
+        'Material "conductor" "float roughness" 0 "rgb reflectance" [1 1 1]'),
+    "furnace_dielectric": _furnace_scene(
+        "furnace_dielectric", 'Material "dielectric" "float eta" 1.5', maxdepth=16),
+    "furnace_rough_conductor": _furnace_scene(
         "furnace_rough_conductor",
-        'Material "conductor" "float roughness" 0.4 "rgb reflectance" [1 1 1]', spp=128),
-    "furnace_per_material": _two_spheres(
+        'Material "conductor" "float roughness" 0.4 "rgb reflectance" [1 1 1]'),
+    "furnace_per_material": _furnace_two(
         "furnace_per_material",
         'Material "diffuse" "rgb reflectance" [0.5 0.5 0.5]',
-        'Material "diffuse" "rgb reflectance" [1 1 1]', spp=128),
+        'Material "diffuse" "rgb reflectance" [1 1 1]'),
 }
 
 

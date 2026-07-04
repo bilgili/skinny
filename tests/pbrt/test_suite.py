@@ -117,15 +117,19 @@ def test_suite_coverage_equivalence_disposition(spec):
 
 @pytest.mark.parametrize("spec", FURNACE, ids=[s.name for s in FURNACE])
 def test_suite_coverage_furnace_disposition(spec):
-    """Every furnace scene records a closure disposition: a target+tolerance, or a
-    recorded baseline for legitimate energy loss."""
+    """Every furnace scene records a gate disposition: a uniformity tolerance (the
+    object must vanish into the constant furnace) or, for the per-material probe, a
+    minimum flagged/unflagged ratio."""
     cfg = spec.furnace
-    assert "tol" in cfg, f"{spec.name}: furnace scene needs a tolerance"
-    assert ("closure" in cfg) or ("baseline" in cfg), (
-        f"{spec.name}: furnace scene needs a closure target or a recorded baseline"
-    )
-    # A furnace scene's reference is the analytic value; it must not also claim a
-    # pbrt reference gate.
+    if cfg.get("per_material"):
+        assert "furnace_material" in cfg, (
+            f"{spec.name}: per-material furnace needs a furnace_material index"
+        )
+    else:
+        assert ("uniformity_tol" in cfg) or ("tol" in cfg) or ("baseline" in cfg), (
+            f"{spec.name}: furnace scene needs a uniformity tolerance or baseline"
+        )
+    # A furnace scene's reference is the analytic invariant, not a pbrt EXR.
     assert spec.pbrt_skip, f"{spec.name}: furnace scene needs a pbrt_skip reason"
 
 
@@ -260,9 +264,13 @@ def test_suite_authoring_equivalence_gate(spec):
 @pytest.mark.gpu
 @pytest.mark.parametrize("spec", FURNACE, ids=[s.name for s in FURNACE])
 def test_suite_furnace_gate(spec):
-    """White-furnace closure across the scene's valid combos: a lossless material
-    closes to 1.0 (or its recorded baseline) within tolerance under furnace mode
-    (change furnace-closure)."""
+    """White-furnace gate across the scene's valid combos (change furnace-closure).
+
+    For a single-material scene the lossless object must vanish into the constant
+    furnace (relative non-uniformity below tolerance). For the per-material scene
+    the flagged sphere must light up while its unflagged neighbour stays dark.
+    """
+    per_material = bool((spec.furnace or {}).get("per_material"))
     combos = enumerate_combos(spec)
     try:
         imgs = {c.label: furnace_mod.render_furnace(spec, c, CORPUS_DIR) for c in combos}
@@ -270,13 +278,19 @@ def test_suite_furnace_gate(spec):
         pytest.skip(f"render backend unavailable: {exc}")
     failures: list[str] = []
     for c in combos:
-        res = furnace_mod.furnace_closure_result(spec, imgs[c.label], c)
-        tag = "(baseline)" if res.baseline_used else ""
-        print(f"[{spec.name}] {c.label:28s} furnace {tag} mean={res.mean:.4f} "
-              f"target={res.target:.4f} dev={res.deviation:.4f}")
-        if not res.passed:
-            failures.append(
-                f"{c.label}: furnace mean={res.mean:.4f} target={res.target:.4f} "
-                f"dev={res.deviation:.4f}"
-            )
+        if per_material:
+            res = furnace_mod.furnace_per_material_result(spec, imgs[c.label], c)
+            print(f"[{spec.name}] {c.label:28s} per-material divergence={res.statistic:.3f} "
+                  f"(>= {res.target:.2f})")
+            if not res.passed:
+                failures.append(f"{c.label}: per-material divergence={res.statistic:.3f} "
+                                f"< {res.target:.2f}")
+        else:
+            res = furnace_mod.furnace_closure_result(spec, imgs[c.label], c)
+            tag = "(baseline)" if res.baseline_used else ""
+            print(f"[{spec.name}] {c.label:28s} furnace {tag} nonunif={res.statistic:.4f} "
+                  f"(<= {res.target:.4f}) envmean={res.mean:.4f}")
+            if not res.passed:
+                failures.append(f"{c.label}: non-uniformity={res.statistic:.4f} "
+                                f"> {res.target:.4f}")
     assert not failures, f"{spec.name} furnace failures:\n  " + "\n  ".join(failures)

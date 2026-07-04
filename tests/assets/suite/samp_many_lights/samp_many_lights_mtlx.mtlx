@@ -17,7 +17,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_1_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_1_mat_surface" />
@@ -27,7 +27,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_2_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_2_mat_surface" />
@@ -37,7 +37,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_3_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_3_mat_surface" />
@@ -47,7 +47,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_4_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_4_mat_surface" />
@@ -57,7 +57,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_5_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_5_mat_surface" />
@@ -67,7 +67,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_6_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_6_mat_surface" />
@@ -77,7 +77,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_7_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_7_mat_surface" />
@@ -87,7 +87,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_8_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_8_mat_surface" />
@@ -97,7 +97,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_9_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_9_mat_surface" />
@@ -107,7 +107,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_10_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_10_mat_surface" />
@@ -117,7 +117,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_11_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_11_mat_surface" />
@@ -127,7 +127,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_12_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_12_mat_surface" />
@@ -137,7 +137,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_13_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_13_mat_surface" />
@@ -147,7 +147,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_14_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_14_mat_surface" />
@@ -157,7 +157,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_15_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_15_mat_surface" />
@@ -167,7 +167,7 @@
     <input name="metalness" type="float" value="0" />
     <input name="specular_roughness" type="float" value="1" />
     <input name="emission" type="float" value="1" />
-    <input name="emission_color" type="color3" value="40, 40, 40" />
+    <input name="emission_color" type="color3" value="120, 120, 120" />
   </standard_surface>
   <surfacematerial name="shape_16_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_16_mat_surface" />

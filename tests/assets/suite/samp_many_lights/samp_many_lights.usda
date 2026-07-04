@@ -92,7 +92,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -126,7 +126,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -142,7 +142,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -176,7 +176,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -192,7 +192,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -226,7 +226,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -242,7 +242,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -276,7 +276,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -292,7 +292,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -326,7 +326,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -342,7 +342,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -376,7 +376,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -392,7 +392,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -426,7 +426,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -442,7 +442,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -476,7 +476,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -492,7 +492,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -526,7 +526,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -542,7 +542,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -576,7 +576,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -592,7 +592,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -626,7 +626,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -642,7 +642,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -676,7 +676,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -692,7 +692,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -726,7 +726,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -742,7 +742,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -776,7 +776,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -792,7 +792,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -826,7 +826,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
@@ -842,7 +842,7 @@ def Xform "World"
                     string L = "rgb"
                 }
                 dictionary params = {
-                    double[] L = [40, 40, 40]
+                    double[] L = [120, 120, 120]
                 }
                 string type = "diffuse"
             }
@@ -876,7 +876,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (0, 0, 0)
-            color3f inputs:emissiveColor = (40, 40, 40)
+            color3f inputs:emissiveColor = (120, 120, 120)
             float inputs:metallic = 0
             float inputs:opacity = 1
             float inputs:roughness = 1
