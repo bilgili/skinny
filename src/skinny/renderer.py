@@ -6146,8 +6146,6 @@ class Renderer:
 
     def _ensure_preview_resources(self, size: int) -> bool:
         """Lazy-create preview image / readback / pipeline. False = unavailable."""
-        from skinny.vk_compute import PreviewPipeline
-
         # The preview pipeline only needs the set-0 layout + the emitted
         # material modules — both live on the scene bindings, so it works in
         # wavefront mode too (where `self.pipeline` is None).
@@ -6178,11 +6176,22 @@ class Renderer:
             )
         if self._preview_pipeline is None:
             try:
-                self._preview_pipeline = PreviewPipeline(
-                    self.ctx, self.shader_dir,
-                    self._scene_set0_layout,
-                    self._preview_image.view,
-                )
+                if self.is_metal:
+                    # Native-Metal preview: compile preview_pass.slang to MSL,
+                    # dispatch by binding resources by name (no descriptor sets,
+                    # no output image view). Change metal-tool-dock-render P1.
+                    from skinny.metal_compute import PreviewPipelineMetal
+                    self._preview_pipeline = PreviewPipelineMetal(
+                        self.ctx, self.shader_dir,
+                        graph_fragments=list(self._scene_graph_fragments),
+                    )
+                else:
+                    from skinny.vk_compute import PreviewPipeline
+                    self._preview_pipeline = PreviewPipeline(
+                        self.ctx, self.shader_dir,
+                        self._scene_set0_layout,
+                        self._preview_image.view,
+                    )
             except RuntimeError as e:
                 print(f"[skinny] preview pipeline build failed: {e}")
                 self._preview_pipeline = None
@@ -6209,11 +6218,7 @@ class Renderer:
         Returns None when the renderer is not ready (no scene loaded, or
         slangc failed on preview_pass.slang).
         """
-        from skinny.vk_compute import PreviewPipeline
-
         if not self._ensure_preview_resources(size):
-            return None
-        if self.descriptor_sets is None or not self.descriptor_sets:
             return None
         if self._usd_scene is None:
             return None
@@ -6221,6 +6226,18 @@ class Renderer:
             return None
 
         graph_id = int(self._material_graph_ids.get(material_id, 0))
+
+        if self.is_metal:
+            # Native-Metal preview dispatch (change metal-tool-dock-render P1).
+            return self._render_material_preview_metal(
+                material_id, graph_id, prim_kind, size,
+                yaw, pitch, distance, fov_tan,
+            )
+
+        from skinny.vk_compute import PreviewPipeline
+
+        if self.descriptor_sets is None or not self.descriptor_sets:
+            return None
 
         # Allocate a one-shot command buffer (same pattern as the existing
         # screenshot path). We submit on the compute queue and wait idle.
@@ -6324,6 +6341,41 @@ class Renderer:
             self.ctx.device, self.ctx.command_pool, 1, [cmd],
         )
         return self._preview_readback.read(), size
+
+    def _render_material_preview_metal(
+        self, material_id: int, graph_id: int, prim_kind: int, size: int,
+        yaw: float, pitch: float, distance: float, fov_tan: float,
+    ) -> "tuple[bytes, int]":
+        """Metal path of `render_material_preview` (change metal-tool-dock-render
+        P1). Mirrors `_render_megakernel_metal`: build the set-0 material bind
+        dict (`_build_metal_binds`) + the bindless texture pool, pack the same
+        32-byte push block, dispatch `PreviewPipelineMetal` over `size×size`,
+        and read back the RGBA32F output image (float32, matching the Vulkan
+        `(pixels, size)` contract the Material Graph dock reshapes)."""
+        from skinny.vk_compute import PreviewPipeline
+
+        push_bytes = PreviewPipeline.pack_push(
+            material_id, graph_id, prim_kind, size,
+            yaw, pitch, distance, fov_tan,
+        )
+        binds = self._build_metal_binds()
+        bindless = (
+            "flatMaterialTextures",
+            [(s.texture if s is not None else None)
+             for s in self.texture_pool._slots],
+        )
+        self._preview_pipeline.dispatch(
+            size,
+            push_bytes=push_bytes,
+            uniform_blob=self._pack_uniforms_msl(),
+            binds=binds,
+            output_image=self._preview_image.texture,
+            bindless=bindless,
+        )
+        # Read the float32 output directly — the Metal `ReadbackBuffer` would
+        # down-convert to RGBA8, but the dock consumer reshapes float32 RGBA.
+        arr = self._preview_image.texture.to_numpy()
+        return np.ascontiguousarray(arr, dtype=np.float32).tobytes(), size
 
     def apply_light_override(
         self, light_type: str, light_index: int, key: str, value: object,

@@ -1129,14 +1129,9 @@ class MaterialGraphDock(QDockWidget):
     def _render_preview(self) -> None:
         if self._view is None:
             return
-        # render_material_preview is Vulkan-only today (metal-tool-dock-render P1
-        # ports it); show a clear notice on Metal instead of a failed request.
-        if getattr(self.renderer, "_backend_name", "") == "metal":
-            self._status.setText(
-                "Material preview renders on the Vulkan backend only "
-                "(Metal port pending)."
-            )
-            return
+        # render_material_preview renders on both backends (Vulkan descriptor-set
+        # path; native-Metal bind-by-name dispatch, change metal-tool-dock-render
+        # P1) — no backend gate.
         prim = self._PRIM_KIND.get(self._prim_combo.currentText(), 0)
         # render_material_preview is GPU work — run it on the worker and blit the
         # returned pixels on the GUI thread.

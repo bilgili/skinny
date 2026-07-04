@@ -938,6 +938,119 @@ class ComputePipeline:
         self._kernel = None
 
 
+class PreviewPipelineMetal:
+    """Metal material-preview pipeline (change metal-tool-dock-render P1, design
+    D1) — the native-Metal sibling of ``vk_compute.PreviewPipeline``.
+
+    Compiles ``preview_pass.slang`` (``previewMain``) to MSL through a SlangPy
+    slang session configured **exactly** like the megakernel
+    :class:`ComputePipeline` (same ``include_paths``, ``SKINNY_COMPUTE_PIPELINE``/
+    ``SKINNY_METAL`` defines, and ``column_major`` matrix layout), linking the
+    same emit-time ``generated_materials`` modules (already written to disk by
+    :func:`emit_megakernel_sources` for the scene's graph set) so the preview
+    shades identically to the main render. There are **no Vulkan descriptor
+    sets**: :meth:`dispatch` binds the scene material resources + the preview
+    output image by name on a root shader object, sets the ``fc`` uniform block
+    and the ``pc`` push block via ``set_data`` (no per-field cursor writes,
+    design D4), runs one compute pass over ``size × size``, submits, and waits
+    idle (Metal auto-syncs the dispatch→readback, so no barriers).
+    """
+
+    def __init__(self, ctx, shader_dir, graph_fragments=None) -> None:
+        self.ctx = ctx
+        self._spy = ctx._spy
+        self.shader_dir = Path(shader_dir)
+        self.graph_fragments = list(graph_fragments) if graph_fragments else []
+        # Emit the generated material/dispatcher Slang preview_pass imports.
+        # Idempotent: the scene `ComputePipeline` already wrote the same files
+        # for this fragment set; re-emitting keeps this pipeline self-contained.
+        emit_megakernel_sources(self.shader_dir, self.graph_fragments)
+        self._build()
+
+    def _build(self) -> None:
+        spy = self._spy
+        dev = self.ctx.device
+        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
+        opts = spy.SlangCompilerOptions()
+        opts.include_paths = [self.shader_dir, mtlx_genslang]
+        opts.defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+        # Column-major matches the megakernel path so the shared `fc` camera
+        # matrices read identically (see ComputePipeline._build).
+        opts.matrix_layout = spy.SlangMatrixLayout.column_major
+        session = dev.create_slang_session(compiler_options=opts)
+
+        src_path = self.shader_dir / "preview_pass.slang"
+        module = session.load_module_from_source(
+            "preview_pass", src_path.read_text(encoding="utf-8"), str(src_path)
+        )
+        self.program = session.link_program(
+            [module], [module.entry_point("previewMain")]
+        )
+        self.pipeline = dev.create_compute_pipeline(program=self.program)
+        # Only bind names the compiled module actually references (dead-stripped
+        # ones are skipped) — same discipline as ComputePipeline.dispatch.
+        self.global_names = {p.name for p in self.program.layout.parameters}
+        # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
+        self._default_tex = dev.create_texture(
+            type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
+            width=1, height=1,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            memory_type=spy.MemoryType.device_local, label="skinny.preview_bindless_default",
+        )
+
+    def dispatch(self, size: int, *, push_bytes: bytes, uniform_blob: bytes,
+                 binds: dict, output_image, bindless=None) -> None:
+        """Bind the scene material resources (``binds``: name → native SlangPy
+        ``Buffer``/``Texture``/``Sampler``), the ``fc`` uniform block, the ``pc``
+        push block, the optional bindless texture array, and the preview output
+        image (``previewOutput``), then dispatch ``previewMain`` over
+        ``size × size`` threads. Names absent from the reflected globals are
+        skipped. ``bindless`` is ``(global_name, [native_texture | None, …])``;
+        ``None`` slots bind the default 1×1 texture (Metal requires every slot
+        bound)."""
+        spy = self._spy
+        dev = self.ctx.device
+        ro = dev.create_root_shader_object(self.program)
+        cur = spy.ShaderCursor(ro)
+
+        if "fc" in self.global_names:
+            cur["fc"].set_data(
+                np.frombuffer(bytes(uniform_blob), dtype=np.uint8).copy())
+        cur["pc"].set_data(
+            np.frombuffer(bytes(push_bytes), dtype=np.uint8).copy())
+        cur["previewOutput"] = output_image
+
+        for name, native in binds.items():
+            if native is None or name == "previewOutput" \
+                    or name not in self.global_names:
+                continue
+            cur[name] = native
+
+        if bindless is not None:
+            name, textures = bindless
+            if name in self.global_names:
+                slot_cur = cur[name]
+                for i in range(BINDLESS_TEXTURE_CAPACITY):
+                    tex = textures[i] if i < len(textures) and textures[i] is not None \
+                        else self._default_tex
+                    slot_cur[i] = tex
+
+        enc = dev.create_command_encoder()
+        cpass = enc.begin_compute_pass()
+        cpass.bind_pipeline(self.pipeline, ro)
+        # Thread count (slang-rhi divides by numthreads(8,8,1)) — mirrors the
+        # megakernel dispatch which passes pixel dims, not group counts.
+        cpass.dispatch([int(size), int(size), 1])
+        cpass.end()
+        dev.submit_command_buffer(enc.finish())
+        dev.wait_for_idle()
+
+    def destroy(self) -> None:
+        self.pipeline = None
+        self.program = None
+        self._default_tex = None
+
+
 class MetalFrameEncoder:
     """Single-frame, multi-pass compute command encoder (design D3) — the Metal
     sibling of recording the whole wavefront bounce loop into one Vulkan command

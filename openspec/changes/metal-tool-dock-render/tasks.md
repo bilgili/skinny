@@ -1,23 +1,33 @@
 # Tasks — Metal render paths for the tool docks
 
 ## 1. P1 — Metal material preview (small)
-- [ ] 1.1 `PreviewPipelineMetal` in `metal_compute.py`: compile `preview_pass.slang`
-      to MSL via the megakernel SlangPy session (reuse its `generated_materials`
-      link); `dispatch(push_bytes, set0_binds, output_image)` = root object +
-      bind-by-name (set-0 material resources + output image) + `set_data(push)` +
+- [x] 1.1 `PreviewPipelineMetal` in `metal_compute.py`: compile `preview_pass.slang`
+      to MSL via a SlangPy session configured like the megakernel `ComputePipeline`
+      (same include paths / `SKINNY_COMPUTE_PIPELINE`+`SKINNY_METAL` defines /
+      `column_major`), linking the same emit-time `generated_materials` modules;
+      `dispatch(size, push_bytes, binds, output_image, bindless)` = root object +
+      bind-by-name (set-0 material resources + output image) + `set_data(fc/pc)` +
       one compute pass over `size×size` + wait idle. No descriptor sets, no barriers.
-- [ ] 1.2 Metal branch in `Renderer.render_material_preview`: `if self.ctx.is_metal`
-      → build the set-0 bind dict (reuse `_build_metal_binds`, filtered), pack the
-      same 32-byte push (`material_id, graph_id, prim_kind, size, yaw, pitch,
-      distance, fov_tan`), dispatch `PreviewPipelineMetal`, read back the RGBA32F.
-      Else the existing Vulkan path, byte-unchanged.
-- [ ] 1.3 Allocate the Metal preview output image + readback (Metal `StorageImage`
-      + `ReadbackBuffer`) lazily on first Metal preview; add a cleanup hook.
-- [ ] 1.4 Verify: headless Metal render test — scene with a std_surface/MaterialX
-      material, `render_material_preview(mid, 0, 128)` returns `(bytes, 128)` with
-      non-degenerate lit pixels (not all-zero/NaN); Vulkan preview numbers
-      unchanged. Then `skinny-gui --backend metal` → Material Graph preview panel
-      shows the material.
+- [x] 1.2 Metal branch in `Renderer.render_material_preview`: `if self.is_metal`
+      → `_render_material_preview_metal` builds the set-0 bind dict (reuse
+      `_build_metal_binds`) + bindless pool, packs the same 32-byte push
+      (`material_id, graph_id, prim_kind, size, yaw, pitch, distance, fov_tan`),
+      dispatches `PreviewPipelineMetal`, reads back the RGBA32F float image
+      directly (Metal `ReadbackBuffer` would down-convert to RGBA8). Else the
+      existing Vulkan path, byte-unchanged. Removed the interim Material Graph
+      Metal notice (`material_graph.py`). `preview_pass.slang`: `pc` bound as a
+      plain `uniform` under `SKINNY_METAL` (slangpy rejects `set_data` on a
+      push-constant `ConstantBuffer`); Vulkan SPIR-V byte-unchanged (`#else`).
+- [x] 1.3 Allocate the Metal preview output image + readback (Metal `StorageImage`
+      + `ReadbackBuffer`) lazily on first Metal preview; cleanup covered by the
+      existing size-keyed teardown + the renderer cleanup hook.
+- [x] 1.4 Verify: headless Metal render test (`tests/test_metal_material_preview.py`,
+      gated `RUN_METAL_PREVIEW_COMPILE=1` under `scripts/guarded_metal.sh`) — demo
+      scene material, `render_material_preview(mid, 0, 128)` returns `(bytes, 128)`
+      with non-degenerate lit pixels (finite, not all-zero); size-rebuild path
+      exercised. PASSED on Metal (rc=0, clean GPU exit); marble/wood/brass previews
+      captured. Vulkan path logically unchanged (only guard order moved). Live
+      `skinny-gui --backend metal` panel check remains a manual step.
 
 ## 2. Interim — Camera Debug Metal notice — DONE (883ef3e)
 - [x] 2.1 On Metal (`proxy._backend_name == "metal"`), both gap docks show a
