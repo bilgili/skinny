@@ -14,6 +14,7 @@ inline instead of swallowing them.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sys
 import threading
@@ -73,10 +74,14 @@ class MaterialReloader:
 
     Caller owns the render-thread lock (typically `RenderViewport._render_lock`)
     and passes it in so this class can serialise its pipeline rebuild against
-    the render worker.
+    the render worker. Under render-thread ownership the reload runs *on* the
+    worker (the single owner of the renderer), so `render_lock` may be omitted
+    (`None`) — the locked region then uses a no-op context.
     """
 
-    def __init__(self, renderer, render_lock: threading.Lock) -> None:
+    def __init__(
+        self, renderer, render_lock: threading.Lock | None = None,
+    ) -> None:
         self.renderer = renderer
         self._lock = render_lock
 
@@ -116,7 +121,7 @@ class MaterialReloader:
             )
 
         try:
-            with self._lock:
+            with (self._lock or contextlib.nullcontext()):
                 # Forces a fresh ComputePipeline build against the now-
                 # regenerated .slang files. Reuses the renderer's existing
                 # slangc-failure fallback (renders affected materials

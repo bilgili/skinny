@@ -54,6 +54,7 @@ from skinny.ui.qt.render_session import (
     QtRendererProxy,
     RenderCommandQueue,
 )
+from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
 
 log = logging.getLogger(__name__)
 
@@ -316,10 +317,17 @@ class MainWindow(QMainWindow):
         )
 
     def _open_python_material_editor(self) -> None:
-        self.statusBar().showMessage(
-            "Python Material Editor needs the command-backed port for render-thread mode",
-            5000,
-        )
+        if self._python_material_dock is None:
+            self._python_material_dock = PythonMaterialEditorDock(
+                self.renderer, parent=self,
+            )
+            self._python_material_dock.setObjectName("python_material_editor")
+            self.addDockWidget(
+                Qt.RightDockWidgetArea, self._python_material_dock,
+            )
+        self._python_material_dock.refresh_from_renderer()
+        self._python_material_dock.show()
+        self._python_material_dock.raise_()
 
     def _ensure_debug_dock(self):
         raise RuntimeError("debug viewport is not yet snapshot-backed in render-thread mode")
