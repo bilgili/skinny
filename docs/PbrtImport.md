@@ -230,6 +230,35 @@ stays future work; see the change's `design.md` for the Stage-2 roadmap and the
 > 0.0001 / FLIP 0.0002 between them on Metal wavefront). **Both** export paths'
 > `coated*` renders change as a result — the coat lobe now contributes.
 
+> **`subsurface` survives the usdMtlx plugin** (change
+> `mtlx-subsurface-plugin-roundtrip`). The equivalence above was only proven on
+> the `_load_mtlx_materials` fallback; the plugin-present path
+> (`_extract_material('mtlx')`) recovered **nothing** for a `-mtlx` subsurface
+> material. Three malformations were fixed. (1) The exporter authored the medium
+> coefficients (`subsurface_sigma_a`/`_s`/`_g`/`_eta`) as `standard_surface`
+> `<input>` elements — skinny-invented keys the node definition doesn't declare,
+> so the usdMtlx plugin rejected the node and dropped the shader's **surface
+> output entirely** (`ComputeBoundMaterial` returned a Material with no source).
+> They are now excluded from the `.mtlx` (`_OVERRIDE_ONLY_INPUTS`, mirroring the
+> UsdPreviewSurface path) and ride only the prim's `skinnyOverrides` customData.
+> (2) `subsurface_radius` was authored as `vector3`; the `standard_surface` input
+> is `color3`, and the type mismatch **also** made the plugin drop the surface —
+> it is now `color3` (`_VECTOR3_INPUTS` is empty). (3) `author_mtlx_reference`
+> referenced the whole `.mtlx` layer, which has no USD `defaultPrim`, so the
+> reference never resolved (the plugin-present path recovered nothing for **any**
+> material); it now references `/MaterialX/Materials/<surfacematerial_name>`
+> directly. So the plugin composes a clean `standard_surface` whose surface output
+> resolves, and `_extract_material` reads its inputs, merges the
+> `skinnyOverrides` interior, and derives `opacity = 0` — equivalent to the
+> fallback. Because the reference now composes, `_resolve_material_binding`
+> resolves against the preloaded `.mtlx` table first when it is populated (i.e.
+> for `use_usd_mtlx_plugin=False`), so the **default** load path stays on the
+> fallback and does not silently switch intake by host plugin availability; the
+> opacity gate is re-derived after the medium is merged
+> (`_merge_prim_overrides`), since the interior is absent when
+> `_load_mtlx_materials` first runs. Plugin-absent behavior is unchanged (the
+> typeless `over` still falls back).
+
 > **Area-light emission gotcha.** `standard_surface` emission is
 > `emission`(weight) × `emission_color`, and the round-trip recovers
 > `emissiveColor` **only when `emission` > 0**. The exporter authors the unit
