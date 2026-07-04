@@ -127,6 +127,16 @@ _METAL_MEGAKERNEL_BAND_PIXELS = {
     2: 8_000_000,   # SPPM eye pass — cheap per pixel
 }
 
+# Watchdog-safe upper bound for the Metal material-preview dispatch (codex #2).
+# The preview commits ONE command buffer over `size×size` and can run per-pixel
+# MaterialX graph evaluation, so `size` (a public `render_material_preview`
+# parameter) must be bounded on Metal — macOS cannot cancel an over-long GPU
+# kernel. 512² = 262 144 px of single-bounce thumbnail shading is far lighter
+# than a full BDPT-over-graph frame (200 000 px/band) and comfortably clears the
+# UI's 256 preview; larger requests clamp (the returned `size` reflects the
+# clamp, and the dock reshapes against it). Vulkan is unbounded — it can cancel.
+_METAL_PREVIEW_MAX_SIZE = 512
+
 # Size of the Vulkan FrameConstants UBO. Must be ≥ len(_pack_uniforms()) — the
 # `UniformBuffer.upload` path memmoves min(len(data), size), so an undersized
 # buffer SILENTLY TRUNCATES the scalar blob's tail (this bit cameraMirror: a
@@ -6146,8 +6156,6 @@ class Renderer:
 
     def _ensure_preview_resources(self, size: int) -> bool:
         """Lazy-create preview image / readback / pipeline. False = unavailable."""
-        from skinny.vk_compute import PreviewPipeline
-
         # The preview pipeline only needs the set-0 layout + the emitted
         # material modules — both live on the scene bindings, so it works in
         # wavefront mode too (where `self.pipeline` is None).
@@ -6178,11 +6186,22 @@ class Renderer:
             )
         if self._preview_pipeline is None:
             try:
-                self._preview_pipeline = PreviewPipeline(
-                    self.ctx, self.shader_dir,
-                    self._scene_set0_layout,
-                    self._preview_image.view,
-                )
+                if self.is_metal:
+                    # Native-Metal preview: compile preview_pass.slang to MSL,
+                    # dispatch by binding resources by name (no descriptor sets,
+                    # no output image view). Change metal-tool-dock-render P1.
+                    from skinny.metal_compute import PreviewPipelineMetal
+                    self._preview_pipeline = PreviewPipelineMetal(
+                        self.ctx, self.shader_dir,
+                        graph_fragments=list(self._scene_graph_fragments),
+                    )
+                else:
+                    from skinny.vk_compute import PreviewPipeline
+                    self._preview_pipeline = PreviewPipeline(
+                        self.ctx, self.shader_dir,
+                        self._scene_set0_layout,
+                        self._preview_image.view,
+                    )
             except RuntimeError as e:
                 print(f"[skinny] preview pipeline build failed: {e}")
                 self._preview_pipeline = None
@@ -6209,11 +6228,12 @@ class Renderer:
         Returns None when the renderer is not ready (no scene loaded, or
         slangc failed on preview_pass.slang).
         """
-        from skinny.vk_compute import PreviewPipeline
-
+        if self.is_metal:
+            # Bound the single-command-buffer Metal preview dispatch under the
+            # GPU watchdog (codex #2) — clamp before allocating the output image
+            # so image size, push `size`, and the returned size stay consistent.
+            size = min(int(size), _METAL_PREVIEW_MAX_SIZE)
         if not self._ensure_preview_resources(size):
-            return None
-        if self.descriptor_sets is None or not self.descriptor_sets:
             return None
         if self._usd_scene is None:
             return None
@@ -6221,6 +6241,18 @@ class Renderer:
             return None
 
         graph_id = int(self._material_graph_ids.get(material_id, 0))
+
+        if self.is_metal:
+            # Native-Metal preview dispatch (change metal-tool-dock-render P1).
+            return self._render_material_preview_metal(
+                material_id, graph_id, prim_kind, size,
+                yaw, pitch, distance, fov_tan,
+            )
+
+        from skinny.vk_compute import PreviewPipeline
+
+        if self.descriptor_sets is None or not self.descriptor_sets:
+            return None
 
         # Allocate a one-shot command buffer (same pattern as the existing
         # screenshot path). We submit on the compute queue and wait idle.
@@ -6324,6 +6356,44 @@ class Renderer:
             self.ctx.device, self.ctx.command_pool, 1, [cmd],
         )
         return self._preview_readback.read(), size
+
+    def _render_material_preview_metal(
+        self, material_id: int, graph_id: int, prim_kind: int, size: int,
+        yaw: float, pitch: float, distance: float, fov_tan: float,
+    ) -> "tuple[bytes, int]":
+        """Metal path of `render_material_preview` (change metal-tool-dock-render
+        P1). Mirrors `_render_megakernel_metal`: build the set-0 material bind
+        dict (`_build_metal_binds`) + the bindless texture pool, pack the same
+        32-byte push block, dispatch `PreviewPipelineMetal` over `size×size`,
+        and read back the RGBA32F output image (float32, matching the Vulkan
+        `(pixels, size)` contract the Material Graph dock reshapes)."""
+        from skinny.vk_compute import PreviewPipeline
+
+        push_bytes = PreviewPipeline.pack_push(
+            material_id, graph_id, prim_kind, size,
+            yaw, pitch, distance, fov_tan,
+        )
+        binds = self._build_metal_binds()
+        bindless = (
+            "flatMaterialTextures",
+            [(s.texture if s is not None else None)
+             for s in self.texture_pool._slots],
+        )
+        self._preview_pipeline.dispatch(
+            size,
+            push_bytes=push_bytes,
+            # Pack `fc` against the preview program's own reflected layout so the
+            # preview works before any megakernel/wavefront layout source exists
+            # (Metal wavefront mode, codex #1).
+            uniform_blob=self._pack_uniforms_msl(self._preview_pipeline),
+            binds=binds,
+            output_image=self._preview_image.texture,
+            bindless=bindless,
+        )
+        # Read the float32 output directly — the Metal `ReadbackBuffer` would
+        # down-convert to RGBA8, but the dock consumer reshapes float32 RGBA.
+        arr = self._preview_image.texture.to_numpy()
+        return np.ascontiguousarray(arr, dtype=np.float32).tobytes(), size
 
     def apply_light_override(
         self, light_type: str, light_index: int, key: str, value: object,
@@ -8537,7 +8607,7 @@ class Renderer:
         bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
         return bmin, bext
 
-    def _pack_uniforms_msl(self) -> bytes:
+    def _pack_uniforms_msl(self, layout_source=None) -> bytes:
         """Pack the `fc` uniform block to the Metal Shading Language struct layout
         (design D3). Reuses `_pack_uniforms` (the Vulkan scalar blob) verbatim and
         relocates every field to its reflected MSL offset, so the field *values*
@@ -8545,10 +8615,16 @@ class Renderer:
         `float3` to 16 B on Metal, making the struct 592 B vs the 512 B scalar
         blob). Offsets come from the compiled module's reflection
         (`pipeline.uniform_layout`), never a hand-maintained table. Uploaded via
-        `set_data` byte blobs only (design D4)."""
+        `set_data` byte blobs only (design D4).
+
+        `layout_source` overrides the default `_msl_layout_source` — the material
+        preview passes its own `PreviewPipelineMetal` so it packs against that
+        program's reflected `fc` layout, independent of whether the megakernel /
+        wavefront layout source exists yet (wavefront-mode preview, codex #1)."""
         scalar = self._pack_uniforms()
-        layout = self._msl_layout_source.uniform_layout
-        size = self._msl_layout_source.uniform_size
+        src = layout_source if layout_source is not None else self._msl_layout_source
+        layout = src.uniform_layout
+        size = src.uniform_size
         out = bytearray(size)
         off = 0
         for name, sz in _FC_SCALAR_FIELDS:

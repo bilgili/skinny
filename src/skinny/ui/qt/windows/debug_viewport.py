@@ -1,9 +1,10 @@
-"""Embedded Qt dock wrapping ``DebugViewport(embedded=True)``.
+"""Embedded Qt dock for the Camera Debug viewport, render-thread ownership.
 
-Owns a render-to-image debug viewport against the main ``VulkanContext``.
-A QTimer drives ``DebugViewport.render_embedded()`` → ``QImage`` blit.
-Mouse + key handlers drive the debug viewport's orbit / free camera and
-the various toggles the legacy GLFW window exposed.
+The ``DebugViewport(embedded=True)`` GPU object lives on the render worker (as
+``renderer.debug_viewport``); the worker renders it each frame and emits a
+``DebugFrame`` the dock blits into a ``QImage``. This dock is passive — mouse +
+key handlers post camera/display commands to the worker, and show/hide/resize/
+close post the viewport lifecycle. No GPU work runs on the GUI thread.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ class _DebugCanvas(QWidget):
         self._on_release = on_release
         self._image: QImage | None = None
         self._buffer: bytes | None = None
+        self._notice: str | None = None
         self._last_pos: tuple[float, float] | None = None
         self._left = self._right = False
 
@@ -52,10 +54,20 @@ class _DebugCanvas(QWidget):
         self._image = QImage(pixels, w, h, 4 * w, QImage.Format_RGBA8888)
         self.update()
 
+    def set_notice(self, text: str) -> None:
+        self._notice = text
+        self._image = None
+        self.update()
+
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         if self._image is None:
             painter.fillRect(self.rect(), Qt.black)
+            if self._notice:
+                painter.setPen(Qt.gray)
+                painter.drawText(
+                    self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self._notice,
+                )
             return
         target = self.rect()
         sw, sh = self._image.width(), self._image.height()
@@ -103,36 +115,111 @@ class _DebugCanvas(QWidget):
             self._on_wheel(notches)
 
 
+# ── Worker-side DebugViewport helpers ─────────────────────────────
+# The DebugViewport owns GPU resources against the worker's VulkanContext, so it
+# lives on the render worker as ``renderer.debug_viewport``. These run inside
+# ``proxy.post(...)`` closures on the worker; the dock never touches it directly.
+
+def _worker_debug_create(renderer, shader_dir, w, h) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is None:
+        dv = DebugViewport(
+            vk_ctx=renderer.ctx, shader_dir=shader_dir,
+            width=max(w, 64), height=max(h, 64), embedded=True,
+        )
+        dv.attach_renderer(renderer)
+        renderer.debug_viewport = dv
+    if not dv.is_open:
+        dv.open()
+    dv.resize_embedded(max(w, 64), max(h, 64))
+    renderer._debug_viewport_active = True
+
+
+def _worker_debug_set_active(renderer, active: bool) -> None:
+    renderer._debug_viewport_active = bool(active)
+
+
+def _worker_debug_resize(renderer, w, h) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is not None and dv.is_open:
+        dv.resize_embedded(max(w, 64), max(h, 64))
+
+
+def _worker_debug_destroy(renderer) -> None:
+    renderer._debug_viewport_active = False
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is not None:
+        try:
+            dv.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+    renderer.debug_viewport = None
+
+
+def _worker_debug_drag(renderer, dx, dy, left, right) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is None:
+        return
+    if dv.camera_mode == "orbit":
+        if left:
+            dv.orbit_camera.orbit(dx, dy)
+        elif right:
+            dv.orbit_camera.pan(dx, dy)
+    elif left:
+        dv.free_camera.look(dx, dy)
+
+
+def _worker_debug_wheel(renderer, notches) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is None:
+        return
+    cam = dv.orbit_camera if dv.camera_mode == "orbit" else dv.free_camera
+    cam.zoom(float(notches))
+
+
+def _worker_debug_move(renderer, f, r, u, dt) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is None or dv.camera_mode != "free":
+        return
+    dv.free_camera.move(float(f), float(r), float(u), dt)
+
+
+def _worker_debug_call(renderer, method: str) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is not None:
+        getattr(dv, method)()
+
+
+def _worker_debug_toggle(renderer, attr: str) -> None:
+    dv = getattr(renderer, "debug_viewport", None)
+    if dv is not None:
+        setattr(dv, attr, not getattr(dv, attr))
+
+
 class DebugViewportDock(QDockWidget):
-    """Qt-embedded debug viewport. Lazy-builds GPU resources when the
-    dock is first shown so the main app starts up fast.
+    """Qt-embedded Camera Debug viewport. Under render-thread ownership the
+    ``DebugViewport`` GPU object lives on the render worker (as
+    ``renderer.debug_viewport``); this dock is a passive surface — it blits the
+    worker-emitted frames and posts camera/display input + lifecycle commands.
     """
 
-    TICK_MS = 33  # ~30 Hz blit; cheap line-rasteriser, plenty.
+    TICK_MS = 33  # ~30 Hz free-cam WASD move posting.
 
-    def __init__(self, ctx, renderer, main_lock, parent: QWidget | None = None) -> None:
+    def __init__(self, renderer, viewport, parent: QWidget | None = None) -> None:
         super().__init__("Camera Debug View", parent)
-        self.ctx = ctx
-        self.renderer = renderer
-        self._main_lock = main_lock  # ``viewport._render_lock`` from RenderViewport
+        self.renderer = renderer  # QtRendererProxy
+        self.viewport = viewport  # RenderViewport (forwards debug_frame_ready)
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
 
-        shader_dir = Path(__file__).resolve().parents[2].parent / "shaders"
-        self._dv = DebugViewport(
-            vk_ctx=ctx, shader_dir=shader_dir,
-            width=960, height=720, embedded=True,
-        )
-        self._dv.attach_renderer(renderer)
-        # Register so other paths (renderer-side keyboard hooks) that
-        # peek at ``renderer.debug_viewport`` find it.
-        renderer.debug_viewport = self._dv
-
+        self._shader_dir = Path(__file__).resolve().parents[2].parent / "shaders"
+        self._created = False
         self._wasd: dict[int, bool] = {}
         self._build_widgets()
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(self.TICK_MS)
-        self._timer.timeout.connect(self._tick)
+        self.viewport.debug_frame_ready.connect(self._on_debug_frame)
+        self._move_timer = QTimer(self)
+        self._move_timer.setInterval(self.TICK_MS)
+        self._move_timer.timeout.connect(self._poll_wasd)
 
     # ── Layout ────────────────────────────────────────────────────
 
@@ -143,15 +230,17 @@ class DebugViewportDock(QDockWidget):
         outer.setSpacing(2)
 
         bar = QHBoxLayout()
-        for label, cb in (
-            ("Top",  lambda: self._view("top")),
-            ("Left", lambda: self._view("left")),
-            ("Back", lambda: self._view("back")),
-            ("Reset", self._dv._reset_debug_camera),
-            ("Toggle Mode", self._dv._toggle_cam_mode),
+        for label, method in (
+            ("Top", "view_top"),
+            ("Left", "view_left"),
+            ("Back", "view_back"),
+            ("Reset", "_reset_debug_camera"),
+            ("Toggle Mode", "_toggle_cam_mode"),
         ):
             btn = QPushButton(label)
-            btn.clicked.connect(cb)
+            btn.clicked.connect(
+                lambda _checked=False, m=method: self._post_call(m),
+            )
             bar.addWidget(btn)
         bar.addStretch(1)
         outer.addLayout(bar)
@@ -166,70 +255,60 @@ class DebugViewportDock(QDockWidget):
 
         self.setWidget(host)
 
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    def _canvas_size(self) -> tuple[int, int]:
+        sz = self._canvas.size()
+        return max(int(sz.width()), 64), max(int(sz.height()), 64)
+
     def showEvent(self, event) -> None:
-        # Lazy GPU resource build on first show.
-        if not self._dv.is_open:
-            try:
-                self._dv.open()
-            except Exception as exc:  # noqa: BLE001
-                print(f"[debug viewport] open failed: {exc}")
-                return
-        # Match GPU image to widget size before the first render.
-        self._sync_size()
-        self._timer.start()
+        # Renders on both backends now: Vulkan graphics rasteriser, or the native
+        # Metal compute rasteriser (change metal-tool-dock-render P2) — the worker
+        # create/render path is backend-agnostic (DebugViewport branches on Metal).
+        w, h = self._canvas_size()
+        sd = self._shader_dir
+        self.renderer.post(
+            lambda r, sd=sd, w=w, h=h: _worker_debug_create(r, sd, w, h),
+            coalesce_key="debug_create",
+        )
+        self._created = True
+        self._move_timer.start()
         super().showEvent(event)
 
     def hideEvent(self, event) -> None:
-        self._timer.stop()
+        self._move_timer.stop()
+        self.renderer.post(
+            lambda r: _worker_debug_set_active(r, False),
+            coalesce_key="debug_active",
+        )
         super().hideEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._sync_size()
+        if not self._created:
+            return
+        w, h = self._canvas_size()
+        self.renderer.post(
+            lambda r, w=w, h=h: _worker_debug_resize(r, w, h),
+            coalesce_key="debug_resize",
+        )
 
     def closeEvent(self, event) -> None:
-        self._timer.stop()
-        try:
-            self._dv.destroy()
-        except Exception:
-            pass
+        self._move_timer.stop()
+        self.renderer.post(_worker_debug_destroy)
+        self._created = False
         super().closeEvent(event)
 
-    def _sync_size(self) -> None:
-        if not self._dv.is_open:
-            return
-        sz = self._canvas.size()
-        w = max(int(sz.width()), 64)
-        h = max(int(sz.height()), 64)
-        try:
-            with self._main_lock:
-                self._dv.resize_embedded(w, h)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[debug viewport] resize failed: {exc}")
+    def _on_debug_frame(self, frame) -> None:
+        self._canvas.set_frame(frame.pixels, frame.width, frame.height)
 
-    # ── Tick ──────────────────────────────────────────────────────
+    # ── Input forwarding (posted to the worker) ───────────────────
 
-    def _tick(self) -> None:
-        if not self._dv.is_open:
-            return
-        # Free-cam WASDQE poll.
-        if self._dv.camera_mode == "free":
-            f = (1.0 if self._wasd.get(Qt.Key_W) else 0.0) - (1.0 if self._wasd.get(Qt.Key_S) else 0.0)
-            r = (1.0 if self._wasd.get(Qt.Key_D) else 0.0) - (1.0 if self._wasd.get(Qt.Key_A) else 0.0)
-            u = (1.0 if self._wasd.get(Qt.Key_E) else 0.0) - (1.0 if self._wasd.get(Qt.Key_Q) else 0.0)
-            if f or r or u:
-                self._dv.free_camera.move(float(f), float(r), float(u), self.TICK_MS / 1000.0)
-        try:
-            with self._main_lock:
-                pixels = self._dv.render_embedded(self.renderer)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[debug viewport] render failed: {exc}")
-            return
-        if pixels is None:
-            return
-        self._canvas.set_frame(pixels, self._dv._width, self._dv._height)
+    def _post_call(self, method: str) -> None:
+        self.renderer.post(lambda r, m=method: _worker_debug_call(r, m))
 
-    # ── Input forwarding ──────────────────────────────────────────
+    def _post_toggle(self, attr: str) -> None:
+        self.renderer.post(lambda r, a=attr: _worker_debug_toggle(r, a))
 
     def _on_press(self, _button) -> None:
         pass
@@ -238,66 +317,58 @@ class DebugViewportDock(QDockWidget):
         pass
 
     def _on_drag(self, dx: float, dy: float, left: bool, right: bool) -> None:
-        if self._dv.camera_mode == "orbit":
-            if left:
-                self._dv.orbit_camera.orbit(dx, dy)
-            elif right:
-                self._dv.orbit_camera.pan(dx, dy)
-        else:
-            if left:
-                self._dv.free_camera.look(dx, dy)
+        self.renderer.post(
+            lambda r, dx=dx, dy=dy, left=left, right=right:
+                _worker_debug_drag(r, dx, dy, left, right),
+        )
 
     def _on_wheel(self, notches: float) -> None:
-        cam = (
-            self._dv.orbit_camera if self._dv.camera_mode == "orbit"
-            else self._dv.free_camera
+        self.renderer.post(lambda r, n=notches: _worker_debug_wheel(r, n))
+
+    def _poll_wasd(self) -> None:
+        f = ((1.0 if self._wasd.get(Qt.Key_W) else 0.0)
+             - (1.0 if self._wasd.get(Qt.Key_S) else 0.0))
+        r = ((1.0 if self._wasd.get(Qt.Key_D) else 0.0)
+             - (1.0 if self._wasd.get(Qt.Key_A) else 0.0))
+        u = ((1.0 if self._wasd.get(Qt.Key_E) else 0.0)
+             - (1.0 if self._wasd.get(Qt.Key_Q) else 0.0))
+        if not (f or r or u):
+            return
+        dt = self.TICK_MS / 1000.0
+        self.renderer.post(
+            lambda rr, f=f, r=r, u=u, dt=dt: _worker_debug_move(rr, f, r, u, dt),
         )
-        cam.zoom(float(notches))
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
         if key in (Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E):
             self._wasd[key] = True
             return
-        if key == Qt.Key_C:
-            self._dv._toggle_cam_mode()
-        elif key == Qt.Key_F:
-            self._dv._reset_debug_camera()
-        elif key == Qt.Key_M:
-            self._dv.show_mesh_wires = not self._dv.show_mesh_wires
-        elif key == Qt.Key_G:
-            self._dv.show_grid = not self._dv.show_grid
-        elif key == Qt.Key_P:
-            self._dv.show_focus_plane = not self._dv.show_focus_plane
-        elif key == Qt.Key_I:
-            self._dv.show_render_area = not self._dv.show_render_area
-        elif key == Qt.Key_O:
-            self._dv.ortho_mode = not self._dv.ortho_mode
-        elif key == Qt.Key_D:
-            self._dv.show_dof_planes = not self._dv.show_dof_planes
-        elif key == Qt.Key_T:
-            self._dv.view_top()
-        elif key == Qt.Key_B:
-            self._dv.view_back()
-        elif key == Qt.Key_L:
-            self._dv.view_left()
-        elif key == Qt.Key_Space:
-            self._dv.show_hud = not self._dv.show_hud
-        else:
+        calls = {
+            Qt.Key_C: ("call", "_toggle_cam_mode"),
+            Qt.Key_F: ("call", "_reset_debug_camera"),
+            Qt.Key_M: ("toggle", "show_mesh_wires"),
+            Qt.Key_G: ("toggle", "show_grid"),
+            Qt.Key_P: ("toggle", "show_focus_plane"),
+            Qt.Key_I: ("toggle", "show_render_area"),
+            Qt.Key_O: ("toggle", "ortho_mode"),
+            Qt.Key_T: ("call", "view_top"),
+            Qt.Key_B: ("call", "view_back"),
+            Qt.Key_L: ("call", "view_left"),
+            Qt.Key_Space: ("toggle", "show_hud"),
+        }
+        action = calls.get(key)
+        if action is None:
             super().keyPressEvent(event)
+            return
+        kind, name = action
+        if kind == "call":
+            self._post_call(name)
+        else:
+            self._post_toggle(name)
 
     def keyReleaseEvent(self, event) -> None:
         if event.key() in self._wasd:
             self._wasd[event.key()] = False
             return
         super().keyReleaseEvent(event)
-
-    # ── View shortcuts ────────────────────────────────────────────
-
-    def _view(self, which: str) -> None:
-        if which == "top":
-            self._dv.view_top()
-        elif which == "left":
-            self._dv.view_left()
-        elif which == "back":
-            self._dv.view_back()

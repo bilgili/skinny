@@ -938,6 +938,298 @@ class ComputePipeline:
         self._kernel = None
 
 
+class PreviewPipelineMetal:
+    """Metal material-preview pipeline (change metal-tool-dock-render P1, design
+    D1) — the native-Metal sibling of ``vk_compute.PreviewPipeline``.
+
+    Compiles ``preview_pass.slang`` (``previewMain``) to MSL through a SlangPy
+    slang session configured **exactly** like the megakernel
+    :class:`ComputePipeline` (same ``include_paths``, ``SKINNY_COMPUTE_PIPELINE``/
+    ``SKINNY_METAL`` defines, and ``column_major`` matrix layout), linking the
+    same emit-time ``generated_materials`` modules (already written to disk by
+    :func:`emit_megakernel_sources` for the scene's graph set) so the preview
+    shades identically to the main render. There are **no Vulkan descriptor
+    sets**: :meth:`dispatch` binds the scene material resources + the preview
+    output image by name on a root shader object, sets the ``fc`` uniform block
+    and the ``pc`` push block via ``set_data`` (no per-field cursor writes,
+    design D4), runs one compute pass over ``size × size``, submits, and waits
+    idle (Metal auto-syncs the dispatch→readback, so no barriers).
+    """
+
+    def __init__(self, ctx, shader_dir, graph_fragments=None) -> None:
+        self.ctx = ctx
+        self._spy = ctx._spy
+        self.shader_dir = Path(shader_dir)
+        self.graph_fragments = list(graph_fragments) if graph_fragments else []
+        # Reflected MSL layout of this program's `fc` uniform block (see
+        # `_reflect_uniform_layout`) — the renderer packs the `fc` blob against
+        # this so the preview never depends on the megakernel/wavefront layout
+        # source existing yet. Duck-typed like `ComputePipeline` so
+        # `_pack_uniforms_msl` can consume either.
+        self.uniform_layout: dict[str, tuple[int, int]] = {}
+        self.uniform_size = 0
+        # Emit the generated material/dispatcher Slang preview_pass imports.
+        # Idempotent: the scene `ComputePipeline` already wrote the same files
+        # for this fragment set; re-emitting keeps this pipeline self-contained.
+        emit_megakernel_sources(self.shader_dir, self.graph_fragments)
+        self._build()
+
+    def _build(self) -> None:
+        spy = self._spy
+        dev = self.ctx.device
+        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
+        opts = spy.SlangCompilerOptions()
+        opts.include_paths = [self.shader_dir, mtlx_genslang]
+        opts.defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+        # Column-major matches the megakernel path so the shared `fc` camera
+        # matrices read identically (see ComputePipeline._build).
+        opts.matrix_layout = spy.SlangMatrixLayout.column_major
+        session = dev.create_slang_session(compiler_options=opts)
+
+        src_path = self.shader_dir / "preview_pass.slang"
+        module = session.load_module_from_source(
+            "preview_pass", src_path.read_text(encoding="utf-8"), str(src_path)
+        )
+        self.program = session.link_program(
+            [module], [module.entry_point("previewMain")]
+        )
+        self.pipeline = dev.create_compute_pipeline(program=self.program)
+        # Only bind names the compiled module actually references (dead-stripped
+        # ones are skipped) — same discipline as ComputePipeline.dispatch.
+        self.global_names = {p.name for p in self.program.layout.parameters}
+        # Reflect this program's OWN `fc` uniform layout so the preview packs the
+        # `fc` blob against its own reflection — independent of whether a
+        # megakernel / wavefront pass has compiled yet. In Metal wavefront mode
+        # the scene bindings are `scene_bindings_only` (no reflection) and
+        # `_msl_layout_source` may be None until a pass builds, so relying on it
+        # here would crash. `fc` is the same struct in every program, so the
+        # renderer can pack its scalar blob against this layout identically.
+        self._reflect_uniform_layout()
+        # Default 1×1 texture for unfilled bindless slots (Metal binds every slot).
+        self._default_tex = dev.create_texture(
+            type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
+            width=1, height=1,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            memory_type=spy.MemoryType.device_local, label="skinny.preview_bindless_default",
+        )
+
+    def _reflect_uniform_layout(self) -> None:
+        """Reflect the MSL field offsets/size of the ``fc`` uniform block from
+        THIS program (mirrors ``ComputePipeline._reflect_uniform_layout``).
+        ``uniform_layout`` maps a flattened field name → (offset, size); the
+        embedded ``camera`` struct is flattened as ``camera.<field>``. Lets the
+        renderer's ``_pack_uniforms_msl`` relocate the scalar ``fc`` blob into
+        the preview program's MSL layout without a megakernel/wavefront source."""
+        fc = next((p for p in self.program.layout.parameters if p.name == "fc"), None)
+        if fc is None:
+            return
+        tl = fc.type_layout
+        self.uniform_size = int(tl.size)
+        layout: dict[str, tuple[int, int]] = {}
+
+        def walk(type_layout, base: int, prefix: str) -> None:
+            fields = getattr(type_layout, "fields", None)
+            if not fields:
+                return
+            for f in fields:
+                off = base + int(f.offset)
+                ftl = f.type_layout
+                name = f"{prefix}{f.name}"
+                layout[name] = (off, int(getattr(ftl, "size", 0)))
+                if getattr(ftl, "fields", None):
+                    walk(ftl, off, f"{name}.")
+
+        walk(tl, 0, "")
+        self.uniform_layout = layout
+
+    def dispatch(self, size: int, *, push_bytes: bytes, uniform_blob: bytes,
+                 binds: dict, output_image, bindless=None) -> None:
+        """Bind the scene material resources (``binds``: name → native SlangPy
+        ``Buffer``/``Texture``/``Sampler``), the ``fc`` uniform block, the ``pc``
+        push block, the optional bindless texture array, and the preview output
+        image (``previewOutput``), then dispatch ``previewMain`` over
+        ``size × size`` threads. Names absent from the reflected globals are
+        skipped. ``bindless`` is ``(global_name, [native_texture | None, …])``;
+        ``None`` slots bind the default 1×1 texture (Metal requires every slot
+        bound)."""
+        spy = self._spy
+        dev = self.ctx.device
+        ro = dev.create_root_shader_object(self.program)
+        cur = spy.ShaderCursor(ro)
+
+        if "fc" in self.global_names:
+            cur["fc"].set_data(
+                np.frombuffer(bytes(uniform_blob), dtype=np.uint8).copy())
+        cur["pc"].set_data(
+            np.frombuffer(bytes(push_bytes), dtype=np.uint8).copy())
+        cur["previewOutput"] = output_image
+
+        for name, native in binds.items():
+            if native is None or name == "previewOutput" \
+                    or name not in self.global_names:
+                continue
+            cur[name] = native
+
+        if bindless is not None:
+            name, textures = bindless
+            if name in self.global_names:
+                slot_cur = cur[name]
+                for i in range(BINDLESS_TEXTURE_CAPACITY):
+                    tex = textures[i] if i < len(textures) and textures[i] is not None \
+                        else self._default_tex
+                    slot_cur[i] = tex
+
+        enc = dev.create_command_encoder()
+        cpass = enc.begin_compute_pass()
+        cpass.bind_pipeline(self.pipeline, ro)
+        # Thread count (slang-rhi divides by numthreads(8,8,1)) — mirrors the
+        # megakernel dispatch which passes pixel dims, not group counts.
+        cpass.dispatch([int(size), int(size), 1])
+        cpass.end()
+        dev.submit_command_buffer(enc.finish())
+        dev.wait_for_idle()
+
+    def destroy(self) -> None:
+        self.pipeline = None
+        self.program = None
+        self._default_tex = None
+
+
+class DebugRasterMetal:
+    """Metal Camera Debug software rasteriser host (change metal-tool-dock-render
+    P2, task 3.1). The native Metal backend has no graphics pipeline, so the
+    debug viewport's line vertex stream is scan-converted in a compute kernel.
+
+    Phase-1 slice: a DDA line rasteriser with **no depth** yet (opaque
+    last-writer-wins). Compiles ``debug_raster.slang`` and drives two compute
+    kernels — ``clearImage`` (fill the packed-RGBA8 output with the background)
+    then ``rasterLines`` (one thread per line). The output is a width*height
+    ``uint`` buffer packed ``r | g<<8 | b<<16 | a<<24``; :meth:`render` returns it
+    as a little-endian RGBA8 byte stream. Kernel math mirrors
+    :mod:`skinny.debug_raster_ref` so it is host-checkable and GPU-diffable.
+
+    Buffers are reused across frames (grown as needed) so a steady debug view
+    does not churn allocations. Each dispatch is bounded (clear = one thread per
+    pixel; lines = one thread per line, per-line pixel loop capped at
+    ``max_steps``) so no single command buffer can exceed the macOS GPU watchdog.
+    """
+
+    _VERTEX_FLOATS = 7
+
+    def __init__(self, ctx, shader_dir) -> None:
+        self.ctx = ctx
+        self._spy = ctx._spy
+        self.shader_dir = Path(shader_dir)
+        dev = ctx.device
+        spy = self._spy
+        opts = spy.SlangCompilerOptions()
+        opts.include_paths = [self.shader_dir]
+        opts.defines = {"SKINNY_METAL": "1"}
+        session = dev.create_slang_session(compiler_options=opts)
+        src = self.shader_dir / "debug_raster.slang"
+        module = session.load_module_from_source(
+            "debug_raster", src.read_text(encoding="utf-8"), str(src))
+
+        def _kernel(entry):
+            return dev.create_compute_kernel(
+                session.link_program([module], [module.entry_point(entry)]))
+
+        self._clear_color = _kernel("clearImage")
+        self._clear_depth = _kernel("clearDepth")
+        self._depth_lines = _kernel("depthLines")
+        self._color_lines = _kernel("colorLines")
+        self._blend_tris = _kernel("blendTris")
+
+        self._color = None   # packed-RGBA8 output (uint per pixel)
+        self._depth = None   # packed depth (uint per pixel)
+        self._color_px = 0
+        self._lverts = None  # line vertex StorageBuffer (float32)
+        self._tverts = None  # triangle vertex StorageBuffer (float32)
+
+    @staticmethod
+    def _grow(buf, nbytes, ctx):
+        nbytes = max(int(nbytes), 16)
+        if buf is None or buf.size < nbytes:
+            if buf is not None:
+                buf.destroy()
+            return StorageBuffer(ctx, nbytes)
+        return buf
+
+    def render(self, line_floats, tri_floats, view_proj, width: int, height: int,
+               *, max_steps: int = 1 << 16) -> bytes:
+        """Rasterise the line + triangle streams → RGBA8 bytes (``width*height*4``,
+        row 0 = top). ``view_proj`` is the math-form 4x4 (row-major, clip =
+        VP·[x,y,z,1]); ``line_floats`` / ``tri_floats`` are flat float sequences
+        (``_VERTEX_FLOATS`` per vertex; 2/line, 3/triangle). Lines are opaque and
+        depth-ordered; triangles alpha-blend over them (depth-tested, no depth
+        write), mirroring :func:`skinny.debug_raster_ref.rasterise`."""
+        from skinny.debug_raster_ref import CLEAR_RGBA8
+        dev = self.ctx.device
+        w, h = int(width), int(height)
+        px = w * h
+        self._color = self._grow(self._color, px * 4, self.ctx)
+        self._depth = self._grow(self._depth, px * 4, self.ctx)
+        self._color_px = px
+        r, g, b, a = CLEAR_RGBA8
+        clear_packed = int(r | (g << 8) | (b << 16) | (a << 24)) & 0xFFFFFFFF
+        vp = np.ascontiguousarray(view_proj, dtype=np.float32).reshape(4, 4)
+        vp_vars = {"gVP0": vp[0].tolist(), "gVP1": vp[1].tolist(),
+                   "gVP2": vp[2].tolist(), "gVP3": vp[3].tolist()}
+
+        # Clear colour + depth.
+        self._clear_color.dispatch(
+            thread_count=[w, h, 1],
+            vars={"colorOut": self._color.buffer, "gWidth": w, "gHeight": h,
+                  "gClearPacked": [clear_packed, 0, 0, 0]})
+        self._clear_depth.dispatch(
+            thread_count=[w, h, 1],
+            vars={"depthOut": self._depth.buffer, "gWidth": w, "gHeight": h})
+        dev.wait_for_idle()
+
+        lverts = np.ascontiguousarray(line_floats, dtype=np.float32).ravel()
+        n_lines = int(lverts.size // (self._VERTEX_FLOATS * 2))
+        if n_lines > 0:
+            self._lverts = self._grow(self._lverts, lverts.nbytes, self.ctx)
+            self._lverts.upload_sync(lverts.tobytes())
+            common = {"lineVerts": self._lverts.buffer,
+                      "colorOut": self._color.buffer, "depthOut": self._depth.buffer,
+                      "gWidth": w, "gHeight": h, "gCount": n_lines,
+                      "gMaxSteps": int(max_steps), **vp_vars}
+            # Pass 1 (depth) then pass 2 (colour) — depth must be complete before
+            # the colour pass re-reads the winning depth.
+            self._depth_lines.dispatch(thread_count=[n_lines, 1, 1], vars=common)
+            dev.wait_for_idle()
+            self._color_lines.dispatch(thread_count=[n_lines, 1, 1], vars=common)
+            dev.wait_for_idle()
+
+        tverts = np.ascontiguousarray(tri_floats, dtype=np.float32).ravel()
+        n_tris = int(tverts.size // (self._VERTEX_FLOATS * 3))
+        if n_tris > 0:
+            self._tverts = self._grow(self._tverts, tverts.nbytes, self.ctx)
+            self._tverts.upload_sync(tverts.tobytes())
+            # One thread per (triangle, screen-row): each walks <= width pixels.
+            self._blend_tris.dispatch(
+                thread_count=[n_tris, h, 1],
+                vars={"triVerts": self._tverts.buffer,
+                      "colorOut": self._color.buffer, "depthOut": self._depth.buffer,
+                      "gWidth": w, "gHeight": h, "gCount": n_tris, **vp_vars})
+            dev.wait_for_idle()
+
+        return self._color.download_sync(px * 4)
+
+    def destroy(self) -> None:
+        for name in ("_color", "_depth", "_lverts", "_tverts"):
+            buf = getattr(self, name, None)
+            if buf is not None:
+                buf.destroy()
+                setattr(self, name, None)
+        self._clear_color = None
+        self._clear_depth = None
+        self._depth_lines = None
+        self._color_lines = None
+        self._blend_tris = None
+
+
 class MetalFrameEncoder:
     """Single-frame, multi-pass compute command encoder (design D3) — the Metal
     sibling of recording the whole wavefront bounce loop into one Vulkan command

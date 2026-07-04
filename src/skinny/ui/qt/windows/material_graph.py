@@ -18,7 +18,7 @@ from typing import Optional
 import MaterialX as mx
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QFont, QImage, QPainter,
     QPainterPath, QPen, QPixmap,
@@ -32,8 +32,77 @@ from PySide6.QtWidgets import (
 
 from skinny.mtlx_graph_view import (
     _ADDABLE_CATEGORIES, NodeGraphView, NodeView, PortView, _layout,
-    _val_to_py, build_view,
+    build_view,
 )
+
+
+# ── Worker-side MaterialX helpers ─────────────────────────────────
+# The MaterialX document lives on the renderer, which the render worker owns.
+# These run inside `renderer.request(...)`/`post(...)` closures on the worker,
+# taking the *real* renderer/doc (never the GUI-side proxy).
+
+def _worker_doc(renderer):
+    lib = getattr(renderer, "_mtlx_library", None)
+    return lib.document if lib is not None else None
+
+
+def _worker_mtlx_node(doc, view, node_name):
+    if doc is None or view is None:
+        return None
+    target = doc.getChild(view.target_name)
+    if target is not None:
+        try:
+            ss_input = target.getInput("surfaceshader")
+            if ss_input is not None:
+                ss = ss_input.getConnectedNode()
+                if ss is not None and ss.getName() == node_name:
+                    return ss
+        except Exception:  # noqa: BLE001
+            pass
+    if view.nodegraph_name:
+        ng = doc.getNodeGraph(view.nodegraph_name)
+        if ng is not None:
+            node = ng.getNode(node_name)
+            if node is not None:
+                return node
+    return None
+
+
+def _set_mtlx_input(inp, type_name: str, value) -> None:
+    if type_name == "float":
+        inp.setValue(float(value))
+    elif type_name == "integer":
+        inp.setValue(int(value))
+    elif type_name == "boolean":
+        inp.setValue(bool(value))
+    elif type_name == "color3":
+        r, g, b = (float(x) for x in value)
+        inp.setValue(mx.Color3(r, g, b))
+    elif type_name == "vector3":
+        x, y, z = (float(v) for v in value)
+        inp.setValue(mx.Vector3(x, y, z))
+    elif type_name == "color4":
+        r, g, b, a = (float(x) for x in value)
+        inp.setValue(mx.Color4(r, g, b, a))
+    elif type_name == "vector4":
+        x, y, z, w = (float(v) for v in value)
+        inp.setValue(mx.Vector4(x, y, z, w))
+    elif type_name == "vector2":
+        x, y = (float(v) for v in value)
+        inp.setValue(mx.Vector2(x, y))
+    elif type_name == "filename":
+        inp.setValueString(str(value))
+    elif type_name == "string":
+        inp.setValueString(str(value))
+    else:
+        raise ValueError(f"unsupported input type: {type_name}")
+
+
+def _build_view_on_worker(renderer, mid, name, target):
+    doc = _worker_doc(renderer)
+    if doc is None:
+        return ("no_lib", None)
+    return ("ok", build_view(doc, mid, name, target))
 
 
 # ── Node graphics item ────────────────────────────────────────────
@@ -227,10 +296,16 @@ class MaterialGraphDock(QDockWidget):
     PREVIEW_SIZE = 256
     PREVIEW_DEBOUNCE_MS = 120
 
+    # Marshal a worker-thread callback (scene-state refresh, build_view, topology
+    # edit result, preview render) onto the GUI thread.
+    _run_on_gui = Signal(object)
+
     def __init__(self, renderer, parent: QWidget | None = None) -> None:
         super().__init__("Material Graph Editor", parent)
         self.renderer = renderer
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self._run_on_gui.connect(self._invoke_on_gui)
+        self._state_inflight = False
 
         self._view: Optional[NodeGraphView] = None
         self._materials: list[tuple[int, str, str]] = []
@@ -340,17 +415,36 @@ class MaterialGraphDock(QDockWidget):
             return []
         return list(getattr(scene, "materials", []) or [])
 
+    def _invoke_on_gui(self, fn) -> None:
+        try:
+            fn()
+        except RuntimeError:
+            pass
+
+    def _resolve_to_gui(self, fut, handler) -> None:
+        """Resolve a worker `Future` off-thread and hand ``("ok", value)`` or
+        ``("exc", exception)`` to `handler` on the GUI thread — the future is
+        never awaited synchronously on the GUI thread."""
+        def done(f) -> None:
+            try:
+                data = ("ok", f.result())
+            except Exception as exc:  # noqa: BLE001
+                data = ("exc", exc)
+            self._run_on_gui.emit(lambda data=data: handler(data))
+        fut.add_done_callback(done)
+
     def _refresh_material_combo(self) -> None:
         mats = self._scene_materials()
-        cm_map = getattr(self.renderer, "_mtlx_scene_materials", {}) or {}
         opts: list[tuple[int, str, str]] = []
         for i, mat in enumerate(mats):
             if i == 0:
                 continue
-            target = getattr(mat, "mtlx_target_name", None)
-            if not target:
-                cm = cm_map.get(i)
-                target = getattr(cm, "target_name", None) if cm else None
+            # The material projection carries both the authored target and the
+            # `_mtlx_scene_materials` fallback target.
+            target = (
+                getattr(mat, "mtlx_target_name", None)
+                or getattr(mat, "mtlx_scene_target", None)
+            )
             if target:
                 opts.append((i, mat.name, target))
         self._materials = opts
@@ -377,14 +471,23 @@ class MaterialGraphDock(QDockWidget):
         if idx < 0 or idx >= len(self._materials):
             return
         mid, name, target = self._materials[idx]
-        lib = getattr(self.renderer, "_mtlx_library", None)
-        if lib is None:
-            self._status.setText("MaterialX library not loaded.")
+        # build_view reads the live MaterialX document — build it on the worker.
+        fut = self.renderer.request(
+            lambda r, mid=mid, name=name, target=target:
+                _build_view_on_worker(r, mid, name, target),
+        )
+        self._resolve_to_gui(
+            fut, lambda data, target=target: self._apply_picked_view(data, target),
+        )
+
+    def _apply_picked_view(self, data, target: str) -> None:
+        kind, payload = data
+        if kind == "exc":
+            self._status.setText(f"build_view error: {payload}")
             return
-        try:
-            view = build_view(lib.document, mid, name, target)
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"build_view error: {exc}")
+        status, view = payload
+        if status == "no_lib":
+            self._status.setText("MaterialX library not loaded.")
             return
         if view is None:
             self._status.setText(f"Could not resolve target '{target}'.")
@@ -407,7 +510,22 @@ class MaterialGraphDock(QDockWidget):
         self._rebuild_scene()
 
     def _poll_scene_swap(self) -> None:
-        cur = id(getattr(self.renderer, "_usd_scene", None))
+        # Pull a fresh scene projection from the render worker, then compare on
+        # the GUI thread (stable projected id, not a per-tick projection object).
+        if self._state_inflight:
+            return
+        self._state_inflight = True
+        self._resolve_to_gui(
+            self.renderer.refresh_scene_state(), self._apply_state_poll,
+        )
+
+    def _apply_state_poll(self, data) -> None:
+        self._state_inflight = False
+        kind, payload = data
+        state = payload if kind == "ok" else None
+        if state is not None:
+            self.renderer.apply_scene_state(state)
+        cur = getattr(self.renderer, "_usd_scene_id", 0)
         if cur != self._last_scene_id:
             self._last_scene_id = cur
             self._refresh_material_combo()
@@ -729,272 +847,257 @@ class MaterialGraphDock(QDockWidget):
 
     # ── Edit application (MaterialX) ─────────────────────────────
 
-    def _doc(self):
-        lib = getattr(self.renderer, "_mtlx_library", None)
-        return lib.document if lib is not None else None
+    def _run_edit(self, mutate, what: str, *, rebuild_view: bool = True,
+                  place_xy=None) -> None:
+        """Run a MaterialX doc mutation on the render worker, then rebuild the
+        view / regenerate materials / re-upload — all atomically on the worker —
+        and marshal the result back to the GUI thread.
 
-    def _mtlx_node(self, node_name: str):
-        doc = self._doc()
-        if doc is None or self._view is None:
-            return None
-        target = doc.getChild(self._view.target_name)
-        if target is not None:
+        `mutate(renderer) -> None | error_str` performs the doc edit.
+        """
+        view = self._view
+        if view is None:
+            return
+        mid, name, target = (
+            view.material_id, view.material_name, view.target_name,
+        )
+
+        def worker(r, mutate=mutate, mid=mid, name=name, target=target,
+                   rebuild_view=rebuild_view):
+            err = mutate(r)
+            if err is not None:
+                return ("error", err, None, True, "")
+            doc = _worker_doc(r)
+            new_view = None
+            valid, msg = True, ""
+            if rebuild_view and doc is not None:
+                new_view = build_view(doc, mid, name, target)
+                try:
+                    valid, msg = doc.validate()
+                except Exception:  # noqa: BLE001
+                    valid, msg = True, ""
             try:
-                ss_input = target.getInput("surfaceshader")
-                if ss_input is not None:
-                    ss = ss_input.getConnectedNode()
-                    if ss is not None and ss.getName() == node_name:
-                        return ss
-            except Exception:
-                pass
-        if self._view.nodegraph_name:
-            ng = doc.getNodeGraph(self._view.nodegraph_name)
-            if ng is not None:
-                node = ng.getNode(node_name)
-                if node is not None:
-                    return node
-        return None
+                r._gen_scene_materials()
+                r._upload_graph_param_buffers()
+                r._material_version += 1
+            except Exception as exc:  # noqa: BLE001
+                return ("rebuild_error", repr(exc), new_view, valid, msg)
+            return ("ok", "", new_view, valid, msg)
 
-    def _set_input_value(self, inp, type_name: str, value) -> None:
-        if type_name == "float":
-            inp.setValue(float(value))
-        elif type_name == "integer":
-            inp.setValue(int(value))
-        elif type_name == "boolean":
-            inp.setValue(bool(value))
-        elif type_name == "color3":
-            r, g, b = (float(x) for x in value)
-            inp.setValue(mx.Color3(r, g, b))
-        elif type_name == "vector3":
-            x, y, z = (float(v) for v in value)
-            inp.setValue(mx.Vector3(x, y, z))
-        elif type_name == "color4":
-            r, g, b, a = (float(x) for x in value)
-            inp.setValue(mx.Color4(r, g, b, a))
-        elif type_name == "vector4":
-            x, y, z, w = (float(v) for v in value)
-            inp.setValue(mx.Vector4(x, y, z, w))
-        elif type_name == "vector2":
-            x, y = (float(v) for v in value)
-            inp.setValue(mx.Vector2(x, y))
-        elif type_name == "filename":
-            inp.setValueString(str(value))
-        elif type_name == "string":
-            inp.setValueString(str(value))
+        self._resolve_to_gui(
+            self.renderer.request(worker),
+            lambda data, what=what, place_xy=place_xy:
+                self._on_edit_result(data, what, place_xy),
+        )
+
+    def _on_edit_result(self, data, what: str, place_xy) -> None:
+        kind, payload = data
+        if kind == "exc":
+            self._status.setText(f"edit failed: {payload}")
+            return
+        status, detail, new_view, valid, msg = payload
+        if status == "error":
+            self._status.setText(detail)
+            return
+        if new_view is not None:
+            old_xy = (
+                {n.name: (n.x, n.y) for n in self._view.nodes}
+                if self._view is not None else {}
+            )
+            for n in new_view.nodes:
+                if n.name in old_xy:
+                    n.x, n.y = old_xy[n.name]
+                elif place_xy is not None:
+                    n.x, n.y = place_xy
+            self._view = new_view
+            self._rebuild_scene()
+            self._refresh_side()
+        if status == "rebuild_error":
+            self._status.setText(f"renderer rebuild fail: {detail}")
+            return
+        if not valid:
+            self._status.setText(f"mtlx validation: {msg[:200]}")
         else:
-            raise ValueError(f"unsupported input type: {type_name}")
+            self._status.setText(f"updated ({what})")
+        self._schedule_preview()
 
     def _apply_value_edit(self, node: NodeView, port: PortView, value) -> None:
         if self._view is None:
             return
-        mx_node = self._mtlx_node(node.name)
-        if mx_node is None:
-            self._status.setText(f"node '{node.name}' missing in doc")
-            return
-        inp = mx_node.getInput(port.name)
-        if inp is None:
-            try:
-                inp = mx_node.addInput(port.name, port.type_name)
-            except Exception as exc:  # noqa: BLE001
-                self._status.setText(f"addInput fail: {exc}")
-                return
-        try:
-            self._set_input_value(inp, port.type_name, value)
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"setValue fail: {exc}")
-            return
-        port.value = value
+        port.value = value  # optimistic GUI-side update
+        view = self._view
+        node_name, port_name, type_name = node.name, port.name, port.type_name
 
         # Fast path: flat or std_surface direct → apply_material_override.
-        # Graph-internal: regen needed.
-        if self._view.flat or node.is_output:
+        if view.flat or node.is_output:
             self.renderer.apply_material_override(
-                self._view.material_id, port.name, value,
+                view.material_id, port_name, value,
             )
-            self._status.setText(f"{node.name}.{port.name} updated (flat path)")
+            self._status.setText(f"{node_name}.{port_name} updated (flat path)")
             self._schedule_preview()
             return
-        try:
-            self.renderer._gen_scene_materials()
-            self.renderer._upload_graph_param_buffers()
-            self.renderer._material_version += 1
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"renderer update fail: {exc}")
-            return
-        self._status.setText(f"{node.name}.{port.name} updated (graph path)")
-        self._schedule_preview()
+
+        # Graph-internal: mutate the doc input on the worker, then regen.
+        def mutate(r, view=view, node_name=node_name, port_name=port_name,
+                   type_name=type_name, value=value):
+            doc = _worker_doc(r)
+            mx_node = _worker_mtlx_node(doc, view, node_name)
+            if mx_node is None:
+                return f"node '{node_name}' missing in doc"
+            inp = mx_node.getInput(port_name)
+            if inp is None:
+                try:
+                    inp = mx_node.addInput(port_name, type_name)
+                except Exception as exc:  # noqa: BLE001
+                    return f"addInput fail: {exc}"
+            try:
+                _set_mtlx_input(inp, type_name, value)
+            except Exception as exc:  # noqa: BLE001
+                return f"setValue fail: {exc}"
+            return None
+
+        self._run_edit(
+            mutate, f"{node_name}.{port_name} (graph path)", rebuild_view=False,
+        )
 
     def _apply_connect(
         self, src_node: str, src_port: str, dst_node: str, dst_port: str,
     ) -> None:
         if self._view is None:
             return
-        src_mx = self._mtlx_node(src_node)
-        dst_mx = self._mtlx_node(dst_node)
-        if src_mx is None or dst_mx is None:
-            self._status.setText("connect: node missing")
-            return
-        inp = dst_mx.getInput(dst_port)
-        if inp is None:
+
+        def mutate(r, view=self._view, src_node=src_node, src_port=src_port,
+                   dst_node=dst_node, dst_port=dst_port):
+            doc = _worker_doc(r)
+            src_mx = _worker_mtlx_node(doc, view, src_node)
+            dst_mx = _worker_mtlx_node(doc, view, dst_node)
+            if src_mx is None or dst_mx is None:
+                return "connect: node missing"
+            inp = dst_mx.getInput(dst_port)
+            if inp is None:
+                try:
+                    type_name = src_mx.getType() or "float"
+                    inp = dst_mx.addInput(dst_port, type_name)
+                except Exception as exc:  # noqa: BLE001
+                    return f"addInput fail: {exc}"
             try:
-                type_name = src_mx.getType() or "float"
-                inp = dst_mx.addInput(dst_port, type_name)
+                src_type = src_mx.getType()
+                if src_type and inp.getType() != src_type:
+                    return f"type mismatch {src_type} → {inp.getType()}"
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                inp.removeAttribute("value")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                inp.setNodeName(src_node)
+                if src_port and src_port != "out":
+                    inp.setOutputString(src_port)
             except Exception as exc:  # noqa: BLE001
-                self._status.setText(f"addInput fail: {exc}")
-                return
-        try:
-            src_type = src_mx.getType()
-            if src_type and inp.getType() != src_type:
-                self._status.setText(
-                    f"type mismatch {src_type} → {inp.getType()}"
-                )
-                return
-        except Exception:
-            pass
-        try:
-            inp.removeAttribute("value")
-        except Exception:
-            pass
-        try:
-            inp.setNodeName(src_node)
-            if src_port and src_port != "out":
-                inp.setOutputString(src_port)
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"connect fail: {exc}")
-            return
-        self._post_topology_edit("connected")
+                return f"connect fail: {exc}"
+            return None
+
+        self._run_edit(mutate, "connected")
 
     def _apply_disconnect(self, node_name: str, port_name: str) -> None:
-        mx_node = self._mtlx_node(node_name)
-        if mx_node is None:
+        if self._view is None:
             return
-        inp = mx_node.getInput(port_name)
-        if inp is None:
-            return
-        for attr in ("nodename", "nodegraph", "output"):
-            try:
-                inp.removeAttribute(attr)
-            except Exception:
-                pass
-        self._post_topology_edit("disconnected")
+
+        def mutate(r, view=self._view, node_name=node_name, port_name=port_name):
+            doc = _worker_doc(r)
+            mx_node = _worker_mtlx_node(doc, view, node_name)
+            if mx_node is None:
+                return None
+            inp = mx_node.getInput(port_name)
+            if inp is None:
+                return None
+            for attr in ("nodename", "nodegraph", "output"):
+                try:
+                    inp.removeAttribute(attr)
+                except Exception:  # noqa: BLE001
+                    pass
+            return None
+
+        self._run_edit(mutate, "disconnected")
 
     def _apply_delete_node(self, node_name: str) -> None:
         if self._view is None:
             return
-        out_name = next(
-            (n.name for n in self._view.nodes if n.is_output), None,
-        )
+        view = self._view
+        out_name = next((n.name for n in view.nodes if n.is_output), None)
         if node_name == out_name:
             self._status.setText("cannot delete the output node")
             return
-        doc = self._doc()
-        if doc is None or self._view.nodegraph_name is None:
-            return
-        ng = doc.getNodeGraph(self._view.nodegraph_name)
-        if ng is None:
-            return
-        # Strip incoming references first.
-        for n in self._view.nodes:
-            for inp in n.inputs:
-                if inp.connected_from and inp.connected_from[0] == node_name:
-                    mx_n = self._mtlx_node(n.name)
-                    if mx_n is None:
-                        continue
-                    mx_in = mx_n.getInput(inp.name)
-                    if mx_in is None:
-                        continue
-                    for attr in ("nodename", "nodegraph", "output"):
-                        try:
-                            mx_in.removeAttribute(attr)
-                        except Exception:
-                            pass
-        try:
-            ng.removeChild(node_name)
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"delete fail: {exc}")
-            return
-        self._post_topology_edit("deleted")
+        # Capture incoming references from the GUI-side view for the worker.
+        incoming = [
+            (n.name, inp.name)
+            for n in view.nodes for inp in n.inputs
+            if inp.connected_from and inp.connected_from[0] == node_name
+        ]
+
+        def mutate(r, view=view, node_name=node_name, incoming=incoming):
+            doc = _worker_doc(r)
+            if doc is None or view.nodegraph_name is None:
+                return None
+            ng = doc.getNodeGraph(view.nodegraph_name)
+            if ng is None:
+                return None
+            for (n_name, inp_name) in incoming:
+                mx_n = _worker_mtlx_node(doc, view, n_name)
+                if mx_n is None:
+                    continue
+                mx_in = mx_n.getInput(inp_name)
+                if mx_in is None:
+                    continue
+                for attr in ("nodename", "nodegraph", "output"):
+                    try:
+                        mx_in.removeAttribute(attr)
+                    except Exception:  # noqa: BLE001
+                        pass
+            try:
+                ng.removeChild(node_name)
+            except Exception as exc:  # noqa: BLE001
+                return f"delete fail: {exc}"
+            return None
+
+        self._run_edit(mutate, "deleted")
 
     def _apply_add_node(self, category: str, x: float, y: float) -> None:
         if self._view is None:
             return
-        doc = self._doc()
-        if doc is None:
-            return
-        if self._view.nodegraph_name is None:
+        view = self._view
+        if view.nodegraph_name is None:
             self._status.setText(
                 "flat material — connect an input to a nodegraph first"
             )
             return
-        ng = doc.getNodeGraph(self._view.nodegraph_name)
-        if ng is None:
-            return
-        out_type = next((t for c, t in _ADDABLE_CATEGORIES if c == category), "float")
-        i = 0
-        while True:
-            cand = f"{category}_{i}"
-            if ng.getChild(cand) is None:
-                break
-            i += 1
-        try:
-            node = ng.addNode(category, cand, out_type)
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"addNode fail: {exc}")
-            return
-        nv = NodeView(
-            name=cand, category=category, inputs=[],
-            outputs=[PortView(name="out", type_name=out_type)],
-            x=x, y=y,
-        )
-        try:
-            nd = node.getNodeDef()
-        except Exception:
-            nd = None
-        if nd is not None:
-            for nd_in in nd.getInputs():
-                nv.inputs.append(PortView(
-                    name=nd_in.getName(), type_name=nd_in.getType(),
-                    value=_val_to_py(nd_in.getValue()),
-                ))
-        self._view.nodes.append(nv)
-        self._post_topology_edit(f"added {category}")
 
-    def _post_topology_edit(self, what: str) -> None:
-        if self._view is None:
-            return
-        lib = getattr(self.renderer, "_mtlx_library", None)
-        if lib is None:
-            return
-        new_view = build_view(
-            lib.document, self._view.material_id,
-            self._view.material_name, self._view.target_name,
-        )
-        if new_view is not None:
-            old_xy = {n.name: (n.x, n.y) for n in self._view.nodes}
-            for n in new_view.nodes:
-                if n.name in old_xy:
-                    n.x, n.y = old_xy[n.name]
-            self._view = new_view
-        try:
-            valid, msg = lib.document.validate()
-        except Exception:
-            valid, msg = True, ""
-        if not valid:
-            self._status.setText(f"mtlx validation: {msg[:200]}")
-        try:
-            self.renderer._gen_scene_materials()
-            self.renderer._upload_graph_param_buffers()
-            self.renderer._material_version += 1
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"renderer rebuild fail: {exc}")
-            self._rebuild_scene()
-            self._refresh_side()
-            return
-        self._rebuild_scene()
-        self._refresh_side()
-        if valid:
-            self._status.setText(f"topology updated ({what})")
-        self._schedule_preview()
+        def mutate(r, view=view, category=category):
+            doc = _worker_doc(r)
+            if doc is None:
+                return None
+            ng = doc.getNodeGraph(view.nodegraph_name)
+            if ng is None:
+                return "nodegraph missing"
+            out_type = next(
+                (t for c, t in _ADDABLE_CATEGORIES if c == category), "float",
+            )
+            i = 0
+            while True:
+                cand = f"{category}_{i}"
+                if ng.getChild(cand) is None:
+                    break
+                i += 1
+            try:
+                ng.addNode(category, cand, out_type)
+            except Exception as exc:  # noqa: BLE001
+                return f"addNode fail: {exc}"
+            return None
+
+        # build_view (worker rebuild) picks up the new node + its nodedef inputs;
+        # place_xy drops the new node at the requested position.
+        self._run_edit(mutate, f"added {category}", place_xy=(x, y))
 
     # ── Preview viewport ─────────────────────────────────────────
 
@@ -1016,13 +1119,8 @@ class MaterialGraphDock(QDockWidget):
         envs = getattr(self.renderer, "environments", None) or []
         if not (0 <= idx < len(envs)):
             return
-        self.renderer.env_index = idx
-        try:
-            self.renderer._ensure_env_uploaded()
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"env upload fail: {exc}")
-            return
-        self.renderer._material_version += 1
+        self.renderer.env_index = idx  # proxy posts the attr set
+        self.renderer.ensure_env_uploaded()  # worker: upload + version bump
         self._schedule_preview()
 
     def _schedule_preview(self) -> None:
@@ -1031,14 +1129,25 @@ class MaterialGraphDock(QDockWidget):
     def _render_preview(self) -> None:
         if self._view is None:
             return
+        # render_material_preview renders on both backends (Vulkan descriptor-set
+        # path; native-Metal bind-by-name dispatch, change metal-tool-dock-render
+        # P1) — no backend gate.
         prim = self._PRIM_KIND.get(self._prim_combo.currentText(), 0)
-        try:
-            result = self.renderer.render_material_preview(
-                self._view.material_id, prim, size=self.PREVIEW_SIZE,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(f"preview render fail: {exc}")
+        # render_material_preview is GPU work — run it on the worker and blit the
+        # returned pixels on the GUI thread.
+        self._resolve_to_gui(
+            self.renderer.render_material_preview(
+                self._view.material_id, prim, self.PREVIEW_SIZE,
+            ),
+            self._apply_preview,
+        )
+
+    def _apply_preview(self, data) -> None:
+        kind, payload = data
+        if kind == "exc":
+            self._status.setText(f"preview render fail: {payload}")
             return
+        result = payload
         if result is None:
             self._status.setText("preview unavailable")
             return

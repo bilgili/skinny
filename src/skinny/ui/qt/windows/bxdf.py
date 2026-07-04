@@ -11,7 +11,7 @@ import math
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDockWidget, QGroupBox, QHBoxLayout,
@@ -69,11 +69,19 @@ class BXDFDock(QDockWidget):
     LOBE_SIZE = 480
     EVAL_DEBOUNCE_MS = 120
 
+    # Marshal a worker-thread callback (scene-state refresh, GPU eval grid, scene
+    # pick) onto the GUI thread. `_eval_ready` carries (dirs|None, f, is_gpu).
+    _run_on_gui = Signal(object)
+    _eval_ready = Signal(object)
+
     def __init__(self, renderer, viewport, parent: QWidget | None = None) -> None:
         super().__init__("BXDF Visualizer", parent)
         self.renderer = renderer
         self.viewport = viewport  # ``RenderViewport``, owns arm_scene_pick
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self._run_on_gui.connect(self._invoke_on_gui)
+        self._eval_ready.connect(self._on_eval_ready)
+        self._state_inflight = False
 
         self._material_id: int = -1
         self._material_ids: list[int] = []
@@ -234,18 +242,32 @@ class BXDFDock(QDockWidget):
 
     # ── Pick flow ─────────────────────────────────────────────────
 
+    def _invoke_on_gui(self, fn) -> None:
+        try:
+            fn()
+        except RuntimeError:
+            # A widget the callback closed over may have been torn down.
+            pass
+
+    def _arm_pick(self, handler) -> None:
+        # `request_scene_pick` invokes the callback on the render worker; marshal
+        # the result onto the GUI thread before touching widgets.
+        def worker_cb(result, handler=handler) -> None:
+            self._run_on_gui.emit(lambda: handler(result))
+        self.viewport.arm_scene_pick(worker_cb)
+
     def _on_pick_click(self) -> None:
         if self.viewport is None:
             self._status.setText("Pick unavailable: no viewport bound.")
             return
-        self.viewport.arm_scene_pick(self._on_pick_result)
+        self._arm_pick(self._on_pick_result)
         self._status.setText("Click the main viewport to pick exit point.")
 
     def _on_entrance_pick_click(self) -> None:
         if self.viewport is None:
             self._status.setText("Pick unavailable: no viewport bound.")
             return
-        self.viewport.arm_scene_pick(self._on_entrance_pick_result)
+        self._arm_pick(self._on_entrance_pick_result)
         self._status.setText("Click the main viewport to pick BSSRDF entrance.")
 
     def _on_pick_result(self, result: Optional[dict]) -> None:
@@ -391,31 +413,41 @@ class BXDFDock(QDockWidget):
             "n_phi": n_phi,
         }
         self._pending_dirs = self._make_dirs_grid(n_theta, n_phi)
-        try:
-            if self._mode == "bssrdf":
-                req["entrance_position"] = self._entrance_state["position"]
-                self.renderer.request_bssrdf_eval(req, self._on_gpu_eval_result)
-            else:
-                self.renderer.request_bxdf_eval(req, self._on_gpu_eval_result)
-            return
-        except Exception as exc:  # noqa: BLE001
-            print(f"[skinny] GPU eval failed: {exc}")
-            self._status.setText(f"GPU eval failed: {exc}")
+        if self._mode == "bssrdf":
+            req["entrance_position"] = self._entrance_state["position"]
 
-        # CPU fallback (analytic Lambert+GGX, no graph procedurals).
+        # CPU-fallback inputs captured on the GUI thread (pure-numpy eval, run on
+        # the worker only if the GPU eval path raises there).
         mats = self._scene_materials()
-        if not (0 <= self._material_id < len(mats)):
-            return
-        params = dict(getattr(mats[self._material_id], "parameter_overrides", {}) or {})
-        dirs, f = eval_grid(self._locked_dir(), self._lock_mode, n_theta, n_phi, params)
-        self._cache_and_render(dirs, f, gpu=False)
+        cpu_params = (
+            dict(getattr(mats[self._material_id], "parameter_overrides", {}) or {})
+            if 0 <= self._material_id < len(mats) else {}
+        )
+        locked, lock_mode = self._locked_dir(), self._lock_mode
 
-    def _on_gpu_eval_result(self, grid: np.ndarray) -> None:
-        if self._pending_dirs is None:
-            return
-        dirs = self._pending_dirs
-        f = grid.astype(np.float64)
-        self._cache_and_render(dirs, f, gpu=True)
+        def deliver(grid, is_gpu=True, dirs=None) -> None:
+            # Runs on the render worker; hop the grid onto the GUI thread.
+            self._eval_ready.emit(
+                (dirs, np.asarray(grid, dtype=np.float64), is_gpu),
+            )
+
+        def cpu_fallback(_exc, locked=locked, lock_mode=lock_mode,
+                         cpu_params=cpu_params, nt=n_theta, npi=n_phi) -> None:
+            cpu_dirs, cpu_f = eval_grid(locked, lock_mode, nt, npi, cpu_params)
+            deliver(cpu_f, is_gpu=False, dirs=cpu_dirs)
+
+        if self._mode == "bssrdf":
+            self.renderer.request_bssrdf_eval(req, deliver, on_error=cpu_fallback)
+        else:
+            self.renderer.request_bxdf_eval(req, deliver, on_error=cpu_fallback)
+
+    def _on_eval_ready(self, payload) -> None:
+        dirs, f, is_gpu = payload
+        if dirs is None:
+            if self._pending_dirs is None:
+                return
+            dirs = self._pending_dirs
+        self._cache_and_render(dirs, f, gpu=is_gpu)
 
     def _cache_and_render(
         self, dirs: np.ndarray, f: np.ndarray, gpu: bool,
@@ -481,9 +513,29 @@ class BXDFDock(QDockWidget):
         return hash((version, payload))
 
     def _poll_material_changes(self) -> None:
-        # Repopulate combo when the active USD scene swaps (model load).
-        scene = getattr(self.renderer, "_usd_scene", None)
-        cur_scene_id = id(scene)
+        # Pull a fresh material projection from the render worker, then compare
+        # on the GUI thread. Skip if a refresh is already in flight.
+        if self._state_inflight:
+            return
+        self._state_inflight = True
+        fut = self.renderer.refresh_scene_state()
+        fut.add_done_callback(self._on_state_future)
+
+    def _on_state_future(self, fut) -> None:
+        try:
+            state = fut.result()
+        except Exception:  # noqa: BLE001
+            state = None
+        self._run_on_gui.emit(lambda state=state: self._apply_state_poll(state))
+
+    def _apply_state_poll(self, state) -> None:
+        self._state_inflight = False
+        if state is not None:
+            self.renderer.apply_scene_state(state)
+        # Repopulate combo when the active USD scene swaps (model load). The
+        # projection carries a stable id of the real scene so a fresh projection
+        # object each tick does not read as a swap.
+        cur_scene_id = getattr(self.renderer, "_usd_scene_id", 0)
         if cur_scene_id != self._last_scene_id:
             self._last_scene_id = cur_scene_id
             self._refresh_material_combo()

@@ -30,7 +30,17 @@ struct PreviewPushConsts
     float distance;   // camera distance from origin
     float fovTan;     // tan(half-fov), governs framing
 };
+#if defined(SKINNY_METAL)
+// Metal (change metal-tool-dock-render P1): bind the preview push block as a
+// plain `uniform` global (the same idiom as `fc` in bindings.slang) set via
+// `cur["pc"].set_data(...)`. slangpy's ShaderCursor rejects `set_data` on a
+// `[[vk::push_constant]] ConstantBuffer` ("ConstantBuffer cannot bind data"),
+// but accepts it on a uniform global. All fields are scalars, so the MSL
+// layout equals the 32-byte scalar pack `PreviewPipeline.pack_push` emits.
+uniform PreviewPushConsts pc;
+#else
 [[vk::push_constant]] ConstantBuffer<PreviewPushConsts> pc;
+#endif
 
 static const float PREVIEW_HIT_EPS = 1e-3;
 

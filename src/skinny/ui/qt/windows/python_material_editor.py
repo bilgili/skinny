@@ -20,11 +20,10 @@ Layout (top→bottom):
 from __future__ import annotations
 
 import re
-import threading
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QRect, QRegularExpression, QSignalBlocker, QSize, Qt, QTimer,
+    QRect, QRegularExpression, QSignalBlocker, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QColor, QFont, QKeySequence, QPainter, QShortcut, QSyntaxHighlighter,
@@ -35,7 +34,9 @@ from PySide6.QtWidgets import (
     QSplitter, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from skinny.material_reloader import MaterialReloader, resolve_source_path
+from skinny.material_reloader import (
+    MaterialReloader, ReloadResult, resolve_source_path,
+)
 
 
 # ─── Syntax highlighter ─────────────────────────────────────────────
@@ -270,20 +271,28 @@ class PythonMaterialEditorDock(QDockWidget):
     """Edits one Python-authored slangpile material at a time, identified
     by a module name like ``python_materials.preview_surface_material``.
 
-    The dock owns no GPU state — all heavy lifting is delegated to
-    `MaterialReloader`, which receives the render-thread lock from the
-    `MainWindow` so its pipeline-rebuild step serialises against the
-    background render worker.
+    The dock owns no GPU state and never touches the live renderer on the GUI
+    thread. Under render-thread ownership `renderer` is the `QtRendererProxy`:
+    the module-list read and the `MaterialReloader` reload both run on the render
+    worker via `renderer.request(...)`, and their results are marshalled back to
+    the GUI thread through the `_modules_ready` / `_reload_ready` signals.
     """
 
+    # Cross-thread result carriers: the render worker's future-callbacks emit
+    # these; Qt delivers them queued onto the GUI thread.
+    _modules_ready = Signal(object)
+    _reload_ready = Signal(object)
+
     def __init__(
-        self, renderer, render_lock: threading.Lock,
-        parent: QWidget | None = None,
+        self, renderer, parent: QWidget | None = None,
     ) -> None:
         super().__init__("Python Material Editor", parent)
         self.renderer = renderer
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self._reloader = MaterialReloader(renderer, render_lock)
+        self._modules_inflight = False
+        self._reload_inflight = False
+        self._modules_ready.connect(self._apply_modules)
+        self._reload_ready.connect(self._apply_reload_result)
         self._module_name: str | None = None
         self._source_path: Path | None = None
         self._dirty: bool = False
@@ -394,16 +403,38 @@ class PythonMaterialEditorDock(QDockWidget):
     def refresh_from_renderer(self) -> None:
         """Refresh the dropdown + buffer from the renderer's current scene.
 
-        Called after a scene load. If the buffer has unsaved edits, the
-        old contents are preserved and the user gets a warning in the
-        output panel.
+        Called after a scene load. The module list is fetched from the render
+        worker and applied on the GUI thread (`_apply_modules`), keeping the
+        current selection when it still lives in the scene; `set_active_module`
+        preserves unsaved edits and warns.
         """
-        modules = self.renderer.scene_python_modules()
-        # Keep the user's current selection if it still lives in the scene.
+        self._request_modules()
+
+    def _request_modules(self) -> None:
+        """Ask the render worker for the scene's Python module list."""
+        if self._modules_inflight:
+            return
+        self._modules_inflight = True
+        fut = self.renderer.request(lambda r: r.scene_python_modules())
+        fut.add_done_callback(self._on_modules_future)
+
+    def _on_modules_future(self, fut) -> None:
+        # Runs on the render worker thread; marshal to the GUI via a signal.
+        try:
+            modules = list(fut.result())
+        except Exception:  # noqa: BLE001
+            modules = []
+        self._modules_ready.emit(modules)
+
+    def _apply_modules(self, modules: "list[str]") -> None:
+        self._modules_inflight = False
+        if not modules:
+            return
+        self._poll_timer.stop()
         target = (
             self._module_name
             if self._module_name in modules
-            else (modules[0] if modules else None)
+            else modules[0]
         )
         self._set_combo_items(modules, selected=target)
         self.set_active_module(target)
@@ -513,20 +544,15 @@ class PythonMaterialEditorDock(QDockWidget):
         self.set_active_module(module_name)
 
     def _poll_for_modules(self) -> None:
-        """Tick handler: re-read the scene's Python modules while the
-        dropdown stays empty. Stops polling once at least one module
-        appears (USD load completed) or when the user has already loaded
-        a buffer.
+        """Tick handler: request the scene's Python modules from the render
+        worker while the dropdown stays empty. Stops polling once at least one
+        module appears (USD load completed, applied in `_apply_modules`) or
+        when the user has already loaded a buffer.
         """
         if self._dirty or self._module_name is not None:
             self._poll_timer.stop()
             return
-        modules = self.renderer.scene_python_modules()
-        if not modules:
-            return
-        self._poll_timer.stop()
-        self._set_combo_items(modules, selected=modules[0])
-        self.set_active_module(modules[0])
+        self._request_modules()
 
     def _on_text_changed(self) -> None:
         if self._loading:
@@ -553,20 +579,37 @@ class PythonMaterialEditorDock(QDockWidget):
         self._set_status("Reverted from disk.", ok=True)
 
     def _on_compile_clicked(self) -> None:
-        if self._module_name is None:
+        if self._module_name is None or self._reload_inflight:
             return
         self._set_status("Compiling…", ok=None)
-        # Disable buttons while the synchronous reload runs so users
+        # Disable buttons while the reload runs on the render worker so users
         # don't queue two slangc compiles on top of each other.
         self._compile_btn.setEnabled(False)
         self._revert_btn.setEnabled(False)
-        try:
-            result = self._reloader.reload(self._module_name,
-                                           self.editor.toPlainText())
-        finally:
-            self._compile_btn.setEnabled(True)
-            self._revert_btn.setEnabled(self._dirty)
+        self._reload_inflight = True
+        module = self._module_name
+        source = self.editor.toPlainText()
+        # The reload (codegen + pipeline rebuild) is GPU work — run it on the
+        # render worker, which owns the live renderer, and collect the result.
+        fut = self.renderer.request(
+            lambda r, m=module, s=source: MaterialReloader(r).reload(m, s),
+        )
+        fut.add_done_callback(self._on_reload_future)
 
+    def _on_reload_future(self, fut) -> None:
+        # Runs on the render worker thread; marshal the result to the GUI.
+        try:
+            result = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            result = ReloadResult(
+                ok=False, stage="pipeline", message=repr(exc),
+            )
+        self._reload_ready.emit(result)
+
+    def _apply_reload_result(self, result: "ReloadResult") -> None:
+        self._reload_inflight = False
+        self._compile_btn.setEnabled(True)
+        self._revert_btn.setEnabled(self._dirty)
         if result.ok:
             self._dirty = False
             self._update_header()

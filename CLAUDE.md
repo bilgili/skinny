@@ -213,6 +213,8 @@ in `README.md` → **Compatibility matrix**; keep the two in sync.
 | Wavefront (path / BDPT / ReSTIR DI / neural) | ✅ | ✅ (`metal-wavefront-parity`, `metal-record-drain`) |
 | Heterogeneous volumes (NanoVDB) — path only, mega+wave | ✅ | ✅ (`nanovdb-volume-rendering`) |
 | Procedural `cloud` medium (pbrt analytic fBm) — path only, mega+wave | ✅ | ✅ (`pbrt-cloud-procedural-medium`) |
+| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal` bind-by-name, `metal-tool-dock-render`) |
+| Camera Debug viewport | ✅ (graphics rasteriser) | ✅ (`DebugRasterMetal` compute rasteriser, `metal-tool-dock-render`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
 | Neural-handoff `interop` | CUDA + `VK_KHR_external_memory` + timeline semaphore (`[interop]` extra) | UMA shared-storage in-place writes, no extra deps (`metal-neural-interop`) |

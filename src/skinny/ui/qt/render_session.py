@@ -51,6 +51,14 @@ class FrameSnapshot:
 
 
 @dataclass(frozen=True)
+class DebugFrame:
+    """One embedded Camera-Debug-viewport frame, produced on the render worker."""
+    pixels: bytes
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
 class RendererStateSnapshot:
     width: int
     height: int
@@ -62,6 +70,115 @@ class RendererStateSnapshot:
     sppm_glossy_roughness: float | None = None
     online_training: dict[str, Any] = field(default_factory=dict)
     choices: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _LensProj:
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class _CameraProj:
+    """Read-only mirror of the camera params the Scene Graph dock displays."""
+    fov: float = 0.0
+    near: float = 0.0
+    far: float = 0.0
+    fstop: float = 0.0
+    focus_distance: float = 0.0
+    yaw: float = 0.0
+    pitch: float = 0.0
+    distance: float = 0.0
+    max_distance: float = 0.0
+    lens: _LensProj | None = None
+
+
+@dataclass(frozen=True)
+class _MaterialProj:
+    python_module: str | None = None
+    name: str | None = None
+    mtlx_target_name: str | None = None
+    mtlx_scene_target: str | None = None
+    parameter_overrides: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _UsdSceneProj:
+    materials: tuple[_MaterialProj, ...] = ()
+
+
+@dataclass(frozen=True)
+class SceneStateSnapshot:
+    """Immutable projection of renderer-owned scene state the Scene Graph and
+    BXDF docks read on the GUI thread — built on the render worker, never a live
+    handle."""
+    scene_graph: Any = None
+    scene_graph_version: int = 0
+    usd_scene: _UsdSceneProj | None = None
+    scene: _UsdSceneProj | None = None
+    usd_scene_id: int = 0
+    has_usd_stage: bool = False
+    has_usd_edit_layer: bool = False
+    camera: _CameraProj | None = None
+    material_version: int = 0
+    mtlx_overrides: dict = field(default_factory=dict)
+
+
+def _proj_scene(scene, cm_map=None) -> "_UsdSceneProj | None":
+    if scene is None:
+        return None
+    cm_map = cm_map or {}
+    mats = getattr(scene, "materials", None) or []
+    out = []
+    for i, m in enumerate(mats):
+        cm = cm_map.get(i)
+        out.append(_MaterialProj(
+            python_module=getattr(m, "python_module", None),
+            name=getattr(m, "name", None),
+            mtlx_target_name=getattr(m, "mtlx_target_name", None),
+            mtlx_scene_target=getattr(cm, "target_name", None) if cm else None,
+            parameter_overrides=dict(getattr(m, "parameter_overrides", {}) or {}),
+        ))
+    return _UsdSceneProj(materials=tuple(out))
+
+
+def build_scene_state(renderer) -> SceneStateSnapshot:
+    """Project the renderer's scene state into an immutable snapshot. Runs on the
+    render worker (via `proxy.request`), so it may touch the live renderer."""
+    cam = getattr(renderer, "camera", None)
+    camera = None
+    if cam is not None:
+        lens = getattr(cam, "lens", None)
+        camera = _CameraProj(
+            fov=float(getattr(cam, "fov", 0.0)),
+            near=float(getattr(cam, "near", 0.0)),
+            far=float(getattr(cam, "far", 0.0)),
+            fstop=float(getattr(cam, "fstop", 0.0)),
+            focus_distance=float(getattr(cam, "focus_distance", 0.0)),
+            yaw=float(getattr(cam, "yaw", 0.0)),
+            pitch=float(getattr(cam, "pitch", 0.0)),
+            distance=float(getattr(cam, "distance", 0.0)),
+            max_distance=float(getattr(cam, "max_distance", 0.0)),
+            lens=_LensProj(bool(lens.enabled)) if lens is not None else None,
+        )
+    usd_scene = getattr(renderer, "_usd_scene", None)
+    cm_map = getattr(renderer, "_mtlx_scene_materials", {}) or {}
+    return SceneStateSnapshot(
+        scene_graph=getattr(renderer, "scene_graph", None),
+        scene_graph_version=int(getattr(renderer, "_scene_graph_version", 0)),
+        usd_scene=_proj_scene(usd_scene, cm_map),
+        scene=_proj_scene(getattr(renderer, "scene", None)),
+        usd_scene_id=id(usd_scene) if usd_scene is not None else 0,
+        has_usd_stage=getattr(renderer, "_usd_stage", None) is not None,
+        has_usd_edit_layer=getattr(renderer, "_usd_edit_layer", None) is not None,
+        camera=camera,
+        material_version=int(getattr(renderer, "_material_version", 0)),
+        mtlx_overrides=dict(getattr(renderer, "mtlx_overrides", {}) or {}),
+    )
+
+
+# Sentinel stored on the proxy for `_usd_stage` / `_usd_edit_layer`: the dock only
+# tests presence (`is None` / `is not None`), never the object itself.
+_SCENE_STATE_PRESENT = object()
 
 
 @dataclass
@@ -155,6 +272,13 @@ class QtRendererProxy:
         self.film.iso = 100.0
         self.film.exposure_time = 1.0
         object.__setattr__(self, "has_usd_camera", False)
+        # Scene Graph dock reads (refreshed from a worker `SceneStateSnapshot`).
+        object.__setattr__(self, "scene", None)
+        object.__setattr__(self, "camera", None)
+        object.__setattr__(self, "_usd_stage", None)
+        object.__setattr__(self, "_usd_edit_layer", None)
+        object.__setattr__(self, "_material_version", 0)
+        object.__setattr__(self, "_usd_scene_id", 0)
 
     def _default_values(self, width: int, height: int) -> dict[str, Any]:
         values: dict[str, Any] = {
@@ -211,6 +335,131 @@ class QtRendererProxy:
     def load_model_from_path(self, path: Path) -> None:
         self.post(lambda renderer, path=Path(path): renderer.load_model_from_path(path))
 
+    # ── Scene Graph dock surface ──────────────────────────────────────────
+    # Reads come from a worker-built `SceneStateSnapshot`; mutations post to the
+    # render worker. The four edits whose result the GUI uses (add/save/texture/
+    # lens) return a `Future` the dock resolves asynchronously.
+
+    def refresh_scene_state(self) -> "Future[SceneStateSnapshot]":
+        return self.request(build_scene_state)
+
+    def apply_scene_state(self, state: SceneStateSnapshot) -> None:
+        self.scene_graph = state.scene_graph
+        self._scene_graph_version = state.scene_graph_version
+        self._usd_scene = state.usd_scene
+        self.scene = state.scene if state.scene is not None else state.usd_scene
+        self._usd_stage = _SCENE_STATE_PRESENT if state.has_usd_stage else None
+        self._usd_edit_layer = (
+            _SCENE_STATE_PRESENT if state.has_usd_edit_layer else None
+        )
+        self.camera = state.camera
+        self._material_version = state.material_version
+        self._usd_scene_id = state.usd_scene_id
+        self.mtlx_overrides = dict(state.mtlx_overrides)
+
+    def set_gizmo_target(self, index: int) -> None:
+        self.post(
+            lambda r, i=int(index): r.set_gizmo_target(i),
+            coalesce_key="gizmo_target",
+        )
+
+    def apply_subtree_enabled(self, path: str, value: bool) -> None:
+        self.post(lambda r, p=path, v=value: r.apply_subtree_enabled(p, v))
+
+    def apply_node_enabled(self, path: str, value: bool) -> None:
+        self.post(lambda r, p=path, v=value: r.apply_node_enabled(p, v))
+
+    def apply_camera_param(self, name: str, value: Any) -> None:
+        self.post(
+            lambda r, n=name, v=value: r.apply_camera_param(n, v),
+            coalesce_key=f"camera_param:{name}",
+        )
+
+    def apply_material_override(self, index: int, name: str, value: Any) -> None:
+        self.post(
+            lambda r, i=index, n=name, v=value: r.apply_material_override(i, n, v),
+            coalesce_key=f"mat_override:{index}:{name}",
+        )
+
+    def apply_light_override(
+        self, light_type: str, index: int, name: str, value: Any,
+    ) -> None:
+        self.post(
+            lambda r, t=light_type, i=index, n=name, v=value:
+                r.apply_light_override(t, i, n, v),
+            coalesce_key=f"light_override:{light_type}:{index}:{name}",
+        )
+
+    def apply_instance_transform(self, path, translate, rotate, scale) -> None:
+        self.post(
+            lambda r, p=path, t=translate, ro=rotate, s=scale:
+                r.apply_instance_transform(p, t, ro, s),
+            coalesce_key=f"instance_xform:{path}",
+        )
+
+    def set_transform(self, path, matrix) -> None:
+        self.post(
+            lambda r, p=path, m=matrix: r.set_transform(p, m),
+            coalesce_key=f"set_transform:{path}",
+        )
+
+    def remove_node(self, path: str) -> "Future[Any]":
+        return self.request(lambda r, p=path: r.remove_node(p))
+
+    def add_model(self, path, parent_prim_path=None) -> "Future[Any]":
+        return self.request(
+            lambda r, p=path, pp=parent_prim_path: r.add_model(
+                p, parent_prim_path=pp,
+            ),
+        )
+
+    def save_edits(self) -> "Future[Any]":
+        return self.request(lambda r: r.save_edits())
+
+    def apply_dome_light_texture(self, index: int, path) -> "Future[Any]":
+        return self.request(
+            lambda r, i=index, p=path: r.apply_dome_light_texture(i, p),
+        )
+
+    def apply_camera_lens_file(self, path) -> "Future[Any]":
+        return self.request(lambda r, p=path: r.apply_camera_lens_file(p))
+
+    # ── BXDF dock GPU eval ────────────────────────────────────────────────
+    # The renderer computes the lobe/BSSRDF grid and invokes `callback(grid)`;
+    # under render-thread ownership that runs on the worker, so the dock passes a
+    # callback that marshals the grid onto the GUI thread.
+
+    def request_bxdf_eval(self, req, callback, on_error=None) -> None:
+        self.post(self._eval_runner("request_bxdf_eval", req, callback, on_error))
+
+    def request_bssrdf_eval(self, req, callback, on_error=None) -> None:
+        self.post(self._eval_runner("request_bssrdf_eval", req, callback, on_error))
+
+    @staticmethod
+    def _eval_runner(method: str, req, callback, on_error):
+        def run(r) -> None:
+            try:
+                getattr(r, method)(req, callback)
+            except Exception as exc:  # noqa: BLE001
+                if on_error is None:
+                    raise
+                on_error(exc)  # worker-thread CPU fallback
+        return run
+
+    # ── Material Graph dock ───────────────────────────────────────────────
+
+    def render_material_preview(self, material_id, prim, size) -> "Future[Any]":
+        return self.request(
+            lambda r, m=material_id, p=prim, s=size:
+                r.render_material_preview(m, p, size=s),
+        )
+
+    def ensure_env_uploaded(self) -> None:
+        def run(r) -> None:
+            r._ensure_env_uploaded()
+            r._material_version += 1
+        self.post(run, coalesce_key="ensure_env_uploaded")
+
     def online_training_status(self) -> dict[str, Any]:
         return {}
 
@@ -246,7 +495,7 @@ class QtRendererProxy:
         if name.startswith("_") or name in {
             "mtlx_overrides", "_mtlx_skin_material", "_usd_scene",
             "_usd_controls", "scene_graph", "_scene_graph_version", "clock",
-            "has_usd_camera", "film",
+            "has_usd_camera", "film", "camera", "scene",
         }:
             object.__setattr__(self, name, value)
             return

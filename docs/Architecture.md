@@ -65,9 +65,19 @@ the spec lights it up in both UIs.
    snapshots. The Qt main thread stores those bytes in a `QImage` and paints the
    latest frame.
 
-Deep inspector/editor docks that still require live renderer internals are gated
-in this mode until their snapshot-backed ports are implemented; they must not
-receive the worker-owned renderer object.
+All five **View**-menu tool docks — Scene Graph, Material Graph, Python Material
+Editor, BXDF Visualizer, and Camera Debug — are proxy-backed under this model
+(change `restore-render-thread-tool-docks`): they receive the `QtRendererProxy`,
+never the worker-owned `Renderer`. Reads come from a worker-built projection
+(`build_scene_state` → `SceneStateSnapshot`, refreshed via `proxy.refresh_scene_state()`),
+mutations post to the command queue, and each dock's GPU-producing work runs on
+the worker and is marshalled back to the GUI thread by a per-dock `Signal`:
+the BXDF/BSSRDF lobe evaluation (`proxy.request_bxdf_eval`), the Material Graph
+preview (`proxy.render_material_preview`) and MaterialX-doc topology edits (relocated
+into worker closures over `_worker_doc`/`_worker_mtlx_node`), and the Camera Debug
+viewport (owned on the worker as `renderer.debug_viewport`, emitting a `DebugFrame`
+each frame via `RenderViewport.debug_frame_ready`). No dock issues a GPU call or
+blocks on a `Future` from the GUI thread.
 
 ### Per-Frame Render Loop (GLFW debug)
 
@@ -939,6 +949,32 @@ gated ⇒ Vulkan SPIR-V byte-unchanged) that `mainImage` adds to the thread's `y
 The accumulation image persists across a frame's bands, so N-band output is
 bit-identical to one dispatch, and ≤256² scenes stay a single band (parity corpus
 unaffected). See [Megakernel.md → Backends](Megakernel.md#backends-vulkan-and-metal).
+
+**Tool-dock render paths** (change `metal-tool-dock-render`): the two View-menu
+tool docks whose render paths were Vulkan-only now run on Metal via compute.
+- **Material Graph preview** — `PreviewPipelineMetal` compiles `preview_pass.slang`
+  (`previewMain`) in-process (same session config as the megakernel
+  `ComputePipeline`, linking the emit-time `generated_materials` so it shades
+  identically) and dispatches by binding the scene material resources + the output
+  image **by name** — no Vulkan descriptor sets. `Renderer.render_material_preview`
+  branches on `is_metal`, reuses `_build_metal_binds` + `_pack_uniforms_msl` (packed
+  against the preview program's own reflected `fc` layout so it works in wavefront
+  mode too), and reads the RGBA32F float image back directly. The preview `size` is
+  clamped to `_METAL_PREVIEW_MAX_SIZE` (one bounded command buffer). The Metal-only
+  `pc` push block is a plain `uniform` (slang-rhi rejects `set_data` on a
+  `[[vk::push_constant]]` ConstantBuffer; `#if defined(SKINNY_METAL)` ⇒ Vulkan SPIR-V
+  unchanged).
+- **Camera Debug viewport** — the native backend has no graphics pipeline, so
+  `DebugRasterMetal` (`debug_raster.slang`) is a **software line/triangle
+  rasteriser** in compute: `clearImage`/`clearDepth` → `depthLines` (`InterlockedMin`
+  into a uint depth UAV) → `colorLines` (opaque, depth-owned pixels) → `blendTris`
+  (edge-function fill, src-alpha over, depth-tested no-write; one thread per
+  triangle×screen-row so no unbounded per-thread loop). `DebugViewport` on Metal
+  builds this instead of the Vulkan render pass; `render_embedded` runs the
+  unchanged `_generate_streams` `_gen_*` generators, dispatches, and returns RGBA8
+  through the same worker `DebugFrame` path. `debug_raster_ref.py` is the numpy
+  mirror the kernel is diffed against (host-checkable, no GPU). The Vulkan graphics
+  rasteriser is untouched.
 
 ## Backend Abstraction (`gfx/`)
 

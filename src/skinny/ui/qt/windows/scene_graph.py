@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer
+from PySide6.QtCore import Qt, QSignalBlocker, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox,
@@ -38,6 +38,11 @@ class SceneGraphDock(QDockWidget):
 
     TICK_MS = 200
 
+    # Marshals a callable emitted from a render-worker future-callback onto the
+    # GUI thread (Qt delivers a queued cross-thread signal). All async results
+    # (scene-state refresh, add/save/delete/texture/lens) route through it.
+    _run_on_gui = Signal(object)
+
     def __init__(
         self, renderer,
         parent: QWidget | None = None,
@@ -48,6 +53,8 @@ class SceneGraphDock(QDockWidget):
         self.renderer = renderer
         self._on_open_python_material = on_open_python_material
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self._run_on_gui.connect(self._invoke_on_gui)
+        self._state_inflight = False
 
         self._last_graph_id: int = -1
         self._last_graph_version: int = -1
@@ -234,6 +241,32 @@ class SceneGraphDock(QDockWidget):
         except Exception:  # noqa: BLE001 — no status bar in this host
             pass
 
+    # ── Render-worker round-trips ─────────────────────────────────────────
+
+    def _invoke_on_gui(self, fn: Callable[[], None]) -> None:
+        try:
+            fn()
+        except RuntimeError:
+            # A widget the callback closed over may have been torn down.
+            pass
+
+    def _await(
+        self, fut, on_ok: Callable[[Any], None], fail_prefix: str,
+    ) -> None:
+        """Resolve a worker `Future` off-thread; run the GUI update on the GUI
+        thread. Renderer edits that report a result (add/save/delete/texture/
+        lens) run on the render worker and must not block the GUI thread."""
+        def done(f) -> None:
+            try:
+                result = f.result()
+            except Exception as exc:  # noqa: BLE001
+                self._run_on_gui.emit(
+                    lambda exc=exc: self._status(f"{fail_prefix}: {exc}"),
+                )
+                return
+            self._run_on_gui.emit(lambda result=result: on_ok(result))
+        fut.add_done_callback(done)
+
     def _on_add_model(self) -> None:
         r = self.renderer
         if getattr(r, "_usd_stage", None) is None:
@@ -245,24 +278,22 @@ class SceneGraphDock(QDockWidget):
             return
         record_last_dir("model", Path(path).parent)
         parent = add_parent_for_node(self._selected_node())
-        try:
-            new_path = r.add_model(path, parent_prim_path=parent)
-        except (ValueError, RuntimeError) as exc:
-            self._status(f"Add model failed: {exc}")
-            return
-        self._status(f"Added {new_path}")
+        self._await(
+            r.add_model(path, parent_prim_path=parent),
+            lambda new_path: self._status(f"Added {new_path}"),
+            "Add model failed",
+        )
 
     def _on_save_edits(self) -> None:
         r = self.renderer
         if getattr(r, "_usd_edit_layer", None) is None:
             self._status("No edits to save (no USD scene loaded).")
             return
-        try:
-            written = r.save_edits()
-        except (ValueError, RuntimeError) as exc:
-            self._status(f"Save edits failed: {exc}")
-            return
-        self._status(f"Saved edits to {written}")
+        self._await(
+            r.save_edits(),
+            lambda written: self._status(f"Saved edits to {written}"),
+            "Save edits failed",
+        )
 
     def _on_tree_context_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
@@ -284,12 +315,11 @@ class SceneGraphDock(QDockWidget):
         if not is_deletable(node):
             self._status(f"{node.path} cannot be deleted.")
             return
-        try:
-            self.renderer.remove_node(node.path)
-        except (ValueError, RuntimeError) as exc:
-            self._status(f"Delete failed: {exc}")
-            return
-        self._status(f"Deleted {node.path}")
+        self._await(
+            self.renderer.remove_node(node.path),
+            lambda _res, p=node.path: self._status(f"Deleted {p}"),
+            "Delete failed",
+        )
 
     def _build_properties(self, node: SceneGraphNode) -> None:
         # Tear down old widgets + pulls.
@@ -567,14 +597,21 @@ class SceneGraphDock(QDockWidget):
             )
             if not path:
                 return
-            ok = False
-            if hasattr(self.renderer, "apply_camera_lens_file"):
-                ok = self.renderer.apply_camera_lens_file(path)
-            if ok:
+            if not hasattr(self.renderer, "apply_camera_lens_file"):
+                return
+
+            def on_ok(ok: bool, path=path) -> None:
+                if not ok:
+                    return
                 record_last_dir("lens", Path(path).parent)
                 name = Path(path).name
                 cur_label.setText(name)
                 prop.value = name
+
+            self._await(
+                self.renderer.apply_camera_lens_file(path), on_ok,
+                "Load lens failed",
+            )
 
         btn.clicked.connect(on_pick)
         layout.addWidget(btn)
@@ -600,13 +637,20 @@ class SceneGraphDock(QDockWidget):
             )
             if not path:
                 return
-            ok = False
-            if hasattr(self.renderer, "apply_dome_light_texture"):
-                ok = self.renderer.apply_dome_light_texture(ref.index, path)
-            if ok:
+            if not hasattr(self.renderer, "apply_dome_light_texture"):
+                return
+
+            def on_ok(ok: bool, path=path) -> None:
+                if not ok:
+                    return
                 record_last_dir("ibl", Path(path).parent)
                 cur_label.setText(Path(path).name)
                 prop.value = path
+
+            self._await(
+                self.renderer.apply_dome_light_texture(ref.index, path), on_ok,
+                "Load HDR failed",
+            )
 
         btn.clicked.connect(on_pick)
         layout.addWidget(btn)
@@ -688,6 +732,30 @@ class SceneGraphDock(QDockWidget):
     # ── Per-tick refresh ──────────────────────────────────────────
 
     def _tick(self) -> None:
+        # Pull a fresh scene-state projection from the render worker, then apply
+        # it + refresh the UI on the GUI thread. Skip if one is already in flight
+        # so slow frames can't pile up requests.
+        if self._state_inflight:
+            return
+        self._state_inflight = True
+        fut = self.renderer.refresh_scene_state()
+        fut.add_done_callback(self._on_scene_state_future)
+
+    def _on_scene_state_future(self, fut) -> None:
+        # Worker thread: marshal the applied refresh onto the GUI thread.
+        try:
+            state = fut.result()
+        except Exception:  # noqa: BLE001
+            state = None
+        self._run_on_gui.emit(
+            lambda state=state: self._apply_scene_state_tick(state),
+        )
+
+    def _apply_scene_state_tick(self, state) -> None:
+        self._state_inflight = False
+        if state is not None:
+            self.renderer.apply_scene_state(state)
+
         # Toolbar enablement tracks loaded-scene / edit-layer state.
         self._add_btn.setEnabled(getattr(self.renderer, "_usd_stage", None) is not None)
         self._save_btn.setEnabled(getattr(self.renderer, "_usd_edit_layer", None) is not None)

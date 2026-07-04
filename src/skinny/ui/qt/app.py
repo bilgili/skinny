@@ -54,6 +54,11 @@ from skinny.ui.qt.render_session import (
     QtRendererProxy,
     RenderCommandQueue,
 )
+from skinny.ui.qt.windows.bxdf import BXDFDock
+from skinny.ui.qt.windows.debug_viewport import DebugViewportDock
+from skinny.ui.qt.windows.material_graph import MaterialGraphDock
+from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
+from skinny.ui.qt.windows.scene_graph import SceneGraphDock
 
 log = logging.getLogger(__name__)
 
@@ -290,10 +295,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{name}: not yet ported (Phase 7)", 3000)
 
     def _open_scene_graph(self) -> None:
-        self.statusBar().showMessage(
-            "Scene Graph dock needs the snapshot-backed port for render-thread mode",
-            5000,
-        )
+        if self._scene_graph_dock is None:
+            self._scene_graph_dock = SceneGraphDock(
+                self.renderer, parent=self,
+                on_open_python_material=self._open_python_material_in_editor,
+            )
+            self._scene_graph_dock.setObjectName("scene_graph")
+            self.addDockWidget(Qt.BottomDockWidgetArea, self._scene_graph_dock)
+        self._scene_graph_dock.show()
+        self._scene_graph_dock.raise_()
 
     def _open_python_material_in_editor(self, module_name: str) -> None:
         """Open the editor dock (creating it if needed) and load
@@ -304,25 +314,43 @@ class MainWindow(QMainWindow):
             self._python_material_dock.set_active_module(module_name)
 
     def _open_bxdf(self) -> None:
-        self.statusBar().showMessage(
-            "BXDF visualizer needs the snapshot-backed port for render-thread mode",
-            5000,
-        )
+        if self._bxdf_dock is None:
+            self._bxdf_dock = BXDFDock(self.renderer, self.viewport, parent=self)
+            self._bxdf_dock.setObjectName("bxdf")
+            self.addDockWidget(Qt.RightDockWidgetArea, self._bxdf_dock)
+        self._bxdf_dock.show()
+        self._bxdf_dock.raise_()
 
     def _open_material_graph(self) -> None:
-        self.statusBar().showMessage(
-            "Material Graph dock needs the snapshot-backed port for render-thread mode",
-            5000,
-        )
+        if self._material_graph_dock is None:
+            self._material_graph_dock = MaterialGraphDock(self.renderer, parent=self)
+            self._material_graph_dock.setObjectName("material_graph")
+            self.addDockWidget(Qt.BottomDockWidgetArea, self._material_graph_dock)
+        self._material_graph_dock.show()
+        self._material_graph_dock.raise_()
 
     def _open_python_material_editor(self) -> None:
-        self.statusBar().showMessage(
-            "Python Material Editor needs the command-backed port for render-thread mode",
-            5000,
-        )
+        if self._python_material_dock is None:
+            self._python_material_dock = PythonMaterialEditorDock(
+                self.renderer, parent=self,
+            )
+            self._python_material_dock.setObjectName("python_material_editor")
+            self.addDockWidget(
+                Qt.RightDockWidgetArea, self._python_material_dock,
+            )
+        self._python_material_dock.refresh_from_renderer()
+        self._python_material_dock.show()
+        self._python_material_dock.raise_()
 
-    def _ensure_debug_dock(self):
-        raise RuntimeError("debug viewport is not yet snapshot-backed in render-thread mode")
+    def _ensure_debug_dock(self) -> DebugViewportDock:
+        if self._debug_dock is not None:
+            return self._debug_dock
+        self._debug_dock = DebugViewportDock(
+            self.renderer, self.viewport, parent=self,
+        )
+        self._debug_dock.setObjectName("debug_viewport")
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._debug_dock)
+        return self._debug_dock
 
     def _show_render_viewport(self) -> None:
         self._render_dock.show()

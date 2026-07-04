@@ -40,6 +40,13 @@ _MAX_LINE_VERTICES = _LINE_BUFFER_BYTES // _VERTEX_STRIDE_BYTES
 # 1 MiB / 28 B = ~37k vertices for the triangle stream.
 _TRI_BUFFER_BYTES = 1 * 1024 * 1024
 _MAX_TRI_VERTICES = _TRI_BUFFER_BYTES // _VERTEX_STRIDE_BYTES
+# Metal compute rasteriser only: the depth key is `depth16 << 16 | (lineIdx &
+# 0xFFFF)`, so the line stream is capped to a 16-bit index space (≤ 65535 lines)
+# to keep the equal-depth tie-break collision-free and deterministic. Well above
+# any real debug scene (grid + frustum + wireframes are ~hundreds–thousands of
+# lines), and below the `_MAX_LINE_VERTICES` (~74.9k line) buffer budget.
+_METAL_MAX_DEBUG_LINES = 0xFFFF
+_METAL_MAX_LINE_VERTICES = min(_MAX_LINE_VERTICES, 2 * _METAL_MAX_DEBUG_LINES)
 
 _DEFAULT_WIDTH = 960
 _DEFAULT_HEIGHT = 720
@@ -654,6 +661,12 @@ class DebugViewport:
         # copies that image into a host-visible staging buffer and returns
         # raw RGBA8 bytes for a Qt blit.
         self._embedded = bool(embedded)
+        # Native Metal has no graphics pipeline, so the embedded debug view is
+        # rendered by a compute rasteriser instead (change metal-tool-dock-render
+        # P2). `_metal_raster` is the `DebugRasterMetal` host, built lazily on
+        # `open()`; the Vulkan graphics resources below stay None on Metal.
+        self.is_metal = bool(getattr(vk_ctx, "is_metal", False))
+        self._metal_raster = None
 
         self._open = False
         self._window = None
@@ -741,16 +754,21 @@ class DebugViewport:
     def open(self) -> None:
         if self._open:
             return
-        # The debug viewport is a Vulkan **graphics** rasteriser (render pass,
-        # framebuffers, VkFormat, a graphics-capable queue). The native Metal
-        # backend is compute-only (no Vulkan device/queues), so it cannot build
-        # these resources — fail with a clear message instead of a cryptic
-        # AttributeError on the first Vulkan-only attribute it reaches.
-        if getattr(self._vk_ctx, "is_metal", False):
-            raise RuntimeError(
-                "debug viewport requires the Vulkan backend (it is a Vulkan "
-                "rasteriser); it is not available on the native Metal backend"
-            )
+        # Native Metal is compute-only (no Vulkan render pass / graphics queue),
+        # so the embedded debug view runs the compute rasteriser instead of the
+        # Vulkan graphics pipeline (change metal-tool-dock-render P2). The GLFW
+        # windowed path is still Vulkan-only.
+        if self.is_metal:
+            if not self._embedded:
+                raise RuntimeError(
+                    "the GLFW debug window is Vulkan-only; the native Metal "
+                    "backend supports the embedded Camera Debug dock"
+                )
+            if self._metal_raster is None:
+                from skinny.metal_compute import DebugRasterMetal
+                self._metal_raster = DebugRasterMetal(self._vk_ctx, self._shader_dir)
+            self._open = True
+            return
         if self._embedded:
             if self._cmd_buffer is None:
                 self._build_embedded_resources()
@@ -814,9 +832,61 @@ class DebugViewport:
         """
         if not self._open or not self._embedded:
             return None
+        if self.is_metal:
+            return self._render_embedded_metal(renderer)
         if self._cmd_buffer is None:
             return None
         return self._draw_frame_embedded(renderer)
+
+    def _render_embedded_metal(self, renderer) -> bytes | None:
+        """Metal embedded render (design D5): generate the CPU vertex streams
+        (unchanged generators), dispatch the compute rasteriser, return RGBA8
+        bytes — the same shape the worker `DebugFrame` path already consumes."""
+        if self._metal_raster is None:
+            return None
+        line_floats, tri_floats = self._generate_streams(renderer)
+        # Cap the streams — the AABB branch (unlike mesh-wires) is not bounded
+        # during generation, so a many-instance scene could otherwise dispatch an
+        # unbounded `depthLines`/`colorLines` (metal-dispatch-hygiene, codex). The
+        # line cap is the 16-bit-tag limit (`_METAL_MAX_LINE_VERTICES`), keeping
+        # the equal-depth tie-break collision-free; triangles use the full budget.
+        line_floats = self._cap_stream(
+            line_floats, _METAL_MAX_LINE_VERTICES, even=True, tri_align=False)
+        tri_floats = self._cap_stream(
+            tri_floats, _MAX_TRI_VERTICES, even=False, tri_align=True)
+        vp = self._metal_view_proj()
+        return self._metal_raster.render(
+            line_floats, tri_floats, vp, self._width, self._height,
+        )
+
+    @staticmethod
+    def _cap_stream(floats: list, max_vertices: int, *, even: bool,
+                    tri_align: bool) -> list:
+        """Truncate a vertex-float stream to `max_vertices` (mirrors the vertex
+        clamp `_upload_stream` applies on the Vulkan path): `even` rounds down to
+        a whole line, `tri_align` to a whole triangle."""
+        vert_count = len(floats) // _VERTEX_FLOATS
+        if vert_count > max_vertices:
+            vert_count = max_vertices
+        if even:
+            vert_count &= ~1
+        if tri_align:
+            vert_count -= vert_count % 3
+        if vert_count <= 0:
+            return []
+        return floats[: vert_count * _VERTEX_FLOATS]
+
+    def _metal_view_proj(self) -> np.ndarray:
+        """Math-form viewProj (`proj_math @ view_math`, row-major) for the debug
+        camera — the convention `debug_raster.slang` / `debug_raster_ref` expect.
+        The stored matrices are transposed for column-major GPU upload, so the
+        math form is the transpose of the Vulkan `view_storage @ proj_storage`
+        UBO product."""
+        cam = self.orbit_camera if self.camera_mode == "orbit" else self.free_camera
+        aspect = float(self._width) / max(1.0, float(self._height))
+        view_storage = cam.view_matrix()
+        proj_storage = self._projection_storage(cam, aspect)
+        return (view_storage @ proj_storage).astype(np.float64).T
 
     def resize_embedded(self, width: int, height: int) -> None:
         """Embedded mode: rebuild offscreen target + depth + staging when
@@ -829,6 +899,10 @@ class DebugViewport:
         if (w, h) == (self._width, self._height):
             return
         self._width, self._height = w, h
+        if self.is_metal:
+            # The Metal rasteriser sizes its buffers per-render from _width/
+            # _height — nothing to rebuild here.
+            return
         if self._cmd_buffer is None:
             return
         ctx = self._vk_ctx
@@ -840,6 +914,14 @@ class DebugViewport:
 
     def destroy(self) -> None:
         """Tear down all Vulkan resources (and the GLFW window, if any)."""
+        if self.is_metal:
+            # Metal embedded: only the compute rasteriser to release (no Vulkan
+            # graphics resources were ever built).
+            if self._metal_raster is not None:
+                self._metal_raster.destroy()
+                self._metal_raster = None
+            self._open = False
+            return
         if not self._embedded and self._window is None:
             return
         if self._embedded and self._cmd_buffer is None:
@@ -1867,6 +1949,24 @@ class DebugViewport:
     # ── Geometry build & UBO upload ──────────────────────────────
 
     def _build_geometry(self, renderer) -> tuple[int, int]:
+        """Vulkan path: generate the debug vertex streams and upload them to the
+        line/triangle VBOs, returning the drawable vertex counts."""
+        line_floats, tri_floats = self._generate_streams(renderer)
+        line_count = self._upload_stream(
+            line_floats, self._vbo_mapped, _MAX_LINE_VERTICES, even=True,
+        )
+        tri_count = self._upload_stream(
+            tri_floats, self._tri_vbo_mapped, _MAX_TRI_VERTICES, even=False,
+            tri_align=True,
+        )
+        return line_count, tri_count
+
+    def _generate_streams(self, renderer) -> tuple[list, list]:
+        """Backend-agnostic debug geometry generation — fills and returns the
+        line + triangle float streams (7 floats/vertex). Shared by the Vulkan
+        upload path (`_build_geometry`) and the Metal compute rasteriser
+        (`_render_embedded_metal`), so the `_gen_*` generators run once, unchanged,
+        on both backends (design D5)."""
         line_floats: list = []
         tri_floats: list = []
 
@@ -1987,14 +2087,7 @@ class DebugViewport:
                 wmin, wmax = inst.world_bounds()
                 _gen_aabb_box(line_floats, wmin, wmax)
 
-        line_count = self._upload_stream(
-            line_floats, self._vbo_mapped, _MAX_LINE_VERTICES, even=True,
-        )
-        tri_count = self._upload_stream(
-            tri_floats, self._tri_vbo_mapped, _MAX_TRI_VERTICES, even=False,
-            tri_align=True,
-        )
-        return line_count, tri_count
+        return line_floats, tri_floats
 
     def _hud_lines(self) -> list[str]:
         """Keyboard shortcuts for the debug viewport, drawn top-left."""
