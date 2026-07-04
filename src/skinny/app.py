@@ -26,6 +26,7 @@ from skinny.cli_common import (
     add_render_flags,
     apply_sppm_glossy_roughness,
     neural_config_from_args,
+    reject_sppm_without_wavefront,
     resolve_execution_mode,
     resolve_walk,
     startup_integrator_name,
@@ -487,6 +488,19 @@ def main() -> None:
     ensure_dirs()
     saved = load_settings()
 
+    # Execution mode 'auto' (the default) derives from the startup integrator —
+    # explicit --integrator, else the persisted integrator, else 'path'. An
+    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Resolved here,
+    # before any GPU/GLFW init, and fixed for the session. validate_render_flags
+    # (above) is keyed on the CLI --integrator and ran before the persisted
+    # integrator was known, so re-check the resolved mode against the effective
+    # startup integrator: a persisted sppm under an explicitly-forced
+    # --execution-mode megakernel must still be refused before the GPU comes up.
+    _startup_integrator = startup_integrator_name(
+        args.integrator, saved.get("params", {}).get("integrator_index"))
+    args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
+    reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
+
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
     # > auto). In this foundation phase auto resolves to Vulkan; an explicit
     # Resolve the backend (auto → Metal on Apple Silicon, else Vulkan). An
@@ -531,13 +545,6 @@ def main() -> None:
             if saved_encoding in ("E0", "E1", "E3"):
                 encoding_value = saved_encoding
         args.encoding = encoding_value
-        # Execution mode 'auto' (the default) derives from the startup integrator —
-        # explicit --integrator, else the persisted integrator, else 'path'. An
-        # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Resolved
-        # once here, before construction, and fixed for the session.
-        _startup_integrator = startup_integrator_name(
-            args.integrator, saved.get("params", {}).get("integrator_index"))
-        args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
         neural_cfg = neural_config_from_args(args)
         renderer = Renderer(
             vk_ctx=vk_ctx,

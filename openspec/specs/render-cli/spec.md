@@ -92,18 +92,25 @@ later or silently doing nothing. Specifically:
   front-ends SHALL raise a usage error naming the incompatible option and the fix
   (`--integrator path`), because BDPT does not consume the neural directional
   proposal on any backend or execution mode.
-- When the integrator is `sppm` AND the **resolved** execution mode is
-  `megakernel`, the front-ends SHALL raise a usage error stating that SPPM has no
-  megakernel path and naming the fix (drop the explicit `--execution-mode
-  megakernel`, or use `--execution-mode wavefront`). Because the execution mode
-  defaults to `auto` and `sppm` auto-derives to `wavefront`, this error SHALL
-  trip only when the user has **explicitly** forced `--execution-mode megakernel`
-  (via flag or `SKINNY_EXECUTION_MODE`).
+- When the **effective startup integrator** is `sppm` AND the **resolved**
+  execution mode is `megakernel`, the front-ends SHALL raise a usage error
+  stating that SPPM has no megakernel path and naming the fix (drop the explicit
+  `--execution-mode megakernel`, or use `--execution-mode wavefront`). Because the
+  execution mode defaults to `auto` and `sppm` auto-derives to `wavefront`, this
+  error SHALL trip only when the user has **explicitly** forced `--execution-mode
+  megakernel` (via flag or `SKINNY_EXECUTION_MODE`). The **effective startup
+  integrator** is the one active at launch — an explicit `--integrator`, else the
+  persisted integrator on the interactive front-ends — so a persisted `sppm`
+  under an explicitly-forced `megakernel` is refused too, since SPPM cannot run
+  under the megakernel regardless of how it was selected.
 
-The validation SHALL run after the execution mode is resolved, SHALL be shared
-across all front-ends (`skinny`, `skinny-gui`, `skinny-web`, `skinny-render`),
-and SHALL NOT trip when the integrator is the default/persisted path (not
-explicitly `bdpt` or `sppm`).
+The validation SHALL run after the execution mode is resolved and SHALL be shared
+across all front-ends (`skinny`, `skinny-gui`, `skinny-web`, `skinny-render`).
+The `bdpt` × neural/online-training guard SHALL trip only on an **explicit**
+`--integrator bdpt` (a default/persisted `bdpt` SHALL NOT trip it, since the
+integrator stays runtime-cycleable); the `sppm` × `megakernel` guard SHALL
+consider the effective startup integrator (explicit or persisted `sppm`) as
+above.
 
 #### Scenario: bdpt + online-training exits with an error
 
@@ -132,6 +139,13 @@ explicitly `bdpt` or `sppm`).
 - **THEN** it prints a clear error stating that SPPM has no megakernel path and
   to drop the flag or use `--execution-mode wavefront`, and exits without
   initializing the GPU
+
+#### Scenario: persisted sppm + explicit megakernel exits with an error
+
+- **WHEN** an interactive front-end is launched with no `--integrator`, a
+  persisted `sppm` integrator, and an explicit `--execution-mode megakernel`
+- **THEN** it prints the same SPPM-has-no-megakernel-path error and exits without
+  initializing the GPU, because the effective startup integrator is `sppm`
 
 #### Scenario: compatible combinations are unaffected
 
