@@ -557,7 +557,16 @@ front-ends:
 |----------|-------------|
 | Path tracing (`path`, default) | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
 | BDPT (`bdpt`) | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
-| SPPM (`sppm`) | **Stochastic Progressive Photon Mapping** — caustic-efficient eye/grid/photon/update pipeline; **wavefront-only**, **flat materials only**, on both Vulkan and native Metal (caustic parity matches across backends). Requires `--execution-mode wavefront` (refused under megakernel). One SPPM pass == one accumulation frame; the per-pixel estimator (radius / count / flux) persists across frames. The initial search radius (default ≈ 0.1 % of the scene bbox diagonal) and photons/pass (default one per pixel) are set by the pbrt `sppm` importer; `--sppm-glossy-roughness` (float; SPPM + wavefront only; default tuned ≈ 0.5; `0` = delta-only PM-1 behaviour) is the glossy / near-specular eye-walk continuation threshold, so glossy metals reconstruct sharp reflections. See [docs/PhotonMapping.md](docs/PhotonMapping.md). |
+| SPPM (`sppm`) | **Stochastic Progressive Photon Mapping** — caustic-efficient eye/grid/photon/update pipeline; **wavefront-only**, **flat materials only**, on both Vulkan and native Metal (caustic parity matches across backends). Runs under wavefront — `--integrator sppm` **auto-selects** `--execution-mode wavefront` (see below), so it needs no second flag; an explicit `--execution-mode megakernel` is refused. One SPPM pass == one accumulation frame; the per-pixel estimator (radius / count / flux) persists across frames. The initial search radius (default ≈ 0.1 % of the scene bbox diagonal) and photons/pass (default one per pixel) are set by the pbrt `sppm` importer; `--sppm-glossy-roughness` (float; SPPM + wavefront only; default tuned ≈ 0.5; `0` = delta-only PM-1 behaviour) is the glossy / near-specular eye-walk continuation threshold, so glossy metals reconstruct sharp reflections. See [docs/PhotonMapping.md](docs/PhotonMapping.md). |
+
+**Execution mode follows the integrator.** `--execution-mode
+{auto,megakernel,wavefront}` (env `SKINNY_EXECUTION_MODE`, default `auto`,
+fixed for the session) picks the GPU execution backend. `auto` (the default)
+**derives the mode from the startup integrator** — `path` → `megakernel`,
+`bdpt` → `megakernel`, `sppm` → `wavefront` — mirroring `--backend auto`, so a
+plain `--integrator sppm` just works. An explicit `megakernel`/`wavefront`
+(flag or env) overrides the derived default and pins the mode; the only
+impossible combo, `sppm` + explicit `megakernel`, is refused at startup.
 
 **Per-lobe BSDF samplers.** The flat / `standard_surface` BSDF draws each lobe
 (`coat`, `spec`, `diffuse`) from a runtime-selectable importance sampler. Native

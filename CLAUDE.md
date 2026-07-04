@@ -155,6 +155,17 @@ explicit `--backend metal` on a host with no Metal device errors clearly.
 `--backend vulkan` forces the production MoltenVK-under-Vulkan path on every
 platform.
 
+`--execution-mode {auto,megakernel,wavefront}` (env `SKINNY_EXECUTION_MODE`,
+default `auto`, fixed for the session) selects the execution mode. `auto`
+**derives the mode from the startup integrator** via `resolve_execution_mode`
+in `cli_common.py` — `path`/`bdpt` → `megakernel`, `sppm` → `wavefront` (SPPM
+has no megakernel path) — mirroring `--backend auto`, so `--integrator sppm`
+alone runs under wavefront. An explicit `megakernel`/`wavefront` (flag or env)
+overrides and pins the mode; `sppm` + explicit `megakernel` is refused at
+startup. Resolution keys off the integrator active at launch (explicit
+`--integrator`, else the persisted integrator on the interactive front-ends,
+else `path`); the mode is not runtime-switchable or persisted.
+
 ## Metal dispatch hygiene (required for ALL GPU work)
 
 macOS cannot cancel another process's GPU work: an abandoned over-long kernel wedges

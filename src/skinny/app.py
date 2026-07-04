@@ -26,7 +26,9 @@ from skinny.cli_common import (
     add_render_flags,
     apply_sppm_glossy_roughness,
     neural_config_from_args,
+    resolve_execution_mode,
     resolve_walk,
+    startup_integrator_name,
     validate_render_flags,
 )
 from skinny.backend_select import (
@@ -529,6 +531,13 @@ def main() -> None:
             if saved_encoding in ("E0", "E1", "E3"):
                 encoding_value = saved_encoding
         args.encoding = encoding_value
+        # Execution mode 'auto' (the default) derives from the startup integrator —
+        # explicit --integrator, else the persisted integrator, else 'path'. An
+        # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Resolved
+        # once here, before construction, and fixed for the session.
+        _startup_integrator = startup_integrator_name(
+            args.integrator, saved.get("params", {}).get("integrator_index"))
+        args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
         neural_cfg = neural_config_from_args(args)
         renderer = Renderer(
             vk_ctx=vk_ctx,
