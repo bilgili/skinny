@@ -55,6 +55,7 @@ from skinny.ui.qt.render_session import (
     RenderCommandQueue,
 )
 from skinny.ui.qt.windows.python_material_editor import PythonMaterialEditorDock
+from skinny.ui.qt.windows.scene_graph import SceneGraphDock
 
 log = logging.getLogger(__name__)
 
@@ -291,10 +292,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{name}: not yet ported (Phase 7)", 3000)
 
     def _open_scene_graph(self) -> None:
-        self.statusBar().showMessage(
-            "Scene Graph dock needs the snapshot-backed port for render-thread mode",
-            5000,
-        )
+        if self._scene_graph_dock is None:
+            self._scene_graph_dock = SceneGraphDock(
+                self.renderer, parent=self,
+                on_open_python_material=self._open_python_material_in_editor,
+            )
+            self._scene_graph_dock.setObjectName("scene_graph")
+            self.addDockWidget(Qt.BottomDockWidgetArea, self._scene_graph_dock)
+        self._scene_graph_dock.show()
+        self._scene_graph_dock.raise_()
 
     def _open_python_material_in_editor(self, module_name: str) -> None:
         """Open the editor dock (creating it if needed) and load

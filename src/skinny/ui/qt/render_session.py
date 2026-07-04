@@ -64,6 +64,94 @@ class RendererStateSnapshot:
     choices: dict[str, list[str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _LensProj:
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class _CameraProj:
+    """Read-only mirror of the camera params the Scene Graph dock displays."""
+    fov: float = 0.0
+    near: float = 0.0
+    far: float = 0.0
+    fstop: float = 0.0
+    focus_distance: float = 0.0
+    yaw: float = 0.0
+    pitch: float = 0.0
+    distance: float = 0.0
+    max_distance: float = 0.0
+    lens: _LensProj | None = None
+
+
+@dataclass(frozen=True)
+class _MaterialProj:
+    python_module: str | None = None
+
+
+@dataclass(frozen=True)
+class _UsdSceneProj:
+    materials: tuple[_MaterialProj, ...] = ()
+
+
+@dataclass(frozen=True)
+class SceneStateSnapshot:
+    """Immutable projection of renderer-owned scene state the Scene Graph dock
+    reads on the GUI thread — built on the render worker, never a live handle."""
+    scene_graph: Any = None
+    scene_graph_version: int = 0
+    usd_scene: _UsdSceneProj | None = None
+    scene: _UsdSceneProj | None = None
+    has_usd_stage: bool = False
+    has_usd_edit_layer: bool = False
+    camera: _CameraProj | None = None
+
+
+def _proj_scene(scene) -> "_UsdSceneProj | None":
+    if scene is None:
+        return None
+    mats = getattr(scene, "materials", None) or []
+    return _UsdSceneProj(materials=tuple(
+        _MaterialProj(python_module=getattr(m, "python_module", None))
+        for m in mats
+    ))
+
+
+def build_scene_state(renderer) -> SceneStateSnapshot:
+    """Project the renderer's scene state into an immutable snapshot. Runs on the
+    render worker (via `proxy.request`), so it may touch the live renderer."""
+    cam = getattr(renderer, "camera", None)
+    camera = None
+    if cam is not None:
+        lens = getattr(cam, "lens", None)
+        camera = _CameraProj(
+            fov=float(getattr(cam, "fov", 0.0)),
+            near=float(getattr(cam, "near", 0.0)),
+            far=float(getattr(cam, "far", 0.0)),
+            fstop=float(getattr(cam, "fstop", 0.0)),
+            focus_distance=float(getattr(cam, "focus_distance", 0.0)),
+            yaw=float(getattr(cam, "yaw", 0.0)),
+            pitch=float(getattr(cam, "pitch", 0.0)),
+            distance=float(getattr(cam, "distance", 0.0)),
+            max_distance=float(getattr(cam, "max_distance", 0.0)),
+            lens=_LensProj(bool(lens.enabled)) if lens is not None else None,
+        )
+    return SceneStateSnapshot(
+        scene_graph=getattr(renderer, "scene_graph", None),
+        scene_graph_version=int(getattr(renderer, "_scene_graph_version", 0)),
+        usd_scene=_proj_scene(getattr(renderer, "_usd_scene", None)),
+        scene=_proj_scene(getattr(renderer, "scene", None)),
+        has_usd_stage=getattr(renderer, "_usd_stage", None) is not None,
+        has_usd_edit_layer=getattr(renderer, "_usd_edit_layer", None) is not None,
+        camera=camera,
+    )
+
+
+# Sentinel stored on the proxy for `_usd_stage` / `_usd_edit_layer`: the dock only
+# tests presence (`is None` / `is not None`), never the object itself.
+_SCENE_STATE_PRESENT = object()
+
+
 @dataclass
 class _Choice:
     name: str
@@ -155,6 +243,11 @@ class QtRendererProxy:
         self.film.iso = 100.0
         self.film.exposure_time = 1.0
         object.__setattr__(self, "has_usd_camera", False)
+        # Scene Graph dock reads (refreshed from a worker `SceneStateSnapshot`).
+        object.__setattr__(self, "scene", None)
+        object.__setattr__(self, "camera", None)
+        object.__setattr__(self, "_usd_stage", None)
+        object.__setattr__(self, "_usd_edit_layer", None)
 
     def _default_values(self, width: int, height: int) -> dict[str, Any]:
         values: dict[str, Any] = {
@@ -211,6 +304,92 @@ class QtRendererProxy:
     def load_model_from_path(self, path: Path) -> None:
         self.post(lambda renderer, path=Path(path): renderer.load_model_from_path(path))
 
+    # ── Scene Graph dock surface ──────────────────────────────────────────
+    # Reads come from a worker-built `SceneStateSnapshot`; mutations post to the
+    # render worker. The four edits whose result the GUI uses (add/save/texture/
+    # lens) return a `Future` the dock resolves asynchronously.
+
+    def refresh_scene_state(self) -> "Future[SceneStateSnapshot]":
+        return self.request(build_scene_state)
+
+    def apply_scene_state(self, state: SceneStateSnapshot) -> None:
+        self.scene_graph = state.scene_graph
+        self._scene_graph_version = state.scene_graph_version
+        self._usd_scene = state.usd_scene
+        self.scene = state.scene if state.scene is not None else state.usd_scene
+        self._usd_stage = _SCENE_STATE_PRESENT if state.has_usd_stage else None
+        self._usd_edit_layer = (
+            _SCENE_STATE_PRESENT if state.has_usd_edit_layer else None
+        )
+        self.camera = state.camera
+
+    def set_gizmo_target(self, index: int) -> None:
+        self.post(
+            lambda r, i=int(index): r.set_gizmo_target(i),
+            coalesce_key="gizmo_target",
+        )
+
+    def apply_subtree_enabled(self, path: str, value: bool) -> None:
+        self.post(lambda r, p=path, v=value: r.apply_subtree_enabled(p, v))
+
+    def apply_node_enabled(self, path: str, value: bool) -> None:
+        self.post(lambda r, p=path, v=value: r.apply_node_enabled(p, v))
+
+    def apply_camera_param(self, name: str, value: Any) -> None:
+        self.post(
+            lambda r, n=name, v=value: r.apply_camera_param(n, v),
+            coalesce_key=f"camera_param:{name}",
+        )
+
+    def apply_material_override(self, index: int, name: str, value: Any) -> None:
+        self.post(
+            lambda r, i=index, n=name, v=value: r.apply_material_override(i, n, v),
+            coalesce_key=f"mat_override:{index}:{name}",
+        )
+
+    def apply_light_override(
+        self, light_type: str, index: int, name: str, value: Any,
+    ) -> None:
+        self.post(
+            lambda r, t=light_type, i=index, n=name, v=value:
+                r.apply_light_override(t, i, n, v),
+            coalesce_key=f"light_override:{light_type}:{index}:{name}",
+        )
+
+    def apply_instance_transform(self, path, translate, rotate, scale) -> None:
+        self.post(
+            lambda r, p=path, t=translate, ro=rotate, s=scale:
+                r.apply_instance_transform(p, t, ro, s),
+            coalesce_key=f"instance_xform:{path}",
+        )
+
+    def set_transform(self, path, matrix) -> None:
+        self.post(
+            lambda r, p=path, m=matrix: r.set_transform(p, m),
+            coalesce_key=f"set_transform:{path}",
+        )
+
+    def remove_node(self, path: str) -> "Future[Any]":
+        return self.request(lambda r, p=path: r.remove_node(p))
+
+    def add_model(self, path, parent_prim_path=None) -> "Future[Any]":
+        return self.request(
+            lambda r, p=path, pp=parent_prim_path: r.add_model(
+                p, parent_prim_path=pp,
+            ),
+        )
+
+    def save_edits(self) -> "Future[Any]":
+        return self.request(lambda r: r.save_edits())
+
+    def apply_dome_light_texture(self, index: int, path) -> "Future[Any]":
+        return self.request(
+            lambda r, i=index, p=path: r.apply_dome_light_texture(i, p),
+        )
+
+    def apply_camera_lens_file(self, path) -> "Future[Any]":
+        return self.request(lambda r, p=path: r.apply_camera_lens_file(p))
+
     def online_training_status(self) -> dict[str, Any]:
         return {}
 
@@ -246,7 +425,7 @@ class QtRendererProxy:
         if name.startswith("_") or name in {
             "mtlx_overrides", "_mtlx_skin_material", "_usd_scene",
             "_usd_controls", "scene_graph", "_scene_graph_version", "clock",
-            "has_usd_camera", "film",
+            "has_usd_camera", "film", "camera", "scene",
         }:
             object.__setattr__(self, name, value)
             return
