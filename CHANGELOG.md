@@ -83,6 +83,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every Vulkan pipeline failed to build on MoltenVK** (change
+  `fix-vulkan-volume-density-binding`) — since `nanovdb-volume-rendering` added
+  the heterogeneous-medium density field `volumeDensity` (`[[vk::binding(26)]]
+  Sampler3D<float>`), the megakernel SPIR-V referenced set-0 binding 26
+  unconditionally, but the binding was never added to the Vulkan descriptor-set
+  layout (`ComputePipeline._create_descriptor_set_layout`). The shader
+  declaration, the descriptor write, and the pool sizing all landed; only the
+  layout entry was missing. On MoltenVK — which derives its SPIR-V→MSL resource
+  map from the pipeline layout — the undeclared binding made SPIRV-Cross return a
+  null mapping and every `VulkanContext` render died at pipeline create with
+  `SPIR-V to MSL conversion error: nullptr`
+  (`VUID-VkComputePipelineCreateInfo-layout-07988`). Declaring binding 26 as a
+  combined image sampler in the shared set-0 layout fixes the megakernel and all
+  wavefront stage pipelines at once (no shader/Metal/stride change). A hostless
+  audit (`tests/test_vk_binding_layout.py`) now asserts every Vulkan-branch
+  `[[vk::binding(N)]]` in `bindings.slang` has a layout entry, so a new shared
+  binding cannot repeat this. This un-silences the raw-Vulkan SPPM GPU gate
+  (`tests/test_sppm_gpu.py`), which had failed to build for months;
+  `test_sppm_builds_and_renders_finite` passes again, and the re-armed energy
+  gate immediately caught a genuine cross-backend SPPM diffuse-indirect deficit
+  (ratio ≈0.71, both backends) — xfail-tracked to `fix-sppm-bathroom-black-walls`,
+  not masked by loosening the band. (The reported "big-kernel SPIRV-Cross limit
+  in a `wfSppm*` entry" was a red herring: all eight convert to MSL cleanly; the
+  failure was the megakernel's undeclared binding.)
 - **Coated diffuse rendered with a dark region** (change
   `fix-flat-coat-fresnel-eta`) — `assets/dragon_removed.usda` (a pbrt
   `coateddiffuse` floor exported as a `UsdPreviewSurface` with `clearcoat = 1`)

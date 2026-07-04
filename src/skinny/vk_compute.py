@@ -566,6 +566,21 @@ class ComputePipeline:
                 descriptorCount=1,
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
+            # binding 26: heterogeneous-medium density grid `volumeDensity`
+            # (nanovdb-volume-rendering, design D3) — ONE R16F Sampler3D,
+            # always bound (1×1×1 zero fallback until a scene grid uploads;
+            # per-scene swaps rewrite via _rebind_volume_descriptor). Must be
+            # declared here for every pipeline that compiles the medium walk:
+            # a shader-referenced binding absent from the layout is UB on
+            # Vulkan and a hard MoltenVK "SPIR-V to MSL conversion error:
+            # nullptr" pipeline-build failure (VUID-07988) — guarded by
+            # tests/test_vk_binding_layout.py.
+            vk.VkDescriptorSetLayoutBinding(
+                binding=26,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
             # binding 20: UsdLux.DistantLight records. 32 B each
             # (vec3 direction, float pad, vec3 radiance, float pad);
             # capacity DISTANT_LIGHT_CAPACITY. fc.numDistantLights bounds
