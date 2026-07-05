@@ -113,15 +113,32 @@ the connect+resolve tail is shared:
 `indirect(SLOT_FULL, wfBdptConnectFull)` → `wfBdptResolve`. The staged
 eye/light walks reuse the same counting-sort machinery
 (`wfBdptWalkClassify` → buildargs → scatter → indirect `wfBdptBounceEye/Light`)
-per bounce. `clear_counts()` here adds an extra COMPUTE→TRANSFER WAR barrier
+per bounce.
+
+**Non-flat first hit → path fallback (terminal types).** When the camera's first
+hit is a **terminal** non-flat material (`MATERIAL_TYPE_SUBSURFACE` / `SKIN` —
+`evaluateBounce` returns a complete radiance and stops), BDPT cannot build a
+subpath through it, so `wfBdptWalk` / `wfBdptGenEye` path-integrate that lane
+instead (`PathTracer.estimateRadiance`, carried out through `aux.escaped`) and
+build no eye/light subpath — mirroring the megakernel, where `main_pass.slang`
+gates `useBdpt` on `MATERIAL_TYPE_FLAT` and routes every non-flat first hit to the
+path tracer. That single terminal eval is the same bounded dispatch shape as
+`wfPathShade`, so it stays inside the Metal watchdog envelope. Without it the
+subsurface object rendered as a **black silhouette** under wavefront BDPT (change
+`wavefront-nonflat-path-fallback`). The non-terminal types (`VOLUME` / `PYTHON`)
+keep bouncing inside `estimateRadiance`; without the megakernel's band-tiling that
+would be an unbounded Metal command buffer, so they retain the black bail here (a
+follow-up). Non-flat hits at *later* bounces still terminate the subpath, matching
+the megakernel `randomWalk`. Flat-only scenes are byte-identical. `clear_counts()` here adds an extra COMPUTE→TRANSFER WAR barrier
 (`vk_wavefront.py:981-986`) absent in the path pass, guarding prior
 indirect-dispatch reads of `slot_count` against the fill.
 
 ### SPPM stages (`WavefrontSppmPass`, `vk_wavefront.py:847`)
 
 The third integrator (`INTEGRATOR_SPPM = 2`) is **Stochastic Progressive Photon
-Mapping** — wavefront-only, flat-materials-only, Vulkan working now (the
-native-Metal pass is a follow-up). One SPPM pass == one progressive-accumulation
+Mapping** — wavefront-only, Vulkan working now (the native-Metal pass is a
+follow-up). Photon gathering is flat-materials-only; non-flat receivers fall back
+to the path tracer (see the eye stage below). One SPPM pass == one progressive-accumulation
 frame, and the per-pixel estimator (radius / count / flux) **persists** across
 frames. Eight kernels compiled from `integrators/wavefront_sppm.slang` (entries
 `wfSppm*`); every dispatch has a host-known count → plain dispatch, **no indirect
@@ -131,7 +148,7 @@ every visible point, so they run after all eye tiles and before any update tile:
 
 | Phase | Stage(s) | Work |
 |-------|----------|------|
-| 1 · eye | `wfSppmEye` (tiled, full stream) | trace the camera path through the flat delta lobe to the first non-specular flat hit; store one `VisiblePoint`/pixel + per-pass direct `ld` (NEE + specular-chain emission) + the evaluated flat BSDF |
+| 1 · eye | `wfSppmEye` (tiled, full stream) | trace the camera path through the flat delta lobe to the first non-specular flat hit; store one `VisiblePoint`/pixel + per-pass direct `ld` (NEE + specular-chain emission) + the evaluated flat BSDF. A **terminal non-flat receiver** (subsurface / skin) stores no visible point — it is path-integrated in place (`PathTracer.estimateRadiance` × specular-chain throughput → `ld`) instead of blacking out, matching the megakernel's non-flat→path routing (change `wavefront-nonflat-path-fallback`); volume / python receivers keep the plain terminate (unbounded-dispatch follow-up) |
 | 2 · grid | `wfSppmGridCount` → `wfSppmGridScanBlock` → `wfSppmGridScanBlockSums` → `wfSppmGridScanAdd` → `wfSppmGridScatter` | counting-sort spatial hash over active VPs: atomic per-cell count → exclusive prefix sum (count → offset) → scatter pixel indices into cell buckets |
 | 3 · photon | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`) | emit power-weighted photons (`beta = Le·π/p_sel`), RR-trace, deposit bare f_r at non-specular vertices (`depth ≥ 1`) via a 3×3×3 cell scan with uint fixed-point `InterlockedAdd` into `SppmAccum` |
 | 4 · update | `wfSppmUpdate` (tiled, full stream) | SPPM reduction `N'=N+γM`, `r'=r·√(N'/(N+M))`, `τ'=(τ+Φ)(r'/r)²`; `L_indirect = τ/(N_emitted·π·r²)`; `sample = ld + L_indirect`; running-mean composite into the film (like `wfPathResolve`) + display; clear the accumulator |
