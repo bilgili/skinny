@@ -59,6 +59,9 @@ class _StubRecorder:
     def restir_primary_direct(self):
         self.ops.append(("restir_primary_direct",))
 
+    def flush_heavy_eye(self):
+        self.ops.append(("flush_heavy_eye",))
+
 
 def _bounce_core():
     """The intersect→build_args→scatter prefix every bounce starts with."""
@@ -179,6 +182,7 @@ def test_bdpt_fused_single_tile():
         ("dispatch_full", "wfBdptWalk"),
         ("barrier",),
         *_bdpt_tail(),
+        ("flush_heavy_eye",),
     ]
 
 
@@ -194,6 +198,7 @@ def test_bdpt_eye_staged_walk_plus_fused_light_tail():
         ("dispatch_full", "wfBdptLightTail"),
         ("barrier",),
         *_bdpt_tail(),
+        ("flush_heavy_eye",),
     ]
 
 
@@ -212,6 +217,7 @@ def test_bdpt_eye_light_fully_staged():
         ("dispatch_full", "wfBdptSplat"),
         ("barrier",),
         *_bdpt_tail(),
+        ("flush_heavy_eye",),
     ]
 
 
@@ -221,9 +227,11 @@ def test_bdpt_two_tiles_leading_barrier_on_second():
                      eye_bounces=5, light_bounces=6)
     assert rec.ops[0] == ("push_tile", 0)
     i = rec.ops.index(("push_tile", 64))
-    assert rec.ops[i - 1] == ("barrier",)
-    assert rec.ops[i - 2] == ("dispatch_full", "wfBdptResolve")
+    assert rec.ops[i - 1] == ("barrier",)                 # leading barrier on tile 2
+    assert rec.ops[i - 2] == ("flush_heavy_eye",)          # per-tile eye submit bound
+    assert rec.ops[i - 3] == ("dispatch_full", "wfBdptResolve")
     assert rec.ops[i + 1] == ("dispatch_full", "wfBdptWalk")
+    assert rec.ops.count(("flush_heavy_eye",)) == 2       # one per tile (2 tiles)
 
 
 def test_bdpt_rejects_unknown_walk_mode():
@@ -273,6 +281,9 @@ class _SppmStub:
     def clear_accum(self):
         self.ops.append(("clear_accum",))
 
+    def flush_heavy_eye(self):
+        self.ops.append(("flush_heavy_eye",))
+
 
 def _sppm_grid_photon(num_pixels, num_cells, photons):
     """The single global grid-build + photon block shared by every pass."""
@@ -305,6 +316,7 @@ def test_sppm_single_tile_first_frame():
         ("barrier",),
         ("push_tile", 0),
         ("dispatch_full", "wfSppmEye"),
+        ("flush_heavy_eye",),
         ("barrier",),
         *_sppm_grid_photon(64, 256, 100),
         ("push_tile", 0),
@@ -345,6 +357,10 @@ def test_sppm_split_order_all_eye_then_grid_then_all_update():
     assert len(eye_idx) == 4 and len(upd_idx) == 4   # 256 px / 64 stream
     assert max(eye_idx) < grid_idx                   # all eye tiles before grid
     assert min(upd_idx) > photon_idx                 # all update tiles after photon
+    # heavy-eye submit bound fires once per phase-1 eye tile, none in phase 4.
+    assert rec.ops.count(("flush_heavy_eye",)) == 4
+    assert all(fi < grid_idx for fi, op in enumerate(rec.ops)
+               if op == ("flush_heavy_eye",))
 
 
 def test_sppm_eye_tiles_have_distinct_bases():
