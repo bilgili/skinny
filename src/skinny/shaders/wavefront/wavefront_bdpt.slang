@@ -175,27 +175,21 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     uint firstMatType = materialTypes[firstHit.materialId] & 0xFFu;
     if (firstMatType != MATERIAL_TYPE_FLAT)
     {
-        // Non-flat first hit. The megakernel routes every non-flat first hit to
-        // the path tracer — main_pass.slang gates `useBdpt` on
-        // MATERIAL_TYPE_FLAT, so BDPT's own non-flat "bail to black" branch is
-        // dead code there. Mirror that here, but ONLY for the terminal non-flat
-        // types — SUBSURFACE and SKIN — whose evaluateBounce returns a complete
-        // radiance and stops (estimateRadiance breaks after one vertex). That
-        // single terminal eval (SUBSURFACE → subsurfaceRadiance3D, the same
-        // interior walk wavefront path uses) is the same dispatch shape as the
-        // wavefront-path catch-all shade (wfPathShade), so it stays inside the
-        // proven watchdog envelope. VOLUME / PYTHON continue bouncing inside
-        // estimateRadiance; without the megakernel's band-tiling that would be
-        // an unbounded Metal command buffer (metal-dispatch-hygiene), so they
-        // keep the black bail here — rendered by megakernel path; a wavefront
-        // follow-up. The lane builds no eye/light subpath (eyeLen/lightLen stay
-        // 0, as for a miss), so the connect stage skips it; s=1 splats from
-        // other lanes still composite via lightSplatBuffer.
-        if (firstMatType == MATERIAL_TYPE_SUBSURFACE || firstMatType == MATERIAL_TYPE_SKIN)
-        {
-            PathTracer integrator;
-            aux.escaped = integrator.estimateRadiance(r, firstHit, rng);
-        }
+        // Non-flat first hit → path fallback for EVERY non-flat type, mirroring
+        // the megakernel: main_pass.slang gates `useBdpt` on MATERIAL_TYPE_FLAT
+        // and routes every non-flat first hit to PathTracer.estimateRadiance, so
+        // BDPT's own non-flat "bail to black" branch is dead code there. The
+        // terminal types (SUBSURFACE / SKIN) evaluate one vertex and stop; the
+        // non-terminal types (VOLUME / PYTHON) run the full multi-bounce path.
+        // The heavy multi-bounce case is kept within the macOS GPU watchdog by
+        // the host bounding the Metal eye submit per tile (record_bdpt_loop's
+        // `bound_heavy_eye`, change wavefront-nonflat-tiled-fallback) — the
+        // row-band discipline of metal-megakernel-watchdog-tiling. The lane
+        // builds no eye/light subpath (eyeLen/lightLen stay 0, as for a miss),
+        // so the connect stage skips it; s=1 splats from other lanes still
+        // composite via lightSplatBuffer.
+        PathTracer integrator;
+        aux.escaped = integrator.estimateRadiance(r, firstHit, rng);
         aux.rngState = rng.state;
         wfAux[slot] = aux;
         return;
@@ -424,15 +418,13 @@ void wfBdptGenEye(uint3 tid: SV_DispatchThreadID)
     uint firstMatType = materialTypes[firstHit.materialId] & 0xFFu;
     if (firstMatType != MATERIAL_TYPE_FLAT)
     {
-        // Non-flat first hit → terminal-type path fallback (see wfBdptWalk for
-        // the full rationale): SUBSURFACE / SKIN path-integrate in place (one
-        // terminal eval, watchdog-safe); VOLUME / PYTHON keep the black bail to
-        // avoid an unbounded Metal command buffer. No eye/light subpath built.
-        if (firstMatType == MATERIAL_TYPE_SUBSURFACE || firstMatType == MATERIAL_TYPE_SKIN)
-        {
-            PathTracer integrator;
-            aux.escaped = integrator.estimateRadiance(r, firstHit, rng);
-        }
+        // Non-flat first hit → path fallback for every non-flat type (see
+        // wfBdptWalk for the full rationale). Terminal (SUBSURFACE / SKIN) = one
+        // eval; non-terminal (VOLUME / PYTHON) = full multi-bounce path, kept in
+        // the watchdog by the host's per-tile Metal eye submit (bound_heavy_eye).
+        // No eye/light subpath built.
+        PathTracer integrator;
+        aux.escaped = integrator.estimateRadiance(r, firstHit, rng);
         aux.rngState = rng.state;
         wfAux[slot] = aux;
         return;
