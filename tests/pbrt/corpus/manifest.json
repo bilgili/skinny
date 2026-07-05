@@ -188,9 +188,9 @@
    "relmse_tol": 0.25,
    "flip_tol": 0.2,
    "material_class": "subsurface",
-   "megakernel_ok": false,
+   "megakernel_ok": true,
    "known_divergent": true,
-   "notes": "Heavy subsurface dragon (28.8M tris \u2192 wavefront-only). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. KNOWN-DIVERGENT (harness-first): subsurface brightness residual vs pbrt is a follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baseline.",
+   "notes": "Heavy subsurface dragon (28.8M tris). ref via: python tests/pbrt/regen_refs.py --scene dragon --res 256 --spp 256. Shades under every combo now: change wavefront-nonflat-path-fallback fixed the wavefront BDPT/SPPM black-out (non-flat first hit \u2192 path fallback, parity with the megakernel), and the megakernel handles the 28.8M-tri mesh via watchdog band-tiling. KNOWN-DIVERGENT (harness-first): the remaining subsurface brightness residual vs pbrt is a separate follow-up (see project_pbrt_subsurface_volumetric). Re-measure on a GPU host to pin the per-combo baselines.",
    "baselines": {}
   },
   {

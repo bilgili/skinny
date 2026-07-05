@@ -33,6 +33,8 @@ import materials.flat.flat_shading;    // isCutoutTransparent
 import integrators.bdpt;  // BDPTVertex, randomWalk, sampleLightOrigin,
                           // connectT1, connectGeneric, misWeight, ConnectResult,
                           // bdptEnvNEE, splatLightWalk, BDPT_MAX_VERTS, BDPT_VK_*
+import integrators.path;  // PathTracer — non-flat first-hit fallback (parity
+                          // with main_pass.slang's useBdpt=FLAT-only gate)
 import wavefront.wf_display;  // wfWriteDisplay (tonemap → output image)
 
 static const uint WF_BDPT_ALIVE = 1u;   // ewFlags bit: eye walk still extending
@@ -170,10 +172,30 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
         wfAux[slot] = aux;
         return;
     }
-    if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+    uint firstMatType = materialTypes[firstHit.materialId] & 0xFFu;
+    if (firstMatType != MATERIAL_TYPE_FLAT)
     {
-        // Non-flat first hit — bdpt bails to black here (the megakernel path
-        // tracer covers skin/python). Matches estimateRadiance.
+        // Non-flat first hit. The megakernel routes every non-flat first hit to
+        // the path tracer — main_pass.slang gates `useBdpt` on
+        // MATERIAL_TYPE_FLAT, so BDPT's own non-flat "bail to black" branch is
+        // dead code there. Mirror that here, but ONLY for the terminal non-flat
+        // types — SUBSURFACE and SKIN — whose evaluateBounce returns a complete
+        // radiance and stops (estimateRadiance breaks after one vertex). That
+        // single terminal eval (SUBSURFACE → subsurfaceRadiance3D, the same
+        // interior walk wavefront path uses) is the same dispatch shape as the
+        // wavefront-path catch-all shade (wfPathShade), so it stays inside the
+        // proven watchdog envelope. VOLUME / PYTHON continue bouncing inside
+        // estimateRadiance; without the megakernel's band-tiling that would be
+        // an unbounded Metal command buffer (metal-dispatch-hygiene), so they
+        // keep the black bail here — rendered by megakernel path; a wavefront
+        // follow-up. The lane builds no eye/light subpath (eyeLen/lightLen stay
+        // 0, as for a miss), so the connect stage skips it; s=1 splats from
+        // other lanes still composite via lightSplatBuffer.
+        if (firstMatType == MATERIAL_TYPE_SUBSURFACE || firstMatType == MATERIAL_TYPE_SKIN)
+        {
+            PathTracer integrator;
+            aux.escaped = integrator.estimateRadiance(r, firstHit, rng);
+        }
         aux.rngState = rng.state;
         wfAux[slot] = aux;
         return;
@@ -399,9 +421,19 @@ void wfBdptGenEye(uint3 tid: SV_DispatchThreadID)
         wfAux[slot] = aux;
         return;
     }
-    if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+    uint firstMatType = materialTypes[firstHit.materialId] & 0xFFu;
+    if (firstMatType != MATERIAL_TYPE_FLAT)
     {
-        aux.rngState = rng.state;                // non-flat first hit → black
+        // Non-flat first hit → terminal-type path fallback (see wfBdptWalk for
+        // the full rationale): SUBSURFACE / SKIN path-integrate in place (one
+        // terminal eval, watchdog-safe); VOLUME / PYTHON keep the black bail to
+        // avoid an unbounded Metal command buffer. No eye/light subpath built.
+        if (firstMatType == MATERIAL_TYPE_SUBSURFACE || firstMatType == MATERIAL_TYPE_SKIN)
+        {
+            PathTracer integrator;
+            aux.escaped = integrator.estimateRadiance(r, firstHit, rng);
+        }
+        aux.rngState = rng.state;
         wfAux[slot] = aux;
         return;
     }

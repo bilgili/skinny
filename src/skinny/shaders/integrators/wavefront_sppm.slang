@@ -28,6 +28,7 @@ import lights.directional_light;
 import cameras.pinhole;            // PinholeCamera
 import wavefront.wf_display;       // wfWriteDisplay (exposure + tonemap + present)
 import integrators.sppm_state;     // VisiblePoint, SppmAccum, VP_ACTIVE, grid helpers
+import integrators.path;           // PathTracer — non-flat receiver fallback
 
 // Per-tile push constant — same 12-byte {streamBase, _, streamSize} layout the
 // path pass uses (a separate pass binds its own; no collision). The middle word
@@ -138,10 +139,28 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
             break;
         }
 
-        // PM-1 is flat-material-only. Glass/mirror are FLAT (delta lobe); skin /
-        // python / debug receivers terminate inactive.
-        if ((materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
+        // PM-1 is flat-material-only. Glass/mirror are FLAT (delta lobe). A
+        // non-flat receiver stores no photon visible point — there is no surface
+        // BRDF density to gather. For the terminal non-flat types (SUBSURFACE /
+        // SKIN), whose estimateRadiance evaluates one vertex and stops, shade it
+        // by the path fallback instead of blacking out (parity with the
+        // megakernel's non-flat→path routing): path-integrate from this hit
+        // (SKINNY_WAVEFRONT → subsurfaceRadiance3D) weighted by the accumulated
+        // specular-chain throughput, add it to the pixel's direct term, then
+        // terminate the eye walk with no VP stored. VOLUME / PYTHON keep the
+        // plain terminate: they continue bouncing inside estimateRadiance, which
+        // without band-tiling would be an unbounded Metal command buffer
+        // (metal-dispatch-hygiene) — a wavefront follow-up.
+        uint recvMatType = materialTypes[h.materialId] & 0xFFu;
+        if (recvMatType != MATERIAL_TYPE_FLAT)
+        {
+            if (recvMatType == MATERIAL_TYPE_SUBSURFACE || recvMatType == MATERIAL_TYPE_SKIN)
+            {
+                PathTracer integrator;
+                ld += throughput * integrator.estimateRadiance(r, h, rng);
+            }
             break;
+        }
 
         FlatMaterial mat = loadFlatMaterial(h);
         float3 N = mat.data.N;
