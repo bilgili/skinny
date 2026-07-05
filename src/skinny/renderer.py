@@ -127,6 +127,17 @@ _METAL_MEGAKERNEL_BAND_PIXELS = {
     2: 8_000_000,   # SPPM eye pass — cheap per pixel
 }
 
+# Per-tile lane cap for the wavefront BDPT/SPPM eye stage when the scene has a
+# non-terminal non-flat material (VOLUME / PYTHON): the non-flat first-hit path
+# fallback runs a full multi-bounce PathTracer.estimateRadiance per lane, so the
+# per-tile Metal submit (WavefrontRecorder.flush_heavy_eye) must also cap the TILE
+# itself — otherwise one committed command buffer could run the heavy fallback
+# over a full-frame stream (up to 1<<20 SPPM lanes) and trip the macOS GPU
+# watchdog. Sized to the megakernel BDPT band budget above (the heaviest
+# proven-safe per-command-buffer work; a VOLUME path-fallback lane's cost is
+# comparable). Change wavefront-nonflat-tiled-fallback.
+_METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES = 200_000
+
 # Watchdog-safe upper bound for the Metal material-preview dispatch (codex #2).
 # The preview commits ONE command buffer over `size×size` and can run per-pixel
 # MaterialX graph evaluation, so `size` (a public `render_material_preview`
@@ -2145,13 +2156,16 @@ class Renderer:
         rebuild key so a material-set change recompiles the pass."""
         if self._scene_bindings is None:
             return None
-        key = (self.width, self.height, self._graph_set_signature())
+        heavy = self._has_heavy_nonflat()
+        key = (self.width, self.height, self._graph_set_signature(), heavy)
         if self._wavefront_sppm_pass is not None and self._wf_sppm_pass_dims == key:
             return self._wavefront_sppm_pass
         self._destroy_wavefront_sppm_pass()
         from skinny.metal_wavefront import MetalWavefrontSppmPass
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None) or MetalWavefrontSppmPass.STREAM_CAP)
+        if heavy:  # bound the heavy per-tile eye submit (see the band constant)
+            cap = min(cap, _METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES)
         stream_size = max(1, min(num_pixels, cap))
         self._wavefront_sppm_pass = MetalWavefrontSppmPass(
             self.ctx, self.shader_dir, stream_size, num_pixels,
@@ -2341,8 +2355,9 @@ class Renderer:
         buffers, sized from the reflected MSL strides."""
         if self._scene_bindings is None:
             return None
+        heavy = self._has_heavy_nonflat()
         key = (self.width, self.height, self.bdpt_walk_mode,
-               self._graph_set_signature())
+               self._graph_set_signature(), heavy)
         if self._wavefront_bdpt_pass is not None and self._wf_bdpt_pass_dims == key:
             return self._wavefront_bdpt_pass
         self._destroy_wavefront_bdpt_pass()
@@ -2350,6 +2365,8 @@ class Renderer:
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None)
                   or MetalWavefrontBdptPass.STREAM_CAP)
+        if heavy:  # bound the heavy per-tile eye submit (see the band constant)
+            cap = min(cap, _METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES)
         stream_size = max(1, min(num_pixels, cap))
         self._wavefront_bdpt_pass = MetalWavefrontBdptPass(
             self.ctx, self.shader_dir, stream_size, num_pixels,
@@ -8748,6 +8765,17 @@ class Renderer:
         bands = (pixels + budget - 1) // budget
         return max(1, min(int(self.height), bands))
 
+    def _has_heavy_nonflat(self) -> bool:
+        """True when the scene has a non-terminal non-flat material (VOLUME /
+        PYTHON). Under wavefront BDPT/SPPM their non-flat first-hit path fallback
+        runs a full multi-bounce `PathTracer.estimateRadiance` in the eye kernel,
+        so the Metal eye submit is bounded per tile to stay within the GPU
+        watchdog (change wavefront-nonflat-tiled-fallback). The terminal types
+        (SUBSURFACE / SKIN) evaluate one vertex, so they need no bounding."""
+        types = getattr(self, "_material_types", None) or ()
+        return any(
+            int(t) in (MATERIAL_TYPE_PYTHON, MATERIAL_TYPE_VOLUME) for t in types)
+
     def _render_wavefront_metal(self, staged) -> None:
         """Dispatch one staged wavefront frame on the Metal backend (change
         metal-wavefront-parity phases 3/4): the shared `record_path_loop` /
@@ -8758,6 +8786,9 @@ class Renderer:
         mtlx_bytes = self._pack_mtlx_skin_array_msl()
         if mtlx_bytes:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+        # Bound the heavy per-tile eye submit for BDPT when the scene has a
+        # non-terminal non-flat material (change wavefront-nonflat-tiled-fallback).
+        staged.bound_heavy_eye = self._has_heavy_nonflat()
         staged.dispatch_frame(
             binds=self._build_metal_binds(),
             uniform_blob=self._pack_uniforms_msl(),
@@ -8796,6 +8827,9 @@ class Renderer:
         mtlx_bytes = self._pack_mtlx_skin_array_msl()
         if mtlx_bytes:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+        # Bound the heavy per-tile eye submit when the scene has a non-terminal
+        # non-flat material (change wavefront-nonflat-tiled-fallback).
+        sppm.bound_heavy_eye = self._has_heavy_nonflat()
         sppm.dispatch_frame(
             binds=self._build_metal_binds(),
             uniform_blob=self._pack_uniforms_msl(),

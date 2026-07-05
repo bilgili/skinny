@@ -514,6 +514,11 @@ class _VkPathRecorder:
             | vk.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
             0, 1, [self._cbarrier], 0, None, 0, None)
 
+    def flush_heavy_eye(self) -> None:
+        # No-op on Vulkan: no GPU watchdog, so the whole frame records into one
+        # command buffer as before (change wavefront-nonflat-tiled-fallback).
+        pass
+
     def clear_counts(self) -> None:
         cmd = self._cmd
         cnt = self._p._buffers["slot_count"]
@@ -799,6 +804,11 @@ class _VkSppmRecorder:
         vk.vkCmdPipelineBarrier(
             self._cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [self._cbarrier], 0, None, 0, None)
+
+    def flush_heavy_eye(self) -> None:
+        # No-op on Vulkan: no GPU watchdog (change
+        # wavefront-nonflat-tiled-fallback).
+        pass
 
     def _fill(self, buf, offset: int, size: int) -> None:
         vk.vkCmdFillBuffer(self._cmd, buf.buffer, int(offset), int(size), 0)
@@ -1379,6 +1389,11 @@ class _VkBdptRecorder:
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
             | vk.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
             0, 1, [self._cbarrier], 0, None, 0, None)
+
+    def flush_heavy_eye(self) -> None:
+        # No-op on Vulkan: no GPU watchdog, so the whole frame records into one
+        # command buffer as before (change wavefront-nonflat-tiled-fallback).
+        pass
 
     def clear_counts(self) -> None:
         cmd = self._cmd

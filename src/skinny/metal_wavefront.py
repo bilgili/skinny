@@ -201,6 +201,16 @@ class _MetalWavefrontRecorder:
     def barrier(self) -> None:
         self._enc.barrier()
 
+    def flush_heavy_eye(self) -> None:
+        # Bound the heavy per-tile eye submit (change
+        # wavefront-nonflat-tiled-fallback): when the scene has a non-terminal
+        # non-flat material (VOLUME / PYTHON), the non-flat first-hit path
+        # fallback runs a full multi-bounce path in the eye kernel, so commit +
+        # drain this tile's command buffer before the next to stay within the
+        # macOS GPU watchdog. No-op otherwise (single submit, byte-identical).
+        if getattr(self._p, "bound_heavy_eye", False):
+            self._enc.flush()
+
     def clear_counts(self) -> None:
         # WAR guard: the previous bounce's shade reads slot_count/queue; order
         # those reads before the clears, then make the zeros visible to the
@@ -697,6 +707,15 @@ class _MetalSppmRecorder:
     def dispatch_count(self, entry: str, count: int, group_size: int) -> None:
         groups = (int(count) + group_size - 1) // group_size
         self._dispatch(entry, (max(groups, 1), 1, 1))
+
+    def flush_heavy_eye(self) -> None:
+        # Bound the heavy per-tile SPPM eye submit (change
+        # wavefront-nonflat-tiled-fallback): wfSppmEye's non-flat first-hit path
+        # fallback runs a full multi-bounce path for VOLUME / PYTHON. Phase 1 is
+        # all dispatch_full (no implicit shade-flush), so commit + drain each eye
+        # tile to stay within the macOS GPU watchdog. No-op otherwise.
+        if getattr(self._p, "bound_heavy_eye", False):
+            self._enc.flush()
 
     def clear_visible_points(self) -> None:
         self._enc.barrier()

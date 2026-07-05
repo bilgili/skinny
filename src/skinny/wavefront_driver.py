@@ -83,6 +83,19 @@ class WavefrontRecorder(Protocol):
         """Run the attached ReSTIR DI primary-direct pass (bounce 0 only)."""
         ...
 
+    def flush_heavy_eye(self) -> None:
+        """Bound the heavy per-tile eye submit (change
+        wavefront-nonflat-tiled-fallback). When the scene has a non-terminal
+        non-flat material (VOLUME / PYTHON), whose non-flat first-hit path
+        fallback runs the full multi-bounce ``PathTracer.estimateRadiance`` in the
+        eye kernel, the Metal backend submits + drains the accumulated command
+        buffer here so no single command buffer runs the fallback over more than
+        one ``stream_size`` tile (the macOS GPU watchdog bound, metal
+        row-band discipline). A no-op on Vulkan (no watchdog) and whenever the
+        scene has no non-terminal non-flat material (byte-identical single
+        submit)."""
+        ...
+
 
 def record_path_loop(
     rec: WavefrontRecorder,
@@ -233,6 +246,11 @@ def record_bdpt_loop(
         rec.barrier()
         rec.dispatch_full("wfBdptResolve")
         stream_base += stream_size
+        # Bound the heavy per-tile eye submit: the non-flat first-hit path
+        # fallback in wfBdptWalk / wfBdptGenEye runs a full multi-bounce path for
+        # VOLUME / PYTHON, so on Metal commit this tile before the next so no
+        # single command buffer exceeds the GPU watchdog (no-op otherwise).
+        rec.flush_heavy_eye()
 
 
 def record_sppm_loop(
@@ -280,6 +298,13 @@ def record_sppm_loop(
         rec.push_tile(stream_base)
         rec.dispatch_full("wfSppmEye")
         stream_base += stream_size
+        # Bound the heavy per-tile eye submit (see record_bdpt_loop): wfSppmEye's
+        # non-flat first-hit path fallback runs a full multi-bounce path for
+        # VOLUME / PYTHON. Phase 1 is otherwise all dispatch_full with no indirect
+        # shade (no implicit flush), so without this every eye tile would
+        # accumulate into one command buffer. No-op off Metal / on terminal-only
+        # scenes.
+        rec.flush_heavy_eye()
     rec.barrier()
 
     # phase 2 — single global grid build (counting sort).
