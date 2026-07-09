@@ -8526,8 +8526,13 @@ class Renderer:
                          len(self._PROPOSAL_PRESETS) - 1))
         prop_tok = self._PROPOSAL_PRESETS[idx][1]
         if self._spectral and prop_tok != "bsdf":
+            # Fold the requested token into the STATUS (not just the requested
+            # column): matrix_signature dedups re-prints on resolved+status only,
+            # so with resolved pinned to "bsdf" a runtime proposal switch would
+            # otherwise leave the matrix stale. Carrying prop_tok in the status
+            # makes the signature flip when the user changes the preset live.
             rows.append(cr.ConfigRow("proposals", prop_tok, "bsdf",
-                                     f"{cr.ON} (pinned bsdf: spectral)"))
+                                     f"{cr.ON} (spectral pin; requested {prop_tok})"))
         else:
             prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
             rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
