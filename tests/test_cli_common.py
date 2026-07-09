@@ -497,9 +497,24 @@ def test_reject_spectral_noop_when_off():
     reject_spectral_unsupported(False, "bdpt", "wavefront", "neural", "restir-di")
 
 
-def test_reject_spectral_path_megakernel_ok():
+def test_reject_spectral_not_implemented_refused():
+    # The envelope is satisfied but the transport is unwired ⇒ refuse (don't
+    # silently render RGB). Message names it "not yet implemented".
+    from skinny import spectral_capability
     from skinny.cli_common import reject_spectral_unsupported
 
+    assert spectral_capability.SPECTRAL_IMPLEMENTED is False
+    with pytest.raises(SystemExit) as ei:
+        reject_spectral_unsupported(True, "path", "megakernel", None, None)
+    assert "not yet implemented" in str(ei.value)
+
+
+def test_reject_spectral_envelope_ok_when_wired(monkeypatch):
+    # With the capability flag flipped, an in-envelope combo is allowed.
+    from skinny import spectral_capability
+    from skinny.cli_common import reject_spectral_unsupported
+
+    monkeypatch.setattr(spectral_capability, "SPECTRAL_IMPLEMENTED", True)
     reject_spectral_unsupported(True, "path", "megakernel", None, None)
     reject_spectral_unsupported(True, "path", "megakernel", "", "none")
 
@@ -534,15 +549,31 @@ def test_reject_spectral_reuse_raises():
 
 
 def test_spectral_auto_execution_mode_allowed(monkeypatch):
-    # --spectral with path + auto execution mode resolves to megakernel ⇒ allowed.
+    # --spectral with path + auto execution mode resolves to megakernel; with the
+    # transport wired (flag flipped) the combo is allowed end-to-end.
     monkeypatch.delenv("SKINNY_EXECUTION_MODE", raising=False)
+    from skinny import spectral_capability
     from skinny.cli_common import reject_spectral_unsupported
 
+    monkeypatch.setattr(spectral_capability, "SPECTRAL_IMPLEMENTED", True)
     ns = _parser().parse_args(["--spectral", "--integrator", "path"])
     mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
     assert mode == "megakernel"
     reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
                                 getattr(ns, "proposals", None), getattr(ns, "reuse", None))
+
+
+def test_spectral_flag_refused_until_implemented_end_to_end(monkeypatch):
+    # A plain `--spectral` (valid envelope) is refused while unwired.
+    monkeypatch.delenv("SKINNY_EXECUTION_MODE", raising=False)
+    from skinny.cli_common import reject_spectral_unsupported
+
+    ns = _parser().parse_args(["--spectral"])
+    mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
+    with pytest.raises(SystemExit) as ei:
+        reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
+                                    getattr(ns, "proposals", None), getattr(ns, "reuse", None))
+    assert "not yet implemented" in str(ei.value)
 
 
 def test_spectral_explicit_wavefront_refused_end_to_end(monkeypatch):
@@ -554,3 +585,22 @@ def test_spectral_explicit_wavefront_refused_end_to_end(monkeypatch):
     with pytest.raises(SystemExit):
         reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
                                     getattr(ns, "proposals", None), getattr(ns, "reuse", None))
+
+
+def test_all_frontends_wire_the_spectral_gate():
+    # Every front-end that exposes --spectral (via add_render_flags) must call
+    # reject_spectral_unsupported at startup, else --spectral silently no-ops to
+    # RGB on that front-end (regression guard: skinny-gui once bypassed it).
+    frontends = [
+        _SRC / "app.py",
+        _SRC / "headless.py",
+        _SRC / "web_app.py",
+        _SRC / "ui" / "qt" / "app.py",
+    ]
+    for fe in frontends:
+        src = fe.read_text()
+        assert "add_render_flags(" in src, f"{fe.name}: expected to expose the shared flags"
+        assert "reject_spectral_unsupported(" in src, (
+            f"{fe.name}: exposes --spectral but never calls reject_spectral_unsupported — "
+            f"a --spectral run would silently render RGB there"
+        )

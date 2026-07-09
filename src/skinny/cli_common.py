@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import os
 
+from skinny import spectral_capability
+
 # path → integrator_index, mirroring the renderer's integrator ordering.
 INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2}
 
@@ -237,6 +239,17 @@ def reject_spectral_unsupported(
         raise SystemExit(
             f"skinny: --spectral is incompatible with --reuse {reuse} — reservoir "
             "reuse is wavefront-only and spectral is megakernel-only in v1."
+        )
+    # The envelope is satisfied, but the megakernel spectral transport (Group 5)
+    # is not wired yet — the renderer would silently produce an RGB frame. Refuse
+    # rather than mislead. Gated by the shared capability flag (flip it with the
+    # transport to enable). Referenced live so a test monkeypatch takes effect.
+    if not spectral_capability.SPECTRAL_IMPLEMENTED:
+        raise SystemExit(
+            "skinny: --spectral is not yet implemented — the hero-wavelength "
+            "megakernel transport is a work in progress. The data, importer, CLI, "
+            "and shader-source foundation have landed, but no spectral render path "
+            "runs yet, so the flag is refused instead of silently rendering RGB."
         )
 
 

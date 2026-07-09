@@ -176,7 +176,8 @@ def test_spectral_envelope_accepts_path_megakernel_flat():
 def test_spectral_not_yet_wired_is_skipped_not_rendered_as_rgb():
     # Until SPECTRAL_IMPLEMENTED flips (Group 5), an in-envelope spectral combo is
     # a recorded skip — never rendered (which would silently produce RGB).
-    assert parity.SPECTRAL_IMPLEMENTED is False
+    from skinny import spectral_capability
+    assert spectral_capability.SPECTRAL_IMPLEMENTED is False
     ok, reason = parity.combo_is_valid(
         RenderCombo("path", "megakernel", spectral=True), _flat_scene())
     assert not ok and "not yet wired" in reason
@@ -186,7 +187,8 @@ def test_spectral_not_yet_wired_is_skipped_not_rendered_as_rgb():
 
 def test_spectral_becomes_valid_when_wired(monkeypatch):
     # Flipping the capability gate admits the in-envelope combo into the sweep.
-    monkeypatch.setattr(parity, "SPECTRAL_IMPLEMENTED", True)
+    from skinny import spectral_capability
+    monkeypatch.setattr(spectral_capability, "SPECTRAL_IMPLEMENTED", True)
     ok, _ = parity.combo_is_valid(
         RenderCombo("path", "megakernel", spectral=True), _flat_scene())
     assert ok

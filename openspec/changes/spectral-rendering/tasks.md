@@ -61,6 +61,11 @@
       13 new tests in `tests/test_cli_common.py` (91 total green). SCENE-level skin/subsurface/
       volume refusal DEFERRED to renderer setup (Group 3.2/5) where the material set is known —
       the CLI validator covers only flag-level combos; documented in the function docstring.
+      — FOLLOW-UP (branch spectral-cli-gate): `reject_spectral_unsupported` now also refuses an
+      in-envelope `--spectral` while the transport is unwired ("not yet implemented"), so it can
+      no longer silently render RGB. Single source of truth `skinny.spectral_capability.
+      SPECTRAL_IMPLEMENTED` (False) now drives BOTH this CLI gate and `parity.combo_is_valid`
+      (referenced live); flip it once with the Group 5 transport to enable both at once.
 - [ ] 3.2 Upload the sigmoid coefficient table and a spectral-asset buffer (D65, conductor
       eta/k curves, authored illuminant SPDs) as storage buffers; assign the next free
       descriptor bindings; extend the Vulkan descriptor layout AND the layout test
