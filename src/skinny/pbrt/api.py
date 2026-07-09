@@ -250,10 +250,14 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
     report.exact(f"shape:{shp.type} {path}")
 
     emissive = None
+    emissive_spectral = None
     if shp.area_light is not None:
         emissive = spectra.param_to_rgb(shp.area_light.get("L"), illuminant=True) or [1, 1, 1]
         scale = shp.area_light.float("scale", 1.0) * exposure_scale
         emissive = [c * scale for c in emissive]
+        # Preserve the authored emission spectrum (blackbody / sampled) for
+        # spectral mode; None for a plain-RGB area light (no new override).
+        emissive_spectral = spectra.param_spectral_payload(shp.area_light.get("L"))
         twosided = shp.area_light.bool("twosided", False)
         report.approx(
             f"arealight {path}",
@@ -280,6 +284,9 @@ def _emit_shape(stage, path, shp: PbrtShape, report, scene: PbrtScene, base_dir=
         # renderer-side predicate does not have to sniff lobe values (D2/3.2).
         overrides = dict(overrides or {})
         overrides["volume_interface"] = True
+    if emissive_spectral is not None:
+        overrides = dict(overrides or {})
+        overrides["emissive_spectral"] = emissive_spectral
     _author_material(stage, f"{path}_mat", material, mesh, report,
                      emissive_rgb=emissive, extra_overrides=overrides,
                      textures=scene.textures, base_dir=base_dir,

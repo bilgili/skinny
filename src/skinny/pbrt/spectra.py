@@ -139,6 +139,41 @@ def named_metal_reflectance_rgb(name: str):
     return fresnel_conductor_rgb(ior[0], ior[1])
 
 
+def param_spectral_payload(param):
+    """Raw spectral payload for a parsed :class:`Param`, or ``None`` for plain RGB.
+
+    Spectral rendering (``--spectral``) consumes the exact authored spectrum
+    rather than the RGB reduction. This preserves that source alongside the
+    (unchanged) :func:`param_to_rgb` value, riding ``skinnyOverrides``:
+
+    * ``blackbody [T]``      -> ``{"kind": "blackbody", "temperature": T}``
+    * named ``spectrum``      -> ``{"kind": "spectrum_named", "name": <str>}``
+      (named conductor eta/k, named glass — render-time binds the vendored curve)
+    * inline ``spectrum``     -> ``{"kind": "spectrum_samples", "lambda": [...],
+      "values": [...]}`` resampled onto the internal 5 nm grid
+
+    Returns ``None`` for ``rgb``/``color``/``float`` params (and unknown types),
+    so an RGB-only scene authors no new override — the import stays byte-identical.
+    Reflectance spectra are intentionally not resampled here (RGB-only in v1).
+    """
+    if param is None:
+        return None
+    if param.type == "blackbody":
+        return {"kind": "blackbody", "temperature": float(param.values[0])}
+    if param.type == "spectrum":
+        if isinstance(param.values[0], str):
+            return {"kind": "spectrum_named", "name": str(param.values[0])}
+        pairs = np.asarray(param.values, dtype=np.float64).reshape(-1, 2)
+        lam, val = pairs[:, 0], pairs[:, 1]
+        sampled = np.interp(_LAMBDA, lam, val, left=val[0], right=val[-1])
+        return {
+            "kind": "spectrum_samples",
+            "lambda": [float(x) for x in _LAMBDA],
+            "values": [float(x) for x in sampled],
+        }
+    return None
+
+
 def param_to_rgb(param, *, illuminant: bool = False, default=None):
     """Reduce a parsed :class:`Param` (any spectral form) to a 3-float RGB list.
 

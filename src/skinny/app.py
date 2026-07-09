@@ -26,6 +26,7 @@ from skinny.cli_common import (
     add_render_flags,
     apply_sppm_glossy_roughness,
     neural_config_from_args,
+    reject_spectral_unsupported,
     reject_sppm_without_wavefront,
     resolve_execution_mode,
     resolve_walk,
@@ -500,6 +501,9 @@ def main() -> None:
         args.integrator, saved.get("params", {}).get("integrator_index"))
     args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
     reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
+    reject_spectral_unsupported(
+        getattr(args, "spectral", False), _startup_integrator, args.execution_mode,
+        getattr(args, "proposals", None), getattr(args, "reuse", None))
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
     # > auto). In this foundation phase auto resolves to Vulkan; an explicit

@@ -33,6 +33,7 @@ from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
     apply_sppm_glossy_roughness,
+    reject_spectral_unsupported,
     resolve_execution_mode,
     resolve_walk,
     validate_render_flags,
@@ -720,6 +721,9 @@ def main() -> None:
     args.execution_mode = resolve_execution_mode(args.execution_mode, args.integrator or "path")
     # Reject impossible combos (e.g. bdpt + --online-training) up front.
     validate_render_flags(args)
+    reject_spectral_unsupported(
+        getattr(args, "spectral", False), args.integrator or "path", args.execution_mode,
+        getattr(args, "proposals", None), getattr(args, "reuse", None))
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > auto). The
     # web server is multi-session and stateless across runs (no persisted

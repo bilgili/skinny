@@ -28,6 +28,20 @@ def _color_intensity(rgb, scale: float = 1.0):
     return (rgb / lum).tolist(), lum
 
 
+def _preserve_spectral(prim, param) -> None:
+    """Ride the light's authored spectrum on ``skinnyOverrides`` (spectral mode).
+
+    No-op when the param is plain RGB/float, so RGB-only scenes are unchanged.
+    """
+    payload = spectra.param_spectral_payload(param)
+    if payload is None:
+        return
+    usd_prim = prim.GetPrim()
+    overrides = dict(usd_prim.GetCustomDataByKey("skinnyOverrides") or {})
+    overrides["spectral"] = payload
+    usd_prim.SetCustomDataByKey("skinnyOverrides", overrides)
+
+
 def _orient_z_to(direction) -> np.ndarray:
     """4x4 rotation whose local +Z maps to *direction* (unit)."""
     z = np.asarray(direction, dtype=np.float64)
@@ -70,6 +84,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
         prim.GetPrim().SetCustomDataByKey("pbrt", pbrt_md)
         _set_color_intensity(prim, spectra.param_to_rgb(p.get("L"), illuminant=True)
                              or [1.0, 1.0, 1.0], scale)
+        _preserve_spectral(prim, p.get("L"))
         prim.AddTransformOp().Set(to_gf_matrix(_orient_z_to(toward_source)))
         report.exact(f"light:distant {path}")
         return True
@@ -82,6 +97,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
         prim.CreateRadiusAttr(0.05)
         _set_color_intensity(prim, spectra.param_to_rgb(p.get("I"), illuminant=True)
                              or [1.0, 1.0, 1.0], scale)
+        _preserve_spectral(prim, p.get("I"))
         prim.AddTransformOp().Set(to_gf_matrix(T.translate(*pos)))
         if ltype == "spot":
             report.approx(f"light:spot {path}", "no skinny spotlight; emitted as point/sphere")
@@ -125,6 +141,7 @@ def add_light(stage, parent_path: str, light, report, asset_dir: str | None = No
                               f"env map {ext} referenced; loader expects .hdr")
         else:
             rgb = spectra.param_to_rgb(p.get("L"), illuminant=True) or [1.0, 1.0, 1.0]
+            _preserve_spectral(prim, p.get("L"))
             rgb = [c * scale for c in rgb]
             if asset_dir is not None:
                 # skinny's dome path needs an actual .hdr asset for a uniform env

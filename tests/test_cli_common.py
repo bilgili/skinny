@@ -466,3 +466,91 @@ def test_headless_keeps_own_resolution(monkeypatch):
     ns = _build_parser().parse_args(["scene.usd"])
     assert ns.width == 1024
     assert ns.height == 1024
+
+
+# ── --spectral flag + reject_spectral_unsupported ─────────────────────
+
+def test_spectral_flag_default_off(monkeypatch):
+    monkeypatch.delenv("SKINNY_SPECTRAL", raising=False)
+    assert _parser().parse_args([]).spectral is False
+
+
+def test_spectral_flag_set():
+    assert _parser().parse_args(["--spectral"]).spectral is True
+
+
+def test_spectral_env_fallback(monkeypatch):
+    monkeypatch.setenv("SKINNY_SPECTRAL", "1")
+    assert _parser().parse_args([]).spectral is True
+
+
+def test_spectral_flag_suppressible():
+    # A front-end may omit the flag; the parser then has no --spectral.
+    ns = _parser(spectral=False).parse_args([])
+    assert not hasattr(ns, "spectral")
+
+
+def test_reject_spectral_noop_when_off():
+    # Not spectral ⇒ never raises, whatever the other axes.
+    from skinny.cli_common import reject_spectral_unsupported
+
+    reject_spectral_unsupported(False, "bdpt", "wavefront", "neural", "restir-di")
+
+
+def test_reject_spectral_path_megakernel_ok():
+    from skinny.cli_common import reject_spectral_unsupported
+
+    reject_spectral_unsupported(True, "path", "megakernel", None, None)
+    reject_spectral_unsupported(True, "path", "megakernel", "", "none")
+
+
+@pytest.mark.parametrize("integrator", ["bdpt", "sppm"])
+def test_reject_spectral_non_path_raises(integrator):
+    from skinny.cli_common import reject_spectral_unsupported
+
+    with pytest.raises(SystemExit):
+        reject_spectral_unsupported(True, integrator, "megakernel", None, None)
+
+
+def test_reject_spectral_wavefront_raises():
+    from skinny.cli_common import reject_spectral_unsupported
+
+    with pytest.raises(SystemExit):
+        reject_spectral_unsupported(True, "path", "wavefront", None, None)
+
+
+def test_reject_spectral_neural_raises():
+    from skinny.cli_common import reject_spectral_unsupported
+
+    with pytest.raises(SystemExit):
+        reject_spectral_unsupported(True, "path", "megakernel", "bsdf,neural", None)
+
+
+def test_reject_spectral_reuse_raises():
+    from skinny.cli_common import reject_spectral_unsupported
+
+    with pytest.raises(SystemExit):
+        reject_spectral_unsupported(True, "path", "megakernel", None, "restir-di")
+
+
+def test_spectral_auto_execution_mode_allowed(monkeypatch):
+    # --spectral with path + auto execution mode resolves to megakernel ⇒ allowed.
+    monkeypatch.delenv("SKINNY_EXECUTION_MODE", raising=False)
+    from skinny.cli_common import reject_spectral_unsupported
+
+    ns = _parser().parse_args(["--spectral", "--integrator", "path"])
+    mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
+    assert mode == "megakernel"
+    reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
+                                getattr(ns, "proposals", None), getattr(ns, "reuse", None))
+
+
+def test_spectral_explicit_wavefront_refused_end_to_end(monkeypatch):
+    monkeypatch.delenv("SKINNY_EXECUTION_MODE", raising=False)
+    from skinny.cli_common import reject_spectral_unsupported
+
+    ns = _parser().parse_args(["--spectral", "--execution-mode", "wavefront"])
+    mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
+    with pytest.raises(SystemExit):
+        reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
+                                    getattr(ns, "proposals", None), getattr(ns, "reuse", None))
