@@ -30,6 +30,7 @@ import numpy as np
 
 from skinny.cli_common import (
     add_render_flags,
+    reject_spectral_unsupported,
     reject_sppm_without_wavefront,
     resolve_execution_mode,
     resolve_walk,
@@ -673,6 +674,9 @@ def main() -> None:
         args.integrator, saved_settings.get("params", {}).get("integrator_index"))
     args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
     reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
+    reject_spectral_unsupported(
+        getattr(args, "spectral", False), _startup_integrator, args.execution_mode,
+        getattr(args, "proposals", None), getattr(args, "reuse", None))
 
     try:
         backend = select_backend(args.backend, persisted=saved_settings.get("backend"))

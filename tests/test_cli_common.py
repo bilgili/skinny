@@ -585,3 +585,22 @@ def test_spectral_explicit_wavefront_refused_end_to_end(monkeypatch):
     with pytest.raises(SystemExit):
         reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
                                     getattr(ns, "proposals", None), getattr(ns, "reuse", None))
+
+
+def test_all_frontends_wire_the_spectral_gate():
+    # Every front-end that exposes --spectral (via add_render_flags) must call
+    # reject_spectral_unsupported at startup, else --spectral silently no-ops to
+    # RGB on that front-end (regression guard: skinny-gui once bypassed it).
+    frontends = [
+        _SRC / "app.py",
+        _SRC / "headless.py",
+        _SRC / "web_app.py",
+        _SRC / "ui" / "qt" / "app.py",
+    ]
+    for fe in frontends:
+        src = fe.read_text()
+        assert "add_render_flags(" in src, f"{fe.name}: expected to expose the shared flags"
+        assert "reject_spectral_unsupported(" in src, (
+            f"{fe.name}: exposes --spectral but never calls reject_spectral_unsupported — "
+            f"a --spectral run would silently render RGB there"
+        )
