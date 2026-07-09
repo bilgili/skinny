@@ -127,11 +127,15 @@
 - [x] 7.1 Add the `spectral` axis to `parity.py` (`combo_is_valid` rules per the delta
       spec); machine-readable skip reasons for BDPT/SPPM/wavefront/proposal/reuse/volume/
       skin × spectral, including the mode-equivalence skip "spectral is megakernel-only"
-      — DONE: `RenderCombo.spectral` field + label tag; `combo_is_valid` spectral block
-      (path+megakernel+flat only, else recorded skip); `all_combos`/`enumerate_combos`
-      enumerate the axis. Mode-equivalence skip is implicit: only `(path, megakernel, spectral)`
-      is valid, so there is no wavefront spectral to pair (the mega≡wave gate finds no spectral
-      pair). Render pass-through of the flag is Group 7.3 (GPU).
+      — DONE: `RenderCombo.spectral` field + label tag; `spectral_envelope` helper (the v1
+      path+megakernel+flat rules) + `combo_is_valid` spectral block. GATED behind
+      `SPECTRAL_IMPLEMENTED=False` (capability flag): the megakernel transport is unwired, so
+      an in-envelope spectral combo is a recorded "not yet wired" SKIP and is ABSENT from
+      `enumerate_combos` (the rendered set) — it is never rendered as RGB and gated as if
+      spectral (codex stop-review fix). Flip `SPECTRAL_IMPLEMENTED=True` with Group 5 to admit
+      it; the delta-spec "(path, megakernel, spectral) present" scenario holds from that point.
+      Mode-equivalence skip is implicit (only megakernel spectral is envelope-eligible, no
+      wavefront pair). Render pass-through of the flag is Group 7.3 (GPU).
 - [x] 7.2 Extend the coverage meta-tests: integrator × spectral validity completeness;
       suite spectral-discriminating disposition presence (hostless)
       — DONE (validity completeness): `test_coverage_meta_spectral_axis_covered` + 8 spectral

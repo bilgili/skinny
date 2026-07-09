@@ -165,10 +165,37 @@ def test_coverage_meta_execution_modes_pinned():
 # ─── spectral axis (change spectral-rendering) ──────────────────────────────
 
 
-def test_spectral_path_megakernel_flat_is_valid():
+def test_spectral_envelope_accepts_path_megakernel_flat():
+    # The intended v1 envelope accepts (path, megakernel) on a flat scene,
+    # independent of whether the transport is wired yet.
+    ok, _ = parity.spectral_envelope(
+        RenderCombo("path", "megakernel", spectral=True), _flat_scene())
+    assert ok
+
+
+def test_spectral_not_yet_wired_is_skipped_not_rendered_as_rgb():
+    # Until SPECTRAL_IMPLEMENTED flips (Group 5), an in-envelope spectral combo is
+    # a recorded skip — never rendered (which would silently produce RGB).
+    assert parity.SPECTRAL_IMPLEMENTED is False
+    ok, reason = parity.combo_is_valid(
+        RenderCombo("path", "megakernel", spectral=True), _flat_scene())
+    assert not ok and "not yet wired" in reason
+    # And it is absent from the rendered (enumerated) set.
+    assert not any(c.spectral for c in parity.enumerate_combos(_flat_scene()))
+
+
+def test_spectral_becomes_valid_when_wired(monkeypatch):
+    # Flipping the capability gate admits the in-envelope combo into the sweep.
+    monkeypatch.setattr(parity, "SPECTRAL_IMPLEMENTED", True)
     ok, _ = parity.combo_is_valid(
         RenderCombo("path", "megakernel", spectral=True), _flat_scene())
     assert ok
+    rendered = parity.enumerate_combos(_flat_scene())
+    assert RenderCombo("path", "megakernel", spectral=True) in rendered
+    # Out-of-envelope combos stay skipped even when wired.
+    for bad in [RenderCombo("bdpt", "megakernel", spectral=True),
+                RenderCombo("path", "wavefront", spectral=True)]:
+        assert not parity.combo_is_valid(bad, _flat_scene())[0]
 
 
 def test_spectral_bdpt_skipped_path_only():
@@ -214,11 +241,14 @@ def test_spectral_non_flat_scene_all_skipped(scene):
         assert not ok and reason
 
 
-def test_spectral_present_in_flat_enumeration():
-    combos = parity.enumerate_combos(_flat_scene())
-    spectral = [c for c in combos if c.spectral]
-    assert spectral == [RenderCombo("path", "megakernel", spectral=True)]
-    assert "spectral" in spectral[0].label
+def test_spectral_absent_from_enumeration_until_wired():
+    # While unwired, no spectral combo is in the rendered set (see the
+    # not-yet-wired test); only (path, megakernel) is even envelope-eligible.
+    eligible = [c for c in parity.all_combos()
+                if c.spectral and parity.spectral_envelope(c, _flat_scene())[0]]
+    assert eligible == [RenderCombo("path", "megakernel", spectral=True)]
+    assert "spectral" in eligible[0].label
+    assert not any(c.spectral for c in parity.enumerate_combos(_flat_scene()))
 
 
 def test_coverage_meta_spectral_axis_covered():

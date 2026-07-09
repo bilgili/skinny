@@ -118,6 +118,16 @@ EXECUTION_MODES = ("megakernel", "wavefront")
 PROPOSAL_AXES = ("neural",)
 REUSE_AXES = ("restir-di",)
 
+# Capability gate for the spectral axis (change spectral-rendering). The
+# megakernel spectral transport (Group 5) is not yet wired, so the renderer
+# ignores the spectral flag and would render an ordinary RGB frame. Until the
+# transport lands, spectral combos are a recorded "not yet wired" SKIP — the
+# matrix must never render one as RGB and gate it as if it were spectral. Flip
+# to True together with the megakernel integration so spectral combos enter the
+# rendered set; the validity ENVELOPE (:func:`spectral_envelope`) is already
+# enforced regardless, so out-of-scope combos keep their specific skip reason.
+SPECTRAL_IMPLEMENTED = False
+
 
 @dataclass(frozen=True)
 class RenderCombo:
@@ -169,6 +179,28 @@ ANCHOR = RenderCombo(integrator="path", execution_mode="wavefront",
                      proposals=(), reuse="none")
 
 
+def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
+    """The intended v1 spectral validity envelope, independent of whether the
+    transport is wired yet (:data:`SPECTRAL_IMPLEMENTED`).
+
+    Path integrator + megakernel execution + flat materials; the neural proposal
+    and ReSTIR reuse are wavefront-only, so they are refused too. Returns
+    ``(ok, reason)`` with a specific reason for each out-of-scope axis. Mirrors
+    ``cli_common.reject_spectral_unsupported``.
+    """
+    if combo.integrator != "path":
+        return False, f"spectral is path-only (v1); {combo.integrator.upper()} follow-up"
+    if combo.execution_mode != "megakernel":
+        return False, "spectral is megakernel-only (v1); wavefront follow-up"
+    if combo.has_neural:
+        return False, "spectral is incompatible with the neural proposal (v1)"
+    if combo.has_reuse:
+        return False, "spectral is incompatible with ReSTIR reuse (v1)"
+    if scene.material_class != "flat":
+        return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
+    return True, ""
+
+
 def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     """Return ``(valid, reason)``. Mirrors the documented compatibility matrix.
 
@@ -206,23 +238,18 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
             return False, f"{combo.integrator.upper()} has no volume transport (follow-up)"
         if combo.has_reuse:
             return False, "ReSTIR DI reuse untested with volume media (follow-up)"
-    # Spectral render variant (change spectral-rendering): hero-wavelength
-    # transport is wired into the Path integrator under the megakernel execution
-    # mode over flat materials only in v1. BDPT/SPPM, the wavefront mode, the
-    # neural proposal, ReSTIR reuse, and non-flat (skin/subsurface/volume)
-    # materials are recorded skips (wavefront spectral is the designated
-    # follow-up). Mirrors reject_spectral_unsupported (cli_common).
+    # Spectral render variant (change spectral-rendering). The v1 envelope is the
+    # Path integrator under the megakernel execution mode over flat materials;
+    # out-of-scope combos take their specific envelope reason. An in-envelope
+    # combo is only rendered once the megakernel transport is wired
+    # (SPECTRAL_IMPLEMENTED); until then it is a recorded "not yet wired" skip so
+    # the sweep never renders it as RGB. Mirrors reject_spectral_unsupported.
     if combo.spectral:
-        if combo.integrator != "path":
-            return False, f"spectral is path-only (v1); {combo.integrator.upper()} follow-up"
-        if combo.execution_mode != "megakernel":
-            return False, "spectral is megakernel-only (v1); wavefront follow-up"
-        if combo.has_neural:
-            return False, "spectral is incompatible with the neural proposal (v1)"
-        if combo.has_reuse:
-            return False, "spectral is incompatible with ReSTIR reuse (v1)"
-        if scene.material_class != "flat":
-            return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
+        ok, reason = spectral_envelope(combo, scene)
+        if not ok:
+            return False, reason
+        if not SPECTRAL_IMPLEMENTED:
+            return False, "spectral transport not yet wired — megakernel Group 5 follow-up"
     # Heavy geometry that OOMs the megakernel.
     if combo.execution_mode == "megakernel" and not scene.megakernel_ok:
         return False, "geometry exceeds megakernel budget"
