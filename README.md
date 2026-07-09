@@ -505,6 +505,7 @@ neural × interop.
 | Heterogeneous volumes — NanoVDB `MakeNamedMedium` (path integrator, megakernel + wavefront) | ✅ | ✅ (`disney-cloud` / `bunny-cloud`; distant + env NEE; BDPT/SPPM excluded) |
 | Procedural `cloud` medium — pbrt `MakeNamedMedium "cloud"` (analytic Perlin-fBm density, path integrator, megakernel + wavefront) | ✅ | ✅ (`clouds`; no grid/texture — `MEDIUM_CLOUD` evaluates pbrt's `CloudMedium::Density` in-shader; BDPT/SPPM excluded) |
 | Neural directional proposal (inference) | ✅ | ✅ |
+| Spectral rendering (`--spectral`, hero-wavelength) | ⏳ WIP | ⏳ WIP |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
 | Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal`, bind-by-name; `metal-tool-dock-render`) |
@@ -522,6 +523,23 @@ constraints, independent of GPU backend.
 | Materials | **Flat only** (`UsdPreviewSurface`, `standard_surface`, `OpenPBR`, Python materials). Skin path is untouched. |
 | Backends | Vulkan ✅, native Metal ✅ — same Slang sources, same MIS pdf accounting. |
 | Inference dtype | fp32 (default), fp16 (mixed on Metal w/ graceful fp32 fallback), fp8 e4m3 (in-shader decode, portable across Vulkan / Metal / MoltenVK). |
+
+**Spectral rendering (`--spectral`)** — hero-wavelength transport instead of
+RGB. **Work in progress:** the CPU/data/importer/CLI/shader-source foundation
+has landed (pbrt-exact upsampling + CIE tables, blackbody/illuminant payload
+preservation on import, the `--spectral` flag, and `spectrum.slang`), but the
+megakernel transport that consumes the flag is not wired yet. Until it is,
+`--spectral` is **refused at startup** ("not yet implemented") on every
+front-end rather than silently rendering RGB. A single capability flag
+(`skinny.spectral_capability.SPECTRAL_IMPLEMENTED`) flips the CLI and the parity
+matrix live together when the transport lands.
+
+| Aspect | Planned v1 scope |
+|--------|------------------|
+| Integrator / execution | **Path + megakernel only** (wavefront spectral is the follow-up). |
+| Materials | **Flat only** — no skin/subsurface/volume. |
+| Layers | No neural proposal, no ReSTIR reuse (both wavefront-only). |
+| Samples | 4 hero-rotated wavelengths over 360–830 nm (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 
 **Online training (`--online-training`)** — combinations of
 `--neural-trainer` × `--neural-handoff` × host. Loop requires

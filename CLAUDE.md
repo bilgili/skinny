@@ -218,6 +218,15 @@ in `README.md` → **Compatibility matrix**; keep the two in sync.
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
 | Neural-handoff `interop` | CUDA + `VK_KHR_external_memory` + timeline semaphore (`[interop]` extra) | UMA shared-storage in-place writes, no extra deps (`metal-neural-interop`) |
+| Spectral rendering (`--spectral`, hero-wavelength) | ⏳ WIP | ⏳ WIP (`spectral-rendering`; foundation landed, transport unwired) |
+
+**Spectral rendering (`--spectral`), work in progress (change `spectral-rendering`):**
+
+| Constraint | Detail |
+|------------|--------|
+| State | Foundation only: pbrt-exact upsampling table + CIE D65/eta-k curves (`pbrt/data/`), numpy estimator mirror (`pbrt/spectral.py`), import payload preservation (blackbody/illuminant SPDs on `skinnyOverrides`), `--spectral` flag, `spectrum.slang` core (slangc-gated). The megakernel transport (Group 5) is **not wired** — `--spectral` is refused at startup ("not yet implemented") on every front-end, never silently RGB. |
+| Capability gate | Single source of truth `skinny.spectral_capability.SPECTRAL_IMPLEMENTED` (False) — referenced live by `reject_spectral_unsupported` (CLI, all four front-ends) AND `parity.combo_is_valid` (spectral axis = recorded "not yet wired" skip). Flip once with the transport to enable both. |
+| Planned v1 scope | **Path + megakernel + flat materials only.** No wavefront (follow-up), no BDPT/SPPM, no neural proposal, no ReSTIR reuse, no skin/subsurface/volume. 4 hero-rotated wavelengths (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 
 **Heterogeneous participating media (NanoVDB + procedural cloud), independent of backend:**
 

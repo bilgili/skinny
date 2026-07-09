@@ -165,9 +165,13 @@
 
 - [ ] 9.1 `docs/Architecture.md`: new bindings in the descriptor map, spectrum module in
       the module map, spectral-variant compile note
-- [ ] 9.2 README + CLAUDE.md compatibility matrices: `--spectral` flag, scope guards
+- [x] 9.2 README + CLAUDE.md compatibility matrices: `--spectral` flag, scope guards
       (path + megakernel only, flat-only, no volumes/skin/reuse/neural; wavefront =
       designated follow-up), backend support; CHANGELOG entry
+      — DONE: README compatibility matrix (spectral row ⏳ WIP + a `--spectral` scope
+      subsection), matching CLAUDE.md matrix row + WIP constraint block (kept in sync per the
+      "keep the two in sync" note), and a CHANGELOG `[Unreleased] Added` entry. All honestly
+      flag the transport as unwired / `--spectral` refused until `SPECTRAL_IMPLEMENTED` flips.
 - [ ] 9.3 New `docs/` section (or doc) for spectral rendering: hero-wavelength estimator,
       upsampling model, film resolve — equations as LaTeX-rendered SVG per repo convention;
       run `node docs/diagrams/embed_code.cjs --check` if marked shader regions were touched
