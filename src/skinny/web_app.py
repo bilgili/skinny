@@ -61,6 +61,7 @@ _REUSE: str | None = None
 _LOBE_SAMPLERS: str | None = None
 _ENCODING: str = "E0"   # axis-2 conditioner encoding (change renderer-conditioner-encoding)
 _SPPM_GLOSSY_ROUGHNESS: float | None = None  # SPPM glossy-continue threshold (None → built-in)
+_SPECTRAL: bool = False  # hero-wavelength spectral megakernel variant (--spectral)
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -123,6 +124,7 @@ class SkinnySession:
                 execution_mode=_EXECUTION_MODE,
                 bdpt_walk=_BDPT_WALK,
                 neural_config=neural_cfg,
+                spectral=_SPECTRAL,
             )
             if _INTEGRATOR is not None:
                 self.renderer.integrator_index = INTEGRATOR_INDEX[_INTEGRATOR]
@@ -736,7 +738,7 @@ def main() -> None:
 
     global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
     global _BDPT_WALK, _INTEGRATOR, _REUSE, _LOBE_SAMPLERS, _ENCODING
-    global _SPPM_GLOSSY_ROUGHNESS
+    global _SPPM_GLOSSY_ROUGHNESS, _SPECTRAL
     _BACKEND = resolved_backend
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
@@ -748,6 +750,7 @@ def main() -> None:
     _LOBE_SAMPLERS = args.lobe_samplers
     _ENCODING = args.encoding
     _SPPM_GLOSSY_ROUGHNESS = args.sppm_glossy_roughness
+    _SPECTRAL = getattr(args, "spectral", False)
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

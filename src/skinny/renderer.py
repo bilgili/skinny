@@ -1315,6 +1315,7 @@ class Renderer:
         neural_handoff: str = "file",
         neural_trainer: str = "auto",
         train_precision: str = "fp32",
+        spectral: bool = False,
     ) -> None:
         self.ctx = vk_ctx
         # Resolve the GPU-resource module once from the context (design D1): the
@@ -1348,6 +1349,12 @@ class Renderer:
         self._neural_config = neural_config or NeuralBuildConfig()
         self._fp16_fallback_warned = False
         self._requested_execution_mode = str(execution_mode)
+        # Hero-wavelength spectral megakernel variant (change spectral-rendering,
+        # GPU transport). When set, the megakernel pipeline is compiled with
+        # `-DSKINNY_SPECTRAL` and the three pbrt upsample / D65 storage buffers
+        # (bindings 45/46/47) are uploaded + bound. Every spectral resource is
+        # guarded on this flag so a non-spectral run is byte-identical to before.
+        self._spectral = bool(spectral)
         # BDPT subpath-build strategy for wavefront+bdpt (CLI-fixed per session):
         #   fused      — one walk kernel (the S1 connect-compaction win, default)
         #   eye        — staged eye walk + fused light tail
@@ -3662,6 +3669,7 @@ class Renderer:
                     entry_module="main_pass",
                     entry_point="mainImage",
                     graph_fragments=list(self._scene_graph_fragments),
+                    spectral=self._spectral,
                 )
             except RuntimeError as e:
                 action = "rebuild" if is_rebuild else "build"
@@ -3680,6 +3688,7 @@ class Renderer:
                     entry_module="main_pass",
                     entry_point="mainImage",
                     graph_fragments=[],
+                    spectral=self._spectral,
                 )
             # In megakernel mode the scene bindings ARE the compiled pipeline.
             self.pipeline = self._scene_bindings
@@ -3806,6 +3815,41 @@ class Renderer:
         self.env_dist_buffer = self._gpu.StorageBuffer(
             self.ctx, ((ENV_HEIGHT + 1) + ENV_HEIGHT * (ENV_WIDTH + 1)) * 4)
         self._ensure_env_uploaded()
+
+        # Hero-wavelength spectral upsample tables (bindings 45/46/47), created
+        # ONCE and only for the spectral megakernel variant — the RGB path
+        # allocates nothing here. Static pbrt data: the sRGB→spectrum sigmoid
+        # table (scale grid + [3,res,res,res,3] cube, res==64) and the CIE D65
+        # SPD (95 samples on the 360-830/5 nm grid). Uploaded C-order float32.
+        self._spectral_scale_buffer = None
+        self._spectral_data_buffer = None
+        self._spectral_d65_buffer = None
+        if self._spectral:
+            from skinny.pbrt import spectral as _spectral_mirror
+            from skinny.pbrt.data import spectral_tables
+            res, scale, data = spectral_tables.load_srgb_upsample_table()
+            # Upload the UNIT-LUMINANCE-normalized D65 (pbrt whitepoint), matching
+            # spectral.upsample_illuminant so the GPU upsampleIlluminant ≡ the numpy
+            # mirror. Raw D65 (~100× luminance) would make every emitter blow out.
+            d65 = _spectral_mirror.d65_normalized()
+            if res != 64:
+                raise ValueError(
+                    f"spectral upsample table res must be 64, got {res}")
+            if d65.size != 95:
+                raise ValueError(
+                    f"spectral D65 SPD must have 95 samples, got {d65.size}")
+            scale_arr = np.ascontiguousarray(scale, dtype=np.float32).ravel()
+            data_arr = np.ascontiguousarray(data, dtype=np.float32).ravel(order="C")
+            d65_arr = np.ascontiguousarray(d65, dtype=np.float32).ravel()
+            self._spectral_scale_buffer = self._gpu.StorageBuffer(
+                self.ctx, scale_arr.size * 4)
+            self._spectral_scale_buffer.upload_sync(scale_arr.tobytes())
+            self._spectral_data_buffer = self._gpu.StorageBuffer(
+                self.ctx, data_arr.size * 4)
+            self._spectral_data_buffer.upload_sync(data_arr.tobytes())
+            self._spectral_d65_buffer = self._gpu.StorageBuffer(
+                self.ctx, d65_arr.size * 4)
+            self._spectral_d65_buffer.upload_sync(d65_arr.tobytes())
 
         # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
         # flow architecture and seeded with a dummy (zero) net so the inline flow
@@ -4211,7 +4255,10 @@ class Renderer:
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envDistCdf (one combined env CDF buffer).
                 # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (22 + graph_slot),
+                # +3 spectral upsample buffers (45/46/47) only for the spectral
+                # megakernel variant.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT
+                * (22 + graph_slot + (3 if self._spectral else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4597,6 +4644,19 @@ class Renderer:
                     pBufferInfo=[vk.VkDescriptorBufferInfo(
                         buffer=_buf.buffer, offset=0, range=_buf.size)],
                 ))
+            # Spectral upsample tables (45/46/47) — only the spectral variant's
+            # layout declares these bindings; the RGB path writes nothing.
+            if self._spectral:
+                for _b, _buf in ((45, self._spectral_scale_buffer),
+                                 (46, self._spectral_data_buffer),
+                                 (47, self._spectral_d65_buffer)):
+                    writes.append(vk.VkWriteDescriptorSet(
+                        dstSet=ds, dstBinding=_b, dstArrayElement=0,
+                        descriptorCount=1,
+                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        pBufferInfo=[vk.VkDescriptorBufferInfo(
+                            buffer=_buf.buffer, offset=0, range=_buf.size)],
+                    ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_scene_descriptors(self) -> None:
@@ -8728,6 +8788,13 @@ class Renderer:
         combined = getattr(self, "_graph_params_combined", None)
         if combined is not None:
             b["graphParamsCombined"] = combined.buffer
+        # Spectral upsample tables (bindings 45/46/47) — only the spectral
+        # megakernel variant references these names; Metal silently skips
+        # unbound names, but only add when the buffers exist.
+        if self._spectral and self._spectral_scale_buffer is not None:
+            b["spectralScale"] = self._spectral_scale_buffer.buffer
+            b["spectralData"] = self._spectral_data_buffer.buffer
+            b["spectralD65"] = self._spectral_d65_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -10362,6 +10429,12 @@ class Renderer:
         # _init_gpu; were previously never freed (surfaced by the record-dump's
         # clean-teardown check).
         self.env_dist_buffer.destroy()
+        # Spectral upsample tables (bindings 45/46/47) — only allocated for the
+        # spectral megakernel variant.
+        for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
+                    self._spectral_d65_buffer):
+            if _sb is not None:
+                _sb.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
         self._offscreen_output.destroy()

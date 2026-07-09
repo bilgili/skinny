@@ -146,7 +146,8 @@ class HeadlessRenderer:
                  execution_mode: str = "megakernel", bdpt_walk: str = "fused",
                  proposals: Optional[str] = None, reuse: Optional[str] = None,
                  lobe_samplers: Optional[str] = None,
-                 encoding: Optional[str] = None) -> None:
+                 encoding: Optional[str] = None,
+                 spectral: bool = False) -> None:
         import skinny
         from skinny.backend_select import make_context
         from skinny.cli_common import resolve_encoding
@@ -171,6 +172,7 @@ class HeadlessRenderer:
                 execution_mode=execution_mode,
                 bdpt_walk=resolve_walk(bdpt_walk),
                 neural_config=neural_cfg,
+                spectral=spectral,
             )
             # Scene-sampling seam selection (mirrors the interactive front-ends).
             if proposals is not None:
@@ -404,7 +406,8 @@ def main(argv: Optional[list] = None) -> int:
                               bdpt_walk=ns.bdpt_walk,
                               proposals=ns.proposals, reuse=ns.reuse,
                               lobe_samplers=ns.lobe_samplers,
-                              encoding=ns.encoding) as r:
+                              encoding=ns.encoding,
+                              spectral=getattr(ns, "spectral", False)) as r:
             if ns.animate:
                 frames = _parse_frames(ns.frames) if ns.frames else None
                 paths = r.render_animation(

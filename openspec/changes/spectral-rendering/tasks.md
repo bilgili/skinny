@@ -66,14 +66,32 @@
       no longer silently render RGB. Single source of truth `skinny.spectral_capability.
       SPECTRAL_IMPLEMENTED` (False) now drives BOTH this CLI gate and `parity.combo_is_valid`
       (referenced live); flip it once with the Group 5 transport to enable both at once.
-- [ ] 3.2 Upload the sigmoid coefficient table and a spectral-asset buffer (D65, conductor
+- [x] 3.2 Upload the sigmoid coefficient table and a spectral-asset buffer (D65, conductor
       eta/k curves, authored illuminant SPDs) as storage buffers; assign the next free
       descriptor bindings; extend the Vulkan descriptor layout AND the layout test
       (`test_vk_binding_layout.py` precedent) plus Metal bind-by-name
-- [ ] 3.3 Shader-variant plumbing: when `--spectral` is active the megakernel compiles with
+      — DONE (D65 + coeff table; conductor eta/k deferred to 6.2): `spectralScale`/`spectralData`/
+      `spectralD65` at vk bindings 45/46/47, gated `#if defined(SKINNY_SPECTRAL)` so the RGB
+      layout + SPIR-V are byte-unchanged (table res=64 / d65Count=95 are compile constants —
+      no FrameConstants growth). `ComputePipeline` gained a `spectral` kwarg on both backends:
+      Vulkan adds the 3 STORAGE_BUFFER layout entries + descriptor writes (pool +3); Metal
+      binds by name. Buffers built + uploaded once (C-order f32) in the `renderer._spectral`
+      block; `--spectral` threaded through all four front-ends → `Renderer(spectral=...)`.
+      D65 uploaded UNIT-LUMINANCE-normalized (`spectral.d65_normalized()`) — see 4.1 note.
+      `test_vk_binding_layout.py` unchanged (spectral bindings are invisible to its
+      all-macros-off Vulkan-branch walker; recorded rationale).
+- [x] 3.3 Shader-variant plumbing: when `--spectral` is active the megakernel compiles with
       `-DSKINNY_SPECTRAL` (Vulkan `main_pass_spectral.spv` checked-in vs compiled-on-demand —
       resolve the design open question and record the decision; Metal folds the define into
       the in-process SlangPy compile)
+      — DONE. DECISION: compiled-on-demand on BOTH backends; NO checked-in `main_pass_spectral.spv`.
+      `main_pass.spv` isn't checked in at all (compiled per-construction), and the Vulkan
+      `spv_cache` key already hashes the flag tuple, so `-D SKINNY_SPECTRAL=1` gets a distinct
+      cache slot for free. Vulkan: append the define to the slangc flags. Metal: add it to
+      `opts.defines`. BUG FIXED (Metal): `opts.defines[k]=v` silently no-ops —
+      `SlangCompilerOptions.defines` getter returns a COPY, so the define must be assembled in
+      a dict and assigned ONCE. (Symptom: `pipeline.spectral=True` but spectral globals never
+      reflected and the render came out byte-identical to RGB.)
 
 ## 4. Spectral shader core
 
@@ -88,24 +106,65 @@
       `tests/test_spectrum_compile.py` (2 tests) proves BOTH variants (`-DSKINNY_SPECTRAL`
       and RGB) typecheck to SPIR-V (48516 B each); harness
       `tests/harnesses/test_spectrum_harness.slang`.
+      — AMENDED (Group 5 GPU bring-up): the illuminant path was corrected to pbrt's
+      `RGBIlluminantSpectrum` — `scale·sigmoid(rgb/scale)·D65` with `scale = 2·max(rgb)` (keeps
+      HDR emitters in the sigmoid gamut instead of clamping a bright light to white and losing
+      its intensity) and D65 normalized to unit luminance (`spectral.d65_normalized()`, GPU
+      reads the pre-normalized buffer). Fixed in BOTH `spectrum.slang::upsampleIlluminant` and
+      `spectral.py::upsample_illuminant`; numpy verified white→1, [16,16,16]→16, chromatic
+      preserved. (Before this a white light resolved ~49× too bright.)
 - [ ] 4.2 GPU≡numpy kernel tests (`tests/kernels/` harness pattern) for wavelength sampling,
       upsample evaluation, and film resolve against the task-1.4 CPU mirror
+      — TODO next session (harness pattern: `tests/conftest.py` slangpy `load_shader` +
+      `tests/harnesses/test_spectrum_harness.slang`, call `test_*` wrappers with the 3 buffers).
 - [ ] 4.3 Byte-identity guard: test that the default (no-define) `main_pass.spv` compile is
       byte-identical to the checked-in binary after all shader edits
+      — PARTIAL: reframed as "the RGB (no-define) build is unchanged by the spectral `#if`
+      blocks" (no checked-in spv; slangc drift). Empirically confirmed: the RGB render of
+      int_bleed produced the IDENTICAL mean (0.31306) across every A/B run before and after all
+      spectral edits. A formal compile-diff test is TODO.
 
 ## 5. Megakernel spectral path
 
-- [ ] 5.1 Convert carriers to `Spectrum` under `SKINNY_SPECTRAL`: `BSDFSample`,
+- [x] 5.1 Convert carriers to `Spectrum` under `SKINNY_SPECTRAL`: `BSDFSample`,
       `LightSample`, `BounceResult`, path `throughput`/`radiance` in
       `integrators/path.slang`; draw hero wavelength at path start from the existing RNG and
       keep it a path-lifetime local
-- [ ] 5.2 Spectral evaluation in `materials/flat/*` (upsampled params/textures),
+      — DONE via a DIFFERENT (lower-risk) design than "widen the shared carriers": widening
+      `BSDFSample`/`LightSample`/`BounceResult` to float4 would break every `float3` assignment
+      across the flat/skin/python/bdpt/record tree and force an IMaterial signature change. So
+      the spectral transport lives in a SEPARATE integrator `integrators/path_spectral.slang`
+      (`SpectralPathTracer`, compiled only under `SKINNY_SPECTRAL`) that carries `Spectrum`
+      throughput/radiance itself and reuses the RGB flat `sample()` for the λ-INDEPENDENT
+      geometry (wi, pdf, delta-ness), recoloring per wavelength. Hero λ drawn as the first
+      `rng.next()` in `estimateRadiance` (path-local); the RGB build has no such draw ⇒ its
+      stream + SPIR-V are unchanged. All shared RGB structs/files are UNTOUCHED.
+- [x] 5.2 Spectral evaluation in `materials/flat/*` (upsampled params/textures),
       `lights/*` (upsampled RGB emitters), `environment.slang` (upsampled env radiance,
       importance sampling unchanged), MIS scalar pdfs unchanged
-- [ ] 5.3 Film resolve in `main_pass.slang` before `clampSampleRadiance` + accumulation;
+      — DONE: `flat_lobes.slang::flatBsdfResponseSpectral` (per-λ mirror of `flatBsdfResponse`,
+      colored reflectances passed pre-upsampled + per-λ Schlick on F0; every scalar factor
+      identical to RGB so `response/pdf` reproduces the RGB sample weight). Materials, lights,
+      env, and emission all upsample inside `path_spectral.slang` (reflectances via
+      `upsampleReflectanceBound`, illuminants via `upsampleIlluminantBound`); NEE forms the
+      `response(λ)·L(λ)` product per wavelength (`spectralAllLightsNEE`). MIS companion pdfs
+      reuse the scalar RGB `mixtureProposalPdf` (λ-independent). `environment.slang` untouched —
+      upsampling happens at the consumer.
+- [x] 5.3 Film resolve in `main_pass.slang` before `clampSampleRadiance` + accumulation;
       BDPT/SPPM/wavefront code paths excluded from the spectral build (compile-time)
-- [ ] 5.4 GPU smoke test: flat corpus scene renders under `--spectral` megakernel on Metal;
+      — DONE: `SpectralPathTracer.estimateRadiance` resolves `spectrumResolveToLinearSRGB(sw,
+      radiance)` → float3 internally at return, so the `IIntegrator` interface + main_pass tail
+      (NaN sanitize / `clampSampleRadiance` / accumulation) stay `float3` and byte-identical.
+      main_pass routes the hit case to `SpectralPathTracer` and the primary env-miss through a
+      spectral upsample+resolve, all under `#if defined(SKINNY_SPECTRAL)`. BDPT/SPPM/wavefront
+      are excluded by construction (separate integrator; the spectral branch never calls them).
+- [~] 5.4 GPU smoke test: flat corpus scene renders under `--spectral` megakernel on Metal;
       furnace scene closes within the existing uniformity gate
+      — PARTIAL: `int_bleed` (flat Cornell box) renders correctly under `--spectral` megakernel
+      on native Metal (M5 Pro) — energy-conserving (spectral mean 0.31343 vs RGB 0.31306, no
+      brightness blow-out) with plausible metameric red/green color-bleed differences (relMSE
+      0.0195). Labelled RGB-vs-spectral side-by-side captured. TODO: formal furnace uniformity
+      gate under spectral + wire into the confirming suite.
 - [ ] 5.5 Backend A/B: one corpus scene rendered spectrally on Vulkan and native Metal
       agrees within the recorded backend-parity tolerance (render the labelled side-by-side)
 

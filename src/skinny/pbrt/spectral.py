@@ -79,12 +79,38 @@ def upsample_reflectance(rgb, lam) -> np.ndarray:
     return st.sigmoid_poly(coeffs, lam)
 
 
+def _d65_luminance() -> float:
+    """CMF luminance of the vendored (raw) D65 SPD, ΣD65·ȳ / Σȳ on the 5 nm grid."""
+    d65 = st.d65_spd()
+    yb = cie_xyz_bar(_LAMBDA)[1]
+    return float(np.sum(d65 * yb) / np.sum(yb))
+
+
+_D65_LUMINANCE = _d65_luminance()
+
+
+def d65_normalized() -> np.ndarray:
+    """D65 SPD scaled to unit luminance — pbrt's whitepoint illuminant, so a unit
+    RGB illuminant resolves to unit radiance. This is the curve uploaded to the
+    GPU (renderer) so the shader's upsampleIlluminant matches this mirror."""
+    return st.d65_spd() / _D65_LUMINANCE
+
+
 def upsample_illuminant(rgb, lam) -> np.ndarray:
-    """Evaluate an sRGB emitter as a spectrum: reflectance shape × D65 (pbrt)."""
-    coeffs = st.rgb_to_sigmoid_coeffs(rgb)
+    """Evaluate an sRGB emitter as a spectrum (pbrt ``RGBIlluminantSpectrum``):
+    ``scale·sigmoid(rgb/scale)·D65_norm`` with ``scale = 2·max(rgb)``. The scale
+    keeps HDR emitters (values > 1) in the sigmoid's [0,1] gamut and restores
+    their magnitude — a plain clamp would collapse a bright light to white and
+    lose its intensity. D65 is normalized to unit luminance so unit RGB → unit
+    radiance."""
+    rgb = np.asarray(rgb, dtype=np.float64)
+    m = float(np.max(rgb))
+    scale = 2.0 * m
+    rgbn = rgb / scale if scale > 0.0 else np.zeros(3, dtype=np.float64)
+    coeffs = st.rgb_to_sigmoid_coeffs(rgbn)
     shape = st.sigmoid_poly(coeffs, lam)
-    d65 = np.interp(lam, _LAMBDA, st.d65_spd())
-    return shape * d65
+    d65 = np.interp(lam, _LAMBDA, d65_normalized())
+    return scale * shape * d65
 
 
 def spectrum_to_xyz(lam, values, pdf) -> np.ndarray:

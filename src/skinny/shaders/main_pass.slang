@@ -19,6 +19,10 @@ import environment;
 import integrators.path;
 import integrators.path_record;   // estimateRadianceRecord — the mainImageRecord dump entry
 import integrators.bdpt;
+#if defined(SKINNY_SPECTRAL)
+import spectrum;                  // SampledWavelengths, sampleWavelengths, spectrumResolveToLinearSRGB
+import integrators.path_spectral; // SpectralPathTracer — hero-wavelength flat transport
+#endif
 import cameras.pinhole;
 import cameras.thick_lens;
 import generated_materials;
@@ -73,6 +77,23 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
 
     float3 sample;
 
+#if defined(SKINNY_SPECTRAL)
+    // Spectral variant: hero-wavelength flat path transport (v1 is path-only, so
+    // no BDPT branch). The primary env-miss resolves the upsampled illuminant
+    // through the same CMF film resolve so the directly-visible background is
+    // spectrally consistent with the transported paths.
+    if (hit.hit)
+    {
+        SpectralPathTracer integrator;
+        sample = integrator.estimateRadiance(ray, hit, rng);
+    }
+    else
+    {
+        float3 envRgb = sceneEnvRadiance(ray.direction, fc.envIntensity, fc.furnaceMode);
+        SampledWavelengths sw = sampleWavelengths(rng.next());
+        sample = spectrumResolveToLinearSRGB(sw, upsampleIlluminantBound(envRgb, sw));
+    }
+#else
     bool useBdpt = (fc.integratorType == INTEGRATOR_BDPT)
                 && hit.hit
                 && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT);
@@ -92,6 +113,7 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
     {
         sample = sceneEnvRadiance(ray.direction, fc.envIntensity, fc.furnaceMode);
     }
+#endif
 
     // Apply the realistic-camera throughput weight (cos⁴θ / Z² · A_rear,
     // PBRT eq. 6.10). For pinhole rays this factor is 1.0; for vignetted

@@ -10,6 +10,20 @@
 
 static const float PI = 3.14159265358979;
 
+// Radiance / throughput carrier width. Spectral build (-DSKINNY_SPECTRAL):
+// float4 (4 hero wavelengths). RGB build: float3. Defined here — not only in
+// spectrum.slang — so the carrier structs in interfaces.slang (BSDFSample /
+// BounceResult) type-check in BOTH builds without importing the spectral module,
+// keeping the RGB SPIR-V byte-identical. spectrum.slang (compiled only in the
+// spectral variant) imports common for this alias rather than redefining it.
+#if defined(SKINNY_SPECTRAL)
+typealias Spectrum = float4;
+static const int SPECTRUM_N = 4;
+#else
+typealias Spectrum = float3;
+static const int SPECTRUM_N = 3;
+#endif
+
 struct Ray
 {
     float3 origin;

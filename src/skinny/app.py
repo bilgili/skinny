@@ -563,6 +563,7 @@ def main() -> None:
             neural_trainer=args.neural_trainer,
             train_precision=args.train_precision,
             neural_config=neural_cfg,
+            spectral=getattr(args, "spectral", False),
         )
 
         # CLI/env --neural-handoff wins; otherwise restore the persisted backend.

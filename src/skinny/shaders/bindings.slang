@@ -82,6 +82,40 @@ uniform FrameConstants fc;
 #else
 [[vk::binding(26)]] Sampler3D<float> volumeDensity;
 #endif
+
+// ── Hero-wavelength spectral upsampling tables (change spectral-rendering) ──
+// Bound ONLY in the spectral megakernel variant (-DSKINNY_SPECTRAL); absent from
+// the RGB build so its descriptor layout AND SPIR-V stay byte-identical. Fed to
+// spectrum.slang's rgbSigmoidCoeffs / upsampleReflectance / upsampleIlluminant.
+//   spectralScale : RES node array               (res floats;      binding 45)
+//   spectralData  : flat [3][res][res][res][3]   sigmoid-coeff grid (binding 46)
+//   spectralD65   : CIE D65 SPD on 360–830/5 nm  (d65Count floats;  binding 47)
+// The vendored table resolution + D65 length are fixed, so they ride as compile
+// constants rather than FrameConstants fields — no std140 change to the shared
+// UBO, so the RGB build's UBO packing is untouched. bindings 45–47 are the next
+// free Vulkan slots above the Metal sampler range (38–44); on Metal they bind by
+// name (spectralScale/Data/D65), so the vk::binding index is inert there.
+#if defined(SKINNY_SPECTRAL)
+import spectrum;
+static const int SPECTRAL_TABLE_RES = 64;   // rgb2spec_srgb.npz `res`
+static const int SPECTRAL_D65_COUNT = 95;   // spectral_curves.npz d65 grid length
+[[vk::binding(45)]] StructuredBuffer<float> spectralScale;
+[[vk::binding(46)]] StructuredBuffer<float> spectralData;
+[[vk::binding(47)]] StructuredBuffer<float> spectralD65;
+
+// Bound-buffer wrappers around spectrum.slang's parameter-driven upsamplers, so
+// call sites in the transport stay short. Reflectance: sigmoid only. Illuminant:
+// sigmoid × D65 (pbrt RGBIlluminantSpectrum).
+Spectrum upsampleReflectanceBound(float3 rgb, SampledWavelengths sw)
+{
+    return upsampleReflectance(rgb, sw, SPECTRAL_TABLE_RES, spectralScale, spectralData);
+}
+Spectrum upsampleIlluminantBound(float3 rgb, SampledWavelengths sw)
+{
+    return upsampleIlluminant(rgb, sw, SPECTRAL_TABLE_RES, spectralScale,
+                              spectralData, spectralD65, SPECTRAL_D65_COUNT);
+}
+#endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)
 //             [0] = (toolMode, lockMode, nTheta, nPhi) as uint bits
