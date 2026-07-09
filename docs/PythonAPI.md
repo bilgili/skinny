@@ -50,6 +50,16 @@ that UsdPreviewSurface drops). `skinny.pbrt.mtlx_emit.write_mtlx_document(...)` 
 `author_mtlx_reference(...)` author the `.mtlx` document and the stage reference
 the loader resolves.
 
+`skinny.pbrt.spectral` is the numpy mirror of the hero-wavelength spectral
+estimator (change `spectral-rendering`). `d65_normalized() -> np.ndarray` returns
+the CIE D65 SPD scaled to unit luminance — pbrt's whitepoint illuminant, and the
+exact curve the renderer uploads to the GPU (binding 47) so the shader's
+`upsampleIlluminant` matches this mirror. `upsample_illuminant(rgb, lam)`
+implements pbrt's `RGBIlluminantSpectrum` — `scale·sigmoid(rgb/scale)·D65_norm`
+with `scale = 2·max(rgb)` — so HDR emitters (values > 1) stay in the sigmoid's
+`[0,1]` gamut while keeping their magnitude, and a unit RGB illuminant resolves
+to unit radiance (its reflectance sibling is `upsample_reflectance(rgb, lam)`).
+
 ---
 
 ## 2. Headless render API — `skinny.headless`
