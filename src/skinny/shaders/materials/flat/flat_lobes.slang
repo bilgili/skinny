@@ -268,23 +268,30 @@ Spectrum flatBsdfResponseSpectral(
     }
 
     // Base spec lobe. Named conductor (6.2): exact complex-index Fresnel at each
-    // hero λ from the tabulated eta/k — this IS the metal's colour (specColorS is
-    // the std_surface white default, so no double-tint). Otherwise spectral
-    // Schlick on the upsampled F0 (the v1 dielectric/RGB-metal approximation).
+    // hero λ from the tabulated eta/k — this IS the metal's full colour, so the
+    // specularColor tint is DROPPED (specTint = white). Otherwise spectral Schlick
+    // on the upsampled F0 (the v1 dielectric/RGB-metal approximation), tinted by
+    // specColorS. The tint drop matters on the MaterialX path, which mirrors the
+    // metal's RGB reflectance into specular_color and would otherwise double-tint
+    // (Fresnel colour × RGB metal colour); the plain-USD path's specularColor is
+    // the white default, so it was already correct.
     Spectrum Fs;
+    Spectrum specTint;
     if (isConductor)
     {
         [ForceUnroll]
         for (int i = 0; i < 4; ++i)
             Fs[i] = fresnelConductor(VdotH, etaHero[i], kHero[i]);
+        specTint = Spectrum(1.0);
     }
     else
     {
         Fs = schlickFresnelSpectral(VdotH, F0S);
+        specTint = specColorS;
     }
     float    G1Ls     = ggxSmithG1(NdotL, m.roughness);
     float    pdfS     = flatLobePdf(LOBE_SPEC, FLAT_SAMPLER_NATIVE, m.roughness, wi, wo);
-    Spectrum specResp = pdfS * (Fs * G1Ls) * specColorS;
+    Spectrum specResp = pdfS * (Fs * G1Ls) * specTint;
 
     // Base diffuse lobe: albedo × (1 - Fview) × (1 - metallic), Oren-Nayar scalar.
     Spectrum Fview    = schlickFresnelSpectral(NdotV, F0S);
