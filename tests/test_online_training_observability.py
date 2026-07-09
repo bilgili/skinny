@@ -55,6 +55,7 @@ def _matrix_fake(**overrides):
         _neural_trainer_kind="auto",
         _neural_handoff_kind="interop",
         _train_precision="fp16",
+        _spectral=False,
     )
     fake._neural_active = lambda: True
     for k, v in overrides.items():
@@ -143,6 +144,29 @@ def test_execution_mode_pin_shows_in_status():
     rows = _rows(fake)
     assert "pinned from wavefront" in rows["execution-mode"].status
     assert rows["execution-mode"].resolved == "megakernel"
+
+
+def test_spectral_pins_proposals_to_bsdf():
+    # Under --spectral the megakernel samples BSDF-only (path_spectral reuses the
+    # native BSDF sampler; a non-BSDF proposal would desync the NEE MIS companion).
+    # The config matrix must REPORT that pin, not echo a non-BSDF selection.
+    fake = _matrix_fake(_spectral=True, proposal_preset_index=1)  # bsdf,neural
+    fake._neural_active = lambda: False
+    rows = _rows(fake)
+    assert rows["proposals"].requested == "bsdf,neural"
+    assert rows["proposals"].resolved == "bsdf"
+    assert "spectral pin" in rows["proposals"].status
+    # The requested token is folded into the STATUS so matrix_signature (which
+    # dedups reprints on resolved+status) flips when the preset changes live —
+    # otherwise the pinned resolved="bsdf" would leave the matrix stale.
+    assert "bsdf,neural" in rows["proposals"].status
+
+    # A BSDF-only preset under spectral needs no pin annotation.
+    plain = _matrix_fake(_spectral=True, proposal_preset_index=0)  # bsdf
+    plain._neural_active = lambda: False
+    prows = _rows(plain)
+    assert prows["proposals"].resolved == "bsdf"
+    assert "spectral pin" not in prows["proposals"].status
 
 
 # ── lifecycle: ACTIVE marker + summary ───────────────────────────────
