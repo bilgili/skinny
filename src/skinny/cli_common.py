@@ -229,11 +229,21 @@ def reject_spectral_unsupported(
             "v1 — drop --execution-mode wavefront (path defaults to megakernel). "
             "Spectral wavefront is the designated follow-up."
         )
-    if "neural" in (proposals or ""):
+    # Only the native BSDF proposal is supported in v1. A non-BSDF proposal
+    # (environment-importance or neural) draws the bounce direction from a
+    # mixture the megakernel spectral path does not sample — it uses the material's
+    # native sample() while NEE's MIS companion assumes the mixture pdf, biasing
+    # direct+indirect coupling. Refuse the whole non-BSDF set (neural is also
+    # wavefront-only); mixture sampling under spectral is a follow-up.
+    extra_proposals = [
+        p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
+    ]
+    if extra_proposals:
         raise SystemExit(
-            "skinny: --spectral is incompatible with the neural proposal "
-            "(--proposals …,neural) — neural guiding is wavefront-only and "
-            "spectral is megakernel-only in v1."
+            f"skinny: --spectral supports only the BSDF proposal in v1 (got "
+            f"--proposals {proposals}). The environment/neural directional proposals "
+            "draw the bounce from a mixture the megakernel spectral path does not "
+            "sample, which biases MIS — they are a spectral follow-up."
         )
     if reuse and reuse not in ("none",):
         raise SystemExit(

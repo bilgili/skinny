@@ -5976,6 +5976,22 @@ class Renderer:
         self.flat_material_buffer.upload_sync(bytes(data))
         self._num_flat_materials = len(materials)
         self._material_types = types
+        # Spectral v1 is FLAT-only: the megakernel spectral integrator
+        # (path_spectral.slang) shades MATERIAL_TYPE_FLAT and terminates the path
+        # on anything else. The CLI flag-level guard (reject_spectral_unsupported)
+        # can't see scene contents, so this is the scene-level refusal the design
+        # deferred to renderer setup — refuse here rather than silently render
+        # non-flat pixels black.
+        if self._spectral:
+            nonflat = sorted({int(t) for t in types if int(t) != MATERIAL_TYPE_FLAT})
+            if nonflat:
+                raise SystemExit(
+                    "skinny: --spectral supports only flat materials in v1 "
+                    "(UsdPreviewSurface / standard_surface / OpenPBR), but this scene "
+                    f"has non-flat material type code(s) {nonflat} "
+                    "(skin=0 / debug=2 / python=3 / subsurface=4 / volume=5). Spectral "
+                    "skin/subsurface/volume are follow-ups — render without --spectral."
+                )
         self._upload_material_types()
         # Pack StdSurfaceParams for every material slot into binding 19.
         # Skin-typed slots get zeroed records (the shader dispatches to the
