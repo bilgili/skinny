@@ -7,9 +7,9 @@ a spectrum. Uses only the merged spectral code — the same `named_glass_ior` th
 GPU dispersion path evaluates at the hero wavelength, and skinny's CIE fit for
 the per-wavelength display colour.
 
-Run (matplotlib lives in the repo-root Python 3.13 env)::
+Run (any Python with numpy + matplotlib on the path)::
 
-    PYTHONPATH=src ./bin/python3.13 examples/dispersion_demo.py
+    PYTHONPATH=src python examples/dispersion_demo.py
 
 Writes ``examples/dispersion_demo.png``.
 """

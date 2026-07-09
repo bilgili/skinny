@@ -17,9 +17,11 @@ from skinny.pbrt import spectral
 
 # Load the example module by path (examples/ is not a package).
 _DEMO = Path(__file__).resolve().parents[2] / "examples" / "dispersion_demo.py"
-_spec = importlib.util.spec_from_file_location("dispersion_demo", _DEMO)
+# Unique module name to avoid colliding with any other "dispersion_demo".
+_MODNAME = "_skinny_examples_dispersion_demo"
+_spec = importlib.util.spec_from_file_location(_MODNAME, _DEMO)
 demo = importlib.util.module_from_spec(_spec)
-sys.modules["dispersion_demo"] = demo
+sys.modules[_MODNAME] = demo
 _spec.loader.exec_module(demo)
 
 
