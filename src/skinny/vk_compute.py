@@ -673,10 +673,11 @@ class ComputePipeline:
         # bindings 45/46/47: spectral hero-wavelength upsample data — the pbrt
         # sRGB→spectrum sigmoid-coefficient table scale grid / data cube and the
         # CIE D65 illuminant SPD (spectralScale / spectralData / spectralD65).
+        # binding 48: named-conductor eta/k curves (spectralMetals, Group 6.2).
         # Declared only for the `-DSKINNY_SPECTRAL` megakernel variant so the RGB
         # layout is byte-identical; consumed by spectrum.slang (SKINNY_SPECTRAL).
         if self.spectral:
-            for _spectral_binding in (45, 46, 47):
+            for _spectral_binding in (45, 46, 47, 48):
                 bindings.append(
                     vk.VkDescriptorSetLayoutBinding(
                         binding=_spectral_binding,

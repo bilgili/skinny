@@ -45,9 +45,15 @@ struct SpectralFlatColors
     Spectrum F0;        // Schlick base (reflectance)
     Spectrum emission;  // illuminant (× D65)
     Spectrum transmission; // reflectance (delta glass tint)
+    // Named-conductor exact Fresnel (6.2): isConductor ⇒ evaluate complex-index
+    // Fresnel from etaHero/kHero (eta(λ)/k(λ) at the 4 hero wavelengths) instead
+    // of Schlick(F0). Off (id 0) ⇒ the RGB/dielectric Schlick path.
+    bool     isConductor;
+    float4   etaHero;
+    float4   kHero;
 };
 
-SpectralFlatColors upsampleFlatColors(FlatMaterial mat, SampledWavelengths sw)
+SpectralFlatColors upsampleFlatColors(FlatMaterial mat, SampledWavelengths sw, uint metalId)
 {
     FlatHitMat m = mat.data.mat;
     SpectralFlatColors c;
@@ -57,6 +63,14 @@ SpectralFlatColors upsampleFlatColors(FlatMaterial mat, SampledWavelengths sw)
     c.F0           = upsampleReflectanceBound(mat.F0, sw);
     c.emission     = upsampleIlluminantBound(m.emission, sw);
     c.transmission = upsampleReflectanceBound(m.transmissionColor, sw);
+    c.isConductor  = (metalId >= 1u && metalId <= 4u);
+    if (c.isConductor)
+        namedMetalEtaK(metalId, sw, c.etaHero, c.kHero);
+    else
+    {
+        c.etaHero = float4(0.0);
+        c.kHero   = float4(0.0);
+    }
     return c;
 }
 
@@ -68,7 +82,8 @@ SpectralFlatColors upsampleFlatColors(FlatMaterial mat, SampledWavelengths sw)
 Spectrum flatResponseS(FlatMaterial mat, SpectralFlatColors c, float3 wo, float3 wi)
 {
     return flatBsdfResponseSpectral(wo, wi, mat.data.mat, mat.F0,
-                                    c.albedo, c.specColor, c.coatColor, c.F0);
+                                    c.albedo, c.specColor, c.coatColor, c.F0,
+                                    c.isConductor, c.etaHero, c.kHero);
 }
 
 // NEE response: the analytic `f·cos·opacity` (opacity is NOT stochastically
@@ -234,7 +249,8 @@ struct SpectralPathTracer
                 break;
 
             FlatMaterial mat = loadFlatMaterial(h);
-            SpectralFlatColors cols = upsampleFlatColors(mat, sw);
+            uint metalId = flatMaterials[h.materialId].conductorMetalId;
+            SpectralFlatColors cols = upsampleFlatColors(mat, sw, metalId);
 
             float3 N = mat.data.N;
             float3 T, B;

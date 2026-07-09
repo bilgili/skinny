@@ -119,6 +119,12 @@ struct FlatMaterialParams
     property float3 transmissionColor { get { return _transmissionColorDiffuseRough.xyz; } }
     property float  diffuseRoughness  { get { return _transmissionColorDiffuseRough.w; } }
     property float3 specularColor     { get { return _specularColorPad.xyz; } }
+    // Named-conductor identity (change spectral-rendering, Group 6.2): 0 = none
+    // (RGB Schlick F0), 1..4 = au/ag/al/cu. Stored in the previously-unused
+    // _specularColorPad.w (_pad1) — no struct growth. Only the spectral conductor
+    // Fresnel reads it; the RGB build ignores it (byte-identical CPU packing: the
+    // packer wrote 0 there before).
+    property uint conductorMetalId    { get { return asuint(_specularColorPad.w); } }
     property float3 mediumSigmaA      { get { return _mediumSigmaA_g.xyz; } }
     property float  mediumG           { get { return _mediumSigmaA_g.w; } }
     property float3 mediumSigmaS      { get { return _mediumSigmaS_kind.xyz; } }

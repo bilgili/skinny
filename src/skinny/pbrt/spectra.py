@@ -22,6 +22,15 @@ from __future__ import annotations
 import numpy as np
 
 from .data import NAMED_METAL_IOR, _normalize_metal_key
+from .data import spectral_tables as _st
+
+# Canonical named-conductor keys the spectral path binds vendored eta/k curves for
+# (spectral_tables.named_metal_spectrum). The alias map mirrors that function so
+# the importer, this module, and spectral_tables agree on normalization.
+_CONDUCTOR_CANON = frozenset({"au", "ag", "al", "cu"})
+_CONDUCTOR_ALIASES = {
+    "gold": "au", "silver": "ag", "aluminium": "al", "aluminum": "al", "copper": "cu",
+}
 
 # XYZ (D65) -> linear sRGB / Rec.709
 _XYZ_TO_SRGB = np.array(
@@ -137,6 +146,49 @@ def named_metal_reflectance_rgb(name: str):
     if ior is None:
         return None
     return fresnel_conductor_rgb(ior[0], ior[1])
+
+
+def named_conductor_key(param):
+    """Canonical metal key (``au``/``ag``/``al``/``cu``) for a named-conductor eta
+    param, or ``None``.
+
+    Spectral mode binds the exact vendored complex-IOR curve for a named metal;
+    this recovers the identity from a pbrt ``"spectrum eta"`` whose value is a
+    metal name (e.g. ``"metal-Au-eta"`` -> ``"au"``). Uses the same normalization
+    as :func:`spectral_tables.named_metal_spectrum` (strip ``metal-``/``metal_``
+    and ``-eta``/``-k``, lower-case, alias gold/silver/aluminium/copper). Returns
+    ``None`` for a float eta, a non-metal spectrum, or an unknown name — so an
+    RGB-only conductor authors no identity override.
+    """
+    if param is None or param.type != "spectrum":
+        return None
+    if not param.values or not isinstance(param.values[0], str):
+        return None
+    key = _normalize_metal_key(param.values[0])
+    key = _CONDUCTOR_ALIASES.get(key, key)
+    return key if key in _CONDUCTOR_CANON else None
+
+
+def named_glass_key(param):
+    """Normalized glass key for a named/dispersive dielectric eta param, or ``None``.
+
+    A named ``"spectrum eta"`` (e.g. ``"glass-BK7"``) carries a dispersive IOR
+    identity the spectral path binds via :func:`spectral_tables.named_glass_ior`;
+    this normalizes it (strip ``glass-``/``glass_``, lower-case) to a key that
+    function understands — a known Cauchy key (e.g. ``"bk7"``) or ``"default"``
+    for any other named glass. Returns ``None`` for a plain ``float eta`` (no
+    dispersion identity) or a non-string spectrum, so a scalar-IOR dielectric
+    authors nothing new.
+    """
+    if param is None or param.type != "spectrum":
+        return None
+    if not param.values or not isinstance(param.values[0], str):
+        return None
+    n = str(param.values[0]).strip().lower()
+    for prefix in ("glass-", "glass_"):
+        if n.startswith(prefix):
+            n = n[len(prefix):]
+    return n if n in _st._GLASS_CAUCHY else "default"
 
 
 def param_spectral_payload(param):

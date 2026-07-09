@@ -130,3 +130,47 @@ def spectrum_to_xyz(lam, values, pdf) -> np.ndarray:
 def resolve_to_linear_srgb(lam, values, pdf) -> np.ndarray:
     """Full film resolve: N spectral samples → linear sRGB (clamped ≥ 0)."""
     return np.clip(xyz_to_linear_srgb(spectrum_to_xyz(lam, values, pdf)), 0.0, None)
+
+
+# ── conductor Fresnel (pbrt FrComplex mirror) ─────────────────────────────
+
+
+def fresnel_conductor(cos_theta_i, eta, k) -> np.ndarray:
+    """Unpolarized conductor Fresnel reflectance, per wavelength (pbrt ``FrComplex``).
+
+    Port of pbrt-v4 ``FrComplex`` (spectrum.cpp): with complex index
+    ``η̃ = eta + i·k`` and ``cosθ_i ∈ [0, 1]``,
+
+        sin²θ_i = 1 − cos²θ_i,   sin²θ_t = sin²θ_i / η̃²,   cosθ_t = √(1 − sin²θ_t),
+        r_∥ = (η̃·cosθ_i − cosθ_t) / (η̃·cosθ_i + cosθ_t),
+        r_⊥ = (cosθ_i − η̃·cosθ_t) / (cosθ_i + η̃·cosθ_t),
+        R  = (|r_∥|² + |r_⊥|²) / 2.
+
+    ``eta``/``k`` are arrays over the sampled λ; ``cos_theta_i`` is a scalar or a
+    broadcastable array. Computed in ``complex128``; the real reflectance is
+    returned in [0, 1]. At normal incidence this equals
+    ``spectra.fresnel_conductor_rgb`` per λ; at grazing (cosθ→0) it → 1.
+    """
+    cos_theta_i = np.clip(np.asarray(cos_theta_i, dtype=np.float64), 0.0, 1.0)
+    eta_c = np.asarray(eta, dtype=np.float64) + 1j * np.asarray(k, dtype=np.float64)
+    sin2_i = 1.0 - cos_theta_i * cos_theta_i
+    sin2_t = sin2_i / (eta_c * eta_c)
+    cos_t = np.sqrt(1.0 - sin2_t)
+    r_parl = (eta_c * cos_theta_i - cos_t) / (eta_c * cos_theta_i + cos_t)
+    r_perp = (cos_theta_i - eta_c * cos_t) / (cos_theta_i + eta_c * cos_t)
+    r = 0.5 * (np.abs(r_parl) ** 2 + np.abs(r_perp) ** 2)
+    return np.real(r)
+
+
+def named_metal_eta_k(name: str, lam):
+    """``(eta, k)`` for a named metal interpolated onto *lam*, or ``None`` if unknown.
+
+    Interpolates :func:`spectral_tables.named_metal_spectrum` (the vendored 360–830
+    nm / 5 nm eta/k grid) onto the sampled wavelengths ``lam`` with ``np.interp``.
+    """
+    spec = st.named_metal_spectrum(name)
+    if spec is None:
+        return None
+    eta_grid, k_grid = spec
+    lam = np.asarray(lam, dtype=np.float64)
+    return np.interp(lam, _LAMBDA, eta_grid), np.interp(lam, _LAMBDA, k_grid)

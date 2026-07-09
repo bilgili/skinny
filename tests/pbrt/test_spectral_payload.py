@@ -35,6 +35,15 @@ def _overrides_with_key(stage, key):
     return None
 
 
+def _scalar_override(stage, key):
+    """Return the (scalar) skinnyOverrides value for *key*, or None."""
+    for prim in stage.Traverse():
+        ov = prim.GetCustomDataByKey("skinnyOverrides")
+        if ov and key in ov:
+            return ov[key]
+    return None
+
+
 # ── param_spectral_payload unit coverage ──────────────────────────
 
 
@@ -72,6 +81,43 @@ def test_payload_none_for_rgb_and_float():
     assert spectra.param_spectral_payload(_param("rgb", [0.5, 0.4, 0.3])) is None
     assert spectra.param_spectral_payload(_param("float", [0.7])) is None
     assert spectra.param_spectral_payload(None) is None
+
+
+# ── named-conductor / glass key normalization (spectra helpers) ────
+
+
+def test_named_conductor_key_normalizes_metals():
+    for raw, expect in [
+        ("metal-Au-eta", "au"),
+        ("metal-Ag-eta", "ag"),
+        ("metal-Al-eta", "al"),
+        ("metal-Cu-eta", "cu"),
+        ("gold", "au"),
+        ("Silver", "ag"),
+        ("aluminium", "al"),
+        ("aluminum", "al"),
+        ("copper", "cu"),
+    ]:
+        assert spectra.named_conductor_key(_param("spectrum", [raw])) == expect
+
+
+def test_named_conductor_key_none_for_unknown_or_nonspectrum():
+    assert spectra.named_conductor_key(_param("spectrum", ["metal-Fe-eta"])) is None
+    assert spectra.named_conductor_key(_param("float", [1.5])) is None
+    assert spectra.named_conductor_key(_param("rgb", [0.1, 0.2, 0.3])) is None
+    assert spectra.named_conductor_key(None) is None
+
+
+def test_named_glass_key_normalizes():
+    assert spectra.named_glass_key(_param("spectrum", ["glass-BK7"])) == "bk7"
+    assert spectra.named_glass_key(_param("spectrum", ["bk7"])) == "bk7"
+    # any other named glass spectrum -> the Cauchy fallback key
+    assert spectra.named_glass_key(_param("spectrum", ["glass-SF11"])) == "default"
+
+
+def test_named_glass_key_none_for_float_eta():
+    assert spectra.named_glass_key(_param("float", [1.5])) is None
+    assert spectra.named_glass_key(None) is None
 
 
 def test_rgb_reduction_unchanged_by_payload_path():
@@ -139,3 +185,71 @@ def test_rgb_only_scene_authors_no_spectral_payload(tmp_path):
     stage = _stage(tmp_path, _RGB_ONLY)
     assert _overrides_with_key(stage, "spectral") is None
     assert _overrides_with_key(stage, "emissive_spectral") is None
+
+
+# ── named-conductor / dispersive-glass material identity round-trip ─
+
+_TRI = ('Shape "trianglemesh" "point3 P" [0 0 0  1 0 0  0 1 0] '
+        '"integer indices" [0 1 2]')
+
+
+def _material_scene(material_line):
+    return f"""
+Film "rgb" "integer xresolution" 8 "integer yresolution" 8
+Camera "perspective" "float fov" 65
+WorldBegin
+AttributeBegin
+  {material_line}
+  {_TRI}
+AttributeEnd
+"""
+
+
+@pytest.mark.parametrize(
+    "eta_name,expect",
+    [("metal-Au-eta", "au"), ("metal-Cu-eta", "cu"),
+     ("metal-Ag-eta", "ag"), ("metal-Al-eta", "al")],
+)
+def test_named_conductor_material_roundtrips_key(tmp_path, eta_name, expect):
+    k_name = eta_name.replace("-eta", "-k")
+    mat = (f'Material "conductor" "spectrum eta" "{eta_name}" '
+           f'"spectrum k" "{k_name}" "float roughness" 0.2')
+    stage = _stage(tmp_path, _material_scene(mat))
+    assert _scalar_override(stage, "conductor_metal") == expect
+    # additive: no glass key on a conductor
+    assert _scalar_override(stage, "glass_dispersion") is None
+
+
+def test_named_glass_material_roundtrips_dispersion(tmp_path):
+    mat = 'Material "dielectric" "spectrum eta" "glass-BK7"'
+    stage = _stage(tmp_path, _material_scene(mat))
+    assert _scalar_override(stage, "glass_dispersion") == "bk7"
+    assert _scalar_override(stage, "conductor_metal") is None
+
+
+def test_rgb_conductor_authors_no_conductor_metal(tmp_path):
+    # A conductor with no named eta (defaults to Cu RGB) authors no identity key.
+    mat = 'Material "conductor" "float roughness" 0.2'
+    stage = _stage(tmp_path, _material_scene(mat))
+    assert _scalar_override(stage, "conductor_metal") is None
+    assert _scalar_override(stage, "glass_dispersion") is None
+
+
+def test_float_eta_dielectric_authors_no_dispersion(tmp_path):
+    mat = 'Material "dielectric" "float eta" 1.5'
+    stage = _stage(tmp_path, _material_scene(mat))
+    assert _scalar_override(stage, "glass_dispersion") is None
+    assert _scalar_override(stage, "conductor_metal") is None
+
+
+def test_named_conductor_material_roundtrips_key_mtlx(tmp_path):
+    from pxr import Usd
+
+    mat = ('Material "conductor" "spectrum eta" "metal-Au-eta" '
+           '"spectrum k" "metal-Au-k" "float roughness" 0.2')
+    src = tmp_path / "s.pbrt"
+    src.write_text(_material_scene(mat))
+    out = tmp_path / "s.usda"
+    import_pbrt(str(src), out=str(out), materialx=True)
+    stage = Usd.Stage.Open(str(out))
+    assert _scalar_override(stage, "conductor_metal") == "au"

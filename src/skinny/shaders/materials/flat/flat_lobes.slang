@@ -237,7 +237,8 @@ Spectrum schlickFresnelSpectral(float cosTheta, Spectrum F0)
 
 Spectrum flatBsdfResponseSpectral(
     float3 wo, float3 wi, FlatHitMat m, float3 F0rgb,
-    Spectrum albedoS, Spectrum specColorS, Spectrum coatColorS, Spectrum F0S)
+    Spectrum albedoS, Spectrum specColorS, Spectrum coatColorS, Spectrum F0S,
+    bool isConductor, float4 etaHero, float4 kHero)
 {
     if (wi.z <= 0.0 || wo.z <= 0.0)
         return Spectrum(0.0);
@@ -266,8 +267,21 @@ Spectrum flatBsdfResponseSpectral(
         resp += pCoat * pdfC * (coatColorS * (Fc * G1L));
     }
 
-    // Base spec lobe: spectral Schlick Fresnel on F0S × specularColor tint.
-    Spectrum Fs       = schlickFresnelSpectral(VdotH, F0S);
+    // Base spec lobe. Named conductor (6.2): exact complex-index Fresnel at each
+    // hero λ from the tabulated eta/k — this IS the metal's colour (specColorS is
+    // the std_surface white default, so no double-tint). Otherwise spectral
+    // Schlick on the upsampled F0 (the v1 dielectric/RGB-metal approximation).
+    Spectrum Fs;
+    if (isConductor)
+    {
+        [ForceUnroll]
+        for (int i = 0; i < 4; ++i)
+            Fs[i] = fresnelConductor(VdotH, etaHero[i], kHero[i]);
+    }
+    else
+    {
+        Fs = schlickFresnelSpectral(VdotH, F0S);
+    }
     float    G1Ls     = ggxSmithG1(NdotL, m.roughness);
     float    pdfS     = flatLobePdf(LOBE_SPEC, FLAT_SAMPLER_NATIVE, m.roughness, wi, wo);
     Spectrum specResp = pdfS * (Fs * G1Ls) * specColorS;

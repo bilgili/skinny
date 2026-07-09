@@ -68,6 +68,40 @@ float fresnelDielectric(float cosI, float eta)
     return 0.5 * (rS * rS + rP * rP);
 }
 
+#if defined(SKINNY_SPECTRAL)
+// Complex arithmetic over float2 (re, im) for the conductor Fresnel below.
+float2 cmul(float2 a, float2 b) { return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+float2 cdiv(float2 a, float2 b)
+{
+    float d = b.x * b.x + b.y * b.y;
+    return float2((a.x * b.x + a.y * b.y) / d, (a.y * b.x - a.x * b.y) / d);
+}
+float  cnorm(float2 z) { return z.x * z.x + z.y * z.y; }
+float2 csqrt(float2 z)
+{
+    float r = length(z);
+    float2 res = float2(sqrt(max((r + z.x) * 0.5, 0.0)), sqrt(max((r - z.x) * 0.5, 0.0)));
+    return (z.y < 0.0) ? float2(res.x, -res.y) : res;
+}
+
+// Unpolarized Fresnel reflectance of a conductor with complex index η+ik at
+// incidence cosθ (pbrt v4 FrComplex, spectrum.cpp). Per single wavelength; the
+// spectral path evaluates it at each hero λ with that λ's tabulated eta/k.
+float fresnelConductor(float cosThetaI, float eta, float k)
+{
+    cosThetaI = clamp(cosThetaI, 0.0, 1.0);
+    float2 e    = float2(eta, k);
+    float  sin2 = 1.0 - cosThetaI * cosThetaI;
+    float2 sin2t = cdiv(float2(sin2, 0.0), cmul(e, e));
+    float2 cost  = csqrt(float2(1.0, 0.0) - sin2t);
+    float2 ci    = float2(cosThetaI, 0.0);
+    float2 eci   = cmul(e, ci);
+    float2 rParl = cdiv(eci - cost, eci + cost);
+    float2 rPerp = cdiv(ci - cmul(e, cost), ci + cmul(e, cost));
+    return 0.5 * (cnorm(rParl) + cnorm(rPerp));
+}
+#endif
+
 struct FlatHitMat
 {
     float3 albedo;

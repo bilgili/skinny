@@ -115,6 +115,30 @@ Spectrum upsampleIlluminantBound(float3 rgb, SampledWavelengths sw)
     return upsampleIlluminant(rgb, sw, SPECTRAL_TABLE_RES, spectralScale,
                               spectralData, spectralD65, SPECTRAL_D65_COUNT);
 }
+
+// Named-conductor eta/k curves (change spectral-rendering, Group 6.2). vk binding
+// 48; uploaded only when spectral. Layout: 4 metals (au, ag, al, cu — ids 1..4)
+// each [eta(95) | k(95)] on the 360–830/5 nm grid (95 = SPECTRAL_D65_COUNT), so
+// stride 190 floats/metal. Absent from the RGB build.
+[[vk::binding(48)]] StructuredBuffer<float> spectralMetals;
+static const int SPECTRAL_METAL_STRIDE = 2 * SPECTRAL_D65_COUNT;  // eta+k per metal
+
+// eta(λ)/k(λ) at the 4 hero wavelengths for named metal id 1..4 (linear interp on
+// the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with a base offset).
+void namedMetalEtaK(uint metalId, SampledWavelengths sw, out float4 eta, out float4 k)
+{
+    int base  = int(metalId - 1u) * SPECTRAL_METAL_STRIDE;
+    int kbase = base + SPECTRAL_D65_COUNT;
+    [ForceUnroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float t = (sw.lambda[i] - SPECTRUM_LAMBDA_MIN) / 5.0;
+        int   j = clamp(int(t), 0, SPECTRAL_D65_COUNT - 2);
+        float f = clamp(t - float(j), 0.0, 1.0);
+        eta[i] = lerp(spectralMetals[base + j],  spectralMetals[base + j + 1],  f);
+        k[i]   = lerp(spectralMetals[kbase + j], spectralMetals[kbase + j + 1], f);
+    }
+}
 #endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)

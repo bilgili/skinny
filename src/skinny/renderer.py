@@ -486,6 +486,11 @@ class TexturePool:
         self._slots = []
 
 
+# Named-conductor id (Group 6.2): must match the au/ag/al/cu upload order in the
+# spectralMetals buffer and namedMetalEtaK's (id-1) indexing in bindings.slang.
+_CONDUCTOR_METAL_ID = {"au": 1, "ag": 2, "al": 3, "cu": 4}
+
+
 def pack_flat_material(
     material,
     diffuse_texture_idx: int = 0xFFFFFFFF,
@@ -583,6 +588,13 @@ def pack_flat_material(
     transmission_color = _override_color3(overrides, "transmission_color", diffuse)
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
+    # Named-conductor identity (Group 6.2): the importer preserves the metal name
+    # on skinnyOverrides["conductor_metal"]; map to the shader id (au/ag/al/cu →
+    # 1..4, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
+    # (read as asuint by conductorMetalId). Only the spectral conductor Fresnel
+    # reads it; RGB build ignores it. 0 for every non-conductor material.
+    conductor_metal_id = _CONDUCTOR_METAL_ID.get(
+        str(overrides.get("conductor_metal", "")).strip().lower(), 0)
     # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
     # Metal 31-buffer cap). σ in mm⁻¹; zero for non-medium materials. Boundary
     # eta reuses `ior`.
@@ -660,7 +672,7 @@ def pack_flat_material(
         transmission_color[0], transmission_color[1], transmission_color[2],
         diffuse_roughness,
         specular_color[0], specular_color[1], specular_color[2],
-        0,
+        int(conductor_metal_id) & 0xFFFFFFFF,
         medium_sigma_a[0], medium_sigma_a[1], medium_sigma_a[2],
         medium_g,
         medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
@@ -3824,6 +3836,7 @@ class Renderer:
         self._spectral_scale_buffer = None
         self._spectral_data_buffer = None
         self._spectral_d65_buffer = None
+        self._spectral_metals_buffer = None
         if self._spectral:
             from skinny.pbrt import spectral as _spectral_mirror
             from skinny.pbrt.data import spectral_tables
@@ -3850,6 +3863,27 @@ class Renderer:
             self._spectral_d65_buffer = self._gpu.StorageBuffer(
                 self.ctx, d65_arr.size * 4)
             self._spectral_d65_buffer.upload_sync(d65_arr.tobytes())
+            # Named-conductor eta/k (Group 6.2, binding 48): au/ag/al/cu (shader
+            # ids 1..4), each [eta(95) | k(95)] on the 360-830/5nm grid,
+            # concatenated → 4·190 floats. Order MUST match namedMetalEtaK's
+            # (metalId-1)*190 indexing in bindings.slang.
+            metal_blocks = []
+            for name in ("au", "ag", "al", "cu"):
+                ek = spectral_tables.named_metal_spectrum(name)
+                if ek is None:
+                    raise ValueError(f"spectral: missing named-metal curve '{name}'")
+                eta, k = ek
+                if eta.size != 95 or k.size != 95:
+                    raise ValueError(
+                        f"spectral metal '{name}' eta/k must be 95 samples, "
+                        f"got {eta.size}/{k.size}")
+                metal_blocks.append(np.asarray(eta, dtype=np.float32).ravel())
+                metal_blocks.append(np.asarray(k, dtype=np.float32).ravel())
+            metals_arr = np.ascontiguousarray(
+                np.concatenate(metal_blocks), dtype=np.float32)
+            self._spectral_metals_buffer = self._gpu.StorageBuffer(
+                self.ctx, metals_arr.size * 4)
+            self._spectral_metals_buffer.upload_sync(metals_arr.tobytes())
 
         # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
         # flow architecture and seeded with a dummy (zero) net so the inline flow
@@ -4255,10 +4289,10 @@ class Renderer:
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envDistCdf (one combined env CDF buffer).
                 # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                # +3 spectral upsample buffers (45/46/47) only for the spectral
-                # megakernel variant.
+                # +4 spectral buffers (45/46/47 upsample + 48 conductor eta/k)
+                # only for the spectral megakernel variant.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
-                * (22 + graph_slot + (3 if self._spectral else 0)),
+                * (22 + graph_slot + (4 if self._spectral else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4649,7 +4683,8 @@ class Renderer:
             if self._spectral:
                 for _b, _buf in ((45, self._spectral_scale_buffer),
                                  (46, self._spectral_data_buffer),
-                                 (47, self._spectral_d65_buffer)):
+                                 (47, self._spectral_d65_buffer),
+                                 (48, self._spectral_metals_buffer)):
                     writes.append(vk.VkWriteDescriptorSet(
                         dstSet=ds, dstBinding=_b, dstArrayElement=0,
                         descriptorCount=1,
@@ -8834,6 +8869,7 @@ class Renderer:
             b["spectralScale"] = self._spectral_scale_buffer.buffer
             b["spectralData"] = self._spectral_data_buffer.buffer
             b["spectralD65"] = self._spectral_d65_buffer.buffer
+            b["spectralMetals"] = self._spectral_metals_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -10468,10 +10504,10 @@ class Renderer:
         # _init_gpu; were previously never freed (surfaced by the record-dump's
         # clean-teardown check).
         self.env_dist_buffer.destroy()
-        # Spectral upsample tables (bindings 45/46/47) — only allocated for the
-        # spectral megakernel variant.
+        # Spectral buffers (bindings 45/46/47 upsample + 48 conductor eta/k) —
+        # only allocated for the spectral megakernel variant.
         for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
-                    self._spectral_d65_buffer):
+                    self._spectral_d65_buffer, self._spectral_metals_buffer):
             if _sb is not None:
                 _sb.destroy()
         self.hud_overlay.destroy()

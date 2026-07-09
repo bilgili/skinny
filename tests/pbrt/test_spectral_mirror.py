@@ -74,3 +74,60 @@ def spectra_spd_xyz_flat(v):
     from skinny.pbrt import spectra
 
     return spectra.spd_to_xyz(np.full(_LAMBDA.shape, v)) / spectra._Y_INTEGRAL
+
+
+# ── conductor Fresnel mirror (pbrt FrComplex) ─────────────────────────────
+
+
+def test_fresnel_normal_incidence_matches_rgb_formula():
+    from skinny.pbrt import spectra
+
+    # cosθ=1 must equal the closed-form ((η-1)²+k²)/((η+1)²+k²) per wavelength.
+    eta = np.array([0.14, 0.95, 1.5, 2.7])
+    k = np.array([3.9, 6.4, 0.0, 4.2])
+    got = spectral.fresnel_conductor(1.0, eta, k)
+    ref = spectra.fresnel_conductor_rgb(eta, k)
+    assert np.allclose(got, ref, atol=1e-12)
+
+
+def test_fresnel_gold_red_reflectance_high():
+    # Gold is a strong red reflector: R climbs through the visible into the red.
+    lam = np.array([580.0, 650.0])
+    eta, k = spectral.named_metal_eta_k("au", lam)
+    r = spectral.fresnel_conductor(1.0, eta, k)
+    assert r.shape == (2,)
+    assert r[0] > 0.88  # yellow-green already high
+    assert r[1] > 0.92  # deep red near-total reflection
+    # red (650) reflects at least as strongly as yellow-green (580)
+    assert r[1] >= r[0]
+
+
+def test_fresnel_reflectance_in_unit_range():
+    lam = np.linspace(360.0, 830.0, 40)
+    for name in ("au", "ag", "al", "cu"):
+        eta, k = spectral.named_metal_eta_k(name, lam)
+        for c in (1.0, 0.7, 0.3, 0.05):
+            r = spectral.fresnel_conductor(c, eta, k)
+            assert np.all(r >= 0.0) and np.all(r <= 1.0)
+
+
+def test_fresnel_grazing_goes_to_one():
+    lam = np.array([500.0, 600.0])
+    eta, k = spectral.named_metal_eta_k("cu", lam)
+    r = spectral.fresnel_conductor(1e-6, eta, k)
+    assert np.all(r > 0.999)
+
+
+def test_fresnel_rises_toward_grazing():
+    # A conductor's reflectance may dip slightly (pseudo-Brewster) but grazing
+    # incidence reflects far more than normal and tends to 1.
+    lam = np.array([550.0])
+    eta, k = spectral.named_metal_eta_k("ag", lam)
+    r_normal = float(spectral.fresnel_conductor(1.0, eta, k)[0])
+    r_graze = float(spectral.fresnel_conductor(0.02, eta, k)[0])
+    assert r_graze > r_normal
+    assert r_graze > 0.99
+
+
+def test_named_metal_eta_k_unknown_is_none():
+    assert spectral.named_metal_eta_k("unobtainium", np.array([500.0])) is None
