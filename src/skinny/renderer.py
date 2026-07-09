@@ -8517,12 +8517,20 @@ class Renderer:
         integ = self.integrator_modes[self.integrator_index].lower()
         rows.append(cr.ConfigRow("integrator", integ, integ, cr.ON))
 
-        # proposals: the active mixture, with whether the neural proposal is live.
+        # proposals: requested = the selected preset token; resolved = what the
+        # renderer actually samples. Spectral v1 pins the mixture to BSDF-only
+        # (see _active_proposals), so the resolved column must report that pin
+        # rather than echo the requested token — otherwise the status surface
+        # claims an env/neural mixture the spectral megakernel never samples.
         idx = max(0, min(int(self.proposal_preset_index),
                          len(self._PROPOSAL_PRESETS) - 1))
         prop_tok = self._PROPOSAL_PRESETS[idx][1]
-        prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
-        rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
+        if self._spectral and prop_tok != "bsdf":
+            rows.append(cr.ConfigRow("proposals", prop_tok, "bsdf",
+                                     f"{cr.ON} (pinned bsdf: spectral)"))
+        else:
+            prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
+            rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
 
         # The training stack rows only matter when online training is requested;
         # mark them n/a otherwise so the matrix reads cleanly with the loop off.
