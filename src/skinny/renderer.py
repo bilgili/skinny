@@ -8202,6 +8202,16 @@ class Renderer:
     def _active_proposals(self) -> list:
         """Active directional proposals for the current preset index."""
         from skinny.sampling import parse_proposals
+        # Spectral v1 is BSDF-proposal-only. The megakernel spectral integrator
+        # (path_spectral.slang) draws the bounce from the material's native
+        # sample() while its NEE MIS companion reads fc.proposalMask — so a
+        # non-BSDF proposal biases MIS. The startup CLI guard
+        # (reject_spectral_unsupported) refuses an explicit non-BSDF --proposals,
+        # but proposal selection is ALSO persisted and runtime-switchable on the
+        # interactive front-ends; clamp here so no persisted/preset/runtime state
+        # can bypass the guard and desync the bounce from the NEE companion.
+        if self._spectral:
+            return parse_proposals("bsdf")
         n = len(self._PROPOSAL_PRESETS)
         idx = max(0, min(int(self.proposal_preset_index), n - 1))
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
