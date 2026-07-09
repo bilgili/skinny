@@ -113,10 +113,16 @@
       reads the pre-normalized buffer). Fixed in BOTH `spectrum.slang::upsampleIlluminant` and
       `spectral.py::upsample_illuminant`; numpy verified white→1, [16,16,16]→16, chromatic
       preserved. (Before this a white light resolved ~49× too bright.)
-- [ ] 4.2 GPU≡numpy kernel tests (`tests/kernels/` harness pattern) for wavelength sampling,
+- [x] 4.2 GPU≡numpy kernel tests (`tests/kernels/` harness pattern) for wavelength sampling,
       upsample evaluation, and film resolve against the task-1.4 CPU mirror
-      — TODO next session (harness pattern: `tests/conftest.py` slangpy `load_shader` +
-      `tests/harnesses/test_spectrum_harness.slang`, call `test_*` wrappers with the 3 buffers).
+      — DONE: `tests/kernels/test_spectrum_kernels.py` (5 gpu-marked tests) compares the
+      `spectrum.slang` harness wrappers to `pbrt/spectral.py` — sampleWavelengths (λ+pdf),
+      terminateSecondary, upsampleReflectance, upsampleIlluminant (incl. HDR + chromatic),
+      spectrumResolveToLinearSRGB. Max rel err ~1e-6 (one atol-covered ~1e-4); the visible-λ
+      pdf's hard range-edge step is masked within 0.05 nm of 360/830 (fp32 vs fp64 boundary).
+      The harness's upsample wrappers now take the sRGB table + D65 as explicit
+      `StructuredBuffer` params (slangpy `NDBuffer.from_numpy(...).storage`); the computeMain
+      compile gate stays 2/2. GPU feeds `spectral.d65_normalized()` to match the upload.
 - [ ] 4.3 Byte-identity guard: test that the default (no-define) `main_pass.spv` compile is
       byte-identical to the checked-in binary after all shader edits
       — PARTIAL: reframed as "the RGB (no-define) build is unchanged by the spectral `#if`
@@ -158,13 +164,16 @@
       main_pass routes the hit case to `SpectralPathTracer` and the primary env-miss through a
       spectral upsample+resolve, all under `#if defined(SKINNY_SPECTRAL)`. BDPT/SPPM/wavefront
       are excluded by construction (separate integrator; the spectral branch never calls them).
-- [~] 5.4 GPU smoke test: flat corpus scene renders under `--spectral` megakernel on Metal;
+- [x] 5.4 GPU smoke test: flat corpus scene renders under `--spectral` megakernel on Metal;
       furnace scene closes within the existing uniformity gate
-      — PARTIAL: `int_bleed` (flat Cornell box) renders correctly under `--spectral` megakernel
-      on native Metal (M5 Pro) — energy-conserving (spectral mean 0.31343 vs RGB 0.31306, no
-      brightness blow-out) with plausible metameric red/green color-bleed differences (relMSE
-      0.0195). Labelled RGB-vs-spectral side-by-side captured. TODO: formal furnace uniformity
-      gate under spectral + wire into the confirming suite.
+      — DONE: `int_bleed` (flat Cornell box) renders correctly under `--spectral` megakernel on
+      native Metal (M5 Pro) — energy-conserving (spectral mean 0.31343 vs RGB 0.31306) with
+      plausible metameric red/green color-bleed (relMSE 0.0195); labelled side-by-side captured.
+      `furnace_lambert` (diffuseColor (1,1,1)) now CLOSES under `--spectral`: mean luminance
+      0.8797 vs RGB 0.8789 (both to the furnace constant 0.879), near-neutral — enabled by the
+      sigmoid-endpoint fix (uniform RGB r∈{0,1} was reflecting 0.5, so white furnace never
+      closed; now rides pbrt's IEEE-inf limit → reflectance {1,0}). TODO (harness wiring):
+      register the spectral furnace disposition in the confirming suite's meta-test.
 - [ ] 5.5 Backend A/B: one corpus scene rendered spectrally on Vulkan and native Metal
       agrees within the recorded backend-parity tolerance (render the labelled side-by-side)
 
@@ -222,8 +231,13 @@
 
 ## 9. Documentation
 
-- [ ] 9.1 `docs/Architecture.md`: new bindings in the descriptor map, spectrum module in
+- [x] 9.1 `docs/Architecture.md`: new bindings in the descriptor map, spectrum module in
       the module map, spectral-variant compile note
+      — DONE: bindings 45/46/47 (spectralScale/Data/D65, spectral-build-only) added to the
+      Descriptor Binding Map with the byte-unchanged-RGB-layout note; `spectrum.slang` +
+      `integrators/path_spectral.slang` in the shader module map (+ `flatBsdfResponseSpectral`);
+      a "spectral compile variant" paragraph (-DSKINNY_SPECTRAL both backends, gated `Spectrum`
+      typealias in common.slang, spv_cache flag hashing).
 - [x] 9.2 README + CLAUDE.md compatibility matrices: `--spectral` flag, scope guards
       (path + megakernel only, flat-only, no volumes/skin/reuse/neural; wavefront =
       designated follow-up), backend support; CHANGELOG entry
@@ -234,5 +248,8 @@
 - [ ] 9.3 New `docs/` section (or doc) for spectral rendering: hero-wavelength estimator,
       upsampling model, film resolve — equations as LaTeX-rendered SVG per repo convention;
       run `node docs/diagrams/embed_code.cjs --check` if marked shader regions were touched
-- [ ] 9.4 `docs/PythonAPI.md` if any public Python symbol was added; `ruff check src/` and
+- [~] 9.4 `docs/PythonAPI.md` if any public Python symbol was added; `ruff check src/` and
       full hostless pytest sweep green
+      — DONE (docs): `spectral.d65_normalized()` + `upsample_illuminant` RGBIlluminantSpectrum
+      semantics added to `docs/PythonAPI.md` §1.1; `ruff check src/` green. Full hostless sweep
+      re-run pending the remaining Group-6 work.
