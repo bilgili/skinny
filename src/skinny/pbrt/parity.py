@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from skinny import spectral_capability
+
 from . import metrics
 from .api import import_pbrt
 
@@ -118,15 +120,14 @@ EXECUTION_MODES = ("megakernel", "wavefront")
 PROPOSAL_AXES = ("neural",)
 REUSE_AXES = ("restir-di",)
 
-# Capability gate for the spectral axis (change spectral-rendering). The
-# megakernel spectral transport (Group 5) is not yet wired, so the renderer
-# ignores the spectral flag and would render an ordinary RGB frame. Until the
-# transport lands, spectral combos are a recorded "not yet wired" SKIP — the
-# matrix must never render one as RGB and gate it as if it were spectral. Flip
-# to True together with the megakernel integration so spectral combos enter the
-# rendered set; the validity ENVELOPE (:func:`spectral_envelope`) is already
-# enforced regardless, so out-of-scope combos keep their specific skip reason.
-SPECTRAL_IMPLEMENTED = False
+# Capability gate for the spectral axis (change spectral-rendering) — the single
+# source of truth lives in :mod:`skinny.spectral_capability` (shared with the
+# `--spectral` CLI gate). Until the megakernel transport is wired, spectral
+# combos are a recorded "not yet wired" SKIP so the matrix never renders one as
+# RGB and gates it as if it were spectral; the validity ENVELOPE
+# (:func:`spectral_envelope`) is enforced regardless. Referenced live below so a
+# single flip (or a test monkeypatch of ``spectral_capability.SPECTRAL_IMPLEMENTED``)
+# takes effect here.
 
 
 @dataclass(frozen=True)
@@ -248,7 +249,7 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
         ok, reason = spectral_envelope(combo, scene)
         if not ok:
             return False, reason
-        if not SPECTRAL_IMPLEMENTED:
+        if not spectral_capability.SPECTRAL_IMPLEMENTED:
             return False, "spectral transport not yet wired — megakernel Group 5 follow-up"
     # Heavy geometry that OOMs the megakernel.
     if combo.execution_mode == "megakernel" and not scene.megakernel_ok:
