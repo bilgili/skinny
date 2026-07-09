@@ -149,9 +149,16 @@ float3 rgbSigmoidCoeffs(float3 rgb, int res,
     rgb = clamp(rgb, float3(0.0), float3(1.0));
     if (rgb.x == rgb.y && rgb.y == rgb.z)
     {
+        // Uniform RGB → constant spectrum. pbrt rides the r∈{0,1} divide-by-zero
+        // into IEEE ±inf → sigmoid {0,1}; a finite ±1e9 reproduces that limit.
+        // The prior `c2 = 0` collapsed both endpoints to 0.5 (white reflected
+        // 50 % → white furnace never closed; black reflected 50 %). Mirrors
+        // spectral_tables.rgb_to_sigmoid_coeffs.
         float r = rgb.x;
-        float denom = (r > 0.0 && r < 1.0) ? sqrt(r * (1.0 - r)) : 0.0;
-        float c2 = (denom == 0.0) ? 0.0 : (r - 0.5) / denom;
+        float c2;
+        if (r >= 1.0)      c2 = 1.0e9;
+        else if (r <= 0.0) c2 = -1.0e9;
+        else               c2 = (r - 0.5) / sqrt(r * (1.0 - r));
         return float3(0.0, 0.0, c2);
     }
     int maxc = (rgb.x > rgb.y) ? ((rgb.x > rgb.z) ? 0 : 2)
