@@ -60,11 +60,24 @@ SpectralFlatColors upsampleFlatColors(FlatMaterial mat, SampledWavelengths sw)
     return c;
 }
 
-// Spectral f·cos response at a flat hit (tangent space), per wavelength.
+// Spectral f·cos response at a flat hit (tangent space), per wavelength. This is
+// the bare BSDF response (no opacity factor) — correct for the bounce THROUGHPUT
+// weight, where opacity cancels (response·op / (pdf·op), and the sample pdf here
+// carries no op). NEE consumes `response·opacity` directly (see flatResponseNEE),
+// mirroring FlatMaterial.evaluate()'s `* op`.
 Spectrum flatResponseS(FlatMaterial mat, SpectralFlatColors c, float3 wo, float3 wi)
 {
     return flatBsdfResponseSpectral(wo, wi, mat.data.mat, mat.F0,
                                     c.albedo, c.specColor, c.coatColor, c.F0);
+}
+
+// NEE response: the analytic `f·cos·opacity` (opacity is NOT stochastically
+// sampled at a direct-light connection, so it must be applied here — matching
+// FlatMaterial.evaluate().response = flatBsdfResponse * op). Without it, NEE
+// over-lights partial-opacity (e.g. glass) surfaces.
+Spectrum flatResponseNEE(FlatMaterial mat, SpectralFlatColors c, float3 wo, float3 wi)
+{
+    return flatResponseS(mat, c, wo, wi) * mat.data.mat.opacity;
 }
 
 // ── Spectral NEE (flat-only) ─────────────────────────────────────
@@ -93,7 +106,7 @@ Spectrum spectralLightNEE<TL : ILight>(
         return Spectrum(0.0);
 
     float3   wi   = worldToTangent(dir, T, B, N);
-    Spectrum resp = flatResponseS(mat, c, wo, wi);
+    Spectrum resp = flatResponseNEE(mat, c, wo, wi);
     Spectrum Li   = upsampleIlluminantBound(ls.radiance, sw);
 
     if (ls.pdfArea == 0.0)   // delta (directional) light
@@ -156,7 +169,7 @@ Spectrum spectralAllLightsNEE(
             visibleDirectional(fc, h.position, N, es.dir))
         {
             float3   wi   = worldToTangent(es.dir, T, B, N);
-            Spectrum resp = flatResponseS(mat, c, wo, wi);
+            Spectrum resp = flatResponseNEE(mat, c, wo, wi);
             ProposalContext pc;
             pc.woT = wo; pc.N = N; pc.T = T; pc.B = B;
             pc.position = h.position; pc.materialId = h.materialId;
