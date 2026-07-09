@@ -132,6 +132,8 @@ class RenderCombo:
     execution_mode: str = "wavefront"
     proposals: tuple[str, ...] = ()
     reuse: str = "none"
+    #: Spectral render variant (hero-wavelength). v1: path + megakernel + flat only.
+    spectral: bool = False
 
     @property
     def has_neural(self) -> bool:
@@ -157,6 +159,8 @@ class RenderCombo:
             parts.append("+".join(self.proposals))
         if self.has_reuse:
             parts.append(self.reuse)
+        if self.spectral:
+            parts.append("spectral")
         return "|".join(parts)
 
 
@@ -202,6 +206,23 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
             return False, f"{combo.integrator.upper()} has no volume transport (follow-up)"
         if combo.has_reuse:
             return False, "ReSTIR DI reuse untested with volume media (follow-up)"
+    # Spectral render variant (change spectral-rendering): hero-wavelength
+    # transport is wired into the Path integrator under the megakernel execution
+    # mode over flat materials only in v1. BDPT/SPPM, the wavefront mode, the
+    # neural proposal, ReSTIR reuse, and non-flat (skin/subsurface/volume)
+    # materials are recorded skips (wavefront spectral is the designated
+    # follow-up). Mirrors reject_spectral_unsupported (cli_common).
+    if combo.spectral:
+        if combo.integrator != "path":
+            return False, f"spectral is path-only (v1); {combo.integrator.upper()} follow-up"
+        if combo.execution_mode != "megakernel":
+            return False, "spectral is megakernel-only (v1); wavefront follow-up"
+        if combo.has_neural:
+            return False, "spectral is incompatible with the neural proposal (v1)"
+        if combo.has_reuse:
+            return False, "spectral is incompatible with ReSTIR reuse (v1)"
+        if scene.material_class != "flat":
+            return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
     # Heavy geometry that OOMs the megakernel.
     if combo.execution_mode == "megakernel" and not scene.megakernel_ok:
         return False, "geometry exceeds megakernel budget"
@@ -220,6 +241,9 @@ def all_combos() -> list[RenderCombo]:
             # reuse axis
             for reuse in REUSE_AXES:
                 combos.append(RenderCombo(integ, mode, (), reuse))
+            # spectral axis — the bare variant per integrator×mode; combo_is_valid
+            # keeps only (path, megakernel) on flat scenes.
+            combos.append(RenderCombo(integ, mode, (), "none", spectral=True))
     return combos
 
 

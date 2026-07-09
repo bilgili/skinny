@@ -124,11 +124,20 @@
 
 ## 7. Parity matrix integration
 
-- [ ] 7.1 Add the `spectral` axis to `parity.py` (`combo_is_valid` rules per the delta
+- [x] 7.1 Add the `spectral` axis to `parity.py` (`combo_is_valid` rules per the delta
       spec); machine-readable skip reasons for BDPT/SPPM/wavefront/proposal/reuse/volume/
       skin × spectral, including the mode-equivalence skip "spectral is megakernel-only"
-- [ ] 7.2 Extend the coverage meta-tests: integrator × spectral validity completeness;
+      — DONE: `RenderCombo.spectral` field + label tag; `combo_is_valid` spectral block
+      (path+megakernel+flat only, else recorded skip); `all_combos`/`enumerate_combos`
+      enumerate the axis. Mode-equivalence skip is implicit: only `(path, megakernel, spectral)`
+      is valid, so there is no wavefront spectral to pair (the mega≡wave gate finds no spectral
+      pair). Render pass-through of the flag is Group 7.3 (GPU).
+- [x] 7.2 Extend the coverage meta-tests: integrator × spectral validity completeness;
       suite spectral-discriminating disposition presence (hostless)
+      — DONE (validity completeness): `test_coverage_meta_spectral_axis_covered` + 8 spectral
+      validity tests in `tests/pbrt/test_matrix.py` (23 pass, 141 hostless total green). Suite
+      spectral-discriminating disposition coverage DEFERRED to Group 6.5 (the discriminating
+      scene must exist first); the meta-test will assert its disposition once 6.5 lands.
 - [ ] 7.3 GPU sweep: run `(Path, megakernel, spectral)` across the corpus; record spectral
       pbrt-truth measurements; assert spectral ≤ RGB on spectrum-authored scenes; report
       (not assert) spectral-vs-RGB anchor deltas
