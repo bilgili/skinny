@@ -192,6 +192,54 @@ def reject_sppm_without_wavefront(integrator: str | None, execution_mode: str | 
         )
 
 
+def reject_spectral_unsupported(
+    spectral: bool,
+    integrator: str | None,
+    execution_mode: str | None,
+    proposals: str | None = None,
+    reuse: str | None = None,
+) -> None:
+    """Refuse ``--spectral`` outside its v1 envelope. No-op when not spectral.
+
+    Spectral mode is a compile-time variant chosen at startup (path integrator,
+    megakernel execution, flat materials). Checked against the **resolved**
+    execution mode after :func:`resolve_execution_mode`, so it catches an
+    explicit ``--execution-mode wavefront`` while ``auto`` (which derives
+    ``megakernel`` for ``path``) is allowed. The neural proposal and ReSTIR reuse
+    layers are wavefront-only, so they are refused too. Raises ``SystemExit``.
+
+    Scene-level unsupported transport (a skin/subsurface or heterogeneous-volume
+    scene) is refused later, at renderer setup, where the material set is known —
+    this CLI guard covers only the flag-level combinations.
+    """
+    if not spectral:
+        return
+    integ = integrator or "path"
+    if integ != "path":
+        raise SystemExit(
+            f"skinny: --spectral supports only --integrator path in v1 (got "
+            f"{integ}). BDPT connection strategies and SPPM photon transport have "
+            "no spectral path yet."
+        )
+    if (execution_mode or "megakernel") == "wavefront":
+        raise SystemExit(
+            "skinny: --spectral runs only under the megakernel execution mode in "
+            "v1 — drop --execution-mode wavefront (path defaults to megakernel). "
+            "Spectral wavefront is the designated follow-up."
+        )
+    if "neural" in (proposals or ""):
+        raise SystemExit(
+            "skinny: --spectral is incompatible with the neural proposal "
+            "(--proposals …,neural) — neural guiding is wavefront-only and "
+            "spectral is megakernel-only in v1."
+        )
+    if reuse and reuse not in ("none",):
+        raise SystemExit(
+            f"skinny: --spectral is incompatible with --reuse {reuse} — reservoir "
+            "reuse is wavefront-only and spectral is megakernel-only in v1."
+        )
+
+
 def apply_sppm_glossy_roughness(renderer, args) -> None:
     """Apply the parsed ``--sppm-glossy-roughness`` override onto ``renderer``.
 
@@ -221,6 +269,7 @@ def add_render_flags(
     online_training: bool = True,
     encoding: bool = True,
     resolution: bool = True,
+    spectral: bool = True,
 ) -> None:
     """Add the shared `--backend` / `--integrator` / `--execution-mode` /
     `--bdpt-walk` / `--proposals` / `--reuse` / `--lobe-samplers` /
@@ -324,6 +373,19 @@ def add_render_flags(
             help="Reuse/resampling mode around direct + indirect lighting (+ "
                  "SKINNY_REUSE env). Only 'none' (stock NEE) ships today; "
                  "ReSTIR-style reservoir reuse is a future mode.",
+        )
+    if spectral:
+        parser.add_argument(
+            "--spectral", action="store_true", default=_env_flag("SKINNY_SPECTRAL"),
+            help="Render spectrally — hero-wavelength transport (4 samples over "
+                 "360–830 nm) with a CIE film resolve — instead of RGB. Chosen "
+                 "once at startup and fixed for the session; kernels compile "
+                 "spectral or RGB accordingly and it is not persisted (+ "
+                 "SKINNY_SPECTRAL env). v1 scope is --integrator path under the "
+                 "megakernel execution mode over flat materials; it is refused at "
+                 "startup with bdpt/sppm, an explicit --execution-mode wavefront, "
+                 "ReSTIR reuse, the neural proposal, or a skin/subsurface/volume "
+                 "scene.",
         )
     if lobe_samplers:
         parser.add_argument(

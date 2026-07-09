@@ -106,6 +106,7 @@ skinny = [
     "mtlx/genslang/*.slang",
     "web_templates/*.html",
     "web_templates/*.js",
+    "pbrt/data/*.npz",
 ]
 
 [tool.pytest.ini_options]

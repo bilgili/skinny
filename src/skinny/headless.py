@@ -18,6 +18,7 @@ import numpy as np
 
 from skinny.cli_common import (
     add_render_flags,
+    reject_spectral_unsupported,
     resolve_execution_mode,
     resolve_walk,
     validate_render_flags,
@@ -379,6 +380,9 @@ def main(argv: Optional[list] = None) -> int:
     ns.execution_mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
     # Reject impossible combos (e.g. bdpt + neural/online-training) up front.
     validate_render_flags(ns)
+    reject_spectral_unsupported(
+        getattr(ns, "spectral", False), ns.integrator or "path", ns.execution_mode,
+        getattr(ns, "proposals", None), getattr(ns, "reuse", None))
     from skinny.backend_select import select_backend
 
     # skinny-render is non-interactive (no persisted setting): resolve the
