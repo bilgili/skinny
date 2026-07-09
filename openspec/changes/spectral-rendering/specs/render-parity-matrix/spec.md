@@ -8,10 +8,14 @@ validity table over the axes `integrator ∈ {Path, BDPT, SPPM}`, `execution_mod
 {megakernel, wavefront}`, `proposals ⊇ {neural}`, `reuse ⊇ {ReSTIR DI}`, and
 `spectral ∈ {off, on}`. The table SHALL mirror the documented compatibility matrix. Every
 (scene × combo) SHALL be either exercised or skipped with an explicit, machine-readable
-reason; no valid combo SHALL be silently dropped. Spectral combos SHALL be valid only for
+reason; no valid combo SHALL be silently dropped. The spectral **envelope** SHALL admit only
 `(Path, megakernel)` without proposal or reuse layers, on flat-material scenes without
 subsurface/skin or heterogeneous-volume transport; the wavefront execution mode is a recorded
-spectral skip until the wavefront follow-up lands.
+spectral skip until the wavefront follow-up lands. An envelope-eligible spectral combo SHALL
+enter the rendered set only once the megakernel spectral transport is wired (a capability
+gate); while unwired it SHALL be a recorded "not yet wired" skip and SHALL be absent from the
+rendered set, so the matrix never renders a spectral combo as an ordinary RGB frame and gates
+it as if it were spectral.
 
 #### Scenario: SPPM is wavefront-only
 - **WHEN** the matrix is enumerated for any scene
@@ -28,11 +32,19 @@ spectral skip until the wavefront follow-up lands.
 - **WHEN** the matrix is enumerated
 - **THEN** no `BDPT` combo carries the neural proposal (skipped by design)
 
-#### Scenario: spectral is Path-megakernel-only without layers
-- **WHEN** the matrix is enumerated
+#### Scenario: spectral envelope is Path-megakernel-only without layers
+- **WHEN** the spectral envelope is evaluated for a flat-material scene
 - **THEN** every `(BDPT, spectral)` / `(SPPM, spectral)` / `(wavefront, spectral)` /
-  spectral+proposal / spectral+reuse combo is skipped with a recorded reason
-- **AND** for a flat-material scene, `(Path, megakernel, spectral)` is present
+  spectral+proposal / spectral+reuse combo is rejected with a recorded reason
+- **AND** `(Path, megakernel, spectral)` is the only envelope-eligible spectral combo
+
+#### Scenario: spectral combos are gated until the transport is wired
+- **WHEN** the matrix is enumerated while the megakernel spectral transport is not yet wired
+  (the capability gate is off)
+- **THEN** the envelope-eligible `(Path, megakernel, spectral)` combo is skipped with a
+  "not yet wired" reason and is absent from the rendered set
+- **AND** once the transport is wired (the capability gate is on), `(Path, megakernel,
+  spectral)` is present in the rendered set for a flat-material scene
 
 #### Scenario: spectral skips volume and skin scenes
 - **WHEN** the matrix is enumerated for a scene with heterogeneous media or skin/subsurface
