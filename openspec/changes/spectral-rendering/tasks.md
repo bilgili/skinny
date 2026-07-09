@@ -182,15 +182,33 @@
 - [ ] 6.1 Blackbody: Planck evaluation at sampled wavelengths from the preserved
       temperature; GPU≡numpy test + chromaticity-moves-toward-pbrt check on a
       blackbody-lit scene
-- [ ] 6.2 Spectral conductor Fresnel from the eta/k asset buffer for named metals; test vs
+- [x] 6.2 Spectral conductor Fresnel from the eta/k asset buffer for named metals; test vs
       CPU mirror
+      — DONE: importer preserves the metal identity on `skinnyOverrides["conductor_metal"]`
+      (au/ag/al/cu; `materials.material_spectral_overrides` + `api._author_material[_mtlx]`).
+      GPU: `spectralMetals` StorageBuffer (vk binding 48, spectral-only) with au/ag/al/cu eta/k
+      on the 5nm grid; `namedMetalEtaK` samples eta(λ)/k(λ) at the 4 hero λ; `fresnelConductor`
+      (pbrt FrComplex, float2 complex) in flat_shading.slang; `flatBsdfResponseSpectral`'s spec
+      lobe uses it when the hit is a named conductor (id in `FlatMaterialParams.conductorMetalId`
+      = spare `_specularColorPad.w`, 0 = RGB Schlick). numpy mirror `spectral.fresnel_conductor`
+      + `named_metal_eta_k` (gold R(580)=0.899, R(650)=0.940, ≡ fresnel_conductor_rgb at normal
+      incidence). VALIDATED: conductor_infinite.pbrt (gold) renders gold under --spectral, exact
+      Au Fresnel warmer/more-saturated than RGB (R/G 1.177 vs 1.125). GPU≡numpy conductor-Fresnel
+      harness test = follow-up (4.2 harness could add it).
 - [ ] 6.3 Authored illuminant SPD lookup from the spectral-asset buffer on lights that
       preserved one; test that a non-constant `spectrum L` renders from the SPD, not the RGB
       upsample
-- [ ] 6.4 Dispersion: wavelength-dependent IOR at hero λ for preserved glass fits;
+- [~] 6.4 Dispersion: wavelength-dependent IOR at hero λ for preserved glass fits;
       secondary termination with pdf adjustment on first dispersive refraction; unbiasedness
       test (constant-IOR dielectric keeps all 4 samples) and a visible prism-dispersion
       render
+      — IMPORTER PREP DONE: `skinnyOverrides["glass_dispersion"]` = bk7/default preserved for a
+      named-glass eta (`materials.material_spectral_overrides` + a pre-existing scalar("eta")
+      crash fix). GPU CONSUMER TODO: the delta-glass branch in path_spectral.slang (:283-287) +
+      flat_material.slang (:37-65) must re-evaluate `eta(λ)` (Cauchy `named_glass_ior`, upload a
+      glass-fit buffer or a Cauchy A/B pair in FlatMaterialParams) per hero λ + `terminateSecondary`
+      on first dispersive refraction (λ-dependent direction). Needs a spectral-specific refraction
+      path (the RGB `bs.wi` is λ-independent).
 - [ ] 6.5 Build the spectral-discriminating confirming-suite scene(s) (dispersive dielectric
       and/or blackbody-lit) via `tests/assets/suite/_gen/`, regen pbrt refs
       (`regen_refs.py`), register dispositions
