@@ -94,6 +94,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Spectral rendering foundation** (change `spectral-rendering`, work in
+  progress) — groundwork for opt-in hero-wavelength transport. Vendors pbrt-v4's
+  exact sRGB→spectrum upsampling table and CIE D65 / named-metal eta-k curves,
+  adds a numpy CPU estimator mirror (`skinny.pbrt.spectral`), preserves
+  blackbody temperatures and illuminant SPDs through pbrt import
+  (`skinnyOverrides`), a `--spectral` CLI flag (`SKINNY_SPECTRAL`), the
+  `spectrum.slang` shader core (sampling / secondary termination / CIE film
+  resolve / table lookup, hostless slangc-gated for both variants), and a
+  parity-matrix spectral axis. The megakernel transport that consumes the flag
+  is **not wired yet**: `--spectral` is refused at startup ("not yet
+  implemented") on every front-end — a single capability flag
+  (`skinny.spectral_capability.SPECTRAL_IMPLEMENTED`) turns the CLI and matrix on
+  together when the transport lands.
+
 - **pbrt procedural `cloud` medium** (change `pbrt-cloud-procedural-medium`) —
   `MakeNamedMedium "cloud"` (pbrt's built-in analytic cloud, `clouds.pbrt`) now
   imports and renders: a new `MEDIUM_CLOUD` kind fills the existing
