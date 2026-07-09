@@ -43,19 +43,33 @@ float3 test_resolve(float u, float4 values)
     return spectrumResolveToLinearSRGB(sampleWavelengths(u), values);
 }
 
-float3 test_rgbSigmoidCoeffs(float3 rgb)
+// The upsample wrappers take the sRGB table (res/scale/data) and D65 curve as
+// explicit function PARAMETERS rather than reading the module globals: slangpy
+// binds a numpy array straight to a `StructuredBuffer<float>` parameter, so the
+// Python GPU≡numpy test (tests/kernels/test_spectrum_kernels.py) can feed
+// gScale=scale, gData=data.ravel('C'), gD65=d65_normalized() per call. The
+// module-scope globals below stay so `computeMain` (the slangc compile gate)
+// still links, and the wrapped spectrum.slang functions are unchanged.
+float3 test_rgbSigmoidCoeffs(float3 rgb, int res,
+                             StructuredBuffer<float> scale,
+                             StructuredBuffer<float> data)
 {
-    return rgbSigmoidCoeffs(rgb, gRes, gScale, gData);
+    return rgbSigmoidCoeffs(rgb, res, scale, data);
 }
 
-float4 test_upsampleReflectance(float3 rgb, float u)
+float4 test_upsampleReflectance(float3 rgb, float u, int res,
+                                StructuredBuffer<float> scale,
+                                StructuredBuffer<float> data)
 {
-    return upsampleReflectance(rgb, sampleWavelengths(u), gRes, gScale, gData);
+    return upsampleReflectance(rgb, sampleWavelengths(u), res, scale, data);
 }
 
-float4 test_upsampleIlluminant(float3 rgb, float u)
+float4 test_upsampleIlluminant(float3 rgb, float u, int res,
+                               StructuredBuffer<float> scale,
+                               StructuredBuffer<float> data,
+                               StructuredBuffer<float> d65, int d65Count)
 {
-    return upsampleIlluminant(rgb, sampleWavelengths(u), gRes, gScale, gData, gD65, gD65Count);
+    return upsampleIlluminant(rgb, sampleWavelengths(u), res, scale, data, d65, d65Count);
 }
 
 [shader("compute")]
@@ -64,10 +78,11 @@ void computeMain(uint3 tid: SV_DispatchThreadID)
 {
     // Touch every entry so nothing is dead-stripped before the compile gate.
     float4 a = test_sampleWavelengths(0.3) + test_wavelengthPdfs(0.3)
-             + test_terminateSecondary(0.3) + test_upsampleReflectance(float3(0.5), 0.3)
-             + test_upsampleIlluminant(float3(0.5), 0.3);
+             + test_terminateSecondary(0.3)
+             + test_upsampleReflectance(float3(0.5), 0.3, gRes, gScale, gData)
+             + test_upsampleIlluminant(float3(0.5), 0.3, gRes, gScale, gData, gD65, gD65Count);
     float3 b = test_cieXYZBar(550.0) + test_resolve(0.3, a)
-             + test_rgbSigmoidCoeffs(float3(0.5, 0.2, 0.7));
+             + test_rgbSigmoidCoeffs(float3(0.5, 0.2, 0.7), gRes, gScale, gData);
     float c = test_sigmoidPoly(b, 550.0);
     gOut[tid.x] = a.x + b.x + c;  // sink: defeats dead-code elimination
 }
