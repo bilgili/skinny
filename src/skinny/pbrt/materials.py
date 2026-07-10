@@ -83,7 +83,11 @@ def get_float_texture(params, name, default, *, textures=None, base_dir=None, no
     Constant -> ``ParamValue(value)``; named texture -> ``ParamValue(default, tex)``;
     absent -> ``ParamValue(default)``. Never raises on a texture-typed param: pbrt
     ``ErrorExit``s on an unknown/unsupported texture, skinny falls back to the
-    default and records an APPROX note (best-effort translator).
+    default and records an APPROX note (best-effort translator). A named
+    ``spectrum`` value (e.g. a dielectric ``"spectrum eta" "glass-BK7"``) has no
+    scalar form here, so it likewise degrades to the default with a note — the
+    dispersive identity is preserved separately on ``skinnyOverrides``
+    (:func:`material_spectral_overrides`).
     """
     p = params.get(name)
     if p is None:
@@ -94,6 +98,10 @@ def get_float_texture(params, name, default, *, textures=None, base_dir=None, no
             return ParamValue(float(default), res)
         if notes is not None:
             notes.append(f"texture '{p.string}' on {name} unresolved/unsupported; used default")
+        return ParamValue(float(default))
+    if p.type == "spectrum" and p.values and isinstance(p.values[0], str):
+        if notes is not None:
+            notes.append(f"named spectrum '{p.string}' on {name} has no scalar; used default")
         return ParamValue(float(default))
     return ParamValue(p.float)
 
@@ -194,6 +202,35 @@ def _conductor_basecolor(params, notes: list[str]):
             pass
     notes.append("conductor IOR unresolved; defaulted to copper")
     return list(spectra.named_metal_reflectance_rgb("copper"))
+
+
+def material_spectral_overrides(pbrt_material) -> dict:
+    """Preserve a named-conductor / dispersive-glass identity for spectral mode.
+
+    Additive to the RGB reduction (which stays unchanged): when a conductor's eta
+    resolves to a named metal (``au``/``ag``/``al``/``cu``) this rides
+    ``conductor_metal`` on ``skinnyOverrides``; when a dielectric carries a
+    named/dispersive eta it rides ``glass_dispersion``. The spectral GPU path
+    binds the exact vendored eta/k or Cauchy curve from these keys. Returns ``{}``
+    for a plain-RGB conductor (unknown/absent named eta) or a scalar-IOR
+    dielectric, so an RGB-only scene authors no new override (byte-identical
+    import). The scalar ``ior`` and the RGB ``diffuseColor`` are untouched.
+    """
+    if pbrt_material is None:
+        return {}
+    mtype = pbrt_material.type
+    p = pbrt_material.params
+    if mtype in ("conductor", "coatedconductor"):
+        # `coatedconductor` names its conductor IOR `conductor.eta` (pbrt-v4).
+        eta_p = p.get("eta") or p.get("conductor.eta")
+        key = spectra.named_conductor_key(eta_p)
+        if key is not None:
+            return {"conductor_metal": key}
+    elif mtype in ("dielectric", "thindielectric"):
+        key = spectra.named_glass_key(p.get("eta"))
+        if key is not None:
+            return {"glass_dispersion": key}
+    return {}
 
 
 def _resolve_roughness_mtlx(params, notes: list[str], *, textures=None, base_dir=None):

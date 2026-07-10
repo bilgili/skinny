@@ -90,6 +90,7 @@ class _RenderWorker(QObject):
             neural_trainer=cfg.neural_trainer,
             train_precision=cfg.train_precision,
             neural_config=neural_cfg,
+            spectral=cfg.spectral,
         )
         renderer._requested_backend = cfg.requested_backend
         renderer._online_training_requested = bool(cfg.online_training)

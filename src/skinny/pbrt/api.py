@@ -359,6 +359,9 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     overrides = dict(extra_overrides or {})
     if pbrt_material is not None and pbrt_material.type == "subsurface":
         overrides.update(media_mod.subsurface_overrides(pbrt_material.params))
+    # Named-conductor / dispersive-glass identity for spectral mode (additive,
+    # RGB reduction unchanged; empty for RGB-only materials).
+    overrides.update(materials_mod.material_spectral_overrides(pbrt_material))
     mat = UsdShade.Material.Define(stage, mat_path)
     shader = UsdShade.Shader.Define(stage, mat_path + "/Surface")
     shader.CreateIdAttr("UsdPreviewSurface")
@@ -408,6 +411,9 @@ def _author_material_mtlx(stage, mat_path, pbrt_material, mesh_prim, report,
     overrides = dict(extra_overrides or {})
     if pbrt_material is not None and pbrt_material.type == "subsurface":
         overrides.update(media_mod.subsurface_overrides(pbrt_material.params))
+    # Named-conductor / dispersive-glass identity for spectral mode (additive,
+    # RGB reduction unchanged; empty for RGB-only materials).
+    overrides.update(materials_mod.material_spectral_overrides(pbrt_material))
 
     mat = UsdShade.Material.Define(stage, mat_path)
     # No UsdPreviewSurface shader, no surface output: ComputeBoundMaterial must

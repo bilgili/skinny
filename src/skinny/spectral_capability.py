@@ -1,18 +1,19 @@
 """Single source of truth for whether spectral rendering is wired.
 
 The `--spectral` flag, its startup refusals (``cli_common``), and the parity
-matrix's spectral axis (``pbrt.parity``) all key off this one constant. The
-CPU/data/shader-source foundation for hero-wavelength spectral rendering is
-merged, but the megakernel transport that actually consumes the spectral flag
-(change ``spectral-rendering`` Group 5) is not wired yet — so the renderer would
-silently produce an ordinary RGB frame for a ``--spectral`` run.
+matrix's spectral axis (``pbrt.parity``) all key off this one constant.
 
-While ``SPECTRAL_IMPLEMENTED`` is ``False`` the flag is refused at startup and
-spectral parity combos are recorded "not yet wired" skips. Flip it to ``True``
-together with the megakernel spectral transport so both the CLI and the matrix
-go live at once.
+The hero-wavelength spectral megakernel transport (change ``spectral-rendering``
+Groups 4–6) is **wired and GPU-validated**: the path+megakernel+flat v1 envelope
+renders under ``--spectral`` on both backends — spectral NEE, the sigmoid/D65
+upsampling model, exact named-conductor Fresnel (6.2), authored/blackbody
+illuminant SPDs (6.1/6.3), and hero-λ glass dispersion (6.4). So
+``SPECTRAL_IMPLEMENTED`` is ``True``: the flag is accepted for an in-envelope run
+(the other startup refusals — non-path integrator, wavefront, ReSTIR reuse,
+neural proposal, skin/subsurface/volume scene — still apply), and the parity
+matrix admits ``(path, megakernel, spectral)`` into the rendered set.
 """
 
 from __future__ import annotations
 
-SPECTRAL_IMPLEMENTED = False
+SPECTRAL_IMPLEMENTED = True

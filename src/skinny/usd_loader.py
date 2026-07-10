@@ -1221,7 +1221,32 @@ def _extract_distant_light(
     light_dir /= norm
 
     radiance = _light_color_radiance(UsdLux.LightAPI(prim))
-    return LightDir(direction=light_dir, radiance=radiance, prim_path=str(prim.GetPath()))
+    return LightDir(direction=light_dir, radiance=radiance,
+                    prim_path=str(prim.GetPath()),
+                    spectral_spd=_extract_light_spd(prim))
+
+
+def _extract_light_spd(prim: Usd.Prim) -> "np.ndarray | None":
+    """Authored illuminant SPD (spectral mode, Group 6.3) from a light prim's
+    `skinnyOverrides["spectral"]` (kind `spectrum_samples`), as a 95-sample
+    360-830/5 nm array. None for a blackbody / named / plain-RGB light — the
+    spectral path upsamples the RGB radiance in those cases."""
+    cd = prim.GetCustomData()
+    payload = cd.get("skinnyOverrides", {}).get("spectral") if cd else None
+    if payload is None or not hasattr(payload, "get"):
+        return None
+    if payload.get("kind") != "spectrum_samples":
+        return None
+    values = payload.get("values")
+    if values is None:
+        return None
+    arr = np.asarray(list(values), dtype=np.float32)
+    # The renderer's SPD buffer (binding 50) is a fixed 95-sample/light block; a
+    # mis-sized payload can't be indexed, so reject here (→ RGB upsample) rather
+    # than let a wrong-length array reach LightDir.spectral_spd.
+    if arr.shape != (95,):
+        return None
+    return arr
 
 
 def _extract_dome_light(

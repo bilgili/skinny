@@ -111,4 +111,7 @@ def render_furnace(spec: parity.SceneSpec, combo: parity.RenderCombo,
         integrator=combo.integrator, execution_mode=combo.execution_mode,
         usd_path=src["usd_path"],
         furnace=True, furnace_material=per_material,
+        # A spectral combo must render under --spectral, not fall back to RGB while
+        # labelled spectral (the spectral build closes the white furnace too, 5.4).
+        spectral=combo.spectral,
     )

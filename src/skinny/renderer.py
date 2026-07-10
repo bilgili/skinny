@@ -314,10 +314,23 @@ SPHERE_LIGHT_CAPACITY = 16
 DISTANT_LIGHT_STRIDE = 32
 DISTANT_LIGHT_CAPACITY = 16
 
+# Authored illuminant SPD per distant light (binding 50, spectral variant only):
+# 95 floats (360-830/5 nm radiance), one slot per distant light, indexed by the
+# SPD-slot stored in the DistantLight record's `_direction.w`. A light with no
+# authored SPD stores index -1 and the shader upsamples its RGB radiance instead.
+SPECTRAL_LIGHT_SPD_SAMPLES = 95
+SPECTRAL_LIGHT_SPD_STRIDE = SPECTRAL_LIGHT_SPD_SAMPLES * 4  # bytes / light
+
 # Emissive-triangle record (binding 18): vec3 v0 + pad, vec3 v1 + pad,
 # vec3 v2 + pad, vec3 emission + float area. 64 B / record.
 EMISSIVE_TRI_STRIDE = 64
 EMISSIVE_TRI_CAPACITY = 256
+
+# Spectral emitter record (binding 49, spectral variant only): float2
+# (temperature_K, scale) per emissive triangle, parallel-indexed to binding 18.
+# 8 B / record. A blackbody emitter carries (T, blackbody_scale(T, emission));
+# a plain-RGB emitter carries (0, 0) so the shader falls back to the RGB upsample.
+SPECTRAL_EMITTER_STRIDE = 8
 
 # StdSurfaceParams record (binding 19): full MaterialX standard_surface
 # parameters packed in scalar layout matching the Slang struct in
@@ -486,6 +499,11 @@ class TexturePool:
         self._slots = []
 
 
+# Named-conductor id (Group 6.2): must match the au/ag/al/cu upload order in the
+# spectralMetals buffer and namedMetalEtaK's (id-1) indexing in bindings.slang.
+_CONDUCTOR_METAL_ID = {"au": 1, "ag": 2, "al": 3, "cu": 4}
+
+
 def pack_flat_material(
     material,
     diffuse_texture_idx: int = 0xFFFFFFFF,
@@ -501,6 +519,7 @@ def pack_flat_material(
     volume_world_to_uvw=None,
     volume_value_max: float = 1.0,
     mm_per_unit: float = 1.0,
+    spectral: bool = False,
 ) -> bytes:
     """Pack a Material's overrides into FLAT_MATERIAL_STRIDE bytes
     (FlatMaterialParams).
@@ -583,6 +602,34 @@ def pack_flat_material(
     transmission_color = _override_color3(overrides, "transmission_color", diffuse)
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
+    # Named-conductor identity (Group 6.2): the importer preserves the metal name
+    # on skinnyOverrides["conductor_metal"]; map to the shader id (au/ag/al/cu →
+    # 1..4, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
+    # (read as asuint by conductorMetalId). SPECTRAL-ONLY: only the spectral
+    # conductor Fresnel reads it, so gate the id on `spectral` (like glassCauchyB)
+    # — the RGB pack keeps the literal 0 in that lane, byte-identical to baseline.
+    # The importer authors conductor_metal regardless of --spectral, so computing
+    # it unconditionally would perturb the RGB material buffer for a named metal.
+    conductor_metal_id = 0
+    if spectral:
+        conductor_metal_id = _CONDUCTOR_METAL_ID.get(
+            str(overrides.get("conductor_metal", "")).strip().lower(), 0)
+    # Named-glass dispersion (Group 6.4): the importer preserves the glass name on
+    # skinnyOverrides["glass_dispersion"]; the Cauchy fit is n(λ)=A+B/λ_µm². The
+    # base index A becomes the scalar `ior` lane (exact); B rides the spare
+    # _normalBiasPad.w (glassCauchyB). 0 = constant-IOR (non-dispersive), so every
+    # non-glass material keeps the old literal-0 pad → RGB pack byte-identical.
+    # SPECTRAL-ONLY: in the RGB build the scalar `ior` (and the pad) are left at
+    # their authored/fallback values, so a named-glass scene renders byte-identical
+    # to the pre-6.4 baseline — only the spectral variant substitutes Cauchy A.
+    glass_cauchy_b = 0.0
+    _gd = overrides.get("glass_dispersion")
+    if spectral and _gd is not None:
+        from skinny.pbrt.data.spectral_tables import named_glass_cauchy
+        _ab = named_glass_cauchy(_gd)
+        if _ab is not None:
+            ior = float(_ab[0])
+            glass_cauchy_b = float(_ab[1])
     # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
     # Metal 31-buffer cap). σ in mm⁻¹; zero for non-medium materials. Boundary
     # eta reuses `ior`.
@@ -638,7 +685,7 @@ def pack_flat_material(
             m = np.asarray([float(v) for v in np.ravel(rows)], np.float32).reshape(3, 4)
             w2u = tuple(tuple(float(v) for v in row) for row in m)
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I"
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff f  fff f  fff I  fff f fff I"
         " ffff ffff ffff ffff",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
@@ -656,11 +703,11 @@ def pack_flat_material(
         float(normal_scale[0]), float(normal_scale[1]), float(normal_scale[2]),
         int(channel_mask) & 0xFFFFFFFF,
         float(normal_bias[0]), float(normal_bias[1]), float(normal_bias[2]),
-        0,
+        float(glass_cauchy_b),
         transmission_color[0], transmission_color[1], transmission_color[2],
         diffuse_roughness,
         specular_color[0], specular_color[1], specular_color[2],
-        0,
+        int(conductor_metal_id) & 0xFFFFFFFF,
         medium_sigma_a[0], medium_sigma_a[1], medium_sigma_a[2],
         medium_g,
         medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
@@ -1315,6 +1362,7 @@ class Renderer:
         neural_handoff: str = "file",
         neural_trainer: str = "auto",
         train_precision: str = "fp32",
+        spectral: bool = False,
     ) -> None:
         self.ctx = vk_ctx
         # Resolve the GPU-resource module once from the context (design D1): the
@@ -1348,6 +1396,12 @@ class Renderer:
         self._neural_config = neural_config or NeuralBuildConfig()
         self._fp16_fallback_warned = False
         self._requested_execution_mode = str(execution_mode)
+        # Hero-wavelength spectral megakernel variant (change spectral-rendering,
+        # GPU transport). When set, the megakernel pipeline is compiled with
+        # `-DSKINNY_SPECTRAL` and the three pbrt upsample / D65 storage buffers
+        # (bindings 45/46/47) are uploaded + bound. Every spectral resource is
+        # guarded on this flag so a non-spectral run is byte-identical to before.
+        self._spectral = bool(spectral)
         # BDPT subpath-build strategy for wavefront+bdpt (CLI-fixed per session):
         #   fused      — one walk kernel (the S1 connect-compaction win, default)
         #   eye        — staged eye walk + fused light tail
@@ -3662,6 +3716,7 @@ class Renderer:
                     entry_module="main_pass",
                     entry_point="mainImage",
                     graph_fragments=list(self._scene_graph_fragments),
+                    spectral=self._spectral,
                 )
             except RuntimeError as e:
                 action = "rebuild" if is_rebuild else "build"
@@ -3680,6 +3735,7 @@ class Renderer:
                     entry_module="main_pass",
                     entry_point="mainImage",
                     graph_fragments=[],
+                    spectral=self._spectral,
                 )
             # In megakernel mode the scene bindings ARE the compiled pipeline.
             self.pipeline = self._scene_bindings
@@ -3806,6 +3862,68 @@ class Renderer:
         self.env_dist_buffer = self._gpu.StorageBuffer(
             self.ctx, ((ENV_HEIGHT + 1) + ENV_HEIGHT * (ENV_WIDTH + 1)) * 4)
         self._ensure_env_uploaded()
+
+        # Hero-wavelength spectral upsample tables (bindings 45/46/47), created
+        # ONCE and only for the spectral megakernel variant — the RGB path
+        # allocates nothing here. Static pbrt data: the sRGB→spectrum sigmoid
+        # table (scale grid + [3,res,res,res,3] cube, res==64) and the CIE D65
+        # SPD (95 samples on the 360-830/5 nm grid). Uploaded C-order float32.
+        self._spectral_scale_buffer = None
+        self._spectral_data_buffer = None
+        self._spectral_d65_buffer = None
+        self._spectral_metals_buffer = None
+        # Per-emissive-triangle blackbody metadata (binding 49, Group 6.1): a
+        # float2 (temperature_K, scale) parallel-indexed to emissive_tri_buffer
+        # (binding 18). Allocated below alongside the triangle buffer, spectral
+        # variant only. scale = spectral.blackbody_scale(T, emissiveColor).
+        self._spectral_emitters_buffer = None
+        if self._spectral:
+            from skinny.pbrt import spectral as _spectral_mirror
+            from skinny.pbrt.data import spectral_tables
+            res, scale, data = spectral_tables.load_srgb_upsample_table()
+            # Upload the UNIT-LUMINANCE-normalized D65 (pbrt whitepoint), matching
+            # spectral.upsample_illuminant so the GPU upsampleIlluminant ≡ the numpy
+            # mirror. Raw D65 (~100× luminance) would make every emitter blow out.
+            d65 = _spectral_mirror.d65_normalized()
+            if res != 64:
+                raise ValueError(
+                    f"spectral upsample table res must be 64, got {res}")
+            if d65.size != 95:
+                raise ValueError(
+                    f"spectral D65 SPD must have 95 samples, got {d65.size}")
+            scale_arr = np.ascontiguousarray(scale, dtype=np.float32).ravel()
+            data_arr = np.ascontiguousarray(data, dtype=np.float32).ravel(order="C")
+            d65_arr = np.ascontiguousarray(d65, dtype=np.float32).ravel()
+            self._spectral_scale_buffer = self._gpu.StorageBuffer(
+                self.ctx, scale_arr.size * 4)
+            self._spectral_scale_buffer.upload_sync(scale_arr.tobytes())
+            self._spectral_data_buffer = self._gpu.StorageBuffer(
+                self.ctx, data_arr.size * 4)
+            self._spectral_data_buffer.upload_sync(data_arr.tobytes())
+            self._spectral_d65_buffer = self._gpu.StorageBuffer(
+                self.ctx, d65_arr.size * 4)
+            self._spectral_d65_buffer.upload_sync(d65_arr.tobytes())
+            # Named-conductor eta/k (Group 6.2, binding 48): au/ag/al/cu (shader
+            # ids 1..4), each [eta(95) | k(95)] on the 360-830/5nm grid,
+            # concatenated → 4·190 floats. Order MUST match namedMetalEtaK's
+            # (metalId-1)*190 indexing in bindings.slang.
+            metal_blocks = []
+            for name in ("au", "ag", "al", "cu"):
+                ek = spectral_tables.named_metal_spectrum(name)
+                if ek is None:
+                    raise ValueError(f"spectral: missing named-metal curve '{name}'")
+                eta, k = ek
+                if eta.size != 95 or k.size != 95:
+                    raise ValueError(
+                        f"spectral metal '{name}' eta/k must be 95 samples, "
+                        f"got {eta.size}/{k.size}")
+                metal_blocks.append(np.asarray(eta, dtype=np.float32).ravel())
+                metal_blocks.append(np.asarray(k, dtype=np.float32).ravel())
+            metals_arr = np.ascontiguousarray(
+                np.concatenate(metal_blocks), dtype=np.float32)
+            self._spectral_metals_buffer = self._gpu.StorageBuffer(
+                self.ctx, metals_arr.size * 4)
+            self._spectral_metals_buffer.upload_sync(metals_arr.tobytes())
 
         # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
         # flow architecture and seeded with a dummy (zero) net so the inline flow
@@ -3953,6 +4071,19 @@ class Renderer:
         # before any USD scene is loaded.
         self.flat_material_buffer.upload_sync(b"\x00" * FLAT_MATERIAL_STRIDE)
         self._num_flat_materials = 0
+        # Per-material blackbody emission (binding 51, Group 6.1 follow-up),
+        # spectral variant only: float2 (temperature_K, scale) per flat material,
+        # indexed by materialId. Lets a camera-visible / BSDF-hit blackbody emitter
+        # use the exact Planck SPD (matching NEE) instead of the RGB upsample.
+        # Sized/grown parallel to flat_material_buffer; zeros ⇒ RGB upsample.
+        self._spectral_mat_emission_buffer = None
+        if self._spectral:
+            self._spectral_mat_emission_buffer = self._gpu.StorageBuffer(
+                self.ctx, self.material_capacity * SPECTRAL_EMITTER_STRIDE + 16
+            )
+            self._spectral_mat_emission_buffer.upload_sync(
+                b"\x00" * (self.material_capacity * SPECTRAL_EMITTER_STRIDE)
+            )
 
         # Bindless texture array (binding 14). Slots are populated lazily by
         # `_upload_flat_materials` from each Material.texture_paths entry.
@@ -3992,6 +4123,18 @@ class Renderer:
             b"\x00" * (DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE)
         )
         self._num_distant_lights: int = 0
+        # Per-distant-light authored illuminant SPD (binding 50, Group 6.3),
+        # spectral variant only — fixed capacity (distant lights never grow past
+        # DISTANT_LIGHT_CAPACITY), so no rebind path. Filled in
+        # _upload_distant_lights; zeros when no light carries an SPD.
+        self._spectral_light_spd_buffer = None
+        if self._spectral:
+            self._spectral_light_spd_buffer = self._gpu.StorageBuffer(
+                self.ctx, DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE + 16
+            )
+            self._spectral_light_spd_buffer.upload_sync(
+                b"\x00" * (DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE)
+            )
 
         # Emissive-triangle buffer (binding 18). Built from scene instances
         # whose material has non-zero emissiveColor. The shader samples one
@@ -4006,6 +4149,16 @@ class Renderer:
             b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
         )
         self._num_emissive_tris: int = 0
+        # Spectral emitter metadata (binding 49): float2 (T, scale) per triangle,
+        # sized/grown parallel to emissive_tri_buffer. Spectral variant only, so
+        # the RGB descriptor layout stays byte-identical.
+        if self._spectral:
+            self._spectral_emitters_buffer = self._gpu.StorageBuffer(
+                self.ctx, self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE + 16
+            )
+            self._spectral_emitters_buffer.upload_sync(
+                b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
+            )
         # Σ(area·Rec709-lum) over emissive triangles → FrameConstants.emissiveTotalPower
         # (the path tracer's BSDF-hit MIS weight). Set in _upload_emissive_triangles.
         self._emissive_total_power: float = 0.0
@@ -4211,7 +4364,11 @@ class Renderer:
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envDistCdf (one combined env CDF buffer).
                 # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (22 + graph_slot),
+                # +7 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
+                # 49 emissive blackbody + 50 distant-light SPD + 51 per-material
+                # blackbody) only for the spectral megakernel variant.
+                descriptorCount=MAX_FRAMES_IN_FLIGHT
+                * (22 + graph_slot + (7 if self._spectral else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4597,6 +4754,23 @@ class Renderer:
                     pBufferInfo=[vk.VkDescriptorBufferInfo(
                         buffer=_buf.buffer, offset=0, range=_buf.size)],
                 ))
+            # Spectral upsample tables (45/46/47) — only the spectral variant's
+            # layout declares these bindings; the RGB path writes nothing.
+            if self._spectral:
+                for _b, _buf in ((45, self._spectral_scale_buffer),
+                                 (46, self._spectral_data_buffer),
+                                 (47, self._spectral_d65_buffer),
+                                 (48, self._spectral_metals_buffer),
+                                 (49, self._spectral_emitters_buffer),
+                                 (50, self._spectral_light_spd_buffer),
+                                 (51, self._spectral_mat_emission_buffer)):
+                    writes.append(vk.VkWriteDescriptorSet(
+                        dstSet=ds, dstBinding=_b, dstArrayElement=0,
+                        descriptorCount=1,
+                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        pBufferInfo=[vk.VkDescriptorBufferInfo(
+                            buffer=_buf.buffer, offset=0, range=_buf.size)],
+                    ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_scene_descriptors(self) -> None:
@@ -4673,6 +4847,17 @@ class Renderer:
                     pBufferInfo=[ss_info],
                 ),
             ]
+            # Spectral (Group 6.1 follow-up): binding 51 grows with the material
+            # buffer, so rewrite it here too or it points at the freed buffer.
+            if self._spectral and self._spectral_mat_emission_buffer is not None:
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=51, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=self._spectral_mat_emission_buffer.buffer, offset=0,
+                        range=self._spectral_mat_emission_buffer.size)],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_emissive_descriptors(self) -> None:
@@ -4695,6 +4880,19 @@ class Renderer:
                     pBufferInfo=[emissive_tri_info],
                 ),
             ]
+            # Spectral (Group 6.1): the parallel-indexed spectralEmitters buffer
+            # (binding 49) is destroyed+recreated in the SAME growth step, so its
+            # descriptor must be rewritten here too — otherwise binding 49 keeps
+            # pointing at the freed buffer and emitterBlackbody() reads stale memory.
+            if self._spectral and self._spectral_emitters_buffer is not None:
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=49, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=self._spectral_emitters_buffer.buffer, offset=0,
+                        range=self._spectral_emitters_buffer.size)],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_mesh_descriptors(self) -> None:
@@ -5592,6 +5790,23 @@ class Renderer:
             )
             if emissive[0] <= 0 and emissive[1] <= 0 and emissive[2] <= 0:
                 continue
+            # Spectral (Group 6.1): a blackbody area light preserves its
+            # temperature on parameter_overrides["emissive_spectral"]. Evaluate the
+            # exact-Planck luminance-matching scale once per instance (shared by all
+            # its triangles); (0, 0) means "not a blackbody, use the RGB upsample".
+            bb_temp, bb_scale = 0.0, 0.0
+            if self._spectral:
+                payload = mat.parameter_overrides.get("emissive_spectral")
+                # payload round-trips USD as a pxr.Vt.Dictionary (NOT a py dict),
+                # so duck-type on `.get` rather than isinstance(dict).
+                if (payload is not None and hasattr(payload, "get")
+                        and payload.get("kind") == "blackbody"):
+                    from skinny.pbrt import spectral as _spectral_mirror
+                    bb_temp = float(payload.get("temperature", 0.0) or 0.0)
+                    if bb_temp > 0.0:
+                        bb_scale = float(
+                            _spectral_mirror.blackbody_scale(bb_temp, emissive)
+                        )
             src = inst.source
             xform = inst.transform
             for tri in range(len(src.tri_idx)):
@@ -5605,7 +5820,7 @@ class Renderer:
                 area = 0.5 * float(np.linalg.norm(np.cross(e1, e2)))
                 if area < 1e-8:
                     continue
-                records.append((p0, p1, p2, emissive, area))
+                records.append((p0, p1, p2, emissive, area, bb_temp, bb_scale))
 
         # Power-weighted importance sampling (change emissive-mesh-nee). Build a
         # normalized cumulative-power CDF over every emissive triangle (no 256
@@ -5618,7 +5833,7 @@ class Renderer:
         n = len(records)
         weights = [
             area * (0.2126 * float(em[0]) + 0.7152 * float(em[1]) + 0.0722 * float(em[2]))
-            for (_p0, _p1, _p2, em, area) in records
+            for (_p0, _p1, _p2, em, area, _t, _s) in records
         ]
         total_w = float(sum(weights))
         # Σ(area·Rec709-lum) → FrameConstants.emissiveTotalPower; the path tracer's
@@ -5632,6 +5847,10 @@ class Renderer:
             self._emissive_total_power = 0.0
             zeros = b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
             self.emissive_tri_buffer.upload_sync(zeros)
+            if self._spectral and self._spectral_emitters_buffer is not None:
+                self._spectral_emitters_buffer.upload_sync(
+                    b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
+                )
             return
 
         # Grow (and rebind) the buffer to hold every emissive triangle, doubling
@@ -5643,13 +5862,21 @@ class Renderer:
             self.emissive_tri_buffer = self._gpu.StorageBuffer(
                 self.ctx, self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE + 16
             )
+            if self._spectral and self._spectral_emitters_buffer is not None:
+                self._spectral_emitters_buffer.destroy()
+                self._spectral_emitters_buffer = self._gpu.StorageBuffer(
+                    self.ctx, self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE + 16
+                )
             self._rebind_emissive_descriptors()
 
         uniform = bool(getattr(self, "_emissive_uniform_selection", False))
         data = bytearray()
+        spectral_data = bytearray()   # binding 49: (T, scale) parallel to `data`
         cum = 0.0
         for i in range(n):
-            p0, p1, p2, em, area = records[i]
+            p0, p1, p2, em, area, bb_temp, bb_scale = records[i]
+            if self._spectral:
+                spectral_data += struct.pack("ff", float(bb_temp), float(bb_scale))
             if uniform:
                 # Test A/B: uniform-by-index — the same shader path then
                 # reproduces exact 1/N selection.
@@ -5674,6 +5901,11 @@ class Renderer:
         while len(data) < cap_bytes:
             data += b"\x00" * EMISSIVE_TRI_STRIDE
         self.emissive_tri_buffer.upload_sync(bytes(data[:cap_bytes]))
+        if self._spectral and self._spectral_emitters_buffer is not None:
+            sp_cap = self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE
+            while len(spectral_data) < sp_cap:
+                spectral_data += b"\x00" * SPECTRAL_EMITTER_STRIDE
+            self._spectral_emitters_buffer.upload_sync(bytes(spectral_data[:sp_cap]))
         self._num_emissive_tris = n
         print(f"[skinny] emissive triangles: {n}"
               + (" (uniform selection)" if uniform else " (power-weighted NEE)"))
@@ -5740,20 +5972,56 @@ class Renderer:
             ]
         n = min(len(enabled), DISTANT_LIGHT_CAPACITY)
         data = bytearray()
+        # Spectral (Group 6.3): a companion SPD buffer (binding 50) carries each
+        # light's authored illuminant spectrum, luminance-matched to its RGB
+        # radiance so switching to the SPD only changes chromaticity, not
+        # brightness. `_direction.w` holds the SPD slot (-1 = upsample the RGB).
+        spd_data = bytearray()
         for i in range(DISTANT_LIGHT_CAPACITY):
             if i < n:
                 light = enabled[i]
                 d = np.asarray(light.direction, np.float32)
                 r = np.asarray(light.radiance, np.float32)
+                # RGB build packs 0.0 in this lane (byte-identical to the pre-6.3
+                # layout); only the spectral build uses it as an SPD slot (-1 = none).
+                spd_index = -1.0 if self._spectral else 0.0
+                if self._spectral and getattr(light, "spectral_spd", None) is not None:
+                    scaled = self._spectral_light_spd_scaled(light.spectral_spd, r)
+                    if scaled is not None:
+                        spd_index = float(i)
+                        spd_data += scaled.astype("<f4").tobytes()
+                if len(spd_data) < (i + 1) * SPECTRAL_LIGHT_SPD_STRIDE:
+                    spd_data += b"\x00" * ((i + 1) * SPECTRAL_LIGHT_SPD_STRIDE - len(spd_data))
                 data += struct.pack(
                     "fff f fff f",
-                    float(d[0]), float(d[1]), float(d[2]), 0.0,
+                    float(d[0]), float(d[1]), float(d[2]), spd_index,
                     float(r[0]), float(r[1]), float(r[2]), 0.0,
                 )
             else:
                 data += b"\x00" * DISTANT_LIGHT_STRIDE
+                spd_data += b"\x00" * SPECTRAL_LIGHT_SPD_STRIDE
         self.distant_lights_buffer.upload_sync(bytes(data))
+        if self._spectral and self._spectral_light_spd_buffer is not None:
+            self._spectral_light_spd_buffer.upload_sync(bytes(spd_data))
         self._num_distant_lights = n
+
+    def _spectral_light_spd_scaled(self, spd, radiance_rgb):
+        """Return the authored SPD (95 samples) scaled so its hero-λ film resolve
+        reproduces the RGB radiance's luminance — so enabling the SPD shifts only
+        chromaticity. Returns None for a degenerate SPD (falls back to RGB)."""
+        import numpy as _np
+
+        from skinny.pbrt import spectra as _spectra
+        from skinny.pbrt.spectral import _REC709_Y, _Y_INTEGRAL
+
+        spd = _np.asarray(spd, dtype=_np.float64).reshape(-1)
+        if spd.size != SPECTRAL_LIGHT_SPD_SAMPLES or not _np.any(spd > 0.0):
+            return None
+        y_spd = float(_spectra.spd_to_xyz(spd)[1]) / _Y_INTEGRAL
+        if y_spd <= 0.0:
+            return None
+        y_target = float(_np.dot(_np.asarray(radiance_rgb, dtype=_np.float64), _REC709_Y))
+        return (spd * (y_target / y_spd)).astype(_np.float32)
 
     def _upload_flat_materials(self, materials: list) -> None:
         """Pack each scene Material into the FLAT_MATERIAL_STRIDE record format
@@ -5793,6 +6061,11 @@ class Renderer:
             self.std_surface_buffer = self._gpu.StorageBuffer(
                 self.ctx, new_cap * STD_SURFACE_STRIDE + 16
             )
+            if self._spectral and self._spectral_mat_emission_buffer is not None:
+                self._spectral_mat_emission_buffer.destroy()
+                self._spectral_mat_emission_buffer = self._gpu.StorageBuffer(
+                    self.ctx, new_cap * SPECTRAL_EMITTER_STRIDE + 16
+                )
             self._rebind_scene_descriptors()
             self._rebind_aux_material_descriptors()
         # Python-material slots route through MATERIAL_TYPE_PYTHON, but
@@ -5805,7 +6078,23 @@ class Renderer:
 
         data = bytearray()
         types: list[int] = []
+        spectral_emis = bytearray()   # binding 51: (T, scale) parallel to `data`
         for i, mat in enumerate(materials):
+            # Spectral (Group 6.1 follow-up): per-material blackbody (T, scale) for
+            # the exact-Planck visible/BSDF-hit emission path. Appended for EVERY
+            # material (before any `continue`) to stay parallel-indexed to materialId.
+            if self._spectral:
+                bb_t, bb_s = 0.0, 0.0
+                _bp = mat.parameter_overrides.get("emissive_spectral")
+                if (_bp is not None and hasattr(_bp, "get")
+                        and _bp.get("kind") == "blackbody"):
+                    bb_t = float(_bp.get("temperature", 0.0) or 0.0)
+                    if bb_t > 0.0:
+                        from skinny.pbrt import spectral as _sp
+                        _em = _override_color3(
+                            mat.parameter_overrides, "emissiveColor", (0.0, 0.0, 0.0))
+                        bb_s = float(_sp.blackbody_scale(bb_t, _em))
+                spectral_emis += struct.pack("ff", bb_t, bb_s)
             if mat.mtlx_target_name == "M_skinny_skin_default":
                 types.append(MATERIAL_TYPE_SKIN)
                 data += b"\x00" * FLAT_MATERIAL_STRIDE
@@ -5909,13 +6198,39 @@ class Renderer:
                 volume_world_to_uvw=self._volume_world_to_uvw,
                 volume_value_max=self._volume_value_max,
                 mm_per_unit=float(self.mm_per_unit),
+                # Group 6.4: only substitute the named-glass Cauchy A into the
+                # scalar `ior` under --spectral; the RGB pack stays byte-identical.
+                spectral=self._spectral,
             )
         if not data:
             data += b"\x00" * FLAT_MATERIAL_STRIDE
             types.append(MATERIAL_TYPE_FLAT)
         self.flat_material_buffer.upload_sync(bytes(data))
+        if self._spectral and self._spectral_mat_emission_buffer is not None:
+            sp_cap = self.material_capacity * SPECTRAL_EMITTER_STRIDE
+            if not spectral_emis:
+                spectral_emis += struct.pack("ff", 0.0, 0.0)
+            while len(spectral_emis) < sp_cap:
+                spectral_emis += b"\x00" * SPECTRAL_EMITTER_STRIDE
+            self._spectral_mat_emission_buffer.upload_sync(bytes(spectral_emis[:sp_cap]))
         self._num_flat_materials = len(materials)
         self._material_types = types
+        # Spectral v1 is FLAT-only: the megakernel spectral integrator
+        # (path_spectral.slang) shades MATERIAL_TYPE_FLAT and terminates the path
+        # on anything else. The CLI flag-level guard (reject_spectral_unsupported)
+        # can't see scene contents, so this is the scene-level refusal the design
+        # deferred to renderer setup — refuse here rather than silently render
+        # non-flat pixels black.
+        if self._spectral:
+            nonflat = sorted({int(t) for t in types if int(t) != MATERIAL_TYPE_FLAT})
+            if nonflat:
+                raise SystemExit(
+                    "skinny: --spectral supports only flat materials in v1 "
+                    "(UsdPreviewSurface / standard_surface / OpenPBR), but this scene "
+                    f"has non-flat material type code(s) {nonflat} "
+                    "(skin=0 / debug=2 / python=3 / subsurface=4 / volume=5). Spectral "
+                    "skin/subsurface/volume are follow-ups — render without --spectral."
+                )
         self._upload_material_types()
         # Pack StdSurfaceParams for every material slot into binding 19.
         # Skin-typed slots get zeroed records (the shader dispatches to the
@@ -8126,9 +8441,31 @@ class Renderer:
     def _active_proposals(self) -> list:
         """Active directional proposals for the current preset index."""
         from skinny.sampling import parse_proposals
+        # Spectral v1 is BSDF-proposal-only. The megakernel spectral integrator
+        # (path_spectral.slang) draws the bounce from the material's native
+        # sample() while its NEE MIS companion reads fc.proposalMask — so a
+        # non-BSDF proposal biases MIS. The startup CLI guard
+        # (reject_spectral_unsupported) refuses an explicit non-BSDF --proposals,
+        # but proposal selection is ALSO persisted and runtime-switchable on the
+        # interactive front-ends; clamp here so no persisted/preset/runtime state
+        # can bypass the guard and desync the bounce from the NEE companion.
+        if self._spectral:
+            return parse_proposals("bsdf")
         n = len(self._PROPOSAL_PRESETS)
         idx = max(0, min(int(self.proposal_preset_index), n - 1))
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
+
+    def _active_integrator_index(self) -> int:
+        """The integrator actually dispatched. Spectral v1 is PATH-only: the
+        megakernel spectral variant always runs SpectralPathTracer (main_pass.slang
+        strips the integrator branch under SKINNY_SPECTRAL), and the startup guard
+        (reject_spectral_unsupported) refuses a non-path startup integrator. But
+        integrator_index is persisted and runtime-switchable on the interactive
+        front-ends (and settable via HeadlessRenderer render options), so clamp to
+        0 (path) here — the same pattern as _active_proposals — so fc.integratorType
+        and the config matrix report what is actually rendered instead of a stale
+        BDPT/SPPM selection."""
+        return 0 if self._spectral else int(self.integrator_index)
 
     def _neural_active(self) -> bool:
         """True when the neural proposal (bit2) is selected AND the backend can
@@ -8427,16 +8764,42 @@ class Renderer:
                if self.execution_mode_fallback_active else cr.ON)
         rows.append(cr.ConfigRow("execution-mode", req_e, res_e, est))
 
-        # integrator.
-        integ = self.integrator_modes[self.integrator_index].lower()
-        rows.append(cr.ConfigRow("integrator", integ, integ, cr.ON))
+        # integrator. Spectral v1 pins the dispatch to path (see
+        # _active_integrator_index); report that pin rather than echo a runtime
+        # BDPT/SPPM selection the spectral megakernel never runs. Fold the
+        # requested token into STATUS so matrix_signature (resolved+status) flips
+        # when the user switches integrator live under spectral.
+        # Inline the path pin (0 under spectral) rather than call
+        # _active_integrator_index — `_collect_config_rows` runs against a plain
+        # namespace in the observability tests, so it must read only fields.
+        res_idx = 0 if getattr(self, "_spectral", False) else int(self.integrator_index)
+        req_integ = self.integrator_modes[self.integrator_index].lower()
+        res_integ = self.integrator_modes[res_idx].lower()
+        if self._spectral and req_integ != res_integ:
+            rows.append(cr.ConfigRow("integrator", req_integ, res_integ,
+                                     f"{cr.ON} (spectral pin; requested {req_integ})"))
+        else:
+            rows.append(cr.ConfigRow("integrator", req_integ, res_integ, cr.ON))
 
-        # proposals: the active mixture, with whether the neural proposal is live.
+        # proposals: requested = the selected preset token; resolved = what the
+        # renderer actually samples. Spectral v1 pins the mixture to BSDF-only
+        # (see _active_proposals), so the resolved column must report that pin
+        # rather than echo the requested token — otherwise the status surface
+        # claims an env/neural mixture the spectral megakernel never samples.
         idx = max(0, min(int(self.proposal_preset_index),
                          len(self._PROPOSAL_PRESETS) - 1))
         prop_tok = self._PROPOSAL_PRESETS[idx][1]
-        prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
-        rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
+        if self._spectral and prop_tok != "bsdf":
+            # Fold the requested token into the STATUS (not just the requested
+            # column): matrix_signature dedups re-prints on resolved+status only,
+            # so with resolved pinned to "bsdf" a runtime proposal switch would
+            # otherwise leave the matrix stale. Carrying prop_tok in the status
+            # makes the signature flip when the user changes the preset live.
+            rows.append(cr.ConfigRow("proposals", prop_tok, "bsdf",
+                                     f"{cr.ON} (spectral pin; requested {prop_tok})"))
+        else:
+            prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
+            rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
 
         # The training stack rows only matter when online training is requested;
         # mark them n/a otherwise so the matrix reads cleanly with the loop off.
@@ -8728,6 +9091,20 @@ class Renderer:
         combined = getattr(self, "_graph_params_combined", None)
         if combined is not None:
             b["graphParamsCombined"] = combined.buffer
+        # Spectral upsample tables (bindings 45/46/47) — only the spectral
+        # megakernel variant references these names; Metal silently skips
+        # unbound names, but only add when the buffers exist.
+        if self._spectral and self._spectral_scale_buffer is not None:
+            b["spectralScale"] = self._spectral_scale_buffer.buffer
+            b["spectralData"] = self._spectral_data_buffer.buffer
+            b["spectralD65"] = self._spectral_d65_buffer.buffer
+            b["spectralMetals"] = self._spectral_metals_buffer.buffer
+            if self._spectral_emitters_buffer is not None:
+                b["spectralEmitters"] = self._spectral_emitters_buffer.buffer
+            if self._spectral_light_spd_buffer is not None:
+                b["spectralLightSpd"] = self._spectral_light_spd_buffer.buffer
+            if self._spectral_mat_emission_buffer is not None:
+                b["spectralMatEmission"] = self._spectral_mat_emission_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -8957,8 +9334,10 @@ class Renderer:
         # Active emissive-triangle count (bounds the shader's NEE loop).
         data += struct.pack("I", int(self._num_emissive_tris))        # 4 bytes
         # Integrator selector — 0 = path, 1 = BDPT. main_pass.slang dispatches
-        # on this; PathTracer codepath is byte-identical for value 0.
-        data += struct.pack("I", int(self.integrator_index))          # 4 bytes
+        # on this; PathTracer codepath is byte-identical for value 0. Under
+        # --spectral this is pinned to 0 (path) — the only integrator the spectral
+        # megakernel runs — so fc.integratorType never disagrees with the render.
+        data += struct.pack("I", int(self._active_integrator_index()))  # 4 bytes
         # Active gizmo-segment count (bounds main_pass's overlay loop).
         data += struct.pack("I", int(self._num_gizmo_segments))       # 4 bytes
         # Thick-lens parameters. numLensElements > 0 swaps the pinhole ray
@@ -10148,7 +10527,13 @@ class Renderer:
             self._record_pipeline = ComputePipeline(
                 self.ctx, self.shader_dir,
                 entry_module="main_pass", entry_point="mainImageRecord",
-                graph_fragments=list(self._scene_graph_fragments))
+                graph_fragments=list(self._scene_graph_fragments),
+                # The record pipeline reuses the scene descriptor sets, which under
+                # --spectral carry the spectral-only bindings 45-51; build its layout
+                # with the same flag so binding a spectral set against it is valid
+                # (record dumps are otherwise wavefront/neural-only, refused under
+                # spectral — this keeps the layout consistent as defense-in-depth).
+                spectral=self._spectral)
         return self._record_pipeline
 
     def _resolve_record_source(self) -> str:
@@ -10362,6 +10747,14 @@ class Renderer:
         # _init_gpu; were previously never freed (surfaced by the record-dump's
         # clean-teardown check).
         self.env_dist_buffer.destroy()
+        # Spectral buffers (bindings 45/46/47 upsample + 48 conductor eta/k) —
+        # only allocated for the spectral megakernel variant.
+        for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
+                    self._spectral_d65_buffer, self._spectral_metals_buffer,
+                    self._spectral_emitters_buffer, self._spectral_light_spd_buffer,
+                    self._spectral_mat_emission_buffer):
+            if _sb is not None:
+                _sb.destroy()
         self.hud_overlay.destroy()
         self.accum_image.destroy()
         self._offscreen_output.destroy()

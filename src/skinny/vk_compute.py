@@ -181,11 +181,16 @@ class ComputePipeline:
         graph_fragments: "list | None" = None,
         *,
         compile_pipeline: bool = True,
+        spectral: bool = False,
     ) -> None:
         self.ctx = ctx
         self.shader_dir = shader_dir
         self.entry_module = entry_module
         self.entry_point = entry_point
+        # Spectral megakernel variant: adds the `-DSKINNY_SPECTRAL=1` compile
+        # define (distinct SPIR-V cache slot) and the three spectral upsample /
+        # D65 storage-buffer bindings (45/46/47). Off ⇒ byte-identical RGB path.
+        self.spectral = bool(spectral)
         # GraphFragment list (skinny.materialx_runtime). Each fragment is a
         # MaterialXGenSlang-extracted nodegraph evaluator that gets
         # concatenated into shaders/generated_materials.slang. Empty list ⇒
@@ -319,6 +324,10 @@ class ComputePipeline:
             "-D", "SKINNY_COMPUTE_PIPELINE=1",
             "-fvk-use-scalar-layout",
         )
+        # Spectral variant: distinct define ⇒ distinct cache key (flags are
+        # hashed into `_cache_key`), so the RGB and spectral SPIR-V never alias.
+        if self.spectral:
+            flags = (*flags, "-D", "SKINNY_SPECTRAL=1")
 
         cache_dir = self._build_dir() / self._CACHE_DIRNAME
         key = self._cache_key(src, flags)
@@ -661,6 +670,28 @@ class ComputePipeline:
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
         ]
+        # bindings 45/46/47: spectral hero-wavelength upsample data — the pbrt
+        # sRGB→spectrum sigmoid-coefficient table scale grid / data cube and the
+        # CIE D65 illuminant SPD (spectralScale / spectralData / spectralD65).
+        # binding 48: named-conductor eta/k curves (spectralMetals, Group 6.2).
+        # binding 49: per-emissive-triangle blackbody (T, scale) (spectralEmitters,
+        # Group 6.1), parallel-indexed to the emissive-triangle buffer (binding 18).
+        # binding 50: per-distant-light authored illuminant SPD (spectralLightSpd,
+        # Group 6.3), 95 floats/light indexed by the DistantLight `_direction.w` slot.
+        # binding 51: per-material blackbody (T, scale) (spectralMatEmission, Group
+        # 6.1 follow-up), indexed by materialId for exact-Planck visible/BSDF-hit
+        # emission. Declared only for the `-DSKINNY_SPECTRAL` megakernel variant so
+        # the RGB layout is byte-identical; consumed by spectrum.slang.
+        if self.spectral:
+            for _spectral_binding in (45, 46, 47, 48, 49, 50, 51):
+                bindings.append(
+                    vk.VkDescriptorSetLayoutBinding(
+                        binding=_spectral_binding,
+                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        descriptorCount=1,
+                        stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                    )
+                )
         # Binding GRAPH_BINDING_BASE: the single combined graph-param buffer
         # (`ByteAddressBuffer graphParamsCombined`) shared by every MaterialX
         # nodegraph compiled into this pipeline — one matId-major byte buffer,

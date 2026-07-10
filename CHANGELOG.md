@@ -116,19 +116,25 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Spectral rendering foundation** (change `spectral-rendering`, work in
-  progress) — groundwork for opt-in hero-wavelength transport. Vendors pbrt-v4's
-  exact sRGB→spectrum upsampling table and CIE D65 / named-metal eta-k curves,
-  adds a numpy CPU estimator mirror (`skinny.pbrt.spectral`), preserves
-  blackbody temperatures and illuminant SPDs through pbrt import
-  (`skinnyOverrides`), a `--spectral` CLI flag (`SKINNY_SPECTRAL`), the
-  `spectrum.slang` shader core (sampling / secondary termination / CIE film
-  resolve / table lookup, hostless slangc-gated for both variants), and a
-  parity-matrix spectral axis. The megakernel transport that consumes the flag
-  is **not wired yet**: `--spectral` is refused at startup ("not yet
-  implemented") on every front-end — a single capability flag
-  (`skinny.spectral_capability.SPECTRAL_IMPLEMENTED`) turns the CLI and matrix on
-  together when the transport lands.
+- **Spectral rendering** (`--spectral`, change `spectral-rendering`) — opt-in
+  hero-wavelength transport instead of RGB, **v1 live**
+  (`SPECTRAL_IMPLEMENTED = True`). The megakernel spectral integrator
+  (`integrators/path_spectral.slang`) renders the **path + megakernel + flat**
+  envelope on Vulkan and native Metal: per-wavelength NEE, pbrt's exact
+  sRGB→spectrum sigmoid upsampling + CIE D65 illuminant model, exact
+  named-conductor complex-index Fresnel, authored `spectrum L` illuminant SPDs +
+  blackbody Planck emission (area lights and distant lights), and hero-λ Cauchy
+  glass dispersion, all resolved through the Wyman CMF to the existing RGBA32F
+  accumulation (exposure/tonemap/readback unchanged). Vendors pbrt-v4's exact
+  upsampling table + CIE/eta-k curves, a numpy CPU estimator mirror
+  (`skinny.pbrt.spectral`), pbrt-import payload preservation (`skinnyOverrides`),
+  the `--spectral` CLI flag (`SKINNY_SPECTRAL`), and a parity-matrix spectral
+  axis. An in-envelope `--spectral` run is accepted on every front-end;
+  out-of-envelope combos (non-path integrator, wavefront, ReSTIR reuse, neural
+  proposal, skin/subsurface/volume scene) are refused at startup. The RGB
+  (no-`--spectral`) build is byte-unchanged — every spectral binding/kernel is
+  compiled only under `-DSKINNY_SPECTRAL`. Wavefront spectral, BDPT/SPPM, and
+  volume/skin spectral are designated follow-ups.
 
 - **pbrt procedural `cloud` medium** (change `pbrt-cloud-procedural-medium`) —
   `MakeNamedMedium "cloud"` (pbrt's built-in analytic cloud, `clouds.pbrt`) now

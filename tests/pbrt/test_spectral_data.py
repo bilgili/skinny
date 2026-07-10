@@ -85,3 +85,38 @@ def test_glass_dispersion_normal():
     n_blue = st.named_glass_ior("glass-BK7", 486.0)
     n_red = st.named_glass_ior("glass-BK7", 656.0)
     assert n_blue > n_red  # normal dispersion
+
+
+def test_named_glass_cauchy_known_coeffs():
+    for name in ("bk7", "default"):
+        coeff = st.named_glass_cauchy(name)
+        assert coeff is not None
+        a, b = coeff
+        assert isinstance(a, float) and isinstance(b, float)
+        assert abs(a - 1.5046) < 1e-9 and abs(b - 0.00420) < 1e-9
+
+
+def test_named_glass_cauchy_normalizes_prefix_and_case():
+    # "glass-BK7" strips the prefix and lowercases to the bk7 entry.
+    assert st.named_glass_cauchy("glass-BK7") == st.named_glass_cauchy("bk7")
+    assert st.named_glass_cauchy("glass_bk7") == st.named_glass_cauchy("bk7")
+
+
+def test_named_glass_cauchy_unknown_falls_back_to_default():
+    # An unknown-but-present name rides the default (BK7-family) coefficients,
+    # mirroring named_glass_ior's fallback.
+    assert st.named_glass_cauchy("glass-SF11") == st.named_glass_cauchy("default")
+
+
+def test_named_glass_cauchy_none_or_empty_is_none():
+    assert st.named_glass_cauchy(None) is None
+    assert st.named_glass_cauchy("") is None
+    assert st.named_glass_cauchy("   ") is None
+
+
+def test_named_glass_cauchy_matches_ior_evaluation():
+    # The (A, B) accessor reproduces named_glass_ior when fed through n=A+B/λµm².
+    a, b = st.named_glass_cauchy("glass-BK7")
+    for lam_nm in (486.0, 589.0, 656.0):
+        lam_um = lam_nm * 1e-3
+        assert abs((a + b / lam_um**2) - float(st.named_glass_ior("bk7", lam_nm))) < 1e-12

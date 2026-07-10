@@ -598,12 +598,15 @@ class ComputePipeline:
 
     def __init__(self, ctx, shader_dir, entry_module: str = "main_pass",
                  entry_point: str = "mainImage", graph_fragments=None, *,
-                 compile_pipeline: bool = True) -> None:
+                 compile_pipeline: bool = True, spectral: bool = False) -> None:
         self.ctx = ctx
         self._spy = ctx._spy
         self.shader_dir = Path(shader_dir)
         self.entry_module = entry_module
         self.entry_point = entry_point
+        # Spectral megakernel variant — adds the `SKINNY_SPECTRAL=1` compile
+        # define. Off ⇒ byte-identical RGB path (mirrors vk_compute).
+        self.spectral = bool(spectral)
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
 
         # Emit the generated material/dispatcher Slang both backends need before
@@ -664,7 +667,14 @@ class ComputePipeline:
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
         opts = spy.SlangCompilerOptions()
         opts.include_paths = [self.shader_dir, mtlx_genslang]
-        opts.defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+        # Build the full dict and assign ONCE: SlangCompilerOptions.defines is a
+        # property whose getter returns a fresh copy, so `opts.defines[k] = v`
+        # mutates a throwaway and is silently lost (the spectral define never
+        # reached the compile → the megakernel ran the RGB variant).
+        defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+        if self.spectral:
+            defines["SKINNY_SPECTRAL"] = "1"
+        opts.defines = defines
         # Match the Vulkan `slangc` path's matrix layout. slangc defaults to
         # column-major (HLSL/Slang default — the Vulkan flags never override it)
         # and both the `_pack_uniforms` camera matrices and the `Instance`

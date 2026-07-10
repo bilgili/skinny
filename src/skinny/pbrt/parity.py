@@ -95,6 +95,15 @@ class SceneSpec:
     #   {..., "per_material":true, "furnace_material":1}  — per-material furnace:
     #     only material index `furnace_material` carries the furnace bit.
     furnace: dict | None = None
+    # Spectral-discriminating disposition (change spectral-rendering, Group 6.5).
+    # Marks a suite scene whose whole point is that a `--spectral` render differs
+    # from the RGB render — e.g. a named-glass dispersion prism (Cauchy IOR splits
+    # the hero wavelengths) or a blackbody-lit scene. Shape:
+    #   {"kind":"dispersion", "glass":"bk7", "note":...}   — dispersive dielectric,
+    #   {"kind":"blackbody", "temperature":T, "note":...}  — blackbody emitter.
+    # Consumed by the suite coverage meta-test (its presence is asserted once a
+    # discriminator lands) and, on GPU, the spectral-vs-RGB delta report (7.3).
+    spectral: dict | None = None
 
 
 @dataclass
@@ -341,7 +350,8 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
                   reuse: str | None = None,
                   usd_path: str | None = None,
                   furnace: bool = False,
-                  furnace_material: int | None = None) -> np.ndarray:
+                  furnace_material: int | None = None,
+                  spectral: bool = False) -> np.ndarray:
     """Render a scene in skinny; return linear-HDR (H,W,3).
 
     The scene source is either a pbrt file (*scene_pbrt*, imported to USD at call
@@ -389,7 +399,8 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     def _run(scene_usd: str) -> np.ndarray:
         with HeadlessRenderer(width, height, gpu=gpu, backend=backend,
                               execution_mode=execution_mode,
-                              proposals=proposals, reuse=reuse) as r:
+                              proposals=proposals, reuse=reuse,
+                              spectral=spectral) as r:
             # Set before the scene build so _upload_emissive_triangles sees it.
             r.renderer._emissive_uniform_selection = bool(emissive_uniform)
             r._prepare(scene_usd, RenderOptions(samples=spp, integrator=integrator))
@@ -481,6 +492,7 @@ def render_combo(spec: SceneSpec, combo: RenderCombo, corpus_dir: str,
         integrator=combo.integrator, execution_mode=combo.execution_mode,
         proposals=combo.proposals_token(), reuse=combo.reuse_token(),
         materialx=spec.materialx, usd_path=src["usd_path"],
+        spectral=combo.spectral,
     )
 
 

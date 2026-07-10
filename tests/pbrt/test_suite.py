@@ -43,6 +43,9 @@ SUITE_BY_NAME = {s.name: s for s in SUITE}
 FURNACE = [s for s in SUITE if s.furnace]
 # _mtlx variants that declare an equivalence pair (skip-reasoned ones excluded).
 EQUIV_PAIRS = [s for s in SUITE if s.equivalence and s.equivalence.get("pair")]
+# Suite scenes carrying a spectral-discriminating disposition (change
+# spectral-rendering, Group 6.5): a --spectral render is meant to differ from RGB.
+SPECTRAL = [s for s in SUITE if s.spectral]
 
 
 def _abs(path: str) -> str:
@@ -131,6 +134,32 @@ def test_suite_coverage_furnace_disposition(spec):
         )
     # A furnace scene's reference is the analytic invariant, not a pbrt EXR.
     assert spec.pbrt_skip, f"{spec.name}: furnace scene needs a pbrt_skip reason"
+
+
+def test_suite_spectral_discriminator_present():
+    """At least one suite scene carries a spectral-discriminating disposition
+    (change spectral-rendering, Group 6.5) — a scene whose whole point is that a
+    ``--spectral`` render differs from the RGB render (a named-glass dispersion
+    prism and/or a blackbody-lit scene). This backstops Group 7.2's deferred
+    assertion: the discriminator must exist before the spectral GPU sweep (7.3)
+    has anything to measure spectral-vs-RGB deltas on."""
+    assert SPECTRAL, (
+        "no suite scene declares a `spectral` disposition — the spectral axis has "
+        "no discriminating confirming-suite scene (Group 6.5)"
+    )
+
+
+@pytest.mark.parametrize("spec", SPECTRAL, ids=[s.name for s in SPECTRAL])
+def test_suite_spectral_disposition_wellformed(spec):
+    """A spectral disposition names a recognized kind and carries the payload that
+    kind needs (a named glass for dispersion, a temperature for blackbody)."""
+    cfg = spec.spectral
+    kind = cfg.get("kind")
+    assert kind in ("dispersion", "blackbody"), f"{spec.name}: unknown spectral kind {kind!r}"
+    if kind == "dispersion":
+        assert cfg.get("glass"), f"{spec.name}: dispersion disposition needs a `glass` key"
+    else:  # blackbody
+        assert "temperature" in cfg, f"{spec.name}: blackbody disposition needs a `temperature`"
 
 
 @pytest.mark.parametrize("spec", SUITE, ids=[s.name for s in SUITE])
@@ -235,10 +264,32 @@ def test_suite_matrix_gate(spec):
         if c != ANCHOR:
             sc = self_consistency_result(spec, c, img, anchor_img)
             print(f"[{spec.name}] {c.label:28s} vs-anchor  {sc.metrics.summary()}")
-            if not sc.passed:
+            if c.spectral:
+                # Spectral is a DISCRIMINATING axis (7.3): on a spectrum-authored
+                # suite scene it differs from the RGB anchor by design, so the
+                # anchor delta is REPORTED, not asserted.
+                print(f"[{spec.name}] {c.label:28s} spectral-vs-RGB "
+                      f"Δ relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}")
+            elif not sc.passed:
                 failures.append(
                     f"{c.label}: self-consistency relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}"
                 )
+
+    # 7.3: REPORT the spectral-vs-RGB pbrt-truth direction (not a hard gate). On a
+    # smooth chromaticity shift spectral improves; on a hero-λ dispersion caustic
+    # (spec_prism) it can regress in pointwise relMSE while being the physically-
+    # correct dispersive result — so spectral pbrt-truth is gated against its own
+    # recorded baseline (above), and only the direction is logged here.
+    if want_pbrt:
+        anchor_pt = pbrt_truth_result(spec, ANCHOR, anchor_img, ref)
+        for c in combos:
+            if not c.spectral:
+                continue
+            spt = pbrt_truth_result(spec, c, imgs[c.label], ref)
+            verdict = "improves" if spt.relmse <= anchor_pt.relmse else "regresses"
+            print(f"[{spec.name}] {c.label:28s} spectral-vs-RGB pbrt-truth "
+                  f"{verdict}: spectral relMSE={spt.relmse:.4f} vs RGB {anchor_pt.relmse:.4f}")
+
     if failures and spec.known_divergent:
         # A recorded, not-yet-fixed divergence (e.g. the MaterialX imagemap path);
         # xfail (visible, non-blocking). The follow-up fix flips known_divergent.

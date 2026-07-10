@@ -11,16 +11,10 @@
 // resolve back to linear sRGB through skinny's Wyman-Sloan-Shirley CMF fit
 // (shared with `spectra.py` so importer, mirror, and shader agree).
 
-// `Spectrum` is the radiance/throughput carrier. Spectral build: 4 wavelength
-// samples. RGB build (module unused): float3, so callers that include the header
-// unconditionally still typecheck.
-#if defined(SKINNY_SPECTRAL)
-typealias Spectrum = float4;
-static const int SPECTRUM_N = 4;
-#else
-typealias Spectrum = float3;
-static const int SPECTRUM_N = 3;
-#endif
+// `Spectrum` (float4 spectral / float3 RGB) + SPECTRUM_N live in common.slang so
+// the carrier structs type-check in both builds; import it here rather than
+// redefine (this module is compiled only in the spectral variant).
+import common;
 
 static const float SPECTRUM_LAMBDA_MIN = 360.0;
 static const float SPECTRUM_LAMBDA_MAX = 830.0;
@@ -83,6 +77,30 @@ SampledWavelengths terminateSecondary(SampledWavelengths sw)
     sw.pdf.z = 0.0;
     sw.pdf.w = 0.0;
     return sw;
+}
+
+// Raw Planck blackbody spectral radiance at the 4 hero wavelengths (change
+// spectral-rendering, Group 6.1). Bit-exact mirror of spectra.py `planck`:
+// 2hc²/(λ⁵·(exp(hc/λk_BT)−1)), λ in metres. Un-normalized; the per-emitter
+// luminance match is a host-computed scalar (spectral.blackbody_scale), applied
+// by the caller — never here. Returns 0 for a non-positive temperature.
+Spectrum planckSpectrum(SampledWavelengths sw, float temperature)
+{
+    if (temperature <= 0.0)
+        return Spectrum(0.0);
+    const float h  = 6.62606957e-34;   // Planck constant (J·s)
+    const float c  = 299792458.0;      // speed of light (m/s)
+    const float kb = 1.3806488e-23;    // Boltzmann constant (J/K)
+    Spectrum L;
+    [ForceUnroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float lam = sw.lambda[i] * 1e-9;                 // nm → m
+        float lam5 = lam * lam * lam * lam * lam;
+        float expo = exp(h * c / (lam * kb * temperature)) - 1.0;
+        L[i] = (2.0 * h * c * c) / (lam5 * expo);
+    }
+    return L;
 }
 
 // ── CIE colour-matching (Wyman-Sloan-Shirley fit, mirrors spectra.py) ──
@@ -155,9 +173,16 @@ float3 rgbSigmoidCoeffs(float3 rgb, int res,
     rgb = clamp(rgb, float3(0.0), float3(1.0));
     if (rgb.x == rgb.y && rgb.y == rgb.z)
     {
+        // Uniform RGB → constant spectrum. pbrt rides the r∈{0,1} divide-by-zero
+        // into IEEE ±inf → sigmoid {0,1}; a finite ±1e9 reproduces that limit.
+        // The prior `c2 = 0` collapsed both endpoints to 0.5 (white reflected
+        // 50 % → white furnace never closed; black reflected 50 %). Mirrors
+        // spectral_tables.rgb_to_sigmoid_coeffs.
         float r = rgb.x;
-        float denom = (r > 0.0 && r < 1.0) ? sqrt(r * (1.0 - r)) : 0.0;
-        float c2 = (denom == 0.0) ? 0.0 : (r - 0.5) / denom;
+        float c2;
+        if (r >= 1.0)      c2 = 1.0e9;
+        else if (r <= 0.0) c2 = -1.0e9;
+        else               c2 = (r - 0.5) / sqrt(r * (1.0 - r));
         return float3(0.0, 0.0, c2);
     }
     int maxc = (rgb.x > rgb.y) ? ((rgb.x > rgb.z) ? 0 : 2)
@@ -221,17 +246,25 @@ float sampleCurve5nm(float lam, StructuredBuffer<float> curve, int count)
     return lerp(curve[i], curve[i + 1], f);
 }
 
-// Evaluate an sRGB emitter as a spectrum: reflectance shape × D65 (pbrt
-// RGBIlluminantSpectrum). `d65` is the vendored D65 SPD on the 5 nm grid.
+// Evaluate an sRGB emitter as a spectrum (pbrt RGBIlluminantSpectrum):
+// scale·sigmoid(rgb/scale)·D65 with scale = 2·max(rgb). The scale keeps HDR
+// emitters (rgb > 1) inside the sigmoid's [0,1] gamut and restores their
+// magnitude — clamping would collapse a bright light to white and lose its
+// intensity. `d65` is uploaded pre-normalized to unit luminance (renderer feeds
+// `spectral.d65_normalized()`), so a unit RGB illuminant resolves to unit
+// radiance and this mirrors `spectral.upsample_illuminant` bit-for-bit.
 float4 upsampleIlluminant(float3 rgb, SampledWavelengths sw, int res,
                           StructuredBuffer<float> scale,
                           StructuredBuffer<float> data,
                           StructuredBuffer<float> d65, int d65Count)
 {
-    float3 co = rgbSigmoidCoeffs(rgb, res, scale, data);
+    float m  = max(rgb.x, max(rgb.y, rgb.z));
+    float sc = 2.0 * m;
+    float3 rgbN = (sc > 0.0) ? rgb / sc : float3(0.0);
+    float3 co = rgbSigmoidCoeffs(rgbN, res, scale, data);
     float4 s;
     [ForceUnroll]
     for (int i = 0; i < 4; ++i)
-        s[i] = sigmoidPoly(co, sw.lambda[i]) * sampleCurve5nm(sw.lambda[i], d65, d65Count);
+        s[i] = sc * sigmoidPoly(co, sw.lambda[i]) * sampleCurve5nm(sw.lambda[i], d65, d65Count);
     return s;
 }

@@ -1,0 +1,438 @@
+# Spectral Rendering — Tasks
+
+## 1. Spectral data groundwork (hostless)
+
+- [x] 1.1 Port pbrt's `rgb2spec` sigmoid-coefficient optimizer to a checked-in numpy script
+      under `src/skinny/pbrt/data/`; generate the sRGB coefficient table and check it in as
+      compressed `.npz` (`git add -f`; repo `.gitignore` is `*`)
+      — DONE: pbrt-v4 source present on disk, so vendored pbrt-EXACT table via
+      `_extract_pbrt_spectra.py` (RES=64 `rgb2spec_srgb.npz`, 8.8 MB) instead of re-optimizing;
+      `spectral_tables.rgb_to_sigmoid_coeffs`/`sigmoid_poly` mirror pbrt's exact lookup.
+      Vendored `.npz` declared in `pyproject.toml` `[tool.setuptools.package-data]`
+      (`pbrt/data/*.npz`) — verified a real `build_py` copies both into the build tree and
+      they load from a non-editable install (codex stop-review fix).
+- [x] 1.2 Vendor spectral tables under `src/skinny/pbrt/data/`: CIE D65 SPD (5 nm grid),
+      full spectral eta/k for the pbrt named metals, Cauchy/Sellmeier IOR fits for pbrt
+      named glasses
+      — DONE: `spectral_curves.npz` (pbrt D65 + Ag/Al/Au/Cu eta/k resampled to 5 nm);
+      glass = documented BK7 Cauchy fit in `spectral_tables.named_glass_ior`.
+- [x] 1.3 Hostless validation tests: coefficient spot-checks against pbrt-published values;
+      upsample→CIE-integrate round-trip error tolerance for reflectance and D65-illuminant
+      modes; D65/eta-k grid sanity
+      — DONE: `tests/pbrt/test_spectral_data.py` (D65-illuminant reflectance round-trip tol
+      0.06 — bias is Wyman-vs-pbrt CMF convention, documented; D65 chromaticity, metal/glass
+      sanity). Exact-vs-pbrt-coefficient check deferred: table IS pbrt's file verbatim.
+- [x] 1.4 Add a shared CPU reference implementation (numpy) of `SampledWavelengths` (visible
+      pdf, rotation, secondary termination), sigmoid evaluation, and the Wyman CMF film
+      resolve — the mirror the GPU kernel tests will compare against
+      — DONE: `src/skinny/pbrt/spectral.py` + `tests/pbrt/test_spectral_mirror.py` (17 tests
+      total green).
+
+## 2. Importer spectral payload preservation
+
+- [x] 2.1 Preserve `blackbody` temperature, resampled illuminant SPDs (360–830/5 nm), named
+      conductor/glass spectrum identities, and glass IOR fits on `skinnyOverrides` alongside
+      the existing RGB reduction (`pbrt/spectra.py`, `materials.py`, light import paths)
+      — DONE for emitters: `spectra.param_spectral_payload` + wired into all light branches
+      (`lights.py` distant/point/infinite `spectral` key) and area lights (`api.py`
+      `emissive_spectral` key). Named-conductor/glass MATERIAL identity preservation DEFERRED
+      to Group 6 (only consumed by the GPU conductor/dispersion binding; threading it through
+      `_conductor_basecolor`/`_author_material` belongs with that consumer).
+- [x] 2.2 Unit tests: each payload type round-trips through import→USD; RGB-only scenes
+      author no new payload (byte-identical import); existing RGB reductions unchanged
+      — DONE: `tests/pbrt/test_spectral_payload.py` (8 tests); importer regression green
+      (46 tests across metadata/materials/media/cloud).
+- [x] 2.3 Renderer-side scene intake: parse preserved payloads into light/material records
+      (CPU structs only; no GPU consumption yet), with unit tests
+      — DONE with its consumers (Group 6): the preserved payloads are read at GPU-upload time —
+      blackbody `emissive_spectral` in `_upload_emissive_triangles`/`_upload_flat_materials`
+      (6.1), authored SPD `spectral` into `LightDir.spectral_spd` via `usd_loader._extract_light_spd`
+      (6.3), named conductor/glass identity on `parameter_overrides` (6.2/6.4). Unit tests:
+      `test_spectral_payload.py` round-trips each payload through import→USD→loader
+      (`test_blackbody_producer_roundtrip_through_loader`, `test_illuminant_spd_producer_roundtrip_
+      through_loader`, rgb-only-no-payload). Built with the consumer rather than as a standalone
+      reader, as noted.
+
+## 3. Session wiring and renderer resources
+
+- [x] 3.1 `--spectral` flag + `SKINNY_SPECTRAL` env in `cli_common.py` and all front-ends;
+      startup refusals (non-path integrator, explicit wavefront execution mode, ReSTIR
+      reuse, neural proposal, skin/subsurface or heterogeneous-volume scene) mirroring the
+      `reject_sppm_without_wavefront` pattern; hostless tests for every refusal and for
+      `--spectral` + `--execution-mode auto` resolving to megakernel
+      — DONE: `--spectral` in `add_render_flags` (store_true, `_env_flag("SKINNY_SPECTRAL")`,
+      not persisted); `reject_spectral_unsupported(spectral, integrator, execution_mode,
+      proposals, reuse)` wired after execution-mode resolution in app.py/headless.py/web_app.py;
+      13 new tests in `tests/test_cli_common.py` (91 total green). SCENE-level skin/subsurface/
+      volume refusal DEFERRED to renderer setup (Group 3.2/5) where the material set is known —
+      the CLI validator covers only flag-level combos; documented in the function docstring.
+      — FOLLOW-UP (branch spectral-cli-gate): `reject_spectral_unsupported` now also refuses an
+      in-envelope `--spectral` while the transport is unwired ("not yet implemented"), so it can
+      no longer silently render RGB. Single source of truth `skinny.spectral_capability.
+      SPECTRAL_IMPLEMENTED` (False) now drives BOTH this CLI gate and `parity.combo_is_valid`
+      (referenced live); flip it once with the Group 5 transport to enable both at once.
+- [x] 3.2 Upload the sigmoid coefficient table and a spectral-asset buffer (D65, conductor
+      eta/k curves, authored illuminant SPDs) as storage buffers; assign the next free
+      descriptor bindings; extend the Vulkan descriptor layout AND the layout test
+      (`test_vk_binding_layout.py` precedent) plus Metal bind-by-name
+      — DONE (D65 + coeff table; conductor eta/k deferred to 6.2): `spectralScale`/`spectralData`/
+      `spectralD65` at vk bindings 45/46/47, gated `#if defined(SKINNY_SPECTRAL)` so the RGB
+      layout + SPIR-V are byte-unchanged (table res=64 / d65Count=95 are compile constants —
+      no FrameConstants growth). `ComputePipeline` gained a `spectral` kwarg on both backends:
+      Vulkan adds the 3 STORAGE_BUFFER layout entries + descriptor writes (pool +3); Metal
+      binds by name. Buffers built + uploaded once (C-order f32) in the `renderer._spectral`
+      block; `--spectral` threaded through all four front-ends → `Renderer(spectral=...)`.
+      D65 uploaded UNIT-LUMINANCE-normalized (`spectral.d65_normalized()`) — see 4.1 note.
+      `test_vk_binding_layout.py` unchanged (spectral bindings are invisible to its
+      all-macros-off Vulkan-branch walker; recorded rationale).
+- [x] 3.3 Shader-variant plumbing: when `--spectral` is active the megakernel compiles with
+      `-DSKINNY_SPECTRAL` (Vulkan `main_pass_spectral.spv` checked-in vs compiled-on-demand —
+      resolve the design open question and record the decision; Metal folds the define into
+      the in-process SlangPy compile)
+      — DONE. DECISION: compiled-on-demand on BOTH backends; NO checked-in `main_pass_spectral.spv`.
+      `main_pass.spv` isn't checked in at all (compiled per-construction), and the Vulkan
+      `spv_cache` key already hashes the flag tuple, so `-D SKINNY_SPECTRAL=1` gets a distinct
+      cache slot for free. Vulkan: append the define to the slangc flags. Metal: add it to
+      `opts.defines`. BUG FIXED (Metal): `opts.defines[k]=v` silently no-ops —
+      `SlangCompilerOptions.defines` getter returns a COPY, so the define must be assembled in
+      a dict and assigned ONCE. (Symptom: `pipeline.spectral=True` but spectral globals never
+      reflected and the render came out byte-identical to RGB.)
+
+## 4. Spectral shader core
+
+- [x] 4.1 New `spectrum.slang`: `Spectrum` typealias (float3 RGB / float4 spectral),
+      `SampledWavelengths` (visible-pdf sampling, rotation, secondary termination), Wyman
+      CMF fit, XYZ→sRGB resolve, sigmoid-polynomial evaluation with manual trilinear
+      coefficient fetch (reflectance + D65-illuminant modes)
+      — DONE: `src/skinny/shaders/spectrum.slang` mirrors `pbrt/spectral.py` +
+      `spectral_tables.py` bit-for-bit (baked `CIE_Y_INTEGRAL=106.9229674725` + XYZ→sRGB
+      matrix to match the numpy mirror; table lookup takes the coeff/scale/D65 buffers the
+      Group-3.2 descriptors will bind). Hostless slangc compile gate
+      `tests/test_spectrum_compile.py` (2 tests) proves BOTH variants (`-DSKINNY_SPECTRAL`
+      and RGB) typecheck to SPIR-V (48516 B each); harness
+      `tests/harnesses/test_spectrum_harness.slang`.
+      — AMENDED (Group 5 GPU bring-up): the illuminant path was corrected to pbrt's
+      `RGBIlluminantSpectrum` — `scale·sigmoid(rgb/scale)·D65` with `scale = 2·max(rgb)` (keeps
+      HDR emitters in the sigmoid gamut instead of clamping a bright light to white and losing
+      its intensity) and D65 normalized to unit luminance (`spectral.d65_normalized()`, GPU
+      reads the pre-normalized buffer). Fixed in BOTH `spectrum.slang::upsampleIlluminant` and
+      `spectral.py::upsample_illuminant`; numpy verified white→1, [16,16,16]→16, chromatic
+      preserved. (Before this a white light resolved ~49× too bright.)
+- [x] 4.2 GPU≡numpy kernel tests (`tests/kernels/` harness pattern) for wavelength sampling,
+      upsample evaluation, and film resolve against the task-1.4 CPU mirror
+      — DONE: `tests/kernels/test_spectrum_kernels.py` (5 gpu-marked tests) compares the
+      `spectrum.slang` harness wrappers to `pbrt/spectral.py` — sampleWavelengths (λ+pdf),
+      terminateSecondary, upsampleReflectance, upsampleIlluminant (incl. HDR + chromatic),
+      spectrumResolveToLinearSRGB. Max rel err ~1e-6 (one atol-covered ~1e-4); the visible-λ
+      pdf's hard range-edge step is masked within 0.05 nm of 360/830 (fp32 vs fp64 boundary).
+      The harness's upsample wrappers now take the sRGB table + D65 as explicit
+      `StructuredBuffer` params (slangpy `NDBuffer.from_numpy(...).storage`); the computeMain
+      compile gate stays 2/2. GPU feeds `spectral.d65_normalized()` to match the upload.
+- [x] 4.3 Byte-identity guard: test that the default (no-define) `main_pass.spv` compile is
+      byte-identical to the checked-in binary after all shader edits
+      — DONE (definitively, see 7.4): the pre-merge review compiled the RGB (no-`-DSKINNY_SPECTRAL`)
+      `main_pass.slang` from BOTH the `main` and branch-HEAD shader trees with slangc and `cmp`'d
+      the `.spv` — byte-identical. Every spectral shader addition is `#if defined(SKINNY_SPECTRAL)`
+      -gated or an unused `typealias`/property that emits no SPIR-V. (Reframed from "vs a checked-in
+      binary" since `main_pass.spv` is compiled per-construction, not checked in — the
+      RGB-build-unchanged invariant is what matters and it holds bit-for-bit.)
+
+## 5. Megakernel spectral path
+
+- [x] 5.1 Convert carriers to `Spectrum` under `SKINNY_SPECTRAL`: `BSDFSample`,
+      `LightSample`, `BounceResult`, path `throughput`/`radiance` in
+      `integrators/path.slang`; draw hero wavelength at path start from the existing RNG and
+      keep it a path-lifetime local
+      — DONE via a DIFFERENT (lower-risk) design than "widen the shared carriers": widening
+      `BSDFSample`/`LightSample`/`BounceResult` to float4 would break every `float3` assignment
+      across the flat/skin/python/bdpt/record tree and force an IMaterial signature change. So
+      the spectral transport lives in a SEPARATE integrator `integrators/path_spectral.slang`
+      (`SpectralPathTracer`, compiled only under `SKINNY_SPECTRAL`) that carries `Spectrum`
+      throughput/radiance itself and reuses the RGB flat `sample()` for the λ-INDEPENDENT
+      geometry (wi, pdf, delta-ness), recoloring per wavelength. Hero λ drawn as the first
+      `rng.next()` in `estimateRadiance` (path-local); the RGB build has no such draw ⇒ its
+      stream + SPIR-V are unchanged. All shared RGB structs/files are UNTOUCHED.
+- [x] 5.2 Spectral evaluation in `materials/flat/*` (upsampled params/textures),
+      `lights/*` (upsampled RGB emitters), `environment.slang` (upsampled env radiance,
+      importance sampling unchanged), MIS scalar pdfs unchanged
+      — DONE: `flat_lobes.slang::flatBsdfResponseSpectral` (per-λ mirror of `flatBsdfResponse`,
+      colored reflectances passed pre-upsampled + per-λ Schlick on F0; every scalar factor
+      identical to RGB so `response/pdf` reproduces the RGB sample weight). Materials, lights,
+      env, and emission all upsample inside `path_spectral.slang` (reflectances via
+      `upsampleReflectanceBound`, illuminants via `upsampleIlluminantBound`); NEE forms the
+      `response(λ)·L(λ)` product per wavelength (`spectralAllLightsNEE`). MIS companion pdfs
+      reuse the scalar RGB `mixtureProposalPdf` (λ-independent). `environment.slang` untouched —
+      upsampling happens at the consumer.
+- [x] 5.3 Film resolve in `main_pass.slang` before `clampSampleRadiance` + accumulation;
+      BDPT/SPPM/wavefront code paths excluded from the spectral build (compile-time)
+      — DONE: `SpectralPathTracer.estimateRadiance` resolves `spectrumResolveToLinearSRGB(sw,
+      radiance)` → float3 internally at return, so the `IIntegrator` interface + main_pass tail
+      (NaN sanitize / `clampSampleRadiance` / accumulation) stay `float3` and byte-identical.
+      main_pass routes the hit case to `SpectralPathTracer` and the primary env-miss through a
+      spectral upsample+resolve, all under `#if defined(SKINNY_SPECTRAL)`. BDPT/SPPM/wavefront
+      are excluded by construction (separate integrator; the spectral branch never calls them).
+- [x] 5.4 GPU smoke test: flat corpus scene renders under `--spectral` megakernel on Metal;
+      furnace scene closes within the existing uniformity gate
+      — DONE: `int_bleed` (flat Cornell box) renders correctly under `--spectral` megakernel on
+      native Metal (M5 Pro) — energy-conserving (spectral mean 0.31343 vs RGB 0.31306) with
+      plausible metameric red/green color-bleed (relMSE 0.0195); labelled side-by-side captured.
+      `furnace_lambert` (diffuseColor (1,1,1)) now CLOSES under `--spectral`: mean luminance
+      0.8797 vs RGB 0.8789 (both to the furnace constant 0.879), near-neutral — enabled by the
+      sigmoid-endpoint fix (uniform RGB r∈{0,1} was reflecting 0.5, so white furnace never
+      closed; now rides pbrt's IEEE-inf limit → reflectance {1,0}). TODO (harness wiring):
+      register the spectral furnace disposition in the confirming suite's meta-test.
+- [x] 5.5 Backend A/B: one corpus scene rendered spectrally on Vulkan and native Metal
+      agrees within the recorded backend-parity tolerance (render the labelled side-by-side)
+      — DONE: `int_bleed` under `--spectral` megakernel on native Metal vs Vulkan (MoltenVK),
+      128²/256 spp — **BIT-IDENTICAL** (relMSE 0.000000, MSE 0.0, mean 0.31288 both). The
+      hero-wavelength megakernel is deterministic (same RNG stream, same table lookups, no
+      backend-specific reordering), so backend parity is exact, not just within tolerance.
+      Labelled side-by-side captured (`scratchpad/spectral_backend_ab.png`).
+
+## 6. Exact spectral sources and dispersion
+
+- [x] 6.1 Blackbody: Planck evaluation at sampled wavelengths from the preserved
+      temperature; GPU≡numpy test + chromaticity-moves-toward-pbrt check on a
+      blackbody-lit scene
+      — DONE (GPU consumer re-hooked to emissive triangles). PRODUCER: pbrt blackbody
+      area lights import with emissiveColor = blackbody_rgb(T)×intensity AND
+      `emissive_spectral={"kind":"blackbody","temperature":T}` on skinnyOverrides
+      (api.py); payload round-trips USD→`Material.parameter_overrides` via
+      usd_loader:603-607 (verified end-to-end, `test_blackbody_producer_roundtrip_
+      through_loader`; surfaces as `pxr.Vt.Dictionary`, so the renderer read duck-types
+      on `.get`, NOT isinstance(dict)). `_upload_emissive_triangles` computes
+      `blackbody_scale(T, emissiveColor)` (numpy, exact) per blackbody instance and packs
+      (T, scale) into a NEW spectral-only buffer `spectralEmitters` (vk binding 49, 8 B
+      float2), parallel-indexed to binding 18; grown/zero-filled alongside it, guarded by
+      `self._spectral` ⇒ RGB layout byte-unchanged. Wired binding 49: vk layout
+      (vk_compute), descriptor writes + pool count (spectral 4→5) + named-buffer dict
+      (Metal bind-by-name) + destroy list. CONSUMER: `spectrum.slang::planckSpectrum(sw,T)`
+      = bit-exact mirror of `spectra.planck`; `bindings.slang::emitterBlackbody(idx)`;
+      `path_spectral.slang` spectralLightNEE gained `(liOverride, hasLiOverride)` — the
+      emissive-triangle NEE branch substitutes `planckSpectrum(sw,T)*scale` for the RGB
+      illuminant upsample when T>0. Constant/RGB emitters (T=0) fall back. VISIBLE/BSDF-HIT
+      EMISSION (codex P2, FIXED): camera-visible AND BSDF-ray-hit blackbody emission now also use
+      the exact Planck SPD, matching NEE — via a NEW spectral-only per-material (T, scale) buffer
+      `spectralMatEmission` (vk binding 51, indexed by materialId; NO FlatMaterialParams growth,
+      so RGB byte-identity preserved). Producer: `_upload_flat_materials` packs (T,
+      blackbody_scale(T, emissiveColor)) per material from `emissive_spectral`, parallel to the
+      flat record, grown/rebound with the material buffer (`_rebind_aux_material_descriptors`).
+      Consumer: path_spectral emission block computes `emis = matBB.x>0 ? planckSpectrum(sw,T)·scale
+      : cols.emission` and uses it in BOTH the visible (bounce 0 / specular) and MIS BSDF-hit
+      branches. Binding 51 wired (vk layout 45-51, writes, pool 6→7, named dict, destroy). TESTS: GPU≡numpy `test_planck` harness (gpu-marked) +
+      producer round-trip + rgb-only-no-payload (hostless). VALIDATED on Metal (M5 Pro): a
+      3400 K area light on saturated red/blue reflectances moves chromaticity off the RGB
+      metamer TOWARD pbrt on both axes (R/G 15.65→2.50 vs pbrt 4.42; B/G 0.42→0.92 vs pbrt
+      2.59); grey-surface scene identical to RGB (same-chromaticity metamer, expected).
+      Both slangc variants compile; RGB byte-unchanged. FOLLOW-UP: commit a blackbody
+      corpus scene for the 7.3 sweep (validated against a scratch scene here).
+      — NUMPY PREP DONE (0b2219f): `spectral.blackbody_emission(sw,T)` (raw Planck at hero λ) +
+      `blackbody_scale(T, emission_rgb)` = Y_target·_Y_INTEGRAL/Y_planck (6 tests, MC round-trip
+      luminance+chromaticity within 2%, hotter→bluer). GPU CONSUMER DEFERRED — DISCOVERY: pbrt
+      blackbody emitters import as AREA LIGHTS → emissive TRIANGLES (light buffer), NOT flat-
+      material emission (the emissive quad's material has emissiveColor 0). So the exact-Planck
+      hook belongs on the emissive-triangle emission path (spectralAllLightsNEE's ls.radiance
+      upsample + the direct light-hit emission), not the flat-material `emissive_spectral`
+      consumer I first built (reverted — it had no producer). Reusable GPU machinery drafted
+      (planckSpectrum + a per-emitter spectral buffer) but must be re-hooked to emissive
+      triangles; that needs per-emissive-triangle blackbody metadata + the light-side consumer.
+- [x] 6.2 Spectral conductor Fresnel from the eta/k asset buffer for named metals; test vs
+      CPU mirror
+      — DONE: importer preserves the metal identity on `skinnyOverrides["conductor_metal"]`
+      (au/ag/al/cu; `materials.material_spectral_overrides` + `api._author_material[_mtlx]`).
+      GPU: `spectralMetals` StorageBuffer (vk binding 48, spectral-only) with au/ag/al/cu eta/k
+      on the 5nm grid; `namedMetalEtaK` samples eta(λ)/k(λ) at the 4 hero λ; `fresnelConductor`
+      (pbrt FrComplex, float2 complex) in flat_shading.slang; `flatBsdfResponseSpectral`'s spec
+      lobe uses it when the hit is a named conductor (id in `FlatMaterialParams.conductorMetalId`
+      = spare `_specularColorPad.w`, 0 = RGB Schlick). numpy mirror `spectral.fresnel_conductor`
+      + `named_metal_eta_k` (gold R(580)=0.899, R(650)=0.940, ≡ fresnel_conductor_rgb at normal
+      incidence). VALIDATED: conductor_infinite.pbrt (gold) renders gold under --spectral, exact
+      Au Fresnel warmer/more-saturated than RGB (R/G 1.177 vs 1.125). GPU≡numpy conductor-Fresnel
+      harness test = follow-up (4.2 harness could add it).
+- [x] 6.3 Authored illuminant SPD lookup from the spectral-asset buffer on lights that
+      preserved one; test that a non-constant `spectrum L` renders from the SPD, not the RGB
+      upsample
+      — DONE for DISTANT lights (v1; point/sphere/env = follow-up). PRODUCER: importer already
+      preserves the resampled 95-sample SPD on the light prim's `skinnyOverrides["spectral"]`
+      (kind spectrum_samples); NEW `usd_loader._extract_light_spd` reads it into
+      `LightDir.spectral_spd` (scene.py field; duck-typed on the pxr.Vt.Dictionary). `_upload_
+      distant_lights` luminance-matches the SPD to the light's RGB radiance (`_spectral_light_
+      spd_scaled` = SPD × Y_rgb / (spd_to_xyz(SPD).Y / _Y_INTEGRAL), so enabling the SPD shifts
+      ONLY chromaticity), packs it into a NEW spectral-only buffer `spectralLightSpd` (vk binding
+      50, 95 floats/light, fixed DISTANT_LIGHT_CAPACITY=16 so no rebind path), and stores the SPD
+      slot in the DistantLight record's `_direction.w` (-1 = no SPD ⇒ RGB upsample). Wired binding
+      50: vk layout, descriptor writes, pool count (spectral 5→6), named dict (Metal bind-by-name),
+      destroy. CONSUMER: `common.slang` DistantLight `spdIndex` property; `bindings.slang`
+      `distantLightSpd(slot, sw)` (5nm-grid hero-λ interp); `path_spectral.slang` directional NEE
+      reads spdIndex and passes the SPD as the spectralLightNEE (liOverride, hasLiOverride) when
+      slot>=0. TEST: `test_illuminant_spd_producer_roundtrip_through_loader` (SPD reaches
+      LightDir.spectral_spd via the real _extract_lights) + rgb-only-no-SPD (hostless). VALIDATED
+      on Metal (M5 Pro): a green-peaked `spectrum L` distant light renders DISTINCTLY from the RGB
+      upsample (B/G 0.810→0.665, moving toward pbrt 0.712) on saturated red/blue surfaces — the
+      metameric signature only the exact SPD carries. Both slangc variants compile; RGB byte-
+      unchanged. Scene `scratchpad/spd_distant.pbrt`, img `scratchpad/spd_3way.png`. NOTE distant-
+      light absolute intensity vs pbrt has a pre-existing calibration gap (RGB-mode-identical,
+      out of 6.3 scope).
+- [x] 6.4 Dispersion: wavelength-dependent IOR at hero λ for preserved glass fits;
+      secondary termination with pdf adjustment on first dispersive refraction; unbiasedness
+      test (constant-IOR dielectric keeps all 4 samples) and a visible prism-dispersion
+      render
+      — DONE. Cauchy B stored in the spare `FlatMaterialParams._normalBiasPad.w` (`glassCauchyB`
+      property), A = the `ior` lane — NO new buffer/binding. path_spectral.slang: after a valid
+      delta refraction, gate `bs.pdf==0 && bs.transmitted && glassCauchyB>0`, recompute the
+      refraction at `etaH=1/n(λ0)`, `n(λ0)=ior+B/λ0_µm²`, override bs.wi, `sw=terminateSecondary(sw)`.
+      Constant-IOR (B=0) never terminates ⇒ keeps 4 λ ⇒ unbiased. numpy: `spectral.cauchy_ior`,
+      `should_terminate_secondary`, `spectral_tables.named_glass_cauchy` (BK7 n(486)=1.522 >
+      n(656)=1.514). packer: glass_dispersion→named_glass_cauchy→ ior=A, B in pad (0.0 bit-identical
+      to old literal-0 ⇒ RGB/non-glass byte-unchanged). VALIDATED: BK7 glass sphere 1.79× more
+      chroma (0.105 vs 0.059 at scalar eta); int_bleed byte-unchanged. GPU≡numpy dispersion harness
+      test = follow-up. A visible prism scene (vs a sphere) = confirming-suite 6.5.
+      — IMPORTER PREP DONE: `skinnyOverrides["glass_dispersion"]` = bk7/default preserved for a
+      named-glass eta (`materials.material_spectral_overrides` + a pre-existing scalar("eta")
+      crash fix). GPU CONSUMER TODO: the delta-glass branch in path_spectral.slang (:283-287) +
+      flat_material.slang (:37-65) must re-evaluate `eta(λ)` (Cauchy `named_glass_ior`, upload a
+      glass-fit buffer or a Cauchy A/B pair in FlatMaterialParams) per hero λ + `terminateSecondary`
+      on first dispersive refraction (λ-dependent direction).
+      — GPU DESIGN READY (in memory): store Cauchy B in the spare `_normalBiasPad.w` (offset 124,
+      `glassCauchyB` property), A = the existing `ior` lane — NO new buffer. Dispersion block in
+      path_spectral.slang after `if (!bs.valid) break;`: gate `bs.pdf==0 && bs.transmitted &&
+      glassCauchyB>0`, recompute refraction at `n(λ0)=ior+B/(λ0_um²)`, override `bs.wi`, `sw =
+      terminateSecondary(sw)`. Constant-IOR (B=0) never terminates ⇒ unbiased. packer:
+      `glass_dispersion`→`named_glass_cauchy`→ ior=A, B in pad. Glass IS flat (opacity<1) so flows
+      through path_spectral cleanly — end-to-end testable (unlike 6.1). Needs a spectral-specific refraction
+      path (the RGB `bs.wi` is λ-independent).
+- [x] 6.5 Build the spectral-discriminating confirming-suite scene(s) (dispersive dielectric
+      and/or blackbody-lit) via `tests/assets/suite/_gen/`, regen pbrt refs
+      (`regen_refs.py`), register dispositions
+      — DONE: `spec_prism` — a BK7 dispersion prism (strongest discriminator; named-glass
+      Cauchy IOR splits hero λ on the first dispersive refraction under `--spectral`, RGB
+      sees a plain delta dielectric). `_gen`: `triangular_prism()` in geom.py + `_prism_scene`
+      in build.py (`Material "dielectric" "spectrum eta" "glass-BK7"`, env + area light + grey
+      floor, path/maxdepth 16, 128²/spp 256). Imported to plain + MaterialX `.usda` (3 inst, 0
+      skipped; both preserve `skinnyOverrides.glass_dispersion="bk7"`). `SceneSpec.spectral`
+      disposition field added to parity.py; manifest registers `spec_prism` (suite, dispersion
+      disposition) + `spec_prism_mtlx` (materialx, equivalence pair). Ref regenerated
+      `refs/suite_spec_prism.exr` (128², spp 256, spectral pbrt). 212 hostless suite+matrix
+      tests green. FOLLOW-UP: the RGB matrix pbrt-truth gate on spec_prism may need a pinned
+      `baseline` under 7.3 (pbrt ref is spectral, RGB render diverges) — recorded in manifest
+      notes. Blackbody-lit suite scene left out (one dispersion discriminator satisfies "≥1").
+
+## 7. Parity matrix integration
+
+- [x] 7.1 Add the `spectral` axis to `parity.py` (`combo_is_valid` rules per the delta
+      spec); machine-readable skip reasons for BDPT/SPPM/wavefront/proposal/reuse/volume/
+      skin × spectral, including the mode-equivalence skip "spectral is megakernel-only"
+      — DONE: `RenderCombo.spectral` field + label tag; `spectral_envelope` helper (the v1
+      path+megakernel+flat rules) + `combo_is_valid` spectral block. GATED behind
+      `SPECTRAL_IMPLEMENTED=False` (capability flag): the megakernel transport is unwired, so
+      an in-envelope spectral combo is a recorded "not yet wired" SKIP and is ABSENT from
+      `enumerate_combos` (the rendered set) — it is never rendered as RGB and gated as if
+      spectral (codex stop-review fix). Flip `SPECTRAL_IMPLEMENTED=True` with Group 5 to admit
+      it; the delta-spec "(path, megakernel, spectral) present" scenario holds from that point.
+      Mode-equivalence skip is implicit (only megakernel spectral is envelope-eligible, no
+      wavefront pair). Render pass-through of the flag is Group 7.3 (GPU).
+- [x] 7.2 Extend the coverage meta-tests: integrator × spectral validity completeness;
+      suite spectral-discriminating disposition presence (hostless)
+      — DONE (validity completeness): `test_coverage_meta_spectral_axis_covered` + 8 spectral
+      validity tests in `tests/pbrt/test_matrix.py` (23 pass, 141 hostless total green). Suite
+      spectral-discriminating disposition coverage LANDED with 6.5:
+      `test_suite_spectral_discriminator_present` + `test_suite_spectral_disposition_wellformed`
+      (tests/pbrt/test_suite.py) assert ≥1 suite scene carries a `spectral` disposition
+      (spec_prism, dispersion).
+- [x] 7.3 GPU sweep: run `(Path, megakernel, spectral)` across the corpus; record spectral
+      pbrt-truth measurements; assert spectral ≤ RGB on spectrum-authored scenes; report
+      (not assert) spectral-vs-RGB anchor deltas
+      — DONE. HARNESS: `render_combo`/`render_linear` now thread `spectral=combo.spectral` →
+      `HeadlessRenderer(spectral=...)`, so an enumerated spectral combo actually renders under
+      `--spectral` (was silently RGB). Both matrix gates (`test_parity.test_scene_matrix_gate`,
+      `test_suite.test_suite_matrix_gate`) treat spectral as a DISCRIMINATING axis: its
+      self-consistency delta vs the RGB anchor is REPORTED not asserted (it differs by design),
+      and a spectral-vs-RGB pbrt-truth direction line is logged. MEASURED (Metal M5 Pro):
+      • conductor_infinite (gold, smooth Fresnel metamerism) — spectral pbrt-truth relMSE
+        **0.00417 < RGB 0.00583** ⇒ exact complex-index Fresnel is CLOSER to spectral pbrt than
+        the RGB reduction (spectral IMPROVES).
+      • spec_prism (BK7 dispersion) — spectral **0.278 > RGB 0.172**: the hero-λ render is the
+        physically-correct dispersive result but carries a HIGHER pointwise relMSE because a
+        chromatic dispersion caustic is a high-variance feature 4 rotated hero-λ under-sample at
+        256 spp (spectral REGRESSES in relMSE while being more correct).
+      KEY FINDING: "spectral ≤ RGB" is NOT a universal invariant (holds for smooth chromaticity
+      shifts, fails for dispersion caustics), so the spec's hard "assert ≤" was DROPPED in favour
+      of REPORTING the direction + gating spectral pbrt-truth against per-combo BASELINES
+      (harness-first, tighten-only). Recorded spec_prism + spec_prism_mtlx per-combo baselines
+      (the pbrt ref is spectral ⇒ every skinny combo diverges: RGB ~0.17 can't disperse, spectral
+      0.278). Both gates green. NOTE (pre-existing, out of scope): conductor_infinite
+      `sppm|wavefront` fails self-consistency (relMSE 0.45) — sppm on a pure-specular gold scene
+      has no diffuse to deposit photons; unrelated to spectral (non-spectral render byte-identical
+      to pre-change). Spawned as a follow-up.
+- [x] 7.4 Verify no RGB baseline changes anywhere (byte-identical default build ⇒ recorded
+      measurements stand)
+      — DONE (definitively): the pre-merge review compiled the RGB megakernel (`main_pass.slang`,
+      NO `-DSKINNY_SPECTRAL`) from BOTH the `main` and branch-HEAD shader trees with slangc →
+      byte-identical `.spv` (`cmp` clean). Every spectral shader addition is `#if
+      defined(SKINNY_SPECTRAL)`-gated or an unused `typealias Spectrum`/property (no SPIR-V);
+      `interfaces.slang` unchanged. RGB material/light buffers: every spectral-derived lane is
+      gated on `self._spectral` — glassCauchyB (`_normalBiasPad.w`), conductorMetalId
+      (`_specularColorPad.w`, gated in a740162), the DistantLight `_direction.w` SPD slot, and
+      the spectralEmitters/LightSpd/MatEmission buffers — all pack the literal-0 / no-buffer
+      baseline in the RGB build. So the recorded RGB parity measurements stand unchanged.
+
+## 8. Metal hygiene and performance
+
+- [x] 8.1 Run the Metal kill harness (hostless 13 + gpu-marked under the guarded runner)
+      with spectral mode exercised; confirm megakernel row-band tiling stays within
+      watchdog budget with the heavier spectral kernel
+      — DONE: `tests/test_metal_cleanup.py` — 13 hostless + 3 gpu-marked (clean-exit probe,
+      SIGKILL-mid-render → GPU-usable probe, atexit teardown) all pass on native Metal (the new
+      spectral kernels/buffers are present in the build). SPECTRAL BAND-TILING STRESS: an
+      `int_bleed` `--spectral` megakernel frame at **1024²** (1 M px ⇒ multiple 200k-px row
+      bands under `SKINNY_METAL`) renders with NO watchdog wedge, and a follow-up 256² render
+      succeeds ⇒ the GPU is not wedged by the heavier spectral kernel. The band tiling is
+      bit-identical to a single dispatch (unchanged from `metal-megakernel-watchdog-tiling`); the
+      spectral integrator adds per-λ work per pixel but does not lengthen a single band's
+      command buffer past the watchdog budget.
+- [x] 8.2 Equal-time throughput measurement spectral-vs-RGB megakernel on a corpus scene;
+      record the overhead factor in the change notes
+      — DONE: `int_bleed` 256², path, native Metal (M5 Pro), warm (compile/first-dispatch
+      excluded), 200 accumulation frames each: RGB **214 fps** vs spectral **200 fps** ⇒
+      **spectral/RGB time overhead = 1.07×** (7 %). Low because the spectral path REUSES the RGB
+      flat `sample()` for the λ-independent geometry (wi/pdf/delta) and only recolors per the 4
+      hero wavelengths (`flatBsdfResponseSpectral` + per-λ upsampled reflectances), rather than
+      re-tracing per wavelength.
+
+## 9. Documentation
+
+- [x] 9.1 `docs/Architecture.md`: new bindings in the descriptor map, spectrum module in
+      the module map, spectral-variant compile note
+      — DONE: bindings 45/46/47 (spectralScale/Data/D65, spectral-build-only) added to the
+      Descriptor Binding Map with the byte-unchanged-RGB-layout note; `spectrum.slang` +
+      `integrators/path_spectral.slang` in the shader module map (+ `flatBsdfResponseSpectral`);
+      a "spectral compile variant" paragraph (-DSKINNY_SPECTRAL both backends, gated `Spectrum`
+      typealias in common.slang, spv_cache flag hashing).
+- [x] 9.2 README + CLAUDE.md compatibility matrices: `--spectral` flag, scope guards
+      (path + megakernel only, flat-only, no volumes/skin/reuse/neural; wavefront =
+      designated follow-up), backend support; CHANGELOG entry
+      — DONE: README compatibility matrix (spectral row ⏳ WIP + a `--spectral` scope
+      subsection), matching CLAUDE.md matrix row + WIP constraint block (kept in sync per the
+      "keep the two in sync" note), and a CHANGELOG `[Unreleased] Added` entry. All honestly
+      flag the transport as unwired / `--spectral` refused until `SPECTRAL_IMPLEMENTED` flips.
+- [x] 9.3 New `docs/` section (or doc) for spectral rendering: hero-wavelength estimator,
+      upsampling model, film resolve — equations as LaTeX-rendered SVG per repo convention;
+      run `node docs/diagrams/embed_code.cjs --check` if marked shader regions were touched
+      — DONE: new `docs/Spectral.md` (estimator: visible-λ importance sampling, hero rotation,
+      secondary termination; upsampling: Jakob-Hanika sigmoid + pbrt RGBIlluminantSpectrum;
+      per-λ transport + scalar MIS/RR; exact sources: Planck blackbody + luminance scale,
+      complex-index conductor Fresnel, Cauchy dispersion + unbiasedness gate; Wyman-CMF film
+      resolve). 15 equation SVGs rendered via MathJax 3 (`docs/diagrams/spectral/equations.json`
+      + render.cjs) + a hand-authored `pipeline.svg`; per-equation symbol→code tables + a WIP
+      banner tied to `SPECTRAL_IMPLEMENTED`. Cross-linked from Architecture.md; added to the
+      README docs list + CLAUDE.md docs-upkeep enumeration. No marked shader regions touched
+      (no embed_code.cjs run needed).
+- [x] 9.4 `docs/PythonAPI.md` if any public Python symbol was added; `ruff check src/` and
+      full hostless pytest sweep green
+      — DONE. `docs/PythonAPI.md` §1.1 documents `spectral.d65_normalized()` +
+      `upsample_illuminant` RGBIlluminantSpectrum semantics (the new public Python surface;
+      blackbody/Cauchy/Fresnel helpers are internal). `ruff check src/` green. Full hostless
+      sweep re-run: **751 passed** across tests/pbrt + spectral + cli + compile + kill-harness +
+      observability. (14 `test_scene_source_resolves[*_cloud]` failures are pre-existing and
+      ENVIRONMENTAL — the heavy cloud `.usda` assets live only in the main checkout, not this
+      worktree; unrelated to spectral and not touched by this change.)

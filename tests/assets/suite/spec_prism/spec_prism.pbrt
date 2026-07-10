@@ -1,0 +1,19 @@
+LookAt 0 1.5 6  0 0.7 0  0 1 0
+Camera "perspective" "float fov" 30
+Sampler "independent" "integer pixelsamples" 256
+Integrator "path" "integer maxdepth" 16
+Film "rgb" "integer xresolution" 128 "integer yresolution" 128 "string filename" "spec_prism.exr"
+WorldBegin
+LightSource "infinite" "rgb L" [0.6 0.6 0.6]
+AttributeBegin
+  AreaLightSource "diffuse" "rgb L" [18 18 18]
+  Shape "trianglemesh" "point3 P" [ -1.00000 4.00000 -1.00000 1.00000 4.00000 -1.00000 1.00000 4.00000 1.00000 -1.00000 4.00000 1.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "diffuse" "rgb reflectance" [0.18 0.18 0.18]
+  Shape "trianglemesh" "point3 P" [ -4.00000 0.00000 4.00000 4.00000 0.00000 4.00000 4.00000 0.00000 -4.00000 -4.00000 0.00000 -4.00000 ] "integer indices" [ 0 1 2 0 2 3 ]
+AttributeEnd
+AttributeBegin
+  Material "dielectric" "spectrum eta" "glass-BK7"
+  Shape "trianglemesh" "point3 P" [ 0.00000 1.65000 0.30000 -0.77942 0.30000 0.30000 0.77942 0.30000 0.30000 0.00000 1.65000 -0.30000 -0.77942 0.30000 -0.30000 0.77942 0.30000 -0.30000 ] "integer indices" [ 0 1 2 3 5 4 0 4 1 0 3 4 1 5 2 1 4 5 2 3 0 2 5 3 ]
+AttributeEnd

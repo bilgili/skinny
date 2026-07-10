@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         sppm_glossy_roughness: float | None = None,
         width: int = 640,
         height: int = 480,
+        spectral: bool = False,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -116,6 +117,7 @@ class MainWindow(QMainWindow):
             width=width,
             height=height,
             requested_backend=requested_backend,
+            spectral=spectral,
         )
 
         # Render viewport: hosted in a dock so the user can detach / re-
@@ -714,7 +716,8 @@ def main() -> None:
                      requested_backend=args.backend,
                      encoding=encoding_value,
                      sppm_glossy_roughness=sppm_glossy_roughness_value,
-                     width=args.width, height=args.height)
+                     width=args.width, height=args.height,
+                     spectral=getattr(args, "spectral", False))
     win.show()
     sys.exit(app.exec())
 

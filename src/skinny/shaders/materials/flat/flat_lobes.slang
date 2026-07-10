@@ -215,3 +215,92 @@ float3 flatBsdfResponse(float3 wo, float3 wi, FlatHitMat m, float3 F0)
     resp += (1.0 - pCoat) * coatAtten * (specResp + diffResp);
     return resp;
 }
+
+#if defined(SKINNY_SPECTRAL)
+// ── Hero-wavelength spectral response (change spectral-rendering, Group 5) ──
+// A per-wavelength mirror of flatBsdfResponse. Every scalar factor (Fresnel
+// scalars, G₁, per-lobe pdfs, selection probs, Oren-Nayar) is IDENTICAL to the
+// RGB version, so `response / pdf` reproduces FlatMaterial.sample()'s per-lobe
+// weight at each wavelength — the spectral transport reuses the RGB draw
+// (λ-independent geometry: wi, pdf) and recolors with this. The colored
+// reflectances are passed in already upsampled (`albedoS/specColorS/coatColorS`
+// as reflectances, `F0S` as the Schlick base) so this stays free of the spectral
+// descriptor bindings. `F0rgb` still feeds the scalar pSpec selection prob.
+
+// Per-wavelength Schlick Fresnel: F0 + (1 - F0)·(1 - cosθ)⁵.
+Spectrum schlickFresnelSpectral(float cosTheta, Spectrum F0)
+{
+    float m  = clamp(1.0 - cosTheta, 0.0, 1.0);
+    float m5 = (m * m) * (m * m) * m;
+    return F0 + (Spectrum(1.0) - F0) * m5;
+}
+
+Spectrum flatBsdfResponseSpectral(
+    float3 wo, float3 wi, FlatHitMat m, float3 F0rgb,
+    Spectrum albedoS, Spectrum specColorS, Spectrum coatColorS, Spectrum F0S,
+    bool isConductor, float4 etaHero, float4 kHero)
+{
+    if (wi.z <= 0.0 || wo.z <= 0.0)
+        return Spectrum(0.0);
+
+    float  NdotV = max(wo.z, 1e-6);
+    float  NdotL = wi.z;
+    float3 H     = normalize(wo + wi);
+    float  VdotH = max(dot(wo, H), 0.0);
+
+    float    coatFresnel = (m.coat > 0.0) ? fresnelDielectric(NdotV, 1.0 / m.coatIOR) : 0.0;
+    float    pCoat       = m.coat * coatFresnel;
+    float    pSpec       = flatLobePSpec(NdotV, m.albedo, m.metallic, F0rgb);
+    Spectrum coatAtten   = (m.coat > 0.0) ? coatColorS : Spectrum(1.0);
+
+    Spectrum resp = Spectrum(0.0);
+
+    // Coat lobe: dielectric coat Fresnel Fc is achromatic (scalar), only the
+    // coatColor tint is spectral.
+    if (m.coat > 0.0)
+    {
+        float r    = (1.0 - m.coatIOR) / (1.0 + m.coatIOR);
+        float F0c  = r * r;
+        float Fc   = schlickFresnelColor(VdotH, float3(F0c)).r;
+        float G1L  = ggxSmithG1(NdotL, m.coatRoughness);
+        float pdfC = flatLobePdf(LOBE_COAT, FLAT_SAMPLER_NATIVE, m.coatRoughness, wi, wo);
+        resp += pCoat * pdfC * (coatColorS * (Fc * G1L));
+    }
+
+    // Base spec lobe. Named conductor (6.2): exact complex-index Fresnel at each
+    // hero λ from the tabulated eta/k — this IS the metal's full colour, so the
+    // specularColor tint is DROPPED (specTint = white). Otherwise spectral Schlick
+    // on the upsampled F0 (the v1 dielectric/RGB-metal approximation), tinted by
+    // specColorS. The tint drop matters on the MaterialX path, which mirrors the
+    // metal's RGB reflectance into specular_color and would otherwise double-tint
+    // (Fresnel colour × RGB metal colour); the plain-USD path's specularColor is
+    // the white default, so it was already correct.
+    Spectrum Fs;
+    Spectrum specTint;
+    if (isConductor)
+    {
+        [ForceUnroll]
+        for (int i = 0; i < 4; ++i)
+            Fs[i] = fresnelConductor(VdotH, etaHero[i], kHero[i]);
+        specTint = Spectrum(1.0);
+    }
+    else
+    {
+        Fs = schlickFresnelSpectral(VdotH, F0S);
+        specTint = specColorS;
+    }
+    float    G1Ls     = ggxSmithG1(NdotL, m.roughness);
+    float    pdfS     = flatLobePdf(LOBE_SPEC, FLAT_SAMPLER_NATIVE, m.roughness, wi, wo);
+    Spectrum specResp = pdfS * (Fs * G1Ls) * specTint;
+
+    // Base diffuse lobe: albedo × (1 - Fview) × (1 - metallic), Oren-Nayar scalar.
+    Spectrum Fview    = schlickFresnelSpectral(NdotV, F0S);
+    Spectrum diffHue  = albedoS * (Spectrum(1.0) - Fview) * (1.0 - m.metallic);
+    float    pdfD     = flatLobePdf(LOBE_DIFFUSE, FLAT_SAMPLER_NATIVE, 0.0, wi, wo);
+    float    on       = orenNayarFactor(wo, wi, m.diffuseRoughness);
+    Spectrum diffResp = pdfD * diffHue * on;
+
+    resp += (1.0 - pCoat) * coatAtten * (specResp + diffResp);
+    return resp;
+}
+#endif

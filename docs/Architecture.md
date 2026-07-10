@@ -897,6 +897,22 @@ roughness/displacement) split into `Texture2D` + a per-map `SamplerState`
 (bindings 39–43), and `NonUniformResourceIndex` (unavailable in the compute stage
 on the Metal target) collapses to identity via the `NRI(x)` macro.
 
+**Spectral compile variant** (change `spectral-rendering`): hero-wavelength
+spectral rendering is a **compile-time variant** of the megakernel selected at
+startup, not a runtime branch. The spectral megakernel compiles with
+`-DSKINNY_SPECTRAL` (Vulkan: appended to the `slangc` flags, with the flag
+hashed into the `spv_cache` key so it lands in a distinct cache slot; Metal:
+added to `SlangCompilerOptions.defines`), pulling in `spectrum.slang` and the
+`SpectralPathTracer` (`integrators/path_spectral.slang`) that carries a `float4`
+`Spectrum` throughput/radiance and reuses the RGB flat sampler for
+λ-independent geometry. `common.slang` holds the gated `Spectrum` typealias
+(`float4` spectral / `float3` RGB) so the carriers type-check in both builds;
+the default RGB build never imports `spectrum.slang`, so its SPIR-V is
+**byte-unchanged**. It compiles on demand on both backends (spectral bindings
+45–47 in the [Descriptor Binding Map](#descriptor-binding-map)). The estimator,
+upsampling model, exact sources, and film resolve are documented in
+[Spectral.md](Spectral.md).
+
 **Wavefront on Metal** (change `metal-wavefront-parity`): the wavefront
 execution mode — staged path + BDPT integrators, ReSTIR DI reuse, and the
 neural directional proposal — runs on the native Metal backend at parity with
@@ -1045,6 +1061,13 @@ incrementally moved over.
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
 | 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry **and** the wavefront path integrator (when `fc.recordMode` is set). *Metal slot-cap gate:* compiled out of the neural-active wavefront build (with 30/37, see binding 30) | `integrators/path_record_common.slang` |
 | 37 | RWStructuredBuffer | Record append counter (`uint[2]` = `[count, capacity]`) — same Metal slot-cap gate as 36 | `integrators/path_record_common.slang` |
+| 45 | StructuredBuffer&lt;float&gt; | **Spectral upsampling — scale grid `spectralScale`** — the Jakob-Hanika RGB→spectrum sigmoid-coefficient table's RES node array (`SPECTRAL_TABLE_RES` = 64 floats). **Spectral-build-only** (`#if defined(SKINNY_SPECTRAL)`); absent from the RGB SPIR-V. Uploaded by `renderer.py` only when `--spectral` is active; on Metal binds by name (`spectralScale`), so the `vk::binding` index is inert there (change `spectral-rendering`) | `bindings.slang` |
+| 46 | StructuredBuffer&lt;float&gt; | **Spectral upsampling — coefficient grid `spectralData`** — flat `[3][res][res][res][3]` sigmoid-coefficient table (2,359,296 floats at res 64). Spectral-build-only, see binding 45 | `bindings.slang` |
+| 47 | StructuredBuffer&lt;float&gt; | **CIE D65 SPD `spectralD65`** — the reference illuminant SPD normalized to unit luminance (`SPECTRAL_D65_COUNT` = 95 floats), consumed by `upsampleIlluminant`. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 48 | StructuredBuffer&lt;float&gt; | **Named-conductor eta/k `spectralMetals`** (Group 6.2) — au/ag/al/cu (ids 1..4), each `[eta(95) \| k(95)]` on the 360–830/5 nm grid (stride 190 floats). Sampled at the 4 hero λ by `namedMetalEtaK` for exact complex-index Fresnel. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 49 | StructuredBuffer&lt;float&gt; | **Per-emissive-triangle blackbody `spectralEmitters`** (Group 6.1) — `(temperature_K, scale)` per emissive triangle (2 floats), **parallel-indexed to the emissive-triangle buffer (binding 18)**; a blackbody area light carries `(T>0, blackbody_scale(T, emission))`, a plain-RGB emitter `(0,0)`. NEE substitutes `planckSpectrum(sw,T)·scale` for the RGB illuminant upsample. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 50 | StructuredBuffer&lt;float&gt; | **Per-distant-light illuminant SPD `spectralLightSpd`** (Group 6.3) — 95 floats/light on the 360–830/5 nm grid (host-scaled to the light's RGB luminance), indexed by the `DistantLight._direction.w` slot (−1 = none → RGB upsample). Fixed `DISTANT_LIGHT_CAPACITY` (16) slots. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 51 | StructuredBuffer&lt;float&gt; | **Per-material blackbody `spectralMatEmission`** (Group 6.1 follow-up) — `(temperature_K, scale)` per flat material, **indexed by materialId**. Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD (matching the NEE path's binding-49 lookup) instead of the RGB upsample. Grown/rebound with the flat-material buffer. Spectral-build-only, see binding 45 | `bindings.slang` |
 
 The table is the **Vulkan** layout. On the **Metal** target (gated
 `#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
@@ -1076,6 +1099,23 @@ layout is shared by the megakernel and every wavefront stage pipeline (via
 `tests/test_vk_binding_layout.py` asserts every Vulkan-branch `[[vk::binding(N)]]`
 in `bindings.slang` has a matching layout entry, so a new shared scene binding
 cannot ship without its declaration (change `fix-vulkan-volume-density-binding`).
+
+**Spectral bindings 45–51** are compiled in **only** the spectral megakernel
+variant (`#if defined(SKINNY_SPECTRAL)`, change `spectral-rendering`) and are
+absent from the default RGB SPIR-V, so they never enter an RGB build's set-0
+layout. `renderer.py` uploads them only when `--spectral` is active: the three
+upsampling `StructuredBuffer<float>`s (45/46/47 — the Jakob-Hanika scale grid,
+the sigmoid-coefficient grid, and the unit-luminance CIE D65 SPD), plus four
+exact-source buffers — named-conductor eta/k (48, `spectralMetals`, Group 6.2),
+per-emissive-triangle blackbody `(T, scale)` (49, `spectralEmitters`, Group 6.1,
+parallel-indexed to binding 18), per-distant-light illuminant SPD (50,
+`spectralLightSpd`, Group 6.3, indexed by `DistantLight._direction.w`), and
+per-material blackbody `(T, scale)` (51, `spectralMatEmission`, indexed by
+materialId — the exact-Planck visible/BSDF-hit emission companion to 49). On
+Metal they all bind by name so the `vk::binding` index is inert. The table resolution
+(`SPECTRAL_TABLE_RES` = 64) and D65/grid length (`SPECTRAL_D65_COUNT` = 95) ride
+as **compile-time constants**, not `FrameConstants` fields, so the RGB UBO
+packing is unchanged.
 
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared
@@ -1534,6 +1574,9 @@ README.md
 ```
 common.slang             interfaces.slang        bindings.slang
 main_pass.slang          preview_pass.slang
+spectrum.slang           # hero-wavelength core (-DSKINNY_SPECTRAL variant only): SampledWavelengths,
+                         # visible-λ importance sampling, Wilkie hero rotation, Jakob-Hanika RGB→spectrum
+                         # upsampling (upsampleReflectance/upsampleIlluminant), Wyman CMF + XYZ→sRGB film resolve
 scene_trace.slang        scene_lights.slang      nee.slang
 mesh_head.slang          sdf_head.slang
 environment.slang        volume_render.slang
@@ -1543,6 +1586,7 @@ debug_line.slang
 cameras/{pinhole.slang, thick_lens.slang}
 materials/debug_normal_material.slang
 materials/flat/{flat_material.slang, flat_lobes.slang, flat_shading.slang}
+                # flat_lobes: flatBsdfResponseSpectral = per-λ mirror of flatBsdfResponse (-DSKINNY_SPECTRAL)
 materials/subsurface/{subsurface_walk.slang, medium.slang, volume_walk.slang,
                       cloud_noise.slang}  // pbrt volumetric SSS + free-standing NanoVDB media
                                           // + procedural cloud (classic Perlin fBm, MEDIUM_CLOUD)
@@ -1557,7 +1601,8 @@ sampling/{proposal.slang, reuse.slang,               # scene-sampling seam
           neural_proposal.slang}                      # renderer adapter (weight buffers 33/34/35, world map)
 lights/{sphere_light.slang, emissive_triangle_light.slang, directional_light.slang}
 integrators/{path.slang, bdpt.slang,
-             path_record.slang}                       # mainImageRecord training-record dump (5.1)
+             path_record.slang,                       # mainImageRecord training-record dump (5.1)
+             path_spectral.slang}                     # SpectralPathTracer (-DSKINNY_SPECTRAL variant, float4 Spectrum carriers)
 wavefront/{wavefront_path.slang, wavefront_bdpt.slang, wf_shade_common.slang,
            flat_bounce.slang, wavefront_state.slang,
            neural_proposal_pass.slang,                # WavefrontNeuralProposalPass pre-pass

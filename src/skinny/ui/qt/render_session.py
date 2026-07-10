@@ -39,6 +39,7 @@ class QtRendererConfig:
     width: int
     height: int
     requested_backend: str = "auto"
+    spectral: bool = False
 
 
 @dataclass(frozen=True)

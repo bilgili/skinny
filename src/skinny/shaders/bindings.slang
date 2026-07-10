@@ -82,6 +82,115 @@ uniform FrameConstants fc;
 #else
 [[vk::binding(26)]] Sampler3D<float> volumeDensity;
 #endif
+
+// ── Hero-wavelength spectral upsampling tables (change spectral-rendering) ──
+// Bound ONLY in the spectral megakernel variant (-DSKINNY_SPECTRAL); absent from
+// the RGB build so its descriptor layout AND SPIR-V stay byte-identical. Fed to
+// spectrum.slang's rgbSigmoidCoeffs / upsampleReflectance / upsampleIlluminant.
+//   spectralScale : RES node array               (res floats;      binding 45)
+//   spectralData  : flat [3][res][res][res][3]   sigmoid-coeff grid (binding 46)
+//   spectralD65   : CIE D65 SPD on 360–830/5 nm  (d65Count floats;  binding 47)
+// The vendored table resolution + D65 length are fixed, so they ride as compile
+// constants rather than FrameConstants fields — no std140 change to the shared
+// UBO, so the RGB build's UBO packing is untouched. bindings 45–47 are the next
+// free Vulkan slots above the Metal sampler range (38–44); on Metal they bind by
+// name (spectralScale/Data/D65), so the vk::binding index is inert there.
+#if defined(SKINNY_SPECTRAL)
+import spectrum;
+static const int SPECTRAL_TABLE_RES = 64;   // rgb2spec_srgb.npz `res`
+static const int SPECTRAL_D65_COUNT = 95;   // spectral_curves.npz d65 grid length
+[[vk::binding(45)]] StructuredBuffer<float> spectralScale;
+[[vk::binding(46)]] StructuredBuffer<float> spectralData;
+[[vk::binding(47)]] StructuredBuffer<float> spectralD65;
+
+// Bound-buffer wrappers around spectrum.slang's parameter-driven upsamplers, so
+// call sites in the transport stay short. Reflectance: sigmoid only. Illuminant:
+// sigmoid × D65 (pbrt RGBIlluminantSpectrum).
+Spectrum upsampleReflectanceBound(float3 rgb, SampledWavelengths sw)
+{
+    return upsampleReflectance(rgb, sw, SPECTRAL_TABLE_RES, spectralScale, spectralData);
+}
+Spectrum upsampleIlluminantBound(float3 rgb, SampledWavelengths sw)
+{
+    return upsampleIlluminant(rgb, sw, SPECTRAL_TABLE_RES, spectralScale,
+                              spectralData, spectralD65, SPECTRAL_D65_COUNT);
+}
+
+// Named-conductor eta/k curves (change spectral-rendering, Group 6.2). vk binding
+// 48; uploaded only when spectral. Layout: 4 metals (au, ag, al, cu — ids 1..4)
+// each [eta(95) | k(95)] on the 360–830/5 nm grid (95 = SPECTRAL_D65_COUNT), so
+// stride 190 floats/metal. Absent from the RGB build.
+[[vk::binding(48)]] StructuredBuffer<float> spectralMetals;
+static const int SPECTRAL_METAL_STRIDE = 2 * SPECTRAL_D65_COUNT;  // eta+k per metal
+
+// eta(λ)/k(λ) at the 4 hero wavelengths for named metal id 1..4 (linear interp on
+// the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with a base offset).
+void namedMetalEtaK(uint metalId, SampledWavelengths sw, out float4 eta, out float4 k)
+{
+    int base  = int(metalId - 1u) * SPECTRAL_METAL_STRIDE;
+    int kbase = base + SPECTRAL_D65_COUNT;
+    [ForceUnroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float t = (sw.lambda[i] - SPECTRUM_LAMBDA_MIN) / 5.0;
+        int   j = clamp(int(t), 0, SPECTRAL_D65_COUNT - 2);
+        float f = clamp(t - float(j), 0.0, 1.0);
+        eta[i] = lerp(spectralMetals[base + j],  spectralMetals[base + j + 1],  f);
+        k[i]   = lerp(spectralMetals[kbase + j], spectralMetals[kbase + j + 1], f);
+    }
+}
+
+// Per-emissive-triangle blackbody metadata (change spectral-rendering, Group 6.1).
+// vk binding 49; uploaded only when spectral, parallel-indexed to the emissive-
+// triangle buffer (binding 18). Two floats/record: (temperature_K, scale). A
+// blackbody area light carries (T>0, blackbody_scale(T, emission)); a plain-RGB
+// emitter carries (0, 0) so the transport falls back to the RGB illuminant
+// upsample. Absent from the RGB build.
+[[vk::binding(49)]] StructuredBuffer<float> spectralEmitters;
+
+// (temperature, scale) for emissive triangle `idx`. temperature == 0 ⇒ not a
+// blackbody (caller upsamples the RGB radiance instead).
+float2 emitterBlackbody(uint idx)
+{
+    return float2(spectralEmitters[idx * 2u], spectralEmitters[idx * 2u + 1u]);
+}
+
+// Per-distant-light authored illuminant SPD (change spectral-rendering, Group 6.3).
+// vk binding 50; uploaded only when spectral. 95 floats/light on the 360-830/5 nm
+// grid (host-scaled to the light's RGB luminance), indexed by the DistantLight
+// `_direction.w` slot. Absent from the RGB build.
+[[vk::binding(50)]] StructuredBuffer<float> spectralLightSpd;
+
+// Evaluate distant-light slot `slot`'s SPD at the 4 hero wavelengths (linear
+// interp on the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with a base
+// offset). Caller gates on slot >= 0.
+Spectrum distantLightSpd(int slot, SampledWavelengths sw)
+{
+    int base = slot * SPECTRAL_D65_COUNT;   // 95 samples / light
+    Spectrum s;
+    [ForceUnroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float t = (sw.lambda[i] - SPECTRUM_LAMBDA_MIN) / 5.0;
+        int   j = clamp(int(t), 0, SPECTRAL_D65_COUNT - 2);
+        float f = clamp(t - float(j), 0.0, 1.0);
+        s[i] = lerp(spectralLightSpd[base + j], spectralLightSpd[base + j + 1], f);
+    }
+    return s;
+}
+
+// Per-material blackbody (temperature, scale) (change spectral-rendering, Group
+// 6.1 follow-up). vk binding 51; uploaded only when spectral, indexed by
+// materialId. temperature == 0 ⇒ not a blackbody (caller keeps the RGB upsample).
+// Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD,
+// matching the NEE path (spectralEmitters). Absent from the RGB build.
+[[vk::binding(51)]] StructuredBuffer<float> spectralMatEmission;
+
+float2 materialBlackbody(uint matId)
+{
+    return float2(spectralMatEmission[matId * 2u], spectralMatEmission[matId * 2u + 1u]);
+}
+#endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)
 //             [0] = (toolMode, lockMode, nTheta, nPhi) as uint bits

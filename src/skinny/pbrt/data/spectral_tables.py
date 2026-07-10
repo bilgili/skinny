@@ -64,8 +64,17 @@ def rgb_to_sigmoid_coeffs(rgb) -> np.ndarray:
     res, zn, data = _load_upsample()
     r, g, b = (float(np.clip(c, 0.0, 1.0)) for c in rgb)
     if r == g == b:
-        denom = np.sqrt(r * (1.0 - r)) if 0.0 < r < 1.0 else 0.0
-        c2 = 0.0 if denom == 0.0 else (r - 0.5) / denom
+        # Uniform RGB → constant spectrum s(c2). pbrt lets the r∈{0,1} endpoints
+        # divide by zero and ride the IEEE ±inf into sigmoid → {0, 1}; a finite
+        # ±1e9 reproduces that limit (sigmoid(±1e9) ≈ {1, 0} to ~1e-9). The prior
+        # `c2 = 0` collapsed BOTH endpoints to 0.5, so pure white reflected 50 %
+        # (white furnace never closed) and pure black reflected 50 %.
+        if r >= 1.0:
+            c2 = 1.0e9
+        elif r <= 0.0:
+            c2 = -1.0e9
+        else:
+            c2 = (r - 0.5) / np.sqrt(r * (1.0 - r))
         return np.array([0.0, 0.0, c2])
     rgb3 = (r, g, b)
     maxc = 0 if (r > g and r > b) else (1 if g > b else 2)
@@ -128,3 +137,23 @@ def named_glass_ior(name: str, lam_nm):
     a, b = coeff
     lam_um = np.asarray(lam_nm, dtype=np.float64) * 1e-3
     return a + b / (lam_um * lam_um)
+
+
+def named_glass_cauchy(name: str):
+    """Return the Cauchy coefficients ``(A, B)`` for a named glass, or ``None``.
+
+    The dispersion law is ``n(λ_µm) = A + B / λ_µm²`` (µm) — the same fit
+    :func:`named_glass_ior` evaluates. The name is normalized like
+    :func:`named_glass_ior` (strip a ``glass-`` / ``glass_`` prefix, lowercase);
+    an unknown-but-present name falls back to the ``"default"`` (BK7-family)
+    coefficients, so the GPU packer always has a usable dispersion for any glass
+    it recognizes. Returns ``None`` only for a ``None``/empty name.
+    """
+    if not name or not name.strip():
+        return None
+    n = name.strip().lower()
+    for prefix in ("glass-", "glass_"):
+        if n.startswith(prefix):
+            n = n[len(prefix) :]
+    a, b = _GLASS_CAUCHY.get(n, _GLASS_CAUCHY["default"])
+    return float(a), float(b)
