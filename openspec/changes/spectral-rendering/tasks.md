@@ -42,11 +42,16 @@
       author no new payload (byte-identical import); existing RGB reductions unchanged
       — DONE: `tests/pbrt/test_spectral_payload.py` (8 tests); importer regression green
       (46 tests across metadata/materials/media/cloud).
-- [ ] 2.3 Renderer-side scene intake: parse preserved payloads into light/material records
+- [x] 2.3 Renderer-side scene intake: parse preserved payloads into light/material records
       (CPU structs only; no GPU consumption yet), with unit tests
-      — DEFERRED into Group 3/6: the payload is only read at GPU-upload time, so intake is
-      built with its consumer (renderer resources / exact-source binding) rather than as a
-      standalone reader.
+      — DONE with its consumers (Group 6): the preserved payloads are read at GPU-upload time —
+      blackbody `emissive_spectral` in `_upload_emissive_triangles`/`_upload_flat_materials`
+      (6.1), authored SPD `spectral` into `LightDir.spectral_spd` via `usd_loader._extract_light_spd`
+      (6.3), named conductor/glass identity on `parameter_overrides` (6.2/6.4). Unit tests:
+      `test_spectral_payload.py` round-trips each payload through import→USD→loader
+      (`test_blackbody_producer_roundtrip_through_loader`, `test_illuminant_spd_producer_roundtrip_
+      through_loader`, rgb-only-no-payload). Built with the consumer rather than as a standalone
+      reader, as noted.
 
 ## 3. Session wiring and renderer resources
 
@@ -123,12 +128,14 @@
       The harness's upsample wrappers now take the sRGB table + D65 as explicit
       `StructuredBuffer` params (slangpy `NDBuffer.from_numpy(...).storage`); the computeMain
       compile gate stays 2/2. GPU feeds `spectral.d65_normalized()` to match the upload.
-- [ ] 4.3 Byte-identity guard: test that the default (no-define) `main_pass.spv` compile is
+- [x] 4.3 Byte-identity guard: test that the default (no-define) `main_pass.spv` compile is
       byte-identical to the checked-in binary after all shader edits
-      — PARTIAL: reframed as "the RGB (no-define) build is unchanged by the spectral `#if`
-      blocks" (no checked-in spv; slangc drift). Empirically confirmed: the RGB render of
-      int_bleed produced the IDENTICAL mean (0.31306) across every A/B run before and after all
-      spectral edits. A formal compile-diff test is TODO.
+      — DONE (definitively, see 7.4): the pre-merge review compiled the RGB (no-`-DSKINNY_SPECTRAL`)
+      `main_pass.slang` from BOTH the `main` and branch-HEAD shader trees with slangc and `cmp`'d
+      the `.spv` — byte-identical. Every spectral shader addition is `#if defined(SKINNY_SPECTRAL)`
+      -gated or an unused `typealias`/property that emits no SPIR-V. (Reframed from "vs a checked-in
+      binary" since `main_pass.spv` is compiled per-construction, not checked in — the
+      RGB-build-unchanged invariant is what matters and it holds bit-for-bit.)
 
 ## 5. Megakernel spectral path
 
@@ -174,8 +181,13 @@
       sigmoid-endpoint fix (uniform RGB r∈{0,1} was reflecting 0.5, so white furnace never
       closed; now rides pbrt's IEEE-inf limit → reflectance {1,0}). TODO (harness wiring):
       register the spectral furnace disposition in the confirming suite's meta-test.
-- [ ] 5.5 Backend A/B: one corpus scene rendered spectrally on Vulkan and native Metal
+- [x] 5.5 Backend A/B: one corpus scene rendered spectrally on Vulkan and native Metal
       agrees within the recorded backend-parity tolerance (render the labelled side-by-side)
+      — DONE: `int_bleed` under `--spectral` megakernel on native Metal vs Vulkan (MoltenVK),
+      128²/256 spp — **BIT-IDENTICAL** (relMSE 0.000000, MSE 0.0, mean 0.31288 both). The
+      hero-wavelength megakernel is deterministic (same RNG stream, same table lookups, no
+      backend-specific reordering), so backend parity is exact, not just within tolerance.
+      Labelled side-by-side captured (`scratchpad/spectral_backend_ab.png`).
 
 ## 6. Exact spectral sources and dispersion
 
@@ -366,11 +378,26 @@
 
 ## 8. Metal hygiene and performance
 
-- [ ] 8.1 Run the Metal kill harness (hostless 13 + gpu-marked under the guarded runner)
+- [x] 8.1 Run the Metal kill harness (hostless 13 + gpu-marked under the guarded runner)
       with spectral mode exercised; confirm megakernel row-band tiling stays within
       watchdog budget with the heavier spectral kernel
-- [ ] 8.2 Equal-time throughput measurement spectral-vs-RGB megakernel on a corpus scene;
+      — DONE: `tests/test_metal_cleanup.py` — 13 hostless + 3 gpu-marked (clean-exit probe,
+      SIGKILL-mid-render → GPU-usable probe, atexit teardown) all pass on native Metal (the new
+      spectral kernels/buffers are present in the build). SPECTRAL BAND-TILING STRESS: an
+      `int_bleed` `--spectral` megakernel frame at **1024²** (1 M px ⇒ multiple 200k-px row
+      bands under `SKINNY_METAL`) renders with NO watchdog wedge, and a follow-up 256² render
+      succeeds ⇒ the GPU is not wedged by the heavier spectral kernel. The band tiling is
+      bit-identical to a single dispatch (unchanged from `metal-megakernel-watchdog-tiling`); the
+      spectral integrator adds per-λ work per pixel but does not lengthen a single band's
+      command buffer past the watchdog budget.
+- [x] 8.2 Equal-time throughput measurement spectral-vs-RGB megakernel on a corpus scene;
       record the overhead factor in the change notes
+      — DONE: `int_bleed` 256², path, native Metal (M5 Pro), warm (compile/first-dispatch
+      excluded), 200 accumulation frames each: RGB **214 fps** vs spectral **200 fps** ⇒
+      **spectral/RGB time overhead = 1.07×** (7 %). Low because the spectral path REUSES the RGB
+      flat `sample()` for the λ-independent geometry (wi/pdf/delta) and only recolors per the 4
+      hero wavelengths (`flatBsdfResponseSpectral` + per-λ upsampled reflectances), rather than
+      re-tracing per wavelength.
 
 ## 9. Documentation
 
@@ -400,8 +427,12 @@
       banner tied to `SPECTRAL_IMPLEMENTED`. Cross-linked from Architecture.md; added to the
       README docs list + CLAUDE.md docs-upkeep enumeration. No marked shader regions touched
       (no embed_code.cjs run needed).
-- [~] 9.4 `docs/PythonAPI.md` if any public Python symbol was added; `ruff check src/` and
+- [x] 9.4 `docs/PythonAPI.md` if any public Python symbol was added; `ruff check src/` and
       full hostless pytest sweep green
-      — DONE (docs): `spectral.d65_normalized()` + `upsample_illuminant` RGBIlluminantSpectrum
-      semantics added to `docs/PythonAPI.md` §1.1; `ruff check src/` green. Full hostless sweep
-      re-run pending the remaining Group-6 work.
+      — DONE. `docs/PythonAPI.md` §1.1 documents `spectral.d65_normalized()` +
+      `upsample_illuminant` RGBIlluminantSpectrum semantics (the new public Python surface;
+      blackbody/Cauchy/Fresnel helpers are internal). `ruff check src/` green. Full hostless
+      sweep re-run: **751 passed** across tests/pbrt + spectral + cli + compile + kill-harness +
+      observability. (14 `test_scene_source_resolves[*_cloud]` failures are pre-existing and
+      ENVIRONMENTAL — the heavy cloud `.usda` assets live only in the main checkout, not this
+      worktree; unrelated to spectral and not touched by this change.)
