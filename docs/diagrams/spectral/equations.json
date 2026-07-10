@@ -1,0 +1,17 @@
+[
+  {"name": "sample-lambda", "tex": "\\lambda(u) = 538 - 138.888889\\,\\operatorname{artanh}\\!\\big(0.85691062 - 1.82750197\\,u\\big)"},
+  {"name": "lambda-pdf", "tex": "p(\\lambda) = \\frac{0.0039398042}{\\cosh^{2}\\!\\big(0.0072\\,(\\lambda - 538)\\big)},\\qquad \\lambda \\in [360, 830]\\ \\text{nm}"},
+  {"name": "hero-rotate", "tex": "\\lambda_i = \\lambda\\!\\left(\\left\\{\\,u + \\tfrac{i}{N}\\,\\right\\}\\right),\\qquad i = 0,\\dots,N-1,\\quad N = 4"},
+  {"name": "terminate", "tex": "p_0 \\leftarrow \\frac{p_0}{N},\\qquad p_1 = p_2 = p_3 = 0"},
+  {"name": "sigmoid", "tex": "S(\\lambda) = s\\!\\big(c_0\\lambda^{2} + c_1\\lambda + c_2\\big),\\qquad s(x) = \\tfrac{1}{2} + \\frac{x}{2\\sqrt{1 + x^{2}}}"},
+  {"name": "reflectance", "tex": "R(\\lambda) = S_{\\mathbf{c}(\\text{rgb})}(\\lambda)"},
+  {"name": "illuminant", "tex": "L(\\lambda) = \\sigma\\, S_{\\mathbf{c}(\\text{rgb}/\\sigma)}(\\lambda)\\, D_{65}(\\lambda),\\qquad \\sigma = 2\\max(r, g, b)"},
+  {"name": "resolve-xyz", "tex": "\\mathrm{XYZ} = \\frac{1}{N\\,\\textstyle\\int \\bar y(\\lambda)\\,d\\lambda}\\sum_{i=1}^{N} \\frac{c(\\lambda_i)}{p(\\lambda_i)}\\,\\big(\\bar x, \\bar y, \\bar z\\big)(\\lambda_i)"},
+  {"name": "xyz-srgb", "tex": "\\begin{pmatrix} R \\\\ G \\\\ B \\end{pmatrix} = \\begin{pmatrix} 3.2405 & -1.5371 & -0.4985 \\\\ -0.9693 & 1.8760 & 0.0416 \\\\ 0.0556 & -0.2040 & 1.0572 \\end{pmatrix} \\begin{pmatrix} X \\\\ Y \\\\ Z \\end{pmatrix}"},
+  {"name": "bounce-weight", "tex": "\\boldsymbol{\\beta} \\mathrel{*}= \\frac{f(\\lambda,\\,\\omega_o \\to \\omega_i)}{p(\\omega_i)},\\qquad L \\mathrel{+}= \\boldsymbol{\\beta}\\odot L_{\\text{NEE}}(\\lambda)"},
+  {"name": "planck", "tex": "L_e(\\lambda, T) = \\frac{2 h c^{2}}{\\lambda^{5}}\\,\\frac{1}{\\exp\\!\\big(h c / \\lambda k_B T\\big) - 1}"},
+  {"name": "planck-scale", "tex": "\\text{scale} = \\frac{Y_{\\text{target}}\\,\\int \\bar y\\, d\\lambda}{Y_{\\text{Planck}}},\\qquad Y_{\\text{target}} = \\mathbf{c}_{\\text{RGB}} \\cdot (0.2126,\\ 0.7152,\\ 0.0722)"},
+  {"name": "cauchy", "tex": "n(\\lambda) = A + \\frac{B}{\\lambda_{\\mu m}^{2}}"},
+  {"name": "fresnel", "tex": "\\begin{aligned} \\tilde\\eta &= \\eta + i\\kappa, & \\cos\\theta_t &= \\sqrt{1 - \\sin^{2}\\theta_i / \\tilde\\eta^{2}} \\\\ r_\\parallel &= \\frac{\\tilde\\eta\\cos\\theta_i - \\cos\\theta_t}{\\tilde\\eta\\cos\\theta_i + \\cos\\theta_t}, & r_\\perp &= \\frac{\\cos\\theta_i - \\tilde\\eta\\cos\\theta_t}{\\cos\\theta_i + \\tilde\\eta\\cos\\theta_t} \\\\ R(\\lambda) &= \\tfrac{1}{2}\\big(|r_\\parallel|^{2} + |r_\\perp|^{2}\\big). \\end{aligned}"},
+  {"name": "dispersion-gate", "tex": "\\text{disperse} \\iff (p_{\\text{bsdf}} = 0)\\ \\wedge\\ (B > 0)\\ \\wedge\\ (\\omega_o^{z}\\,\\omega_i^{z} < 0)"}
+]

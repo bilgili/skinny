@@ -95,6 +95,15 @@ class SceneSpec:
     #   {..., "per_material":true, "furnace_material":1}  — per-material furnace:
     #     only material index `furnace_material` carries the furnace bit.
     furnace: dict | None = None
+    # Spectral-discriminating disposition (change spectral-rendering, Group 6.5).
+    # Marks a suite scene whose whole point is that a `--spectral` render differs
+    # from the RGB render — e.g. a named-glass dispersion prism (Cauchy IOR splits
+    # the hero wavelengths) or a blackbody-lit scene. Shape:
+    #   {"kind":"dispersion", "glass":"bk7", "note":...}   — dispersive dielectric,
+    #   {"kind":"blackbody", "temperature":T, "note":...}  — blackbody emitter.
+    # Consumed by the suite coverage meta-test (its presence is asserted once a
+    # discriminator lands) and, on GPU, the spectral-vs-RGB delta report (7.3).
+    spectral: dict | None = None
 
 
 @dataclass

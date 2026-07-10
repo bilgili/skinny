@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from skinny.pbrt import spectra
+from skinny.pbrt import spectra, spectral
 
 pytest.importorskip("pxr")
 
@@ -185,6 +185,67 @@ def test_rgb_only_scene_authors_no_spectral_payload(tmp_path):
     stage = _stage(tmp_path, _RGB_ONLY)
     assert _overrides_with_key(stage, "spectral") is None
     assert _overrides_with_key(stage, "emissive_spectral") is None
+
+
+# ── producer round-trip through the renderer's material loader (Group 6.1) ──
+#
+# The renderer reads a blackbody area light's temperature from
+# `Material.parameter_overrides["emissive_spectral"]` (renderer.py ~5725) and
+# feeds it to `spectral.blackbody_scale`. This proves that payload survives the
+# FULL pbrt → USD (skinnyOverrides) → `usd_loader._extract_material` path the
+# renderer actually uses to build Material objects — not just the raw stage
+# customData the tests above inspect. Hostless: pxr USD only, no GPU, no
+# PyMaterialXGenSlang.
+
+
+def _load_materials_via_loader(stage):
+    """Yield `Material` objects built by the SAME loader the renderer uses,
+    one per bound UsdShade.Material prim on the stage."""
+    from pxr import UsdShade
+
+    from skinny import usd_loader
+
+    for prim in stage.Traverse():
+        if prim.IsA(UsdShade.Material):
+            yield usd_loader._extract_material(UsdShade.Material(prim))
+
+
+def test_blackbody_producer_roundtrip_through_loader(tmp_path):
+    import math
+
+    stage = _stage(tmp_path, _BLACKBODY_AREALIGHT)
+
+    materials = list(_load_materials_via_loader(stage))
+    assert materials, "importer authored no bound material"
+
+    emissive_mats = [
+        m for m in materials if m.parameter_overrides.get("emissive_spectral") is not None
+    ]
+    assert len(emissive_mats) == 1, "expected exactly one blackbody area-light material"
+    mat = emissive_mats[0]
+
+    # The temperature the renderer reads off parameter_overrides survived the
+    # round-trip. The payload round-trips USD as a pxr.Vt.Dictionary, so
+    # duck-type on `.get` (matches the renderer's own access at renderer.py).
+    payload = mat.parameter_overrides["emissive_spectral"]
+    assert hasattr(payload, "get")
+    assert payload.get("kind") == "blackbody"
+    assert float(payload.get("temperature")) == pytest.approx(3000.0)
+
+    # The emissive RGB the renderer pairs with the temperature is also present,
+    # and `blackbody_scale` yields a finite, strictly positive luminance scale.
+    emissive = mat.parameter_overrides.get("emissiveColor")
+    assert emissive is not None
+    emissive_rgb = tuple(float(c) for c in emissive)
+    scale = spectral.blackbody_scale(float(payload.get("temperature")), emissive_rgb)
+    assert math.isfinite(scale)
+    assert scale > 0.0
+
+
+def test_rgb_only_producer_roundtrip_has_no_spectral(tmp_path):
+    stage = _stage(tmp_path, _RGB_ONLY)
+    for mat in _load_materials_via_loader(stage):
+        assert mat.parameter_overrides.get("emissive_spectral") is None
 
 
 # ── named-conductor / dispersive-glass material identity round-trip ─

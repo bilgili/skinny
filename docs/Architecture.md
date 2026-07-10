@@ -909,7 +909,9 @@ added to `SlangCompilerOptions.defines`), pulling in `spectrum.slang` and the
 (`float4` spectral / `float3` RGB) so the carriers type-check in both builds;
 the default RGB build never imports `spectrum.slang`, so its SPIR-V is
 **byte-unchanged**. It compiles on demand on both backends (spectral bindings
-45–47 in the [Descriptor Binding Map](#descriptor-binding-map)).
+45–47 in the [Descriptor Binding Map](#descriptor-binding-map)). The estimator,
+upsampling model, exact sources, and film resolve are documented in
+[Spectral.md](Spectral.md).
 
 **Wavefront on Metal** (change `metal-wavefront-parity`): the wavefront
 execution mode — staged path + BDPT integrators, ReSTIR DI reuse, and the

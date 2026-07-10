@@ -43,6 +43,9 @@ SUITE_BY_NAME = {s.name: s for s in SUITE}
 FURNACE = [s for s in SUITE if s.furnace]
 # _mtlx variants that declare an equivalence pair (skip-reasoned ones excluded).
 EQUIV_PAIRS = [s for s in SUITE if s.equivalence and s.equivalence.get("pair")]
+# Suite scenes carrying a spectral-discriminating disposition (change
+# spectral-rendering, Group 6.5): a --spectral render is meant to differ from RGB.
+SPECTRAL = [s for s in SUITE if s.spectral]
 
 
 def _abs(path: str) -> str:
@@ -131,6 +134,32 @@ def test_suite_coverage_furnace_disposition(spec):
         )
     # A furnace scene's reference is the analytic invariant, not a pbrt EXR.
     assert spec.pbrt_skip, f"{spec.name}: furnace scene needs a pbrt_skip reason"
+
+
+def test_suite_spectral_discriminator_present():
+    """At least one suite scene carries a spectral-discriminating disposition
+    (change spectral-rendering, Group 6.5) — a scene whose whole point is that a
+    ``--spectral`` render differs from the RGB render (a named-glass dispersion
+    prism and/or a blackbody-lit scene). This backstops Group 7.2's deferred
+    assertion: the discriminator must exist before the spectral GPU sweep (7.3)
+    has anything to measure spectral-vs-RGB deltas on."""
+    assert SPECTRAL, (
+        "no suite scene declares a `spectral` disposition — the spectral axis has "
+        "no discriminating confirming-suite scene (Group 6.5)"
+    )
+
+
+@pytest.mark.parametrize("spec", SPECTRAL, ids=[s.name for s in SPECTRAL])
+def test_suite_spectral_disposition_wellformed(spec):
+    """A spectral disposition names a recognized kind and carries the payload that
+    kind needs (a named glass for dispersion, a temperature for blackbody)."""
+    cfg = spec.spectral
+    kind = cfg.get("kind")
+    assert kind in ("dispersion", "blackbody"), f"{spec.name}: unknown spectral kind {kind!r}"
+    if kind == "dispersion":
+        assert cfg.get("glass"), f"{spec.name}: dispersion disposition needs a `glass` key"
+    else:  # blackbody
+        assert "temperature" in cfg, f"{spec.name}: blackbody disposition needs a `temperature`"
 
 
 @pytest.mark.parametrize("spec", SUITE, ids=[s.name for s in SUITE])

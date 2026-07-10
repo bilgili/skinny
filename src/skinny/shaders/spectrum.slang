@@ -79,6 +79,30 @@ SampledWavelengths terminateSecondary(SampledWavelengths sw)
     return sw;
 }
 
+// Raw Planck blackbody spectral radiance at the 4 hero wavelengths (change
+// spectral-rendering, Group 6.1). Bit-exact mirror of spectra.py `planck`:
+// 2hc²/(λ⁵·(exp(hc/λk_BT)−1)), λ in metres. Un-normalized; the per-emitter
+// luminance match is a host-computed scalar (spectral.blackbody_scale), applied
+// by the caller — never here. Returns 0 for a non-positive temperature.
+Spectrum planckSpectrum(SampledWavelengths sw, float temperature)
+{
+    if (temperature <= 0.0)
+        return Spectrum(0.0);
+    const float h  = 6.62606957e-34;   // Planck constant (J·s)
+    const float c  = 299792458.0;      // speed of light (m/s)
+    const float kb = 1.3806488e-23;    // Boltzmann constant (J/K)
+    Spectrum L;
+    [ForceUnroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float lam = sw.lambda[i] * 1e-9;                 // nm → m
+        float lam5 = lam * lam * lam * lam * lam;
+        float expo = exp(h * c / (lam * kb * temperature)) - 1.0;
+        L[i] = (2.0 * h * c * c) / (lam5 * expo);
+    }
+    return L;
+}
+
 // ── CIE colour-matching (Wyman-Sloan-Shirley fit, mirrors spectra.py) ──
 
 float cieGauss(float x, float mu, float s1, float s2)

@@ -139,6 +139,21 @@ void namedMetalEtaK(uint metalId, SampledWavelengths sw, out float4 eta, out flo
         k[i]   = lerp(spectralMetals[kbase + j], spectralMetals[kbase + j + 1], f);
     }
 }
+
+// Per-emissive-triangle blackbody metadata (change spectral-rendering, Group 6.1).
+// vk binding 49; uploaded only when spectral, parallel-indexed to the emissive-
+// triangle buffer (binding 18). Two floats/record: (temperature_K, scale). A
+// blackbody area light carries (T>0, blackbody_scale(T, emission)); a plain-RGB
+// emitter carries (0, 0) so the transport falls back to the RGB illuminant
+// upsample. Absent from the RGB build.
+[[vk::binding(49)]] StructuredBuffer<float> spectralEmitters;
+
+// (temperature, scale) for emissive triangle `idx`. temperature == 0 ⇒ not a
+// blackbody (caller upsamples the RGB radiance instead).
+float2 emitterBlackbody(uint idx)
+{
+    return float2(spectralEmitters[idx * 2u], spectralEmitters[idx * 2u + 1u]);
+}
 #endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)

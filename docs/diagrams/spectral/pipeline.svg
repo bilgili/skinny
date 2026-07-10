@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="560" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">
+  <defs>
+    <marker id="sarr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .b{fill:#f4f6fb;stroke:#5b7cc4;stroke-width:1.3;}
+    .g{fill:#eef7f0;stroke:#5b9c6e;stroke-width:1.3;}
+    .br{fill:#fbf3ee;stroke:#c4865b;stroke-width:1.3;}
+    .t{fill:#1a2230;}
+    .f{fill:#7a8aa0;font-size:10.5px;font-style:italic;}
+    .e{stroke:#555;stroke-width:1.2;fill:none;marker-end:url(#sarr);}
+    .lbl{fill:#5b7cc4;font-size:10.5px;font-weight:600;}
+  </style>
+  <text class="t" x="380" y="22" text-anchor="middle" font-weight="600" font-size="13">SpectralPathTracer — hero-wavelength megakernel (one thread per pixel)</text>
+
+  <rect class="b" x="240" y="40" width="280" height="48" rx="8"/>
+  <text class="t" x="380" y="61" text-anchor="middle" font-weight="600">draw hero wavelengths</text>
+  <text class="f" x="380" y="78" text-anchor="middle">sw = sampleWavelengths(rng.next()) — 4 rotated λ + pdf</text>
+
+  <rect class="g" x="150" y="108" width="460" height="150" rx="8"/>
+  <text class="t" x="380" y="128" text-anchor="middle" font-weight="600">per-bounce transport (loop, per wavelength)</text>
+  <text class="f" x="380" y="147" text-anchor="middle">upsample flat reflectances (sigmoid) + emitters/env (RGBIlluminant × D65)</text>
+  <text class="f" x="380" y="163" text-anchor="middle">spectral NEE: Σ response(λ)·L(λ) · MIS  (scalar pdfs, unchanged)</text>
+  <text class="f" x="380" y="179" text-anchor="middle">reuse RGB sample() for λ-independent wi / pdf / delta-ness</text>
+  <text class="f" x="380" y="195" text-anchor="middle">β ∗= f(λ)/pdf   (named-conductor: exact complex Fresnel)</text>
+  <text class="f" x="380" y="211" text-anchor="middle">dispersion gate → refract at n(λ₀), terminateSecondary</text>
+  <text class="f" x="380" y="227" text-anchor="middle">scalar RR on max(β)</text>
+  <text class="f" x="380" y="245" text-anchor="middle">radiance += β ⊙ (NEE + emission)</text>
+
+  <rect class="br" x="200" y="278" width="360" height="64" rx="8"/>
+  <text class="t" x="380" y="300" text-anchor="middle" font-weight="600">film resolve  (spectrum.slang)</text>
+  <text class="f" x="380" y="318" text-anchor="middle">XYZ = (1/N∫ȳ) Σ c(λᵢ)/p(λᵢ) · (x̄,ȳ,z̄)(λᵢ)  — Wyman CMF</text>
+  <text class="f" x="380" y="334" text-anchor="middle">→ XYZ→sRGB matrix → float3, clamp ≥ 0</text>
+
+  <rect class="br" x="240" y="362" width="280" height="44" rx="8"/>
+  <text class="t" x="380" y="383" text-anchor="middle">NaN sanitise → clampSampleRadiance</text>
+  <text class="f" x="380" y="399" text-anchor="middle">shared RGB tail — byte-identical interface</text>
+
+  <rect class="br" x="240" y="426" width="280" height="44" rx="8"/>
+  <text class="t" x="380" y="447" text-anchor="middle">RGBA32F progressive accumulation</text>
+  <text class="f" x="380" y="463" text-anchor="middle">same buffer / exposure / tonemap as RGB</text>
+
+  <text class="lbl" x="622" y="188" text-anchor="middle">×6</text>
+  <text class="f" x="622" y="202" text-anchor="middle" font-size="9">bounces</text>
+
+  <path class="e" d="M380,88 L380,106"/>
+  <path class="e" d="M380,258 L380,276"/>
+  <path class="e" d="M380,342 L380,360"/>
+  <path class="e" d="M380,406 L380,424"/>
+  <path class="e" d="M610,170 C650,170 650,150 618,140" />
+  <path class="e" d="M150,150 C112,150 112,215 148,225" />
+</svg>

@@ -1,0 +1,210 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary pbrt = {
+            string colorSpace = "srgb"
+            dictionary film = {
+                dictionary paramTypes = {
+                    string filename = "string"
+                    string xresolution = "integer"
+                    string yresolution = "integer"
+                }
+                dictionary params = {
+                    string filename = "spec_prism.exr"
+                    int xresolution = 128
+                    int yresolution = 128
+                }
+            }
+            dictionary integrator = {
+                dictionary paramTypes = {
+                    string maxdepth = "integer"
+                }
+                dictionary params = {
+                    int maxdepth = 16
+                }
+                string type = "path"
+            }
+            dictionary sampler = {
+                dictionary paramTypes = {
+                    string pixelsamples = "integer"
+                }
+                dictionary params = {
+                    int pixelsamples = 256
+                }
+                string type = "independent"
+            }
+        }
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Mesh "shape_0" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+        customData = {
+            dictionary pbrtAreaLight = {
+                dictionary paramTypes = {
+                    string L = "rgb"
+                }
+                dictionary params = {
+                    double[] L = [18, 18, 18]
+                }
+                string type = "diffuse"
+            }
+        }
+    )
+    {
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [2, 1, 0, 3, 2, 0]
+        rel material:binding = </World/shape_0_mat>
+        point3f[] points = [(-1, 4, 1), (1, 4, 1), (1, 4, -1), (-1, 4, -1)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Material "shape_0_mat" (
+        customData = {
+            dictionary pbrt = {
+                string type = "diffuse"
+            }
+        }
+    )
+    {
+        token outputs:surface.connect = </World/shape_0_mat/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+            color3f inputs:emissiveColor = (18, 18, 18)
+            float inputs:metallic = 0
+            float inputs:opacity = 1
+            float inputs:roughness = 1
+            token outputs:surface
+        }
+    }
+
+    def Mesh "shape_1" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [2, 1, 0, 3, 2, 0]
+        rel material:binding = </World/shape_1_mat>
+        point3f[] points = [(-4, 0, -4), (4, 0, -4), (4, 0, 4), (-4, 0, 4)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Material "shape_1_mat" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string reflectance = "rgb"
+                }
+                dictionary params = {
+                    double[] reflectance = [0.18, 0.18, 0.18]
+                }
+                string type = "diffuse"
+            }
+        }
+    )
+    {
+        token outputs:surface.connect = </World/shape_1_mat/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.18, 0.18, 0.18)
+            float inputs:metallic = 0
+            float inputs:opacity = 1
+            float inputs:roughness = 1
+            token outputs:surface
+        }
+    }
+
+    def Mesh "shape_2" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3]
+        int[] faceVertexIndices = [2, 1, 0, 4, 5, 3, 1, 4, 0, 4, 3, 0, 2, 5, 1, 5, 4, 1, 0, 3, 2, 3, 5, 2]
+        rel material:binding = </World/shape_2_mat>
+        point3f[] points = [(0, 1.65, -0.3), (-0.77942, 0.3, -0.3), (0.77942, 0.3, -0.3), (0, 1.65, 0.3), (-0.77942, 0.3, 0.3), (0.77942, 0.3, 0.3)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Material "shape_2_mat" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string eta = "spectrum"
+                }
+                dictionary params = {
+                    string eta = "glass-BK7"
+                }
+                string type = "dielectric"
+            }
+            dictionary skinnyOverrides = {
+                string glass_dispersion = "bk7"
+            }
+        }
+    )
+    {
+        token outputs:surface.connect = </World/shape_2_mat/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (1, 1, 1)
+            float inputs:ior = 1.5
+            float inputs:metallic = 0
+            float inputs:opacity = 0
+            float inputs:roughness = 0
+            token outputs:surface
+        }
+    }
+
+    def Camera "Camera" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string fov = "float"
+                }
+                dictionary params = {
+                    double fov = 30
+                }
+                string type = "perspective"
+            }
+        }
+    )
+    {
+        float exposure = 0
+        float focalLength = 44.78461
+        float horizontalAperture = 24
+        custom float skinny:film:exposureTime = 1
+        custom float skinny:film:iso = 100
+        float verticalAperture = 24
+        matrix4d xformOp:transform = ( (-1, 0, 0, 0), (0, 0.9912279006826348, 0.13216372009101796, 0), (0, 0.13216372009101798, -0.9912279006826346, 0), (0, 1.5000000000000002, -6, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def DomeLight "light_infinite_1ee0" (
+        customData = {
+            dictionary pbrt = {
+                dictionary paramTypes = {
+                    string L = "rgb"
+                }
+                dictionary params = {
+                    double[] L = [0.6, 0.6, 0.6]
+                }
+                string type = "infinite"
+            }
+        }
+    )
+    {
+        asset inputs:texture:file = @light_infinite_1ee0_const.hdr@
+    }
+}
+

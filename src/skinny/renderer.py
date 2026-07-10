@@ -319,6 +319,12 @@ DISTANT_LIGHT_CAPACITY = 16
 EMISSIVE_TRI_STRIDE = 64
 EMISSIVE_TRI_CAPACITY = 256
 
+# Spectral emitter record (binding 49, spectral variant only): float2
+# (temperature_K, scale) per emissive triangle, parallel-indexed to binding 18.
+# 8 B / record. A blackbody emitter carries (T, blackbody_scale(T, emission));
+# a plain-RGB emitter carries (0, 0) so the shader falls back to the RGB upsample.
+SPECTRAL_EMITTER_STRIDE = 8
+
 # StdSurfaceParams record (binding 19): full MaterialX standard_surface
 # parameters packed in scalar layout matching the Slang struct in
 # mtlx_std_surface.slang.  256 B / record.
@@ -3850,6 +3856,11 @@ class Renderer:
         self._spectral_data_buffer = None
         self._spectral_d65_buffer = None
         self._spectral_metals_buffer = None
+        # Per-emissive-triangle blackbody metadata (binding 49, Group 6.1): a
+        # float2 (temperature_K, scale) parallel-indexed to emissive_tri_buffer
+        # (binding 18). Allocated below alongside the triangle buffer, spectral
+        # variant only. scale = spectral.blackbody_scale(T, emissiveColor).
+        self._spectral_emitters_buffer = None
         if self._spectral:
             from skinny.pbrt import spectral as _spectral_mirror
             from skinny.pbrt.data import spectral_tables
@@ -4097,6 +4108,16 @@ class Renderer:
             b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
         )
         self._num_emissive_tris: int = 0
+        # Spectral emitter metadata (binding 49): float2 (T, scale) per triangle,
+        # sized/grown parallel to emissive_tri_buffer. Spectral variant only, so
+        # the RGB descriptor layout stays byte-identical.
+        if self._spectral:
+            self._spectral_emitters_buffer = self._gpu.StorageBuffer(
+                self.ctx, self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE + 16
+            )
+            self._spectral_emitters_buffer.upload_sync(
+                b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
+            )
         # Σ(area·Rec709-lum) over emissive triangles → FrameConstants.emissiveTotalPower
         # (the path tracer's BSDF-hit MIS weight). Set in _upload_emissive_triangles.
         self._emissive_total_power: float = 0.0
@@ -4302,10 +4323,10 @@ class Renderer:
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envDistCdf (one combined env CDF buffer).
                 # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                # +4 spectral buffers (45/46/47 upsample + 48 conductor eta/k)
-                # only for the spectral megakernel variant.
+                # +5 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
+                # 49 emissive blackbody) only for the spectral megakernel variant.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
-                * (22 + graph_slot + (4 if self._spectral else 0)),
+                * (22 + graph_slot + (5 if self._spectral else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4697,7 +4718,8 @@ class Renderer:
                 for _b, _buf in ((45, self._spectral_scale_buffer),
                                  (46, self._spectral_data_buffer),
                                  (47, self._spectral_d65_buffer),
-                                 (48, self._spectral_metals_buffer)):
+                                 (48, self._spectral_metals_buffer),
+                                 (49, self._spectral_emitters_buffer)):
                     writes.append(vk.VkWriteDescriptorSet(
                         dstSet=ds, dstBinding=_b, dstArrayElement=0,
                         descriptorCount=1,
@@ -5700,6 +5722,23 @@ class Renderer:
             )
             if emissive[0] <= 0 and emissive[1] <= 0 and emissive[2] <= 0:
                 continue
+            # Spectral (Group 6.1): a blackbody area light preserves its
+            # temperature on parameter_overrides["emissive_spectral"]. Evaluate the
+            # exact-Planck luminance-matching scale once per instance (shared by all
+            # its triangles); (0, 0) means "not a blackbody, use the RGB upsample".
+            bb_temp, bb_scale = 0.0, 0.0
+            if self._spectral:
+                payload = mat.parameter_overrides.get("emissive_spectral")
+                # payload round-trips USD as a pxr.Vt.Dictionary (NOT a py dict),
+                # so duck-type on `.get` rather than isinstance(dict).
+                if (payload is not None and hasattr(payload, "get")
+                        and payload.get("kind") == "blackbody"):
+                    from skinny.pbrt import spectral as _spectral_mirror
+                    bb_temp = float(payload.get("temperature", 0.0) or 0.0)
+                    if bb_temp > 0.0:
+                        bb_scale = float(
+                            _spectral_mirror.blackbody_scale(bb_temp, emissive)
+                        )
             src = inst.source
             xform = inst.transform
             for tri in range(len(src.tri_idx)):
@@ -5713,7 +5752,7 @@ class Renderer:
                 area = 0.5 * float(np.linalg.norm(np.cross(e1, e2)))
                 if area < 1e-8:
                     continue
-                records.append((p0, p1, p2, emissive, area))
+                records.append((p0, p1, p2, emissive, area, bb_temp, bb_scale))
 
         # Power-weighted importance sampling (change emissive-mesh-nee). Build a
         # normalized cumulative-power CDF over every emissive triangle (no 256
@@ -5726,7 +5765,7 @@ class Renderer:
         n = len(records)
         weights = [
             area * (0.2126 * float(em[0]) + 0.7152 * float(em[1]) + 0.0722 * float(em[2]))
-            for (_p0, _p1, _p2, em, area) in records
+            for (_p0, _p1, _p2, em, area, _t, _s) in records
         ]
         total_w = float(sum(weights))
         # Σ(area·Rec709-lum) → FrameConstants.emissiveTotalPower; the path tracer's
@@ -5740,6 +5779,10 @@ class Renderer:
             self._emissive_total_power = 0.0
             zeros = b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
             self.emissive_tri_buffer.upload_sync(zeros)
+            if self._spectral and self._spectral_emitters_buffer is not None:
+                self._spectral_emitters_buffer.upload_sync(
+                    b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
+                )
             return
 
         # Grow (and rebind) the buffer to hold every emissive triangle, doubling
@@ -5751,13 +5794,21 @@ class Renderer:
             self.emissive_tri_buffer = self._gpu.StorageBuffer(
                 self.ctx, self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE + 16
             )
+            if self._spectral and self._spectral_emitters_buffer is not None:
+                self._spectral_emitters_buffer.destroy()
+                self._spectral_emitters_buffer = self._gpu.StorageBuffer(
+                    self.ctx, self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE + 16
+                )
             self._rebind_emissive_descriptors()
 
         uniform = bool(getattr(self, "_emissive_uniform_selection", False))
         data = bytearray()
+        spectral_data = bytearray()   # binding 49: (T, scale) parallel to `data`
         cum = 0.0
         for i in range(n):
-            p0, p1, p2, em, area = records[i]
+            p0, p1, p2, em, area, bb_temp, bb_scale = records[i]
+            if self._spectral:
+                spectral_data += struct.pack("ff", float(bb_temp), float(bb_scale))
             if uniform:
                 # Test A/B: uniform-by-index — the same shader path then
                 # reproduces exact 1/N selection.
@@ -5782,6 +5833,11 @@ class Renderer:
         while len(data) < cap_bytes:
             data += b"\x00" * EMISSIVE_TRI_STRIDE
         self.emissive_tri_buffer.upload_sync(bytes(data[:cap_bytes]))
+        if self._spectral and self._spectral_emitters_buffer is not None:
+            sp_cap = self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE
+            while len(spectral_data) < sp_cap:
+                spectral_data += b"\x00" * SPECTRAL_EMITTER_STRIDE
+            self._spectral_emitters_buffer.upload_sync(bytes(spectral_data[:sp_cap]))
         self._num_emissive_tris = n
         print(f"[skinny] emissive triangles: {n}"
               + (" (uniform selection)" if uniform else " (power-weighted NEE)"))
@@ -8883,6 +8939,8 @@ class Renderer:
             b["spectralData"] = self._spectral_data_buffer.buffer
             b["spectralD65"] = self._spectral_d65_buffer.buffer
             b["spectralMetals"] = self._spectral_metals_buffer.buffer
+            if self._spectral_emitters_buffer is not None:
+                b["spectralEmitters"] = self._spectral_emitters_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -10520,7 +10578,8 @@ class Renderer:
         # Spectral buffers (bindings 45/46/47 upsample + 48 conductor eta/k) —
         # only allocated for the spectral megakernel variant.
         for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
-                    self._spectral_d65_buffer, self._spectral_metals_buffer):
+                    self._spectral_d65_buffer, self._spectral_metals_buffer,
+                    self._spectral_emitters_buffer):
             if _sb is not None:
                 _sb.destroy()
         self.hud_overlay.destroy()

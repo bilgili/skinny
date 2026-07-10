@@ -179,9 +179,35 @@
 
 ## 6. Exact spectral sources and dispersion
 
-- [~] 6.1 Blackbody: Planck evaluation at sampled wavelengths from the preserved
+- [x] 6.1 Blackbody: Planck evaluation at sampled wavelengths from the preserved
       temperature; GPU≡numpy test + chromaticity-moves-toward-pbrt check on a
       blackbody-lit scene
+      — DONE (GPU consumer re-hooked to emissive triangles). PRODUCER: pbrt blackbody
+      area lights import with emissiveColor = blackbody_rgb(T)×intensity AND
+      `emissive_spectral={"kind":"blackbody","temperature":T}` on skinnyOverrides
+      (api.py); payload round-trips USD→`Material.parameter_overrides` via
+      usd_loader:603-607 (verified end-to-end, `test_blackbody_producer_roundtrip_
+      through_loader`; surfaces as `pxr.Vt.Dictionary`, so the renderer read duck-types
+      on `.get`, NOT isinstance(dict)). `_upload_emissive_triangles` computes
+      `blackbody_scale(T, emissiveColor)` (numpy, exact) per blackbody instance and packs
+      (T, scale) into a NEW spectral-only buffer `spectralEmitters` (vk binding 49, 8 B
+      float2), parallel-indexed to binding 18; grown/zero-filled alongside it, guarded by
+      `self._spectral` ⇒ RGB layout byte-unchanged. Wired binding 49: vk layout
+      (vk_compute), descriptor writes + pool count (spectral 4→5) + named-buffer dict
+      (Metal bind-by-name) + destroy list. CONSUMER: `spectrum.slang::planckSpectrum(sw,T)`
+      = bit-exact mirror of `spectra.planck`; `bindings.slang::emitterBlackbody(idx)`;
+      `path_spectral.slang` spectralLightNEE gained `(liOverride, hasLiOverride)` — the
+      emissive-triangle NEE branch substitutes `planckSpectrum(sw,T)*scale` for the RGB
+      illuminant upsample when T>0. Constant/RGB emitters (T=0) fall back. KNOWN v1 LIMIT:
+      BSDF-ray-hits-emissive-triangle MIS emission stays the RGB upsample (`cols.emission`)
+      — the megakernel hit carries only materialId, not a per-triangle emitter index; NEE
+      dominates area-light energy. TESTS: GPU≡numpy `test_planck` harness (gpu-marked) +
+      producer round-trip + rgb-only-no-payload (hostless). VALIDATED on Metal (M5 Pro): a
+      3400 K area light on saturated red/blue reflectances moves chromaticity off the RGB
+      metamer TOWARD pbrt on both axes (R/G 15.65→2.50 vs pbrt 4.42; B/G 0.42→0.92 vs pbrt
+      2.59); grey-surface scene identical to RGB (same-chromaticity metamer, expected).
+      Both slangc variants compile; RGB byte-unchanged. FOLLOW-UP: commit a blackbody
+      corpus scene for the 7.3 sweep (validated against a scratch scene here).
       — NUMPY PREP DONE (0b2219f): `spectral.blackbody_emission(sw,T)` (raw Planck at hero λ) +
       `blackbody_scale(T, emission_rgb)` = Y_target·_Y_INTEGRAL/Y_planck (6 tests, MC round-trip
       luminance+chromaticity within 2%, hotter→bluer). GPU CONSUMER DEFERRED — DISCOVERY: pbrt
@@ -236,9 +262,21 @@
       `glass_dispersion`→`named_glass_cauchy`→ ior=A, B in pad. Glass IS flat (opacity<1) so flows
       through path_spectral cleanly — end-to-end testable (unlike 6.1). Needs a spectral-specific refraction
       path (the RGB `bs.wi` is λ-independent).
-- [ ] 6.5 Build the spectral-discriminating confirming-suite scene(s) (dispersive dielectric
+- [x] 6.5 Build the spectral-discriminating confirming-suite scene(s) (dispersive dielectric
       and/or blackbody-lit) via `tests/assets/suite/_gen/`, regen pbrt refs
       (`regen_refs.py`), register dispositions
+      — DONE: `spec_prism` — a BK7 dispersion prism (strongest discriminator; named-glass
+      Cauchy IOR splits hero λ on the first dispersive refraction under `--spectral`, RGB
+      sees a plain delta dielectric). `_gen`: `triangular_prism()` in geom.py + `_prism_scene`
+      in build.py (`Material "dielectric" "spectrum eta" "glass-BK7"`, env + area light + grey
+      floor, path/maxdepth 16, 128²/spp 256). Imported to plain + MaterialX `.usda` (3 inst, 0
+      skipped; both preserve `skinnyOverrides.glass_dispersion="bk7"`). `SceneSpec.spectral`
+      disposition field added to parity.py; manifest registers `spec_prism` (suite, dispersion
+      disposition) + `spec_prism_mtlx` (materialx, equivalence pair). Ref regenerated
+      `refs/suite_spec_prism.exr` (128², spp 256, spectral pbrt). 212 hostless suite+matrix
+      tests green. FOLLOW-UP: the RGB matrix pbrt-truth gate on spec_prism may need a pinned
+      `baseline` under 7.3 (pbrt ref is spectral, RGB render diverges) — recorded in manifest
+      notes. Blackbody-lit suite scene left out (one dispersion discriminator satisfies "≥1").
 
 ## 7. Parity matrix integration
 
@@ -258,8 +296,10 @@
       suite spectral-discriminating disposition presence (hostless)
       — DONE (validity completeness): `test_coverage_meta_spectral_axis_covered` + 8 spectral
       validity tests in `tests/pbrt/test_matrix.py` (23 pass, 141 hostless total green). Suite
-      spectral-discriminating disposition coverage DEFERRED to Group 6.5 (the discriminating
-      scene must exist first); the meta-test will assert its disposition once 6.5 lands.
+      spectral-discriminating disposition coverage LANDED with 6.5:
+      `test_suite_spectral_discriminator_present` + `test_suite_spectral_disposition_wellformed`
+      (tests/pbrt/test_suite.py) assert ≥1 suite scene carries a `spectral` disposition
+      (spec_prism, dispersion).
 - [ ] 7.3 GPU sweep: run `(Path, megakernel, spectral)` across the corpus; record spectral
       pbrt-truth measurements; assert spectral ≤ RGB on spectrum-authored scenes; report
       (not assert) spectral-vs-RGB anchor deltas
@@ -290,9 +330,18 @@
       subsection), matching CLAUDE.md matrix row + WIP constraint block (kept in sync per the
       "keep the two in sync" note), and a CHANGELOG `[Unreleased] Added` entry. All honestly
       flag the transport as unwired / `--spectral` refused until `SPECTRAL_IMPLEMENTED` flips.
-- [ ] 9.3 New `docs/` section (or doc) for spectral rendering: hero-wavelength estimator,
+- [x] 9.3 New `docs/` section (or doc) for spectral rendering: hero-wavelength estimator,
       upsampling model, film resolve — equations as LaTeX-rendered SVG per repo convention;
       run `node docs/diagrams/embed_code.cjs --check` if marked shader regions were touched
+      — DONE: new `docs/Spectral.md` (estimator: visible-λ importance sampling, hero rotation,
+      secondary termination; upsampling: Jakob-Hanika sigmoid + pbrt RGBIlluminantSpectrum;
+      per-λ transport + scalar MIS/RR; exact sources: Planck blackbody + luminance scale,
+      complex-index conductor Fresnel, Cauchy dispersion + unbiasedness gate; Wyman-CMF film
+      resolve). 15 equation SVGs rendered via MathJax 3 (`docs/diagrams/spectral/equations.json`
+      + render.cjs) + a hand-authored `pipeline.svg`; per-equation symbol→code tables + a WIP
+      banner tied to `SPECTRAL_IMPLEMENTED`. Cross-linked from Architecture.md; added to the
+      README docs list + CLAUDE.md docs-upkeep enumeration. No marked shader regions touched
+      (no embed_code.cjs run needed).
 - [~] 9.4 `docs/PythonAPI.md` if any public Python symbol was added; `ruff check src/` and
       full hostless pytest sweep green
       — DONE (docs): `spectral.d65_normalized()` + `upsample_illuminant` RGBIlluminantSpectrum

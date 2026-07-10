@@ -210,6 +210,25 @@ AttributeBegin
 AttributeEnd
 """
 
+def _prism_scene(name: str, material: str, *, spp=256, maxdepth=16,
+                 env="0.6 0.6 0.6", area_light="18 18 18") -> str:
+    """A single dispersion prism on the grey floor under an area light + constant
+    environment — the spectral discriminator. A named-glass (BK7) dielectric here
+    splits the hero wavelengths under ``--spectral`` (Cauchy IOR at the refraction),
+    a difference an RGB render cannot reproduce; the transport/lobe is otherwise a
+    plain delta dielectric so the RGB gates still hold."""
+    parts = [_HEADER.format(spp=spp, integrator="path", maxdepth=maxdepth, name=name)]
+    parts.append(f'LightSource "infinite" "rgb L" [{env}]\n')
+    lr, lg, lb = area_light.split()
+    parts.append(_AREA_LIGHT.format(
+        lr=lr, lg=lg, lb=lb,
+        light_geom=geom.trianglemesh(*geom.ceiling_light())))
+    parts.append(_GROUND.format(ground_geom=geom.trianglemesh(*geom.ground())))
+    pts, idx = geom.triangular_prism(0.0, 0.75, 0.0, r=0.9, depth=0.6)
+    parts.append(f"AttributeBegin\n  {material}\n  {geom.trianglemesh(pts, idx)}\nAttributeEnd\n")
+    return "".join(parts)
+
+
 SCENES: dict[str, str] = {
     # ── materials (one lobe family each) ──
     "mat_diffuse": _scene("mat_diffuse",
@@ -253,6 +272,14 @@ SCENES: dict[str, str] = {
         "samp_env_glossy",
         'Material "conductor" "spectrum eta" "metal-Al-eta" "spectrum k" "metal-Al-k" "float roughness" 0.25',
         env="0.8 0.8 0.9", area_light=None),
+    # ── spectral discriminators (change spectral-rendering, Group 6.5) ──
+    # A BK7 dispersion prism: named-glass dielectric ⇒ Cauchy IOR under --spectral
+    # separates the hero wavelengths; the RGB render (and RGB gates) see a plain
+    # delta dielectric. pbrt v4 renders it spectrally, so the reference already
+    # carries the dispersion the spectral path is measured against (Group 7.3).
+    "spec_prism": _prism_scene(
+        "spec_prism",
+        'Material "dielectric" "spectrum eta" "glass-BK7"'),
     # ── furnace closure (lossless materials; reference is the analytic 1.0) ──
     "furnace_lambert": _furnace_scene(
         "furnace_lambert", 'Material "diffuse" "rgb reflectance" [1 1 1]'),

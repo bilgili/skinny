@@ -35,6 +35,49 @@ def uv_sphere(cx: float, cy: float, cz: float, r: float,
     return pts, idx
 
 
+def triangular_prism(cx: float, cy: float, cz: float, r: float = 0.9,
+                     depth: float = 0.6) -> tuple[list[tuple], list[int]]:
+    """A solid equilateral triangular prism (a classic dispersion prism).
+
+    The equilateral cross-section (circumradius ``r``, apex up) lies in the XY
+    plane and is extruded ``±depth/2`` along Z; the camera looks in along -Z so
+    the triangular face is presented to the viewer. All 8 triangles (2 caps + 3
+    rectangular sides) are wound so their geometric normals point *outward* — the
+    orientation is computed against the solid centroid rather than trusted by
+    hand, so refraction enters/exits a well-formed closed manifold regardless of
+    the vertex order below. Under ``--spectral`` a named-glass (BK7) dielectric
+    on this prism separates the hero wavelengths (Cauchy IOR); in RGB it cannot.
+    """
+    ang = [math.pi / 2, math.pi / 2 + 2 * math.pi / 3, math.pi / 2 + 4 * math.pi / 3]
+    tri = [(cx + r * math.cos(a), cy + r * math.sin(a)) for a in ang]
+    d = depth * 0.5
+    pts = [(x, y, cz + d) for (x, y) in tri] + [(x, y, cz - d) for (x, y) in tri]
+    gx = sum(p[0] for p in pts) / 6.0
+    gy = sum(p[1] for p in pts) / 6.0
+    gz = sum(p[2] for p in pts) / 6.0
+    raw = [
+        (0, 1, 2), (3, 4, 5),              # front / back caps
+        (0, 1, 4), (0, 4, 3),             # side v0-v1
+        (1, 2, 5), (1, 5, 4),             # side v1-v2
+        (2, 0, 3), (2, 3, 5),             # side v2-v0
+    ]
+    idx: list[int] = []
+    for a, b, c in raw:
+        pa, pb, pc = pts[a], pts[b], pts[c]
+        ux, uy, uz = (pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2])
+        vx, vy, vz = (pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2])
+        nx, ny, nz = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
+        # outward if the face normal agrees with (face-centroid → solid-centroid
+        # reversed), i.e. points away from the centroid.
+        fx = (pa[0] + pb[0] + pc[0]) / 3.0 - gx
+        fy = (pa[1] + pb[1] + pc[1]) / 3.0 - gy
+        fz = (pa[2] + pb[2] + pc[2]) / 3.0 - gz
+        if nx * fx + ny * fy + nz * fz < 0.0:
+            a, b, c = a, c, b
+        idx += [a, b, c]
+    return pts, idx
+
+
 def quad(p0: tuple, p1: tuple, p2: tuple, p3: tuple) -> tuple[list[tuple], list[int]]:
     """A single quad (two triangles) with winding p0→p1→p2→p3."""
     return [p0, p1, p2, p3], [0, 1, 2, 0, 2, 3]

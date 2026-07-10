@@ -170,6 +170,21 @@ class TestUpsampleIlluminant:
         print(f"\nupsampleIlluminant max rel err: {max(errs):.3e}")
 
 
+class TestPlanckBlackbody:
+    """Exact-Planck blackbody emission (Group 6.1): GPU ``planckSpectrum`` ==
+    numpy ``spectral.blackbody_emission`` at the 4 hero wavelengths."""
+
+    def test_matches_mirror(self, spectrum_harness):
+        errs: list[float] = []
+        for temp in (3000.0, 5500.0, 6500.0):
+            for u in _US:
+                sw = spectral.sample_wavelengths(u)
+                ref = spectral.blackbody_emission(sw, temp)
+                gpu = spectrum_harness.test_planck(float(u), float(temp))
+                _assert_close(gpu, ref, f"planck(u={u}, T={temp})", errs)
+        print(f"\nplanckSpectrum max rel err: {max(errs):.3e}")
+
+
 class TestSpectrumResolve:
     def test_full_film_resolve(self, spectrum_harness):
         """Resolve a known spectrum (an upsampled reflectance) to linear sRGB."""

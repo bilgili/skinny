@@ -593,6 +593,52 @@
    }
   },
   {
+   "name": "spec_prism",
+   "suite": true,
+   "file": "suite/spec_prism/spec_prism.pbrt",
+   "usd": "tests/assets/suite/spec_prism/spec_prism.usda",
+   "ref": "refs/suite_spec_prism.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "spectral discriminator (spec_prism): BK7 dispersion prism. The RGB matrix gates (self-consistency + pbrt-truth) hold as for any delta dielectric; the spectral-vs-RGB delta is measured on GPU (Group 7.3), where a pbrt-truth baseline is pinned if the RGB render diverges from the spectral pbrt reference.",
+   "spectral": {
+    "kind": "dispersion",
+    "glass": "bk7",
+    "note": "named-glass (BK7) Cauchy IOR splits the hero wavelengths on the first dispersive refraction under --spectral; the RGB render cannot reproduce it"
+   }
+  },
+  {
+   "name": "spec_prism_mtlx",
+   "suite": true,
+   "file": "suite/spec_prism/spec_prism.pbrt",
+   "usd": "tests/assets/suite/spec_prism/spec_prism_mtlx.usda",
+   "ref": "refs/suite_spec_prism.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.12,
+   "flip_tol": 0.1,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "spec_prism",
+    "relmse": 0.02,
+    "flip": 0.03
+   },
+   "notes": "MaterialX authoring of spec_prism; authoring-equivalence vs the plain sibling (both RGB delta dielectrics).",
+   "spectral": {
+    "kind": "dispersion",
+    "glass": "bk7",
+    "note": "named-glass (BK7) Cauchy IOR splits the hero wavelengths under --spectral; RGB cannot"
+   }
+  },
+  {
    "name": "furnace_lambert",
    "suite": true,
    "file": "suite/furnace_lambert/furnace_lambert.pbrt",

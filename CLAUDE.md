@@ -15,11 +15,13 @@ At the end of every implementation, review **all** Markdown documentation and
 update whatever the change touched, scoped to each document's subject. Technical
 docs live in `docs/` (`docs/Architecture.md`, `docs/SkinRendering.md`,
 `docs/Megakernel.md`, `docs/Wavefront.md`, `docs/ReSTIR.md`,
-`docs/PythonAPI.md`); `README.md`,
+`docs/Spectral.md`, `docs/PythonAPI.md`); `README.md`,
 `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` stay at the repo root. A change to
 the wavefront pipeline updates `docs/Wavefront.md`; a change to ReSTIR DI
 (reservoir/RIS/GRIS shaders, the reuse pass set, or its GUI controls) updates
-`docs/ReSTIR.md`; a new descriptor binding
+`docs/ReSTIR.md`; a change to the hero-wavelength spectral path (`spectrum.slang`,
+`path_spectral.slang`, upsampling/CMF tables, or the `--spectral` scope) updates
+`docs/Spectral.md`; a new descriptor binding
 updates the `docs/Architecture.md` binding map; a new CLI flag updates
 `README.md`; a new public Python symbol updates `docs/PythonAPI.md`; and so on.
 Do not let docs drift from the code.

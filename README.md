@@ -18,7 +18,8 @@ nodedefs, head geometry, presets, tattoos) is documented separately in
 direct-lighting reuse in [ReSTIR.md](docs/ReSTIR.md); the GPU SPPM photon-mapping
 integrator in [PhotonMapping.md](docs/PhotonMapping.md); the SplineFlow neural
 path guiding proposal in [NeuralGuiding.md](docs/NeuralGuiding.md), with its
-first-principles theory companion in [SplineFlows.md](docs/SplineFlows.md); the
+first-principles theory companion in [SplineFlows.md](docs/SplineFlows.md);
+hero-wavelength spectral rendering in [Spectral.md](docs/Spectral.md); the
 public Python API in [PythonAPI.md](docs/PythonAPI.md).
 
 ## Gallery

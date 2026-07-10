@@ -101,10 +101,15 @@ Spectrum flatResponseNEE(FlatMaterial mat, SpectralFlatColors c, float3 wo, floa
 // the response(λ)·L(λ) product is formed per wavelength (metamerism). Every pdf /
 // MIS weight is the SAME scalar the RGB NEE uses (mixtureProposalPdf on the RGB
 // material), so direct + indirect stay MIS-consistent with the bounce sampler.
+// `liOverride`/`hasLiOverride`: when set, the sampled light's radiance is taken
+// from `liOverride` (already per-wavelength) instead of upsampling ls.radiance —
+// used for exact-Planck blackbody emissive triangles (Group 6.1). All geometry /
+// pdf / MIS factors are identical to the RGB-upsample path.
 Spectrum spectralLightNEE<TL : ILight>(
     FlatMaterial mat, SpectralFlatColors c, TL light,
     HitInfo h, float3 N, float3 T, float3 B, float3 wo,
-    SampledWavelengths sw, float2 u)
+    SampledWavelengths sw, float2 u,
+    Spectrum liOverride, bool hasLiOverride)
 {
     LightSample ls = light.samplePoint(h.position, u);
     if (!ls.valid)
@@ -122,7 +127,8 @@ Spectrum spectralLightNEE<TL : ILight>(
 
     float3   wi   = worldToTangent(dir, T, B, N);
     Spectrum resp = flatResponseNEE(mat, c, wo, wi);
-    Spectrum Li   = upsampleIlluminantBound(ls.radiance, sw);
+    Spectrum Li   = hasLiOverride ? liOverride
+                                  : upsampleIlluminantBound(ls.radiance, sw);
 
     if (ls.pdfArea == 0.0)   // delta (directional) light
     {
@@ -159,13 +165,15 @@ Spectrum spectralAllLightsNEE(
     for (uint d = 0u; d < fc.numDistantLights; d++)
     {
         DirectionalLightImpl dl = loadDirectionalLightImpl(distantLights[d]);
-        total += spectralLightNEE(mat, c, dl, h, N, T, B, wo, sw, float2(0.0));
+        total += spectralLightNEE(mat, c, dl, h, N, T, B, wo, sw, float2(0.0),
+                                  Spectrum(0.0), false);
     }
 
     for (uint i = 0u; i < fc.numSphereLights; i++)
     {
         SphereLightImpl sl = loadSphereLightImpl(sphereLights[i]);
-        total += spectralLightNEE(mat, c, sl, h, N, T, B, wo, sw, rng.next2());
+        total += spectralLightNEE(mat, c, sl, h, N, T, B, wo, sw, rng.next2(),
+                                  Spectrum(0.0), false);
     }
 
     if (fc.numEmissiveTriangles > 0u)
@@ -173,7 +181,15 @@ Spectrum spectralAllLightsNEE(
         uint idx = sampleEmissiveTriangle(rng.next(), fc.numEmissiveTriangles);
         EmissiveTriangleLightImpl el = loadEmissiveTriangleLightImpl(
             emissiveTriangles[idx], fc.numEmissiveTriangles);
-        total += spectralLightNEE(mat, c, el, h, N, T, B, wo, sw, rng.next2());
+        // Group 6.1: a blackbody area light (temperature > 0) emits the exact
+        // Planck SPD at the hero wavelengths, luminance-matched by the host scale,
+        // instead of upsampling its RGB reduction. spectralEmitters is parallel-
+        // indexed to emissiveTriangles.
+        float2   bb = emitterBlackbody(idx);
+        bool     bbHit = bb.x > 0.0;
+        Spectrum bbLi = bbHit ? planckSpectrum(sw, bb.x) * bb.y : Spectrum(0.0);
+        total += spectralLightNEE(mat, c, el, h, N, T, B, wo, sw, rng.next2(),
+                                  bbLi, bbHit);
     }
 
     // Environment NEE (skipped under furnace: constant white env has no features).

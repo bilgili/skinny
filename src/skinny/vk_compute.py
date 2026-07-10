@@ -674,10 +674,12 @@ class ComputePipeline:
         # sRGB→spectrum sigmoid-coefficient table scale grid / data cube and the
         # CIE D65 illuminant SPD (spectralScale / spectralData / spectralD65).
         # binding 48: named-conductor eta/k curves (spectralMetals, Group 6.2).
+        # binding 49: per-emissive-triangle blackbody (T, scale) (spectralEmitters,
+        # Group 6.1), parallel-indexed to the emissive-triangle buffer (binding 18).
         # Declared only for the `-DSKINNY_SPECTRAL` megakernel variant so the RGB
         # layout is byte-identical; consumed by spectrum.slang (SKINNY_SPECTRAL).
         if self.spectral:
-            for _spectral_binding in (45, 46, 47, 48):
+            for _spectral_binding in (45, 46, 47, 48, 49):
                 bindings.append(
                     vk.VkDescriptorSetLayoutBinding(
                         binding=_spectral_binding,
