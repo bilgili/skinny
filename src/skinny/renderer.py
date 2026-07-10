@@ -605,10 +605,15 @@ def pack_flat_material(
     # Named-conductor identity (Group 6.2): the importer preserves the metal name
     # on skinnyOverrides["conductor_metal"]; map to the shader id (au/ag/al/cu →
     # 1..4, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
-    # (read as asuint by conductorMetalId). Only the spectral conductor Fresnel
-    # reads it; RGB build ignores it. 0 for every non-conductor material.
-    conductor_metal_id = _CONDUCTOR_METAL_ID.get(
-        str(overrides.get("conductor_metal", "")).strip().lower(), 0)
+    # (read as asuint by conductorMetalId). SPECTRAL-ONLY: only the spectral
+    # conductor Fresnel reads it, so gate the id on `spectral` (like glassCauchyB)
+    # — the RGB pack keeps the literal 0 in that lane, byte-identical to baseline.
+    # The importer authors conductor_metal regardless of --spectral, so computing
+    # it unconditionally would perturb the RGB material buffer for a named metal.
+    conductor_metal_id = 0
+    if spectral:
+        conductor_metal_id = _CONDUCTOR_METAL_ID.get(
+            str(overrides.get("conductor_metal", "")).strip().lower(), 0)
     # Named-glass dispersion (Group 6.4): the importer preserves the glass name on
     # skinnyOverrides["glass_dispersion"]; the Cauchy fit is n(λ)=A+B/λ_µm². The
     # base index A becomes the scalar `ior` lane (exact); B rides the spare
