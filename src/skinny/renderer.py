@@ -8450,6 +8450,18 @@ class Renderer:
         idx = max(0, min(int(self.proposal_preset_index), n - 1))
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
 
+    def _active_integrator_index(self) -> int:
+        """The integrator actually dispatched. Spectral v1 is PATH-only: the
+        megakernel spectral variant always runs SpectralPathTracer (main_pass.slang
+        strips the integrator branch under SKINNY_SPECTRAL), and the startup guard
+        (reject_spectral_unsupported) refuses a non-path startup integrator. But
+        integrator_index is persisted and runtime-switchable on the interactive
+        front-ends (and settable via HeadlessRenderer render options), so clamp to
+        0 (path) here — the same pattern as _active_proposals — so fc.integratorType
+        and the config matrix report what is actually rendered instead of a stale
+        BDPT/SPPM selection."""
+        return 0 if self._spectral else int(self.integrator_index)
+
     def _neural_active(self) -> bool:
         """True when the neural proposal (bit2) is selected AND the backend can
         run it (wavefront only). Drives lazy pass build + the scene-set bind."""
@@ -8747,9 +8759,22 @@ class Renderer:
                if self.execution_mode_fallback_active else cr.ON)
         rows.append(cr.ConfigRow("execution-mode", req_e, res_e, est))
 
-        # integrator.
-        integ = self.integrator_modes[self.integrator_index].lower()
-        rows.append(cr.ConfigRow("integrator", integ, integ, cr.ON))
+        # integrator. Spectral v1 pins the dispatch to path (see
+        # _active_integrator_index); report that pin rather than echo a runtime
+        # BDPT/SPPM selection the spectral megakernel never runs. Fold the
+        # requested token into STATUS so matrix_signature (resolved+status) flips
+        # when the user switches integrator live under spectral.
+        # Inline the path pin (0 under spectral) rather than call
+        # _active_integrator_index — `_collect_config_rows` runs against a plain
+        # namespace in the observability tests, so it must read only fields.
+        res_idx = 0 if getattr(self, "_spectral", False) else int(self.integrator_index)
+        req_integ = self.integrator_modes[self.integrator_index].lower()
+        res_integ = self.integrator_modes[res_idx].lower()
+        if self._spectral and req_integ != res_integ:
+            rows.append(cr.ConfigRow("integrator", req_integ, res_integ,
+                                     f"{cr.ON} (spectral pin; requested {req_integ})"))
+        else:
+            rows.append(cr.ConfigRow("integrator", req_integ, res_integ, cr.ON))
 
         # proposals: requested = the selected preset token; resolved = what the
         # renderer actually samples. Spectral v1 pins the mixture to BSDF-only
@@ -9304,8 +9329,10 @@ class Renderer:
         # Active emissive-triangle count (bounds the shader's NEE loop).
         data += struct.pack("I", int(self._num_emissive_tris))        # 4 bytes
         # Integrator selector — 0 = path, 1 = BDPT. main_pass.slang dispatches
-        # on this; PathTracer codepath is byte-identical for value 0.
-        data += struct.pack("I", int(self.integrator_index))          # 4 bytes
+        # on this; PathTracer codepath is byte-identical for value 0. Under
+        # --spectral this is pinned to 0 (path) — the only integrator the spectral
+        # megakernel runs — so fc.integratorType never disagrees with the render.
+        data += struct.pack("I", int(self._active_integrator_index()))  # 4 bytes
         # Active gizmo-segment count (bounds main_pass's overlay loop).
         data += struct.pack("I", int(self._num_gizmo_segments))       # 4 bytes
         # Thick-lens parameters. numLensElements > 0 swaps the pinhole ray
@@ -10495,7 +10522,13 @@ class Renderer:
             self._record_pipeline = ComputePipeline(
                 self.ctx, self.shader_dir,
                 entry_module="main_pass", entry_point="mainImageRecord",
-                graph_fragments=list(self._scene_graph_fragments))
+                graph_fragments=list(self._scene_graph_fragments),
+                # The record pipeline reuses the scene descriptor sets, which under
+                # --spectral carry the spectral-only bindings 45-51; build its layout
+                # with the same flag so binding a spectral set against it is valid
+                # (record dumps are otherwise wavefront/neural-only, refused under
+                # spectral — this keeps the layout consistent as defense-in-depth).
+                spectral=self._spectral)
         return self._record_pipeline
 
     def _resolve_record_source(self) -> str:
