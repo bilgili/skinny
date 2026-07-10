@@ -179,9 +179,19 @@
 
 ## 6. Exact spectral sources and dispersion
 
-- [ ] 6.1 Blackbody: Planck evaluation at sampled wavelengths from the preserved
+- [~] 6.1 Blackbody: Planck evaluation at sampled wavelengths from the preserved
       temperature; GPU≡numpy test + chromaticity-moves-toward-pbrt check on a
       blackbody-lit scene
+      — NUMPY PREP DONE (0b2219f): `spectral.blackbody_emission(sw,T)` (raw Planck at hero λ) +
+      `blackbody_scale(T, emission_rgb)` = Y_target·_Y_INTEGRAL/Y_planck (6 tests, MC round-trip
+      luminance+chromaticity within 2%, hotter→bluer). GPU CONSUMER DEFERRED — DISCOVERY: pbrt
+      blackbody emitters import as AREA LIGHTS → emissive TRIANGLES (light buffer), NOT flat-
+      material emission (the emissive quad's material has emissiveColor 0). So the exact-Planck
+      hook belongs on the emissive-triangle emission path (spectralAllLightsNEE's ls.radiance
+      upsample + the direct light-hit emission), not the flat-material `emissive_spectral`
+      consumer I first built (reverted — it had no producer). Reusable GPU machinery drafted
+      (planckSpectrum + a per-emitter spectral buffer) but must be re-hooked to emissive
+      triangles; that needs per-emissive-triangle blackbody metadata + the light-side consumer.
 - [x] 6.2 Spectral conductor Fresnel from the eta/k asset buffer for named metals; test vs
       CPU mirror
       — DONE: importer preserves the metal identity on `skinnyOverrides["conductor_metal"]`
@@ -207,7 +217,14 @@
       crash fix). GPU CONSUMER TODO: the delta-glass branch in path_spectral.slang (:283-287) +
       flat_material.slang (:37-65) must re-evaluate `eta(λ)` (Cauchy `named_glass_ior`, upload a
       glass-fit buffer or a Cauchy A/B pair in FlatMaterialParams) per hero λ + `terminateSecondary`
-      on first dispersive refraction (λ-dependent direction). Needs a spectral-specific refraction
+      on first dispersive refraction (λ-dependent direction).
+      — GPU DESIGN READY (in memory): store Cauchy B in the spare `_normalBiasPad.w` (offset 124,
+      `glassCauchyB` property), A = the existing `ior` lane — NO new buffer. Dispersion block in
+      path_spectral.slang after `if (!bs.valid) break;`: gate `bs.pdf==0 && bs.transmitted &&
+      glassCauchyB>0`, recompute refraction at `n(λ0)=ior+B/(λ0_um²)`, override `bs.wi`, `sw =
+      terminateSecondary(sw)`. Constant-IOR (B=0) never terminates ⇒ unbiased. packer:
+      `glass_dispersion`→`named_glass_cauchy`→ ior=A, B in pad. Glass IS flat (opacity<1) so flows
+      through path_spectral cleanly — end-to-end testable (unlike 6.1). Needs a spectral-specific refraction
       path (the RGB `bs.wi` is λ-independent).
 - [ ] 6.5 Build the spectral-discriminating confirming-suite scene(s) (dispersive dielectric
       and/or blackbody-lit) via `tests/assets/suite/_gen/`, regen pbrt refs
