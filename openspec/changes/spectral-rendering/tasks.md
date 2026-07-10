@@ -208,10 +208,20 @@
 - [ ] 6.3 Authored illuminant SPD lookup from the spectral-asset buffer on lights that
       preserved one; test that a non-constant `spectrum L` renders from the SPD, not the RGB
       upsample
-- [~] 6.4 Dispersion: wavelength-dependent IOR at hero λ for preserved glass fits;
+- [x] 6.4 Dispersion: wavelength-dependent IOR at hero λ for preserved glass fits;
       secondary termination with pdf adjustment on first dispersive refraction; unbiasedness
       test (constant-IOR dielectric keeps all 4 samples) and a visible prism-dispersion
       render
+      — DONE. Cauchy B stored in the spare `FlatMaterialParams._normalBiasPad.w` (`glassCauchyB`
+      property), A = the `ior` lane — NO new buffer/binding. path_spectral.slang: after a valid
+      delta refraction, gate `bs.pdf==0 && bs.transmitted && glassCauchyB>0`, recompute the
+      refraction at `etaH=1/n(λ0)`, `n(λ0)=ior+B/λ0_µm²`, override bs.wi, `sw=terminateSecondary(sw)`.
+      Constant-IOR (B=0) never terminates ⇒ keeps 4 λ ⇒ unbiased. numpy: `spectral.cauchy_ior`,
+      `should_terminate_secondary`, `spectral_tables.named_glass_cauchy` (BK7 n(486)=1.522 >
+      n(656)=1.514). packer: glass_dispersion→named_glass_cauchy→ ior=A, B in pad (0.0 bit-identical
+      to old literal-0 ⇒ RGB/non-glass byte-unchanged). VALIDATED: BK7 glass sphere 1.79× more
+      chroma (0.105 vs 0.059 at scalar eta); int_bleed byte-unchanged. GPU≡numpy dispersion harness
+      test = follow-up. A visible prism scene (vs a sphere) = confirming-suite 6.5.
       — IMPORTER PREP DONE: `skinnyOverrides["glass_dispersion"]` = bk7/default preserved for a
       named-glass eta (`materials.material_spectral_overrides` + a pre-existing scalar("eta")
       crash fix). GPU CONSUMER TODO: the delta-glass branch in path_spectral.slang (:283-287) +
