@@ -676,10 +676,12 @@ class ComputePipeline:
         # binding 48: named-conductor eta/k curves (spectralMetals, Group 6.2).
         # binding 49: per-emissive-triangle blackbody (T, scale) (spectralEmitters,
         # Group 6.1), parallel-indexed to the emissive-triangle buffer (binding 18).
+        # binding 50: per-distant-light authored illuminant SPD (spectralLightSpd,
+        # Group 6.3), 95 floats/light indexed by the DistantLight `_direction.w` slot.
         # Declared only for the `-DSKINNY_SPECTRAL` megakernel variant so the RGB
         # layout is byte-identical; consumed by spectrum.slang (SKINNY_SPECTRAL).
         if self.spectral:
-            for _spectral_binding in (45, 46, 47, 48, 49):
+            for _spectral_binding in (45, 46, 47, 48, 49, 50):
                 bindings.append(
                     vk.VkDescriptorSetLayoutBinding(
                         binding=_spectral_binding,

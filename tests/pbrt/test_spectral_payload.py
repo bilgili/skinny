@@ -248,6 +248,38 @@ def test_rgb_only_producer_roundtrip_has_no_spectral(tmp_path):
         assert mat.parameter_overrides.get("emissive_spectral") is None
 
 
+def _load_distant_lights_via_loader(stage):
+    """Distant lights (LightDir) built by the SAME loader the renderer uses."""
+    from pxr import Usd
+
+    from skinny import usd_loader
+
+    lights_dir, _sphere, _env, _emissive = usd_loader._extract_lights(
+        stage, Usd.TimeCode.Default(), [], {}
+    )
+    return lights_dir
+
+
+def test_illuminant_spd_producer_roundtrip_through_loader(tmp_path):
+    # Group 6.3: a distant `spectrum L` light round-trips its authored SPD all the
+    # way into LightDir.spectral_spd (the field the renderer packs into binding 50),
+    # NOT just the raw USD customData.
+    stage = _stage(tmp_path, _ILLUMINANT_SPD_LIGHT)
+    lights = _load_distant_lights_via_loader(stage)
+    assert len(lights) == 1
+    spd = lights[0].spectral_spd
+    assert spd is not None
+    assert spd.shape == spectra._LAMBDA.shape  # resampled to the 95-sample grid
+    assert np.any(spd > 0.0)
+    assert not np.allclose(spd, spd[0])         # non-constant (real illuminant)
+
+
+def test_rgb_only_distant_light_has_no_spd(tmp_path):
+    stage = _stage(tmp_path, _RGB_ONLY)
+    for ld in _load_distant_lights_via_loader(stage):
+        assert ld.spectral_spd is None
+
+
 # ── named-conductor / dispersive-glass material identity round-trip ─
 
 _TRI = ('Shape "trianglemesh" "point3 P" [0 0 0  1 0 0  0 1 0] '

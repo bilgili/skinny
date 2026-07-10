@@ -154,6 +154,30 @@ float2 emitterBlackbody(uint idx)
 {
     return float2(spectralEmitters[idx * 2u], spectralEmitters[idx * 2u + 1u]);
 }
+
+// Per-distant-light authored illuminant SPD (change spectral-rendering, Group 6.3).
+// vk binding 50; uploaded only when spectral. 95 floats/light on the 360-830/5 nm
+// grid (host-scaled to the light's RGB luminance), indexed by the DistantLight
+// `_direction.w` slot. Absent from the RGB build.
+[[vk::binding(50)]] StructuredBuffer<float> spectralLightSpd;
+
+// Evaluate distant-light slot `slot`'s SPD at the 4 hero wavelengths (linear
+// interp on the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with a base
+// offset). Caller gates on slot >= 0.
+Spectrum distantLightSpd(int slot, SampledWavelengths sw)
+{
+    int base = slot * SPECTRAL_D65_COUNT;   // 95 samples / light
+    Spectrum s;
+    [ForceUnroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float t = (sw.lambda[i] - SPECTRUM_LAMBDA_MIN) / 5.0;
+        int   j = clamp(int(t), 0, SPECTRAL_D65_COUNT - 2);
+        float f = clamp(t - float(j), 0.0, 1.0);
+        s[i] = lerp(spectralLightSpd[base + j], spectralLightSpd[base + j + 1], f);
+    }
+    return s;
+}
 #endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)

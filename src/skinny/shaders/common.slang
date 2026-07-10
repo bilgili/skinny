@@ -232,11 +232,14 @@ struct EmissiveTriangle
 // Mirrors UsdLux.DistantLight: radiance is color × intensity × 2^exposure.
 struct DistantLight
 {
-    float4 _direction;       // xyz = direction
+    float4 _direction;       // xyz = direction, w = spectral SPD slot (-1 = none)
     float4 _radiance;        // xyz = radiance
 
     property float3 direction { get { return _direction.xyz; } }
     property float3 radiance  { get { return _radiance.xyz; } }
+    // Authored illuminant SPD slot (spectral mode, Group 6.3); < 0 ⇒ upsample the
+    // RGB radiance instead. Ignored by the RGB build (the lane packs 0.0 there).
+    property float  spdIndex  { get { return _direction.w; } }
 };
 
 struct SphereLight

@@ -314,6 +314,13 @@ SPHERE_LIGHT_CAPACITY = 16
 DISTANT_LIGHT_STRIDE = 32
 DISTANT_LIGHT_CAPACITY = 16
 
+# Authored illuminant SPD per distant light (binding 50, spectral variant only):
+# 95 floats (360-830/5 nm radiance), one slot per distant light, indexed by the
+# SPD-slot stored in the DistantLight record's `_direction.w`. A light with no
+# authored SPD stores index -1 and the shader upsamples its RGB radiance instead.
+SPECTRAL_LIGHT_SPD_SAMPLES = 95
+SPECTRAL_LIGHT_SPD_STRIDE = SPECTRAL_LIGHT_SPD_SAMPLES * 4  # bytes / light
+
 # Emissive-triangle record (binding 18): vec3 v0 + pad, vec3 v1 + pad,
 # vec3 v2 + pad, vec3 emission + float area. 64 B / record.
 EMISSIVE_TRI_STRIDE = 64
@@ -4094,6 +4101,18 @@ class Renderer:
             b"\x00" * (DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE)
         )
         self._num_distant_lights: int = 0
+        # Per-distant-light authored illuminant SPD (binding 50, Group 6.3),
+        # spectral variant only — fixed capacity (distant lights never grow past
+        # DISTANT_LIGHT_CAPACITY), so no rebind path. Filled in
+        # _upload_distant_lights; zeros when no light carries an SPD.
+        self._spectral_light_spd_buffer = None
+        if self._spectral:
+            self._spectral_light_spd_buffer = self._gpu.StorageBuffer(
+                self.ctx, DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE + 16
+            )
+            self._spectral_light_spd_buffer.upload_sync(
+                b"\x00" * (DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE)
+            )
 
         # Emissive-triangle buffer (binding 18). Built from scene instances
         # whose material has non-zero emissiveColor. The shader samples one
@@ -4323,10 +4342,11 @@ class Renderer:
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envDistCdf (one combined env CDF buffer).
                 # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                # +5 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
-                # 49 emissive blackbody) only for the spectral megakernel variant.
+                # +6 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
+                # 49 emissive blackbody + 50 distant-light SPD) only for the
+                # spectral megakernel variant.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
-                * (22 + graph_slot + (5 if self._spectral else 0)),
+                * (22 + graph_slot + (6 if self._spectral else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4719,7 +4739,8 @@ class Renderer:
                                  (46, self._spectral_data_buffer),
                                  (47, self._spectral_d65_buffer),
                                  (48, self._spectral_metals_buffer),
-                                 (49, self._spectral_emitters_buffer)):
+                                 (49, self._spectral_emitters_buffer),
+                                 (50, self._spectral_light_spd_buffer)):
                     writes.append(vk.VkWriteDescriptorSet(
                         dstSet=ds, dstBinding=_b, dstArrayElement=0,
                         descriptorCount=1,
@@ -5917,20 +5938,54 @@ class Renderer:
             ]
         n = min(len(enabled), DISTANT_LIGHT_CAPACITY)
         data = bytearray()
+        # Spectral (Group 6.3): a companion SPD buffer (binding 50) carries each
+        # light's authored illuminant spectrum, luminance-matched to its RGB
+        # radiance so switching to the SPD only changes chromaticity, not
+        # brightness. `_direction.w` holds the SPD slot (-1 = upsample the RGB).
+        spd_data = bytearray()
         for i in range(DISTANT_LIGHT_CAPACITY):
             if i < n:
                 light = enabled[i]
                 d = np.asarray(light.direction, np.float32)
                 r = np.asarray(light.radiance, np.float32)
+                spd_index = -1.0
+                if self._spectral and getattr(light, "spectral_spd", None) is not None:
+                    scaled = self._spectral_light_spd_scaled(light.spectral_spd, r)
+                    if scaled is not None:
+                        spd_index = float(i)
+                        spd_data += scaled.astype("<f4").tobytes()
+                if len(spd_data) < (i + 1) * SPECTRAL_LIGHT_SPD_STRIDE:
+                    spd_data += b"\x00" * ((i + 1) * SPECTRAL_LIGHT_SPD_STRIDE - len(spd_data))
                 data += struct.pack(
                     "fff f fff f",
-                    float(d[0]), float(d[1]), float(d[2]), 0.0,
+                    float(d[0]), float(d[1]), float(d[2]), spd_index,
                     float(r[0]), float(r[1]), float(r[2]), 0.0,
                 )
             else:
                 data += b"\x00" * DISTANT_LIGHT_STRIDE
+                spd_data += b"\x00" * SPECTRAL_LIGHT_SPD_STRIDE
         self.distant_lights_buffer.upload_sync(bytes(data))
+        if self._spectral and self._spectral_light_spd_buffer is not None:
+            self._spectral_light_spd_buffer.upload_sync(bytes(spd_data))
         self._num_distant_lights = n
+
+    def _spectral_light_spd_scaled(self, spd, radiance_rgb):
+        """Return the authored SPD (95 samples) scaled so its hero-λ film resolve
+        reproduces the RGB radiance's luminance — so enabling the SPD shifts only
+        chromaticity. Returns None for a degenerate SPD (falls back to RGB)."""
+        import numpy as _np
+
+        from skinny.pbrt import spectra as _spectra
+        from skinny.pbrt.spectral import _REC709_Y, _Y_INTEGRAL
+
+        spd = _np.asarray(spd, dtype=_np.float64).reshape(-1)
+        if spd.size != SPECTRAL_LIGHT_SPD_SAMPLES or not _np.any(spd > 0.0):
+            return None
+        y_spd = float(_spectra.spd_to_xyz(spd)[1]) / _Y_INTEGRAL
+        if y_spd <= 0.0:
+            return None
+        y_target = float(_np.dot(_np.asarray(radiance_rgb, dtype=_np.float64), _REC709_Y))
+        return (spd * (y_target / y_spd)).astype(_np.float32)
 
     def _upload_flat_materials(self, materials: list) -> None:
         """Pack each scene Material into the FLAT_MATERIAL_STRIDE record format
@@ -8954,6 +9009,8 @@ class Renderer:
             b["spectralMetals"] = self._spectral_metals_buffer.buffer
             if self._spectral_emitters_buffer is not None:
                 b["spectralEmitters"] = self._spectral_emitters_buffer.buffer
+            if self._spectral_light_spd_buffer is not None:
+                b["spectralLightSpd"] = self._spectral_light_spd_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -10592,7 +10649,7 @@ class Renderer:
         # only allocated for the spectral megakernel variant.
         for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
                     self._spectral_d65_buffer, self._spectral_metals_buffer,
-                    self._spectral_emitters_buffer):
+                    self._spectral_emitters_buffer, self._spectral_light_spd_buffer):
             if _sb is not None:
                 _sb.destroy()
         self.hud_overlay.destroy()

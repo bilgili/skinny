@@ -231,9 +231,30 @@
       incidence). VALIDATED: conductor_infinite.pbrt (gold) renders gold under --spectral, exact
       Au Fresnel warmer/more-saturated than RGB (R/G 1.177 vs 1.125). GPU≡numpy conductor-Fresnel
       harness test = follow-up (4.2 harness could add it).
-- [ ] 6.3 Authored illuminant SPD lookup from the spectral-asset buffer on lights that
+- [x] 6.3 Authored illuminant SPD lookup from the spectral-asset buffer on lights that
       preserved one; test that a non-constant `spectrum L` renders from the SPD, not the RGB
       upsample
+      — DONE for DISTANT lights (v1; point/sphere/env = follow-up). PRODUCER: importer already
+      preserves the resampled 95-sample SPD on the light prim's `skinnyOverrides["spectral"]`
+      (kind spectrum_samples); NEW `usd_loader._extract_light_spd` reads it into
+      `LightDir.spectral_spd` (scene.py field; duck-typed on the pxr.Vt.Dictionary). `_upload_
+      distant_lights` luminance-matches the SPD to the light's RGB radiance (`_spectral_light_
+      spd_scaled` = SPD × Y_rgb / (spd_to_xyz(SPD).Y / _Y_INTEGRAL), so enabling the SPD shifts
+      ONLY chromaticity), packs it into a NEW spectral-only buffer `spectralLightSpd` (vk binding
+      50, 95 floats/light, fixed DISTANT_LIGHT_CAPACITY=16 so no rebind path), and stores the SPD
+      slot in the DistantLight record's `_direction.w` (-1 = no SPD ⇒ RGB upsample). Wired binding
+      50: vk layout, descriptor writes, pool count (spectral 5→6), named dict (Metal bind-by-name),
+      destroy. CONSUMER: `common.slang` DistantLight `spdIndex` property; `bindings.slang`
+      `distantLightSpd(slot, sw)` (5nm-grid hero-λ interp); `path_spectral.slang` directional NEE
+      reads spdIndex and passes the SPD as the spectralLightNEE (liOverride, hasLiOverride) when
+      slot>=0. TEST: `test_illuminant_spd_producer_roundtrip_through_loader` (SPD reaches
+      LightDir.spectral_spd via the real _extract_lights) + rgb-only-no-SPD (hostless). VALIDATED
+      on Metal (M5 Pro): a green-peaked `spectrum L` distant light renders DISTINCTLY from the RGB
+      upsample (B/G 0.810→0.665, moving toward pbrt 0.712) on saturated red/blue surfaces — the
+      metameric signature only the exact SPD carries. Both slangc variants compile; RGB byte-
+      unchanged. Scene `scratchpad/spd_distant.pbrt`, img `scratchpad/spd_3way.png`. NOTE distant-
+      light absolute intensity vs pbrt has a pre-existing calibration gap (RGB-mode-identical,
+      out of 6.3 scope).
 - [x] 6.4 Dispersion: wavelength-dependent IOR at hero λ for preserved glass fits;
       secondary termination with pdf adjustment on first dispersive refraction; unbiasedness
       test (constant-IOR dielectric keeps all 4 samples) and a visible prism-dispersion

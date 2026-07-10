@@ -164,9 +164,15 @@ Spectrum spectralAllLightsNEE(
 
     for (uint d = 0u; d < fc.numDistantLights; d++)
     {
-        DirectionalLightImpl dl = loadDirectionalLightImpl(distantLights[d]);
+        DistantLight raw = distantLights[d];
+        DirectionalLightImpl dl = loadDirectionalLightImpl(raw);
+        // Group 6.3: an authored `spectrum L` distant light (slot >= 0) emits its
+        // exact SPD at the hero wavelengths instead of upsampling the RGB radiance.
+        int      slot = int(raw.spdIndex);
+        bool     spd  = slot >= 0;
+        Spectrum spdL = spd ? distantLightSpd(slot, sw) : Spectrum(0.0);
         total += spectralLightNEE(mat, c, dl, h, N, T, B, wo, sw, float2(0.0),
-                                  Spectrum(0.0), false);
+                                  spdL, spd);
     }
 
     for (uint i = 0u; i < fc.numSphereLights; i++)

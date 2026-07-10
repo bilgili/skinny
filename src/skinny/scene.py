@@ -203,10 +203,18 @@ class LightDir:
     # preserve the runtime `enabled` flag when lights are re-read from the stage
     # during a scene-graph edit. Empty for synthesized/non-USD lights.
     prim_path: str = ""
+    # Authored illuminant SPD (spectral mode, Group 6.3): the resampled
+    # 360-830/5 nm (95-sample) radiance from a pbrt `spectrum L`, preserved on
+    # the light prim's `skinnyOverrides["spectral"]`. None for a plain-RGB light
+    # (the spectral path then upsamples `radiance`). Only consumed under
+    # `--spectral`; ignored by the RGB build.
+    spectral_spd: "np.ndarray | None" = None
 
     def __post_init__(self) -> None:
         self.direction = np.asarray(self.direction, np.float32).reshape(3)
         self.radiance = np.asarray(self.radiance, np.float32).reshape(3)
+        if self.spectral_spd is not None:
+            self.spectral_spd = np.asarray(self.spectral_spd, np.float32).reshape(-1)
 
 
 @dataclass
