@@ -519,6 +519,7 @@ def pack_flat_material(
     volume_world_to_uvw=None,
     volume_value_max: float = 1.0,
     mm_per_unit: float = 1.0,
+    spectral: bool = False,
 ) -> bytes:
     """Pack a Material's overrides into FLAT_MATERIAL_STRIDE bytes
     (FlatMaterialParams).
@@ -613,9 +614,12 @@ def pack_flat_material(
     # base index A becomes the scalar `ior` lane (exact); B rides the spare
     # _normalBiasPad.w (glassCauchyB). 0 = constant-IOR (non-dispersive), so every
     # non-glass material keeps the old literal-0 pad → RGB pack byte-identical.
+    # SPECTRAL-ONLY: in the RGB build the scalar `ior` (and the pad) are left at
+    # their authored/fallback values, so a named-glass scene renders byte-identical
+    # to the pre-6.4 baseline — only the spectral variant substitutes Cauchy A.
     glass_cauchy_b = 0.0
     _gd = overrides.get("glass_dispersion")
-    if _gd is not None:
+    if spectral and _gd is not None:
         from skinny.pbrt.data.spectral_tables import named_glass_cauchy
         _ab = named_glass_cauchy(_gd)
         if _ab is not None:
@@ -6143,6 +6147,9 @@ class Renderer:
                 volume_world_to_uvw=self._volume_world_to_uvw,
                 volume_value_max=self._volume_value_max,
                 mm_per_unit=float(self.mm_per_unit),
+                # Group 6.4: only substitute the named-glass Cauchy A into the
+                # scalar `ior` under --spectral; the RGB pack stays byte-identical.
+                spectral=self._spectral,
             )
         if not data:
             data += b"\x00" * FLAT_MATERIAL_STRIDE
