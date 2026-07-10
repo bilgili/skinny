@@ -4825,6 +4825,19 @@ class Renderer:
                     pBufferInfo=[emissive_tri_info],
                 ),
             ]
+            # Spectral (Group 6.1): the parallel-indexed spectralEmitters buffer
+            # (binding 49) is destroyed+recreated in the SAME growth step, so its
+            # descriptor must be rewritten here too — otherwise binding 49 keeps
+            # pointing at the freed buffer and emitterBlackbody() reads stale memory.
+            if self._spectral and self._spectral_emitters_buffer is not None:
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=49, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=self._spectral_emitters_buffer.buffer, offset=0,
+                        range=self._spectral_emitters_buffer.size)],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_mesh_descriptors(self) -> None:
