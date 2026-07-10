@@ -1240,7 +1240,13 @@ def _extract_light_spd(prim: Usd.Prim) -> "np.ndarray | None":
     values = payload.get("values")
     if values is None:
         return None
-    return np.asarray(list(values), dtype=np.float32)
+    arr = np.asarray(list(values), dtype=np.float32)
+    # The renderer's SPD buffer (binding 50) is a fixed 95-sample/light block; a
+    # mis-sized payload can't be indexed, so reject here (→ RGB upsample) rather
+    # than let a wrong-length array reach LightDir.spectral_spd.
+    if arr.shape != (95,):
+        return None
+    return arr
 
 
 def _extract_dome_light(

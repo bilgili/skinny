@@ -5948,7 +5948,9 @@ class Renderer:
                 light = enabled[i]
                 d = np.asarray(light.direction, np.float32)
                 r = np.asarray(light.radiance, np.float32)
-                spd_index = -1.0
+                # RGB build packs 0.0 in this lane (byte-identical to the pre-6.3
+                # layout); only the spectral build uses it as an SPD slot (-1 = none).
+                spd_index = -1.0 if self._spectral else 0.0
                 if self._spectral and getattr(light, "spectral_spd", None) is not None:
                     scaled = self._spectral_light_spd_scaled(light.spectral_spd, r)
                     if scaled is not None:
