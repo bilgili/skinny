@@ -40,6 +40,76 @@ def test_terminate_secondary():
     assert term.pdf[0] == hero_pdf / 4.0
 
 
+# ── dispersion mirror (Cauchy IOR + secondary termination gate) ───────────────
+
+
+def test_cauchy_ior_bk7_sodium_line():
+    # n(589 nm) ≈ 1.5168 for the BK7-family fit (A + B / 0.589²).
+    a, b = st.named_glass_cauchy("bk7")
+    n589 = float(spectral.cauchy_ior(a, b, 589.0))
+    assert abs(n589 - 1.5168) < 0.01
+
+
+def test_cauchy_ior_normal_dispersion_monotonic():
+    # Normal dispersion: index falls monotonically with wavelength (blue > red).
+    a, b = st.named_glass_cauchy("bk7")
+    lam = np.array([400.0, 486.0, 550.0, 589.0, 656.0, 700.0])
+    n = spectral.cauchy_ior(a, b, lam)
+    assert np.all(np.diff(n) < 0.0)
+    # blue (486 nm) index exceeds red (656 nm) index.
+    assert float(spectral.cauchy_ior(a, b, 486.0)) > float(spectral.cauchy_ior(a, b, 656.0))
+
+
+def test_cauchy_ior_agrees_with_named_glass_ior_matched_wavelengths():
+    # cauchy_ior takes nm; named_glass_ior takes µm — same physical λ ⇒ same n.
+    for name in ("bk7", "default"):
+        a, b = st.named_glass_cauchy(name)
+        for lam_nm in (420.0, 486.0, 589.0, 656.0, 780.0):
+            lam_um = lam_nm * 1e-3
+            got = float(spectral.cauchy_ior(a, b, lam_nm))
+            ref = float(st.named_glass_ior(name, lam_nm))
+            # named_glass_ior evaluates a + b/λµm² directly:
+            assert abs(got - (a + b / lam_um**2)) < 1e-12
+            assert abs(got - ref) < 1e-12
+
+
+def test_should_terminate_secondary_truth_table():
+    # The exact GPU gate: delta pdf AND transmitted AND dispersive (b > 0).
+    assert spectral.should_terminate_secondary(0.0, True, 0.00420) is True
+    # Constant-IOR glass (b == 0) never terminates.
+    assert spectral.should_terminate_secondary(0.0, True, 0.0) is False
+    # Non-delta pdf (reflection lobe with a real pdf) never terminates.
+    assert spectral.should_terminate_secondary(0.5, True, 0.00420) is False
+    # Not transmitted (reflected) never terminates.
+    assert spectral.should_terminate_secondary(0.0, False, 0.00420) is False
+
+
+def test_dispersion_gate_drives_terminate_secondary():
+    # Constant-IOR glass (b = 0): gate is False ⇒ all 4 hero pdfs stay live.
+    sw = spectral.sample_wavelengths(0.42)
+    assert not spectral.should_terminate_secondary(0.0, True, 0.0)
+    kept = (
+        spectral.terminate_secondary(sw)
+        if spectral.should_terminate_secondary(0.0, True, 0.0)
+        else sw
+    )
+    assert not kept.secondary_terminated()
+    assert np.all(kept.pdf > 0.0)  # 4 wavelengths carried
+
+    # Dispersive glass (b > 0), transmitted through a delta refraction: gate is
+    # True ⇒ collapse to the hero λ (pdf.x /= 4, y/z/w = 0).
+    assert spectral.should_terminate_secondary(0.0, True, 0.00420)
+    hero_pdf = sw.pdf[0]
+    collapsed = (
+        spectral.terminate_secondary(sw)
+        if spectral.should_terminate_secondary(0.0, True, 0.00420)
+        else sw
+    )
+    assert collapsed.secondary_terminated()
+    assert np.all(collapsed.pdf[1:] == 0.0)
+    assert collapsed.pdf[0] == hero_pdf / 4.0
+
+
 def test_resolve_d65_is_neutral():
     # The sRGB white point is D65: a converged resolve of the D65 SPD is neutral.
     # A single 4-sample draw is pure MC noise — average many draws to converge.

@@ -595,6 +595,19 @@ def pack_flat_material(
     # reads it; RGB build ignores it. 0 for every non-conductor material.
     conductor_metal_id = _CONDUCTOR_METAL_ID.get(
         str(overrides.get("conductor_metal", "")).strip().lower(), 0)
+    # Named-glass dispersion (Group 6.4): the importer preserves the glass name on
+    # skinnyOverrides["glass_dispersion"]; the Cauchy fit is n(λ)=A+B/λ_µm². The
+    # base index A becomes the scalar `ior` lane (exact); B rides the spare
+    # _normalBiasPad.w (glassCauchyB). 0 = constant-IOR (non-dispersive), so every
+    # non-glass material keeps the old literal-0 pad → RGB pack byte-identical.
+    glass_cauchy_b = 0.0
+    _gd = overrides.get("glass_dispersion")
+    if _gd is not None:
+        from skinny.pbrt.data.spectral_tables import named_glass_cauchy
+        _ab = named_glass_cauchy(_gd)
+        if _ab is not None:
+            ior = float(_ab[0])
+            glass_cauchy_b = float(_ab[1])
     # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
     # Metal 31-buffer cap). σ in mm⁻¹; zero for non-medium materials. Boundary
     # eta reuses `ior`.
@@ -650,7 +663,7 @@ def pack_flat_material(
             m = np.asarray([float(v) for v in np.ravel(rows)], np.float32).reshape(3, 4)
             w2u = tuple(tuple(float(v) for v in row) for row in m)
     return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff I  fff f  fff I  fff f fff I"
+        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff f  fff f  fff I  fff f fff I"
         " ffff ffff ffff ffff",
         diffuse[0], diffuse[1], diffuse[2],
         roughness, metallic, specular, opacity,
@@ -668,7 +681,7 @@ def pack_flat_material(
         float(normal_scale[0]), float(normal_scale[1]), float(normal_scale[2]),
         int(channel_mask) & 0xFFFFFFFF,
         float(normal_bias[0]), float(normal_bias[1]), float(normal_bias[2]),
-        0,
+        float(glass_cauchy_b),
         transmission_color[0], transmission_color[1], transmission_color[2],
         diffuse_roughness,
         specular_color[0], specular_color[1], specular_color[2],

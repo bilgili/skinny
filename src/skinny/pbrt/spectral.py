@@ -79,6 +79,35 @@ def terminate_secondary(sw: SampledWavelengths) -> SampledWavelengths:
     return SampledWavelengths(lambda_=sw.lambda_.copy(), pdf=pdf)
 
 
+# ── dispersion (Cauchy glass IOR + secondary-wavelength termination gate) ──────
+
+
+def cauchy_ior(a: float, b: float, lam_nm) -> np.ndarray:
+    """Cauchy dispersion ``n(λ) = a + b / λ_µm²`` with the wavelength in **nm**.
+
+    Vectorized over ``lam_nm``. This is the same physical law as
+    :func:`spectral_tables.named_glass_ior` (which takes µm); passing the same
+    physical wavelengths — nm here, µm there — yields identical indices. Normal
+    (crown-glass) dispersion has ``b > 0`` so the index falls with increasing λ
+    (blue index > red index).
+    """
+    lam_um = np.asarray(lam_nm, dtype=np.float64) * 1e-3
+    return a + b / (lam_um * lam_um)
+
+
+def should_terminate_secondary(bs_pdf: float, transmitted: bool, glass_b: float) -> bool:
+    """The exact dispersion unbiasedness gate the GPU implements.
+
+    A refracted (``transmitted``) interaction through a **dispersive** glass
+    (Cauchy ``b > 0``) whose BSDF sampling pdf is a hard delta (``bs_pdf == 0``)
+    must collapse the secondary wavelengths — the refraction bends each λ
+    differently, so only the hero wavelength can be carried unbiased past a
+    dispersive refraction. A constant-IOR glass (``b == 0``) refracts every λ
+    identically and keeps all four hero wavelengths live.
+    """
+    return bs_pdf == 0.0 and transmitted and glass_b > 0.0
+
+
 def upsample_reflectance(rgb, lam) -> np.ndarray:
     """Evaluate an sRGB reflectance as a spectrum at wavelengths *lam*."""
     coeffs = st.rgb_to_sigmoid_coeffs(rgb)

@@ -293,6 +293,31 @@ struct SpectralPathTracer
             if (!bs.valid)
                 break;
 
+            // ── Dispersive dielectric (Group 6.4) ──────────────────────────
+            // The RGB sample() refracted at the scalar ior (λ-independent). For a
+            // named glass, recompute the delta refraction at the HERO-λ Cauchy
+            // index n(λ0) = ior + B/λ0² and collapse to the hero wavelength — the
+            // secondary λ would refract along different directions, so pbrt
+            // terminates them (terminateSecondary: pdf.x/=4, y/z/w=0). Only the
+            // REFRACTED delta branch disperses; reflection off glass is achromatic.
+            // Constant-IOR glass (glassCauchyB == 0) never enters ⇒ keeps all 4 λ
+            // ⇒ unbiased. Reflect fallback on hero-λ TIR is achromatic.
+            float glassB = flatMaterials[h.materialId].glassCauchyB;
+            if (bs.pdf == 0.0 && bs.transmitted && glassB > 0.0)
+            {
+                float  lam0um   = sw.lambda.x * 1e-3;                 // nm → µm
+                float  nHero    = mat.data.mat.ior + glassB / (lam0um * lam0um);
+                bool   entering = wo.z > 0.0;
+                float3 faceN    = entering ? float3(0, 0, 1) : float3(0, 0, -1);
+                float  etaH     = entering ? (1.0 / nHero) : nHero;  // flat_material.slang:39
+                float3 nd       = refract(-wo, faceN, etaH);
+                if (all(nd == float3(0.0)))                          // hero-λ TIR ⇒ reflect
+                    nd = reflect(-wo, faceN);
+                bs.wi           = nd;
+                bs.transmitted  = nd.z < 0.0;
+                sw              = terminateSecondary(sw);
+            }
+
             // Spectral throughput update. Non-delta lobe: response/pdf reproduces
             // the RGB sample weight per wavelength. Delta glass (pdf 0): the RGB
             // weight is transmissionColor — upsample it as a reflectance.

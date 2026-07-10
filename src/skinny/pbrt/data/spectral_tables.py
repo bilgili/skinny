@@ -137,3 +137,23 @@ def named_glass_ior(name: str, lam_nm):
     a, b = coeff
     lam_um = np.asarray(lam_nm, dtype=np.float64) * 1e-3
     return a + b / (lam_um * lam_um)
+
+
+def named_glass_cauchy(name: str):
+    """Return the Cauchy coefficients ``(A, B)`` for a named glass, or ``None``.
+
+    The dispersion law is ``n(λ_µm) = A + B / λ_µm²`` (µm) — the same fit
+    :func:`named_glass_ior` evaluates. The name is normalized like
+    :func:`named_glass_ior` (strip a ``glass-`` / ``glass_`` prefix, lowercase);
+    an unknown-but-present name falls back to the ``"default"`` (BK7-family)
+    coefficients, so the GPU packer always has a usable dispersion for any glass
+    it recognizes. Returns ``None`` only for a ``None``/empty name.
+    """
+    if not name or not name.strip():
+        return None
+    n = name.strip().lower()
+    for prefix in ("glass-", "glass_"):
+        if n.startswith(prefix):
+            n = n[len(prefix) :]
+    a, b = _GLASS_CAUCHY.get(n, _GLASS_CAUCHY["default"])
+    return float(a), float(b)

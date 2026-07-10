@@ -116,6 +116,12 @@ struct FlatMaterialParams
     property float3 normalScale       { get { return _normalScaleChannelMask.xyz; } }
     property uint   channelMask       { get { return asuint(_normalScaleChannelMask.w); } }
     property float3 normalBias        { get { return _normalBiasPad.xyz; } }
+    // Named-glass Cauchy dispersion coefficient B (µm²) for a dispersive dielectric
+    // (change spectral-rendering, Group 6.4): n(λ) = ior + B/λ_µm². 0 = constant-IOR
+    // (non-dispersive). Rides the previously-unused _normalBiasPad.w (_pad0); only
+    // the spectral dispersion path reads it, RGB build ignores it (byte-identical
+    // CPU packing: the packer wrote 0 there before).
+    property float  glassCauchyB      { get { return _normalBiasPad.w; } }
     property float3 transmissionColor { get { return _transmissionColorDiffuseRough.xyz; } }
     property float  diffuseRoughness  { get { return _transmissionColorDiffuseRough.w; } }
     property float3 specularColor     { get { return _specularColorPad.xyz; } }
