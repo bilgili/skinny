@@ -119,7 +119,20 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
     Ray r = cam.generateRay(pixel, rng, lensWeight);
     float3 throughput = float3(lensWeight);
     float3 ld = float3(0.0);
+    // Was the current ray spawned by a delta/perfectly-specular carrier (pdf<=0)?
+    // A delta lobe has no NEE partner ⇒ an emissive triangle it lands on is taken
+    // at full weight; a non-delta glossy-continue carrier ran emissive NEE, so its
+    // emissive hit is MIS-weighted instead. Mirrors path.slang (delta-only here,
+    // not "any continue"). False for the primary ray.
     bool spawnedBySpecular = false;
+    // BSDF pdf of the glossy-continue bounce that spawned the current ray, for
+    // MIS against the env NEE that same vertex ran (change sppm-glossy-final-gather).
+    // -1 ⇒ no env-NEE counterpart (primary ray, delta carrier, transmitted, or
+    // furnace) ⇒ take the escaped env at full weight, mirroring path.slang.
+    float misBsdfPdf = -1.0;
+    // Companion for the emissive-triangle hit MIS (distinct from misBsdfPdf, which
+    // is additionally gated on env NEE). -1 ⇒ no NEE partner ⇒ emission full weight.
+    float prevBsdfPdf = -1.0;
 
     HitInfo h = traceScene(fc, r);
     for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
@@ -132,10 +145,18 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
     {
         if (!h.hit)
         {
-            // Direct-visible environment (through the specular chain). Taken at
-            // full weight: SPPM's photon term is the indirect/caustic complement.
-            ld += throughput * sceneEnvRadianceCell(
+            // Direct-visible environment (through the specular chain). A delta
+            // carrier has no NEE partner ⇒ full weight (SPPM's photon term is the
+            // indirect/caustic complement). A glossy-continue vertex DID run env
+            // NEE, so its BSDF-sampled env is the MIS complement — weight it by
+            // powerHeuristic(bsdfPdf, envPdf), exactly as path.slang does on its
+            // env miss. Prevents double-counting the env at a glossy metal whose
+            // reflection escapes straight to the environment (conductor_infinite).
+            float3 envR = sceneEnvRadianceCell(
                 r.direction, fc.envIntensity, effectiveFurnaceMode(h.materialId));
+            float w = (misBsdfPdf > 0.0)
+                ? powerHeuristic(misBsdfPdf, envPdf(r.direction)) : 1.0;
+            ld += throughput * envR * w;
             break;
         }
 
@@ -178,10 +199,25 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
 
         BSDFSample bs = mat.sample(wo, rng);
 
-        // Direct-visible self-emission, gated like the path tracer (delta chain /
-        // no emissive NEE ⇒ full weight).
+        // Direct-visible self-emission, MIS-gated like the path tracer. Bounce 0,
+        // no emissive triangles, or a delta-spawned ray ⇒ no NEE partner ⇒ full
+        // weight. A non-delta (glossy-continued) spawn ran emissive NEE at that
+        // vertex, so add only the BSDF-sampling MIS complement — pdfLightSA is
+        // reconstructed without the tri index (the per-tri area cancels in the
+        // power-weighted area·lum CDF), per emissive-triangle-bsdf-hit-mis.
         if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)
+        {
             ld += throughput * bs.emission;
+        }
+        else if (any(bs.emission > 0.0))
+        {
+            float cosLight = max(dot(h.normal, -r.direction), 0.0);
+            float lum = dot(bs.emission, float3(0.2126, 0.7152, 0.0722));
+            float pdfLightSA = (cosLight > 1e-6 && fc.emissiveTotalPower > 0.0)
+                ? lum * (h.t * h.t) / (fc.emissiveTotalPower * cosLight)
+                : 1e30;   // grazing / degenerate ⇒ NEE owns it ⇒ wBSDF → 0
+            ld += throughput * bs.emission * powerHeuristic(prevBsdfPdf, pdfLightSA);
+        }
 
         if (!bs.valid)
             break;
@@ -198,7 +234,17 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         // point lands on the next non-glossy surface and the reflection is rebuilt.
         bs.wi = tangentToWorld(bs.wi, T, B, N);
         throughput *= bs.weight;
-        spawnedBySpecular = true;
+        // Carry this bounce's MIS companions to the next iteration, mirroring
+        // path.slang. A delta carrier (bs.pdf<=0) has no NEE partner ⇒ full-weight
+        // env miss AND full-weight emissive hit next iteration. A non-delta
+        // glossy-continue ran env + emissive NEE here, so both its env miss
+        // (misBsdfPdf → envPdf companion) and any emissive-triangle hit
+        // (prevBsdfPdf → pdfLightSA companion) are MIS-weighted, never
+        // double-counted. Furnace / transmission suppress the env companion.
+        bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
+        misBsdfPdf = (envNeeActive && !bs.transmitted && bs.pdf > 0.0) ? bs.pdf : -1.0;
+        spawnedBySpecular = (bs.pdf <= 0.0);
+        prevBsdfPdf = spawnedBySpecular ? -1.0 : bs.pdf;
         let spawnOffset = bs.transmitted ? -h.normal * 0.002 : h.normal * 0.002;
         r.origin = h.position + spawnOffset;
         r.direction = bs.wi;

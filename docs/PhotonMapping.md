@@ -141,9 +141,34 @@ instead continues to the surface the eye VP now lives on.
 
 **Threshold semantics.** A threshold of `0` reproduces PM-1 exactly
 (`m.roughness < 0` is never true, so nothing is continued and every glossy metal
-stores a VP at the first hit — delta-only behaviour). The default is `≈ 0.5`,
+stores a VP at the first hit — delta-only behaviour). The default is `≈ 0.6`,
 set with `--sppm-glossy-roughness` (env `SKINNY_SPPM_GLOSSY_ROUGHNESS`); it is
-folded into `_current_state_hash` so changing it resets accumulation cleanly.
+folded into `_current_state_hash` so changing it resets accumulation cleanly. The
+threshold is in **perceptual (USD) roughness**, so it must also reach
+pbrt-imported polished metals: pbrt's perceptual roughness `r` imports through
+`alpha = sqrt(r)` then `usd = sqrt(alpha) = r**0.25`, so a polished
+pbrt-roughness-`0.1` conductor lands at usd `≈ 0.562` (GGX alpha `≈ 0.316`). `0.6`
+is an alpha `≲ 0.36` "polished metal" cutoff that catches it while leaving a
+pbrt-roughness-`0.3` metal (usd `≈ 0.740`) on the gather side.
+
+**Reached-light MIS.** A glossy-continued vertex runs env *and* emissive-triangle
+NEE like any flat vertex, so any light its carrier ray reaches must be MIS-weighted
+(not added at full weight, which would double-count it):
+
+- **Env escape** — a metal reflecting only a distant/IBL light (e.g. the
+  `conductor_infinite` gate scene, where no photon can ever deposit on the sole
+  metal surface) weights the escaped env by `powerHeuristic(bsdfPdf, envPdf(dir))`.
+- **Emissive-triangle hit** — the emission is weighted by
+  `powerHeuristic(bsdfPdf, pdfLightSA)`, `pdfLightSA` reconstructed without the tri
+  index (`lum·d² / (emissiveTotalPower·cosLight)`).
+
+Both mirror `integrators/path.slang` exactly. `spawnedBySpecular` is therefore
+**delta-only** (`bs.pdf ≤ 0`) — the earlier code treated *every* continued vertex
+as delta for the emissive gate, a latent full-weight double-count that the raised
+threshold would expose. Only perfectly-specular (delta) carriers keep full weight;
+transmitted lobes and furnace mode suppress the env companion. With this, SPPM
+converges to the path reference on glossy-metal-under-light scenes instead of
+diverging.
 
 **Why the metallic guard.** `BSDFSample` carries **no sampled-lobe id**, and the
 shared flat BSDF (`interfaces.slang` / `flat_material.slang`) is kept
@@ -423,7 +448,7 @@ megakernel self-adapts — only the `_MSL_FC_BYTES` test pin is hand-tracked):
 | `sppmCellSize` | `float` | spatial-hash cell size (== `sppmInitialRadius`, a valid upper bound as radii shrink) |
 | `sppmGridRes` | `uint3` | per-axis grid resolution — packed but **unused** by the kernels (they hash from `width*height`) |
 | `sppmPhotonsEmitted` | `uint` | photons emitted per pass (the `1/N_emitted` estimator divisor); default `num_pixels` (one photon/pixel), or the `_sppm_photons_override` renderer attribute (set by the pbrt `photonsperiteration` import) |
-| `sppmGlossyContinueRoughness` | `float` | glossy / near-specular eye-walk continuation threshold (see [Glossy / near-specular continuation](#glossy--near-specular-continuation)). A metallic sample whose roughness is below this value is continued one bounce instead of storing a VP. **0** reproduces PM-1 (delta-only); default ≈ **0.5**, set via `--sppm-glossy-roughness` / `SKINNY_SPPM_GLOSSY_ROUGHNESS`. |
+| `sppmGlossyContinueRoughness` | `float` | glossy / near-specular eye-walk continuation threshold (see [Glossy / near-specular continuation](#glossy--near-specular-continuation)). A metallic sample whose roughness is below this value is continued one bounce instead of storing a VP. **0** reproduces PM-1 (delta-only); default ≈ **0.6** (perceptual/USD roughness; reaches pbrt-imported polished metals, `usd = r**0.25`), set via `--sppm-glossy-roughness` / `SKINNY_SPPM_GLOSSY_ROUGHNESS`. |
 
 All three SPPM tuning overrides (`_sppm_radius_override`,
 `_sppm_photons_override`, `_sppm_glossy_roughness_override`) are added to
