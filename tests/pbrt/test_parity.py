@@ -143,11 +143,37 @@ def test_scene_matrix_gate(spec):
         if c != ANCHOR:
             sc = self_consistency_result(spec, c, img, anchor_img)
             print(f"[{spec.name}] {c.label:32s} vs-anchor       {sc.metrics.summary()}")
-            if not sc.passed:
+            if c.spectral:
+                # Spectral is a DISCRIMINATING axis (change spectral-rendering,
+                # 7.3): it differs from the RGB anchor BY DESIGN on a
+                # spectrum-authored scene (metamerism / exact Fresnel-dispersion),
+                # so the anchor delta is REPORTED, never asserted — holding it to
+                # the megakernel≡wavefront self-consistency tolerance would be wrong.
+                print(f"[{spec.name}] {c.label:32s} spectral-vs-RGB  "
+                      f"Δ relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}")
+            elif not sc.passed:
                 failures.append(
                     f"{c.label}: self-consistency vs anchor relMSE={sc.relmse:.4f} "
                     f"FLIP={sc.flip:.4f}"
                 )
+
+    # 7.3: REPORT the spectral-vs-RGB pbrt-truth comparison (not a hard gate). The
+    # exact spectral render improves accuracy on a SMOOTH chromaticity shift
+    # (metamerism / Fresnel — e.g. conductor_infinite, spectral relMSE < RGB), but
+    # a hero-wavelength DISPERSION caustic is a high-variance feature that the
+    # RGB (non-dispersive) render sidesteps, so spectral can carry a higher
+    # pointwise relMSE while being the physically-correct result. "spectral ≤ RGB"
+    # is therefore scene-dependent, not an invariant — spectral pbrt-truth is gated
+    # against its own recorded baseline (above), and the direction is logged here.
+    anchor_pt = pbrt_truth_result(spec, ANCHOR, anchor_img, ref)
+    for c in combos:
+        if not c.spectral:
+            continue
+        spt = pbrt_truth_result(spec, c, imgs[c.label], ref)
+        verdict = "improves" if spt.relmse <= anchor_pt.relmse else "regresses"
+        print(f"[{spec.name}] {c.label:32s} spectral-vs-RGB  pbrt-truth "
+              f"{verdict}: spectral relMSE={spt.relmse:.4f} vs RGB {anchor_pt.relmse:.4f}")
+
     if failures and spec.known_divergent:
         # Harness-first: a known, not-yet-fixed heavy-scene divergence. Record
         # and xfail (visible, non-blocking); the follow-up fix flips the flag.

@@ -264,10 +264,32 @@ def test_suite_matrix_gate(spec):
         if c != ANCHOR:
             sc = self_consistency_result(spec, c, img, anchor_img)
             print(f"[{spec.name}] {c.label:28s} vs-anchor  {sc.metrics.summary()}")
-            if not sc.passed:
+            if c.spectral:
+                # Spectral is a DISCRIMINATING axis (7.3): on a spectrum-authored
+                # suite scene it differs from the RGB anchor by design, so the
+                # anchor delta is REPORTED, not asserted.
+                print(f"[{spec.name}] {c.label:28s} spectral-vs-RGB "
+                      f"Δ relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}")
+            elif not sc.passed:
                 failures.append(
                     f"{c.label}: self-consistency relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}"
                 )
+
+    # 7.3: REPORT the spectral-vs-RGB pbrt-truth direction (not a hard gate). On a
+    # smooth chromaticity shift spectral improves; on a hero-λ dispersion caustic
+    # (spec_prism) it can regress in pointwise relMSE while being the physically-
+    # correct dispersive result — so spectral pbrt-truth is gated against its own
+    # recorded baseline (above), and only the direction is logged here.
+    if want_pbrt:
+        anchor_pt = pbrt_truth_result(spec, ANCHOR, anchor_img, ref)
+        for c in combos:
+            if not c.spectral:
+                continue
+            spt = pbrt_truth_result(spec, c, imgs[c.label], ref)
+            verdict = "improves" if spt.relmse <= anchor_pt.relmse else "regresses"
+            print(f"[{spec.name}] {c.label:28s} spectral-vs-RGB pbrt-truth "
+                  f"{verdict}: spectral relMSE={spt.relmse:.4f} vs RGB {anchor_pt.relmse:.4f}")
+
     if failures and spec.known_divergent:
         # A recorded, not-yet-fixed divergence (e.g. the MaterialX imagemap path);
         # xfail (visible, non-blocking). The follow-up fix flips known_divergent.

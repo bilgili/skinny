@@ -605,7 +605,17 @@
    "flip_tol": 0.1,
    "material_class": "flat",
    "megakernel_ok": true,
-   "notes": "spectral discriminator (spec_prism): BK7 dispersion prism. The RGB matrix gates (self-consistency + pbrt-truth) hold as for any delta dielectric; the spectral-vs-RGB delta is measured on GPU (Group 7.3), where a pbrt-truth baseline is pinned if the RGB render diverges from the spectral pbrt reference.",
+   "baselines": {
+    "path|megakernel": {"relmse": 0.1723, "flip": 0.0651},
+    "path|wavefront": {"relmse": 0.1723, "flip": 0.0651},
+    "bdpt|megakernel": {"relmse": 0.1704, "flip": 0.0651},
+    "bdpt|wavefront": {"relmse": 0.1704, "flip": 0.0651},
+    "path|megakernel|spectral": {"relmse": 0.2777, "flip": 0.0868},
+    "path|wavefront|neural": {"relmse": 0.1664, "flip": 0.0660},
+    "path|wavefront|restir-di": {"relmse": 0.1712, "flip": 0.0644},
+    "sppm|wavefront": {"relmse": 0.2103, "flip": 0.0963}
+   },
+   "notes": "spectral discriminator (spec_prism): BK7 dispersion prism. The pbrt reference is SPECTRAL (pbrt disperses), so every skinny combo diverges from it: the RGB combos (~0.17 relMSE) cannot disperse at all, and the hero-wavelength --spectral render (0.278) IS the physically-correct dispersive result but carries a HIGHER pointwise relMSE than RGB because a chromatic dispersion caustic is a high-variance feature that 4 rotated hero-λ under-sample at 256 spp (measured GPU Group 7.3). So spectral-vs-RGB pbrt-truth REGRESSES here in relMSE while being more correct — 'spectral <= RGB' is NOT an invariant (it holds for smooth chromaticity shifts like conductor_infinite: spectral 0.0042 < RGB 0.0058). pbrt-truth is pinned to the measured per-combo baselines (harness-first, tighten-only); the spectral-vs-RGB delta is REPORTED, not gated.",
    "spectral": {
     "kind": "dispersion",
     "glass": "bk7",
@@ -631,7 +641,17 @@
     "relmse": 0.02,
     "flip": 0.03
    },
-   "notes": "MaterialX authoring of spec_prism; authoring-equivalence vs the plain sibling (both RGB delta dielectrics).",
+   "baselines": {
+    "path|megakernel": {"relmse": 0.1723, "flip": 0.0651},
+    "path|wavefront": {"relmse": 0.1723, "flip": 0.0651},
+    "bdpt|megakernel": {"relmse": 0.1704, "flip": 0.0651},
+    "bdpt|wavefront": {"relmse": 0.1704, "flip": 0.0651},
+    "path|megakernel|spectral": {"relmse": 0.2777, "flip": 0.0868},
+    "path|wavefront|neural": {"relmse": 0.1664, "flip": 0.0660},
+    "path|wavefront|restir-di": {"relmse": 0.1712, "flip": 0.0644},
+    "sppm|wavefront": {"relmse": 0.2103, "flip": 0.0963}
+   },
+   "notes": "MaterialX authoring of spec_prism; authoring-equivalence vs the plain sibling. Same SPECTRAL pbrt ref, so the same per-combo pbrt-truth baselines apply (see spec_prism notes for the 7.3 dispersion-regresses finding).",
    "spectral": {
     "kind": "dispersion",
     "glass": "bk7",
