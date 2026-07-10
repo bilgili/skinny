@@ -131,3 +131,81 @@ def test_fresnel_rises_toward_grazing():
 
 def test_named_metal_eta_k_unknown_is_none():
     assert spectral.named_metal_eta_k("unobtainium", np.array([500.0])) is None
+
+
+# ── blackbody emitters (pbrt planckSpectrum mirror) ───────────────────────────
+
+_REC709_Y = np.array([0.2126, 0.7152, 0.0722])
+
+
+def _luminance(rgb):
+    """CIE Y of a linear-sRGB colour (Rec.709 luminance, the resolve convention)."""
+    return float(np.dot(np.asarray(rgb, dtype=np.float64), _REC709_Y))
+
+
+def _mc_resolve_blackbody(temperature_k, emission_rgb, *, trials=8000, seed=0):
+    """Monte-Carlo film resolve of the scaled Planck SPD over many hero draws."""
+    from skinny.pbrt import spectral
+
+    scale = spectral.blackbody_scale(temperature_k, emission_rgb)
+    rng = np.random.default_rng(seed)
+    acc = np.zeros(3)
+    for _ in range(trials):
+        sw = spectral.sample_wavelengths(float(rng.random()))
+        vals = spectral.blackbody_emission(sw, temperature_k) * scale
+        acc += spectral.resolve_to_linear_srgb(sw.lambda_, vals, sw.pdf)
+    return acc / trials
+
+
+def test_blackbody_emission_is_raw_planck():
+    from skinny.pbrt import spectra
+
+    sw = spectral.sample_wavelengths(0.31)
+    got = spectral.blackbody_emission(sw, 5500.0)
+    assert np.allclose(got, spectra.planck(sw.lambda_, 5500.0))
+
+
+def test_blackbody_emission_all_positive():
+    sw = spectral.sample_wavelengths(0.63)
+    for temperature_k in (3000.0, 6500.0, 9000.0):
+        vals = spectral.blackbody_emission(sw, temperature_k)
+        assert np.all(vals > 0.0)
+
+
+def test_blackbody_scale_guards():
+    rgb = np.array([1.0, 1.0, 1.0])
+    assert spectral.blackbody_scale(0.0, rgb) == 0.0
+    assert spectral.blackbody_scale(-100.0, rgb) == 0.0
+
+
+def test_blackbody_roundtrip_luminance_and_chromaticity():
+    from skinny.pbrt import spectra
+
+    intensity = 10.0
+    for temperature_k in (3000.0, 6500.0, 9000.0):
+        emission_rgb = spectra.blackbody_rgb(temperature_k) * intensity
+        resolved = _mc_resolve_blackbody(temperature_k, emission_rgb)
+
+        # Luminance reproduced within ~2%.
+        lum_res = _luminance(resolved)
+        lum_tgt = _luminance(emission_rgb)
+        assert abs(lum_res - lum_tgt) / lum_tgt < 0.02
+
+        # Chromaticity (rgb / sum) matches the blackbody chromaticity within ~2%.
+        chroma_res = resolved / np.sum(resolved)
+        bb = spectra.blackbody_rgb(temperature_k)
+        chroma_ref = bb / np.sum(bb)
+        assert np.max(np.abs(chroma_res - chroma_ref)) < 0.02
+
+
+def test_blackbody_hotter_shifts_blue():
+    from skinny.pbrt import spectra
+
+    intensity = 5.0
+    ratios = []
+    for temperature_k in (3000.0, 6500.0, 9000.0):
+        emission_rgb = spectra.blackbody_rgb(temperature_k) * intensity
+        resolved = _mc_resolve_blackbody(temperature_k, emission_rgb, seed=7)
+        ratios.append(resolved[2] / resolved[0])  # b / r
+    # Cooler colour temperature (higher K) = bluer: b/r rises monotonically.
+    assert ratios[0] < ratios[1] < ratios[2]

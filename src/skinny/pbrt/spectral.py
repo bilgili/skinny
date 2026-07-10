@@ -18,8 +18,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import spectra
 from .data import spectral_tables as st
-from .spectra import _LAMBDA, _Y_INTEGRAL, cie_xyz_bar, xyz_to_linear_srgb
+from .spectra import _LAMBDA, _Y_INTEGRAL, cie_xyz_bar, planck, xyz_to_linear_srgb
+
+# CIE Y / Rec.709 luminance weights — the Y row of the linear-sRGB→XYZ matrix
+# under a D65 whitepoint, so ``dot(rgb, _REC709_Y)`` is exactly the CIE Y of a
+# linear-sRGB colour.
+_REC709_Y = np.array([0.2126, 0.7152, 0.0722], dtype=np.float64)
 
 N_SPECTRUM_SAMPLES = 4
 
@@ -130,6 +136,55 @@ def spectrum_to_xyz(lam, values, pdf) -> np.ndarray:
 def resolve_to_linear_srgb(lam, values, pdf) -> np.ndarray:
     """Full film resolve: N spectral samples → linear sRGB (clamped ≥ 0)."""
     return np.clip(xyz_to_linear_srgb(spectrum_to_xyz(lam, values, pdf)), 0.0, None)
+
+
+# ── blackbody emitters (pbrt planckSpectrum mirror) ───────────────────────────
+
+
+def blackbody_emission(sw: SampledWavelengths, temperature_k: float) -> np.ndarray:
+    """Raw relative Planck SPD at the hero wavelengths ``sw.lambda_`` (N,).
+
+    This is exactly what the GPU's ``planckSpectrum(sw, T)`` evaluates — the
+    un-normalized Planck spectral radiance (``spectra.planck``); the per-emitter
+    energy/chromaticity match is applied separately via :func:`blackbody_scale`,
+    never here.
+    """
+    return planck(sw.lambda_, temperature_k)
+
+
+def blackbody_scale(temperature_k: float, emission_rgb) -> float:
+    """Scalar the renderer multiplies the Planck SPD by so the hero-λ film resolve
+    of ``blackbody_emission(sw, T) * scale`` reproduces ``emission_rgb``.
+
+    Deterministic (not Monte-Carlo). ``emission_rgb`` is the material's already
+    computed linear-sRGB emission (``blackbody_rgb(T) × authored intensity``); the
+    Planck SPD carries the blackbody *chromaticity* on its own, so this scale only
+    has to fix the *luminance*::
+
+        scale = Y_target / Y_planck_resolved
+
+    * ``Y_target`` = the CIE Y of ``emission_rgb`` — the Rec.709 luminance
+      ``dot(emission_rgb, [0.2126, 0.7152, 0.0722])``, which for a linear-sRGB
+      colour equals its CIE Y under the D65 whitepoint (the Y row of the
+      linear-sRGB→XYZ matrix). ``blackbody_rgb`` has unit CIE Y, so
+      ``Y_target`` recovers the authored intensity.
+    * ``Y_planck_resolved`` = the Planck SPD's luminance **under the same
+      normalization the film resolve applies** — ``spectrum_to_xyz`` /
+      ``resolve_to_linear_srgb`` divide the Monte-Carlo XYZ by ``_Y_INTEGRAL``
+      (``∫ȳ dλ``), whereas ``spectra.spd_to_xyz`` returns the raw un-normalized
+      trapz luminance. Dividing the raw ``Y_planck`` by ``_Y_INTEGRAL`` puts the
+      denominator in the resolve's units, so the round-trip closes (a literal
+      ``Y_target / spd_to_xyz(...)[1]`` would be off by exactly ``_Y_INTEGRAL``).
+
+    Returns ``0.0`` for a non-positive temperature or a degenerate Planck SPD.
+    """
+    if temperature_k <= 0.0:
+        return 0.0
+    y_planck = float(spectra.spd_to_xyz(planck(_LAMBDA, temperature_k))[1])
+    if y_planck <= 0.0:
+        return 0.0
+    y_target = float(np.dot(np.asarray(emission_rgb, dtype=np.float64), _REC709_Y))
+    return y_target * _Y_INTEGRAL / y_planck
 
 
 # ── conductor Fresnel (pbrt FrComplex mirror) ─────────────────────────────
