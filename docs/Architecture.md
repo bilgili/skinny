@@ -1064,6 +1064,9 @@ incrementally moved over.
 | 45 | StructuredBuffer&lt;float&gt; | **Spectral upsampling — scale grid `spectralScale`** — the Jakob-Hanika RGB→spectrum sigmoid-coefficient table's RES node array (`SPECTRAL_TABLE_RES` = 64 floats). **Spectral-build-only** (`#if defined(SKINNY_SPECTRAL)`); absent from the RGB SPIR-V. Uploaded by `renderer.py` only when `--spectral` is active; on Metal binds by name (`spectralScale`), so the `vk::binding` index is inert there (change `spectral-rendering`) | `bindings.slang` |
 | 46 | StructuredBuffer&lt;float&gt; | **Spectral upsampling — coefficient grid `spectralData`** — flat `[3][res][res][res][3]` sigmoid-coefficient table (2,359,296 floats at res 64). Spectral-build-only, see binding 45 | `bindings.slang` |
 | 47 | StructuredBuffer&lt;float&gt; | **CIE D65 SPD `spectralD65`** — the reference illuminant SPD normalized to unit luminance (`SPECTRAL_D65_COUNT` = 95 floats), consumed by `upsampleIlluminant`. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 48 | StructuredBuffer&lt;float&gt; | **Named-conductor eta/k `spectralMetals`** (Group 6.2) — au/ag/al/cu (ids 1..4), each `[eta(95) \| k(95)]` on the 360–830/5 nm grid (stride 190 floats). Sampled at the 4 hero λ by `namedMetalEtaK` for exact complex-index Fresnel. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 49 | StructuredBuffer&lt;float&gt; | **Per-emissive-triangle blackbody `spectralEmitters`** (Group 6.1) — `(temperature_K, scale)` per emissive triangle (2 floats), **parallel-indexed to the emissive-triangle buffer (binding 18)**; a blackbody area light carries `(T>0, blackbody_scale(T, emission))`, a plain-RGB emitter `(0,0)`. NEE substitutes `planckSpectrum(sw,T)·scale` for the RGB illuminant upsample. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 50 | StructuredBuffer&lt;float&gt; | **Per-distant-light illuminant SPD `spectralLightSpd`** (Group 6.3) — 95 floats/light on the 360–830/5 nm grid (host-scaled to the light's RGB luminance), indexed by the `DistantLight._direction.w` slot (−1 = none → RGB upsample). Fixed `DISTANT_LIGHT_CAPACITY` (16) slots. Spectral-build-only, see binding 45 | `bindings.slang` |
 
 The table is the **Vulkan** layout. On the **Metal** target (gated
 `#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
@@ -1096,16 +1099,20 @@ layout is shared by the megakernel and every wavefront stage pipeline (via
 in `bindings.slang` has a matching layout entry, so a new shared scene binding
 cannot ship without its declaration (change `fix-vulkan-volume-density-binding`).
 
-**Spectral bindings 45–47** are compiled in **only** the spectral megakernel
+**Spectral bindings 45–50** are compiled in **only** the spectral megakernel
 variant (`#if defined(SKINNY_SPECTRAL)`, change `spectral-rendering`) and are
 absent from the default RGB SPIR-V, so they never enter an RGB build's set-0
-layout. `renderer.py` uploads the three `StructuredBuffer<float>`s — the
-Jakob-Hanika upsampling scale grid, the sigmoid-coefficient grid, and the
-unit-luminance CIE D65 SPD — only when `--spectral` is active; on Metal they
-bind by name (`spectralScale`/`spectralData`/`spectralD65`) so the `vk::binding`
-index is inert. The table resolution (`SPECTRAL_TABLE_RES` = 64) and D65 length
-(`SPECTRAL_D65_COUNT` = 95) ride as **compile-time constants**, not
-`FrameConstants` fields, so the RGB UBO packing is unchanged.
+layout. `renderer.py` uploads them only when `--spectral` is active: the three
+upsampling `StructuredBuffer<float>`s (45/46/47 — the Jakob-Hanika scale grid,
+the sigmoid-coefficient grid, and the unit-luminance CIE D65 SPD), plus three
+exact-source buffers — named-conductor eta/k (48, `spectralMetals`, Group 6.2),
+per-emissive-triangle blackbody `(T, scale)` (49, `spectralEmitters`, Group 6.1,
+parallel-indexed to binding 18), and per-distant-light illuminant SPD (50,
+`spectralLightSpd`, Group 6.3, indexed by `DistantLight._direction.w`). On Metal
+they all bind by name so the `vk::binding` index is inert. The table resolution
+(`SPECTRAL_TABLE_RES` = 64) and D65/grid length (`SPECTRAL_D65_COUNT` = 95) ride
+as **compile-time constants**, not `FrameConstants` fields, so the RGB UBO
+packing is unchanged.
 
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared

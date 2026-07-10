@@ -198,10 +198,16 @@
       = bit-exact mirror of `spectra.planck`; `bindings.slang::emitterBlackbody(idx)`;
       `path_spectral.slang` spectralLightNEE gained `(liOverride, hasLiOverride)` — the
       emissive-triangle NEE branch substitutes `planckSpectrum(sw,T)*scale` for the RGB
-      illuminant upsample when T>0. Constant/RGB emitters (T=0) fall back. KNOWN v1 LIMIT:
-      BSDF-ray-hits-emissive-triangle MIS emission stays the RGB upsample (`cols.emission`)
-      — the megakernel hit carries only materialId, not a per-triangle emitter index; NEE
-      dominates area-light energy. TESTS: GPU≡numpy `test_planck` harness (gpu-marked) +
+      illuminant upsample when T>0. Constant/RGB emitters (T=0) fall back. KNOWN v1 LIMIT
+      (codex P2, consciously deferred): BSDF-ray-hits-emissive-triangle AND camera-visible
+      blackbody emission stay the RGB upsample (`cols.emission`) — the megakernel hit carries
+      only materialId, not a per-triangle emitter index, and FlatMaterialParams has no spare
+      lanes for a per-material (T, scale) (only `_cloudDensityWispinessFrequency.w` = 1 float
+      free). LOW IMPACT: a directly-visible blackbody's RGB metamer PRESERVES its chromaticity
+      (emitter renders the correct colour); only second-order metamerism off the BSDF-hit path is
+      approximate, and NEE carries the spectrally-significant surface interaction exactly.
+      FOLLOW-UP: grow FlatMaterialParams by a float4 (or a per-material blackbody buffer) for
+      (T, scale) and re-hook the emission path. TESTS: GPU≡numpy `test_planck` harness (gpu-marked) +
       producer round-trip + rgb-only-no-payload (hostless). VALIDATED on Metal (M5 Pro): a
       3400 K area light on saturated red/blue reflectances moves chromaticity off the RGB
       metamer TOWARD pbrt on both axes (R/G 15.65→2.50 vs pbrt 4.42; B/G 0.42→0.92 vs pbrt
