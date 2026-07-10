@@ -300,10 +300,14 @@ struct SpectralPathTracer
             // secondary λ would refract along different directions, so pbrt
             // terminates them (terminateSecondary: pdf.x/=4, y/z/w=0). Only the
             // REFRACTED delta branch disperses; reflection off glass is achromatic.
+            // A refraction is detected by wi/wo landing on OPPOSITE sides of the
+            // interface (wo.z·wi.z < 0) — this catches BOTH the entering AND the
+            // EXITING refraction (the exit has wi.z > 0 ⇒ bs.transmitted is false,
+            // so gating on transmitted would leave exit refractions undispersed).
             // Constant-IOR glass (glassCauchyB == 0) never enters ⇒ keeps all 4 λ
             // ⇒ unbiased. Reflect fallback on hero-λ TIR is achromatic.
             float glassB = flatMaterials[h.materialId].glassCauchyB;
-            if (bs.pdf == 0.0 && bs.transmitted && glassB > 0.0)
+            if (bs.pdf == 0.0 && glassB > 0.0 && wo.z * bs.wi.z < 0.0)
             {
                 float  lam0um   = sw.lambda.x * 1e-3;                 // nm → µm
                 float  nHero    = mat.data.mat.ior + glassB / (lam0um * lam0um);
