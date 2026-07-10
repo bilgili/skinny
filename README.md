@@ -506,7 +506,7 @@ neural × interop.
 | Heterogeneous volumes — NanoVDB `MakeNamedMedium` (path integrator, megakernel + wavefront) | ✅ | ✅ (`disney-cloud` / `bunny-cloud`; distant + env NEE; BDPT/SPPM excluded) |
 | Procedural `cloud` medium — pbrt `MakeNamedMedium "cloud"` (analytic Perlin-fBm density, path integrator, megakernel + wavefront) | ✅ | ✅ (`clouds`; no grid/texture — `MEDIUM_CLOUD` evaluates pbrt's `CloudMedium::Density` in-shader; BDPT/SPPM excluded) |
 | Neural directional proposal (inference) | ✅ | ✅ |
-| Spectral rendering (`--spectral`, hero-wavelength) | ⏳ WIP | ⏳ WIP |
+| Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + megakernel + flat, v1) | ✅ (`spectral-rendering`) |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
 | Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal`, bind-by-name; `metal-tool-dock-render`) |
@@ -526,20 +526,20 @@ constraints, independent of GPU backend.
 | Inference dtype | fp32 (default), fp16 (mixed on Metal w/ graceful fp32 fallback), fp8 e4m3 (in-shader decode, portable across Vulkan / Metal / MoltenVK). |
 
 **Spectral rendering (`--spectral`)** — hero-wavelength transport instead of
-RGB. **Work in progress:** the CPU/data/importer/CLI/shader-source foundation
-has landed (pbrt-exact upsampling + CIE tables, blackbody/illuminant payload
-preservation on import, the `--spectral` flag, and `spectrum.slang`), but the
-megakernel transport that consumes the flag is not wired yet. Until it is,
-`--spectral` is **refused at startup** ("not yet implemented") on every
-front-end rather than silently rendering RGB. A single capability flag
-(`skinny.spectral_capability.SPECTRAL_IMPLEMENTED`) flips the CLI and the parity
-matrix live together when the transport lands.
+RGB. **v1 is live** (`SPECTRAL_IMPLEMENTED = True`): the megakernel spectral
+integrator (`path_spectral.slang`) renders the path+megakernel+flat envelope on
+both backends — per-wavelength NEE, the pbrt sigmoid/D65 upsampling model, exact
+named-conductor Fresnel, authored + blackbody illuminant SPDs, and hero-λ glass
+dispersion — resolving through the Wyman CMF to the existing RGBA32F
+accumulation. An in-envelope `--spectral` run is accepted on every front-end;
+out-of-envelope combos are still refused at startup (see the scope below). See
+[Spectral.md](docs/Spectral.md).
 
-| Aspect | Planned v1 scope |
-|--------|------------------|
-| Integrator / execution | **Path + megakernel only** (wavefront spectral is the follow-up). |
-| Materials | **Flat only** — no skin/subsurface/volume. |
-| Layers | No neural proposal, no ReSTIR reuse (both wavefront-only). |
+| Aspect | v1 scope |
+|--------|----------|
+| Integrator / execution | **Path + megakernel only** — a non-path integrator or an explicit wavefront mode under `--spectral` is refused at startup (wavefront spectral is the follow-up). |
+| Materials | **Flat only** — a skin/subsurface/heterogeneous-volume scene under `--spectral` is refused. |
+| Layers | No neural proposal, no ReSTIR reuse (both refused under `--spectral`). |
 | Samples | 4 hero-rotated wavelengths over 360–830 nm (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 
 **Online training (`--online-training`)** — combinations of

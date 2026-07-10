@@ -220,15 +220,15 @@ in `README.md` → **Compatibility matrix**; keep the two in sync.
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
 | Neural-handoff `interop` | CUDA + `VK_KHR_external_memory` + timeline semaphore (`[interop]` extra) | UMA shared-storage in-place writes, no extra deps (`metal-neural-interop`) |
-| Spectral rendering (`--spectral`, hero-wavelength) | ⏳ WIP | ⏳ WIP (`spectral-rendering`; foundation landed, transport unwired) |
+| Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + megakernel + flat, v1) | ✅ (`spectral-rendering`) |
 
-**Spectral rendering (`--spectral`), work in progress (change `spectral-rendering`):**
+**Spectral rendering (`--spectral`), v1 live (change `spectral-rendering`):**
 
 | Constraint | Detail |
 |------------|--------|
-| State | Foundation only: pbrt-exact upsampling table + CIE D65/eta-k curves (`pbrt/data/`), numpy estimator mirror (`pbrt/spectral.py`), import payload preservation (blackbody/illuminant SPDs on `skinnyOverrides`), `--spectral` flag, `spectrum.slang` core (slangc-gated). The megakernel transport (Group 5) is **not wired** — `--spectral` is refused at startup ("not yet implemented") on every front-end, never silently RGB. |
-| Capability gate | Single source of truth `skinny.spectral_capability.SPECTRAL_IMPLEMENTED` (False) — referenced live by `reject_spectral_unsupported` (CLI, all four front-ends) AND `parity.combo_is_valid` (spectral axis = recorded "not yet wired" skip). Flip once with the transport to enable both. |
-| Planned v1 scope | **Path + megakernel + flat materials only.** No wavefront (follow-up), no BDPT/SPPM, no neural proposal, no ReSTIR reuse, no skin/subsurface/volume. 4 hero-rotated wavelengths (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
+| State | **Wired + GPU-validated.** Megakernel spectral integrator `integrators/path_spectral.slang` (`SpectralPathTracer`, compiled under `-DSKINNY_SPECTRAL`) renders the path+megakernel+flat envelope on both backends: per-λ NEE, pbrt sigmoid/D65 upsampling (`spectrum.slang`), exact named-conductor Fresnel (6.2, binding 48), authored illuminant SPDs (6.3, binding 50) + blackbody Planck emission (6.1, bindings 49/51), hero-λ glass dispersion (6.4). Foundation (upsampling/CIE tables `pbrt/data/`, numpy mirror `pbrt/spectral.py`, import payload preservation, `spectrum.slang`) unchanged. |
+| Capability gate | Single source of truth `skinny.spectral_capability.SPECTRAL_IMPLEMENTED` (**True**) — referenced live by `reject_spectral_unsupported` (CLI, all four front-ends) AND `parity.combo_is_valid` (admits `(path, megakernel, spectral)` into the rendered set). An in-envelope `--spectral` run is accepted; out-of-envelope combos still refused. |
+| v1 scope | **Path + megakernel + flat materials only.** No wavefront (follow-up), no BDPT/SPPM, no neural proposal, no ReSTIR reuse, no skin/subsurface/volume — each refused at startup. 4 hero-rotated wavelengths (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 
 **Heterogeneous participating media (NanoVDB + procedural cloud), independent of backend:**
 
