@@ -27,6 +27,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SPPM renders a polished metal under an environment** (change
+  `sppm-glossy-env-escape-mis`) — the `sppm|wavefront` parity gate on
+  `conductor_infinite` (a pbrt-roughness-`0.1` gold sphere lit only by a constant
+  infinite light) failed at relMSE ≈ 0.45 vs the path anchor. Two coupled eye-walk
+  defects: (1) the glossy-continuation threshold `sppmGlossyContinueRoughness`
+  (perceptual/USD roughness) did not reach pbrt-imported polished metals — pbrt
+  roughness `r` imports as `usd = r**0.25`, so a polished `0.1` conductor lands at
+  usd `≈ 0.562`, just above the old `0.5` default, and was stored as a
+  photon-gather visible point that never receives a deposit (env photons hit the
+  sole metal at depth 0 and escape); (2) a non-delta glossy-continued vertex that
+  escapes to a distant/env light added the env at full weight while also running
+  env NEE at that vertex, double-counting the environment. The default is raised to
+  `0.6` (an alpha `≲ 0.36` polished-metal cutoff that still leaves a
+  pbrt-roughness-`0.3` metal on the gather side), and the eye walk now
+  MIS-weights every light a glossy carrier reaches — the escaped env by
+  `powerHeuristic(bsdfPdf, envPdf(dir))` and an emissive-triangle hit by
+  `powerHeuristic(bsdfPdf, pdfLightSA)` (`spawnedBySpecular` is now delta-only,
+  correcting a pre-existing full-weight double-count the higher threshold would
+  expose) — mirroring the path tracer's env-miss and emissive-hit MIS. Delta
+  carriers / transmitted / furnace keep full weight. SPPM now converges to the
+  path reference; no binding, ABI, or photon-stage change. `mat_conductor` SPPM
+  baselines are unchanged.
 - **MaterialX imagemap `base_color` textures now render** (change
   `confirming-test-scenes` follow-up) — a `standard_surface` whose `base_color`
   is driven by an `<image>` node (what `import_pbrt --mtlx` emits for a pbrt

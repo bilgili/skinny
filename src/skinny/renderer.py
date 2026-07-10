@@ -66,10 +66,16 @@ MAX_FRAMES_IN_FLIGHT = 2
 # SPPM glossy/near-specular eye-walk continuation: default roughness threshold
 # (change sppm-glossy-final-gather). Tuned for polished metals — brass in
 # assets/three_materials_demo has roughness ~0.15 (p95 0.23); the metallic guard in
-# the shader keeps dielectrics on the gather side, so 0.5 catches metals with
-# headroom. Override per-render via renderer._sppm_glossy_roughness_override (None =
-# use this default; explicit 0.0 = PM-1 delta-only).
-_SPPM_GLOSSY_ROUGHNESS_DEFAULT = 0.5
+# the shader keeps dielectrics on the gather side. This threshold is in perceptual
+# (USD) roughness, so it also has to catch pbrt-imported metals: pbrt's perceptual
+# roughness r maps through alpha=sqrt(r) then usd=sqrt(alpha)=r**0.25, so a polished
+# pbrt-roughness-0.1 conductor lands at usd ~0.562 (GGX alpha ~0.316). 0.6 covers it
+# — an alpha<=~0.36 "polished metal" cutoff — while still leaving a pbrt-roughness-0.3
+# metal (usd ~0.740) on the photon-gather side. A glossy-continued vertex escaping to
+# a distant/env light is MIS-weighted in wfSppmEye, so continuation matches the path
+# tracer instead of double-counting env (conductor_infinite). Override per-render via
+# renderer._sppm_glossy_roughness_override (None = use this default; 0.0 = PM-1 delta-only).
+_SPPM_GLOSSY_ROUGHNESS_DEFAULT = 0.6
 
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
 # matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
