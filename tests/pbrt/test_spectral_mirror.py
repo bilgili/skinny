@@ -74,35 +74,42 @@ def test_cauchy_ior_agrees_with_named_glass_ior_matched_wavelengths():
 
 
 def test_should_terminate_secondary_truth_table():
-    # The exact GPU gate: delta pdf AND transmitted AND dispersive (b > 0).
-    assert spectral.should_terminate_secondary(0.0, True, 0.00420) is True
+    # The exact GPU gate: delta pdf AND refraction (wo/wi opposite sides) AND
+    # dispersive (b > 0). wo_z, wi_z are the tangent-space z of the outgoing /
+    # sampled directions; opposite signs ⇒ the ray crossed the interface.
+    # Entering refraction (wo above, wi below): terminates.
+    assert spectral.should_terminate_secondary(0.0, 1.0, -1.0, 0.00420) is True
+    # EXITING refraction (wo below, wi above) — also crosses ⇒ terminates. This is
+    # the case a `transmitted` (wi_z < 0) flag would have missed.
+    assert spectral.should_terminate_secondary(0.0, -1.0, 1.0, 0.00420) is True
     # Constant-IOR glass (b == 0) never terminates.
-    assert spectral.should_terminate_secondary(0.0, True, 0.0) is False
+    assert spectral.should_terminate_secondary(0.0, 1.0, -1.0, 0.0) is False
     # Non-delta pdf (reflection lobe with a real pdf) never terminates.
-    assert spectral.should_terminate_secondary(0.5, True, 0.00420) is False
-    # Not transmitted (reflected) never terminates.
-    assert spectral.should_terminate_secondary(0.0, False, 0.00420) is False
+    assert spectral.should_terminate_secondary(0.5, 1.0, -1.0, 0.00420) is False
+    # Reflection (wi/wo on the SAME side) never terminates — achromatic.
+    assert spectral.should_terminate_secondary(0.0, 1.0, 1.0, 0.00420) is False
+    assert spectral.should_terminate_secondary(0.0, -1.0, -1.0, 0.00420) is False
 
 
 def test_dispersion_gate_drives_terminate_secondary():
     # Constant-IOR glass (b = 0): gate is False ⇒ all 4 hero pdfs stay live.
     sw = spectral.sample_wavelengths(0.42)
-    assert not spectral.should_terminate_secondary(0.0, True, 0.0)
+    assert not spectral.should_terminate_secondary(0.0, 1.0, -1.0, 0.0)
     kept = (
         spectral.terminate_secondary(sw)
-        if spectral.should_terminate_secondary(0.0, True, 0.0)
+        if spectral.should_terminate_secondary(0.0, 1.0, -1.0, 0.0)
         else sw
     )
     assert not kept.secondary_terminated()
     assert np.all(kept.pdf > 0.0)  # 4 wavelengths carried
 
-    # Dispersive glass (b > 0), transmitted through a delta refraction: gate is
+    # Dispersive glass (b > 0), a delta refraction (wo/wi opposite sides): gate is
     # True ⇒ collapse to the hero λ (pdf.x /= 4, y/z/w = 0).
-    assert spectral.should_terminate_secondary(0.0, True, 0.00420)
+    assert spectral.should_terminate_secondary(0.0, 1.0, -1.0, 0.00420)
     hero_pdf = sw.pdf[0]
     collapsed = (
         spectral.terminate_secondary(sw)
-        if spectral.should_terminate_secondary(0.0, True, 0.00420)
+        if spectral.should_terminate_secondary(0.0, 1.0, -1.0, 0.00420)
         else sw
     )
     assert collapsed.secondary_terminated()

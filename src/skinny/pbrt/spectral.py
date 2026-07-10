@@ -95,17 +95,22 @@ def cauchy_ior(a: float, b: float, lam_nm) -> np.ndarray:
     return a + b / (lam_um * lam_um)
 
 
-def should_terminate_secondary(bs_pdf: float, transmitted: bool, glass_b: float) -> bool:
+def should_terminate_secondary(bs_pdf: float, wo_z: float, wi_z: float,
+                               glass_b: float) -> bool:
     """The exact dispersion unbiasedness gate the GPU implements.
 
-    A refracted (``transmitted``) interaction through a **dispersive** glass
-    (Cauchy ``b > 0``) whose BSDF sampling pdf is a hard delta (``bs_pdf == 0``)
-    must collapse the secondary wavelengths — the refraction bends each λ
-    differently, so only the hero wavelength can be carried unbiased past a
-    dispersive refraction. A constant-IOR glass (``b == 0``) refracts every λ
-    identically and keeps all four hero wavelengths live.
+    A delta **refraction** (``bs_pdf == 0``) through a **dispersive** glass
+    (Cauchy ``b > 0``) must collapse the secondary wavelengths — the refraction
+    bends each λ differently, so only the hero wavelength survives unbiased past a
+    dispersive refraction. A refraction is detected geometrically by ``wi`` and
+    ``wo`` landing on **opposite sides** of the interface (``wo_z * wi_z < 0``),
+    which matches the GPU gate in ``path_spectral.slang`` and — unlike a
+    ``transmitted`` (``wi_z < 0``) flag — catches BOTH the entering AND the
+    exiting refraction (the exit has ``wi_z > 0``). A reflection keeps ``wi``/``wo``
+    on the same side (skipped, achromatic); a constant-IOR glass (``b == 0``)
+    refracts every λ identically and keeps all four hero wavelengths live.
     """
-    return bs_pdf == 0.0 and transmitted and glass_b > 0.0
+    return bs_pdf == 0.0 and glass_b > 0.0 and (wo_z * wi_z < 0.0)
 
 
 def upsample_reflectance(rgb, lam) -> np.ndarray:
