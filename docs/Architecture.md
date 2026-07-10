@@ -1067,6 +1067,7 @@ incrementally moved over.
 | 48 | StructuredBuffer&lt;float&gt; | **Named-conductor eta/k `spectralMetals`** (Group 6.2) — au/ag/al/cu (ids 1..4), each `[eta(95) \| k(95)]` on the 360–830/5 nm grid (stride 190 floats). Sampled at the 4 hero λ by `namedMetalEtaK` for exact complex-index Fresnel. Spectral-build-only, see binding 45 | `bindings.slang` |
 | 49 | StructuredBuffer&lt;float&gt; | **Per-emissive-triangle blackbody `spectralEmitters`** (Group 6.1) — `(temperature_K, scale)` per emissive triangle (2 floats), **parallel-indexed to the emissive-triangle buffer (binding 18)**; a blackbody area light carries `(T>0, blackbody_scale(T, emission))`, a plain-RGB emitter `(0,0)`. NEE substitutes `planckSpectrum(sw,T)·scale` for the RGB illuminant upsample. Spectral-build-only, see binding 45 | `bindings.slang` |
 | 50 | StructuredBuffer&lt;float&gt; | **Per-distant-light illuminant SPD `spectralLightSpd`** (Group 6.3) — 95 floats/light on the 360–830/5 nm grid (host-scaled to the light's RGB luminance), indexed by the `DistantLight._direction.w` slot (−1 = none → RGB upsample). Fixed `DISTANT_LIGHT_CAPACITY` (16) slots. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 51 | StructuredBuffer&lt;float&gt; | **Per-material blackbody `spectralMatEmission`** (Group 6.1 follow-up) — `(temperature_K, scale)` per flat material, **indexed by materialId**. Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD (matching the NEE path's binding-49 lookup) instead of the RGB upsample. Grown/rebound with the flat-material buffer. Spectral-build-only, see binding 45 | `bindings.slang` |
 
 The table is the **Vulkan** layout. On the **Metal** target (gated
 `#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
@@ -1099,17 +1100,19 @@ layout is shared by the megakernel and every wavefront stage pipeline (via
 in `bindings.slang` has a matching layout entry, so a new shared scene binding
 cannot ship without its declaration (change `fix-vulkan-volume-density-binding`).
 
-**Spectral bindings 45–50** are compiled in **only** the spectral megakernel
+**Spectral bindings 45–51** are compiled in **only** the spectral megakernel
 variant (`#if defined(SKINNY_SPECTRAL)`, change `spectral-rendering`) and are
 absent from the default RGB SPIR-V, so they never enter an RGB build's set-0
 layout. `renderer.py` uploads them only when `--spectral` is active: the three
 upsampling `StructuredBuffer<float>`s (45/46/47 — the Jakob-Hanika scale grid,
-the sigmoid-coefficient grid, and the unit-luminance CIE D65 SPD), plus three
+the sigmoid-coefficient grid, and the unit-luminance CIE D65 SPD), plus four
 exact-source buffers — named-conductor eta/k (48, `spectralMetals`, Group 6.2),
 per-emissive-triangle blackbody `(T, scale)` (49, `spectralEmitters`, Group 6.1,
-parallel-indexed to binding 18), and per-distant-light illuminant SPD (50,
-`spectralLightSpd`, Group 6.3, indexed by `DistantLight._direction.w`). On Metal
-they all bind by name so the `vk::binding` index is inert. The table resolution
+parallel-indexed to binding 18), per-distant-light illuminant SPD (50,
+`spectralLightSpd`, Group 6.3, indexed by `DistantLight._direction.w`), and
+per-material blackbody `(T, scale)` (51, `spectralMatEmission`, indexed by
+materialId — the exact-Planck visible/BSDF-hit emission companion to 49). On
+Metal they all bind by name so the `vk::binding` index is inert. The table resolution
 (`SPECTRAL_TABLE_RES` = 64) and D65/grid length (`SPECTRAL_D65_COUNT` = 95) ride
 as **compile-time constants**, not `FrameConstants` fields, so the RGB UBO
 packing is unchanged.

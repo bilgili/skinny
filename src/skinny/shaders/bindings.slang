@@ -178,6 +178,18 @@ Spectrum distantLightSpd(int slot, SampledWavelengths sw)
     }
     return s;
 }
+
+// Per-material blackbody (temperature, scale) (change spectral-rendering, Group
+// 6.1 follow-up). vk binding 51; uploaded only when spectral, indexed by
+// materialId. temperature == 0 ⇒ not a blackbody (caller keeps the RGB upsample).
+// Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD,
+// matching the NEE path (spectralEmitters). Absent from the RGB build.
+[[vk::binding(51)]] StructuredBuffer<float> spectralMatEmission;
+
+float2 materialBlackbody(uint matId)
+{
+    return float2(spectralMatEmission[matId * 2u], spectralMatEmission[matId * 2u + 1u]);
+}
 #endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:
 //   [0..7]  : tool header (input, written by CPU before each eval)

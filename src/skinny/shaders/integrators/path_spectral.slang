@@ -297,9 +297,17 @@ struct SpectralPathTracer
 
             // Emission at this hit (emissive flat), MIS-gated exactly as the RGB
             // path (emissive-triangle-bsdf-hit-mis). lum uses the RGB emission.
+            // Group 6.1 follow-up: a blackbody material (per-material T>0) emits the
+            // exact Planck SPD here too — luminance-matched by the host scale — so a
+            // camera-visible / BSDF-hit blackbody agrees with its NEE contribution
+            // instead of showing the RGB metamer. Non-blackbody keeps cols.emission.
+            Spectrum emis = cols.emission;
+            float2   matBB = materialBlackbody(h.materialId);
+            if (matBB.x > 0.0)
+                emis = planckSpectrum(sw, matBB.x) * matBB.y;
             if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)
             {
-                radiance += throughput * cols.emission;
+                radiance += throughput * emis;
             }
             else if (any(bs.emission > 0.0))
             {
@@ -309,7 +317,7 @@ struct SpectralPathTracer
                     ? lum * (h.t * h.t) / (fc.emissiveTotalPower * cosLight)
                     : 1e30;
                 float wBSDF = powerHeuristic(prevBsdfPdf, pdfLightSA);
-                radiance += throughput * cols.emission * wBSDF;
+                radiance += throughput * emis * wBSDF;
             }
 
             if (!bs.valid)

@@ -4066,6 +4066,19 @@ class Renderer:
         # before any USD scene is loaded.
         self.flat_material_buffer.upload_sync(b"\x00" * FLAT_MATERIAL_STRIDE)
         self._num_flat_materials = 0
+        # Per-material blackbody emission (binding 51, Group 6.1 follow-up),
+        # spectral variant only: float2 (temperature_K, scale) per flat material,
+        # indexed by materialId. Lets a camera-visible / BSDF-hit blackbody emitter
+        # use the exact Planck SPD (matching NEE) instead of the RGB upsample.
+        # Sized/grown parallel to flat_material_buffer; zeros ⇒ RGB upsample.
+        self._spectral_mat_emission_buffer = None
+        if self._spectral:
+            self._spectral_mat_emission_buffer = self._gpu.StorageBuffer(
+                self.ctx, self.material_capacity * SPECTRAL_EMITTER_STRIDE + 16
+            )
+            self._spectral_mat_emission_buffer.upload_sync(
+                b"\x00" * (self.material_capacity * SPECTRAL_EMITTER_STRIDE)
+            )
 
         # Bindless texture array (binding 14). Slots are populated lazily by
         # `_upload_flat_materials` from each Material.texture_paths entry.
@@ -4346,11 +4359,11 @@ class Renderer:
                 #      lensElements+lensPupilBounds+distantLights+toolBuffer+
                 #      envDistCdf (one combined env CDF buffer).
                 # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                # +6 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
-                # 49 emissive blackbody + 50 distant-light SPD) only for the
-                # spectral megakernel variant.
+                # +7 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
+                # 49 emissive blackbody + 50 distant-light SPD + 51 per-material
+                # blackbody) only for the spectral megakernel variant.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
-                * (22 + graph_slot + (6 if self._spectral else 0)),
+                * (22 + graph_slot + (7 if self._spectral else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4744,7 +4757,8 @@ class Renderer:
                                  (47, self._spectral_d65_buffer),
                                  (48, self._spectral_metals_buffer),
                                  (49, self._spectral_emitters_buffer),
-                                 (50, self._spectral_light_spd_buffer)):
+                                 (50, self._spectral_light_spd_buffer),
+                                 (51, self._spectral_mat_emission_buffer)):
                     writes.append(vk.VkWriteDescriptorSet(
                         dstSet=ds, dstBinding=_b, dstArrayElement=0,
                         descriptorCount=1,
@@ -4828,6 +4842,17 @@ class Renderer:
                     pBufferInfo=[ss_info],
                 ),
             ]
+            # Spectral (Group 6.1 follow-up): binding 51 grows with the material
+            # buffer, so rewrite it here too or it points at the freed buffer.
+            if self._spectral and self._spectral_mat_emission_buffer is not None:
+                writes.append(vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=51, dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=self._spectral_mat_emission_buffer.buffer, offset=0,
+                        range=self._spectral_mat_emission_buffer.size)],
+                ))
             vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     def _rebind_emissive_descriptors(self) -> None:
@@ -6031,6 +6056,11 @@ class Renderer:
             self.std_surface_buffer = self._gpu.StorageBuffer(
                 self.ctx, new_cap * STD_SURFACE_STRIDE + 16
             )
+            if self._spectral and self._spectral_mat_emission_buffer is not None:
+                self._spectral_mat_emission_buffer.destroy()
+                self._spectral_mat_emission_buffer = self._gpu.StorageBuffer(
+                    self.ctx, new_cap * SPECTRAL_EMITTER_STRIDE + 16
+                )
             self._rebind_scene_descriptors()
             self._rebind_aux_material_descriptors()
         # Python-material slots route through MATERIAL_TYPE_PYTHON, but
@@ -6043,7 +6073,23 @@ class Renderer:
 
         data = bytearray()
         types: list[int] = []
+        spectral_emis = bytearray()   # binding 51: (T, scale) parallel to `data`
         for i, mat in enumerate(materials):
+            # Spectral (Group 6.1 follow-up): per-material blackbody (T, scale) for
+            # the exact-Planck visible/BSDF-hit emission path. Appended for EVERY
+            # material (before any `continue`) to stay parallel-indexed to materialId.
+            if self._spectral:
+                bb_t, bb_s = 0.0, 0.0
+                _bp = mat.parameter_overrides.get("emissive_spectral")
+                if (_bp is not None and hasattr(_bp, "get")
+                        and _bp.get("kind") == "blackbody"):
+                    bb_t = float(_bp.get("temperature", 0.0) or 0.0)
+                    if bb_t > 0.0:
+                        from skinny.pbrt import spectral as _sp
+                        _em = _override_color3(
+                            mat.parameter_overrides, "emissiveColor", (0.0, 0.0, 0.0))
+                        bb_s = float(_sp.blackbody_scale(bb_t, _em))
+                spectral_emis += struct.pack("ff", bb_t, bb_s)
             if mat.mtlx_target_name == "M_skinny_skin_default":
                 types.append(MATERIAL_TYPE_SKIN)
                 data += b"\x00" * FLAT_MATERIAL_STRIDE
@@ -6155,6 +6201,13 @@ class Renderer:
             data += b"\x00" * FLAT_MATERIAL_STRIDE
             types.append(MATERIAL_TYPE_FLAT)
         self.flat_material_buffer.upload_sync(bytes(data))
+        if self._spectral and self._spectral_mat_emission_buffer is not None:
+            sp_cap = self.material_capacity * SPECTRAL_EMITTER_STRIDE
+            if not spectral_emis:
+                spectral_emis += struct.pack("ff", 0.0, 0.0)
+            while len(spectral_emis) < sp_cap:
+                spectral_emis += b"\x00" * SPECTRAL_EMITTER_STRIDE
+            self._spectral_mat_emission_buffer.upload_sync(bytes(spectral_emis[:sp_cap]))
         self._num_flat_materials = len(materials)
         self._material_types = types
         # Spectral v1 is FLAT-only: the megakernel spectral integrator
@@ -9020,6 +9073,8 @@ class Renderer:
                 b["spectralEmitters"] = self._spectral_emitters_buffer.buffer
             if self._spectral_light_spd_buffer is not None:
                 b["spectralLightSpd"] = self._spectral_light_spd_buffer.buffer
+            if self._spectral_mat_emission_buffer is not None:
+                b["spectralMatEmission"] = self._spectral_mat_emission_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -10658,7 +10713,8 @@ class Renderer:
         # only allocated for the spectral megakernel variant.
         for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
                     self._spectral_d65_buffer, self._spectral_metals_buffer,
-                    self._spectral_emitters_buffer, self._spectral_light_spd_buffer):
+                    self._spectral_emitters_buffer, self._spectral_light_spd_buffer,
+                    self._spectral_mat_emission_buffer):
             if _sb is not None:
                 _sb.destroy()
         self.hud_overlay.destroy()
