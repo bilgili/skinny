@@ -352,8 +352,17 @@
       `sppm|wavefront` fails self-consistency (relMSE 0.45) — sppm on a pure-specular gold scene
       has no diffuse to deposit photons; unrelated to spectral (non-spectral render byte-identical
       to pre-change). Spawned as a follow-up.
-- [ ] 7.4 Verify no RGB baseline changes anywhere (byte-identical default build ⇒ recorded
+- [x] 7.4 Verify no RGB baseline changes anywhere (byte-identical default build ⇒ recorded
       measurements stand)
+      — DONE (definitively): the pre-merge review compiled the RGB megakernel (`main_pass.slang`,
+      NO `-DSKINNY_SPECTRAL`) from BOTH the `main` and branch-HEAD shader trees with slangc →
+      byte-identical `.spv` (`cmp` clean). Every spectral shader addition is `#if
+      defined(SKINNY_SPECTRAL)`-gated or an unused `typealias Spectrum`/property (no SPIR-V);
+      `interfaces.slang` unchanged. RGB material/light buffers: every spectral-derived lane is
+      gated on `self._spectral` — glassCauchyB (`_normalBiasPad.w`), conductorMetalId
+      (`_specularColorPad.w`, gated in a740162), the DistantLight `_direction.w` SPD slot, and
+      the spectralEmitters/LightSpd/MatEmission buffers — all pack the literal-0 / no-buffer
+      baseline in the RGB build. So the recorded RGB parity measurements stand unchanged.
 
 ## 8. Metal hygiene and performance
 
