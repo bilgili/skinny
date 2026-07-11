@@ -196,11 +196,13 @@ def test_spectral_skipped_when_gate_off(monkeypatch):
 
 
 def test_spectral_out_of_envelope_skipped_even_when_wired():
-    # Out-of-envelope combos stay skipped with the gate on. (bdpt+megakernel is
-    # now IN envelope — change spectral-bdpt-megakernel — so the out-of-envelope
-    # cases are sppm and the wavefront execution mode.)
+    # Out-of-envelope combos stay skipped with the gate on. (path/bdpt run in
+    # BOTH execution modes and sppm under wavefront — change spectral-wavefront —
+    # so the remaining out-of-envelope cases are sppm+megakernel (no megakernel
+    # photon pass) and the neural / ReSTIR reuse axes.)
     for bad in [RenderCombo("sppm", "megakernel", spectral=True),
-                RenderCombo("path", "wavefront", spectral=True)]:
+                RenderCombo("path", "megakernel", ("neural",), spectral=True),
+                RenderCombo("path", "wavefront", (), "restir-di", spectral=True)]:
         assert not parity.combo_is_valid(bad, _flat_scene())[0]
 
 
@@ -212,18 +214,33 @@ def test_spectral_bdpt_admitted():
     assert ok, reason
 
 
-def test_spectral_sppm_skipped():
-    # SPPM has no megakernel path, so spectral SPPM is always skipped with a
-    # reason (it trips the earlier SPPM-wavefront-only rule).
+def test_spectral_sppm_megakernel_skipped():
+    # SPPM has no megakernel path, so spectral SPPM under the megakernel is skipped
+    # with a reason (it trips the earlier SPPM-wavefront-only rule). Spectral SPPM
+    # under WAVEFRONT is admitted — see test_spectral_wavefront_admitted.
     ok, reason = parity.combo_is_valid(
         RenderCombo("sppm", "megakernel", spectral=True), _flat_scene())
     assert not ok and reason
 
 
-def test_spectral_wavefront_skipped():
+def test_spectral_wavefront_admitted():
+    # change spectral-wavefront: spectral path/bdpt/sppm under the wavefront
+    # execution mode are now valid rendered combos (flat, no neural, no reuse).
+    flat = _flat_scene()
+    for integ in ("path", "bdpt", "sppm"):
+        ok, reason = parity.combo_is_valid(
+            RenderCombo(integ, "wavefront", spectral=True), flat)
+        assert ok, f"{integ} spectral wavefront should be admitted: {reason}"
+
+
+def test_spectral_sppm_wavefront_validity_entry_exists():
+    # 6.3: sppm × spectral has a rendered validity entry (under wavefront) so the
+    # coverage meta-test does not fail for a missing spectral sppm combo.
     ok, reason = parity.combo_is_valid(
-        RenderCombo("path", "wavefront", spectral=True), _flat_scene())
-    assert not ok and "megakernel-only" in reason
+        RenderCombo("sppm", "wavefront", spectral=True), _flat_scene())
+    assert ok, reason
+    assert any(c.spectral and c.integrator == "sppm"
+               for c in parity.enumerate_combos(_flat_scene()))
 
 
 def test_spectral_with_neural_skipped():
@@ -248,18 +265,57 @@ def test_spectral_non_flat_scene_all_skipped(scene):
         assert not ok and reason
 
 
-def test_spectral_envelope_is_exactly_path_and_bdpt_megakernel():
-    # Exactly two spectral combos are envelope-eligible: (path, megakernel) and
-    # (bdpt, megakernel) — change spectral-bdpt-megakernel. With the gate on
-    # (ships True) they are the sole spectral entries in the rendered set.
-    expected = [RenderCombo("path", "megakernel", spectral=True),
-                RenderCombo("bdpt", "megakernel", spectral=True)]
-    eligible = [c for c in parity.all_combos()
-                if c.spectral and parity.spectral_envelope(c, _flat_scene())[0]]
-    assert set(eligible) == set(expected)
+def test_spectral_envelope_is_path_bdpt_both_modes_and_sppm_wavefront():
+    # change spectral-wavefront: the envelope is path/bdpt in EITHER execution
+    # mode plus sppm under wavefront (flat, no neural, no reuse). With the gate on
+    # (ships True) these are exactly the spectral entries in the rendered set.
+    expected = {RenderCombo("path", "megakernel", spectral=True),
+                RenderCombo("path", "wavefront", spectral=True),
+                RenderCombo("bdpt", "megakernel", spectral=True),
+                RenderCombo("bdpt", "wavefront", spectral=True),
+                RenderCombo("sppm", "wavefront", spectral=True)}
+    eligible = {c for c in parity.all_combos()
+                if c.spectral and parity.spectral_envelope(c, _flat_scene())[0]}
+    assert eligible == expected
     assert all("spectral" in c.label for c in eligible)
-    rendered_spectral = [c for c in parity.enumerate_combos(_flat_scene()) if c.spectral]
-    assert set(rendered_spectral) == set(expected)
+    rendered_spectral = {c for c in parity.enumerate_combos(_flat_scene()) if c.spectral}
+    assert rendered_spectral == expected
+
+
+def test_self_consistency_anchor_is_spectral_aware():
+    # 6.2: the spectral axis anchors to the megakernel spectral path image, never
+    # the RGB golden; RGB combos keep the RGB anchor.
+    assert parity.self_consistency_anchor(RenderCombo("path", "wavefront")) == parity.ANCHOR
+    sp = RenderCombo("path", "wavefront", spectral=True)
+    assert parity.self_consistency_anchor(sp) == parity.SPECTRAL_ANCHOR
+    assert parity.SPECTRAL_ANCHOR.spectral
+    assert parity.SPECTRAL_ANCHOR.execution_mode == "megakernel"
+    assert parity.SPECTRAL_ANCHOR.integrator == "path"
+
+
+def test_spectral_axis_class_vs_spectral_anchor():
+    # 6.2: axis class is measured against the spectral anchor, so a spectral
+    # wavefront path is a "mode" delta (not conflated with the RGB→spectral shift).
+    assert parity.combo_axis_class(RenderCombo("path", "wavefront", spectral=True)) == "mode"
+    assert parity.combo_axis_class(RenderCombo("bdpt", "wavefront", spectral=True)) == "integrator"
+    assert parity.combo_axis_class(RenderCombo("sppm", "wavefront", spectral=True)) == "sppm"
+
+
+def test_spectral_selfconsistency_dispersion_bdpt_is_reported_only():
+    # 6.2/6.4 (D4/D7): spectral bdpt on an out-of-gamut dispersion (light-tracer
+    # splat) scene is the one retained mega≡wave skip (reported, not asserted).
+    disp = _flat_scene(spectral={"kind": "dispersion", "glass": "bk7"})
+    assert not parity.spectral_selfconsistency_assertable(
+        RenderCombo("bdpt", "wavefront", spectral=True), disp)
+    # spectral path on the same scene stays a hard assertion.
+    assert parity.spectral_selfconsistency_assertable(
+        RenderCombo("path", "wavefront", spectral=True), disp)
+    # bdpt on a NON-dispersion spectral scene is assertable.
+    assert parity.spectral_selfconsistency_assertable(
+        RenderCombo("bdpt", "wavefront", spectral=True), _flat_scene())
+    # RGB combos are always assertable; the spectral anchor is not self-compared.
+    assert parity.spectral_selfconsistency_assertable(RenderCombo("path", "wavefront"), disp)
+    assert not parity.spectral_selfconsistency_assertable(parity.SPECTRAL_ANCHOR, _flat_scene())
 
 
 def test_coverage_meta_spectral_axis_covered():

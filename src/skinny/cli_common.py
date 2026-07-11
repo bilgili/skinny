@@ -201,15 +201,16 @@ def reject_spectral_unsupported(
     proposals: str | None = None,
     reuse: str | None = None,
 ) -> None:
-    """Refuse ``--spectral`` outside its v1 envelope. No-op when not spectral.
+    """Refuse ``--spectral`` outside its envelope. No-op when not spectral.
 
-    Spectral mode is a compile-time variant chosen at startup (path or bdpt
-    integrator, megakernel execution, flat materials). Checked against the
-    **resolved** execution mode after :func:`resolve_execution_mode`, so it
-    catches an explicit ``--execution-mode wavefront`` while ``auto`` (which
-    derives ``megakernel`` for ``path``/``bdpt``) is allowed. SPPM has no
-    megakernel path, and the neural proposal and ReSTIR reuse layers are
-    wavefront-only, so they are refused. Raises ``SystemExit``.
+    Spectral mode is a compile-time variant chosen at startup. It now spans the
+    ``path``, ``bdpt``, and ``sppm`` integrators under **either** the megakernel
+    or the wavefront execution mode (SPPM under wavefront only, as in RGB — that
+    ``sppm`` + explicit ``--execution-mode megakernel`` refusal lives in
+    :func:`reject_sppm_without_wavefront`, not here, so it stays a single source
+    of truth for both RGB and spectral). Flat materials only. What is still refused:
+    a non-BSDF directional proposal (environment-importance or neural) and
+    ReSTIR reuse. Raises ``SystemExit``.
 
     Scene-level unsupported transport (a skin/subsurface or heterogeneous-volume
     scene) is refused later, at renderer setup, where the material set is known —
@@ -217,40 +218,27 @@ def reject_spectral_unsupported(
     """
     if not spectral:
         return
-    integ = integrator or "path"
-    if integ not in ("path", "bdpt"):
-        raise SystemExit(
-            f"skinny: --spectral supports --integrator path or bdpt in the "
-            f"megakernel (got {integ}). SPPM has no megakernel path (its photon "
-            "pass is wavefront-only), so spectral SPPM awaits the spectral "
-            "wavefront follow-up."
-        )
-    if (execution_mode or "megakernel") == "wavefront":
-        raise SystemExit(
-            "skinny: --spectral runs only under the megakernel execution mode in "
-            "v1 — drop --execution-mode wavefront (path/bdpt default to "
-            "megakernel). Spectral wavefront is the designated follow-up."
-        )
-    # Only the native BSDF proposal is supported in v1. A non-BSDF proposal
+    del integrator, execution_mode  # accepted for path/bdpt/sppm × mega/wavefront
+    # Only the native BSDF proposal is supported. A non-BSDF proposal
     # (environment-importance or neural) draws the bounce direction from a
-    # mixture the megakernel spectral path does not sample — it uses the material's
-    # native sample() while NEE's MIS companion assumes the mixture pdf, biasing
-    # direct+indirect coupling. Refuse the whole non-BSDF set (neural is also
-    # wavefront-only); mixture sampling under spectral is a follow-up.
+    # mixture the spectral path does not sample — it uses the material's native
+    # sample() while NEE's MIS companion assumes the mixture pdf, biasing
+    # direct+indirect coupling. Refuse the whole non-BSDF set; mixture sampling
+    # under spectral is a follow-up.
     extra_proposals = [
         p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
     ]
     if extra_proposals:
         raise SystemExit(
-            f"skinny: --spectral supports only the BSDF proposal in v1 (got "
+            f"skinny: --spectral supports only the BSDF proposal (got "
             f"--proposals {proposals}). The environment/neural directional proposals "
-            "draw the bounce from a mixture the megakernel spectral path does not "
-            "sample, which biases MIS — they are a spectral follow-up."
+            "draw the bounce from a mixture the spectral path does not sample, "
+            "which biases MIS — they are a spectral follow-up."
         )
     if reuse and reuse not in ("none",):
         raise SystemExit(
             f"skinny: --spectral is incompatible with --reuse {reuse} — reservoir "
-            "reuse is wavefront-only and spectral is megakernel-only in v1."
+            "reuse (ReSTIR DI) is not supported under spectral."
         )
     # The envelope is satisfied, but the megakernel spectral transport (Group 5)
     # is not wired yet — the renderer would silently produce an RGB frame. Refuse

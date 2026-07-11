@@ -456,7 +456,8 @@ class MetalWavefrontPathPass:
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  build_catchall: bool = True, record_capacity: int = 0,
                  graph_fragments=None, neural_config=None,
-                 neural_active: bool = False, records_active: bool = False) -> None:
+                 neural_active: bool = False, records_active: bool = False,
+                 spectral: bool = False) -> None:
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
         self.stream_size = int(stream_size)
@@ -468,6 +469,8 @@ class MetalWavefrontPathPass:
         self._neural = None  # neural pre-pass seam (phase 6)
         self.neural_active = bool(neural_active)
         self.records_active = bool(records_active)
+        # Spectral wavefront variant (spectral-wavefront 5.2).
+        self._spectral = bool(spectral)
 
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
@@ -490,6 +493,8 @@ class MetalWavefrontPathPass:
             defines["SKINNY_METAL_NEURAL"] = "1"
         if self.records_active:
             defines["SKINNY_METAL_RECORDS"] = "1"
+        if self._spectral:
+            defines["SKINNY_SPECTRAL"] = "1"
         session = _metal_slang_session(ctx, self.shader_dir, defines)
 
         src_path = self.shader_dir / "wavefront" / "wavefront_path.slang"
@@ -749,7 +754,8 @@ class MetalWavefrontSppmPass:
                 "wfSppmPhotonTrace", "wfSppmUpdate"]
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
-                 graph_fragments=None, neural_config=None) -> None:
+                 graph_fragments=None, neural_config=None,
+                 spectral: bool = False) -> None:
         from skinny.wavefront_layout import (
             SPPM_ACCUM_STRIDE,
             VISIBLE_POINT_STRIDE_MSL,
@@ -762,11 +768,15 @@ class MetalWavefrontSppmPass:
         self.stream_size = int(min(stream_size, self.STREAM_CAP))
         self.num_cells = sppm_grid_cell_count(self.num_pixels)
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
+        # Spectral wavefront variant (spectral-wavefront 5.2).
+        self._spectral = bool(spectral)
 
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
         defines = _defines_dict(neural_config.slang_defines())
+        if self._spectral:
+            defines["SKINNY_SPECTRAL"] = "1"
         session = _metal_slang_session(ctx, self.shader_dir, defines)
         src_path = self.shader_dir / "integrators" / "wavefront_sppm.slang"
         module = session.load_module_from_source(
@@ -886,7 +896,8 @@ class MetalWavefrontBdptPass:
     WALK_MODES = ("fused", "eye", "eye_light")
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
-                 walk_mode: str = "fused", graph_fragments=None) -> None:
+                 walk_mode: str = "fused", graph_fragments=None,
+                 spectral: bool = False) -> None:
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
         self.stream_size = int(stream_size)
@@ -898,12 +909,17 @@ class MetalWavefrontBdptPass:
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
         self._restir = None  # recorder protocol stubs — bdpt has no reuse hook
         self._neural = None  # nor a neural pre-pass
+        # Spectral wavefront variant (spectral-wavefront 5.2).
+        self._spectral = bool(spectral)
 
         spy = ctx._spy
         dev = ctx.device
         # No neural defines: parity with the Vulkan `_compile_full_spv` bdpt
-        # kernels, which compile with the plain define set.
-        session = _metal_slang_session(ctx, self.shader_dir)
+        # kernels, which compile with the plain define set. Spectral adds
+        # SKINNY_SPECTRAL to match the Vulkan spectral bdpt compile.
+        session = _metal_slang_session(
+            ctx, self.shader_dir,
+            {"SKINNY_SPECTRAL": "1"} if self._spectral else None)
         src_path = self.shader_dir / "wavefront" / "wavefront_bdpt.slang"
         module = session.load_module_from_source(
             "wavefront_bdpt", src_path.read_text(encoding="utf-8"), str(src_path))
