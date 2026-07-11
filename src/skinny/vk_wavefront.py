@@ -445,7 +445,8 @@ class WavefrontEnvPass:
 
 
 def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
-                      defines: tuple[str, ...] = (), tag: str = "") -> Path:
+                      defines: tuple[str, ...] = (), tag: str = "",
+                      spectral: bool = False) -> Path:
     """Compile a wavefront kernel that pulls in the full material/integrator
     tree (integrators.path → skin/python/flat materials), so it needs the same
     include paths + define as the megakernel. Writes to a per-entry .spv so
@@ -455,9 +456,15 @@ def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
     study change neural-precision-size-study); ``tag`` is folded into the .spv
     filename so distinct configs never clobber each other's module (the pipeline
     cache key). The default config passes ``defines=()`` and ``tag=""`` → the
-    flags + filename are unchanged → byte-identical to the shipped kernel."""
+    flags + filename are unchanged → byte-identical to the shipped kernel.
+
+    ``spectral`` adds the ``-DSKINNY_SPECTRAL=1`` compile define (matching the
+    megakernel's ComputePipeline spectral variant) and a distinct ``_spectral``
+    .spv name so the spectral wavefront kernels never alias the RGB cache
+    (spectral-wavefront 5.2)."""
     src = shader_dir / f"{module}.slang"
-    out = shader_dir / f"{out_name}{tag}.spv"
+    spectral_suffix = "_spectral" if spectral else ""
+    out = shader_dir / f"{out_name}{tag}{spectral_suffix}.spv"
     slangc = shutil.which("slangc")
     if slangc is None:
         raise RuntimeError("slangc not found on PATH — install the Slang compiler")
@@ -466,6 +473,7 @@ def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
         slangc, str(src), "-target", "spirv", "-entry", entry, "-stage", "compute",
         "-I", str(shader_dir), "-I", str(mtlx_genslang),
         "-D", "SKINNY_COMPUTE_PIPELINE=1", "-D", "SKINNY_WAVEFRONT=1",
+        *(("-D", "SKINNY_SPECTRAL=1") if spectral else ()),
         *defines, "-fvk-use-scalar-layout",
         "-o", str(out),
     ]
@@ -582,11 +590,16 @@ class WavefrontPathPass:
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
                  stream_size: int, num_pixels: int, build_catchall: bool = True,
-                 record_capacity: int = 0, neural_config=None) -> None:
+                 record_capacity: int = 0, neural_config=None,
+                 spectral: bool = False) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
         self.build_catchall = bool(build_catchall)
+        # Spectral wavefront variant (spectral-wavefront 5.2): compiles the staged
+        # kernels with -DSKINNY_SPECTRAL so the shared carriers/helpers take their
+        # hero-wavelength spectral branch. RGB (default) stays byte-identical.
+        self._spectral = bool(spectral)
         # Wavefront-native path records (change wavefront-native-path-records):
         # per-lane vertex stack (binding 9) + stacked count (binding 10) in this
         # pass's set 1, in SEPARATE buffers (NOT inside the by-value-copied
@@ -630,7 +643,8 @@ class WavefrontPathPass:
         modules = {}
         for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name,
-                                    defines=self._nf_defines, tag=self._nf_tag)
+                                    defines=self._nf_defines, tag=self._nf_tag,
+                                    spectral=self._spectral)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -888,7 +902,7 @@ class WavefrontSppmPass:
     ]
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
-                 stream_size: int, num_pixels: int) -> None:
+                 stream_size: int, num_pixels: int, spectral: bool = False) -> None:
         from skinny.wavefront_layout import (
             SPPM_ACCUM_STRIDE,
             VISIBLE_POINT_STRIDE,
@@ -900,10 +914,14 @@ class WavefrontSppmPass:
         self.num_pixels = int(num_pixels)
         self.stream_size = int(min(stream_size, self.STREAM_CAP))
         self.num_cells = sppm_grid_cell_count(self.num_pixels)
+        # Spectral wavefront variant (spectral-wavefront 5.2): per-λ photon flux +
+        # per-pass hero-wavelength resolve; RGB (default) stays byte-identical.
+        self._spectral = bool(spectral)
 
         modules = {}
         for entry, out_name in self._ENTRIES:
-            spv = _compile_full_spv(shader_dir, "integrators/wavefront_sppm", entry, out_name)
+            spv = _compile_full_spv(shader_dir, "integrators/wavefront_sppm", entry, out_name,
+                                    spectral=self._spectral)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -1475,13 +1493,16 @@ class WavefrontBdptPass:
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
                  stream_size: int, num_pixels: int,
-                 walk_mode: str = "fused") -> None:
+                 walk_mode: str = "fused", spectral: bool = False) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.num_pixels = int(num_pixels)
         if walk_mode not in self.WALK_MODES:
             raise ValueError(f"unknown bdpt walk_mode {walk_mode!r} (expected {self.WALK_MODES})")
         self.walk_mode = walk_mode
+        # Spectral wavefront variant (spectral-wavefront 5.2): per-λ eye/light
+        # walks + splat resolve; RGB (default) stays byte-identical.
+        self._spectral = bool(spectral)
 
         # The connect counting sort (classify / build_args / scatter) + split
         # connect (nee / full, indirect) + resolve are shared by all walk modes;
@@ -1515,7 +1536,8 @@ class WavefrontBdptPass:
             ] + shared
         modules = {}
         for entry, out_name in entries:
-            spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name)
+            spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name,
+                                    spectral=self._spectral)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)

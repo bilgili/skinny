@@ -25,7 +25,9 @@ from skinny.pbrt.parity import (
     pbrt_truth_result,
     reference_exists,
     render_combo,
+    self_consistency_anchor,
     self_consistency_result,
+    spectral_selfconsistency_assertable,
 )
 
 usd_loader = pytest.importorskip("skinny.usd_loader")
@@ -141,16 +143,28 @@ def test_scene_matrix_gate(spec):
                         f"relMSE={ab.relmse:.4f}"
                     )
         if c != ANCHOR:
-            sc = self_consistency_result(spec, c, img, anchor_img)
+            # Spectral-aware anchor (change spectral-wavefront, D7): a spectral
+            # combo gates against the MEGAKERNEL SPECTRAL PATH image, never the RGB
+            # anchor (RGB↔spectrum is not identity). Report-only fallback if that
+            # anchor image is unavailable for the scene.
+            anchor_combo = self_consistency_anchor(c)
+            sc_anchor_img = imgs.get(anchor_combo.label, anchor_img)
+            sc = self_consistency_result(spec, c, img, sc_anchor_img)
             print(f"[{spec.name}] {c.label:32s} vs-anchor       {sc.metrics.summary()}")
-            if c.spectral:
-                # Spectral is a DISCRIMINATING axis (change spectral-rendering,
-                # 7.3): it differs from the RGB anchor BY DESIGN on a
-                # spectrum-authored scene (metamerism / exact Fresnel-dispersion),
-                # so the anchor delta is REPORTED, never asserted — holding it to
-                # the megakernel≡wavefront self-consistency tolerance would be wrong.
-                print(f"[{spec.name}] {c.label:32s} spectral-vs-RGB  "
-                      f"Δ relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}")
+            if c.spectral and spectral_selfconsistency_assertable(c, spec) \
+                    and anchor_combo.label in imgs:
+                # mega≡wave is now ASSERTED for spectral path/bdpt against the
+                # spectral anchor (the old blanket "spectral-only skip" is lifted).
+                if not sc.passed:
+                    failures.append(
+                        f"{c.label}: spectral self-consistency vs spectral anchor "
+                        f"relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f}"
+                    )
+            elif c.spectral:
+                # Dispersion-splat bdpt (or a missing spectral anchor): REPORTED,
+                # not asserted — per-splat gamut clamp differs mega-vs-wave (D4/D7).
+                print(f"[{spec.name}] {c.label:32s} spectral-vs-anchor "
+                      f"Δ relMSE={sc.relmse:.4f} FLIP={sc.flip:.4f} (reported)")
             elif not sc.passed:
                 failures.append(
                     f"{c.label}: self-consistency vs anchor relMSE={sc.relmse:.4f} "

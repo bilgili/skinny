@@ -132,7 +132,11 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
 
     if (depth > 0u)
     {
-        float p = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05, 0.95);
+        float pMax = max(max(throughput.x, throughput.y), throughput.z);
+#if defined(SKINNY_SPECTRAL)
+        pMax = max(pMax, throughput.w);  // 4th hero wavelength (matches path_spectral RR)
+#endif
+        float p = clamp(pMax, 0.05, 0.95);
         if (rng.next() > p)
         {
             wfTerminate(i, s, radiance, rng);

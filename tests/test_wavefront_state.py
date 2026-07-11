@@ -19,6 +19,7 @@ from skinny.wavefront_layout import (
     INDIRECT_ARGS_STRIDE,
     PATH_STATE_STRIDE,
     PATH_STATE_STRIDE_MSL,
+    PATH_STATE_STRIDE_SPECTRAL,
     REC_VERTEX_FIELDS,
     REC_VERTEX_STRIDE_MSL,
     SLANG_MSL_ALIGNS,
@@ -48,21 +49,57 @@ def _msl_offsets(fields: list[tuple[str, str]]) -> list[tuple[str, int]]:
     return out
 
 
-def _parse_struct_fields(src: str, struct_name: str) -> list[tuple[str, str]]:
+# Nested-struct field types (not primitive) → their scalar byte size + the
+# (type, name) expansion the Python mirror uses. `Spectrum` is a typealias, not a
+# struct, so it is handled by _norm_type instead.
+_NESTED_SCALAR_SIZE = {"SampledWavelengths": 32}  # { float4 lambda; float4 pdf; }
+
+
+def _norm_type(t: str, *, spectral: bool) -> str:
+    """Normalize the `Spectrum` typealias to its concrete type for the variant
+    (float3 in the RGB build, float4 under SKINNY_SPECTRAL)."""
+    if t == "Spectrum":
+        return "float4" if spectral else "float3"
+    return t
+
+
+def _parse_struct_fields(
+    src: str, struct_name: str, *, spectral: bool = False
+) -> list[tuple[str, str]]:
     """Return [(slang_type, field_name), …] in declaration order for the named
-    struct. Ignores comments and helper functions."""
+    struct. Ignores comments and helper functions. Resolves `#if
+    defined(SKINNY_SPECTRAL)` blocks per ``spectral`` and normalizes the
+    `Spectrum` typealias to its concrete type. Nested struct types (e.g.
+    SampledWavelengths) are returned verbatim; callers size them via
+    _NESTED_SCALAR_SIZE."""
     m = re.search(
         rf"struct\s+{struct_name}\s*\{{(.*?)\}}\s*;", src, re.DOTALL
     )
     assert m, f"struct {struct_name} not found"
     body = m.group(1)
     fields: list[tuple[str, str]] = []
+    in_spectral_block = False
     for raw in body.splitlines():
         line = raw.split("//", 1)[0].strip()
+        if line.startswith("#if defined(SKINNY_SPECTRAL)"):
+            in_spectral_block = True
+            continue
+        if line.startswith("#endif"):
+            in_spectral_block = False
+            continue
+        if in_spectral_block and not spectral:
+            continue
         fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", line)
         if fm:
-            fields.append((fm.group(1), fm.group(2)))
+            fields.append((_norm_type(fm.group(1), spectral=spectral), fm.group(2)))
     return fields
+
+
+def _scalar_size(slang_type: str) -> int:
+    """Scalar-layout byte size of a field type, including nested structs."""
+    if slang_type in _NESTED_SCALAR_SIZE:
+        return _NESTED_SCALAR_SIZE[slang_type]
+    return SLANG_SCALAR_SIZES[slang_type]
 
 
 def test_python_stride_is_68():
@@ -89,8 +126,22 @@ def test_slang_struct_matches_python_layout():
 def test_slang_struct_size_sums_to_stride():
     src = _STATE_SLANG.read_text(encoding="utf-8")
     slang_fields = _parse_struct_fields(src, "WavefrontPathState")
-    total = sum(SLANG_SCALAR_SIZES[t] for t, _ in slang_fields)
+    total = sum(_scalar_size(t) for t, _ in slang_fields)
     assert total == PATH_STATE_STRIDE
+
+
+def test_slang_spectral_struct_matches_python_layout():
+    # Under SKINNY_SPECTRAL the color roles are float4 and the struct appends
+    # SampledWavelengths (spectral-wavefront change). The RGB layout above stays
+    # byte-identical; this locks the spectral variant's scalar stride.
+    src = _STATE_SLANG.read_text(encoding="utf-8")
+    slang_fields = _parse_struct_fields(src, "WavefrontPathState", spectral=True)
+    total = sum(_scalar_size(t) for t, _ in slang_fields)
+    assert total == PATH_STATE_STRIDE_SPECTRAL == 108
+    # color roles are float4, sw present
+    types = [t for t, _ in slang_fields]
+    assert types.count("float4") >= 2
+    assert ("SampledWavelengths", "sw") in slang_fields
 
 
 # ── queue buffer sizing (P1 §P1-B / §P1-C) ─────────────────────────

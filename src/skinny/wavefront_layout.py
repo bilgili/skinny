@@ -62,26 +62,47 @@ def _struct_stride(fields: list[tuple[str, str]], *, msl: bool) -> int:
     return (offset + struct_align - 1) // struct_align * struct_align
 
 # (field_name, slang_type) in declaration order — must match the Slang struct.
-FIELDS: list[tuple[str, str]] = [
-    ("rayOrigin",  "float3"),
-    ("rayDir",     "float3"),
-    ("throughput", "float3"),
-    ("radiance",   "float3"),
-    ("pixelIndex", "uint"),
-    ("rngState",   "uint"),
-    ("depth",      "uint"),
-    ("flags",      "uint"),
-    ("bsdfPdf",    "float"),
-]
+# In the spectral build (change spectral-wavefront) the color roles carry
+# `Spectrum` = float4 (vs float3 RGB) and the struct appends `SampledWavelengths`
+# (two float4: lambda, pdf) — see wavefront_state.slang. The two variants diverge
+# by construction: scalar grows +4 B per retyped color field plus +32 B for sw;
+# MSL already pads float3→16 B so the color retype is 0-byte on Metal and only sw
+# (+32 B) grows the MSL stride.
 
 
-def path_state_size(*, msl: bool = False) -> int:
-    """Byte stride of WavefrontPathState — scalar (default) or MSL (``msl=True``)."""
-    return _struct_stride(FIELDS, msl=msl)
+def _path_state_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    fields: list[tuple[str, str]] = [
+        ("rayOrigin",  "float3"),
+        ("rayDir",     "float3"),
+        ("throughput", col),
+        ("radiance",   col),
+        ("pixelIndex", "uint"),
+        ("rngState",   "uint"),
+        ("depth",      "uint"),
+        ("flags",      "uint"),
+        ("bsdfPdf",    "float"),
+    ]
+    if spectral:
+        # SampledWavelengths { float4 lambda; float4 pdf; }
+        fields += [("sw_lambda", "float4"), ("sw_pdf", "float4")]
+    return fields
+
+
+# RGB field list (back-compat: existing call sites and tests reference FIELDS).
+FIELDS: list[tuple[str, str]] = _path_state_fields(spectral=False)
+
+
+def path_state_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of WavefrontPathState — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_path_state_fields(spectral), msl=msl)
 
 
 PATH_STATE_STRIDE = path_state_size()              # 68 B (scalar / Vulkan)
 PATH_STATE_STRIDE_MSL = path_state_size(msl=True)  # 96 B (Metal)
+PATH_STATE_STRIDE_SPECTRAL = path_state_size(spectral=True)              # scalar
+PATH_STATE_STRIDE_SPECTRAL_MSL = path_state_size(msl=True, spectral=True)  # Metal
 
 # `flags` bit positions (mirror the static consts in wavefront_state.slang).
 PATH_FLAG_ALIVE = 1 << 0     # lane still bouncing

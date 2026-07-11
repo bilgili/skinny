@@ -188,30 +188,70 @@ class RenderCombo:
 ANCHOR = RenderCombo(integrator="path", execution_mode="wavefront",
                      proposals=(), reuse="none")
 
+#: The spectral self-consistency anchor (change spectral-wavefront, D7). Spectral
+#: combos differ from the RGB anchor *by construction* on a spectrum-authored
+#: scene (RGB↔spectrum round-trip is not identity), so they are gated against the
+#: **megakernel spectral path** image, never the RGB golden. The wavefront spectral
+#: path/bdpt combos anchor here (lifting the old blanket "spectral is megakernel-
+#: only" self-consistency skip); spectral sppm anchors here too, at the `sppm`
+#: tolerance class.
+SPECTRAL_ANCHOR = RenderCombo(integrator="path", execution_mode="megakernel",
+                              proposals=(), reuse="none", spectral=True)
+
+
+def self_consistency_anchor(combo: RenderCombo) -> RenderCombo:
+    """The anchor combo *combo*'s image is measured against for self-consistency.
+
+    The RGB anchor for RGB combos; the megakernel spectral path anchor for the
+    spectral axis (change spectral-wavefront, D7).
+    """
+    return SPECTRAL_ANCHOR if combo.spectral else ANCHOR
+
+
+def spectral_selfconsistency_assertable(combo: RenderCombo, scene: SceneSpec) -> bool:
+    """Whether a spectral *combo*'s self-consistency vs the spectral anchor is a
+    hard assertion (True) or reported-only (False).
+
+    With spectral transport in both execution modes the mega≡wave equivalence is
+    asserted for spectral path/bdpt exactly like their RGB counterparts. The one
+    retained skip (D4/D7): spectral ``bdpt`` on an out-of-gamut **dispersion**
+    (light-tracer splat) scene, whose per-splat gamut clamp is nonlinear and
+    differs by splat granularity between the fused (megakernel) and staged
+    (wavefront) pipelines. The spectral anchor itself is not self-compared.
+    """
+    if not combo.spectral:
+        return True
+    if combo == SPECTRAL_ANCHOR:
+        return False  # the anchor is not compared against itself
+    if combo.integrator == "bdpt" and (scene.spectral or {}).get("kind") == "dispersion":
+        return False  # recorded dispersion-splat mega≡wave skip (D4/D7)
+    return True
+
 
 def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     """The intended spectral validity envelope, independent of whether the
     transport is wired yet (:data:`SPECTRAL_IMPLEMENTED`).
 
-    Path or BDPT integrator + megakernel execution + flat materials; SPPM has no
-    megakernel path (photon pass is wavefront-only), and the neural proposal and
-    ReSTIR reuse are wavefront-only, so they are refused. Returns ``(ok, reason)``
-    with a specific reason for each out-of-scope axis. Mirrors
-    ``cli_common.reject_spectral_unsupported``.
+    v1 (megakernel) admitted path/bdpt under the megakernel; the
+    ``spectral-wavefront`` change extends the envelope to the **wavefront**
+    execution mode too, for path, bdpt and sppm (flat materials, BSDF proposal,
+    no reuse). SPPM has no megakernel path (photon pass is wavefront-only), so
+    ``sppm`` is refused under the megakernel; the neural proposal and ReSTIR
+    reuse remain unsupported under spectral (wavefront-only reuse/proposal axes
+    that spectral does not yet cover). Returns ``(ok, reason)`` with a specific
+    reason per out-of-scope axis. Mirrors ``cli_common.reject_spectral_unsupported``.
     """
-    if combo.integrator not in ("path", "bdpt"):
-        return False, (
-            f"spectral is path/bdpt-megakernel only; {combo.integrator.upper()} has no "
-            "megakernel path — spectral wavefront follow-up"
-        )
-    if combo.execution_mode != "megakernel":
-        return False, "spectral is megakernel-only (v1); wavefront follow-up"
+    if combo.integrator not in ("path", "bdpt", "sppm"):
+        return False, f"spectral supports path/bdpt/sppm; {combo.integrator.upper()} unsupported"
     if combo.has_neural:
         return False, "spectral is incompatible with the neural proposal (v1)"
     if combo.has_reuse:
         return False, "spectral is incompatible with ReSTIR reuse (v1)"
     if scene.material_class != "flat":
         return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
+    # SPPM has no megakernel path (photon pass is wavefront-only).
+    if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
+        return False, "SPPM is wavefront-only"
     return True, ""
 
 
@@ -252,12 +292,13 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
             return False, f"{combo.integrator.upper()} has no volume transport (follow-up)"
         if combo.has_reuse:
             return False, "ReSTIR DI reuse untested with volume media (follow-up)"
-    # Spectral render variant (change spectral-rendering). The v1 envelope is the
-    # Path integrator under the megakernel execution mode over flat materials;
-    # out-of-scope combos take their specific envelope reason. An in-envelope
-    # combo is only rendered once the megakernel transport is wired
-    # (SPECTRAL_IMPLEMENTED); until then it is a recorded "not yet wired" skip so
-    # the sweep never renders it as RGB. Mirrors reject_spectral_unsupported.
+    # Spectral render variant (changes spectral-rendering / spectral-wavefront).
+    # The envelope is path/bdpt under either execution mode plus sppm under the
+    # wavefront mode, over flat materials (no neural, no reuse); out-of-scope
+    # combos take their specific envelope reason. An in-envelope combo is only
+    # rendered once the transport is wired (SPECTRAL_IMPLEMENTED); until then it
+    # is a recorded "not yet wired" skip so the sweep never renders it as RGB.
+    # Mirrors reject_spectral_unsupported.
     if combo.spectral:
         ok, reason = spectral_envelope(combo, scene)
         if not ok:
@@ -296,12 +337,18 @@ def enumerate_combos(scene: SceneSpec) -> list[RenderCombo]:
 
 
 def combo_axis_class(combo: RenderCombo) -> str:
-    """Which self-consistency tolerance class applies for *combo* vs the anchor."""
+    """Which self-consistency tolerance class applies for *combo* vs its anchor.
+
+    The comparison is against :func:`self_consistency_anchor` — the RGB anchor
+    for RGB combos, the megakernel spectral path anchor for the spectral axis —
+    so a spectral wavefront path is a ``"mode"`` delta against the spectral
+    anchor (not conflated with the RGB→spectral shift).
+    """
     if combo.has_neural or combo.has_reuse:
         return "unbiased"
     if combo.integrator == "sppm":
         return "sppm"
-    if combo.integrator != ANCHOR.integrator:
+    if combo.integrator != self_consistency_anchor(combo).integrator:
         return "integrator"
     return "mode"  # same integrator, differs only in execution mode
 
