@@ -456,7 +456,8 @@ class MetalWavefrontPathPass:
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  build_catchall: bool = True, record_capacity: int = 0,
                  graph_fragments=None, neural_config=None,
-                 neural_active: bool = False, records_active: bool = False) -> None:
+                 neural_active: bool = False, records_active: bool = False,
+                 spectral: bool = False) -> None:
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
         self.stream_size = int(stream_size)
@@ -468,6 +469,8 @@ class MetalWavefrontPathPass:
         self._neural = None  # neural pre-pass seam (phase 6)
         self.neural_active = bool(neural_active)
         self.records_active = bool(records_active)
+        # Spectral wavefront variant (spectral-wavefront 5.2).
+        self._spectral = bool(spectral)
 
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
@@ -490,6 +493,8 @@ class MetalWavefrontPathPass:
             defines["SKINNY_METAL_NEURAL"] = "1"
         if self.records_active:
             defines["SKINNY_METAL_RECORDS"] = "1"
+        if self._spectral:
+            defines["SKINNY_SPECTRAL"] = "1"
         session = _metal_slang_session(ctx, self.shader_dir, defines)
 
         src_path = self.shader_dir / "wavefront" / "wavefront_path.slang"
@@ -512,12 +517,12 @@ class MetalWavefrontPathPass:
         isect = self._entries["wfPathIntersect"].program
         flat = self._entries["wfPathShadeFlat"].program
         state_stride = (_reflect_element(gen, "wfState") or (None, 0))[1]
-        expected = path_state_size(msl=True)
+        expected = path_state_size(msl=True, spectral=self._spectral)
         if state_stride and state_stride != expected:
             raise RuntimeError(
                 f"reflected Metal WavefrontPathState stride {state_stride}B != "
-                f"wavefront_layout.path_state_size(msl=True) {expected}B — "
-                f"update the GPU-free mirror (task 1.5)")
+                f"wavefront_layout.path_state_size(msl=True, spectral={self._spectral}) "
+                f"{expected}B — update the GPU-free mirror (task 1.5)")
         self.state_stride = state_stride or expected
         self.hit_stride = (_reflect_element(isect, "wfHits") or (None, 0))[1] or 128
         self.neural_stride = (_reflect_element(flat, "wfNeural") or (None, 0))[1] or 48
@@ -749,12 +754,13 @@ class MetalWavefrontSppmPass:
                 "wfSppmPhotonTrace", "wfSppmUpdate"]
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
-                 graph_fragments=None, neural_config=None) -> None:
+                 graph_fragments=None, neural_config=None,
+                 spectral: bool = False) -> None:
         from skinny.wavefront_layout import (
-            SPPM_ACCUM_STRIDE,
-            VISIBLE_POINT_STRIDE_MSL,
+            sppm_accum_size,
             sppm_grid_buffer_sizes,
             sppm_grid_cell_count,
+            visible_point_size,
         )
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
@@ -762,25 +768,32 @@ class MetalWavefrontSppmPass:
         self.stream_size = int(min(stream_size, self.STREAM_CAP))
         self.num_cells = sppm_grid_cell_count(self.num_pixels)
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
+        # Spectral wavefront variant (spectral-wavefront 5.2).
+        self._spectral = bool(spectral)
 
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
         defines = _defines_dict(neural_config.slang_defines())
+        if self._spectral:
+            defines["SKINNY_SPECTRAL"] = "1"
         session = _metal_slang_session(ctx, self.shader_dir, defines)
         src_path = self.shader_dir / "integrators" / "wavefront_sppm.slang"
         module = session.load_module_from_source(
             "wavefront_sppm", src_path.read_text(encoding="utf-8"), str(src_path))
         self._entries = {e: _EntryPipeline(ctx, session, module, e) for e in self._ENTRIES}
 
-        # Reflected VisiblePoint stride must match the host MSL mirror.
+        # Reflected VisiblePoint stride must match the host MSL mirror. Spectral
+        # widens it (Spectrum beta/ld + conductorMetalId); RGB stays identical.
         eye = self._entries["wfSppmEye"].program
+        vp_expected = visible_point_size(msl=True, spectral=self._spectral)
         vp_stride = (_reflect_element(eye, "sppmVisiblePoints") or (None, 0))[1]
-        if vp_stride and vp_stride != VISIBLE_POINT_STRIDE_MSL:
+        if vp_stride and vp_stride != vp_expected:
             raise RuntimeError(
                 f"reflected Metal VisiblePoint stride {vp_stride}B != "
-                f"wavefront_layout.VISIBLE_POINT_STRIDE_MSL {VISIBLE_POINT_STRIDE_MSL}B")
-        self.vp_stride = vp_stride or VISIBLE_POINT_STRIDE_MSL
+                f"wavefront_layout.visible_point_size(msl=True, spectral="
+                f"{self._spectral}) {vp_expected}B")
+        self.vp_stride = vp_stride or vp_expected
 
         # MSL reflection surface for the renderer's relocators (the pass is the
         # `_msl_layout_source` in wavefront mode — no megakernel is compiled). fc
@@ -799,9 +812,10 @@ class MetalWavefrontSppmPass:
         self.graph_param_layouts: dict = {}
 
         grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
+        acc_stride = sppm_accum_size(msl=True, spectral=self._spectral)
         self.buffers: dict[str, StorageBuffer] = {
             "visible_points": StorageBuffer(ctx, self.num_pixels * self.vp_stride),
-            "accum": StorageBuffer(ctx, self.num_pixels * SPPM_ACCUM_STRIDE),
+            "accum": StorageBuffer(ctx, self.num_pixels * acc_stride),
             "grid": StorageBuffer(ctx, grid_sizes["grid_combined"]),
             "scan": StorageBuffer(ctx, grid_sizes["scan_scratch"]),
         }
@@ -886,7 +900,8 @@ class MetalWavefrontBdptPass:
     WALK_MODES = ("fused", "eye", "eye_light")
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
-                 walk_mode: str = "fused", graph_fragments=None) -> None:
+                 walk_mode: str = "fused", graph_fragments=None,
+                 spectral: bool = False) -> None:
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
         self.stream_size = int(stream_size)
@@ -898,12 +913,17 @@ class MetalWavefrontBdptPass:
         self.graph_fragments = list(graph_fragments) if graph_fragments else []
         self._restir = None  # recorder protocol stubs — bdpt has no reuse hook
         self._neural = None  # nor a neural pre-pass
+        # Spectral wavefront variant (spectral-wavefront 5.2).
+        self._spectral = bool(spectral)
 
         spy = ctx._spy
         dev = ctx.device
         # No neural defines: parity with the Vulkan `_compile_full_spv` bdpt
-        # kernels, which compile with the plain define set.
-        session = _metal_slang_session(ctx, self.shader_dir)
+        # kernels, which compile with the plain define set. Spectral adds
+        # SKINNY_SPECTRAL to match the Vulkan spectral bdpt compile.
+        session = _metal_slang_session(
+            ctx, self.shader_dir,
+            {"SKINNY_SPECTRAL": "1"} if self._spectral else None)
         src_path = self.shader_dir / "wavefront" / "wavefront_bdpt.slang"
         module = session.load_module_from_source(
             "wavefront_bdpt", src_path.read_text(encoding="utf-8"), str(src_path))

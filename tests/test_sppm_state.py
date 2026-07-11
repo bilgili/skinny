@@ -25,10 +25,15 @@ from skinny.wavefront_layout import (
     SLANG_SCALAR_SIZES,
     SPPM_ACCUM_FIELDS,
     SPPM_ACCUM_STRIDE,
+    SPPM_ACCUM_STRIDE_SPECTRAL,
     VISIBLE_POINT_FIELDS,
     VISIBLE_POINT_STRIDE,
     VISIBLE_POINT_STRIDE_MSL,
+    VISIBLE_POINT_STRIDE_SPECTRAL,
+    VISIBLE_POINT_STRIDE_SPECTRAL_MSL,
     VP_ACTIVE,
+    _sppm_accum_fields,
+    _visible_point_fields,
     sppm_accum_size,
     sppm_buffer_sizes,
     sppm_grid_buffer_sizes,
@@ -42,17 +47,36 @@ _SPPM_SLANG = _SHADERS / "integrators" / "sppm_state.slang"
 _HARNESS = _ROOT / "tests" / "harnesses" / "test_sppm_state_harness.slang"
 
 
-def _parse_struct_fields(src: str, struct_name: str) -> list[tuple[str, str]]:
+def _norm_type(t: str, *, spectral: bool) -> str:
+    """Normalize the `Spectrum` typealias to its concrete type for the variant
+    (float3 in the RGB build, float4 under SKINNY_SPECTRAL)."""
+    return ("float4" if spectral else "float3") if t == "Spectrum" else t
+
+
+def _parse_struct_fields(
+    src: str, struct_name: str, *, spectral: bool = False
+) -> list[tuple[str, str]]:
     """Return [(slang_type, field_name), …] in declaration order for the named
-    struct, ignoring comments + helper functions."""
+    struct, ignoring comments + helper functions. Resolves
+    `#if defined(SKINNY_SPECTRAL)` blocks per ``spectral`` (spectral-wavefront D5)
+    and normalizes the `Spectrum` typealias to its concrete type."""
     m = re.search(rf"struct\s+{struct_name}\s*\{{(.*?)\}}\s*;", src, re.DOTALL)
     assert m, f"struct {struct_name} not found"
     fields: list[tuple[str, str]] = []
+    in_spectral_block = False
     for raw in m.group(1).splitlines():
         line = raw.split("//", 1)[0].strip()
+        if line.startswith("#if defined(SKINNY_SPECTRAL)"):
+            in_spectral_block = True
+            continue
+        if line.startswith("#endif"):
+            in_spectral_block = False
+            continue
+        if in_spectral_block and not spectral:
+            continue
         fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", line)
         if fm:
-            fields.append((fm.group(1), fm.group(2)))
+            fields.append((_norm_type(fm.group(1), spectral=spectral), fm.group(2)))
     return fields
 
 
@@ -113,6 +137,54 @@ def test_vp_active_flag_matches_slang():
     assert int(m.group(1)) == VP_ACTIVE
 
 
+# ── spectral variant lock (change spectral-wavefront, D5) ─────────────
+# Under SKINNY_SPECTRAL: beta/ld are Spectrum=float4 (per-pass spectral),
+# VisiblePoint appends conductorMetalId, SppmAccum grows to 4 hero-λ flux
+# channels; tau STAYS float3 (resolved-before-fold). RGB widths are unchanged.
+
+def test_visible_point_spectral_strides():
+    # beta/ld float3→float4 (+8) + conductorMetalId (+4) = +12 over 180.
+    assert VISIBLE_POINT_STRIDE_SPECTRAL == 192
+    # MSL: float3 is already padded to 16 B, so the color retype is 0-byte and the
+    # uint conductorMetalId fits the padding before tau's float3 → stride unchanged.
+    assert VISIBLE_POINT_STRIDE_SPECTRAL_MSL == 240
+    # RGB widths must NOT drift.
+    assert VISIBLE_POINT_STRIDE == 180
+    assert VISIBLE_POINT_STRIDE_MSL == 240
+
+
+def test_sppm_accum_spectral_stride_is_20():
+    assert SPPM_ACCUM_STRIDE_SPECTRAL == 20   # 4 hero-λ flux channels + m
+    assert sppm_accum_size(msl=True, spectral=True) == 20  # all-uint: layout-invariant
+    assert SPPM_ACCUM_STRIDE == 16            # RGB unchanged
+
+
+def test_slang_visible_point_spectral_matches_python_layout():
+    src = _SPPM_SLANG.read_text(encoding="utf-8")
+    slang_fields = _parse_struct_fields(src, "VisiblePoint", spectral=True)
+    expected = [(t, n) for (n, t) in _visible_point_fields(spectral=True)]
+    assert slang_fields == expected
+    assert ("float4", "beta") in slang_fields
+    assert ("float4", "ld") in slang_fields
+    assert ("uint", "conductorMetalId") in slang_fields
+    assert ("float3", "tau") in slang_fields  # D5: tau spectral-invariant
+
+
+def test_slang_sppm_accum_spectral_matches_python_layout():
+    src = _SPPM_SLANG.read_text(encoding="utf-8")
+    slang_fields = _parse_struct_fields(src, "SppmAccum", spectral=True)
+    expected = [(t, n) for (n, t) in _sppm_accum_fields(spectral=True)]
+    assert slang_fields == expected
+    assert [n for _t, n in slang_fields] == ["phiR", "phiG", "phiB", "phiW", "m"]
+
+
+def test_slang_visible_point_spectral_size_sums_to_stride():
+    src = _SPPM_SLANG.read_text(encoding="utf-8")
+    slang_fields = _parse_struct_fields(src, "VisiblePoint", spectral=True)
+    total = sum(SLANG_SCALAR_SIZES[t] for t, _ in slang_fields)
+    assert total == VISIBLE_POINT_STRIDE_SPECTRAL == 192
+
+
 # ── FlatHitMat ⊆ VisiblePoint completeness (fix-sppm-bathroom-black-walls) ──
 # The photon deposit rebuilds the FlatMaterial from VP-stored fields
 # (sppmLoadMaterial). A FlatHitMat field with no VP slot / no store / no
@@ -144,10 +216,13 @@ def test_every_flat_hit_mat_field_has_a_visible_point_slot():
 
 def test_sppm_store_and_load_cover_every_flat_hit_mat_field():
     src = _WF_SPPM.read_text(encoding="utf-8")
+    # `.*?\)\s*\{` (non-greedy, DOTALL) spans the whole param list up to the body
+    # brace — tolerant of a `#if defined(SKINNY_SPECTRAL)` guarded param whose
+    # `defined(...)` paren would trip a `[^)]*` match (spectral-wavefront D5).
     store = re.search(
-        r"void\s+sppmStoreVisiblePoint\s*\([^)]*\)\s*\{(.*?)\n\}", src, re.DOTALL)
+        r"void\s+sppmStoreVisiblePoint\s*\(.*?\)\s*\{(.*?)\n\}", src, re.DOTALL)
     load = re.search(
-        r"FlatMaterial\s+sppmLoadMaterial\s*\([^)]*\)\s*\{(.*?)\n\}", src, re.DOTALL)
+        r"FlatMaterial\s+sppmLoadMaterial\s*\(.*?\)\s*\{(.*?)\n\}", src, re.DOTALL)
     assert store and load, "sppmStoreVisiblePoint / sppmLoadMaterial not found"
     for f in _flat_hit_mat_fields():
         if f in _VP_EXEMPT_FLAT_FIELDS:

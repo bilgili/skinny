@@ -522,19 +522,23 @@ def test_reject_spectral_envelope_ok_when_wired(monkeypatch):
     reject_spectral_unsupported(True, "bdpt", "megakernel", None, None)
 
 
-def test_reject_spectral_sppm_raises():
-    # SPPM has no megakernel path, so spectral SPPM is refused at startup.
+def test_reject_spectral_sppm_accepted():
+    # Spectral SPPM is now in the envelope (change spectral-wavefront) — accepted
+    # under wavefront (resolve_execution_mode sends sppm → wavefront). The
+    # sppm + explicit megakernel refusal lives in reject_sppm_without_wavefront,
+    # not here, so this gate does not raise for either mode.
     from skinny.cli_common import reject_spectral_unsupported
 
-    with pytest.raises(SystemExit):
-        reject_spectral_unsupported(True, "sppm", "megakernel", None, None)
+    reject_spectral_unsupported(True, "sppm", "wavefront", None, None)
+    reject_spectral_unsupported(True, "sppm", "megakernel", None, None)
 
 
-def test_reject_spectral_wavefront_raises():
+def test_reject_spectral_wavefront_accepted():
+    # Spectral now spans the wavefront execution mode (change spectral-wavefront).
     from skinny.cli_common import reject_spectral_unsupported
 
-    with pytest.raises(SystemExit):
-        reject_spectral_unsupported(True, "path", "wavefront", None, None)
+    reject_spectral_unsupported(True, "path", "wavefront", None, None)
+    reject_spectral_unsupported(True, "bdpt", "wavefront", None, None)
 
 
 def test_reject_spectral_neural_raises():
@@ -595,15 +599,17 @@ def test_spectral_flag_accepted_end_to_end():
                                 getattr(ns, "proposals", None), getattr(ns, "reuse", None))
 
 
-def test_spectral_explicit_wavefront_refused_end_to_end(monkeypatch):
+def test_spectral_explicit_wavefront_accepted_end_to_end(monkeypatch):
+    # Spectral under an explicit --execution-mode wavefront is now accepted
+    # end-to-end (change spectral-wavefront widened the envelope).
     monkeypatch.delenv("SKINNY_EXECUTION_MODE", raising=False)
     from skinny.cli_common import reject_spectral_unsupported
 
     ns = _parser().parse_args(["--spectral", "--execution-mode", "wavefront"])
     mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
-    with pytest.raises(SystemExit):
-        reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
-                                    getattr(ns, "proposals", None), getattr(ns, "reuse", None))
+    assert mode == "wavefront"
+    reject_spectral_unsupported(ns.spectral, ns.integrator or "path", mode,
+                                getattr(ns, "proposals", None), getattr(ns, "reuse", None))
 
 
 def test_all_frontends_wire_the_spectral_gate():

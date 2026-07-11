@@ -2129,7 +2129,7 @@ class Renderer:
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
         from skinny.vk_wavefront import WavefrontPathPass
-        from skinny.wavefront_layout import PATH_STATE_STRIDE
+        from skinny.wavefront_layout import path_state_size
         # Tiled streaming: the path-state buffer holds a fixed-size stream
         # (capped at STREAM_CAP), not one slot per pixel — so VRAM does not grow
         # with resolution. The frame is processed in ceil(num_pixels/stream)
@@ -2137,7 +2137,10 @@ class Renderer:
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
-        self._wf_path_state_buf = self._gpu.StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
+        # Spectral path state is wider (Spectrum throughput/radiance +
+        # SampledWavelengths); RGB (spectral=False) keeps the 68 B scalar stride.
+        path_state_stride = path_state_size(spectral=self._spectral)
+        self._wf_path_state_buf = self._gpu.StorageBuffer(self.ctx, stream_size * path_state_stride)
         self._wf_path_hit_buf = self._gpu.StorageBuffer(
             self.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
         self._wavefront_path_pass = WavefrontPathPass(
@@ -2147,6 +2150,7 @@ class Renderer:
             stream_size, num_pixels, build_catchall=has_nonflat,
             record_capacity=(stream_size if wf_record else 0),
             neural_config=self._effective_neural_config(),
+            spectral=self._spectral,
         )
         # ReSTIR DI reuse plugin: build the primary-direct pass over the same
         # path-state + hit buffers and hook it at bounce 0. We are in wavefront
@@ -2204,7 +2208,8 @@ class Renderer:
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontSppmPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
         self._wavefront_sppm_pass = WavefrontSppmPass(
-            self.ctx, self.shader_dir, self._scene_set0_layout, stream_size, num_pixels)
+            self.ctx, self.shader_dir, self._scene_set0_layout, stream_size, num_pixels,
+            spectral=self._spectral)
         self._wf_sppm_pass_dims = key
         return self._wavefront_sppm_pass
 
@@ -2230,7 +2235,8 @@ class Renderer:
         self._wavefront_sppm_pass = MetalWavefrontSppmPass(
             self.ctx, self.shader_dir, stream_size, num_pixels,
             graph_fragments=list(self._scene_graph_fragments),
-            neural_config=self._effective_neural_config())
+            neural_config=self._effective_neural_config(),
+            spectral=self._spectral)
         self._wf_sppm_pass_dims = key
         return self._wavefront_sppm_pass
 
@@ -2314,6 +2320,7 @@ class Renderer:
             neural_config=self._effective_neural_config(),
             neural_active=self._neural_active(),
             records_active=wf_record,
+            spectral=self._spectral,
         )
         # ReSTIR DI reuse plugin (phase 5): the pass owns the persistent
         # reservoir/G-buffer StorageBuffers and binds the path pass's
@@ -2394,8 +2401,18 @@ class Renderer:
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
-        vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
-        aux_bytes = stream_size * WavefrontBdptPass.AUX_STRIDE
+        # Spectral eye/light vertices (Spectrum throughput/emission) and aux
+        # (Spectrum roles + SampledWavelengths) are wider than RGB. Size against
+        # the mirrored spectral stride, floored by the RGB headroom constants so
+        # RGB (spectral=False) is byte-identical.
+        vert_stride = WavefrontBdptPass.VERTEX_STRIDE
+        aux_stride = WavefrontBdptPass.AUX_STRIDE
+        if self._spectral:
+            from skinny.wavefront_layout import bdpt_vertex_size, wf_bdpt_aux_size
+            vert_stride = max(vert_stride, bdpt_vertex_size(spectral=True))
+            aux_stride = max(aux_stride, wf_bdpt_aux_size(spectral=True))
+        vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * vert_stride
+        aux_bytes = stream_size * aux_stride
         self._wf_bdpt_eye_buf = self._gpu.StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_light_buf = self._gpu.StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_aux_buf = self._gpu.StorageBuffer(self.ctx, aux_bytes)
@@ -2404,6 +2421,7 @@ class Renderer:
             self._wf_bdpt_eye_buf.buffer, self._wf_bdpt_light_buf.buffer,
             self._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
             stream_size, num_pixels, walk_mode=self.bdpt_walk_mode,
+            spectral=self._spectral,
         )
         self._wf_bdpt_pass_dims = (self.width, self.height)
         return self._wavefront_bdpt_pass
@@ -2432,6 +2450,7 @@ class Renderer:
             self.ctx, self.shader_dir, stream_size, num_pixels,
             walk_mode=self.bdpt_walk_mode,
             graph_fragments=list(self._scene_graph_fragments),
+            spectral=self._spectral,
         )
         self._wf_bdpt_pass_dims = key
         # The scene-build uploads ran before any Metal reflection existed
@@ -8456,16 +8475,17 @@ class Renderer:
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
 
     def _active_integrator_index(self) -> int:
-        """The integrator actually dispatched. The spectral megakernel supports
-        PATH (0) and BDPT (1) — main_pass.slang under SKINNY_SPECTRAL dispatches
-        SpectralBDPTIntegrator when fc.integratorType == INTEGRATOR_BDPT on a flat
-        first hit, else SpectralPathTracer. SPPM (2) has no megakernel path, so it
-        is pinned to PATH (mirroring the RGB megakernel's silent path fallback for
-        non-BDPT/SPPM types). integrator_index is persisted and runtime-switchable
-        on the interactive front-ends, so this is what drives fc.integratorType and
-        the config matrix — reporting what is actually rendered."""
-        if self._spectral:
-            return int(self.integrator_index) if int(self.integrator_index) in (0, 1) else 0
+        """The integrator actually dispatched. Spectral now spans PATH (0),
+        BDPT (1), and SPPM (2) — like RGB. Under the megakernel, main_pass.slang
+        under SKINNY_SPECTRAL dispatches SpectralBDPTIntegrator when
+        fc.integratorType == INTEGRATOR_BDPT on a flat first hit, else
+        SpectralPathTracer (so SPPM, which has no megakernel path, falls to
+        PATH there — but resolve_execution_mode sends sppm → wavefront, so a
+        spectral SPPM session runs the wavefront photon+gather passes). Under the
+        wavefront execution mode all three integrators dispatch spectrally. So we
+        report the selected integrator verbatim, matching RGB — this drives
+        fc.integratorType and the config matrix. integrator_index is persisted and
+        runtime-switchable on the interactive front-ends."""
         return int(self.integrator_index)
 
     def _neural_active(self) -> bool:
@@ -8765,25 +8785,14 @@ class Renderer:
                if self.execution_mode_fallback_active else cr.ON)
         rows.append(cr.ConfigRow("execution-mode", req_e, res_e, est))
 
-        # integrator. Spectral supports path (0) and bdpt (1); SPPM (2) pins to
-        # path (see _active_integrator_index). Report that pin rather than echo a
-        # runtime SPPM selection the spectral megakernel never runs. Fold the
-        # requested token into STATUS so matrix_signature (resolved+status) flips
-        # when the user switches integrator live under spectral.
-        # Inline the pin rather than call _active_integrator_index —
-        # `_collect_config_rows` runs against a plain namespace in the
-        # observability tests, so it must read only fields.
-        _sp = getattr(self, "_spectral", False)
-        res_idx = int(self.integrator_index)
-        if _sp and res_idx not in (0, 1):
-            res_idx = 0
+        # integrator. Spectral now spans path (0), bdpt (1), and sppm (2) — like
+        # RGB (see _active_integrator_index). SPPM has no megakernel path, but
+        # resolve_execution_mode sends sppm → wavefront, so a spectral SPPM
+        # session runs the wavefront passes; the resolved integrator equals the
+        # requested one. Reads only fields — `_collect_config_rows` runs against a
+        # plain namespace in the observability tests.
         req_integ = self.integrator_modes[self.integrator_index].lower()
-        res_integ = self.integrator_modes[res_idx].lower()
-        if self._spectral and req_integ != res_integ:
-            rows.append(cr.ConfigRow("integrator", req_integ, res_integ,
-                                     f"{cr.ON} (spectral pin; requested {req_integ})"))
-        else:
-            rows.append(cr.ConfigRow("integrator", req_integ, res_integ, cr.ON))
+        rows.append(cr.ConfigRow("integrator", req_integ, req_integ, cr.ON))
 
         # proposals: requested = the selected preset token; resolved = what the
         # renderer actually samples. Spectral v1 pins the mixture to BSDF-only

@@ -41,15 +41,25 @@ import wavefront.wf_records;
 // Flat-material bounce eval — imports only the flat material + NEE, so the flat
 // shade kernel stays small (no skin/python). The catch-all uses evaluateBounce.
 import wavefront.flat_bounce;
+#if defined(SKINNY_SPECTRAL)
+// Hero-wavelength draw (generate) + env-miss upsample + film resolve. Imports
+// are not transitive, so name it here even though bindings pulls it under the
+// same define. RGB build never sees this.
+import spectrum;   // SampledWavelengths, sampleWavelengths, spectrumResolveToLinearSRGB
+#endif
 
 // Write the lane's accumulated radiance + clear ALIVE; persist the rng cursor.
 // On termination `radiance` IS the path's L_final, so splat the lane's stacked
 // guideable records here (gated; no-op when not recording). Mirrors the copy in
 // wf_shade_common.slang — the intersect-stage miss terminates through this one.
-void wfTerminate(uint i, inout WavefrontPathState s, float3 radiance, RNG rng)
+void wfTerminate(uint i, inout WavefrontPathState s, Spectrum radiance, RNG rng)
 {
+#if !defined(SKINNY_SPECTRAL)
+    // Path records feed neural guiding — wavefront-only, refused under spectral,
+    // so the (float3) emitter is compiled out rather than widened to Spectrum.
     if (fc.recordMode != 0u)
         wfEmitRecords(i, radiance);
+#endif
     s.radiance = radiance;
     s.flags &= ~PATH_FLAG_ALIVE;
     s.rngState = rng.state;
@@ -81,20 +91,28 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
     PinholeCamera cam;
     float lensWeight;
     Ray ray = cam.generateRay(pixel, rng, lensWeight);
+#if defined(SKINNY_SPECTRAL)
+    // Hero-wavelength draw AFTER generateRay (which consumes the RNG first) —
+    // matches path_spectral.slang's ordering. Fixed for this path's life.
+    SampledWavelengths sw = sampleWavelengths(rng.next());
+#endif
 
     WavefrontPathState s;
     s.rayOrigin  = ray.origin;
     s.rayDir     = ray.direction;
     // Fold the realistic-camera weight into the initial throughput — radiance
     // is linear in it, so this reproduces main_pass's post-hoc `sample *=
-    // lensWeight` (1.0 for pinhole).
-    s.throughput = float3(lensWeight);
-    s.radiance   = float3(0.0);
+    // lensWeight` (1.0 for pinhole). Spectrum(x) == float3(x) in the RGB build.
+    s.throughput = Spectrum(lensWeight);
+    s.radiance   = Spectrum(0.0);
     s.pixelIndex = lane;
     s.rngState   = rng.state;
     s.depth      = 0u;
     s.flags      = PATH_FLAG_ALIVE;
     s.bsdfPdf    = -1.0;   // no env-NEE partner for the primary ray
+#if defined(SKINNY_SPECTRAL)
+    s.sw         = sw;
+#endif
     wfState[i] = s;
 }
 
@@ -126,12 +144,21 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 
     if (!h.hit)
     {
+#if defined(SKINNY_SPECTRAL)
+        Spectrum radiance = s.radiance;
+#else
         float3 radiance = s.radiance;
+#endif
         if (s.depth == 0u)
         {
             // runFrame primary-ray miss: env at full weight (no NEE partner).
+#if defined(SKINNY_SPECTRAL)
+            radiance += s.throughput * upsampleIlluminantBound(sceneEnvRadiance(
+                r.direction, fc.envIntensity, fc.furnaceMode), s.sw);
+#else
             radiance += s.throughput * sceneEnvRadiance(
                 r.direction, fc.envIntensity, fc.furnaceMode);
+#endif
         }
         else
         {
@@ -150,7 +177,11 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
                 float w = 1.0;
                 if (s.bsdfPdf > 0.0)
                     w = powerHeuristic(s.bsdfPdf, envPdf(r.direction));
+#if defined(SKINNY_SPECTRAL)
+                radiance += s.throughput * upsampleIlluminantBound(envR, s.sw) * w;
+#else
                 radiance += s.throughput * envR * w;
+#endif
             }
         }
         wfTerminate(i, s, radiance, rng);
@@ -277,10 +308,19 @@ void wfPathResolve(uint3 tid: SV_DispatchThreadID)
     // terminating, so it never splatted its stack — do it now with its final
     // radiance as L_final. Terminated lanes already emitted in wfTerminate and
     // cleared ALIVE, so they are skipped. No-op when not recording.
+#if !defined(SKINNY_SPECTRAL)
     if (fc.recordMode != 0u && pathAlive(wfState[i]))
         wfEmitRecords(i, wfState[i].radiance);
+#endif
 
+#if defined(SKINNY_SPECTRAL)
+    // Resolve the lane's per-λ radiance to linear sRGB at the film write — the
+    // 4 hero wavelengths → XYZ → linear sRGB, feeding the SAME RGBA32F accum as
+    // RGB (spectrum.slang). Mirrors path_spectral's return.
+    float3 sample = spectrumResolveToLinearSRGB(wfState[i].sw, wfState[i].radiance);
+#else
     float3 sample = wfState[i].radiance;
+#endif
     // Same sanitisation as main_pass.slang: kill NaN/Inf, clamp negatives.
     bool3 bad = isnan(sample) | isinf(sample);
     sample = select(bad, float3(0.0), sample);

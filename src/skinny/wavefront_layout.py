@@ -32,6 +32,7 @@ SLANG_SCALAR_SIZES: dict[str, int] = {
     "float4": 16,
     "uint": 4,
     "int": 4,
+    "bool": 4,  # Slang stores bool as a 32-bit value in a buffer (scalar layout)
 }
 
 # MSL (Metal target) byte sizes + alignments. Slang pads ``float3`` to 16 B
@@ -39,9 +40,11 @@ SLANG_SCALAR_SIZES: dict[str, int] = {
 # size==alignment. A struct's stride rounds up to its largest member alignment.
 SLANG_MSL_SIZES: dict[str, int] = {
     "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
+    "bool": 1,
 }
 SLANG_MSL_ALIGNS: dict[str, int] = {
     "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
+    "bool": 1,
 }
 
 
@@ -62,26 +65,47 @@ def _struct_stride(fields: list[tuple[str, str]], *, msl: bool) -> int:
     return (offset + struct_align - 1) // struct_align * struct_align
 
 # (field_name, slang_type) in declaration order — must match the Slang struct.
-FIELDS: list[tuple[str, str]] = [
-    ("rayOrigin",  "float3"),
-    ("rayDir",     "float3"),
-    ("throughput", "float3"),
-    ("radiance",   "float3"),
-    ("pixelIndex", "uint"),
-    ("rngState",   "uint"),
-    ("depth",      "uint"),
-    ("flags",      "uint"),
-    ("bsdfPdf",    "float"),
-]
+# In the spectral build (change spectral-wavefront) the color roles carry
+# `Spectrum` = float4 (vs float3 RGB) and the struct appends `SampledWavelengths`
+# (two float4: lambda, pdf) — see wavefront_state.slang. The two variants diverge
+# by construction: scalar grows +4 B per retyped color field plus +32 B for sw;
+# MSL already pads float3→16 B so the color retype is 0-byte on Metal and only sw
+# (+32 B) grows the MSL stride.
 
 
-def path_state_size(*, msl: bool = False) -> int:
-    """Byte stride of WavefrontPathState — scalar (default) or MSL (``msl=True``)."""
-    return _struct_stride(FIELDS, msl=msl)
+def _path_state_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    fields: list[tuple[str, str]] = [
+        ("rayOrigin",  "float3"),
+        ("rayDir",     "float3"),
+        ("throughput", col),
+        ("radiance",   col),
+        ("pixelIndex", "uint"),
+        ("rngState",   "uint"),
+        ("depth",      "uint"),
+        ("flags",      "uint"),
+        ("bsdfPdf",    "float"),
+    ]
+    if spectral:
+        # SampledWavelengths { float4 lambda; float4 pdf; }
+        fields += [("sw_lambda", "float4"), ("sw_pdf", "float4")]
+    return fields
+
+
+# RGB field list (back-compat: existing call sites and tests reference FIELDS).
+FIELDS: list[tuple[str, str]] = _path_state_fields(spectral=False)
+
+
+def path_state_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of WavefrontPathState — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_path_state_fields(spectral), msl=msl)
 
 
 PATH_STATE_STRIDE = path_state_size()              # 68 B (scalar / Vulkan)
 PATH_STATE_STRIDE_MSL = path_state_size(msl=True)  # 96 B (Metal)
+PATH_STATE_STRIDE_SPECTRAL = path_state_size(spectral=True)              # scalar
+PATH_STATE_STRIDE_SPECTRAL_MSL = path_state_size(msl=True, spectral=True)  # Metal
 
 # `flags` bit positions (mirror the static consts in wavefront_state.slang).
 PATH_FLAG_ALIVE = 1 << 0     # lane still bouncing
@@ -125,7 +149,7 @@ REC_VERTEX_STRIDE_MSL = rec_vertex_size(msl=True)  # 112 B (Metal)
 
 
 def queue_buffer_sizes(stream_size: int, num_materials: int,
-                       *, msl: bool = False) -> dict[str, int]:
+                       *, msl: bool = False, spectral: bool = False) -> dict[str, int]:
     """Byte sizes for the wavefront stage buffers, the single source of truth
     the `WavefrontPasses` allocator (vk_wavefront.py) sizes against.
 
@@ -137,9 +161,11 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
     ``msl=True`` sizes the struct-backed buffers (``path_state``) against the
     Metal MSL stride so the Metal wavefront allocator does not undersize them;
     plain (uint-stride) queue buffers are layout-agnostic. Vulkan callers omit
-    it and keep the scalar sizing byte-for-byte.
+    it and keep the scalar sizing byte-for-byte. ``spectral=True`` sizes
+    ``path_state`` against the wider spectral WavefrontPathState (Spectrum
+    throughput/radiance + SampledWavelengths); RGB stays byte-identical.
     """
-    path_state_stride = PATH_STATE_STRIDE_MSL if msl else PATH_STATE_STRIDE
+    path_state_stride = path_state_size(msl=msl, spectral=spectral)
     return {
         "path_state":      stream_size * path_state_stride,
         "ray_queue":       stream_size * _UINT,
@@ -163,58 +189,93 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
 # VisiblePoint.flags bits (mirror the static consts in sppm_state.slang).
 VP_ACTIVE = 1 << 0  # a valid visible point was stored this pass
 
-VISIBLE_POINT_FIELDS: list[tuple[str, str]] = [
-    ("pos",           "float3"),
-    ("ns",            "float3"),
-    ("wo",            "float3"),
-    ("beta",          "float3"),
-    ("ld",            "float3"),
-    ("albedo",        "float3"),
-    ("F0",            "float3"),
-    ("coatColor",     "float3"),
-    ("roughness",     "float"),
-    ("metallic",      "float"),
-    ("specular",      "float"),
-    ("ior",           "float"),
-    ("opacity",       "float"),
-    ("coat",          "float"),
-    ("coatRoughness", "float"),
-    ("coatIOR",       "float"),
-    ("transmissionColor", "float3"),
-    ("specularColor",     "float3"),
-    ("diffuseRoughness",  "float"),
-    ("tau",           "float3"),
-    ("flags",         "uint"),
-    ("radius",        "float"),
-    ("n",             "float"),
-]
-
-SPPM_ACCUM_FIELDS: list[tuple[str, str]] = [
-    ("phiR", "uint"),
-    ("phiG", "uint"),
-    ("phiB", "uint"),
-    ("m",    "uint"),
-]
+# VisiblePoint / SppmAccum, RGB and spectral (change spectral-wavefront, D5).
+# Spectral (SKINNY_SPECTRAL): beta/ld carry `Spectrum`=float4 (per-pass spectral)
+# and VisiblePoint appends `conductorMetalId` (exact conductor Fresnel at deposit);
+# SppmAccum grows to 4 hero-λ flux channels (phi0..phi3). tau STAYS float3 in both
+# builds — the per-pass per-λ flux is resolved to 3-wide BEFORE it folds into the
+# progressive estimator (D5), so tau is a spectral-invariant quantity. The RGB
+# layout is byte-identical to before (phiR/G/B → phi0/1/2 is a name-only change).
 
 
-def visible_point_size(*, msl: bool = False) -> int:
-    """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``)."""
-    return _struct_stride(VISIBLE_POINT_FIELDS, msl=msl)
+def _visible_point_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    fields: list[tuple[str, str]] = [
+        ("pos",           "float3"),
+        ("ns",            "float3"),
+        ("wo",            "float3"),
+        ("beta",          col),
+        ("ld",            col),
+        ("albedo",        "float3"),
+        ("F0",            "float3"),
+        ("coatColor",     "float3"),
+        ("roughness",     "float"),
+        ("metallic",      "float"),
+        ("specular",      "float"),
+        ("ior",           "float"),
+        ("opacity",       "float"),
+        ("coat",          "float"),
+        ("coatRoughness", "float"),
+        ("coatIOR",       "float"),
+        ("transmissionColor", "float3"),
+        ("specularColor",     "float3"),
+        ("diffuseRoughness",  "float"),
+    ]
+    if spectral:
+        fields.append(("conductorMetalId", "uint"))
+    fields += [
+        ("tau",           "float3"),
+        ("flags",         "uint"),
+        ("radius",        "float"),
+        ("n",             "float"),
+    ]
+    return fields
 
 
-def sppm_accum_size(*, msl: bool = False) -> int:
+def _sppm_accum_fields(spectral: bool) -> list[tuple[str, str]]:
+    # phiR/G/B are the RGB channels (kept byte-identical); phiW is the 4th spectral
+    # hero-λ slot (RGBA convention), present only under SKINNY_SPECTRAL.
+    fields: list[tuple[str, str]] = [
+        ("phiR", "uint"),
+        ("phiG", "uint"),
+        ("phiB", "uint"),
+    ]
+    if spectral:
+        fields.append(("phiW", "uint"))
+    fields.append(("m", "uint"))
+    return fields
+
+
+# RGB field lists (back-compat: existing call sites + tests reference these).
+VISIBLE_POINT_FIELDS: list[tuple[str, str]] = _visible_point_fields(spectral=False)
+SPPM_ACCUM_FIELDS: list[tuple[str, str]] = _sppm_accum_fields(spectral=False)
+
+
+def visible_point_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_visible_point_fields(spectral), msl=msl)
+
+
+def sppm_accum_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of SppmAccum — scalar (default) or MSL (``msl=True``). All
-    fields are uint, so the scalar and MSL strides are identical."""
-    return _struct_stride(SPPM_ACCUM_FIELDS, msl=msl)
+    fields are uint, so the scalar and MSL strides are identical (RGB 16 B /
+    spectral 20 B)."""
+    return _struct_stride(_sppm_accum_fields(spectral), msl=msl)
 
 
 VISIBLE_POINT_STRIDE = visible_point_size()              # 180 B (scalar / Vulkan)
 VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 240 B (Metal)
+VISIBLE_POINT_STRIDE_SPECTRAL = visible_point_size(spectral=True)              # scalar
+VISIBLE_POINT_STRIDE_SPECTRAL_MSL = visible_point_size(msl=True, spectral=True)  # Metal
 SPPM_ACCUM_STRIDE = sppm_accum_size()                    # 16 B (both layouts)
 SPPM_ACCUM_STRIDE_MSL = sppm_accum_size(msl=True)        # 16 B
+SPPM_ACCUM_STRIDE_SPECTRAL = sppm_accum_size(spectral=True)              # 20 B
+SPPM_ACCUM_STRIDE_SPECTRAL_MSL = sppm_accum_size(msl=True, spectral=True)  # 20 B
 
 
-def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False) -> dict[str, int]:
+def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False,
+                      spectral: bool = False) -> dict[str, int]:
     """Byte sizes for the SPPM per-pixel buffers, the source of truth the SPPM
     stage allocator sizes against.
 
@@ -226,13 +287,89 @@ def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False) -> dict[str, int]:
     the per-pixel lane, in ``[0, num_pixels)``.
 
     ``msl=True`` uses the Metal struct stride so the Metal allocator does not
-    undersize the visible-point region."""
-    vp_stride = VISIBLE_POINT_STRIDE_MSL if msl else VISIBLE_POINT_STRIDE
-    acc_stride = SPPM_ACCUM_STRIDE_MSL if msl else SPPM_ACCUM_STRIDE
+    undersize the visible-point region. ``spectral=True`` sizes against the wider
+    spectral structs (Spectrum beta/ld + conductorMetalId; 4-channel SppmAccum)."""
+    vp_stride = visible_point_size(msl=msl, spectral=spectral)
+    acc_stride = sppm_accum_size(msl=msl, spectral=spectral)
     return {
         "visible_points": num_pixels * vp_stride,
         "sppm_accum":     num_pixels * acc_stride,
     }
+
+
+# ── Wavefront BDPT subpath-vertex + aux buffers (change spectral-wavefront) ──
+# Mirror of BDPTVertex (shaders/integrators/bdpt.slang) and WfBdptAux
+# (shaders/wavefront/wavefront_bdpt.slang) — the per-lane eye/light vertex stacks
+# and per-lane aux record the wavefront BDPT pass carries in VRAM (GPU-internal
+# scratch; the host only SIZES them). In the spectral build (SKINNY_SPECTRAL) the
+# color roles carry `Spectrum`=float4 (vs float3 RGB) and WfBdptAux appends
+# `SampledWavelengths` (two float4). These grow the scalar (Vulkan) stride, so the
+# host allocator must size against the spectral stride or the Metal/Vulkan BDPT
+# kernels overrun. The Metal pass reflects the real MSL stride and does not use
+# these helpers; they exist to size the Vulkan (scalar) allocation and to lock the
+# spectral stride against a test. RGB is byte-identical to the pre-spectral build.
+
+
+def _bdpt_vertex_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    return [
+        ("kind",       "uint"),
+        ("position",   "float3"),
+        ("N",          "float3"),
+        ("throughput", col),
+        ("emission",   col),
+        ("pdfFwd",     "float"),
+        ("pdfRev",     "float"),
+        ("isDelta",    "bool"),
+        ("onLight",    "bool"),
+        ("matId",      "uint"),
+        ("uv",         "float2"),
+        ("posObject",  "float3"),
+        ("geoN",       "float3"),
+        ("tangent",    "float3"),
+        ("hasTangent", "bool"),
+    ]
+
+
+def _wf_bdpt_aux_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    fields: list[tuple[str, str]] = [
+        ("eyeLen",        "int"),
+        ("lightLen",      "int"),
+        ("rngState",      "uint"),
+        ("lensWeight",    "float"),
+        ("pixel",         "uint"),
+        ("escaped",       col),
+        ("radiance",      col),
+        ("ewRayO",        "float3"),
+        ("ewRayD",        "float3"),
+        ("ewThroughput",  col),
+        ("ewPdfFwdOmega", "float"),
+        ("ewMisBsdfPdf",  "float"),
+        ("ewFlags",       "uint"),
+    ]
+    if spectral:
+        # SampledWavelengths { float4 lambda; float4 pdf; }
+        fields += [("sw_lambda", "float4"), ("sw_pdf", "float4")]
+    return fields
+
+
+def bdpt_vertex_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of BDPTVertex — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_bdpt_vertex_fields(spectral), msl=msl)
+
+
+def wf_bdpt_aux_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of WfBdptAux — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_wf_bdpt_aux_fields(spectral), msl=msl)
+
+
+BDPT_VERTEX_STRIDE = bdpt_vertex_size()                             # 120 B (scalar)
+BDPT_VERTEX_STRIDE_SPECTRAL = bdpt_vertex_size(spectral=True)       # 128 B (scalar)
+WF_BDPT_AUX_STRIDE = wf_bdpt_aux_size()                            # 92 B (scalar)
+WF_BDPT_AUX_STRIDE_SPECTRAL = wf_bdpt_aux_size(spectral=True)      # 136 B (scalar)
 
 
 def sppm_grid_cell_count(num_pixels: int) -> int:

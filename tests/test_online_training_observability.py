@@ -169,29 +169,26 @@ def test_spectral_pins_proposals_to_bsdf():
     assert "spectral pin" not in prows["proposals"].status
 
 
-def test_spectral_integrator_pin_path_bdpt_pass_sppm_pins():
-    # The spectral megakernel dispatches path (0) and bdpt (1); sppm (2) has no
-    # megakernel path and pins to path (change spectral-bdpt-megakernel). Both the
-    # dispatched-index helper and the config row must agree.
+def test_spectral_integrator_passthrough_path_bdpt_sppm():
+    # Spectral now spans path (0), bdpt (1), and sppm (2) — like RGB (change
+    # spectral-wavefront widened the envelope to the wavefront execution mode and
+    # SPPM). The dispatched-index helper and the config row both pass the
+    # selected integrator through verbatim, with no spectral pin.
     def idx(spectral, i):
         s = types.SimpleNamespace(_spectral=spectral, integrator_index=i)
         return Renderer._active_integrator_index(s)
 
-    # non-spectral: passthrough for every integrator
+    # passthrough for every integrator, spectral or not
     assert [idx(False, i) for i in (0, 1, 2)] == [0, 1, 2]
-    # spectral: path/bdpt pass through, sppm pins to path
-    assert [idx(True, i) for i in (0, 1, 2)] == [0, 1, 0]
+    assert [idx(True, i) for i in (0, 1, 2)] == [0, 1, 2]
 
-    # Config row: path/bdpt report no pin, sppm reports the pin.
+    # Config row: every integrator reports itself, no pin.
     modes = ["Path", "BDPT", "SPPM"]
-    for i, name in ((0, "path"), (1, "bdpt")):
+    for i, name in ((0, "path"), (1, "bdpt"), (2, "sppm")):
         rows = _rows(_matrix_fake(_spectral=True, integrator_modes=modes, integrator_index=i))
+        assert rows["integrator"].requested == name
         assert rows["integrator"].resolved == name
         assert "spectral pin" not in rows["integrator"].status
-    sppm_rows = _rows(_matrix_fake(_spectral=True, integrator_modes=modes, integrator_index=2))
-    assert sppm_rows["integrator"].requested == "sppm"
-    assert sppm_rows["integrator"].resolved == "path"
-    assert "spectral pin" in sppm_rows["integrator"].status
 
 
 # ── lifecycle: ACTIVE marker + summary ───────────────────────────────
