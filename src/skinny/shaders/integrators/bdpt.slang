@@ -54,13 +54,26 @@ static const uint BDPT_VK_SURFACE      = 1u;
 static const uint BDPT_VK_LIGHT_AREA   = 2u;
 static const uint BDPT_VK_LIGHT_DIR    = 3u;
 
+// BDPTVertex color fields (throughput/emission) are `Spectrum` (= float3 RGB /
+// float4 spectral, D1 retype). The scalar RGB BDPT functions below stay RGB;
+// where they store a float3 color into a `Spectrum` vertex field, the write is
+// `#if defined(SKINNY_SPECTRAL)`-widened to keep the module type-checking in the
+// spectral megakernel build (those paths are unused there — SpectralBDPTIntegrator
+// recolors per-λ). Each RGB branch is textually the original so its SPIR-V is
+// byte-unchanged.
+#if defined(SKINNY_SPECTRAL)
+#define SPEC3(c) Spectrum((c).x, (c).y, (c).z, 0.0)
+#else
+#define SPEC3(c) (c)
+#endif
+
 struct BDPTVertex
 {
     uint   kind;
     float3 position;
     float3 N;
-    float3 throughput;    // β accumulated up to and including this vertex
-    float3 emission;      // Le at this vertex (zero if not emissive)
+    Spectrum throughput;  // β accumulated up to and including this vertex (per-λ under SKINNY_SPECTRAL)
+    Spectrum emission;    // Le at this vertex (per-λ under SKINNY_SPECTRAL)
     float  pdfFwd;        // area-measure pdf of arriving here from origin side
     float  pdfRev;        // area-measure pdf of arriving here from far side
     bool   isDelta;
@@ -198,8 +211,8 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
     r.vertex.kind = BDPT_VK_LIGHT_AREA;
     r.vertex.position = float3(0.0);
     r.vertex.N = float3(0.0, 1.0, 0.0);
-    r.vertex.throughput = float3(0.0);
-    r.vertex.emission = float3(0.0);
+    r.vertex.throughput = Spectrum(0.0);
+    r.vertex.emission = Spectrum(0.0);
     r.vertex.pdfFwd = 0.0;
     r.vertex.pdfRev = 0.0;
     r.vertex.isDelta = false;
@@ -243,8 +256,8 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
         float lightPickPdf = groupPdf / float(nDir);
         r.vertex.kind = BDPT_VK_LIGHT_DIR;
         r.vertex.N = -dir;
-        r.vertex.emission = L.radiance;
-        r.vertex.throughput = L.radiance;
+        r.vertex.emission = SPEC3(L.radiance);
+        r.vertex.throughput = SPEC3(L.radiance);
         r.vertex.pdfFwd = lightPickPdf;
         r.vertex.isDelta = true;
         r.dirOut = dir;
@@ -292,8 +305,8 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
     r.vertex.kind = BDPT_VK_LIGHT_AREA;
     r.vertex.position = lpos;
     r.vertex.N = lN;
-    r.vertex.emission = lRad;
-    r.vertex.throughput = lRad / max(pdfPos, 1e-20);
+    r.vertex.emission = SPEC3(lRad);
+    r.vertex.throughput = SPEC3(lRad) / max(pdfPos, 1e-20);
     r.vertex.pdfFwd = pdfPos;
     r.dirOut = dirWorld;
     r.beta = lRad * cosOut / max(pdfPos * pdfDir, 1e-20);
@@ -396,8 +409,8 @@ int randomWalk(
         v.kind = BDPT_VK_SURFACE;
         v.position = h.position;
         v.N = fd.N;
-        v.throughput = throughput;
-        v.emission = fd.mat.emission;
+        v.throughput = SPEC3(throughput);
+        v.emission = SPEC3(fd.mat.emission);
         v.pdfFwd = 0.0;
         v.pdfRev = 0.0;
         v.isDelta = false;
@@ -638,7 +651,13 @@ ConnectResult connectGeneric(
         pdf_y_sa = cosY / PI;
     }
 
+#if defined(SKINNY_SPECTRAL)
+    // Unused in the spectral build (SpectralBDPTIntegrator uses connectGenericS);
+    // .rgb keeps this scalar path type-checking against the Spectrum vertex field.
+    r.contribution = z.throughput.rgb * respZ * respY / d2 * y.throughput.rgb;
+#else
     r.contribution = z.throughput * respZ * respY / d2 * y.throughput;
+#endif
 
     r.pdf_zsm1_rev = convertSAtoArea(pdf_y_sa, y.position, z);
     r.pdf_ytm1_rev = convertSAtoArea(pdf_z_sa, z.position, y);
@@ -679,7 +698,11 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
         if (NdotL > 0.0 && visibleDirectional(fc, z.position, z.N, dir))
         {
             float3 resp = bdptEval(zs, z.N, woWorld, dir).response;
+#if defined(SKINNY_SPECTRAL)
+            total += z.throughput.rgb * resp * L.radiance;
+#else
             total += z.throughput * resp * L.radiance;
+#endif
         }
     }
 
@@ -704,7 +727,11 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
         float invPdfOmega = cosLight / (d2 * ls.pdfArea);
         float pdfLightSA = d2 * ls.pdfArea / max(cosLight, 1e-12);
         float wNEE = powerHeuristic(pdfLightSA, b.pdf);
+#if defined(SKINNY_SPECTRAL)
+        total += z.throughput.rgb * b.response * ls.radiance * invPdfOmega * wNEE;
+#else
         total += z.throughput * b.response * ls.radiance * invPdfOmega * wNEE;
+#endif
     }
 
     // Emissive-triangle NEE — unified onto misWeight (the same MIS partition as
@@ -750,8 +777,8 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
                     lit0.kind = BDPT_VK_LIGHT_AREA;
                     lit0.position = ls.point;
                     lit0.N = ls.normal;
-                    lit0.throughput = float3(0.0);
-                    lit0.emission = ls.radiance;
+                    lit0.throughput = Spectrum(0.0);
+                    lit0.emission = SPEC3(ls.radiance);
                     lit0.pdfFwd = ls.pdfArea;     // light area-sampling pdf
                     lit0.pdfRev = 0.0;
                     lit0.isDelta = false;
@@ -788,7 +815,11 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
                     float w = misWeight(eye, s, litArr, 1,
                                         pdf_zsm1_rev, pdf_zsm2_rev,
                                         pdf_ytm1_rev, 0.0);
+#if defined(SKINNY_SPECTRAL)
+                    total += z.throughput.rgb * b.response * ls.radiance * invPdfOmega * w;
+#else
                     total += z.throughput * b.response * ls.radiance * invPdfOmega * w;
+#endif
                 }
             }
         }
@@ -914,7 +945,13 @@ void splatLightVertex<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS], int i,
 
     float w = splatMisWeight(lightPath, t, pdf_ytm1_rev, pdf_ytm2_rev);
 
+#if defined(SKINNY_SPECTRAL)
+    // Unused in the spectral build (SpectralBDPTIntegrator uses splatLightVertexS);
+    // .rgb keeps this scalar path type-checking against the Spectrum vertex field.
+    float3 contrib = y.throughput.rgb * respY / (distCam * distCam) * We * w;
+#else
     float3 contrib = y.throughput * respY / (distCam * distCam) * We * w;
+#endif
     atomicSplatRadiance(pixel, contrib);
 }
 
@@ -942,8 +979,8 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         camVtx.kind = BDPT_VK_CAMERA;
         camVtx.position = ray.origin;
         camVtx.N = -ray.direction;
-        camVtx.throughput = float3(1.0);
-        camVtx.emission = float3(0.0);
+        camVtx.throughput = Spectrum(1.0);
+        camVtx.emission = Spectrum(0.0);
         camVtx.pdfFwd = 1.0;
         camVtx.pdfRev = 0.0;
         camVtx.isDelta = false;
@@ -987,8 +1024,8 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         z1.kind = BDPT_VK_SURFACE;
         z1.position = firstHit.position;
         z1.N = fmat.data.N;
-        z1.throughput = float3(1.0);
-        z1.emission = fmat.data.mat.emission;
+        z1.throughput = Spectrum(1.0);
+        z1.emission = SPEC3(fmat.data.mat.emission);
         z1.pdfFwd = 1.0;
         z1.pdfRev = 0.0;
         z1.isDelta = false;
@@ -1086,7 +1123,11 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
                               || (fc.numEmissiveTriangles == 0u)
                               || eye[s - 2].isDelta;
             if (noNeePartner)
+#if defined(SKINNY_SPECTRAL)
+                L += (z.throughput * z.emission).rgb;
+#else
                 L += z.throughput * z.emission;
+#endif
         }
 
         // (s ≥ 2, t = 1): NEE.

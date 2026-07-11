@@ -29,6 +29,10 @@ import cameras.pinhole;            // PinholeCamera
 import wavefront.wf_display;       // wfWriteDisplay (exposure + tonemap + present)
 import integrators.sppm_state;     // VisiblePoint, SppmAccum, VP_ACTIVE, grid helpers
 import integrators.path;           // PathTracer — non-flat receiver fallback
+#if defined(SKINNY_SPECTRAL)
+import spectrum;                   // SampledWavelengths, sampleWavelengths, spectrumResolveToLinearSRGB, planckSpectrum
+import integrators.spectral_flat_common;  // SpectralFlatColors, upsampleFlatColors, flatResponseNEE, spectralAllLightsNEE
+#endif
 
 // Per-tile push constant — same 12-byte {streamBase, _, streamSize} layout the
 // path pass uses (a separate pass binds its own; no collision). The middle word
@@ -54,6 +58,26 @@ static const uint SPPM_SCAN_BLOCK = 256u;
 
 uint sppmNumPixels() { return fc.width * fc.height; }
 
+#if defined(SKINNY_SPECTRAL)
+// One shared hero-λ set per SPPM PASS (D5). Seeded ONLY from the pass index so
+// every photon thread AND every eye visible-point thread of the same pass draw
+// the IDENTICAL 4 wavelengths — the deposit phi = beta ⊗ f_r(VP) is then a
+// coherent per-λ product (a photon lands on many VPs). NOT a per-path/per-photon
+// draw. Rotating λ across passes integrates the spectrum via the accumulation
+// film's running mean (the per-pass phi is resolved to 3-wide BEFORE folding).
+//
+// TODO(spectral-wavefront 4.1): fc.frameIndex is the per-pass counter already
+// shared by the eye + photon RNG seeds (createRNG(..., fc.frameIndex)), so both
+// stages observe the same value within a pass and derive the same λ with no new
+// renderer plumbing. If a dedicated `sppmPassIndex` uniform is ever added, seed
+// from it instead — nothing else here changes.
+SampledWavelengths sppmPassWavelengths()
+{
+    float u = float(pcgHash(fc.frameIndex)) * 2.3283064365386963e-10;  // /2^32 → [0,1)
+    return sampleWavelengths(u);
+}
+#endif
+
 // Glossy / near-specular continuation predicate (change sppm-glossy-final-gather).
 // True => follow the BSDF-sampled lobe one bounce like a delta carrier instead of
 // storing a visible point. Metallic guard: BSDFSample carries no lobe id, so gate on
@@ -76,7 +100,11 @@ uint sppmSortedIdxBase(uint nc)  { return 3u * nc; }
 // zeroes the VP buffer at accumFrame==0, so `n == 0` reliably means "never
 // updated" → (re)initialize the radius until photons start shrinking it.
 void sppmStoreVisiblePoint(uint idx, float3 pos, float3 ns, float3 wo,
-                           float3 beta, float3 ld, FlatMaterial mat)
+                           Spectrum beta, Spectrum ld, FlatMaterial mat
+#if defined(SKINNY_SPECTRAL)
+                           , uint conductorMetalId
+#endif
+                           )
 {
     VisiblePoint vp = sppmVisiblePoints[idx];   // read to preserve persistent fields
     vp.pos = pos; vp.ns = ns; vp.wo = wo; vp.beta = beta; vp.ld = ld;
@@ -88,6 +116,9 @@ void sppmStoreVisiblePoint(uint idx, float3 pos, float3 ns, float3 wo,
     vp.transmissionColor = m.transmissionColor;
     vp.specularColor = m.specularColor;
     vp.diffuseRoughness = m.diffuseRoughness;
+#if defined(SKINNY_SPECTRAL)
+    vp.conductorMetalId = conductorMetalId;      // exact conductor Fresnel at deposit
+#endif
     if (vp.n == 0.0)                              // first activation → init estimator
     {
         vp.radius = fc.sppmInitialRadius;
@@ -117,8 +148,12 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
     PinholeCamera cam;
     float lensWeight;
     Ray r = cam.generateRay(pixel, rng, lensWeight);
-    float3 throughput = float3(lensWeight);
-    float3 ld = float3(0.0);
+    Spectrum throughput = Spectrum(lensWeight);
+    Spectrum ld = Spectrum(0.0);
+#if defined(SKINNY_SPECTRAL)
+    // Shared pass wavelengths (D5) — same 4 λ the photon stage uses this pass.
+    SampledWavelengths gSw = sppmPassWavelengths();
+#endif
     // Was the current ray spawned by a delta/perfectly-specular carrier (pdf<=0)?
     // A delta lobe has no NEE partner ⇒ an emissive triangle it lands on is taken
     // at full weight; a non-delta glossy-continue carrier ran emissive NEE, so its
@@ -152,11 +187,15 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
             // powerHeuristic(bsdfPdf, envPdf), exactly as path.slang does on its
             // env miss. Prevents double-counting the env at a glossy metal whose
             // reflection escapes straight to the environment (conductor_infinite).
-            float3 envR = sceneEnvRadianceCell(
+            float3 envRgb = sceneEnvRadianceCell(
                 r.direction, fc.envIntensity, effectiveFurnaceMode(h.materialId));
             float w = (misBsdfPdf > 0.0)
                 ? powerHeuristic(misBsdfPdf, envPdf(r.direction)) : 1.0;
-            ld += throughput * envR * w;
+#if defined(SKINNY_SPECTRAL)
+            ld += throughput * upsampleIlluminantBound(envRgb, gSw) * w;
+#else
+            ld += throughput * envRgb * w;
+#endif
             break;
         }
 
@@ -174,12 +213,21 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         // wavefront-nonflat-tiled-fallback).
         if ((materialTypes[h.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
         {
+#if !defined(SKINNY_SPECTRAL)
             PathTracer integrator;
             ld += throughput * integrator.estimateRadiance(r, h, rng);
+#endif
+            // Spectral is FLAT-only (non-flat refused at startup ⇒ unreachable);
+            // the RGB path fallback would return float3 into a Spectrum ld, so it
+            // is compiled out and the eye walk terminates with no VP stored.
             break;
         }
 
         FlatMaterial mat = loadFlatMaterial(h);
+#if defined(SKINNY_SPECTRAL)
+        uint sppmMetalId = flatMaterials[h.materialId].conductorMetalId;
+        SpectralFlatColors cols = upsampleFlatColors(mat, gSw, sppmMetalId);
+#endif
         float3 N = mat.data.N;
         float3 T, B;
         if (h.hasTangent)
@@ -195,7 +243,11 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         let wo = worldToTangent(V, T, B, N);
 
         // Per-pass direct at this vertex (NEE), accumulated into ld.
+#if defined(SKINNY_SPECTRAL)
+        ld += throughput * spectralAllLightsNEE(mat, cols, h, N, T, B, wo, gSw, rng);
+#else
         ld += throughput * allLightsNEE(mat, h, N, T, B, wo, false, rng);
+#endif
 
         BSDFSample bs = mat.sample(wo, rng);
 
@@ -205,9 +257,21 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         // vertex, so add only the BSDF-sampling MIS complement — pdfLightSA is
         // reconstructed without the tri index (the per-tri area cancels in the
         // power-weighted area·lum CDF), per emissive-triangle-bsdf-hit-mis.
+#if defined(SKINNY_SPECTRAL)
+        // Spectral emission: upsampled illuminant, or exact Planck for a
+        // per-material blackbody (mirror path_spectral). lum/MIS stay scalar.
+        Spectrum emis = cols.emission;
+        float2   matBB = materialBlackbody(h.materialId);
+        if (matBB.x > 0.0)
+            emis = planckSpectrum(gSw, matBB.x) * matBB.y;
+#endif
         if (bounce == 0u || fc.numEmissiveTriangles == 0u || spawnedBySpecular)
         {
+#if defined(SKINNY_SPECTRAL)
+            ld += throughput * emis;
+#else
             ld += throughput * bs.emission;
+#endif
         }
         else if (any(bs.emission > 0.0))
         {
@@ -216,7 +280,11 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
             float pdfLightSA = (cosLight > 1e-6 && fc.emissiveTotalPower > 0.0)
                 ? lum * (h.t * h.t) / (fc.emissiveTotalPower * cosLight)
                 : 1e30;   // grazing / degenerate ⇒ NEE owns it ⇒ wBSDF → 0
+#if defined(SKINNY_SPECTRAL)
+            ld += throughput * emis * powerHeuristic(prevBsdfPdf, pdfLightSA);
+#else
             ld += throughput * bs.emission * powerHeuristic(prevBsdfPdf, pdfLightSA);
+#endif
         }
 
         if (!bs.valid)
@@ -226,14 +294,35 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         if (bs.pdf > 0.0 && !glossyContinue)
         {
             // Non-delta, non-glossy-continued surface ⇒ this is the visible point.
-            sppmStoreVisiblePoint(lane, h.position, N, V, throughput, ld, mat);
+            sppmStoreVisiblePoint(lane, h.position, N, V, throughput, ld, mat
+#if defined(SKINNY_SPECTRAL)
+                , sppmMetalId
+#endif
+                );
             return;
         }
 
         // Delta OR glossy-continue ⇒ caustic carrier: keep tracing so the visible
         // point lands on the next non-glossy surface and the reflection is rebuilt.
+#if defined(SKINNY_SPECTRAL)
+        // Spectral carrier recolor (D5): reuse the RGB geometry (wi/pdf/delta-ness);
+        // recolor the throughput per-λ. Non-delta glossy-continue → response/pdf;
+        // delta glass/mirror → the RGB transmissionColor upsampled as a reflectance
+        // (mirror path_spectral). Secondary-λ dispersion collapse is deliberately
+        // NOT applied — the photon stage shares this pass's 4-λ set, so terminating
+        // secondaries per eye path would break phi = beta ⊗ f_r λ-coherence. SPPM
+        // caustics are therefore non-dispersive here (documented v1 limit; the
+        // megakernel path/bdpt carry dispersion).
+        Spectrum weightS = (bs.pdf > 0.0)
+            ? (flatResponseS(mat, cols, wo, bs.wi) / bs.pdf)
+            : cols.transmission;
+#endif
         bs.wi = tangentToWorld(bs.wi, T, B, N);
+#if defined(SKINNY_SPECTRAL)
+        throughput *= weightS;
+#else
         throughput *= bs.weight;
+#endif
         // Carry this bounce's MIS companions to the next iteration, mirroring
         // path.slang. A delta carrier (bs.pdf<=0) has no NEE partner ⇒ full-weight
         // env miss AND full-weight emissive hit next iteration. A non-delta
@@ -410,11 +499,15 @@ FlatMaterial sppmLoadMaterial(VisiblePoint vp)
 // (pSel, folded into LightSample.pdfArea). beta carries the per-photon flux
 // (the 1/N_emitted normalization is applied in the update stage). For a diffuse
 // area emitter the emission cosine cancels the cosine-pdf, so beta = Le·π/selPdf.
-bool sppmEmitPhoton(inout RNG rng, out Ray ray, out float3 beta)
+bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
+#if defined(SKINNY_SPECTRAL)
+                    , SampledWavelengths sw   // shared pass λ (D5)
+#endif
+                    )
 {
     ray.origin = float3(0.0);
     ray.direction = float3(0.0, 0.0, 1.0);
-    beta = float3(0.0);
+    beta = Spectrum(0.0);
 
     let hasE = (fc.numEmissiveTriangles > 0u) ? 1u : 0u;
     let hasS = (fc.numSphereLights > 0u) ? 1u : 0u;
@@ -445,7 +538,16 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out float3 beta)
         let d = sppmCosineHemisphere(rng.next2());
         ray.direction = normalize(t * d.x + b * d.y + ls.normal * d.z);
         ray.origin = ls.point + ls.normal * 0.002;
+#if defined(SKINNY_SPECTRAL)
+        // Per-λ photon flux: exact Planck for a blackbody emitter, else the RGB
+        // radiance upsampled as an illuminant — matching the spectral NEE source.
+        float2   bb = emitterBlackbody(idx);
+        Spectrum Le = (bb.x > 0.0) ? planckSpectrum(sw, bb.x) * bb.y
+                                   : upsampleIlluminantBound(ls.radiance, sw);
+        beta = Le * PI / max(selA, 1e-20);
+#else
         beta = ls.radiance * PI / max(selA, 1e-20);
+#endif
         return true;
     }
     if (chosen == 1u)
@@ -460,7 +562,11 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out float3 beta)
         let d = sppmCosineHemisphere(rng.next2());
         ray.direction = normalize(t * d.x + b * d.y + ls.normal * d.z);
         ray.origin = ls.point + ls.normal * 0.002;
+#if defined(SKINNY_SPECTRAL)
+        beta = upsampleIlluminantBound(ls.radiance, sw) * PI / max(selA, 1e-20);
+#else
         beta = ls.radiance * PI / max(selA, 1e-20);
+#endif
         return true;
     }
     // Distant light: a parallel beam from a bbox-covering disk (pdfDir is a delta,
@@ -476,7 +582,15 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out float3 beta)
     ray.origin = center + dl.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
     ray.direction = -dl.dir;
     let selPdf = gsel * (1.0 / float(fc.numDistantLights));
+#if defined(SKINNY_SPECTRAL)
+    // Authored distant-light SPD (slot >= 0), else RGB radiance upsampled.
+    int      slot = int(distantLights[i].spdIndex);
+    Spectrum Ld   = (slot >= 0) ? distantLightSpd(slot, sw)
+                                : upsampleIlluminantBound(dl.rad, sw);
+    beta = Ld * (PI * R * R) / max(selPdf, 1e-20);
+#else
     beta = dl.rad * (PI * R * R) / max(selPdf, 1e-20);
+#endif
     return true;
 }
 
@@ -484,7 +598,11 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out float3 beta)
 // using EACH visible point's own BSDF (bare f_r, no cosine — the photon-map
 // density estimate). The 3x3x3 neighbour cells are de-duplicated so a hash
 // collision can't double-deposit.
-void sppmDepositPhoton(float3 beta, float3 photonPos, float3 photonInDir)
+void sppmDepositPhoton(Spectrum beta, float3 photonPos, float3 photonInDir
+#if defined(SKINNY_SPECTRAL)
+                       , SampledWavelengths sw   // shared pass λ (D5)
+#endif
+                       )
 {
     let nc = sppmGridCellCount(sppmNumPixels());
     let base = sppmCellCoord(photonPos, fc.sceneBoundsMin, fc.sppmCellSize);
@@ -522,15 +640,31 @@ void sppmDepositPhoton(float3 beta, float3 photonPos, float3 photonInDir)
             if (wiVP.z <= 1e-4)
                 continue;
             FlatMaterial mat = sppmLoadMaterial(vp);
+#if defined(SKINNY_SPECTRAL)
+            // Per-λ f_r at the shared pass λ so phi = beta ⊗ f_r is coherent.
+            // flatResponseNEE = f·cos·opacity mirrors mat.evaluate().response
+            // (= flatBsdfResponse·op); /wiVP.z removes the cosine → bare f_r·op,
+            // matching the RGB deposit's evaluate().response / wiVP.z.
+            SpectralFlatColors cols = upsampleFlatColors(mat, sw, vp.conductorMetalId);
+            let f = flatResponseNEE(mat, cols, woVP, wiVP) / max(wiVP.z, 1e-4);
+#else
             let f = mat.evaluate(woVP, wiVP).response / max(wiVP.z, 1e-4);  // bare f_r
-            float3 phi = beta * f;
+#endif
+            Spectrum phi = beta * f;
             if (any(phi != phi) || any(isinf(phi)))
                 continue;
+#if defined(SKINNY_SPECTRAL)
+            phi = max(phi, Spectrum(0.0));
+#else
             phi = max(phi, float3(0.0));
+#endif
             uint old;
             InterlockedAdd(sppmAccum[j].phiR, uint(phi.x * SPPM_FLUX_FIXED_SCALE), old);
             InterlockedAdd(sppmAccum[j].phiG, uint(phi.y * SPPM_FLUX_FIXED_SCALE), old);
             InterlockedAdd(sppmAccum[j].phiB, uint(phi.z * SPPM_FLUX_FIXED_SCALE), old);
+#if defined(SKINNY_SPECTRAL)
+            InterlockedAdd(sppmAccum[j].phiW, uint(phi.w * SPPM_FLUX_FIXED_SCALE), old);
+#endif
             InterlockedAdd(sppmAccum[j].m, 1u, old);
         }
     }
@@ -544,10 +678,18 @@ void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
     if (pid >= fc.sppmPhotonsEmitted)
         return;
     RNG rng = createRNG(uint2(pid & 0xFFFFu, pid >> 16), fc.frameIndex);
+#if defined(SKINNY_SPECTRAL)
+    // Same shared pass λ (D5) the eye stage draws — identical for every photon.
+    SampledWavelengths gSw = sppmPassWavelengths();
+#endif
 
     Ray r;
-    float3 beta;
-    if (!sppmEmitPhoton(rng, r, beta))
+    Spectrum beta;
+    if (!sppmEmitPhoton(rng, r, beta
+#if defined(SKINNY_SPECTRAL)
+                        , gSw
+#endif
+                        ))
         return;
 
     HitInfo h = traceScene(fc, r);
@@ -566,6 +708,10 @@ void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
             break;  // flat-only photon transport (PM-1)
 
         FlatMaterial mat = loadFlatMaterial(h);
+#if defined(SKINNY_SPECTRAL)
+        SpectralFlatColors cols = upsampleFlatColors(
+            mat, gSw, flatMaterials[h.materialId].conductorMetalId);
+#endif
         float3 N = mat.data.N;
         float3 T, B;
         if (h.hasTangent)
@@ -592,14 +738,34 @@ void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
         // deposited term is purely indirect/caustic and disjoint from the NEE
         // direct the eye stage already accumulated (depth==0 = light->VP direct).
         if (!specular && depth >= 1u)
-            sppmDepositPhoton(beta, h.position, r.direction);
+            sppmDepositPhoton(beta, h.position, r.direction
+#if defined(SKINNY_SPECTRAL)
+                              , gSw
+#endif
+                              );
 
+#if defined(SKINNY_SPECTRAL)
+        // Spectral photon throughput recolor (D5): reuse the RGB geometry, recolor
+        // per-λ (response/pdf, or transmissionColor for a delta lobe) — coherent
+        // with the eye carrier + the megakernel. No secondary-λ dispersion (see eye).
+        Spectrum photonWeightS = (bs.pdf > 0.0)
+            ? (flatResponseS(mat, cols, wo, bs.wi) / bs.pdf)
+            : cols.transmission;
+#endif
         bs.wi = tangentToWorld(bs.wi, T, B, N);
+#if defined(SKINNY_SPECTRAL)
+        beta *= photonWeightS;
+#else
         beta *= bs.weight;
+#endif
         depth++;
         if (depth > 1u)
         {
+#if defined(SKINNY_SPECTRAL)
+            let p = clamp(max(max(beta.x, beta.y), max(beta.z, beta.w)), 0.05, 0.95);
+#else
             let p = clamp(max(max(beta.x, beta.y), beta.z), 0.05, 0.95);
+#endif
             if (rng.next() > p)
                 break;
             beta /= p;
@@ -635,6 +801,10 @@ void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
 
     VisiblePoint vp = sppmVisiblePoints[lane];
     SppmAccum acc = sppmAccum[lane];
+#if defined(SKINNY_SPECTRAL)
+    // Same shared pass λ (D5) the photons + eye VPs used — the resolve wavelengths.
+    SampledWavelengths gSw = sppmPassWavelengths();
+#endif
 
     float3 lIndirect = float3(0.0);
     if ((vp.flags & VP_ACTIVE) != 0u)
@@ -647,15 +817,33 @@ void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
         // shrinking radius), NOT by accumulating τ here — accumulating τ AND
         // film-averaging would double-count. τ/N still advance the radius for
         // the next pass (bias → 0 as r shrinks).
+#if defined(SKINNY_SPECTRAL)
+        // D5: resolve the per-pass per-λ flux → linear sRGB at the pass λ BEFORE
+        // it folds into the spectral-INVARIANT progressive estimator. tau stays
+        // 3-wide; the (r'/r)² ratio in sppmUpdate is scalar geometry (unchanged).
+        // Rotating λ across passes integrates the spectrum via the film mean.
+        Spectrum phiS = sppmDecodeFlux(acc);
+        let rGather = vp.radius;
+        let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * rGather * rGather;
+        lIndirect = spectrumResolveToLinearSRGB(gSw, phiS / max(denom, 1e-20));
+        sppmUpdate(vp, spectrumResolveToLinearSRGB(gSw, phiS), acc.m, 2.0 / 3.0);
+#else
+        // RGB block kept textually verbatim (byte-identical .spv guard).
         let phi = sppmDecodeFlux(acc);
         let rGather = vp.radius;
         let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * rGather * rGather;
         lIndirect = phi / max(denom, 1e-20);
         sppmUpdate(vp, phi, acc.m, 2.0 / 3.0);  // advance radius / N for the next pass
+#endif
         sppmVisiblePoints[lane] = vp;
     }
 
+#if defined(SKINNY_SPECTRAL)
+    // Resolve the per-pass spectral direct term into the 3-wide pass sample too.
+    float3 sample = spectrumResolveToLinearSRGB(gSw, vp.ld) + lIndirect;
+#else
     float3 sample = vp.ld + lIndirect;
+#endif
     if (any(sample != sample) || any(isinf(sample)))
         sample = float3(0.0);
     sample = max(sample, float3(0.0));
@@ -677,6 +865,10 @@ void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
 
     // Reset the per-pass photon accumulator for the next pass.
     SppmAccum z;
-    z.phiR = 0u; z.phiG = 0u; z.phiB = 0u; z.m = 0u;
+    z.phiR = 0u; z.phiG = 0u; z.phiB = 0u;
+#if defined(SKINNY_SPECTRAL)
+    z.phiW = 0u;
+#endif
+    z.m = 0u;
     sppmAccum[lane] = z;
 }

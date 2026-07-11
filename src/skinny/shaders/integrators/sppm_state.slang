@@ -30,9 +30,11 @@ static const float SPPM_FLUX_FIXED_SCALE = 1048576.0;
 
 // Per-pixel visible point: this-pass eye geometry + per-pass direct radiance +
 // the EVALUATED flat BSDF, fused with the persistent progressive estimator.
-// Scalar = 180 B, MSL = 240 B. All fields are scalar (no nested struct) so the
-// host layout mirror + parse-lock test stay simple, and so sppm_state.slang need
-// not import the material tree.
+// RGB: scalar = 180 B, MSL = 240 B. Spectral (SKINNY_SPECTRAL): beta/ld widen
+// float3→float4 (+8 B scalar) and conductorMetalId adds +4 B; tau stays float3
+// (D5). All fields are scalar (no nested struct) so the host layout mirror +
+// parse-lock test stay simple, and so sppm_state.slang need not import the
+// material tree. wavefront_layout._visible_point_fields(spectral) mirrors both.
 //
 // `ld` holds the FULL per-pass direct term (NEE at the visible point plus any
 // emitter/env reached through the eye specular chain) — computed once in the
@@ -52,8 +54,8 @@ struct VisiblePoint
     float3 pos;            // world hit position (rewritten each pass)
     float3 ns;             // world shading normal, post normal-map (rewritten each pass)
     float3 wo;             // world outgoing dir toward the camera (this pass)
-    float3 beta;           // eye throughput reaching the point, EXCLUDING the VP BSDF (this pass)
-    float3 ld;             // per-pass direct radiance (NEE + specular-chain emitters)
+    Spectrum beta;         // eye throughput reaching the point, EXCLUDING the VP BSDF (this pass; per-pass spectral)
+    Spectrum ld;           // per-pass direct radiance (NEE + specular-chain emitters; per-pass spectral)
     float3 albedo;         // FlatHitMat.albedo
     float3 F0;             // FlatMaterial.F0
     float3 coatColor;      // FlatHitMat.coatColor
@@ -68,27 +70,51 @@ struct VisiblePoint
     float3 transmissionColor;  // FlatHitMat.transmissionColor (Stage-2 rich input)
     float3 specularColor;      // FlatHitMat.specularColor (Stage-2 rich input)
     float  diffuseRoughness;   // FlatHitMat.diffuseRoughness (Stage-2 rich input)
-    float3 tau;            // accumulated reflected flux (persists)
+#if defined(SKINNY_SPECTRAL)
+    // Named-conductor id (common.slang FlatMaterialParams.conductorMetalId),
+    // stored so the photon deposit's per-λ recolor (upsampleFlatColors) uses the
+    // EXACT conductor Fresnel (6.2) — not upsampled Schlick(F0) — for a rough
+    // named-metal visible point, matching the megakernel spectral path.
+    uint   conductorMetalId;
+#endif
+    // D5: tau is a spectral-INVARIANT progressive quantity — the per-pass per-λ
+    // flux is resolved (spectrumResolveToLinearSRGB) BEFORE it folds here, so this
+    // stays float3 in BOTH builds (never widened to Spectrum). Rotating the pass λ
+    // across passes integrates the spectrum via the accumulation-film running mean.
+    float3 tau;            // accumulated reflected flux (persists; resolved 3-wide)
     uint   flags;          // bit0 = VP_ACTIVE
     float  radius;         // current search radius r_i (persists)
     float  n;              // accumulated photon count N_i (persists; float for gamma)
 };
 
 // Per-pass photon-deposit accumulator (separate buffer, atomically written by
-// the photon stage). Scalar = 16 B, MSL = 16 B.
+// the photon stage). RGB: 3 fixed-point flux channels + m (16 B). Spectral
+// (SKINNY_SPECTRAL): 4 hero-λ flux channels + m (20 B) — one per shared pass
+// wavelength (D5). Flux is non-negative per λ so the unsigned fixed point is
+// clean (no signed-gamut concern — contrast the BDPT splat). The RGB layout is
+// byte-identical (phiR/G/B → phi0/1/2 is a name-only change).
 struct SppmAccum
 {
-    uint phiR;  // 0..4   fixed-point accumulated flux, red
-    uint phiG;  // 4..8   green
-    uint phiB;  // 8..12  blue
-    uint m;     // 12..16 photons deposited into this point this pass (M_i)
+    uint phiR;  // fixed-point accumulated flux — RGB red / spectral hero λ0
+    uint phiG;  // RGB green / spectral λ1
+    uint phiB;  // RGB blue  / spectral λ2
+#if defined(SKINNY_SPECTRAL)
+    uint phiW;  // spectral λ3 (RGBA hero-λ slot; absent in the RGB build so the
+                // RGB SPIR-V — member names included — is byte-identical)
+#endif
+    uint m;     // photons deposited into this point this pass (M_i)
 };
 
-// Decode the fixed-point per-pass flux accumulator back to linear float flux.
-float3 sppmDecodeFlux(SppmAccum a)
+// Decode the fixed-point per-pass flux accumulator back to linear float flux
+// (Spectrum: float4 spectral / float3 RGB).
+Spectrum sppmDecodeFlux(SppmAccum a)
 {
     let inv = 1.0 / SPPM_FLUX_FIXED_SCALE;
+#if defined(SKINNY_SPECTRAL)
+    return Spectrum(float(a.phiR), float(a.phiG), float(a.phiB), float(a.phiW)) * inv;
+#else
     return float3(float(a.phiR), float(a.phiG), float(a.phiB)) * inv;
+#endif
 }
 
 // SPPM progressive reduction for one pass (Hachisuka & Jensen 2009):

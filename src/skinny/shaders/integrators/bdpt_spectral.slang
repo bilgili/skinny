@@ -67,8 +67,8 @@ BDPTVertex asRgb(SpectralBDPTVertex v)
     r.kind = v.kind;
     r.position = v.position;
     r.N = v.N;
-    r.throughput = float3(0.0);
-    r.emission = float3(0.0);
+    r.throughput = Spectrum(0.0);   // BDPTVertex color fields are Spectrum (D1 retype); misWeight ignores them
+    r.emission = Spectrum(0.0);
     r.pdfFwd = v.pdfFwd;
     r.pdfRev = v.pdfRev;
     r.isDelta = v.isDelta;
@@ -630,8 +630,8 @@ Spectrum connectT1S(SpectralBDPTVertex eye[BDPT_MAX_VERTS], int s,
                     lit0.kind = BDPT_VK_LIGHT_AREA;
                     lit0.position = ls.point;
                     lit0.N = ls.normal;
-                    lit0.throughput = float3(0.0);
-                    lit0.emission = float3(0.0);
+                    lit0.throughput = Spectrum(0.0);   // BDPTVertex color fields are Spectrum (D1 retype)
+                    lit0.emission = Spectrum(0.0);
                     lit0.pdfFwd = ls.pdfArea;
                     lit0.pdfRev = 0.0;
                     lit0.isDelta = false;

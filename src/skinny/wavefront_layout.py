@@ -184,58 +184,93 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
 # VisiblePoint.flags bits (mirror the static consts in sppm_state.slang).
 VP_ACTIVE = 1 << 0  # a valid visible point was stored this pass
 
-VISIBLE_POINT_FIELDS: list[tuple[str, str]] = [
-    ("pos",           "float3"),
-    ("ns",            "float3"),
-    ("wo",            "float3"),
-    ("beta",          "float3"),
-    ("ld",            "float3"),
-    ("albedo",        "float3"),
-    ("F0",            "float3"),
-    ("coatColor",     "float3"),
-    ("roughness",     "float"),
-    ("metallic",      "float"),
-    ("specular",      "float"),
-    ("ior",           "float"),
-    ("opacity",       "float"),
-    ("coat",          "float"),
-    ("coatRoughness", "float"),
-    ("coatIOR",       "float"),
-    ("transmissionColor", "float3"),
-    ("specularColor",     "float3"),
-    ("diffuseRoughness",  "float"),
-    ("tau",           "float3"),
-    ("flags",         "uint"),
-    ("radius",        "float"),
-    ("n",             "float"),
-]
-
-SPPM_ACCUM_FIELDS: list[tuple[str, str]] = [
-    ("phiR", "uint"),
-    ("phiG", "uint"),
-    ("phiB", "uint"),
-    ("m",    "uint"),
-]
+# VisiblePoint / SppmAccum, RGB and spectral (change spectral-wavefront, D5).
+# Spectral (SKINNY_SPECTRAL): beta/ld carry `Spectrum`=float4 (per-pass spectral)
+# and VisiblePoint appends `conductorMetalId` (exact conductor Fresnel at deposit);
+# SppmAccum grows to 4 hero-λ flux channels (phi0..phi3). tau STAYS float3 in both
+# builds — the per-pass per-λ flux is resolved to 3-wide BEFORE it folds into the
+# progressive estimator (D5), so tau is a spectral-invariant quantity. The RGB
+# layout is byte-identical to before (phiR/G/B → phi0/1/2 is a name-only change).
 
 
-def visible_point_size(*, msl: bool = False) -> int:
-    """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``)."""
-    return _struct_stride(VISIBLE_POINT_FIELDS, msl=msl)
+def _visible_point_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    fields: list[tuple[str, str]] = [
+        ("pos",           "float3"),
+        ("ns",            "float3"),
+        ("wo",            "float3"),
+        ("beta",          col),
+        ("ld",            col),
+        ("albedo",        "float3"),
+        ("F0",            "float3"),
+        ("coatColor",     "float3"),
+        ("roughness",     "float"),
+        ("metallic",      "float"),
+        ("specular",      "float"),
+        ("ior",           "float"),
+        ("opacity",       "float"),
+        ("coat",          "float"),
+        ("coatRoughness", "float"),
+        ("coatIOR",       "float"),
+        ("transmissionColor", "float3"),
+        ("specularColor",     "float3"),
+        ("diffuseRoughness",  "float"),
+    ]
+    if spectral:
+        fields.append(("conductorMetalId", "uint"))
+    fields += [
+        ("tau",           "float3"),
+        ("flags",         "uint"),
+        ("radius",        "float"),
+        ("n",             "float"),
+    ]
+    return fields
 
 
-def sppm_accum_size(*, msl: bool = False) -> int:
+def _sppm_accum_fields(spectral: bool) -> list[tuple[str, str]]:
+    # phiR/G/B are the RGB channels (kept byte-identical); phiW is the 4th spectral
+    # hero-λ slot (RGBA convention), present only under SKINNY_SPECTRAL.
+    fields: list[tuple[str, str]] = [
+        ("phiR", "uint"),
+        ("phiG", "uint"),
+        ("phiB", "uint"),
+    ]
+    if spectral:
+        fields.append(("phiW", "uint"))
+    fields.append(("m", "uint"))
+    return fields
+
+
+# RGB field lists (back-compat: existing call sites + tests reference these).
+VISIBLE_POINT_FIELDS: list[tuple[str, str]] = _visible_point_fields(spectral=False)
+SPPM_ACCUM_FIELDS: list[tuple[str, str]] = _sppm_accum_fields(spectral=False)
+
+
+def visible_point_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_visible_point_fields(spectral), msl=msl)
+
+
+def sppm_accum_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of SppmAccum — scalar (default) or MSL (``msl=True``). All
-    fields are uint, so the scalar and MSL strides are identical."""
-    return _struct_stride(SPPM_ACCUM_FIELDS, msl=msl)
+    fields are uint, so the scalar and MSL strides are identical (RGB 16 B /
+    spectral 20 B)."""
+    return _struct_stride(_sppm_accum_fields(spectral), msl=msl)
 
 
 VISIBLE_POINT_STRIDE = visible_point_size()              # 180 B (scalar / Vulkan)
 VISIBLE_POINT_STRIDE_MSL = visible_point_size(msl=True)  # 240 B (Metal)
+VISIBLE_POINT_STRIDE_SPECTRAL = visible_point_size(spectral=True)              # scalar
+VISIBLE_POINT_STRIDE_SPECTRAL_MSL = visible_point_size(msl=True, spectral=True)  # Metal
 SPPM_ACCUM_STRIDE = sppm_accum_size()                    # 16 B (both layouts)
 SPPM_ACCUM_STRIDE_MSL = sppm_accum_size(msl=True)        # 16 B
+SPPM_ACCUM_STRIDE_SPECTRAL = sppm_accum_size(spectral=True)              # 20 B
+SPPM_ACCUM_STRIDE_SPECTRAL_MSL = sppm_accum_size(msl=True, spectral=True)  # 20 B
 
 
-def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False) -> dict[str, int]:
+def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False,
+                      spectral: bool = False) -> dict[str, int]:
     """Byte sizes for the SPPM per-pixel buffers, the source of truth the SPPM
     stage allocator sizes against.
 
@@ -247,9 +282,10 @@ def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False) -> dict[str, int]:
     the per-pixel lane, in ``[0, num_pixels)``.
 
     ``msl=True`` uses the Metal struct stride so the Metal allocator does not
-    undersize the visible-point region."""
-    vp_stride = VISIBLE_POINT_STRIDE_MSL if msl else VISIBLE_POINT_STRIDE
-    acc_stride = SPPM_ACCUM_STRIDE_MSL if msl else SPPM_ACCUM_STRIDE
+    undersize the visible-point region. ``spectral=True`` sizes against the wider
+    spectral structs (Spectrum beta/ld + conductorMetalId; 4-channel SppmAccum)."""
+    vp_stride = visible_point_size(msl=msl, spectral=spectral)
+    acc_stride = sppm_accum_size(msl=msl, spectral=spectral)
     return {
         "visible_points": num_pixels * vp_stride,
         "sppm_accum":     num_pixels * acc_stride,
