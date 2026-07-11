@@ -2129,7 +2129,7 @@ class Renderer:
             return self._wavefront_path_pass
         self._destroy_wavefront_path_pass()
         from skinny.vk_wavefront import WavefrontPathPass
-        from skinny.wavefront_layout import PATH_STATE_STRIDE
+        from skinny.wavefront_layout import path_state_size
         # Tiled streaming: the path-state buffer holds a fixed-size stream
         # (capped at STREAM_CAP), not one slot per pixel — so VRAM does not grow
         # with resolution. The frame is processed in ceil(num_pixels/stream)
@@ -2137,7 +2137,10 @@ class Renderer:
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
-        self._wf_path_state_buf = self._gpu.StorageBuffer(self.ctx, stream_size * PATH_STATE_STRIDE)
+        # Spectral path state is wider (Spectrum throughput/radiance +
+        # SampledWavelengths); RGB (spectral=False) keeps the 68 B scalar stride.
+        path_state_stride = path_state_size(spectral=self._spectral)
+        self._wf_path_state_buf = self._gpu.StorageBuffer(self.ctx, stream_size * path_state_stride)
         self._wf_path_hit_buf = self._gpu.StorageBuffer(
             self.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
         self._wavefront_path_pass = WavefrontPathPass(
@@ -2398,8 +2401,18 @@ class Renderer:
         num_pixels = self.width * self.height
         cap = int(getattr(self, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
         stream_size = max(1, min(num_pixels, cap))
-        vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * WavefrontBdptPass.VERTEX_STRIDE
-        aux_bytes = stream_size * WavefrontBdptPass.AUX_STRIDE
+        # Spectral eye/light vertices (Spectrum throughput/emission) and aux
+        # (Spectrum roles + SampledWavelengths) are wider than RGB. Size against
+        # the mirrored spectral stride, floored by the RGB headroom constants so
+        # RGB (spectral=False) is byte-identical.
+        vert_stride = WavefrontBdptPass.VERTEX_STRIDE
+        aux_stride = WavefrontBdptPass.AUX_STRIDE
+        if self._spectral:
+            from skinny.wavefront_layout import bdpt_vertex_size, wf_bdpt_aux_size
+            vert_stride = max(vert_stride, bdpt_vertex_size(spectral=True))
+            aux_stride = max(aux_stride, wf_bdpt_aux_size(spectral=True))
+        vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * vert_stride
+        aux_bytes = stream_size * aux_stride
         self._wf_bdpt_eye_buf = self._gpu.StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_light_buf = self._gpu.StorageBuffer(self.ctx, vert_bytes)
         self._wf_bdpt_aux_buf = self._gpu.StorageBuffer(self.ctx, aux_bytes)

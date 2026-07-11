@@ -517,12 +517,12 @@ class MetalWavefrontPathPass:
         isect = self._entries["wfPathIntersect"].program
         flat = self._entries["wfPathShadeFlat"].program
         state_stride = (_reflect_element(gen, "wfState") or (None, 0))[1]
-        expected = path_state_size(msl=True)
+        expected = path_state_size(msl=True, spectral=self._spectral)
         if state_stride and state_stride != expected:
             raise RuntimeError(
                 f"reflected Metal WavefrontPathState stride {state_stride}B != "
-                f"wavefront_layout.path_state_size(msl=True) {expected}B — "
-                f"update the GPU-free mirror (task 1.5)")
+                f"wavefront_layout.path_state_size(msl=True, spectral={self._spectral}) "
+                f"{expected}B — update the GPU-free mirror (task 1.5)")
         self.state_stride = state_stride or expected
         self.hit_stride = (_reflect_element(isect, "wfHits") or (None, 0))[1] or 128
         self.neural_stride = (_reflect_element(flat, "wfNeural") or (None, 0))[1] or 48
@@ -757,10 +757,10 @@ class MetalWavefrontSppmPass:
                  graph_fragments=None, neural_config=None,
                  spectral: bool = False) -> None:
         from skinny.wavefront_layout import (
-            SPPM_ACCUM_STRIDE,
-            VISIBLE_POINT_STRIDE_MSL,
+            sppm_accum_size,
             sppm_grid_buffer_sizes,
             sppm_grid_cell_count,
+            visible_point_size,
         )
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
@@ -783,14 +783,17 @@ class MetalWavefrontSppmPass:
             "wavefront_sppm", src_path.read_text(encoding="utf-8"), str(src_path))
         self._entries = {e: _EntryPipeline(ctx, session, module, e) for e in self._ENTRIES}
 
-        # Reflected VisiblePoint stride must match the host MSL mirror.
+        # Reflected VisiblePoint stride must match the host MSL mirror. Spectral
+        # widens it (Spectrum beta/ld + conductorMetalId); RGB stays identical.
         eye = self._entries["wfSppmEye"].program
+        vp_expected = visible_point_size(msl=True, spectral=self._spectral)
         vp_stride = (_reflect_element(eye, "sppmVisiblePoints") or (None, 0))[1]
-        if vp_stride and vp_stride != VISIBLE_POINT_STRIDE_MSL:
+        if vp_stride and vp_stride != vp_expected:
             raise RuntimeError(
                 f"reflected Metal VisiblePoint stride {vp_stride}B != "
-                f"wavefront_layout.VISIBLE_POINT_STRIDE_MSL {VISIBLE_POINT_STRIDE_MSL}B")
-        self.vp_stride = vp_stride or VISIBLE_POINT_STRIDE_MSL
+                f"wavefront_layout.visible_point_size(msl=True, spectral="
+                f"{self._spectral}) {vp_expected}B")
+        self.vp_stride = vp_stride or vp_expected
 
         # MSL reflection surface for the renderer's relocators (the pass is the
         # `_msl_layout_source` in wavefront mode — no megakernel is compiled). fc
@@ -809,9 +812,10 @@ class MetalWavefrontSppmPass:
         self.graph_param_layouts: dict = {}
 
         grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
+        acc_stride = sppm_accum_size(msl=True, spectral=self._spectral)
         self.buffers: dict[str, StorageBuffer] = {
             "visible_points": StorageBuffer(ctx, self.num_pixels * self.vp_stride),
-            "accum": StorageBuffer(ctx, self.num_pixels * SPPM_ACCUM_STRIDE),
+            "accum": StorageBuffer(ctx, self.num_pixels * acc_stride),
             "grid": StorageBuffer(ctx, grid_sizes["grid_combined"]),
             "scan": StorageBuffer(ctx, grid_sizes["scan_scratch"]),
         }

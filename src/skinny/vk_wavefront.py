@@ -904,8 +904,7 @@ class WavefrontSppmPass:
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  stream_size: int, num_pixels: int, spectral: bool = False) -> None:
         from skinny.wavefront_layout import (
-            SPPM_ACCUM_STRIDE,
-            VISIBLE_POINT_STRIDE,
+            sppm_buffer_sizes,
             sppm_grid_buffer_sizes,
             sppm_grid_cell_count,
         )
@@ -928,9 +927,12 @@ class WavefrontSppmPass:
         self._modules = modules
 
         grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
+        # Spectral (Spectrum beta/ld + conductorMetalId; 4-channel SppmAccum)
+        # widens both per-pixel buffers; RGB (spectral=False) stays byte-identical.
+        sppm_sizes = sppm_buffer_sizes(self.num_pixels, spectral=self._spectral)
         self._buffers = {}
-        self._buffers["visible_points"] = StorageBuffer(ctx, self.num_pixels * VISIBLE_POINT_STRIDE)
-        self._buffers["accum"] = StorageBuffer(ctx, self.num_pixels * SPPM_ACCUM_STRIDE)
+        self._buffers["visible_points"] = StorageBuffer(ctx, sppm_sizes["visible_points"])
+        self._buffers["accum"] = StorageBuffer(ctx, sppm_sizes["sppm_accum"])
         self._buffers["grid"] = StorageBuffer(ctx, grid_sizes["grid_combined"])
         self._buffers["scan"] = StorageBuffer(ctx, grid_sizes["scan_scratch"])
 
@@ -1678,11 +1680,13 @@ class WavefrontPasses:
     stream-size retune).
     """
 
-    def __init__(self, ctx, stream_size: int, num_materials: int) -> None:
+    def __init__(self, ctx, stream_size: int, num_materials: int,
+                 spectral: bool = False) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.num_materials = int(num_materials)
-        self.buffer_sizes = queue_buffer_sizes(self.stream_size, self.num_materials)
+        self.buffer_sizes = queue_buffer_sizes(
+            self.stream_size, self.num_materials, spectral=bool(spectral))
         self.buffers: dict[str, StorageBuffer] = {
             name: StorageBuffer(ctx, size) for name, size in self.buffer_sizes.items()
         }

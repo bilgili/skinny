@@ -32,6 +32,7 @@ SLANG_SCALAR_SIZES: dict[str, int] = {
     "float4": 16,
     "uint": 4,
     "int": 4,
+    "bool": 4,  # Slang stores bool as a 32-bit value in a buffer (scalar layout)
 }
 
 # MSL (Metal target) byte sizes + alignments. Slang pads ``float3`` to 16 B
@@ -39,9 +40,11 @@ SLANG_SCALAR_SIZES: dict[str, int] = {
 # size==alignment. A struct's stride rounds up to its largest member alignment.
 SLANG_MSL_SIZES: dict[str, int] = {
     "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
+    "bool": 1,
 }
 SLANG_MSL_ALIGNS: dict[str, int] = {
     "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
+    "bool": 1,
 }
 
 
@@ -146,7 +149,7 @@ REC_VERTEX_STRIDE_MSL = rec_vertex_size(msl=True)  # 112 B (Metal)
 
 
 def queue_buffer_sizes(stream_size: int, num_materials: int,
-                       *, msl: bool = False) -> dict[str, int]:
+                       *, msl: bool = False, spectral: bool = False) -> dict[str, int]:
     """Byte sizes for the wavefront stage buffers, the single source of truth
     the `WavefrontPasses` allocator (vk_wavefront.py) sizes against.
 
@@ -158,9 +161,11 @@ def queue_buffer_sizes(stream_size: int, num_materials: int,
     ``msl=True`` sizes the struct-backed buffers (``path_state``) against the
     Metal MSL stride so the Metal wavefront allocator does not undersize them;
     plain (uint-stride) queue buffers are layout-agnostic. Vulkan callers omit
-    it and keep the scalar sizing byte-for-byte.
+    it and keep the scalar sizing byte-for-byte. ``spectral=True`` sizes
+    ``path_state`` against the wider spectral WavefrontPathState (Spectrum
+    throughput/radiance + SampledWavelengths); RGB stays byte-identical.
     """
-    path_state_stride = PATH_STATE_STRIDE_MSL if msl else PATH_STATE_STRIDE
+    path_state_stride = path_state_size(msl=msl, spectral=spectral)
     return {
         "path_state":      stream_size * path_state_stride,
         "ray_queue":       stream_size * _UINT,
@@ -290,6 +295,81 @@ def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False,
         "visible_points": num_pixels * vp_stride,
         "sppm_accum":     num_pixels * acc_stride,
     }
+
+
+# ── Wavefront BDPT subpath-vertex + aux buffers (change spectral-wavefront) ──
+# Mirror of BDPTVertex (shaders/integrators/bdpt.slang) and WfBdptAux
+# (shaders/wavefront/wavefront_bdpt.slang) — the per-lane eye/light vertex stacks
+# and per-lane aux record the wavefront BDPT pass carries in VRAM (GPU-internal
+# scratch; the host only SIZES them). In the spectral build (SKINNY_SPECTRAL) the
+# color roles carry `Spectrum`=float4 (vs float3 RGB) and WfBdptAux appends
+# `SampledWavelengths` (two float4). These grow the scalar (Vulkan) stride, so the
+# host allocator must size against the spectral stride or the Metal/Vulkan BDPT
+# kernels overrun. The Metal pass reflects the real MSL stride and does not use
+# these helpers; they exist to size the Vulkan (scalar) allocation and to lock the
+# spectral stride against a test. RGB is byte-identical to the pre-spectral build.
+
+
+def _bdpt_vertex_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    return [
+        ("kind",       "uint"),
+        ("position",   "float3"),
+        ("N",          "float3"),
+        ("throughput", col),
+        ("emission",   col),
+        ("pdfFwd",     "float"),
+        ("pdfRev",     "float"),
+        ("isDelta",    "bool"),
+        ("onLight",    "bool"),
+        ("matId",      "uint"),
+        ("uv",         "float2"),
+        ("posObject",  "float3"),
+        ("geoN",       "float3"),
+        ("tangent",    "float3"),
+        ("hasTangent", "bool"),
+    ]
+
+
+def _wf_bdpt_aux_fields(spectral: bool) -> list[tuple[str, str]]:
+    col = "float4" if spectral else "float3"
+    fields: list[tuple[str, str]] = [
+        ("eyeLen",        "int"),
+        ("lightLen",      "int"),
+        ("rngState",      "uint"),
+        ("lensWeight",    "float"),
+        ("pixel",         "uint"),
+        ("escaped",       col),
+        ("radiance",      col),
+        ("ewRayO",        "float3"),
+        ("ewRayD",        "float3"),
+        ("ewThroughput",  col),
+        ("ewPdfFwdOmega", "float"),
+        ("ewMisBsdfPdf",  "float"),
+        ("ewFlags",       "uint"),
+    ]
+    if spectral:
+        # SampledWavelengths { float4 lambda; float4 pdf; }
+        fields += [("sw_lambda", "float4"), ("sw_pdf", "float4")]
+    return fields
+
+
+def bdpt_vertex_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of BDPTVertex — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_bdpt_vertex_fields(spectral), msl=msl)
+
+
+def wf_bdpt_aux_size(*, msl: bool = False, spectral: bool = False) -> int:
+    """Byte stride of WfBdptAux — scalar (default) or MSL (``msl=True``),
+    RGB (default) or spectral (``spectral=True``)."""
+    return _struct_stride(_wf_bdpt_aux_fields(spectral), msl=msl)
+
+
+BDPT_VERTEX_STRIDE = bdpt_vertex_size()                             # 120 B (scalar)
+BDPT_VERTEX_STRIDE_SPECTRAL = bdpt_vertex_size(spectral=True)       # 128 B (scalar)
+WF_BDPT_AUX_STRIDE = wf_bdpt_aux_size()                            # 92 B (scalar)
+WF_BDPT_AUX_STRIDE_SPECTRAL = wf_bdpt_aux_size(spectral=True)      # 136 B (scalar)
 
 
 def sppm_grid_cell_count(num_pixels: int) -> int:

@@ -210,6 +210,75 @@ def test_queue_buffer_sizes_msl_covers_scalar():
     assert queue_buffer_sizes(1024, 4) == scalar
 
 
+# ── Spectral allocation-stride guard (change spectral-wavefront) ────────────
+#
+# Regression for the P1 memory-corruption bug codex found: the spectral shader
+# structs grew (WavefrontPathState / WfBdptAux+BDPTVertex / VisiblePoint+SppmAccum)
+# but the host buffer allocators sized against the RGB strides, so a
+# `--spectral --execution-mode wavefront` run overran/corrupted the GPU buffers.
+# These lock every allocator's spectral stride to the spectral layout size AND
+# strictly above the RGB stride, and pin spectral=False byte-identical to RGB.
+
+
+def test_spectral_path_state_alloc_stride():
+    from skinny.wavefront_layout import PATH_STATE_STRIDE_SPECTRAL_MSL
+    # scalar (Vulkan renderer path-state buffer, renderer.py)
+    assert path_state_size(spectral=True) == PATH_STATE_STRIDE_SPECTRAL == 108
+    assert path_state_size(spectral=True) > PATH_STATE_STRIDE
+    assert path_state_size(spectral=False) == PATH_STATE_STRIDE  # RGB unchanged
+    # MSL (Metal validator expected stride, metal_wavefront.py)
+    assert path_state_size(msl=True, spectral=True) == PATH_STATE_STRIDE_SPECTRAL_MSL == 128
+    assert path_state_size(msl=True, spectral=True) > PATH_STATE_STRIDE_MSL
+    # queue_buffer_sizes threads spectral into the path_state region only.
+    spec = queue_buffer_sizes(1024, 4, spectral=True)
+    rgb = queue_buffer_sizes(1024, 4)
+    assert spec["path_state"] == 1024 * path_state_size(spectral=True)
+    assert spec["path_state"] > rgb["path_state"]
+    for key in ("ray_queue", "material_queue", "ray_count",
+                "material_count", "material_offset", "indirect_args"):
+        assert spec[key] == rgb[key]
+
+
+def test_spectral_bdpt_aux_and_vertex_alloc_stride():
+    from skinny.wavefront_layout import bdpt_vertex_size, wf_bdpt_aux_size
+    # WfBdptAux is the codex-flagged overrun: RGB alloc constant AUX_STRIDE=128,
+    # spectral struct ≈136 B scalar → must exceed both the RGB struct and 128.
+    assert wf_bdpt_aux_size() == 92
+    assert wf_bdpt_aux_size(spectral=True) == 136
+    assert wf_bdpt_aux_size(spectral=True) > wf_bdpt_aux_size()
+    assert wf_bdpt_aux_size(spectral=True) > 128  # > RGB alloc constant AUX_STRIDE
+    # BDPTVertex grows throughput/emission float3→float4 (+8 B scalar).
+    assert bdpt_vertex_size() == 120
+    assert bdpt_vertex_size(spectral=True) == 128
+    assert bdpt_vertex_size(spectral=True) > bdpt_vertex_size()
+    # The renderer floors both strides by the RGB alloc constants (128/128), so
+    # RGB is byte-identical and spectral bumps aux to 136 (vertex fits at 128).
+    assert max(128, bdpt_vertex_size(spectral=False)) == 128
+    assert max(128, wf_bdpt_aux_size(spectral=False)) == 128
+    assert max(128, wf_bdpt_aux_size(spectral=True)) == 136
+
+
+def test_spectral_sppm_alloc_stride():
+    from skinny.wavefront_layout import (
+        SPPM_ACCUM_STRIDE,
+        VISIBLE_POINT_STRIDE,
+        sppm_accum_size,
+        sppm_buffer_sizes,
+        visible_point_size,
+    )
+    # VisiblePoint: +conductorMetalId (spectral); SppmAccum: +phiW 4th channel.
+    assert visible_point_size(spectral=True) == 192 > VISIBLE_POINT_STRIDE == 180
+    assert sppm_accum_size(spectral=True) == 20 > SPPM_ACCUM_STRIDE == 16
+    assert visible_point_size(spectral=False) == VISIBLE_POINT_STRIDE  # RGB unchanged
+    assert sppm_accum_size(spectral=False) == SPPM_ACCUM_STRIDE
+    spec = sppm_buffer_sizes(4096, spectral=True)
+    rgb = sppm_buffer_sizes(4096)
+    assert spec["visible_points"] == 4096 * visible_point_size(spectral=True)
+    assert spec["sppm_accum"] == 4096 * sppm_accum_size(spectral=True)
+    assert spec["visible_points"] > rgb["visible_points"]
+    assert spec["sppm_accum"] > rgb["sppm_accum"]
+
+
 def _reflect_msl_layout(struct: str, import_mod: str):
     """Reflect (stride, [(field, offset), …]) of a struct under Slang's Metal
     target by importing the real shader module — the GPU-free truth the mirror is
