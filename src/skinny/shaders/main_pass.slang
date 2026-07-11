@@ -22,6 +22,7 @@ import integrators.bdpt;
 #if defined(SKINNY_SPECTRAL)
 import spectrum;                  // SampledWavelengths, sampleWavelengths, spectrumResolveToLinearSRGB
 import integrators.path_spectral; // SpectralPathTracer — hero-wavelength flat transport
+import integrators.bdpt_spectral; // SpectralBDPTIntegrator — hero-wavelength flat bidirectional transport
 #endif
 import cameras.pinhole;
 import cameras.thick_lens;
@@ -78,11 +79,22 @@ void runFrame<TC : ICamera>(TC cam, uint2 pixel, inout RNG rng)
     float3 sample;
 
 #if defined(SKINNY_SPECTRAL)
-    // Spectral variant: hero-wavelength flat path transport (v1 is path-only, so
-    // no BDPT branch). The primary env-miss resolves the upsampled illuminant
+    // Spectral variant: hero-wavelength flat transport. BDPT when selected on a
+    // flat first hit (mirrors the RGB useBdpt gate), else the path tracer; a
+    // non-flat first hit under either falls through the integrator's own
+    // flat-only guard. The primary env-miss resolves the upsampled illuminant
     // through the same CMF film resolve so the directly-visible background is
     // spectrally consistent with the transported paths.
-    if (hit.hit)
+    bool useBdptS = (fc.integratorType == INTEGRATOR_BDPT)
+                 && hit.hit
+                 && ((materialTypes[hit.materialId] & 0xFFu) == MATERIAL_TYPE_FLAT);
+    if (useBdptS)
+    {
+        SpectralBDPTIntegrator<TC> bdpt;
+        bdpt.cam = cam;
+        sample = bdpt.estimateRadiance(ray, hit, rng);
+    }
+    else if (hit.hit)
     {
         SpectralPathTracer integrator;
         sample = integrator.estimateRadiance(ray, hit, rng);

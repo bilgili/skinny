@@ -196,24 +196,27 @@ def test_spectral_skipped_when_gate_off(monkeypatch):
 
 
 def test_spectral_out_of_envelope_skipped_even_when_wired():
-    # Out-of-envelope combos stay skipped with the gate on.
-    for bad in [RenderCombo("bdpt", "megakernel", spectral=True),
+    # Out-of-envelope combos stay skipped with the gate on. (bdpt+megakernel is
+    # now IN envelope — change spectral-bdpt-megakernel — so the out-of-envelope
+    # cases are sppm and the wavefront execution mode.)
+    for bad in [RenderCombo("sppm", "megakernel", spectral=True),
                 RenderCombo("path", "wavefront", spectral=True)]:
         assert not parity.combo_is_valid(bad, _flat_scene())[0]
 
 
-def test_spectral_bdpt_skipped_path_only():
+def test_spectral_bdpt_admitted():
+    # BDPT under the megakernel is in the spectral envelope (change
+    # spectral-bdpt-megakernel) and, with the transport wired, rendered.
     ok, reason = parity.combo_is_valid(
         RenderCombo("bdpt", "megakernel", spectral=True), _flat_scene())
-    assert not ok and "path-only" in reason
+    assert ok, reason
 
 
-@pytest.mark.parametrize("integrator", ["bdpt", "sppm"])
-def test_spectral_non_path_skipped(integrator):
-    # bdpt/sppm spectral combos are always skipped with a reason (sppm trips the
-    # earlier SPPM-wavefront-only rule; bdpt trips the spectral path-only rule).
+def test_spectral_sppm_skipped():
+    # SPPM has no megakernel path, so spectral SPPM is always skipped with a
+    # reason (it trips the earlier SPPM-wavefront-only rule).
     ok, reason = parity.combo_is_valid(
-        RenderCombo(integrator, "megakernel", spectral=True), _flat_scene())
+        RenderCombo("sppm", "megakernel", spectral=True), _flat_scene())
     assert not ok and reason
 
 
@@ -245,15 +248,18 @@ def test_spectral_non_flat_scene_all_skipped(scene):
         assert not ok and reason
 
 
-def test_spectral_envelope_is_exactly_path_megakernel():
-    # Exactly one spectral combo is envelope-eligible: (path, megakernel). With
-    # the gate on (ships True) it is the sole spectral entry in the rendered set.
+def test_spectral_envelope_is_exactly_path_and_bdpt_megakernel():
+    # Exactly two spectral combos are envelope-eligible: (path, megakernel) and
+    # (bdpt, megakernel) — change spectral-bdpt-megakernel. With the gate on
+    # (ships True) they are the sole spectral entries in the rendered set.
+    expected = [RenderCombo("path", "megakernel", spectral=True),
+                RenderCombo("bdpt", "megakernel", spectral=True)]
     eligible = [c for c in parity.all_combos()
                 if c.spectral and parity.spectral_envelope(c, _flat_scene())[0]]
-    assert eligible == [RenderCombo("path", "megakernel", spectral=True)]
-    assert "spectral" in eligible[0].label
+    assert set(eligible) == set(expected)
+    assert all("spectral" in c.label for c in eligible)
     rendered_spectral = [c for c in parity.enumerate_combos(_flat_scene()) if c.spectral]
-    assert rendered_spectral == [RenderCombo("path", "megakernel", spectral=True)]
+    assert set(rendered_spectral) == set(expected)
 
 
 def test_coverage_meta_spectral_axis_covered():

@@ -8456,16 +8456,17 @@ class Renderer:
         return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
 
     def _active_integrator_index(self) -> int:
-        """The integrator actually dispatched. Spectral v1 is PATH-only: the
-        megakernel spectral variant always runs SpectralPathTracer (main_pass.slang
-        strips the integrator branch under SKINNY_SPECTRAL), and the startup guard
-        (reject_spectral_unsupported) refuses a non-path startup integrator. But
-        integrator_index is persisted and runtime-switchable on the interactive
-        front-ends (and settable via HeadlessRenderer render options), so clamp to
-        0 (path) here — the same pattern as _active_proposals — so fc.integratorType
-        and the config matrix report what is actually rendered instead of a stale
-        BDPT/SPPM selection."""
-        return 0 if self._spectral else int(self.integrator_index)
+        """The integrator actually dispatched. The spectral megakernel supports
+        PATH (0) and BDPT (1) — main_pass.slang under SKINNY_SPECTRAL dispatches
+        SpectralBDPTIntegrator when fc.integratorType == INTEGRATOR_BDPT on a flat
+        first hit, else SpectralPathTracer. SPPM (2) has no megakernel path, so it
+        is pinned to PATH (mirroring the RGB megakernel's silent path fallback for
+        non-BDPT/SPPM types). integrator_index is persisted and runtime-switchable
+        on the interactive front-ends, so this is what drives fc.integratorType and
+        the config matrix — reporting what is actually rendered."""
+        if self._spectral:
+            return int(self.integrator_index) if int(self.integrator_index) in (0, 1) else 0
+        return int(self.integrator_index)
 
     def _neural_active(self) -> bool:
         """True when the neural proposal (bit2) is selected AND the backend can
@@ -8764,15 +8765,18 @@ class Renderer:
                if self.execution_mode_fallback_active else cr.ON)
         rows.append(cr.ConfigRow("execution-mode", req_e, res_e, est))
 
-        # integrator. Spectral v1 pins the dispatch to path (see
-        # _active_integrator_index); report that pin rather than echo a runtime
-        # BDPT/SPPM selection the spectral megakernel never runs. Fold the
+        # integrator. Spectral supports path (0) and bdpt (1); SPPM (2) pins to
+        # path (see _active_integrator_index). Report that pin rather than echo a
+        # runtime SPPM selection the spectral megakernel never runs. Fold the
         # requested token into STATUS so matrix_signature (resolved+status) flips
         # when the user switches integrator live under spectral.
-        # Inline the path pin (0 under spectral) rather than call
-        # _active_integrator_index — `_collect_config_rows` runs against a plain
-        # namespace in the observability tests, so it must read only fields.
-        res_idx = 0 if getattr(self, "_spectral", False) else int(self.integrator_index)
+        # Inline the pin rather than call _active_integrator_index —
+        # `_collect_config_rows` runs against a plain namespace in the
+        # observability tests, so it must read only fields.
+        _sp = getattr(self, "_spectral", False)
+        res_idx = int(self.integrator_index)
+        if _sp and res_idx not in (0, 1):
+            res_idx = 0
         req_integ = self.integrator_modes[self.integrator_index].lower()
         res_integ = self.integrator_modes[res_idx].lower()
         if self._spectral and req_integ != res_integ:

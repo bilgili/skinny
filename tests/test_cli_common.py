@@ -518,14 +518,16 @@ def test_reject_spectral_envelope_ok_when_wired(monkeypatch):
     monkeypatch.setattr(spectral_capability, "SPECTRAL_IMPLEMENTED", True)
     reject_spectral_unsupported(True, "path", "megakernel", None, None)
     reject_spectral_unsupported(True, "path", "megakernel", "", "none")
+    # BDPT is in the megakernel spectral envelope (change spectral-bdpt-megakernel).
+    reject_spectral_unsupported(True, "bdpt", "megakernel", None, None)
 
 
-@pytest.mark.parametrize("integrator", ["bdpt", "sppm"])
-def test_reject_spectral_non_path_raises(integrator):
+def test_reject_spectral_sppm_raises():
+    # SPPM has no megakernel path, so spectral SPPM is refused at startup.
     from skinny.cli_common import reject_spectral_unsupported
 
     with pytest.raises(SystemExit):
-        reject_spectral_unsupported(True, integrator, "megakernel", None, None)
+        reject_spectral_unsupported(True, "sppm", "megakernel", None, None)
 
 
 def test_reject_spectral_wavefront_raises():

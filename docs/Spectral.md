@@ -69,7 +69,7 @@ and the companions share the same path geometry.
 
 | Property | Value |
 | --- | --- |
-| Integrator | **Path only.** BDPT / SPPM are excluded at compile time (the spectral branch never calls them). |
+| Integrator | **Path and BDPT** (megakernel). SPPM is excluded — its photon pass is wavefront-only, so spectral SPPM awaits the spectral wavefront follow-up. See [Bidirectional transport](#bidirectional-transport-bdpt). |
 | Execution mode | **Megakernel only.** Wavefront is a designated follow-up; `--spectral` refuses an explicit `--execution-mode wavefront`. |
 | Materials | **Flat only** (`UsdPreviewSurface` / `standard_surface` / `OpenPBR` / Python-material flats). Skin / subsurface / heterogeneous-volume scenes are refused at startup; a non-flat hit inside the loop terminates the path rather than mis-shade. |
 | Reuse / guiding | **None.** ReSTIR reuse and the neural proposal are refused. |
@@ -218,6 +218,64 @@ reproduces the RGB sample weight exactly:
 `flatBsdfResponse`: colored reflectances are passed pre-upsampled, the Schlick
 term evaluates per-λ on `F0`, and every scalar lobe weight is identical to the RGB
 sample, so `response/pdf` reproduces the RGB weight.
+
+The per-λ NEE machinery (`SpectralFlatColors`, `upsampleFlatColors`,
+`flatResponseS/NEE`, `spectralAllLightsNEE`) lives in
+`integrators/spectral_flat_common.slang` — shared verbatim by the path and
+bidirectional spectral integrators so both recolour identically.
+
+## Bidirectional transport (BDPT)
+
+`--spectral --integrator bdpt` runs `SpectralBDPTIntegrator`
+(`integrators/bdpt_spectral.slang`), the bidirectional analogue of
+`SpectralPathTracer` and the same relationship to the RGB `BDPTIntegrator` that
+the spectral path tracer has to the RGB one: a **separate** integrator carrying
+`Spectrum` throughput/emission that reuses the RGB machinery for everything
+wavelength-independent. The split is exact:
+
+- **Colour** (`Spectrum`) — the eye/light subpath throughputs, vertex emission,
+  every connection contribution, and the light-tracer splat. Endpoint responses
+  use the same `flatResponseNEE` (`f·cos·opacity` per λ) as the path integrator;
+  light radiance upsamples as an illuminant (or takes the exact Planck / authored
+  SPD, [Exact spectral sources](#exact-spectral-sources)).
+- **Geometry / pdf / MIS** (scalar) — sampled directions, solid-angle pdfs, the
+  area↔solid-angle conversions, and the full power-heuristic MIS partition are
+  the **RGB** values. A `SpectralBDPTVertex` projects to a colour-free
+  `BDPTVertex` (`asRgb`) and calls `bdpt.slang`'s `misWeight` / `splatMisWeight` /
+  `convertSAtoArea` / `bdptSurface` **directly** — there is exactly one MIS
+  implementation, so spectral and RGB BDPT can never disagree on weighting.
+
+All five strategy families transport spectrally: the eye random walk, the light
+random walk (whose origin seeds the blackbody Planck SPD at emissive-triangle
+origins), s≥2/t=0 emissive-vertex hits, t=1 NEE (`connectT1S`), t≥2 generic
+connections (`connectGenericS`), and the s=1 camera splat (`splatLightVertexS`).
+Directional lights spawn no light subpath (delta), so authored-SPD distant lights
+and environment metamerism reach the image via t=1 NEE and the eye walk — exactly
+as in RGB BDPT.
+
+**Shared wavelengths and dispersion order.** The 4 hero wavelengths are drawn
+**once** per pixel path and shared across both subpaths — required so a connection
+forms the per-λ product `f_eye(λ)·G·f_light(λ)·L(λ)`. Evaluation order is pinned:
+eye walk → light walk → splats → connections. A hero-λ dispersion collapse
+(`terminateSecondary`, the same Cauchy `n(λ₀)` rule as the path tracer, on either
+subpath) therefore narrows every subsequent strategy; on a dispersion-dominated
+scene this raises spectral variance (unbiased, matching the known hero-wavelength
+behaviour — pbrt-v4 has no BDPT, so there is no direct reference for the
+bidirectional collapse).
+
+**Splat resolve.** The s=1 light-tracer contribution is a `Spectrum`; it is
+resolved through the CIE film resolve to linear sRGB **before** the atomic add
+into `lightSplatBuffer`, so the splat buffer format and compositing are untouched.
+The resolve applies the gamut clamp per splat (clamp-per-splat ≠ clamp-of-sum),
+which biases out-of-gamut hero-collapsed dispersion splats — an accepted v1
+choice, consistent with the eye side's per-sample clamp. If the dispersion-caustic
+gate shows hue/energy bias, the escalation is signed-XYZ splat accumulation
+(3-wide, converted at composite).
+
+The RGB build never imports `bdpt_spectral.slang`; `main_pass.slang` dispatches it
+only under `-DSKINNY_SPECTRAL` when `fc.integratorType == INTEGRATOR_BDPT` on a
+flat first hit (a non-flat first hit falls through to the path tracer's flat-only
+guard, as the RGB `useBdpt` falls to the path tracer).
 
 ## Exact spectral sources
 
