@@ -190,16 +190,20 @@ ANCHOR = RenderCombo(integrator="path", execution_mode="wavefront",
 
 
 def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
-    """The intended v1 spectral validity envelope, independent of whether the
+    """The intended spectral validity envelope, independent of whether the
     transport is wired yet (:data:`SPECTRAL_IMPLEMENTED`).
 
-    Path integrator + megakernel execution + flat materials; the neural proposal
-    and ReSTIR reuse are wavefront-only, so they are refused too. Returns
-    ``(ok, reason)`` with a specific reason for each out-of-scope axis. Mirrors
+    Path or BDPT integrator + megakernel execution + flat materials; SPPM has no
+    megakernel path (photon pass is wavefront-only), and the neural proposal and
+    ReSTIR reuse are wavefront-only, so they are refused. Returns ``(ok, reason)``
+    with a specific reason for each out-of-scope axis. Mirrors
     ``cli_common.reject_spectral_unsupported``.
     """
-    if combo.integrator != "path":
-        return False, f"spectral is path-only (v1); {combo.integrator.upper()} follow-up"
+    if combo.integrator not in ("path", "bdpt"):
+        return False, (
+            f"spectral is path/bdpt-megakernel only; {combo.integrator.upper()} has no "
+            "megakernel path — spectral wavefront follow-up"
+        )
     if combo.execution_mode != "megakernel":
         return False, "spectral is megakernel-only (v1); wavefront follow-up"
     if combo.has_neural:
@@ -279,7 +283,7 @@ def all_combos() -> list[RenderCombo]:
             for reuse in REUSE_AXES:
                 combos.append(RenderCombo(integ, mode, (), reuse))
             # spectral axis — the bare variant per integrator×mode; combo_is_valid
-            # keeps only (path, megakernel) on flat scenes.
+            # keeps (path, megakernel) and (bdpt, megakernel) on flat scenes.
             combos.append(RenderCombo(integ, mode, (), "none", spectral=True))
     return combos
 

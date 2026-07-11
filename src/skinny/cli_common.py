@@ -203,12 +203,13 @@ def reject_spectral_unsupported(
 ) -> None:
     """Refuse ``--spectral`` outside its v1 envelope. No-op when not spectral.
 
-    Spectral mode is a compile-time variant chosen at startup (path integrator,
-    megakernel execution, flat materials). Checked against the **resolved**
-    execution mode after :func:`resolve_execution_mode`, so it catches an
-    explicit ``--execution-mode wavefront`` while ``auto`` (which derives
-    ``megakernel`` for ``path``) is allowed. The neural proposal and ReSTIR reuse
-    layers are wavefront-only, so they are refused too. Raises ``SystemExit``.
+    Spectral mode is a compile-time variant chosen at startup (path or bdpt
+    integrator, megakernel execution, flat materials). Checked against the
+    **resolved** execution mode after :func:`resolve_execution_mode`, so it
+    catches an explicit ``--execution-mode wavefront`` while ``auto`` (which
+    derives ``megakernel`` for ``path``/``bdpt``) is allowed. SPPM has no
+    megakernel path, and the neural proposal and ReSTIR reuse layers are
+    wavefront-only, so they are refused. Raises ``SystemExit``.
 
     Scene-level unsupported transport (a skin/subsurface or heterogeneous-volume
     scene) is refused later, at renderer setup, where the material set is known —
@@ -217,17 +218,18 @@ def reject_spectral_unsupported(
     if not spectral:
         return
     integ = integrator or "path"
-    if integ != "path":
+    if integ not in ("path", "bdpt"):
         raise SystemExit(
-            f"skinny: --spectral supports only --integrator path in v1 (got "
-            f"{integ}). BDPT connection strategies and SPPM photon transport have "
-            "no spectral path yet."
+            f"skinny: --spectral supports --integrator path or bdpt in the "
+            f"megakernel (got {integ}). SPPM has no megakernel path (its photon "
+            "pass is wavefront-only), so spectral SPPM awaits the spectral "
+            "wavefront follow-up."
         )
     if (execution_mode or "megakernel") == "wavefront":
         raise SystemExit(
             "skinny: --spectral runs only under the megakernel execution mode in "
-            "v1 — drop --execution-mode wavefront (path defaults to megakernel). "
-            "Spectral wavefront is the designated follow-up."
+            "v1 — drop --execution-mode wavefront (path/bdpt default to "
+            "megakernel). Spectral wavefront is the designated follow-up."
         )
     # Only the native BSDF proposal is supported in v1. A non-BSDF proposal
     # (environment-importance or neural) draws the bounce direction from a

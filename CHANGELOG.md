@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Spectral BDPT in the megakernel** (change `spectral-bdpt-megakernel`) —
+  `--spectral --integrator bdpt` now renders on both backends, widening the
+  hero-wavelength envelope from path-only to **path + BDPT** (megakernel, flat
+  materials). A separate `integrators/bdpt_spectral.slang` (`SpectralBDPTIntegrator`,
+  compiled only under `-DSKINNY_SPECTRAL`) carries `Spectrum` throughput/emission
+  and transports all five strategy families spectrally — eye/light random walks,
+  s≥2/t=0 emissive hits, t=1 NEE, t≥2 connections, and the s=1 camera splat —
+  while **reusing the RGB `bdpt.slang` MIS chain verbatim** (a colour-free vertex
+  projection feeds `misWeight`/`splatMisWeight`/`convertSAtoArea`, so spectral and
+  RGB BDPT can never disagree on weighting). Wavelengths are drawn once per pixel
+  path and shared across both subpaths; hero-λ glass dispersion collapses on either
+  walk; the light-tracer splat resolves λ→linear-sRGB before the atomic add. The
+  per-λ flat NEE machinery is hoisted into `integrators/spectral_flat_common.slang`,
+  shared with the path integrator (spectral path output byte-unchanged). SPPM stays
+  excluded (no megakernel path — spectral SPPM awaits spectral wavefront). Startup
+  gate (`reject_spectral_unsupported`) and the parity matrix envelope
+  (`spectral_envelope`) admit `(bdpt, megakernel)`; the renderer integrator pin
+  (`_active_integrator_index`) dispatches path/bdpt live and pins sppm→path. The
+  RGB `main_pass.spv` is byte-identical. See [Spectral.md](docs/Spectral.md).
+
 ### Changed
 
 - **Execution mode follows the integrator** (change
