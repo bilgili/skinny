@@ -177,7 +177,7 @@
 
 ## 7. Metal specifics (Group 7)
 
-- [ ] 7.1 The widening grows element **strides within existing buffers**, not the count of
+- [x] 7.1 The widening grows element **strides within existing buffers**, not the count of
       bound buffers, so the 31-slot argument-table cap is low-risk (review, minor). Real Metal
       watch-item is the **MSL stride asserts** (7.2/1.5): color retype is 0-byte on MSL
       (`float3` already 16 B), only `sw` (+32 B) grows the MSL stride; the 128-texture cap is
