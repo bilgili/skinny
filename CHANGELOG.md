@@ -9,6 +9,31 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Spectral rendering in the wavefront mode** (change `spectral-wavefront`) —
+  `--spectral --execution-mode wavefront` now carries hero-wavelength transport
+  through all three staged wavefront integrators — **path, BDPT, and SPPM** —
+  widening the envelope beyond megakernel-only. Everything is gated behind
+  `#if defined(SKINNY_SPECTRAL)`: the wavefront records
+  (`WavefrontPathState`/`WfBdptAux`/`BDPTVertex`/`VisiblePoint`/`SppmAccum`) carry
+  a `Spectrum` bundle + `SampledWavelengths` under the define, so the RGB build is
+  **byte-identical** across all 28 wavefront kernels + the megakernel; the host
+  allocators size each buffer by the spectral stride
+  (`path_state_size`/`wf_bdpt_aux_size`/`sppm_buffer_sizes`). Per-λ transport
+  mirrors the megakernel spectral integrators (`spectralAllLightsNEE`, per-λ
+  emission/Planck, `spectrumResolveToLinearSRGB` at the film; BDPT reuses the
+  scalar `misWeight` via the colour-free projection). **SPPM (design D5):** one
+  shared hero-wavelength set per pass (photons and eye visible points agree),
+  per-pass φ resolved λ→linear-sRGB before the progressive fold, `VisiblePoint.tau`
+  a spectral-invariant 3-wide quantity; **v1 limit — no dispersion in the SPPM
+  photon/eye carriers** (path + BDPT do carry hero-λ Cauchy dispersion). The
+  startup gate (`reject_spectral_unsupported`) and parity matrix admit
+  `(path|bdpt|sppm, wavefront)`. **Status: wired + CPU-verified (179+ hostless
+  tests, codex pre-merge review clean after a host-stride fix) + merged; the
+  GPU-render gates (self-consistency / prism-BDPT / white-furnace) and the
+  `SPPM_FLUX_FIXED_SCALE` numpy re-measure are a pending interactive-Metal
+  follow-up — not yet render-validated.** See [Spectral.md](docs/Spectral.md) and
+  [Wavefront.md](docs/Wavefront.md).
+
 - **Spectral BDPT in the megakernel** (change `spectral-bdpt-megakernel`) —
   `--spectral --integrator bdpt` now renders on both backends, widening the
   hero-wavelength envelope from path-only to **path + BDPT** (megakernel, flat
