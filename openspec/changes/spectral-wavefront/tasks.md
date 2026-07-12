@@ -206,9 +206,9 @@
 
 ## 9. Docs (Group 9)
 
-- [ ] 9.1 `docs/Spectral.md` scope: wavefront + sppm now in the envelope.
-- [ ] 9.2 `docs/Wavefront.md`: spectral carrier (`Spectrum` retype + `SampledWavelengths`),
+- [x] 9.1 `docs/Spectral.md` scope: wavefront + sppm now in the envelope.
+- [x] 9.2 `docs/Wavefront.md`: spectral carrier (`Spectrum` retype + `SampledWavelengths`),
       per-λ SPPM deposit accumulator.
-- [ ] 9.3 `CLAUDE.md` + `README.md` compatibility matrices: spectral row spans wavefront and
+- [x] 9.3 `CLAUDE.md` + `README.md` compatibility matrices: spectral row spans wavefront and
       all three integrators.
-- [ ] 9.4 `CHANGELOG.md` entry.
+- [x] 9.4 `CHANGELOG.md` entry.

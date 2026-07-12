@@ -7,13 +7,15 @@ sources (blackbody, illuminant SPD, conductor Fresnel, glass dispersion), and th
 film resolve back to linear sRGB, with the governing equations and the exact
 shader/numpy symbols that realize them.
 
-> **Work in progress.** The megakernel transport lives on the `spectral-megakernel`
-> branch; on `main` the single capability flag
-> `skinny.spectral_capability.SPECTRAL_IMPLEMENTED` is `False`, so `--spectral` is
-> refused at startup ("not yet implemented") on every front-end and the parity
-> matrix records the spectral axis as a "not yet wired" skip — it is **never**
-> silently rendered as RGB. Flip that one flag with the transport to enable both
-> the CLI gate and `parity.combo_is_valid` at once. See the
+> **State.** `skinny.spectral_capability.SPECTRAL_IMPLEMENTED` is `True`: an
+> in-envelope `--spectral` run is accepted on every front-end and
+> `parity.combo_is_valid` admits it into the rendered set; out-of-envelope combos
+> are still refused at startup (never silently rendered as RGB). The megakernel
+> path/BDPT transport is GPU-validated; the **wavefront** transport for all three
+> integrators (change `spectral-wavefront`) is wired + CPU-verified + merged, but
+> its GPU-render gates (self-consistency / prism-BDPT / white-furnace, and the
+> SPPM flux-scale re-measure) are a pending interactive-Metal follow-up — no
+> wavefront render output is verified correct yet. See the
 > [README compatibility matrix](../README.md) and
 > [CLAUDE.md](../CLAUDE.md) for the current state and scope guards.
 
@@ -69,8 +71,8 @@ and the companions share the same path geometry.
 
 | Property | Value |
 | --- | --- |
-| Integrator | **Path and BDPT** (megakernel). SPPM is excluded — its photon pass is wavefront-only, so spectral SPPM awaits the spectral wavefront follow-up. See [Bidirectional transport](#bidirectional-transport-bdpt). |
-| Execution mode | **Megakernel only.** Wavefront is a designated follow-up; `--spectral` refuses an explicit `--execution-mode wavefront`. |
+| Integrator | **Path, BDPT, and SPPM.** Path/BDPT run under both execution modes; SPPM is wavefront-only (no megakernel photon pass). See [Bidirectional transport](#bidirectional-transport-bdpt) and [Wavefront spectral transport](#wavefront-spectral-transport). |
+| Execution mode | **Megakernel and wavefront.** Wavefront carries hero-λ transport for all three integrators (change `spectral-wavefront`, wired + CPU-verified + merged; GPU-render gates pending). |
 | Materials | **Flat only** (`UsdPreviewSurface` / `standard_surface` / `OpenPBR` / Python-material flats). Skin / subsurface / heterogeneous-volume scenes are refused at startup; a non-flat hit inside the loop terminates the path rather than mis-shade. |
 | Reuse / guiding | **None.** ReSTIR reuse and the neural proposal are refused. |
 | Wavelengths | **4** hero-rotated, drawn from pbrt's visible-λ importance pdf. |
@@ -276,6 +278,44 @@ The RGB build never imports `bdpt_spectral.slang`; `main_pass.slang` dispatches 
 only under `-DSKINNY_SPECTRAL` when `fc.integratorType == INTEGRATOR_BDPT` on a
 flat first hit (a non-flat first hit falls through to the path tracer's flat-only
 guard, as the RGB `useBdpt` falls to the path tracer).
+
+## Wavefront spectral transport
+
+`--spectral --execution-mode wavefront` carries the same hero-wavelength
+transport through the staged wavefront integrators — **path, BDPT, and SPPM**
+(change `spectral-wavefront`). It is the transport counterpart of the megakernel
+integrators above, so the per-λ NEE, per-λ emission / Planck, upsampling, and
+CIE film resolve are the **same math**; see
+[Wavefront.md § Spectral](Wavefront.md#8-spectral---spectral-hero-wavelength)
+for the staged mechanics and record-stride details.
+
+> **Status: wired + CPU-verified + merged; GPU-render validation pending.** The
+> RGB SPIR-V byte-identity (all 28 wavefront kernels + megakernel), the
+> spectral-compile-clean check, and the host-buffer-stride guards are proven
+> hostlessly (179+ tests, codex pre-merge review clean after a host-stride fix).
+> The GPU self-consistency / prism-BDPT / white-furnace gates and the
+> `SPPM_FLUX_FIXED_SCALE` numpy re-measure are the pending interactive-Metal
+> follow-up. **No wavefront render output is verified correct yet** — do not
+> read this as GPU-validated.
+
+The wavefront records carry the spectral bundle only under
+`#if defined(SKINNY_SPECTRAL)`: `WavefrontPathState.throughput/radiance`,
+`WfBdptAux` / `BDPTVertex` color roles, and `SppmAccum` become the `Spectrum`
+typealias (`float3` RGB / `float4` spectral) and `SampledWavelengths sw` is
+appended, so the RGB build is byte-identical. Path recolors in `wfFinishShade`
+(`spectralAllLightsNEE` + hero-λ Cauchy dispersion) and resolves in
+`wfPathResolve`; BDPT reuses the scalar `misWeight` via the color-free `asRgb`
+projection and resolves the s=1 splat before the atomic add — one MIS
+implementation shared with the megakernel.
+
+**SPPM per-pass wavelengths (design D5).** SPPM draws **one shared
+hero-wavelength set per pass** (`sppmPassWavelengths`) so a pass's photons and
+its eye visible points agree on λ — the per-λ product φ = β ⊗ f_r is coherent.
+The per-pass φ is resolved λ → linear sRGB **before** it folds into the
+progressive estimator, and `VisiblePoint.tau` stays a **spectral-invariant
+3-wide** quantity. **v1 limit: no dispersion in the SPPM photon / eye
+carriers** — a hero-λ collapse would break the per-pass photon/visible-point
+wavelength coherence; path and BDPT do carry hero-λ dispersion.
 
 ## Exact spectral sources
 

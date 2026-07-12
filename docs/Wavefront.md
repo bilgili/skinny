@@ -773,6 +773,58 @@ megakernel; the megakernel remains the default on both backends.
 
 ---
 
+## 8. Spectral (`--spectral`, hero-wavelength)
+
+Under `--spectral` the wavefront mode carries **hero-wavelength** transport for
+all three integrators (path, BDPT, SPPM), mirroring the megakernel spectral
+integrators (`path_spectral.slang` / `bdpt_spectral.slang`; see
+[Spectral.md](Spectral.md)). Everything is gated behind
+`#if defined(SKINNY_SPECTRAL)`, compiled from a **distinct `_spectral` `.spv`**
+(the RGB cache never aliases), and the RGB (no-define) build is **byte-identical**
+across all 28 wavefront kernels + the megakernel.
+
+**Status: wired + CPU-verified + merged, GPU-render validation pending.** The
+RGB SPIR-V byte-identity, spectral-compile-clean, and host-stride guards are
+proven hostlessly (179+ tests); the GPU self-consistency / prism-BDPT /
+white-furnace gates and the SPPM flux-scale numpy re-measure are the pending
+interactive-Metal follow-up. No render output is verified correct yet.
+
+**Record carriers.** The per-lane records grow a spectral bundle only under the
+define — the color roles become the `Spectrum` typealias (`float3` RGB /
+`float4` spectral) and `SampledWavelengths sw` is appended:
+
+| Record | RGB → spectral | Notes |
+|--------|----------------|-------|
+| `WavefrontPathState` | `throughput`/`radiance` → `Spectrum`; `+ sw`; RR max gains `.w` | 68 → 108 B (scalar), 96 → 128 B (MSL) |
+| `WfBdptAux` / `BDPTVertex` | vertex/aux color roles → `Spectrum` | aux 128 → 136 B; retype is 0-effect on the merged spectral megakernel |
+| `VisiblePoint` (SPPM) | `tau` stays a spectral-invariant **3-wide** quantity | 180 → 192 B |
+| `SppmAccum` (SPPM) | `+ phiW` 4th hero channel | 16 → 20 B; RGB debug-string names untouched |
+
+**Host stride.** The host allocators size every one of these by the **spectral
+stride** when `self._spectral` is set — `path_state_size(spectral=…)`,
+`wf_bdpt_aux_size` / `bdpt_vertex_size` (max of RGB const and spectral mirror),
+`sppm_buffer_sizes(spectral=…)` in `wavefront_layout.py`. Sizing them by the RGB
+constant while the shader struct grew corrupts GPU buffers (the bug codex caught
+pre-merge); regression tests lock each spectral alloc stride == its layout size
+and strictly > RGB.
+
+**Per-λ transport.** Path: `wfPathGenerate` draws `SampledWavelengths` after
+`generateRay`; `wfFinishShade` recolors per hero wavelength (`spectralAllLightsNEE`,
+per-λ emission / Planck, hero-λ Cauchy dispersion collapse); `wfPathResolve`
+applies `spectrumResolveToLinearSRGB` before accumulation. BDPT: spectral eye /
+light walks and connections (`wfConnectT1S` / `wfConnectGenericS`) reuse the
+scalar `misWeight` via the color-free `asRgb` projection — one MIS
+implementation, shared with the megakernel; the s=1 splat resolves λ → linear
+sRGB before the atomic add.
+
+**SPPM per-pass λ (D5).** SPPM draws **one shared hero-wavelength set per pass**
+(`sppmPassWavelengths`) so photons and eye visible points agree — the per-λ
+product φ = β ⊗ f_r is coherent. Each pass's φ is resolved λ → linear sRGB
+**before** it folds into the progressive estimator; `VisiblePoint.tau` stays a
+spectral-invariant 3-wide quantity. **v1 limit: no dispersion in the SPPM photon
+/ eye carriers** — a hero-λ collapse would break the per-pass photon/visible-point
+wavelength coherence; path and BDPT do carry hero-λ Cauchy dispersion.
+
 ## Megakernel vs wavefront
 
 | Axis | [Megakernel](Megakernel.md) | Wavefront |

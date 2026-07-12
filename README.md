@@ -506,7 +506,7 @@ neural × interop.
 | Heterogeneous volumes — NanoVDB `MakeNamedMedium` (path integrator, megakernel + wavefront) | ✅ | ✅ (`disney-cloud` / `bunny-cloud`; distant + env NEE; BDPT/SPPM excluded) |
 | Procedural `cloud` medium — pbrt `MakeNamedMedium "cloud"` (analytic Perlin-fBm density, path integrator, megakernel + wavefront) | ✅ | ✅ (`clouds`; no grid/texture — `MEDIUM_CLOUD` evaluates pbrt's `CloudMedium::Density` in-shader; BDPT/SPPM excluded) |
 | Neural directional proposal (inference) | ✅ | ✅ |
-| Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + bdpt + megakernel + flat) | ✅ (`spectral-rendering`, `spectral-bdpt-megakernel`) |
+| Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + bdpt + sppm, megakernel + wavefront, flat) | ✅ (`spectral-rendering`, `spectral-bdpt-megakernel`, `spectral-wavefront`) |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
 | Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal`, bind-by-name; `metal-tool-dock-render`) |
@@ -531,15 +531,20 @@ RGB. **Live** (`SPECTRAL_IMPLEMENTED = True`): the megakernel spectral integrato
 the path/bdpt+megakernel+flat envelope on both backends — per-wavelength NEE, the
 pbrt sigmoid/D65 upsampling model, exact named-conductor Fresnel, authored +
 blackbody illuminant SPDs, and hero-λ glass dispersion — resolving through the
-Wyman CMF to the existing RGBA32F accumulation. An in-envelope `--spectral` run is
-accepted on every front-end; out-of-envelope combos are still refused at startup
-(see the scope below). See [Spectral.md](docs/Spectral.md).
+Wyman CMF to the existing RGBA32F accumulation. The same hero-λ transport also
+threads all three **wavefront** integrators — path, BDPT, and SPPM (change
+`spectral-wavefront`) — wired + CPU-verified + merged (RGB `.spv` byte-identical,
+179+ hostless tests), though its GPU-render gates are a pending interactive-Metal
+follow-up (not yet render-validated). An in-envelope `--spectral` run is accepted
+on every front-end; out-of-envelope combos are still refused at startup (see the
+scope below). See [Spectral.md](docs/Spectral.md).
 
 | Aspect | Scope |
 |--------|----------|
-| Integrator / execution | **Path or BDPT, megakernel only** — SPPM (no megakernel path) or an explicit wavefront mode under `--spectral` is refused at startup (spectral wavefront / SPPM are the follow-ups). |
+| Integrator / execution | **Path, BDPT, or SPPM.** Path/BDPT run under megakernel + wavefront; SPPM is wavefront-only (no megakernel photon pass). Megakernel path/BDPT is GPU-validated; wavefront (all three) is CPU-verified + merged, GPU gates pending. Out-of-envelope combos are refused at startup. |
 | Materials | **Flat only** — a skin/subsurface/heterogeneous-volume scene under `--spectral` is refused. |
 | Layers | No neural proposal, no ReSTIR reuse (both refused under `--spectral`). |
+| Dispersion | Path + BDPT carry hero-λ Cauchy glass dispersion; **SPPM has no dispersion** (v1 limit — it would break the per-pass photon/visible-point wavelength coherence). |
 | Samples | 4 hero-rotated wavelengths over 360–830 nm (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 
 **Online training (`--online-training`)** — combinations of
