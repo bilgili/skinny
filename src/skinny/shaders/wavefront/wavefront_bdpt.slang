@@ -33,8 +33,16 @@ import materials.flat.flat_shading;    // isCutoutTransparent
 import integrators.bdpt;  // BDPTVertex, randomWalk, sampleLightOrigin,
                           // connectT1, connectGeneric, misWeight, ConnectResult,
                           // bdptEnvNEE, splatLightWalk, BDPT_MAX_VERTS, BDPT_VK_*
+#if !defined(SKINNY_SPECTRAL)
 import integrators.path;  // PathTracer — non-flat first-hit fallback (parity
-                          // with main_pass.slang's useBdpt=FLAT-only gate)
+                          // with main_pass.slang's useBdpt=FLAT-only gate).
+                          // Under spectral the scene is flat-only (non-flat
+                          // refused at startup), so this fallback is dead — and
+                          // importing it drags the whole skin/std material tree
+                          // (mtlxSkin/stdSurfaceParams buffers + skin textures)
+                          // over Metal's 31-buffer argument table. Gated out; the
+                          // spectral non-flat branches return Spectrum(0.0).
+#endif
 import wavefront.wf_display;  // wfWriteDisplay (tonemap → output image)
 #if defined(SKINNY_SPECTRAL)
 import spectrum;                          // SampledWavelengths, sampleWavelengths, terminateSecondary, planckSpectrum, spectrumResolveToLinearSRGB
@@ -125,12 +133,6 @@ uint wfBdptQueueLane(uint slot, uint qpos)
 // projection) and only the color-carrying evaluations recolor per wavelength via
 // spectral_flat_common. Directions/pdfs/MIS are the SAME scalars the RGB kernels
 // compute — the single MIS source (D3). Compiled only under SKINNY_SPECTRAL.
-
-// Widen a float3 into `Spectrum` — for the non-flat PathTracer fallback whose RGB
-// return is stored into the now-`Spectrum` `escaped` (that branch is unreachable
-// under spectral: non-flat scenes are refused at startup — the widen only keeps it
-// type-checking).
-#define WF_SPEC3(c) Spectrum((c).x, (c).y, (c).z, 0.0)
 
 struct WfSpectralEval { Spectrum response; float pdf; };
 
@@ -841,10 +843,10 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     }
     if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
     {
-        // Non-flat first hit is refused at startup under spectral — unreachable;
-        // widen the RGB fallback only to keep it type-checking.
-        PathTracer integrator;
-        aux.escaped = WF_SPEC3(integrator.estimateRadiance(r, firstHit, rng));
+        // Non-flat first hit is refused at startup under spectral — unreachable.
+        // The RGB PathTracer fallback (and its skin/std material tree) is compiled
+        // out here so the Metal-spectral kernel fits the 31-buffer argument table.
+        aux.escaped = Spectrum(0.0);
         aux.rngState = rng.state;
         wfAux[slot] = aux;
         return;
@@ -1292,8 +1294,9 @@ void wfBdptGenEye(uint3 tid: SV_DispatchThreadID)
     }
     if ((materialTypes[firstHit.materialId] & 0xFFu) != MATERIAL_TYPE_FLAT)
     {
-        PathTracer integrator;   // unreachable under spectral (non-flat refused); widen to compile
-        aux.escaped = WF_SPEC3(integrator.estimateRadiance(r, firstHit, rng));
+        // unreachable under spectral (non-flat refused); RGB PathTracer fallback
+        // compiled out to keep the Metal-spectral kernel under 31 buffer slots.
+        aux.escaped = Spectrum(0.0);
         aux.rngState = rng.state;
         wfAux[slot] = aux;
         return;

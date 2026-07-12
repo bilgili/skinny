@@ -64,8 +64,16 @@ uniform FrameConstants fc;
 [[vk::binding(21)]] RWStructuredBuffer<uint> lightSplatBuffer;
 [[vk::binding(22)]] StructuredBuffer<GizmoSegment> gizmoSegments;
 #endif
+// Thick-lens camera buffers: dead in every wavefront kernel (wavefront is
+// pinhole-only — no kernel imports cameras.thick_lens). Compiling them out of
+// the Metal wavefront build reclaims two of its 31 buffer-argument slots — the
+// spectral build's 7 extra spectral globals otherwise push the top buffer index
+// past Metal's 30 ceiling (change spectral-wavefront, Group 7). The megakernel
+// (SKINNY_METAL only) and Vulkan builds keep them.
+#if !(defined(SKINNY_METAL) && defined(SKINNY_WAVEFRONT))
 [[vk::binding(23)]] StructuredBuffer<float4>       lensElements;
 [[vk::binding(24)]] StructuredBuffer<float4>       exitPupilBounds;
+#endif
 // Heterogeneous-medium density grid (nanovdb-volume-rendering, design D3): ONE
 // R16F 3D texture, normalized to [0,1] on the CPU (divide by the grid's value
 // max — folded into the packed σ so the texel IS the density multiplier).
@@ -215,8 +223,11 @@ float2 materialBlackbody(uint matId)
 // recordBuf/recordCounter (integrators/path_record_common.slang) — are
 // compiled out of that build to make room for neuralWeights/Biases/Layers.
 // The megakernel (SKINNY_METAL only) and Vulkan (no SKINNY_METAL) builds are
-// unaffected; no wavefront kernel references the tool dispatch.
-#if !(defined(SKINNY_METAL) && defined(SKINNY_METAL_NEURAL))
+// unaffected; no wavefront kernel references the tool dispatch. Widened from the
+// NEURAL-only gate to every Metal wavefront flavor (change spectral-wavefront):
+// the tool dispatch is a megakernel path, so toolBuffer is dead in ALL wavefront
+// kernels — stripping it frees a buffer slot the spectral wavefront build needs.
+#if !(defined(SKINNY_METAL) && defined(SKINNY_WAVEFRONT))
 [[vk::binding(30)]] RWStructuredBuffer<float4>     toolBuffer;
 #endif
 
