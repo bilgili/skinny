@@ -824,6 +824,11 @@ class _VkSppmRecorder:
         # wavefront-nonflat-tiled-fallback).
         pass
 
+    def flush(self) -> None:
+        # No-op on Vulkan: no GPU watchdog (SPPM phase-boundary flush is a
+        # Metal-only guard, change spectral-wavefront).
+        pass
+
     def _fill(self, buf, offset: int, size: int) -> None:
         vk.vkCmdFillBuffer(self._cmd, buf.buffer, int(offset), int(size), 0)
 

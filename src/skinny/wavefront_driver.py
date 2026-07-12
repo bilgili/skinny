@@ -306,6 +306,12 @@ def record_sppm_loop(
         # scenes.
         rec.flush_heavy_eye()
     rec.barrier()
+    # Bound the SPPM command buffers under the macOS GPU watchdog (Metal only;
+    # no-op on Vulkan): without a flush at each phase boundary the whole pass —
+    # every eye tile + grid + the entire photon pass + updates — commits as one
+    # command buffer, which wedges the GPU on a heavy (caustic / spectral) scene
+    # (change spectral-wavefront). Isolate each phase into its own submission.
+    rec.flush()
 
     # phase 2 — single global grid build (counting sort).
     rec.clear_grid()
@@ -320,12 +326,18 @@ def record_sppm_loop(
     rec.barrier()
     rec.dispatch_count("wfSppmGridScatter", num_pixels, 64)
     rec.barrier()
+    rec.flush()
 
-    # phase 3 — single global photon pass.
+    # phase 3 — single global photon pass. The heaviest command buffer: one
+    # thread per photon, each depositing into every visible point within radius
+    # (spectral recolor per λ). The renderer caps `photons` per pass under Metal
+    # (SKINNY_SPPM_METAL_PHOTON_CAP) and continues the budget across accumulation
+    # frames, so this dispatch stays under the watchdog (change spectral-wavefront).
     rec.clear_accum()
     rec.barrier()
     rec.dispatch_count("wfSppmPhotonTrace", photons, 64)
     rec.barrier()
+    rec.flush()
 
     # phase 4 — all update tiles.
     stream_base = 0

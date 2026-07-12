@@ -722,6 +722,15 @@ class _MetalSppmRecorder:
         if getattr(self._p, "bound_heavy_eye", False):
             self._enc.flush()
 
+    def flush(self) -> None:
+        # Commit + drain at an SPPM phase boundary so no single command buffer
+        # spans the whole pass (all eye tiles + grid + the entire photon pass +
+        # updates). The spectral photon deposit is per-λ heavier, and a caustic
+        # scene clusters many visible points into the focus cell, so the phase-3
+        # photon command buffer alone can exceed the macOS GPU watchdog and wedge
+        # the GPU (change spectral-wavefront). Metal only — Vulkan has no watchdog.
+        self._enc.flush()
+
     def clear_visible_points(self) -> None:
         self._enc.barrier()
         self._enc.clear(self._p.buffers["visible_points"])

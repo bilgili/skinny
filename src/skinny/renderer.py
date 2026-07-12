@@ -9498,6 +9498,19 @@ class Renderer:
                 or max(_diag * 0.001, 1e-4)
             sppm_photons = int(getattr(self, "_sppm_photons_override", 0)) \
                 or int(self.width * self.height)
+            # Metal GPU-watchdog cap (change spectral-wavefront): the phase-3
+            # photon dispatch is the heaviest SPPM command buffer — one thread
+            # per photon, each depositing into every visible point in radius,
+            # per-λ under spectral. width*height photons on a caustic scene wedge
+            # the GPU. Cap photons per pass; progressive accumulation continues
+            # the budget across frames (the photon RNG varies by frameIndex, so
+            # consecutive passes trace different photons). Env override
+            # SKINNY_SPPM_METAL_PHOTON_CAP (0 disables the cap).
+            if self.is_metal:
+                import os
+                _cap = int(os.environ.get("SKINNY_SPPM_METAL_PHOTON_CAP", "262144"))
+                if _cap > 0:
+                    sppm_photons = min(sppm_photons, _cap)
             _glossy = getattr(self, "_sppm_glossy_roughness_override", None)
             sppm_glossy = float(_glossy) if _glossy is not None else _SPPM_GLOSSY_ROUGHNESS_DEFAULT
         else:
