@@ -7,6 +7,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **SPPM no longer wedges the Metal GPU on caustic scenes, without starving
+  photons** (change `sppm-photon-dispatch-tiling`). The wavefront phase-3 photon
+  pass (`wfSppmPhotonTrace`) was committed as one command buffer whose work is
+  `photons × visible-points-in-cell` — unbounded where visible points cluster in
+  a caustic focus cell, tripping the macOS GPU watchdog. The prior cap on
+  photons-per-pass avoided the wedge but **starved** the estimator (dark bias).
+  The photon dispatch is now **tiled by breadth** into flushed sub-batches of
+  `SKINNY_SPPM_METAL_PHOTON_BATCH` photons (default 65536, 64-aligned), like the
+  megakernel row bands, so the full `width×height` photon budget renders under the
+  watchdog. Unbiased: additive fixed-point deposits + a single pre-loop
+  `clear_accum` make the tiled pass bit-identical to one dispatch (GPU-verified
+  |diff| 0.0000). `SKINNY_SPPM_METAL_PHOTON_CAP` default `262144→0` (unlimited;
+  kept as an optional ceiling). Also repairs 5 SPPM `test_wavefront_driver.py`
+  tests left red by the earlier phase-boundary flush commit.
+
 ### Added
 
 - **Spectral rendering in the wavefront mode** (change `spectral-wavefront`) —
