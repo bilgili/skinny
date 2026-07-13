@@ -261,6 +261,7 @@ def record_sppm_loop(
     num_cells: int,
     photons: int,
     first_frame: bool,
+    photon_batch: int = 0,
 ) -> None:
     """Record one SPPM pass (== one progressive-accumulation frame).
 
@@ -328,16 +329,40 @@ def record_sppm_loop(
     rec.barrier()
     rec.flush()
 
-    # phase 3 — single global photon pass. The heaviest command buffer: one
-    # thread per photon, each depositing into every visible point within radius
-    # (spectral recolor per λ). The renderer caps `photons` per pass under Metal
-    # (SKINNY_SPPM_METAL_PHOTON_CAP) and continues the budget across accumulation
-    # frames, so this dispatch stays under the watchdog (change spectral-wavefront).
+    # phase 3 — global photon pass. The heaviest work: one thread per photon,
+    # each depositing into every visible point within radius (spectral recolor
+    # per λ). A caustic scene clusters visible points into the focus cell, so a
+    # single command buffer of all `photons` would run photons × VPs-in-cell and
+    # wedge the macOS GPU watchdog. Tile the dispatch by breadth into flushed
+    # sub-batches (change sppm-photon-dispatch-tiling): each command buffer traces
+    # `photon_batch` photons at base `[0, batch, 2·batch, …]` (the shader reads
+    # `pid = streamBase + tid.x`). `clear_accum` runs ONCE before the loop — the
+    # deposits are additive atomics, so batching is bit-exact vs one dispatch and
+    # never starves the photon budget. `photon_batch <= 0` (Vulkan / no watchdog)
+    # is the degenerate single full-photon dispatch, base 0.
     rec.clear_accum()
     rec.barrier()
-    rec.dispatch_count("wfSppmPhotonTrace", photons, 64)
-    rec.barrier()
-    rec.flush()
+    # `dispatch_count` rounds the launch up to a multiple of the 64-wide
+    # threadgroup, and the photon kernel is bounded only by the GLOBAL guard
+    # `pid >= sppmPhotonsEmitted`. So a NON-final batch whose count is not
+    # 64-aligned would over-launch threads with `pid ∈ [base+n, base+ceil64(n))`
+    # that are all < photons (hence unmasked) and ALSO belong to the next batch —
+    # double-depositing those photons (energy bias). Align the batch to 64 so
+    # every non-final batch is exactly `batch` photons (no round-up); only the
+    # final batch's tail rounds up, and that tail satisfies `pid >= photons` and
+    # is masked. `photon_batch <= 0` = single full dispatch (round-up masked).
+    if photon_batch and photon_batch > 0:
+        batch = max(64, (int(photon_batch) // 64) * 64)
+    else:
+        batch = int(photons)
+    base = 0
+    while base < photons:
+        n = min(batch, photons - base)
+        rec.push_tile(base)
+        rec.dispatch_count("wfSppmPhotonTrace", n, 64)
+        rec.barrier()
+        rec.flush()
+        base += n
 
     # phase 4 — all update tiles.
     stream_base = 0

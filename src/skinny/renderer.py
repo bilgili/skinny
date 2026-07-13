@@ -76,6 +76,13 @@ MAX_FRAMES_IN_FLIGHT = 2
 # tracer instead of double-counting env (conductor_infinite). Override per-render via
 # renderer._sppm_glossy_roughness_override (None = use this default; 0.0 = PM-1 delta-only).
 _SPPM_GLOSSY_ROUGHNESS_DEFAULT = 0.6
+# Default per-dispatch photon breadth for the Metal SPPM phase-3 tiling
+# (change sppm-photon-dispatch-tiling). The photon command buffer's work is
+# `batch × visible-points-gathered-per-photon`; sized to the megakernel
+# watchdog band budget (~2·10⁵ work units) so even a caustic focus cell stays
+# watchdog-safe while photons/pass remains the full width*height. Env override
+# SKINNY_SPPM_METAL_PHOTON_BATCH; 0 disables tiling (single full dispatch).
+_SPPM_METAL_PHOTON_BATCH_DEFAULT = 65536
 
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
 # matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
@@ -1711,6 +1718,7 @@ class Renderer:
         self._wavefront_sppm_pass = None
         self._wf_sppm_pass_dims = None
         self._sppm_photons_emitted = 0
+        self._sppm_metal_photon_batch = 0  # set per-frame in _pack_uniforms (Metal SPPM tiling)
         # Staged wavefront bdpt (Phase 3): subpath-vertex + aux buffers + pass,
         # same lazy lifecycle as the path pass.
         self._wavefront_bdpt_pass = None
@@ -9235,6 +9243,7 @@ class Renderer:
             ],
             photons=self._sppm_photons_emitted,
             first_frame=(self.accum_frame == 0),
+            photon_batch=self._sppm_metal_photon_batch,
         )
 
     def _render_headless_metal(self) -> bytes:
@@ -9498,19 +9507,27 @@ class Renderer:
                 or max(_diag * 0.001, 1e-4)
             sppm_photons = int(getattr(self, "_sppm_photons_override", 0)) \
                 or int(self.width * self.height)
-            # Metal GPU-watchdog cap (change spectral-wavefront): the phase-3
-            # photon dispatch is the heaviest SPPM command buffer — one thread
-            # per photon, each depositing into every visible point in radius,
-            # per-λ under spectral. width*height photons on a caustic scene wedge
-            # the GPU. Cap photons per pass; progressive accumulation continues
-            # the budget across frames (the photon RNG varies by frameIndex, so
-            # consecutive passes trace different photons). Env override
-            # SKINNY_SPPM_METAL_PHOTON_CAP (0 disables the cap).
+            # Metal GPU-watchdog handling (change sppm-photon-dispatch-tiling):
+            # the phase-3 photon dispatch is the heaviest SPPM command buffer —
+            # one thread per photon, each depositing into every visible point in
+            # radius, per-λ under spectral. A caustic scene clusters visible
+            # points into the focus cell, so photons × VPs-in-cell wedges the GPU.
+            # The driver now BOUNDS this by BREADTH — it tiles the photon dispatch
+            # into flushed sub-batches of `_sppm_metal_photon_batch` photons — so
+            # photons/pass stays the full width*height (no dark-starvation bias).
+            # SKINNY_SPPM_METAL_PHOTON_BATCH sets the per-dispatch breadth (0 =
+            # single dispatch). SKINNY_SPPM_METAL_PHOTON_CAP is retained as an
+            # OPTIONAL per-pass ceiling (default 0 = unlimited) for pathological
+            # scenes; prefer lowering the batch over capping photons.
+            self._sppm_metal_photon_batch = 0
             if self.is_metal:
                 import os
-                _cap = int(os.environ.get("SKINNY_SPPM_METAL_PHOTON_CAP", "262144"))
+                _cap = int(os.environ.get("SKINNY_SPPM_METAL_PHOTON_CAP", "0"))
                 if _cap > 0:
                     sppm_photons = min(sppm_photons, _cap)
+                self._sppm_metal_photon_batch = int(
+                    os.environ.get("SKINNY_SPPM_METAL_PHOTON_BATCH",
+                                   str(_SPPM_METAL_PHOTON_BATCH_DEFAULT)))
             _glossy = getattr(self, "_sppm_glossy_roughness_override", None)
             sppm_glossy = float(_glossy) if _glossy is not None else _SPPM_GLOSSY_ROUGHNESS_DEFAULT
         else:

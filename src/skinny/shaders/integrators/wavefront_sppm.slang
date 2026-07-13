@@ -674,7 +674,13 @@ void sppmDepositPhoton(Spectrum beta, float3 photonPos, float3 photonInDir
 [numthreads(64, 1, 1)]
 void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
 {
-    let pid = tid.x;
+    // Photon-dispatch tiling (change sppm-photon-dispatch-tiling): the phase-3
+    // pass is committed as flushed photon sub-batches under Metal so no single
+    // command buffer spans photons × VPs-in-cell (caustic clusters wedge the
+    // watchdog). Each batch dispatches [streamBase, streamBase+batch); the guard
+    // masks the last batch's round-up. streamBase == 0 reproduces the single
+    // full-photon dispatch (Vulkan, and Metal when batch >= photons).
+    let pid = sppmTile.streamBase + tid.x;
     if (pid >= fc.sppmPhotonsEmitted)
         return;
     RNG rng = createRNG(uint2(pid & 0xFFFFu, pid >> 16), fc.frameIndex);
