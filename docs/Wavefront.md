@@ -155,14 +155,14 @@ every visible point, so they run after all eye tiles and before any update tile:
 |-------|----------|------|
 | 1 · eye | `wfSppmEye` (tiled, full stream) | trace the camera path through the flat delta lobe to the first non-specular flat hit; store one `VisiblePoint`/pixel + per-pass direct `ld` (NEE + specular-chain emission) + the evaluated flat BSDF. A **non-flat receiver** (subsurface / skin / volume / python) stores no visible point — it is path-integrated in place (`PathTracer.estimateRadiance` × specular-chain throughput → `ld`) instead of blacking out, matching the megakernel's non-flat→path routing (change `wavefront-nonflat-path-fallback`); non-terminal (volume / python) receivers run the full multi-bounce path, bounded per eye tile on Metal via `flush_heavy_eye` (change `wavefront-nonflat-tiled-fallback`) |
 | 2 · grid | `wfSppmGridCount` → `wfSppmGridScanBlock` → `wfSppmGridScanBlockSums` → `wfSppmGridScanAdd` → `wfSppmGridScatter` | counting-sort spatial hash over active VPs: atomic per-cell count → exclusive prefix sum (count → offset) → scatter pixel indices into cell buckets |
-| 3 · photon | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`) | emit power-weighted photons (`beta = Le·π/p_sel`), RR-trace, deposit bare f_r at non-specular vertices (`depth ≥ 1`) via a 3×3×3 cell scan with uint fixed-point `InterlockedAdd` into `SppmAccum` |
+| 3 · photon | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`, **breadth-tiled** on Metal) | emit power-weighted photons (`beta = Le·π/p_sel`), RR-trace, deposit bare f_r at non-specular vertices (`depth ≥ 1`) via a 3×3×3 cell scan with uint fixed-point `InterlockedAdd` into `SppmAccum`. The per-photon deposit cost is `visible-points-in-cell`, unbounded and maximised where visible points cluster (caustic focus) — so on Metal the dispatch is **tiled into flushed sub-batches** of `SKINNY_SPPM_METAL_PHOTON_BATCH` photons (default 65536), each `[base, base+batch)` via `pid = sppmTile.streamBase + tid.x`. This bounds each command buffer by **breadth** (like the megakernel row bands) so the full `width×height` photon budget renders without a watchdog wedge — **not** by starving photons. `clear_accum` runs once before the batch loop; the additive fixed-point deposits make tiling bit-identical to one dispatch. Off Metal / `batch ≤ 0` = one full dispatch (change `sppm-photon-dispatch-tiling`) |
 | 4 · update | `wfSppmUpdate` (tiled, full stream) | SPPM reduction `N'=N+γM`, `r'=r·√(N'/(N+M))`, `τ'=(τ+Φ)(r'/r)²`; `L_indirect = τ/(N_emitted·π·r²)`; `sample = ld + L_indirect`; running-mean composite into the film (like `wfPathResolve`) + display; clear the accumulator |
 
 ```text
 [frame 0]  clear_visible_points → barrier
-phase 1    all wfSppmEye tiles                                            → barrier
-phase 2    clear_grid → Count → ScanBlock → ScanBlockSums → ScanAdd → Scatter → barrier
-phase 3    clear_accum → wfSppmPhotonTrace                               → barrier
+phase 1    all wfSppmEye tiles                                            → barrier → flush
+phase 2    clear_grid → Count → ScanBlock → ScanBlockSums → ScanAdd → Scatter → barrier → flush
+phase 3    clear_accum → [push_tile(base) → wfSppmPhotonTrace(batch) → barrier → flush]×⌈N/batch⌉
 phase 4    all wfSppmUpdate tiles                                        → barrier
 ```
 

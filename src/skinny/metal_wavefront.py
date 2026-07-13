@@ -845,7 +845,8 @@ class MetalWavefrontSppmPass:
             memory_type=spy.MemoryType.device_local, label="skinny.sppm_bindless_default")
 
     def dispatch_frame(self, *, binds: dict, uniform_blob: bytes,
-                       bindless_textures=None, photons: int, first_frame: bool) -> None:
+                       bindless_textures=None, photons: int, first_frame: bool,
+                       photon_batch: int = 0) -> None:
         """Record + submit one SPPM pass over a fresh ``MetalFrameEncoder``."""
         from skinny.wavefront_driver import record_sppm_loop
         all_binds = dict(binds)
@@ -857,7 +858,8 @@ class MetalWavefrontSppmPass:
         rec = _MetalSppmRecorder(self, enc, all_binds, uniform_blob, bindless)
         record_sppm_loop(
             rec, num_pixels=self.num_pixels, stream_size=self.stream_size,
-            num_cells=self.num_cells, photons=int(photons), first_frame=bool(first_frame))
+            num_cells=self.num_cells, photons=int(photons), first_frame=bool(first_frame),
+            photon_batch=int(photon_batch))
         enc.submit()
 
     def destroy(self) -> None:

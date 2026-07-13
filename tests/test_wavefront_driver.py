@@ -284,9 +284,35 @@ class _SppmStub:
     def flush_heavy_eye(self):
         self.ops.append(("flush_heavy_eye",))
 
+    def flush(self):
+        # Phase-boundary + per-photon-batch command-buffer submit (Metal watchdog
+        # hygiene; no-op off Metal). Recorded so the driver's flush placement is
+        # pinned hostlessly (changes spectral-wavefront + sppm-photon-dispatch-tiling).
+        self.ops.append(("flush",))
 
-def _sppm_grid_photon(num_pixels, num_cells, photons):
-    """The single global grid-build + photon block shared by every pass."""
+
+def _photon_block(photons, batch=0):
+    """Phase-3: clear the accumulator ONCE, then trace the photon budget as
+    breadth-tiled sub-batches (change sppm-photon-dispatch-tiling). ``batch<=0``
+    is the degenerate single full dispatch (Vulkan / no watchdog)."""
+    b = batch if batch and batch > 0 else photons
+    ops = [("clear_accum",), ("barrier",)]
+    base = 0
+    while base < photons:
+        n = min(b, photons - base)
+        ops += [
+            ("push_tile", base),
+            ("dispatch_count", "wfSppmPhotonTrace", n, 64),
+            ("barrier",),
+            ("flush",),
+        ]
+        base += n
+    return ops
+
+
+def _sppm_grid_photon(num_pixels, num_cells, photons, batch=0):
+    """The single global grid-build + photon block shared by every pass. The
+    grid stage ends with a phase-boundary flush; the photon stage is tiled."""
     return [
         ("clear_grid",),
         ("barrier",),
@@ -300,10 +326,8 @@ def _sppm_grid_photon(num_pixels, num_cells, photons):
         ("barrier",),
         ("dispatch_count", "wfSppmGridScatter", num_pixels, 64),
         ("barrier",),
-        ("clear_accum",),
-        ("barrier",),
-        ("dispatch_count", "wfSppmPhotonTrace", photons, 64),
-        ("barrier",),
+        ("flush",),                     # phase 2 → 3 boundary
+        *_photon_block(photons, batch),
     ]
 
 
@@ -318,6 +342,7 @@ def test_sppm_single_tile_first_frame():
         ("dispatch_full", "wfSppmEye"),
         ("flush_heavy_eye",),
         ("barrier",),
+        ("flush",),                     # phase 1 → 2 boundary
         *_sppm_grid_photon(64, 256, 100),
         ("push_tile", 0),
         ("dispatch_full", "wfSppmUpdate"),
@@ -335,12 +360,14 @@ def test_sppm_later_frame_skips_vp_clear():
 
 
 def test_sppm_grid_and_photon_run_once_globally():
-    # Grid build + photon pass must appear EXACTLY once regardless of tile count.
+    # Grid build + accumulator clear must appear EXACTLY once regardless of tile
+    # count (photon dispatch may tile — clear_accum must not).
     rec = _SppmStub(stream_size=64)
     record_sppm_loop(rec, num_pixels=256, stream_size=64, num_cells=1024,
                      photons=500, first_frame=False)
     assert rec.ops.count(("clear_grid",)) == 1
     assert rec.ops.count(("clear_accum",)) == 1
+    # batch defaults to 0 → single full-photon dispatch.
     assert rec.ops.count(("dispatch_count", "wfSppmPhotonTrace", 500, 64)) == 1
 
 
@@ -367,6 +394,84 @@ def test_sppm_eye_tiles_have_distinct_bases():
     rec = _SppmStub(stream_size=64)
     record_sppm_loop(rec, num_pixels=192, stream_size=64, num_cells=512,
                      photons=10, first_frame=False)
-    bases = [op[1] for op in rec.ops if op[0] == "push_tile"]
+    # push_tile now also drives the photon-batch base; isolate the eye/update
+    # dispatch_full bases (photons=10 < batch → one photon push_tile(0)).
+    eye_upd_bases = [
+        rec.ops[i - 1][1]
+        for i, op in enumerate(rec.ops)
+        if op in (("dispatch_full", "wfSppmEye"), ("dispatch_full", "wfSppmUpdate"))
+    ]
     # 3 eye tiles + 3 update tiles, bases 0/64/128 each phase.
-    assert bases == [0, 64, 128, 0, 64, 128]
+    assert eye_upd_bases == [0, 64, 128, 0, 64, 128]
+
+
+# ── photon-dispatch tiling (change sppm-photon-dispatch-tiling) ──────
+
+def test_sppm_photon_dispatch_tiled_into_flushed_batches():
+    # batch=256 (64-aligned), photons=500 → sub-batches [0,256] × counts [256,244],
+    # each its own flushed command buffer; clear_accum stays a single pre-loop op.
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=500, first_frame=False, photon_batch=256)
+    photon = [op for op in rec.ops if op[0] == "dispatch_count"
+              and op[1] == "wfSppmPhotonTrace"]
+    assert photon == [
+        ("dispatch_count", "wfSppmPhotonTrace", 256, 64),
+        ("dispatch_count", "wfSppmPhotonTrace", 244, 64),
+    ]
+    # bases of the photon push_tile ops (the only push_tile between clear_accum
+    # and the update phase). slice ends at upd-1 (the first update tile's own
+    # push_tile) so only the photon-batch bases remain.
+    ca = rec.ops.index(("clear_accum",))
+    upd = rec.ops.index(("dispatch_full", "wfSppmUpdate"))
+    photon_bases = [op[1] for op in rec.ops[ca:upd - 1] if op[0] == "push_tile"]
+    assert photon_bases == [0, 256]
+    # every photon batch is flushed; clear_accum is emitted once.
+    assert rec.ops.count(("clear_accum",)) == 1
+    # exactly one barrier+flush follows the final photon dispatch.
+    for i, op in enumerate(rec.ops):
+        if op == ("dispatch_count", "wfSppmPhotonTrace", 244, 64):
+            assert rec.ops[i + 1] == ("barrier",)
+            assert rec.ops[i + 2] == ("flush",)
+    # UNBIASED: the tiled counts sum to the full photon budget — no starvation.
+    assert sum(op[2] for op in photon) == 500
+
+
+def test_sppm_photon_batch_aligned_to_threadgroup_width():
+    # A non-64-aligned batch MUST be floored to a 64 multiple: `dispatch_count`
+    # rounds the launch up to /64, and the kernel is bounded only by the global
+    # `pid >= sppmPhotonsEmitted` guard — a non-final batch that over-launched
+    # would deposit photons that also belong to the next batch (double-count,
+    # energy bias). With alignment every non-final batch count is exactly the
+    # aligned batch (a 64 multiple), so no non-final round-up occurs.
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=500, first_frame=False, photon_batch=200)
+    photon = [op[2] for op in rec.ops if op[0] == "dispatch_count"
+              and op[1] == "wfSppmPhotonTrace"]
+    # 200 → aligned 192; 500 = 192 + 192 + 116.
+    assert photon == [192, 192, 116]
+    # every NON-final batch count is a multiple of 64 (no unmasked over-launch).
+    assert all(c % 64 == 0 for c in photon[:-1])
+    # still unbiased: exact full budget, no overlap.
+    assert sum(photon) == 500
+
+
+def test_sppm_photon_batch_zero_is_single_full_dispatch():
+    # batch<=0 (Vulkan / no watchdog) collapses to one full-photon dispatch, base 0.
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=500, first_frame=False, photon_batch=0)
+    photon = [op for op in rec.ops if op[0] == "dispatch_count"
+              and op[1] == "wfSppmPhotonTrace"]
+    assert photon == [("dispatch_count", "wfSppmPhotonTrace", 500, 64)]
+
+
+def test_sppm_photon_batch_ge_photons_is_single_dispatch():
+    # batch >= photons → no tiling, one dispatch of the whole budget.
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=300, first_frame=False, photon_batch=4096)
+    photon = [op for op in rec.ops if op[0] == "dispatch_count"
+              and op[1] == "wfSppmPhotonTrace"]
+    assert photon == [("dispatch_count", "wfSppmPhotonTrace", 300, 64)]
