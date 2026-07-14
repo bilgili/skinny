@@ -3774,6 +3774,7 @@ class Renderer:
                 self.ctx,
                 self.shader_dir,
                 graph_fragments=list(self._scene_graph_fragments),
+                spectral=self._spectral,
             )
             self.pipeline = None
         # `built_sig` reflects what we *attempted*, not the post-fallback

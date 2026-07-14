@@ -236,7 +236,8 @@ class ComputePipeline:
         print(f"[skinny] pipeline ready in {_time.perf_counter() - t0:.2f}s", flush=True)
 
     @classmethod
-    def scene_bindings_only(cls, ctx, shader_dir, graph_fragments=None):
+    def scene_bindings_only(cls, ctx, shader_dir, graph_fragments=None,
+                            spectral=False):
         """Build ONLY the backend-independent scene plumbing — the set-0
         descriptor-set layout, the `generated_materials`/per-graph + python
         dispatcher emission, and the `graph_bindings` map — with NO megakernel
@@ -250,6 +251,7 @@ class ComputePipeline:
             ctx, shader_dir,
             entry_module="main_pass", entry_point="mainImage",
             graph_fragments=graph_fragments, compile_pipeline=False,
+            spectral=spectral,
         )
 
     # ── Slang → SPIR-V compilation ───────────────────────────────

@@ -653,11 +653,13 @@ class ComputePipeline:
         self._build()
 
     @classmethod
-    def scene_bindings_only(cls, ctx, shader_dir, graph_fragments=None):
+    def scene_bindings_only(cls, ctx, shader_dir, graph_fragments=None,
+                            spectral=False):
         """Emit the scene plumbing without compiling/dispatching the megakernel —
         Metal sibling of ``vk_compute.ComputePipeline.scene_bindings_only``."""
         return cls(ctx, shader_dir, entry_module="main_pass", entry_point="mainImage",
-                   graph_fragments=graph_fragments, compile_pipeline=False)
+                   graph_fragments=graph_fragments, compile_pipeline=False,
+                   spectral=spectral)
 
     # ── Compile + reflect ────────────────────────────────────────
 
