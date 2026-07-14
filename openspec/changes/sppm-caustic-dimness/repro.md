@@ -1,31 +1,39 @@
-# Repro / measurement methodology — SPPM vs path dimness
+# Repro — SPPM env-direct under-count
 
-## Correct methodology (avoids the two artifacts)
+Tight, deterministic loop (goes red on the bug, green when fixed).
 
-1. Render path AND sppm at the **same, high** sample count (≥2048) so fireflies
-   have averaged out.
-2. Read the linear `.hdr`, compare **per-region MEDIAN** (firefly-robust), path
-   vs sppm **at the same spp** (a per-spp export scaling cancels).
+## Isolation scene (env-only)
+
+A diffuse ground + box under ONLY the env dome — a flat plane's value is almost
+pure env DIRECT (analytic ≈ albedo·L), so the deficit is unambiguous. See
+`/tmp` scratch `env_ground.usda` (ground albedo 0.8, no analytic light).
 
 ```bash
 export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS
 export DYLD_LIBRARY_PATH=$VULKAN_SDK/lib SKINNY_BACKEND=metal
 WT=<worktree>; MAIN=/Users/ahmetbilgili/projects/skinny
 for I in path sppm; do
-  PYTHONPATH=$WT/src $MAIN/bin/python3.13 -m skinny.headless \
-    $WT/assets/glass_caustics_test.usda -o /tmp/${I}.hdr --integrator $I \
-    --backend metal --width 256 --height 256 --samples 2048 --tonemap linear --format hdr
+  PYTHONPATH=$WT/src $MAIN/bin/python3.13 -m skinny.headless env_ground.usda \
+    -o /tmp/${I}.hdr --integrator $I --backend metal --width 256 --height 256 \
+    --samples 1024 --tonemap linear --format hdr
 done
-# median(sppm)/median(path) per region; ~0.75-0.84 = the real dimness.
+# flat-ground median(sppm)/median(path): 0.735 before, ~1.0 after.
 ```
 
-## Two artifacts that fooled the first pass (do NOT repeat)
+## Confirmation probe (root cause)
 
-- **Low-spp box MEAN** is firefly-dominated: path reads 263× its converged value
-  at 1 spp. Never use a low-spp mean — use median or high spp.
-- **Cross-spp linear-HDR comparison** is invalid: `--format hdr --tonemap linear`
-  has a per-spp scaling common to path AND sppm (path's flat-ground median halves
-  per spp doubling). Compare at the SAME spp only.
+Force the env NEE to full weight in `nee.slang`
+(`float w = powerHeuristic(es.pdf, misPdf);` → `float w = 1.0;`) and render sppm:
+env-only flat ground 0.735 → **0.998**. Proves the deficit is the MIS-weighted env
+NEE with no BSDF companion (the eye terminates at the VP). Revert the probe.
 
-An earlier "1/N energy / 58× direct-term" conclusion was these artifacts —
-retracted. The real signal is a spp-invariant ~0.75-0.84 same-spp ratio.
+## Methodology guards (learned the hard way)
+
+- Compare integrators at the SAME spp with a MEDIAN (firefly-robust). A low-spp box
+  MEAN is firefly-dominated (path reads 263× at 1 spp), and `--format hdr
+  --tonemap linear` has a per-spp export scaling common to both — cross-spp linear
+  comparison is invalid.
+- `--no-direct` is INVALID for SPPM: the eye stores the VP with NEE-based direct
+  and returns, so NEE-off strips SPPM's direct entirely (not just NEE).
+- `--env-intensity 0` reads the authored env-dome intensity (renderer.py ~9320),
+  not the flag — do not use it as a clean env-off control.
