@@ -9,6 +9,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SPPM env-lit scenes no longer render ~15–25% dim vs path/bdpt** (change
+  `sppm-caustic-dimness`). The wavefront SPPM eye terminates at the first diffuse
+  visible point (photons carry the indirect) and computed that vertex's direct via
+  the MIS-weighted `allLightsNEE`; its env NEE expected a BSDF-sampled env-miss
+  companion that a continuing path would add next bounce, but SPPM never fires it,
+  so env NEE was down-weighted with no counterpart → env **direct** under-counted
+  under a broad environment. The eye now adds that env-miss companion at the
+  terminal visible point (one BSDF sample, MIS-weighted), so env direct = NEE +
+  BSDF-miss exactly as the path tracer. GPU-verified: env-only flat ground
+  0.735→0.998; `glass_caustics_test` all regions 0.75–0.87 → 0.95–1.04. Small
+  analytic lights unaffected.
+
+
 - **SPPM no longer wedges the Metal GPU on caustic scenes, without starving
   photons** (change `sppm-photon-dispatch-tiling`). The wavefront phase-3 photon
   pass (`wfSppmPhotonTrace`) was committed as one command buffer whose work is

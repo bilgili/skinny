@@ -58,6 +58,18 @@ the existing NEE path (computed once in the eye stage); the photon term carries
 only the *indirect / caustic* complement, so the two are disjoint with no
 double-count.
 
+Because the eye **terminates** at the visible point (photons carry the indirect,
+so it never continues), it must add the **env-miss MIS companion** of that
+vertex's environment NEE itself: `allLightsNEE` MIS-weights the env NEE by
+`powerHeuristic(envPdf, bsdfPdf)`, expecting a BSDF-sampled env-miss from the next
+bounce — which a continuing path would supply but SPPM never traces. So the eye
+takes one BSDF sample at the visible point and, if it escapes to the environment,
+adds `throughput · bsdfWeight · L_env · powerHeuristic(bsdfPdf, envPdf)`, giving
+env direct = NEE + BSDF-miss exactly as `path.slang`. Without it the env NEE is
+down-weighted with no counterpart and env direct is under-counted ~25 % under a
+broad environment (change `sppm-caustic-dimness`); small analytic lights are
+unaffected (their BSDF pdf ≈ 0 ⇒ the NEE is already effectively full weight).
+
 ### Scope and limits
 
 | Property | Value |

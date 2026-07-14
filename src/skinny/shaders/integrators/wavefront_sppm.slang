@@ -294,6 +294,49 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
         if (bs.pdf > 0.0 && !glossyContinue)
         {
             // Non-delta, non-glossy-continued surface ⇒ this is the visible point.
+            //
+            // Complete the env-direct MIS pair at this TERMINAL vertex. The eye's
+            // env NEE (in allLightsNEE above) is MIS-weighted by
+            // powerHeuristic(envPdf, bsdfPdf), expecting a BSDF-sampled env-miss
+            // companion. A continuing path adds that companion at its next bounce
+            // (the loop-top env-miss term) — but SPPM stops here (photons carry
+            // the indirect), so the companion never fires and the env NEE is
+            // down-weighted with no counterpart: env DIRECT is under-counted for a
+            // broad environment (~25 % on a diffuse surface under a smooth dome).
+            // Trace one BSDF sample and add its env-miss, mirroring the loop-top
+            // term, so env direct = NEE + BSDF-miss exactly as the path tracer
+            // computes it (change sppm-caustic-dimness). Reflection hemisphere
+            // only: a non-delta *transmitted* escape (diffuse-transmission flats)
+            // is a recorded v1 gap — path.slang takes it at full weight, but it is
+            // rare and glass transmission is delta (⇒ the carrier branch, not
+            // this one), so it is not handled here.
+            if (bs.pdf > 0.0 && !bs.transmitted &&
+                effectiveFurnaceMode(h.materialId) == 0u)
+            {
+                float3 wiW = tangentToWorld(bs.wi, T, B, N);
+                Ray er;
+                // Offset along the GEOMETRIC normal (like the carrier spawn and
+                // path.slang), not the shading normal — a shading-normal offset
+                // can seat the origin under the surface on grazing normal-mapped
+                // geometry and false-self-hit, silently dropping the env term.
+                er.origin = h.position + h.normal * 0.002;
+                er.direction = wiW;
+                HitInfo eh = traceScene(fc, er);
+                if (!eh.hit)
+                {
+                    float wB = powerHeuristic(bs.pdf, envPdf(wiW));
+#if defined(SKINNY_SPECTRAL)
+                    Spectrum envR = upsampleIlluminantBound(
+                        sceneEnvRadianceCell(wiW, fc.envIntensity, 0u), gSw);
+                    ld += throughput * (flatResponseS(mat, cols, wo, bs.wi) / bs.pdf)
+                          * envR * wB;
+#else
+                    float3 envR = sceneEnvRadianceCell(wiW, fc.envIntensity, 0u);
+                    ld += throughput * bs.weight * envR * wB;
+#endif
+                }
+            }
+
             sppmStoreVisiblePoint(lane, h.position, N, V, throughput, ld, mat
 #if defined(SKINNY_SPECTRAL)
                 , sppmMetalId
