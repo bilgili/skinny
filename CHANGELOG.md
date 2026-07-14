@@ -7,6 +7,37 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: the built-in default DistantLight is no longer injected into
+  scenes that author their own lights** (change `distant-light-caustic-parity`).
+  A USD scene with any powered light (DistantLight, SphereLight, emissive-
+  material mesh, or an authored DomeLight) now renders with exactly its
+  authored lights on every front-end; only a truly light-less scene (or the
+  default no-USD session) keeps the slider-driven synth sun. The phantom sun
+  changed authored scenes' lighting, and its glass caustic was renderable only
+  by SPPM (a delta light through delta glass is unsampleable by the path
+  tracer, and BDPT skipped the distant light walk) — the source of the
+  long-standing "SPPM caustics don't match bdpt" speckle, which is gone at the
+  default SPPM radius with the phantom suppressed.
+
+### Added
+
+- **BDPT walks light subpaths from distant lights** (change
+  `distant-light-caustic-parity`). The distant light-origin sample is now a
+  real emission ray from a scene-bounds-covering disk (mirroring the SPPM
+  photon emitter and pbrt's `DistantLight::Sample_Le`), so distant-light
+  specular caustics — which unidirectional path tracing cannot sample — are
+  carried by the s = 1 camera splat and the s ≥ 2 connections, agreeing with
+  the SPPM photon estimate (Gate B: bdpt/sppm full 1.0095, mega ≡ wave
+  1.0000). The eye-side distant NEE joined the `misWeight` partition (it was
+  an unconditional full-weight term — a guaranteed 2× double-count once the
+  walk exists), the first walked vertex uses the parallel-projection area
+  density (no cos/d² — the disk distance is a placement artifact), and
+  distant **direct** stays owned by NEE (the t = 2 splat is skipped; the
+  repo's `z1.pdfFwd = 1` camera convention cannot partition it at grazing
+  camera pdfs). RGB + spectral (per-λ SPD recolor), megakernel + wavefront.
+
 ### Fixed
 
 - **SPPM env-lit scenes no longer render ~15–25% dim vs path/bdpt** (change

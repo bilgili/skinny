@@ -501,6 +501,29 @@ per-input channel selectors into `channelMask` (4 bits per input), so the
 shader fetches the correct channel and applies the right normal-map convention
 without per-texture branches.
 
+### Default-Light Synthesis Policy (`renderer.py`)
+
+The renderer owns a built-in, slider-driven default DistantLight (the "synth
+sun"). Since change `distant-light-caustic-parity` it is injected **only into
+scenes that author no powered light at all**: the per-frame distant-light
+mirror in `update()` uploads the authored `lights_dir` when present; otherwise,
+if `_scene_authors_lights(scene)` is true (any *powered* DistantLight or
+SphereLight, any emissive-material mesh instance, or an authored DomeLight —
+detected as `scene.environment`, never the built-in HDRI backdrop), it uploads
+**zero** distant records; only a truly unlit scene (including one authoring
+only zero-power lights) falls back to the slider light. The predicate is
+derived from the load-time `_usd_scene` and cached per Scene object — live
+scene-graph light edits do not re-derive it (documented v1 limitation).
+`direct_light_index` keeps its global-off semantics on top.
+
+Rationale: the phantom sun changed authored scenes' lighting, and its glass
+caustic was renderable **only** by SPPM (photons walk delta-light→delta-glass
+chains; the path tracer fundamentally cannot sample them and BDPT historically
+skipped the distant light walk) — so the integrators disagreed by
+construction on any authored-light scene with specular geometry. Corollary: a
+geometry-only USD under the built-in HDRI still gets sun + HDRI, as the
+default head session expects.
+
 ### Runtime Scene-Graph Editing (`renderer.py`)
 
 The loaded `Usd.Stage` is the authoritative scene model; the flat `Scene` +

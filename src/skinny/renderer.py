@@ -5975,6 +5975,80 @@ class Renderer:
         self.sphere_lights_buffer.upload_sync(bytes(data))
         self._num_sphere_lights = n
 
+    def _scene_authors_lights(self, scene) -> bool:
+        """True when the loaded USD scene authors any *powered* light.
+
+        Counts: a powered DistantLight, a powered SphereLight, an
+        emissive-material mesh instance (the emissive-triangle NEE source —
+        RectLight/DiskLight import as these), or an authored DomeLight
+        (``scene.environment``; the renderer's built-in HDRI backdrop is NOT
+        an authored light). Zero-power-only scenes count as unlit so they keep
+        the default light rather than rendering black.
+
+        Drives the default-light synthesis policy (change
+        distant-light-caustic-parity): the synthesized default DistantLight is
+        injected only into scenes that author no light at all. Authority is
+        the load-time scene — the result is cached per Scene object, so live
+        scene-graph light edits do not re-derive it (documented limitation).
+        """
+        cached = getattr(self, "_authors_lights_cache", None)
+        if cached is not None and cached[0] is scene:
+            return cached[1]
+
+        def _has_power(lt) -> bool:
+            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
+                return False
+            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
+            return bool(np.any(rad > 0.0))
+
+        def _powered(lights: list) -> bool:
+            return any(
+                getattr(lt, "enabled", True) and _has_power(lt) for lt in lights
+            )
+
+        result = bool(
+            _powered(getattr(scene, "lights_dir", []) or [])
+            or _powered(getattr(scene, "lights_sphere", []) or [])
+            or getattr(scene, "environment", None) is not None
+            or self._scene_has_emissive_instances(scene)
+        )
+        self._authors_lights_cache = (scene, result)
+        return result
+
+    def _scene_has_powered_dir(self, scene) -> bool:
+        """Any enabled, powered authored DistantLight (the mirror's branch-1
+        test — list truthiness alone would let a zero-power-only lights_dir
+        upload zero records and bypass the slider fallback)."""
+        def _has_power(lt) -> bool:
+            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
+                return False
+            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
+            return bool(np.any(rad > 0.0))
+
+        return any(
+            getattr(lt, "enabled", True) and _has_power(lt)
+            for lt in (getattr(scene, "lights_dir", []) or [])
+        )
+
+    @staticmethod
+    def _scene_has_emissive_instances(scene) -> bool:
+        """Any enabled instance bound to a material with non-zero emissiveColor
+        (the same walk _upload_emissive_triangles packs from)."""
+        materials = getattr(scene, "materials", []) or []
+        for inst in getattr(scene, "instances", []) or []:
+            if not getattr(inst, "enabled", True):
+                continue
+            mat_id = getattr(inst, "material_id", -1)
+            if not (0 <= mat_id < len(materials)):
+                continue
+            emissive = _override_color3(
+                materials[mat_id].parameter_overrides,
+                "emissiveColor", (0.0, 0.0, 0.0),
+            )
+            if emissive[0] > 0 or emissive[1] > 0 or emissive[2] > 0:
+                return True
+        return False
+
     def _upload_distant_lights(self, lights: list) -> None:
         """Pack each LightDir into binding 20. Active count goes to
         FrameConstants.numDistantLights for the shader to bound its loop.
@@ -9757,13 +9831,26 @@ class Renderer:
 
         # Mirror the active distant-light list into the GPU SSBO at
         # binding 20 every frame. Cheap (16 records × 32 B). When a USD
-        # scene is loaded every authored DistantLight is uploaded;
-        # otherwise the renderer's slider-driven synth default light goes
-        # in alone. fc.numDistantLights bounds the iterators in
-        # path/bdpt/skin_direct.
-        if self._usd_scene is not None and self._usd_scene.lights_dir:
+        # scene is loaded every authored DistantLight is uploaded. The
+        # slider-driven synth default light is injected ONLY when the scene
+        # authors no powered light at all (change distant-light-caustic-
+        # parity): a scene lit by its own SphereLight / emissive mesh / dome
+        # must not gain a phantom sun — SPPM renders that phantom's glass
+        # caustic (photons walk it) while path cannot sample it (delta light
+        # + delta glass) and BDPT historically skipped it, so the phantom
+        # made the integrators disagree by construction.
+        # fc.numDistantLights bounds the iterators in path/bdpt/skin_direct.
+        if (self._usd_scene is not None
+                and self._scene_has_powered_dir(self._usd_scene)):
             self._upload_distant_lights(self._usd_scene.lights_dir)
+        elif (self._usd_scene is not None
+              and self._scene_authors_lights(self._usd_scene)):
+            self._upload_distant_lights([])
         else:
+            # No POWERED authored DistantLight (a zero-power-only lights_dir
+            # counts as unlit — branching on list truthiness would upload zero
+            # records and silently drop the slider fallback; codex P2-2) and
+            # no other authored light: the slider default light applies.
             self._upload_distant_lights(self.scene.lights_dir)
 
         # If the environment selection changed, re-upload the HDR texture.
