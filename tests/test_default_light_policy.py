@@ -30,12 +30,13 @@ needs_renderer = pytest.mark.skipif(
 
 
 def _host():
-    """Minimal object exposing the two policy methods unbound from Renderer,
+    """Minimal object exposing the policy methods unbound from Renderer,
     so no GPU context is stood up."""
     from skinny.renderer import Renderer
 
     class _Host:
         _scene_authors_lights = Renderer._scene_authors_lights
+        _scene_has_powered_dir = Renderer._scene_has_powered_dir
         _scene_has_emissive_instances = staticmethod(
             Renderer._scene_has_emissive_instances
         )
@@ -168,7 +169,7 @@ def test_result_cached_per_scene_object():
 @pytest.mark.parametrize(
     "scene_kwargs, expected",
     [
-        # authored DistantLight → its own records
+        # authored powered DistantLight → its own records
         (dict(dir_lights=[_light()]), "authored"),
         # authored SphereLight only → ZERO records (no phantom sun)
         (dict(sphere_lights=[_light(intensity=60.0)]), "zero"),
@@ -178,12 +179,21 @@ def test_result_cached_per_scene_object():
         (dict(), "slider"),
         # zero-power sphere only → still the slider default light
         (dict(sphere_lights=[_light(intensity=0.0, radiance=(0, 0, 0))]), "slider"),
+        # zero-power DistantLight ONLY → slider, NOT the authored branch
+        # (branching on list truthiness would upload zero records and drop the
+        # fallback; codex P2-2)
+        (dict(dir_lights=[_light(intensity=0.0, radiance=(0, 0, 0))]), "slider"),
+        # zero-power dir + powered sphere → zero records (scene is lit)
+        (dict(dir_lights=[_light(intensity=0.0, radiance=(0, 0, 0))],
+              sphere_lights=[_light(intensity=60.0)]), "zero"),
+        # disabled dir + nothing else → slider
+        (dict(dir_lights=[_light(enabled=False)]), "slider"),
     ],
 )
 def test_mirror_decision_table(scene_kwargs, expected):
     host = _host()
     usd_scene = _scene(**scene_kwargs)
-    if usd_scene.lights_dir:
+    if host._scene_has_powered_dir(usd_scene):
         outcome = "authored"
     elif host._scene_authors_lights(usd_scene):
         outcome = "zero"

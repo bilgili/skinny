@@ -6015,6 +6015,21 @@ class Renderer:
         self._authors_lights_cache = (scene, result)
         return result
 
+    def _scene_has_powered_dir(self, scene) -> bool:
+        """Any enabled, powered authored DistantLight (the mirror's branch-1
+        test — list truthiness alone would let a zero-power-only lights_dir
+        upload zero records and bypass the slider fallback)."""
+        def _has_power(lt) -> bool:
+            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
+                return False
+            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
+            return bool(np.any(rad > 0.0))
+
+        return any(
+            getattr(lt, "enabled", True) and _has_power(lt)
+            for lt in (getattr(scene, "lights_dir", []) or [])
+        )
+
     @staticmethod
     def _scene_has_emissive_instances(scene) -> bool:
         """Any enabled instance bound to a material with non-zero emissiveColor
@@ -9825,12 +9840,17 @@ class Renderer:
         # + delta glass) and BDPT historically skipped it, so the phantom
         # made the integrators disagree by construction.
         # fc.numDistantLights bounds the iterators in path/bdpt/skin_direct.
-        if self._usd_scene is not None and self._usd_scene.lights_dir:
+        if (self._usd_scene is not None
+                and self._scene_has_powered_dir(self._usd_scene)):
             self._upload_distant_lights(self._usd_scene.lights_dir)
         elif (self._usd_scene is not None
               and self._scene_authors_lights(self._usd_scene)):
             self._upload_distant_lights([])
         else:
+            # No POWERED authored DistantLight (a zero-power-only lights_dir
+            # counts as unlit — branching on list truthiness would upload zero
+            # records and silently drop the slider fallback; codex P2-2) and
+            # no other authored light: the slider default light applies.
             self._upload_distant_lights(self.scene.lights_dir)
 
         # If the environment selection changed, re-upload the HDR texture.

@@ -806,7 +806,15 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
                 }
             }
 
-            float w = misWeight(eye, s, litArr, 1,
+            // s == 2: the ONLY other strategy for (camera, z, DIR) was the
+            // t = 2 splat, which splatLightVertex now skips (distant DIRECT is
+            // owned by NEE) — so NEE takes the path at full weight; counting
+            // the removed strategy would darken distant direct lighting by a
+            // scene-scale-dependent factor (codex P2-1). Deeper s keeps the
+            // partition: those alternatives (t >= 2 connections, t >= 3
+            // splats) still exist.
+            float w = (s == 2) ? 1.0
+                    : misWeight(eye, s, litArr, 1,
                                 pdf_zsm1_rev, pdf_zsm2_rev, 0.0, 0.0);
 #if defined(SKINNY_SPECTRAL)
             total += z.throughput.rgb * resp * L.radiance * w;

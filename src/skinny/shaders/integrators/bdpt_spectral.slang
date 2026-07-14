@@ -645,7 +645,10 @@ Spectrum connectT1S(SpectralBDPTVertex eye[BDPT_MAX_VERTS], int s,
 
             BDPTVertex eyeRgb[BDPT_MAX_VERTS];
             mirrorRgb(eye, eyeRgb);
-            float w = misWeight(eyeRgb, s, litArr, 1,
+            // s == 2: full weight — the t = 2 distant splat is skipped (see
+            // bdpt.connectT1; codex P2-1).
+            float w = (s == 2) ? 1.0
+                    : misWeight(eyeRgb, s, litArr, 1,
                                 pdf_zsm1_rev, pdf_zsm2_rev, 0.0, 0.0);
             total += z.throughput * e.response * Li * w;
         }

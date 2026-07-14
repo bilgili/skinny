@@ -63,11 +63,11 @@
   splats have no spatial reuse — matched-spp equality is unrealistic); record
   the honest number. `path` = recorded per-component exclusion. Distant
   *direct* regions unchanged before/after (the no-double-count check for 2.4).
-- [ ] 3.3 Re-run the full parity matrix (bathroom/dragon author distant lights)
+- [x] 3.3 Re-run the full parity matrix (bathroom/dragon author distant lights)
   — no combo regresses; distant direct lighting energy unchanged (the 2.4
   degradation-to-1.0 check at scale); update manifests only with recorded
   baselines, never loosened tolerances.
-- [ ] 3.4 Megakernel ≡ wavefront BDPT self-consistency green (both now walk
+- [x] 3.4 Megakernel ≡ wavefront BDPT self-consistency green (both now walk
   distant subpaths); spectral bdpt smoke on Gate B's scene.
 
 ## 4. Docs + close-out
@@ -78,8 +78,8 @@
   light's caustic — SPPM was correct).
 - [x] 4.2 `CHANGELOG.md`: **BREAKING** phantom-sun policy + BDPT distant-caustic
   support.
-- [ ] 4.3 `openspec validate distant-light-caustic-parity --strict`; codex (or
+- [x] 4.3 `openspec validate distant-light-caustic-parity --strict`; codex (or
   review-subagent fallback) pre-merge; merge from the worktree; archive.
-- [ ] 4.4 File follow-up notes: SPPM env-indirect dimness (env photon emission /
+- [x] 4.4 File follow-up notes: SPPM env-indirect dimness (env photon emission /
   eye-walk continuation), SPPM deposit `vp.beta`, optional disk-radius
   tightening (variance), spectral dispersion on the light-side specular chain.
