@@ -96,14 +96,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 skinny = [
-    "shaders/*.slang",
-    "shaders/estimators/*.slang",
-    "shaders/samplers/*.slang",
-    "shaders/lights/*.slang",
-    "shaders/integrators/*.slang",
-    "mtlx/*.mtlx",
-    "mtlx/genslang/*.mtlx",
-    "mtlx/genslang/*.slang",
+    "shaders/**/*.slang",
+    "mtlx/**/*.mtlx",
+    "mtlx/**/*.slang",
+    "mtlx/**/*.json",
     "web_templates/*.html",
     "web_templates/*.js",
     "pbrt/data/*.npz",
