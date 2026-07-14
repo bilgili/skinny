@@ -17,7 +17,11 @@
 //     projected onto camera and atomic-added into lightSplatBuffer. This
 //     is the path that produces caustic spots on diffuse floors (pure-spec
 //     connections via the t≥2 generic path are zero on co-planar surfaces).
-//   - Directional light only via t=1 NEE (delta — no light walk).
+//   - Distant (directional) lights: t=1 NEE joined with a REAL light-subpath
+//     walk from a scene-bounds disk (change distant-light-caustic-parity), so
+//     distant-light specular caustics — unsampleable by the path tracer —
+//     are carried by the s=1 splat and s≥2 connections. Distant DIRECT is
+//     owned by NEE (the t=2 splat is skipped; see splatLightVertex).
 //   - Env (IBL): eye-walk env NEE (importance-sample the env distribution) +
 //     the BSDF-sampled escape ray, combined via the power heuristic — matching
 //     PathTracer. Env NEE is the variance fix for bright-sun HDRIs, where the
@@ -250,19 +254,41 @@ LightOriginSample sampleLightOrigin(inout RNG rng)
         // would converge faster but every NEE/connectT1 loop iterates
         // *all* distant lights, so the BDPT sampleLightOrigin choice only
         // matters for the s≥1 light-walk strategy.
+        //
+        // Distant emission (change distant-light-caustic-parity): a REAL
+        // light ray from a scene-bounds-covering disk, mirroring the SPPM
+        // photon emitter (wavefront_sppm.sppmEmitPhoton) and pbrt-v3
+        // DistantLight::Sample_Le — so the light walk carries distant
+        // radiance through specular chains (glass caustics) instead of the
+        // DIR vertex sitting inert. `dir` points TOWARD the light (the
+        // connectT1 / visibleDirectional convention); the beam travels -dir.
+        // beta = L / (pdfPos·pdfDir) = L·πR²/pickPdf; the direction pdf is a
+        // delta carried as 1. `isDelta` stays FALSE on the vertex — pbrt
+        // separates the vertex (BSDF) delta flag from is-delta-LIGHT, which
+        // only suppresses the "eye ray hits the light" MIS term; misWeight /
+        // splatMisWeight test the vertex KIND for that (i == 0 guard).
         uint idx = min(uint(rng.next() * float(nDir)), nDir - 1u);
         DistantLight L = distantLights[idx];
         float3 dir = normalize(L.direction);
         float lightPickPdf = groupPdf / float(nDir);
+        float3 center = fc.sceneBoundsMin + 0.5 * fc.sceneBoundsExtent;
+        float  R = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+        float3 t, b;
+        buildBasis(dir, t, b);
+        float2 u2 = rng.next2();
+        float rr = R * sqrt(u2.x);
+        float ph = 2.0 * PI * u2.y;
+        float pdfPos = lightPickPdf / (PI * R * R);
         r.vertex.kind = BDPT_VK_LIGHT_DIR;
+        r.vertex.position = center + dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
         r.vertex.N = -dir;
         r.vertex.emission = SPEC3(L.radiance);
-        r.vertex.throughput = SPEC3(L.radiance);
-        r.vertex.pdfFwd = lightPickPdf;
-        r.vertex.isDelta = true;
-        r.dirOut = dir;
-        r.beta = L.radiance;
-        r.pdfPos = lightPickPdf;
+        r.vertex.throughput = SPEC3(L.radiance) / max(pdfPos, 1e-20);
+        r.vertex.pdfFwd = pdfPos;
+        r.vertex.isDelta = false;
+        r.dirOut = -dir;
+        r.beta = L.radiance / max(pdfPos, 1e-20);
+        r.pdfPos = pdfPos;
         r.pdfDir = 1.0;
         r.valid = true;
         return r;
@@ -423,7 +449,17 @@ int randomWalk(
         v.hasTangent = h.hasTangent;
 
         BDPTVertex prev = path[idx - 1];
-        v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
+        // Distant-light source segment (change distant-light-caustic-parity):
+        // the beam is parallel, so the first surface vertex's area density is
+        // the disk pdf times the parallel-projection Jacobian |N·beam| — no
+        // cos/d² falloff (the disk-to-hit distance is a placement artifact).
+        // The DIR seed passes its AREA-measure pdfPos through pdfDirOmegaIn.
+        // pbrt-v3 Vertex::PdfLight's IsInfiniteLight branch (pdf = 1/(πr²),
+        // then ·AbsDot(ng, w)) is the reference.
+        if (prev.kind == BDPT_VK_LIGHT_DIR)
+            v.pdfFwd = pdfFwdOmega * abs(dot(v.N, ray.direction));
+        else
+            v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
 
         int prevIdx = idx - 1;
         path[idx] = v;
@@ -562,7 +598,16 @@ float misWeight(
         // SPIR-V (`OpAccessChain ... %int_n1`, flagged by spirv-val) even though
         // the `i > 0` guard discards the value. `max(i - 1, 0)` reads `litC[0]`
         // in that discarded case: identical result, valid index.
-        bool deltaLight = (i > 0) ? litC[max(i - 1, 0)].isDelta : false;
+        //
+        // i == 0 is the "pure eye path hits the light" strategy — impossible
+        // for a delta-DIRECTION light (a random ray never hits it), so it is
+        // suppressed by the light-vertex KIND, not the vertex delta flag
+        // (pbrt: `i > 0 ? pt[i-1].delta : pt[0].IsDeltaLight()`). The DIR
+        // vertex itself carries isDelta = false so the i == 1 term (the NEE /
+        // connection alternative at the first walked surface) still counts
+        // (change distant-light-caustic-parity).
+        bool deltaLight = (i > 0) ? litC[max(i - 1, 0)].isDelta
+                                  : (litC[0].kind == BDPT_VK_LIGHT_DIR);
         if (!litC[i].isDelta && !deltaLight)
             sumRi += ri * ri;
     }
@@ -690,6 +735,17 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
     BdptSurface zs = bdptSurface(z);
     float3 woWorld = normalize(eye[s - 2].position - z.position);
 
+    // Distant NEE — unified onto misWeight (change distant-light-caustic-parity).
+    // Historically this term was added at unconditional full weight, which was
+    // correct only while the distant light-subpath walk never ran: with the walk
+    // enabled, the same path (…→ z → DIR) is also generated by the s=1 camera
+    // splat of the first walked surface vertex and by the t≥2 connections, so an
+    // unweighted NEE double-counts distant direct lighting (~2×). The walked
+    // strategy's density at z is the parallel-projection disk pdf σ·N·L — tiny
+    // for a scene-bounds disk — so this weight degrades to ~1.0 whenever the
+    // walk is an ineffective alternative (m10: pure-direct distant scenes are
+    // unchanged), and the partition transfers weight to the splat only where
+    // NEE cannot reach (delta chains — the caustic).
     for (uint d = 0u; d < fc.numDistantLights; d++)
     {
         DistantLight L = distantLights[d];
@@ -698,10 +754,64 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
         if (NdotL > 0.0 && visibleDirectional(fc, z.position, z.N, dir))
         {
             float3 resp = bdptEval(zs, z.N, woWorld, dir).response;
+
+            // The walked-strategy density at z (must match sampleLightOrigin's
+            // distant branch exactly): group pick × light pick × disk area pdf,
+            // times the parallel-projection Jacobian N·L at z.
+            uint nGroups = (fc.numDistantLights > 0u ? 1u : 0u)
+                         + (fc.numSphereLights  > 0u ? 1u : 0u)
+                         + (fc.numEmissiveTriangles > 0u ? 1u : 0u);
+            float R = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+            float sigma = 1.0 / (float(nGroups) * float(fc.numDistantLights)
+                                 * PI * R * R);
+
+            // The distant light as the t=1 subpath (lit[0]) — a DIR pseudo-
+            // vertex. isDelta stays false (vertex flag ≠ delta LIGHT; misWeight
+            // suppresses the i == 0 "eye ray hits the light" term by KIND).
+            BDPTVertex lit0;
+            lit0.kind = BDPT_VK_LIGHT_DIR;
+            lit0.position = z.position + dir;   // direction anchor; unused by MIS
+            lit0.N = -dir;
+            lit0.throughput = Spectrum(0.0);
+            lit0.emission = SPEC3(L.radiance);
+            lit0.pdfFwd = sigma;                // disk area pdf (walk's origin pdf)
+            lit0.pdfRev = 0.0;
+            lit0.isDelta = false;
+            lit0.onLight = true;
+            lit0.matId = 0u;
+            lit0.uv = float2(0.0);
+            lit0.posObject = float3(0.0);
+            lit0.geoN = -dir;
+            lit0.tangent = float3(1.0, 0.0, 0.0);
+            lit0.hasTangent = false;
+            BDPTVertex litArr[BDPT_MAX_VERTS];
+            litArr[0] = lit0;
+
+            // Endpoint reverse pdfs (area measure):
+            //   zsm1 — the walked strategy generating z from the light: the
+            //          parallel-projection density σ·(N·L) (no cos/d² — the
+            //          beam is parallel; mirrors randomWalk's DIR-source case).
+            //   zsm2 — z's BSDF toward eye[s-2] viewed from the light dir.
+            float pdf_zsm1_rev = sigma * NdotL;
+            float pdf_zsm2_rev = 0.0;
+            if (s >= 3)
+            {
+                float3 toPrev = eye[s - 2].position - z.position;
+                float l2 = dot(toPrev, toPrev);
+                if (l2 > 1e-20)
+                {
+                    float3 dp = toPrev / sqrt(l2);
+                    float pr = bdptEval(zs, z.N, dir, dp).pdf;
+                    pdf_zsm2_rev = convertSAtoArea(pr, z.position, eye[s - 2]);
+                }
+            }
+
+            float w = misWeight(eye, s, litArr, 1,
+                                pdf_zsm1_rev, pdf_zsm2_rev, 0.0, 0.0);
 #if defined(SKINNY_SPECTRAL)
-            total += z.throughput.rgb * resp * L.radiance;
+            total += z.throughput.rgb * resp * L.radiance * w;
 #else
-            total += z.throughput * resp * L.radiance;
+            total += z.throughput * resp * L.radiance * w;
 #endif
         }
     }
@@ -877,7 +987,15 @@ float splatMisWeight(
         // SPIR-V (`OpAccessChain ... %int_n1`, flagged by spirv-val) even though
         // the `i > 0` guard discards the value. `max(i - 1, 0)` reads `litC[0]`
         // in that discarded case: identical result, valid index.
-        bool deltaLight = (i > 0) ? litC[max(i - 1, 0)].isDelta : false;
+        //
+        // i == 0: same delta-LIGHT kind guard as misWeight — a random eye ray
+        // can never hit a delta-direction light, but the first walked surface
+        // vertex's NEE alternative (connectT1's distant branch) does exist, so
+        // its i == 1 term must count. Keeps the splat ≈ 0 on directly-visible
+        // diffuse under a distant light (NEE dominates) while staying 1 on the
+        // pure delta caustic chain (change distant-light-caustic-parity).
+        bool deltaLight = (i > 0) ? litC[max(i - 1, 0)].isDelta
+                                  : (litC[0].kind == BDPT_VK_LIGHT_DIR);
         if (!litC[i].isDelta && !deltaLight)
             sumRi += ri * ri;
     }
@@ -896,6 +1014,16 @@ void splatLightVertex<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS], int i,
 {
     BDPTVertex y = lightPath[i];
     if (y.isDelta || y.kind != BDPT_VK_SURFACE) return;
+    // Delta-direction (distant) lights: the t = 2 splat is the pure DIRECT
+    // path (light -> surface -> camera), which eye-side NEE (connectT1's
+    // distant branch) samples deterministically at ~full weight. Under the
+    // repo's z1.pdfFwd = 1 camera convention the two strategies cannot
+    // partition consistently at grazing camera pdfs (horizon), so distant
+    // DIRECT is owned by NEE outright and the splat carries only the
+    // t >= 3 transport NEE cannot reach (specular caustic chains, where
+    // every alternative crosses a delta vertex and this splat's MIS weight
+    // is 1). Change distant-light-caustic-parity.
+    if (i == 1 && lightPath[0].kind == BDPT_VK_LIGHT_DIR) return;
     int2 pixel;
     float cosCam;
     float distCam;
@@ -1086,15 +1214,22 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         {
             lightPath[0] = lo.vertex;
             lightLen = 1;
-            if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-            {
-                Ray rL;
-                rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
-                rL.direction = lo.dirOut;
-                float3 unusedEscape = float3(0.0);
-                lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
-                                      false, unusedEscape, -1.0);
-            }
+            // Distant lights walk too (change distant-light-caustic-parity):
+            // the DIR seed is a real disk-origin emission ray, so the light
+            // subpath carries distant radiance through specular chains (glass
+            // caustics — the transport SPPM's photon pass always had and the
+            // path tracer fundamentally cannot sample). The DIR seed passes
+            // its AREA-measure pdfPos as the initial pdf so randomWalk's
+            // parallel-projection case converts it at the first surface hit;
+            // area lights keep passing the solid-angle pdfDir.
+            Ray rL;
+            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+            rL.direction = lo.dirOut;
+            float3 unusedEscape = float3(0.0);
+            float pdfIn = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                        ? lo.pdfPos : lo.pdfDir;
+            lightLen = randomWalk(lightPath, 1, rL, lo.beta, pdfIn, rng,
+                                  false, unusedEscape, -1.0);
         }
 
         // s = 1 light tracer: project each non-delta light vertex onto the

@@ -503,6 +503,27 @@ closes that: `Integrator "sppm"` / `"photonmap"` is now recognized and **mapped*
 
 See [PbrtImport.md § pbrt metadata carry](PbrtImport.md#pbrt-metadata-carry).
 
+## Post-mortem: the "SPPM caustic speckle" was the phantom sun (2026-07)
+
+An investigation of "SPPM's caustics don't match bdpt" on the glass-caustics
+scene ended with SPPM being the **most correct** integrator. The scattered
+bright speckle in the shadow/penumbra ground was the glass caustic of the
+renderer's **synthesized default DistantLight** (injected into any scene
+authoring no directional light — even one lit by its own SphereLight). A delta
+light through delta glass is an SDS path the path tracer fundamentally cannot
+sample, and BDPT's light subpath historically skipped distant lights — so only
+SPPM's photon pass rendered that real transport, as needle-sharp filaments read
+as fireflies. Estimator form (the per-pass film-mean is algebraically identical
+to τ-accumulation), initial radius, photon count, RR floor, and mesh
+tessellation were all experimentally ruled out. The fix lives in change
+`distant-light-caustic-parity`: the default light is injected only into
+scenes that author no powered light, and BDPT gained the distant-light
+subpath walk so authored suns over glass render their caustics on every
+integrator. Methodology keepers: mask on a reference's own bright pixels (a
+geometric box mixes caustic and shadow), split regions by brightness tercile,
+and never compare SPPM via `direct_light_index=1` (it strips SPPM's eye direct
+differently from the megakernel integrators).
+
 ## Verification
 
 On Vulkan (Apple M5 Pro), a Cornell-box scene renders an **SPPM / path energy

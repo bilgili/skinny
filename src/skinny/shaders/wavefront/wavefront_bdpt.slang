@@ -226,20 +226,35 @@ WfSpectralLightOrigin wfSampleLightOriginS(SampledWavelengths sw, inout RNG rng)
 
     if (chosen == 2u)
     {
+        // Distant emission (change distant-light-caustic-parity): real disk-
+        // origin ray, mirror of bdpt_spectral.sampleLightOriginS's distant
+        // branch — per-λ SPD recolor, isDelta = false (the vertex KIND carries
+        // the delta-LIGHT semantics for the MIS i == 0 guard).
         uint idx = min(uint(rng.next() * float(nDir)), nDir - 1u);
         DistantLight L = distantLights[idx];
         float3 dir = normalize(L.direction);
         float lightPickPdf = groupPdf / float(nDir);
-        Spectrum Le = upsampleIlluminantBound(L.radiance, sw);
+        int      slot = int(distantLights[idx].spdIndex);
+        Spectrum Le   = (slot >= 0) ? distantLightSpd(slot, sw)
+                                    : upsampleIlluminantBound(L.radiance, sw);
+        float3 center = fc.sceneBoundsMin + 0.5 * fc.sceneBoundsExtent;
+        float  Rd = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+        float3 t, b;
+        buildBasis(dir, t, b);
+        float2 u2 = rng.next2();
+        float rr = Rd * sqrt(u2.x);
+        float ph = 2.0 * PI * u2.y;
+        float pdfPos = lightPickPdf / (PI * Rd * Rd);
         r.vertex.kind = BDPT_VK_LIGHT_DIR;
+        r.vertex.position = center + dir * Rd + t * (rr * cos(ph)) + b * (rr * sin(ph));
         r.vertex.N = -dir;
         r.vertex.emission = Le;
-        r.vertex.throughput = Le;
-        r.vertex.pdfFwd = lightPickPdf;
-        r.vertex.isDelta = true;
-        r.dirOut = dir;
-        r.beta = Le;
-        r.pdfPos = lightPickPdf;
+        r.vertex.throughput = Le / max(pdfPos, 1e-20);
+        r.vertex.pdfFwd = pdfPos;
+        r.vertex.isDelta = false;
+        r.dirOut = -dir;
+        r.beta = Le / max(pdfPos, 1e-20);
+        r.pdfPos = pdfPos;
         r.pdfDir = 1.0;
         r.valid = true;
         return r;
@@ -386,7 +401,13 @@ int wfRandomWalkS(
         v.hasTangent = h.hasTangent;
 
         BDPTVertex prev = path[idx - 1];
-        v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
+        // Distant-light source segment: parallel-projection area density
+        // (disk pdf × |N·beam|, no cos/d²) — mirrors bdpt.randomWalk's
+        // DIR-source case (change distant-light-caustic-parity).
+        if (prev.kind == BDPT_VK_LIGHT_DIR)
+            v.pdfFwd = pdfFwdOmega * abs(dot(v.N, ray.direction));
+        else
+            v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
 
         int prevIdx = idx - 1;
         path[idx] = v;
@@ -588,6 +609,10 @@ Spectrum wfConnectT1S(BDPTVertex eye[BDPT_MAX_VERTS], int s,
     SpectralFlatColors zcols = wfColsFor(zs.mat, z.matId, sw);
     float3 woWorld = normalize(eye[s - 2].position - z.position);
 
+    // Distant NEE — unified onto misWeight, mirror of bdpt.connectT1's distant
+    // branch (change distant-light-caustic-parity): with the distant light walk
+    // enabled, the unconditional full-weight term would double-count against
+    // the s=1 splat / t≥2 connections.
     for (uint di = 0u; di < fc.numDistantLights; di++)
     {
         DistantLight L = distantLights[di];
@@ -599,7 +624,50 @@ Spectrum wfConnectT1S(BDPTVertex eye[BDPT_MAX_VERTS], int s,
             int slot = int(L.spdIndex);
             Spectrum Li = (slot >= 0) ? distantLightSpd(slot, sw)
                                       : upsampleIlluminantBound(L.radiance, sw);
-            total += z.throughput * e.response * Li;
+
+            uint nGroups = (fc.numDistantLights > 0u ? 1u : 0u)
+                         + (fc.numSphereLights  > 0u ? 1u : 0u)
+                         + (fc.numEmissiveTriangles > 0u ? 1u : 0u);
+            float Rd = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+            float sigma = 1.0 / (float(nGroups) * float(fc.numDistantLights)
+                                 * PI * Rd * Rd);
+
+            BDPTVertex lit0;
+            lit0.kind = BDPT_VK_LIGHT_DIR;
+            lit0.position = z.position + dir;   // direction anchor; unused by MIS
+            lit0.N = -dir;
+            lit0.throughput = Spectrum(0.0);
+            lit0.emission = Spectrum(0.0);
+            lit0.pdfFwd = sigma;
+            lit0.pdfRev = 0.0;
+            lit0.isDelta = false;
+            lit0.onLight = true;
+            lit0.matId = 0u;
+            lit0.uv = float2(0.0);
+            lit0.posObject = float3(0.0);
+            lit0.geoN = -dir;
+            lit0.tangent = float3(1.0, 0.0, 0.0);
+            lit0.hasTangent = false;
+            BDPTVertex litArr[BDPT_MAX_VERTS];
+            litArr[0] = lit0;
+
+            float pdf_zsm1_rev = sigma * NdotL;
+            float pdf_zsm2_rev = 0.0;
+            if (s >= 3)
+            {
+                float3 toPrev = eye[s - 2].position - z.position;
+                float l2 = dot(toPrev, toPrev);
+                if (l2 > 1e-20)
+                {
+                    float3 dp = toPrev / sqrt(l2);
+                    float pr = bdptEval(zs, z.N, dir, dp).pdf;
+                    pdf_zsm2_rev = convertSAtoArea(pr, z.position, eye[s - 2]);
+                }
+            }
+
+            float w = misWeight(eye, s, litArr, 1,
+                                pdf_zsm1_rev, pdf_zsm2_rev, 0.0, 0.0);
+            total += z.throughput * e.response * Li * w;
         }
     }
 
@@ -710,6 +778,16 @@ void wfSplatLightVertexS<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS], int
 {
     BDPTVertex y = lightPath[i];
     if (y.isDelta || y.kind != BDPT_VK_SURFACE) return;
+    // Delta-direction (distant) lights: the t = 2 splat is the pure DIRECT
+    // path (light -> surface -> camera), which eye-side NEE (connectT1's
+    // distant branch) samples deterministically at ~full weight. Under the
+    // repo's z1.pdfFwd = 1 camera convention the two strategies cannot
+    // partition consistently at grazing camera pdfs (horizon), so distant
+    // DIRECT is owned by NEE outright and the splat carries only the
+    // t >= 3 transport NEE cannot reach (specular caustic chains, where
+    // every alternative crosses a delta vertex and this splat's MIS weight
+    // is 1). Change distant-light-caustic-parity.
+    if (i == 1 && lightPath[0].kind == BDPT_VK_LIGHT_DIR) return;
     int2 pixel;
     float cosCam;
     float distCam;
@@ -934,15 +1012,17 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     {
         lightPath[0] = lo.vertex;
         lightLen = 1;
-        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-        {
-            Ray rL;
-            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
-            rL.direction = lo.dirOut;
-            Spectrum unusedEscape = Spectrum(0.0);
-            lightLen = wfRandomWalkS(lightPath, 1, rL, lo.beta, lo.pdfDir, sw, rng,
-                                     false, unusedEscape, -1.0);
-        }
+        // Distant lights walk too (change distant-light-caustic-parity): the
+        // DIR seed passes its AREA-measure pdfPos so the walk's parallel-
+        // projection case converts it at the first surface hit.
+        Ray rL;
+        rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+        rL.direction = lo.dirOut;
+        Spectrum unusedEscape = Spectrum(0.0);
+        float pdfIn = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                    ? lo.pdfPos : lo.pdfDir;
+        lightLen = wfRandomWalkS(lightPath, 1, rL, lo.beta, pdfIn, sw, rng,
+                                 false, unusedEscape, -1.0);
     }
 
     wfSplatLightWalkS<PinholeCamera>(lightPath, lightLen, sw, rng, cam);
@@ -1093,15 +1173,17 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
     {
         lightPath[0] = lo.vertex;
         lightLen = 1;
-        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-        {
-            Ray rL;
-            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
-            rL.direction = lo.dirOut;
-            float3 unusedEscape = float3(0.0);
-            lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
-                                  false, unusedEscape, -1.0);
-        }
+        // Distant lights walk too (change distant-light-caustic-parity): the
+        // DIR seed passes its AREA-measure pdfPos so randomWalk's parallel-
+        // projection case converts it at the first surface hit.
+        Ray rL;
+        rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+        rL.direction = lo.dirOut;
+        float3 unusedEscape = float3(0.0);
+        float pdfIn = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                    ? lo.pdfPos : lo.pdfDir;
+        lightLen = randomWalk(lightPath, 1, rL, lo.beta, pdfIn, rng,
+                              false, unusedEscape, -1.0);
     }
 
     // s = 1 light tracer splat (atomic into lightSplatBuffer, set 0).
@@ -1148,15 +1230,17 @@ void wfBdptLightTail(uint3 tid: SV_DispatchThreadID)
     {
         lightPath[0] = lo.vertex;
         lightLen = 1;
-        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-        {
-            Ray rL;
-            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
-            rL.direction = lo.dirOut;
-            Spectrum unusedEscape = Spectrum(0.0);
-            lightLen = wfRandomWalkS(lightPath, 1, rL, lo.beta, lo.pdfDir, sw, rng,
-                                     false, unusedEscape, -1.0);
-        }
+        // Distant lights walk too (change distant-light-caustic-parity): the
+        // DIR seed passes its AREA-measure pdfPos so the walk's parallel-
+        // projection case converts it at the first surface hit.
+        Ray rL;
+        rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+        rL.direction = lo.dirOut;
+        Spectrum unusedEscape = Spectrum(0.0);
+        float pdfIn = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                    ? lo.pdfPos : lo.pdfDir;
+        lightLen = wfRandomWalkS(lightPath, 1, rL, lo.beta, pdfIn, sw, rng,
+                                 false, unusedEscape, -1.0);
     }
 
     wfSplatLightWalkS<PinholeCamera>(lightPath, lightLen, sw, rng, cam);
@@ -1177,15 +1261,17 @@ void wfBdptLightTail(uint3 tid: SV_DispatchThreadID)
     {
         lightPath[0] = lo.vertex;
         lightLen = 1;
-        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-        {
-            Ray rL;
-            rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
-            rL.direction = lo.dirOut;
-            float3 unusedEscape = float3(0.0);
-            lightLen = randomWalk(lightPath, 1, rL, lo.beta, lo.pdfDir, rng,
-                                  false, unusedEscape, -1.0);
-        }
+        // Distant lights walk too (change distant-light-caustic-parity): the
+        // DIR seed passes its AREA-measure pdfPos so randomWalk's parallel-
+        // projection case converts it at the first surface hit.
+        Ray rL;
+        rL.origin = lo.vertex.position + lo.vertex.N * 0.002;
+        rL.direction = lo.dirOut;
+        float3 unusedEscape = float3(0.0);
+        float pdfIn = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                    ? lo.pdfPos : lo.pdfDir;
+        lightLen = randomWalk(lightPath, 1, rL, lo.beta, pdfIn, rng,
+                              false, unusedEscape, -1.0);
     }
 
     splatLightWalk<PinholeCamera>(lightPath, lightLen, rng, cam);
@@ -1928,14 +2014,15 @@ void wfBdptGenLight(uint3 tid: SV_DispatchThreadID)
     {
         wfLight[base + 0u] = lo.vertex;
         aux.lightLen = 1;
-        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-        {
-            aux.ewRayO = lo.vertex.position + lo.vertex.N * 0.002;
-            aux.ewRayD = lo.dirOut;
-            aux.ewThroughput = lo.beta;
-            aux.ewPdfFwdOmega = lo.pdfDir;
-            aux.ewFlags = WF_BDPT_ALIVE;         // extend the light subpath
-        }
+        // Distant lights walk too (change distant-light-caustic-parity): the
+        // DIR seed hands its AREA-measure pdfPos to the staged bounce kernel,
+        // whose parallel-projection case converts it at the first surface hit.
+        aux.ewRayO = lo.vertex.position + lo.vertex.N * 0.002;
+        aux.ewRayD = lo.dirOut;
+        aux.ewThroughput = lo.beta;
+        aux.ewPdfFwdOmega = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                          ? lo.pdfPos : lo.pdfDir;
+        aux.ewFlags = WF_BDPT_ALIVE;             // extend the light subpath
     }
     aux.rngState = rng.state;
     wfAux[slot] = aux;
@@ -1946,14 +2033,15 @@ void wfBdptGenLight(uint3 tid: SV_DispatchThreadID)
     {
         wfLight[base + 0u] = lo.vertex;
         aux.lightLen = 1;
-        if (lo.vertex.kind != BDPT_VK_LIGHT_DIR)
-        {
-            aux.ewRayO = lo.vertex.position + lo.vertex.N * 0.002;
-            aux.ewRayD = lo.dirOut;
-            aux.ewThroughput = lo.beta;
-            aux.ewPdfFwdOmega = lo.pdfDir;
-            aux.ewFlags = WF_BDPT_ALIVE;         // extend the light subpath
-        }
+        // Distant lights walk too (change distant-light-caustic-parity): the
+        // DIR seed hands its AREA-measure pdfPos to the staged bounce kernel,
+        // whose parallel-projection case converts it at the first surface hit.
+        aux.ewRayO = lo.vertex.position + lo.vertex.N * 0.002;
+        aux.ewRayD = lo.dirOut;
+        aux.ewThroughput = lo.beta;
+        aux.ewPdfFwdOmega = (lo.vertex.kind == BDPT_VK_LIGHT_DIR)
+                          ? lo.pdfPos : lo.pdfDir;
+        aux.ewFlags = WF_BDPT_ALIVE;             // extend the light subpath
     }
     aux.rngState = rng.state;
     wfAux[slot] = aux;
@@ -2020,7 +2108,13 @@ void wfBdptBounceLight(uint3 tid: SV_DispatchThreadID)
     v.hasTangent = h.hasTangent;
 
     BDPTVertex prev = wfLight[base + uint(idx - 1)];
-    v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
+    // Distant-light source segment: parallel-projection area density
+    // (disk pdf x |N.beam|, no cos/d^2) - mirrors bdpt.randomWalk's
+    // DIR-source case (change distant-light-caustic-parity).
+    if (prev.kind == BDPT_VK_LIGHT_DIR)
+        v.pdfFwd = pdfFwdOmega * abs(dot(v.N, rayS.direction));
+    else
+        v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
     int prevIdx = idx - 1;
     wfLight[base + uint(idx)] = v;
     idx++;
@@ -2165,7 +2259,13 @@ void wfBdptBounceLight(uint3 tid: SV_DispatchThreadID)
     v.hasTangent = h.hasTangent;
 
     BDPTVertex prev = wfLight[base + uint(idx - 1)];
-    v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
+    // Distant-light source segment: parallel-projection area density
+    // (disk pdf x |N.beam|, no cos/d^2) - mirrors bdpt.randomWalk's
+    // DIR-source case (change distant-light-caustic-parity).
+    if (prev.kind == BDPT_VK_LIGHT_DIR)
+        v.pdfFwd = pdfFwdOmega * abs(dot(v.N, ray.direction));
+    else
+        v.pdfFwd = convertSAtoArea(pdfFwdOmega, prev.position, v);
     int prevIdx = idx - 1;
     wfLight[base + uint(idx)] = v;
     idx++;
