@@ -860,28 +860,33 @@ void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
     {
         // This pass's photon-map density estimate at the radius the photons
         // actually gathered within (the radius BEFORE this pass's reduction):
-        //   L_indirect = Φ_thispass / (N_emitted · π · r²).
+        //   L_indirect = (β_eye ⊗ Φ_thispass) / (N_emitted · π · r²)
+        // where β_eye = vp.beta, the camera→VP throughput (pbrt folds it into
+        // τ at pass end, integrators.cpp:3148); ≈1 for directly-viewed VPs,
+        // <1 through glass / lossy glossy eye chains. Applied here (not at
+        // deposit) so the fixed-point sppmAccum stays in raw photon scale.
         // The progressive averaging is done by the accumulation film's
         // running mean over passes (each pass is an independent estimate at a
         // shrinking radius), NOT by accumulating τ here — accumulating τ AND
         // film-averaging would double-count. τ/N still advance the radius for
-        // the next pass (bias → 0 as r shrinks).
+        // the next pass (bias → 0 as r shrinks); the radius rule is
+        // flux-independent, so the sppmUpdate fold stays β-free (inert).
 #if defined(SKINNY_SPECTRAL)
         // D5: resolve the per-pass per-λ flux → linear sRGB at the pass λ BEFORE
-        // it folds into the spectral-INVARIANT progressive estimator. tau stays
+        // it folds into the spectral-INVARIANT progressive estimator. β⊗Φ is
+        // per-λ at the shared pass λ (vp.beta stored at gSw too). tau stays
         // 3-wide; the (r'/r)² ratio in sppmUpdate is scalar geometry (unchanged).
         // Rotating λ across passes integrates the spectrum via the film mean.
         Spectrum phiS = sppmDecodeFlux(acc);
         let rGather = vp.radius;
         let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * rGather * rGather;
-        lIndirect = spectrumResolveToLinearSRGB(gSw, phiS / max(denom, 1e-20));
+        lIndirect = spectrumResolveToLinearSRGB(gSw, (vp.beta * phiS) / max(denom, 1e-20));
         sppmUpdate(vp, spectrumResolveToLinearSRGB(gSw, phiS), acc.m, 2.0 / 3.0);
 #else
-        // RGB block kept textually verbatim (byte-identical .spv guard).
         let phi = sppmDecodeFlux(acc);
         let rGather = vp.radius;
         let denom = max(float(fc.sppmPhotonsEmitted), 1.0) * PI * rGather * rGather;
-        lIndirect = phi / max(denom, 1e-20);
+        lIndirect = (vp.beta * phi) / max(denom, 1e-20);
         sppmUpdate(vp, phi, acc.m, 2.0 / 3.0);  // advance radius / N for the next pass
 #endif
         sppmVisiblePoints[lane] = vp;

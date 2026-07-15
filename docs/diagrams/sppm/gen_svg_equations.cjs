@@ -21,8 +21,9 @@ const EQ = [
   ['update-N', row('N\' = N + γ · M')],
   ['update-r', frac('r\' = r · √', 'N\'', 'N + M')],
   ['update-tau', frac('τ\' = (τ + Φ) · (r\'/r)² = (τ + Φ) · ', 'N\'', 'N + M')],
-  // Per-pass indirect radiance estimate from the accumulated flux.
-  ['radiance', frac('L_{indirect} = ', 'τ', 'N_{emitted} · π · r²')],
+  // Per-pass indirect radiance estimate: this pass's flux Φ scaled by the eye
+  // throughput β_eye = vp.beta (change sppm-vp-beta-resolve).
+  ['radiance', frac('L_{indirect} = ', 'β_{eye} ⊗ Φ', 'N_{emitted} · π · r²')],
   // The composited per-pixel sample = direct (NEE + specular-chain) + indirect.
   ['sample', row('L = L_{d} + L_{indirect}')],
   // Spatial-hash cell count = next power of two ≥ 2·W·H.
