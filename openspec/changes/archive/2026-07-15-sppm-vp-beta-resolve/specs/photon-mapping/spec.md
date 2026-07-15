@@ -1,6 +1,6 @@
 # photon-mapping (delta)
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Update stage applies eye throughput at resolve
 
