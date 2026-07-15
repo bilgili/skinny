@@ -1276,7 +1276,19 @@ def _extract_dome_light(
     p = Path(asset_path)
     if not p.exists() or p.suffix.lower() != ".hdr":
         # .exr / unresolved path: skip rather than throw — the renderer's
-        # built-in HDR library still works, just no DomeLight upload.
+        # built-in HDR library still works, just no DomeLight upload. A
+        # missing file is a scene-data integrity hole (a deleted baked env
+        # renders under the wrong illuminant), so it must not stay silent.
+        if not p.exists():
+            log.warning(
+                "DomeLight %s references missing texture:file %r; falling "
+                "back to the built-in environment", prim.GetPath(), asset_path,
+            )
+            print(
+                f"[skinny] WARNING: DomeLight {prim.GetPath()} references "
+                f"missing texture:file {asset_path!r}; falling back to the "
+                "built-in environment"
+            )
         return None
 
     try:

@@ -6,6 +6,9 @@ compatibility rules are tested without rendering.
 
 from __future__ import annotations
 
+import os as _os
+import re as _re
+
 import pytest
 
 from skinny.pbrt import parity
@@ -329,3 +332,64 @@ def test_coverage_meta_spectral_axis_covered():
         for c in (c for c in parity.all_combos() if c.spectral):
             ok, reason = parity.combo_is_valid(c, scene)
             assert ok or reason  # a skip always carries a reason
+
+
+# ─── corpus scene-data integrity (change parity-scene-asset-integrity) ─────
+# The GPU gates render whatever is on disk; a silently-deleted side-file (the
+# disney_cloud baked constant sky) or an undeclared material class (the
+# subsurface_infinite spectral SystemExit) turns into an opaque gate failure.
+# These hostless checks catch both classes at unit-test time.
+
+_CORPUS_DIR = _os.path.join(_os.path.dirname(__file__), "corpus")
+_REPO_ROOT = _os.path.abspath(_os.path.join(_CORPUS_DIR, "..", "..", ".."))
+
+
+def test_usd_asset_texture_refs_exist():
+    """Every texture:file authored in an on-disk manifest .usda must resolve.
+
+    A scene whose usd asset is absent on this checkout (untracked assets live
+    only in the main checkout) is skipped, not failed.
+    """
+    dangling: list[str] = []
+    checked = 0
+    for spec in parity.load_manifest(_CORPUS_DIR):
+        if not spec.usd:
+            continue
+        usd = spec.usd if _os.path.isabs(spec.usd) else _os.path.join(_REPO_ROOT, spec.usd)
+        if not _os.path.exists(usd):
+            continue  # asset not on this checkout (e.g. a worktree)
+        checked += 1
+        with open(usd, encoding="utf-8", errors="ignore") as fh:
+            txt = fh.read()
+        for ref in _re.findall(r"texture:file\s*=\s*@([^@]+)@", txt):
+            p = ref if _os.path.isabs(ref) else _os.path.join(_os.path.dirname(usd), ref)
+            if not _os.path.exists(p):
+                dangling.append(f"{spec.name}: {ref!r} (in {usd})")
+        # A .usda authoring a volume field must sit in the manifest as a
+        # volume scene (the validity table keys BDPT/SPPM exclusions off it).
+        if "OpenVDBAsset" in txt and spec.material_class != "volume":
+            dangling.append(f"{spec.name}: authors OpenVDBAsset but material_class="
+                            f"{spec.material_class!r} (in {usd})")
+    if checked == 0:
+        pytest.skip("no manifest usd assets present on this checkout")
+    assert not dangling, "dangling texture:file references:\n  " + "\n  ".join(dangling)
+
+
+def test_nonflat_pbrt_scene_declares_material_class():
+    """A corpus .pbrt authoring subsurface/named-medium content must not sit in
+    the manifest as the default flat class (the spectral envelope would admit
+    combos the renderer refuses at scene build)."""
+    missing: list[str] = []
+    for spec in parity.load_manifest(_CORPUS_DIR):
+        src = _os.path.join(_CORPUS_DIR, spec.file)
+        if not _os.path.exists(src):
+            continue
+        with open(src, encoding="utf-8", errors="ignore") as fh:
+            txt = fh.read()
+        nonflat = 'Material "subsurface"' in txt or "MakeNamedMedium" in txt
+        if nonflat and spec.material_class == "flat":
+            missing.append(spec.name)
+    assert not missing, (
+        "scenes author subsurface/medium content but declare no material_class: "
+        + ", ".join(missing)
+    )
