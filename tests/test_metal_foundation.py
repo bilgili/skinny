@@ -310,11 +310,12 @@ def test_rebind_descriptors_noop_on_metal():
 
 
 def test_debug_viewport_refuses_metal_cleanly():
-    """The debug viewport is a Vulkan **graphics** rasteriser; the compute-only
-    Metal backend can't build it. `open()` must raise a clear RuntimeError on a
-    Metal context (not a cryptic `AttributeError: 'MetalContext' object has no
-    attribute 'queue_family_indices'`) and leave the viewport closed, so the Qt
-    dock's showEvent degrades gracefully. Stub via `__new__` — no GPU."""
+    """Since metal-tool-dock-render P2, Metal supports the **embedded** Camera
+    Debug dock via the compute rasteriser, but the GLFW **windowed** debug view
+    is still a Vulkan graphics rasteriser. On a Metal context `open()` must
+    raise a clear RuntimeError for the windowed path (not a cryptic
+    `AttributeError`) and leave the viewport closed, while the embedded path
+    opens through `_metal_raster`. Stub via `__new__` — no GPU."""
     import types
 
     try:
@@ -324,11 +325,17 @@ def test_debug_viewport_refuses_metal_cleanly():
 
     dv = DebugViewport.__new__(DebugViewport)
     dv._vk_ctx = types.SimpleNamespace(is_metal=True)
+    dv.is_metal = True
     dv._open = False
-    dv._embedded = True
-    with pytest.raises(RuntimeError, match="Vulkan backend"):
+    dv._embedded = False
+    with pytest.raises(RuntimeError, match="Vulkan-only"):
         dv.open()
     assert dv._open is False
+
+    dv._embedded = True
+    dv._metal_raster = object()  # already-built rasteriser: open() must not rebuild
+    dv.open()
+    assert dv._open is True
 
 
 def test_bxdf_eval_degrades_on_metal():
