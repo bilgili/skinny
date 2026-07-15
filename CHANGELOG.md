@@ -7,6 +7,32 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Parity gates `disney_cloud` and `subsurface_infinite` repaired — scene-data
+  integrity, not renderer regressions** (change `parity-scene-asset-integrity`).
+  `disney_cloud` (relMSE 0.075 → 0.584) was a *deleted untracked side-file*: the
+  usda's DomeLight references the baked constant blue sky
+  `assets/light_infinite_f620_const.hdr`, whose silent-fallback loss swapped the
+  illuminant for the default gray env (src at the Jul-3 baseline and current
+  main render bit-identically). The baked env (and the outright-deleted
+  `bunny_cloud.usda`) are restored; the 173-byte const `.hdr` is now
+  git-tracked (the usda stays untracked — it bakes a machine-absolute `.nvdb`
+  path); `usd_loader` warns loudly when a DomeLight's
+  `texture:file` is missing instead of silently falling back.
+  `subsurface_infinite` died on a spectral combo the scene can't render: the
+  manifest entry predated `material_class`, defaulted to `flat`, and the
+  spectral envelope admitted combos the renderer refuses at scene build
+  (`SystemExit`). It now declares `material_class: "subsurface"` and records
+  the by-design `path|megakernel`-vs-anchor delta (wavefront true 3D interior
+  walk vs megakernel watchdog-safe 1D slab, change `pbrt-subsurface-3d-walk`)
+  as a measured, tighten-only `self_consistency` mode override (relMSE
+  0.0362 / FLIP 0.0554 at 512 spp, tol 0.05/0.07). Two hostless integrity
+  meta-tests (`tests/pbrt/test_matrix.py`) now catch both failure classes
+  without a GPU: a `texture:file` dangling-reference sweep over on-disk
+  manifest usd assets (plus `OpenVDBAsset` ⇒ `material_class: "volume"`), and
+  a non-flat `.pbrt`-source vs declared-`material_class` cross-check.
+
 ### Changed
 
 - **BREAKING: the built-in default DistantLight is no longer injected into

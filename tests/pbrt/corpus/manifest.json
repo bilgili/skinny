@@ -101,10 +101,18 @@
    "spp": 512,
    "relmse_tol": 0.13,
    "flip_tol": 0.14,
+   "material_class": "subsurface",
+   "self_consistency": {
+    "mode": {
+     "relmse": 0.05,
+     "flip": 0.07
+    }
+   },
    "measured": {
-    "relmse": 0.0792,
-    "flip": 0.0894
-   }
+    "relmse": 0.1197,
+    "flip": 0.1109
+   },
+   "notes": "Homogeneous subsurface sphere, IBL-lit. material_class excludes the spectral combos (spectral v1 refuses subsurface at scene build). measured re-baselined 0.0792->0.1197 by pbrt-subsurface-3d-walk: the wavefront anchor runs the true 3D interior walk while the megakernel keeps the watchdog-safe 1D slab, so mode self-consistency carries a recorded override (measured mega-vs-wave relMSE 0.0362 / FLIP 0.0554 at 512 spp; tighten-only). The megakernel slab sits closer to pbrt's dipole ref (0.0543) than the 3D walk (0.1197) on this curved geometry - a dipole-vs-walk residual, not a transport bug (parity-scene-asset-integrity)."
   },
   {
    "name": "bathroom",
