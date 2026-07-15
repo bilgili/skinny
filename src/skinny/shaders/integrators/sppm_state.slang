@@ -54,7 +54,7 @@ struct VisiblePoint
     float3 pos;            // world hit position (rewritten each pass)
     float3 ns;             // world shading normal, post normal-map (rewritten each pass)
     float3 wo;             // world outgoing dir toward the camera (this pass)
-    Spectrum beta;         // eye throughput reaching the point, EXCLUDING the VP BSDF (this pass; per-pass spectral)
+    Spectrum beta;         // eye throughput reaching the point, EXCLUDING the VP BSDF (this pass; per-pass spectral); scales the photon term at resolve (wfSppmUpdate)
     Spectrum ld;           // per-pass direct radiance (NEE + specular-chain emitters; per-pass spectral)
     float3 albedo;         // FlatHitMat.albedo
     float3 F0;             // FlatMaterial.F0

@@ -9,6 +9,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SPPM photon-indirect term now scaled by the eye throughput `vp.beta` at
+  resolve** (change `sppm-vp-beta-resolve`). `wfSppmUpdate` resolved the
+  per-pass photon flux as `Φ/(N_emitted·π·r²)` without the camera→visible-point
+  throughput the eye stage stores (`VisiblePoint.beta`, previously write-only) —
+  the only radiance component that skipped it (`ld` already folds `throughput`
+  per add). pbrt-v4 folds `vp.beta` into the flux at pass end. Invisible for
+  directly-viewed visible points and clear Fresnel-sampled delta glass
+  (weight ≡ 1; bit-identical A/B on `glass_caustics_test.usda`), but the photon
+  term through a *tinted/lossy* eye chain was over-bright and un-tinted:
+  through-tinted-glass region mean 0.00102 → 0.00067 vs BDPT reference 0.00074.
+  Applied per-λ before the spectral λ→sRGB resolve; the radius/N advance is
+  flux-independent and unchanged.
+
 - **Parity gates `disney_cloud` and `subsurface_infinite` repaired — scene-data
   integrity, not renderer regressions** (change `parity-scene-asset-integrity`).
   `disney_cloud` (relMSE 0.075 → 0.584) was a *deleted untracked side-file*: the
