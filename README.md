@@ -534,14 +534,15 @@ blackbody illuminant SPDs, and hero-λ glass dispersion — resolving through th
 Wyman CMF to the existing RGBA32F accumulation. The same hero-λ transport also
 threads all three **wavefront** integrators — path, BDPT, and SPPM (change
 `spectral-wavefront`) — wired + CPU-verified + merged (RGB `.spv` byte-identical,
-179+ hostless tests), though its GPU-render gates are a pending interactive-Metal
-follow-up (not yet render-validated). An in-envelope `--spectral` run is accepted
+179+ hostless tests); its GPU self-consistency + prism/pbrt-truth gates are now
+measured on Metal across the confirming-suite spectral scenes (white-furnace
+closure + full-corpus sweep still pending). An in-envelope `--spectral` run is accepted
 on every front-end; out-of-envelope combos are still refused at startup (see the
 scope below). See [Spectral.md](docs/Spectral.md).
 
 | Aspect | Scope |
 |--------|----------|
-| Integrator / execution | **Path, BDPT, or SPPM.** Path/BDPT run under megakernel + wavefront; SPPM is wavefront-only (no megakernel photon pass). Megakernel path/BDPT is GPU-validated; wavefront (all three) is CPU-verified + merged, GPU gates pending. Out-of-envelope combos are refused at startup. |
+| Integrator / execution | **Path, BDPT, or SPPM.** Path/BDPT run under megakernel + wavefront; SPPM is wavefront-only (no megakernel photon pass). Megakernel path/BDPT is GPU-validated; wavefront (all three) is CPU-verified + merged, with the GPU self-consistency + prism/pbrt-truth gates now measured on Metal (suite scenes; white-furnace + full-corpus pending). Out-of-envelope combos are refused at startup. |
 | Materials | **Flat only** — a skin/subsurface/heterogeneous-volume scene under `--spectral` is refused. |
 | Layers | No neural proposal, no ReSTIR reuse (both refused under `--spectral`). |
 | Dispersion | Path + BDPT carry hero-λ Cauchy glass dispersion; **SPPM has no dispersion** (v1 limit — it would break the per-pass photon/visible-point wavelength coherence). |

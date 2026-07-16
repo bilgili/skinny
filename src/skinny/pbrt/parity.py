@@ -53,6 +53,17 @@ class SceneSpec:
     # Optional per-axis self-consistency tolerances, keyed by axis class
     # ("mode"/"integrator"/"sppm"/"unbiased"): {"mode": {"relmse":.., "flip":..}}.
     self_consistency: dict | None = None
+    # Optional per-axis self-consistency tolerances for the SPECTRAL axis, same
+    # shape/keys as ``self_consistency`` but consulted only for spectral combos
+    # (change spectral-wavefront GPU-validation). Separate because RGB mega≡wave
+    # is bit-identical (mode ≡ 0), whereas spectral wavefront threads the hero
+    # wavelengths through the staged records and so draws a DIFFERENT sample
+    # sequence than the fused megakernel — decorrelated-but-unbiased MC (the means
+    # agree; the delta shrinks with spp), which needs a variance-sized floor on
+    # high-variance scenes (caustics, dispersion) rather than the RGB 0.02.
+    # Overriding this NEVER relaxes the RGB gate, so the strict RGB invariant is
+    # preserved. Absent ⇒ the spectral defaults below apply.
+    spectral_self_consistency: dict | None = None
     # Optional recorded pbrt-truth baselines, keyed by combo label:
     # {"path|wavefront": {"relmse":.., "flip":..}} — a known mismatch the gate
     # guards against regressing past (it does NOT relax self-consistency).
@@ -362,13 +373,41 @@ _DEFAULT_SELF_CONSISTENCY = {
     "unbiased": {"relmse": 0.05, "flip": 0.05},
 }
 
+#: Default self-consistency tolerances for the SPECTRAL axis (change
+#: spectral-wavefront GPU-validation). Wider than the RGB defaults on the
+#: sample-sharing classes because spectral wavefront is NOT bit-identical to the
+#: megakernel: it threads the hero wavelengths through the staged records and so
+#: draws a different sample sequence, giving a decorrelated-but-unbiased MC delta
+#: (measured on Metal: ≈0 on smooth scenes, growing with variance to ~0.08 on a
+#: caustic). ``mode`` 0.02→0.03, ``integrator`` 0.06→0.09; ``sppm`` unchanged
+#: (already noise-limited). A scene overrides via ``spectral_self_consistency``.
+#: This is a spectral-only floor — the RGB ``mode`` mega≡wave bit-identity gate
+#: (0.02) is untouched.
+_DEFAULT_SPECTRAL_SELF_CONSISTENCY = {
+    "mode": {"relmse": 0.03, "flip": 0.03},
+    "integrator": {"relmse": 0.09, "flip": 0.06},
+    "sppm": {"relmse": 0.15, "flip": 0.12},
+    "unbiased": {"relmse": 0.05, "flip": 0.05},
+}
+
 
 def self_consistency_tol(combo: RenderCombo, scene: SceneSpec) -> tuple[float, float]:
-    """(relmse_tol, flip_tol) for *combo* measured against the anchor."""
+    """(relmse_tol, flip_tol) for *combo* measured against the anchor.
+
+    Spectral combos consult :data:`_DEFAULT_SPECTRAL_SELF_CONSISTENCY` and the
+    scene's ``spectral_self_consistency`` override; RGB combos keep the strict
+    RGB table. The axis *class* is the same for both (see ``combo_axis_class``);
+    only the tolerance floor differs.
+    """
     cls = combo_axis_class(combo)
-    table = dict(_DEFAULT_SELF_CONSISTENCY)
-    if scene.self_consistency:
-        for k, v in scene.self_consistency.items():
+    if combo.spectral:
+        table = dict(_DEFAULT_SPECTRAL_SELF_CONSISTENCY)
+        override = scene.spectral_self_consistency
+    else:
+        table = dict(_DEFAULT_SELF_CONSISTENCY)
+        override = scene.self_consistency
+    if override:
+        for k, v in override.items():
             table.setdefault(k, {})
             table[k] = {**table.get(k, {}), **v}
     t = table[cls]

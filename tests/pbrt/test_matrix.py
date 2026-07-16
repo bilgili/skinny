@@ -137,6 +137,25 @@ def test_self_consistency_tol_scene_override():
     assert rel == parity._DEFAULT_SELF_CONSISTENCY["sppm"]["relmse"]
 
 
+def test_spectral_self_consistency_tol_is_separate_from_rgb():
+    # change spectral-wavefront GPU-validation: spectral combos consult a separate
+    # tolerance table (wider on the sample-sharing classes because spectral
+    # wavefront is not bit-identical to the megakernel). The RGB table is NEVER
+    # loosened by a spectral override, so the RGB mega≡wave bit-identity gate holds.
+    scene = _flat_scene(spectral_self_consistency={"mode": {"relmse": 0.085, "flip": 0.03}})
+    rgb = parity.self_consistency_tol(RenderCombo("path", "wavefront"), scene)
+    assert rgb == (parity._DEFAULT_SELF_CONSISTENCY["mode"]["relmse"],
+                   parity._DEFAULT_SELF_CONSISTENCY["mode"]["flip"])
+    # spectral path (mode class) picks up the scene override
+    sp = parity.self_consistency_tol(RenderCombo("path", "wavefront", spectral=True), scene)
+    assert sp == (0.085, 0.03)
+    # spectral class with no scene override falls back to the SPECTRAL default,
+    # which is wider than the RGB default on the sample-sharing classes
+    sp_bdpt = parity.self_consistency_tol(RenderCombo("bdpt", "wavefront", spectral=True), scene)
+    assert sp_bdpt[0] == parity._DEFAULT_SPECTRAL_SELF_CONSISTENCY["integrator"]["relmse"]
+    assert sp_bdpt[0] > parity._DEFAULT_SELF_CONSISTENCY["integrator"]["relmse"]
+
+
 # ─── coverage meta-test: app-exposed combos all have a validity entry ───────
 
 def test_coverage_meta_app_integrators_covered():

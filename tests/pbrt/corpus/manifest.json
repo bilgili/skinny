@@ -457,7 +457,7 @@
    "flip_tol": 0.08,
    "material_class": "flat",
    "megakernel_ok": true,
-   "notes": "suite discriminator (mat_emissive); pbrt-gated + self-consistency",
+   "notes": "suite discriminator (mat_emissive); pbrt-gated + self-consistency. Spectral pbrt-truth baselines (bdpt/sppm |spectral) are GPU-measured on Metal (change spectral-wavefront GPU-validation): a neutral (achromatic) emitter, so spectral tracks its RGB sibling (bdpt/sppm spectral 0.1293 vs RGB 0.1292); path|*|spectral (~0.052) passes the scene tol without a baseline.",
    "baselines": {
     "bdpt|megakernel": {
      "relmse": 0.1292,
@@ -469,6 +469,18 @@
     },
     "sppm|wavefront": {
      "relmse": 0.1292,
+     "flip": 0.1217
+    },
+    "bdpt|megakernel|spectral": {
+     "relmse": 0.1293,
+     "flip": 0.1217
+    },
+    "bdpt|wavefront|spectral": {
+     "relmse": 0.1293,
+     "flip": 0.1217
+    },
+    "sppm|wavefront|spectral": {
+     "relmse": 0.1293,
      "flip": 0.1217
     }
    }
@@ -492,7 +504,7 @@
     "relmse": 0.02,
     "flip": 0.03
    },
-   "notes": "MaterialX authoring of mat_emissive; equivalence vs plain sibling",
+   "notes": "MaterialX authoring of mat_emissive; equivalence vs plain sibling. Same GPU-measured spectral pbrt-truth baselines as the plain sibling (change spectral-wavefront GPU-validation).",
    "baselines": {
     "bdpt|megakernel": {
      "relmse": 0.1292,
@@ -504,6 +516,18 @@
     },
     "sppm|wavefront": {
      "relmse": 0.1292,
+     "flip": 0.1217
+    },
+    "bdpt|megakernel|spectral": {
+     "relmse": 0.1293,
+     "flip": 0.1217
+    },
+    "bdpt|wavefront|spectral": {
+     "relmse": 0.1293,
+     "flip": 0.1217
+    },
+    "sppm|wavefront|spectral": {
+     "relmse": 0.1293,
      "flip": 0.1217
     }
    }
@@ -557,7 +581,7 @@
    "flip_tol": 0.1,
    "material_class": "flat",
    "megakernel_ok": true,
-   "notes": "suite discriminator (int_caustic); pbrt-gated + self-consistency",
+   "notes": "suite discriminator (int_caustic); pbrt-gated + self-consistency. spectral_self_consistency.mode (0.085) is the GPU-measured spectral wave↔mega decorrelation floor on this caustic (measured 0.081 vs the RGB bit-identical 0.0); unbiased — the spectral wavefront/megakernel path pbrt-truth means agree (0.117 vs 0.114).",
    "self_consistency": {
     "integrator": {
      "relmse": 0.082,
@@ -566,6 +590,12 @@
     "unbiased": {
      "relmse": 0.0825,
      "flip": 0.05
+    }
+   },
+   "spectral_self_consistency": {
+    "mode": {
+     "relmse": 0.085,
+     "flip": 0.03
     }
    }
   },
@@ -588,7 +618,7 @@
     "relmse": 0.02,
     "flip": 0.03
    },
-   "notes": "MaterialX authoring of int_caustic; equivalence vs plain sibling",
+   "notes": "MaterialX authoring of int_caustic; equivalence vs plain sibling. Same GPU-measured spectral_self_consistency floor as the plain sibling.",
    "self_consistency": {
     "integrator": {
      "relmse": 0.082,
@@ -597,6 +627,12 @@
     "unbiased": {
      "relmse": 0.0825,
      "flip": 0.05
+    }
+   },
+   "spectral_self_consistency": {
+    "mode": {
+     "relmse": 0.085,
+     "flip": 0.03
     }
    }
   },
@@ -619,11 +655,21 @@
     "bdpt|megakernel": {"relmse": 0.1704, "flip": 0.0651},
     "bdpt|wavefront": {"relmse": 0.1704, "flip": 0.0651},
     "path|megakernel|spectral": {"relmse": 0.2777, "flip": 0.0868},
+    "path|wavefront|spectral": {"relmse": 0.2746, "flip": 0.0878},
+    "bdpt|megakernel|spectral": {"relmse": 0.2847, "flip": 0.0865},
+    "bdpt|wavefront|spectral": {"relmse": 0.2847, "flip": 0.0865},
+    "sppm|wavefront|spectral": {"relmse": 0.1554, "flip": 0.0653},
     "path|wavefront|neural": {"relmse": 0.1664, "flip": 0.0660},
     "path|wavefront|restir-di": {"relmse": 0.1712, "flip": 0.0644},
     "sppm|wavefront": {"relmse": 0.2103, "flip": 0.0963}
    },
-   "notes": "spectral discriminator (spec_prism): BK7 dispersion prism. The pbrt reference is SPECTRAL (pbrt disperses), so every skinny combo diverges from it: the RGB combos (~0.17 relMSE) cannot disperse at all, and the hero-wavelength --spectral render (0.278) IS the physically-correct dispersive result but carries a HIGHER pointwise relMSE than RGB because a chromatic dispersion caustic is a high-variance feature that 4 rotated hero-λ under-sample at 256 spp (measured GPU Group 7.3). So spectral-vs-RGB pbrt-truth REGRESSES here in relMSE while being more correct — 'spectral <= RGB' is NOT an invariant (it holds for smooth chromaticity shifts like conductor_infinite: spectral 0.0042 < RGB 0.0058). pbrt-truth is pinned to the measured per-combo baselines (harness-first, tighten-only); the spectral-vs-RGB delta is REPORTED, not gated. change spectral-wavefront (Group 6.4): this is the registered dispersion discriminator for the spectral WAVEFRONT axis; spectral path/bdpt now render in wavefront and anchor to the megakernel spectral path image (mega≡wave asserted), EXCEPT spectral bdpt here — a recorded mega≡wave skip (per-splat gamut clamp differs by light-tracer splat granularity between the fused and staged pipelines, D4/D7), enforced by parity.spectral_selfconsistency_assertable keying on this scene's spectral.kind=='dispersion'. TODO(spectral-wavefront 6.4): add GPU-measured pbrt-truth baselines for path|wavefront|spectral, bdpt|megakernel|spectral, bdpt|wavefront|spectral, sppm|wavefront|spectral once the spectral wavefront transport (Groups 1-5) is GPU-validated — needs pbrt + GPU, out of scope for the harness-only Group 6.",
+   "notes": "spectral discriminator (spec_prism): BK7 dispersion prism. The pbrt reference is SPECTRAL (pbrt disperses), so every skinny combo diverges from it: the RGB combos (~0.17 relMSE) cannot disperse at all, and the hero-wavelength --spectral render (0.278) IS the physically-correct dispersive result but carries a HIGHER pointwise relMSE than RGB because a chromatic dispersion caustic is a high-variance feature that 4 rotated hero-λ under-sample at 256 spp (measured GPU Group 7.3). So spectral-vs-RGB pbrt-truth REGRESSES here in relMSE while being more correct — 'spectral <= RGB' is NOT an invariant (it holds for smooth chromaticity shifts like conductor_infinite: spectral 0.0042 < RGB 0.0058). pbrt-truth is pinned to the measured per-combo baselines (harness-first, tighten-only); the spectral-vs-RGB delta is REPORTED, not gated. change spectral-wavefront (Group 6.4): this is the registered dispersion discriminator for the spectral WAVEFRONT axis; spectral path/bdpt now render in wavefront and anchor to the megakernel spectral path image (mega≡wave asserted), EXCEPT spectral bdpt here — a recorded mega≡wave skip (per-splat gamut clamp differs by light-tracer splat granularity between the fused and staged pipelines, D4/D7), enforced by parity.spectral_selfconsistency_assertable keying on this scene's spectral.kind=='dispersion'. GPU-measured on Metal (change spectral-wavefront GPU-validation): the spectral pbrt-truth baselines are now recorded — path|wavefront|spectral 0.2746, bdpt|megakernel|spectral 0.2847, bdpt|wavefront|spectral 0.2847, sppm|wavefront|spectral 0.1554 (sppm has no hero-λ dispersion, so it stays near the RGB level; path/bdpt disperse and regress to ~0.28 as documented). The spectral path mega≡wave self-consistency delta measured 0.057 on GPU (vs the RGB bit-identical 0.0) — decorrelated hero-λ sampling on the high-variance dispersion caustic (both unbiased — the means agree: wavefront pbrt-truth 0.2746 ~ megakernel 0.2777 — so it is MC variance, not a transport bias).",
+   "spectral_self_consistency": {
+    "mode": {
+     "relmse": 0.065,
+     "flip": 0.03
+    }
+   },
    "spectral": {
     "kind": "dispersion",
     "glass": "bk7",
@@ -655,11 +701,21 @@
     "bdpt|megakernel": {"relmse": 0.1704, "flip": 0.0651},
     "bdpt|wavefront": {"relmse": 0.1704, "flip": 0.0651},
     "path|megakernel|spectral": {"relmse": 0.2777, "flip": 0.0868},
+    "path|wavefront|spectral": {"relmse": 0.2746, "flip": 0.0878},
+    "bdpt|megakernel|spectral": {"relmse": 0.2847, "flip": 0.0865},
+    "bdpt|wavefront|spectral": {"relmse": 0.2847, "flip": 0.0865},
+    "sppm|wavefront|spectral": {"relmse": 0.1554, "flip": 0.0653},
     "path|wavefront|neural": {"relmse": 0.1664, "flip": 0.0660},
     "path|wavefront|restir-di": {"relmse": 0.1712, "flip": 0.0644},
     "sppm|wavefront": {"relmse": 0.2103, "flip": 0.0963}
    },
-   "notes": "MaterialX authoring of spec_prism; authoring-equivalence vs the plain sibling. Same SPECTRAL pbrt ref, so the same per-combo pbrt-truth baselines apply (see spec_prism notes for the 7.3 dispersion-regresses finding).",
+   "notes": "MaterialX authoring of spec_prism; authoring-equivalence vs the plain sibling. Same SPECTRAL pbrt ref, so the same GPU-measured per-combo pbrt-truth baselines apply (see spec_prism notes for the 7.3 dispersion-regresses finding).",
+   "spectral_self_consistency": {
+    "mode": {
+     "relmse": 0.065,
+     "flip": 0.03
+    }
+   },
    "spectral": {
     "kind": "dispersion",
     "glass": "bk7",
@@ -993,7 +1049,7 @@
    "equivalence": {
     "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
    },
-   "notes": "PBR material from assets/materialxusd/tests/physically_based/Gold_OPBR_MAT_PBM.usda",
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Gold_OPBR_MAT_PBM.usda. spectral_self_consistency.integrator (0.125) is the GPU-measured spectral bdpt↔path floor (measured 0.123): on this hard specular gold the spectral bdpt draws slightly noisier hero-λ than the RGB bdpt (0.106), still unbiased.",
    "self_consistency": {
     "integrator": {
      "relmse": 0.1222,
@@ -1002,6 +1058,12 @@
     "unbiased": {
      "relmse": 0.1795,
      "flip": 0.1233
+    }
+   },
+   "spectral_self_consistency": {
+    "integrator": {
+     "relmse": 0.125,
+     "flip": 0.06
     }
    }
   },
@@ -1023,7 +1085,7 @@
    "equivalence": {
     "skip": "OpenPBR standard_surface has no UsdPreviewSurface plain-USD counterpart"
    },
-   "notes": "PBR material from assets/materialxusd/tests/physically_based/Copper_OPBR_MAT_PBM.usda",
+   "notes": "PBR material from assets/materialxusd/tests/physically_based/Copper_OPBR_MAT_PBM.usda. spectral_self_consistency.integrator (0.13) is the GPU-measured spectral bdpt↔path floor (measured 0.1286): spectral bdpt is slightly noisier than the RGB bdpt (0.112), still unbiased.",
    "self_consistency": {
     "integrator": {
      "relmse": 0.1282,
@@ -1032,6 +1094,12 @@
     "unbiased": {
      "relmse": 0.1803,
      "flip": 0.1229
+    }
+   },
+   "spectral_self_consistency": {
+    "integrator": {
+     "relmse": 0.13,
+     "flip": 0.06
     }
    }
   },
