@@ -537,11 +537,15 @@ FlatMaterial sppmLoadMaterial(VisiblePoint vp)
     return mat;
 }
 
-// Sample one photon from the scene lights. Group selection is uniform over the
-// present light groups; emissive triangles are power-weighted within the group
-// (pSel, folded into LightSample.pdfArea). beta carries the per-photon flux
-// (the 1/N_emitted normalization is applied in the update stage). For a diffuse
-// area emitter the emission cosine cancels the cosine-pdf, so beta = Le·π/selPdf.
+// Sample one photon from the scene lights. Group selection is proportional to
+// each group's emitted power via the host-normalized fc.sppmGroupPmf* pmf
+// (change sppm-power-proportional-photon-groups) — per-photon flux equalises
+// across groups (Φ_g / p_g ≈ Φ_total), so a dominant environment no longer
+// rides on a uniform 1/G share as sparse huge splats. Emissive triangles stay
+// power-weighted within the group (pSel, folded into LightSample.pdfArea).
+// beta carries the per-photon flux (the 1/N_emitted normalization is applied
+// in the update stage). For a diffuse area emitter the emission cosine cancels
+// the cosine-pdf, so beta = Le·π/selPdf.
 bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
 #if defined(SKINNY_SPECTRAL)
                     , SampledWavelengths sw   // shared pass λ (D5)
@@ -562,17 +566,32 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
     let G = hasE + hasS + hasD + hasEnv;
     if (G == 0u)
         return false;
-    let gsel = 1.0 / float(G);
 
-    // Map a uniform draw to one of the present groups
-    // (order: emissive, sphere, distant, environment).
-    uint pick = min(uint(rng.next() * float(G)), G - 1u);
-    uint gi = 0u;
+    // Power-proportional group selection: CDF walk over the host-normalized
+    // pmf (order: emissive, sphere, distant, environment). The host zeroes
+    // absent groups with the same presence predicates as hasE/hasS/hasD/hasEnv
+    // above, so only present groups carry mass; the last positive-pmf group
+    // absorbs the float cumsum residual. pSel is this photon's actual
+    // selection probability — every branch divides its flux by it.
+    float pmf[4] = { fc.sppmGroupPmfE, fc.sppmGroupPmfS,
+                     fc.sppmGroupPmfD, fc.sppmGroupPmfEnv };
+    let u = rng.next();
+    float acc = 0.0;
     uint chosen = 99u;
-    if (hasE == 1u) { if (gi == pick) chosen = 0u; gi++; }
-    if (chosen == 99u && hasS == 1u) { if (gi == pick) chosen = 1u; gi++; }
-    if (chosen == 99u && hasD == 1u) { if (gi == pick) chosen = 2u; gi++; }
-    if (chosen == 99u && hasEnv == 1u) { if (gi == pick) chosen = 3u; gi++; }
+    float pSel = 0.0;
+    [unroll]
+    for (uint g = 0u; g < 4u; ++g)
+    {
+        if (pmf[g] <= 0.0)
+            continue;
+        acc += pmf[g];
+        chosen = g;             // last positive group absorbs the residual
+        pSel = pmf[g];
+        if (u < acc)
+            break;
+    }
+    if (chosen == 99u)
+        return false;           // stale/non-SPPM fc blob: no group carries mass
 
     if (chosen == 0u)
     {
@@ -582,7 +601,7 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
         LightSample ls = el.samplePoint(float3(0.0), rng.next2());
         if (!ls.valid || ls.pdfArea <= 0.0)
             return false;
-        let selA = gsel * ls.pdfArea;             // area-measure selection pdf
+        let selA = pSel * ls.pdfArea;             // area-measure selection pdf
         float3 t, b; buildBasis(ls.normal, t, b);
         let d = sppmCosineHemisphere(rng.next2());
         ray.direction = normalize(t * d.x + b * d.y + ls.normal * d.z);
@@ -606,7 +625,7 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
         LightSample ls = sl.samplePoint(float3(0.0), rng.next2());
         if (!ls.valid || ls.pdfArea <= 0.0)
             return false;
-        let selA = gsel * (1.0 / float(fc.numSphereLights)) * ls.pdfArea;
+        let selA = pSel * (1.0 / float(fc.numSphereLights)) * ls.pdfArea;
         float3 t, b; buildBasis(ls.normal, t, b);
         let d = sppmCosineHemisphere(rng.next2());
         ray.direction = normalize(t * d.x + b * d.y + ls.normal * d.z);
@@ -632,7 +651,7 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
         let ph = 2.0 * PI * u2.y;
         ray.origin = center + dl.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
         ray.direction = -dl.dir;
-        let selPdf = gsel * (1.0 / float(fc.numDistantLights));
+        let selPdf = pSel * (1.0 / float(fc.numDistantLights));
 #if defined(SKINNY_SPECTRAL)
         // Authored distant-light SPD (slot >= 0), else RGB radiance upsampled.
         int      slot = int(distantLights[i].spdIndex);
@@ -649,7 +668,7 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
     // inward from the bbox-covering disk (same geometry as the distant branch;
     // the only new factor is the non-delta direction pdf).
     // pbrt ImageInfiniteLight::SampleLe: pdfPos = 1/(πR²) on the disk cancels
-    // the disk area to leave beta = L·πR²/(gsel·pdfDir). envIntensity is folded
+    // the disk area to leave beta = L·πR²/(p_sel·pdfDir). envIntensity is folded
     // once inside sampleEnvDir's radiance — do not re-multiply it here.
     // Emission gates on the GLOBAL fc.furnaceMode (hasEnv above), whereas the
     // eye stage's env NEE / terminal env-miss gates per-VP on
@@ -671,7 +690,7 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
         let ph = 2.0 * PI * u2.y;
         ray.origin = center + es.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
         ray.direction = -es.dir;
-        let selPdf = gsel * es.pdf;
+        let selPdf = pSel * es.pdf;
 #if defined(SKINNY_SPECTRAL)
         beta = upsampleIlluminantBound(es.radiance, sw) * (PI * R * R) / max(selPdf, 1e-20);
 #else

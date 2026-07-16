@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **SPPM env-photon fireflies — power-proportional photon group selection**
+  (change `sppm-power-proportional-photon-groups`). `sppmEmitPhoton` now selects
+  the photon-emission group (emissive / sphere / distant / environment)
+  proportionally to each group's emitted power — the pbrt light-power
+  distribution — instead of uniformly (`gsel = 1/G`), dividing each branch's
+  flux by the actual selection probability (unbiased; per-photon flux equalises
+  across groups, `Φ_g/p_g ≈ Φ_total`). Under uniform selection an env photon's
+  flux (`β = L·πR²/(gsel·p_dir)`, scene-bbox disc `πR² ≈ 85+` on the repro
+  scene) dwarfed a small sphere light's (r = 0.2), so env deposits landed as
+  sparse, enormous splats — heavy firefly speckle (~1.7× path-tracer noise at
+  matched spp) on scenes mixing a weak local light with an environment. The
+  host computes the four group powers from data it already owns (emissive
+  `π·Σ(area·lum)`; sphere `4π²·Σ(lum·r²)`; distant `πR²·Σlum`; env
+  `πR²·envIntensity·∫L dω`, the sin θ-weighted luminance integral now returned
+  by `build_env_distribution`), normalizes via
+  `renderer._sppm_photon_group_pmf` (uniform-over-present fallback on zero /
+  non-finite total), and uploads `FrameConstants.sppmGroupPmfE/S/D/Env`
+  (scalar tail; Vulkan blob 552 → 568 B). `_sppm_group_pmf_override` forces a
+  packed pmf verbatim (flux-normalization probes).
+
 ### Added
 
 - **SPPM environment photon emission — env-INDIRECT transport** (change

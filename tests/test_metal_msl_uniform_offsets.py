@@ -50,11 +50,12 @@ except OSError as exc:  # pragma: no cover - environment dependent
 
 # Expected sizes — the Vulkan scalar FrameConstants blob and the std140 skin UBO.
 # If either struct grows, update the packer AND this pin in the same change.
-_VK_SCALAR_FC_BYTES = 552  # 516 + 28 SPPM tail (changes photon-mapping-sppm +
+_VK_SCALAR_FC_BYTES = 568  # 516 + 28 SPPM tail (changes photon-mapping-sppm +
 #   sppm-glossy-final-gather): sppmInitialRadius + sppmCellSize + sppmGridRes(float3)
 #   + sppmPhotonsEmitted + sppmGlossyContinueRoughness = 544; then +8 for the
 #   scalar-tail fields filmMaxComponent (change film-maxcomponent-clamp) and
-#   tileOriginY (change metal-megakernel-watchdog-tiling).
+#   tileOriginY (change metal-megakernel-watchdog-tiling); then +16 for the four
+#   sppmGroupPmfE/S/D/Env floats (change sppm-power-proportional-photon-groups).
 _SKIN_PARAMS_BYTES = 80
 # Reflected MSL `fc` size on Metal (float3 padded to 16 B; design D3 / task 1.2).
 # 592 -> 640 B (change sppm-glossy-final-gather): unlike recordMode/cameraMirror —
@@ -64,7 +65,10 @@ _SKIN_PARAMS_BYTES = 80
 # under guarded Metal (RUN_METAL_MEGAKERNEL_COMPILE=1): MetalContext main_pass
 # reflects 640 B and _pack_uniforms_msl packs to exactly that (it sizes from the
 # reflection, so the Metal megakernel self-adapts; only this pin is hand-tracked).
-_MSL_FC_BYTES = 640
+# 640 -> 656 B (change sppm-power-proportional-photon-groups): the four scalar
+# sppmGroupPmf floats (+16 B before tileOriginY) push the reflected struct one
+# 16-B alignment step further. Verified live under guarded Metal.
+_MSL_FC_BYTES = 656
 
 
 def test_vulkan_scalar_fc_blob_is_552():

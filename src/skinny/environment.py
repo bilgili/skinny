@@ -199,14 +199,18 @@ def _load_radiance_hdr(path: Path) -> np.ndarray:
     return mantissa * scale[..., None]
 
 
-def build_env_distribution(env_rgba: np.ndarray) -> tuple[bytes, bytes]:
+def build_env_distribution(env_rgba: np.ndarray) -> tuple[bytes, bytes, float]:
     """Build a 2D piecewise-constant sampling distribution over an equirect
     environment, for importance sampling in the path tracer.
 
-    Returns ``(marginal_cdf_bytes, conditional_cdf_bytes)`` as float32:
-      - marginal CDF over rows (v): ``ENV_HEIGHT + 1`` entries, 0..1.
+    Returns ``(marginal_cdf_bytes, conditional_cdf_bytes, lum_integral)``:
+      - marginal CDF over rows (v): ``ENV_HEIGHT + 1`` float32 entries, 0..1.
       - conditional CDF over columns (u) per row: ``ENV_HEIGHT * (ENV_WIDTH+1)``
-        entries, row-major, each row 0..1.
+        float32 entries, row-major, each row 0..1.
+      - ``lum_integral``: the sphere luminance integral ∫L dω of the (unscaled)
+        map — the sin θ-weighted grid total times the per-cell solid angle
+        (π/H)·(2π/W). Feeds the SPPM photon-group power distribution
+        (Φ_env = πR² · envIntensity · ∫L dω).
 
     The per-cell weight is sin(theta)-corrected luminance (equirect rows near
     the poles subtend less solid angle). The shader recovers the image-space
@@ -245,8 +249,10 @@ def build_env_distribution(env_rgba: np.ndarray) -> tuple[bytes, bytes]:
         marg_cdf = np.linspace(0.0, 1.0, ENV_HEIGHT + 1, dtype=np.float64)
     marg_cdf[ENV_HEIGHT] = 1.0
 
+    lum_integral = float(total * (np.pi / ENV_HEIGHT) * (2.0 * np.pi / ENV_WIDTH))
     return (marg_cdf.astype(np.float32).tobytes(),
-            cond_cdf.astype(np.float32).tobytes())
+            cond_cdf.astype(np.float32).tobytes(),
+            lum_integral)
 
 
 def _resize_equirect(img: np.ndarray) -> np.ndarray:
