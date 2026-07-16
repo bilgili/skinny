@@ -23,6 +23,6 @@
 ## 3. Docs + review
 
 - [x] 3.1 Update `docs/PhotonMapping.md` (photon budget), `CHANGELOG.md`.
-- [ ] 3.2 Pre-merge review (codex; review-subagent fallback if codex
+- [x] 3.2 Pre-merge review (codex; review-subagent fallback if codex
       unavailable), fold findings.
-- [ ] 3.3 `openspec validate sppm-env-photon-budget`, merge to main, archive.
+- [x] 3.3 `openspec validate sppm-env-photon-budget`, merge to main, archive.
