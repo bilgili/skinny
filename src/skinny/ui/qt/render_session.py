@@ -469,6 +469,14 @@ class QtRendererProxy:
                 r.render_material_preview(m, p, size=s),
         )
 
+    def save_screenshot(self, buf, fmt: str) -> None:
+        def run(r, fmt=fmt) -> bytes:
+            import io as _io
+            inner = _io.BytesIO()
+            r.save_screenshot(inner, fmt)
+            return inner.getvalue()
+        buf.write(self.request(run).result(timeout=30.0))
+
     def ensure_env_uploaded(self) -> None:
         def run(r) -> None:
             r._ensure_env_uploaded()

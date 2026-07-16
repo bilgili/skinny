@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
             open_debug_viewport=self._toggle_debug_viewport,
             load_model=self._queue_load_model,
             resize_render_target=self.viewport.request_resize,
+            capture_screenshot=self._capture_screenshot,
         )
         tree = build_main_ui(self.renderer, callbacks=cb)
 
@@ -424,6 +425,12 @@ class MainWindow(QMainWindow):
         self.viewport.post_render_command(load, coalesce_key="load-model")
         if self._python_material_dock is not None:
             QTimer.singleShot(250, self._python_material_dock.refresh_from_renderer)
+
+    def _capture_screenshot(self, fmt: str) -> bytes:
+        import io as _io
+        buf = _io.BytesIO()
+        self.renderer.save_screenshot(buf, fmt)
+        return buf.getvalue()
 
     # ── State persistence ────────────────────────────────────────
 
