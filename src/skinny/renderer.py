@@ -111,6 +111,33 @@ def _sppm_photon_group_pmf(
         return (0.0, 0.0, 0.0, 0.0)
     return tuple((1.0 / n_present) if b else 0.0 for b in present)
 
+
+# Ceiling on the env-aware photon-budget multiplier (change
+# sppm-env-photon-budget): pmfEnv → 1 would send the budget to infinity, and ×8
+# already cuts the env noise component by √8 ≈ 2.8 (measured exact on
+# glass_caustics_test.usda) at negligible photon-stage cost.
+_SPPM_ENV_PHOTON_BUDGET_CAP = 8.0
+
+
+def _sppm_photon_budget(pixels: int, pmf_env: float,
+                        cap: float = _SPPM_ENV_PHOTON_BUDGET_CAP) -> int:
+    """Env-aware per-pass photon count (change sppm-env-photon-budget).
+
+    ``pixels / (1 - pmfEnv)`` keeps the EXPECTED non-env photon count at
+    exactly ``pixels`` (the flat pre-env budget) and rides the env group's
+    photons on top of it instead of diluting the local lights — env photons
+    deposit only after ≥1 bounce from a disc covering the whole scene bounding
+    sphere, so at one-per-pixel they are sparse fat splats (speckle). Capped at
+    ``cap``× so an env-dominated pmf can't run away; ``pmfEnv == 0`` returns
+    ``pixels`` exactly (env-free scenes stay bit-identical). ``pmf_env`` is
+    clamped to [0, 1] and treated as 0 when non-finite — the pmf override hook
+    is unvalidated.
+    """
+    if not math.isfinite(pmf_env):
+        pmf_env = 0.0
+    pmf_env = min(max(pmf_env, 0.0), 1.0)
+    return int(round(int(pixels) / max(1.0 - pmf_env, 1.0 / cap)))
+
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
 # matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
 # packer (`_pack_uniforms_msl`, design D3) to relocate each field from the Vulkan
@@ -9644,31 +9671,6 @@ class Renderer:
             _diag = float(np.linalg.norm(_bext))
             sppm_radius = float(getattr(self, "_sppm_radius_override", 0.0)) \
                 or max(_diag * 0.001, 1e-4)
-            sppm_photons = int(getattr(self, "_sppm_photons_override", 0)) \
-                or int(self.width * self.height)
-            # Metal GPU-watchdog handling (change sppm-photon-dispatch-tiling):
-            # the phase-3 photon dispatch is the heaviest SPPM command buffer —
-            # one thread per photon, each depositing into every visible point in
-            # radius, per-λ under spectral. A caustic scene clusters visible
-            # points into the focus cell, so photons × VPs-in-cell wedges the GPU.
-            # The driver now BOUNDS this by BREADTH — it tiles the photon dispatch
-            # into flushed sub-batches of `_sppm_metal_photon_batch` photons — so
-            # photons/pass stays the full width*height (no dark-starvation bias).
-            # SKINNY_SPPM_METAL_PHOTON_BATCH sets the per-dispatch breadth (0 =
-            # single dispatch). SKINNY_SPPM_METAL_PHOTON_CAP is retained as an
-            # OPTIONAL per-pass ceiling (default 0 = unlimited) for pathological
-            # scenes; prefer lowering the batch over capping photons.
-            self._sppm_metal_photon_batch = 0
-            if self.is_metal:
-                import os
-                _cap = int(os.environ.get("SKINNY_SPPM_METAL_PHOTON_CAP", "0"))
-                if _cap > 0:
-                    sppm_photons = min(sppm_photons, _cap)
-                self._sppm_metal_photon_batch = int(
-                    os.environ.get("SKINNY_SPPM_METAL_PHOTON_BATCH",
-                                   str(_SPPM_METAL_PHOTON_BATCH_DEFAULT)))
-            _glossy = getattr(self, "_sppm_glossy_roughness_override", None)
-            sppm_glossy = float(_glossy) if _glossy is not None else _SPPM_GLOSSY_ROUGHNESS_DEFAULT
             # Photon-emission group selection pmf, proportional to each group's
             # emitted power (change sppm-power-proportional-photon-groups).
             # Presence predicates mirror the shader's hasE/hasS/hasD/hasEnv
@@ -9696,6 +9698,37 @@ class Renderer:
             )
             sppm_pmf = self._sppm_group_pmf_override \
                 or _sppm_photon_group_pmf(_powers, _present)
+            # Env-aware per-pass photon budget (change sppm-env-photon-budget):
+            # the expected non-env photon count stays exactly width*height, the
+            # env group's photons ride on top (capped ×8) — env deposits are
+            # sparse (depth≥1 only, whole-bounding-disc emission), so the flat
+            # one-per-pixel budget left env-lit scenes speckled. pmfEnv == 0 ⇒
+            # width*height exactly (env-free renders bit-identical).
+            sppm_photons = int(getattr(self, "_sppm_photons_override", 0)) \
+                or _sppm_photon_budget(self.width * self.height, float(sppm_pmf[3]))
+            # Metal GPU-watchdog handling (change sppm-photon-dispatch-tiling):
+            # the phase-3 photon dispatch is the heaviest SPPM command buffer —
+            # one thread per photon, each depositing into every visible point in
+            # radius, per-λ under spectral. A caustic scene clusters visible
+            # points into the focus cell, so photons × VPs-in-cell wedges the GPU.
+            # The driver now BOUNDS this by BREADTH — it tiles the photon dispatch
+            # into flushed sub-batches of `_sppm_metal_photon_batch` photons — so
+            # photons/pass stays the full width*height (no dark-starvation bias).
+            # SKINNY_SPPM_METAL_PHOTON_BATCH sets the per-dispatch breadth (0 =
+            # single dispatch). SKINNY_SPPM_METAL_PHOTON_CAP is retained as an
+            # OPTIONAL per-pass ceiling (default 0 = unlimited) for pathological
+            # scenes; prefer lowering the batch over capping photons.
+            self._sppm_metal_photon_batch = 0
+            if self.is_metal:
+                import os
+                _cap = int(os.environ.get("SKINNY_SPPM_METAL_PHOTON_CAP", "0"))
+                if _cap > 0:
+                    sppm_photons = min(sppm_photons, _cap)
+                self._sppm_metal_photon_batch = int(
+                    os.environ.get("SKINNY_SPPM_METAL_PHOTON_BATCH",
+                                   str(_SPPM_METAL_PHOTON_BATCH_DEFAULT)))
+            _glossy = getattr(self, "_sppm_glossy_roughness_override", None)
+            sppm_glossy = float(_glossy) if _glossy is not None else _SPPM_GLOSSY_ROUGHNESS_DEFAULT
         else:
             sppm_radius = 0.0
             sppm_photons = 0
