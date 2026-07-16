@@ -415,9 +415,15 @@ float2 nf_flow_forward(
         float xtr   = even ? z.y : z.x;
         float params[NF_PARAMS];
         nf_mlp(W, B, H, L * 3, xcond, cond, params);
+#if NF_COUPLING == 1
+        float widths[NF_BINS]; float vertices[NF_BINS + 1];
+        nf_decode_pq(params, widths, vertices);
+        float ld; float ytr = nf_pq_fwd(xtr, widths, vertices, ld);
+#else
         float widths[NF_BINS]; float heights[NF_BINS]; float derivs[NF_BINS + 1];
         nf_decode(params, widths, heights, derivs);
         float ld; float ytr = nf_rqs_fwd(xtr, widths, heights, derivs, ld);
+#endif
         logdet += ld;
         if (even) z.y = ytr; else z.x = ytr;
     }
@@ -547,7 +553,13 @@ float3 nf_square_to_hemi(float2 z)
     return float3(sin_t * cphi, cos_t, sin_t * sphi);
 }
     // …
-    pdfOmega = exp(log_q_square - NF_LOG2PI);
+#if NF_CHART == NF_CHART_V1
+    pdfOmega = exp(log_q_square - NF_LOG2PI);            // V1 (default): constant 2π
+    return nf_square_to_hemi(z);
+#else
+    pdfOmega = exp(log_q_square - nf_chart_logjac(z));   // V0 (2π) / V5 (π²·sinθ)
+    return nf_chart_square_to_dir(z);
+#endif
 ```
 <!-- /CODE:pdf-omega -->
 
@@ -576,10 +588,17 @@ float pdfNeural(
     float cond[NF_MLP_ENC], float3 wi)
     // …
     if (wi.y <= 0.0f) return 0.0f;
+#if NF_CHART == NF_CHART_V1
     float2 z = nf_hemi_to_square(wi);
     float logdet;
     nf_flow_inverse(W, B, H, z, cond, logdet);          // log|det du/dz| = log q_square
-    return exp(logdet - NF_LOG2PI);
+    return exp(logdet - NF_LOG2PI);                      // V1 (default): constant 2π
+#else
+    float2 z = nf_chart_dir_to_square(wi);
+    float logdet;
+    nf_flow_inverse(W, B, H, z, cond, logdet);
+    return exp(logdet - nf_chart_logjac(z));             // V0 (2π) / V5 (π²·sinθ)
+#endif
 ```
 <!-- /CODE:pdf-inv -->
 

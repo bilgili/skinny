@@ -388,6 +388,19 @@ struct FrameConstants
     // 0 = disabled (the clamp is a no-op and the render is byte-identical).
     // Scalar tail appended last by _pack_uniforms in this exact order.
     float  filmMaxComponent;
+    // ── SPPM photon-emission group pmf (change sppm-power-proportional-photon-groups) ──
+    // Selection probability per emission group (emissive triangles, sphere
+    // lights, distant lights, environment), proportional to each group's
+    // emitted power and normalized host-side (renderer._sppm_photon_group_pmf;
+    // uniform-over-present fallback when total power is 0/non-finite). Zeros
+    // when the integrator is not SPPM. sppmEmitPhoton walks these as a CDF and
+    // divides each branch's flux by its own entry — replacing the uniform 1/G
+    // whose flux disparity produced sparse huge env splats. Scalar tail: the
+    // Python packer appends them after filmMaxComponent in this exact order.
+    float  sppmGroupPmfE;
+    float  sppmGroupPmfS;
+    float  sppmGroupPmfD;
+    float  sppmGroupPmfEnv;
     // ── Metal megakernel watchdog tiling (change metal-megakernel-watchdog-tiling) ──
     // Screen-space Y offset of the row band this megakernel command buffer covers.
     // Under `SKINNY_METAL` the megakernel frame is committed as a sequence of row

@@ -84,6 +84,33 @@ _SPPM_GLOSSY_ROUGHNESS_DEFAULT = 0.6
 # SKINNY_SPPM_METAL_PHOTON_BATCH; 0 disables tiling (single full dispatch).
 _SPPM_METAL_PHOTON_BATCH_DEFAULT = 65536
 
+
+def _sppm_photon_group_pmf(
+    powers: tuple[float, float, float, float],
+    present: tuple[bool, bool, bool, bool],
+) -> tuple[float, float, float, float]:
+    """Photon-emission group selection pmf (emissive, sphere, distant, env),
+    proportional to each group's emitted power (change
+    sppm-power-proportional-photon-groups). Per-photon flux then equalises
+    across groups (Φ_g / p_g ≈ Φ_total) — the pbrt light-power distribution —
+    which kills the sparse huge env splats that uniform 1/G selection produced.
+
+    Absent groups get 0. Non-finite or negative powers are treated as 0. When
+    the total usable power is 0 (or every power was non-finite) the pmf falls
+    back to uniform over the *present* groups — the pre-change behavior.
+    """
+    clean = [
+        p if (present[i] and math.isfinite(p) and p > 0.0) else 0.0
+        for i, p in enumerate(powers)
+    ]
+    total = sum(clean)
+    if total > 0.0 and math.isfinite(total):
+        return tuple(p / total for p in clean)
+    n_present = sum(1 for b in present if b)
+    if n_present == 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    return tuple((1.0 / n_present) if b else 0.0 for b in present)
+
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
 # matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
 # packer (`_pack_uniforms_msl`, design D3) to relocate each field from the Vulkan
@@ -116,6 +143,11 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     # Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
     # film-maxcomponent-clamp). 0 = disabled.
     ("filmMaxComponent", 4),
+    # SPPM photon-emission group selection pmf (change
+    # sppm-power-proportional-photon-groups): P(emissive/sphere/distant/env),
+    # power-proportional, normalized host-side. Zeros when integrator != SPPM.
+    ("sppmGroupPmfE", 4), ("sppmGroupPmfS", 4), ("sppmGroupPmfD", 4),
+    ("sppmGroupPmfEnv", 4),
     # Metal megakernel watchdog tiling (change metal-megakernel-watchdog-tiling):
     # row-band Y origin for this dispatch. 0 from the base packer (Vulkan always
     # dispatches the full frame); the Metal megakernel path patches it per band.
@@ -3889,6 +3921,12 @@ class Renderer:
         # slot). Uploaded by _ensure_env_uploaded; drives env NEE + MIS.
         self.env_dist_buffer = self._gpu.StorageBuffer(
             self.ctx, ((ENV_HEIGHT + 1) + ENV_HEIGHT * (ENV_WIDTH + 1)) * 4)
+        # Env sphere luminance integral ∫L dω (Φ_env = πR²·envIntensity·∫L dω)
+        # — an SPPM photon-group power input, cached alongside the importance
+        # CDF. MUST default before the _ensure_env_uploaded() call below (which
+        # computes it); a later re-init would clobber the computed value and
+        # silently zero the env photon group.
+        self._env_lum_integral: float = 0.0
         self._ensure_env_uploaded()
 
         # Hero-wavelength spectral upsample tables (bindings 45/46/47), created
@@ -4138,6 +4176,10 @@ class Renderer:
             b"\x00" * (SPHERE_LIGHT_CAPACITY * SPHERE_LIGHT_STRIDE)
         )
         self._num_sphere_lights: int = 0
+        # Σ(lum·r²) over the packed sphere lights — feeds the SPPM photon-group
+        # power distribution (Φ_S = 4π²·Σ(lum·r²)); refreshed by every
+        # _upload_sphere_lights call so live light edits stay consistent.
+        self._sphere_power_sum: float = 0.0
 
         # Distant-light buffer (binding 20). Filled from scene.lights_dir;
         # fc.numDistantLights bounds the active range. Replaces the legacy
@@ -4151,6 +4193,16 @@ class Renderer:
             b"\x00" * (DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE)
         )
         self._num_distant_lights: int = 0
+        # Σlum over the packed distant lights (Φ_D = πR²·Σlum) — an SPPM
+        # photon-group power input (see _sppm_photon_group_pmf).
+        # _sppm_group_pmf_override (a 4-tuple) bypasses the power distribution
+        # and packs verbatim — the forced-group flux-normalization probe hook
+        # ([0,0,0,1] = all-env). NOTE: the companion _env_lum_integral is
+        # initialized *before* the env buffer construction above —
+        # _ensure_env_uploaded() already ran at construction and a default here
+        # would clobber the computed integral (env pmf silently 0).
+        self._distant_lum_sum: float = 0.0
+        self._sppm_group_pmf_override: tuple | None = None
         # Per-distant-light authored illuminant SPD (binding 50, Group 6.3),
         # spectral variant only — fixed capacity (distant lights never grow past
         # DISTANT_LIGHT_CAPACITY), so no rebind path. Filled in
@@ -5974,6 +6026,12 @@ class Renderer:
                 data += b"\x00" * SPHERE_LIGHT_STRIDE
         self.sphere_lights_buffer.upload_sync(bytes(data))
         self._num_sphere_lights = n
+        # Σ(lum·r²) over the packed set → SPPM photon-group power Φ_S = 4π²·Σ(lum·r²)
+        self._sphere_power_sum = float(sum(
+            (0.2126 * float(lt.radiance[0]) + 0.7152 * float(lt.radiance[1])
+             + 0.0722 * float(lt.radiance[2])) * float(lt.radius) ** 2
+            for lt in enabled[:n]
+        ))
 
     def _scene_authors_lights(self, scene) -> bool:
         """True when the loaded USD scene authors any *powered* light.
@@ -6106,6 +6164,12 @@ class Renderer:
         if self._spectral and self._spectral_light_spd_buffer is not None:
             self._spectral_light_spd_buffer.upload_sync(bytes(spd_data))
         self._num_distant_lights = n
+        # Σlum over the packed set → SPPM photon-group power Φ_D = πR²·Σlum
+        self._distant_lum_sum = float(sum(
+            0.2126 * float(lt.radiance[0]) + 0.7152 * float(lt.radiance[1])
+            + 0.0722 * float(lt.radiance[2])
+            for lt in enabled[:n]
+        ))
 
     def _spectral_light_spd_scaled(self, spd, radiance_rgb):
         """Return the authored SPD (95 samples) scaled so its hero-λ film resolve
@@ -9605,10 +9669,38 @@ class Renderer:
                                    str(_SPPM_METAL_PHOTON_BATCH_DEFAULT)))
             _glossy = getattr(self, "_sppm_glossy_roughness_override", None)
             sppm_glossy = float(_glossy) if _glossy is not None else _SPPM_GLOSSY_ROUGHNESS_DEFAULT
+            # Photon-emission group selection pmf, proportional to each group's
+            # emitted power (change sppm-power-proportional-photon-groups).
+            # Presence predicates mirror the shader's hasE/hasS/hasD/hasEnv
+            # byte-for-byte (the packed counts below feed the fc fields the
+            # shader reads). R is the same bounding-sphere radius the emission
+            # geometry uses; envIntensity is folded exactly once (the CDF's
+            # luminance integral is unscaled). Emitted powers:
+            #   Φ_E = π·Σ(area·lum)      (cosine-hemisphere area emitters)
+            #   Φ_S = 4π²·Σ(lum·r²)      (= π·Σ(lum·4πr²), full-sphere emitters)
+            #   Φ_D = πR²·Σlum           (parallel beam through the bbox disc)
+            #   Φ_env = πR²·envIntensity·∫L dω   (pbrt ImageInfiniteLight::Phi)
+            _R = max(0.5 * _diag, 1e-4)
+            _furnace = 1 if self.scene.furnace_mode else 0
+            _present = (
+                int(self._num_emissive_tris) > 0,
+                int(self._num_sphere_lights) > 0,
+                int(self._num_distant_lights) > 0,
+                _furnace == 0 and float(env_intensity) > 0.0,
+            )
+            _powers = (
+                math.pi * float(getattr(self, "_emissive_total_power", 0.0)),
+                4.0 * math.pi ** 2 * float(self._sphere_power_sum),
+                math.pi * _R * _R * float(self._distant_lum_sum),
+                math.pi * _R * _R * float(env_intensity) * float(self._env_lum_integral),
+            )
+            sppm_pmf = self._sppm_group_pmf_override \
+                or _sppm_photon_group_pmf(_powers, _present)
         else:
             sppm_radius = 0.0
             sppm_photons = 0
             sppm_glossy = 0.0
+            sppm_pmf = (0.0, 0.0, 0.0, 0.0)
         self._sppm_photons_emitted = sppm_photons
         data += struct.pack("f", sppm_radius)                        # sppmInitialRadius
         data += struct.pack("f", sppm_radius)                        # sppmCellSize
@@ -9616,6 +9708,7 @@ class Renderer:
         data += struct.pack("I", int(sppm_photons))                  # sppmPhotonsEmitted
         data += struct.pack("f", sppm_glossy)                        # sppmGlossyContinueRoughness
         data += struct.pack("f", float(self.film_max_component))      # filmMaxComponent
+        data += struct.pack("4f", *(float(p) for p in sppm_pmf))     # sppmGroupPmfE/S/D/Env
         data += struct.pack("I", 0)                                  # tileOriginY (Metal band loop patches)
 
         # Directional lights are no longer in the UBO — they live in the
@@ -9649,7 +9742,10 @@ class Renderer:
         # Rebuild + upload the importance-sampling distribution to match the
         # newly-uploaded env texture, so env NEE samples the right directions.
         from skinny.environment import build_env_distribution
-        marg, cond = build_env_distribution(env_hdr_data)
+        marg, cond, lum_integral = build_env_distribution(env_hdr_data)
+        # ∫L dω of the (unscaled) map → SPPM photon-group power
+        # Φ_env = πR²·envIntensity·∫L dω (intensity applied at pack time).
+        self._env_lum_integral = float(lum_integral)
         # Concatenate into the one combined buffer: marginal then conditional,
         # matching envDistCdf's [marginal | conditional] layout (the shader reads
         # the conditional at ENV_COND_CDF_BASE = ENV_DIST_H+1 elements in).

@@ -221,11 +221,30 @@ per-pass photon count; γ the SPPM reduction parameter (2/3). lum(·) is luminan
 
 ### 1. Photon emission
 
-Each photon is sampled from one scene light. Group selection is uniform over the
-present light groups (emissive triangle / sphere / distant / environment); within
-the emissive group, triangles are **power-weighted** (pSel, folded into the
-area-measure selection pdf p_sel). For a diffuse area emitter the emission cosine
-cancels the cosine sampling pdf, so the carried flux is
+Each photon is sampled from one scene light. Group selection is
+**power-proportional** over the present light groups (emissive triangle / sphere
+/ distant / environment; change `sppm-power-proportional-photon-groups`): the
+host computes each group's emitted power —
+
+| group | emitted power Φ_g |
+| --- | --- |
+| emissive triangles | `π · Σ(area · lum)` (the existing `emissiveTotalPower` sum) |
+| sphere lights | `4π² · Σ(lum · r²)` (full-sphere diffuse emitters) |
+| distant lights | `πR² · Σ lum` (parallel beam through the bbox disc) |
+| environment | `πR² · envIntensity · ∫L dω` (pbrt `ImageInfiniteLight::Phi`; the sin θ-weighted luminance integral is computed alongside the env CDF) |
+
+— normalizes them into a selection pmf (`renderer._sppm_photon_group_pmf`;
+uniform-over-present fallback when the total power is 0/non-finite), and uploads
+it in `FrameConstants` (`sppmGroupPmfE/S/D/Env`). `sppmEmitPhoton` walks the pmf
+as a CDF and divides each branch's flux by its **actual** selection probability,
+so the estimator stays unbiased while per-photon flux equalises across groups
+(`Φ_g / p_g ≈ Φ_total`). Under the previous uniform `1/G` selection a dominant
+environment (β = L·πR²/(gsel·p_dir), bbox disc πR² ≫ a small local emitter) rode
+on an equal photon share as sparse, enormous splats — firefly speckle on any
+scene mixing a weak local light with an environment. Within the emissive group,
+triangles remain **power-weighted** (pSel, folded into the area-measure
+selection pdf p_sel). For a diffuse area emitter the emission cosine cancels the
+cosine sampling pdf, so the carried flux is
 
 ![beta = Le · pi / p_sel](diagrams/sppm/photon-beta.svg)
 
@@ -243,7 +262,7 @@ the pbrt `ImageInfiniteLight::SampleLe` flux — the disc position pdf `1/(πR²
 cancels against the disc area, leaving the non-delta direction pdf in the
 denominator:
 
-`beta = L_env(ω) · πR² / (gsel · p_dir(ω))`
+`beta = L_env(ω) · πR² / (p_sel · p_dir(ω))`
 
 Samples with `p_dir ≤ 0` (equirect poles / degenerate distribution) are rejected
 before the divide — an unguarded pole sample yields an infinite β that poisons
@@ -256,7 +275,7 @@ NEE at the VP + the terminal env-miss companion); env photons contribute only
 > **Implements:** `sppmEmitPhoton` in `wavefront_sppm.slang`
 > (`beta = ls.radiance * PI / max(selA, 1e-20)` for area emitters;
 > `beta = dl.rad * (PI·R²) / selPdf` for the distant beam;
-> `beta = es.radiance * (PI·R²) / max(gsel · es.pdf, 1e-20)` for env photons).
+> `beta = es.radiance * (PI·R²) / max(pSel · es.pdf, 1e-20)` for env photons).
 
 | symbol | code | meaning |
 | --- | --- | --- |
