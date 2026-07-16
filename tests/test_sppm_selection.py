@@ -209,3 +209,48 @@ def test_pack_uniforms_honors_pmf_override_hook():
     body = src[start:]
     assert "_sppm_group_pmf_override" in body, \
         "_pack_uniforms must honor _sppm_group_pmf_override (forced-group flux probe)"
+
+
+def test_photon_budget_env_free_is_flat_pixels():
+    # pmfEnv == 0 must return pixels EXACTLY (env-free renders bit-identical).
+    from skinny.renderer import _sppm_photon_budget
+    assert _sppm_photon_budget(384 * 384, 0.0) == 384 * 384
+    assert _sppm_photon_budget(1, 0.0) == 1
+
+
+def test_photon_budget_scales_by_env_pmf_share():
+    # N = pixels/(1-pmfEnv): expected NON-env photon count stays exactly pixels.
+    from skinny.renderer import _sppm_photon_budget
+    n = _sppm_photon_budget(100_000, 0.84)
+    assert n == round(100_000 / 0.16)  # ×6.25
+    # non-env expectation: N·(1−pmfEnv) == pixels (to rounding)
+    assert abs(n * (1.0 - 0.84) - 100_000) < 1.0
+
+
+def test_photon_budget_caps_at_8x():
+    from skinny.renderer import _sppm_photon_budget
+    assert _sppm_photon_budget(100_000, 1.0) == 800_000
+    assert _sppm_photon_budget(100_000, 0.999) == 800_000
+
+
+def test_photon_budget_nonfinite_and_out_of_range_pmf_is_flat():
+    # The pmf override hook is unvalidated: NaN/inf/negative/>1 must not
+    # explode the pack path — clamp to the flat budget (or the cap).
+    from skinny.renderer import _sppm_photon_budget
+    assert _sppm_photon_budget(4096, float("nan")) == 4096
+    assert _sppm_photon_budget(4096, float("-inf")) == 4096
+    assert _sppm_photon_budget(4096, -0.5) == 4096
+    assert _sppm_photon_budget(4096, 1.5) == 4096 * 8
+
+
+def test_pack_uniforms_derives_photons_from_env_budget():
+    src = _read("renderer.py")
+    start = src.index("def _pack_uniforms(self")
+    body = src[start:]
+    assert "_sppm_photon_budget(" in body, \
+        "_pack_uniforms must derive the per-pass photon count from the env-aware budget"
+    assert body.index("_sppm_photon_group_pmf") < body.index("_sppm_photon_budget("), \
+        "group pmf must be computed before the photon budget that consumes pmfEnv"
+    assert "_sppm_photons_override" in body.split("_sppm_photon_budget(")[0].rsplit("sppm_photons", 2)[-1] \
+        or "_sppm_photons_override" in body, \
+        "_sppm_photons_override must keep absolute precedence"

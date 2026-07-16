@@ -9,6 +9,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SPPM env-photon speckle — env-aware per-pass photon budget** (change
+  `sppm-env-photon-budget`). The per-pass photon count is now
+  `round(pixels / max(1 − pmfEnv, 1/8))` instead of a flat `width·height`:
+  the expected non-env photon count stays exactly `pixels` (env-free scenes
+  bit-identical, verified byte-for-byte), while the environment group's photons
+  ride on top, capped at ×8. Env photons deposit only at `depth ≥ 1` from a
+  whole-bounding-disc emission, so at one-per-pixel their sparse deposits carry
+  fat flux — the residual speckle after the power-proportional pmf (measured to
+  scale exactly `1/√N_photons`, i.e. pure deposit sparsity, not a flux error).
+  On `glass_caustics_test.usda` (384², 48 spp, Metal) whole-image `noise_sigma`
+  drops 0.0272 → 0.0180 (env component 0.0224 → 0.0093 ≈ ÷√6.25, matching the
+  ×6.25 budget at pmfEnv = 0.84); mean stays on the path anchor (unbiased —
+  the update stage divides by the actually-emitted count). The shared photon
+  dispatch loop now also hard-caps every single dispatch at `65535 × 64`
+  photons on every backend (Vulkan's minimum-guaranteed workgroup count),
+  tiling larger budgets into 64-aligned sub-dispatches — previously a >4.19M
+  photon budget could be silently driver-clamped into a dim bias.
+
 - **SPPM env-photon fireflies — power-proportional photon group selection**
   (change `sppm-power-proportional-photon-groups`). `sppmEmitPhoton` now selects
   the photon-emission group (emissive / sphere / distant / environment)

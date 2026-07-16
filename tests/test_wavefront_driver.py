@@ -475,3 +475,22 @@ def test_sppm_photon_batch_ge_photons_is_single_dispatch():
     photon = [op for op in rec.ops if op[0] == "dispatch_count"
               and op[1] == "wfSppmPhotonTrace"]
     assert photon == [("dispatch_count", "wfSppmPhotonTrace", 300, 64)]
+
+
+def test_sppm_photon_dispatch_never_exceeds_workgroup_limit():
+    # Vulkan guarantees only maxComputeWorkGroupCount[0] >= 65535 → one dispatch
+    # carries at most 65535*64 photons; larger budgets (env-aware ×8) must tile
+    # even when the backend requested no watchdog batching (photon_batch <= 0),
+    # or a driver may silently clamp groupCountX (dim bias). Batches stay
+    # 64-aligned and sum to the full budget.
+    limit = 65535 * 64
+    photons = limit + 100_000
+    rec = _SppmStub(stream_size=64)
+    record_sppm_loop(rec, num_pixels=64, stream_size=64, num_cells=256,
+                     photons=photons, first_frame=False, photon_batch=0)
+    batches = [op for op in rec.ops if op[0] == "dispatch_count"
+               and op[1] == "wfSppmPhotonTrace"]
+    counts = [op[2] for op in batches]
+    assert max(counts) <= limit
+    assert sum(counts) == photons
+    assert all(c % 64 == 0 for c in counts[:-1])  # non-final batches aligned

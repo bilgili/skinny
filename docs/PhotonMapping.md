@@ -272,6 +272,23 @@ mirroring the sphere-light branch. Env DIRECT stays owned by the eye stage (env
 NEE at the VP + the terminal env-miss companion); env photons contribute only
 `depth ≥ 1` deposits, so the partition is disjoint by construction.
 
+**Per-pass photon budget** (change `sppm-env-photon-budget`): the emitted count
+is env-aware, `N = round(pixels / max(1 − pmfEnv, 1/8))`
+(`renderer._sppm_photon_budget`; `_sppm_photons_override` keeps absolute
+precedence). Env photons are a structurally sparse source — they launch from the
+whole bounding disc over every env direction and deposit only after ≥ 1 bounce,
+so at the flat one-per-pixel budget the few surviving deposits carry fat flux
+(speckle on any env-lit scene; measured: the env noise component scales exactly
+`1/√N_photons`). Dividing by `1 − pmfEnv` pins the **expected non-env photon
+count at exactly `pixels`** — env-free scenes (`pmfEnv = 0`) stay bit-identical,
+and the env group's photons ride on top of, never dilute, the local-light
+budget, capped at ×8. Unbiasedness is budget-independent: the update stage
+divides by the actually-emitted `N`. The shared photon-dispatch loop
+additionally bounds every single dispatch to `65535 × 64` photons on **every**
+backend (Vulkan's minimum-guaranteed `maxComputeWorkGroupCount[0]` × the
+threadgroup width), tiling larger budgets into 64-aligned sub-dispatches so a
+driver can never silently clamp the launch and starve the divisor (dim bias).
+
 > **Implements:** `sppmEmitPhoton` in `wavefront_sppm.slang`
 > (`beta = ls.radiance * PI / max(selA, 1e-20)` for area emitters;
 > `beta = dl.rad * (PI·R²) / selPdf` for the distant beam;

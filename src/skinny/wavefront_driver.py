@@ -355,6 +355,15 @@ def record_sppm_loop(
         batch = max(64, (int(photon_batch) // 64) * 64)
     else:
         batch = int(photons)
+    # Hard per-dispatch ceiling, every backend (change sppm-env-photon-budget):
+    # Vulkan only guarantees maxComputeWorkGroupCount[0] >= 65535, so a single
+    # dispatch may carry at most 65535 × 64 = 4,194,240 photons — beyond that a
+    # driver may silently clamp groupCountX, dropping photons while the update
+    # stage still divides by the full emitted count (dim bias). 64-aligned by
+    # construction, so the non-final-batch double-deposit hazard above stays
+    # closed. The env-aware budget (×8 on env-lit scenes) crosses this at
+    # ~724² renders; the flat budget crossed it latently at ~4.2 Mpx.
+    batch = min(batch, 65535 * 64)
     base = 0
     while base < photons:
         n = min(batch, photons - base)
