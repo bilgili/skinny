@@ -94,7 +94,7 @@ CPU-readback stall**.
 |-------|-----------|------|
 | **EYE** | `wfSppmEye` (over num_pixels, tiled) | Trace the camera path through the flat **delta lobe** (glass/mirror are flat delta materials) to the first non-specular flat hit. Store **one** stochastic `VisiblePoint`/pixel `{pos, ns, wo, beta, the evaluated flat BSDF}`, plus the full per-pass **direct** term `ld` (NEE at the VP + any emitter/env reached through the specular chain). Persistent `radius`/`n`/`tau` are preserved; on first activation (`n == 0`) the radius inits to `fc.sppmInitialRadius`. A pixel that escapes leaves its VP **inactive** so a stale point can't sit in the grid. |
 | **GRID BUILD** | `wfSppmGridCount` → `wfSppmGridScanBlock` → `wfSppmGridScanBlockSums` → `wfSppmGridScanAdd` → `wfSppmGridScatter` | A uniform spatial **hash grid** built by **counting sort** over the active visible points: per-cell atomic count → blocked **exclusive prefix sum** (count → offset) → scatter pixel indices into their cell buckets. `numCells = next_pow2(2·num_pixels)`; `cellSize = sppmInitialRadius` (a valid upper bound on every active VP's radius, since radii only shrink — so the 3×3×3 neighbour scan never misses a photon). |
-| **PHOTON** | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`; **breadth-tiled on Metal**, change `sppm-photon-dispatch-tiling`) | **Emit** power-weighted photons (emissive triangles via `sampleEmissiveTriangle` pSel, sphere lights, distant beam; `beta = Le·π / p_sel`), **trace** with Russian roulette, and **deposit** only at non-specular vertices with `depth ≥ 1` (so the photon term is disjoint from the NEE direct: `depth == 0` is light→VP direct that NEE owns; the SDS caustic carrier light→specular→VP still deposits). Deposit via a de-duplicated **3×3×3 neighbour-cell scan**, adding the **bare** f_r `= evaluate(woVP,wiVP).response / max(wiVP.z, 1e-4)` (no cosine — the photon-map density estimate) with portable **uint fixed-point** `InterlockedAdd` into `SppmAccum`. |
+| **PHOTON** | `wfSppmPhotonTrace` (over `fc.sppmPhotonsEmitted`; **breadth-tiled on Metal**, change `sppm-photon-dispatch-tiling`) | **Emit** power-weighted photons (emissive triangles via `sampleEmissiveTriangle` pSel, sphere lights, distant beam, env beam via `sampleEnvDir` — `beta = Le·π / p_sel`, distant/env `beta = L·πR²/p_sel` from the bbox disc), **trace** with Russian roulette, and **deposit** only at non-specular vertices with `depth ≥ 1` (so the photon term is disjoint from the NEE direct: `depth == 0` is light→VP direct that NEE owns; the SDS caustic carrier light→specular→VP still deposits). Deposit via a de-duplicated **3×3×3 neighbour-cell scan**, adding the **bare** f_r `= evaluate(woVP,wiVP).response / max(wiVP.z, 1e-4)` (no cosine — the photon-map density estimate) with portable **uint fixed-point** `InterlockedAdd` into `SppmAccum`. |
 | **UPDATE** | `wfSppmUpdate` (over num_pixels, tiled) | The per-pass indirect estimate `L_indirect = (vp.beta ⊗ Φ) / (N_emitted · π · r²)` — **this pass's** deposited flux Φ, scaled by the eye throughput `vp.beta` (change `sppm-vp-beta-resolve`), at the gather radius (the radius before this pass's reduction); `sample = vp.ld + L_indirect`; **running-mean composite** into the accumulation film (exactly like `wfPathResolve`), which is what averages the per-pass estimates into the progressive result. The SPPM reduction `N' = N + γM`, `r' = r·√(N'/(N+M))` (γ = 2/3) then **advances the radius** for the next pass so the per-pass bias shrinks; display + clear the accumulator. |
 
 ### Split dispatch order
@@ -222,10 +222,10 @@ per-pass photon count; γ the SPPM reduction parameter (2/3). lum(·) is luminan
 ### 1. Photon emission
 
 Each photon is sampled from one scene light. Group selection is uniform over the
-present light groups (emissive triangle / sphere / distant); within the emissive
-group, triangles are **power-weighted** (pSel, folded into the area-measure
-selection pdf p_sel). For a diffuse area emitter the emission cosine cancels the
-cosine sampling pdf, so the carried flux is
+present light groups (emissive triangle / sphere / distant / environment); within
+the emissive group, triangles are **power-weighted** (pSel, folded into the
+area-measure selection pdf p_sel). For a diffuse area emitter the emission cosine
+cancels the cosine sampling pdf, so the carried flux is
 
 ![beta = Le · pi / p_sel](diagrams/sppm/photon-beta.svg)
 
@@ -234,9 +234,29 @@ folded into β here — it is applied once in the update stage's radiance estima
 A distant light emits a parallel beam from a bbox-covering disc, accounting the
 `A_disk` factor in β (`pdfDir` is a delta, no cosine).
 
+The **environment** (change `sppm-env-indirect-transport`) is a fourth group,
+present iff the env is live (`furnaceMode == 0 && envIntensity > 0` — the same
+standing preconditions env NEE relies on). An env photon importance-samples a
+sky direction via `sampleEnvDir` (the identical distribution env NEE uses), is
+emitted inward from the same bbox-covering disc as the distant beam, and carries
+the pbrt `ImageInfiniteLight::SampleLe` flux — the disc position pdf `1/(πR²)`
+cancels against the disc area, leaving the non-delta direction pdf in the
+denominator:
+
+`beta = L_env(ω) · πR² / (gsel · p_dir(ω))`
+
+Samples with `p_dir ≤ 0` (equirect poles / degenerate distribution) are rejected
+before the divide — an unguarded pole sample yields an infinite β that poisons
+Russian roulette and the whole walk. Under `SKINNY_SPECTRAL` the env radiance is
+upsampled with `upsampleIlluminantBound` at the shared per-pass wavelengths,
+mirroring the sphere-light branch. Env DIRECT stays owned by the eye stage (env
+NEE at the VP + the terminal env-miss companion); env photons contribute only
+`depth ≥ 1` deposits, so the partition is disjoint by construction.
+
 > **Implements:** `sppmEmitPhoton` in `wavefront_sppm.slang`
 > (`beta = ls.radiance * PI / max(selA, 1e-20)` for area emitters;
-> `beta = dl.rad * (PI·R²) / selPdf` for the distant beam).
+> `beta = dl.rad * (PI·R²) / selPdf` for the distant beam;
+> `beta = es.radiance * (PI·R²) / max(gsel · es.pdf, 1e-20)` for env photons).
 
 | symbol | code | meaning |
 | --- | --- | --- |

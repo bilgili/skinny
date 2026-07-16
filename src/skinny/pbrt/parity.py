@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +23,29 @@ from skinny import spectral_capability
 
 from . import metrics
 from .api import import_pbrt
+
+
+def render_log_path() -> str:
+    """Where per-render progress lines are appended.
+
+    Always on so a long headless sweep is trackable with ``tail -f`` without the
+    caller having to remember to redirect output (the matrix/suite renders happen
+    in one dict-comprehension, so stdout shows nothing until the run ends).
+    Override with ``SKINNY_RENDER_LOG``; default is a stable per-user temp file.
+    """
+    return os.environ.get(
+        "SKINNY_RENDER_LOG",
+        os.path.join(tempfile.gettempdir(), "skinny_render_progress.log"),
+    )
+
+
+def _render_log(msg: str) -> None:
+    """Append one timestamped line to the render progress log (best-effort)."""
+    try:
+        with open(render_log_path(), "a", encoding="utf-8") as fh:
+            fh.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except OSError:
+        pass  # logging must never break a render
 
 
 @dataclass
@@ -537,7 +561,9 @@ def render_combo(spec: SceneSpec, combo: RenderCombo, corpus_dir: str,
                  gpu: str | None = None) -> np.ndarray:
     """Render *spec* with *combo* and return the linear-HDR image (H,W,3)."""
     src = _scene_source(spec, corpus_dir)
-    return render_linear(
+    _render_log(f"START {spec.name:24s} {combo.label}")
+    t0 = time.time()
+    img = render_linear(
         src["scene_pbrt"], spec.width, spec.height, spp=spec.spp,
         gpu=gpu, env_off=_env_off_for(spec, corpus_dir, src),
         integrator=combo.integrator, execution_mode=combo.execution_mode,
@@ -545,6 +571,8 @@ def render_combo(spec: SceneSpec, combo: RenderCombo, corpus_dir: str,
         materialx=spec.materialx, usd_path=src["usd_path"],
         spectral=combo.spectral,
     )
+    _render_log(f"DONE  {spec.name:24s} {combo.label}  ({time.time() - t0:.1f}s)")
+    return img
 
 
 def pbrt_truth_result(spec: SceneSpec, combo: RenderCombo, img: np.ndarray,

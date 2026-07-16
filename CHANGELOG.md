@@ -7,6 +7,27 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **SPPM environment photon emission — env-INDIRECT transport** (change
+  `sppm-env-indirect-transport`). The environment light is now a fourth photon
+  group in `sppmEmitPhoton` (present iff `furnaceMode == 0 && envIntensity > 0`):
+  a sky direction is importance-sampled with `sampleEnvDir` (the same
+  distribution env NEE uses), emitted inward from the scene-bounding disc, with
+  pbrt `ImageInfiniteLight::SampleLe` flux `beta = L_env·πR²/(gsel·p_dir)` and a
+  pole-pdf validity guard. Previously SPPM had **no** env-indirect transport —
+  env light reached the film only via the eye stage's direct terms — leaving
+  env-lit scenes dim (recorded 0.78 shadow-box vs the path anchor on the fair
+  null-sun glass-caustics scene). Post-change probe: totals vs path ≈ 0.99–1.05
+  on the same regions (constant-env closure exactly 1.00; residual excess in
+  glass-shadow regions is env-through-glass SDS caustic transport only photons
+  can carry). Spectral branch upsamples with `upsampleIlluminantBound` at the
+  shared per-pass wavelengths. Env DIRECT stays owned by the eye stage; photons
+  deposit only at `depth ≥ 1`, so the partition is disjoint. The prior
+  env-photon attempt's "8× over-bright" was diagnosed as probe methodology
+  (forced selection kept `gsel = 1/G`; mean-not-median; indirect-vs-total
+  mismatch), not a flux-formula error.
+
 ### Fixed
 
 - **SPPM photon-indirect term now scaled by the eye throughput `vp.beta` at
