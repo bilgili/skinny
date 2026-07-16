@@ -555,18 +555,24 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
     let hasE = (fc.numEmissiveTriangles > 0u) ? 1u : 0u;
     let hasS = (fc.numSphereLights > 0u) ? 1u : 0u;
     let hasD = (fc.numDistantLights > 0u) ? 1u : 0u;
-    let G = hasE + hasS + hasD;
+    // Environment as a photon source only when the env is live: the constant
+    // furnace env is analytic in the eye stage (photons would double it into
+    // the closure gates), and a zero-intensity env must not dilute the budget.
+    let hasEnv = (fc.furnaceMode == 0u && fc.envIntensity > 0.0) ? 1u : 0u;
+    let G = hasE + hasS + hasD + hasEnv;
     if (G == 0u)
         return false;
     let gsel = 1.0 / float(G);
 
-    // Map a uniform draw to one of the present groups (order: emissive, sphere, distant).
+    // Map a uniform draw to one of the present groups
+    // (order: emissive, sphere, distant, environment).
     uint pick = min(uint(rng.next() * float(G)), G - 1u);
     uint gi = 0u;
     uint chosen = 99u;
     if (hasE == 1u) { if (gi == pick) chosen = 0u; gi++; }
     if (chosen == 99u && hasS == 1u) { if (gi == pick) chosen = 1u; gi++; }
     if (chosen == 99u && hasD == 1u) { if (gi == pick) chosen = 2u; gi++; }
+    if (chosen == 99u && hasEnv == 1u) { if (gi == pick) chosen = 3u; gi++; }
 
     if (chosen == 0u)
     {
@@ -612,29 +618,69 @@ bool sppmEmitPhoton(inout RNG rng, out Ray ray, out Spectrum beta
 #endif
         return true;
     }
-    // Distant light: a parallel beam from a bbox-covering disk (pdfDir is a delta,
-    // no cosine). beta = L·A_disk / selPdf.
-    let i = min(uint(rng.next() * float(fc.numDistantLights)), fc.numDistantLights - 1u);
-    DirectionalLightImpl dl = loadDirectionalLightImpl(distantLights[i]);
-    let center = fc.sceneBoundsMin + 0.5 * fc.sceneBoundsExtent;
-    let R = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
-    float3 t, b; buildBasis(dl.dir, t, b);
-    let u2 = rng.next2();
-    let rr = R * sqrt(u2.x);
-    let ph = 2.0 * PI * u2.y;
-    ray.origin = center + dl.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
-    ray.direction = -dl.dir;
-    let selPdf = gsel * (1.0 / float(fc.numDistantLights));
+    if (chosen == 2u)
+    {
+        // Distant light: a parallel beam from a bbox-covering disk (pdfDir is a delta,
+        // no cosine). beta = L·A_disk / selPdf.
+        let i = min(uint(rng.next() * float(fc.numDistantLights)), fc.numDistantLights - 1u);
+        DirectionalLightImpl dl = loadDirectionalLightImpl(distantLights[i]);
+        let center = fc.sceneBoundsMin + 0.5 * fc.sceneBoundsExtent;
+        let R = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+        float3 t, b; buildBasis(dl.dir, t, b);
+        let u2 = rng.next2();
+        let rr = R * sqrt(u2.x);
+        let ph = 2.0 * PI * u2.y;
+        ray.origin = center + dl.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
+        ray.direction = -dl.dir;
+        let selPdf = gsel * (1.0 / float(fc.numDistantLights));
 #if defined(SKINNY_SPECTRAL)
-    // Authored distant-light SPD (slot >= 0), else RGB radiance upsampled.
-    int      slot = int(distantLights[i].spdIndex);
-    Spectrum Ld   = (slot >= 0) ? distantLightSpd(slot, sw)
-                                : upsampleIlluminantBound(dl.rad, sw);
-    beta = Ld * (PI * R * R) / max(selPdf, 1e-20);
+        // Authored distant-light SPD (slot >= 0), else RGB radiance upsampled.
+        int      slot = int(distantLights[i].spdIndex);
+        Spectrum Ld   = (slot >= 0) ? distantLightSpd(slot, sw)
+                                    : upsampleIlluminantBound(dl.rad, sw);
+        beta = Ld * (PI * R * R) / max(selPdf, 1e-20);
 #else
-    beta = dl.rad * (PI * R * R) / max(selPdf, 1e-20);
+        beta = dl.rad * (PI * R * R) / max(selPdf, 1e-20);
 #endif
-    return true;
+        return true;
+    }
+
+    // Environment: importance-sample a sky direction, emit a parallel-style beam
+    // inward from the bbox-covering disk (same geometry as the distant branch;
+    // the only new factor is the non-delta direction pdf).
+    // pbrt ImageInfiniteLight::SampleLe: pdfPos = 1/(πR²) on the disk cancels
+    // the disk area to leave beta = L·πR²/(gsel·pdfDir). envIntensity is folded
+    // once inside sampleEnvDir's radiance — do not re-multiply it here.
+    // Emission gates on the GLOBAL fc.furnaceMode (hasEnv above), whereas the
+    // eye stage's env NEE / terminal env-miss gates per-VP on
+    // effectiveFurnaceMode(materialId) (global OR the per-material furnace bit).
+    // A scene mixing a live env with a per-material-furnace-flagged material is
+    // outside the furnace matrix (furnace scenes force global furnaceMode!=0 ⇒
+    // hasEnv==0) and unreached today; if that combo is ever authored, gate
+    // emission per-VP too to keep the direct/indirect partition disjoint.
+    if (chosen == 3u)
+    {
+        EnvSample es = sampleEnvDir(rng.next2(), fc.envIntensity);
+        if (es.pdf <= 0.0)
+            return false;               // pole / degenerate distribution: inf-beta guard
+        let center = fc.sceneBoundsMin + 0.5 * fc.sceneBoundsExtent;
+        let R = max(0.5 * length(fc.sceneBoundsExtent), 1e-4);
+        float3 t, b; buildBasis(es.dir, t, b);
+        let u2 = rng.next2();
+        let rr = R * sqrt(u2.x);
+        let ph = 2.0 * PI * u2.y;
+        ray.origin = center + es.dir * R + t * (rr * cos(ph)) + b * (rr * sin(ph));
+        ray.direction = -es.dir;
+        let selPdf = gsel * es.pdf;
+#if defined(SKINNY_SPECTRAL)
+        beta = upsampleIlluminantBound(es.radiance, sw) * (PI * R * R) / max(selPdf, 1e-20);
+#else
+        beta = es.radiance * (PI * R * R) / max(selPdf, 1e-20);
+#endif
+        return true;
+    }
+
+    return false;   // no group selected (unreachable: chosen is set whenever G>0)
 }
 
 // Deposit a photon's flux into every active visible point within its radius,
