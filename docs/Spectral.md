@@ -12,10 +12,16 @@ shader/numpy symbols that realize them.
 > `parity.combo_is_valid` admits it into the rendered set; out-of-envelope combos
 > are still refused at startup (never silently rendered as RGB). The megakernel
 > path/BDPT transport is GPU-validated; the **wavefront** transport for all three
-> integrators (change `spectral-wavefront`) is wired + CPU-verified + merged, but
-> its GPU-render gates (self-consistency / prism-BDPT / white-furnace, and the
-> SPPM flux-scale re-measure) are a pending interactive-Metal follow-up — no
-> wavefront render output is verified correct yet. See the
+> integrators (change `spectral-wavefront`) is wired + CPU-verified + merged, and
+> its **GPU self-consistency + prism/pbrt-truth gates are now measured on Metal**
+> across the confirming-suite spectral scenes (change spectral-wavefront
+> GPU-validation): the spectral matrix gate passes for the emissive / caustic /
+> BK7-dispersion-prism / OpenPBR gold·copper·glass·plastic discriminators, with
+> the per-combo spectral pbrt-truth `baselines` and the spectral wave↔mega
+> self-consistency floor (`spectral_self_consistency`) recorded harness-first from
+> the GPU measurement. Still pending: the wavefront **white-furnace** spectral
+> closure gate, the `SPPM_FLUX_FIXED_SCALE` numpy re-measure, and the full-corpus
+> (non-suite) spectral sweep. See the
 > [README compatibility matrix](../README.md) and
 > [CLAUDE.md](../CLAUDE.md) for the current state and scope guards.
 
@@ -289,14 +295,23 @@ CIE film resolve are the **same math**; see
 [Wavefront.md § Spectral](Wavefront.md#8-spectral---spectral-hero-wavelength)
 for the staged mechanics and record-stride details.
 
-> **Status: wired + CPU-verified + merged; GPU-render validation pending.** The
-> RGB SPIR-V byte-identity (all 28 wavefront kernels + megakernel), the
-> spectral-compile-clean check, and the host-buffer-stride guards are proven
-> hostlessly (179+ tests, codex pre-merge review clean after a host-stride fix).
-> The GPU self-consistency / prism-BDPT / white-furnace gates and the
-> `SPPM_FLUX_FIXED_SCALE` numpy re-measure are the pending interactive-Metal
-> follow-up. **No wavefront render output is verified correct yet** — do not
-> read this as GPU-validated.
+> **Status: wired + CPU-verified + merged; GPU self-consistency + prism gates
+> now measured on Metal.** The RGB SPIR-V byte-identity (all 28 wavefront kernels
+> + megakernel), the spectral-compile-clean check, and the host-buffer-stride
+> guards are proven hostlessly (179+ tests, codex pre-merge review clean after a
+> host-stride fix). The **GPU self-consistency + prism/pbrt-truth gates are now
+> measured** (change spectral-wavefront GPU-validation): the confirming-suite
+> spectral matrix gate (`tests/pbrt/test_suite.py::test_suite_matrix_gate`) passes
+> on Metal for path/bdpt/sppm × wavefront across the spectral discriminators. A
+> key GPU finding: **spectral wavefront is NOT bit-identical to the megakernel**
+> (unlike RGB, where mega≡wave is exact) — it threads the hero wavelengths through
+> the staged records and draws a different sample sequence, so spectral wave↔mega
+> is a decorrelated-but-*unbiased* MC delta (≈0 on smooth scenes, ~0.06–0.08
+> relMSE on caustic/dispersion at 256 spp; the means agree). That floor is
+> recorded per-scene as `spectral_self_consistency` (separate from the RGB gate,
+> which stays bit-identity-tight). Still pending: the wavefront **white-furnace**
+> spectral closure gate, the `SPPM_FLUX_FIXED_SCALE` numpy re-measure, and the
+> full-corpus (non-suite) spectral sweep.
 
 The wavefront records carry the spectral bundle only under
 `#if defined(SKINNY_SPECTRAL)`: `WavefrontPathState.throughput/radiance`,

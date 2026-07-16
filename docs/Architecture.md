@@ -724,7 +724,14 @@ known mismatch is recorded) and **self-consistency** (`self_consistency_result`
 tight for a pure `megakernel ≡ wavefront` mode change, looser for BDPT/SPPM,
 unbiasedness for the neural/ReSTIR axes). Self-consistency never uses a baseline
 escape, so a shared material bug (which makes both modes wrong identically) stays
-green there while pbrt-truth records the delta.
+green there while pbrt-truth records the delta. The **spectral axis** keeps the
+same axis *class* against the megakernel spectral anchor but consults a separate
+tolerance table (`_DEFAULT_SPECTRAL_SELF_CONSISTENCY` + a per-scene
+`spectral_self_consistency` override): spectral wavefront is not bit-identical to
+the megakernel (it threads the hero wavelengths through the staged records, a
+different sample sequence), so mega≡wave is a decorrelated-but-unbiased MC delta
+rather than the RGB bit-identity — measured on Metal and recorded harness-first.
+The RGB tolerance table is never widened by a spectral override.
 
 **Standard metric battery.** `metrics.compute_metrics(img, ref=None) ->
 ImageMetrics` is the single place a number is computed: error vs reference (MSE,
