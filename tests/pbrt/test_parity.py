@@ -255,3 +255,37 @@ def test_corpus_scene_parity_gate_mtlx(spec):
         f"{spec.name}: relMSE={result.relmse:.4f} (<= {spec.relmse_tol}), "
         f"FLIP={result.flip:.4f} (<= {spec.flip_tol})"
     )
+
+
+# ── Render progress log (rule: renders always log to a file) ─────────────────
+
+def test_render_log_appends_line(tmp_path, monkeypatch):
+    """`_render_log` appends a timestamped line to the env-configured path.
+
+    Guards the "renders always log to a file so a sweep is trackable" rule — the
+    matrix/suite renders happen in one dict-comprehension, so without this file
+    there is no live progress signal.
+    """
+    from skinny.pbrt import parity
+
+    log = tmp_path / "prog.log"
+    monkeypatch.setenv("SKINNY_RENDER_LOG", str(log))
+    assert parity.render_log_path() == str(log)
+    parity._render_log("START bathroom path|megakernel")
+    parity._render_log("DONE  bathroom path|megakernel  (12.3s)")
+    lines = log.read_text().strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith("START bathroom path|megakernel")
+    assert "DONE  bathroom" in lines[1]
+
+
+def test_render_log_default_path_is_stable(monkeypatch):
+    """With no override the log lands on a stable per-user temp file (always on)."""
+    import os
+    import tempfile
+    from skinny.pbrt import parity
+
+    monkeypatch.delenv("SKINNY_RENDER_LOG", raising=False)
+    assert parity.render_log_path() == os.path.join(
+        tempfile.gettempdir(), "skinny_render_progress.log"
+    )

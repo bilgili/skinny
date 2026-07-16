@@ -133,6 +133,23 @@ Set `renderer.direct_light_index = 1` to disable direct lights (isolate IBL).
 comparison read the accumulation image instead. See `tests/test_headless.py`
 (`TestMaterialXGraphDemoRender`) for a complete headless USD render example.
 
+**Renders always log progress to a file.** A long headless sweep must be
+trackable *while it runs* — never leave the only progress signal buffered behind
+a `| tail`/`| head` pipe. Two mechanisms, both mandatory:
+
+- **Harness (automatic):** every `parity.render_combo` call appends a
+  timestamped `START`/`DONE (Ns)` line to the render progress log —
+  `$SKINNY_RENDER_LOG`, default `$TMPDIR/skinny_render_progress.log`
+  (`parity.render_log_path()`). So *any* matrix/suite sweep is live-trackable
+  with `tail -f "$(python -c 'from skinny.pbrt import parity;print(parity.render_log_path())')"`
+  regardless of how pytest's stdout is piped (the 528-render sweep renders in one
+  dict-comprehension, so stdout is silent until it exits — the file is the only
+  live signal). Set `SKINNY_RENDER_LOG=<path>` to pin a per-run log.
+- **When you launch a render/sweep yourself:** run it in the background and
+  `tee` stdout to a logfile (or redirect), then poll that file — do **not** make
+  `| tail -N` the only sink, which discards every interim line. Report the
+  logfile path so progress is inspectable.
+
 **Compile the Slang shader manually (requires `slangc` on PATH):**
 ```bash
 slangc src/skinny/shaders/main_pass.slang -target spirv -entry mainImage -stage compute \
