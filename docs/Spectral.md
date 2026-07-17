@@ -389,7 +389,20 @@ from data vendored verbatim out of pbrt-v4 by `_extract_pbrt_spectra.py`:
 pbrt's `canon_*` / `ilford_*` named spectra are **camera sensor responses**, not
 scene spectra, and are out of scope here (they belong with film-sensor work).
 
-Two limits worth knowing:
+A metal's id is a byte offset into the `spectralMetals` upload
+(`(metalId-1)·SPECTRAL_METAL_STRIDE`), so ids are **append-only** — renumbering
+one silently swaps materials in every existing scene. `SPECTRAL_METAL_COUNT`
+(`bindings.slang`) bounds the named-conductor gate and must equal the host's
+upload length, or the metals past the bound fall back to RGB Schlick instead of
+their vendored eta/k; a hostless test pins the two together.
+
+Three limits worth knowing:
+
+* **Inline `spectrum` values on *materials* are not preserved.** Only lights have
+  an SPD path, so a material's authored SPD would be an override nothing reads.
+  Material reflectance spectrally upsamples from its RGB reduction (the existing
+  equal-energy simplification). Named metals/glasses are unaffected — they carry
+  their identity through `conductor_metal` / `glass_dispersion`.
 
 * **Unknown names are reported, not silently substituted.** An unrecognised
   `glass-*` renders as BK7 and an unrecognised `metal-*` as copper — but each

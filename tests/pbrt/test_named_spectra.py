@@ -57,6 +57,26 @@ def test_recognised_glass_reports_nothing():
     assert notes == []
 
 
+@pytest.mark.parametrize("param", ["roughness", "uroughness", "vroughness",
+                                   "conductor.roughness", "interface.roughness"])
+def test_named_glass_on_a_non_ior_param_does_not_become_an_ior(param):
+    # A glass name is only an index on an IOR-bearing param. Every other float
+    # param routed through get_float_texture is a roughness — handing one 1.51673
+    # would silently write an IOR into a roughness lane.
+    notes: list[str] = []
+    pv = M.get_float_texture(_ps(**{param: _spectrum(param, "glass-BK7")}),
+                             param, 0.0, notes=notes)
+    assert pv.const == pytest.approx(0.0)
+    assert len(notes) == 1 and "glass-BK7" in notes[0]
+
+
+def test_interface_eta_gets_the_glass_ior():
+    # `interface.eta` (coat IOR) is IOR-bearing, so it does resolve.
+    pv = M.get_float_texture(_ps(**{"interface.eta": _spectrum("interface.eta", "glass-LASF9")}),
+                             "interface.eta", 1.5)
+    assert pv.const == pytest.approx(1.85004, abs=1e-5)
+
+
 def test_scalar_eta_dielectric_is_untouched():
     pv = M.get_float_texture(_ps(eta=Param("float", "eta", [1.33])), "eta", 1.5)
     assert pv.const == pytest.approx(1.33)
@@ -199,17 +219,11 @@ def test_looks_like_spectrum_file_discriminates():
 # --- inline material spectra ------------------------------------------------
 
 
-def test_inline_material_spectrum_is_preserved():
+def test_inline_material_spectrum_authors_no_dead_override():
+    # Deliberately NOT preserved: nothing consumes a *material's*
+    # skinnyOverrides["spectral"] (only distant lights have an SPD path), so
+    # writing it would serialize data that looks like a feature and isn't.
     mat = _Mat("diffuse", reflectance=Param("spectrum", "reflectance", [400, 0.1, 700, 0.9]))
-    payload = M.material_spectral_overrides(mat)["spectral"]
-    assert payload["kind"] == "spectrum_samples"
-    assert len(payload["values"]) == 95
-
-
-def test_constant_inline_spectrum_authors_nothing():
-    # A constant spectrum is identical to its RGB reduction; preserving it would
-    # author an override for a scene that needs none.
-    mat = _Mat("diffuse", reflectance=Param("spectrum", "reflectance", [400, 0.2, 700, 0.2]))
     assert M.material_spectral_overrides(mat) == {}
 
 
@@ -253,3 +267,18 @@ def test_every_conductor_key_has_a_metal_id():
     r = _renderer()
     for key in spectra._CONDUCTOR_CANON:
         assert key in r._CONDUCTOR_METAL_ID
+
+
+def test_shader_metal_count_matches_the_host_upload():
+    # The shader gates named-conductor Fresnel on `metalId <= SPECTRAL_METAL_COUNT`.
+    # If that constant lags the host upload, the extra metals upload at correct
+    # offsets but silently render with RGB Schlick instead of their eta/k — which
+    # is exactly what shipped with the gate hard-coded to 4.
+    import re
+    from pathlib import Path
+
+    r = _renderer()
+    src = Path(r.__file__).resolve().parent / "shaders" / "bindings.slang"
+    m = re.search(r"SPECTRAL_METAL_COUNT\s*=\s*(\d+)u", src.read_text())
+    assert m, "SPECTRAL_METAL_COUNT not found in bindings.slang"
+    assert int(m.group(1)) == len(r._SPECTRAL_METAL_ORDER)

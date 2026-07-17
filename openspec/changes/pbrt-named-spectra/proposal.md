@@ -43,7 +43,11 @@ unchanged by this work — the gap is data coverage and import resolution.
   chromaticity (luminance-normalised, as blackbody already does), and
   `_extract_light_spd` learns to resolve a `spectrum_named` illuminant payload to
   the vendored 95-sample SPD it already binds at binding 50.
-* **Inline material spectra preserved** on `skinnyOverrides`, matching lights.
+* **Inline material spectra: cut.** Nothing consumes a material SPD (`skinnyOverrides
+  ["spectral"]` is read only for distant *light* prims), so preserving it would author a
+  dead override that reads as a working feature. Lights keep their existing preservation.
+  Real per-material reflectance SPDs need a loader field + packer + binding + shader change
+  — its own change.
 * **Unknown names stop failing silently.** An unrecognised `glass-*` / `metal-*` /
   `stdillum-*` name records an APPROX note in the import report naming the substituted
   fallback, instead of quietly rendering a different material.
@@ -87,10 +91,13 @@ None — this deepens existing spectrum conversion rather than adding a capabili
   4004), whose order **is** the shader's `(metalId-1)` index. Plus the now-stale
   "spectral-only" named-glass comment at lines 688-690.
 * Docs: `docs/Spectral.md` (named-spectrum coverage table), `CHANGELOG.md`.
-* Unchanged: every Slang shader (verified — `namedMetalEtaK` indexes a host-sized buffer
-  generically, with no per-metal switch and no metal-count constant), all descriptor
-  bindings, the `FlatMaterialParams` layout, and the import of any scene that authors no
-  named spectra.
+* `src/skinny/shaders/bindings.slang` + `integrators/spectral_flat_common.slang` — the
+  named-conductor gate was hard-coded `metalId <= 4u`, which would have silently dropped
+  CuZn/MgO/TiO2 to RGB Schlick; it now reads a `SPECTRAL_METAL_COUNT` constant pinned to the
+  host upload by a test. **Spectral build only — the RGB SPIR-V is verified byte-identical
+  to main.**
+* Unchanged: all descriptor bindings, the `FlatMaterialParams` layout, and the import of any
+  scene that authors no named spectra.
 * **Changed on purpose**: named-glass scenes shift in **both** RGB and spectral modes — RGB
   more than spectral, because a named glass currently renders at the generic `eta` default
   of 1.5 (LASF9 should be 1.85). Baselines must be re-measured in both modes.

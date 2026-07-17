@@ -18,8 +18,6 @@ import math
 import os
 from dataclasses import dataclass
 
-import numpy as np
-
 from . import spectra
 from .data import spectral_tables as _st
 from .parser import ParamSet
@@ -112,18 +110,25 @@ def get_float_texture(params, name, default, *, textures=None, base_dir=None, no
     return ParamValue(p.float)
 
 
+#: Float params whose value is a refractive index, so a named glass resolves to
+#: its d-line IOR. Every OTHER float param routed through `get_float_texture` is a
+#: roughness (`roughness`, `uroughness`, `vroughness`, `conductor.roughness`,
+#: `interface.roughness`) — handing one a glass IOR would silently write 1.51673
+#: into a roughness lane instead of degrading to the caller's default with a note.
+_IOR_PARAM_NAMES = frozenset({"eta", "interface.eta"})
+
+
 def _named_spectrum_scalar(spectrum_name, param_name, default, notes) -> float:
     """Scalar for a named-spectrum-valued float param, reporting any substitution.
 
-    A recognised glass yields its d-line IOR silently (it is exact, not a
-    fallback). Anything else degrades to *default* with an APPROX note that names
-    what was unrecognised — a spectrum **file** reference is called out as such
-    rather than mis-reported as an unknown glass (pbrt reads a file when a name
-    misses its table; skinny has no reader).
+    A recognised glass on an **IOR-bearing** param yields its d-line IOR silently
+    (it is exact, not a fallback). Anything else degrades to *default* with an
+    APPROX note that names what was unrecognised — a spectrum **file** reference is
+    called out as such rather than mis-reported as an unknown glass (pbrt reads a
+    file when a name misses its table; skinny has no reader).
     """
-    ior_d = _st.named_glass_ior_d(spectrum_name)
-    if ior_d is not None and _st.glass_is_known(spectrum_name):
-        return float(ior_d)
+    if param_name in _IOR_PARAM_NAMES and _st.glass_is_known(spectrum_name):
+        return float(_st.named_glass_ior_d(spectrum_name))
     if notes is not None:
         if spectra.looks_like_spectrum_file(spectrum_name):
             notes.append(
@@ -264,47 +269,27 @@ def material_spectral_overrides(pbrt_material) -> dict:
         return {}
     mtype = pbrt_material.type
     p = pbrt_material.params
-    inline = _inline_spectrum_override(p)
     if mtype in ("conductor", "coatedconductor"):
         # `coatedconductor` names its conductor IOR `conductor.eta` (pbrt-v4).
         eta_p = p.get("eta") or p.get("conductor.eta")
         key = spectra.named_conductor_key(eta_p)
         if key is not None:
-            return {**inline, "conductor_metal": key}
+            return {"conductor_metal": key}
     elif mtype in ("dielectric", "thindielectric"):
         key = spectra.named_glass_key(p.get("eta"))
         if key is not None:
-            return {**inline, "glass_dispersion": key}
-    return inline
-
-
-#: Material parameters whose inline spectrum is worth preserving for spectral
-#: mode. Reflectance-ish inputs only — `eta`/`k` carry their identity through
-#: `conductor_metal` / `glass_dispersion` instead.
-_INLINE_SPECTRUM_PARAMS = ("reflectance", "diffuse", "albedo")
-
-
-def _inline_spectrum_override(params) -> dict:
-    """``{"spectral": payload}`` for an inline non-constant material spectrum, else ``{}``.
-
-    Mirrors what ``lights._preserve_spectral`` does for lights: the RGB reduction
-    is unchanged, and the authored SPD rides alongside it. A constant spectrum is
-    achromatic (identical to its RGB reduction), so it authors nothing — keeping
-    RGB-only and constant-spectrum scenes byte-identical.
-    """
-    for name in _INLINE_SPECTRUM_PARAMS:
-        p = params.get(name)
-        if p is None or p.type != "spectrum" or not p.values:
-            continue
-        if isinstance(p.values[0], str):
-            continue  # a named spectrum, not an inline SPD
-        vals = np.asarray(p.values, dtype=np.float64).reshape(-1, 2)[:, 1]
-        if np.all(vals == vals[0]):
-            continue  # constant == its RGB reduction; nothing to preserve
-        payload = spectra.param_spectral_payload(p)
-        if payload is not None:
-            return {"spectral": payload}
+            return {"glass_dispersion": key}
     return {}
+
+# NOTE: an inline non-constant `spectrum` on a *material* (e.g.
+# `"spectrum reflectance" [400 .1 700 .9]`) is deliberately NOT preserved here.
+# Nothing consumes it: `skinnyOverrides["spectral"]` is read only by
+# `usd_loader._extract_light_spd`, and only for distant *light* prims — there is no
+# per-material SPD field, buffer, or shader path, so writing the payload would
+# serialize data that looks like a working feature and silently isn't. Materials
+# spectrally upsample from their RGB reduction instead. Wiring real per-material
+# reflectance SPDs needs a loader field + packer + binding + shader change and is
+# its own change (see `pbrt-named-spectra` design, Non-Goals).
 
 
 def _resolve_roughness_mtlx(params, notes: list[str], *, textures=None, base_dir=None):
@@ -368,7 +353,7 @@ def _subsurface_overrides(p) -> dict:
     eta_p = p.get("eta")
     if eta_p is not None and eta_p.type == "spectrum" and eta_p.values \
             and isinstance(eta_p.values[0], str):
-        eta_f = [_named_spectrum_scalar(eta_p.string, "subsurface eta", ETA_DEFAULT, None)]
+        eta_f = [_named_spectrum_scalar(eta_p.string, "eta", ETA_DEFAULT, None)]
     else:
         eta_f = p.floats("eta", [ETA_DEFAULT])
     scale_f = p.floats("scale", [SCALE_DEFAULT])

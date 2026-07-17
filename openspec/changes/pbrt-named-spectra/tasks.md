@@ -20,7 +20,7 @@
 - [x] 3.1 Widen `_CONDUCTOR_CANON` / `NAMED_METAL_IOR` to the seven metals; `named_conductor_key` returns the new keys. **Derive** the three new RGB entries by sampling `named_metal_spectrum(key)` at the sRGB primaries (630/532/465 nm) through `fresnel_conductor_rgb` rather than hand-typing constants — the data is already in the `.npz` and `NAMED_METAL_IOR` is hand-approximated (`data/__init__.py:6-9`). Do **not** retrofit au/ag/al/cu; that would move existing RGB baselines for no reason here (m4)
 - [x] 3.2 Rework `named_glass_key` to return the per-glass key and to distinguish "recognised" from "fell back", so the caller can note it (D3)
 - [x] 3.3 Add named-illuminant reduction to `param_to_rgb`: SPD → XYZ → linear sRGB, unit-luminance normalised (mirrors `blackbody_rgb`)
-- [x] 3.4 Extend `param_spectral_payload` / `material_spectral_overrides` to preserve an inline non-constant material `spectrum` as a `spectrum_samples` payload
+- [x] 3.4 ~~Preserve an inline non-constant material `spectrum`~~ — **CUT**: nothing consumes a material SPD, so the override would be dead data. Recorded as a non-goal + follow-up; a test pins that no override is authored
 - [x] 3.5 Give `get_float_texture`'s named-spectrum branch (`materials.py:102-105`) the per-glass d-line IOR instead of the generic default. This single fix covers **both** authoring paths — `-mtlx` `specular_IOR` (`materials.py:398`) and plain `ior` (`materials.py:563`) both route through it; `mtlx_emit.py` authors no IOR of its own (n2), so no second task
 - [x] 3.6 Emit APPROX report notes naming the unrecognised spectrum and its substituted fallback for unknown glass / metal / illuminant names; distinguish a **path-like** string ("spectrum file not read", pbrt's file fallback) from an unknown name (m2)
 - [x] 3.7 Verify both `api.py` override sites (plain-USD ~line 364 and `-mtlx` ~line 416) carry the widened overrides identically
@@ -35,7 +35,10 @@
 - [x] 4.2 Extend `_CONDUCTOR_METAL_ID` (`renderer.py:570`) with `cuzn`/`mgo`/`tio2` → 5/6/7 — **append only**, never renumber au/ag/al/cu (D7)
 - [x] 4.3 Extend the `spectralMetals` upload loop (`renderer.py:4004`) with the same three metals in the **same order**; the id is the upload index + 1 (`namedMetalEtaK` does `(metalId-1)*stride`)
 - [x] 4.4 Correct the now-stale "SPECTRAL-ONLY … RGB build renders byte-identical" comment at `renderer.py:688-690` — the d-line IOR now moves the RGB build for named glasses (D2)
-- [x] 4.5 Confirm no `.slang` edit is needed (`namedMetalEtaK` indexes a host-sized buffer generically; no metal-count constant exists) — if one turns out to be, stop and revisit the design's non-goal
+- [x] 4.5 ~~Confirm no `.slang` edit is needed~~ — **it was needed** (codex): `spectral_flat_common.slang:53` hard-gated `metalId <= 4u`, so CuZn/MgO/TiO2 would upload correctly then render with RGB Schlick. Design non-goal corrected
+- [x] 4.6 Add `SPECTRAL_METAL_COUNT` to `bindings.slang`, gate `spectral_flat_common.slang` on it, and pin it to `len(_SPECTRAL_METAL_ORDER)` with a hostless test
+- [x] 4.7 Verify the RGB SPIR-V is byte-identical to main (shader edit is spectral-only)
+- [x] 4.8 Restrict the named-glass scalar to IOR-bearing params (`eta`, `interface.eta`) — codex: `"spectrum roughness" "glass-BK7"` silently returned 1.51673 into a roughness lane
 
 ## 5. Hostless tests
 
@@ -45,7 +48,7 @@
 - [x] 5.4 Import: `"spectrum eta" "glass-LASF9"` → scalar IOR ≈ 1.850 and a LASF9 `glass_dispersion` key; `glass-BK7`'s key is unchanged
 - [x] 5.5 Import: a `stdillum-A` **distant** light round-trips to a 95-sample SPD through `_extract_light_spd`
 - [x] 5.5b Import: a `stdillum-A` **area** light gets the warm chromaticity and no SPD, raising no payload-shape error (D4 envelope — asserts the limit, so a later widening has to update this test deliberately)
-- [x] 5.6 Import: an inline material `spectrum` is preserved; `-mtlx` and plain-USD paths record the same identity
+- [x] 5.6 Import: an inline material `spectrum` authors NO dead override; `-mtlx` and plain-USD paths record the same identity
 - [x] 5.7 Unknown-name notes: unrecognised glass/metal/illuminant each produce an APPROX note naming the fallback; a recognised-only scene produces none
 - [x] 5.8 Regression: an RGB-only scene imports byte-identically (no new overrides authored)
 - [x] 5.9 Alignment: `_CONDUCTOR_METAL_ID` agrees with the `spectralMetals` upload order (id == index+1) and au/ag/al/cu still map to 1–4 (D7)

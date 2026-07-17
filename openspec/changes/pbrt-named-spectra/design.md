@@ -41,16 +41,36 @@ Constraint: this must stay additive. An RGB-only scene must import byte-identica
 
 - **No USD→pbrt writer.** "Export" here means round-tripping the authored identity
   through skinny's own USD/MaterialX output, not emitting `.pbrt` files.
-- **No shader or descriptor-binding change.** Every new datum is expressed in the formats
-  the GPU already consumes (Cauchy `(A, B)`, eta/k curves, 95-sample SPDs). *Verified*:
-  `bindings.slang:136 namedMetalEtaK` indexes `(metalId-1) * SPECTRAL_METAL_STRIDE` into a
-  flat, host-sized `spectralMetals` buffer with no per-metal switch and no metal-count
-  constant, so three more metals need no `.slang` edit. Host-side `renderer.py` edits **are**
-  required — see D7.
+- **No descriptor-binding or `FlatMaterialParams` layout change.** Every new datum is
+  expressed in the formats the GPU already consumes (Cauchy `(A, B)`, eta/k curves,
+  95-sample SPDs).
+
+  **CORRECTED TWICE during implementation — this was originally "no shader change", and
+  that was wrong.** The first pass verified `bindings.slang:136 namedMetalEtaK` indexes
+  `(metalId-1) * SPECTRAL_METAL_STRIDE` generically and concluded no `.slang` edit was
+  needed. That check was too narrow: a *second* gate,
+  `spectral_flat_common.slang:53`, hard-coded `c.isConductor = (metalId >= 1u && metalId
+  <= 4u)`. So CuZn/MgO/TiO2 would upload at correct offsets and then silently render with
+  RGB Schlick instead of their vendored eta/k — the exact class of silent-wrong-material
+  bug this change exists to kill. The gate now reads a new
+  `SPECTRAL_METAL_COUNT` constant, pinned to `len(renderer._SPECTRAL_METAL_ORDER)` by a
+  hostless test.
+
+  Lesson: "does the GPU consume this generically?" must be answered by grepping **every**
+  use of the id, not just the indexing helper. The RGB SPIR-V is verified byte-identical
+  to main, so the blast radius stays inside the spectral build.
 - **No camera-response curves.** pbrt's `canon_*` / `ilford_*` named spectra are film
   sensor responses, not scene spectra; they belong to a film-sensor change.
 - **No RGB-reflectance-spectrum fidelity work.** Reflectance still reduces under an
   equal-energy whitepoint (the existing documented simplification).
+- **No inline-spectrum preservation on materials.** *Cut during implementation* (it was
+  originally in scope). The payload had nowhere to go: `skinnyOverrides["spectral"]` is read
+  only by `usd_loader._extract_light_spd`, and only for distant **light** prims. There is no
+  per-material SPD field, buffer, or shader path, so writing it would serialize data nothing
+  reads — a dead override that reads as a working feature (the same trap as D9's stale
+  assets). Materials keep upsampling from their RGB reduction. Doing it properly needs a
+  loader field + packer + binding + shader change, i.e. its own change; the honest version of
+  "inline spectra are covered" is: preserved **on lights**, where they are consumed.
 - **No widening of spectral SPD consumption.** Only distant lights bind an illuminant SPD
   today; point/spot/infinite/area lights spectrally upsample from RGB. A named illuminant
   gets the correct chromaticity on every light type, but an SPD only where one is already

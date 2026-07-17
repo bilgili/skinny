@@ -15,12 +15,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `-FK51A`/`-LASF9`/`-F5`/`-F10`/`-F11`, each with its own Cauchy dispersion fit
   and d-line IOR), all **7 named metals** (adds `metal-CuZn`/`-MgO`/`-TiO2` to
   Ag/Al/Au/Cu), and **16 named illuminants** (`stdillum-A`/`-D50`/`-D65`/
-  `-F1`…`-F12`, `illum-acesD60`). Inline `spectrum` values authored on materials
-  are preserved for spectral mode like lights' already were. An unrecognised
-  name now records an APPROX import note naming its fallback instead of silently
-  substituting one; a spectrum *file* reference is reported as unread rather
-  than mistaken for an unknown glass name. No shader, descriptor-binding, or
-  `FlatMaterialParams` layout change. See docs/Spectral.md → Named-spectrum
+  `-F1`…`-F12`, `illum-acesD60`). An unrecognised name now records an APPROX
+  import note naming its fallback instead of silently substituting one; a
+  spectrum *file* reference is reported as unread rather than mistaken for an
+  unknown glass name. No descriptor-binding or `FlatMaterialParams` layout
+  change, and the RGB SPIR-V is byte-identical (the one shader edit — widening
+  the named-conductor id gate past 4 so the new metals use their real eta/k —
+  affects the spectral build only). See docs/Spectral.md → Named-spectrum
   coverage.
 
 - **Pre-commit hooks** (`.pre-commit-config.yaml`, `pre-commit` in the `dev`

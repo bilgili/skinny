@@ -81,12 +81,18 @@ per-glass maximum fit residual.
 ### Requirement: Spectral payloads are preserved alongside the RGB reduction
 
 For every spectrum-valued parameter it reduces to RGB, the importer SHALL additionally
-preserve the raw spectral payload for renderer consumption in spectral mode, riding the
-established `skinnyOverrides` side-channel: the authored temperature for `blackbody`
-parameters, the sample pairs (densely resampled onto the 360–830 nm / 5 nm grid) for
-`spectrum` parameters — on **materials as well as lights** — the named-spectrum identity for
-named spectra (including conductor eta/k, glass IOR, and standard-illuminant names), and
-wavelength-dependent IOR fits for named glasses. The payload SHALL be written identically on
+preserve the raw spectral payload **that something consumes** for renderer consumption in
+spectral mode, riding the established `skinnyOverrides` side-channel: the authored
+temperature for `blackbody` parameters, the sample pairs (densely resampled onto the
+360–830 nm / 5 nm grid) for `spectrum` parameters **on lights**, the named-spectrum identity
+for named spectra (including conductor eta/k, glass IOR, and standard-illuminant names), and
+wavelength-dependent IOR fits for named glasses.
+
+A payload SHALL NOT be authored where no consumer exists: an inline `spectrum` on a
+**material** is deliberately not preserved, because only light prims have an SPD path
+(`_extract_light_spd`) — writing it would serialize a dead override that reads as a working
+feature. Material reflectance spectrally upsamples from its RGB reduction. The payload SHALL
+be written identically on
 the plain-USD and the `-mtlx` authoring paths, so the authored identity survives
 import → `.usda` → render on both. The existing RGB reduction SHALL remain unchanged and
 remain the value consumed by the RGB pipeline. Scenes that author no spectra SHALL carry no
@@ -117,12 +123,13 @@ new payload.
 - **THEN** the imported USD records the spectrum name so the renderer can bind the vendored
   spectral eta/k curve
 
-#### Scenario: inline material spectrum preserved
+#### Scenario: inline material spectrum authors no dead override
 
 - **WHEN** a material authors an inline non-constant `"spectrum reflectance"
   [400 0.1 700 0.9]`
-- **THEN** the imported USD carries the SPD resampled onto the 5 nm grid on the material's
-  `skinnyOverrides`, alongside the unchanged RGB reduction
+- **THEN** the material's RGB reduction is unchanged and **no** spectral payload is authored
+  on it — nothing consumes a material SPD, so the override would be dead data that looks
+  like a working feature
 
 #### Scenario: identity survives the -mtlx path
 
@@ -286,3 +293,20 @@ unchanged. A hostless test SHALL assert the two agree.
 
 - **WHEN** the id map and the upload order disagree on any metal's position
 - **THEN** the hostless alignment test fails
+
+### Requirement: The shader's named-conductor gate covers every uploaded metal
+
+The shader's compile-time bound on named-conductor Fresnel ids SHALL equal the number of
+metals the host uploads, so that no uploaded metal silently falls through to the RGB Schlick
+approximation. A hostless test SHALL assert the shader constant matches the host's upload
+length.
+
+#### Scenario: a newly vendored metal actually uses its curves
+
+- **WHEN** a conductor names `metal-CuZn-eta` and renders in spectral mode
+- **THEN** it shades with the vendored CuZn eta/k, not the RGB Schlick fallback
+
+#### Scenario: a lagging shader bound fails the build
+
+- **WHEN** the shader's metal-count constant is lower than the host upload length
+- **THEN** the hostless test fails rather than the extra metals silently mis-rendering
