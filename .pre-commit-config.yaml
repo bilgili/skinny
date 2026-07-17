@@ -1,0 +1,25 @@
+# Scoped to hand-written first-party source only. Excludes: vendored build
+# artifacts (share/), binary/data assets (assets, hdrs, heads, lenses),
+# openspec/examples/etc corpora, golden test fixtures (tests/assets, many
+# binary .hdr), generated diagrams (docs/diagrams), and generated MaterialX
+# Slang output (src/skinny/mtlx/genslang, analogous to a checked-in .spv).
+exclude: ^(share|assets|hdrs|heads|lenses|openspec|examples|etc|tests/assets|docs/diagrams|src/skinny/mtlx/genslang)/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^src/

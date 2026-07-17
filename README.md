@@ -187,6 +187,28 @@ For development tools:
 .\Scripts\python -m pip install -e ".[dev]"
 ```
 
+### Pre-commit hooks
+
+`.pre-commit-config.yaml` runs `ruff` (lint) plus basic hygiene checks
+(trailing whitespace, EOF newline, YAML/TOML syntax, merge conflicts) against
+first-party source under `src/`, `tests/`, and `docs/` — it excludes vendored
+build output, binary assets, generated Slang, and the openspec corpus. Install
+the `[dev]` extra (above), then enable the git hook:
+
+```bash
+.venv/bin/pre-commit install
+```
+
+Run it manually against staged changes at any time:
+
+```bash
+.venv/bin/pre-commit run
+```
+
+If `core.hooksPath` is already customized in this repo (e.g. by another tool's
+hook installer), `pre-commit install` refuses rather than clobbering it — run
+`pre-commit run` manually in that case, or reconcile the hooks path first.
+
 Verify the Slang compiler:
 
 ```powershell
