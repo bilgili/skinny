@@ -120,7 +120,7 @@ def Xform "World"
         {
             uniform token info:id = "UsdPreviewSurface"
             color3f inputs:diffuseColor = (1, 1, 1)
-            float inputs:ior = 1.5
+            float inputs:ior = 1.51673
             float inputs:metallic = 0
             float inputs:opacity = 0
             float inputs:roughness = 0

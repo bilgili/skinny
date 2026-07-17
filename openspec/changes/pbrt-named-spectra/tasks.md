@@ -62,8 +62,8 @@
 output hard-coding `ior = 1.5`; measuring before regenerating them would report "no change"
 and ship green over a fix that never reached a pixel.*
 
-- [ ] 6.1 Re-run `tests/assets/suite/_gen/build.py` for `spec_prism`; re-import `assets/prism_dispersion/prism_dispersion.pbrt` and `assets/glass_machines.usda` (untracked, 7 `glass-BK7` dielectrics, no `_gen` — re-import by hand)
-- [ ] 6.2 **Gate**: diff the regenerated `spec_prism.usda:161`, `spec_prism_mtlx.mtlx:27`, `prism_dispersion.usda:123` and confirm `1.5 → 1.51673` actually appears. If the diff is empty the importer fix did not land — stop, do not proceed to measurement
+- [x] 6.1 Re-run `tests/assets/suite/_gen/build.py` for `spec_prism`; re-import `assets/prism_dispersion/prism_dispersion.pbrt` and `assets/glass_machines.usda` (untracked, 7 `glass-BK7` dielectrics, no `_gen` — re-import by hand)
+- [x] 6.2 **Gate**: diff the regenerated `spec_prism.usda:161`, `spec_prism_mtlx.mtlx:27`, `prism_dispersion.usda:123` and confirm `1.5 → 1.51673` actually appears. If the diff is empty the importer fix did not land — stop, do not proceed to measurement
 
 ## 7. Baselines and GPU verification
 

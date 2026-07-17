@@ -24,7 +24,7 @@
     <input name="specular_roughness" type="float" value="0" />
     <input name="transmission" type="float" value="1" />
     <input name="transmission_color" type="color3" value="1, 1, 1" />
-    <input name="specular_IOR" type="float" value="1.5" />
+    <input name="specular_IOR" type="float" value="1.51673" />
   </standard_surface>
   <surfacematerial name="shape_2_mat" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="shape_2_mat_surface" />
