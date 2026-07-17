@@ -392,9 +392,12 @@ scene spectra, and are out of scope here (they belong with film-sensor work).
 A metal's id is a byte offset into the `spectralMetals` upload
 (`(metalId-1)·SPECTRAL_METAL_STRIDE`), so ids are **append-only** — renumbering
 one silently swaps materials in every existing scene. `SPECTRAL_METAL_COUNT`
-(`bindings.slang`) bounds the named-conductor gate and must equal the host's
-upload length, or the metals past the bound fall back to RGB Schlick instead of
-their vendored eta/k; a hostless test pins the two together.
+(`bindings.slang`) bounds the named-conductor gate and must equal the number of
+uploaded metals, or the ones past the bound fall back to RGB Schlick instead of
+their vendored eta/k. The id map `skinny.pbrt.data.CONDUCTOR_METAL_ID` is the
+single source of truth — the importer's recognised-name set and the renderer's
+upload order both derive from it, and a hostless test pins the shader constant to
+its length.
 
 Three limits worth knowing:
 

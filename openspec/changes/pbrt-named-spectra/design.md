@@ -54,8 +54,9 @@ Constraint: this must stay additive. An RGB-only scene must import byte-identica
   <= 4u)`. So CuZn/MgO/TiO2 would upload at correct offsets and then silently render with
   RGB Schlick instead of their vendored eta/k — the exact class of silent-wrong-material
   bug this change exists to kill. The gate now reads a new
-  `SPECTRAL_METAL_COUNT` constant, pinned to `len(renderer._SPECTRAL_METAL_ORDER)` by a
-  hostless test.
+  `SPECTRAL_METAL_COUNT` constant, pinned by a genuinely hostless test to
+  `len(data.CONDUCTOR_METAL_ID)` — the id map now lives in the GPU-free
+  `skinny.pbrt.data`, so the test needs no Vulkan SDK (see D7).
 
   Lesson: "does the GPU consume this generically?" must be answered by grepping **every**
   use of the id, not just the indexing helper. The RGB SPIR-V is verified byte-identical
@@ -240,14 +241,30 @@ the new metals at the end of both, in the same order, keeps ids 1–4 and every 
 Inserting alphabetically instead would silently renumber the existing metals and swap
 materials in every checked-in scene; don't.
 
-**Revised during implementation:** this decision originally said to keep the two lists and
-let a test assert they agree, on the assumption that unifying them meant refactoring the
-upload path. It didn't — `_SPECTRAL_METAL_ORDER` derives from `_CONDUCTOR_METAL_ID` by
-sorting on the id, and the upload site changes by exactly one line
-(`for name in ("au","ag","al","cu")` → `for name in _SPECTRAL_METAL_ORDER`). Deriving is
-both the smaller diff and the structurally safer one, so it wins over the stated plan; the
-invariant is now unbreakable by construction rather than by test. The alignment test stays,
-narrowed to what still can regress: that au/ag/al/cu keep ids 1–4.
+**Revised twice during implementation.** The decision originally said to keep the two lists
+and let a test assert they agree, assuming unification meant refactoring the upload path. It
+didn't — `_SPECTRAL_METAL_ORDER` derives from the id map by sorting on the id, and the upload
+site changed by exactly one line (`for name in ("au","ag","al","cu")` →
+`for name in _SPECTRAL_METAL_ORDER`).
+
+The second revision came from codex: the id map lived in `renderer.py`, which imports
+`vulkan` at module load, so **every test of the invariant skipped on a host without the SDK**
+— including the one guarding the `metalId <= 4u` bug. A guard that skips is not a guard. The
+map therefore moved to `skinny.pbrt.data.CONDUCTOR_METAL_ID`, a GPU-free leaf module, and is
+now the single source of truth for the whole chain:
+
+```
+data.CONDUCTOR_METAL_ID          (append-only; id == upload index + 1)
+  ├── spectra._CONDUCTOR_CANON   = frozenset(...)      # importer's recognised names
+  ├── renderer._SPECTRAL_METAL_ORDER = sorted by id    # spectralMetals upload order
+  └── bindings.slang SPECTRAL_METAL_COUNT              # pinned by a hostless test
+```
+
+Three duplicated lists became one derived map, so "importable but unbound" and "uploaded but
+ungated" are now unrepresentable rather than merely tested. The hostless tests pin what is
+left: the shader constant equals `len(CONDUCTOR_METAL_ID)`, ids are dense 1..N, and au/ag/al/cu
+keep 1–4. Verified by injection — dropping `tio2` from the map, or reverting the shader
+constant to `4u`, each fails the suite under a plain `.venv` pytest with no SDK.
 
 ### D8: Fix the illuminant branch's missing `_Y_INTEGRAL` division rather than ship a third convention
 

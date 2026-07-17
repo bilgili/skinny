@@ -289,18 +289,38 @@ def _shader_metal_count() -> int:
 
 
 def test_shader_metal_gate_covers_every_importable_metal():
-    # HOSTLESS. The shader gates named-conductor Fresnel on
-    # `metalId <= SPECTRAL_METAL_COUNT`. If that bound lags the set of metals the
-    # importer can emit, the extra ones upload at correct offsets and then
-    # silently render with RGB Schlick instead of their vendored eta/k — which is
+    # HOSTLESS, and pinned against the REAL id map (skinny.pbrt.data is GPU-free).
+    # The shader gates named-conductor Fresnel on `metalId <= SPECTRAL_METAL_COUNT`;
+    # if that bound lags the id map, the metals past it upload at correct offsets
+    # and then silently render with RGB Schlick instead of their vendored eta/k —
     # precisely what shipped with the gate hard-coded to 4.
-    #
-    # `spectra._CONDUCTOR_CANON` is the importer's authority and imports without a
-    # GPU; `test_every_conductor_key_has_a_metal_id` ties it to the renderer's id
-    # map, and the ids are the upload order by construction. So pinning
-    # shader-count == len(canon) closes the chain canon -> ids -> upload -> gate
-    # without needing Vulkan.
-    assert _shader_metal_count() == len(spectra._CONDUCTOR_CANON)
+    from skinny.pbrt.data import CONDUCTOR_METAL_ID
+
+    assert _shader_metal_count() == len(CONDUCTOR_METAL_ID)
+    # ...and every id is actually reachable by the gate (ids are 1-based, dense).
+    assert max(CONDUCTOR_METAL_ID.values()) == _shader_metal_count()
+
+
+def test_importer_canon_cannot_outrun_the_id_map():
+    # HOSTLESS. A name the importer recognises but the renderer has no id for packs
+    # id 0 → RGB Schlick. Derived rather than duplicated, so this holds by
+    # construction; the test pins that nobody re-introduces a parallel list.
+    from skinny.pbrt.data import CONDUCTOR_METAL_ID
+
+    assert spectra._CONDUCTOR_CANON == frozenset(CONDUCTOR_METAL_ID)
+
+
+def test_metal_ids_are_dense_and_append_only():
+    # HOSTLESS. An id is a byte offset ((id-1)*stride) into the upload, so ids must
+    # be 1..N with no gaps, and the four original metals must keep 1-4 or every
+    # checked-in scene silently swaps conductors.
+    from skinny.pbrt.data import CONDUCTOR_METAL_ID
+
+    assert sorted(CONDUCTOR_METAL_ID.values()) == list(range(1, len(CONDUCTOR_METAL_ID) + 1))
+    assert CONDUCTOR_METAL_ID["au"] == 1
+    assert CONDUCTOR_METAL_ID["ag"] == 2
+    assert CONDUCTOR_METAL_ID["al"] == 3
+    assert CONDUCTOR_METAL_ID["cu"] == 4
 
 
 def test_shader_metal_stride_indexing_is_unbounded_by_count():

@@ -17,6 +17,7 @@ import vulkan as vk
 from PIL import Image, ImageDraw, ImageFont
 
 from skinny.environment import Environment, load_environments
+from skinny.pbrt.data import CONDUCTOR_METAL_ID
 from skinny.scene import CameraOverride, LensSystem, Scene, build_default_scene
 from skinny.head_textures import (
     DETAIL_TEX_RES,
@@ -565,15 +566,11 @@ class TexturePool:
         self._slots = []
 
 
-# Named-conductor id (Group 6.2): must match the upload order in the
-# spectralMetals buffer (_SPECTRAL_METAL_ORDER below) and namedMetalEtaK's (id-1)
-# indexing in bindings.slang.
-#
-# APPEND-ONLY. An id is a byte offset into the uploaded buffer (id-1)*stride, so
-# renumbering an existing metal silently swaps materials in every checked-in
-# scene. New metals go on the end; `_SPECTRAL_METAL_ORDER` is derived from this
-# map so the two cannot drift.
-_CONDUCTOR_METAL_ID = {"au": 1, "ag": 2, "al": 3, "cu": 4, "cuzn": 5, "mgo": 6, "tio2": 7}
+# Named-conductor id (Group 6.2). Defined in skinny.pbrt.data (a GPU-free module)
+# so the importer, this upload, and the shader gate share one source of truth that
+# a hostless test can pin — see CONDUCTOR_METAL_ID's docstring for the append-only
+# rule. Aliased to the historical private name used throughout this module.
+_CONDUCTOR_METAL_ID = CONDUCTOR_METAL_ID
 
 #: spectralMetals upload order — index i holds the metal with id i+1. Derived, so
 #: the id↔offset invariant is structural rather than two lists kept in sync by hand.

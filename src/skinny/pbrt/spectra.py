@@ -21,13 +21,17 @@ from __future__ import annotations
 
 import numpy as np
 
+from .data import CONDUCTOR_METAL_ID as _CONDUCTOR_METAL_ID
 from .data import NAMED_METAL_IOR, _normalize_metal_key
 from .data import spectral_tables as _st
 
 # Canonical named-conductor keys the spectral path binds vendored eta/k curves for
 # (spectral_tables.named_metal_spectrum). The alias map mirrors that function so
 # the importer, this module, and spectral_tables agree on normalization.
-_CONDUCTOR_CANON = frozenset({"au", "ag", "al", "cu", "cuzn", "mgo", "tio2"})
+#: Derived from the id map, NOT a parallel list: a name the importer recognises but
+#: the renderer has no id for would pack id 0 and silently render RGB Schlick
+#: instead of its vendored eta/k.
+_CONDUCTOR_CANON = frozenset(_CONDUCTOR_METAL_ID)
 _CONDUCTOR_ALIASES = {
     "gold": "au", "silver": "ag", "aluminium": "al", "aluminum": "al", "copper": "cu",
     "brass": "cuzn",
