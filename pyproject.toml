@@ -58,6 +58,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
+    "pre-commit>=3.7",
 ]
 # OpenUSD now ships as a base dependency (openusd-materialx, from the GitHub
 # Release above) rather than PyPI usd-core, so this extra is a no-op kept only so

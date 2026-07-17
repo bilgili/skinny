@@ -1,0 +1,27 @@
+# Hygiene hooks below run repo-wide except under these prefixes: vendored
+# build artifacts (share/), asset/data dirs (assets, hdrs, heads, lenses),
+# openspec/examples/etc corpora, golden test fixtures (tests/assets, many
+# binary .hdr), generated diagrams (docs/diagrams), and generated MaterialX
+# Slang output (src/skinny/mtlx/genslang, analogous to a checked-in .spv).
+# This is not exhaustive — other binary blobs (e.g. src/skinny/pbrt/data/*.npz)
+# can still be touched; ruff-check is separately scoped to src/ only.
+exclude: ^(share|assets|hdrs|heads|lenses|openspec|examples|etc|tests/assets|docs/diagrams|src/skinny/mtlx/genslang)/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+        files: ^src/

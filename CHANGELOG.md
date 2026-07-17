@@ -7,6 +7,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Pre-commit hooks** (`.pre-commit-config.yaml`, `pre-commit` in the `dev`
+  extra). Runs `ruff-check` (scoped to `src/`) plus trailing-whitespace/EOF/
+  YAML/TOML/merge-conflict hygiene checks over the repo minus vendored build
+  output, data/asset dirs, generated Slang, and the openspec corpus. See
+  README → Pre-commit hooks.
+
 ### Fixed
 
 - **SPPM env-photon speckle — env-aware per-pass photon budget** (change
