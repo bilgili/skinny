@@ -359,7 +359,7 @@ emissive triangles, task 6.1.)*
 
 ### Conductor Fresnel (complex index)
 
-A named metal (`au`/`ag`/`al`/`cu`) preserves its identity on
+A named metal (`au`/`ag`/`al`/`cu`/`cuzn`/`mgo`/`tio2`) preserves its identity on
 `skinnyOverrides["conductor_metal"]`; its complex index η̃ = η + iκ is looked up per
 hero wavelength from the vendored eta/k curves (`spectralMetals`, binding 48, 5 nm
 grid) and the specular lobe uses pbrt's exact unpolarized `FrComplex` instead of a

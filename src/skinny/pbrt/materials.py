@@ -257,9 +257,9 @@ def material_spectral_overrides(pbrt_material) -> dict:
     Additive to the RGB reduction (which stays unchanged): when a conductor's eta
     resolves to a named metal (``au``/``ag``/``al``/``cu``/``cuzn``/``mgo``/
     ``tio2``) this rides ``conductor_metal`` on ``skinnyOverrides``; when a
-    dielectric carries a named/dispersive eta it rides ``glass_dispersion``; an
-    inline non-constant ``spectrum`` on any material rides ``spectral`` (the same
-    payload shape lights use). The spectral GPU path binds the exact vendored
+    dielectric carries a named/dispersive eta it rides ``glass_dispersion``. An
+    inline ``spectrum`` on a material rides nothing — see the note below. The
+    spectral GPU path binds the exact vendored
     eta/k or Cauchy curve from these keys. Returns ``{}`` for a plain-RGB
     conductor (unknown/absent named eta) or a scalar-IOR dielectric, so an
     RGB-only scene authors no new override (byte-identical import). The scalar

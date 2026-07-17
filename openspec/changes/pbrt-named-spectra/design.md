@@ -6,7 +6,7 @@ vendored eta/k at binding 48 (Group 6.2), authored illuminant SPDs bind at bindi
 `FlatMaterialParams` (Group 6.4). The import side already carries authored spectra to
 the renderer over the `skinnyOverrides` customData side-channel
 (`materials.material_spectral_overrides` → `conductor_metal` / `glass_dispersion`;
-`lights._preserve_spectral` → `spectral` payload).
+`lights._preserve_spectral` → `spectral` payload, consumed for distant lights only).
 
 What is missing is **coverage and resolution**, not architecture:
 
@@ -14,7 +14,7 @@ What is missing is **coverage and resolution**, not architecture:
 |---|---|---|
 | `spectral_tables._GLASS_CAUCHY` | `{"default", "bk7"}`, both = the same BK7 fit | 7 named glasses |
 | `_extract_pbrt_spectra._METALS` | Ag, Al, Au, Cu | + CuZn, MgO, TiO2 |
-| `stdillum-*` | unhandled anywhere | 15 SPDs (A, D50, D65, F1–F12) |
+| `stdillum-*` | unhandled anywhere | 16 SPDs (A, D50, D65, F1–F12, acesD60) |
 
 Three failure modes follow, all silent. `spectra.named_glass_key` maps **any**
 unrecognised glass name to `"default"`, which is the BK7 fit — `glass-LASF9` (n_d≈1.850)
@@ -32,7 +32,8 @@ Constraint: this must stay additive. An RGB-only scene must import byte-identica
 
 - Import every pbrt-v4 named glass, metal, and standard illuminant at pbrt's own data.
 - Resolve named illuminants to both an RGB chromaticity and a bindable 95-sample SPD.
-- Preserve inline (non-named) spectra authored on *materials*, matching lights.
+- Preserve authored spectra wherever a consumer exists (lights). *Inline spectra on
+  materials were a goal originally and were cut — see Non-Goals.*
 - Make an unrecognised name produce a visible import note naming its fallback.
 - Keep the identity surviving import → `.usda` → render on the plain-USD and `-mtlx`
   paths alike.

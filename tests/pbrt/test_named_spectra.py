@@ -269,16 +269,47 @@ def test_every_conductor_key_has_a_metal_id():
         assert key in r._CONDUCTOR_METAL_ID
 
 
-def test_shader_metal_count_matches_the_host_upload():
-    # The shader gates named-conductor Fresnel on `metalId <= SPECTRAL_METAL_COUNT`.
-    # If that constant lags the host upload, the extra metals upload at correct
-    # offsets but silently render with RGB Schlick instead of their eta/k — which
-    # is exactly what shipped with the gate hard-coded to 4.
+def _shader_metal_count() -> int:
+    """SPECTRAL_METAL_COUNT read from bindings.slang WITHOUT importing the renderer.
+
+    Deliberately parsed from source rather than imported: `skinny.renderer` needs
+    the Vulkan SDK on the library path, and a guard that skips on the machines
+    that lack it is not a guard — a silently-skipped test is exactly how the
+    `metalId <= 4u` gate shipped in the first place.
+    """
     import re
     from pathlib import Path
 
-    r = _renderer()
-    src = Path(r.__file__).resolve().parent / "shaders" / "bindings.slang"
+    import skinny
+
+    src = Path(skinny.__file__).resolve().parent / "shaders" / "bindings.slang"
     m = re.search(r"SPECTRAL_METAL_COUNT\s*=\s*(\d+)u", src.read_text())
     assert m, "SPECTRAL_METAL_COUNT not found in bindings.slang"
-    assert int(m.group(1)) == len(r._SPECTRAL_METAL_ORDER)
+    return int(m.group(1))
+
+
+def test_shader_metal_gate_covers_every_importable_metal():
+    # HOSTLESS. The shader gates named-conductor Fresnel on
+    # `metalId <= SPECTRAL_METAL_COUNT`. If that bound lags the set of metals the
+    # importer can emit, the extra ones upload at correct offsets and then
+    # silently render with RGB Schlick instead of their vendored eta/k — which is
+    # precisely what shipped with the gate hard-coded to 4.
+    #
+    # `spectra._CONDUCTOR_CANON` is the importer's authority and imports without a
+    # GPU; `test_every_conductor_key_has_a_metal_id` ties it to the renderer's id
+    # map, and the ids are the upload order by construction. So pinning
+    # shader-count == len(canon) closes the chain canon -> ids -> upload -> gate
+    # without needing Vulkan.
+    assert _shader_metal_count() == len(spectra._CONDUCTOR_CANON)
+
+
+def test_shader_metal_stride_indexing_is_unbounded_by_count():
+    # HOSTLESS companion: namedMetalEtaK must keep indexing generically
+    # ((metalId-1)*stride). If someone re-introduces a hard-coded id list there,
+    # this catches it.
+    from pathlib import Path
+
+    import skinny
+
+    src = (Path(skinny.__file__).resolve().parent / "shaders" / "bindings.slang").read_text()
+    assert "int(metalId - 1u) * SPECTRAL_METAL_STRIDE" in src

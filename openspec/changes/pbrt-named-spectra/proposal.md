@@ -68,9 +68,10 @@ None — this deepens existing spectrum conversion rather than adding a capabili
 
 - `pbrt-spectrum-conversion`: the **Vendored spectral data tables** requirement
   broadens from "named metals + D65 + glass IOR fits" to pbrt's complete named-spectrum
-  set (7 glasses with per-glass dispersion, 7 metals, 15 standard illuminants); the
+  set (7 glasses with per-glass dispersion, 7 metals, 16 illuminants); the
   **Spectral payloads are preserved alongside the RGB reduction** requirement extends to
-  named illuminants and to inline spectra on materials; new requirements cover
+  named illuminants, and is narrowed so no payload is authored where no consumer exists
+  (inline spectra on *materials*); new requirements cover
   named-illuminant RGB resolution, per-glass IOR/dispersion resolution, and explicit
   unknown-name reporting.
 
@@ -83,7 +84,8 @@ None — this deepens existing spectrum conversion rather than adding a capabili
   2-entry `_GLASS_CAUCHY`; `named_illuminant_spectrum()` added.
 * `src/skinny/pbrt/spectra.py` — `named_glass_key` / `named_conductor_key` widened,
   unknown-name signalling, named-illuminant reduction in `param_to_rgb`.
-* `src/skinny/pbrt/materials.py` — per-glass scalar IOR; inline-spectrum preservation.
+* `src/skinny/pbrt/materials.py` — per-glass scalar IOR (IOR-bearing params only);
+  `conductor.eta` read on `coatedconductor`.
 * `src/skinny/pbrt/lights.py`, `src/skinny/usd_loader.py` — named-illuminant payload
   resolution to an SPD.
 * `src/skinny/renderer.py` — the four-metal set is hard-coded twice and both must grow in

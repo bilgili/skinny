@@ -681,8 +681,8 @@ def pack_flat_material(
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
     # Named-conductor identity (Group 6.2): the importer preserves the metal name
-    # on skinnyOverrides["conductor_metal"]; map to the shader id (au/ag/al/cu →
-    # 1..4, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
+    # on skinnyOverrides["conductor_metal"]; map to the shader id (_CONDUCTOR_METAL_ID,
+    # ids 1..N, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
     # (read as asuint by conductorMetalId). SPECTRAL-ONLY: only the spectral
     # conductor Fresnel reads it, so gate the id on `spectral` (like glassCauchyB)
     # — the RGB pack keeps the literal 0 in that lane, byte-identical to baseline.
@@ -4011,10 +4011,12 @@ class Renderer:
             self._spectral_d65_buffer = self._gpu.StorageBuffer(
                 self.ctx, d65_arr.size * 4)
             self._spectral_d65_buffer.upload_sync(d65_arr.tobytes())
-            # Named-conductor eta/k (Group 6.2, binding 48): au/ag/al/cu (shader
-            # ids 1..4), each [eta(95) | k(95)] on the 360-830/5nm grid,
-            # concatenated → 4·190 floats. Order MUST match namedMetalEtaK's
-            # (metalId-1)*190 indexing in bindings.slang.
+            # Named-conductor eta/k (Group 6.2, binding 48): every metal in
+            # _SPECTRAL_METAL_ORDER (shader ids 1..N), each [eta(95) | k(95)] on the
+            # 360-830/5nm grid, concatenated → N·190 floats. Order MUST match
+            # namedMetalEtaK's (metalId-1)*190 indexing in bindings.slang, and N MUST
+            # match SPECTRAL_METAL_COUNT there — a shader bound below N silently drops
+            # the extra metals to RGB Schlick.
             metal_blocks = []
             for name in _SPECTRAL_METAL_ORDER:
                 ek = spectral_tables.named_metal_spectrum(name)
