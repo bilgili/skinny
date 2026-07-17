@@ -384,3 +384,80 @@ def record_sppm_loop(
         rec.dispatch_full("wfSppmUpdate")
         stream_base += stream_size
     rec.barrier()
+
+
+def _mlt_chain_batch(num_chains: int, chain_batch: int = 0) -> int:
+    """Per-dispatch chain window: 64-aligned (dispatch rounds up to 64-wide
+    groups; the window guard masks the tail), never above the portable
+    65535 x 64 workgroup-count ceiling, never above ``num_chains``."""
+    if chain_batch and chain_batch > 0:
+        batch = max(64, (int(chain_batch) // 64) * 64)
+    else:
+        batch = int(num_chains)
+    return min(batch, num_chains, 65535 * 64)
+
+
+def record_mlt_bootstrap(rec, *, bootstrap_samples: int, num_chains: int,
+                         chain_batch: int = 0) -> None:
+    """Record the MLT bootstrap phase (change mlt-integrator).
+
+    One thread = one bootstrap sample writing its scalar contribution; the host
+    reads the weights back afterwards (CDF, b, chain-seed resample) — that host
+    step is NOT part of this recording. Dispatches are breadth-tiled to at most
+    ``num_chains`` in-flight slots because the primary-sample buffer doubles as
+    bootstrap scratch (each slot owns one X slice), and flushed per sub-batch
+    (Metal watchdog; no-op on Vulkan). The recorder must supply ``push_window(
+    base, size)`` (the MLT tile push: streamBase + exact streamSize) plus the
+    shared ``dispatch_count`` / ``barrier`` / ``flush`` primitives."""
+    batch = _mlt_chain_batch(num_chains, chain_batch)
+    base = 0
+    while base < bootstrap_samples:
+        n = min(batch, bootstrap_samples - base)
+        rec.push_window(base, n)
+        rec.dispatch_count("wfMltBootstrap", n, 64)
+        rec.barrier()
+        rec.flush()
+        base += n
+
+
+def record_mlt_init(rec, *, num_chains: int, chain_batch: int = 0) -> None:
+    """Record the MLT chain-init phase: replay each chain's resampled bootstrap
+    seed (the host uploaded ``mltChainSeeds`` after the bootstrap readback) and
+    store its current state. Breadth-tiled + flushed like the bootstrap."""
+    batch = _mlt_chain_batch(num_chains, chain_batch)
+    base = 0
+    while base < num_chains:
+        n = min(batch, num_chains - base)
+        rec.push_window(base, n)
+        rec.dispatch_count("wfMltInit", n, 64)
+        rec.barrier()
+        rec.flush()
+        base += n
+
+
+def record_mlt_frame(rec, *, num_pixels: int, num_chains: int, iterations: int,
+                     chain_batch: int = 0) -> None:
+    """Record one MLT accumulation frame: ``iterations`` Metropolis steps over
+    every chain (each step = one proposal + dual splat + accept/reject), then
+    the b-normalized resolve folding the frame's splat buffer into the
+    accumulation image and clearing it.
+
+    Every mutate dispatch is breadth-tiled + flushed (Metal watchdog; no-op on
+    Vulkan); a barrier separates steps so iteration i+1 reads iteration i's
+    chain state, and separates the last step from the resolve. ``mpp_actual =
+    iterations * num_chains / num_pixels`` is packed by the host into
+    ``fc.mltMppActual`` — the resolve divides by the ACTUAL executed budget,
+    never the requested target (design D4)."""
+    batch = _mlt_chain_batch(num_chains, chain_batch)
+    for _ in range(max(1, int(iterations))):
+        base = 0
+        while base < num_chains:
+            n = min(batch, num_chains - base)
+            rec.push_window(base, n)
+            rec.dispatch_count("wfMltMutate", n, 64)
+            rec.barrier()
+            rec.flush()
+            base += n
+    rec.push_window(0, num_pixels)
+    rec.dispatch_count("wfMltResolve", num_pixels, 64)
+    rec.barrier()

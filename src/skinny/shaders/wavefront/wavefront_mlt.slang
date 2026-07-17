@@ -34,8 +34,12 @@ struct MltTilePC { uint streamBase; uint shadeSlot; uint streamSize; };
 // position (slot 0) or a light-tracer splat (slots 1..BDPT_MAX_VERTS).
 struct MltRecord
 {
-    uint pixel;      // lane = y * width + x (WF_PIXEL_SENTINEL-free: always valid)
-    float3 rgb;
+    // Scalar fields (not float3) so the Vulkan-scalar and Metal MSL strides
+    // are both exactly 16 B (wavefront_layout.mlt_buffer_sizes).
+    uint pixel;      // lane = y * width + x
+    float r;
+    float g;
+    float b;
 };
 
 static const uint MLT_RECORD_SLOTS = BDPT_MAX_VERTS + 1u;   // eye + ≤6 splats
@@ -119,7 +123,7 @@ MltSample mltEvaluate(inout RNG rng, out MltRecord records[MLT_RECORD_SLOTS])
 
     MltSample s;
     records[0].pixel = pixel.y * fc.width + pixel.x;
-    records[0].rgb = eyeL;
+    records[0].r = eyeL.x; records[0].g = eyeL.y; records[0].b = eyeL.z;
     s.nRecords = 1u;
     float c = mltLuminance(eyeL);
     [loop]
@@ -129,7 +133,9 @@ MltSample mltEvaluate(inout RNG rng, out MltRecord records[MLT_RECORD_SLOTS])
         if (sp.x < 0 || sp.y < 0 || uint(sp.x) >= fc.width || uint(sp.y) >= fc.height)
             continue;
         records[s.nRecords].pixel = uint(sp.y) * fc.width + uint(sp.x);
-        records[s.nRecords].rgb = gMltSplatRgb[i];
+        records[s.nRecords].r = gMltSplatRgb[i].x;
+        records[s.nRecords].g = gMltSplatRgb[i].y;
+        records[s.nRecords].b = gMltSplatRgb[i].z;
         c += mltLuminance(gMltSplatRgb[i]);
         s.nRecords += 1u;
     }
@@ -228,7 +234,8 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
         float wp = a / prop.c;
         [loop]
         for (uint i = 0u; i < prop.nRecords; i++)
-            mltFilmSplat(proposal[i].pixel, proposal[i].rgb * wp);
+            mltFilmSplat(proposal[i].pixel,
+                         float3(proposal[i].r, proposal[i].g, proposal[i].b) * wp);
     }
     if (cCurrent > 0.0 && a < 1.0)
     {
@@ -236,8 +243,8 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
         [loop]
         for (uint i = 0u; i < meta.nRecords; i++)
         {
-            MltRecord r = mltCurrentRecords[chain * MLT_RECORD_SLOTS + i];
-            mltFilmSplat(r.pixel, r.rgb * wc);
+            MltRecord rr = mltCurrentRecords[chain * MLT_RECORD_SLOTS + i];
+            mltFilmSplat(rr.pixel, float3(rr.r, rr.g, rr.b) * wc);
         }
     }
 
@@ -267,11 +274,11 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
 // per-frame film average — design D4), and clear the splat buffer for the
 // next frame. One thread per pixel, full-frame dispatch.
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(64, 1, 1)]
 void wfMltResolve(uint3 tid: SV_DispatchThreadID)
 {
-    if (tid.x >= fc.width || tid.y >= fc.height) return;
-    uint lane = tid.y * fc.width + tid.x;
+    uint lane = tid.x;
+    if (lane >= fc.width * fc.height) return;
     uint base = lane * 3u;
 
     float scale = fc.mltB / (MLT_SPLAT_SCALE * max(fc.mltMppActual, 1e-8));
@@ -282,7 +289,7 @@ void wfMltResolve(uint3 tid: SV_DispatchThreadID)
     lightSplatBuffer[base + 1u] = 0u;
     lightSplatBuffer[base + 2u] = 0u;
 
-    int2 p = int2(tid.xy);
+    int2 p = int2(int(lane % fc.width), int(lane / fc.width));
     uint n = fc.accumFrame;
     float4 prev = accumBuffer[p];
     float4 cur = float4(frameL, 1.0);

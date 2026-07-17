@@ -73,20 +73,20 @@ worktree off `main`.
 
 ## 5. MLT transport shader + wavefront sequence
 
-- [ ] 5.1 `shaders/wavefront/wavefront_mlt.slang`: fused per-chain `wfMltEval`
+- [x] 5.1 `shaders/wavefront/wavefront_mlt.slang`: fused per-chain `wfMltEval`
       implementing pbrt `MLTIntegrator::L` — strategy pick (`nStrategies =
       depth+2`, depth-0 special case s=0,t=2, result ×nStrategies), eye subpath
       of exactly `t` / light subpath of exactly `s` via `bdpt.slang`
       `randomWalk`/`sampleLightOrigin`, single-strategy connect with existing
       `misWeight`; chain-metadata buffer {bootstrapIndex, depth, cCurrent,
       LCurrent, pCurrent, rng state, iteration counters}
-- [ ] 5.2 Bootstrap kernels: fresh-fill L evaluation over `nBootstrap ×
+- [x] 5.2 Bootstrap kernels: fresh-fill L evaluation over `nBootstrap ×
       (maxDepth+1)` seeds writing luminance weights (breadth-tiled); host
       readback → numpy CDF, `b = (maxDepth+1)/N·Σw`, loud black-image error,
       resample `nChains` seeds, depth `k = idx mod (maxDepth+1)`,
       depth-contiguous chain layout; chain state reconstruction pass (pinned
       initial bookkeeping per design D3)
-- [ ] 5.3 `wfMltMutate` (startIteration → proposal L → acceptance `min(1,
+- [x] 5.3 `wfMltMutate` (startIteration → proposal L → acceptance `min(1,
       c_p/c_c)` → dual splat `a/c_p` + `(1−a)/c_c` uint fixed-point, MLT splat
       scale from the D4 overflow inequality, NO upper clamp → accept/reject)
       + `wfMltResolve` (fold × `b/mpp_actual`, film-average; `mpp_actual =

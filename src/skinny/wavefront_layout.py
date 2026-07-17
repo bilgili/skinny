@@ -395,3 +395,73 @@ def sppm_grid_buffer_sizes(num_pixels: int) -> dict[str, int]:
         "grid_combined": grid_uints * _UINT,
         "scan_scratch":  scan_uints * _UINT,
     }
+
+
+# ── MLT chain buffers (change mlt-integrator) ───────────────────────────────
+#
+# Kelemen full-sample PSSMLT chain state (shaders/wavefront/wavefront_mlt.slang
+# + the SKINNY_MLT RNG override in common.slang). All fields are 4-byte
+# scalars, so the Vulkan-scalar and Metal MSL strides are identical by
+# construction — asserted below rather than assumed.
+
+MLT_MAX_DIMS = 192          # must match common.slang MLT_MAX_DIMS
+MLT_RECORD_SLOTS = 8        # eye record + up to BDPT_MAX_VERTS-1 light splats
+
+_MLT_PRIMARY_SAMPLE_FIELDS: list[tuple[str, str]] = [
+    ("value",       "float"),
+    ("valueBackup", "float"),
+    ("lastMod",     "uint"),
+    ("modBackup",   "uint"),
+]
+
+_MLT_CHAIN_META_FIELDS: list[tuple[str, str]] = [
+    ("rngState",               "uint"),
+    ("currentIteration",       "uint"),
+    ("lastLargeStepIteration", "uint"),
+    ("seedIndex",              "uint"),
+    ("cCurrent",               "float"),
+    ("nRecords",               "uint"),
+    ("pad0",                   "uint"),
+    ("pad1",                   "uint"),
+]
+
+_MLT_RECORD_FIELDS: list[tuple[str, str]] = [
+    ("pixel", "uint"),
+    ("r",     "float"),
+    ("g",     "float"),
+    ("b",     "float"),
+]
+
+
+def mlt_primary_sample_size(*, msl: bool = False) -> int:
+    """Byte stride of MltPrimarySample (16 B on both layouts)."""
+    return _struct_stride(_MLT_PRIMARY_SAMPLE_FIELDS, msl=msl)
+
+
+def mlt_chain_meta_size(*, msl: bool = False) -> int:
+    """Byte stride of MltChainMeta (32 B on both layouts)."""
+    return _struct_stride(_MLT_CHAIN_META_FIELDS, msl=msl)
+
+
+def mlt_record_size(*, msl: bool = False) -> int:
+    """Byte stride of MltRecord (16 B on both layouts)."""
+    return _struct_stride(_MLT_RECORD_FIELDS, msl=msl)
+
+
+def mlt_buffer_sizes(num_chains: int, bootstrap_samples: int, *,
+                     msl: bool = False) -> dict[str, int]:
+    """Byte sizes for the MLT chain buffers — the source of truth the MLT
+    stage allocator sizes against.
+
+    CRITICAL: sized by ``num_chains`` (chain state PERSISTS across accumulation
+    frames), never by the wavefront ``stream_size``. The primary-sample buffer
+    is also the bootstrap scratch: bootstrap dispatches are breadth-tiled to at
+    most ``num_chains`` in-flight slots so each slot owns a distinct X slice.
+    """
+    return {
+        "mlt_primary_samples":   num_chains * MLT_MAX_DIMS * mlt_primary_sample_size(msl=msl),
+        "mlt_chain_meta":        num_chains * mlt_chain_meta_size(msl=msl),
+        "mlt_current_records":   num_chains * MLT_RECORD_SLOTS * mlt_record_size(msl=msl),
+        "mlt_bootstrap_weights": max(1, bootstrap_samples) * 4,
+        "mlt_chain_seeds":       num_chains * 4,
+    }
