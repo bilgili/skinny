@@ -1,9 +1,9 @@
 """Hostless tests for the PSSMLT sampler numpy mirror (change mlt-integrator).
 
 Asserts the pbrt MLTSampler semantics the GPU shader must reproduce; the
-shader (shaders/integrators/mlt_sampler.slang) is kept in lockstep with the
-mirror (source-level constant checks below; bit-agreement is a GPU-harness
-follow-up in the transport tasks).
+shader side is the SKINNY_MLT RNG override in shaders/common.slang, kept in
+lockstep with this mirror (source-level constant checks below; bit-agreement
+is a GPU-harness follow-up in the transport tasks).
 """
 
 from __future__ import annotations
@@ -150,12 +150,18 @@ def test_budget_overflow_asserts():
 # ── shader lockstep (source-level) ───────────────────────────────────────────
 
 def test_shader_constants_match_mirror():
-    src = (_SRC / "shaders/integrators/mlt_sampler.slang").read_text()
+    # The PSS machinery lives in common.slang as the SKINNY_MLT RNG override
+    # (design D2): under -DSKINNY_MLT rng.next() serves lazily-mutated primary
+    # samples, so the whole bdpt transport tree becomes PSS-driven unmodified;
+    # the #else branch is byte-identical to the shipped RNG (RGB .spv unchanged).
+    src = (_SRC / "shaders/common.slang").read_text()
+    assert "#if defined(SKINNY_MLT)" in src
     m = re.search(r"MLT_MAX_DIMS\s*=\s*(\d+)u", src)
     assert m and int(m.group(1)) == MLT_MAX_DIMS
     m = re.search(r"MLT_NUM_STREAMS\s*=\s*(\d+)u", src)
     assert m and int(m.group(1)) == MLT_NUM_STREAMS
-    # Reject-restore and lazy-reset markers exist.
-    for token in ("mltReject", "mltAccept", "lastLargeStepIteration",
-                  "mltErfInv", "valueBackup"):
-        assert token in src, f"{token} missing from mlt_sampler.slang"
+    # Reject-restore / lazy-reset / stream machinery markers exist.
+    for token in ("void reject()", "void accept()", "void startIteration(",
+                  "void startStream(", "lastLargeStepIteration", "mltErfInv",
+                  "valueBackup", "mltCreateSampler"):
+        assert token in src, f"{token} missing from common.slang SKINNY_MLT block"

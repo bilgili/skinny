@@ -414,6 +414,20 @@ struct FrameConstants
 #if defined(SKINNY_METAL)
     uint   tileOriginY;
 #endif
+    // ── MLT chain constants (change mlt-integrator; MLT compile only). Gated
+    // so every non-MLT FrameConstants layout — and the RGB SPIR-V — is
+    // byte-unchanged. The host appends these only when packing for the MLT
+    // wavefront pass.
+#if defined(SKINNY_MLT)
+    float  mltSigma;          // small-step sigma (pbrt default 0.01)
+    float  mltLargeStepProb;  // large-step probability (pbrt default 0.3)
+    float  mltB;              // bootstrap normalization b
+    float  mltMppActual;      // mutations/pixel actually executed this frame
+    uint   mltNumChains;
+    uint   mltChainBase;      // breadth-tile base (chainId = base + tid.x)
+    uint   mltMaxDepth;       // pbrt maxdepth (chain depth strata = maxdepth+1)
+    uint   mltSeed;           // per-accumulation-reset seed (bootstrap replay)
+#endif
 };
 
 /// Per-sample radiance clamp matching pbrt `RGBFilm::AddSample`. When
@@ -486,6 +500,229 @@ uint pcgHash(uint input)
     return (word >> 22u) ^ word;
 }
 
+#if defined(SKINNY_MLT)
+// ── PSSMLT primary-sample-space RNG override (change mlt-integrator) ────
+//
+// Under -DSKINNY_MLT the RNG that every walk and material sampler consumes is
+// backed by a Markov chain's primary-sample vector X (pbrt-v4 MLTSampler,
+// src/pbrt/samplers.{h,cpp}): rng.next() returns the lazily-mutated
+// X[streamIndex + 3·sampleIndex], so the entire BDPT transport in this compile
+// becomes a deterministic function of the chain state — the PSSMLT target.
+// Per iteration a chain either takes a "large step" (fresh uniforms, prob.
+// `largeStepProbability`) or a "small step" (per-dimension Gaussian with
+// effective sigma sigma·sqrt(nSmall) aggregated since the dimension was last
+// touched, wrapped to [0,1)); each dimension carries a one-deep backup so a
+// rejected proposal restores exactly (pbrt Accept/Reject).
+//
+// pbrt's X resizes dynamically (EnsureReady LOG_FATALs on GPU); here the
+// budget is FIXED at MLT_MAX_DIMS. The flat-material envelope bounds the
+// worst-case index (~72 at maxDepth 5, design D2) well below it — the
+// overflow branch is memory-safety only (a fresh hash value every evaluation
+// is not restored on reject and would break detailed balance).
+//
+// This block only exists in the MLT wavefront compile; the #else branch is
+// byte-identical to the shipped RNG, so every RGB kernel .spv is unchanged.
+// numpy mirror: src/skinny/sampling/mlt_sampler.py (keep in lockstep;
+// tests/test_mlt_sampler.py pins the semantics hostlessly).
+
+static const uint MLT_NUM_STREAMS = 3u;
+static const uint MLT_MAX_DIMS = 192u;   // matches sampling/mlt_sampler.py
+
+// One primary-sample dimension — 16 B, matches the host stride
+// (wavefront_layout.mlt_buffer_sizes).
+struct MltPrimarySample
+{
+    float value;
+    float valueBackup;
+    uint lastMod;    // iteration this dimension was last modified
+    uint modBackup;  // lastMod backup for reject-restore
+};
+
+// Chain primary-sample vectors, nChains × MLT_MAX_DIMS. Bound only by the MLT
+// wavefront pass (MLT compile only — no RGB binding-map change).
+[[vk::binding(52)]] RWStructuredBuffer<MltPrimarySample> mltPrimarySamples;
+
+// Inverse error function (pbrt-v4 util/math.h ErfInv — Giles' polynomial).
+// Needed for the 1-uniform-per-dimension inverse-CDF normal draw: Box-Muller
+// would consume two uniforms and skew the primary-sample-space mapping.
+float mltErfInv(float a)
+{
+    float t = log(max(fma(a, -a, 1.0f), 1.175494e-38f));
+    float p;
+    if (abs(t) > 6.125f)
+    {
+        p = 3.03697567e-10f;
+        p = fma(p, t, 2.93243101e-8f);
+        p = fma(p, t, 1.22150334e-6f);
+        p = fma(p, t, 2.84108955e-5f);
+        p = fma(p, t, 3.93552968e-4f);
+        p = fma(p, t, 3.02698812e-3f);
+        p = fma(p, t, 4.83185798e-3f);
+        p = fma(p, t, -2.64646143e-1f);
+        p = fma(p, t, 8.40016484e-1f);
+    }
+    else
+    {
+        p = 5.43877832e-9f;
+        p = fma(p, t, 1.43286059e-7f);
+        p = fma(p, t, 1.22775396e-6f);
+        p = fma(p, t, 1.12962631e-7f);
+        p = fma(p, t, -5.61531961e-5f);
+        p = fma(p, t, -1.47697705e-4f);
+        p = fma(p, t, 2.31468701e-3f);
+        p = fma(p, t, 1.15392562e-2f);
+        p = fma(p, t, -2.32015476e-1f);
+        p = fma(p, t, 8.86226892e-1f);
+    }
+    return p * a;
+}
+
+float mltSampleNormal(float u, float mu, float sigma)
+{
+    return mu + 1.41421356237f * sigma
+        * mltErfInv(clamp(2.0f * u - 1.0f, -0.99999994f, 0.99999994f));
+}
+
+struct RNG
+{
+    // Same public surface as the vanilla RNG (next / next2), plus the chain
+    // bookkeeping pbrt keeps on MLTSampler. Initial state matches a freshly
+    // constructed pbrt sampler: iteration 0, largeStep true, lastLargeStep 0
+    // — the initial L evaluation runs with NO preceding startIteration, so
+    // every dimension fresh-fills with lastMod = 0 (design D3).
+    uint state;                  // mutation randomness (true PCG stream)
+    uint xBase;                  // chainId * MLT_MAX_DIMS
+    uint currentIteration;
+    uint lastLargeStepIteration;
+    uint largeStep;              // bool
+    uint streamIndex;
+    uint sampleIndex;
+    float sigma;                 // small-step sigma (fc.mltSigma)
+
+    // The raw PCG stream — mutation draws and anything that must NOT be part
+    // of primary sample space (the accept decision).
+    [mutating]
+    float nextMutation()
+    {
+        state = pcgHash(state);
+        return float(state) / float(0xFFFFFFFFu);
+    }
+
+    // pbrt MLTSampler::EnsureReady.
+    [mutating]
+    float ensureReady(uint index)
+    {
+        if (index >= MLT_MAX_DIMS)
+        {
+            // Broken invariant (design D2): unreachable in the flat envelope.
+            return nextMutation();
+        }
+        MltPrimarySample Xi = mltPrimarySamples[xBase + index];
+        if (Xi.lastMod < lastLargeStepIteration)
+        {
+            Xi.value = nextMutation();
+            Xi.lastMod = lastLargeStepIteration;
+        }
+        Xi.valueBackup = Xi.value;
+        Xi.modBackup = Xi.lastMod;
+        if (largeStep != 0u)
+        {
+            Xi.value = nextMutation();
+        }
+        else
+        {
+            uint nSmall = currentIteration - Xi.lastMod;
+            float effSigma = sigma * sqrt(float(nSmall));
+            Xi.value += mltSampleNormal(nextMutation(), 0.0f, effSigma);
+            Xi.value -= floor(Xi.value);
+        }
+        Xi.lastMod = currentIteration;
+        mltPrimarySamples[xBase + index] = Xi;
+        return Xi.value;
+    }
+
+    // pbrt MLTSampler::Get1D via GetNextIndex — the vanilla-RNG surface.
+    [mutating]
+    float next()
+    {
+        uint index = streamIndex + MLT_NUM_STREAMS * sampleIndex;
+        sampleIndex += 1u;
+        return ensureReady(index);
+    }
+
+    [mutating]
+    float2 next2()
+    {
+        return float2(next(), next());
+    }
+
+    // pbrt MLTSampler::StartIteration.
+    [mutating]
+    void startIteration(float largeStepProbability)
+    {
+        currentIteration += 1u;
+        largeStep = nextMutation() < largeStepProbability ? 1u : 0u;
+    }
+
+    // pbrt MLTSampler::StartStream.
+    [mutating]
+    void startStream(uint index)
+    {
+        streamIndex = index;
+        sampleIndex = 0u;
+    }
+
+    // pbrt MLTSampler::Accept.
+    [mutating]
+    void accept()
+    {
+        if (largeStep != 0u)
+            lastLargeStepIteration = currentIteration;
+    }
+
+    // pbrt MLTSampler::Reject — restore every dimension touched this
+    // iteration and rewind the iteration counter.
+    [mutating]
+    void reject()
+    {
+        for (uint i = 0u; i < MLT_MAX_DIMS; ++i)
+        {
+            MltPrimarySample Xi = mltPrimarySamples[xBase + i];
+            if (Xi.lastMod == currentIteration)
+            {
+                Xi.value = Xi.valueBackup;
+                Xi.lastMod = Xi.modBackup;
+                mltPrimarySamples[xBase + i] = Xi;
+            }
+        }
+        currentIteration -= 1u;
+    }
+};
+
+// Fresh chain sampler seeded from a bootstrap / chain index (pbrt constructs
+// MLTSampler(rngSequenceIndex); the replay stream must be bit-reproducible
+// from that index — design D3).
+RNG mltCreateSampler(uint seedIndex, uint seed, uint xBase, float sigma)
+{
+    RNG rng;
+    rng.state = pcgHash(seedIndex + seed * 16777259u);
+    rng.xBase = xBase;
+    rng.currentIteration = 0u;
+    rng.lastLargeStepIteration = 0u;
+    rng.largeStep = 1u;
+    rng.streamIndex = 0u;
+    rng.sampleIndex = 0u;
+    rng.sigma = sigma;
+    return rng;
+}
+
+RNG createRNG(uint2 pixel, uint frame)
+{
+    // Stray entry-point seeding degrades to the raw PCG stream (all PSS
+    // bookkeeping zeroed). MLT kernels construct via mltCreateSampler.
+    return mltCreateSampler(pixel.x + pixel.y * 65536u, frame, 0u, 0.0f);
+}
+#else
 struct RNG
 {
     uint state;
@@ -510,6 +747,7 @@ RNG createRNG(uint2 pixel, uint frame)
     rng.state = pcgHash(pixel.x + pixel.y * 65536u + frame * 16777259u);
     return rng;
 }
+#endif
 
 // ── Sampling helpers ────────────────────────────────────────────
 
