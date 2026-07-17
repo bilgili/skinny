@@ -43,7 +43,7 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
 <p align="center">
   <img src="docs/crown.png" alt="Skinny render output - PBRT v4 crown scene" width="32%">
   <img src="docs/watercolor.png" alt="Skinny render output - PBRT v4 watercolor scene" width="32%">
-  <img src="docs/cloud.png" alt="Skinny render output - PBRT v4 cloud (NanoVDB volume) scene" width="32%">
+  <img src="docs/cloud.png" alt="Skinny render output - PBRT v4 cloud scene" width="32%">
 </p>
 
 ## Features
