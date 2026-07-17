@@ -7,6 +7,7 @@ import math
 import struct
 import threading
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -2367,6 +2368,24 @@ class Renderer:
         return (self.width, self.height,
                 int(self.mlt_num_chains), int(self.mlt_bootstrap_samples))
 
+    def _next_mlt_seed(self) -> int:
+        """Per-reset MLT replay seed (design D3): stable across an accumulation
+        run, decorrelated between consecutive resets, and REPRODUCIBLE ACROSS
+        PROCESSES — the parity gate re-renders in a fresh interpreter and must
+        get the same chains (design D6's deterministic budget mapping).
+
+        Deliberately NOT derived from `_current_state_hash()`. That hash exists
+        for change detection, where only equality *within* one process matters,
+        and it hashes tuples containing str (`state_signature()` leads with
+        "orbit"/"free") — so PYTHONHASHSEED randomizes it per process. Seeding
+        MLT from it made every render irreproducible: the same scene scored
+        self-consistency relMSE 0.17 / 0.25 / 1.10 across three runs, which is
+        pass-or-fail by luck. `frame_index` alone already decorrelates resets
+        (it advances between them) and is deterministic in a headless render,
+        so it is both necessary and sufficient here.
+        """
+        return zlib.crc32(struct.pack("<i", int(self.frame_index))) & 0xFFFFFFFF
+
     def _ensure_wavefront_mlt_pass_metal(self):
         """Build (once) the native-Metal staged MLT pass (change
         mlt-integrator, task 5.6) — the Metal sibling of
@@ -2467,10 +2486,7 @@ class Renderer:
         GPU work — its own submits, awaited before the frame records."""
         from skinny.mlt_bootstrap import resample_chain_seeds
 
-        # Per-reset replay seed (stable across the accumulation run; the
-        # frame index at reset decorrelates consecutive resets of one state).
-        self._mlt_seed = hash(
-            (self._current_state_hash(), self.frame_index)) & 0xFFFFFFFF
+        self._mlt_seed = self._next_mlt_seed()
         mlt.b = 0.0
         mlt.seeded = False
         # The bootstrap/init kernels read fc.mltSeed — re-upload before they run.
@@ -9636,8 +9652,7 @@ class Renderer:
         between them sees finished GPU work without an explicit wait."""
         from skinny.mlt_bootstrap import resample_chain_seeds
 
-        self._mlt_seed = hash(
-            (self._current_state_hash(), self.frame_index)) & 0xFFFFFFFF
+        self._mlt_seed = self._next_mlt_seed()
         mlt.b = 0.0
         mlt.seeded = False
         binds = self._build_metal_binds()

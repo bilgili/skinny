@@ -11,7 +11,11 @@ Two halves, no GPU:
 
 from __future__ import annotations
 
+import inspect
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -205,6 +209,51 @@ def test_mlt_tail_starts_where_vulkan_spirv_expects_it():
             break
         off += sz
     assert off == R._TILE_ORIGIN_Y_OFFSET == 564
+
+
+def test_mlt_seed_is_stable_across_processes():
+    # The MLT replay seed must be reproducible in a FRESH interpreter: the
+    # parity gate re-renders in a new process and compares against a recorded
+    # tolerance (design D6). Seeding from `_current_state_hash()` broke this —
+    # that hash covers tuples containing str, so PYTHONHASHSEED randomizes it
+    # per process and the same scene scored relMSE 0.17 / 0.25 / 1.10 across
+    # three runs. Assert the derivation is hash()-free and str-free.
+    R = _renderer_module()
+    src = inspect.getsource(R.Renderer._next_mlt_seed)
+    assert "zlib.crc32" in src
+    assert "_current_state_hash" not in src.split('"""')[-1], \
+        "_next_mlt_seed must not derive from the randomized change-detection hash"
+
+    # Same frame_index → same seed, in a subprocess with a DIFFERENT hash seed.
+    probe = (
+        "import struct, zlib;"
+        "print(zlib.crc32(struct.pack('<i', 7)) & 0xFFFFFFFF)"
+    )
+    outs = set()
+    for hashseed in ("0", "1", "12345"):
+        env = {**os.environ, "PYTHONHASHSEED": hashseed}
+        outs.add(subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                                text=True, env=env, check=True).stdout.strip())
+    assert len(outs) == 1, f"seed derivation varies with PYTHONHASHSEED: {outs}"
+
+    # And the randomized hash it replaced really is unstable — the bug is real,
+    # not hypothetical (guards against someone "simplifying" it back).
+    bad = "print(hash(('orbit', 1.0)))"
+    bad_outs = {subprocess.run([sys.executable, "-c", bad], capture_output=True,
+                               text=True, env={**os.environ, "PYTHONHASHSEED": hs},
+                               check=True).stdout.strip()
+                for hs in ("0", "1", "12345")}
+    assert len(bad_outs) > 1
+
+
+def test_both_backends_share_one_seed_derivation():
+    # Vulkan and Metal must seed identically or the backends' chains diverge
+    # for reasons unrelated to the backend (this is what made the int_caustic
+    # gate look Metal-specific when it was not).
+    src = _read("renderer.py")
+    assert src.count("self._mlt_seed = self._next_mlt_seed()") == 2, \
+        "both bootstrap paths must route through _next_mlt_seed"
+    assert "_mlt_seed = hash(" not in src, "no call site may re-introduce hash()"
 
 
 def test_vk_wavefront_has_mlt_pass_and_recorder():

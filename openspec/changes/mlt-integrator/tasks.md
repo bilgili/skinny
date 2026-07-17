@@ -117,17 +117,17 @@ worktree off `main`.
 
 ## 6. GPU validation + gates (guarded Metal env, one process at a time)
 
-- [ ] 6.1 Kill harness: `tests/test_metal_cleanup.py -m gpu` passes with the
+- [x] 6.1 Kill harness: `tests/test_metal_cleanup.py -m gpu` passes with the
       new dispatch shapes
-- [ ] 6.2 Self-consistency: measure `(mlt, wavefront)` vs the Path anchor on
+- [x] 6.2 Self-consistency: measure `(mlt, wavefront)` vs the Path anchor on
       the flat suite scenes; record the `"mlt"` tolerance row harness-first
       (tighten-only); verify mega-session fallback renders path (SPPM-wart
       scenario)
-- [ ] 6.3 pbrt-truth: regen suite EXRs with the pinned pbrt binary running
+- [x] 6.3 pbrt-truth: regen suite EXRs with the pinned pbrt binary running
       `Integrator "mlt"` (`regen_refs.py`; perspective-camera-only scenes,
       recorded skips otherwise); record per-combo baselines; caustic/SDS
       discriminator scenes must not regress vs path/BDPT at the gate budget
-- [ ] 6.4 Splat-scale validation on the brightest caustic suite scene: no
+- [x] 6.4 Splat-scale validation on the brightest caustic suite scene: no
       wraparound at the default per-frame budget (assert headroom), Vulkan ↔
       Metal parity render
 
