@@ -133,7 +133,7 @@ worktree off `main`.
 
 ## 7. Docs + finish
 
-- [ ] 7.1 README (`--integrator mlt`, compatibility matrix, MCMC "swim"
+- [x] 7.1 README (`--integrator mlt`, compatibility matrix, MCMC "swim"
       note), CLAUDE.md + `docs/Architecture.md` compatibility matrix +
       binding map if a new binding landed, `docs/Wavefront.md` MLT sequence
       section, CHANGELOG

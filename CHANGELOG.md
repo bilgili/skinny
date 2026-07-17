@@ -9,6 +9,36 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MLT integrator — PSSMLT over BDPT** (change `mlt-integrator`). A fourth
+  integrator, `--integrator mlt` (index 3), joining `path`/`bdpt`/`sppm`:
+  Kelemen primary-sample-space Metropolis (PSSMLT) driving the existing
+  wavefront BDPT estimator (all strategy families, existing MIS weights), so
+  `E[MLT] = E[skinny BDPT]` by construction. Uses **full-sample chains** (Kelemen
+  2002 / Mitsuba PSSMLT), **not** pbrt's per-depth strategy decomposition —
+  skinny's environment transport is deliberately not strategy-partitioned, so a
+  per-depth split would drop env transport per stratum; the PSS sampler is a
+  compile-time `RNG` override in `common.slang` under `-DSKINNY_MLT`, leaving the
+  megakernel `.spv` byte-identical. **Wavefront-only** (no megakernel variant,
+  mirrors SPPM; `--execution-mode auto` + `--integrator mlt` → wavefront,
+  explicit `megakernel` + `mlt` refused), **flat materials only**, **RGB only** —
+  spectral / neural / ReSTIR / online-training and non-flat scenes refused at
+  startup (recorded parity skips; no path-fallback inside a Markov chain). Both
+  backends: Vulkan (`WavefrontMltPass`) and native Metal (`MetalWavefrontMltPass`),
+  bit-identical at equal budget (measured relMSE 0.0983, mean 0.251768 on the
+  `int_caustic` suite scene). Per frame: a bootstrap `b`-normalization at
+  accumulation reset (`wfMltBootstrap` → host CDF + weight-proportional chain
+  seeding → `wfMltInit`), then `wfMltMutate` × iterations (propose → dual splat
+  of proposal and current state by acceptance, uint fixed-point, **never
+  clamped**) → `wfMltResolve` (fold splats × `b/mpp_actual`, film-averaged like
+  SPPM); default 16384 GPU-parallel chains. Chain-mutation dispatches are
+  breadth-tiled + flushed per sub-batch under `SKINNY_METAL` (Metal watchdog);
+  new descriptor bindings 52–56 hold the chain state. pbrt imports
+  `Integrator "mlt"` (`mutationsperpixel` / `largestepprobability` / `sigma` /
+  `chains` / `bootstrapsamples` / `maxdepth`). Unbiased but Markov-correlated, so
+  the parity combo carries a recorded self-consistency tolerance (0.15) and
+  per-combo pbrt-truth baselines, harness-first. Interactively the image "swims"
+  early as the chains explore, then the film average stabilizes like SPPM. See
+  README → Sampling and [docs/Wavefront.md § MLT stages](docs/Wavefront.md).
 - **Pre-commit hooks** (`.pre-commit-config.yaml`, `pre-commit` in the `dev`
   extra). Runs `ruff-check` (scoped to `src/`) plus trailing-whitespace/EOF/
   YAML/TOML/merge-conflict hygiene checks over the repo minus vendored build
