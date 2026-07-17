@@ -59,18 +59,22 @@ def _orient_z_to(direction) -> np.ndarray:
 
 
 def add_light(stage, parent_path: str, light, report, asset_dir: str | None = None,
-              exposure_scale: float = 1.0, base_dir: str | None = None) -> bool:
+              exposure_scale: float = 1.0, base_dir: str | None = None,
+              index: int = 0) -> bool:
     """Author one UsdLux light. Returns True if a light was created.
 
     *asset_dir* (when writing to disk) is where synthesized / converted `.hdr`
     maps are written for ``infinite`` lights; *base_dir* is the scene directory
     used to resolve a referenced env map. *exposure_scale* folds the pbrt film
-    imagingRatio into the emitted radiance.
+    imagingRatio into the emitted radiance. *index* is the light's position in
+    the scene's light list — it seeds the prim name (and any synthesized `.hdr`
+    filename) so re-importing the same scene is byte-identical. Using an object
+    address here (``id(light)``) made both nondeterministic across imports.
     """
     p = light.params
     ltype = light.type
     scale = p.float("scale", 1.0) * exposure_scale
-    name = sanitize(f"light_{ltype}_{id(light) & 0xFFFF:x}")
+    name = sanitize(f"light_{ltype}_{index}")
     path = f"{parent_path}/{name}"
     pbrt_md = light_metadata(light)
 
