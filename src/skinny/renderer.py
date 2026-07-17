@@ -9459,17 +9459,19 @@ class Renderer:
         preview passes its own `PreviewPipelineMetal` so it packs against that
         program's reflected `fc` layout, independent of whether the megakernel /
         wavefront layout source exists yet (wavefront-mode preview, codex #1)."""
-        scalar = self._pack_uniforms()
         src = layout_source if layout_source is not None else self._msl_layout_source
         layout = src.uniform_layout
         size = src.uniform_size
-        # An MLT program's `fc` carries the `#if defined(SKINNY_MLT)` tail, so
-        # `_pack_uniforms` emitted 32 B more than the base table describes.
-        # Key off the REFLECTED layout, not the integrator index: the two agree
-        # only when the MLT pass is the layout source, and the drift guard
-        # below is what proves it.
-        fields = (_FC_SCALAR_FIELDS_MLT if "mltSigma" in layout
-                  else _FC_SCALAR_FIELDS)
+        # The scalar tail must match the TARGET layout, not the session state:
+        # only a `SKINNY_MLT` program's reflected `fc` has the MLT fields, so an
+        # explicit non-MLT `layout_source` (e.g. the material preview's
+        # `PreviewPipelineMetal`) needs the base 568 B blob even while MLT is the
+        # active integrator — otherwise the tail bytes have no destination and
+        # the drift guard fires (codex pre-merge review). Drive `_pack_uniforms`
+        # off `"mltSigma" in layout` so the blob and the field table always agree.
+        has_tail = "mltSigma" in layout
+        scalar = self._pack_uniforms(mlt_tail=has_tail)
+        fields = _FC_SCALAR_FIELDS_MLT if has_tail else _FC_SCALAR_FIELDS
         out = bytearray(size)
         off = 0
         for name, sz in fields:
@@ -9777,7 +9779,12 @@ class Renderer:
         surface.present()
         self.ctx.device.wait_for_idle()
 
-    def _pack_uniforms(self) -> bytes:
+    def _pack_uniforms(self, *, mlt_tail: bool | None = None) -> bytes:
+        """Assemble the `fc` scalar blob. ``mlt_tail`` overrides whether the
+        `#if defined(SKINNY_MLT)` tail is appended; ``None`` (the Vulkan direct
+        path, which has no reflected layout to key off) defers to
+        ``_mlt_uniform_tail_active()``. ``_pack_uniforms_msl`` passes an explicit
+        bool derived from the target layout so the blob matches it exactly."""
         self._sync_lens_buffer()
         aspect = self.width / self.height
         view_fwd = self.camera.view_matrix()
@@ -10092,7 +10099,9 @@ class Renderer:
         # megakernel-fallback MLT selection or a runtime switch to another
         # integrator can't desync the blob from the reflected `fc` (codex
         # pre-merge review).
-        if self._mlt_uniform_tail_active():  # INTEGRATOR_MLT, active consumer
+        emit_tail = (self._mlt_uniform_tail_active() if mlt_tail is None
+                     else bool(mlt_tail))
+        if emit_tail:  # INTEGRATOR_MLT, active consumer
             chains = max(1, int(self.mlt_num_chains))
             pixels = max(1, self.width * self.height)
             iterations = self._mlt_iterations_per_frame()

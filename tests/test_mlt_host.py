@@ -259,12 +259,27 @@ def test_mlt_uniform_tail_gated_on_active_consumer():
     assert "EXECUTION_WAVEFRONT" in tail and "self.is_metal" in tail
     assert "_wavefront_mlt_pass is not None" in tail
 
-    # Both the layout source and the tail append route through the predicate.
+    # The layout source routes through the predicate; the scalar packer's tail
+    # is driven either by the predicate (Vulkan direct call) or by the target
+    # layout (the MSL path passes an explicit mlt_tail).
     src = _read("renderer.py")
     assert "if self._mlt_uniform_tail_active():\n            return self._wavefront_mlt_pass" in src
-    assert "if self._mlt_uniform_tail_active():  # INTEGRATOR_MLT" in src
+    assert "self._mlt_uniform_tail_active() if mlt_tail is None" in src
     # The dropped naive gate must not linger anywhere.
     assert "integrator_index == 3 and not self.is_metal" not in src
+
+
+def test_mlt_msl_pack_matches_target_layout_not_session():
+    # codex pre-merge review: an explicit non-MLT layout_source (the material
+    # preview's PreviewPipelineMetal) must pack the base 568 B blob even while
+    # MLT is the active integrator — _pack_uniforms_msl keys the tail off
+    # `"mltSigma" in layout` and passes that to _pack_uniforms(mlt_tail=…), so
+    # the blob and the field table always agree with the target layout.
+    src = _read("renderer.py")
+    msl = src[src.index("def _pack_uniforms_msl"):src.index("def _build_metal_binds")]
+    assert 'has_tail = "mltSigma" in layout' in msl
+    assert "self._pack_uniforms(mlt_tail=has_tail)" in msl
+    assert "_FC_SCALAR_FIELDS_MLT if has_tail else _FC_SCALAR_FIELDS" in msl
 
 
 def test_mlt_metal_chain_batch_defaults_to_one_batch_at_default_chains():
