@@ -114,6 +114,13 @@ def translate_scene(
         report.exact("integrator:sppm",
                      "mapped to skinny SPPM (wavefront, flat materials)")
 
+    # Integrator mapping (change mlt-integrator): pbrt's `mlt` (PSSMLT over
+    # BDPT) maps onto skinny's MLT integrator; the normalized selection with
+    # chain parameters is recorded in the stage metadata above.
+    if scene.integrator is not None and scene.integrator[0] == "mlt":
+        report.exact("integrator:mlt",
+                     "mapped to skinny MLT (PSSMLT, wavefront, flat materials)")
+
     # MaterialX sidecar: write the .mtlx document and author its references on
     # the Material prims (downgrading the bound def-Materials to typeless overs)
     # before exporting, so the reference specs are part of the exported layer.
@@ -136,16 +143,28 @@ def translate_scene(
     return stage, report
 
 
+def integrator_selection(stage):
+    """Return the normalized skinny integrator selection written into an
+    imported stage's ``customLayerData["pbrt"]["skinny"]`` — a dict with an
+    ``"integrator"`` key (``"sppm"`` or ``"mlt"``) plus integrator-specific
+    parameters — or ``None`` when the pbrt scene's integrator has no skinny
+    mapping (path/bdpt/etc. run through the default selection)."""
+    pbrt = dict(stage.GetRootLayer().customLayerData).get("pbrt", {})
+    return pbrt.get("skinny")
+
+
 def sppm_selection(stage):
-    """Return the normalized skinny SPPM selection written into an imported
-    stage's ``customLayerData["pbrt"]["skinny"]`` when the pbrt scene used
-    ``Integrator "sppm"`` / ``"photonmap"`` — a dict ``{"integrator": "sppm",
-    "radius"?: float, "photons"?: int}`` — or ``None`` for any other integrator.
+    """Return the normalized skinny SPPM selection — a dict ``{"integrator":
+    "sppm", "radius"?: float, "photons"?: int}`` — or ``None`` for any other
+    integrator (including ``mlt``; use :func:`integrator_selection` for the
+    general reader).
 
     A loader or the parity harness uses this to select skinny's SPPM integrator
     and seed its initial radius / photons-per-pass from the pbrt parameters."""
-    pbrt = dict(stage.GetRootLayer().customLayerData).get("pbrt", {})
-    return pbrt.get("skinny")
+    sel = integrator_selection(stage)
+    if sel and sel.get("integrator") == "sppm":
+        return sel
+    return None
 
 
 # --------------------------------------------------------------------------- #

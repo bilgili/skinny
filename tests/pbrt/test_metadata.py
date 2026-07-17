@@ -163,3 +163,67 @@ def test_non_sppm_integrator_has_no_skinny_selection(tmp_path):
     stage = Usd.Stage.Open(str(out))
     assert sppm_selection(stage) is None
     assert "skinny" not in stage.GetRootLayer().customLayerData["pbrt"]
+
+
+# ── MLT integrator mapping (change mlt-integrator) ──────────────────
+
+def _mlt_stage(tmp_path, params=""):
+    from skinny.pbrt.api import import_pbrt
+    from pxr import Usd
+    src = tmp_path / "m.pbrt"
+    src.write_text(
+        f'Integrator "mlt"{params}\n'
+        'Camera "perspective" "float fov" 50\nWorldBegin\n'
+        'Shape "sphere" "float radius" 1\n'
+    )
+    out = tmp_path / "m.usda"
+    _stage, report = import_pbrt(str(src), out=str(out))
+    return Usd.Stage.Open(str(out)), report
+
+
+def test_mlt_records_selection_with_pbrt_defaults(tmp_path):
+    from skinny.pbrt.api import integrator_selection, sppm_selection
+    stage, _report = _mlt_stage(tmp_path)
+    sel = integrator_selection(stage)
+    assert sel is not None and sel["integrator"] == "mlt"
+    # Self-contained selection: pbrt defaults filled in.
+    assert sel["maxdepth"] == 5
+    assert sel["mutationsperpixel"] == 100
+    assert sel["largestepprobability"] == pytest.approx(0.3)
+    assert sel["sigma"] == pytest.approx(0.01)
+    assert sel["chains"] == 1000
+    assert sel["bootstrapsamples"] == 100000
+    # The SPPM-specific reader keeps its documented contract.
+    assert sppm_selection(stage) is None
+
+
+def test_mlt_records_authored_params(tmp_path):
+    from skinny.pbrt.api import integrator_selection
+    stage, _report = _mlt_stage(
+        tmp_path,
+        ' "integer mutationsperpixel" 200 "float largestepprobability" 0.5'
+        ' "integer maxdepth" 7 "float sigma" 0.02'
+        ' "integer chains" 4096 "integer bootstrapsamples" 50000')
+    sel = integrator_selection(stage)
+    assert sel["mutationsperpixel"] == 200
+    assert sel["largestepprobability"] == pytest.approx(0.5)
+    assert sel["maxdepth"] == 7
+    assert sel["sigma"] == pytest.approx(0.02)
+    assert sel["chains"] == 4096
+    assert sel["bootstrapsamples"] == 50000
+
+
+def test_mlt_reported_mapped(tmp_path):
+    _stage, report = _mlt_stage(tmp_path)
+    constructs = [e.construct for e in report.entries]
+    assert any("integrator:mlt" in c for c in constructs), constructs
+    assert "skipped" not in [e.status for e in report.entries
+                             if "integrator" in e.construct]
+
+
+def test_sppm_selection_still_returns_sppm(tmp_path):
+    # Regression: the generalized reader must not change the SPPM contract.
+    from skinny.pbrt.api import integrator_selection, sppm_selection
+    stage = _stage(tmp_path)
+    assert sppm_selection(stage)["integrator"] == "sppm"
+    assert integrator_selection(stage)["integrator"] == "sppm"

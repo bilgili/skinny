@@ -1601,7 +1601,7 @@ class Renderer:
         # fall through to the path tracer in main_pass.slang. Index 2 = SPPM
         # (Stochastic Progressive Photon Mapping), wavefront-only and flat-material
         # only; under the megakernel it falls through to the path tracer.
-        self.integrator_modes: list[str] = ["Path", "BDPT", "SPPM"]
+        self.integrator_modes: list[str] = ["Path", "BDPT", "SPPM", "MLT"]
         self.integrator_index = 0
 
         # Pluggable scene-sampling seam (sampling/proposal.slang). The active

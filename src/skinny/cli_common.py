@@ -17,19 +17,21 @@ from __future__ import annotations
 import argparse
 import os
 
-from skinny import spectral_capability
+from skinny import mlt_capability, spectral_capability
 
 # path → integrator_index, mirroring the renderer's integrator ordering.
-INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2}
+INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
 
 # Execution mode `auto` derives from the integrator: `path`/`bdpt` run under the
-# megakernel; `sppm` has no megakernel path and runs under the wavefront backend.
+# megakernel; `sppm` and `mlt` have no megakernel path and run under the
+# wavefront backend.
 # An explicit `--execution-mode` (flag or env) overrides this (see
 # :func:`resolve_execution_mode`).
 DEFAULT_EXECUTION_FOR_INTEGRATOR = {
     "path": "megakernel",
     "bdpt": "megakernel",
     "sppm": "wavefront",
+    "mlt": "wavefront",
 }
 
 # Advertised walk choices. `megakernel` is accepted as a deprecated alias but is
@@ -116,6 +118,19 @@ def validate_render_flags(args) -> None:
         # CLI-integrator-keyed guard cannot see) via reject_sppm_without_wavefront.
         reject_sppm_without_wavefront(integrator, getattr(args, "execution_mode", "megakernel"))
         return
+    if integrator == "mlt":
+        # MLT is wavefront-only and RGB/layer-free in v1; the persisted-mlt case
+        # (which this CLI-keyed guard cannot see) is re-checked by the
+        # interactive front-ends via reject_mlt_unsupported.
+        reject_mlt_unsupported(
+            integrator,
+            getattr(args, "execution_mode", "megakernel"),
+            spectral=bool(getattr(args, "spectral", False)),
+            proposals=getattr(args, "proposals", None),
+            reuse=getattr(args, "reuse", None),
+            online_training=bool(getattr(args, "online_training", False)),
+        )
+        return
     if integrator != "bdpt":
         return
     proposals = getattr(args, "proposals", None) or ""
@@ -152,7 +167,7 @@ def resolve_execution_mode(execution_mode: str | None, integrator: str | None) -
     ``auto`` (the default) — meaning neither ``--execution-mode`` nor
     ``SKINNY_EXECUTION_MODE`` pinned a concrete mode — derives the mode from the
     startup ``integrator`` via :data:`DEFAULT_EXECUTION_FOR_INTEGRATOR`
-    (``path``/``bdpt`` → ``megakernel``, ``sppm`` → ``wavefront``). An explicit
+    (``path``/``bdpt`` → ``megakernel``, ``sppm``/``mlt`` → ``wavefront``). An explicit
     ``megakernel``/``wavefront`` wins. Precedence: explicit mode > integrator
     default. Called once at startup, before ``validate_render_flags`` and before
     the renderer is constructed; the result is fixed for the session. A ``None``
@@ -191,6 +206,74 @@ def reject_sppm_without_wavefront(integrator: str | None, execution_mode: str | 
             "visible-point / photon-grid structure across pixels. Drop the "
             "explicit --execution-mode megakernel (sppm auto-selects "
             "wavefront) or pass --execution-mode wavefront."
+        )
+
+
+def reject_mlt_unsupported(
+    integrator: str | None,
+    execution_mode: str | None,
+    spectral: bool = False,
+    proposals: str | None = None,
+    reuse: str | None = None,
+    online_training: bool = False,
+) -> None:
+    """Refuse an ``mlt`` integrator outside its envelope. No-op otherwise.
+
+    MLT (PSSMLT over BDPT, change ``mlt-integrator``) is wavefront-only — a
+    Markov chain shares bootstrap/normalization state across pixels the same
+    way SPPM shares its photon grid — and its v1 envelope is RGB, flat
+    materials, layer-free: no ``--spectral``, no non-BSDF directional
+    proposal, no ReSTIR reuse, no ``--online-training``. Checks the
+    **effective** startup integrator against the **resolved** execution mode
+    (same contract as :func:`reject_sppm_without_wavefront`), so interactive
+    front-ends can re-check the persisted-``mlt`` case the CLI-keyed
+    :func:`validate_render_flags` cannot see. While the transport is not wired
+    (``mlt_capability.MLT_IMPLEMENTED`` is False, referenced live so a test
+    monkeypatch takes effect), ``mlt`` is refused outright rather than
+    silently rendering another integrator. Raises ``SystemExit``."""
+    if integrator != "mlt":
+        return
+    if not mlt_capability.MLT_IMPLEMENTED:
+        raise SystemExit(
+            "skinny: --integrator mlt is not yet implemented — the PSSMLT "
+            "wavefront transport (change mlt-integrator) is a work in "
+            "progress. Registration, refusals, and the parity-matrix wiring "
+            "have landed, but no MLT render path runs yet, so the integrator "
+            "is refused instead of silently rendering the path tracer."
+        )
+    if (execution_mode or "megakernel") == "megakernel":
+        raise SystemExit(
+            "skinny: --integrator mlt has no megakernel path — MLT mutates "
+            "Markov chains through the staged wavefront BDPT kernels and "
+            "shares bootstrap/normalization state across pixels. Drop the "
+            "explicit --execution-mode megakernel (mlt auto-selects "
+            "wavefront) or pass --execution-mode wavefront."
+        )
+    if spectral:
+        raise SystemExit(
+            "skinny: --spectral is incompatible with --integrator mlt — "
+            "spectral MLT is outside the v1 envelope (RGB only)."
+        )
+    extra_proposals = [
+        p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
+    ]
+    if extra_proposals:
+        raise SystemExit(
+            f"skinny: --integrator mlt supports only the BSDF proposal (got "
+            f"--proposals {proposals}) — a non-BSDF directional proposal inside "
+            "a Markov-chain mutation would change the target function MLT "
+            "normalizes against."
+        )
+    if reuse and reuse not in ("none",):
+        raise SystemExit(
+            f"skinny: --integrator mlt is incompatible with --reuse {reuse} — "
+            "reservoir reuse (ReSTIR DI) is not supported under MLT."
+        )
+    if online_training:
+        raise SystemExit(
+            "skinny: --online-training is incompatible with --integrator mlt — "
+            "MLT does not consume the neural directional proposal the training "
+            "loop exists to improve."
         )
 
 
@@ -332,13 +415,15 @@ def add_render_flags(
         )
     if integrator:
         parser.add_argument(
-            "--integrator", choices=("path", "bdpt", "sppm"), default=None,
+            "--integrator", choices=("path", "bdpt", "sppm", "mlt"), default=None,
             help="Light-transport integrator (default: 'path', or the persisted "
                  "value on the interactive front-ends). 'path' is the "
                  "unidirectional path tracer; 'bdpt' is the bidirectional path "
                  "tracer; 'sppm' is the Stochastic Progressive Photon Mapping "
-                 "integrator (caustic-efficient, flat materials, wavefront-only — "
-                 "requires --execution-mode wavefront). On the interactive "
+                 "integrator (caustic-efficient, flat materials, wavefront-only); "
+                 "'mlt' is the Metropolis Light Transport integrator (PSSMLT over "
+                 "BDPT — hard indirect/caustic scenes, flat materials, "
+                 "wavefront-only). On the interactive "
                  "front-ends this sets the initial integrator and it remains "
                  "runtime-cycleable.",
         )

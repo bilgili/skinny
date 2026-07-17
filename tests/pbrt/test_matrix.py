@@ -50,6 +50,45 @@ def test_neural_requires_wavefront_path_flat():
     assert not ok and "flat-material" in reason
 
 
+def test_mlt_is_wavefront_only():
+    ok, reason = parity.combo_is_valid(RenderCombo("mlt", "megakernel"), _flat_scene())
+    assert not ok and "wavefront-only" in reason
+
+
+def test_mlt_gated_until_wired(monkeypatch):
+    from skinny import mlt_capability
+    flat = _flat_scene()
+    # Gate off (the shipped default): recorded "not yet wired" skip.
+    ok, reason = parity.combo_is_valid(RenderCombo("mlt", "wavefront"), flat)
+    assert not ok and "not yet wired" in reason
+    # Gate on: the in-envelope combo enters the rendered set.
+    monkeypatch.setattr(mlt_capability, "MLT_IMPLEMENTED", True)
+    assert parity.combo_is_valid(RenderCombo("mlt", "wavefront"), flat)[0]
+
+
+def test_mlt_is_flat_material_layer_free_rgb_only(monkeypatch):
+    from skinny import mlt_capability
+    monkeypatch.setattr(mlt_capability, "MLT_IMPLEMENTED", True)
+    # Non-flat scenes: recorded skip regardless of the gate.
+    for scene in (_sss_scene(), _flat_scene(name="vol", material_class="volume")):
+        ok, reason = parity.combo_is_valid(RenderCombo("mlt", "wavefront"), scene)
+        assert not ok and "flat-material" in reason
+    flat = _flat_scene()
+    ok, reason = parity.combo_is_valid(RenderCombo("mlt", "wavefront", ("neural",)), flat)
+    assert not ok and "layer-free" in reason
+    ok, reason = parity.combo_is_valid(RenderCombo("mlt", "wavefront", (), "restir-di"), flat)
+    assert not ok and "layer-free" in reason
+    ok, reason = parity.combo_is_valid(
+        RenderCombo("mlt", "wavefront", (), "none", spectral=True), flat)
+    assert not ok and "RGB only" in reason
+
+
+def test_mlt_axis_class_and_tolerance_row():
+    assert parity.combo_axis_class(RenderCombo("mlt", "wavefront")) == "mlt"
+    tol = parity._DEFAULT_SELF_CONSISTENCY["mlt"]
+    assert tol["relmse"] > 0 and tol["flip"] > 0
+
+
 def test_restir_is_wavefront_only():
     ok, reason = parity.combo_is_valid(RenderCombo("path", "megakernel", (), "restir-di"), _flat_scene())
     assert not ok and "wavefront-only" in reason

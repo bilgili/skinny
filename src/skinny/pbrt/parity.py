@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from skinny import spectral_capability
+from skinny import mlt_capability, spectral_capability
 
 from . import metrics
 from .api import import_pbrt
@@ -158,7 +158,7 @@ class ParityResult:
 # matrix. A combo is a point in (integrator × execution_mode × proposals ×
 # reuse); ``combo_is_valid`` is the single source of truth for which combos run.
 
-INTEGRATORS = ("path", "bdpt", "sppm")
+INTEGRATORS = ("path", "bdpt", "sppm", "mlt")
 EXECUTION_MODES = ("megakernel", "wavefront")
 # Proposal/reuse axes exercised by the matrix (beyond the bare baseline).
 PROPOSAL_AXES = ("neural",)
@@ -303,6 +303,24 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     # SPPM has no megakernel path.
     if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
         return False, "SPPM is wavefront-only"
+    # MLT (PSSMLT over BDPT, change mlt-integrator): wavefront-only, RGB-only,
+    # layer-free, flat-material scenes only — the fixed primary-sample dimension
+    # budget is only boundable without volumetric/subsurface transport, and the
+    # wavefront non-flat path-fallback is not extended into Markov chains
+    # (mixing estimators inside a chain). Gated on MLT_IMPLEMENTED (referenced
+    # live, monkeypatchable) so combos are recorded "not yet wired" skips until
+    # the transport lands — never silently rendered as another integrator.
+    if combo.integrator == "mlt":
+        if combo.execution_mode != "wavefront":
+            return False, "MLT is wavefront-only"
+        if combo.spectral:
+            return False, "spectral MLT is outside the v1 envelope (RGB only)"
+        if combo.has_neural or combo.has_reuse:
+            return False, "MLT is layer-free (no neural proposal, no ReSTIR reuse)"
+        if scene.material_class != "flat":
+            return False, "MLT is flat-material only (no skin/subsurface/volume chains)"
+        if not mlt_capability.MLT_IMPLEMENTED:
+            return False, "MLT transport not yet wired — change mlt-integrator group 5"
     # Neural directional proposal: wavefront + path + flat material only.
     if combo.has_neural:
         if combo.execution_mode != "wavefront":
@@ -383,6 +401,8 @@ def combo_axis_class(combo: RenderCombo) -> str:
         return "unbiased"
     if combo.integrator == "sppm":
         return "sppm"
+    if combo.integrator == "mlt":
+        return "mlt"
     if combo.integrator != self_consistency_anchor(combo).integrator:
         return "integrator"
     return "mode"  # same integrator, differs only in execution mode
@@ -394,6 +414,10 @@ _DEFAULT_SELF_CONSISTENCY = {
     "mode": {"relmse": 0.02, "flip": 0.03},
     "integrator": {"relmse": 0.06, "flip": 0.06},
     "sppm": {"relmse": 0.15, "flip": 0.12},
+    # MLT: unbiased in expectation but Markov-correlated — different per-pixel
+    # noise structure at equal spp. Placeholder sized to the SPPM row; measured
+    # harness-first at GPU validation (mlt-integrator task 6.2), tighten-only.
+    "mlt": {"relmse": 0.15, "flip": 0.12},
     "unbiased": {"relmse": 0.05, "flip": 0.05},
 }
 
@@ -411,6 +435,10 @@ _DEFAULT_SPECTRAL_SELF_CONSISTENCY = {
     "mode": {"relmse": 0.03, "flip": 0.03},
     "integrator": {"relmse": 0.09, "flip": 0.06},
     "sppm": {"relmse": 0.15, "flip": 0.12},
+    # MLT: unbiased in expectation but Markov-correlated — different per-pixel
+    # noise structure at equal spp. Placeholder sized to the SPPM row; measured
+    # harness-first at GPU validation (mlt-integrator task 6.2), tighten-only.
+    "mlt": {"relmse": 0.15, "flip": 0.12},
     "unbiased": {"relmse": 0.05, "flip": 0.05},
 }
 
@@ -502,9 +530,9 @@ def render_linear(scene_pbrt: str, width: int, height: int, spp: int,
     from skinny.backend_select import select_backend
     from skinny.headless import HeadlessRenderer, RenderOptions  # lazy: renderer/GPU
 
-    # SPPM is wavefront-only (no megakernel path) — force the execution mode so
-    # callers can pass integrator="sppm" without also threading execution_mode.
-    if integrator == "sppm":
+    # SPPM and MLT are wavefront-only (no megakernel path) — force the execution
+    # mode so callers can pass the integrator without also threading it.
+    if integrator in ("sppm", "mlt"):
         execution_mode = "wavefront"
 
     backend = select_backend()
