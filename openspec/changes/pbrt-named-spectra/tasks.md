@@ -69,11 +69,11 @@ and ship green over a fix that never reached a pixel.*
 
 *Sequence this group after `spectral-dispersion-showcase-asset` lands (D2 coordination).*
 
-- [ ] 7.1 Re-measure `spec_prism` + `prism_dispersion` + the spectral suite pbrt-truth metrics under the BK7 refit (Metal backend, headless env per CLAUDE.md); metrics must hold or improve — if one worsens, fix the fit, do not raise the baseline
-- [ ] 7.2 Re-measure the **RGB-mode** baselines for named-glass scenes — the d-line IOR moves RGB more than the refit moves spectral (BK7 1.5→1.51673, LASF9 1.5→1.85); same hold-or-improve rule (D2)
-- [ ] 7.3 Confirm no checked-in scene uses a CuZn/MgO/TiO2 conductor (grep says none, so this is expected to be a no-op — record that rather than leaving an unbounded corpus sweep). If one exists, re-measure it: the copper fallback was a bug, so it legitimately changes
-- [ ] 7.4 Re-verify megakernel ≡ wavefront self-consistency on all affected scenes
-- [ ] 7.5 Update the manifest `measured` values to the new measurements
+- [x] 7.1 Re-measure `spec_prism` + `prism_dispersion` + the spectral suite pbrt-truth metrics under the BK7 refit (Metal backend, headless env per CLAUDE.md); metrics must hold or improve — if one worsens, fix the fit, do not raise the baseline
+- [x] 7.2 Re-measure the **RGB-mode** baselines for named-glass scenes — the d-line IOR moves RGB more than the refit moves spectral (BK7 1.5→1.51673, LASF9 1.5→1.85); same hold-or-improve rule (D2)
+- [x] 7.3 Confirm no checked-in scene uses a CuZn/MgO/TiO2 conductor (grep says none, so this is expected to be a no-op — record that rather than leaving an unbounded corpus sweep). If one exists, re-measure it: the copper fallback was a bug, so it legitimately changes
+- [x] 7.4 Re-verify megakernel ≡ wavefront self-consistency on all affected scenes
+- [x] 7.5 Update the manifest `measured` values to the new measurements
 
 ## 8. Docs and gates
 
