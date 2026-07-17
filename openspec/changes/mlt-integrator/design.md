@@ -49,26 +49,49 @@ override), each advancing one mutation per dispatch iteration; a frame runs
 per-frame mutation budget is proportional to pixel count (pbrt semantics,
 progressive).
 
-Proposal evaluation (`MLTIntegrator::L`) runs in a **fused per-chain kernel**
-(`wfMltMutate`): strategy selection, eye subpath of exactly `t` vertices, light
-subpath of exactly `s` vertices, single-strategy connection ×`nStrategies`,
-calling `bdpt.slang`'s `randomWalk` / `sampleLightOrigin` / `misWeight`
-directly — the same code the fused `wfBdptWalk` walk mode already runs per
-pixel. *Alternative considered:* staging chains through the counting-sorted
-BDPT queue kernels (`wfBdptGenEye/BounceEye/...`). Rejected for v1: per-chain
-variable `(s,t)` makes the queue bookkeeping the hard part, and the fused BDPT
-walk is already the default production path, so the fused kernel is both
-simpler and precedented. Staged split is a recorded follow-up if register
-pressure or divergence measurably hurts.
+Proposal evaluation runs in a **fused per-chain kernel** (`wfMltMutate`) that
+calls the existing `BDPTIntegrator<TC>.estimateRadiance` **verbatim** — one
+complete BDPT sample per mutation: all depths, all eye-side strategies, env
+NEE/escape, plus the light-tracer splats — i.e. **Kelemen-style full-sample
+PSSMLT chains (Kelemen 2002, Mitsuba PSSMLT precedent), NOT pbrt's per-depth
+strategy decomposition.** *Amended during implementation:* pbrt's per-depth
+chains require the target to be decomposable per (s,t) strategy at a fixed
+path length, but skinny's environment transport is deliberately NOT
+strategy-partitioned (`bdptEnvNEE` at the first eye vertex + escape-MIS
+accumulated inside `randomWalk`) — a per-depth dispatch would either silently
+drop env transport per stratum or force invasive surgery on `bdpt.slang`.
+Full-sample chains reuse skinny's BDPT estimator unmodified, so
+`E[MLT] = E[skinny BDPT]` **by construction** — exactly what the
+self-consistency gate asserts. Consequences: no depth stratification (the
+chain explores all path lengths through its primary samples), the scalar
+contribution is `c = luminance(eye L) + Σ luminance(light-tracer splats)`,
+and the film write distributes every captured contribution (eye value at the
+chain's PSS raster position + each light-splat at its own raster) with the
+same acceptance weights. pbrt's 3-stream sample-index discipline is retained
+via three `#if defined(SKINNY_MLT)`-guarded `startStream` boundaries inside
+`estimateRadiance` (camera/eye walk → light walk → connections), byte-identity
+verified. Light-tracer splats are captured per chain (`atomicSplatRadiance`
+overridden under `SKINNY_MLT` to push into a bounded per-thread record stack,
+≤ `BDPT_MAX_VERTS` entries) and written post-acceptance with `a/c_p`,
+`(1−a)/c_c` weights — never directly to the film during evaluation.
 
-Chains are **assigned to depth strata contiguously** (sorted by their bootstrap
-depth `k`) so warps mutate mostly-equal path lengths — cheap divergence win, no
-estimator change.
+*Alternative considered:* staging chains through the counting-sorted BDPT
+queue kernels. Rejected for v1: the fused BDPT walk is already the default
+production path; staged split is a recorded follow-up if register pressure or
+divergence measurably hurts.
 
 ### D2. Primary-sample-space sampler: fixed-size per-chain X vector
 
-New `MLTSampler` struct in `integrators/mlt_sampler.slang` mirroring pbrt
-exactly, minus dynamic resize:
+The PSS sampler is implemented as a **compile-time RNG override in
+`common.slang`**: under `-DSKINNY_MLT` (the MLT wavefront compile only) the
+`RNG` struct itself is backed by the chain's primary-sample vector — same
+public surface (`next()`/`next2()`), so every bdpt walk and material sampler
+becomes PSS-driven with zero transport-code changes; the `#else` branch is
+textually identical to the shipped RNG (megakernel SPIR-V verified
+byte-identical). The chain X buffer is `[[vk::binding(52)]]` (first free
+binding), declared inside the guarded block; FrameConstants grows gated MLT
+fields at the tail (spectral/Metal-tiling precedent). Sampler semantics mirror
+pbrt exactly, minus dynamic resize:
 
 - `PrimarySample = { value: f32, valueBackup: f32, lastMod: u32, modBackup: u32 }`
   (16 B). Iteration counters are u32 (a chain never exceeds 2³² iterations).
@@ -119,14 +142,14 @@ PSSMLT design.
 
 Bootstrap phase at every accumulation reset (state-hash change):
 
-1. GPU: `nBootstrap × (maxDepth + 1)` evaluations of the fused L kernel in
-   "fresh sample" mode (X filled from `createRNG(bootstrapIndex, seed)`), each
-   writing luminance to a weights buffer. Breadth-tiled like the SPPM photon
-   phase.
-2. Host readback (once per reset): numpy CDF over weights, `b = (maxDepth+1)/N ×
-   Σw`; all-zero weights → loud "no light-carrying paths" error. Sample
-   `nChains` bootstrap indices proportional to weight; chain depth
-   `k = index mod (maxDepth+1)`; upload `{bootstrapIndex, depth}` per chain.
+1. GPU: `nBootstrap` full-sample evaluations of the fused L kernel in "fresh
+   sample" mode (X filled from the bootstrap-index-seeded replay stream), each
+   writing its scalar contribution `c` to a weights buffer. Breadth-tiled like
+   the SPPM photon phase. (No `×(maxDepth+1)` factor — full-sample chains have
+   no depth strata, D1 amendment.)
+2. Host readback (once per reset): numpy CDF over weights, `b = (1/N) × Σc`;
+   all-zero weights → loud "no light-carrying paths" error. Sample `nChains`
+   bootstrap indices proportional to weight; upload `bootstrapIndex` per chain.
 3. First mutation iteration reconstructs each chain's current state by
    re-evaluating L with the seed-derived X (identical to pbrt constructing
    `MLTSampler(rngSequenceIndex = bootstrapIndex)`), storing `cCurrent`,

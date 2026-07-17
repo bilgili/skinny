@@ -65,41 +65,43 @@ backup so a rejected proposal restores the prior value exactly
 
 ### Requirement: Bootstrap phase estimates b and seeds chains
 
-Before the first MLT frame, the renderer SHALL run a bootstrap phase: `N_boot ×
-(maxDepth + 1)` ordinary samples of the target function evaluated with
-independent primary-sample vectors, one per (bootstrap index, depth). The scalar
-contribution `c` SHALL be luminance. The renderer SHALL build a discrete
-distribution over bootstrap weights, compute the normalization `b = (maxDepth +
-1) / N × Σ c_i`, and seed each chain by resampling a bootstrap entry
-proportional to its weight — the chain inherits that entry's RNG-reconstructible
-primary-sample state and its **fixed depth** `k = index mod (maxDepth + 1)` (a
-chain mutates within one path-length stratum, as in pbrt). A bootstrap whose
-weights sum to zero SHALL fail loudly (black-image error), not render silently.
+Before the first MLT frame, the renderer SHALL run a bootstrap phase: `N_boot`
+ordinary full samples of the target function evaluated with independent
+primary-sample vectors, one per bootstrap index. The scalar contribution `c`
+SHALL be the luminance of the complete sample (eye contribution plus captured
+light-tracer splats). The renderer SHALL build a discrete distribution over
+bootstrap weights, compute the normalization `b = (1/N) × Σ c_i`, and seed each
+chain by resampling a bootstrap entry proportional to its weight — the chain
+inherits that entry's RNG-reconstructible primary-sample state. (Full-sample
+Kelemen chains — no per-depth strata; see design D1: skinny's env transport is
+not strategy-partitioned, so per-depth chains would drop env light.) A
+bootstrap whose weights sum to zero SHALL fail loudly (black-image error), not
+render silently.
 
 #### Scenario: Chains are seeded proportional to luminance
 - **WHEN** the bootstrap completes on a scene with bright and dark regions
 - **THEN** chain initial states are drawn from the bootstrap distribution
-  proportional to path luminance, and each chain carries a fixed depth stratum
+  proportional to path luminance
 
 #### Scenario: Black bootstrap fails loudly
 - **WHEN** every bootstrap sample carries zero luminance
 - **THEN** the renderer reports a clear "no light-carrying paths found" error
   instead of accumulating a black image
 
-### Requirement: Mutation step evaluates BDPT strategies and splats both states
+### Requirement: Mutation step evaluates the full BDPT sample and splats both states
 
-Each chain iteration SHALL evaluate the target function exactly as pbrt's
-`MLTIntegrator::L`: for the chain's depth `k`, select one `(s, t)` strategy
-uniformly from the `k + 2` available strategies (depth 0: fixed `s=0, t=2`),
-generate a camera subpath of exactly `t` vertices and a light subpath of exactly
-`s` vertices from the chain's primary samples, connect with the existing
-wavefront BDPT connection/MIS machinery, and multiply by the strategy count. The
-Metropolis acceptance SHALL be `a = min(1, c_proposed / c_current)` on scalar
-luminance, and each iteration SHALL splat **both** states into the splat buffer:
-the proposal weighted `a / c_proposed` and the current state weighted `(1 − a) /
-c_current`, at their respective raster positions (`t = 1` strategies re-splat at
-the connection-determined raster position). Acceptance SHALL update chain state;
-rejection SHALL restore it.
+Each chain iteration SHALL evaluate the target function as one **complete**
+sample of the existing BDPT integrator (`BDPTIntegrator.estimateRadiance`,
+unmodified): camera ray from the chain's primary-sample raster position, all
+depths and eye-side strategies including environment NEE/escape, plus the
+light-tracer splats — captured into a bounded per-chain record stack instead of
+written to the film during evaluation. The Metropolis acceptance SHALL be
+`a = min(1, c_proposed / c_current)` on the scalar luminance of the complete
+sample, and each iteration SHALL splat **both** states into the splat buffer:
+every captured contribution of the proposal (eye value at its raster position,
+each light-splat record at its own) weighted `a / c_proposed`, and the current
+state's contributions weighted `(1 − a) / c_current`. Acceptance SHALL update
+chain state; rejection SHALL restore it exactly.
 
 #### Scenario: Both states contribute every iteration
 - **WHEN** a proposal with nonzero luminance is evaluated and rejected
