@@ -104,6 +104,16 @@ worktree off `main`.
       ~:9371), FrameConstants MLT fields, interactive quick-bootstrap +
       settle-debounce (D3), flip `MLT_IMPLEMENTED = True`; verify all
       existing RGB kernel `.spv` byte-identical
+- [x] 5.6 Native-Metal adapter (`metal_wavefront.py`): `MetalWavefrontMltPass`
+      + `_MetalMltRecorder` mirroring `MetalWavefrontSppmPass` /
+      `_MetalSppmRecorder` (bind-by-name, `SKINNY_MLT=1` + `SKINNY_METAL`
+      defines, per-phase `flush()`, breadth-tiled chain dispatch per D7);
+      chain-base tiling via a Metal blob instead of the Vulkan push constant;
+      `_ensure/_destroy_wavefront_mlt_pass_metal` + the `_render_scene_metal`
+      dispatch branch replacing the `NotImplementedError` (`renderer.py`
+      ~:9527); `_pack_uniforms` MLT tail on the Metal side at its
+      `SKINNY_METAL`-gated offset (`renderer.py` ~:9912 currently
+      `not self.is_metal`); bootstrap readback through the Metal host buffer
 
 ## 6. GPU validation + gates (guarded Metal env, one process at a time)
 

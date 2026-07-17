@@ -3,10 +3,10 @@
 Two halves, no GPU:
 - the pure bootstrap resample (``skinny.mlt_bootstrap.resample_chain_seeds``:
   b math, weight-proportional seeding, zero-weight refusal, determinism);
-- source-level guards that the Vulkan renderer wiring exists (the ensure/
-  destroy/dispatch seam, the MLT uniform tail, the Metal refusal) — the
+- source-level guards that the renderer wiring exists on BOTH backends (the
+  ensure/destroy/dispatch seam, the MLT uniform tail, the Metal adapter) — the
   ``test_mlt_selection`` grep-style pattern, since constructing a Renderer
-  needs a GPU.
+  needs a GPU — plus the pure MSL field-table math, which is importable.
 """
 
 from __future__ import annotations
@@ -112,12 +112,99 @@ def test_renderer_packs_mlt_uniform_tail_in_shader_order():
         "MLT uniform tail must precede the tileOriginY filler u32"
 
 
-def test_metal_dispatch_refuses_mlt_loudly():
+def test_metal_dispatch_selects_mlt_pass():
+    # Task 5.6 replaced the "adapter pending" NotImplementedError with the real
+    # Metal branch. MLT must be selected BEFORE the SPPM/BDPT/path branches,
+    # exactly like the Vulkan `_record_wavefront_dispatch` order.
     src = _read("renderer.py")
     start = src.index("def _render_scene_metal")
     body = src[start:start + 3000]
-    assert "NotImplementedError" in body and "mlt-integrator" in body, \
-        "Metal dispatch must refuse MLT explicitly (adapter pending)"
+    assert "integrator_index == 3" in body
+    assert "_ensure_wavefront_mlt_pass_metal" in body
+    assert body.index("integrator_index == 3") < body.index("integrator_index == 2"), \
+        "the MLT branch must precede SPPM's"
+
+
+def test_metal_mlt_pass_and_recorder_exist():
+    src = _read("metal_wavefront.py")
+    assert "class MetalWavefrontMltPass" in src
+    assert "class _MetalMltRecorder" in src
+    assert '"SKINNY_MLT": "1"' in src, "MLT kernels must compile under SKINNY_MLT"
+    for entry in ("wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"):
+        assert entry in src
+
+
+def test_metal_mlt_recorder_flushes_every_sub_batch():
+    # Design D7 / the Metal dispatch-hygiene rule: one mutation dispatch runs a
+    # complete BDPT sample per chain, so each breadth-tiled sub-batch must be
+    # committed + drained or the macOS GPU watchdog wedges the device.
+    src = _read("metal_wavefront.py")
+    start = src.index("class _MetalMltRecorder")
+    body = src[start:src.index("class MetalWavefrontMltPass")]
+    assert "def flush" in body and "self._enc.flush()" in body
+    assert "def push_window" in body, \
+        "the MLT driver sequences push a chain window, not a lane stream"
+
+
+def test_metal_mlt_binds_the_chain_buffers_by_name():
+    # Metal has no descriptor sets: the Vulkan bindings 52–56 become Slang
+    # global names merged into the per-dispatch bind map.
+    src = _read("metal_wavefront.py")
+    start = src.index("class MetalWavefrontMltPass")
+    body = src[start:]
+    for name in ("mltPrimarySamples", "mltChainMeta", "mltCurrentRecords",
+                 "mltBootstrapWeights", "mltChainSeeds"):
+        assert name in body, f"Metal MLT pass must bind {name}"
+
+
+def test_renderer_metal_mlt_bootstrap_round_trip():
+    src = _read("renderer.py")
+    start = src.index("def _run_wavefront_mlt_bootstrap_metal")
+    body = src[start:start + 2500]
+    # Same host round-trip as Vulkan, in order: bootstrap → readback →
+    # resample → seed upload → init. Anchored on the CALL sites (the
+    # `resample_chain_seeds` import sits above them all).
+    order = ["mlt.dispatch_bootstrap(", "mlt.read_bootstrap_weights(",
+             "resample_chain_seeds(weights", "mlt.upload_chain_seeds(",
+             "mlt.dispatch_init("]
+    at = [body.index(sym) for sym in order]
+    assert at == sorted(at), f"Metal MLT bootstrap steps out of order: {order}"
+
+
+def _renderer_module():
+    # renderer.py imports `vulkan` at module load, which raises OSError (NOT
+    # ImportError) when the SDK is not on the dynamic-library path — so
+    # importorskip does not catch it.
+    try:
+        from skinny import renderer
+    except (ImportError, OSError) as exc:  # pragma: no cover - env-dependent
+        pytest.skip(f"renderer import unavailable: {exc}")
+    return renderer
+
+
+def test_mlt_msl_field_table_inserts_tail_before_tile_origin():
+    # `_pack_uniforms_msl` walks a field table over the scalar blob, so the
+    # table must describe the MLT pack EXACTLY: the 32 B tail sits where the
+    # Vulkan filler word would be, and tileOriginY stays last.
+    R = _renderer_module()
+    base = [n for n, _ in R._FC_SCALAR_FIELDS]
+    mlt = [n for n, _ in R._FC_SCALAR_FIELDS_MLT]
+    assert base[-1] == "tileOriginY" and mlt[-1] == "tileOriginY"
+    assert mlt == base[:-1] + [n for n, _ in R._FC_MLT_FIELDS] + ["tileOriginY"]
+    assert sum(s for _, s in R._FC_SCALAR_FIELDS_MLT) == \
+        sum(s for _, s in R._FC_SCALAR_FIELDS) + 32
+
+
+def test_mlt_tail_starts_where_vulkan_spirv_expects_it():
+    # In the Vulkan MLT SPIR-V `tileOriginY` does not exist (SKINNY_METAL-gated),
+    # so `mltSigma` must land at 564, immediately after sppmGroupPmfEnv.
+    R = _renderer_module()
+    off = 0
+    for name, sz in R._FC_SCALAR_FIELDS_MLT:
+        if name == "mltSigma":
+            break
+        off += sz
+    assert off == R._TILE_ORIGIN_Y_OFFSET == 564
 
 
 def test_vk_wavefront_has_mlt_pass_and_recorder():

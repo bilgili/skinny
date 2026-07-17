@@ -181,8 +181,30 @@ _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
     ("tileOriginY", 4),
 )
 
+# The `#if defined(SKINNY_MLT)` FrameConstants tail (change mlt-integrator).
+# `_pack_uniforms` appends these ONLY when the MLT wavefront pass is the
+# consumer — every other pipeline's struct ends at `tileOriginY` above, so the
+# RGB SPIR-V and the non-MLT MSL layouts are byte-unchanged. Field order
+# matches common.slang's gated block exactly; the scalar blob carries the tail
+# BEFORE the trailing `tileOriginY` word (see `_pack_uniforms`), which is why
+# this is a separate table rather than an extension of the one above.
+_FC_MLT_FIELDS: tuple[tuple[str, int], ...] = (
+    ("mltSigma", 4), ("mltLargeStepProb", 4), ("mltB", 4), ("mltMppActual", 4),
+    ("mltNumChains", 4), ("mltChainBase", 4), ("mltMaxDepth", 4), ("mltSeed", 4),
+)
+
+# Scalar-blob field order for an MLT pack: the MLT tail sits where the Vulkan
+# filler word would be, and `tileOriginY` follows it. `_pack_uniforms_msl`
+# relocates by NAME from reflection, so this order need not match the MSL
+# struct's — only the scalar blob it walks.
+_FC_SCALAR_FIELDS_MLT: tuple[tuple[str, int], ...] = (
+    _FC_SCALAR_FIELDS[:-1] + _FC_MLT_FIELDS + _FC_SCALAR_FIELDS[-1:]
+)
+
 # Byte offset of the `tileOriginY` u32 at the tail of the `_pack_uniforms` scalar
 # blob, so the Metal band loop can patch it in place without a full re-pack.
+# MLT never uses this (the megakernel band loop is the only patcher, and MLT is
+# wavefront-only) — under an MLT pack the word moves by the tail's 32 B.
 _TILE_ORIGIN_Y_OFFSET = sum(sz for _, sz in _FC_SCALAR_FIELDS) - 4
 
 # Target pixels per Metal megakernel command buffer, per integrator, before the
@@ -2074,7 +2096,16 @@ class Renderer:
         wavefront pass — path, or bdpt when the bidirectional integrator is
         the only compiled program (both reflect the same surface from their
         own programs). ``None`` before any exists — the MSL relocators then
-        fall through to their scalar defaults."""
+        fall through to their scalar defaults.
+
+        The Metal MLT pass comes FIRST (change mlt-integrator): it is the only
+        program compiled with ``SKINNY_MLT``, so it is the only one whose
+        reflected ``fc`` carries the MLT tail that ``_pack_uniforms`` emits in
+        an MLT session — any other source would drop the tail's fields. Gated
+        on the backend because `_wavefront_mlt_pass` also holds the *Vulkan*
+        pass, which reflects no MSL layouts at all."""
+        if self.is_metal and self._wavefront_mlt_pass is not None:
+            return self._wavefront_mlt_pass
         if self.pipeline is not None:
             return self.pipeline
         if self._wavefront_sppm_pass is not None:
@@ -2332,12 +2363,34 @@ class Renderer:
             self._wavefront_sppm_pass = None
         self._wf_sppm_pass_dims = None
 
+    def _mlt_pass_key(self):
+        return (self.width, self.height,
+                int(self.mlt_num_chains), int(self.mlt_bootstrap_samples))
+
+    def _ensure_wavefront_mlt_pass_metal(self):
+        """Build (once) the native-Metal staged MLT pass (change
+        mlt-integrator, task 5.6) — the Metal sibling of
+        `_ensure_wavefront_mlt_pass`. Metal binds by name, so there are no
+        scene-set slots 52–56 to rebind: the pass merges its chain buffers into
+        the per-dispatch bind map itself."""
+        key = self._mlt_pass_key()
+        if self._wavefront_mlt_pass is not None and self._wf_mlt_pass_dims == key:
+            return self._wavefront_mlt_pass
+        self._destroy_wavefront_mlt_pass()
+        from skinny.metal_wavefront import MetalWavefrontMltPass
+        self._wavefront_mlt_pass = MetalWavefrontMltPass(
+            self.ctx, self.shader_dir,
+            num_pixels=self.width * self.height,
+            num_chains=int(self.mlt_num_chains),
+            bootstrap_samples=int(self.mlt_bootstrap_samples))
+        self._wf_mlt_pass_dims = key
+        return self._wavefront_mlt_pass
+
     def _ensure_wavefront_mlt_pass(self):
         """Build (once) the staged wavefront MLT pass (change mlt-integrator).
-        Vulkan only — the native-Metal MLT adapter is a follow-up, so this
-        returns None on Metal (`_render_scene_metal` refuses integrator 3
-        before reaching here). Also returns None when the scene set-0 layout
-        lacks the MLT bindings 52–56 (a megakernel-mode session — the
+        Vulkan path — the Metal sibling is `_ensure_wavefront_mlt_pass_metal`
+        (`_render_scene_metal` routes there). Returns None when the scene set-0
+        layout lacks the MLT bindings 52–56 (a megakernel-mode session — the
         `scene_bindings_only` wavefront layout always carries them); the
         caller then falls back to the path tracer like SPPM does."""
         if self.is_metal:
@@ -2348,8 +2401,7 @@ class Renderer:
             return None
         if not getattr(self._scene_bindings, "mlt_bindings", False):
             return None
-        key = (self.width, self.height,
-               int(self.mlt_num_chains), int(self.mlt_bootstrap_samples))
+        key = self._mlt_pass_key()
         if self._wavefront_mlt_pass is not None and self._wf_mlt_pass_dims == key:
             return self._wavefront_mlt_pass
         self._destroy_wavefront_mlt_pass()
@@ -9356,9 +9408,16 @@ class Renderer:
         src = layout_source if layout_source is not None else self._msl_layout_source
         layout = src.uniform_layout
         size = src.uniform_size
+        # An MLT program's `fc` carries the `#if defined(SKINNY_MLT)` tail, so
+        # `_pack_uniforms` emitted 32 B more than the base table describes.
+        # Key off the REFLECTED layout, not the integrator index: the two agree
+        # only when the MLT pass is the layout source, and the drift guard
+        # below is what proves it.
+        fields = (_FC_SCALAR_FIELDS_MLT if "mltSigma" in layout
+                  else _FC_SCALAR_FIELDS)
         out = bytearray(size)
         off = 0
-        for name, sz in _FC_SCALAR_FIELDS:
+        for name, sz in fields:
             moff, _msz = layout[name]
             out[moff:moff + sz] = scalar[off:off + sz]
             off += sz
@@ -9524,13 +9583,12 @@ class Renderer:
         buildable) — bdpt when the bidirectional integrator is active (phase
         4), else the path tracer — falling back to the megakernel."""
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            if self.integrator_index == 3:  # MLT → no Metal adapter yet
-                # Refuse loudly rather than silently rendering another
-                # integrator (change mlt-integrator; the Metal chain-state
-                # pass is a recorded follow-up).
-                raise NotImplementedError(
-                    "MLT on the native Metal backend is pending (change "
-                    "mlt-integrator) — run --backend vulkan for MLT")
+            if self.integrator_index == 3:  # MLT → staged wavefront mlt
+                mlt = self._ensure_wavefront_mlt_pass_metal()
+                if mlt is not None:
+                    self._render_wavefront_mlt_metal(mlt)
+                    return
+                # unbuildable → fall back to the path tracer below
             if self.integrator_index == 2:  # SPPM → staged wavefront sppm
                 sppm = self._ensure_wavefront_sppm_pass()
                 if sppm is not None:
@@ -9567,6 +9625,58 @@ class Renderer:
             photons=self._sppm_photons_emitted,
             first_frame=(self.accum_frame == 0),
             photon_batch=self._sppm_metal_photon_batch,
+        )
+
+    def _run_wavefront_mlt_bootstrap_metal(self, mlt) -> None:
+        """Synchronous MLT (re)seed at an accumulation reset on Metal (design
+        D3) — the Metal sibling of `_run_wavefront_mlt_bootstrap`. Identical
+        host round-trip; the two submits are the pass's own
+        `dispatch_bootstrap` / `dispatch_init` encoders (each ends in a
+        `MetalFrameEncoder.submit`, which drains), so the weight readback
+        between them sees finished GPU work without an explicit wait."""
+        from skinny.mlt_bootstrap import resample_chain_seeds
+
+        self._mlt_seed = hash(
+            (self._current_state_hash(), self.frame_index)) & 0xFFFFFFFF
+        mlt.b = 0.0
+        mlt.seeded = False
+        binds = self._build_metal_binds()
+        textures = [(s.texture if s is not None else None)
+                    for s in self.texture_pool._slots]
+        # Packed AFTER _mlt_seed is set: the bootstrap/init kernels read
+        # fc.mltSeed, and on Metal the blob is a per-dispatch argument (no
+        # persistent uniform buffer to re-upload as on Vulkan).
+        mlt.dispatch_bootstrap(
+            binds=binds, uniform_blob=self._pack_uniforms_msl(),
+            bindless_textures=textures)
+        weights = mlt.read_bootstrap_weights()
+        b, seeds = resample_chain_seeds(weights, mlt.num_chains, self._mlt_seed)
+        mlt.upload_chain_seeds(seeds)
+        mlt.dispatch_init(
+            binds=binds, uniform_blob=self._pack_uniforms_msl(),
+            bindless_textures=textures)
+        mlt.b = b
+        mlt.seeded = True
+
+    def _render_wavefront_mlt_metal(self, mlt) -> None:
+        """Dispatch one staged MLT frame on the Metal backend (change
+        mlt-integrator, task 5.6) — the `record_mlt_frame` sequence over one
+        MetalFrameEncoder, preceded at an accumulation reset by the synchronous
+        bootstrap round-trip. The frame's uniform blob is packed AFTER the
+        bootstrap so the resolve reads the freshly measured `fc.mltB`."""
+        mtlx_bytes = self._pack_mtlx_skin_array_msl()
+        if mtlx_bytes:
+            self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
+        if self.accum_frame == 0 or not mlt.seeded:
+            self._run_wavefront_mlt_bootstrap_metal(mlt)
+        mlt.dispatch_frame(
+            binds=self._build_metal_binds(),
+            uniform_blob=self._pack_uniforms_msl(),
+            bindless_textures=[
+                (s.texture if s is not None else None)
+                for s in self.texture_pool._slots
+            ],
+            iterations=self._mlt_iterations_per_frame(),
         )
 
     def _render_headless_metal(self) -> bytes:
@@ -9900,16 +10010,17 @@ class Renderer:
         data += struct.pack("f", float(self.film_max_component))      # filmMaxComponent
         data += struct.pack("4f", *(float(p) for p in sppm_pmf))     # sppmGroupPmfE/S/D/Env
         # MLT chain constants (change mlt-integrator): the SKINNY_MLT
-        # FrameConstants tail, appended ONLY when the MLT wavefront pass is
-        # the consumer — every other pipeline's struct ends above. The tail
-        # goes BEFORE the trailing tileOriginY filler: `tileOriginY` is
-        # `#if defined(SKINNY_METAL)`-gated, so in the Vulkan MLT SPIR-V
-        # `mltSigma` sits at offset 564 immediately after sppmGroupPmfEnv
-        # (verified by spirv-cross reflection) — exactly where the filler u32
-        # would land. Vulkan-only (Metal MLT is refused at dispatch; the
-        # Metal packer's drift guard never sees this tail). Field order
-        # matches common.slang's `#if defined(SKINNY_MLT)` block exactly.
-        if self.integrator_index == 3 and not self.is_metal:  # INTEGRATOR_MLT
+        # FrameConstants tail (`_FC_MLT_FIELDS`), appended ONLY when the MLT
+        # wavefront pass is the consumer — every other pipeline's struct ends
+        # above. The tail goes BEFORE the trailing tileOriginY word: in the
+        # Vulkan MLT SPIR-V `tileOriginY` does not exist at all (it is
+        # `#if defined(SKINNY_METAL)`-gated), so `mltSigma` sits at offset 564
+        # immediately after sppmGroupPmfEnv — exactly where the filler would
+        # land — and the trailing word is harmless slack in the oversized UBO.
+        # On Metal BOTH fields exist and the packer relocates by reflected name
+        # (`_pack_uniforms_msl` over `_FC_SCALAR_FIELDS_MLT`), so this scalar
+        # order needs no backend split: only the MSL placement differs.
+        if self.integrator_index == 3:  # INTEGRATOR_MLT
             chains = max(1, int(self.mlt_num_chains))
             pixels = max(1, self.width * self.height)
             iterations = self._mlt_iterations_per_frame()
@@ -9920,7 +10031,7 @@ class Renderer:
                 "ffff", float(self.mlt_sigma), float(self.mlt_large_step_prob),
                 mlt_b, float(mpp_actual))
             data += struct.pack(
-                "IIII", chains, 0,  # mltChainBase: Vulkan tiles via push constant
+                "IIII", chains, 0,  # mltChainBase: both backends tile via wfTile
                 int(self.mlt_max_depth), int(self._mlt_seed) & 0xFFFFFFFF)
         data += struct.pack("I", 0)                                  # tileOriginY (Metal band loop patches)
 
