@@ -22,6 +22,7 @@ import bindings;
 import scene_trace;
 import cameras.pinhole;
 import integrators.bdpt;
+import wavefront.wf_display;   // wfWriteDisplay (exposure + tonemap + present)
 
 // Per-dispatch tile window (same push-constant layout as wavefront_bdpt's
 // WfTilePC so the host tile-push path is shared).
@@ -289,9 +290,14 @@ void wfMltResolve(uint3 tid: SV_DispatchThreadID)
     lightSplatBuffer[base + 1u] = 0u;
     lightSplatBuffer[base + 2u] = 0u;
 
-    int2 p = int2(int(lane % fc.width), int(lane / fc.width));
+    uint2 p = uint2(lane % fc.width, lane / fc.width);
     uint n = fc.accumFrame;
-    float4 prev = accumBuffer[p];
-    float4 cur = float4(frameL, 1.0);
-    accumBuffer[p] = (n == 0u) ? cur : (prev * float(n) + cur) / float(n + 1u);
+    float3 accum = frameL;
+    if (n != 0u)
+    {
+        let prev = accumBuffer[p].rgb;
+        accum = (prev * float(n) + frameL) / float(n + 1u);
+    }
+    accumBuffer[p] = float4(accum, 1.0);
+    wfWriteDisplay(p, accum);
 }

@@ -58,10 +58,12 @@ def test_mlt_is_wavefront_only():
 def test_mlt_gated_until_wired(monkeypatch):
     from skinny import mlt_capability
     flat = _flat_scene()
-    # Gate off (the shipped default): recorded "not yet wired" skip.
+    # Gate off (monkeypatched — the rollback path): recorded skip.
+    monkeypatch.setattr(mlt_capability, "MLT_IMPLEMENTED", False)
     ok, reason = parity.combo_is_valid(RenderCombo("mlt", "wavefront"), flat)
     assert not ok and "not yet wired" in reason
-    # Gate on: the in-envelope combo enters the rendered set.
+    # Gate on (the shipped default since the Vulkan transport landed): the
+    # in-envelope combo enters the rendered set.
     monkeypatch.setattr(mlt_capability, "MLT_IMPLEMENTED", True)
     assert parity.combo_is_valid(RenderCombo("mlt", "wavefront"), flat)[0]
 

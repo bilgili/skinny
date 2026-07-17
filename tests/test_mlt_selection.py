@@ -73,18 +73,25 @@ def test_mlt_auto_derives_wavefront():
     assert resolve_execution_mode("megakernel", "mlt") == "megakernel"
 
 
-# ── Refusals (capability gate off — the shipped default) ────────────────────
+# ── Capability gate (shipped ON since the Vulkan transport landed) ──────────
 
-def test_mlt_refused_while_unimplemented():
-    assert mlt_capability.MLT_IMPLEMENTED is False
+def test_mlt_gate_is_on_and_accepted():
+    # The transport is wired (change mlt-integrator): an in-envelope
+    # `--integrator mlt` session is accepted, no monkeypatch needed.
+    assert mlt_capability.MLT_IMPLEMENTED is True
+    reject_mlt_unsupported("mlt", "wavefront")
+    validate_render_flags(_ns(integrator="mlt", execution_mode="wavefront"))
+
+
+def test_mlt_refused_when_gate_monkeypatched_off(monkeypatch):
+    # The gate is referenced live, so flipping it back off (rollback path)
+    # restores the clean refusal instead of silently rendering another
+    # integrator.
+    monkeypatch.setattr(mlt_capability, "MLT_IMPLEMENTED", False)
     with pytest.raises(SystemExit, match="not yet implemented"):
         reject_mlt_unsupported("mlt", "wavefront")
-
-
-def test_validate_render_flags_refuses_explicit_mlt_while_unimplemented():
-    ns = _ns(integrator="mlt", execution_mode="wavefront")
     with pytest.raises(SystemExit, match="not yet implemented"):
-        validate_render_flags(ns)
+        validate_render_flags(_ns(integrator="mlt", execution_mode="wavefront"))
 
 
 def test_non_mlt_integrators_unaffected():

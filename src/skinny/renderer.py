@@ -1778,6 +1778,25 @@ class Renderer:
         self._wf_sppm_pass_dims = None
         self._sppm_photons_emitted = 0
         self._sppm_metal_photon_batch = 0  # set per-frame in _pack_uniforms (Metal SPPM tiling)
+        # Staged wavefront MLT (change mlt-integrator): PSSMLT chains over the
+        # BDPT estimator, Vulkan only (the Metal adapter is a follow-up —
+        # _render_scene_metal refuses integrator 3 explicitly). The pass owns
+        # the five chain buffers (bindings 52–56 of the wavefront scene set);
+        # per accumulation reset the renderer runs the synchronous bootstrap
+        # round-trip (_run_wavefront_mlt_bootstrap) before recording frames.
+        self._wavefront_mlt_pass = None
+        self._wf_mlt_pass_dims = None
+        self.mlt_num_chains = 16384          # design D1 default (one lane = one chain)
+        # Bootstrap budget per accumulation reset (design D3): interactive
+        # default 8192 (quick reseed while dragging); parity / headless raise
+        # it toward pbrt's 100000 via SKINNY_MLT_BOOTSTRAP or the attribute.
+        import os as _os
+        self.mlt_bootstrap_samples = int(
+            _os.environ.get("SKINNY_MLT_BOOTSTRAP", "8192"))
+        self.mlt_sigma = 0.01                # pbrt `sigma`
+        self.mlt_large_step_prob = 0.3       # pbrt `largestepprobability`
+        self.mlt_max_depth = 5               # pbrt `maxdepth`
+        self._mlt_seed = 0                   # derived per accumulation reset
         # Staged wavefront bdpt (Phase 3): subpath-vertex + aux buffers + pass,
         # same lazy lifecycle as the path pass.
         self._wavefront_bdpt_pass = None
@@ -2313,12 +2332,124 @@ class Renderer:
             self._wavefront_sppm_pass = None
         self._wf_sppm_pass_dims = None
 
+    def _ensure_wavefront_mlt_pass(self):
+        """Build (once) the staged wavefront MLT pass (change mlt-integrator).
+        Vulkan only — the native-Metal MLT adapter is a follow-up, so this
+        returns None on Metal (`_render_scene_metal` refuses integrator 3
+        before reaching here). Also returns None when the scene set-0 layout
+        lacks the MLT bindings 52–56 (a megakernel-mode session — the
+        `scene_bindings_only` wavefront layout always carries them); the
+        caller then falls back to the path tracer like SPPM does."""
+        if self.is_metal:
+            return None
+        if not hasattr(self.ctx, "compute_queue"):
+            return None
+        if self._scene_bindings is None or self.descriptor_sets is None:
+            return None
+        if not getattr(self._scene_bindings, "mlt_bindings", False):
+            return None
+        key = (self.width, self.height,
+               int(self.mlt_num_chains), int(self.mlt_bootstrap_samples))
+        if self._wavefront_mlt_pass is not None and self._wf_mlt_pass_dims == key:
+            return self._wavefront_mlt_pass
+        self._destroy_wavefront_mlt_pass()
+        from skinny.vk_wavefront import WavefrontMltPass
+        self._wavefront_mlt_pass = WavefrontMltPass(
+            self.ctx, self.shader_dir, self._scene_set0_layout,
+            num_pixels=self.width * self.height,
+            num_chains=int(self.mlt_num_chains),
+            bootstrap_samples=int(self.mlt_bootstrap_samples))
+        # Rebind the scene descriptor sets' MLT slots (52–56) from the
+        # creation-time dummies to this pass's chain buffers.
+        for ds in self.descriptor_sets:
+            writes = [
+                vk.VkWriteDescriptorSet(
+                    dstSet=ds, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[vk.VkDescriptorBufferInfo(
+                        buffer=buf.buffer, offset=0, range=buf.size)],
+                )
+                for b, buf in self._wavefront_mlt_pass.descriptor_bindings
+            ]
+            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+        self._wf_mlt_pass_dims = key
+        return self._wavefront_mlt_pass
+
+    def _destroy_wavefront_mlt_pass(self):
+        if self._wavefront_mlt_pass is not None:
+            self._wavefront_mlt_pass.destroy()
+            self._wavefront_mlt_pass = None
+        self._wf_mlt_pass_dims = None
+
+    def _mlt_iterations_per_frame(self) -> int:
+        """Mutation iterations per accumulation frame: ~1 mutation/pixel/frame
+        (`mpp_actual = iterations × nChains / pixels` is packed into the MLT
+        uniform tail so the resolve divides by the ACTUAL budget, design D4)."""
+        pixels = max(1, self.width * self.height)
+        return max(1, round(pixels / max(1, int(self.mlt_num_chains))))
+
+    def _submit_one_shot_compute(self, record_fn) -> None:
+        """Allocate, record, submit, and wait one command buffer on the compute
+        queue — the synchronous seam for one-shot GPU work (the MLT bootstrap +
+        chain-init phases). Mirrors StorageBuffer.upload_sync's submit."""
+        cmd = vk.vkAllocateCommandBuffers(
+            self.ctx.device, vk.VkCommandBufferAllocateInfo(
+                commandPool=self.ctx.command_pool,
+                level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                commandBufferCount=1))[0]
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+        record_fn(cmd)
+        vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1,
+            [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
+            vk.VK_NULL_HANDLE)
+        vk.vkQueueWaitIdle(self.ctx.compute_queue)
+        vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
+
+    def _run_wavefront_mlt_bootstrap(self, mlt, scene_set) -> None:
+        """Synchronous MLT (re)seed at an accumulation reset (design D3):
+        bootstrap dispatch → weight readback → host CDF resample (b + chain
+        seeds) → seed upload → chain-init dispatch. Runs like other one-shot
+        GPU work — its own submits, awaited before the frame records."""
+        from skinny.mlt_bootstrap import resample_chain_seeds
+
+        # Per-reset replay seed (stable across the accumulation run; the
+        # frame index at reset decorrelates consecutive resets of one state).
+        self._mlt_seed = hash(
+            (self._current_state_hash(), self.frame_index)) & 0xFFFFFFFF
+        mlt.b = 0.0
+        mlt.seeded = False
+        # The bootstrap/init kernels read fc.mltSeed — re-upload before they run.
+        self.uniform_buffer.upload(self._pack_uniforms())
+        self._submit_one_shot_compute(lambda c: mlt.record_bootstrap(c, scene_set))
+        weights = mlt.read_bootstrap_weights()
+        b, seeds = resample_chain_seeds(weights, mlt.num_chains, self._mlt_seed)
+        mlt.upload_chain_seeds(seeds)
+        self._submit_one_shot_compute(lambda c: mlt.record_init(c, scene_set))
+        mlt.b = b
+        mlt.seeded = True
+        # The frame's resolve reads fc.mltB — re-upload now that b is known
+        # (the frame command buffer has not been submitted yet).
+        self.uniform_buffer.upload(self._pack_uniforms())
+
     def _record_wavefront_dispatch(self, cmd, scene_set):
         """Record the active wavefront integrator's dispatch into ``cmd`` —
         shared by the windowed + headless Vulkan seams. SPPM (integrator 2) needs
-        the per-frame photon count + first-frame flag; path/bdpt take the scene
-        set alone. SPPM falls back to the path tracer when its pass is
-        unbuildable (e.g. Metal, not yet wired)."""
+        the per-frame photon count + first-frame flag; MLT (integrator 3) runs
+        the synchronous bootstrap round-trip at an accumulation reset before
+        recording its frame; path/bdpt take the scene set alone. SPPM and MLT
+        fall back to the path tracer when their pass is unbuildable (e.g. a
+        megakernel-mode session's layout, not yet wired)."""
+        if self.integrator_index == 3:  # INTEGRATOR_MLT
+            mlt = self._ensure_wavefront_mlt_pass()
+            if mlt is not None:
+                if self.accum_frame == 0 or not mlt.seeded:
+                    self._run_wavefront_mlt_bootstrap(mlt, scene_set)
+                mlt.record_frame(
+                    cmd, scene_set, iterations=self._mlt_iterations_per_frame())
+                return
         if self.integrator_index == 2:  # INTEGRATOR_SPPM
             sppm = self._ensure_wavefront_sppm_pass()
             if sppm is not None:
@@ -3775,6 +3906,9 @@ class Renderer:
             # scene bindings, so a rebuild of the layout invalidates them too.
             self._destroy_wavefront_path_pass()
             self._destroy_wavefront_bdpt_pass()
+            # MLT also holds descriptor writes in the (freed) scene sets — a
+            # rebuild must force the ensure/rebind path (change mlt-integrator).
+            self._destroy_wavefront_mlt_pass()
             # `self.pipeline` (megakernel) shares the scene-bindings object in
             # megakernel mode; destroy the scene bindings once, then clear the
             # alias. In wavefront mode `self.pipeline` is already None.
@@ -4474,8 +4608,11 @@ class Renderer:
                 # +7 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
                 # 49 emissive blackbody + 50 distant-light SPD + 51 per-material
                 # blackbody) only for the spectral megakernel variant.
+                # +5 MLT chain buffers (52–56, change mlt-integrator) only on
+                # the wavefront (`scene_bindings_only`) layout.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
-                * (22 + graph_slot + (7 if self._spectral else 0)),
+                * (22 + graph_slot + (7 if self._spectral else 0)
+                   + (5 if getattr(self._scene_bindings, "mlt_bindings", False) else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -4861,6 +4998,19 @@ class Renderer:
                     pBufferInfo=[vk.VkDescriptorBufferInfo(
                         buffer=_buf.buffer, offset=0, range=_buf.size)],
                 ))
+            # MLT chain buffers (52–56, change mlt-integrator) — only the
+            # wavefront (`scene_bindings_only`) layout declares them; dummies
+            # until `_ensure_wavefront_mlt_pass` rebinds the real chain
+            # buffers (the 36/37 record-dump precedent).
+            if getattr(self._scene_bindings, "mlt_bindings", False):
+                for _b in (52, 53, 54, 55, 56):
+                    writes.append(vk.VkWriteDescriptorSet(
+                        dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
+                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        pBufferInfo=[vk.VkDescriptorBufferInfo(
+                            buffer=self.record_counter.buffer, offset=0,
+                            range=self.record_counter.size)],
+                    ))
             # Spectral upsample tables (45/46/47) — only the spectral variant's
             # layout declares these bindings; the RGB path writes nothing.
             if self._spectral:
@@ -9374,6 +9524,13 @@ class Renderer:
         buildable) — bdpt when the bidirectional integrator is active (phase
         4), else the path tracer — falling back to the megakernel."""
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
+            if self.integrator_index == 3:  # MLT → no Metal adapter yet
+                # Refuse loudly rather than silently rendering another
+                # integrator (change mlt-integrator; the Metal chain-state
+                # pass is a recorded follow-up).
+                raise NotImplementedError(
+                    "MLT on the native Metal backend is pending (change "
+                    "mlt-integrator) — run --backend vulkan for MLT")
             if self.integrator_index == 2:  # SPPM → staged wavefront sppm
                 sppm = self._ensure_wavefront_sppm_pass()
                 if sppm is not None:
@@ -9742,6 +9899,29 @@ class Renderer:
         data += struct.pack("f", sppm_glossy)                        # sppmGlossyContinueRoughness
         data += struct.pack("f", float(self.film_max_component))      # filmMaxComponent
         data += struct.pack("4f", *(float(p) for p in sppm_pmf))     # sppmGroupPmfE/S/D/Env
+        # MLT chain constants (change mlt-integrator): the SKINNY_MLT
+        # FrameConstants tail, appended ONLY when the MLT wavefront pass is
+        # the consumer — every other pipeline's struct ends above. The tail
+        # goes BEFORE the trailing tileOriginY filler: `tileOriginY` is
+        # `#if defined(SKINNY_METAL)`-gated, so in the Vulkan MLT SPIR-V
+        # `mltSigma` sits at offset 564 immediately after sppmGroupPmfEnv
+        # (verified by spirv-cross reflection) — exactly where the filler u32
+        # would land. Vulkan-only (Metal MLT is refused at dispatch; the
+        # Metal packer's drift guard never sees this tail). Field order
+        # matches common.slang's `#if defined(SKINNY_MLT)` block exactly.
+        if self.integrator_index == 3 and not self.is_metal:  # INTEGRATOR_MLT
+            chains = max(1, int(self.mlt_num_chains))
+            pixels = max(1, self.width * self.height)
+            iterations = self._mlt_iterations_per_frame()
+            mpp_actual = iterations * chains / pixels
+            mlt_pass = self._wavefront_mlt_pass
+            mlt_b = float(getattr(mlt_pass, "b", 0.0)) if mlt_pass is not None else 0.0
+            data += struct.pack(
+                "ffff", float(self.mlt_sigma), float(self.mlt_large_step_prob),
+                mlt_b, float(mpp_actual))
+            data += struct.pack(
+                "IIII", chains, 0,  # mltChainBase: Vulkan tiles via push constant
+                int(self.mlt_max_depth), int(self._mlt_seed) & 0xFFFFFFFF)
         data += struct.pack("I", 0)                                  # tileOriginY (Metal band loop patches)
 
         # Directional lights are no longer in the UBO — they live in the
@@ -11060,6 +11240,7 @@ class Renderer:
         # the wavefront stage passes down first, then the scene bindings once.
         self._destroy_wavefront_path_pass()
         self._destroy_wavefront_bdpt_pass()
+        self._destroy_wavefront_mlt_pass()
         if self._scene_bindings is not None:
             self._scene_bindings.destroy()
             self._scene_bindings = None
