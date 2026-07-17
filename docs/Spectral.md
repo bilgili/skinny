@@ -359,7 +359,7 @@ emissive triangles, task 6.1.)*
 
 ### Conductor Fresnel (complex index)
 
-A named metal (`au`/`ag`/`al`/`cu`) preserves its identity on
+A named metal (`au`/`ag`/`al`/`cu`/`cuzn`/`mgo`/`tio2`) preserves its identity on
 `skinnyOverrides["conductor_metal"]`; its complex index η̃ = η + iκ is looked up per
 hero wavelength from the vendored eta/k curves (`spectralMetals`, binding 48, 5 nm
 grid) and the specular lobe uses pbrt's exact unpolarized `FrComplex` instead of a
@@ -374,12 +374,74 @@ renders warmer / more saturated than its RGB Schlick approximation).
 > (used by `flatBsdfResponseSpectral` when `FlatMaterialParams.conductorMetalId ≠ 0`);
 > `fresnel_conductor` / `named_metal_eta_k` in `spectral.py`.
 
+### Named-spectrum coverage
+
+pbrt addresses its built-in spectra by name (`"spectrum eta" "glass-BK7"`,
+`"spectrum L" "stdillum-A"`). The importer resolves every scene-addressable one,
+from data vendored verbatim out of pbrt-v4 by `_extract_pbrt_spectra.py`:
+
+| Family | Covered | Resolves to |
+|---|---|---|
+| Glasses (7) | `glass-BK7`, `-BAF10`, `-FK51A`, `-LASF9`, `-F5`, `-F10`, `-F11` | per-glass Cauchy `(A, B)` + d-line IOR |
+| Metals (7) | `metal-Ag`, `-Al`, `-Au`, `-Cu`, `-CuZn`, `-MgO`, `-TiO2` (`-eta`/`-k`) | vendored eta/k curves + RGB reflectance |
+| Illuminants (16) | `stdillum-A`, `-D50`, `-D65`, `-F1`…`-F12`, `illum-acesD60` | unit-luminance chromaticity + 95-sample SPD |
+
+pbrt's `canon_*` / `ilford_*` named spectra are **camera sensor responses**, not
+scene spectra, and are out of scope here (they belong with film-sensor work).
+
+A metal's id is a byte offset into the `spectralMetals` upload
+(`(metalId-1)·SPECTRAL_METAL_STRIDE`), so ids are **append-only** — renumbering
+one silently swaps materials in every existing scene. `SPECTRAL_METAL_COUNT`
+(`bindings.slang`) bounds the named-conductor gate and must equal the number of
+uploaded metals, or the ones past the bound fall back to RGB Schlick instead of
+their vendored eta/k. The id map `skinny.pbrt.data.CONDUCTOR_METAL_ID` is the
+single source of truth — the importer's recognised-name set and the renderer's
+upload order both derive from it, and a hostless test pins the shader constant to
+its length.
+
+Three limits worth knowing:
+
+* **Inline `spectrum` values on *materials* are not preserved.** Only lights have
+  an SPD path, so a material's authored SPD would be an override nothing reads.
+  Material reflectance spectrally upsamples from its RGB reduction (the existing
+  equal-energy simplification). Named metals/glasses are unaffected — they carry
+  their identity through `conductor_metal` / `glass_dispersion`.
+
+* **Unknown names are reported, not silently substituted.** An unrecognised
+  `glass-*` renders as BK7 and an unrecognised `metal-*` as copper — but each
+  records an APPROX import note naming the substitution. A name that is really a
+  *file* reference (pbrt reads a file when a name misses its table; skinny has no
+  reader) is reported as such rather than mistaken for an unknown glass.
+* **SPD binding is distant-light-only.** A named illuminant yields the correct
+  chromaticity on *every* light type, but only distant lights bind an SPD
+  (binding 50). Point/spot/infinite/area lights spectrally upsample from that RGB
+  — the same treatment an inline `spectrum L` gets on those lights. Area lights
+  carry only a blackbody `(temperature, scale)` pair (binding 49), so there is
+  nowhere to put an SPD without a record-layout change.
+
 ### Glass dispersion (Cauchy)
 
-A named glass preserves a Cauchy fit; the index falls with wavelength (normal
-dispersion, blue index > red):
+Each named glass carries its **own** Cauchy coefficients, least-squares fit to
+pbrt's tabulated eta over 360–830 nm (`_extract_pbrt_spectra.fit_cauchy`;
+regenerate the literals with `--print-tables`). The index falls with wavelength
+(normal dispersion, blue index > red):
 
 ![n(lambda) = A + B / lambda_um^2](diagrams/spectral/cauchy.svg)
+
+The 2-term form is deliberate. A third term (`+ C/λ⁴`) was measured and does not
+pay: on the worst glass (F11) it moves the max residual 7.5e-3 → 6.1e-3, and on
+LASF9 it gets *worse* — the residual is piecewise-linear interpolation error in
+pbrt's own sparse table, not a missing Cauchy order. It would also cost a
+`FlatMaterialParams` layout change to carry the extra coefficient. Fit residual
+by glass runs from 3e-4 (BK7) to 7.5e-3 (F11); the raw curves are vendored in
+`spectral_curves.npz` so `tests/pbrt/test_spectral_data.py` re-checks the fit
+hostlessly. If a glass ever needs better than ~0.4% index accuracy, the upgrade
+path is a tabulated GPU curve, not a third coefficient.
+
+The scalar d-line (589.3 nm) index is what the **RGB** build renders a named glass
+with — so `glass-LASF9` is n=1.850 in both builds, and the two agree at the d-line,
+differing only by dispersion. (Before the `pbrt-named-spectra` change the RGB build
+rendered *every* named glass at the generic 1.5 default.)
 
 The Cauchy `A` rides the material's `ior` lane and `B` the spare
 `FlatMaterialParams._normalBiasPad.w` (`glassCauchyB`) — **no new buffer**. After

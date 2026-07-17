@@ -125,14 +125,22 @@ Spectrum upsampleIlluminantBound(float3 rgb, SampledWavelengths sw)
 }
 
 // Named-conductor eta/k curves (change spectral-rendering, Group 6.2). vk binding
-// 48; uploaded only when spectral. Layout: 4 metals (au, ag, al, cu — ids 1..4)
-// each [eta(95) | k(95)] on the 360–830/5 nm grid (95 = SPECTRAL_D65_COUNT), so
-// stride 190 floats/metal. Absent from the RGB build.
+// 48; uploaded only when spectral. Layout: SPECTRAL_METAL_COUNT metals (au, ag,
+// al, cu, cuzn, mgo, tio2 — ids 1..7) each [eta(95) | k(95)] on the 360–830/5 nm
+// grid (95 = SPECTRAL_D65_COUNT), so stride 190 floats/metal. Absent from the RGB
+// build.
 [[vk::binding(48)]] StructuredBuffer<float> spectralMetals;
 static const int SPECTRAL_METAL_STRIDE = 2 * SPECTRAL_D65_COUNT;  // eta+k per metal
 
-// eta(λ)/k(λ) at the 4 hero wavelengths for named metal id 1..4 (linear interp on
-// the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with a base offset).
+//: Number of metals uploaded to `spectralMetals`. MUST equal
+//: len(renderer._SPECTRAL_METAL_ORDER) — an id is an offset ((id-1)*stride) into
+//: that upload, so a gate narrower than the upload silently drops the extra
+//: metals to the RGB Schlick path instead of their vendored eta/k.
+static const uint SPECTRAL_METAL_COUNT = 7u;
+
+// eta(λ)/k(λ) at the 4 hero wavelengths for named metal id 1..SPECTRAL_METAL_COUNT
+// (linear interp on the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with
+// a base offset).
 void namedMetalEtaK(uint metalId, SampledWavelengths sw, out float4 eta, out float4 k)
 {
     int base  = int(metalId - 1u) * SPECTRAL_METAL_STRIDE;

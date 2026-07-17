@@ -50,7 +50,7 @@ SpectralFlatColors upsampleFlatColors(FlatMaterial mat, SampledWavelengths sw, u
     c.F0           = upsampleReflectanceBound(mat.F0, sw);
     c.emission     = upsampleIlluminantBound(m.emission, sw);
     c.transmission = upsampleReflectanceBound(m.transmissionColor, sw);
-    c.isConductor  = (metalId >= 1u && metalId <= 4u);
+    c.isConductor  = (metalId >= 1u && metalId <= SPECTRAL_METAL_COUNT);
     if (c.isConductor)
         namedMetalEtaK(metalId, sw, c.etaHero, c.kHero);
     else

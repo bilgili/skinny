@@ -17,6 +17,7 @@ import vulkan as vk
 from PIL import Image, ImageDraw, ImageFont
 
 from skinny.environment import Environment, load_environments
+from skinny.pbrt.data import CONDUCTOR_METAL_ID
 from skinny.scene import CameraOverride, LensSystem, Scene, build_default_scene
 from skinny.head_textures import (
     DETAIL_TEX_RES,
@@ -565,9 +566,17 @@ class TexturePool:
         self._slots = []
 
 
-# Named-conductor id (Group 6.2): must match the au/ag/al/cu upload order in the
-# spectralMetals buffer and namedMetalEtaK's (id-1) indexing in bindings.slang.
-_CONDUCTOR_METAL_ID = {"au": 1, "ag": 2, "al": 3, "cu": 4}
+# Named-conductor id (Group 6.2). Defined in skinny.pbrt.data (a GPU-free module)
+# so the importer, this upload, and the shader gate share one source of truth that
+# a hostless test can pin — see CONDUCTOR_METAL_ID's docstring for the append-only
+# rule. Aliased to the historical private name used throughout this module.
+_CONDUCTOR_METAL_ID = CONDUCTOR_METAL_ID
+
+#: spectralMetals upload order — index i holds the metal with id i+1. Derived, so
+#: the id↔offset invariant is structural rather than two lists kept in sync by hand.
+_SPECTRAL_METAL_ORDER = tuple(
+    k for k, _ in sorted(_CONDUCTOR_METAL_ID.items(), key=lambda kv: kv[1])
+)
 
 
 def pack_flat_material(
@@ -669,8 +678,8 @@ def pack_flat_material(
     specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
     diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
     # Named-conductor identity (Group 6.2): the importer preserves the metal name
-    # on skinnyOverrides["conductor_metal"]; map to the shader id (au/ag/al/cu →
-    # 1..4, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
+    # on skinnyOverrides["conductor_metal"]; map to the shader id (_CONDUCTOR_METAL_ID,
+    # ids 1..N, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
     # (read as asuint by conductorMetalId). SPECTRAL-ONLY: only the spectral
     # conductor Fresnel reads it, so gate the id on `spectral` (like glassCauchyB)
     # — the RGB pack keeps the literal 0 in that lane, byte-identical to baseline.
@@ -685,9 +694,12 @@ def pack_flat_material(
     # base index A becomes the scalar `ior` lane (exact); B rides the spare
     # _normalBiasPad.w (glassCauchyB). 0 = constant-IOR (non-dispersive), so every
     # non-glass material keeps the old literal-0 pad → RGB pack byte-identical.
-    # SPECTRAL-ONLY: in the RGB build the scalar `ior` (and the pad) are left at
-    # their authored/fallback values, so a named-glass scene renders byte-identical
-    # to the pre-6.4 baseline — only the spectral variant substitutes Cauchy A.
+    # Only the spectral variant substitutes Cauchy A here; the RGB build keeps the
+    # authored `ior`. That authored value is NOT the old generic 1.5 default any
+    # more: since `pbrt-named-spectra`, the importer resolves a named glass to its
+    # d-line index (materials._named_spectrum_scalar), so `glass-LASF9` arrives as
+    # 1.850 in both builds. The two agree at the d-line and differ only by
+    # dispersion — the RGB build has no wavelength to disperse over.
     glass_cauchy_b = 0.0
     _gd = overrides.get("glass_dispersion")
     if spectral and _gd is not None:
@@ -3996,12 +4008,14 @@ class Renderer:
             self._spectral_d65_buffer = self._gpu.StorageBuffer(
                 self.ctx, d65_arr.size * 4)
             self._spectral_d65_buffer.upload_sync(d65_arr.tobytes())
-            # Named-conductor eta/k (Group 6.2, binding 48): au/ag/al/cu (shader
-            # ids 1..4), each [eta(95) | k(95)] on the 360-830/5nm grid,
-            # concatenated → 4·190 floats. Order MUST match namedMetalEtaK's
-            # (metalId-1)*190 indexing in bindings.slang.
+            # Named-conductor eta/k (Group 6.2, binding 48): every metal in
+            # _SPECTRAL_METAL_ORDER (shader ids 1..N), each [eta(95) | k(95)] on the
+            # 360-830/5nm grid, concatenated → N·190 floats. Order MUST match
+            # namedMetalEtaK's (metalId-1)*190 indexing in bindings.slang, and N MUST
+            # match SPECTRAL_METAL_COUNT there — a shader bound below N silently drops
+            # the extra metals to RGB Schlick.
             metal_blocks = []
-            for name in ("au", "ag", "al", "cu"):
+            for name in _SPECTRAL_METAL_ORDER:
                 ek = spectral_tables.named_metal_spectrum(name)
                 if ek is None:
                     raise ValueError(f"spectral: missing named-metal curve '{name}'")

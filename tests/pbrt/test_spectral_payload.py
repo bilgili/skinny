@@ -111,8 +111,13 @@ def test_named_conductor_key_none_for_unknown_or_nonspectrum():
 def test_named_glass_key_normalizes():
     assert spectra.named_glass_key(_param("spectrum", ["glass-BK7"])) == "bk7"
     assert spectra.named_glass_key(_param("spectrum", ["bk7"])) == "bk7"
-    # any other named glass spectrum -> the Cauchy fallback key
-    assert spectra.named_glass_key(_param("spectrum", ["glass-SF11"])) == "default"
+    # Each recognised pbrt glass now resolves to its OWN key, not a shared fallback.
+    assert spectra.named_glass_key(_param("spectrum", ["glass-LASF9"])) == "lasf9"
+    # SF11 used to land on "default" (it was unrecognised); pbrt's `glass-F11` reads
+    # the array `GlassSF11_eta`, so both spellings are that glass.
+    assert spectra.named_glass_key(_param("spectrum", ["glass-SF11"])) == "sf11"
+    # only a genuinely unknown named glass rides the fallback key
+    assert spectra.named_glass_key(_param("spectrum", ["glass-NOSUCH"])) == "default"
 
 
 def test_named_glass_key_none_for_float_eta():

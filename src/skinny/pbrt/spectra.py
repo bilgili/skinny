@@ -21,15 +21,20 @@ from __future__ import annotations
 
 import numpy as np
 
+from .data import CONDUCTOR_METAL_ID as _CONDUCTOR_METAL_ID
 from .data import NAMED_METAL_IOR, _normalize_metal_key
 from .data import spectral_tables as _st
 
 # Canonical named-conductor keys the spectral path binds vendored eta/k curves for
 # (spectral_tables.named_metal_spectrum). The alias map mirrors that function so
 # the importer, this module, and spectral_tables agree on normalization.
-_CONDUCTOR_CANON = frozenset({"au", "ag", "al", "cu"})
+#: Derived from the id map, NOT a parallel list: a name the importer recognises but
+#: the renderer has no id for would pack id 0 and silently render RGB Schlick
+#: instead of its vendored eta/k.
+_CONDUCTOR_CANON = frozenset(_CONDUCTOR_METAL_ID)
 _CONDUCTOR_ALIASES = {
     "gold": "au", "silver": "ag", "aluminium": "al", "aluminum": "al", "copper": "cu",
+    "brass": "cuzn",
 }
 
 # XYZ (D65) -> linear sRGB / Rec.709
@@ -108,8 +113,16 @@ def sampled_spectrum_to_rgb(pairs, *, illuminant: bool = False) -> np.ndarray:
     A constant SPD (all sample values exactly equal) is achromatic in pbrt, so
     it maps straight to ``[v, v, v]`` — projecting it through XYZ would tint it
     because the equal-energy whitepoint is not the sRGB (D65) white. Colored
-    spectra are integrated to XYZ: reflectance under an equal-energy whitepoint
-    (documented simplification), illuminants directly.
+    spectra are integrated to XYZ and divided by the CMF integral, matching
+    pbrt's ``SpectrumToXYZ`` (which divides by ``CIE_Y_integral`` for *every*
+    spectrum). Reflectance is thereby taken under an equal-energy whitepoint — a
+    documented simplification.
+
+    The division applies to both branches so the projection stays continuous with
+    the achromatic shortcut above as a spectrum approaches constant. It used to be
+    skipped for illuminants, which made a colored illuminant ~107× (``_Y_INTEGRAL``)
+    a constant one of the same magnitude: ``[400 10 700 10]`` → ``[10, 10, 10]``
+    but ``[400 10 700 10.000001]`` → ``[1283, 1015, 971]``.
     """
     pairs = np.asarray(pairs, dtype=np.float64).reshape(-1, 2)
     lam, val = pairs[:, 0], pairs[:, 1]
@@ -117,8 +130,7 @@ def sampled_spectrum_to_rgb(pairs, *, illuminant: bool = False) -> np.ndarray:
         return np.full(3, max(val[0], 0.0))
     sampled = np.interp(_LAMBDA, lam, val, left=val[0], right=val[-1])
     xyz = spd_to_xyz(sampled)
-    if not illuminant and _Y_INTEGRAL > 0:
-        # reflectance under equal-energy E: normalise by the CMF integral
+    if _Y_INTEGRAL > 0:
         xyz = xyz / _Y_INTEGRAL
     rgb = xyz_to_linear_srgb(xyz)
     return np.clip(rgb, 0.0, None)
@@ -169,26 +181,60 @@ def named_conductor_key(param):
     return key if key in _CONDUCTOR_CANON else None
 
 
+def looks_like_spectrum_file(name: str) -> bool:
+    """True if a named-spectrum string is really a file reference, not a name.
+
+    pbrt falls back to ``readSpectrumFromFile`` when a name misses its built-in
+    table (``paramdict.cpp`` ``GetNamedSpectrum``), so an unmatched string may be
+    a path to a ``.spd``. skinny has no spectrum-file reader; distinguishing the
+    two keeps the import report from calling a legitimate file reference an
+    "unknown glass".
+    """
+    n = (name or "").strip()
+    return "/" in n or "\\" in n or n.lower().endswith((".spd", ".txt", ".csv"))
+
+
 def named_glass_key(param):
     """Normalized glass key for a named/dispersive dielectric eta param, or ``None``.
 
     A named ``"spectrum eta"`` (e.g. ``"glass-BK7"``) carries a dispersive IOR
     identity the spectral path binds via :func:`spectral_tables.named_glass_ior`;
     this normalizes it (strip ``glass-``/``glass_``, lower-case) to a key that
-    function understands — a known Cauchy key (e.g. ``"bk7"``) or ``"default"``
-    for any other named glass. Returns ``None`` for a plain ``float eta`` (no
-    dispersion identity) or a non-string spectrum, so a scalar-IOR dielectric
-    authors nothing new.
+    function understands — a recognised glass (e.g. ``"bk7"``, ``"lasf9"``) or
+    ``"default"`` for any other named glass. Returns ``None`` for a plain
+    ``float eta`` (no dispersion identity) or a non-string spectrum, so a
+    scalar-IOR dielectric authors nothing new.
+
+    Every recognised glass resolves to its *own* key; ``"default"`` means "not
+    recognised, substituting BK7". Callers that need to report the substitution
+    use :func:`spectral_tables.glass_is_known` — a ``"default"`` return alone is
+    ambiguous only in that it cannot say *which* unknown name produced it.
     """
     if param is None or param.type != "spectrum":
         return None
     if not param.values or not isinstance(param.values[0], str):
         return None
-    n = str(param.values[0]).strip().lower()
-    for prefix in ("glass-", "glass_"):
-        if n.startswith(prefix):
-            n = n[len(prefix):]
-    return n if n in _st._GLASS_CAUCHY else "default"
+    key = _st.normalize_glass_key(str(param.values[0]))
+    return key if _st.glass_is_known(key) else "default"
+
+
+def named_illuminant_rgb(name: str):
+    """Linear-RGB chromaticity of a pbrt named illuminant at unit luminance, or None.
+
+    Mirrors :func:`blackbody_rgb`: the SPD is integrated to XYZ and normalised to
+    Y = 1, so only *chromaticity* comes from the name and magnitude keeps coming
+    from the light's ``L``/``scale``. This matches pbrt, which normalises named
+    illuminants to luminance 1 at load (``FromInterleaved(..., normalize=true)``)
+    and divides by ``CIE_Y_integral`` in its film — so pbrt's own film luminance
+    for ``"spectrum L" "stdillum-A"`` is exactly 1.
+    """
+    spd = _st.named_illuminant_spectrum(name)
+    if spd is None:
+        return None
+    xyz = spd_to_xyz(spd)
+    if xyz[1] > 0:
+        xyz = xyz / xyz[1]
+    return np.clip(xyz_to_linear_srgb(xyz), 0.0, None)
 
 
 def param_spectral_payload(param):
@@ -230,7 +276,12 @@ def param_to_rgb(param, *, illuminant: bool = False, default=None):
     """Reduce a parsed :class:`Param` (any spectral form) to a 3-float RGB list.
 
     Handles ``rgb``/``color`` passthrough, ``blackbody`` temperatures, named
-    spectra (returns the named reflectance), and inline sampled spectra.
+    spectra (named metal reflectance, or — when *illuminant* — a named
+    illuminant's unit-luminance chromaticity), and inline sampled spectra.
+
+    The named-illuminant lookup is gated on *illuminant* so a reflectance-mode
+    parameter (e.g. a medium's ``"spectrum sigma_a"``) can never reduce to an
+    illuminant chromaticity.
     """
     if param is None:
         return default
@@ -245,7 +296,12 @@ def param_to_rgb(param, *, illuminant: bool = False, default=None):
         return [v[0], v[0], v[0]]
     if ptype == "spectrum":
         if isinstance(param.values[0], str):
-            refl = named_metal_reflectance_rgb(param.values[0])
+            name = param.values[0]
+            if illuminant:
+                illum = named_illuminant_rgb(name)
+                if illum is not None:
+                    return list(illum)
+            refl = named_metal_reflectance_rgb(name)
             if refl is not None:
                 return list(refl)
             return default
