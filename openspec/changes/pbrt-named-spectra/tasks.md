@@ -79,6 +79,6 @@ and ship green over a fix that never reached a pixel.*
 
 - [x] 8.1 `docs/Spectral.md`: named-spectrum coverage table (7 glasses / 7 metals / 16 illuminants), the 2-term Cauchy residual limit + tabulated-GPU-curve upgrade path, and the D4 envelope (SPD bound on distant lights only; other light types get chromaticity and upsample from RGB)
 - [x] 8.2 `CHANGELOG.md`: note that brass/MgO/TiO2 conductors, `coatedconductor` (M4), and named-illuminant lights legitimately change appearance (they previously fell back to copper / neutral white), plus the illuminant-projection fix (D8)
-- [ ] 8.3 `.venv/bin/ruff check src/` and `.venv/bin/pytest` (hostless) green
+- [x] 8.3 `.venv/bin/ruff check src/` and `.venv/bin/pytest` (hostless) green
 - [x] 8.4 `openspec validate pbrt-named-spectra --strict`
-- [ ] 8.5 Codex pre-merge review (`codex:rescue`); fold findings back in, or fall back to a review subagent and say so if codex is unavailable
+- [x] 8.5 Codex pre-merge review (`codex:rescue`); fold findings back in, or fall back to a review subagent and say so if codex is unavailable

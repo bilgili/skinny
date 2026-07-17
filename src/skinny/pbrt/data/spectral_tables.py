@@ -51,6 +51,14 @@ _GLASS_CAUCHY = {
     "f5": (1.63949, 0.011655),  # max resid 4.0e-03
     "f10": (1.68848, 0.013994),  # max resid 5.9e-03
     "f11": (1.73547, 0.017399),  # max resid 7.5e-03
+    # Schott catalogue names for the same glasses. pbrt's public name for the dense
+    # flints is `glass-F5`/`-F10`/`-F11`, but it reads them from the arrays
+    # `GlassSF5_eta`/`GlassSF10_eta`/`GlassSF11_eta` — SF11 *is* F11. Accepting both
+    # spellings keeps a hand-authored `glass_dispersion = "sf11"` from silently
+    # falling back to BK7 (i.e. losing its dispersion entirely).
+    "sf5": (1.63949, 0.011655),  # == f5
+    "sf10": (1.68848, 0.013994),  # == f10
+    "sf11": (1.73547, 0.017399),  # == f11
 }
 
 # Refractive index at the sodium d-line (589.3 nm) — the scalar IOR a glass is
@@ -65,6 +73,9 @@ _GLASS_IOR_D = {
     "f5": 1.67254,
     "f10": 1.72806,
     "f11": 1.78448,
+    "sf5": 1.67254,  # == f5   (Schott spelling, see _GLASS_CAUCHY)
+    "sf10": 1.72806,  # == f10
+    "sf11": 1.78448,  # == f11
 }
 
 

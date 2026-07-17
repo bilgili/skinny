@@ -109,7 +109,26 @@ def test_named_glass_cauchy_normalizes_prefix_and_case():
 def test_named_glass_cauchy_unknown_falls_back_to_default():
     # An unknown-but-present name rides the default (BK7-family) coefficients,
     # mirroring named_glass_ior's fallback.
-    assert st.named_glass_cauchy("glass-SF11") == st.named_glass_cauchy("default")
+    #
+    # This used to probe "glass-SF11", which was unknown at the time. It no longer
+    # is: pbrt's `glass-F11` reads the array `GlassSF11_eta` — SF11 *is* F11 — so
+    # both spellings now resolve to that glass's own dispersion. Probe a genuinely
+    # unknown name instead.
+    assert st.named_glass_cauchy("glass-NOSUCH") == st.named_glass_cauchy("default")
+
+
+def test_schott_sf_spellings_alias_the_pbrt_flints():
+    # A hand-authored `glass_dispersion = "sf11"` (the Schott catalogue spelling)
+    # must not silently degrade to BK7 — that would drop its dispersion entirely,
+    # which is the whole failure class this change exists to fix.
+    for schott, pbrt_name in (("sf5", "f5"), ("sf10", "f10"), ("sf11", "f11")):
+        assert st.named_glass_cauchy(schott) == st.named_glass_cauchy(pbrt_name)
+        assert st.named_glass_ior_d(schott) == st.named_glass_ior_d(pbrt_name)
+        assert st.glass_is_known(schott)
+    # ...and SF11 is a dense flint: denser and more dispersive than BK7.
+    a_sf11, b_sf11 = st.named_glass_cauchy("glass-SF11")
+    a_bk7, b_bk7 = st.named_glass_cauchy("glass-BK7")
+    assert a_sf11 > a_bk7 and b_sf11 > b_bk7
 
 
 def test_named_glass_cauchy_none_or_empty_is_none():
