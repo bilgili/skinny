@@ -189,11 +189,12 @@ For development tools:
 
 ### Pre-commit hooks
 
-`.pre-commit-config.yaml` runs `ruff` (lint) plus basic hygiene checks
-(trailing whitespace, EOF newline, YAML/TOML syntax, merge conflicts) against
-first-party source under `src/`, `tests/`, and `docs/` — it excludes vendored
-build output, binary assets, generated Slang, and the openspec corpus. Install
-the `[dev]` extra (above), then enable the git hook:
+`.pre-commit-config.yaml` runs `ruff-check` (lint, scoped to `src/`) plus
+basic hygiene checks (trailing whitespace, EOF newline, YAML/TOML syntax,
+merge conflicts) over the repo minus vendored build output, data/asset dirs,
+generated Slang, and the openspec corpus — see the comment atop the config
+for the exact exclude list. Install the `[dev]` extra (above), then enable
+the git hook:
 
 ```bash
 .venv/bin/pre-commit install

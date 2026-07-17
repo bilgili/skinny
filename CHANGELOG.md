@@ -10,10 +10,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Pre-commit hooks** (`.pre-commit-config.yaml`, `pre-commit` in the `dev`
-  extra). Runs `ruff` lint plus trailing-whitespace/EOF/YAML/TOML/merge-conflict
-  hygiene checks, scoped to hand-written source under `src/`, `tests/`, and
-  `docs/` — vendored build output, binary assets, generated Slang, and the
-  openspec corpus are excluded. See README → Pre-commit hooks.
+  extra). Runs `ruff-check` (scoped to `src/`) plus trailing-whitespace/EOF/
+  YAML/TOML/merge-conflict hygiene checks over the repo minus vendored build
+  output, data/asset dirs, generated Slang, and the openspec corpus. See
+  README → Pre-commit hooks.
 
 ### Fixed
 
