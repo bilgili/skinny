@@ -92,13 +92,14 @@ worktree off `main`.
       + `wfMltResolve` (fold × `b/mpp_actual`, film-average; `mpp_actual =
       iterations × nChains / pixels`); decide splat-buffer reuse vs dedicated
       against the Metal argument-table budget
-- [ ] 5.4 `wavefront_driver.py` `record_mlt_loop`: [reset] bootstrap phases →
+- [x] 5.4 `wavefront_driver.py` `record_mlt_loop`: [reset] bootstrap phases →
       per-frame mutation iterations (breadth-tiled, 64-aligned, 65535·64
       ceiling, `flush()` at phase boundaries) → resolve; recorder primitives
       as needed; `wavefront_layout.py` `mlt_buffer_sizes` (sized by `nChains`,
       MSL-stride-aware); hostless driver tests with the recording stub
       (phase order, tiling alignment, budget math)
-- [ ] 5.5 Host wiring: `_ensure/destroy_wavefront_mlt_pass` (+`_metal`) in
+- [x] 5.5 Host wiring (Vulkan DONE + GPU smoke-validated; **Metal adapter
+      PENDING** — Metal dispatch raises clear NotImplementedError, next task): `_ensure/destroy_wavefront_mlt_pass` (+`_metal`) in
       `renderer.py`, dispatch selection branches (Vulkan ~:2322, Metal
       ~:9371), FrameConstants MLT fields, interactive quick-bootstrap +
       settle-debounce (D3), flip `MLT_IMPLEMENTED = True`; verify all
