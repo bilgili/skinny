@@ -158,7 +158,7 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 
-    def DomeLight "light_infinite_8290" (
+    def DomeLight "light_infinite_0" (
         customData = {
             dictionary pbrt = {
                 dictionary paramTypes = {
@@ -172,7 +172,7 @@ def Xform "World"
         }
     )
     {
-        asset inputs:texture:file = @light_infinite_8290_const.hdr@
+        asset inputs:texture:file = @light_infinite_0_const.hdr@
     }
 }
 

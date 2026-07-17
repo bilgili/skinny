@@ -100,9 +100,9 @@ def translate_scene(
         report.skipped("camera", "scene has no Camera")
 
     asset_dir = os.path.dirname(os.path.abspath(out)) if out else None
-    for light in scene.lights:
+    for i, light in enumerate(scene.lights):
         add_light(stage, world, light, report, asset_dir=asset_dir,
-                  exposure_scale=1.0, base_dir=base_dir)
+                  exposure_scale=1.0, base_dir=base_dir, index=i)
 
     # carry the exact pbrt scene config (integrator/sampler/film/colorspace)
     meta_mod.tag_stage(stage, meta_mod.scene_metadata(scene))
