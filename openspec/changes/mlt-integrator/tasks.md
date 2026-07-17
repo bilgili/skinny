@@ -56,7 +56,7 @@ worktree off `main`.
 
 ## 4. MLT sampler shader (net-new PSS machinery)
 
-- [ ] 4.1 `shaders/integrators/mlt_sampler.slang`: `PrimarySample` (16 B:
+- [x] 4.1 `shaders/integrators/mlt_sampler.slang`: `PrimarySample` (16 B:
       value/valueBackup/lastMod/modBackup u32 iterations), fixed X budget =
       3 streams × DIMS_PER_STREAM(maxDepth) (≥192 for maxDepth 5; worst-case
       index ≈72 — overflow is a debug-assert invariant, NOT a fallback),
@@ -65,7 +65,7 @@ worktree off `main`.
       small step `σ·√nSmall`), `accept`/`reject` backup-restore — all verbatim
       pbrt `MLTSampler` semantics; net-new `erfInv`-based `sampleNormal`
       (inverse-CDF, exactly 1 uniform per dimension)
-- [ ] 4.2 numpy mirror of the sampler (mutation math + `erfInv`) +
+- [x] 4.2 numpy mirror of the sampler (mutation math + `erfInv`) +
       hostless tests: accept/reject restore exactness, large-step lazy reset,
       aggregated-small-step distribution, stream interleaving, initial-state
       bookkeeping (iteration 0, largeStep=true, lastMod=0, no startIteration
