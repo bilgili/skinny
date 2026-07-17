@@ -1228,14 +1228,24 @@ def _extract_distant_light(
 
 def _extract_light_spd(prim: Usd.Prim) -> "np.ndarray | None":
     """Authored illuminant SPD (spectral mode, Group 6.3) from a light prim's
-    `skinnyOverrides["spectral"]` (kind `spectrum_samples`), as a 95-sample
-    360-830/5 nm array. None for a blackbody / named / plain-RGB light — the
-    spectral path upsamples the RGB radiance in those cases."""
+    `skinnyOverrides["spectral"]`, as a 95-sample 360-830/5 nm array.
+
+    Two payload kinds resolve: `spectrum_samples` (an inline authored SPD) and
+    `spectrum_named` (a pbrt named illuminant like `stdillum-A`, resolved here to
+    its vendored curve — the `.usda` keeps the legible name rather than baking
+    samples). None for a blackbody / plain-RGB light, or a named spectrum that
+    isn't an illuminant (e.g. a metal eta name on some other prim) — the spectral
+    path upsamples the RGB radiance in those cases."""
     cd = prim.GetCustomData()
     payload = cd.get("skinnyOverrides", {}).get("spectral") if cd else None
     if payload is None or not hasattr(payload, "get"):
         return None
-    if payload.get("kind") != "spectrum_samples":
+    kind = payload.get("kind")
+    if kind == "spectrum_named":
+        from skinny.pbrt.data import spectral_tables as _st
+        spd = _st.named_illuminant_spectrum(str(payload.get("name") or ""))
+        return None if spd is None else np.asarray(spd, dtype=np.float32)
+    if kind != "spectrum_samples":
         return None
     values = payload.get("values")
     if values is None:

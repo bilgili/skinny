@@ -18,7 +18,10 @@ import math
 import os
 from dataclasses import dataclass
 
+import numpy as np
+
 from . import spectra
+from .data import spectral_tables as _st
 from .parser import ParamSet
 
 # pbrt material input -> (UsdPreviewSurface input, value_type). ``value_type`` is
@@ -83,11 +86,16 @@ def get_float_texture(params, name, default, *, textures=None, base_dir=None, no
     Constant -> ``ParamValue(value)``; named texture -> ``ParamValue(default, tex)``;
     absent -> ``ParamValue(default)``. Never raises on a texture-typed param: pbrt
     ``ErrorExit``s on an unknown/unsupported texture, skinny falls back to the
-    default and records an APPROX note (best-effort translator). A named
-    ``spectrum`` value (e.g. a dielectric ``"spectrum eta" "glass-BK7"``) has no
-    scalar form here, so it likewise degrades to the default with a note — the
-    dispersive identity is preserved separately on ``skinnyOverrides``
-    (:func:`material_spectral_overrides`).
+    default and records an APPROX note (best-effort translator).
+
+    A named ``spectrum`` value has no scalar form of its own, but a **named
+    glass** (e.g. a dielectric ``"spectrum eta" "glass-BK7"``) does: its d-line
+    (589.3 nm) index. That is what pbrt renders such a dielectric with in RGB, so
+    it is used here in place of the generic default — otherwise every named glass
+    would render at the caller's fallback (1.5), turning e.g. `glass-LASF9`
+    (n=1.850) into a plain crown. The *dispersive* identity is preserved
+    separately on ``skinnyOverrides`` (:func:`material_spectral_overrides`) and
+    only the spectral build consumes it.
     """
     p = params.get(name)
     if p is None:
@@ -100,10 +108,32 @@ def get_float_texture(params, name, default, *, textures=None, base_dir=None, no
             notes.append(f"texture '{p.string}' on {name} unresolved/unsupported; used default")
         return ParamValue(float(default))
     if p.type == "spectrum" and p.values and isinstance(p.values[0], str):
-        if notes is not None:
-            notes.append(f"named spectrum '{p.string}' on {name} has no scalar; used default")
-        return ParamValue(float(default))
+        return ParamValue(_named_spectrum_scalar(p.string, name, default, notes))
     return ParamValue(p.float)
+
+
+def _named_spectrum_scalar(spectrum_name, param_name, default, notes) -> float:
+    """Scalar for a named-spectrum-valued float param, reporting any substitution.
+
+    A recognised glass yields its d-line IOR silently (it is exact, not a
+    fallback). Anything else degrades to *default* with an APPROX note that names
+    what was unrecognised — a spectrum **file** reference is called out as such
+    rather than mis-reported as an unknown glass (pbrt reads a file when a name
+    misses its table; skinny has no reader).
+    """
+    ior_d = _st.named_glass_ior_d(spectrum_name)
+    if ior_d is not None and _st.glass_is_known(spectrum_name):
+        return float(ior_d)
+    if notes is not None:
+        if spectra.looks_like_spectrum_file(spectrum_name):
+            notes.append(
+                f"spectrum file '{spectrum_name}' on {param_name} not read "
+                f"(unsupported); used default {default}")
+        else:
+            notes.append(
+                f"named spectrum '{spectrum_name}' on {param_name} unrecognised; "
+                f"used default {default}")
+    return float(default)
 
 
 def get_spectrum_texture(params, name, default_rgb, *, textures=None, base_dir=None,
@@ -187,12 +217,24 @@ def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None
 def _conductor_basecolor(params, notes: list[str]):
     if "reflectance" in params:
         return spectra.param_to_rgb(params.get("reflectance")) or [0.9, 0.9, 0.9]
-    eta_p, k_p = params.get("eta"), params.get("k")
+    # `coatedconductor` names its conductor IOR `conductor.eta`/`conductor.k`
+    # (pbrt-v4). Read both spellings — material_spectral_overrides already does,
+    # so reading only `eta` here would give an RGB copper base colour while the
+    # spectral override named a different metal.
+    eta_p = params.get("eta") or params.get("conductor.eta")
+    k_p = params.get("k") or params.get("conductor.k")
     # named spectra (strings) -> tabulated metal IOR
     if eta_p is not None and eta_p.type == "spectrum" and isinstance(eta_p.values[0], str):
         refl = spectra.named_metal_reflectance_rgb(eta_p.values[0])
         if refl is not None:
             return list(refl)
+        if spectra.looks_like_spectrum_file(eta_p.values[0]):
+            notes.append(f"spectrum file '{eta_p.values[0]}' on conductor eta not read "
+                         f"(unsupported); defaulted to copper")
+        else:
+            notes.append(f"named spectrum '{eta_p.values[0]}' on conductor eta "
+                         f"unrecognised; defaulted to copper")
+        return list(spectra.named_metal_reflectance_rgb("copper"))
     if eta_p is not None and k_p is not None:
         try:
             eta = spectra.param_to_rgb(eta_p) or eta_p.floats[:3]
@@ -208,28 +250,60 @@ def material_spectral_overrides(pbrt_material) -> dict:
     """Preserve a named-conductor / dispersive-glass identity for spectral mode.
 
     Additive to the RGB reduction (which stays unchanged): when a conductor's eta
-    resolves to a named metal (``au``/``ag``/``al``/``cu``) this rides
-    ``conductor_metal`` on ``skinnyOverrides``; when a dielectric carries a
-    named/dispersive eta it rides ``glass_dispersion``. The spectral GPU path
-    binds the exact vendored eta/k or Cauchy curve from these keys. Returns ``{}``
-    for a plain-RGB conductor (unknown/absent named eta) or a scalar-IOR
-    dielectric, so an RGB-only scene authors no new override (byte-identical
-    import). The scalar ``ior`` and the RGB ``diffuseColor`` are untouched.
+    resolves to a named metal (``au``/``ag``/``al``/``cu``/``cuzn``/``mgo``/
+    ``tio2``) this rides ``conductor_metal`` on ``skinnyOverrides``; when a
+    dielectric carries a named/dispersive eta it rides ``glass_dispersion``; an
+    inline non-constant ``spectrum`` on any material rides ``spectral`` (the same
+    payload shape lights use). The spectral GPU path binds the exact vendored
+    eta/k or Cauchy curve from these keys. Returns ``{}`` for a plain-RGB
+    conductor (unknown/absent named eta) or a scalar-IOR dielectric, so an
+    RGB-only scene authors no new override (byte-identical import). The scalar
+    ``ior`` and the RGB ``diffuseColor`` are untouched.
     """
     if pbrt_material is None:
         return {}
     mtype = pbrt_material.type
     p = pbrt_material.params
+    inline = _inline_spectrum_override(p)
     if mtype in ("conductor", "coatedconductor"):
         # `coatedconductor` names its conductor IOR `conductor.eta` (pbrt-v4).
         eta_p = p.get("eta") or p.get("conductor.eta")
         key = spectra.named_conductor_key(eta_p)
         if key is not None:
-            return {"conductor_metal": key}
+            return {**inline, "conductor_metal": key}
     elif mtype in ("dielectric", "thindielectric"):
         key = spectra.named_glass_key(p.get("eta"))
         if key is not None:
-            return {"glass_dispersion": key}
+            return {**inline, "glass_dispersion": key}
+    return inline
+
+
+#: Material parameters whose inline spectrum is worth preserving for spectral
+#: mode. Reflectance-ish inputs only — `eta`/`k` carry their identity through
+#: `conductor_metal` / `glass_dispersion` instead.
+_INLINE_SPECTRUM_PARAMS = ("reflectance", "diffuse", "albedo")
+
+
+def _inline_spectrum_override(params) -> dict:
+    """``{"spectral": payload}`` for an inline non-constant material spectrum, else ``{}``.
+
+    Mirrors what ``lights._preserve_spectral`` does for lights: the RGB reduction
+    is unchanged, and the authored SPD rides alongside it. A constant spectrum is
+    achromatic (identical to its RGB reduction), so it authors nothing — keeping
+    RGB-only and constant-spectrum scenes byte-identical.
+    """
+    for name in _INLINE_SPECTRUM_PARAMS:
+        p = params.get(name)
+        if p is None or p.type != "spectrum" or not p.values:
+            continue
+        if isinstance(p.values[0], str):
+            continue  # a named spectrum, not an inline SPD
+        vals = np.asarray(p.values, dtype=np.float64).reshape(-1, 2)[:, 1]
+        if np.all(vals == vals[0]):
+            continue  # constant == its RGB reduction; nothing to preserve
+        payload = spectra.param_spectral_payload(p)
+        if payload is not None:
+            return {"spectral": payload}
     return {}
 
 
@@ -288,7 +362,15 @@ def _subsurface_overrides(p) -> dict:
     reflectance = p.rgb("reflectance", None)
     mfp = p.rgb("mfp", None)
     g_f = p.floats("g", [0.0])
-    eta_f = p.floats("eta", [ETA_DEFAULT])
+    # `eta` may be a named spectrum (e.g. "glass-BK7"), which `floats` would raise
+    # on — it is the one eta reader not routed through get_float_texture. Resolve a
+    # recognised glass to its d-line index, anything else to the pbrt default.
+    eta_p = p.get("eta")
+    if eta_p is not None and eta_p.type == "spectrum" and eta_p.values \
+            and isinstance(eta_p.values[0], str):
+        eta_f = [_named_spectrum_scalar(eta_p.string, "subsurface eta", ETA_DEFAULT, None)]
+    else:
+        eta_f = p.floats("eta", [ETA_DEFAULT])
     scale_f = p.floats("scale", [SCALE_DEFAULT])
     coeffs = subsurface_coefficients(
         name=name, sigma_a=sigma_a, sigma_s=sigma_s,

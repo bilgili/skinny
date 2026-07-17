@@ -7,13 +7,18 @@ Two datasets, extracted verbatim from pbrt-v4 by ``_extract_pbrt_spectra.py``
   ``sRGBToSpectrumTable`` pbrt uses, RES=64; :func:`rgb_to_sigmoid_coeffs`
   reproduces pbrt's ``RGBToSpectrumTable::operator()`` trilinear lookup and
   :func:`sigmoid_poly` its ``RGBSigmoidPolynomial`` evaluation.
-* the CIE D65 illuminant SPD and the named-metal complex IOR curves
-  (Ag/Al/Au/Cu ``eta``/``k``), resampled onto skinny's 360–830 nm / 5 nm grid.
+* the named illuminant SPDs, the named-metal complex IOR curves
+  (Ag/Al/Au/Cu/CuZn/MgO/TiO2 ``eta``/``k``) and the named-glass ``eta`` curves,
+  resampled onto skinny's 360–830 nm / 5 nm grid.
 
-Named-glass dispersion uses a documented Cauchy fit (no bulk table): the pbrt
-named glasses are close to BK7-family crowns; ``named_glass_ior`` evaluates
-``n(λ) = A + B/λ²`` with published BK7 coefficients — a documented
-approximation, adequate for the hero-wavelength dispersion path.
+Named-glass dispersion evaluates ``n(λ) = A + B/λ_µm²`` from **per-glass**
+Cauchy coefficients least-squares fit to pbrt's own tabulated eta (see
+``_extract_pbrt_spectra.fit_cauchy``), so every pbrt named glass carries its own
+dispersion and its own d-line index. Max fit residual over the visible is 3e-4
+(BK7) to 7.5e-3 (F11); the raw curves are vendored so the residual is tested
+hostlessly. A 2-term Cauchy is deliberate — a third term was measured and does
+not improve the fit (the residual is interpolation error in pbrt's sparse table)
+while costing a `FlatMaterialParams` layout change.
 """
 
 from __future__ import annotations
@@ -28,9 +33,39 @@ from . import _normalize_metal_key
 _DATA_DIR = Path(__file__).resolve().parent
 _LAMBDA = np.arange(360.0, 830.0 + 1.0, 5.0)
 
-# Cauchy coefficients for a BK7-family crown glass (n = A + B/λ², λ in µm).
-# n(589 nm) ≈ 1.5168, normal dispersion (blue > red). Documented approximation.
-_GLASS_CAUCHY = {"default": (1.5046, 0.00420), "bk7": (1.5046, 0.00420)}
+# Per-glass Cauchy coefficients (A, B) for n(λ) = A + B/λ_µm², least-squares fit
+# to pbrt's tabulated eta over 360-830 nm. Regenerate with
+# `python -m skinny.pbrt.data._extract_pbrt_spectra --print-tables`.
+#
+# "default" is the fallback for a named-but-unrecognised glass and is BK7's fit
+# *by definition* — pbrt is the single source of truth for every entry here, so
+# the fallback reuses a real glass rather than inventing an unsourced constant.
+# What removes the silence is the import-time APPROX note naming the
+# substitution (spectra.named_glass_key), not a distinct number.
+_GLASS_CAUCHY = {
+    "default": (1.50431, 0.004267),  # == bk7
+    "bk7": (1.50431, 0.004267),  # max resid 3.1e-04
+    "baf10": (1.64775, 0.007720),  # max resid 1.4e-03
+    "fk51a": (1.47768, 0.003035),  # max resid 1.7e-04
+    "lasf9": (1.80852, 0.014634),  # max resid 4.6e-03
+    "f5": (1.63949, 0.011655),  # max resid 4.0e-03
+    "f10": (1.68848, 0.013994),  # max resid 5.9e-03
+    "f11": (1.73547, 0.017399),  # max resid 7.5e-03
+}
+
+# Refractive index at the sodium d-line (589.3 nm) — the scalar IOR a glass is
+# quoted by, and what the RGB (non-spectral) build renders with. Read from
+# pbrt's tabulated eta, same provenance as _GLASS_CAUCHY.
+_GLASS_IOR_D = {
+    "default": 1.51673,  # == bk7
+    "bk7": 1.51673,
+    "baf10": 1.66988,
+    "fk51a": 1.48651,
+    "lasf9": 1.85004,
+    "f5": 1.67254,
+    "f10": 1.72806,
+    "f11": 1.78448,
+}
 
 
 @functools.lru_cache(maxsize=1)
@@ -127,14 +162,29 @@ def named_metal_spectrum(name: str):
     return curves[f"{key}_eta"].copy(), curves[f"{key}_k"].copy()
 
 
-def named_glass_ior(name: str, lam_nm):
-    """Cauchy dispersion n(λ) for a named glass, or None. Documented BK7 fit."""
+def normalize_glass_key(name: str) -> str:
+    """Strip a ``glass-``/``glass_`` prefix and lower-case; ``""`` for a falsy name."""
     n = (name or "").strip().lower()
     for prefix in ("glass-", "glass_"):
         if n.startswith(prefix):
             n = n[len(prefix) :]
-    coeff = _GLASS_CAUCHY.get(n, _GLASS_CAUCHY["default"])
-    a, b = coeff
+    return n
+
+
+def glass_is_known(name: str) -> bool:
+    """True if *name* names a glass with its own vendored coefficients.
+
+    ``"default"`` is a fallback, not a pbrt glass, so it reads as unknown — the
+    caller reports the substitution rather than silently adopting BK7's
+    dispersion for an unrecognised name.
+    """
+    key = normalize_glass_key(name)
+    return bool(key) and key != "default" and key in _GLASS_CAUCHY
+
+
+def named_glass_ior(name: str, lam_nm):
+    """Cauchy dispersion n(λ) for a named glass. Unknown names fall back to BK7."""
+    a, b = _GLASS_CAUCHY.get(normalize_glass_key(name), _GLASS_CAUCHY["default"])
     lam_um = np.asarray(lam_nm, dtype=np.float64) * 1e-3
     return a + b / (lam_um * lam_um)
 
@@ -142,18 +192,51 @@ def named_glass_ior(name: str, lam_nm):
 def named_glass_cauchy(name: str):
     """Return the Cauchy coefficients ``(A, B)`` for a named glass, or ``None``.
 
-    The dispersion law is ``n(λ_µm) = A + B / λ_µm²`` (µm) — the same fit
-    :func:`named_glass_ior` evaluates. The name is normalized like
-    :func:`named_glass_ior` (strip a ``glass-`` / ``glass_`` prefix, lowercase);
-    an unknown-but-present name falls back to the ``"default"`` (BK7-family)
-    coefficients, so the GPU packer always has a usable dispersion for any glass
-    it recognizes. Returns ``None`` only for a ``None``/empty name.
+    The dispersion law is ``n(λ_µm) = A + B / λ_µm²`` — the same fit
+    :func:`named_glass_ior` evaluates. Each recognised pbrt glass resolves to its
+    **own** coefficients; an unknown-but-present name falls back to ``"default"``
+    (== BK7) so the GPU packer always has a usable dispersion. Returns ``None``
+    only for a ``None``/empty name. Use :func:`glass_is_known` to tell a
+    recognised glass from a fallback — this function cannot report that.
     """
     if not name or not name.strip():
         return None
-    n = name.strip().lower()
-    for prefix in ("glass-", "glass_"):
-        if n.startswith(prefix):
-            n = n[len(prefix) :]
-    a, b = _GLASS_CAUCHY.get(n, _GLASS_CAUCHY["default"])
+    a, b = _GLASS_CAUCHY.get(normalize_glass_key(name), _GLASS_CAUCHY["default"])
     return float(a), float(b)
+
+
+def named_glass_ior_d(name: str):
+    """Scalar refractive index at the sodium d-line (589.3 nm), or ``None``.
+
+    This is what the RGB (non-spectral) build renders a named glass with; the
+    spectral build substitutes the Cauchy base index instead. Unknown-but-present
+    names fall back to ``"default"`` (== BK7), mirroring :func:`named_glass_cauchy`.
+    """
+    if not name or not name.strip():
+        return None
+    return float(_GLASS_IOR_D.get(normalize_glass_key(name), _GLASS_IOR_D["default"]))
+
+
+def named_illuminant_spectrum(name: str):
+    """Vendored SPD for a pbrt named illuminant on the 5 nm grid, or ``None``.
+
+    Covers ``stdillum-A``/``-D50``/``-D65``/``-F1``…``-F12`` and ``illum-acesD60``
+    (pbrt's scene-addressable illuminants; the ``canon_*``/``ilford_*`` entries in
+    pbrt's table are camera sensor responses, not scene spectra, and are out of
+    scope). Matching is case-insensitive. ``stdillum-D65`` aliases the ``d65``
+    array rather than storing a second copy of the same pbrt symbol.
+
+    The SPD is the raw pbrt curve — pbrt's load-time ``normalize`` is not applied
+    (see ``_extract_pbrt_spectra``); every consumer rescales, so absolute scale
+    cancels.
+    """
+    if not name or not name.strip():
+        return None
+    key = name.strip().lower()
+    if key in ("stdillum-d65", "d65"):
+        return d65_spd()
+    curves = _load_curves()
+    lookup = {f"illum_{k}".lower(): k for k in
+              (n[len("illum_"):] for n in curves if n.startswith("illum_"))}
+    arr = lookup.get(f"illum_{key}")
+    return curves[f"illum_{arr}"].copy() if arr is not None else None

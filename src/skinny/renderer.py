@@ -565,9 +565,21 @@ class TexturePool:
         self._slots = []
 
 
-# Named-conductor id (Group 6.2): must match the au/ag/al/cu upload order in the
-# spectralMetals buffer and namedMetalEtaK's (id-1) indexing in bindings.slang.
-_CONDUCTOR_METAL_ID = {"au": 1, "ag": 2, "al": 3, "cu": 4}
+# Named-conductor id (Group 6.2): must match the upload order in the
+# spectralMetals buffer (_SPECTRAL_METAL_ORDER below) and namedMetalEtaK's (id-1)
+# indexing in bindings.slang.
+#
+# APPEND-ONLY. An id is a byte offset into the uploaded buffer (id-1)*stride, so
+# renumbering an existing metal silently swaps materials in every checked-in
+# scene. New metals go on the end; `_SPECTRAL_METAL_ORDER` is derived from this
+# map so the two cannot drift.
+_CONDUCTOR_METAL_ID = {"au": 1, "ag": 2, "al": 3, "cu": 4, "cuzn": 5, "mgo": 6, "tio2": 7}
+
+#: spectralMetals upload order — index i holds the metal with id i+1. Derived, so
+#: the id↔offset invariant is structural rather than two lists kept in sync by hand.
+_SPECTRAL_METAL_ORDER = tuple(
+    k for k, _ in sorted(_CONDUCTOR_METAL_ID.items(), key=lambda kv: kv[1])
+)
 
 
 def pack_flat_material(
@@ -685,9 +697,12 @@ def pack_flat_material(
     # base index A becomes the scalar `ior` lane (exact); B rides the spare
     # _normalBiasPad.w (glassCauchyB). 0 = constant-IOR (non-dispersive), so every
     # non-glass material keeps the old literal-0 pad → RGB pack byte-identical.
-    # SPECTRAL-ONLY: in the RGB build the scalar `ior` (and the pad) are left at
-    # their authored/fallback values, so a named-glass scene renders byte-identical
-    # to the pre-6.4 baseline — only the spectral variant substitutes Cauchy A.
+    # Only the spectral variant substitutes Cauchy A here; the RGB build keeps the
+    # authored `ior`. That authored value is NOT the old generic 1.5 default any
+    # more: since `pbrt-named-spectra`, the importer resolves a named glass to its
+    # d-line index (materials._named_spectrum_scalar), so `glass-LASF9` arrives as
+    # 1.850 in both builds. The two agree at the d-line and differ only by
+    # dispersion — the RGB build has no wavelength to disperse over.
     glass_cauchy_b = 0.0
     _gd = overrides.get("glass_dispersion")
     if spectral and _gd is not None:
@@ -4001,7 +4016,7 @@ class Renderer:
             # concatenated → 4·190 floats. Order MUST match namedMetalEtaK's
             # (metalId-1)*190 indexing in bindings.slang.
             metal_blocks = []
-            for name in ("au", "ag", "al", "cu"):
+            for name in _SPECTRAL_METAL_ORDER:
                 ek = spectral_tables.named_metal_spectrum(name)
                 if ek is None:
                     raise ValueError(f"spectral: missing named-metal curve '{name}'")

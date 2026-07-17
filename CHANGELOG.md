@@ -9,6 +9,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Full pbrt named-spectrum import** (change `pbrt-named-spectra`). The importer
+  now resolves every scene-addressable pbrt named spectrum from data vendored
+  verbatim out of pbrt-v4: all **7 named glasses** (`glass-BK7`/`-BAF10`/
+  `-FK51A`/`-LASF9`/`-F5`/`-F10`/`-F11`, each with its own Cauchy dispersion fit
+  and d-line IOR), all **7 named metals** (adds `metal-CuZn`/`-MgO`/`-TiO2` to
+  Ag/Al/Au/Cu), and **16 named illuminants** (`stdillum-A`/`-D50`/`-D65`/
+  `-F1`…`-F12`, `illum-acesD60`). Inline `spectrum` values authored on materials
+  are preserved for spectral mode like lights' already were. An unrecognised
+  name now records an APPROX import note naming its fallback instead of silently
+  substituting one; a spectrum *file* reference is reported as unread rather
+  than mistaken for an unknown glass name. No shader, descriptor-binding, or
+  `FlatMaterialParams` layout change. See docs/Spectral.md → Named-spectrum
+  coverage.
+
 - **Pre-commit hooks** (`.pre-commit-config.yaml`, `pre-commit` in the `dev`
   extra). Runs `ruff-check` (scoped to `src/`) plus trailing-whitespace/EOF/
   YAML/TOML/merge-conflict hygiene checks over the repo minus vendored build
@@ -16,6 +30,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   README → Pre-commit hooks.
 
 ### Fixed
+
+- **Named-spectrum materials that silently rendered as the wrong thing** (change
+  `pbrt-named-spectra`). These scenes legitimately change appearance:
+  - **Named glasses other than BK7.** Every unrecognised glass name fell back to
+    BK7's dispersion, and the RGB build rendered *all* named glasses at the
+    generic `eta` default of 1.5 — so `glass-LASF9` (n=1.850) rendered as a plain
+    crown. Each glass now carries its own dispersion and d-line index.
+  - **Brass / MgO / TiO2 conductors** fell back to **copper**; they now resolve to
+    their own vendored eta/k. `coatedconductor` was doubly affected: it spells its
+    IOR `conductor.eta`, which the RGB base-colour path did not read, so it could
+    render copper in RGB while the spectral path used the correct metal.
+  - **Named-illuminant lights** (`stdillum-A` etc.) reduced to neutral white and
+    their identity was dropped by the loader; they now carry the correct
+    chromaticity, and distant lights bind the real SPD.
+  - **BK7's Cauchy coefficients** are refit from pbrt's own table
+    (`1.5046, 0.00420` → `1.50431, 0.004267`, |Δn| ≈ 3e-4), making pbrt the single
+    source of truth for every glass.
+- **Colored illuminant spectra were ~107× too bright** (change
+  `pbrt-named-spectra`). `sampled_spectrum_to_rgb` divided by the CMF integral on
+  the reflectance branch only, so a 1e-6 nudge to a constant illuminant jumped it
+  from `[10, 10, 10]` to `[1283, 1015, 971]`. pbrt divides for every spectrum
+  (`SpectrumToXYZ`); both branches now do, and they agree up to the authored
+  magnitude. No checked-in scene authors a non-constant inline `spectrum L`/`I`,
+  so no baseline moves.
 
 - **SPPM env-photon speckle — env-aware per-pass photon budget** (change
   `sppm-env-photon-budget`). The per-pass photon count is now

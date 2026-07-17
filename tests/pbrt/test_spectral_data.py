@@ -88,12 +88,16 @@ def test_glass_dispersion_normal():
 
 
 def test_named_glass_cauchy_known_coeffs():
+    # Refit from pbrt's own tabulated eta (change `pbrt-named-spectra`), superseding
+    # the hand-entered catalogue coefficients (1.5046, 0.00420) — |Δn| ≈ 3e-4. pbrt is
+    # the single source of truth for every glass, BK7 included. "default" is the
+    # unrecognised-name fallback and is BK7 by definition.
     for name in ("bk7", "default"):
         coeff = st.named_glass_cauchy(name)
         assert coeff is not None
         a, b = coeff
         assert isinstance(a, float) and isinstance(b, float)
-        assert abs(a - 1.5046) < 1e-9 and abs(b - 0.00420) < 1e-9
+        assert abs(a - 1.50431) < 1e-9 and abs(b - 0.004267) < 1e-9
 
 
 def test_named_glass_cauchy_normalizes_prefix_and_case():
@@ -120,3 +124,93 @@ def test_named_glass_cauchy_matches_ior_evaluation():
     for lam_nm in (486.0, 589.0, 656.0):
         lam_um = lam_nm * 1e-3
         assert abs((a + b / lam_um**2) - float(st.named_glass_ior("bk7", lam_nm))) < 1e-12
+
+
+# --- named-spectrum coverage (change `pbrt-named-spectra`) -------------------
+#
+# The fits/curves are vendored from pbrt-v4 by `_extract_pbrt_spectra`; these
+# tests are hostless because the raw glass eta curves ride in the .npz alongside
+# the fitted literals, so the fit can be re-checked without a pbrt checkout.
+
+_PBRT_GLASSES = ("bk7", "baf10", "fk51a", "lasf9", "f5", "f10", "f11")
+
+#: Max |Δn| of the 2-term Cauchy fit vs pbrt's tabulated eta over 360-830 nm.
+#: A 3rd term was measured and does not improve this (design D1) — the residual
+#: is interpolation error in pbrt's own sparse table.
+_FIT_RESIDUAL_TOL = 8e-3
+
+
+@pytest.mark.parametrize("key", _PBRT_GLASSES)
+def test_named_glass_cauchy_reproduces_pbrt_curve(key):
+    curves = st._load_curves()
+    pbrt_eta = curves[f"glass_{key}_eta"]
+    a, b = st.named_glass_cauchy(key)
+    lam_um = _LAMBDA * 1e-3
+    fitted = a + b / lam_um**2
+    assert np.max(np.abs(fitted - pbrt_eta)) < _FIT_RESIDUAL_TOL
+
+
+def test_named_glasses_have_distinct_dispersion():
+    # The bug this change fixes: every unrecognised glass silently rendered as BK7.
+    coeffs = {k: st.named_glass_cauchy(k) for k in _PBRT_GLASSES}
+    assert len(set(coeffs.values())) == len(_PBRT_GLASSES)
+    assert st.named_glass_cauchy("glass-LASF9") != st.named_glass_cauchy("glass-BK7")
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("bk7", 1.51673), ("baf10", 1.66988), ("fk51a", 1.48651),
+    ("lasf9", 1.85004), ("f5", 1.67254), ("f10", 1.72806), ("f11", 1.78448),
+])
+def test_named_glass_ior_d_matches_pbrt(key, expected):
+    assert st.named_glass_ior_d(key) == pytest.approx(expected, abs=1e-5)
+
+
+def test_glass_is_known_distinguishes_fallback_from_real_glass():
+    assert st.glass_is_known("glass-BK7") and st.glass_is_known("glass-LASF9")
+    assert not st.glass_is_known("glass-NOSUCH")
+    # "default" is the fallback itself, not a pbrt glass.
+    assert not st.glass_is_known("default")
+
+
+def test_unknown_glass_still_falls_back_to_bk7():
+    # Best-effort translator: an unknown name must not hard-fail, it renders as
+    # BK7 *and* gets reported (see test_named_spectra.py).
+    assert st.named_glass_cauchy("glass-NOSUCH") == st.named_glass_cauchy("bk7")
+    assert st.named_glass_ior_d("glass-NOSUCH") == st.named_glass_ior_d("bk7")
+
+
+@pytest.mark.parametrize("name", ("metal-CuZn-eta", "metal-MgO-eta", "metal-TiO2-eta"))
+def test_extended_metals_have_vendored_curves(name):
+    ek = st.named_metal_spectrum(name)
+    assert ek is not None
+    eta, k = ek
+    assert eta.shape == (95,) and k.shape == (95,)
+
+
+def test_preexisting_metals_unchanged():
+    # au/ag/al/cu keep their shipped RGB IOR: re-deriving them from the vendored
+    # curves would move existing RGB baselines for no benefit (design m4).
+    from skinny.pbrt.data import NAMED_METAL_IOR
+    assert NAMED_METAL_IOR["au"] == ((0.143, 0.375, 1.442), (3.983, 2.386, 1.603))
+    assert NAMED_METAL_IOR["cu"] == ((0.200, 0.924, 1.102), (3.910, 2.450, 2.140))
+
+
+def test_named_illuminant_a_is_warm_and_d65_is_neutral():
+    a_rgb = spectra.named_illuminant_rgb("stdillum-A")
+    assert a_rgb[0] > a_rgb[2]  # tungsten: red-heavy
+    d65 = spectra.named_illuminant_rgb("stdillum-D65")
+    # D65 is the sRGB whitepoint, so unit luminance lands on ~[1,1,1]. Measured
+    # deviation 6.0e-4 (the Wyman analytic CMF fit).
+    assert np.allclose(d65, [1.0, 1.0, 1.0], atol=1e-3)
+
+
+def test_named_illuminant_lookup_is_case_insensitive_and_bounded():
+    assert spectra.named_illuminant_rgb("STDILLUM-F11") is not None
+    assert spectra.named_illuminant_rgb("illum-acesD60") is not None
+    assert spectra.named_illuminant_rgb("stdillum-NOPE") is None
+    assert spectra.named_illuminant_rgb("") is None
+
+
+def test_stdillum_d65_aliases_the_vendored_d65():
+    # Same pbrt symbol (CIE_Illum_D6500); stored once, not twice.
+    assert np.array_equal(st.named_illuminant_spectrum("stdillum-D65"), st.d65_spd())
