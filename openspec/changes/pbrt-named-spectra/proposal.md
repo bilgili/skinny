@@ -88,10 +88,17 @@ None — this deepens existing spectrum conversion rather than adding a capabili
   `conductor.eta` read on `coatedconductor`.
 * `src/skinny/pbrt/lights.py`, `src/skinny/usd_loader.py` — named-illuminant payload
   resolution to an SPD.
-* `src/skinny/renderer.py` — the four-metal set is hard-coded twice and both must grow in
-  lockstep: `_CONDUCTOR_METAL_ID` (line 570) and the `spectralMetals` upload loop (line
-  4004), whose order **is** the shader's `(metalId-1)` index. Plus the now-stale
-  "spectral-only" named-glass comment at lines 688-690.
+* `src/skinny/pbrt/data/__init__.py` — **new home** of `CONDUCTOR_METAL_ID`, the single
+  source of truth for the named-metal set. It was hard-coded three times (here as
+  `NAMED_METAL_IOR` keys, in `spectra._CONDUCTOR_CANON`, and in `renderer`), and the id map
+  lived in `renderer.py`, which imports `vulkan` at load — so every test of the invariant
+  skipped on a host without the SDK. `spectra._CONDUCTOR_CANON` and
+  `renderer._SPECTRAL_METAL_ORDER` now derive from it, and `bindings.slang`'s
+  `SPECTRAL_METAL_COUNT` is pinned to its length by a hostless test. An id is a byte offset
+  (`(id-1)*stride`), so the map is **append-only**.
+* `src/skinny/renderer.py` — consumes the shared id map and derives the `spectralMetals`
+  upload order from it (one line at the upload loop). Plus the now-stale "spectral-only"
+  named-glass comment.
 * Docs: `docs/Spectral.md` (named-spectrum coverage table), `CHANGELOG.md`.
 * `src/skinny/shaders/bindings.slang` + `integrators/spectral_flat_common.slang` — the
   named-conductor gate was hard-coded `metalId <= 4u`, which would have silently dropped
