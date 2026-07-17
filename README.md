@@ -242,11 +242,13 @@ already pulls prebuilt wheels for both packages as base (non-extra) dependencies
 Both are published as direct-URL GitHub Release wheels from
 [`bilgili/openusd-materialx`](https://github.com/bilgili/openusd-materialx) (not
 PyPI — the PyPI `MaterialX`/`usd-core` wheels lack GenSlang/usdMtlx), one entry per
-`(python_version, sys_platform, platform_machine)` combination the release ships:
-`cp312`/`cp313`/`cp314` × `macosx_26_0_arm64` (Apple Silicon) / `linux_x86_64` /
-`win_amd64`. `pip` resolves the matching entry automatically from the environment
-markers, so a plain `pip install -e .` (or `-e ".[dev]"`) installs the Slang- and
-usdMtlx-capable builds directly — no compiler, no CMake.
+`(python_version, sys_platform, platform_machine)` combination the release ships —
+Python 3.12/3.13/3.14 × (`darwin`/`arm64` [Apple Silicon], `linux`/`x86_64`,
+`win32`/`AMD64`), matching wheel filename tags `cp312`-`cp314` ×
+`macosx_26_0_arm64`/`linux_x86_64`/`win_amd64`. `pip` resolves the matching
+entry automatically from the environment markers, so a plain `pip install -e .`
+(or `-e ".[dev]"`) installs the Slang- and usdMtlx-capable builds directly —
+no compiler, no CMake.
 
 The manual from-source build below is only needed if your platform isn't in that
 matrix (e.g. Linux aarch64, Intel macOS) or you need a newer MaterialX than the
