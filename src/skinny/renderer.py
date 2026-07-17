@@ -85,6 +85,16 @@ _SPPM_GLOSSY_ROUGHNESS_DEFAULT = 0.6
 # SKINNY_SPPM_METAL_PHOTON_BATCH; 0 disables tiling (single full dispatch).
 _SPPM_METAL_PHOTON_BATCH_DEFAULT = 65536
 
+# Per-dispatch chain breadth for the Metal MLT mutation/bootstrap phases (change
+# mlt-integrator, design D7). One MLT chain runs a COMPLETE BDPT sample per
+# dispatch (heavier than one SPPM photon deposit), so a very large `--chains`
+# could push a single command buffer past the macOS GPU watchdog. The recorder
+# tiles each phase into flushed sub-batches of this many chains. At the default
+# `nChains` (16384) this is exactly one batch — the GPU-validated path is
+# unchanged — and only a larger chain count subdivides. Env override
+# SKINNY_MLT_METAL_CHAIN_BATCH; 0 disables tiling (single full dispatch).
+_MLT_METAL_CHAIN_BATCH_DEFAULT = 16384
+
 
 def _sppm_photon_group_pmf(
     powers: tuple[float, float, float, float],
@@ -2099,13 +2109,17 @@ class Renderer:
         own programs). ``None`` before any exists — the MSL relocators then
         fall through to their scalar defaults.
 
-        The Metal MLT pass comes FIRST (change mlt-integrator): it is the only
-        program compiled with ``SKINNY_MLT``, so it is the only one whose
-        reflected ``fc`` carries the MLT tail that ``_pack_uniforms`` emits in
-        an MLT session — any other source would drop the tail's fields. Gated
-        on the backend because `_wavefront_mlt_pass` also holds the *Vulkan*
-        pass, which reflects no MSL layouts at all."""
-        if self.is_metal and self._wavefront_mlt_pass is not None:
+        The Metal MLT pass comes FIRST (change mlt-integrator) when it is the
+        ACTIVE consumer: it is the only program compiled with ``SKINNY_MLT``,
+        so it is the only one whose reflected ``fc`` carries the MLT tail that
+        ``_pack_uniforms`` emits — and the two must agree or the drift guard in
+        ``_pack_uniforms_msl`` fires. Gating on `_mlt_uniform_tail_active()`
+        (not merely "the pass exists") is what makes runtime integrator cycling
+        safe: after an MLT frame the pass stays cached, but switching to
+        path/BDPT/SPPM — or a megakernel-fallback MLT selection — must fall
+        through to the ordinary layout source, whose `fc` has no tail (codex
+        pre-merge review)."""
+        if self._mlt_uniform_tail_active():
             return self._wavefront_mlt_pass
         if self.pipeline is not None:
             return self.pipeline
@@ -2368,6 +2382,27 @@ class Renderer:
         return (self.width, self.height,
                 int(self.mlt_num_chains), int(self.mlt_bootstrap_samples))
 
+    def _mlt_uniform_tail_active(self) -> bool:
+        """Whether ``_pack_uniforms`` must emit the ``#if defined(SKINNY_MLT)``
+        FrameConstants tail — i.e. the dispatched shader's ``fc`` actually has
+        those fields (codex pre-merge review).
+
+        Vulkan uses one oversized shared UBO, so appending the tail whenever
+        MLT is the integrator is harmless — only the MLT ``.spv`` reads the
+        offsets. Metal packs the blob per-dispatch and the drift guard asserts
+        the blob length equals the reflected ``fc`` size, so the tail is packed
+        ONLY when the Metal MLT wavefront pass is the real consumer: integrator
+        3, wavefront mode, and the pass built. A megakernel-fallback MLT
+        selection (execution mode != wavefront) or any non-MLT integrator gets
+        the base layout, no tail — otherwise runtime integrator cycling crashes
+        uniform packing."""
+        if self.integrator_index != 3:
+            return False
+        if not self.is_metal:
+            return True
+        return (self.effective_execution_mode_index == EXECUTION_WAVEFRONT
+                and self._wavefront_mlt_pass is not None)
+
     def _next_mlt_seed(self) -> int:
         """Per-reset MLT replay seed (design D3): stable across an accumulation
         run, decorrelated between consecutive resets, and REPRODUCIBLE ACROSS
@@ -2384,7 +2419,11 @@ class Renderer:
         (it advances between them) and is deterministic in a headless render,
         so it is both necessary and sufficient here.
         """
-        return zlib.crc32(struct.pack("<i", int(self.frame_index))) & 0xFFFFFFFF
+        # frame_index is a monotonic counter and mltSeed is a u32 shader field,
+        # so mask to 32 bits — a signed "<i" pack raises struct.error past 2**31
+        # (codex pre-merge review).
+        return zlib.crc32(
+            struct.pack("<I", int(self.frame_index) & 0xFFFFFFFF)) & 0xFFFFFFFF
 
     def _ensure_wavefront_mlt_pass_metal(self):
         """Build (once) the native-Metal staged MLT pass (change
@@ -9658,20 +9697,32 @@ class Renderer:
         binds = self._build_metal_binds()
         textures = [(s.texture if s is not None else None)
                     for s in self.texture_pool._slots]
+        batch = self._mlt_metal_chain_batch()
         # Packed AFTER _mlt_seed is set: the bootstrap/init kernels read
         # fc.mltSeed, and on Metal the blob is a per-dispatch argument (no
         # persistent uniform buffer to re-upload as on Vulkan).
         mlt.dispatch_bootstrap(
             binds=binds, uniform_blob=self._pack_uniforms_msl(),
-            bindless_textures=textures)
+            bindless_textures=textures, chain_batch=batch)
         weights = mlt.read_bootstrap_weights()
         b, seeds = resample_chain_seeds(weights, mlt.num_chains, self._mlt_seed)
         mlt.upload_chain_seeds(seeds)
         mlt.dispatch_init(
             binds=binds, uniform_blob=self._pack_uniforms_msl(),
-            bindless_textures=textures)
+            bindless_textures=textures, chain_batch=batch)
         mlt.b = b
         mlt.seeded = True
+
+    def _mlt_metal_chain_batch(self) -> int:
+        """Per-dispatch chain breadth for the Metal MLT phases (design D7,
+        codex pre-merge review). 0 on Vulkan (no watchdog) and off by env; on
+        Metal, `SKINNY_MLT_METAL_CHAIN_BATCH` overrides the default so a large
+        `--chains` stays under the macOS GPU watchdog."""
+        if not self.is_metal:
+            return 0
+        import os
+        return int(os.environ.get("SKINNY_MLT_METAL_CHAIN_BATCH",
+                                  str(_MLT_METAL_CHAIN_BATCH_DEFAULT)))
 
     def _render_wavefront_mlt_metal(self, mlt) -> None:
         """Dispatch one staged MLT frame on the Metal backend (change
@@ -9692,6 +9743,7 @@ class Renderer:
                 for s in self.texture_pool._slots
             ],
             iterations=self._mlt_iterations_per_frame(),
+            chain_batch=self._mlt_metal_chain_batch(),
         )
 
     def _render_headless_metal(self) -> bytes:
@@ -10034,8 +10086,13 @@ class Renderer:
         # land — and the trailing word is harmless slack in the oversized UBO.
         # On Metal BOTH fields exist and the packer relocates by reflected name
         # (`_pack_uniforms_msl` over `_FC_SCALAR_FIELDS_MLT`), so this scalar
-        # order needs no backend split: only the MSL placement differs.
-        if self.integrator_index == 3:  # INTEGRATOR_MLT
+        # order needs no backend split: only the MSL placement differs. Gated on
+        # `_mlt_uniform_tail_active()` (not just integrator 3): on Metal the tail
+        # is packed ONLY when the MLT wavefront pass is the real consumer, so a
+        # megakernel-fallback MLT selection or a runtime switch to another
+        # integrator can't desync the blob from the reflected `fc` (codex
+        # pre-merge review).
+        if self._mlt_uniform_tail_active():  # INTEGRATOR_MLT, active consumer
             chains = max(1, int(self.mlt_num_chains))
             pixels = max(1, self.width * self.height)
             iterations = self._mlt_iterations_per_frame()

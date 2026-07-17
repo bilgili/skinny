@@ -1235,37 +1235,42 @@ class MetalWavefrontMltPass:
         enc.submit()
 
     def dispatch_bootstrap(self, *, binds: dict, uniform_blob: bytes,
-                           bindless_textures=None) -> None:
+                           bindless_textures=None, chain_batch: int = 0) -> None:
         """Record + submit the bootstrap phase (one thread = one bootstrap
-        sample). The caller reads the weights back afterwards."""
+        sample). The caller reads the weights back afterwards. ``chain_batch``
+        breadth-tiles the dispatch so a large chain count stays under the macOS
+        GPU watchdog (design D7)."""
         from skinny.wavefront_driver import record_mlt_bootstrap
 
         self._encode(
             lambda rec: record_mlt_bootstrap(
                 rec, bootstrap_samples=self.bootstrap_samples,
-                num_chains=self.num_chains),
+                num_chains=self.num_chains, chain_batch=int(chain_batch)),
             binds, uniform_blob, bindless_textures)
 
     def dispatch_init(self, *, binds: dict, uniform_blob: bytes,
-                      bindless_textures=None) -> None:
+                      bindless_textures=None, chain_batch: int = 0) -> None:
         """Record + submit the chain-init phase (replays the resampled seeds
         uploaded via :meth:`upload_chain_seeds`)."""
         from skinny.wavefront_driver import record_mlt_init
 
         self._encode(
-            lambda rec: record_mlt_init(rec, num_chains=self.num_chains),
+            lambda rec: record_mlt_init(
+                rec, num_chains=self.num_chains, chain_batch=int(chain_batch)),
             binds, uniform_blob, bindless_textures)
 
     def dispatch_frame(self, *, binds: dict, uniform_blob: bytes,
-                       bindless_textures=None, iterations: int) -> None:
+                       bindless_textures=None, iterations: int,
+                       chain_batch: int = 0) -> None:
         """Record + submit one MLT accumulation frame (mutate × iterations +
-        the b-normalized resolve)."""
+        the b-normalized resolve). ``chain_batch`` breadth-tiles each mutation
+        dispatch (design D7)."""
         from skinny.wavefront_driver import record_mlt_frame
 
         self._encode(
             lambda rec: record_mlt_frame(
                 rec, num_pixels=self.num_pixels, num_chains=self.num_chains,
-                iterations=int(iterations)),
+                iterations=int(iterations), chain_batch=int(chain_batch)),
             binds, uniform_blob, bindless_textures)
 
     def read_bootstrap_weights(self):

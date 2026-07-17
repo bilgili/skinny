@@ -246,6 +246,50 @@ def test_mlt_seed_is_stable_across_processes():
     assert len(bad_outs) > 1
 
 
+def test_mlt_uniform_tail_gated_on_active_consumer():
+    # codex pre-merge review: the SKINNY_MLT fc tail must be packed by
+    # _mlt_uniform_tail_active(), NOT bare `integrator_index == 3`. On Metal the
+    # blob length must equal the dispatched pipeline's reflected fc, so the tail
+    # is packed only when the MLT wavefront pass is the real consumer —
+    # otherwise a runtime switch to path, or a megakernel-fallback MLT
+    # selection, desyncs the blob and trips the drift-guard assertion.
+    R = _renderer_module()
+    tail = inspect.getsource(R.Renderer._mlt_uniform_tail_active)
+    assert "integrator_index != 3" in tail
+    assert "EXECUTION_WAVEFRONT" in tail and "self.is_metal" in tail
+    assert "_wavefront_mlt_pass is not None" in tail
+
+    # Both the layout source and the tail append route through the predicate.
+    src = _read("renderer.py")
+    assert "if self._mlt_uniform_tail_active():\n            return self._wavefront_mlt_pass" in src
+    assert "if self._mlt_uniform_tail_active():  # INTEGRATOR_MLT" in src
+    # The dropped naive gate must not linger anywhere.
+    assert "integrator_index == 3 and not self.is_metal" not in src
+
+
+def test_mlt_metal_chain_batch_defaults_to_one_batch_at_default_chains():
+    # codex pre-merge review / design D7: the Metal MLT phases breadth-tile so a
+    # large --chains can't wedge the GPU. The default batch equals the default
+    # nChains, so the GPU-validated single-dispatch path is unchanged.
+    R = _renderer_module()
+    assert R._MLT_METAL_CHAIN_BATCH_DEFAULT == 16384
+    src = _read("renderer.py")
+    assert "chain_batch=self._mlt_metal_chain_batch()" in src
+    assert "chain_batch=batch" in src  # bootstrap + init in the reseed path
+    ms = _read("metal_wavefront.py")
+    # All three Metal dispatch entries thread chain_batch into the driver.
+    assert ms.count("chain_batch=int(chain_batch)") == 3
+
+
+def test_mlt_seed_masks_frame_index_to_u32():
+    # codex pre-merge review: a signed "<i" pack raises past 2**31; mltSeed is a
+    # u32 shader field, so the pack must mask to 32 bits.
+    R = _renderer_module()
+    src = inspect.getsource(R.Renderer._next_mlt_seed)
+    assert 'struct.pack("<I"' in src and "& 0xFFFFFFFF" in src
+    assert 'struct.pack("<i"' not in src
+
+
 def test_both_backends_share_one_seed_derivation():
     # Vulkan and Metal must seed identically or the backends' chains diverge
     # for reasons unrelated to the backend (this is what made the int_caustic
