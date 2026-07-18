@@ -213,13 +213,12 @@ class HeadlessRenderer:
         self.renderer.integrator_index = opts.integrator_index
         self.renderer.tonemap_index = opts.tonemap_index
         self.renderer.exposure = float(opts.exposure)
-        # These options belong to Skinny's fallback pair. An authored-light
-        # USD scene keeps exclusive authority and must not have its lighting
-        # state—or the retained fallback state—mutated by hidden CLI values.
-        if self.renderer.uses_default_lights:
-            self.renderer.direct_light_index = 0 if opts.direct_light else 1
-            if opts.env_intensity is not None:
-                self.renderer.env_intensity = float(opts.env_intensity)
+        # These options belong to Skinny's fallback pair. Retain them even
+        # while authored USD lighting owns the current scene; the renderer's
+        # authority gates keep them from affecting authored contributions.
+        self.renderer.direct_light_index = 0 if opts.direct_light else 1
+        if opts.env_intensity is not None:
+            self.renderer.env_intensity = float(opts.env_intensity)
         # SPPM glossy-continue threshold override (only read under SPPM). None
         # leaves the renderer's built-in default in place.
         if opts.sppm_glossy_roughness is not None:

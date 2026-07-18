@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from skinny.scene import (
     environment_contribution_intensity,
+    scene_auxiliary_lights_for_authority,
     scene_has_authored_lighting,
     scene_environment_for_authority,
     scene_uses_default_lights,
@@ -274,3 +277,67 @@ def test_light_authority_is_integrator_independent(
     # consume the same packed light counts and environment intensity.
     assert integrator_index in (0, 1, 2, 3)
     assert scene_uses_default_lights(scene, usd_active=True) is expected_defaults
+
+
+def test_inactive_usd_auxiliary_lights_are_not_selected_for_fallback_scene():
+    usd = _scene(
+        sphere_lights=[_light()],
+        instances=[_instance(0)],
+        materials=[_emissive_mat()],
+        has_authored_lighting=True,
+    )
+    spheres, emissive_scene = scene_auxiliary_lights_for_authority(
+        usd,
+        uses_default_lights=True,
+    )
+    assert spheres == []
+    assert emissive_scene is None
+
+
+def test_active_authored_scene_selects_usd_auxiliary_lights():
+    sphere = _light()
+    usd = _scene(
+        sphere_lights=[sphere],
+        instances=[_instance(0)],
+        materials=[_emissive_mat()],
+        has_authored_lighting=True,
+    )
+    spheres, emissive_scene = scene_auxiliary_lights_for_authority(
+        usd,
+        uses_default_lights=False,
+    )
+    assert spheres == [sphere]
+    assert emissive_scene is usd
+
+
+def test_update_polls_usd_before_building_authority_snapshot():
+    renderer_path = (
+        Path(__file__).resolve().parents[1] / "src" / "skinny" / "renderer.py"
+    )
+    tree = ast.parse(renderer_path.read_text())
+    renderer_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Renderer"
+    )
+    update = next(
+        node
+        for node in renderer_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "update"
+    )
+    call_lines = {
+        call.func.attr: call.lineno
+        for call in ast.walk(update)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {
+            "_poll_usd_streaming",
+            "_build_scene_from_state",
+            "_sync_auxiliary_light_authority",
+        }
+    }
+    assert call_lines["_poll_usd_streaming"] < call_lines["_build_scene_from_state"]
+    assert (
+        call_lines["_build_scene_from_state"]
+        < call_lines["_sync_auxiliary_light_authority"]
+    )

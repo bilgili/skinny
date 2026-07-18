@@ -542,6 +542,17 @@ def scene_environment_for_authority(
     return getattr(usd_scene, "environment", None)
 
 
+def scene_auxiliary_lights_for_authority(
+    usd_scene,
+    *,
+    uses_default_lights: bool,
+) -> tuple[list, object | None]:
+    """Select authored sphere and emissive sources for the active authority."""
+    if uses_default_lights or usd_scene is None:
+        return [], None
+    return list(getattr(usd_scene, "lights_sphere", []) or []), usd_scene
+
+
 def environment_contribution_intensity(environment) -> float:
     """Return an environment's live contribution, with no implicit fallback."""
     if environment is None or not getattr(environment, "enabled", True):

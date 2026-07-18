@@ -152,10 +152,10 @@ class RenderOptions:                                  # :32
 `_INTEGRATORS = {"path": 0, "bdpt": 1}`, `_TONEMAPS = {"aces":0,"reinhard":1,"hable":2,"linear":3}`.
 
 `env_intensity` and `direct_light` configure Skinny's fallback pair only. If the
-active USD scene contains any authored light or emissive material, the options
-are ignored and cannot mutate the authored lighting or retained fallback state.
-A light-less scene enables the default DistantLight and built-in IBL together;
-`direct_light=False` may then disable the fallback DistantLight.
+active USD scene contains any authored light or emissive material, the values
+are retained for a later fallback scene but cannot alter current authored
+lighting. A light-less scene enables the default DistantLight and built-in IBL
+together; `direct_light=False` may then disable the fallback DistantLight.
 
 ### `skinny-render` CLI
 

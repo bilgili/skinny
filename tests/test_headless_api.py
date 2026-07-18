@@ -145,8 +145,11 @@ class TestHeadlessFallbackLightOptions:
         headless, wrapper = self._headless(monkeypatch, uses_defaults=False)
         opts = headless.RenderOptions(env_intensity=2.0, direct_light=False)
         wrapper._prepare("authored.usda", opts)
-        assert wrapper.renderer.env_intensity == 0.5
-        assert wrapper.renderer.direct_light_index == 0
+        # Values are retained for the next fallback scene but the authored
+        # scene itself remains the active lighting authority.
+        assert wrapper.renderer.env_intensity == 2.0
+        assert wrapper.renderer.direct_light_index == 1
+        assert wrapper.renderer.uses_default_lights is False
 
 
 def test_fmt_for_output():

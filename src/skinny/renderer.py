@@ -1991,6 +1991,7 @@ class Renderer:
         self._usd_scene: Scene | None = None
         self._scene_graph: object | None = None
         self._last_projected_default_lights: bool | None = None
+        self._last_aux_light_authority_token: tuple | None = None
         # Bumped whenever the scene graph is (re)built so the UI panels, which
         # poll it, repaint. Always defined so observers can read it pre-edit.
         self._scene_graph_version = 0
@@ -3269,6 +3270,7 @@ class Renderer:
         self._prim_to_instances = {}
         self._scene_graph = None
         self._last_projected_default_lights = None
+        self._last_aux_light_authority_token = None
         self._usd_model_index = -1
         self._camera_mirror = False
         self._usd_bake_done = None
@@ -5470,8 +5472,16 @@ class Renderer:
         from an OBJ entry that overwrote the buffers.
         """
         scene = self._usd_scene
-        if scene is None or not scene.instances:
+        if scene is None:
             self._prim_to_instances = {}
+            return
+        if not scene.instances:
+            self._prim_to_instances = {}
+            if self.uses_default_lights:
+                self._upload_distant_lights([])
+            else:
+                self._upload_distant_lights(scene.lights_dir)
+            self._sync_auxiliary_light_authority(force=True)
             return
         # Rebuild the prim-path → instance-index map for the editing API. One
         # prim may expand to several instances (e.g. multi-material meshes).
@@ -5498,9 +5508,11 @@ class Renderer:
         # instance transforms (cheap) without re-concatenating geometry.
         self._usd_instance_layout = (enabled_idx, enabled_offsets, material_ids)
         self._upload_flat_materials(scene.materials)
-        self._upload_sphere_lights(scene.lights_sphere)
-        self._upload_distant_lights(scene.lights_dir)
-        self._upload_emissive_triangles(scene)
+        if self.uses_default_lights:
+            self._upload_distant_lights([])
+        else:
+            self._upload_distant_lights(scene.lights_dir)
+        self._sync_auxiliary_light_authority(force=True)
 
     def _reupload_instance_transforms(self) -> None:
         """Re-upload only the TLAS instance records using the cached layout.
@@ -6310,6 +6322,32 @@ class Renderer:
             self._usd_scene,
             usd_active=self._is_usd_active(),
         )
+
+    def _sync_auxiliary_light_authority(self, *, force: bool = False) -> None:
+        """Mirror sphere/emissive sources owned by the active scene.
+
+        USD buffers remain resident across model switches, so counts and
+        backing data must be cleared when fallback authority becomes active
+        and restored when the authored USD scene becomes active again.
+        """
+        token = (
+            self._is_usd_active(),
+            id(self._usd_scene) if self._usd_scene is not None else 0,
+            self.uses_default_lights,
+        )
+        if not force and token == self._last_aux_light_authority_token:
+            return
+
+        from skinny.scene import scene_auxiliary_lights_for_authority
+        sphere_lights, emissive_scene = scene_auxiliary_lights_for_authority(
+            self._usd_scene,
+            uses_default_lights=self.uses_default_lights,
+        )
+        self._upload_sphere_lights(sphere_lights)
+        self._upload_emissive_triangles(
+            emissive_scene if emissive_scene is not None else Scene(),
+        )
+        self._last_aux_light_authority_token = token
 
     def _upload_distant_lights(
         self,
@@ -10279,6 +10317,11 @@ class Renderer:
                 inst_fps if self._fps_smooth == 0 else self._fps_smooth * 0.9 + inst_fps * 0.1
             )
 
+        # Apply newly-arrived USD metadata before building the per-frame scene
+        # snapshot. This makes the authority transition atomic: authored lights
+        # and environment state become visible in the same frame.
+        self._poll_usd_streaming()
+
         # Advance USD playback and re-evaluate animated prims before any
         # light/scene upload below reads from _usd_scene. No-op when paused or
         # when the loaded stage has no animation.
@@ -10319,11 +10362,10 @@ class Renderer:
             )
         else:
             self._upload_distant_lights(self._usd_scene.lights_dir)
+        self._sync_auxiliary_light_authority()
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()
-        # Pick up USD meshes that finished baking in the background.
-        self._poll_usd_streaming()
         # Rebake the head mesh if source or displacement-scale drifted from
         # whatever we last built. Uses wall-clock time so slider drags get
         # debounced cleanly regardless of frame rate.
