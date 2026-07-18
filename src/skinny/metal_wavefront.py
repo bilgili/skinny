@@ -1156,7 +1156,7 @@ class MetalWavefrontMltPass:
     )
 
     def __init__(self, ctx, shader_dir: Path, num_pixels: int, num_chains: int,
-                 bootstrap_samples: int) -> None:
+                 bootstrap_samples: int, spectral: bool = False) -> None:
         from skinny.wavefront_layout import mlt_buffer_sizes
 
         self.ctx = ctx
@@ -1164,10 +1164,18 @@ class MetalWavefrontMltPass:
         self.num_pixels = int(num_pixels)
         self.num_chains = int(num_chains)
         self.bootstrap_samples = int(bootstrap_samples)
+        self.spectral = bool(spectral)
         self.b = 0.0
         self.seeded = False
 
-        session = _metal_slang_session(ctx, self.shader_dir, {"SKINNY_MLT": "1"})
+        # Spectral MLT (change spectral-mlt): compile the SpectralBDPTIntegrator
+        # target with SKINNY_SPECTRAL. The MSL uniform layout is reflected from
+        # the actual compiled program below, so the SKINNY_MLT tail offsets are
+        # keyed off the spectral layout automatically (design D6).
+        defines = {"SKINNY_MLT": "1"}
+        if self.spectral:
+            defines["SKINNY_SPECTRAL"] = "1"
+        session = _metal_slang_session(ctx, self.shader_dir, defines)
         src_path = self.shader_dir / "wavefront" / "wavefront_mlt.slang"
         module = session.load_module_from_source(
             "wavefront_mlt", src_path.read_text(encoding="utf-8"), str(src_path))

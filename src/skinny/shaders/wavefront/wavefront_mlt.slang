@@ -22,6 +22,17 @@ import bindings;
 import scene_trace;
 import cameras.pinhole;
 import integrators.bdpt;
+#if defined(SKINNY_SPECTRAL)
+// Spectral MLT (change spectral-mlt): the target function becomes the megakernel
+// spectral BDPT estimator (change spectral-bdpt-megakernel). Its estimateRadiance
+// has the identical `float3 (Ray, HitInfo, inout RNG)` signature and already
+// resolves Spectrum → clamped linear sRGB internally (spectrumResolveToLinearSRGB),
+// so c, the splat capture, and the resolve pass all stay on the RGB code paths.
+// The hero-wavelength draw `sampleWavelengths(rng.next())` at the top of
+// estimateRadiance is served by the -DSKINNY_MLT PSS override → the wavelength is
+// a primary-sample dimension with no estimator or mutation-logic change (design D2).
+import integrators.bdpt_spectral;   // SpectralBDPTIntegrator
+#endif
 import wavefront.wf_display;   // wfWriteDisplay (exposure + tonemap + present)
 
 // Per-dispatch tile window (same push-constant layout as wavefront_bdpt's
@@ -115,7 +126,11 @@ MltSample mltEvaluate(inout RNG rng, out MltRecord records[MLT_RECORD_SLOTS])
 
     HitInfo firstHit = traceScene(fc, ray);
 
+#if defined(SKINNY_SPECTRAL)
+    SpectralBDPTIntegrator<PinholeCamera> integ;
+#else
     BDPTIntegrator<PinholeCamera> integ;
+#endif
     integ.cam = cam;
     float3 eyeL = integ.estimateRadiance(ray, firstHit, rng) * lensWeight;
     if (any(eyeL != eyeL) || any(isinf(eyeL)))

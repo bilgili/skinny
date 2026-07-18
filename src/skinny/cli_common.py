@@ -221,9 +221,10 @@ def reject_mlt_unsupported(
 
     MLT (PSSMLT over BDPT, change ``mlt-integrator``) is wavefront-only — a
     Markov chain shares bootstrap/normalization state across pixels the same
-    way SPPM shares its photon grid — and its v1 envelope is RGB, flat
-    materials, layer-free: no ``--spectral``, no non-BSDF directional
-    proposal, no ReSTIR reuse, no ``--online-training``. Checks the
+    way SPPM shares its photon grid — over flat materials, layer-free: no
+    non-BSDF directional proposal, no ReSTIR reuse, no ``--online-training``.
+    ``--spectral`` IS supported (change ``spectral-mlt``): the target function
+    becomes the spectral BDPT estimator. Checks the
     **effective** startup integrator against the **resolved** execution mode
     (same contract as :func:`reject_sppm_without_wavefront`), so interactive
     front-ends can re-check the persisted-``mlt`` case the CLI-keyed
@@ -249,11 +250,7 @@ def reject_mlt_unsupported(
             "explicit --execution-mode megakernel (mlt auto-selects "
             "wavefront) or pass --execution-mode wavefront."
         )
-    if spectral:
-        raise SystemExit(
-            "skinny: --spectral is incompatible with --integrator mlt — "
-            "spectral MLT is outside the v1 envelope (RGB only)."
-        )
+    del spectral  # spectral MLT supported (change spectral-mlt)
     extra_proposals = [
         p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
     ]

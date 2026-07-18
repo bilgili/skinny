@@ -518,7 +518,10 @@ uint pcgHash(uint input)
 // budget is FIXED at MLT_MAX_DIMS. The flat-material envelope bounds the
 // worst-case index (~72 at maxDepth 5, design D2) well below it — the
 // overflow branch is memory-safety only (a fresh hash value every evaluation
-// is not restored on reject and would break detailed balance).
+// is not restored on reject and would break detailed balance). Spectral MLT
+// (change spectral-mlt) consumes exactly ONE extra camera-stream dimension —
+// the SpectralBDPTIntegrator's `sampleWavelengths(rng.next())` at the top of
+// estimateRadiance — so the worst case rises to ~73, still far under 192.
 //
 // This block only exists in the MLT wavefront compile; the #else branch is
 // byte-identical to the shipped RNG, so every RGB kernel .spv is unchanged.

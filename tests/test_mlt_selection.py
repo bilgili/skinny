@@ -126,9 +126,13 @@ def test_persisted_mlt_explicit_megakernel_refused(_implemented):
         reject_mlt_unsupported(integ, resolve_execution_mode("megakernel", integ))
 
 
-def test_mlt_spectral_refused(_implemented):
-    with pytest.raises(SystemExit, match="spectral"):
-        reject_mlt_unsupported("mlt", "wavefront", spectral=True)
+def test_mlt_spectral_accepted(_implemented):
+    # change spectral-mlt: --spectral --integrator mlt is in-envelope (the target
+    # function becomes the spectral BDPT estimator). No raise on wavefront.
+    reject_mlt_unsupported("mlt", "wavefront", spectral=True)
+    # still wavefront-only, even with spectral.
+    with pytest.raises(SystemExit, match="no megakernel path"):
+        reject_mlt_unsupported("mlt", "megakernel", spectral=True)
 
 
 def test_mlt_neural_proposal_refused(_implemented):
@@ -147,10 +151,16 @@ def test_mlt_online_training_refused(_implemented):
 
 
 def test_validate_render_flags_routes_mlt_envelope(_implemented):
+    # A still-refused axis (neural proposal) routes through validate_render_flags;
+    # spectral is now accepted (change spectral-mlt) so it can't be the probe.
     ns = _ns(integrator="mlt", execution_mode="wavefront",
-             spectral=True, proposals=None, reuse=None, online_training=False)
-    with pytest.raises(SystemExit, match="spectral"):
+             spectral=False, proposals="bsdf,neural", reuse=None, online_training=False)
+    with pytest.raises(SystemExit, match="BSDF proposal"):
         validate_render_flags(ns)
+    # spectral mlt passes the envelope router (wavefront, flat, bsdf-only).
+    ok = _ns(integrator="mlt", execution_mode="wavefront",
+             spectral=True, proposals=None, reuse=None, online_training=False)
+    validate_render_flags(ok)
 
 
 def test_bsdf_only_proposals_accepted(_implemented):

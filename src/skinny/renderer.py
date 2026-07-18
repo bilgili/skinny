@@ -2454,7 +2454,8 @@ class Renderer:
             self.ctx, self.shader_dir,
             num_pixels=self.width * self.height,
             num_chains=int(self.mlt_num_chains),
-            bootstrap_samples=int(self.mlt_bootstrap_samples))
+            bootstrap_samples=int(self.mlt_bootstrap_samples),
+            spectral=self._spectral)
         self._wf_mlt_pass_dims = key
         return self._wavefront_mlt_pass
 
@@ -2482,7 +2483,8 @@ class Renderer:
             self.ctx, self.shader_dir, self._scene_set0_layout,
             num_pixels=self.width * self.height,
             num_chains=int(self.mlt_num_chains),
-            bootstrap_samples=int(self.mlt_bootstrap_samples))
+            bootstrap_samples=int(self.mlt_bootstrap_samples),
+            spectral=self._spectral)
         # Rebind the scene descriptor sets' MLT slots (52–56) from the
         # creation-time dummies to this pass's chain buffers.
         for ds in self.descriptor_sets:

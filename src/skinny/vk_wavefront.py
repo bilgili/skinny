@@ -1107,13 +1107,15 @@ class WavefrontMltPass:
     )
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
-                 num_pixels: int, num_chains: int, bootstrap_samples: int) -> None:
+                 num_pixels: int, num_chains: int, bootstrap_samples: int,
+                 spectral: bool = False) -> None:
         from skinny.wavefront_layout import mlt_buffer_sizes
 
         self.ctx = ctx
         self.num_pixels = int(num_pixels)
         self.num_chains = int(num_chains)
         self.bootstrap_samples = int(bootstrap_samples)
+        self.spectral = bool(spectral)
         # Renderer-owned per-accumulation state: the bootstrap-normalization b
         # (resolve scale, design D4) and whether the chains have been seeded.
         self.b = 0.0
@@ -1121,9 +1123,12 @@ class WavefrontMltPass:
 
         modules = {}
         for entry, out_name in self._ENTRIES:
+            # Spectral MLT (change spectral-mlt) adds -DSKINNY_SPECTRAL and a
+            # distinct `_spectral` .spv suffix (via _compile_full_spv) so the
+            # SpectralBDPTIntegrator target never aliases the RGB MLT cache.
             spv = _compile_full_spv(
                 shader_dir, "wavefront/wavefront_mlt", entry, out_name,
-                defines=("-D", "SKINNY_MLT=1"), tag="_mlt")
+                defines=("-D", "SKINNY_MLT=1"), tag="_mlt", spectral=self.spectral)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)

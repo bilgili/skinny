@@ -68,7 +68,7 @@ def test_mlt_gated_until_wired(monkeypatch):
     assert parity.combo_is_valid(RenderCombo("mlt", "wavefront"), flat)[0]
 
 
-def test_mlt_is_flat_material_layer_free_rgb_only(monkeypatch):
+def test_mlt_is_flat_material_layer_free(monkeypatch):
     from skinny import mlt_capability
     monkeypatch.setattr(mlt_capability, "MLT_IMPLEMENTED", True)
     # Non-flat scenes: recorded skip regardless of the gate.
@@ -80,9 +80,16 @@ def test_mlt_is_flat_material_layer_free_rgb_only(monkeypatch):
     assert not ok and "layer-free" in reason
     ok, reason = parity.combo_is_valid(RenderCombo("mlt", "wavefront", (), "restir-di"), flat)
     assert not ok and "layer-free" in reason
+    # Spectral MLT (change spectral-mlt): admitted on flat scenes; still
+    # wavefront-only and flat-only.
+    assert parity.combo_is_valid(
+        RenderCombo("mlt", "wavefront", (), "none", spectral=True), flat)[0]
     ok, reason = parity.combo_is_valid(
-        RenderCombo("mlt", "wavefront", (), "none", spectral=True), flat)
-    assert not ok and "RGB only" in reason
+        RenderCombo("mlt", "megakernel", (), "none", spectral=True), flat)
+    assert not ok and "wavefront-only" in reason
+    ok, reason = parity.combo_is_valid(
+        RenderCombo("mlt", "wavefront", (), "none", spectral=True), _sss_scene())
+    assert not ok and "flat-material" in reason
 
 
 def test_mlt_axis_class_and_tolerance_row():
@@ -328,15 +335,17 @@ def test_spectral_non_flat_scene_all_skipped(scene):
         assert not ok and reason
 
 
-def test_spectral_envelope_is_path_bdpt_both_modes_and_sppm_wavefront():
-    # change spectral-wavefront: the envelope is path/bdpt in EITHER execution
-    # mode plus sppm under wavefront (flat, no neural, no reuse). With the gate on
-    # (ships True) these are exactly the spectral entries in the rendered set.
+def test_spectral_envelope_is_path_bdpt_both_modes_and_sppm_mlt_wavefront():
+    # change spectral-wavefront: path/bdpt in EITHER execution mode plus sppm
+    # under wavefront. change spectral-mlt: mlt under wavefront too (flat, no
+    # neural, no reuse). With the gate on (ships True) these are exactly the
+    # spectral entries in the rendered set.
     expected = {RenderCombo("path", "megakernel", spectral=True),
                 RenderCombo("path", "wavefront", spectral=True),
                 RenderCombo("bdpt", "megakernel", spectral=True),
                 RenderCombo("bdpt", "wavefront", spectral=True),
-                RenderCombo("sppm", "wavefront", spectral=True)}
+                RenderCombo("sppm", "wavefront", spectral=True),
+                RenderCombo("mlt", "wavefront", spectral=True)}
     eligible = {c for c in parity.all_combos()
                 if c.spectral and parity.spectral_envelope(c, _flat_scene())[0]}
     assert eligible == expected
