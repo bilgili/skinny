@@ -18,19 +18,20 @@ single shared source so they cannot drift. The flags are:
 
 - `--backend {auto,metal,vulkan}` — default `auto`, with a `SKINNY_BACKEND`
   environment fallback; selects the GPU backend, fixed for the session.
-- `--integrator {path,bdpt,sppm}` — default `path`. `sppm` selects the
-  Stochastic Progressive Photon Mapping integrator, which runs under
+- `--integrator {path,bdpt,sppm,mlt}` — default `path`. `sppm` selects the
+  Stochastic Progressive Photon Mapping integrator and `mlt` selects the
+  Metropolis Light Transport integrator; both run under
   `--execution-mode wavefront`.
 - `--execution-mode {auto,megakernel,wavefront}` — default `auto`, with a
   `SKINNY_EXECUTION_MODE` environment fallback. `auto` (the default) SHALL derive
   the execution mode from the startup integrator — `path` → `megakernel`, `bdpt`
-  → `megakernel`, `sppm` → `wavefront` — via a single shared resolver used by
-  every front-end. An explicit `megakernel` or `wavefront` (flag or environment
-  variable) SHALL override the derived default and pin the mode for the session.
-  Precedence: explicit mode > integrator-derived default. The resolution SHALL
-  happen once at startup, from the integrator active at launch (explicit
-  `--integrator`, else the persisted integrator on interactive front-ends, else
-  `path`), and the mode SHALL remain fixed for the session.
+  → `megakernel`, `sppm` → `wavefront`, `mlt` → `wavefront` — via a single shared
+  resolver used by every front-end. An explicit `megakernel` or `wavefront` (flag
+  or environment variable) SHALL override the derived default and pin the mode
+  for the session. Precedence: explicit mode > integrator-derived default. The
+  resolution SHALL happen once at startup, from the integrator active at launch
+  (explicit `--integrator`, else the persisted integrator on interactive
+  front-ends, else `path`), and the mode SHALL remain fixed for the session.
 - `--bdpt-walk {fused,eye,eye_light}` — default `fused`, with a
   `SKINNY_BDPT_WALK` environment fallback; affects only `wavefront` + `bdpt`.
 
@@ -45,8 +46,8 @@ fixed for the session.
   with `--help`
 - **THEN** all of `--backend`, `--integrator`, `--execution-mode`, `--bdpt-walk`
   are present with identical choices and defaults, `--integrator` lists `path`,
-  `bdpt`, and `sppm`, and `--execution-mode` lists `auto`, `megakernel`, and
-  `wavefront` with default `auto`
+  `bdpt`, `sppm`, and `mlt`, and `--execution-mode` lists `auto`, `megakernel`,
+  and `wavefront` with default `auto`
 
 #### Scenario: Interactive front-end launches into the chosen integrator
 
@@ -56,8 +57,8 @@ fixed for the session.
 
 #### Scenario: Execution mode is auto-derived from the integrator
 
-- **WHEN** a front-end is launched with `--integrator sppm` and no explicit
-  `--execution-mode` (and no `SKINNY_EXECUTION_MODE`)
+- **WHEN** a front-end is launched with `--integrator sppm` or `--integrator
+  mlt` and no explicit `--execution-mode` (and no `SKINNY_EXECUTION_MODE`)
 - **THEN** the execution mode resolves to `wavefront`, and with `--integrator
   path` or `--integrator bdpt` (and no explicit mode) it resolves to `megakernel`
 
@@ -92,25 +93,29 @@ later or silently doing nothing. Specifically:
   front-ends SHALL raise a usage error naming the incompatible option and the fix
   (`--integrator path`), because BDPT does not consume the neural directional
   proposal on any backend or execution mode.
-- When the **effective startup integrator** is `sppm` AND the **resolved**
-  execution mode is `megakernel`, the front-ends SHALL raise a usage error
-  stating that SPPM has no megakernel path and naming the fix (drop the explicit
-  `--execution-mode megakernel`, or use `--execution-mode wavefront`). Because the
-  execution mode defaults to `auto` and `sppm` auto-derives to `wavefront`, this
-  error SHALL trip only when the user has **explicitly** forced `--execution-mode
-  megakernel` (via flag or `SKINNY_EXECUTION_MODE`). The **effective startup
-  integrator** is the one active at launch — an explicit `--integrator`, else the
-  persisted integrator on the interactive front-ends — so a persisted `sppm`
-  under an explicitly-forced `megakernel` is refused too, since SPPM cannot run
-  under the megakernel regardless of how it was selected.
+- When the **effective startup integrator** is `sppm` or `mlt` AND the
+  **resolved** execution mode is `megakernel`, the front-ends SHALL raise a
+  usage error stating that the integrator has no megakernel path and naming the
+  fix (drop the explicit `--execution-mode megakernel`, or use `--execution-mode
+  wavefront`). Because the execution mode defaults to `auto` and `sppm`/`mlt`
+  auto-derive to `wavefront`, this error SHALL trip only when the user has
+  **explicitly** forced `--execution-mode megakernel` (via flag or
+  `SKINNY_EXECUTION_MODE`). The **effective startup integrator** is the one
+  active at launch — an explicit `--integrator`, else the persisted integrator
+  on the interactive front-ends — so a persisted `sppm`/`mlt` under an
+  explicitly-forced `megakernel` is refused too.
+- When the integrator is explicitly `mlt` AND any of `--spectral`,
+  `--online-training`, a neural proposal in the mixture, or ReSTIR DI reuse is
+  requested, the front-ends SHALL raise a usage error naming the incompatible
+  option — MLT v1 is RGB, layer-free, wavefront-only.
 
 The validation SHALL run after the execution mode is resolved and SHALL be shared
 across all front-ends (`skinny`, `skinny-gui`, `skinny-web`, `skinny-render`).
-The `bdpt` × neural/online-training guard SHALL trip only on an **explicit**
-`--integrator bdpt` (a default/persisted `bdpt` SHALL NOT trip it, since the
-integrator stays runtime-cycleable); the `sppm` × `megakernel` guard SHALL
-consider the effective startup integrator (explicit or persisted `sppm`) as
-above.
+The `bdpt` × neural/online-training and `mlt` × axis guards SHALL trip only on
+an **explicit** `--integrator bdpt`/`--integrator mlt` (a default/persisted
+value SHALL NOT trip them, since the integrator stays runtime-cycleable); the
+integrator × `megakernel` guard SHALL consider the effective startup integrator
+(explicit or persisted `sppm`/`mlt`) as above.
 
 #### Scenario: bdpt + online-training exits with an error
 
@@ -132,6 +137,13 @@ above.
 - **THEN** the execution mode resolves to `wavefront` and startup proceeds
   normally with no error
 
+#### Scenario: mlt alone does not error
+
+- **WHEN** a front-end is launched with `--integrator mlt` and no explicit
+  `--execution-mode`
+- **THEN** the execution mode resolves to `wavefront` and startup proceeds
+  normally with no error
+
 #### Scenario: sppm + explicit megakernel exits with an error
 
 - **WHEN** a front-end is launched with `--integrator sppm --execution-mode
@@ -139,6 +151,23 @@ above.
 - **THEN** it prints a clear error stating that SPPM has no megakernel path and
   to drop the flag or use `--execution-mode wavefront`, and exits without
   initializing the GPU
+
+#### Scenario: mlt + explicit megakernel exits with an error
+
+- **WHEN** a front-end is launched with `--integrator mlt --execution-mode
+  megakernel` (or with a persisted `mlt` integrator and an explicitly-forced
+  `megakernel` mode)
+- **THEN** it prints a clear error stating that MLT has no megakernel path and
+  to drop the flag or use `--execution-mode wavefront`, and exits without
+  initializing the GPU
+
+#### Scenario: mlt + spectral / neural / ReSTIR / online-training exits with an error
+
+- **WHEN** a front-end is launched with `--integrator mlt` plus any of
+  `--spectral`, `--proposals bsdf,neural`, ReSTIR DI reuse, or
+  `--online-training`
+- **THEN** it prints a clear error naming the incompatible option and exits
+  without initializing the GPU
 
 #### Scenario: persisted sppm + explicit megakernel exits with an error
 
@@ -151,9 +180,9 @@ above.
 
 - **WHEN** a front-end is launched with `--integrator path` (with or without a
   neural proposal / `--online-training`), or with `--integrator bdpt` and no
-  neural proposal and no `--online-training`, or with `--integrator sppm` (with
-  or without an explicit `--execution-mode wavefront`), or with no explicit
-  `--integrator`
+  neural proposal and no `--online-training`, or with `--integrator sppm` or
+  `--integrator mlt` (with or without an explicit `--execution-mode wavefront`),
+  or with no explicit `--integrator`
 - **THEN** startup proceeds normally with no error
 
 ### Requirement: Render-area resolution flags

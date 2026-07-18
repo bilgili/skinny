@@ -31,7 +31,7 @@ comparison.
 
 ### Requirement: Parity matrix is derived from a validity table
 The parity harness SHALL derive the set of rendered combinations from a single
-validity table over the axes `integrator ∈ {Path, BDPT, SPPM}`, `execution_mode ∈
+validity table over the axes `integrator ∈ {Path, BDPT, SPPM, MLT}`, `execution_mode ∈
 {megakernel, wavefront}`, `proposals ⊇ {neural}`, `reuse ⊇ {ReSTIR DI}`, and
 `spectral ∈ {off, on}`. The table SHALL mirror the documented compatibility matrix. Every
 (scene × combo) SHALL be either exercised or skipped with an explicit, machine-readable
@@ -49,6 +49,15 @@ it as if it were spectral.
 - **THEN** `(SPPM, megakernel)` is skipped with reason "SPPM is wavefront-only"
 - **AND** `(SPPM, wavefront)` is present in the rendered set
 
+#### Scenario: MLT is wavefront-only, RGB-only, and layer-free
+- **WHEN** the matrix is enumerated for any scene
+- **THEN** `(MLT, megakernel)` is skipped with reason "MLT is wavefront-only"
+- **AND** every `(MLT, spectral)` / MLT+neural / MLT+ReSTIR combo is skipped
+  with a recorded reason
+- **AND** `(MLT, wavefront)` is present in the rendered set for flat-material
+  scenes, while skin/subsurface/volume-dominated scenes record an
+  out-of-envelope skip
+
 #### Scenario: neural proposal requires wavefront and a flat material scene
 - **WHEN** the matrix is enumerated for a subsurface/skin scene (e.g. the SSS dragon)
 - **THEN** every combo carrying the neural proposal is skipped with reason
@@ -61,8 +70,9 @@ it as if it were spectral.
 
 #### Scenario: spectral envelope is Path-megakernel-only without layers
 - **WHEN** the spectral envelope is evaluated for a flat-material scene
-- **THEN** every `(BDPT, spectral)` / `(SPPM, spectral)` / `(wavefront, spectral)` /
-  spectral+proposal / spectral+reuse combo is rejected with a recorded reason
+- **THEN** every `(BDPT, spectral)` / `(SPPM, spectral)` / `(MLT, spectral)` /
+  `(wavefront, spectral)` / spectral+proposal / spectral+reuse combo is rejected
+  with a recorded reason
 - **AND** `(Path, megakernel, spectral)` is the only envelope-eligible spectral combo
 
 #### Scenario: spectral combos are gated until the transport is wired
@@ -113,7 +123,12 @@ divergence on flat or volume scenes.
 The harness SHALL designate `(Path, wavefront, no-proposal, no-reuse)` as the
 self-consistency anchor per scene and assert that every other valid integrator
 combo agrees with the anchor within a per-integrator tolerance (looser for SPPM
-caustics and BDPT connection noise than for a pure mode change).
+caustics and BDPT connection noise than for a pure mode change). MLT SHALL gate
+against the same anchor with its own recorded MLT-equivalence tolerance,
+measured harness-first: Markov-chain samples are correlated, so at equal spp the
+per-pixel noise structure differs from independent sampling even though the
+means agree; the tolerance SHALL only ever be tightened, never loosened to hide
+a real divergence.
 
 #### Scenario: BDPT matches the Path anchor
 - **WHEN** a scene is rendered with BDPT and with the Path anchor
@@ -124,6 +139,12 @@ caustics and BDPT connection noise than for a pure mode change).
 - **WHEN** a scene is rendered with `(SPPM, wavefront)` and with the Path anchor
 - **THEN** the exposure-aligned relMSE/FLIP between them is within the (looser)
   SPPM-equivalence tolerance
+
+#### Scenario: MLT matches the Path anchor within its recorded tolerance
+- **WHEN** a scene is rendered with `(MLT, wavefront)` and with the Path anchor
+  at the manifest spp
+- **THEN** the exposure-aligned relMSE/FLIP between them is within the recorded
+  MLT-equivalence tolerance for that scene
 
 ### Requirement: Proposal and reuse layers are unbiased
 Adding the neural directional proposal or ReSTIR DI direct-light reuse SHALL change
