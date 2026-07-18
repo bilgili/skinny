@@ -144,12 +144,18 @@ class RenderOptions:                                  # :32
     integrator: str = "path"        # "path" | "bdpt"
     exposure: float = 0.0           # EV stops, 2^EV
     tonemap: str = "aces"           # aces | reinhard | hable | linear
-    env_intensity: Optional[float] = None
-    direct_light: bool = True       # False → IBL only
+    env_intensity: Optional[float] = None  # fallback IBL only
+    direct_light: bool = True       # fallback DistantLight only
     time: object = None             # None | int | float | Usd.TimeCode
 ```
 
 `_INTEGRATORS = {"path": 0, "bdpt": 1}`, `_TONEMAPS = {"aces":0,"reinhard":1,"hable":2,"linear":3}`.
+
+`env_intensity` and `direct_light` configure Skinny's fallback pair only. If the
+active USD scene contains any authored light or emissive material, the options
+are ignored and cannot mutate the authored lighting or retained fallback state.
+A light-less scene enables the default DistantLight and built-in IBL together;
+`direct_light=False` may then disable the fallback DistantLight.
 
 ### `skinny-render` CLI
 
@@ -346,6 +352,10 @@ linear-HDR read; folded into the display exposure). Retunable via the `film.iso`
 `film.exposure_time` params; a change resets accumulation. Mode lists:
 `integrator_modes = ["Path","BDPT"]`, `tonemap_modes = ["ACES","Reinhard","Hable","Linear"]`,
 `proposal_preset_modes`, `reuse_modes = ["None"]`.
+
+`renderer.uses_default_lights` reports the active lighting authority.
+`direct_light_index` and `env_intensity` affect only the synthesized fallback
+pair; authored USD lighting remains controlled by its USD light/material state.
 
 ### `SkinParameters` dataclass (`renderer.py:504`)
 

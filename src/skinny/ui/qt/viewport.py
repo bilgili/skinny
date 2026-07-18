@@ -130,6 +130,7 @@ class _RenderWorker(QObject):
                 renderer, "_sppm_glossy_roughness_override", None),
             online_training=renderer_online_status(renderer),
             choices=choice_names_from_renderer(renderer),
+            uses_default_lights=bool(renderer.uses_default_lights),
         )
 
     def _maybe_render_debug(self) -> bool:

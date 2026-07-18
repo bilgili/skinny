@@ -794,30 +794,21 @@ def _serialize_value(value: object) -> object:
 # ─── Lookup ─────────────────────────────────────────────────────────
 
 
-def inject_default_lights(root: SceneGraphNode, default_stage) -> None:
+def inject_default_lights(
+    root: SceneGraphNode,
+    default_stage,
+    *,
+    enabled: bool = True,
+) -> None:
     """Layer the synthetic ``/Skinny/DefaultLight`` / ``/Skinny/DefaultDome``
-    nodes onto ``root`` so the user can always see + tweak the renderer's
-    direct light and IBL — even when the loaded USD asset authors neither.
+    nodes onto ``root`` only while Skinny's fallback pair owns lighting.
 
     Idempotent: existing synthetic nodes are stripped and re-added so a
-    repeated call refreshes their values. Real USD-authored lights in
-    ``root`` are left alone; we only fill in the gaps (no direct light
-    in the asset ⇒ inject DefaultLight, no dome ⇒ inject DefaultDome).
+    repeated call refreshes their values. Real USD-authored lights are
+    never removed.
     """
-    if default_stage is None:
-        return
-    try:
-        from pxr import Usd, UsdLux
-    except Exception:
-        return
-
     SYNTH_DIR = "/Skinny/DefaultLight"
     SYNTH_DOME = "/Skinny/DefaultDome"
-
-    def has_kind(node: SceneGraphNode, ref_kind: str) -> bool:
-        if node.renderer_ref is not None and node.renderer_ref.kind == ref_kind:
-            return True
-        return any(has_kind(c, ref_kind) for c in node.children)
 
     def strip_synth(node: SceneGraphNode) -> None:
         node.children = [
@@ -828,9 +819,11 @@ def inject_default_lights(root: SceneGraphNode, default_stage) -> None:
 
     strip_synth(root)
 
-    needs_dir = not has_kind(root, "light_dir")
-    needs_dome = not has_kind(root, "light_env")
-    if not needs_dir and not needs_dome:
+    if not enabled or default_stage is None:
+        return
+    try:
+        from pxr import Usd, UsdLux
+    except Exception:
         return
 
     time = Usd.TimeCode.Default()
@@ -841,7 +834,7 @@ def inject_default_lights(root: SceneGraphNode, default_stage) -> None:
         if not prim.IsActive() or prim.IsAbstract():
             continue
         path = str(prim.GetPath())
-        if needs_dir and path == SYNTH_DIR and prim.IsA(UsdLux.DistantLight):
+        if path == SYNTH_DIR and prim.IsA(UsdLux.DistantLight):
             node = SceneGraphNode(
                 path=path, name=prim.GetName(),
                 type_name=prim.GetTypeName(),
@@ -850,7 +843,7 @@ def inject_default_lights(root: SceneGraphNode, default_stage) -> None:
             _add_light_props(node, prim, time)
             root.children.append(node)
             light_dir_idx += 1
-        elif needs_dome and path == SYNTH_DOME and prim.IsA(UsdLux.DomeLight):
+        elif path == SYNTH_DOME and prim.IsA(UsdLux.DomeLight):
             node = SceneGraphNode(
                 path=path, name=prim.GetName(),
                 type_name=prim.GetTypeName(),

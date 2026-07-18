@@ -234,6 +234,22 @@ def build_all_params(renderer) -> list[ParamSpec]:
     return STATIC_PARAMS + build_dynamic_params(renderer)
 
 
+def is_fallback_light_param(param: ParamSpec) -> bool:
+    """Whether a parameter controls Skinny's synthesized fallback pair."""
+    return (
+        param.path in {"env_index", "env_intensity", "direct_light_index"}
+        or param.path.startswith("light")
+    )
+
+
+def build_visible_params(renderer) -> list[ParamSpec]:
+    """Return controls visible for the renderer's current light authority."""
+    params = build_all_params(renderer)
+    if bool(getattr(renderer, "uses_default_lights", True)):
+        return params
+    return [param for param in params if not is_fallback_light_param(param)]
+
+
 def _get_nested(obj, path):
     """Resolve `path` on `obj`. Routes:
     - "mtlx.<field>"          -> obj.mtlx_overrides[field]   (scalar)

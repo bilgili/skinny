@@ -72,6 +72,7 @@ class RendererStateSnapshot:
     sppm_glossy_roughness: float | None = None
     online_training: dict[str, Any] = field(default_factory=dict)
     choices: dict[str, list[str]] = field(default_factory=dict)
+    uses_default_lights: bool = True
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ class QtRendererProxy:
         object.__setattr__(self, "_usd_edit_layer", None)
         object.__setattr__(self, "_material_version", 0)
         object.__setattr__(self, "_usd_scene_id", 0)
+        self._values["uses_default_lights"] = True
 
     def _default_values(self, width: int, height: int) -> dict[str, Any]:
         values: dict[str, Any] = {
@@ -331,6 +333,7 @@ class QtRendererProxy:
             self._gpu_name = snapshot.gpu_name
             self._encoding = snapshot.encoding
             self._sppm_glossy_roughness = snapshot.sppm_glossy_roughness
+            self._values["uses_default_lights"] = snapshot.uses_default_lights
 
     def post(self, callback: Callable[[Any], Any], *, coalesce_key: str | None = None) -> None:
         self._commands.post(callback, coalesce_key=coalesce_key)

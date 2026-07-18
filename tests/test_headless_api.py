@@ -111,6 +111,44 @@ class TestRenderOptions:
             RenderOptions(tonemap="nope")
 
 
+class TestHeadlessFallbackLightOptions:
+    @staticmethod
+    def _headless(monkeypatch, *, uses_defaults):
+        from types import SimpleNamespace
+        from skinny import headless
+
+        class _Renderer:
+            direct_light_index = 0
+            env_intensity = 0.5
+
+            def set_usd_scene(self, scene):
+                self.scene = scene
+                self.uses_default_lights = uses_defaults
+
+        wrapper = object.__new__(headless.HeadlessRenderer)
+        wrapper.renderer = _Renderer()
+        monkeypatch.setattr(
+            headless,
+            "_load_scene",
+            lambda source, time: SimpleNamespace(source=source, time=time),
+        )
+        return headless, wrapper
+
+    def test_options_apply_to_lightless_fallback_scene(self, monkeypatch):
+        headless, wrapper = self._headless(monkeypatch, uses_defaults=True)
+        opts = headless.RenderOptions(env_intensity=2.0, direct_light=False)
+        wrapper._prepare("lightless.usda", opts)
+        assert wrapper.renderer.env_intensity == 2.0
+        assert wrapper.renderer.direct_light_index == 1
+
+    def test_options_cannot_mutate_authored_usd_lighting(self, monkeypatch):
+        headless, wrapper = self._headless(monkeypatch, uses_defaults=False)
+        opts = headless.RenderOptions(env_intensity=2.0, direct_light=False)
+        wrapper._prepare("authored.usda", opts)
+        assert wrapper.renderer.env_intensity == 0.5
+        assert wrapper.renderer.direct_light_index == 0
+
+
 def test_fmt_for_output():
     from skinny.headless import _fmt_for_output
     assert _fmt_for_output(Path("a.png"), None) == "png"

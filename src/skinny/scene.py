@@ -434,6 +434,12 @@ class Scene:
     lights_dir: list[LightDir] = field(default_factory=list)
     lights_sphere: list[LightSphere] = field(default_factory=list)
     environment: Optional[LightEnvHDR] = None
+    # True when the source USD stage contains an active, supported authored
+    # lighting source, regardless of its current intensity/visibility. This is
+    # source-authority metadata, not a "currently emits power" test: it
+    # survives Rect/Disk conversion to emissive geometry and lets the renderer
+    # decide whether its built-in DistantLight + IBL fallback pair is allowed.
+    has_authored_lighting: Optional[bool] = None
     camera_override: Optional[CameraOverride] = None
 
     # Scene-scale bridge: 1 world unit = `mm_per_unit` millimetres. Used
@@ -480,6 +486,89 @@ class Scene:
         amin = np.minimum.reduce(mins).astype(np.float32)
         amax = np.maximum.reduce(maxs).astype(np.float32)
         return amin, amax
+
+
+def scene_has_emissive_instances(scene) -> bool:
+    """Whether any authored instance is bound to a non-zero emissive material."""
+    materials = getattr(scene, "materials", []) or []
+    for inst in getattr(scene, "instances", []) or []:
+        material_id = getattr(inst, "material_id", -1)
+        if not (0 <= material_id < len(materials)):
+            continue
+        value = materials[material_id].parameter_overrides.get("emissiveColor")
+        if value is None:
+            continue
+        try:
+            if any(float(value[i]) > 0.0 for i in range(3)):
+                return True
+        except (IndexError, TypeError, ValueError):
+            continue
+    return False
+
+
+def scene_has_authored_lighting(scene) -> bool:
+    """Source-authority predicate, independent of current emitted power."""
+    authored = getattr(scene, "has_authored_lighting", None)
+    if authored is not None:
+        return bool(authored)
+    return bool(
+        (getattr(scene, "lights_dir", []) or [])
+        or (getattr(scene, "lights_sphere", []) or [])
+        or getattr(scene, "environment", None) is not None
+        or scene_has_emissive_instances(scene)
+    )
+
+
+def scene_uses_default_lights(usd_scene, *, usd_active: bool) -> bool:
+    """Whether Skinny's fallback pair owns lighting for the active scene."""
+    return not (
+        usd_active
+        and usd_scene is not None
+        and scene_has_authored_lighting(usd_scene)
+    )
+
+
+def scene_environment_for_authority(
+    usd_scene,
+    fallback_environment,
+    *,
+    uses_default_lights: bool,
+):
+    """Select the environment owned by the active lighting authority."""
+    if uses_default_lights:
+        return fallback_environment
+    if usd_scene is None:
+        return None
+    return getattr(usd_scene, "environment", None)
+
+
+def environment_contribution_intensity(environment) -> float:
+    """Return an environment's live contribution, with no implicit fallback."""
+    if environment is None or not getattr(environment, "enabled", True):
+        return 0.0
+    return float(getattr(environment, "intensity", 0.0))
+
+
+def select_powered_distant_lights(lights, *, authority_enabled: bool = True) -> list:
+    """Select distant lights that currently contribute under the active authority."""
+    if not authority_enabled:
+        return []
+
+    def _has_power(light) -> bool:
+        intensity = getattr(light, "intensity", None)
+        if intensity is not None and float(intensity) == 0.0:
+            return False
+        radiance = np.asarray(
+            getattr(light, "radiance", (0.0, 0.0, 0.0)),
+            dtype=np.float32,
+        )
+        return bool(np.any(radiance > 0.0))
+
+    return [
+        light
+        for light in lights
+        if getattr(light, "enabled", True) and _has_power(light)
+    ]
 
 
 # ─── Construction helpers ────────────────────────────────────────────
@@ -532,6 +621,7 @@ def build_default_scene(
         materials=materials,
         lights_dir=lights_dir,
         environment=env,
+        has_authored_lighting=False,
         mm_per_unit=float(mm_per_unit),
         furnace_mode=bool(furnace_mode),
     )

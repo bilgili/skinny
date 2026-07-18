@@ -1990,6 +1990,7 @@ class Renderer:
         # via _usd_instance_queue.
         self._usd_scene: Scene | None = None
         self._scene_graph: object | None = None
+        self._last_projected_default_lights: bool | None = None
         # Bumped whenever the scene graph is (re)built so the UI panels, which
         # poll it, repaint. Always defined so observers can read it pre-edit.
         self._scene_graph_version = 0
@@ -3049,7 +3050,7 @@ class Renderer:
         accumulate state, so call sites that consume scene-level inputs go
         through `self.scene` rather than `self.*` directly.
         """
-        env: Environment | None = (
+        fallback_env: Environment | None = (
             self.environments[self.env_index]
             if 0 <= self.env_index < len(self.environments)
             else None
@@ -3076,10 +3077,19 @@ class Renderer:
             env_intensity_for_scene = 1.0
             direct_enabled = False
         else:
-            env_for_scene = env
-            env_intensity_for_scene = float(self.env_intensity)
-            direct_enabled = (self.direct_light_index == 0)
-        return build_default_scene(
+            from skinny.scene import scene_environment_for_authority
+            env_for_scene = scene_environment_for_authority(
+                self._usd_scene,
+                fallback_env,
+                uses_default_lights=self.uses_default_lights,
+            )
+            env_intensity_for_scene = (
+                float(self.env_intensity) if self.uses_default_lights else 0.0
+            )
+            direct_enabled = (
+                self.uses_default_lights and self.direct_light_index == 0
+            )
+        snapshot = build_default_scene(
             environment=env_for_scene,
             env_intensity=env_intensity_for_scene,
             mesh=None,
@@ -3089,6 +3099,13 @@ class Renderer:
             mm_per_unit=float(self.mm_per_unit),
             furnace_mode=is_furnace,
         )
+        # Preserve the authored DomeLight object itself so its enabled and
+        # intensity state remain authoritative. build_default_scene clones an
+        # Environment into a fallback LightEnvHDR and is used only for that
+        # fallback/furnace path.
+        if not is_furnace and not self.uses_default_lights:
+            snapshot.environment = env_for_scene
+        return snapshot
 
     def _frame_camera_to_scene(self, scene: Scene) -> None:
         """Position the orbit camera from a USD authored UsdGeom.Camera
@@ -3251,6 +3268,7 @@ class Renderer:
         self._edit_layer_default_path = None
         self._prim_to_instances = {}
         self._scene_graph = None
+        self._last_projected_default_lights = None
         self._usd_model_index = -1
         self._camera_mirror = False
         self._usd_bake_done = None
@@ -3813,53 +3831,6 @@ class Renderer:
             or self._graph_set_signature() != self._pipeline_built_for_targets
         ):
             self._build_pipeline_for_current_graphs()
-
-    def _apply_usd_lights(self, scene: Scene) -> None:
-        """Seed the renderer's light + environment state from a USD scene.
-
-        Runs once at __init__ time. Picks the first DistantLight and the
-        DomeLight (if any) the loader extracted, converts them into the
-        renderer's UI-friendly representation (elevation/azimuth + colour
-        + intensity for the analytic light, an Environment entry for the
-        dome), and leaves the user's sliders fully in charge afterwards.
-        """
-        if scene.lights_dir:
-            light = scene.lights_dir[0]
-            d = np.asarray(light.direction, dtype=np.float32)
-            norm = float(np.linalg.norm(d))
-            if norm > 1e-6:
-                d = d / norm
-                # Inverse of _update_light's spherical→cartesian:
-                #   d = [cos(el)·sin(az), sin(el), cos(el)·cos(az)]
-                self.light_elevation = float(
-                    np.degrees(np.arcsin(np.clip(d[1], -1.0, 1.0)))
-                )
-                self.light_azimuth = float(
-                    np.degrees(np.arctan2(d[0], d[2]))
-                )
-            r = np.asarray(light.radiance, dtype=np.float32)
-            intensity = float(np.max(r))
-            if intensity > 1e-6:
-                self.light_intensity = intensity
-                self.light_color_r = float(r[0] / intensity)
-                self.light_color_g = float(r[1] / intensity)
-                self.light_color_b = float(r[2] / intensity)
-
-        if scene.environment is not None:
-            from skinny.environment import Environment
-            env_hdr = scene.environment
-            self.environments.append(Environment(
-                name=f"USD: {env_hdr.name}",
-                _data=env_hdr.data,
-            ))
-            self.env_index = len(self.environments) - 1
-            if env_hdr.intensity > 0:
-                self.env_intensity = float(env_hdr.intensity)
-        else:
-            # USD scene without a DomeLight: keep a soft IBL fill so
-            # indirect bounces don't black out closed interiors / direct-
-            # only setups. 0.5 reads as "ambient", easy to dial up.
-            self.env_intensity = 0.5
 
     def _init_default_light_stage(self) -> None:
         """Create an anonymous in-memory stage with /Skinny/DefaultLight as a
@@ -5377,7 +5348,6 @@ class Renderer:
             self._usd_scene = scene
             self._scene_graph = sg
             self._gen_scene_materials()
-            self._apply_usd_lights(scene)
             self._frame_camera_to_scene(scene)
             # Seed the USD camera follower from the default-time camera so the
             # user can switch to usd mode before pressing play.
@@ -5852,11 +5822,10 @@ class Renderer:
 
         Per call, geometry, flat materials, and lights are re-uploaded, so a
         mutated stage's moved transforms / deforming meshes / animated lights
-        update. Light + environment sliders are seeded once (from the first
-        scene only — `_apply_usd_lights` appends an env entry, so it must not
-        run per call). An authored `camera_override` is re-applied every call
-        (animated cameras track); with no authored camera the orbit framing is
-        set once and does not follow a moving scene.
+        update. Fallback light and environment controls retain their values
+        across authored scenes. An authored `camera_override` is re-applied
+        every call (animated cameras track); with no authored camera the orbit
+        framing is set once and does not follow a moving scene.
 
         Limitations (headless / non-interactive use): the scene-graph tree
         (`self.scene_graph`) is not built here, so scene-graph inspection APIs
@@ -5893,7 +5862,6 @@ class Renderer:
         self._sync_volume_grid(scene)
         self._gen_scene_materials()           # guarded: rebuilds pipeline only on graph-set change
         if first:
-            self._apply_usd_lights(scene)     # once: appends env + seeds sliders
             self._frame_camera_to_scene(scene)
         elif scene.camera_override is not None:
             self._frame_camera_to_scene(scene)  # animated authored camera
@@ -5910,8 +5878,9 @@ class Renderer:
         so unchanged prims are not re-baked. Runtime ``enabled`` flags (not
         authored to the stage) are carried across by prim path for both
         instances and lights, so an unrelated edit does not lose a user toggle.
-        Environment is left as live session state. Finally rebuilds the derived
-        scene graph (with synthesized default lights re-injected) and bumps the
+        Authored environment state is replaced or cleared from the re-read
+        stage. Finally rebuilds the derived scene graph (with synthesized
+        default lights re-injected) and bumps the
         version so the UI panels repaint, and so a deleted light/camera prim
         drops out of the render.
         """
@@ -5938,12 +5907,14 @@ class Renderer:
             if lt.prim_path in prev_light_enabled:
                 lt.enabled = prev_light_enabled[lt.prim_path]
         # Swap instances + materials together so material_ids stay consistent;
-        # take the re-read lights + camera too so deleting one drops it. The
-        # environment (HDR library selection) stays as live session state.
+        # take the re-read lights + environment + camera too so deleting one
+        # drops it.
         scene.instances = new_scene.instances
         scene.materials = new_scene.materials
         scene.lights_dir = new_scene.lights_dir
         scene.lights_sphere = new_scene.lights_sphere
+        scene.environment = new_scene.environment
+        scene.has_authored_lighting = new_scene.has_authored_lighting
         scene.camera_override = new_scene.camera_override
         scene.volume_grid = getattr(new_scene, "volume_grid", None)
         self._sync_volume_grid(scene)
@@ -6331,103 +6302,39 @@ class Renderer:
             for lt in enabled[:n]
         ))
 
-    def _scene_authors_lights(self, scene) -> bool:
-        """True when the loaded USD scene authors any *powered* light.
-
-        Counts: a powered DistantLight, a powered SphereLight, an
-        emissive-material mesh instance (the emissive-triangle NEE source —
-        RectLight/DiskLight import as these), or an authored DomeLight
-        (``scene.environment``; the renderer's built-in HDRI backdrop is NOT
-        an authored light). Zero-power-only scenes count as unlit so they keep
-        the default light rather than rendering black.
-
-        Drives the default-light synthesis policy (change
-        distant-light-caustic-parity): the synthesized default DistantLight is
-        injected only into scenes that author no light at all. Authority is
-        the load-time scene — the result is cached per Scene object, so live
-        scene-graph light edits do not re-derive it (documented limitation).
-        """
-        cached = getattr(self, "_authors_lights_cache", None)
-        if cached is not None and cached[0] is scene:
-            return cached[1]
-
-        def _has_power(lt) -> bool:
-            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
-                return False
-            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
-            return bool(np.any(rad > 0.0))
-
-        def _powered(lights: list) -> bool:
-            return any(
-                getattr(lt, "enabled", True) and _has_power(lt) for lt in lights
-            )
-
-        result = bool(
-            _powered(getattr(scene, "lights_dir", []) or [])
-            or _powered(getattr(scene, "lights_sphere", []) or [])
-            or getattr(scene, "environment", None) is not None
-            or self._scene_has_emissive_instances(scene)
-        )
-        self._authors_lights_cache = (scene, result)
-        return result
-
-    def _scene_has_powered_dir(self, scene) -> bool:
-        """Any enabled, powered authored DistantLight (the mirror's branch-1
-        test — list truthiness alone would let a zero-power-only lights_dir
-        upload zero records and bypass the slider fallback)."""
-        def _has_power(lt) -> bool:
-            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
-                return False
-            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
-            return bool(np.any(rad > 0.0))
-
-        return any(
-            getattr(lt, "enabled", True) and _has_power(lt)
-            for lt in (getattr(scene, "lights_dir", []) or [])
+    @property
+    def uses_default_lights(self) -> bool:
+        """Whether the active scene uses Skinny's DistantLight + IBL pair."""
+        from skinny.scene import scene_uses_default_lights
+        return scene_uses_default_lights(
+            self._usd_scene,
+            usd_active=self._is_usd_active(),
         )
 
-    @staticmethod
-    def _scene_has_emissive_instances(scene) -> bool:
-        """Any enabled instance bound to a material with non-zero emissiveColor
-        (the same walk _upload_emissive_triangles packs from)."""
-        materials = getattr(scene, "materials", []) or []
-        for inst in getattr(scene, "instances", []) or []:
-            if not getattr(inst, "enabled", True):
-                continue
-            mat_id = getattr(inst, "material_id", -1)
-            if not (0 <= mat_id < len(materials)):
-                continue
-            emissive = _override_color3(
-                materials[mat_id].parameter_overrides,
-                "emissiveColor", (0.0, 0.0, 0.0),
-            )
-            if emissive[0] > 0 or emissive[1] > 0 or emissive[2] > 0:
-                return True
-        return False
-
-    def _upload_distant_lights(self, lights: list) -> None:
+    def _upload_distant_lights(
+        self,
+        lights: list,
+        *,
+        fallback_controls: bool = False,
+    ) -> None:
         """Pack each LightDir into binding 20. Active count goes to
         FrameConstants.numDistantLights for the shader to bound its loop.
 
         Honoured by every NEE path (path.allLightsNEE, bdpt.connectT1,
         skin_direct.skinAllLightsEstimator) and the BDPT s≥1 light-walk
-        seed (bdpt.sampleLightOrigin).  ``self.direct_light_index`` is the
-        global On/Off switch — Off uploads zero records so the shader
-        skips the directional contribution entirely.
+        seed (bdpt.sampleLightOrigin). ``direct_light_index`` applies only
+        to Skinny's fallback light; authored USD lights keep their own
+        enabled/intensity state.
         """
-        def _has_power(lt) -> bool:
-            if getattr(lt, "intensity", None) is not None and float(lt.intensity) == 0.0:
-                return False
-            rad = np.asarray(getattr(lt, "radiance", (0.0, 0.0, 0.0)), np.float32)
-            return bool(np.any(rad > 0.0))
+        from skinny.scene import select_powered_distant_lights
 
-        if self.direct_light_index != 0:
-            enabled: list = []
-        else:
-            enabled = [
-                lt for lt in lights
-                if getattr(lt, "enabled", True) and _has_power(lt)
-            ]
+        authority_enabled = not (
+            fallback_controls and self.direct_light_index != 0
+        )
+        enabled = select_powered_distant_lights(
+            lights,
+            authority_enabled=authority_enabled,
+        )
         n = min(len(enabled), DISTANT_LIGHT_CAPACITY)
         data = bytearray()
         # Spectral (Group 6.3): a companion SPD buffer (binding 50) carries each
@@ -7207,7 +7114,14 @@ class Renderer:
         """Mutate a scene light parameter and re-upload."""
         if light_type == "env":
             if key == "intensity":
-                self.env_intensity = float(value)
+                if (
+                    self._is_usd_active()
+                    and self._usd_scene is not None
+                    and self._usd_scene.environment is not None
+                ):
+                    self._usd_scene.environment.intensity = float(value)
+                else:
+                    self.env_intensity = float(value)
                 prim = self._find_dome_light_prim(light_index)
                 if prim is not None:
                     try:
@@ -7221,47 +7135,68 @@ class Renderer:
             return
 
         if light_type == "dir":
-            # Renderer state is the source of truth for the analytic
-            # direct light. Mirror the change onto the matching USD
-            # ``LightDir`` entry only when one actually exists (real USD
-            # asset light); synthesised ``/Skinny/DefaultLight`` has no
-            # entry and still must be editable.
             has_usd_light = (
-                self._usd_scene is not None
+                self._is_usd_active()
+                and self._usd_scene is not None
                 and 0 <= light_index < len(self._usd_scene.lights_dir)
             )
+            if has_usd_light:
+                light = self._usd_scene.lights_dir[light_index]
+                radiance = np.asarray(light.radiance, np.float32)
+                intensity = float(np.max(radiance))
+                color = (
+                    radiance / intensity
+                    if intensity > 1e-6
+                    else np.ones(3, np.float32)
+                )
+                direction = np.asarray(light.direction, np.float32)
+                norm = float(np.linalg.norm(direction))
+                if norm > 1e-6:
+                    direction = direction / norm
+                elevation = float(
+                    np.degrees(np.arcsin(np.clip(direction[1], -1.0, 1.0)))
+                )
+                azimuth = float(
+                    np.degrees(np.arctan2(direction[0], direction[2]))
+                )
+                if key == "color":
+                    color = _light_value_to_vec3(value)
+                    light.radiance = (color * intensity).astype(np.float32)
+                elif key == "intensity":
+                    light.radiance = (
+                        color * float(value)
+                    ).astype(np.float32)
+                elif key in ("elevation", "azimuth"):
+                    if key == "elevation":
+                        elevation = float(value)
+                    else:
+                        azimuth = float(value)
+                    el = np.radians(elevation)
+                    az = np.radians(azimuth)
+                    direction = np.array([
+                        np.cos(el) * np.sin(az),
+                        np.sin(el),
+                        np.cos(el) * np.cos(az),
+                    ], dtype=np.float32)
+                    light.direction = direction / np.linalg.norm(direction)
+                self._upload_distant_lights(self._usd_scene.lights_dir)
+                self._material_version += 1
+                return
+
+            # Synthesized fallback light: renderer slider state is the source
+            # of truth and remains available for the next light-less scene.
             if key == "color":
                 color = _light_value_to_vec3(value)
                 self.light_color_r = float(color[0])
                 self.light_color_g = float(color[1])
                 self.light_color_b = float(color[2])
-                if has_usd_light:
-                    intensity = self.light_intensity
-                    light = self._usd_scene.lights_dir[light_index]
-                    light.radiance = (color * intensity).astype(np.float32)
             elif key == "intensity":
                 self.light_intensity = float(value)
-                if has_usd_light:
-                    color = np.array([
-                        self.light_color_r,
-                        self.light_color_g,
-                        self.light_color_b,
-                    ], np.float32)
-                    light = self._usd_scene.lights_dir[light_index]
-                    light.radiance = (color * float(value)).astype(np.float32)
             elif key == "elevation":
                 self.light_elevation = float(value)
             elif key == "azimuth":
                 self.light_azimuth = float(value)
             self._update_light()
-            # Reflect the edit into the distantLights SSBO immediately so
-            # the next frame sees the new direction / radiance without
-            # waiting for update()'s per-frame mirror.
-            if (
-                self._usd_scene is not None
-                and self._usd_scene.lights_dir
-            ):
-                self._upload_distant_lights(self._usd_scene.lights_dir)
             self._material_version += 1
             return
 
@@ -7935,12 +7870,21 @@ class Renderer:
             print(f"[skinny] HDR load failed: {exc}", flush=True)
             return False
 
-        if 0 <= env_index < len(self.environments):
-            self.environments[env_index] = env
+        authored_dome = (
+            self._is_usd_active()
+            and self._usd_scene is not None
+            and self._usd_scene.environment is not None
+        )
+        if authored_dome:
+            self._usd_scene.environment.name = env.name
+            self._usd_scene.environment.data = env.data
         else:
-            self.environments.append(env)
-            env_index = len(self.environments) - 1
-        self.env_index = env_index
+            if 0 <= env_index < len(self.environments):
+                self.environments[env_index] = env
+            else:
+                self.environments.append(env)
+                env_index = len(self.environments) - 1
+            self.env_index = env_index
         # Invalidate the env-upload cache so the texture genuinely
         # re-uploads. `_ensure_env_uploaded` keys on (env_index, furnace)
         # and short-circuits on a hit — replacing the slot at the same
@@ -7965,7 +7909,7 @@ class Renderer:
         # hand, so upload them directly to avoid a one-frame lag.
         try:
             self.env_image.upload_sync(env.data)
-            self._last_env_index = (int(env_index), int(self.furnace_index))
+            self._last_env_index = object()
         except Exception as exc:  # noqa: BLE001
             print(f"[skinny] env upload failed for {p.name}: {exc}")
         # Bump the scene-graph version so the dock repopulates with the
@@ -7984,7 +7928,12 @@ class Renderer:
         except Exception:
             return None
         idx = 0
-        for stage in (self._usd_stage, self._default_light_stage):
+        stages = (
+            (self._default_light_stage,)
+            if self.uses_default_lights
+            else (self._usd_stage,)
+        )
+        for stage in stages:
             if stage is None:
                 continue
             for prim in stage.Traverse():
@@ -8122,17 +8071,19 @@ class Renderer:
         self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
 
     def _inject_default_lights_into_scene_graph(self) -> None:
-        """Append synthetic ``/Skinny/DefaultLight`` / ``/Skinny/DefaultDome``
-        nodes when the loaded scene graph lacks a direct light or dome.
-        Keeps the renderer's built-in light + IBL editable from the dock.
-        """
+        """Project or remove the fallback light pair in the scene graph."""
         if self._scene_graph is None or self._default_light_stage is None:
             return
         # Refresh the default dome prim from current env state before we
         # mirror it into the scene graph.
         self._sync_default_dome_prim()
         from skinny.scene_graph import inject_default_lights
-        inject_default_lights(self._scene_graph, self._default_light_stage)
+        inject_default_lights(
+            self._scene_graph,
+            self._default_light_stage,
+            enabled=self.uses_default_lights,
+        )
+        self._last_projected_default_lights = self.uses_default_lights
         # Bump the version so the Scene Graph dock repopulates its tree — the
         # graph object is mutated in place, so an `id()` comparison alone
         # wouldn't trigger a redraw.
@@ -9836,13 +9787,10 @@ class Renderer:
         data += struct.pack("f", float(pigment_density))    # 4 bytes
         # E-2: scatterMode is no longer in FrameConstants — the per-material
         # entry in materialTypes[i] carries scatter flags in bits 8-9.
-        env = self.scene.environment
-        if env is not None and env.enabled:
-            env_intensity = float(env.intensity)
-        elif env is not None and not env.enabled:
-            env_intensity = 0.0
-        else:
-            env_intensity = float(self.env_intensity)
+        from skinny.scene import environment_contribution_intensity
+        env_intensity = environment_contribution_intensity(
+            self.scene.environment,
+        )
         data += struct.pack("f", float(env_intensity))      # 4 bytes
         data += struct.pack("I", 1 if self.scene.furnace_mode else 0)  # 4 bytes
         data += struct.pack("f", float(self.scene.mm_per_unit))        # 4 bytes
@@ -10139,21 +10087,30 @@ class Renderer:
     def _ensure_env_uploaded(self) -> None:
         """Upload current env to GPU if it has changed (called once per switch).
 
-        Reads the environment data from `self.scene.environment` (populated
-        by `_build_scene_from_state`); env_index continues to drive the
-        change-detection cache key so we don't re-upload every frame.
+        Reads environment data from `self.scene.environment`. Authored scenes
+        without a DomeLight deliberately keep the already allocated texture
+        as an inert backing resource while uniforms set its contribution to
+        zero.
         """
-        # Cache key combines env selection AND furnace toggle so the
-        # constant-white furnace IBL gets uploaded when the user toggles
-        # furnace on/off (env_index alone wouldn't trip the change check).
-        cache_key = (int(self.env_index), int(self.furnace_index))
-        if cache_key == self._last_env_index:
-            return
         self.env_index = int(np.clip(self.env_index, 0, len(self.environments) - 1))
         env_hdr = self.scene.environment
+        if self.scene.furnace_mode:
+            cache_key = ("furnace", id(env_hdr.data) if env_hdr is not None else None)
+        elif self.uses_default_lights:
+            cache_key = (
+                "fallback",
+                int(self.env_index),
+                id(env_hdr.data) if env_hdr is not None else None,
+            )
+        elif env_hdr is not None:
+            cache_key = ("authored", id(self._usd_scene), id(env_hdr.data))
+        else:
+            cache_key = ("authored-black", id(self._usd_scene))
+        if cache_key == self._last_env_index:
+            return
         if env_hdr is None:
-            # Should not happen at runtime — _build_scene_from_state always
-            # produces an env when env_index is valid. Defensive fallback.
+            # The GPU binding remains valid, but environment intensity is zero
+            # for this authored no-Dome path.
             env_hdr_data = self.environments[self.env_index].data
         else:
             env_hdr_data = env_hdr.data
@@ -10343,30 +10300,25 @@ class Renderer:
         self.scene = self._build_scene_from_state()
         if self._scene_graph is None:
             self._ensure_default_scene_graph()
+        if (
+            self._scene_graph is not None
+            and self.uses_default_lights
+            != self._last_projected_default_lights
+        ):
+            self._inject_default_lights_into_scene_graph()
 
-        # Mirror the active distant-light list into the GPU SSBO at
-        # binding 20 every frame. Cheap (16 records × 32 B). When a USD
-        # scene is loaded every authored DistantLight is uploaded. The
-        # slider-driven synth default light is injected ONLY when the scene
-        # authors no powered light at all (change distant-light-caustic-
-        # parity): a scene lit by its own SphereLight / emissive mesh / dome
-        # must not gain a phantom sun — SPPM renders that phantom's glass
-        # caustic (photons walk it) while path cannot sample it (delta light
-        # + delta glass) and BDPT historically skipped it, so the phantom
-        # made the integrators disagree by construction.
-        # fc.numDistantLights bounds the iterators in path/bdpt/skin_direct.
-        if (self._usd_scene is not None
-                and self._scene_has_powered_dir(self._usd_scene)):
-            self._upload_distant_lights(self._usd_scene.lights_dir)
-        elif (self._usd_scene is not None
-              and self._scene_authors_lights(self._usd_scene)):
-            self._upload_distant_lights([])
+        # Mirror the active authority's distant lights into binding 20 every
+        # frame. Any authored USD lighting suppresses the fallback sun, even
+        # when the authored source is a dome, area light, emissive material,
+        # disabled light, or zero-power light. A retained inactive USD scene
+        # cannot affect the active default/OBJ model.
+        if self.uses_default_lights:
+            self._upload_distant_lights(
+                self.scene.lights_dir,
+                fallback_controls=True,
+            )
         else:
-            # No POWERED authored DistantLight (a zero-power-only lights_dir
-            # counts as unlit — branching on list truthiness would upload zero
-            # records and silently drop the slider fallback; codex P2-2) and
-            # no other authored light: the slider default light applies.
-            self._upload_distant_lights(self.scene.lights_dir)
+            self._upload_distant_lights(self._usd_scene.lights_dir)
 
         # If the environment selection changed, re-upload the HDR texture.
         self._ensure_env_uploaded()

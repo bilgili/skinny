@@ -32,6 +32,14 @@ class _DynSection:
     pulls: list[Callable[[], None]] = field(default_factory=list)
 
 
+@dataclass
+class _TopSection:
+    node: spec.Node
+    title: str
+    body: pn.viewable.Viewable
+    expanded: bool
+
+
 # ── Builder ────────────────────────────────────────────────────────
 
 
@@ -47,18 +55,20 @@ class PanelTreeBuilder:
         self.root = root
         self._pulls: list[Callable[[], None]] = []
         self._dyn: list[_DynSection] = []
+        self._top_sections: list[_TopSection] = []
+        self._visible_top_ids: set[int] = set()
 
-        sections: list[tuple[str, pn.viewable.Viewable]] = []
-        active: list[int] = []
         for child in root.children:
             entry = self._build_top_level(child)
             if entry is None:
                 continue
-            sections.append(entry[0])
-            if entry[1]:
-                active.append(len(sections) - 1)
+            (title, body), expanded = entry
+            self._top_sections.append(
+                _TopSection(child, title, body, expanded),
+            )
 
-        self.layout = pn.Accordion(*sections, active=active)
+        self.layout = pn.Accordion()
+        self._sync_top_level_visibility()
         # Drive the first dynamic rebuild now so the initial render
         # already shows materials / scene-graph contents.
         for dyn in self._dyn:
@@ -76,6 +86,7 @@ class PanelTreeBuilder:
     def _tick(self) -> None:
         for pull in self._pulls:
             _safe_call(pull)
+        self._sync_top_level_visibility()
         for dyn in self._dyn:
             self._maybe_rebuild_dynamic(dyn)
             for pull in dyn.pulls:
@@ -103,6 +114,35 @@ class PanelTreeBuilder:
         if w is None:
             return None
         return ("(item)", pn.Column(w)), True
+
+    def _sync_top_level_visibility(self) -> None:
+        visible = [
+            entry
+            for entry in self._top_sections
+            if not isinstance(entry.node, spec.Section)
+            or entry.node.is_visible()
+        ]
+        visible_ids = {id(entry.node) for entry in visible}
+        if visible_ids == self._visible_top_ids:
+            return
+
+        old_active_titles = {
+            self.layout._names[index]
+            for index in self.layout.active
+            if 0 <= index < len(self.layout._names)
+        }
+        sections = [(entry.title, entry.body) for entry in visible]
+        self.layout[:] = sections
+        self.layout.active = [
+            index
+            for index, entry in enumerate(visible)
+            if entry.title in old_active_titles
+            or (
+                id(entry.node) not in self._visible_top_ids
+                and entry.expanded
+            )
+        ]
+        self._visible_top_ids = visible_ids
 
     # ── Generic walker ────────────────────────────────────────────
 

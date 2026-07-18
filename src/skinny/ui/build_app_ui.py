@@ -623,7 +623,16 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
         params_in_group = grouped.get(group)
         if not params_in_group and group not in ("IBL", "Direct Light"):
             continue
-        with ui.section(group, expanded=(group != "Skin")):
+        visible_when = (
+            (lambda: bool(renderer.uses_default_lights))
+            if group in ("IBL", "Direct Light")
+            else None
+        )
+        with ui.section(
+            group,
+            expanded=(group != "Skin"),
+            visible_when=visible_when,
+        ):
             for p in (params_in_group or []):
                 if p.path in _DEDICATED_WIDGET_PATHS:
                     continue

@@ -42,6 +42,16 @@ class Section(Node):
     title: str
     expanded: bool = True
     children: list[Node] = field(default_factory=list)
+    visible_when: Callable[[], bool] | None = None
+
+    def is_visible(self) -> bool:
+        """Return current visibility without caching runtime scene state."""
+        if self.visible_when is None:
+            return True
+        try:
+            return bool(self.visible_when())
+        except Exception:  # noqa: BLE001
+            return False
 
 
 @dataclass
@@ -219,8 +229,18 @@ class UIBuilder:
     # ── Layout primitives ──────────────────────────────────────────
 
     @contextmanager
-    def section(self, title: str, *, expanded: bool = True) -> Iterator[Section]:
-        s = Section(title=title, expanded=expanded)
+    def section(
+        self,
+        title: str,
+        *,
+        expanded: bool = True,
+        visible_when: Callable[[], bool] | None = None,
+    ) -> Iterator[Section]:
+        s = Section(
+            title=title,
+            expanded=expanded,
+            visible_when=visible_when,
+        )
         self._append(s)
         self._stack.append(s)
         try:

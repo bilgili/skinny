@@ -1459,7 +1459,7 @@ def _disk_light_to_instance(
         angle = 2.0 * np.pi * i / n
         positions[i + 1] = [r * np.cos(angle), r * np.sin(angle), 0.0]
     tri_idx = np.array(
-        [[0, i + 1, (i % n) + 2] for i in range(n)], dtype=np.int32
+        [[0, i + 1, ((i + 1) % n) + 1] for i in range(n)], dtype=np.int32
     )
     radiance = _light_color_radiance(UsdLux.LightAPI(prim))
     inst = _area_light_to_instance(
@@ -1482,7 +1482,7 @@ def _extract_lights(
     stage: Usd.Stage, time: Usd.TimeCode,
     materials: list[Material], material_index: dict[str, int],
 ) -> tuple[list[LightDir], list, Optional[LightEnvHDR], list[MeshInstance]]:
-    """Walk the stage and return (distant, sphere, dome, emissive instances).
+    """Walk the stage and return extracted lights.
 
     RectLight and DiskLight prims are converted to emissive mesh instances
     so they flow through the existing emissive triangle NEE path.
@@ -1524,6 +1524,42 @@ def _extract_lights(
                 material_index[str(prim.GetPath())] = mat_id
                 emissive_instances.append(inst)
     return lights_dir, lights_sphere, environment, emissive_instances
+
+
+def _stage_has_authored_light_prim(stage: Usd.Stage) -> bool:
+    """Whether the stage has any active supported UsdLux light prim."""
+    supported = (
+        UsdLux.DistantLight,
+        UsdLux.SphereLight,
+        UsdLux.DomeLight,
+        UsdLux.RectLight,
+        UsdLux.DiskLight,
+    )
+    return any(
+        prim.IsActive()
+        and not prim.IsAbstract()
+        and any(prim.IsA(light_type) for light_type in supported)
+        for prim in stage.Traverse()
+    )
+
+
+def _prim_data_has_emissive_material(
+    prim_data: list[tuple[MeshSource, np.ndarray, int]],
+    materials: list[Material],
+) -> bool:
+    """Whether any USD geometry instance is explicitly emissive."""
+    for _source, _transform, material_id in prim_data:
+        if not (0 <= material_id < len(materials)):
+            continue
+        value = materials[material_id].parameter_overrides.get("emissiveColor")
+        if value is None:
+            continue
+        try:
+            if any(float(value[i]) > 0.0 for i in range(3)):
+                return True
+        except (IndexError, TypeError, ValueError):
+            continue
+    return False
 
 
 def _extract_camera(
@@ -1956,9 +1992,13 @@ def _read_open_stage(
             f"USD stage {label} contains no usable mesh or gprim geometry"
         )
 
-    lights_dir, lights_sphere, environment, emissive_instances = _extract_lights(
-        stage, eval_time, materials, material_index,
-    )
+    (
+        lights_dir,
+        lights_sphere,
+        environment,
+        emissive_instances,
+    ) = _extract_lights(stage, eval_time, materials, material_index)
+    has_authored_light_prim = _stage_has_authored_light_prim(stage)
     camera_override = _extract_camera(stage, eval_time)
 
     meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
@@ -1971,6 +2011,10 @@ def _read_open_stage(
         lights_dir=lights_dir,
         lights_sphere=lights_sphere,
         environment=environment,
+        has_authored_lighting=(
+            has_authored_light_prim
+            or _prim_data_has_emissive_material(prim_data, materials)
+        ),
         camera_override=camera_override,
         mm_per_unit=mm_per_unit,
         film_max_component=film_max_component,

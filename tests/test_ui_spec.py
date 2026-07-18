@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from skinny.params import build_all_params
+from skinny.params import build_all_params, build_visible_params
 from skinny.ui import spec
 from skinny.ui.build_app_ui import (
     _DEDICATED_WIDGET_PATHS, build_main_ui,
@@ -81,6 +81,7 @@ class _StubRenderer:
         self.height = 720
         self._usd_scene = None
         self.scene_graph = None
+        self.uses_default_lights = True
 
     # Minimal action-API surface.
     def resize(self, w: int, h: int) -> None:
@@ -161,6 +162,48 @@ def test_top_level_section_order(stub_renderer):
         "Scene", "Resolution", "Capture", "Animation", "Scene Controls",
         "Render", "ReSTIR", "Skin", "Detail", "IBL", "Direct Light",
     ]
+
+
+def test_fallback_light_sections_follow_runtime_authority(stub_renderer):
+    tree = build_main_ui(stub_renderer)
+    sections = {
+        child.title: child
+        for child in tree.children
+        if isinstance(child, spec.Section)
+    }
+
+    assert sections["IBL"].is_visible() is True
+    assert sections["Direct Light"].is_visible() is True
+
+    stub_renderer.uses_default_lights = False
+    assert sections["IBL"].is_visible() is False
+    assert sections["Direct Light"].is_visible() is False
+
+    stub_renderer.uses_default_lights = True
+    assert sections["IBL"].is_visible() is True
+    assert sections["Direct Light"].is_visible() is True
+
+
+def test_glfw_visible_params_hide_the_complete_fallback_pair(stub_renderer):
+    fallback_paths = {
+        "env_index",
+        "env_intensity",
+        "direct_light_index",
+        "light_intensity",
+        "light_elevation",
+        "light_azimuth",
+        "light_color_r",
+        "light_color_g",
+        "light_color_b",
+    }
+    assert fallback_paths <= {
+        param.path for param in build_visible_params(stub_renderer)
+    }
+
+    stub_renderer.uses_default_lights = False
+    assert fallback_paths.isdisjoint(
+        param.path for param in build_visible_params(stub_renderer)
+    )
 
 
 def test_dedicated_widgets_present(stub_renderer):

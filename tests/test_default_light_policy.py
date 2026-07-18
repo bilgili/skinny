@@ -1,10 +1,4 @@
-"""Default-light synthesis policy (change distant-light-caustic-parity).
-
-The synthesized default DistantLight is injected only into scenes that author
-no *powered* light at all. These tests exercise the predicate truth table and
-the per-frame mirror outcome, hostless (no GPU) — the renderer module import
-is skipped when the Vulkan SDK is absent, mirroring test_camera_placement.py.
-"""
+"""Hostless policy tests for USD-light authority."""
 
 from __future__ import annotations
 
@@ -12,46 +6,24 @@ from types import SimpleNamespace
 
 import pytest
 
-
-def _have_renderer() -> bool:
-    # skinny.renderer imports `vulkan` at module scope, which raises without
-    # the Vulkan SDK on the dynamic-library path. These policy tests are pure
-    # CPU but can't import the module without it.
-    try:
-        import skinny.renderer  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-needs_renderer = pytest.mark.skipif(
-    not _have_renderer(), reason="skinny.renderer unimportable (no Vulkan SDK)"
+from skinny.scene import (
+    environment_contribution_intensity,
+    scene_has_authored_lighting,
+    scene_environment_for_authority,
+    scene_uses_default_lights,
+    select_powered_distant_lights,
 )
 
 
-def _host():
-    """Minimal object exposing the policy methods unbound from Renderer,
-    so no GPU context is stood up."""
-    from skinny.renderer import Renderer
-
-    class _Host:
-        _scene_authors_lights = Renderer._scene_authors_lights
-        _scene_has_powered_dir = Renderer._scene_has_powered_dir
-        _scene_has_emissive_instances = staticmethod(
-            Renderer._scene_has_emissive_instances
-        )
-
-    return _Host()
-
-
 def _scene(*, dir_lights=(), sphere_lights=(), environment=None,
-           instances=(), materials=()):
+           instances=(), materials=(), has_authored_lighting=None):
     return SimpleNamespace(
         lights_dir=list(dir_lights),
         lights_sphere=list(sphere_lights),
         environment=environment,
         instances=list(instances),
         materials=list(materials),
+        has_authored_lighting=has_authored_lighting,
     )
 
 
@@ -74,129 +46,231 @@ def _instance(material_id=0, enabled=True):
 # ── Predicate truth table ───────────────────────────────────────────────────
 
 
-@needs_renderer
-def test_no_lights_at_all_is_unlit():
-    assert _host()._scene_authors_lights(_scene()) is False
+def test_no_lights_at_all_has_no_authored_authority():
+    assert scene_has_authored_lighting(_scene()) is False
 
 
-@needs_renderer
-def test_powered_distant_light_counts():
-    assert _host()._scene_authors_lights(
+def test_distant_light_presence_counts():
+    assert scene_has_authored_lighting(
         _scene(dir_lights=[_light()])
     ) is True
 
 
-@needs_renderer
-def test_powered_sphere_light_counts():
-    assert _host()._scene_authors_lights(
+def test_sphere_light_presence_counts():
+    assert scene_has_authored_lighting(
         _scene(sphere_lights=[_light(intensity=60.0)])
     ) is True
 
 
-@needs_renderer
-def test_zero_power_lights_count_as_unlit():
-    # A scene authoring only zero-intensity lights keeps the default light
-    # (rendering it black instead would be a worse default).
+def test_zero_power_lights_still_count_as_authored():
     scene = _scene(
         dir_lights=[_light(intensity=0.0)],
         sphere_lights=[_light(intensity=0.0, radiance=(0.0, 0.0, 0.0))],
     )
-    assert _host()._scene_authors_lights(scene) is False
+    assert scene_has_authored_lighting(scene) is True
 
 
-@needs_renderer
-def test_zero_radiance_light_counts_as_unlit():
+def test_zero_radiance_light_still_counts_as_authored():
     scene = _scene(sphere_lights=[_light(intensity=None, radiance=(0.0, 0.0, 0.0))])
-    assert _host()._scene_authors_lights(scene) is False
+    assert scene_has_authored_lighting(scene) is True
 
 
-@needs_renderer
-def test_disabled_light_counts_as_unlit():
-    assert _host()._scene_authors_lights(
+def test_disabled_active_light_still_counts_as_authored():
+    assert scene_has_authored_lighting(
         _scene(sphere_lights=[_light(enabled=False)])
-    ) is False
+    ) is True
 
 
-@needs_renderer
 def test_authored_dome_counts():
     # scene.environment is set ONLY for an authored UsdLux.DomeLight — the
     # renderer's built-in HDRI backdrop never appears here.
-    assert _host()._scene_authors_lights(
+    assert scene_has_authored_lighting(
         _scene(environment=SimpleNamespace(name="dome"))
     ) is True
 
 
-@needs_renderer
 def test_emissive_instance_counts():
     scene = _scene(instances=[_instance(0)], materials=[_emissive_mat()])
-    assert _host()._scene_authors_lights(scene) is True
+    assert scene_has_authored_lighting(scene) is True
 
 
-@needs_renderer
-def test_non_emissive_instance_is_unlit():
+def test_non_emissive_instance_has_no_authored_authority():
     scene = _scene(instances=[_instance(0)], materials=[_plain_mat()])
-    assert _host()._scene_authors_lights(scene) is False
+    assert scene_has_authored_lighting(scene) is False
 
 
-@needs_renderer
-def test_disabled_emissive_instance_is_unlit():
+def test_disabled_emissive_instance_still_counts_as_authored():
     scene = _scene(
         instances=[_instance(0, enabled=False)], materials=[_emissive_mat()]
     )
-    assert _host()._scene_authors_lights(scene) is False
+    assert scene_has_authored_lighting(scene) is True
 
 
-@needs_renderer
-def test_result_cached_per_scene_object():
-    host = _host()
-    scene = _scene(sphere_lights=[_light()])
-    assert host._scene_authors_lights(scene) is True
-    # Mutating the scene does not re-derive (load-time authority) …
-    scene.lights_sphere = []
-    assert host._scene_authors_lights(scene) is True
-    # … but a different Scene object does.
-    assert host._scene_authors_lights(_scene()) is False
+def test_result_re_evaluates_on_same_scene_object():
+    scene = _scene(has_authored_lighting=True)
+    assert scene_has_authored_lighting(scene) is True
+    scene.has_authored_lighting = False
+    assert scene_has_authored_lighting(scene) is False
 
 
-# ── Per-frame mirror outcome ────────────────────────────────────────────────
-# The mirror branch (renderer.update) is exercised structurally: authored
-# lights_dir → those records; authored-light scene without lights_dir → zero
-# records; unlit scene → the slider default light. We reproduce the branch
-# with the real predicate to lock the decision table.
+# ── Active-scene authority ─────────────────────────────────────────────────
 
 
-@needs_renderer
+def test_no_loaded_usd_uses_defaults():
+    assert scene_uses_default_lights(None, usd_active=False) is True
+
+
+def test_active_lit_usd_suppresses_defaults():
+    scene = _scene(has_authored_lighting=True)
+    assert scene_uses_default_lights(scene, usd_active=True) is False
+
+
+def test_active_lightless_usd_uses_defaults():
+    scene = _scene(has_authored_lighting=False)
+    assert scene_uses_default_lights(scene, usd_active=True) is True
+
+
+def test_retained_inactive_usd_does_not_suppress_defaults():
+    scene = _scene(has_authored_lighting=True)
+    assert scene_uses_default_lights(scene, usd_active=False) is True
+    assert scene_uses_default_lights(scene, usd_active=True) is False
+
+
+def test_first_and_last_authored_light_transition_without_new_scene():
+    scene = _scene(has_authored_lighting=False)
+    assert scene_uses_default_lights(scene, usd_active=True) is True
+    scene.has_authored_lighting = True
+    assert scene_uses_default_lights(scene, usd_active=True) is False
+    scene.has_authored_lighting = False
+    assert scene_uses_default_lights(scene, usd_active=True) is True
+
+
 @pytest.mark.parametrize(
-    "scene_kwargs, expected",
+    "scene, usd_active, expected_pair",
     [
-        # authored powered DistantLight → its own records
-        (dict(dir_lights=[_light()]), "authored"),
-        # authored SphereLight only → ZERO records (no phantom sun)
-        (dict(sphere_lights=[_light(intensity=60.0)]), "zero"),
-        # authored dome only → ZERO records
-        (dict(environment=SimpleNamespace(name="dome")), "zero"),
-        # truly unlit → slider default light
-        (dict(), "slider"),
-        # zero-power sphere only → still the slider default light
-        (dict(sphere_lights=[_light(intensity=0.0, radiance=(0, 0, 0))]), "slider"),
-        # zero-power DistantLight ONLY → slider, NOT the authored branch
-        # (branching on list truthiness would upload zero records and drop the
-        # fallback; codex P2-2)
-        (dict(dir_lights=[_light(intensity=0.0, radiance=(0, 0, 0))]), "slider"),
-        # zero-power dir + powered sphere → zero records (scene is lit)
-        (dict(dir_lights=[_light(intensity=0.0, radiance=(0, 0, 0))],
-              sphere_lights=[_light(intensity=60.0)]), "zero"),
-        # disabled dir + nothing else → slider
-        (dict(dir_lights=[_light(enabled=False)]), "slider"),
+        (None, False, (True, True)),
+        (_scene(has_authored_lighting=False), True, (True, True)),
+        (_scene(has_authored_lighting=True), True, (False, False)),
+        # Retained but inactive USD metadata cannot suppress the active
+        # default-head/OBJ fallback pair.
+        (_scene(has_authored_lighting=True), False, (True, True)),
     ],
 )
-def test_mirror_decision_table(scene_kwargs, expected):
-    host = _host()
-    usd_scene = _scene(**scene_kwargs)
-    if host._scene_has_powered_dir(usd_scene):
-        outcome = "authored"
-    elif host._scene_authors_lights(usd_scene):
-        outcome = "zero"
-    else:
-        outcome = "slider"
-    assert outcome == expected
+def test_default_distant_and_ibl_authority_is_all_or_nothing(
+    scene, usd_active, expected_pair,
+):
+    uses_defaults = scene_uses_default_lights(scene, usd_active=usd_active)
+    assert (uses_defaults, uses_defaults) == expected_pair
+
+
+# ── Distant-light contribution routing ─────────────────────────────────────
+
+
+def test_fallback_direct_toggle_can_disable_only_the_fallback_light():
+    fallback = [_light()]
+    assert select_powered_distant_lights(
+        fallback,
+        authority_enabled=False,
+    ) == []
+    assert select_powered_distant_lights(
+        fallback,
+        authority_enabled=True,
+    ) == fallback
+
+
+def test_authored_distant_light_state_controls_its_own_contribution():
+    powered = _light()
+    disabled = _light(enabled=False)
+    zero_power = _light(intensity=0.0)
+    selected = select_powered_distant_lights(
+        [powered, disabled, zero_power],
+        authority_enabled=True,
+    )
+    assert selected == [powered]
+
+
+# ── Environment contribution routing ───────────────────────────────────────
+
+
+def test_fallback_authority_selects_builtin_ibl():
+    fallback = SimpleNamespace(name="fallback", intensity=0.5, enabled=True)
+    usd = _scene(has_authored_lighting=False)
+    selected = scene_environment_for_authority(
+        usd,
+        fallback,
+        uses_default_lights=True,
+    )
+    assert selected is fallback
+    assert environment_contribution_intensity(selected) == 0.5
+
+
+def test_authored_dome_is_the_only_environment_in_authored_mode():
+    fallback = SimpleNamespace(name="fallback", intensity=0.5, enabled=True)
+    dome = SimpleNamespace(name="usd-dome", intensity=3.0, enabled=True)
+    usd = _scene(environment=dome, has_authored_lighting=True)
+    selected = scene_environment_for_authority(
+        usd,
+        fallback,
+        uses_default_lights=False,
+    )
+    assert selected is dome
+    assert environment_contribution_intensity(selected) == 3.0
+
+
+def test_authored_scene_without_dome_has_black_environment():
+    fallback = SimpleNamespace(name="fallback", intensity=0.5, enabled=True)
+    usd = _scene(dir_lights=[_light()], has_authored_lighting=True)
+    selected = scene_environment_for_authority(
+        usd,
+        fallback,
+        uses_default_lights=False,
+    )
+    assert selected is None
+    assert environment_contribution_intensity(selected) == 0.0
+
+
+def test_disabled_authored_dome_has_zero_contribution():
+    dome = SimpleNamespace(name="usd-dome", intensity=3.0, enabled=False)
+    assert environment_contribution_intensity(dome) == 0.0
+
+
+@pytest.mark.parametrize("integrator_index", range(4))
+@pytest.mark.parametrize(
+    "scene, expected_defaults",
+    [
+        (_scene(sphere_lights=[_light()], has_authored_lighting=True), False),
+        (
+            _scene(
+                environment=SimpleNamespace(name="dome"),
+                has_authored_lighting=True,
+            ),
+            False,
+        ),
+        (_scene(has_authored_lighting=True), False),  # converted area light
+        (
+            _scene(
+                instances=[_instance(0)],
+                materials=[_emissive_mat()],
+                has_authored_lighting=True,
+            ),
+            False,
+        ),
+        (
+            _scene(
+                dir_lights=[_light(intensity=0.0)],
+                has_authored_lighting=True,
+            ),
+            False,
+        ),
+        (_scene(has_authored_lighting=False), True),
+    ],
+)
+def test_light_authority_is_integrator_independent(
+    integrator_index,
+    scene,
+    expected_defaults,
+):
+    # The integrator selector is intentionally irrelevant: all four hosts
+    # consume the same packed light counts and environment intensity.
+    assert integrator_index in (0, 1, 2, 3)
+    assert scene_uses_default_lights(scene, usd_active=True) is expected_defaults

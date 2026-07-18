@@ -18,7 +18,7 @@ import numpy as np
 import glfw
 
 from skinny.params import (
-    ParamSpec, build_all_params,
+    ParamSpec, build_visible_params,
     _get_nested, _set_nested, _snapshot_params, _apply_saved_params,
 )
 from skinny.cli_common import (
@@ -132,7 +132,7 @@ class InputHandler:
         # Live param list — static base + dynamic MaterialX inputs from
         # the active skin material. Built once after the renderer's MtlX
         # runtime has loaded so uniform_block reflection is available.
-        self.params: list[ParamSpec] = build_all_params(renderer)
+        self.params: list[ParamSpec] = build_visible_params(renderer)
 
         # Mouse state
         self._last_mx = 0.0
@@ -314,6 +314,7 @@ class InputHandler:
 
     def update(self, dt: float) -> None:
         """Poll continuous inputs (free-cam WASDQE). Called once per frame."""
+        self._refresh_params()
         if self.renderer.camera_mode != "free":
             return
         w = self.window
@@ -322,6 +323,31 @@ class InputHandler:
         u = (glfw.get_key(w, glfw.KEY_E) == glfw.PRESS) - (glfw.get_key(w, glfw.KEY_Q) == glfw.PRESS)
         if f or r or u:
             self.renderer.camera.move(float(f), float(r), float(u), dt)
+
+    def _refresh_params(self) -> None:
+        """Keep the keyboard/HUD control list aligned with light authority."""
+        previous_path = (
+            self.params[self.selected_param].path
+            if self.params and 0 <= self.selected_param < len(self.params)
+            else None
+        )
+        params = build_visible_params(self.renderer)
+        if [param.path for param in params] == [param.path for param in self.params]:
+            return
+        self.params = params
+        matching = next(
+            (
+                index
+                for index, param in enumerate(params)
+                if param.path == previous_path
+            ),
+            None,
+        )
+        self.selected_param = (
+            matching
+            if matching is not None
+            else min(self.selected_param, max(len(params) - 1, 0))
+        )
 
     def _adjust_param(self, direction: int) -> None:
         p = self.params[self.selected_param]

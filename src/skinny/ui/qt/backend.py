@@ -164,6 +164,12 @@ class QtTreeBuilder:
         box.toggled.connect(body.setVisible)
         layout.addWidget(box)
         self._sections[node.title] = box
+        if node.visible_when is not None:
+            def pull_visibility(box=box, node=node) -> None:
+                box.setVisible(node.is_visible())
+
+            pull_visibility()
+            pulls.append(pull_visibility)
 
     def _build_dynamic_section(
         self, layout: QLayout, node: spec.DynamicSection,

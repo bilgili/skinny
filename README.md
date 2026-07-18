@@ -61,6 +61,10 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
 - **OpenUSD scene loading** -- meshes, transforms, `UsdShade.Material` bindings,
   lights (`DomeLight`, `DistantLight`, `SphereLight`, `RectLight`), and
   per-prim material assignment
+- **USD light authority** -- any active authored USD light or emissive material
+  exclusively owns scene lighting. Skinny adds its default DistantLight + IBL
+  pair only when the active scene has no authored lighting; the pair's controls
+  and synthetic scene-graph nodes are hidden otherwise
 - **USD animation playback** -- time-sampled transform / camera / light tracks
   play in the viewport via a built-in transport (play/pause, scrubber, fps);
   cheap per-frame re-eval (TLAS/​light re-upload, no rebake) with a `usd` camera
@@ -496,6 +500,12 @@ detail maps) is documented in [SkinRendering.md](docs/SkinRendering.md).
 ### USD Scenes
 
 Example scenes ship in `assets/`:
+
+Lighting is all-or-nothing: a USD scene containing any active supported light
+or emissive material uses only its authored sources. A light-less USD scene,
+OBJ, or default head receives Skinny's default DistantLight and built-in IBL
+together. Zero-intensity and runtime-disabled authored lights still express
+author intent and therefore suppress the fallback pair.
 
 | File | Description |
 |------|-------------|

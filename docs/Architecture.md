@@ -503,26 +503,26 @@ without per-texture branches.
 
 ### Default-Light Synthesis Policy (`renderer.py`)
 
-The renderer owns a built-in, slider-driven default DistantLight (the "synth
-sun"). Since change `distant-light-caustic-parity` it is injected **only into
-scenes that author no powered light at all**: the per-frame distant-light
-mirror in `update()` uploads the authored `lights_dir` when present; otherwise,
-if `_scene_authors_lights(scene)` is true (any *powered* DistantLight or
-SphereLight, any emissive-material mesh instance, or an authored DomeLight —
-detected as `scene.environment`, never the built-in HDRI backdrop), it uploads
-**zero** distant records; only a truly unlit scene (including one authoring
-only zero-power lights) falls back to the slider light. The predicate is
-derived from the load-time `_usd_scene` and cached per Scene object — live
-scene-graph light edits do not re-derive it (documented v1 limitation).
-`direct_light_index` keeps its global-off semantics on top.
+The central `Renderer.uses_default_lights` decision grants lighting authority
+to exactly one source set:
 
-Rationale: the phantom sun changed authored scenes' lighting, and its glass
-caustic was renderable **only** by SPPM (photons walk delta-light→delta-glass
-chains; the path tracer fundamentally cannot sample them and BDPT historically
-skipped the distant light walk) — so the integrators disagreed by
-construction on any authored-light scene with specular geometry. Corollary: a
-geometry-only USD under the built-in HDRI still gets sun + HDRI, as the
-default head session expects.
+- If the active USD scene has any authored Distant, Sphere, Dome, Rect, or Disk
+  light, or an emissive material, only authored USD lighting contributes.
+  Presence expresses author intent: zero-intensity and runtime-disabled lights
+  still suppress fallback; inactive/deactivated prims do not.
+- Otherwise Skinny synthesizes its default DistantLight and built-in IBL
+  together. Their own controls can disable contributions while fallback
+  authority remains active.
+
+The decision is re-evaluated rather than cached, is gated by the active model
+(a retained inactive USD scene cannot affect an OBJ/default head), and is
+shared by distant-light upload, environment selection, headless options, UI
+visibility, and scene-graph projection. Authored mode without a DomeLight uses
+a black environment; fallback `env_intensity` and `direct_light_index` cannot
+alter authored sources. Stage resync copies or clears the authored environment,
+so adding the first light and removing the last light transition both
+contributions and controls at runtime. Furnace mode remains an explicit
+diagnostic override.
 
 ### Runtime Scene-Graph Editing (`renderer.py`)
 
@@ -602,6 +602,13 @@ attribute `Get`/`Set` + a live-state refresh (lights/transforms/camera). A
 data-driven "Scene Controls" `DynamicSection` in `build_main_ui` renders one
 widget per control across all front-ends, shown only when the stage declares
 controls. Authored `skinny:ui:default` values apply at load.
+
+The shared UI tree also marks the top-level `IBL` and `Direct Light` sections
+conditional on `Renderer.uses_default_lights`. Qt hides each complete group;
+Panel rebuilds the accordion entries so headings and bodies both disappear;
+the GLFW debug host filters the same fallback parameters from its keyboard/HUD
+list. Runtime resync transitions update all three without rebuilding the
+renderer.
 
 ### Scene Graph Inspector (`scene_graph.py`, `ui/qt/windows/scene_graph.py`)
 

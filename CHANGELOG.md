@@ -60,6 +60,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   output, data/asset dirs, generated Slang, and the openspec corpus. See
   README → Pre-commit hooks.
 
+### Changed
+
+- **USD-authored lighting is authoritative** (change `usd-light-authority`).
+  Any active supported USD light or emissive material suppresses Skinny's
+  default DistantLight and built-in IBL as a pair, including zero-intensity or
+  runtime-disabled authored lights. Light-less USD, OBJ, and default-head
+  scenes still receive both fallbacks. Authored scenes without a DomeLight now
+  use a black environment instead of ambient fill; fallback CLI/API settings
+  cannot alter authored lighting. Qt, Panel/web, and GLFW hide the complete IBL
+  and Direct Light controls while authored authority is active, and the
+  synthetic scene-graph light nodes follow runtime add/remove transitions.
+
 ### Fixed
 
 - **BDPT under-shaded area-light emission ~3% vs the path tracer** (change
