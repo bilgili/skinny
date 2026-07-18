@@ -137,6 +137,6 @@ worktree off `main`.
       note), CLAUDE.md + `docs/Architecture.md` compatibility matrix +
       binding map if a new binding landed, `docs/Wavefront.md` MLT sequence
       section, CHANGELOG
-- [ ] 7.2 `ruff check src/`, full hostless pytest, `openspec validate
+- [x] 7.2 `ruff check src/`, full hostless pytest, `openspec validate
       mlt-integrator`; codex pre-merge review (or review-subagent fallback);
       merge from worktree, archive change
