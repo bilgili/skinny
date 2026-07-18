@@ -12,8 +12,8 @@ It is one of two execution modes (`EXECUTION_WAVEFRONT = 1`, `params.py:65`),
 selected once at startup with `--execution-mode wavefront` and **fixed for the
 session**. `--execution-mode {auto,megakernel,wavefront}` defaults to `auto`,
 which **derives the mode from the startup integrator** (`resolve_execution_mode`
-in `cli_common.py`): `path`/`bdpt` → `megakernel`, `sppm` → `wavefront` (SPPM
-has no megakernel path). An explicit `megakernel`/`wavefront` — flag or
+in `cli_common.py`): `path`/`bdpt` → `megakernel`, `sppm`/`mlt` → `wavefront`
+(neither SPPM nor MLT has a megakernel path). An explicit `megakernel`/`wavefront` — flag or
 `SKINNY_EXECUTION_MODE` env — overrides the derived default and pins the mode.
 The resolution runs once at startup, from the integrator active at launch
 (explicit `--integrator`, else the persisted integrator on the interactive
@@ -172,6 +172,78 @@ num_pixels — see [Architecture.md § SPPM set 1](Architecture.md#wavefront-pas
 The full SPPM reference — pipeline diagram, the estimator equations + the
 equation→shader map, the buffer/state layout, the pbrt mapping, and the deferred
 PM-2/PM-3 phases — is in **[PhotonMapping.md](PhotonMapping.md)**.
+
+### MLT stages (`WavefrontMltPass` / `MetalWavefrontMltPass`, change `mlt-integrator`)
+
+The fourth integrator (`INTEGRATOR_INDEX["mlt"] = 3`) is **Metropolis Light Transport** —
+Kelemen primary-sample-space Metropolis (PSSMLT) whose target function is the
+existing wavefront BDPT path contribution. **Wavefront-only** (no megakernel
+variant, mirrors SPPM), **flat materials only**, **RGB only**, on both Vulkan
+(`WavefrontMltPass`) and native Metal (`MetalWavefrontMltPass`, bit-identical at
+equal budget). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
+`wfMlt*`).
+
+**Full-sample chains, not pbrt's per-depth decomposition (design D1).** pbrt's
+`MLTIntegrator` runs one chain per path-length stratum, which requires the
+target to be decomposable per (s,t) strategy at a fixed depth. skinny's
+environment transport is deliberately **not** strategy-partitioned — `bdptEnvNEE`
+fires at the first eye vertex and escape-MIS is accumulated inside `randomWalk` —
+so a per-depth dispatch would either silently drop env transport per stratum or
+force invasive surgery on `bdpt.slang`. Instead each mutation is **one complete
+BDPT sample** (Kelemen 2002 / Mitsuba PSSMLT): `wfMltMutate` calls the existing
+`BDPTIntegrator.estimateRadiance` **verbatim** — all depths, all eye-side
+strategies, env NEE/escape, plus the light-tracer splats — with the scalar
+contribution `c = luminance(eye L) + Σ luminance(light-tracer splats)`. Because
+the estimator is reused unmodified, `E[MLT] = E[skinny BDPT]` **by
+construction** — exactly what the self-consistency gate asserts. The
+primary-sample-space sampler is a **compile-time `RNG` override in
+`common.slang`** under `-DSKINNY_MLT`: the `RNG` struct is backed by the chain's
+`mltPrimarySamples` vector with the same `next()`/`next2()` surface, so every
+BDPT walk and material sampler becomes PSS-driven with zero transport-code
+changes; the `#else` branch is textually the shipped RNG (megakernel SPIR-V
+byte-identical).
+
+**Chain-parallel mapping: one GPU lane = one Markov chain.** Default
+`nChains = 16384` (CLI/import override), each advancing one mutation per
+dispatch iteration; a frame runs `ceil(pixels × mpp_per_frame / nChains)`
+iterations, so the per-frame mutation budget is proportional to pixel count
+(pbrt progressive semantics, ~1 mutation/pixel/frame by default). Chain state is
+sized by `nChains` (not `stream_size`) and MSL-stride-aware via `mlt_buffer_sizes`
+in `wavefront_layout.py` (SPPM `sppm_buffer_sizes` precedent); the chain-state
+buffers live at descriptor bindings 52–56 (see
+[Architecture.md § Descriptor Binding Map](Architecture.md#descriptor-binding-map)).
+
+The per-frame staged sequence:
+
+| Phase | Stage(s) | Work |
+|-------|----------|------|
+| bootstrap (at accumulation reset only) | `wfMltBootstrap` (**breadth-tiled** on Metal) → host CDF/`b`/seed resample → `wfMltInit` | `nBootstrap` full-sample L-evaluations in "fresh sample" mode, each writing its scalar `c` to `mltBootstrapWeights`; the host reads it back **once**, forms the numpy CDF, `b = (1/N)·Σc` (all-zero → loud "no light-carrying paths" error), resamples `nChains` bootstrap indices proportional to weight into `mltChainSeeds`. `wfMltInit` replays each seed to reconstruct the chain's initial current state (`cCurrent`, `LCurrent`, `pCurrent` in `mltChainMeta`, records in `mltCurrentRecords`), pinned to pbrt's iteration-0 / `largeStep`-true bookkeeping so `cCurrent` is consistent with the stored `X` |
+| mutate (× iterations, per frame) | `wfMltMutate` (**breadth-tiled** on Metal) | one Metropolis step per chain: propose (large-step restart w.p. `largestepprobability`, else small `σ` perturbation of the stored `X`) → evaluate the full BDPT sample → Metropolis accept on scalar luminance → **dual splat** of both states (proposal weighted `a/c_p`, current weighted `(1−a)/c_c`) as uint fixed-point RGB (`atomicSplatRadiance` pattern, no portable fp atomics), **never clamped** (an upper clamp would truncate energy on exactly the caustic foci MLT targets). Accept/reject uses backup-restore over `mltCurrentRecords` verbatim from pbrt |
+| resolve (per frame) | `wfMltResolve` | fold the frame's splats into `accumBuffer` scaled by `b / mpp_actual` (`mpp_actual` = the **actually executed** `iterations × nChains / pixels`, not the requested target), film-averaged across accumulation frames — the SPPM `wfSppmUpdate` "film-average of per-pass estimates" structure. Each frame's fold is an unbiased estimate (`E = b·μ`), so the running mean is unbiased and, at a constant per-frame budget, collapses to pbrt's `WriteImage(…, b / mutationsPerPixel)` |
+
+The MLT splat buffer is **cleared every frame** and resolved before the next, so
+the per-pixel splat-count bound is the per-frame mutation budget (not the whole
+accumulation) — this is what keeps the uint fixed-point accumulate from silently
+wrapping on caustic-hot pixels; no clamp is ever applied (design D4).
+
+**Metal watchdog (design D7).** One mutation is a complete BDPT sample per
+chain, so an untiled `nChains`-lane dispatch would exceed the macOS GPU watchdog
+budget. The bootstrap and mutation dispatches are therefore **breadth-tiled into
+flushed 64-aligned sub-batches** under `SKINNY_METAL` (the SPPM photon
+breadth-tiling precedent, `65535·64` Vulkan hard-cap applies too), with a
+`flush()` at every phase boundary (bootstrap / mutate / resolve). The
+fused per-chain evaluation is bounded per lane by `maxDepth` (≤ 5 default), so
+`flush_heavy_eye` is not needed for the flat-only v1.
+
+**Parity.** MLT is unbiased but **Markov-correlated** — NOT bit-identical to the
+path anchor at equal spp (unlike RGB `megakernel ≡ wavefront`), so its parity
+combo carries a recorded self-consistency tolerance (0.15) and per-combo
+pbrt-truth `baselines`, measured harness-first like SPPM/spectral. Non-flat
+scenes are recorded parity skips — the wavefront non-flat first-hit
+path-fallback is **not** extended to MLT chains (a fallback inside a Markov chain
+would mix estimators). Interactively the image **"swims"** early as the chains
+explore primary-sample space, then the progressive film average stabilizes like
+SPPM — expected MCMC behavior.
 
 ---
 

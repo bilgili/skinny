@@ -1026,6 +1026,208 @@ class WavefrontSppmPass:
             buf.destroy()
 
 
+class _VkMltRecorder:
+    """Vulkan adapter for the :mod:`skinny.wavefront_driver` MLT phase
+    recorders (``record_mlt_bootstrap`` / ``record_mlt_init`` /
+    ``record_mlt_frame``, change mlt-integrator).
+
+    Every MLT dispatch has a host-known count (bootstrap samples / chains /
+    pixels), so each stage is a plain ``vkCmdDispatch`` over a 64-wide window
+    pushed via the shared 12-byte ``{streamBase, shadeSlot, streamSize}``
+    tile push constant — no indirect dispatch, no readback stall.
+    """
+
+    def __init__(self, p: "WavefrontMltPass", cmd, scene_set) -> None:
+        self._p = p
+        self._cmd = cmd
+        self._scene = scene_set
+        self._cbarrier = vk.VkMemoryBarrier(
+            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT)
+
+    def barrier(self) -> None:
+        vk.vkCmdPipelineBarrier(
+            self._cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, [self._cbarrier], 0, None, 0, None)
+
+    def flush(self) -> None:
+        # No-op on Vulkan: no GPU watchdog (the MLT sub-batch flush is a
+        # Metal-only guard — dispatch hygiene, design D7).
+        pass
+
+    def push_window(self, base: int, size: int) -> None:
+        # MLT tile push: streamBase + EXACT streamSize (shadeSlot unused).
+        self._p._push(self._cmd, 0, [int(base), 0, int(size)])
+
+    def dispatch_count(self, entry: str, count: int, group_size: int) -> None:
+        self._p._bind(self._cmd, entry, self._scene)
+        groups = (int(count) + group_size - 1) // group_size
+        vk.vkCmdDispatch(self._cmd, max(groups, 1), 1, 1)
+
+
+class WavefrontMltPass:
+    """Staged wavefront PSSMLT pass (change mlt-integrator). Owns the five
+    MLT chain buffers (sizes from ``wavefront_layout.mlt_buffer_sizes``) and
+    four compute pipelines compiled from ``wavefront/wavefront_mlt.slang``
+    under ``-DSKINNY_MLT=1`` (which swaps common.slang's RNG for the
+    primary-sample-space sampler — distinct ``_mlt`` .spv names so the RGB
+    kernel cache is never aliased).
+
+    Set 0 is the renderer's shared wavefront scene descriptor set, whose
+    layout carries the MLT bindings 52–56 (``ComputePipeline.mlt_bindings``);
+    the renderer writes this pass's buffers into those slots at build. There
+    is no set 1 — the kernels bind everything through the scene set.
+
+    Per accumulation reset the renderer runs the synchronous host round-trip:
+    ``record_bootstrap`` → ``read_bootstrap_weights`` →
+    ``mlt_bootstrap.resample_chain_seeds`` → ``upload_chain_seeds`` →
+    ``record_init``; then every frame records ``record_frame``. The
+    bootstrap-normalization ``b`` and the ``seeded`` flag are renderer-owned
+    state stashed on the pass.
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] on all four MLT kernels
+
+    _ENTRIES = [
+        ("wfMltBootstrap", "wavefront/_wfmlt_bootstrap"),
+        ("wfMltInit", "wavefront/_wfmlt_init"),
+        ("wfMltMutate", "wavefront/_wfmlt_mutate"),
+        ("wfMltResolve", "wavefront/_wfmlt_resolve"),
+    ]
+
+    # Binding → mlt_buffer_sizes key (bindings 52–56 of the scene set-0
+    # layout; 52 lives in common.slang's SKINNY_MLT block, 53–56 in
+    # wavefront_mlt.slang).
+    _BINDINGS = (
+        (52, "mlt_primary_samples"),
+        (53, "mlt_chain_meta"),
+        (54, "mlt_current_records"),
+        (55, "mlt_bootstrap_weights"),
+        (56, "mlt_chain_seeds"),
+    )
+
+    def __init__(self, ctx, shader_dir: Path, scene_set_layout,
+                 num_pixels: int, num_chains: int, bootstrap_samples: int) -> None:
+        from skinny.wavefront_layout import mlt_buffer_sizes
+
+        self.ctx = ctx
+        self.num_pixels = int(num_pixels)
+        self.num_chains = int(num_chains)
+        self.bootstrap_samples = int(bootstrap_samples)
+        # Renderer-owned per-accumulation state: the bootstrap-normalization b
+        # (resolve scale, design D4) and whether the chains have been seeded.
+        self.b = 0.0
+        self.seeded = False
+
+        modules = {}
+        for entry, out_name in self._ENTRIES:
+            spv = _compile_full_spv(
+                shader_dir, "wavefront/wavefront_mlt", entry, out_name,
+                defines=("-D", "SKINNY_MLT=1"), tag="_mlt")
+            code = spv.read_bytes()
+            modules[entry] = vk.vkCreateShaderModule(
+                ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
+        self._modules = modules
+
+        sizes = mlt_buffer_sizes(self.num_chains, self.bootstrap_samples)
+        self._buffers = {key: StorageBuffer(ctx, sizes[key])
+                         for _, key in self._BINDINGS}
+
+        # Pipeline layout: [scene set 0 only] + the shared 12-byte tile push
+        # constant {streamBase, shadeSlot(unused), streamSize}. The scene
+        # layout already declares 52–56, so no pass-owned descriptor set.
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=12)
+        self._pipe_layout = vk.vkCreatePipelineLayout(
+            ctx.device, vk.VkPipelineLayoutCreateInfo(
+                setLayoutCount=1, pSetLayouts=[scene_set_layout],
+                pushConstantRangeCount=1, pPushConstantRanges=[push_range]), None)
+
+        self._pipelines = {}
+        for entry, mod in modules.items():
+            stage = vk.VkPipelineShaderStageCreateInfo(
+                stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=mod, pName="main")
+            self._pipelines[entry] = vk.vkCreateComputePipelines(
+                ctx.device, vk.VK_NULL_HANDLE, 1,
+                [vk.VkComputePipelineCreateInfo(stage=stage, layout=self._pipe_layout)], None)[0]
+
+    @property
+    def descriptor_bindings(self):
+        """``(binding, StorageBuffer)`` pairs the renderer writes into the
+        shared scene descriptor sets (slots 52–56)."""
+        return tuple((b, self._buffers[key]) for b, key in self._BINDINGS)
+
+    def _bind(self, cmd, entry, scene_set) -> None:
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipe_layout,
+            0, 1, [scene_set], 0, None)
+
+    def _push(self, cmd, offset, values) -> None:
+        import struct
+
+        import cffi
+        data = struct.pack(f"{len(values)}I", *[int(v) for v in values])
+        buf = cffi.FFI().new("char[]", data)
+        vk.vkCmdPushConstants(
+            cmd, self._pipe_layout, vk.VK_SHADER_STAGE_COMPUTE_BIT, int(offset), len(data), buf)
+
+    def record_bootstrap(self, cmd, scene_set) -> None:
+        """Record the bootstrap phase (one thread = one bootstrap sample)."""
+        from skinny.wavefront_driver import record_mlt_bootstrap
+
+        record_mlt_bootstrap(
+            _VkMltRecorder(self, cmd, scene_set),
+            bootstrap_samples=self.bootstrap_samples, num_chains=self.num_chains)
+
+    def record_init(self, cmd, scene_set) -> None:
+        """Record the chain-init phase (replays the resampled seeds the host
+        uploaded via :meth:`upload_chain_seeds`)."""
+        from skinny.wavefront_driver import record_mlt_init
+
+        record_mlt_init(
+            _VkMltRecorder(self, cmd, scene_set), num_chains=self.num_chains)
+
+    def record_frame(self, cmd, scene_set, *, iterations: int) -> None:
+        """Record one MLT accumulation frame (mutate × iterations + resolve)."""
+        from skinny.wavefront_driver import record_mlt_frame
+
+        record_mlt_frame(
+            _VkMltRecorder(self, cmd, scene_set),
+            num_pixels=self.num_pixels, num_chains=self.num_chains,
+            iterations=int(iterations))
+
+    def read_bootstrap_weights(self):
+        """Host readback of the bootstrap scalar contributions (float32,
+        ``bootstrap_samples`` entries) — the device→staging→map path every
+        StorageBuffer carries."""
+        import numpy as np
+
+        raw = self._buffers["mlt_bootstrap_weights"].download_sync(
+            self.bootstrap_samples * 4)
+        return np.frombuffer(raw, dtype=np.float32).copy()
+
+    def upload_chain_seeds(self, seeds) -> None:
+        """Upload the resampled per-chain bootstrap indices (uint32,
+        ``num_chains`` entries)."""
+        import numpy as np
+
+        arr = np.ascontiguousarray(seeds, dtype=np.uint32)
+        if arr.size != self.num_chains:
+            raise ValueError(
+                f"MLT chain seeds: expected {self.num_chains} entries, got {arr.size}")
+        self._buffers["mlt_chain_seeds"].upload_sync(arr.tobytes())
+
+    def destroy(self) -> None:
+        for p in self._pipelines.values():
+            vk.vkDestroyPipeline(self.ctx.device, p, None)
+        vk.vkDestroyPipelineLayout(self.ctx.device, self._pipe_layout, None)
+        for m in self._modules.values():
+            vk.vkDestroyShaderModule(self.ctx.device, m, None)
+        for buf in self._buffers.values():
+            buf.destroy()
+
+
 class WavefrontNeuralProposalPass:
     """Neural directional-proposal pre-pass (wavefront-only).
 

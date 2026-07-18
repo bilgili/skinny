@@ -1098,6 +1098,11 @@ incrementally moved over.
 | 49 | StructuredBuffer&lt;float&gt; | **Per-emissive-triangle blackbody `spectralEmitters`** (Group 6.1) — `(temperature_K, scale)` per emissive triangle (2 floats), **parallel-indexed to the emissive-triangle buffer (binding 18)**; a blackbody area light carries `(T>0, blackbody_scale(T, emission))`, a plain-RGB emitter `(0,0)`. NEE substitutes `planckSpectrum(sw,T)·scale` for the RGB illuminant upsample. Spectral-build-only, see binding 45 | `bindings.slang` |
 | 50 | StructuredBuffer&lt;float&gt; | **Per-distant-light illuminant SPD `spectralLightSpd`** (Group 6.3) — 95 floats/light on the 360–830/5 nm grid (host-scaled to the light's RGB luminance), indexed by the `DistantLight._direction.w` slot (−1 = none → RGB upsample). Fixed `DISTANT_LIGHT_CAPACITY` (16) slots. Spectral-build-only, see binding 45 | `bindings.slang` |
 | 51 | StructuredBuffer&lt;float&gt; | **Per-material blackbody `spectralMatEmission`** (Group 6.1 follow-up) — `(temperature_K, scale)` per flat material, **indexed by materialId**. Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD (matching the NEE path's binding-49 lookup) instead of the RGB upsample. Grown/rebound with the flat-material buffer. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 52 | RWStructuredBuffer | **MLT primary-sample vectors `mltPrimarySamples`** — the per-chain PSS state `X` (`MltPrimarySample` = value/backup + lastMod/modBackup, 16 B), `nChains × dims_per_chain`. The PSS `RNG` override in `common.slang` reads/mutates it. **MLT-build-only** (`#if defined(SKINNY_MLT)`, change `mlt-integrator`); absent from the default RGB/megakernel SPIR-V. On Metal binds by name (`vk::binding` index inert) | `common.slang` |
+| 53 | RWStructuredBuffer | **MLT chain metadata `mltChainMeta`** (`MltChainMeta`, `nChains`) — per-chain `{depth, cCurrent, pCurrent, LCurrent (rgb), rngState, iteration counters}`; the accept/reject bookkeeping. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
+| 54 | RWStructuredBuffer | **MLT current-state records `mltCurrentRecords`** (`MltRecord`, `nChains × MLT_RECORD_SLOTS`, `MLT_RECORD_SLOTS = BDPT_MAX_VERTS + 1`) — the accepted chain's captured contributions (eye value + ≤ `BDPT_MAX_VERTS` light-tracer splats) restored on reject and re-splatted per mutation. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
+| 55 | RWStructuredBuffer&lt;float&gt; | **MLT bootstrap weights `mltBootstrapWeights`** (`nBootstrap`) — each bootstrap L-evaluation writes its scalar contribution `c` here; the host reads it back once per accumulation reset to build the CDF, `b = (1/N)·Σc`, and resample chain seeds proportional to weight. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
+| 56 | RWStructuredBuffer&lt;uint&gt; | **MLT chain seeds `mltChainSeeds`** (`nChains`) — the resampled `bootstrapIndex` per chain (host-uploaded after the bootstrap readback); `wfMltInit` replays each seed to reconstruct the chain's initial current state. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
 
 The table is the **Vulkan** layout. On the **Metal** target (gated
 `#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
@@ -1146,6 +1151,19 @@ Metal they all bind by name so the `vk::binding` index is inert. The table resol
 (`SPECTRAL_TABLE_RES` = 64) and D65/grid length (`SPECTRAL_D65_COUNT` = 95) ride
 as **compile-time constants**, not `FrameConstants` fields, so the RGB UBO
 packing is unchanged.
+
+**MLT bindings 52–56** are compiled in **only** the MLT wavefront variant
+(`#if defined(SKINNY_MLT)`, change `mlt-integrator`) and are absent from the
+default RGB SPIR-V (the megakernel `.spv` stays byte-identical), so they never
+enter a non-MLT build's set-0 layout. They hold the per-chain PSSMLT state:
+`mltPrimarySamples` (52, the primary-sample `X` vectors read by the PSS `RNG`
+override), `mltChainMeta` (53, per-chain accept/reject bookkeeping),
+`mltCurrentRecords` (54, the accepted chain's captured eye + light-tracer
+contributions), `mltBootstrapWeights` (55, the bootstrap `c` weights read back
+for the CDF/`b`-normalization), and `mltChainSeeds` (56, the resampled
+`bootstrapIndex` per chain). Sized by `nChains` (not `stream_size`) via
+`mlt_buffer_sizes` in `wavefront_layout.py` (SPPM `sppm_buffer_sizes`
+precedent). On Metal they all bind by name so the `vk::binding` index is inert.
 
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared

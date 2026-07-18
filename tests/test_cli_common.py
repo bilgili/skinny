@@ -113,8 +113,11 @@ def test_execution_mode_accepts_auto_and_pins(mode):
 # ── resolve_execution_mode (integrator → execution mode) ─────────────
 
 def test_default_execution_map():
+    # mlt → wavefront like sppm: neither has a megakernel variant (change
+    # mlt-integrator, task 1.2).
     assert DEFAULT_EXECUTION_FOR_INTEGRATOR == {
-        "path": "megakernel", "bdpt": "megakernel", "sppm": "wavefront"}
+        "path": "megakernel", "bdpt": "megakernel", "sppm": "wavefront",
+        "mlt": "wavefront"}
 
 
 @pytest.mark.parametrize("integrator,expected", [
@@ -255,7 +258,7 @@ def test_flags_can_be_suppressed():
 
 
 def test_integrator_index_map():
-    assert INTEGRATOR_INDEX == {"path": 0, "bdpt": 1, "sppm": 2}
+    assert INTEGRATOR_INDEX == {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
 
 
 def test_integrator_choices_include_sppm():

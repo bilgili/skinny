@@ -1013,6 +1013,28 @@ float3 connectT1(BDPTVertex eye[BDPT_MAX_VERTS], int s, inout RNG rng)
 
 static const float BDPT_SPLAT_SCALE = 1024.0;     // Q22.10 fixed-point
 
+#if defined(SKINNY_MLT)
+// MLT (change mlt-integrator): light-tracer splats are CAPTURED per chain and
+// written to the film post-acceptance with a/c_p, (1-a)/c_c weights — the
+// weights are unknowable during evaluation (design D4). Bounded per-thread
+// stack: splatLightWalk emits at most BDPT_MAX_VERTS-1 records per sample.
+static uint gMltSplatCount = 0u;
+static int2 gMltSplatPixel[BDPT_MAX_VERTS];
+static float3 gMltSplatRgb[BDPT_MAX_VERTS];
+
+void atomicSplatRadiance(int2 pixel, float3 radiance)
+{
+    if (any(radiance != radiance)) return;        // NaN guard
+    if (any(isinf(radiance))) return;
+    radiance = max(radiance, float3(0.0));
+    if (gMltSplatCount < uint(BDPT_MAX_VERTS))
+    {
+        gMltSplatPixel[gMltSplatCount] = pixel;
+        gMltSplatRgb[gMltSplatCount] = radiance;
+        gMltSplatCount += 1u;
+    }
+}
+#else
 void atomicSplatRadiance(int2 pixel, float3 radiance)
 {
     if (any(radiance != radiance)) return;        // NaN guard
@@ -1024,6 +1046,7 @@ void atomicSplatRadiance(int2 pixel, float3 radiance)
     InterlockedAdd(lightSplatBuffer[base + 1u], uint(radiance.y * BDPT_SPLAT_SCALE), orig);
     InterlockedAdd(lightSplatBuffer[base + 2u], uint(radiance.z * BDPT_SPLAT_SCALE), orig);
 }
+#endif
 
 // MIS weight (power heuristic) for the s = 1 light-tracer splat connecting the
 // camera to light vertex lit[t-1]. The eye subpath is a single (camera) vertex,
@@ -1280,6 +1303,9 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         BDPTVertex lightPath[BDPT_MAX_VERTS];
         int lightLen = 0;
 
+#if defined(SKINNY_MLT)
+        rng.startStream(1u);   // pbrt lightStreamIndex (sample-index locality)
+#endif
         LightOriginSample lo = sampleLightOrigin(rng);
         if (lo.valid)
         {
@@ -1306,6 +1332,9 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
         // s = 1 light tracer: project each non-delta light vertex onto the
         // camera and atomic-add the contribution into lightSplatBuffer.
         // main_pass.slang composites the splat at end-of-frame.
+#if defined(SKINNY_MLT)
+        rng.startStream(2u);   // pbrt connectionStreamIndex
+#endif
         splatLightWalk<TC>(lightPath, lightLen, rng, cam);
 
         float3 L = escapedRadiance;
