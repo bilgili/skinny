@@ -4,11 +4,12 @@
 > and serves as a testbed for experimenting with new rendering algorithms.
 > The codebase evolves rapidly and stability is not guaranteed.
 
-Skinny is a physically based renderer built on a Vulkan compute shader
-pipeline. It started as a human skin rendering testbed -- and retains
-first-class skin support -- but the core pipeline handles arbitrary MaterialX
-materials, OpenUSD scenes, ray-traced geometry, image-based lighting,
-microfacet specular, and energy-conservation checks.
+Skinny is a physically based GPU renderer with Vulkan and native Metal compute
+backends compiled from the same Slang shader sources. It started as a human skin
+rendering testbed -- and retains first-class skin support -- but the core
+pipeline handles arbitrary MaterialX materials, OpenUSD scenes, ray-traced
+geometry, image-based lighting, microfacet specular, and energy-conservation
+checks.
 
 Skin-specific rendering (three-layer optics, scattering modes, MaterialX skin
 nodedefs, head geometry, presets, tattoos) is documented separately in
@@ -98,7 +99,7 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
 - **Stochastic Progressive Photon Mapping** -- caustic-efficient SPPM integrator
   (`--integrator sppm`): per-pass eye → spatial-hash grid → photon → radius/flux
   update, with the per-pixel estimator persisting across accumulation frames;
-  wavefront-only, flat materials, Vulkan now (native Metal is a follow-up). See
+  wavefront-only, flat materials, supported on both Vulkan and native Metal. See
   [docs/PhotonMapping.md](docs/PhotonMapping.md)
 - **Furnace mode** -- unit-sphere + white-environment energy conservation test;
   violations tinted pink; supports per-material furnace probes
@@ -136,7 +137,8 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
 ## Requirements
 
 - Python 3.11 or newer
-- Vulkan 1.2 capable GPU and current graphics driver
+- A GPU supported by one of the compute backends: Vulkan 1.2 with a current
+  graphics driver, or native Metal on Apple Silicon
 - Slang compiler (`slangc`) on `PATH`
 - MaterialX **built from source** with the Slang code generator enabled — the
   PyPI wheel does not ship `PyMaterialXGenSlang`. See
@@ -364,8 +366,8 @@ server-side and decoded via WebCodecs in the browser.
 .\Scripts\skinny.exe assets/demo_head.usda
 ```
 
-Keyboard-driven loop with no Qt overhead. Useful for fast iteration on Vulkan
-or Slang code where the Qt event loop gets in the way.
+Keyboard-driven loop with no Qt overhead. Useful for fast iteration on the
+render pipeline or Slang code where the Qt event loop gets in the way.
 
 ### Headless rendering (`skinny-render`)
 
@@ -802,7 +804,7 @@ per-material furnace probes.
 
 | File | Purpose |
 |------|---------|
-| `renderer.py` | Vulkan resources, uniforms, environment/mesh/texture upload, frame loop |
+| `renderer.py` | Backend-neutral render orchestration, uniforms, environment/mesh/texture upload, frame loop |
 | `scene.py` | Scene graph data classes (`MeshInstance`, `Material`, `Light*`, `Scene`) |
 | `usd_loader.py` | USD stage to `Scene` conversion (with MaterialX API fallback) |
 | `materialx_runtime.py` | MaterialX document loading, Slang code generation, uniform packing |
@@ -830,9 +832,14 @@ per-material furnace probes.
 | `gfx/device.py` | Device abstraction over queues / allocators |
 | `gfx/presenter.py` | Surface / swapchain abstraction (None for headless) |
 | `gfx/vulkan/` | Vulkan implementation of `Backend` / `Device` / `Presenter` |
-| `gfx/metal/` | Metal stub (placeholder for future native macOS backend) |
+| `gfx/metal/` | Legacy `Backend` abstraction stub; the production Metal path uses `metal_*.py` |
+| `backend_select.py` | Shared `auto` / Vulkan / Metal backend selection |
 | `vk_context.py` | Vulkan instance, device, queue setup (windowed + headless) |
 | `vk_compute.py` | Compute pipeline, descriptor layout, GPU buffer/image helpers |
+| `vk_wavefront.py` | Vulkan wavefront execution passes |
+| `metal_context.py` | Native Metal device, queue, and presentation setup |
+| `metal_compute.py` | Native Metal compute pipeline and resource helpers |
+| `metal_wavefront.py` | Native Metal wavefront execution passes |
 | `hardware.py` | GPU enumeration, vendor detection, encoder selection |
 | `video_encoder.py` | H264/JPEG encoding with hardware-aware fallback chain |
 
