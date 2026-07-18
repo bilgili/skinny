@@ -89,6 +89,100 @@ void mirrorRgb(SpectralBDPTVertex src[BDPT_MAX_VERTS], out BDPTVertex dst[BDPT_M
     [loop] for (int i = 0; i < int(BDPT_MAX_VERTS); i++) dst[i] = asRgb(src[i]);
 }
 
+// MIS weight over the SPECTRAL subpath arrays, without materialising RGB mirrors.
+//
+// Line-for-line the same arithmetic as bdpt.misWeight (keep the two in lockstep;
+// the self-consistency gate is what catches drift) — but misWeight reads ONLY
+// pdfFwd / pdfRev / isDelta / kind, so this variant lifts those four scalars into
+// tiny local arrays instead of copying two full BDPTVertex arrays (each carrying
+// two Spectrums) and then copying them AGAIN inside misWeight.
+//
+// That difference is not cosmetic: with `eye`, `lightPath`, `eyeRgb`, `litRgb`
+// and misWeight's internal `eyeC`/`litC` all live across the t>=2 connection
+// double loop, the per-thread footprint overflowed what the Metal backend can
+// hold and the wfMltBootstrap dispatch hung forever on the GPU (spectral MLT;
+// RGB MLT survived only because BDPTVertex is smaller and needs no mirrors).
+// Keeping the MIS scratch scalar keeps that loop's live state bounded.
+float misWeightS(
+    SpectralBDPTVertex eye[BDPT_MAX_VERTS], int s,
+    SpectralBDPTVertex lit[BDPT_MAX_VERTS], int t,
+    float pdf_zsm1_rev,
+    float pdf_zsm2_rev,
+    float pdf_ytm1_rev,
+    float pdf_ytm2_rev)
+{
+    if (s + t == 2) return 1.0;
+
+    float eFwd[BDPT_MAX_VERTS], eRev[BDPT_MAX_VERTS];
+    float lFwd[BDPT_MAX_VERTS], lRev[BDPT_MAX_VERTS];
+    bool  eDel[BDPT_MAX_VERTS], lDel[BDPT_MAX_VERTS];
+    [loop]
+    for (int i = 0; i < int(BDPT_MAX_VERTS); i++)
+    {
+        eFwd[i] = eye[i].pdfFwd; eRev[i] = eye[i].pdfRev; eDel[i] = eye[i].isDelta;
+        lFwd[i] = lit[i].pdfFwd; lRev[i] = lit[i].pdfRev; lDel[i] = lit[i].isDelta;
+    }
+    bool litIsDeltaDirLight = (lit[0].kind == BDPT_VK_LIGHT_DIR);
+
+    if (s >= 1) eRev[max(s - 1, 0)] = pdf_zsm1_rev;
+    if (s >= 2) eRev[max(s - 2, 0)] = pdf_zsm2_rev;
+    if (t >= 1) lRev[max(t - 1, 0)] = pdf_ytm1_rev;
+    if (t >= 2) lRev[max(t - 2, 0)] = pdf_ytm2_rev;
+
+    float sumRi = 0.0;
+    float ri = 1.0;
+
+    [loop]
+    for (int i = s - 1; i > 0; i--)
+    {
+        ri *= remap0(eRev[i]) / remap0(eFwd[i]);
+        if (!eDel[i] && !eDel[i - 1])
+            sumRi += ri * ri;
+    }
+
+    ri = 1.0;
+    [loop]
+    for (int i = t - 1; i >= 0; i--)
+    {
+        ri *= remap0(lRev[i]) / remap0(lFwd[i]);
+        // i == 0 is the "pure eye path hits the light" strategy — suppressed by
+        // the light-vertex KIND, not the delta flag (see bdpt.misWeight).
+        bool deltaLight = (i > 0) ? lDel[max(i - 1, 0)] : litIsDeltaDirLight;
+        if (!lDel[i] && !deltaLight)
+            sumRi += ri * ri;
+    }
+
+    return 1.0 / (1.0 + sumRi);
+}
+
+// Spectral sibling of bdpt.emitterHitMisWeightT0 — the t = 0 emitter-hit MIS
+// partition (change bdpt-emissive-hit-mis), over the SPECTRAL eye array so no
+// RGB mirror has to be materialised in estimateRadiance (see misWeightS).
+// Arithmetic is line-for-line the RGB helper's; keep the two in lockstep.
+// As there, the lit array is unused at t = 0 (misWeightS's light-side loop
+// no-ops) — `eye` is passed for both to avoid an uninitialised array copy.
+float emitterHitMisWeightT0S(SpectralBDPTVertex eye[BDPT_MAX_VERTS], int s)
+{
+    SpectralBDPTVertex z    = eye[s - 1];
+    SpectralBDPTVertex prev = eye[s - 2];
+
+    float3 emRgb = bdptSurface(asRgb(z)).mat.data.mat.emission;
+    float  lum   = dot(emRgb, float3(0.2126, 0.7152, 0.0722));
+    float pdf_zsm1_rev = (fc.emissiveTotalPower > 0.0)
+        ? lum / fc.emissiveTotalPower : 0.0;
+
+    float pdf_zsm2_rev = 0.0;
+    float3 toPrev = prev.position - z.position;
+    float l2 = dot(toPrev, toPrev);
+    if (l2 > 1e-20)
+    {
+        float cosOut = max(dot(z.N, toPrev * rsqrt(l2)), 0.0);
+        pdf_zsm2_rev = convertSAtoArea(cosOut / PI, z.position, asRgb(prev));
+    }
+
+    return misWeightS(eye, s, eye, 0, pdf_zsm1_rev, pdf_zsm2_rev, 0.0, 0.0);
+}
+
 // Upsampled reflectances for a reconstructed surface vertex (conductor id from
 // the material record), reused across the connection / splat responses.
 SpectralFlatColors colsFor(FlatMaterial mat, uint matId, SampledWavelengths sw)
@@ -984,11 +1078,11 @@ struct SpectralBDPTIntegrator<TC : ICamera>
 
         Spectrum L = escapedRadiance;
 
-        // RGB mirror of the eye subpath — the scalar MIS helpers (misWeight,
-        // emitterHitMisWeightT0) operate on BDPTVertex geometry/pdfs. Built once
-        // here; reused by the t = 0 term below and the t ≥ 2 connections.
-        BDPTVertex eyeRgb[BDPT_MAX_VERTS];
-        mirrorRgb(eye, eyeRgb);
+        // No RGB mirror of the eye subpath here: both MIS consumers below take
+        // the spectral array directly (emitterHitMisWeightT0S / misWeightS).
+        // Materialising eyeRgb/litRgb across these loops pushed the live
+        // per-thread state past what Metal can hold and hung the spectral MLT
+        // kernels (change spectral-mlt).
 
         // (s ≥ 2, t = 0): emissive eye-vertex hits, MIS-gated as bdpt.slang.
         [loop]
@@ -1007,7 +1101,7 @@ struct SpectralBDPTIntegrator<TC : ICamera>
                 // (bdptSurface) so z.pdfRev matches the host CDF the spectral NEE
                 // (connectT1S) actually samples with; the scalar weight multiplies
                 // the per-λ emission.
-                L += z.throughput * z.emission * emitterHitMisWeightT0(eyeRgb, s);
+                L += z.throughput * z.emission * emitterHitMisWeightT0S(eye, s);
         }
 
         // (s ≥ 2, t = 1): NEE.
@@ -1015,9 +1109,10 @@ struct SpectralBDPTIntegrator<TC : ICamera>
         for (int s = 2; s <= eyeLen; s++)
             L += connectT1S(eye, s, sw, rng);
 
-        // (s ≥ 2, t ≥ 2): generic connections + MIS.
-        BDPTVertex litRgb[BDPT_MAX_VERTS];
-        mirrorRgb(lightPath, litRgb);
+        // (s ≥ 2, t ≥ 2): generic connections + MIS. The MIS weight reads the
+        // spectral arrays directly (misWeightS) — materialising RGB mirrors here
+        // pushed this loop's live per-thread state past what Metal can hold and
+        // hung the spectral MLT bootstrap dispatch.
         [loop]
         for (int s = 2; s <= eyeLen; s++)
         {
@@ -1027,9 +1122,9 @@ struct SpectralBDPTIntegrator<TC : ICamera>
                 if (s + t - 2 > int(BDPT_MAX_DEPTH)) continue;
                 SpectralConnectResult cr = connectGenericS(eye, s, lightPath, t, sw);
                 if (!cr.nonzero) continue;
-                float w = misWeight(eyeRgb, s, litRgb, t,
-                                    cr.pdf_zsm1_rev, cr.pdf_zsm2_rev,
-                                    cr.pdf_ytm1_rev, cr.pdf_ytm2_rev);
+                float w = misWeightS(eye, s, lightPath, t,
+                                     cr.pdf_zsm1_rev, cr.pdf_zsm2_rev,
+                                     cr.pdf_ytm1_rev, cr.pdf_ytm2_rev);
                 L += cr.contribution * w;
             }
         }

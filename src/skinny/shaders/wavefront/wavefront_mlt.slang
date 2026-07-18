@@ -73,6 +73,16 @@ struct MltChainMeta
 [[vk::binding(54)]] RWStructuredBuffer<MltRecord> mltCurrentRecords;    // nChains × MLT_RECORD_SLOTS
 [[vk::binding(55)]] RWStructuredBuffer<float> mltBootstrapWeights;      // nBootstrap
 [[vk::binding(56)]] RWStructuredBuffer<uint> mltChainSeeds;             // nChains
+// Proposal-record scratch (change spectral-mlt, Metal live-state fix):
+// mltEvaluate writes its captured records STRAIGHT here instead of returning a
+// thread-local MltRecord[7] — on Metal, that array (on top of the spectral
+// estimator's live subpath state) overflowed the per-thread budget and hung
+// wfMltMutate forever; bootstrap/init sat just under the limit. Same values,
+// same order, so Vulkan behavior is unchanged. Indexed chain*MLT_RECORD_SLOTS
+// (bootstrap: slot*MLT_RECORD_SLOTS — in-flight slots ≤ nChains by the same
+// tiling contract that lets the PSS buffer double as bootstrap scratch).
+[[vk::binding(57)]] RWStructuredBuffer<MltRecord> mltProposalRecords;   // nChains × MLT_RECORD_SLOTS
+
 
 // MLT film splat scale — Q24.8 (design D4): headroom 2^24 luminance units per
 // frame against the per-frame splat-count bound; NO upper clamp is permitted
@@ -100,16 +110,18 @@ void mltFilmSplat(uint pixelLane, float3 radiance)
 
 // ── target-function evaluation ──────────────────────────────────
 
-// One complete BDPT sample driven by the chain's primary samples. Returns the
-// captured contributions in-place (records[0] = eye, then light splats) and
-// the scalar contribution c.
+// One complete BDPT sample driven by the chain's primary samples. The captured
+// contributions land in mltProposalRecords[recordBase .. recordBase+nRecords)
+// (slot 0 = eye, then light splats) — device memory, never a thread-local
+// array (see the binding-57 comment). Returns the record count and the scalar
+// contribution c.
 struct MltSample
 {
     uint nRecords;
     float c;
 };
 
-MltSample mltEvaluate(inout RNG rng, out MltRecord records[MLT_RECORD_SLOTS])
+MltSample mltEvaluate(inout RNG rng, uint recordBase)
 {
     gMltSplatCount = 0u;
     rng.startStream(0u);   // pbrt cameraStreamIndex
@@ -138,8 +150,10 @@ MltSample mltEvaluate(inout RNG rng, out MltRecord records[MLT_RECORD_SLOTS])
     eyeL = max(eyeL, float3(0.0));
 
     MltSample s;
-    records[0].pixel = pixel.y * fc.width + pixel.x;
-    records[0].r = eyeL.x; records[0].g = eyeL.y; records[0].b = eyeL.z;
+    MltRecord r0;
+    r0.pixel = pixel.y * fc.width + pixel.x;
+    r0.r = eyeL.x; r0.g = eyeL.y; r0.b = eyeL.z;
+    mltProposalRecords[recordBase] = r0;
     s.nRecords = 1u;
     float c = mltLuminance(eyeL);
     [loop]
@@ -148,10 +162,12 @@ MltSample mltEvaluate(inout RNG rng, out MltRecord records[MLT_RECORD_SLOTS])
         int2 sp = gMltSplatPixel[i];
         if (sp.x < 0 || sp.y < 0 || uint(sp.x) >= fc.width || uint(sp.y) >= fc.height)
             continue;
-        records[s.nRecords].pixel = uint(sp.y) * fc.width + uint(sp.x);
-        records[s.nRecords].r = gMltSplatRgb[i].x;
-        records[s.nRecords].g = gMltSplatRgb[i].y;
-        records[s.nRecords].b = gMltSplatRgb[i].z;
+        MltRecord rr;
+        rr.pixel = uint(sp.y) * fc.width + uint(sp.x);
+        rr.r = gMltSplatRgb[i].x;
+        rr.g = gMltSplatRgb[i].y;
+        rr.b = gMltSplatRgb[i].z;
+        mltProposalRecords[recordBase + s.nRecords] = rr;
         c += mltLuminance(gMltSplatRgb[i]);
         s.nRecords += 1u;
     }
@@ -173,8 +189,9 @@ void wfMltBootstrap(uint3 tid: SV_DispatchThreadID)
     uint index = wfTile.streamBase + slot;
 
     RNG rng = mltCreateSampler(index, fc.mltSeed, slot * MLT_MAX_DIMS, fc.mltSigma);
-    MltRecord records[MLT_RECORD_SLOTS];
-    MltSample s = mltEvaluate(rng, records);
+    // Records land in the slot's proposal-scratch slice and are ignored —
+    // bootstrap only needs the scalar contribution.
+    MltSample s = mltEvaluate(rng, slot * MLT_RECORD_SLOTS);
     mltBootstrapWeights[index] = s.c;
 }
 
@@ -193,8 +210,8 @@ void wfMltInit(uint3 tid: SV_DispatchThreadID)
 
     uint seedIndex = mltChainSeeds[chain];
     RNG rng = mltCreateSampler(seedIndex, fc.mltSeed, chain * MLT_MAX_DIMS, fc.mltSigma);
-    MltRecord records[MLT_RECORD_SLOTS];
-    MltSample s = mltEvaluate(rng, records);
+    uint base = chain * MLT_RECORD_SLOTS;
+    MltSample s = mltEvaluate(rng, base);
 
     MltChainMeta meta;
     meta.rngState = pcgHash(chain + fc.mltSeed * 9781u + 0x9E3779B9u);
@@ -207,7 +224,7 @@ void wfMltInit(uint3 tid: SV_DispatchThreadID)
     mltChainMeta[chain] = meta;
     [loop]
     for (uint i = 0u; i < s.nRecords; i++)
-        mltCurrentRecords[chain * MLT_RECORD_SLOTS + i] = records[i];
+        mltCurrentRecords[base + i] = mltProposalRecords[base + i];
 }
 
 // Phase M (mutate): one thread = one chain = ONE Metropolis iteration.
@@ -231,10 +248,11 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
     rng.streamIndex = 0u;
     rng.sampleIndex = 0u;
     rng.sigma = fc.mltSigma;
+    rng.maxDim = 0u;   // per-invocation reject() scan bound
 
     rng.startIteration(fc.mltLargeStepProb);
-    MltRecord proposal[MLT_RECORD_SLOTS];
-    MltSample prop = mltEvaluate(rng, proposal);
+    uint base = chain * MLT_RECORD_SLOTS;
+    MltSample prop = mltEvaluate(rng, base);
 
     float cCurrent = meta.cCurrent;
     // Seeding guarantees cCurrent > 0 (bootstrap resample over positive
@@ -245,13 +263,16 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
 
     // Dual splat (pbrt MLTIntegrator::Render): proposal × a/c_p, current ×
     // (1−a)/c_c — every captured contribution at its own raster position.
+    // Decision-independent (uses a, not the accept draw), so it stays here.
     if (a > 0.0 && prop.c > 0.0)
     {
         float wp = a / prop.c;
         [loop]
         for (uint i = 0u; i < prop.nRecords; i++)
-            mltFilmSplat(proposal[i].pixel,
-                         float3(proposal[i].r, proposal[i].g, proposal[i].b) * wp);
+        {
+            MltRecord pr = mltProposalRecords[base + i];
+            mltFilmSplat(pr.pixel, float3(pr.r, pr.g, pr.b) * wp);
+        }
     }
     if (cCurrent > 0.0 && a < 1.0)
     {
@@ -259,7 +280,7 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
         [loop]
         for (uint i = 0u; i < meta.nRecords; i++)
         {
-            MltRecord rr = mltCurrentRecords[chain * MLT_RECORD_SLOTS + i];
+            MltRecord rr = mltCurrentRecords[base + i];
             mltFilmSplat(rr.pixel, float3(rr.r, rr.g, rr.b) * wc);
         }
     }
@@ -272,7 +293,7 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
         meta.nRecords = prop.nRecords;
         [loop]
         for (uint i = 0u; i < prop.nRecords; i++)
-            mltCurrentRecords[chain * MLT_RECORD_SLOTS + i] = proposal[i];
+            mltCurrentRecords[base + i] = mltProposalRecords[base + i];
     }
     else
     {
@@ -284,6 +305,7 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
     meta.lastLargeStepIteration = rng.lastLargeStepIteration;
     mltChainMeta[chain] = meta;
 }
+
 
 // Phase R (resolve): fold the frame's splats into the accumulation image,
 // scaled b / mpp_actual (pbrt WriteImage(b / mutationsPerPixel), applied as a

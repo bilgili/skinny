@@ -1131,7 +1131,7 @@ class MetalWavefrontMltPass:
     SlangPy under ``SKINNY_MLT=1`` (which swaps common.slang's RNG for the
     primary-sample-space sampler) and owns the five chain buffers, bound by
     Slang global name — the Metal backend has no descriptor sets, so unlike
-    Vulkan there are no scene-set slots 52–56 to rebind: the names simply merge
+    Vulkan there are no scene-set slots 52–57 to rebind: the names simply merge
     into the per-dispatch bind map.
 
     The renderer drives the same host round-trip as Vulkan, split across
@@ -1146,13 +1146,14 @@ class MetalWavefrontMltPass:
 
     _ENTRIES = ["wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"]
 
-    # Slang global name → mlt_buffer_sizes key (the Vulkan bindings 52–56).
+    # Slang global name → mlt_buffer_sizes key (the Vulkan bindings 52–57).
     _BINDINGS = (
         ("mltPrimarySamples", "mlt_primary_samples"),
         ("mltChainMeta", "mlt_chain_meta"),
         ("mltCurrentRecords", "mlt_current_records"),
         ("mltBootstrapWeights", "mlt_bootstrap_weights"),
         ("mltChainSeeds", "mlt_chain_seeds"),
+        ("mltProposalRecords", "mlt_proposal_records"),
     )
 
     def __init__(self, ctx, shader_dir: Path, num_pixels: int, num_chains: int,

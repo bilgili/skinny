@@ -206,6 +206,24 @@ GPU work, in code or in tests, must go through it**:
   overridable) so a full-frame BDPT-over-graph-materials frame can't wedge the GPU
   (`metal-megakernel-watchdog-tiling`; band count in `renderer._metal_megakernel_bands`,
   tiling is bit-identical to one dispatch).
+- **Never hard-kill a Metal process to enforce a timeout.** `os._exit()`,
+  `faulthandler.dump_traceback_later(exit=True)`, `kill -9`, `pkill -9` and an outer
+  `timeout -s KILL` all bypass `destroy()` **and** leave any in-flight kernel running
+  on the GPU — macOS cannot reclaim another process's GPU work, so *every* such kill
+  permanently wedges more GPU capacity until reboot. This binds **ad-hoc debug and
+  repro scripts exactly as hard as committed tests**: a throwaway script that
+  SIGKILLs a hung dispatch is the single most destructive thing to do to this machine.
+  Timeout pattern instead: run the GPU work in a **child process**; on timeout send
+  **SIGTERM** (the chained handler runs `destroy()`), wait a grace period, and escalate
+  to SIGKILL **only** once the child is confirmed to hold no in-flight dispatch.
+- **Make a kernel bounded BEFORE dispatching it again.** When a kernel is suspected of
+  hanging, do not re-dispatch it to "see if it still hangs" — each attempt wedges the
+  GPU again. Add a hard trip-count guard (a `[loop]` counter that breaks, writing a
+  sentinel) so the dispatch is *incapable* of running forever, then investigate. Bisect
+  by making the kernel terminate and report, never by killing the host process.
+- **Verify the GPU is healthy between guarded runs.** After any abnormal termination,
+  confirm a fresh `MetalContext` builds and a trivial dispatch completes before
+  launching the next run; if it does not, stop and report — do not keep launching.
 - **Run the kill harness when you touch GPU dispatch or kernel length.** Any change
   that adds a kernel, lengthens one, or alters context lifecycle must pass
   `tests/test_metal_cleanup.py` before merge — 13 hostless tests via plain pytest, and

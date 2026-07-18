@@ -601,6 +601,15 @@ struct RNG
     uint streamIndex;
     uint sampleIndex;
     float sigma;                 // small-step sigma (fc.mltSigma)
+    // High-water primary-sample index touched THIS iteration (exclusive bound).
+    // reject() only has to restore dimensions it actually visited, so this caps
+    // the restore scan at the path's real dimension count (~70 in the flat
+    // envelope) instead of the full MLT_MAX_DIMS=192 (change spectral-mlt: the
+    // fixed 192-trip scan over mltPrimarySamples hangs the Metal dispatch —
+    // A/B-isolated, arm-A/arm-B on int_caustic). Per-invocation state: draws and
+    // the reject() that consumes them live in the same kernel call, so this is
+    // never persisted to mltChainMeta.
+    uint maxDim;
 
     // The raw PCG stream — mutation draws and anything that must NOT be part
     // of primary sample space (the accept decision).
@@ -620,6 +629,7 @@ struct RNG
             // Broken invariant (design D2): unreachable in the flat envelope.
             return nextMutation();
         }
+        if (index + 1u > maxDim) maxDim = index + 1u;   // reject() scan bound
         MltPrimarySample Xi = mltPrimarySamples[xBase + index];
         if (Xi.lastMod < lastLargeStepIteration)
         {
@@ -688,7 +698,13 @@ struct RNG
     [mutating]
     void reject()
     {
-        for (uint i = 0u; i < MLT_MAX_DIMS; ++i)
+        // Scan only the dimensions this iteration actually touched (maxDim),
+        // not all MLT_MAX_DIMS. Restore semantics are unchanged: every dim with
+        // lastMod == currentIteration lies below maxDim by construction, and the
+        // lastMod guard already skips untouched dims inside the range. [loop]
+        // keeps Slang from unrolling (bound is dynamic now, but be explicit).
+        [loop]
+        for (uint i = 0u; i < maxDim; ++i)
         {
             MltPrimarySample Xi = mltPrimarySamples[xBase + i];
             if (Xi.lastMod == currentIteration)
@@ -716,6 +732,7 @@ RNG mltCreateSampler(uint seedIndex, uint seed, uint xBase, float sigma)
     rng.streamIndex = 0u;
     rng.sampleIndex = 0u;
     rng.sigma = sigma;
+    rng.maxDim = 0u;
     return rng;
 }
 

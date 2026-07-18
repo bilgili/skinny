@@ -1826,7 +1826,7 @@ class Renderer:
         # Staged wavefront MLT (change mlt-integrator): PSSMLT chains over the
         # BDPT estimator, Vulkan only (the Metal adapter is a follow-up —
         # _render_scene_metal refuses integrator 3 explicitly). The pass owns
-        # the five chain buffers (bindings 52–56 of the wavefront scene set);
+        # the six chain buffers (bindings 52–57 of the wavefront scene set);
         # per accumulation reset the renderer runs the synchronous bootstrap
         # round-trip (_run_wavefront_mlt_bootstrap) before recording frames.
         self._wavefront_mlt_pass = None
@@ -2443,7 +2443,7 @@ class Renderer:
         """Build (once) the native-Metal staged MLT pass (change
         mlt-integrator, task 5.6) — the Metal sibling of
         `_ensure_wavefront_mlt_pass`. Metal binds by name, so there are no
-        scene-set slots 52–56 to rebind: the pass merges its chain buffers into
+        scene-set slots 52–57 to rebind: the pass merges its chain buffers into
         the per-dispatch bind map itself."""
         key = self._mlt_pass_key()
         if self._wavefront_mlt_pass is not None and self._wf_mlt_pass_dims == key:
@@ -2463,7 +2463,7 @@ class Renderer:
         """Build (once) the staged wavefront MLT pass (change mlt-integrator).
         Vulkan path — the Metal sibling is `_ensure_wavefront_mlt_pass_metal`
         (`_render_scene_metal` routes there). Returns None when the scene set-0
-        layout lacks the MLT bindings 52–56 (a megakernel-mode session — the
+        layout lacks the MLT bindings 52–57 (a megakernel-mode session — the
         `scene_bindings_only` wavefront layout always carries them); the
         caller then falls back to the path tracer like SPPM does."""
         if self.is_metal:
@@ -2485,7 +2485,7 @@ class Renderer:
             num_chains=int(self.mlt_num_chains),
             bootstrap_samples=int(self.mlt_bootstrap_samples),
             spectral=self._spectral)
-        # Rebind the scene descriptor sets' MLT slots (52–56) from the
+        # Rebind the scene descriptor sets' MLT slots (52–57) from the
         # creation-time dummies to this pass's chain buffers.
         for ds in self.descriptor_sets:
             writes = [
@@ -4704,11 +4704,11 @@ class Renderer:
                 # +7 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
                 # 49 emissive blackbody + 50 distant-light SPD + 51 per-material
                 # blackbody) only for the spectral megakernel variant.
-                # +5 MLT chain buffers (52–56, change mlt-integrator) only on
+                # +6 MLT chain buffers (52–57, change mlt-integrator/spectral-mlt) only on
                 # the wavefront (`scene_bindings_only`) layout.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
                 * (22 + graph_slot + (7 if self._spectral else 0)
-                   + (5 if getattr(self._scene_bindings, "mlt_bindings", False) else 0)),
+                   + (6 if getattr(self._scene_bindings, "mlt_bindings", False) else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -5094,12 +5094,12 @@ class Renderer:
                     pBufferInfo=[vk.VkDescriptorBufferInfo(
                         buffer=_buf.buffer, offset=0, range=_buf.size)],
                 ))
-            # MLT chain buffers (52–56, change mlt-integrator) — only the
+            # MLT chain buffers (52–57, change mlt-integrator/spectral-mlt) — only the
             # wavefront (`scene_bindings_only`) layout declares them; dummies
             # until `_ensure_wavefront_mlt_pass` rebinds the real chain
             # buffers (the 36/37 record-dump precedent).
             if getattr(self._scene_bindings, "mlt_bindings", False):
-                for _b in (52, 53, 54, 55, 56):
+                for _b in (52, 53, 54, 55, 56, 57):
                     writes.append(vk.VkWriteDescriptorSet(
                         dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
                         descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,

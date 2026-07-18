@@ -1074,7 +1074,7 @@ class WavefrontMltPass:
     kernel cache is never aliased).
 
     Set 0 is the renderer's shared wavefront scene descriptor set, whose
-    layout carries the MLT bindings 52–56 (``ComputePipeline.mlt_bindings``);
+    layout carries the MLT bindings 52–57 (``ComputePipeline.mlt_bindings``);
     the renderer writes this pass's buffers into those slots at build. There
     is no set 1 — the kernels bind everything through the scene set.
 
@@ -1095,8 +1095,8 @@ class WavefrontMltPass:
         ("wfMltResolve", "wavefront/_wfmlt_resolve"),
     ]
 
-    # Binding → mlt_buffer_sizes key (bindings 52–56 of the scene set-0
-    # layout; 52 lives in common.slang's SKINNY_MLT block, 53–56 in
+    # Binding → mlt_buffer_sizes key (bindings 52–57 of the scene set-0
+    # layout; 52 lives in common.slang's SKINNY_MLT block, 53–57 in
     # wavefront_mlt.slang).
     _BINDINGS = (
         (52, "mlt_primary_samples"),
@@ -1104,6 +1104,7 @@ class WavefrontMltPass:
         (54, "mlt_current_records"),
         (55, "mlt_bootstrap_weights"),
         (56, "mlt_chain_seeds"),
+        (57, "mlt_proposal_records"),
     )
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
@@ -1140,7 +1141,7 @@ class WavefrontMltPass:
 
         # Pipeline layout: [scene set 0 only] + the shared 12-byte tile push
         # constant {streamBase, shadeSlot(unused), streamSize}. The scene
-        # layout already declares 52–56, so no pass-owned descriptor set.
+        # layout already declares 52–57, so no pass-owned descriptor set.
         push_range = vk.VkPushConstantRange(
             stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=12)
         self._pipe_layout = vk.vkCreatePipelineLayout(
@@ -1159,7 +1160,7 @@ class WavefrontMltPass:
     @property
     def descriptor_bindings(self):
         """``(binding, StorageBuffer)`` pairs the renderer writes into the
-        shared scene descriptor sets (slots 52–56)."""
+        shared scene descriptor sets (slots 52–57)."""
         return tuple((b, self._buffers[key]) for b, key in self._BINDINGS)
 
     def _bind(self, cmd, entry, scene_set) -> None:
