@@ -553,6 +553,7 @@ neural × interop.
 | Megakernel execution | ✅ | ✅ |
 | Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
 | SPPM integrator (wavefront, flat materials) | ✅ | ✅ (`MetalWavefrontSppmPass`; caustic parity matches Vulkan) |
+| MLT integrator — PSSMLT over BDPT (wavefront, flat materials) | ✅ (`WavefrontMltPass`) | ✅ (`MetalWavefrontMltPass`; bit-identical to Vulkan at equal budget) |
 | pbrt `subsurface` (volumetric interior random walk) | ✅ | ✅ (megakernel + wavefront, all integrators; under wavefront BDPT/SPPM every non-flat first hit — subsurface/skin/volume/python — falls back to the path tracer, parity with the megakernel, with the heavy multi-bounce cases bounded per eye tile on Metal; lights from a single distant light + the environment) |
 | Heterogeneous volumes — NanoVDB `MakeNamedMedium` (path integrator, megakernel + wavefront) | ✅ | ✅ (`disney-cloud` / `bunny-cloud`; distant + env NEE; BDPT/SPPM excluded) |
 | Procedural `cloud` medium — pbrt `MakeNamedMedium "cloud"` (analytic Perlin-fBm density, path integrator, megakernel + wavefront) | ✅ | ✅ (`clouds`; no grid/texture — `MEDIUM_CLOUD` evaluates pbrt's `CloudMedium::Density` in-shader; BDPT/SPPM excluded) |
@@ -636,7 +637,7 @@ through disk. Swap `mlx` for `cpu` to use the torch-free numpy oracle instead.
 
 ### Sampling
 
-Three integrators selectable via `--integrator {path,bdpt,sppm}` across the
+Four integrators selectable via `--integrator {path,bdpt,sppm,mlt}` across the
 front-ends:
 
 | Strategy | Description |
@@ -644,15 +645,20 @@ front-ends:
 | Path tracing (`path`, default) | Unidirectional with MIS; each estimator pairs a primary sampler with a companion via power heuristic |
 | BDPT (`bdpt`) | Bidirectional path tracer with light-tracer splatting for caustics; 4-vertex subpaths, connections evaluate the real `standard_surface` BSDF, env importance sampling matched to the path tracer |
 | SPPM (`sppm`) | **Stochastic Progressive Photon Mapping** — caustic-efficient eye/grid/photon/update pipeline; **wavefront-only**, **flat materials only**, on both Vulkan and native Metal (caustic parity matches across backends). Runs under wavefront — `--integrator sppm` **auto-selects** `--execution-mode wavefront` (see below), so it needs no second flag; an explicit `--execution-mode megakernel` is refused. One SPPM pass == one accumulation frame; the per-pixel estimator (radius / count / flux) persists across frames. The initial search radius (default ≈ 0.1 % of the scene bbox diagonal) and photons/pass (default one per pixel) are set by the pbrt `sppm` importer; `--sppm-glossy-roughness` (float; SPPM + wavefront only; default tuned ≈ 0.6 in perceptual/USD roughness, reaching pbrt-imported polished metals; `0` = delta-only PM-1 behaviour) is the glossy / near-specular eye-walk continuation threshold, so glossy metals reconstruct sharp reflections (a glossy metal reflecting only the environment is MIS-weighted on escape). See [docs/PhotonMapping.md](docs/PhotonMapping.md). |
+| MLT (`mlt`) | **Metropolis Light Transport** — Kelemen primary-sample-space Metropolis (PSSMLT) driving the existing wavefront BDPT estimator (all strategy families, existing MIS weights), so `E[MLT] = E[skinny BDPT]` by construction. Full-sample chains (Kelemen 2002 / Mitsuba PSSMLT), **not** pbrt's per-depth strategy decomposition — skinny's environment transport is deliberately not strategy-partitioned, so a per-depth split would drop env transport per stratum. Thousands of GPU-parallel Markov chains (default 16384) advance one mutation per frame; each frame runs a bootstrap b-normalization at accumulation reset, then mutate (propose → dual splat of proposal and current state by acceptance, uint fixed-point, **never clamped**) → resolve (fold splats × `b/mpp_actual`, film-averaged like SPPM). **Wavefront-only**, **flat materials only**, on both Vulkan (`WavefrontMltPass`) and native Metal (`MetalWavefrontMltPass`, bit-identical at equal budget). Runs under wavefront — `--integrator mlt` **auto-selects** `--execution-mode wavefront` (see below); an explicit `--execution-mode megakernel` is refused. pbrt imports `Integrator "mlt"` (`mutationsperpixel` / `largestepprobability` / `sigma` / `chains` / `bootstrapsamples` / `maxdepth`; pbrt defaults 100 / 0.3 / 0.01 / 1000 / 100000 / 5). MCMC images **"swim"** early as the chains explore, then the progressive film average stabilizes like SPPM. Spectral / neural / ReSTIR / online-training and non-flat scenes are refused at startup (recorded parity skips — no path-fallback inside a Markov chain). See [docs/Wavefront.md § MLT stages](docs/Wavefront.md). |
 
 **Execution mode follows the integrator.** `--execution-mode
 {auto,megakernel,wavefront}` (env `SKINNY_EXECUTION_MODE`, default `auto`,
 fixed for the session) picks the GPU execution backend. `auto` (the default)
 **derives the mode from the startup integrator** — `path` → `megakernel`,
-`bdpt` → `megakernel`, `sppm` → `wavefront` — mirroring `--backend auto`, so a
-plain `--integrator sppm` just works. An explicit `megakernel`/`wavefront`
-(flag or env) overrides the derived default and pins the mode; the only
-impossible combo, `sppm` + explicit `megakernel`, is refused at startup.
+`bdpt` → `megakernel`, `sppm` → `wavefront`, `mlt` → `wavefront` — mirroring
+`--backend auto`, so a plain `--integrator sppm` or `--integrator mlt` just
+works. An explicit `megakernel`/`wavefront` (flag or env) overrides the derived
+default and pins the mode; the impossible combos, `sppm` + explicit
+`megakernel` and `mlt` + explicit `megakernel`, are refused at startup. (In a
+megakernel-fixed session, cycling the runtime integrator to a wavefront-only
+integrator — `sppm` or `mlt` — falls back to the megakernel path tracer, same
+safe wart SPPM has today.)
 
 **Per-lobe BSDF samplers.** The flat / `standard_surface` BSDF draws each lobe
 (`coat`, `spec`, `diffuse`) from a runtime-selectable importance sampler. Native

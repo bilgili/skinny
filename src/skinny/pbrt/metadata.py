@@ -113,6 +113,22 @@ def scene_metadata(scene) -> dict:
             if "photonsperiteration" in iparams:
                 sel["photons"] = int(iparams["photonsperiteration"])
             md["skinny"] = sel
+        # pbrt's MLT (PSSMLT over BDPT) maps 1:1 onto skinny's MLT integrator
+        # (change mlt-integrator). Record a self-contained normalized selection —
+        # authored values over pbrt defaults — so a loader / the parity harness
+        # can configure the chains without re-parsing pbrt param names.
+        elif itype == "mlt":
+            iparams, _ = paramset_to_dicts(scene.integrator[1])
+            sel = {
+                "integrator": "mlt",
+                "maxdepth": int(iparams.get("maxdepth", 5)),
+                "mutationsperpixel": int(iparams.get("mutationsperpixel", 100)),
+                "largestepprobability": float(iparams.get("largestepprobability", 0.3)),
+                "sigma": float(iparams.get("sigma", 0.01)),
+                "chains": int(iparams.get("chains", 1000)),
+                "bootstrapsamples": int(iparams.get("bootstrapsamples", 100000)),
+            }
+            md["skinny"] = sel
     if scene.sampler is not None:
         md["sampler"] = _entity_md(scene.sampler[0], scene.sampler[1])
     if scene.film is not None:

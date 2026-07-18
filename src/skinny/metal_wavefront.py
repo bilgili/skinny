@@ -1073,3 +1073,230 @@ class MetalWavefrontBdptPass:
         self._bind_map = {}
         self._entries = {}
         self.default_tex = None
+
+
+class _MetalMltRecorder:
+    """Metal adapter for the ``record_mlt_*`` driver sequences (change
+    mlt-integrator, task 5.6) — the sibling of ``vk_wavefront._VkMltRecorder``.
+
+    MLT's tile window is the CHAIN window, not a lane stream: ``push_window``
+    sets ``wfTile`` to ``{streamBase = chain base, streamSize = exact batch}``,
+    the same ``[[vk::push_constant]] MltTilePC`` the Vulkan recorder pushes
+    (Slang binds it by name on Metal — the ``sppmTile`` precedent). Every
+    dispatch is host-counted, so there is no indirect path."""
+
+    def __init__(self, p, enc: MetalFrameEncoder, binds: dict, fc_blob: bytes,
+                 bindless) -> None:
+        self._p = p
+        self._enc = enc
+        self._binds = binds
+        self._fc = fc_blob
+        self._bindless = bindless
+        self._tile = (0, 0, p.num_chains)
+
+    def _tile_blob(self) -> bytes:
+        return struct.pack("3I", *(int(v) for v in self._tile))
+
+    def _dispatch(self, entry: str, groups) -> None:
+        self._enc.dispatch(
+            self._p._entries[entry], groups,
+            bindings=self._binds, uniform_blob=self._fc,
+            uniforms={"wfTile": self._tile_blob()}, bindless=self._bindless)
+
+    def barrier(self) -> None:
+        self._enc.barrier()
+
+    def push_window(self, base: int, size: int) -> None:
+        self._tile = (int(base), 0, int(size))
+
+    def dispatch_count(self, entry: str, count: int, group_size: int) -> None:
+        groups = (int(count) + group_size - 1) // group_size
+        self._dispatch(entry, (max(groups, 1), 1, 1))
+
+    def flush(self) -> None:
+        # Commit + drain at every MLT sub-batch boundary (design D7). One
+        # mutation dispatch runs a COMPLETE BDPT sample per chain (eye walk +
+        # light walk + the full connection matrix), so an untiled 16384-chain
+        # iteration — let alone every iteration of a frame in one command
+        # buffer — can exceed the macOS GPU watchdog and wedge the GPU. Metal
+        # only; the Vulkan recorder no-ops this.
+        self._enc.flush()
+
+
+class MetalWavefrontMltPass:
+    """Native-Metal staged PSSMLT pass (change mlt-integrator, task 5.6) — the
+    Metal sibling of :class:`skinny.vk_wavefront.WavefrontMltPass`.
+
+    Compiles the four ``wavefront/wavefront_mlt.slang`` entries in-process via
+    SlangPy under ``SKINNY_MLT=1`` (which swaps common.slang's RNG for the
+    primary-sample-space sampler) and owns the five chain buffers, bound by
+    Slang global name — the Metal backend has no descriptor sets, so unlike
+    Vulkan there are no scene-set slots 52–56 to rebind: the names simply merge
+    into the per-dispatch bind map.
+
+    The renderer drives the same host round-trip as Vulkan, split across
+    submits because the bootstrap weights must reach the host between them:
+    :meth:`dispatch_bootstrap` → :meth:`read_bootstrap_weights` →
+    ``mlt_bootstrap.resample_chain_seeds`` → :meth:`upload_chain_seeds` →
+    :meth:`dispatch_init`; then :meth:`dispatch_frame` per frame. ``b`` and
+    ``seeded`` are renderer-owned state stashed here, as on the Vulkan pass.
+    """
+
+    _GROUP = 64  # matches [numthreads(64,1,1)] on all four MLT kernels
+
+    _ENTRIES = ["wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"]
+
+    # Slang global name → mlt_buffer_sizes key (the Vulkan bindings 52–56).
+    _BINDINGS = (
+        ("mltPrimarySamples", "mlt_primary_samples"),
+        ("mltChainMeta", "mlt_chain_meta"),
+        ("mltCurrentRecords", "mlt_current_records"),
+        ("mltBootstrapWeights", "mlt_bootstrap_weights"),
+        ("mltChainSeeds", "mlt_chain_seeds"),
+    )
+
+    def __init__(self, ctx, shader_dir: Path, num_pixels: int, num_chains: int,
+                 bootstrap_samples: int) -> None:
+        from skinny.wavefront_layout import mlt_buffer_sizes
+
+        self.ctx = ctx
+        self.shader_dir = Path(shader_dir)
+        self.num_pixels = int(num_pixels)
+        self.num_chains = int(num_chains)
+        self.bootstrap_samples = int(bootstrap_samples)
+        self.b = 0.0
+        self.seeded = False
+
+        session = _metal_slang_session(ctx, self.shader_dir, {"SKINNY_MLT": "1"})
+        src_path = self.shader_dir / "wavefront" / "wavefront_mlt.slang"
+        module = session.load_module_from_source(
+            "wavefront_mlt", src_path.read_text(encoding="utf-8"), str(src_path))
+        self._entries = {e: _EntryPipeline(ctx, session, module, e)
+                         for e in self._ENTRIES}
+
+        # MSL reflection surface for the renderer's relocators: in a Metal MLT
+        # session this pass is the `_msl_layout_source`, and it is the ONLY
+        # program whose `fc` carries the SKINNY_MLT tail — `_pack_uniforms_msl`
+        # relocates mltSigma…mltSeed against this layout.
+        mutate = self._entries["wfMltMutate"].program
+        self.uniform_layout, self.uniform_size = _reflect_uniform_layout(mutate)
+        self.mtlx_skin_layout: dict = {}
+        self.mtlx_skin_stride = 0
+        self.std_surface_layout: dict = {}
+        self.std_surface_stride = 0
+        _ss = _reflect_element(mutate, "stdSurfaceParams")
+        if _ss is not None:
+            self.std_surface_layout, self.std_surface_stride = _ss
+        self.graph_param_layouts: dict = {}
+
+        # Every MLT struct is scalar-field-only by construction (MltRecord's
+        # rgb is 3 floats, not a float3), so the MSL and Vulkan-scalar strides
+        # agree — but size through the `msl=True` mirror anyway and assert the
+        # result against reflection rather than assuming the two never diverge.
+        sizes = mlt_buffer_sizes(self.num_chains, self.bootstrap_samples, msl=True)
+        for name, key, count in (
+            ("mltChainMeta", "mlt_chain_meta", self.num_chains),
+            ("mltBootstrapWeights", "mlt_bootstrap_weights", self.bootstrap_samples),
+            ("mltChainSeeds", "mlt_chain_seeds", self.num_chains),
+        ):
+            refl = _reflect_element(mutate, name)
+            stride = (refl or (None, 0))[1]
+            expect = sizes[key] // max(1, count)
+            if stride and stride != expect:
+                raise RuntimeError(
+                    f"reflected Metal {name} stride {stride}B != "
+                    f"wavefront_layout.mlt_buffer_sizes {expect}B")
+
+        self.buffers: dict[str, StorageBuffer] = {
+            key: StorageBuffer(ctx, sizes[key]) for _, key in self._BINDINGS
+        }
+        for buf in self.buffers.values():
+            buf.fill_zero_sync()
+        self._bind_map = {name: self.buffers[key] for name, key in self._BINDINGS}
+
+        spy = ctx._spy
+        self.default_tex = ctx.device.create_texture(
+            type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
+            width=1, height=1,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            memory_type=spy.MemoryType.device_local, label="skinny.mlt_bindless_default")
+
+    def _encode(self, record_fn, binds: dict, uniform_blob: bytes,
+                bindless_textures) -> None:
+        """Merge the pass's chain buffers into the renderer's bind map, run one
+        ``record_mlt_*`` sequence over a fresh encoder, and submit."""
+        all_binds = dict(binds)
+        all_binds.update(self._bind_map)
+        bindless = None
+        if bindless_textures is not None:
+            bindless = ("flatMaterialTextures", bindless_textures, self.default_tex)
+        enc = MetalFrameEncoder(self.ctx)
+        record_fn(_MetalMltRecorder(self, enc, all_binds, uniform_blob, bindless))
+        enc.submit()
+
+    def dispatch_bootstrap(self, *, binds: dict, uniform_blob: bytes,
+                           bindless_textures=None, chain_batch: int = 0) -> None:
+        """Record + submit the bootstrap phase (one thread = one bootstrap
+        sample). The caller reads the weights back afterwards. ``chain_batch``
+        breadth-tiles the dispatch so a large chain count stays under the macOS
+        GPU watchdog (design D7)."""
+        from skinny.wavefront_driver import record_mlt_bootstrap
+
+        self._encode(
+            lambda rec: record_mlt_bootstrap(
+                rec, bootstrap_samples=self.bootstrap_samples,
+                num_chains=self.num_chains, chain_batch=int(chain_batch)),
+            binds, uniform_blob, bindless_textures)
+
+    def dispatch_init(self, *, binds: dict, uniform_blob: bytes,
+                      bindless_textures=None, chain_batch: int = 0) -> None:
+        """Record + submit the chain-init phase (replays the resampled seeds
+        uploaded via :meth:`upload_chain_seeds`)."""
+        from skinny.wavefront_driver import record_mlt_init
+
+        self._encode(
+            lambda rec: record_mlt_init(
+                rec, num_chains=self.num_chains, chain_batch=int(chain_batch)),
+            binds, uniform_blob, bindless_textures)
+
+    def dispatch_frame(self, *, binds: dict, uniform_blob: bytes,
+                       bindless_textures=None, iterations: int,
+                       chain_batch: int = 0) -> None:
+        """Record + submit one MLT accumulation frame (mutate × iterations +
+        the b-normalized resolve). ``chain_batch`` breadth-tiles each mutation
+        dispatch (design D7)."""
+        from skinny.wavefront_driver import record_mlt_frame
+
+        self._encode(
+            lambda rec: record_mlt_frame(
+                rec, num_pixels=self.num_pixels, num_chains=self.num_chains,
+                iterations=int(iterations), chain_batch=int(chain_batch)),
+            binds, uniform_blob, bindless_textures)
+
+    def read_bootstrap_weights(self):
+        """Host readback of the bootstrap scalar contributions (float32,
+        ``bootstrap_samples`` entries)."""
+        import numpy as np
+
+        raw = self.buffers["mlt_bootstrap_weights"].download_sync(
+            self.bootstrap_samples * 4)
+        return np.frombuffer(raw, dtype=np.float32).copy()
+
+    def upload_chain_seeds(self, seeds) -> None:
+        """Upload the resampled per-chain bootstrap indices (uint32,
+        ``num_chains`` entries)."""
+        import numpy as np
+
+        arr = np.ascontiguousarray(seeds, dtype=np.uint32)
+        if arr.size != self.num_chains:
+            raise ValueError(
+                f"MLT chain seeds: expected {self.num_chains} entries, got {arr.size}")
+        self.buffers["mlt_chain_seeds"].upload_sync(arr.tobytes())
+
+    def destroy(self) -> None:  # SlangPy owns lifetimes via refcount
+        for buf in self.buffers.values():
+            buf.destroy()
+        self.buffers = {}
+        self._bind_map = {}
+        self._entries = {}
+        self.default_tex = None

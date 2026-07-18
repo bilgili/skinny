@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 Source = Union[str, Path, "Usd.Stage", object]
 
-_INTEGRATORS = {"path": 0, "bdpt": 1, "sppm": 2}
+_INTEGRATORS = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
 _TONEMAPS = {"aces": 0, "reinhard": 1, "hable": 2, "linear": 3}
 _LDR_FORMATS = {"png", "jpeg", "bmp"}
 _HDR_FORMATS = {"exr", "hdr"}
