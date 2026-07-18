@@ -292,10 +292,15 @@ eye-vertex loop is **MIS-gated** like the megakernel `bdpt.slang` (and the path
 tracer's specular rule above): the eye/BSDF subpath landing on an emissive
 triangle adds `z.throughput * z.emission` at full weight only when no NEE partner
 exists — `s == 2` (first hit, behind the delta camera), `eye[s - 2].isDelta` (a
-delta bounce reached z), or `numEmissiveTriangles == 0`; otherwise `connectT1`
-(the `t = 1` NEE) owns it. Ungated, the emissive hit double-counted direct
-area-light transport on top of the weighted NEE — BDPT read ~1.7× brighter than
-pbrt (change `bdpt-energy-convergence`, gate `tests/pbrt/test_bdpt_energy.py`).
+delta bounce reached z), or `numEmissiveTriangles == 0`; otherwise the `t = 0`
+hit is **MIS-weighted through the shared `misWeight` partition**
+(`emitterHitMisWeightT0`, change `bdpt-emissive-hit-mis`) so it and `connectT1`'s
+`t = 1` NEE, the `t ≥ 2` connections, and the `s = 1` splat sum to 1. Adding the
+hit at full weight (ungated) double-counted direct area-light transport — BDPT
+read ~1.7× brighter than pbrt (change `bdpt-energy-convergence`, gate
+`tests/pbrt/test_bdpt_energy.py`); then dropping it entirely under-shaded area
+lights ~3% dim vs the path tracer, which the `misWeight` complement fixes
+(`mat_emissive` relMSE 0.1292 → 0.0538, bit-identical to the megakernel).
 
 The wavefront BDPT shares `connectT1` and `splatLightWalk` with the megakernel, so
 the `bdpt-mis-unification` change applies here too: each `s = 1` splat is now

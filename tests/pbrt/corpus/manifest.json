@@ -457,27 +457,27 @@
    "flip_tol": 0.08,
    "material_class": "flat",
    "megakernel_ok": true,
-   "notes": "suite discriminator (mat_emissive); pbrt-gated + self-consistency. Spectral pbrt-truth baselines (bdpt/sppm |spectral) are GPU-measured on Metal (change spectral-wavefront GPU-validation): a neutral (achromatic) emitter, so spectral tracks its RGB sibling (bdpt/sppm spectral 0.1293 vs RGB 0.1292); path|*|spectral (~0.052) passes the scene tol without a baseline.",
+   "notes": "suite discriminator (mat_emissive); pbrt-gated + self-consistency. Spectral pbrt-truth baselines (bdpt/sppm |spectral) are GPU-measured on Metal (change spectral-wavefront GPU-validation): a neutral (achromatic) emitter, so spectral tracks its RGB sibling (sppm spectral 0.1293 vs RGB 0.1292; bdpt spectral 0.0535 vs RGB 0.0538 after change bdpt-emissive-hit-mis); path|*|spectral (~0.052) passes the scene tol without a baseline. change bdpt-emissive-hit-mis (2026-07-18): the BDPT eye-subpath emitter-hit (t=0) MIS complement — weighting the emitter hit through the shared misWeight partition instead of dropping it — lowered bdpt|megakernel and bdpt|wavefront pbrt-truth from 0.1292 to 0.0538 (RGB) / 0.0535 (spectral), matching the path anchor (0.0522): the ~3% direct/one-bounce area-light dim bias is removed, and bdpt megakernel==wavefront stays bit-identical (0.0538, vs-anchor 0.0046). sppm|* is a separate transport and is unchanged at 0.1292/0.1293 (its own follow-up).",
    "baselines": {
     "bdpt|megakernel": {
-     "relmse": 0.1292,
-     "flip": 0.1217
+     "relmse": 0.0538,
+     "flip": 0.0649
     },
     "bdpt|wavefront": {
-     "relmse": 0.1292,
-     "flip": 0.1217
+     "relmse": 0.0538,
+     "flip": 0.0649
     },
     "sppm|wavefront": {
      "relmse": 0.1292,
      "flip": 0.1217
     },
     "bdpt|megakernel|spectral": {
-     "relmse": 0.1293,
-     "flip": 0.1217
+     "relmse": 0.0535,
+     "flip": 0.0647
     },
     "bdpt|wavefront|spectral": {
-     "relmse": 0.1293,
-     "flip": 0.1217
+     "relmse": 0.0535,
+     "flip": 0.0647
     },
     "sppm|wavefront|spectral": {
      "relmse": 0.1293,
@@ -504,27 +504,27 @@
     "relmse": 0.02,
     "flip": 0.03
    },
-   "notes": "MaterialX authoring of mat_emissive; equivalence vs plain sibling. Same GPU-measured spectral pbrt-truth baselines as the plain sibling (change spectral-wavefront GPU-validation).",
+   "notes": "MaterialX authoring of mat_emissive; equivalence vs plain sibling. Same GPU-measured spectral pbrt-truth baselines as the plain sibling (change spectral-wavefront GPU-validation). change bdpt-emissive-hit-mis (2026-07-18): bdpt|* lowered 0.1292 -> 0.0538 (RGB) / 0.0535 (spectral) by the t=0 emitter-hit MIS complement, matching the path anchor; sppm|* unchanged.",
    "baselines": {
     "bdpt|megakernel": {
-     "relmse": 0.1292,
-     "flip": 0.1217
+     "relmse": 0.0538,
+     "flip": 0.0649
     },
     "bdpt|wavefront": {
-     "relmse": 0.1292,
-     "flip": 0.1217
+     "relmse": 0.0538,
+     "flip": 0.0649
     },
     "sppm|wavefront": {
      "relmse": 0.1292,
      "flip": 0.1217
     },
     "bdpt|megakernel|spectral": {
-     "relmse": 0.1293,
-     "flip": 0.1217
+     "relmse": 0.0535,
+     "flip": 0.0647
     },
     "bdpt|wavefront|spectral": {
-     "relmse": 0.1293,
-     "flip": 0.1217
+     "relmse": 0.0535,
+     "flip": 0.0647
     },
     "sppm|wavefront|spectral": {
      "relmse": 0.1293,

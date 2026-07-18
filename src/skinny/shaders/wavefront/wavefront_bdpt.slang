@@ -2496,6 +2496,12 @@ void wfBdptConnectLane(uint i, bool includeGeneric)
                           || eye[s - 2].isDelta;
         if (noNeePartner)
             L += z.throughput * z.emission;
+        else
+            // NEE partner exists: weight the t = 0 emitter hit through the shared
+            // misWeight partition (bdpt.slang) instead of dropping it. `eye` is a
+            // BDPTVertex array and `L` is Spectrum/float3 per build, so the scalar
+            // weight works for both with no #if.
+            L += z.throughput * z.emission * emitterHitMisWeightT0(eye, s);
     }
 
     // (s ≥ 2, t = 1): NEE.

@@ -32,6 +32,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BDPT under-shaded area-light emission ~3% vs the path tracer** (change
+  `bdpt-emissive-hit-mis`). A bidirectional eye walk that terminates on an
+  emissive triangle (the `t = 0` strategy) had its emission **dropped entirely**
+  whenever a next-event-estimation partner existed, discarding the
+  BSDF-sampling strategy's MIS share and biasing direct/one-bounce area lighting
+  dim. The `t = 0` term is now weighted through the same `misWeight` partition
+  `connectT1`'s NEE already uses (megakernel, wavefront, and spectral BDPT), so
+  every strategy that can generate the path shares one partition summing to 1.
+  On the `mat_emissive` suite scene BDPT's pbrt-truth relMSE drops from 0.1292 to
+  0.0538 (RGB) / 0.0535 (spectral), matching the path anchor (0.0522); BDPT
+  megakernel ≡ wavefront stays bit-identical. This is the BDPT follow-up to the
+  path-tracer fix `emissive-triangle-bsdf-mis`; SPPM keeps its own emission
+  handling (separate follow-up).
 - **Named-spectrum materials that silently rendered as the wrong thing** (change
   `pbrt-named-spectra`). These scenes legitimately change appearance:
   - **Named glasses other than BK7.** Every unrecognised glass name fell back to

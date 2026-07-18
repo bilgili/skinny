@@ -615,6 +615,69 @@ float misWeight(
     return 1.0 / (1.0 + sumRi);
 }
 
+// MIS weight for the BDPT eye-subpath emitter-hit strategy (`t = 0`): an eye
+// random walk that terminates on an emissive triangle at z = eye[s-1]. This is
+// one strategy in the SAME partition connectT1's `t = 1` NEE, the `t ≥ 2` generic
+// connections, and the `s = 1` splat already share, so weighting it through
+// misWeight makes them all sum to 1. Dropping it (the previous behaviour)
+// discarded the BSDF-sampling strategy's share and biased area lights ~3% dim vs
+// the path tracer. NOT a path.slang-style 2-strategy powerHeuristic — that
+// ignores the t≥2 / s=1 alternatives (the reason it was already replaced for
+// connectT1) and would not sum to 1.
+//
+// Call ONLY when a NEE partner exists (s > 2, non-delta predecessor, emissive
+// triangles present). The no-partner cases (primary hit, delta bounce into the
+// emitter, no emissive triangles) take the emission at full weight upstream.
+//
+// Reverse pdfs at the emitter end mirror connectT1's endpoint pdfs, with the
+// light vertex being z itself:
+//   z.pdfRev    — the area-measure pdf a light-sampling strategy would assign to
+//                 z. Under the area·lum power-weighted CDF (p_i = area_i·lum_i/ΣW)
+//                 with uniform-area sampling, the per-triangle area cancels to
+//                 lum_i/ΣW (matches samplePoint's pdfArea = pSel/triArea exactly).
+//                 The RGB authored emission is reloaded from the vertex
+//                 (bdptSurface → FlatMaterial.data.mat.emission stays RGB pre
+//                 spectral-upsampling), NOT read off z.emission, because the
+//                 spectral vertex stores an SPD, not the RGB value connectT1S
+//                 samples with — the reload gives the same RGB emission in every
+//                 build.
+//   prev.pdfRev — z's diffuse-emitter directional pdf (cosOut/π) converted to
+//                 area at prev (the emitter-side analogue of connectT1's
+//                 (cosLight/π)·NdotL/d²).
+//
+// ponytail: for a *textured* emitter (emissiveTextureIdx set, flat_shading.slang)
+// this reload returns the per-uv texel while the host CDF / emissiveTotalPower are
+// built from the constant emissiveColor, so pdf_zsm1_rev is not exactly the pdf
+// connectT1 samples with — a small MIS-weight error on textured area lights.
+// EXACT for every constant emitter (all gated scenes). Left as-is deliberately:
+// this mirrors the path tracer's pdfLightSA (path.slang, also per-uv), so
+// BDPT ≡ path is preserved; using the constant here would break that parity. A
+// consistent fix (texture-aware NEE + per-tri power) spans path + bdpt + host.
+float emitterHitMisWeightT0(BDPTVertex eyeArr[BDPT_MAX_VERTS], int s)
+{
+    BDPTVertex z    = eyeArr[s - 1];
+    BDPTVertex prev = eyeArr[s - 2];
+
+    float3 emRgb = bdptSurface(z).mat.data.mat.emission;
+    float  lum   = dot(emRgb, float3(0.2126, 0.7152, 0.0722));
+    float pdf_zsm1_rev = (fc.emissiveTotalPower > 0.0)
+        ? lum / fc.emissiveTotalPower : 0.0;
+
+    float pdf_zsm2_rev = 0.0;
+    float3 toPrev = prev.position - z.position;
+    float l2 = dot(toPrev, toPrev);
+    if (l2 > 1e-20)
+    {
+        float cosOut = max(dot(z.N, toPrev * rsqrt(l2)), 0.0);
+        pdf_zsm2_rev = convertSAtoArea(cosOut / PI, z.position, prev);
+    }
+
+    // lit array unused for t = 0 (misWeight's light-side loop no-ops); pass eye
+    // to avoid an uninitialized array copy.
+    return misWeight(eyeArr, s, eyeArr, 0,
+                     pdf_zsm1_rev, pdf_zsm2_rev, 0.0, 0.0);
+}
+
 // ── Connections ─────────────────────────────────────────────────
 
 // Connection contribution between eye[s-1] and lit[t-1] using Lambertian
@@ -1271,6 +1334,17 @@ struct BDPTIntegrator<TC : ICamera> : IIntegrator
 #else
                 L += z.throughput * z.emission;
 #endif
+            else
+            {
+                // NEE partner exists: weight the t = 0 emitter hit through the
+                // shared misWeight partition instead of dropping it.
+                float w = emitterHitMisWeightT0(eye, s);
+#if defined(SKINNY_SPECTRAL)
+                L += (z.throughput * z.emission).rgb * w;
+#else
+                L += z.throughput * z.emission * w;
+#endif
+            }
         }
 
         // (s ≥ 2, t = 1): NEE.

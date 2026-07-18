@@ -984,6 +984,12 @@ struct SpectralBDPTIntegrator<TC : ICamera>
 
         Spectrum L = escapedRadiance;
 
+        // RGB mirror of the eye subpath — the scalar MIS helpers (misWeight,
+        // emitterHitMisWeightT0) operate on BDPTVertex geometry/pdfs. Built once
+        // here; reused by the t = 0 term below and the t ≥ 2 connections.
+        BDPTVertex eyeRgb[BDPT_MAX_VERTS];
+        mirrorRgb(eye, eyeRgb);
+
         // (s ≥ 2, t = 0): emissive eye-vertex hits, MIS-gated as bdpt.slang.
         [loop]
         for (int s = 2; s <= eyeLen; s++)
@@ -995,6 +1001,13 @@ struct SpectralBDPTIntegrator<TC : ICamera>
                               || eye[s - 2].isDelta;
             if (noNeePartner)
                 L += z.throughput * z.emission;
+            else
+                // NEE partner exists: weight the t = 0 emitter hit through the
+                // shared misWeight partition. The helper reloads the RGB emission
+                // (bdptSurface) so z.pdfRev matches the host CDF the spectral NEE
+                // (connectT1S) actually samples with; the scalar weight multiplies
+                // the per-λ emission.
+                L += z.throughput * z.emission * emitterHitMisWeightT0(eyeRgb, s);
         }
 
         // (s ≥ 2, t = 1): NEE.
@@ -1003,9 +1016,7 @@ struct SpectralBDPTIntegrator<TC : ICamera>
             L += connectT1S(eye, s, sw, rng);
 
         // (s ≥ 2, t ≥ 2): generic connections + MIS.
-        BDPTVertex eyeRgb[BDPT_MAX_VERTS];
         BDPTVertex litRgb[BDPT_MAX_VERTS];
-        mirrorRgb(eye, eyeRgb);
         mirrorRgb(lightPath, litRgb);
         [loop]
         for (int s = 2; s <= eyeLen; s++)

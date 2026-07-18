@@ -179,12 +179,24 @@ the BDPT analog of the path tracer's BSDF-hit emission, so it carries the **same
 gate**: add `z.throughput * z.emission` at full weight only when no NEE partner
 exists — `s == 2` (z is the first hit, behind the delta camera ≡ `bounce == 0`),
 `eye[s - 2].isDelta` (a delta bounce reached z ≡ `spawnedBySpecular`), or
-`numEmissiveTriangles == 0`. Otherwise `connectT1` owns the light. Without this
-gate BDPT added the emissive hit at full weight on top of the already-weighted
-NEE, double-counting direct area-light transport and rendering **~1.7× brighter
-than pbrt** even on a purely diffuse scene (change `bdpt-energy-convergence`;
-guarded by `tests/pbrt/test_bdpt_energy.py`, which compares **un-aligned** mean
-energy because the parity gate's exposure alignment hides a uniform scale).
+`numEmissiveTriangles == 0`. When a NEE partner **does** exist, the `t = 0` hit
+is **MIS-weighted through the shared `misWeight` partition** (change
+`bdpt-emissive-hit-mis`) — the same partition `connectT1`'s `t = 1` NEE, the
+`t ≥ 2` connections, and the `s = 1` splat use, so every strategy that can
+generate the path shares one power-heuristic partition summing to 1. The reverse
+pdfs are reconstructed at the emitter vertex without the triangle index:
+`z.pdfRev = Rec709-lum(emission) / emissiveTotalPower` (the per-triangle area
+cancels under the area·luminance CDF; the RGB emission is reloaded via
+`bdptSurface` so the spectral build matches the host CDF) and
+`prev.pdfRev = convertSAtoArea(cosOut/π, z, prev)`. Two earlier states biased
+this term: adding it at full weight on top of the weighted NEE double-counted and
+rendered **~1.7× brighter than pbrt** (change `bdpt-energy-convergence`, guarded
+by `tests/pbrt/test_bdpt_energy.py`, which compares **un-aligned** mean energy
+because the parity gate's exposure alignment hides a uniform scale), and then
+**dropping** it entirely once the double-count was gated out discarded the
+BSDF-sampling share and biased area lights **~3% dim** vs the path tracer
+(`mat_emissive` pbrt-truth relMSE 0.1292 → 0.0538, matching the path anchor
+0.0522). The `misWeight` complement is the unbiased fix.
 
 **One MIS partition for the display (change `bdpt-mis-unification`).** The above
 fixes the *accumulation*; the *display* also composites the `s = 1` light-tracer
