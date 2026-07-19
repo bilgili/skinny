@@ -132,25 +132,31 @@ rather than via chance BSDF bounces — see *Environment Importance Sampling* in
 
 ## Volume Rendering (`volume_render.slang`)
 
-Delta-tracking (Woodcock tracking) through heterogeneous skin:
+![Introductory volume-light-transport derivation: the radiative transfer equation and its integral form lead to homogeneous free-flight sampling, heterogeneous majorants, delta tracking, ratio tracking, phase-function scattering, next-event estimation, and boundary escape.](diagrams/sketches/volume-transport-step-by-step.png)
+
+Volume rendering estimates the integral form of the radiative transfer equation
+along each ray. Extinction is `σ_t = σ_a + σ_s`, transmittance between two
+points is the Beer–Lambert integral
+`T(a,b) = exp(−∫_a^b σ_t(x(s)) ds)`, and real scattering events draw their new
+direction from the Henyey–Greenstein phase function.
+
+The implementation uses null-collision sampling through heterogeneous skin and
+through the shared volume-medium seam:
 
 - `layerAtDepth(depth, stack)` — depth-stratified σa/σs/g lookup
 - Henyey-Greenstein phase function + importance sampler
 - `MAX_VOLUME_STEPS = 128`, `VOLUME_DEFAULT_BOUNCES = 8`
 - `mmPerUnit` converts between mm-valued optical coefficients and world-unit
   ray distances (FrameConstants offset +156)
-
-The Henyey-Greenstein phase function with anisotropy `g` (`henyeyGreenstein`)
-sets the scattering angle distribution:
-
-![p(cos theta) = (1 - g^2) / (4 pi (1 + g^2 - 2 g cos theta)^(3/2))](diagrams/skin/hg-phase.svg)
-
-Free-flight distances are sampled by exponential delta tracking against the
-majorant σ_maj, and segment transmittance is Beer-Lambert:
-
-![Delta t = -ln(u) / sigma_maj](diagrams/skin/free-flight.svg)
-
-![T(d) = exp(-sigma_t · d)](diagrams/skin/transmittance.svg)
+- **Delta tracking** draws candidate free flights from the majorant
+  `Δs = −ln(1−u)/σ̄_t` and accepts a real collision with probability
+  `σ_t(x)/σ̄_t`.
+- **Ratio tracking** estimates shadow transmittance from the same majorant
+  events. `traverseMediumSegment` uses the channel-aware null weight
+  `(1−p_real)/(1−p_max)`; `volumeShadowTransmittance` returns zero when the
+  shadow walk samples a real collision.
+- A real event scatters with single-scattering albedo `σ_s/σ_t`; sampling the
+  HG phase function with its own density makes the `phase/pdf` factor one.
 
 ## MaterialX Skin Integration
 

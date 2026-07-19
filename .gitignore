@@ -2,3 +2,8 @@
 *
 !LICENSE
 !AGENTS.md
+!docs/
+!docs/MetropolisLightTransport.md
+!docs/diagrams/
+!docs/diagrams/sketches/
+!docs/diagrams/sketches/*.png

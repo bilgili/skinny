@@ -88,7 +88,7 @@ target reserves `main`). Every dispatch has a host-known count (num_pixels,
 numCells, photonsEmitted) → plain dispatch, **no indirect dispatch / no Metal
 CPU-readback stall**.
 
-![GPU SPPM per-pass pipeline: eye → grid build (count/scan/scatter) → photon → update, with the persistent per-pixel estimator feeding back across accumulation frames](diagrams/sppm_pipeline.svg)
+![Introductory SPPM derivation: the indirect term of the rendering equation becomes a photon-density estimator, followed by visible-point storage, spatial hashing, photon deposition, progressive radius updates, and final radiance resolve.](diagrams/sketches/sppm-integrator-step-by-step.png)
 
 | Stage | Kernel(s) | Work |
 |-------|-----------|------|

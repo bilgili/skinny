@@ -307,13 +307,14 @@ incrementally.
 ## Integrator mapping
 
 The pbrt integrator is carried in `customLayerData["pbrt"]["integrator"]`
-(type + params). Two integrators are *actively mapped* onto a skinny renderer
+(type + params). Three integrator families are *actively mapped* onto a skinny renderer
 counterpart (the rest are carriage-only):
 
 | pbrt integrator | skinny | notes |
 |-----------------|--------|-------|
 | `path` / `volpath` | path tracer | the default renderer |
 | `sppm` / `photonmap` | **SPPM** (`INTEGRATOR_SPPM`) | wavefront-only, flat materials — see [PhotonMapping.md](PhotonMapping.md) |
+| `mlt` | **MLT** (`INTEGRATOR_MLT`) | wavefront-only full-sample PSSMLT over BDPT, flat materials — see [MetropolisLightTransport.md](MetropolisLightTransport.md) |
 
 For an `sppm` / `photonmap` scene the importer additionally records a normalized
 skinny selection under `customLayerData["pbrt"]["skinny"]` and reports the
@@ -332,6 +333,12 @@ integrator), so a loader or the parity harness can select skinny's SPPM
 integrator and seed its initial radius / photons-per-pass directly from the pbrt
 parameters — without re-parsing pbrt param names. Encoders live in
 `metadata.scene_metadata`; the reader is `api.sppm_selection`.
+
+For an `mlt` scene, the same normalized `skinny` dictionary carries
+`maxdepth`, `mutationsperpixel`, `largestepprobability`, `sigma`, `chains`, and
+`bootstrapsamples`. `api.integrator_selection(stage)` returns either the SPPM or
+MLT selection; the older `sppm_selection(stage)` remains the SPPM-only
+compatibility reader.
 
 ## Parity validation
 

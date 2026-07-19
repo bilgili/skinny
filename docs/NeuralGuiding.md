@@ -255,6 +255,8 @@ thread regardless of caller, and multi-thread use serializes instead of crashing
 SplineFlow runs as a **pre-pass + seam** pair on the wavefront backend, mirroring
 how the ReSTIR DI pass slots into the bounce.
 
+![Introductory directional-proposal derivation: the rendering equation becomes an importance-sampling expectation, then BSDF, environment, and neural densities form a mixture used for technique selection, direction sampling, full-pdf evaluation, and an unbiased throughput update.](diagrams/sketches/directional-proposals-step-by-step.png)
+
 ![Online per-bounce inference plus the offline record→train→export→load loop](diagrams/neural/neural_pipeline.svg)
 
 **Online (per bounce, the only on-device cost):**

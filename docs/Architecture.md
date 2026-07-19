@@ -1,11 +1,11 @@
 # Skinny — Architecture
 
-Skinny is a single-kernel Vulkan compute path tracer specialised for
-physically-based human skin rendering. It combines a three-layer biological
-skin model (epidermis / dermis / subcutaneous) with a full MaterialX-based
-standard_surface closure tree plus arbitrary MaterialX nodegraphs compiled
-to per-material Slang modules — all driven from one
-`[numthreads(8,8,1)]` compute dispatch.
+Skinny is a GPU path tracer specialised for physically-based human skin
+rendering. It combines a three-layer biological skin model (epidermis / dermis /
+subcutaneous) with a full MaterialX-based `standard_surface` closure tree plus
+arbitrary MaterialX nodegraphs compiled to per-material Slang modules. The same
+renderer runs through either a one-dispatch megakernel or a staged wavefront
+pipeline, on native Metal or Vulkan.
 
 The skin-specific subsystems (three-layer biological model, §1–§6 estimator
 chain, volume transport, head geometry, and MaterialX skin codegen) are
@@ -35,6 +35,15 @@ below describes the megakernel GPU flow in detail.
 Three entry points share the same renderer core:
 
 ![High-level pipeline: GLFW / Qt / Web front-ends feed Renderer.py, which dispatches Vulkan compute to swapchain or headless readback.](diagrams/high_level_pipeline.svg)
+
+### Step-by-step architecture sketch
+
+The single overview below keeps the architecture sequence and its two governing
+film/dispatch expressions together: front ends feed the renderer, the renderer
+packs state, the selected execution mode runs on Metal or Vulkan, and the HDR
+film is progressively accumulated and displayed.
+
+![Introductory derivation and architecture sketch: the rendering equation becomes a Monte Carlo estimator, then flows through scene input, renderer state, integrator selection, megakernel or wavefront GPU execution on Metal or Vulkan, and progressive film display.](diagrams/sketches/renderer-architecture-step-by-step.png)
 
 `skinny-gui` and `skinny-web` share a **single widget-tree spec**
 (`ui/spec.py` + `ui/build_app_ui.py`). The Qt backend
@@ -219,7 +228,13 @@ geometry-term conversion.
 estimateRadiance(Ray ray, HitInfo firstHit, inout RNG rng) → float3
 ```
 
-Two implementations, selected by `fc.integratorType`:
+Four integrators are user-visible through `fc.integratorType`. Path and BDPT
+directly implement `IIntegrator`; SPPM is a staged photon-mapping estimator, and
+MLT wraps the BDPT target in persistent primary-sample-space Markov chains.
+
+#### Path tracing
+
+![Introductory path-tracing derivation: the rendering equation becomes a Monte Carlo estimator, followed by camera-ray generation, next-event estimation, BSDF sampling, throughput updates, Russian roulette, and progressive film averaging.](diagrams/sketches/path-integrator-step-by-step.png)
 
 - **`PathTracer`** — 6-bounce loop with Russian roulette, cutout
   transparency traversal, per-bounce NEE via generic `allLightsNEE<TM>()`,
@@ -240,10 +255,16 @@ Two implementations, selected by `fc.integratorType`:
   `bdpt-emissive-fill-gap`). Flat materials only; skin hits fall through
   to PathTracer.
 
+#### Bidirectional path tracing
+
+![Introductory bidirectional path-tracing derivation: the rendering equation expands into a path-space integral, then eye and light subpaths are connected with geometry terms and multiple-importance weights before film accumulation.](diagrams/sketches/bdpt-integrator-step-by-step.png)
+
 | Implementation | File | Mode |
 |---|---|---|
 | `PathTracer` | `integrators/path.slang` | `INTEGRATOR_PATH` (0) |
 | `BDPTIntegrator` | `integrators/bdpt.slang` | `INTEGRATOR_BDPT` (1) |
+| SPPM staged estimator | `integrators/wavefront_sppm.slang` | `INTEGRATOR_SPPM` (2), wavefront only — [PhotonMapping.md](PhotonMapping.md) |
+| PSSMLT over BDPT | `wavefront/wavefront_mlt.slang` | `INTEGRATOR_MLT` (3), wavefront only — [MetropolisLightTransport.md](MetropolisLightTransport.md) |
 
 ### Adding a New Material (Two-File Add)
 
@@ -1119,6 +1140,7 @@ incrementally moved over.
 | 54 | RWStructuredBuffer | **MLT current-state records `mltCurrentRecords`** (`MltRecord`, `nChains × MLT_RECORD_SLOTS`, `MLT_RECORD_SLOTS = BDPT_MAX_VERTS + 1`) — the accepted chain's captured contributions (eye value + ≤ `BDPT_MAX_VERTS` light-tracer splats) restored on reject and re-splatted per mutation. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
 | 55 | RWStructuredBuffer&lt;float&gt; | **MLT bootstrap weights `mltBootstrapWeights`** (`nBootstrap`) — each bootstrap L-evaluation writes its scalar contribution `c` here; the host reads it back once per accumulation reset to build the CDF, `b = (1/N)·Σc`, and resample chain seeds proportional to weight. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
 | 56 | RWStructuredBuffer&lt;uint&gt; | **MLT chain seeds `mltChainSeeds`** (`nChains`) — the resampled `bootstrapIndex` per chain (host-uploaded after the bootstrap readback); `wfMltInit` replays each seed to reconstruct the chain's initial current state. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
+| 57 | RWStructuredBuffer | **MLT proposal records `mltProposalRecords`** (`MltRecord`, `nChains × MLT_RECORD_SLOTS`) — device-memory scratch for the proposed eye contribution and light-tracer splats. Keeping these records out of a thread-local array is required by the spectral Metal live-state budget. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
 
 The table is the **Vulkan** layout. On the **Metal** target (gated
 `#if defined(SKINNY_METAL)`, Vulkan SPIR-V byte-unchanged) the combined
@@ -1168,7 +1190,7 @@ Metal they all bind by name so the `vk::binding` index is inert. The table resol
 as **compile-time constants**, not `FrameConstants` fields, so the RGB UBO
 packing is unchanged.
 
-**MLT bindings 52–56** are compiled in **only** the MLT wavefront variant
+**MLT bindings 52–57** are compiled in **only** the MLT wavefront variant
 (`#if defined(SKINNY_MLT)`, change `mlt-integrator`) and are absent from the
 default RGB SPIR-V (the megakernel `.spv` stays byte-identical), so they never
 enter a non-MLT build's set-0 layout. They hold the per-chain PSSMLT state:
@@ -1177,9 +1199,12 @@ override), `mltChainMeta` (53, per-chain accept/reject bookkeeping),
 `mltCurrentRecords` (54, the accepted chain's captured eye + light-tracer
 contributions), `mltBootstrapWeights` (55, the bootstrap `c` weights read back
 for the CDF/`b`-normalization), and `mltChainSeeds` (56, the resampled
-`bootstrapIndex` per chain). Sized by `nChains` (not `stream_size`) via
+`bootstrapIndex` per chain), plus `mltProposalRecords` (57, device-memory
+proposal scratch for the eye value and light splats). Sized by `nChains` (not `stream_size`) via
 `mlt_buffer_sizes` in `wavefront_layout.py` (SPPM `sppm_buffer_sizes`
 precedent). On Metal they all bind by name so the `vk::binding` index is inert.
+The full state and algorithm reference is
+[MetropolisLightTransport.md](MetropolisLightTransport.md).
 
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared
@@ -1512,7 +1537,7 @@ Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
 | ... | uint | numInstances |
 | ... | uint | numSphereLights |
 | ... | uint | numEmissiveTriangles |
-| ... | uint | integratorType (0 = path, 1 = BDPT) |
+| ... | uint | integratorType (0 = path, 1 = BDPT, 2 = SPPM, 3 = MLT) |
 | ... | (lens) | numLensElements (0 = pinhole, else thick-lens), film/aperture/pupil + focus-overlay + zoom-rect + vignette-debug fields |
 | ... | uint2 | pickPixel; uint pickArmed (one-shot scene pick → toolBuffer) |
 | ... | float | exposure (EV stops, 2^EV) |

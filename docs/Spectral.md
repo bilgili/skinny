@@ -343,6 +343,10 @@ returns resolved, gamut-clamped linear sRGB, so the scalar contribution `c`, the
 capture and `wfMltResolve` all stay on the RGB code paths unchanged. The hero-wavelength
 draw at the top of `estimateRadiance` is simply served by the PSS sampler, making the
 wavelength one more primary-sample dimension (~73 of `MLT_MAX_DIMS` 192).
+The shared RGB/spectral chain algorithm, state, equation-rich step sketch, and
+host orchestration are documented in
+[MetropolisLightTransport.md](MetropolisLightTransport.md); this section covers
+only the spectral target substitution and its Metal constraints.
 
 Because `E[MLT] = E[BDPT]` by construction, spectral MLT is **unbiased but
 Markov-correlated**: at equal spp its per-pixel noise is structured differently from the

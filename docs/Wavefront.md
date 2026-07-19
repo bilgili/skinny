@@ -18,12 +18,15 @@ in `cli_common.py`): `path`/`bdpt` → `megakernel`, `sppm`/`mlt` → `wavefront
 The resolution runs once at startup, from the integrator active at launch
 (explicit `--integrator`, else the persisted integrator on the interactive
 front-ends, else `path`); the mode is not runtime-switchable. Both modes run on
-Vulkan (MoltenVK on macOS) — "wavefront" is an execution strategy, not a
-separate graphics API. The implementation lives in `vk_wavefront.py`,
+native Metal and Vulkan (MoltenVK when Vulkan is selected on macOS) —
+"wavefront" is an execution strategy, not a separate graphics API. The
+implementation lives in `vk_wavefront.py`, `metal_wavefront.py`,
 `wavefront_layout.py`, and `shaders/wavefront/`.
 
 For the high-level contrast with the megakernel see
 [Megakernel vs wavefront](#megakernel-vs-wavefront) below.
+The single cross-mode overview with dispatch and film equations is in
+[Architecture.md § Step-by-step architecture sketch](Architecture.md#step-by-step-architecture-sketch).
 
 ---
 
@@ -183,6 +186,11 @@ variant, mirrors SPPM), **flat materials only**, **RGB and spectral** (change
 (`MetalWavefrontMltPass`, bit-identical at equal budget in both). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
 `wfMlt*`).
 
+The complete algorithm, one-image step/equation sketch, chain-state layout,
+controls, pbrt mapping, and verification map now live in the dedicated
+**[MetropolisLightTransport.md](MetropolisLightTransport.md)** reference. This
+section records only how that estimator is hosted by the wavefront backend.
+
 **Spectral MLT (change `spectral-mlt`).** Under `-DSKINNY_SPECTRAL` the target
 function becomes `SpectralBDPTIntegrator.estimateRadiance` — a change of target,
 not of algorithm, since that estimator already returns resolved, clamped linear
@@ -224,7 +232,7 @@ iterations, so the per-frame mutation budget is proportional to pixel count
 (pbrt progressive semantics, ~1 mutation/pixel/frame by default). Chain state is
 sized by `nChains` (not `stream_size`) and MSL-stride-aware via `mlt_buffer_sizes`
 in `wavefront_layout.py` (SPPM `sppm_buffer_sizes` precedent); the chain-state
-buffers live at descriptor bindings 52–56 (see
+buffers live at descriptor bindings 52–57 (see
 [Architecture.md § Descriptor Binding Map](Architecture.md#descriptor-binding-map)).
 
 The per-frame staged sequence:
@@ -452,6 +460,8 @@ native `sample()` for bit-exact parity. Shipped proposal bits: `0x1` BSDF
 (always on), `0x2` environment importance, `0x4` **neural** (the learned
 spline-flow proposal below). `proposalWeights()` renormalises the active bits'
 selection weights to Σ = 1 per lane, so any subset stays unbiased.
+
+![Introductory directional-proposal derivation: the rendering equation becomes an importance-sampling expectation, then BSDF, environment, and neural densities form a mixture used for technique selection, direction sampling, full-pdf evaluation, and an unbiased throughput update.](diagrams/sketches/directional-proposals-step-by-step.png)
 
 ### Proposal seam: neural directional proposal (proposal bit2, wavefront-only)
 

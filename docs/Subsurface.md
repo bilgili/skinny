@@ -12,7 +12,21 @@ This is the physically-correct ground truth pbrt's tabulated dipole BSSRDF
 approximates (they agree in the diffusive, high-albedo limit), so it tracks pbrt
 closely but is **not bit-parity** with the dipole — see [Verification](#verification).
 
-![subsurface random walk](diagrams/subsurface/walk.svg)
+![Introductory volume-light-transport derivation: the radiative transfer equation and its integral form lead to homogeneous free-flight sampling, heterogeneous majorants, delta tracking, ratio tracking, phase-function scattering, next-event estimation, and boundary escape.](diagrams/sketches/volume-transport-step-by-step.png)
+
+The poster separates two related null-collision estimators that are easy to
+confuse:
+
+- **Delta tracking** samples the location of the next real collision. Candidate
+  distances come from an exponential distribution with majorant
+  `σ̄_t ≥ σ_t(x)`; each candidate is accepted with probability
+  `σ_t(x) / σ̄_t`, otherwise it is a null collision.
+- **Ratio tracking** estimates transmittance along a segment. The textbook
+  estimator multiplies `1 − σ_t(x_k) / σ̄_t` over majorant-generated events.
+  Skinny's RGB traversal samples a scalar acceptance probability
+  `p_max = max_RGB(σ_t / σ̄_t)` and, on the null branch, carries the equivalent
+  per-channel ratio `(1 − p_real) / (1 − p_max)`. A sampled real collision on a
+  shadow segment contributes zero.
 
 ## The interior random walk
 

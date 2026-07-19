@@ -6,7 +6,7 @@ accumulation, tonemap, and overlay compositing — runs in **one monolithic
 compute dispatch** of `shaders/main_pass.slang`, one thread per pixel.
 
 It is one of two execution modes (the other is the
-[wavefront](Wavefront.md) mode). Both run on the Vulkan backend; the mode is
+[wavefront](Wavefront.md) mode). Both run on native Metal and Vulkan; the mode is
 selected once at startup with `--execution-mode megakernel|wavefront`
 (`cli_common.py:85`) or `SKINNY_BACKEND`-adjacent config and is **fixed for the
 session** — there is no runtime cycler, and it is deliberately excluded from
@@ -14,9 +14,10 @@ session** — there is no runtime cycler, and it is deliberately excluded from
 `EXECUTION_MEGAKERNEL = 0` / `EXECUTION_WAVEFRONT = 1` (`params.py:64-65`).
 
 > **Terminology note.** "Megakernel" and "wavefront" are *execution modes*, not
-> graphics backends. There is currently no native Metal path in the tree; both
-> modes dispatch through Vulkan (MoltenVK on macOS). The `--backend metal`
-> language in some older docs refers to MoltenVK-via-Vulkan, not a separate API.
+> graphics backends. Both modes run on native Metal and Vulkan (MoltenVK when
+> Vulkan is selected on macOS). The cross-mode architecture, including dispatch
+> and film equations, is shown in
+> [Architecture.md § Step-by-step architecture sketch](Architecture.md#step-by-step-architecture-sketch).
 
 For *why* the wavefront mode exists alongside this one, see
 [Why two execution modes](#why-two-execution-modes) below and the matching
