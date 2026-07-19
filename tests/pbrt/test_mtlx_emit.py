@@ -303,12 +303,19 @@ def test_round_trip_rich_overrides_via_load_mtlx_materials(tmp_path):
     mats = usd_loader._load_mtlx_materials(stage, tmp_path)
     assert "M_Glass" in mats
     ovr = mats["M_Glass"].parameter_overrides
-    # transmission -> opacity bridge; specular_IOR -> ior; transmission_color
-    # -> diffuseColor migration (all per the loader's documented behavior).
+    # transmission -> opacity bridge; specular_IOR -> ior (per the loader's
+    # documented behavior).
     assert ovr["specular_IOR"] == pytest.approx(1.5)
     assert ovr["ior"] == pytest.approx(1.5)
     assert ovr["opacity"] == pytest.approx(0.0)
-    assert ovr["diffuseColor"] == pytest.approx((0.9, 0.95, 1.0))
+    # transmission_color is NO LONGER folded into diffuseColor (change
+    # flat-lobes-rich-inputs, af4ffb5): it survives as a first-class override
+    # that pack_flat_material reads into FlatHitMat.transmissionColor, so the
+    # delta-transmission lobe tints by it while the diffuse albedo stays
+    # decoupled. A transmissive dielectric with no authored base color therefore
+    # defaults to white, keeping its reflection lobe neutral.
+    assert ovr["transmission_color"] == pytest.approx((0.9, 0.95, 1.0))
+    assert ovr["diffuseColor"] == pytest.approx((1.0, 1.0, 1.0))
 
 
 def test_round_trip_via_full_scene_loader(tmp_path):
