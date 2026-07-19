@@ -6060,6 +6060,94 @@ class Renderer:
             raise
         return prim_path
 
+    def add_light(
+        self,
+        light_type: str,
+        parent_prim_path: str = "/World",
+        name: "str | None" = None,
+        transform=None,
+    ) -> str:
+        """Author a supported ``UsdLux`` light and return its unique prim path.
+
+        The light is defined in the active non-destructive edit layer, receives
+        explicit property-editor-friendly defaults, and triggers the same full
+        stage resync as add/remove edits. ``light_type`` must be one of
+        DistantLight, SphereLight, DomeLight, RectLight, or DiskLight.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("add_light requires a loaded USD stage")
+
+        from pxr import Gf, Tf, Usd, UsdGeom, UsdLux
+
+        schemas = {
+            "DistantLight": UsdLux.DistantLight,
+            "SphereLight": UsdLux.SphereLight,
+            "DomeLight": UsdLux.DomeLight,
+            "RectLight": UsdLux.RectLight,
+            "DiskLight": UsdLux.DiskLight,
+        }
+        schema = schemas.get(str(light_type))
+        if schema is None:
+            supported = ", ".join(schemas)
+            raise ValueError(
+                f"add_light: unsupported light type {light_type!r}; "
+                f"expected one of {supported}"
+            )
+
+        parent = str(parent_prim_path or "/World").rstrip("/") or "/"
+        leaf = Tf.MakeValidIdentifier(name or str(light_type))
+        prim_path = self._unique_prim_path(
+            f"/{leaf}" if parent == "/" else f"{parent}/{leaf}"
+        )
+        parent_parts = [part for part in parent.split("/") if part]
+        parent_paths = [
+            "/" + "/".join(parent_parts[:i])
+            for i in range(1, len(parent_parts) + 1)
+        ]
+        missing_parent_paths = [
+            path for path in parent_paths
+            if not stage.GetPrimAtPath(path).IsValid()
+        ]
+        resync_started = False
+        try:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if parent != "/" and not stage.GetPrimAtPath(parent).IsValid():
+                    UsdGeom.Xform.Define(stage, parent)
+                light = schema.Define(stage, prim_path)
+                light.CreateColorAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+                light.CreateIntensityAttr().Set(1.0)
+                light.CreateExposureAttr().Set(0.0)
+                if light_type == "DistantLight":
+                    light.CreateAngleAttr().Set(0.53)
+                elif light_type == "SphereLight":
+                    light.CreateRadiusAttr().Set(0.5)
+                elif light_type == "RectLight":
+                    light.CreateWidthAttr().Set(1.0)
+                    light.CreateHeightAttr().Set(1.0)
+                elif light_type == "DiskLight":
+                    light.CreateRadiusAttr().Set(0.5)
+                if transform is not None:
+                    self._author_local_transform(
+                        UsdGeom.Xformable(light.GetPrim()), transform,
+                    )
+            resync_started = True
+            self._resync_geometry_from_stage()
+        except Exception:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if stage.GetPrimAtPath(prim_path).IsValid():
+                    stage.RemovePrim(prim_path)
+                for created_parent_path in reversed(missing_parent_paths):
+                    if stage.GetPrimAtPath(created_parent_path).IsValid():
+                        stage.RemovePrim(created_parent_path)
+            if resync_started:
+                try:
+                    self._resync_geometry_from_stage()
+                except Exception:  # preserve the original creation failure
+                    pass
+            raise
+        return prim_path
+
     def remove_node(self, prim_path: str) -> None:
         """Remove a node by deactivating its prim (non-destructive) and re-reading.
 
@@ -6088,9 +6176,21 @@ class Renderer:
         prim = stage.GetPrimAtPath(prim_path)
         if not prim or not prim.IsValid():
             raise ValueError(f"set_transform: prim not found: {prim_path}")
-        from pxr import Usd, UsdGeom
+        from pxr import Usd, UsdGeom, UsdLux
         with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
             self._author_local_transform(UsdGeom.Xformable(prim), matrix)
+        light_types = (
+            UsdLux.DistantLight,
+            UsdLux.SphereLight,
+            UsdLux.DomeLight,
+            UsdLux.RectLight,
+            UsdLux.DiskLight,
+        )
+        if any(prim.IsA(light_type) for light_type in light_types):
+            # Analytic light transforms live outside the instance TLAS; re-read
+            # them from USD so positions/directions and the scene graph update.
+            self._resync_geometry_from_stage()
+            return
         self._resync_instance_transforms(prim_path)
         self._material_version += 1
 

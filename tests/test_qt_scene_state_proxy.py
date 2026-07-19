@@ -192,6 +192,21 @@ def test_add_model_returns_future_resolved_by_worker() -> None:
     assert fut.result(timeout=0) == "/World/dragon.usda"
 
 
+def test_add_light_returns_future_resolved_by_worker() -> None:
+    queue = RenderCommandQueue()
+    proxy = _proxy(queue)
+
+    class Target:
+        def add_light(self, light_type, parent_prim_path=None) -> str:
+            return f"{parent_prim_path}/{light_type}"
+
+    fut = proxy.add_light("SphereLight", parent_prim_path="/World/Lights")
+    command = queue.drain()[0]
+    command.reply.set_result(command.callback(Target()))
+
+    assert fut.result(timeout=0) == "/World/Lights/SphereLight"
+
+
 # ── BXDF material-state projection (Phase 3) ──────────────────────────────
 
 class _RichMat:

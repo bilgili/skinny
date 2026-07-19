@@ -54,7 +54,12 @@ def build_scene_graph_pane(
     from pathlib import Path as _Path
 
     from skinny.settings import get_last_dir, record_last_dir
-    from skinny.ui.scene_edit_actions import add_parent_for_node, is_deletable
+    from skinny.ui.scene_edit_actions import (
+        SUPPORTED_LIGHT_TYPES,
+        add_parent_for_node,
+        has_editable_stage,
+        is_deletable,
+    )
 
     renderer = session.renderer
     selector = pn.widgets.Select(name="Node", options={}, size=16)
@@ -81,6 +86,12 @@ def build_scene_graph_pane(
     start_dir = str(get_last_dir("model") or "") or None
     file_sel = pn.widgets.FileSelector(start_dir, file_pattern="*", only_files=True)
     add_btn = pn.widgets.Button(name="Add model", button_type="primary")
+    add_light_btn = pn.widgets.MenuButton(
+        name="Add light",
+        items=[(f"Add {light_type}", light_type) for light_type in SUPPORTED_LIGHT_TYPES],
+        button_type="primary",
+        disabled=not has_editable_stage(renderer),
+    )
     del_btn = pn.widgets.Button(name="Delete node", button_type="danger", disabled=True)
     save_btn = pn.widgets.Button(name="Save edits", button_type="default")
     status = pn.pane.Alert("", alert_type="info", visible=False)
@@ -125,6 +136,27 @@ def build_scene_graph_pane(
                 return
         _set_status(f"Deleted {node.path}", "success")
 
+    def _on_add_light(event) -> None:
+        light_type = event.new
+        if light_type not in SUPPORTED_LIGHT_TYPES:
+            _set_status(f"Unsupported light type: {light_type}", "warning")
+            return
+        if not has_editable_stage(renderer):
+            _set_status(
+                "Load an editable USD scene before adding a light.", "warning",
+            )
+            return
+        parent = add_parent_for_node(state["node"])
+        with session._lock:
+            try:
+                new_path = renderer.add_light(
+                    light_type, parent_prim_path=parent,
+                )
+            except Exception as exc:  # noqa: BLE001 — non-fatal UI boundary
+                _set_status(f"Add {light_type} failed: {exc}", "danger")
+                return
+        _set_status(f"Added {new_path}", "success")
+
     def _on_save(_event) -> None:
         if getattr(renderer, "_usd_edit_layer", None) is None:
             _set_status("No edits to save (no USD scene loaded).", "warning")
@@ -138,6 +170,7 @@ def build_scene_graph_pane(
         _set_status(f"Saved edits to {written}", "success")
 
     add_btn.on_click(_on_add)
+    add_light_btn.on_click(_on_add_light)
     del_btn.on_click(_on_delete)
     save_btn.on_click(_on_save)
 
@@ -186,11 +219,12 @@ def build_scene_graph_pane(
                 del_btn.disabled = True
                 props_col.clear()
         save_btn.disabled = getattr(renderer, "_usd_edit_layer", None) is None
+        add_light_btn.disabled = not has_editable_stage(renderer)
 
     pn.state.add_periodic_callback(poll, period=1000)
 
     controls = pn.Column(
-        pn.Row(add_btn, del_btn, save_btn),
+        pn.Row(add_btn, add_light_btn, del_btn, save_btn),
         pn.Card(file_sel, title="Add model — pick a USD file", collapsed=True),
         status,
         sizing_mode="stretch_width",
@@ -340,9 +374,7 @@ def _apply_prop_value(renderer, ref, prop, value) -> None:
 
 
 def _apply_vec3_value(renderer, ref, node, prop, values) -> None:
-    if ref is None:
-        return
-    if ref.kind == "renderer_camera":
+    if ref is not None and ref.kind == "renderer_camera":
         axis_kind = prop.metadata.get("camera_axis", "")
         if axis_kind == "target":
             keys = ("target_x", "target_y", "target_z")
@@ -353,7 +385,11 @@ def _apply_vec3_value(renderer, ref, node, prop, values) -> None:
         for k, v in zip(keys, values):
             renderer.apply_camera_param(k, v)
         return
-    if ref.kind != "instance":
+    from skinny.ui.scene_edit_actions import SUPPORTED_LIGHT_TYPES
+    is_authored_light = node.type_name in SUPPORTED_LIGHT_TYPES
+    if ref is None and not is_authored_light:
+        return
+    if ref is not None and ref.kind != "instance" and not is_authored_light:
         return
     translate = scale = (0.0, 0.0, 0.0)
     rotate = (0.0, 0.0, 0.0)

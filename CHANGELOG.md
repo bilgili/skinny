@@ -9,6 +9,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Scene-graph light creation** (change `scene-graph-light-controls`). The Qt
+  and Panel/web scene-graph editors now expose an **Add light** menu for
+  DistantLight, SphereLight, DomeLight, RectLight, and DiskLight. New prims are
+  authored non-destructively into the active edit layer below the selected
+  Xform/Scope (or `/World`), receive unique names and explicit defaults, resync
+  immediately, and can be positioned through their TRS
+  properties. `Renderer.add_light()` exposes the same operation to Python with
+  optional name/transform arguments and rollback on failure. Adding the first
+  authored light uses the existing USD authority rule to remove both fallback
+  lights atomically; a new DomeLight remains black until its HDR is selected.
 - **MLT integrator — PSSMLT over BDPT** (change `mlt-integrator`). A fourth
   integrator, `--integrator mlt` (index 3), joining `path`/`bdpt`/`sppm`:
   Kelemen primary-sample-space Metropolis (PSSMLT) driving the existing

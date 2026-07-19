@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox,
     QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSplitter,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from skinny.scene_graph import (
@@ -25,7 +25,11 @@ from skinny.scene_graph import (
 from skinny.settings import get_last_dir, record_last_dir
 from skinny.ui.qt.dialogs import get_open_file_name
 from skinny.ui.scene_edit_actions import (
-    add_parent_for_node, is_deletable, trs_to_matrix,
+    SUPPORTED_LIGHT_TYPES,
+    add_parent_for_node,
+    has_editable_stage,
+    is_deletable,
+    trs_to_matrix,
 )
 
 _USD_PICKER_FILTER = "USD (*.usda *.usdc *.usdz);;All files (*)"
@@ -79,13 +83,31 @@ class SceneGraphDock(QDockWidget):
         self._add_btn = QPushButton("Add model…")
         self._add_btn.setToolTip("Reference a USD file under the selected group (or /World)")
         self._add_btn.clicked.connect(self._on_add_model)
+        self._add_light_btn = QToolButton()
+        self._add_light_btn.setText("Add light")
+        self._add_light_btn.setToolTip(
+            "Author a USD light under the selected group (or /World)"
+        )
+        self._add_light_btn.setPopupMode(QToolButton.InstantPopup)
+        light_menu = QMenu(self._add_light_btn)
+        for light_type in SUPPORTED_LIGHT_TYPES:
+            action = light_menu.addAction(f"Add {light_type}")
+            action.setData(light_type)
+            action.triggered.connect(
+                lambda _checked=False, lt=light_type: self._on_add_light(lt)
+            )
+        self._add_light_btn.setMenu(light_menu)
         self._save_btn = QPushButton("Save edits…")
         self._save_btn.setToolTip("Write the runtime edits to a USD layer")
         self._save_btn.clicked.connect(self._on_save_edits)
         tb_layout.addWidget(self._add_btn)
+        tb_layout.addWidget(self._add_light_btn)
         tb_layout.addWidget(self._save_btn)
         tb_layout.addStretch(1)
         root_layout.addWidget(toolbar)
+        has_stage = getattr(self.renderer, "_usd_stage", None) is not None
+        self._add_btn.setEnabled(has_stage)
+        self._add_light_btn.setEnabled(has_editable_stage(self.renderer))
 
         splitter = QSplitter(Qt.Vertical)
         root_layout.addWidget(splitter, 1)
@@ -284,6 +306,18 @@ class SceneGraphDock(QDockWidget):
             r.add_model(path, parent_prim_path=parent),
             lambda new_path: self._status(f"Added {new_path}"),
             "Add model failed",
+        )
+
+    def _on_add_light(self, light_type: str) -> None:
+        r = self.renderer
+        if not has_editable_stage(r):
+            self._status("Load an editable USD scene before adding a light.")
+            return
+        parent = add_parent_for_node(self._selected_node())
+        self._await(
+            r.add_light(light_type, parent_prim_path=parent),
+            lambda new_path: self._status(f"Added {new_path}"),
+            f"Add {light_type} failed",
         )
 
     def _on_save_edits(self) -> None:
@@ -684,9 +718,7 @@ class SceneGraphDock(QDockWidget):
         values: tuple[float, float, float],
     ) -> None:
         ref = node.renderer_ref
-        if ref is None:
-            return
-        if ref.kind == "renderer_camera":
+        if ref is not None and ref.kind == "renderer_camera":
             axis_kind = prop.metadata.get("camera_axis", "")
             if axis_kind == "target":
                 keys = ("target_x", "target_y", "target_z")
@@ -697,7 +729,10 @@ class SceneGraphDock(QDockWidget):
             for k, v in zip(keys, values):
                 self.renderer.apply_camera_param(k, float(v))
             return
-        if ref.kind != "instance":
+        is_authored_light = node.type_name in SUPPORTED_LIGHT_TYPES
+        if ref is None and not is_authored_light:
+            return
+        if ref is not None and ref.kind != "instance" and not is_authored_light:
             return
 
         # TRS for an instance needs all three vectors. Walk the active
@@ -759,7 +794,9 @@ class SceneGraphDock(QDockWidget):
             self.renderer.apply_scene_state(state)
 
         # Toolbar enablement tracks loaded-scene / edit-layer state.
-        self._add_btn.setEnabled(getattr(self.renderer, "_usd_stage", None) is not None)
+        has_stage = getattr(self.renderer, "_usd_stage", None) is not None
+        self._add_btn.setEnabled(has_stage)
+        self._add_light_btn.setEnabled(has_editable_stage(self.renderer))
         self._save_btn.setEnabled(getattr(self.renderer, "_usd_edit_layer", None) is not None)
 
         graph = self.renderer.scene_graph

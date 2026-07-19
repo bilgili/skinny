@@ -6,7 +6,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from skinny.ui.scene_edit_actions import add_parent_for_node, is_deletable, trs_to_matrix
+from skinny.ui.scene_edit_actions import (
+    SUPPORTED_LIGHT_TYPES,
+    add_parent_for_node,
+    is_deletable,
+    trs_to_matrix,
+)
 from skinny.scene_graph import RendererRef, SceneGraphNode
 
 
@@ -26,6 +31,16 @@ class TestAddParentForNode:
 
     def test_no_selection_falls_back_to_world(self):
         assert add_parent_for_node(None) == "/World"
+
+
+def test_supported_light_types_match_renderer_usd_schemas():
+    assert SUPPORTED_LIGHT_TYPES == (
+        "DistantLight",
+        "SphereLight",
+        "DomeLight",
+        "RectLight",
+        "DiskLight",
+    )
 
 
 class TestIsDeletable:

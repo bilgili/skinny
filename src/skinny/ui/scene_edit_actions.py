@@ -19,12 +19,30 @@ _SYNTH_PREFIX = "/Skinny"
 # them. Anything else falls back to /World.
 _GROUP_TYPES = frozenset({"Xform", "Scope"})
 
+# Canonical UsdLux schema names accepted by ``Renderer.add_light``. Kept here
+# so the Qt and Panel scene-graph controls expose the same ordered menu.
+SUPPORTED_LIGHT_TYPES = (
+    "DistantLight",
+    "SphereLight",
+    "DomeLight",
+    "RectLight",
+    "DiskLight",
+)
+
+
+def has_editable_stage(renderer) -> bool:
+    """Whether scene-edit operations can author into an active USD edit layer."""
+    return (
+        getattr(renderer, "_usd_stage", None) is not None
+        and getattr(renderer, "_usd_edit_layer", None) is not None
+    )
+
 
 def add_parent_for_node(node: "SceneGraphNode | None") -> str:
-    """Parent prim path for an "Add model" relative to ``node``.
+    """Parent prim path for an add action relative to ``node``.
 
     Returns the node's own path when it is a group-like prim (Xform/Scope) so
-    the model nests under the selection; otherwise ``/World``.
+    the new model or light nests under the selection; otherwise ``/World``.
     """
     if node is not None and node.type_name in _GROUP_TYPES and node.path:
         return node.path

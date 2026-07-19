@@ -431,6 +431,13 @@ class QtRendererProxy:
             ),
         )
 
+    def add_light(self, light_type, parent_prim_path=None) -> "Future[Any]":
+        return self.request(
+            lambda r, lt=light_type, pp=parent_prim_path: r.add_light(
+                lt, parent_prim_path=pp,
+            ),
+        )
+
     def save_edits(self) -> "Future[Any]":
         return self.request(lambda r: r.save_edits())
 

@@ -59,8 +59,8 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
   shim (`mtlx_gen_shim.slang`); SPIR-V cache (mtime-LRU, ~32 entries) skips
   recompilation
 - **OpenUSD scene loading** -- meshes, transforms, `UsdShade.Material` bindings,
-  lights (`DomeLight`, `DistantLight`, `SphereLight`, `RectLight`), and
-  per-prim material assignment
+  lights (`DomeLight`, `DistantLight`, `SphereLight`, `RectLight`,
+  `DiskLight`), and per-prim material assignment
 - **USD light authority** -- any active authored USD light or emissive material
   exclusively owns scene lighting. Skinny adds its default DistantLight + IBL
   pair only when the active scene has no authored lighting; the pair's controls
@@ -118,6 +118,10 @@ public Python API in [PythonAPI.md](docs/PythonAPI.md).
   instance: rotate rings or translate arrows, in world or local space, cycled
   with `Space` (a `W`/`L` glyph hints the coordinate space); line list
   composited by `main_pass.slang`
+- **Scene graph editing** -- add referenced USD models or authored Distant,
+  Sphere, Dome, Rect, and Disk lights from the Qt or web scene-graph panel;
+  transform and delete prims, then persist the non-destructive edit layer with
+  **Save edits**
 - **Exposure + tonemapping** -- EV-stop exposure and selectable tonemap
   operator (ACES filmic / Reinhard / Hable / linear) as post-process knobs that
   don't reset accumulation; HDR/EXR screenshot export
@@ -330,6 +334,13 @@ Layout:
   Materials sections, generated from the shared widget-tree spec)
 - View menu: BXDF visualiser, MaterialX graph editor, scene graph
   inspector, camera debug viewport (each a `QDockWidget`)
+
+The scene-graph inspector's **Add light** menu authors a DistantLight,
+SphereLight, DomeLight, RectLight, or DiskLight below the selected Xform/Scope
+(or `/World`), assigns a unique name and explicit defaults, and refreshes the
+render immediately. Adding the first authored light activates USD lighting
+authority and removes both built-in fallback lights. DomeLight starts without
+an HDR; select the new node and use its texture property to choose one.
 
 The render viewport owns the renderer session on a Qt worker thread: GPU context
 creation, `Renderer` construction, frame rendering, online-training ticks, and

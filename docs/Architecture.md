@@ -483,8 +483,9 @@ Transparency helpers (defined in `materials/flat/flat_shading.slang`):
 ### USD Loading (`usd_loader.py`)
 
 Walks USD stage for `UsdGeom.Mesh`, `UsdLux` lights (DistantLight,
-SphereLight, DomeLight, RectLight), `UsdGeom.Camera`, `UsdShade.Material`
-bindings with UsdPreviewSurface, MaterialX, and **OpenPBR** overrides.
+SphereLight, DomeLight, RectLight, DiskLight), `UsdGeom.Camera`,
+`UsdShade.Material` bindings with UsdPreviewSurface, MaterialX, and **OpenPBR**
+overrides.
 Connected shader inputs are resolved to their authored constant when a node
 graph drives them (the OpenPBR / `standard_surface` connection case), so
 single-value parameters survive even when authored through a connection.
@@ -531,15 +532,18 @@ GPU buffers are a derived cache. `Renderer._attach_edit_layer()` inserts an
 in-memory anonymous `Sdf.Layer` as the strongest sublayer and sets it as the
 edit target, so every runtime edit is authored there and the original file is
 never written until `save_edits()`. The editing API — `add_model()` (define an
-`Xform` + `AddReference`), `remove_node()` (`SetActive(False)`),
-`set_transform()` (author `xformOp:transform`), `save_edits()`, `list_nodes()` —
-authors inside a scoped `Usd.EditContext`. Add/remove trigger a geometry resync
-(`_resync_geometry_from_stage`: re-read via `load_scene_from_stage`, mesh cache
-keeps unchanged prims free, runtime `enabled` flags carried by prim path);
-`set_transform` uses a transform-only fast path (`_reupload_instance_transforms`,
-no re-bake). `MeshInstance.prim_path` + the `_prim_to_instances` index key all
-edits by USD prim path; edits reset progressive accumulation via
-`_material_version`. Headless callers pass `stage=` to `set_usd_scene`.
+`Xform` + `AddReference`), `add_light()` (define one of the five supported
+`UsdLux` schemas with explicit defaults), `remove_node()` (`SetActive(False)`),
+`set_transform()` (author `xformOp:transform`), `save_edits()`, and
+`list_nodes()` — authors inside a scoped `Usd.EditContext`. Add/remove/light
+creation trigger a geometry resync (`_resync_geometry_from_stage`: re-read via
+`load_scene_from_stage`, mesh cache keeps unchanged prims free, runtime
+`enabled` flags carried by prim path). `set_transform` uses a transform-only
+fast path for geometry (`_reupload_instance_transforms`, no re-bake) and a full
+light resync for authored light prims so analytic positions/directions refresh.
+`MeshInstance.prim_path` + the `_prim_to_instances` index key all edits by USD
+prim path; edits reset progressive accumulation via `_material_version`.
+Headless callers pass `stage=` to `set_usd_scene`.
 
 The geometry resync also re-reads lights + camera (so deleting a light/camera
 prim drops it; `LightDir`/`LightSphere` carry `prim_path` to preserve runtime
@@ -547,9 +551,12 @@ prim drops it; `LightDir`/`LightSphere` carry `prim_path` to preserve runtime
 (`build_scene_graph` + default-light injection) while bumping
 `_scene_graph_version`, so the scene-graph panels repaint. Both front-ends drive
 this from their scene-graph view — the Qt dock (`ui/qt/windows/scene_graph.py`)
-and Panel card (`ui/panel/windows.py`) expose Add model / Delete node / Save
-edits and route per-node TRS edits through `set_transform`. The decision logic
-(add-parent resolution, deletability, TRS→matrix) lives in pure helpers
+and Panel card (`ui/panel/windows.py`) expose Add model / Add light / Delete
+node / Save edits and route per-node TRS edits through `set_transform`. The Add
+light menu offers DistantLight, SphereLight, DomeLight, RectLight, and DiskLight;
+the first authored light naturally switches the existing all-or-nothing light
+authority and removes the fallback pair. The decision logic (supported types,
+add-parent resolution, deletability, TRS→matrix) lives in pure helpers
 (`ui/scene_edit_actions.py`) shared by both and unit-tested without a display.
 
 ### USD Animation Playback (`playback.py`, `usd_loader.py`, `renderer.py`)
@@ -617,7 +624,9 @@ editable properties on each node. `SceneGraphNode` carries a
 `RendererRef` (kind + index) mapping back to the flat renderer arrays
 (material, light, instance). Property edits flow through
 `apply_material_override` / `apply_light_override` /
-`apply_instance_transform`. Qt presents tree-above-properties inside a
+`set_transform`. Authored light transforms are editable for all five supported
+schemas; analytic-light transforms trigger a USD re-read while geometry keeps
+the fast TLAS-only path. Qt presents tree-above-properties inside a
 `QDockWidget`; the web UI (`ui/panel/windows.py` + `scene_tree.html`)
 serves the same model in a Panel iframe.
 
