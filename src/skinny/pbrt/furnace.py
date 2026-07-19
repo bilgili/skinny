@@ -63,12 +63,24 @@ def furnace_closure_result(spec: parity.SceneSpec, img: np.ndarray,
                            combo: parity.RenderCombo) -> FurnaceResult:
     """Uniformity furnace gate: the object must vanish into the constant furnace
     (relative non-uniformity below tolerance). A recorded ``baseline`` widens the
-    tolerance to a known residual non-uniformity (tighten-only)."""
+    tolerance to a known residual non-uniformity (tighten-only).
+
+    Two baseline scopes, mirroring the matrix gate: a scalar ``baseline`` widens
+    the tolerance for **every** combo, while ``baselines`` is a per-combo map
+    (``{combo.label: value}``) that widens it for that combo only. Per-combo is
+    the right scope when one estimator is simply noisier at the scene's sample
+    budget — e.g. MLT's Markov-correlated chains — since a scene-wide widening
+    would silently slacken the gate for path/bdpt/sppm too. The per-combo entry
+    wins when both are present."""
     cfg = spec.furnace or {}
     tol = float(cfg.get("uniformity_tol", cfg.get("tol", 0.03)))
     baseline_used = "baseline" in cfg
     if baseline_used:
         tol = max(tol, float(cfg["baseline"]))
+    per_combo = (cfg.get("baselines") or {}).get(combo.label)
+    if per_combo is not None:
+        tol = max(tol, float(per_combo))
+        baseline_used = True
     nonunif, mean = relative_nonuniformity(img)
     return FurnaceResult(
         name=spec.name, combo_label=combo.label, statistic=nonunif, target=tol,
