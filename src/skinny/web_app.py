@@ -714,7 +714,7 @@ def main() -> None:
     # the in-app Proposals control owns proposal selection at runtime.
     # resolution=False: the web session render size is out of scope for the
     # shared --width/--height render-area flags (would otherwise be a no-op flag).
-    add_render_flags(parser, proposals=False, resolution=False)
+    add_render_flags(parser, proposals=False, resolution=False, mcp=False)
     args = parser.parse_args()
     # Derive the execution mode from the integrator when 'auto' (the default); an
     # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. The web server

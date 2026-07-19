@@ -361,7 +361,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # headless owns its own --width/--height (offline output size, 1024^2
     # default), so it opts out of the shared render-area flags to avoid an
     # argparse conflict.
-    add_render_flags(p, resolution=False)
+    add_render_flags(p, resolution=False, mcp=False)
     p.add_argument("--tonemap", choices=["aces", "reinhard", "hable", "linear"],
                    default="aces")
     p.add_argument("--exposure", type=float, default=0.0)

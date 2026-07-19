@@ -69,6 +69,15 @@ web = [
     "bokeh>=3.4",
     "av>=12.0",
 ]
+# In-process MCP server (--mcp, change mcp-scene-control). Optional so a default
+# install gains no network-server dependency; --mcp without it fails at startup
+# with an install hint rather than at first client connection.
+mcp = [
+    # >=1.8: streamable_http_app() lands in 1.8.0. An older-but-compliant pin
+    # would import fine, pass the startup check, then fail at first request.
+    "mcp>=1.8,<2",
+    "uvicorn>=0.30",
+]
 # CUDA↔Vulkan weight-handoff interop (--neural-handoff interop, change
 # neural-online-training): cuda-python drives cudaImportExternalMemory /
 # ImportExternalSemaphore. CUDA-only and opt-in — the default file handoff needs

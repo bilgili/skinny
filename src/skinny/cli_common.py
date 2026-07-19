@@ -60,6 +60,36 @@ def _env_float(name: str) -> float | None:
         raise SystemExit(f"invalid {name}={v!r}: expected a float")
 
 
+DEFAULT_MCP_PORT = 8765
+
+
+def _mcp_port(value: str) -> int:
+    """Parse ``--mcp-port`` as a bare port number.
+
+    A host component is refused rather than parsed: the MCP server binds
+    loopback only, and accepting ``0.0.0.0:8765`` here — even to ignore the host
+    — would invite a later change to honour it and turn a local tool into a
+    remotely reachable scene and filesystem control plane.
+    """
+    text = str(value).strip()
+    if ":" in text or "/" in text or not text.isdigit():
+        raise SystemExit(
+            f"invalid --mcp-port {value!r}: expected a port number only "
+            "(the MCP server always binds 127.0.0.1; a host cannot be configured)"
+        )
+    port = int(text)
+    if not (1 <= port <= 65535):
+        raise SystemExit(f"invalid --mcp-port {value!r}: out of range 1-65535")
+    return port
+
+
+def _env_mcp_port() -> int:
+    raw = os.environ.get("SKINNY_MCP_PORT", "").strip()
+    if not raw:
+        return DEFAULT_MCP_PORT
+    return _mcp_port(raw)
+
+
 def _env_int(name: str) -> int | None:
     """Parse an integer env var for a numeric flag default — unset/empty →
     ``None`` (the sentinel meaning "use the built-in default"). A malformed value
@@ -274,6 +304,32 @@ def reject_mlt_unsupported(
         )
 
 
+def reject_mcp_unsupported(mcp: bool) -> None:
+    """Refuse ``--mcp`` when the optional server dependency is missing.
+
+    Fails at startup rather than at first client connection, so the operator
+    learns the server is unavailable while they are still looking at the
+    terminal. No-op when MCP is not requested. Raises ``SystemExit``.
+    """
+    if not mcp:
+        return
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError:
+        raise SystemExit(
+            "--mcp needs the optional MCP server dependency.\n"
+            "  Install it with:  pip install -e '.[mcp]'"
+        )
+    # Feature-check, not just import-check: streamable_http_app() arrived in
+    # mcp 1.8, so an older install imports cleanly and then fails at the first
+    # request. Catch it at startup where the operator can see it.
+    if not hasattr(FastMCP, "streamable_http_app"):
+        raise SystemExit(
+            "--mcp needs mcp>=1.8 (this build lacks streamable_http_app).\n"
+            "  Upgrade with:  pip install -e '.[mcp]' --upgrade"
+        )
+
+
 def reject_spectral_unsupported(
     spectral: bool,
     integrator: str | None,
@@ -372,6 +428,7 @@ def add_render_flags(
     encoding: bool = True,
     resolution: bool = True,
     spectral: bool = True,
+    mcp: bool = True,
 ) -> None:
     """Add the shared `--backend` / `--integrator` / `--execution-mode` /
     `--bdpt-walk` / `--proposals` / `--reuse` / `--lobe-samplers` /
@@ -490,6 +547,23 @@ def add_render_flags(
                  "startup with bdpt/sppm, an explicit --execution-mode wavefront, "
                  "ReSTIR reuse, the neural proposal, or a skin/subsurface/volume "
                  "scene.",
+        )
+    if mcp:
+        parser.add_argument(
+            "--mcp", action="store_true", default=_env_flag("SKINNY_MCP"),
+            help="Serve an MCP server in-process so an MCP client can inspect and "
+                 "edit the live scene graph (+ SKINNY_MCP env). Off by default. "
+                 "Binds loopback only, requires a bearer token from "
+                 "~/.skinny/mcp_token, and prints the client registration command "
+                 "at startup. Interactive front-ends only; needs the 'mcp' extra.",
+        )
+        parser.add_argument(
+            "--mcp-port", type=_mcp_port, default=_env_mcp_port(),
+            metavar="PORT",
+            help=f"Port for the MCP server (default {DEFAULT_MCP_PORT}, + "
+                 "SKINNY_MCP_PORT env). A port number only — the bind address is "
+                 "always loopback and cannot be configured. If the port is already "
+                 "bound, the renderer starts normally with MCP disabled.",
         )
     if lobe_samplers:
         parser.add_argument(

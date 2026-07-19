@@ -26,6 +26,7 @@ from skinny.cli_common import (
     add_render_flags,
     apply_sppm_glossy_roughness,
     neural_config_from_args,
+    reject_mcp_unsupported,
     reject_mlt_unsupported,
     reject_spectral_unsupported,
     reject_sppm_without_wavefront,
@@ -38,6 +39,7 @@ from skinny.backend_select import (
     make_context,
     select_backend,
 )
+from skinny.render_session import RenderCommandQueue
 from skinny.renderer import Renderer
 from skinny.settings import ensure_dirs, load_settings, save_settings
 
@@ -537,6 +539,7 @@ def main() -> None:
     reject_spectral_unsupported(
         getattr(args, "spectral", False), _startup_integrator, args.execution_mode,
         getattr(args, "proposals", None), getattr(args, "reuse", None))
+    reject_mcp_unsupported(bool(getattr(args, "mcp", False)))
 
     # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
     # > auto). In this foundation phase auto resolves to Vulkan; an explicit
@@ -669,6 +672,15 @@ def main() -> None:
         debug_viewport.attach_renderer(renderer)
 
         input_handler = InputHandler(window, renderer)
+        # Marshalling seam for threads that do not own the renderer. Drained in
+        # the main loop below; the MCP server posts into it when enabled.
+        commands = RenderCommandQueue()
+        # Optional MCP control surface. Holds only the queue -- never the
+        # renderer or the GPU context -- so it cannot extend a context's
+        # lifetime. A bind collision leaves the renderer running without it.
+        if getattr(args, "mcp", False):
+            from skinny.mcp_server import start as _mcp_start
+            _mcp_start(commands, args.mcp_port)
 
         # --online-training prerequisite gate (change online-training-trigger). The
         # static prerequisites (wavefront + a neural proposal) are known now, so
@@ -686,6 +698,11 @@ def main() -> None:
         prev_time = time.perf_counter()
         while not glfw.window_should_close(window):
             glfw.poll_events()
+
+            # Apply anything another thread posted (the MCP server, when
+            # enabled) before this frame advances. Unconditional: ordering must
+            # not depend on optional features being active.
+            commands.run_pending(renderer)
 
             now = time.perf_counter()
             dt = now - prev_time

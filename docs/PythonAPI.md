@@ -506,6 +506,82 @@ renderer.set_usd_scene(scene, stage=stage)
 
 ---
 
+## 6b. Render-thread marshalling & MCP control
+
+### `skinny.render_session` — command queue + renderer proxy
+
+Front-end-neutral (imports no GUI toolkit). `skinny.ui.qt.render_session`
+re-exports every name for backwards compatibility.
+
+```python
+class RenderCommand                                   # frozen: callback, coalesce_key, reply
+class RenderCommandQueue:
+    def post(callback, *, coalesce_key=None) -> None          # last-write-wins coalescing
+    def post_with_reply(callback) -> Future[Any]              # no coalesce_key by design
+    def drain() -> list[RenderCommand]                        # removes only — does NOT execute
+    def run_pending(target, *, on_error=None) -> None         # executes AND settles replies
+    def __len__() -> int
+
+class QtRendererProxy                                 # GUI-thread facade; all verbs post
+def build_scene_state(renderer) -> SceneStateSnapshot # detached copy + both version counters
+```
+
+Call `run_pending`, not `drain`: a caller that drains and loops the callbacks
+itself must settle every `reply` future, or awaited commands hang to their
+timeout. Any thread that does not own the renderer must marshal through this
+queue — **including for reads**, since the scene graph is rebuilt on the
+streaming load thread and swapped in.
+
+### `skinny.ui.scene_edit_actions` — shared property dispatch
+
+```python
+def apply_scene_property(renderer, node, prop, value, *, graph=None) -> str | None
+def find_material_ref(graph, node) -> RendererRef | None
+```
+
+`apply_scene_property` returns `None` when routed, or a reason string when not.
+Used by both the Qt Scene Graph dock and the MCP server so the two cannot drift
+— with one exemption: the dock's *file-chooser* flows (HDR, lens) keep their own
+dialog and async error handling, because against `QtRendererProxy` those calls
+return a `Future` rather than a bool. The routing decision still lives here, so a
+client reaches the same verb.
+Routing depends on the resolved property and node, **not** on `(path, name)`:
+material parameters sit on Shader prims with no `renderer_ref` and resolve by
+ancestor walk; a transform component recomposes from its siblings.
+
+### `skinny.mcp_server` / `skinny.mcp_auth` — MCP control surface
+
+Requires the `[mcp]` extra. Opt-in via `--mcp`.
+
+```python
+# skinny.mcp_server
+class SceneToolError(Exception)
+class SceneTools:                                     # proxy or bare queue
+    def scene_list(path="/", depth=2, kind=None) -> dict
+    def scene_get(path) -> dict
+    def scene_set(path, property, value) -> dict
+def build_app(tools, token, port)                     # guarded ASGI app
+def serve(proxy_or_queue, port, sock) -> Thread       # daemon; installs NO signal handlers
+def start(proxy_or_queue, port) -> Thread | None      # None if the port is taken
+
+# skinny.mcp_auth
+TOKEN_FILE, LOOPBACK_HOST
+def load_or_create_token(path=None) -> str            # see platform note below; SKINNY_MCP_TOKEN override
+def token_is_from_env() -> bool                       # True when the env override supplies it
+def bind_loopback_socket(port) -> socket.socket       # asserts loopback
+def check_request(headers, token, port) -> str | None # None allows; Origin/Host/token guards
+def registration_command(port) -> str                 # references the token file, not its value
+```
+
+**Token file, platform note.** On POSIX the file is created mode `0600` and
+re-validated on every read — no-follow open, with owner and mode checked by
+`fstat` on that same descriptor. **Windows lacks those primitives**
+(`O_NOFOLLOW`, `getuid`), so there the checks are skipped and the token is only
+as protected as the profile directory holding it. Recorded as a known platform
+gap rather than implied to be equivalent. Publication is always an atomic
+exclusive `os.link`; there is no non-exclusive fallback, so a filesystem without
+hard links refuses to start and directs the operator to `SKINNY_MCP_TOKEN`.
+
 ## 7. Settings & presets
 
 ### `skinny.settings` — `~/.skinny/`
