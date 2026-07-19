@@ -9,6 +9,12 @@ a worktree off `main` for each piece of work instead of editing the primary
 checkout directly, then open a PR / merge from there. This keeps the main
 working directory clean and lets multiple changes proceed in isolation.
 
+When the primary checkout already has a working `.venv`, reuse it from a feature
+worktree by symlinking `.venv` to that environment instead of reinstalling the
+dependency stack. Prefix Python test/lint commands with `PYTHONPATH=src` so the
+active worktree source wins over the editable install recorded in the shared
+environment.
+
 ### Documentation upkeep
 
 At the end of every implementation, review **all** Markdown documentation and

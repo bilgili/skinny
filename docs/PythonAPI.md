@@ -322,23 +322,28 @@ r.cleanup(); ctx.destroy()
 ### Scene swap & editing
 
 ```python
-def set_usd_scene(self, scene: "Scene", stage=None) -> None             # :4125
+def set_usd_scene(self, scene: "Scene", stage=None) -> None             # :5827
 def add_model(self, usd_path, parent_prim_path="/World",
-              name=None, transform=None) -> str                         # :4298
-def remove_node(self, prim_path: str) -> None                           # :4349
-def set_transform(self, prim_path: str, matrix) -> None                 # :4365
-def save_edits(self, path: str | None = None) -> str                    # :4383
-def list_nodes(self) -> list[dict]                                      # :4398
+              name=None, transform=None) -> str                         # :6012
+def add_light(self, light_type, parent_prim_path="/World",
+              name=None, transform=None) -> str                         # :6063
+def remove_node(self, prim_path: str) -> None                           # :6145
+def set_transform(self, prim_path: str, matrix) -> None                 # :6161
+def save_edits(self, path: str | None = None) -> str                    # :6191
+def list_nodes(self) -> list[dict]                                      # :6206
 ```
 
 - `set_usd_scene` is the synchronous headless scene-swap. It does **not** build
   the scene-graph model, so the edit API below is unavailable after a bare swap.
-- The edit API (`add_model` / `remove_node` / `set_transform` / `save_edits` /
-  `list_nodes`) requires a **USD stage with an attached edit layer** (the
-  interactive load path); each raises `RuntimeError` otherwise. `add_model`
-  returns the new prim path (USD only — OBJ raises `ValueError`); `remove_node`
-  deactivates non-destructively; `save_edits` defaults to `<scene>.edits.usda`;
-  `list_nodes` returns `[{"path", "type", "active"}, …]`.
+- The edit API (`add_model` / `add_light` / `remove_node` / `set_transform` /
+  `save_edits` / `list_nodes`) requires a **USD stage with an attached edit
+  layer** (the interactive load path); each raises `RuntimeError` otherwise.
+  `add_model` returns the new prim path (USD only — OBJ raises `ValueError`).
+  `add_light` accepts `DistantLight`, `SphereLight`, `DomeLight`, `RectLight`,
+  or `DiskLight`, returns a unique prim path, authors explicit defaults, and
+  immediately resyncs the scene. `remove_node` deactivates non-destructively;
+  `save_edits` defaults to `<scene>.edits.usda`; `list_nodes` returns
+  `[{"path", "type", "active"}, …]`.
 
 ### Public attributes set programmatically
 

@@ -326,7 +326,7 @@ def _add_mesh_props(
 def _add_transform_props(
     node: SceneGraphNode, prim, time, instance_map: dict[str, int],
 ) -> None:
-    from pxr import Gf, UsdGeom
+    from pxr import Gf, UsdGeom, UsdLux
     xformable = UsdGeom.Xformable(prim)
     if not xformable:
         return
@@ -338,7 +338,16 @@ def _add_transform_props(
     translate, rotate, scale = _decompose_matrix(local_mat)
 
     path = str(prim.GetPath())
-    is_editable = path in instance_map
+    light_types = (
+        UsdLux.DistantLight,
+        UsdLux.SphereLight,
+        UsdLux.DomeLight,
+        UsdLux.RectLight,
+        UsdLux.DiskLight,
+    )
+    is_editable = path in instance_map or any(
+        prim.IsA(light_type) for light_type in light_types
+    )
 
     node.properties.append(SceneGraphProperty(
         name="translate", display_name="translate",
