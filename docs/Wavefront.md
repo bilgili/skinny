@@ -178,10 +178,24 @@ PM-2/PM-3 phases — is in **[PhotonMapping.md](PhotonMapping.md)**.
 The fourth integrator (`INTEGRATOR_INDEX["mlt"] = 3`) is **Metropolis Light Transport** —
 Kelemen primary-sample-space Metropolis (PSSMLT) whose target function is the
 existing wavefront BDPT path contribution. **Wavefront-only** (no megakernel
-variant, mirrors SPPM), **flat materials only**, **RGB only**, on both Vulkan
-(`WavefrontMltPass`) and native Metal (`MetalWavefrontMltPass`, bit-identical at
-equal budget). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
+variant, mirrors SPPM), **flat materials only**, **RGB and spectral** (change
+`spectral-mlt`), on both Vulkan (`WavefrontMltPass`) and native Metal
+(`MetalWavefrontMltPass`, bit-identical at equal budget in both). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
 `wfMlt*`).
+
+**Spectral MLT (change `spectral-mlt`).** Under `-DSKINNY_SPECTRAL` the target
+function becomes `SpectralBDPTIntegrator.estimateRadiance` — a change of target,
+not of algorithm, since that estimator already returns resolved, clamped linear
+sRGB (so `c`, the splat capture and `wfMltResolve` are untouched). Three Metal
+live-state rules apply to every MLT kernel and are **structural, not tuning**: a
+kernel that breaks them never retires, and macOS cannot cancel it. (1) Captured
+records live in device memory (`mltProposalRecords`, binding 57), never a
+thread-local `MltRecord[7]`. (2) MIS reads the spectral arrays directly
+(`misWeightS` / `emitterHitMisWeightT0S`) — materialising `BDPTVertex` mirrors
+next to the inlined spectral estimator overflows the per-thread budget. (3)
+`RNG.reject()` scans only `RNG.maxDim` (the dimensions the iteration touched,
+~70), never all `MLT_MAX_DIMS` = 192. All three are output-neutral: RGB MLT is
+bit-identical across the change, and spectral Metal ≡ spectral Vulkan.
 
 **Full-sample chains, not pbrt's per-depth decomposition (design D1).** pbrt's
 `MLTIntegrator` runs one chain per path-length stratum, which requires the
