@@ -44,7 +44,7 @@ optionally, across accumulation frames). Two ideas make it cheap and effective:
   effective candidate count per pixel grows far beyond what it sampled itself —
   the variance reduction.
 
-![Initial RIS at the primary hit: many unshadowed candidate rays to the lights, one survivor that pays the single shadow ray](diagrams/restir/fig_initial_ris.svg)
+![Introductory ReSTIR DI derivation: the direct-lighting integral becomes a Monte Carlo and RIS estimator, followed by mixture candidate generation, streaming reservoir updates, GRIS neighbour reuse, survivor selection, and one deferred shadow ray.](diagrams/sketches/restir-di-step-by-step.png)
 
 ReSTIR DI **converges to the same direct-lighting integral as stock NEE** (it is
 unbiased in the default regime) while reaching a given noise level at a lower
