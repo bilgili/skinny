@@ -276,17 +276,18 @@ def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     that spectral does not yet cover). Returns ``(ok, reason)`` with a specific
     reason per out-of-scope axis. Mirrors ``cli_common.reject_spectral_unsupported``.
     """
-    if combo.integrator not in ("path", "bdpt", "sppm"):
-        return False, f"spectral supports path/bdpt/sppm; {combo.integrator.upper()} unsupported"
+    if combo.integrator not in ("path", "bdpt", "sppm", "mlt"):
+        return False, f"spectral supports path/bdpt/sppm/mlt; {combo.integrator.upper()} unsupported"
     if combo.has_neural:
         return False, "spectral is incompatible with the neural proposal (v1)"
     if combo.has_reuse:
         return False, "spectral is incompatible with ReSTIR reuse (v1)"
     if scene.material_class != "flat":
         return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
-    # SPPM has no megakernel path (photon pass is wavefront-only).
-    if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
-        return False, "SPPM is wavefront-only"
+    # SPPM and MLT have no megakernel path (photon / Markov-chain passes are
+    # wavefront-only). Spectral MLT (change spectral-mlt) shares that constraint.
+    if combo.integrator in ("sppm", "mlt") and combo.execution_mode != "wavefront":
+        return False, f"{combo.integrator.upper()} is wavefront-only"
     return True, ""
 
 
@@ -313,8 +314,8 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     if combo.integrator == "mlt":
         if combo.execution_mode != "wavefront":
             return False, "MLT is wavefront-only"
-        if combo.spectral:
-            return False, "spectral MLT is outside the v1 envelope (RGB only)"
+        # Spectral MLT (change spectral-mlt): admitted — the target function is
+        # the spectral BDPT estimator, wavefront + flat only, same as RGB MLT.
         if combo.has_neural or combo.has_reuse:
             return False, "MLT is layer-free (no neural proposal, no ReSTIR reuse)"
         if scene.material_class != "flat":

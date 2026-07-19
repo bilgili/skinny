@@ -328,5 +328,6 @@ def test_vk_wavefront_has_mlt_pass_and_recorder():
 def test_scene_layout_declares_mlt_bindings_for_wavefront():
     src = _read("vk_compute.py")
     assert "mlt_bindings" in src
-    assert "(52, 53, 54, 55, 56)" in src, \
-        "the wavefront scene set-0 layout must declare MLT bindings 52-56"
+    assert "(52, 53, 54, 55, 56, 57)" in src, \
+        "the wavefront scene set-0 layout must declare MLT bindings 52-57 " \
+        "(57 = mltProposalRecords, change spectral-mlt)"

@@ -19,6 +19,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   optional name/transform arguments and rollback on failure. Adding the first
   authored light uses the existing USD authority rule to remove both fallback
   lights atomically; a new DomeLight remains black until its HDR is selected.
+- **Spectral MLT** (change `spectral-mlt`). `--integrator mlt` now runs under
+  `--spectral`: the PSSMLT chain's target function becomes the megakernel
+  `SpectralBDPTIntegrator` instead of the RGB BDPT estimator. Because that
+  estimator already resolves and clamps to linear sRGB, the scalar contribution,
+  splat capture and resolve pass are unchanged — the hero-wavelength draw is just
+  one more primary-sample dimension. Unbiased but Markov-correlated, so it needs
+  more samples than path/BDPT to converge (the `int_caustic` and `spec_prism`
+  suite scenes were raised 256⇒512 spp rather than relaxing the MLT tolerance).
+
+  Fixes two Metal hangs found in the process, both per-thread live-state
+  overflows that made the dispatch never retire (macOS cannot cancel such work):
+  the RGB mirror arrays in the spectral connection loop (now `misWeightS` /
+  `emitterHitMisWeightT0S`, plus a device-side `mltProposalRecords` buffer,
+  binding 57) and `RNG.reject()`'s fixed 192-entry restore scan (now bounded by
+  `RNG.maxDim` to the dimensions actually touched). Both are output-neutral:
+  pre-change Vulkan, post-change Vulkan and post-change Metal all render
+  bit-identically, and RGB MLT is unchanged.
+
 - **MLT integrator — PSSMLT over BDPT** (change `mlt-integrator`). A fourth
   integrator, `--integrator mlt` (index 3), joining `path`/`bdpt`/`sppm`:
   Kelemen primary-sample-space Metropolis (PSSMLT) driving the existing

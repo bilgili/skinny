@@ -13,7 +13,10 @@ from __future__ import annotations
 import numpy as np
 
 MLT_NUM_STREAMS = 3
-MLT_MAX_DIMS = 192  # must match mlt_sampler.slang MLT_MAX_DIMS
+# Must match common.slang MLT_MAX_DIMS. Worst-case usage ~72 at maxDepth 5
+# (design D2); spectral MLT (change spectral-mlt) adds exactly one camera-stream
+# dimension (the hero-wavelength draw) → ~73, still far under this budget.
+MLT_MAX_DIMS = 192
 
 _F32 = np.float32
 _U32_MAX = _F32(np.float32(4294967295.0))
