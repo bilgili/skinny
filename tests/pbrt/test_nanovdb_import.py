@@ -118,8 +118,13 @@ def test_interface_material_has_no_diffuse_dielectric_fallback(tmp_path):
     assert mat_prim.IsValid()
     cd = dict(mat_prim.GetCustomDataByKey("skinnyOverrides") or {})
     assert cd.get("volume_interface") is True
+    # Constant pbrt SPD -> achromatic RGB (change constant-spectrum-achromatic-rgb,
+    # c1df5f0): the scene authors `"spectrum sigma_s" [200 1 900 1]`, a CONSTANT
+    # spectrum, which short-circuits to [v, v, v]. Projecting it through XYZ would
+    # tint it (equal-energy whitepoint != sRGB D65) — that tint is what the old
+    # expectation below encoded, and a 1e-6 perturbation still reproduces it.
     assert list(cd.get("volume_sigma_s")) == pytest.approx(
-        [4.800925674688010, 3.798817675757128, 3.6334018691778454]
+        [4.0, 4.0, 4.0]
     )
 
     surface = stage.GetPrimAtPath("/World/shape_0_mat/Surface")
@@ -209,7 +214,7 @@ def test_disney_cloud_imports_volume_and_medium():
     assert list(cd["volume_sigma_a"]) == pytest.approx([0.0, 0.0, 0.0])
     # sigma_s = 1 (spectrally reduced) x scale=4
     assert list(cd["volume_sigma_s"]) == pytest.approx(
-        [4.800925674688010, 3.798817675757128, 3.6334018691778454]
+        [4.0, 4.0, 4.0]
     )
     assert cd.get("volume_g") == pytest.approx(0.877)
 
@@ -232,10 +237,10 @@ def test_bunny_cloud_interface_sphere_and_volume_xform():
     cd = dict(mat_prim.GetCustomDataByKey("skinnyOverrides") or {})
     assert cd.get("volume_interface") is True
     assert list(cd["volume_sigma_s"]) == pytest.approx(
-        [12.002314186720017, 9.497044189392826, 9.083504672944615]
+        [10.0, 10.0, 10.0]
     )
     assert list(cd["volume_sigma_a"]) == pytest.approx(
-        [0.6001157093360012, 0.474852209469641, 0.45417523364723067]
+        [0.5, 0.5, 0.5]
     )
 
     surface = stage.GetPrimAtPath("/World/shape_0_mat/Surface")
