@@ -221,9 +221,10 @@ def reject_mlt_unsupported(
 
     MLT (PSSMLT over BDPT, change ``mlt-integrator``) is wavefront-only — a
     Markov chain shares bootstrap/normalization state across pixels the same
-    way SPPM shares its photon grid — and its v1 envelope is RGB, flat
-    materials, layer-free: no ``--spectral``, no non-BSDF directional
-    proposal, no ReSTIR reuse, no ``--online-training``. Checks the
+    way SPPM shares its photon grid — over flat materials, layer-free: no
+    non-BSDF directional proposal, no ReSTIR reuse, no ``--online-training``.
+    ``--spectral`` IS supported (change ``spectral-mlt``): the target function
+    becomes the spectral BDPT estimator. Checks the
     **effective** startup integrator against the **resolved** execution mode
     (same contract as :func:`reject_sppm_without_wavefront`), so interactive
     front-ends can re-check the persisted-``mlt`` case the CLI-keyed
@@ -249,11 +250,7 @@ def reject_mlt_unsupported(
             "explicit --execution-mode megakernel (mlt auto-selects "
             "wavefront) or pass --execution-mode wavefront."
         )
-    if spectral:
-        raise SystemExit(
-            "skinny: --spectral is incompatible with --integrator mlt — "
-            "spectral MLT is outside the v1 envelope (RGB only)."
-        )
+    del spectral  # spectral MLT supported (change spectral-mlt)
     extra_proposals = [
         p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
     ]
@@ -287,14 +284,13 @@ def reject_spectral_unsupported(
     """Refuse ``--spectral`` outside its envelope. No-op when not spectral.
 
     Spectral mode is a compile-time variant chosen at startup. It now spans the
-    ``path``, ``bdpt``, and ``sppm`` integrators under **either** the megakernel
-    or the wavefront execution mode (SPPM under wavefront only, as in RGB — that
-    ``sppm`` + explicit ``--execution-mode megakernel`` refusal lives in
-    :func:`reject_sppm_without_wavefront`, not here, so it stays a single source
-    of truth for both RGB and spectral). Flat materials only. The spectral
-    ``path`` integrator admits the analytic BSDF and environment-importance
-    proposals; BDPT/SPPM retain native BSDF sampling. The neural directional
-    proposal and ReSTIR reuse remain refused. Raises ``SystemExit``.
+    ``path``, ``bdpt``, ``sppm``, and ``mlt`` integrators in their existing
+    execution envelopes (SPPM/MLT are wavefront-only, as in RGB; those
+    execution-mode refusals live in their integrator-specific guards). Flat
+    materials only. The spectral ``path`` integrator admits the analytic BSDF
+    and environment-importance proposals; BDPT/SPPM/MLT retain native BSDF
+    sampling. The neural directional proposal and ReSTIR reuse remain refused.
+    Raises ``SystemExit``.
 
     Scene-level unsupported transport (a skin/subsurface or heterogeneous-volume
     scene) is refused later, at renderer setup, where the material set is known —
@@ -302,7 +298,7 @@ def reject_spectral_unsupported(
     """
     if not spectral:
         return
-    del execution_mode  # accepted for path/bdpt/sppm × mega/wavefront
+    del execution_mode  # integrator-specific guards own wavefront-only modes
     # The analytic environment proposal shares the wavelength-independent
     # direction/pdf seam with RGB; the spectral path recolors its selected
     # direction per hero wavelength. Stateful neural inference remains outside
@@ -325,8 +321,8 @@ def reject_spectral_unsupported(
     if "env" in proposal_tokens and integrator != "path":
         raise SystemExit(
             f"skinny: --spectral --proposals {proposals} requires "
-            "--integrator path — spectral BDPT/SPPM retain their native BSDF "
-            "sampling and do not consume the directional-proposal seam."
+            "--integrator path — spectral BDPT/SPPM/MLT retain their native "
+            "BSDF sampling and do not consume the directional-proposal seam."
         )
     if reuse and reuse not in ("none",):
         raise SystemExit(

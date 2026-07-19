@@ -464,4 +464,10 @@ def mlt_buffer_sizes(num_chains: int, bootstrap_samples: int, *,
         "mlt_current_records":   num_chains * MLT_RECORD_SLOTS * mlt_record_size(msl=msl),
         "mlt_bootstrap_weights": max(1, bootstrap_samples) * 4,
         "mlt_chain_seeds":       num_chains * 4,
+        # Proposal-record scratch (binding 57): mltEvaluate writes captured
+        # records here instead of a thread-local array — the array (on top of
+        # the spectral estimator's live state) overflowed Metal's per-thread
+        # budget and hung wfMltMutate (change spectral-mlt). Slot-indexed by
+        # chain (bootstrap: in-flight slot; both < num_chains by tiling).
+        "mlt_proposal_records":  num_chains * MLT_RECORD_SLOTS * mlt_record_size(msl=msl),
     }

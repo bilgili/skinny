@@ -1846,7 +1846,7 @@ class Renderer:
         # Staged wavefront MLT (change mlt-integrator): PSSMLT chains over the
         # BDPT estimator, Vulkan only (the Metal adapter is a follow-up —
         # _render_scene_metal refuses integrator 3 explicitly). The pass owns
-        # the five chain buffers (bindings 52–56 of the wavefront scene set);
+        # the six chain buffers (bindings 52–57 of the wavefront scene set);
         # per accumulation reset the renderer runs the synchronous bootstrap
         # round-trip (_run_wavefront_mlt_bootstrap) before recording frames.
         self._wavefront_mlt_pass = None
@@ -2463,7 +2463,7 @@ class Renderer:
         """Build (once) the native-Metal staged MLT pass (change
         mlt-integrator, task 5.6) — the Metal sibling of
         `_ensure_wavefront_mlt_pass`. Metal binds by name, so there are no
-        scene-set slots 52–56 to rebind: the pass merges its chain buffers into
+        scene-set slots 52–57 to rebind: the pass merges its chain buffers into
         the per-dispatch bind map itself."""
         key = self._mlt_pass_key()
         if self._wavefront_mlt_pass is not None and self._wf_mlt_pass_dims == key:
@@ -2474,7 +2474,8 @@ class Renderer:
             self.ctx, self.shader_dir,
             num_pixels=self.width * self.height,
             num_chains=int(self.mlt_num_chains),
-            bootstrap_samples=int(self.mlt_bootstrap_samples))
+            bootstrap_samples=int(self.mlt_bootstrap_samples),
+            spectral=self._spectral)
         self._wf_mlt_pass_dims = key
         return self._wavefront_mlt_pass
 
@@ -2482,7 +2483,7 @@ class Renderer:
         """Build (once) the staged wavefront MLT pass (change mlt-integrator).
         Vulkan path — the Metal sibling is `_ensure_wavefront_mlt_pass_metal`
         (`_render_scene_metal` routes there). Returns None when the scene set-0
-        layout lacks the MLT bindings 52–56 (a megakernel-mode session — the
+        layout lacks the MLT bindings 52–57 (a megakernel-mode session — the
         `scene_bindings_only` wavefront layout always carries them); the
         caller then falls back to the path tracer like SPPM does."""
         if self.is_metal:
@@ -2502,8 +2503,9 @@ class Renderer:
             self.ctx, self.shader_dir, self._scene_set0_layout,
             num_pixels=self.width * self.height,
             num_chains=int(self.mlt_num_chains),
-            bootstrap_samples=int(self.mlt_bootstrap_samples))
-        # Rebind the scene descriptor sets' MLT slots (52–56) from the
+            bootstrap_samples=int(self.mlt_bootstrap_samples),
+            spectral=self._spectral)
+        # Rebind the scene descriptor sets' MLT slots (52–57) from the
         # creation-time dummies to this pass's chain buffers.
         for ds in self.descriptor_sets:
             writes = [
@@ -4722,11 +4724,11 @@ class Renderer:
                 # +7 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
                 # 49 emissive blackbody + 50 distant-light SPD + 51 per-material
                 # blackbody) only for the spectral megakernel variant.
-                # +5 MLT chain buffers (52–56, change mlt-integrator) only on
+                # +6 MLT chain buffers (52–57, change mlt-integrator/spectral-mlt) only on
                 # the wavefront (`scene_bindings_only`) layout.
                 descriptorCount=MAX_FRAMES_IN_FLIGHT
                 * (22 + graph_slot + (7 if self._spectral else 0)
-                   + (5 if getattr(self._scene_bindings, "mlt_bindings", False) else 0)),
+                   + (6 if getattr(self._scene_bindings, "mlt_bindings", False) else 0)),
             )
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
@@ -5112,12 +5114,12 @@ class Renderer:
                     pBufferInfo=[vk.VkDescriptorBufferInfo(
                         buffer=_buf.buffer, offset=0, range=_buf.size)],
                 ))
-            # MLT chain buffers (52–56, change mlt-integrator) — only the
+            # MLT chain buffers (52–57, change mlt-integrator/spectral-mlt) — only the
             # wavefront (`scene_bindings_only`) layout declares them; dummies
             # until `_ensure_wavefront_mlt_pass` rebinds the real chain
             # buffers (the 36/37 record-dump precedent).
             if getattr(self._scene_bindings, "mlt_bindings", False):
-                for _b in (52, 53, 54, 55, 56):
+                for _b in (52, 53, 54, 55, 56, 57):
                     writes.append(vk.VkWriteDescriptorSet(
                         dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
                         descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -9020,7 +9022,7 @@ class Renderer:
         # Spectral path tracing supports the analytic BSDF/environment subset.
         # Proposal selection is persisted and runtime-switchable, so strip the
         # unsupported neural bit here as well as refusing it on explicit CLI
-        # startup. BDPT/SPPM do not consume the proposal seam, so they also
+        # startup. BDPT/SPPM/MLT do not consume the proposal seam, so they also
         # resolve to native BSDF sampling. An empty subset safely falls back to
         # the BSDF baseline.
         if self._spectral:
@@ -9032,13 +9034,14 @@ class Renderer:
 
     def _active_integrator_index(self) -> int:
         """The integrator actually dispatched. Spectral now spans PATH (0),
-        BDPT (1), and SPPM (2) — like RGB. Under the megakernel, main_pass.slang
+        BDPT (1), SPPM (2), and MLT (3) — like RGB. Under the megakernel,
+        main_pass.slang
         under SKINNY_SPECTRAL dispatches SpectralBDPTIntegrator when
         fc.integratorType == INTEGRATOR_BDPT on a flat first hit, else
         SpectralPathTracer (so SPPM, which has no megakernel path, falls to
         PATH there — but resolve_execution_mode sends sppm → wavefront, so a
         spectral SPPM session runs the wavefront photon+gather passes). Under the
-        wavefront execution mode all three integrators dispatch spectrally. So we
+        wavefront execution mode all four integrators dispatch spectrally. So we
         report the selected integrator verbatim, matching RGB — this drives
         fc.integratorType and the config matrix. integrator_index is persisted and
         runtime-switchable on the interactive front-ends."""
@@ -9341,12 +9344,12 @@ class Renderer:
                if self.execution_mode_fallback_active else cr.ON)
         rows.append(cr.ConfigRow("execution-mode", req_e, res_e, est))
 
-        # integrator. Spectral now spans path (0), bdpt (1), and sppm (2) — like
-        # RGB (see _active_integrator_index). SPPM has no megakernel path, but
-        # resolve_execution_mode sends sppm → wavefront, so a spectral SPPM
-        # session runs the wavefront passes; the resolved integrator equals the
-        # requested one. Reads only fields — `_collect_config_rows` runs against a
-        # plain namespace in the observability tests.
+        # integrator. Spectral now spans path (0), bdpt (1), sppm (2), and mlt
+        # (3) — like RGB (see _active_integrator_index). SPPM/MLT have no
+        # megakernel path, but resolve_execution_mode sends them to wavefront, so
+        # the resolved integrator equals the requested one. Reads only fields —
+        # `_collect_config_rows` runs against a plain namespace in the
+        # observability tests.
         req_integ = self.integrator_modes[self.integrator_index].lower()
         rows.append(cr.ConfigRow("integrator", req_integ, req_integ, cr.ON))
 

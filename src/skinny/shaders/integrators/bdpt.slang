@@ -1019,8 +1019,11 @@ static const float BDPT_SPLAT_SCALE = 1024.0;     // Q22.10 fixed-point
 // weights are unknowable during evaluation (design D4). Bounded per-thread
 // stack: splatLightWalk emits at most BDPT_MAX_VERTS-1 records per sample.
 static uint gMltSplatCount = 0u;
-static int2 gMltSplatPixel[BDPT_MAX_VERTS];
-static float3 gMltSplatRgb[BDPT_MAX_VERTS];
+// Zero-init only to silence Slang's E41017 false positive: every read in
+// wavefront_mlt.slang is bounded by gMltSplatCount, so no element is ever read
+// before atomicSplatRadiance writes it.
+static int2 gMltSplatPixel[BDPT_MAX_VERTS] = {};
+static float3 gMltSplatRgb[BDPT_MAX_VERTS] = {};
 
 void atomicSplatRadiance(int2 pixel, float3 radiance)
 {

@@ -273,16 +273,17 @@ def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
 
     v1 (megakernel) admitted path/bdpt under the megakernel; the
     ``spectral-wavefront`` change extends the envelope to the **wavefront**
-    execution mode too, for path, bdpt and sppm (flat materials, no reuse).
+    execution mode too, for path, bdpt and sppm; ``spectral-mlt`` adds MLT
+    under wavefront (flat materials, no reuse).
     The analytic environment proposal is admitted on spectral path only; BDPT
-    and SPPM retain native BSDF sampling. SPPM has no megakernel path (photon
-    pass is wavefront-only), so ``sppm`` is refused under the megakernel; the
-    neural proposal and ReSTIR reuse remain unsupported under spectral. Returns
-    ``(ok, reason)`` with a specific reason per out-of-scope axis. Mirrors
-    ``cli_common.reject_spectral_unsupported``.
+    SPPM, and MLT retain native BSDF sampling. SPPM and MLT have no megakernel
+    path (photon / Markov-chain passes are wavefront-only), so both are refused
+    under the megakernel; the neural proposal and ReSTIR reuse remain
+    unsupported under spectral. Returns ``(ok, reason)`` with a specific reason
+    per out-of-scope axis. Mirrors ``cli_common.reject_spectral_unsupported``.
     """
-    if combo.integrator not in ("path", "bdpt", "sppm"):
-        return False, f"spectral supports path/bdpt/sppm; {combo.integrator.upper()} unsupported"
+    if combo.integrator not in ("path", "bdpt", "sppm", "mlt"):
+        return False, f"spectral supports path/bdpt/sppm/mlt; {combo.integrator.upper()} unsupported"
     if combo.has_neural:
         return False, "spectral is incompatible with the neural proposal (v1)"
     if combo.has_env_proposal and combo.integrator != "path":
@@ -291,9 +292,10 @@ def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
         return False, "spectral is incompatible with ReSTIR reuse (v1)"
     if scene.material_class != "flat":
         return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
-    # SPPM has no megakernel path (photon pass is wavefront-only).
-    if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
-        return False, "SPPM is wavefront-only"
+    # SPPM and MLT have no megakernel path (photon / Markov-chain passes are
+    # wavefront-only). Spectral MLT (change spectral-mlt) shares that constraint.
+    if combo.integrator in ("sppm", "mlt") and combo.execution_mode != "wavefront":
+        return False, f"{combo.integrator.upper()} is wavefront-only"
     return True, ""
 
 
@@ -310,8 +312,9 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     # SPPM has no megakernel path.
     if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
         return False, "SPPM is wavefront-only"
-    # MLT (PSSMLT over BDPT, change mlt-integrator): wavefront-only, RGB-only,
-    # layer-free, flat-material scenes only — the fixed primary-sample dimension
+    # MLT (PSSMLT over BDPT, changes mlt-integrator / spectral-mlt):
+    # wavefront-only, RGB or spectral, layer-free, flat-material scenes only —
+    # the fixed primary-sample dimension
     # budget is only boundable without volumetric/subsurface transport, and the
     # wavefront non-flat path-fallback is not extended into Markov chains
     # (mixing estimators inside a chain). Gated on MLT_IMPLEMENTED (referenced
@@ -320,8 +323,8 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     if combo.integrator == "mlt":
         if combo.execution_mode != "wavefront":
             return False, "MLT is wavefront-only"
-        if combo.spectral:
-            return False, "spectral MLT is outside the v1 envelope (RGB only)"
+        # Spectral MLT (change spectral-mlt): admitted — the target function is
+        # the spectral BDPT estimator, wavefront + flat only, same as RGB MLT.
         if combo.proposals or combo.has_reuse:
             return False, "MLT is layer-free (no directional proposal, no ReSTIR reuse)"
         if scene.material_class != "flat":
@@ -361,11 +364,12 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
         if combo.has_reuse:
             return False, "ReSTIR DI reuse untested with volume media (follow-up)"
     # Spectral render variant (changes spectral-rendering / spectral-wavefront).
-    # The envelope is path/bdpt under either execution mode plus sppm under the
-    # wavefront mode, over flat materials (no neural, no reuse); out-of-scope
-    # combos take their specific envelope reason. An in-envelope combo is only
-    # rendered once the transport is wired (SPECTRAL_IMPLEMENTED); until then it
-    # is a recorded "not yet wired" skip so the sweep never renders it as RGB.
+    # The envelope is path/bdpt under either execution mode plus sppm/mlt under
+    # wavefront, over flat materials (no neural, no reuse; environment proposal
+    # on path only). Out-of-scope combos take their specific envelope reason. An
+    # in-envelope combo is only rendered once the transport is wired
+    # (SPECTRAL_IMPLEMENTED); until then it is a recorded "not yet wired" skip
+    # so the sweep never renders it as RGB.
     # Mirrors reject_spectral_unsupported.
     if combo.spectral:
         ok, reason = spectral_envelope(combo, scene)

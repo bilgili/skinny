@@ -77,10 +77,10 @@ and the companions share the same path geometry.
 
 | Property | Value |
 | --- | --- |
-| Integrator | **Path, BDPT, and SPPM.** Path/BDPT run under both execution modes; SPPM is wavefront-only (no megakernel photon pass). See [Bidirectional transport](#bidirectional-transport-bdpt) and [Wavefront spectral transport](#wavefront-spectral-transport). |
-| Execution mode | **Megakernel and wavefront.** Wavefront carries hero-λ transport for all three integrators (change `spectral-wavefront`, wired + CPU-verified + merged); spectral environment-proposal convergence is GPU-gated in both modes. |
+| Integrator | **Path, BDPT, SPPM, and MLT.** Path/BDPT run under both execution modes; SPPM and MLT are wavefront-only (no megakernel photon pass; no megakernel MLT variant). See [Bidirectional transport](#bidirectional-transport-bdpt), [Wavefront spectral transport](#wavefront-spectral-transport) and [Spectral MLT](#spectral-mlt). |
+| Execution mode | **Megakernel and wavefront.** Wavefront carries hero-λ transport for path, BDPT, and SPPM, while MLT composes the spectral BDPT estimator (changes `spectral-wavefront` / `spectral-mlt`); spectral environment-proposal convergence is GPU-gated in both path execution modes. |
 | Materials | **Flat only** (`UsdPreviewSurface` / `standard_surface` / `OpenPBR` / Python-material flats). Skin / subsurface / heterogeneous-volume scenes are refused at startup; a non-flat hit inside the loop terminates the path rather than mis-shade. |
-| Proposals / reuse | Spectral **path** supports analytic `bsdf`, `bsdf,env`, and `env` proposals in megakernel + wavefront. BDPT/SPPM keep native sampling. ReSTIR reuse and the neural proposal are refused. |
+| Proposals / reuse | Spectral **path** supports analytic `bsdf`, `bsdf,env`, and `env` proposals in megakernel + wavefront. BDPT/SPPM/MLT keep native sampling. ReSTIR reuse and the neural proposal are refused. |
 | Wavelengths | **4** hero-rotated, drawn from pbrt's visible-λ importance pdf. |
 | Film | CIE resolve (Wyman CMF) into the **existing RGBA32F accumulation** — exposure / tonemap / readback are untouched. |
 | Backends | Vulkan and native Metal, at parity (compile-time `-DSKINNY_SPECTRAL` on both). |
@@ -342,6 +342,46 @@ progressive estimator, and `VisiblePoint.tau` stays a **spectral-invariant
 3-wide** quantity. **v1 limit: no dispersion in the SPPM photon / eye
 carriers** — a hero-λ collapse would break the per-pass photon/visible-point
 wavelength coherence; path and BDPT do carry hero-λ dispersion.
+
+## Spectral MLT
+
+MLT (`--integrator mlt`, wavefront-only) needs no spectral transport of its own. It is
+Kelemen primary-sample-space Metropolis *over* an existing estimator, so making it
+spectral is a change of target function, not of algorithm: under
+`-DSKINNY_MLT -DSKINNY_SPECTRAL` the chain drives
+`SpectralBDPTIntegrator.estimateRadiance` instead of the RGB one. That estimator already
+returns resolved, gamut-clamped linear sRGB, so the scalar contribution `c`, the splat
+capture and `wfMltResolve` all stay on the RGB code paths unchanged. The hero-wavelength
+draw at the top of `estimateRadiance` is simply served by the PSS sampler, making the
+wavelength one more primary-sample dimension (~73 of `MLT_MAX_DIMS` 192).
+
+Because `E[MLT] = E[BDPT]` by construction, spectral MLT is **unbiased but
+Markov-correlated**: at equal spp its per-pixel noise is structured differently from the
+path anchor, and it converges more slowly. On `int_caustic` its self-consistency against
+the spectral anchor measures 0.339 at 256 spp but 0.036 at 1024 spp, while the mean holds
+at 1.06× pbrt (RGB MLT sits at 1.05×) — variance, not bias. The suite therefore renders
+`int_caustic` and `spec_prism` at **512 spp** rather than relaxing the MLT tolerance.
+
+### Metal live-state constraint
+
+Two Metal-specific hazards were found here, and both are structural rules rather than
+tuning knobs — a kernel that violates them does not run slowly, it **never retires**, and
+macOS cannot cancel it:
+
+1. **No large per-thread arrays alongside the inlined spectral estimator.** The spectral
+   BDPT vertex arrays plus RGB mirror arrays plus `misWeight`'s internal copies overflowed
+   the per-thread budget in the t≥2 connection loop. MIS therefore reads the spectral
+   arrays directly (`misWeightS`, `emitterHitMisWeightT0S` — no `BDPTVertex` mirrors), and
+   captured records live in device memory (`mltProposalRecords`, binding 57) instead of a
+   thread-local `MltRecord[7]`.
+2. **`RNG.reject()` must not scan all `MLT_MAX_DIMS`.** The fixed 192-entry
+   read-modify-write restore scan hung `wfMltMutate` wherever it lived. `RNG.maxDim`
+   records the high-water dimension the iteration actually touched (~70) and the scan is
+   bounded to it; restore semantics are unchanged because every dimension with
+   `lastMod == currentIteration` lies below that bound.
+
+Both fixes are output-neutral: pre-change Vulkan, post-change Vulkan and post-change Metal
+render `int_caustic` bit-identically, and RGB MLT is bit-identical across the change.
 
 ## Exact spectral sources
 

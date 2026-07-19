@@ -576,12 +576,12 @@ neural × interop.
 | Megakernel execution | ✅ | ✅ |
 | Wavefront execution (path / BDPT / ReSTIR DI) | ✅ | ✅ |
 | SPPM integrator (wavefront, flat materials) | ✅ | ✅ (`MetalWavefrontSppmPass`; caustic parity matches Vulkan) |
-| MLT integrator — PSSMLT over BDPT (wavefront, flat materials) | ✅ (`WavefrontMltPass`) | ✅ (`MetalWavefrontMltPass`; bit-identical to Vulkan at equal budget) |
+| MLT integrator — PSSMLT over BDPT (wavefront, flat materials, RGB + spectral) | ✅ (`WavefrontMltPass`) | ✅ (`MetalWavefrontMltPass`; bit-identical to Vulkan at equal budget, both RGB and spectral) |
 | pbrt `subsurface` (volumetric interior random walk) | ✅ | ✅ (megakernel + wavefront, all integrators; under wavefront BDPT/SPPM every non-flat first hit — subsurface/skin/volume/python — falls back to the path tracer, parity with the megakernel, with the heavy multi-bounce cases bounded per eye tile on Metal; lights from a single distant light + the environment) |
 | Heterogeneous volumes — NanoVDB `MakeNamedMedium` (path integrator, megakernel + wavefront) | ✅ | ✅ (`disney-cloud` / `bunny-cloud`; distant + env NEE; BDPT/SPPM excluded) |
 | Procedural `cloud` medium — pbrt `MakeNamedMedium "cloud"` (analytic Perlin-fBm density, path integrator, megakernel + wavefront) | ✅ | ✅ (`clouds`; no grid/texture — `MEDIUM_CLOUD` evaluates pbrt's `CloudMedium::Density` in-shader; BDPT/SPPM excluded) |
 | Neural directional proposal (inference) | ✅ | ✅ |
-| Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + bdpt + sppm, megakernel + wavefront, flat) | ✅ (`spectral-rendering`, `spectral-bdpt-megakernel`, `spectral-wavefront`) |
+| Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + bdpt + sppm + mlt, megakernel + wavefront, flat) | ✅ (`spectral-rendering`, `spectral-bdpt-megakernel`, `spectral-wavefront`) |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
 | Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal`, bind-by-name; `metal-tool-dock-render`) |
@@ -619,7 +619,7 @@ scope below). See [Spectral.md](docs/Spectral.md).
 |--------|----------|
 | Integrator / execution | **Path, BDPT, or SPPM.** Path/BDPT run under megakernel + wavefront; SPPM is wavefront-only (no megakernel photon pass). Megakernel path/BDPT is GPU-validated; wavefront (all three) is CPU-verified + merged, with the GPU self-consistency + prism/pbrt-truth gates now measured on Metal (suite scenes; white-furnace + full-corpus pending). Out-of-envelope combos are refused at startup. |
 | Materials | **Flat only** — a skin/subsurface/heterogeneous-volume scene under `--spectral` is refused. |
-| Sampling layers | Spectral **path** supports the analytic `bsdf`, `bsdf,env`, and `env` directional-proposal presets in megakernel + wavefront; the environment proposal reuses the existing env CDF and full mixture-pdf MIS. BDPT/SPPM keep their native sampling. No neural proposal or ReSTIR reuse (both refused under `--spectral`). |
+| Sampling layers | Spectral **path** supports the analytic `bsdf`, `bsdf,env`, and `env` directional-proposal presets in megakernel + wavefront; the environment proposal reuses the existing env CDF and full mixture-pdf MIS. BDPT/SPPM/MLT keep their native sampling. No neural proposal or ReSTIR reuse (both refused under `--spectral`). |
 | Dispersion | Path + BDPT carry hero-λ Cauchy glass dispersion; **SPPM has no dispersion** (v1 limit — it would break the per-pass photon/visible-point wavelength coherence). |
 | Samples | 4 hero-rotated wavelengths over 360–830 nm (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 

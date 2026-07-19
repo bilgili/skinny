@@ -8,8 +8,8 @@ TBD - created by archiving change spectral-rendering. Update Purpose after archi
 The renderer SHALL provide an opt-in spectral render mode selected at startup
 via a `--spectral` CLI flag on all front-ends (env var `SKINNY_SPECTRAL`), fixed
 for the session like the execution mode, and not persisted. Spectral mode SHALL
-support the `path`, `bdpt`, and `sppm` integrators in their existing execution
-envelopes on flat-material scenes. The spectral `path` integrator SHALL admit
+support the `path`, `bdpt`, `sppm`, and `mlt` integrators in their existing
+execution envelopes on flat-material scenes. The spectral `path` integrator SHALL admit
 the analytic directional-proposal sets `{bsdf}`, `{bsdf,env}`, and `{env}` in
 both megakernel and wavefront execution modes. Startup SHALL refuse the flag
 with a clear error when combined with ReSTIR DI reuse, the neural directional
@@ -41,9 +41,9 @@ pipeline.
 
 #### Scenario: spectral environment proposal is path-only
 
-- **WHEN** an explicit spectral BDPT/SPPM launch requests an environment
+- **WHEN** an explicit spectral BDPT/SPPM/MLT launch requests an environment
   proposal, or an interactive spectral session switches from path with an
-  environment proposal selected to BDPT/SPPM
+  environment proposal selected to BDPT/SPPM/MLT
 - **THEN** explicit startup is refused with an error naming `path` as the
   required integrator, while an interactive switch resolves to native BSDF
   sampling and reports the pin
@@ -236,4 +236,3 @@ no GPU state.
 - **WHEN** spectral path tracing runs with the default `{bsdf}` proposal
 - **THEN** the shared proposal sampler takes its BSDF-only fast path and the
   spectral response/pdf estimator is unchanged
-
