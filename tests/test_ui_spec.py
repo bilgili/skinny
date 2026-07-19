@@ -10,11 +10,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from skinny.params import build_all_params, build_visible_params
+from skinny.params import build_all_params, build_visible_params, is_fallback_light_param
 from skinny.ui import spec
-from skinny.ui.build_app_ui import (
-    _DEDICATED_WIDGET_PATHS, build_main_ui,
-)
+from skinny.ui.build_app_ui import build_main_ui
 
 
 # ── Stub renderer ──────────────────────────────────────────────────
@@ -118,8 +116,9 @@ def _collect_bound_paths(node: spec.Node) -> list[str]:
 
 def test_every_param_bound_exactly_once(stub_renderer):
     """Every entry from ``build_all_params`` either appears as a
-    Slider/Combo bound to its path, or is on the dedicated-widget
-    allowlist (light RGB + elev/az), exactly once.
+    Slider/Combo bound to its path, or is a fallback-light (IBL + Direct
+    Light) param — those are dropped from the sidebar entirely, not
+    exposed by any widget — exactly once.
     """
     tree = build_main_ui(stub_renderer)
     bound = _collect_bound_paths(tree)
@@ -130,11 +129,9 @@ def test_every_param_bound_exactly_once(stub_renderer):
     )
 
     expected = {p.path for p in build_all_params(stub_renderer)}
-    # IBL + Direct Light params live in the scene-graph dock now, not in
-    # the sidebar; their paths intentionally absent from the sidebar tree.
-    sidebar_excluded = _DEDICATED_WIDGET_PATHS | {
-        "env_index", "env_intensity",
-        "direct_light_index", "light_intensity",
+    sidebar_excluded = {
+        p.path for p in build_all_params(stub_renderer)
+        if is_fallback_light_param(p)
     }
     missing = expected - bound_set - sidebar_excluded
     assert not missing, f"Params missing from UI tree: {sorted(missing)}"
@@ -143,14 +140,24 @@ def test_every_param_bound_exactly_once(stub_renderer):
     assert not extra, f"Tree binds unknown paths: {sorted(extra)}"
 
 
-def test_dedicated_widgets_not_double_bound(stub_renderer):
-    """light_color_* and light_elev/az must NOT also appear as Slider rows
-    — they're owned by the Color and DirectionPicker widgets.
+def test_fallback_light_params_not_bound(stub_renderer):
+    """IBL + Direct Light params (env_index, env_intensity,
+    direct_light_index, light_*) must not appear anywhere in the sidebar
+    tree — no Slider/Combo binds them, and no Color/DirectionPicker widget
+    is built for them either.
     """
     tree = build_main_ui(stub_renderer)
     bound = set(_collect_bound_paths(tree))
-    leaked = bound & _DEDICATED_WIDGET_PATHS
-    assert not leaked, f"Dedicated widget paths leaked into sliders: {leaked}"
+    fallback_paths = {
+        p.path for p in build_all_params(stub_renderer)
+        if is_fallback_light_param(p)
+    }
+    leaked = bound & fallback_paths
+    assert not leaked, f"Fallback-light paths leaked into the sidebar: {leaked}"
+
+    kinds = {type(n).__name__ for n in spec.walk(tree)}
+    assert "Color" not in kinds
+    assert "DirectionPicker" not in kinds
 
 
 def test_top_level_section_order(stub_renderer):
@@ -160,28 +167,10 @@ def test_top_level_section_order(stub_renderer):
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
         "Scene", "Resolution", "Capture", "Animation", "Scene Controls",
-        "Render", "ReSTIR", "Skin", "Detail", "IBL", "Direct Light",
+        "Render", "ReSTIR", "Skin", "Detail",
     ]
-
-
-def test_fallback_light_sections_follow_runtime_authority(stub_renderer):
-    tree = build_main_ui(stub_renderer)
-    sections = {
-        child.title: child
-        for child in tree.children
-        if isinstance(child, spec.Section)
-    }
-
-    assert sections["IBL"].is_visible() is True
-    assert sections["Direct Light"].is_visible() is True
-
-    stub_renderer.uses_default_lights = False
-    assert sections["IBL"].is_visible() is False
-    assert sections["Direct Light"].is_visible() is False
-
-    stub_renderer.uses_default_lights = True
-    assert sections["IBL"].is_visible() is True
-    assert sections["Direct Light"].is_visible() is True
+    assert "IBL" not in titles
+    assert "Direct Light" not in titles
 
 
 def test_glfw_visible_params_hide_the_complete_fallback_pair(stub_renderer):

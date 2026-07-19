@@ -18,7 +18,7 @@ from typing import Callable
 
 from skinny.params import (
     ParamSpec, RESOLUTION_PRESETS, _get_nested, _set_nested,
-    build_all_params,
+    build_all_params, is_fallback_light_param,
 )
 from skinny.presets import apply_preset
 from skinny.ui.spec import Section, UIBuilder
@@ -52,15 +52,6 @@ HDR_FILE_FILTERS: list[tuple[str, str]] = [
     ("PFM",          "*.pfm"),
     ("All files",    "*.*"),
 ]
-
-
-# Light RGB and elev/az get dedicated widgets (color picker, direction
-# picker), so we hide their individual sliders from the generic param
-# loop. Same set the old Tk panel used (`control_panel._HIDDEN_PANEL_PATHS`).
-_DEDICATED_WIDGET_PATHS: frozenset[str] = frozenset({
-    "light_color_r", "light_color_g", "light_color_b",
-    "light_elevation", "light_azimuth",
-})
 
 
 # ── Host-supplied callbacks ────────────────────────────────────────
@@ -103,10 +94,6 @@ def _classify(p: ParamSpec) -> str:
     path = p.path
     if path == "preset_index" or path.startswith("mtlx.") or path in ("tattoo_index", "tattoo_density", "scatter_index"):
         return "Skin"
-    if path in ("env_index", "env_intensity"):
-        return "IBL"
-    if path.startswith("light") or path == "direct_light_index":
-        return "Direct Light"
     if path in ("normal_map_strength", "displacement_scale_mm",
                 "detail_maps_index"):
         return "Detail"
@@ -120,13 +107,19 @@ def _classify(p: ParamSpec) -> str:
 def _group_params(
     renderer,
 ) -> tuple[dict[str, list[ParamSpec]], list[ParamSpec]]:
-    """Return ``(by_group, all_params)``. Empty groups are dropped."""
+    """Return ``(by_group, all_params)``. Empty groups are dropped.
+
+    Fallback-light params (IBL + Direct Light: ``env_index``,
+    ``env_intensity``, ``direct_light_index``, ``light_*``) are not exposed
+    in the sidebar at all — no GUI section for them.
+    """
     all_params = build_all_params(renderer)
     groups: dict[str, list[ParamSpec]] = {
-        "Render": [], "ReSTIR": [], "Skin": [], "Detail": [], "IBL": [],
-        "Direct Light": [],
+        "Render": [], "ReSTIR": [], "Skin": [], "Detail": [],
     }
     for p in all_params:
+        if is_fallback_light_param(p):
+            continue
         groups[_classify(p)].append(p)
     return {k: v for k, v in groups.items() if v}, all_params
 
@@ -184,45 +177,6 @@ def _set_param_value(renderer, path: str, value) -> None:
         setter(path, value)
     else:
         _set_nested(renderer, path, value)
-
-
-# ── Light helpers ──────────────────────────────────────────────────
-
-
-def _add_light_color(ui: UIBuilder, renderer) -> None:
-    def _get() -> tuple[float, float, float]:
-        return (
-            float(getattr(renderer, "light_color_r")),
-            float(getattr(renderer, "light_color_g")),
-            float(getattr(renderer, "light_color_b")),
-        )
-
-    def _set(rgb: tuple[float, float, float]) -> None:
-        renderer.light_color_r = float(rgb[0])
-        renderer.light_color_g = float(rgb[1])
-        renderer.light_color_b = float(rgb[2])
-        # Existing Tk + web both call _update_light after editing light
-        # state so the cached spherical→cartesian direction stays in sync.
-        if hasattr(renderer, "_update_light"):
-            renderer._update_light()
-
-    ui.color("Color", getter=_get, setter=_set)
-
-
-def _add_light_direction(ui: UIBuilder, renderer) -> None:
-    ui.direction_picker(
-        "Direction",
-        elev_getter=lambda: float(getattr(renderer, "light_elevation")),
-        elev_setter=lambda v: _set_light_angle(renderer, "light_elevation", v),
-        az_getter=lambda: float(getattr(renderer, "light_azimuth")),
-        az_setter=lambda v: _set_light_angle(renderer, "light_azimuth", v),
-    )
-
-
-def _set_light_angle(renderer, attr: str, value: float) -> None:
-    setattr(renderer, attr, float(value))
-    if hasattr(renderer, "_update_light"):
-        renderer._update_light()
 
 
 # ── Animation transport ────────────────────────────────────────────
@@ -618,28 +572,14 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
         ),
     )
 
-    section_order = ["Render", "ReSTIR", "Skin", "Detail", "IBL", "Direct Light"]
+    section_order = ["Render", "ReSTIR", "Skin", "Detail"]
     for group in section_order:
         params_in_group = grouped.get(group)
-        if not params_in_group and group not in ("IBL", "Direct Light"):
+        if not params_in_group:
             continue
-        visible_when = (
-            (lambda: bool(renderer.uses_default_lights))
-            if group in ("IBL", "Direct Light")
-            else None
-        )
-        with ui.section(
-            group,
-            expanded=(group != "Skin"),
-            visible_when=visible_when,
-        ):
-            for p in (params_in_group or []):
-                if p.path in _DEDICATED_WIDGET_PATHS:
-                    continue
+        with ui.section(group, expanded=(group != "Skin")):
+            for p in params_in_group:
                 _add_param(ui, renderer, p)
-            if group == "Direct Light":
-                _add_light_color(ui, renderer)
-                _add_light_direction(ui, renderer)
 
     # Materials + Scene Graph sections used to be sidebar dynamic-section
     # accordions. Removed — those live in dedicated docks (Material
