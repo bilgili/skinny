@@ -16,6 +16,7 @@ The gpu gates skip cleanly when no backend/reference is available, mirroring
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from skinny.pbrt import furnace as furnace_mod
 from skinny.pbrt import metrics
 from skinny.pbrt.parity import (
     ANCHOR,
+    RenderCombo,
     authoring_equivalence_result,
     enumerate_combos,
     load_manifest,
@@ -48,6 +50,20 @@ EQUIV_PAIRS = [s for s in SUITE if s.equivalence and s.equivalence.get("pair")]
 # Suite scenes carrying a spectral-discriminating disposition (change
 # spectral-rendering, Group 6.5): a --spectral render is meant to differ from RGB.
 SPECTRAL = [s for s in SUITE if s.spectral]
+
+# Focused proposal gate measured on native Metal at 64×64, 128 spp:
+# megakernel relMSE=0.002764 / FLIP=0.008695, wavefront
+# relMSE=0.003192 / FLIP=0.009214.  The recorded ceilings retain modest
+# cross-driver headroom while remaining much tighter than the standing matrix's
+# general unbiased-proposal floor.
+SPECTRAL_ENV_GATE = {
+    "scene": "samp_env_glossy",
+    "width": 64,
+    "height": 64,
+    "spp": 128,
+    "relmse": 0.01,
+    "flip": 0.015,
+}
 
 
 def _abs(path: str) -> str:
@@ -236,6 +252,44 @@ def test_pbr_shaderball_smoke(card):
 
 
 # ─── gpu: render gates ─────────────────────────────────────────────────────
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("execution_mode", ["megakernel", "wavefront"])
+def test_spectral_environment_proposal_converges(execution_mode):
+    """Spectral ``{bsdf,env}`` stays consistent with ``{bsdf}`` on the suite's
+    IBL/glossy discriminator in both execution modes.
+
+    This is the focused, affordable gate for the environment proposal itself;
+    the full suite matrix independently enumerates the same spectral proposal
+    axis at each scene's authored resolution and sample count.
+    """
+    cfg = SPECTRAL_ENV_GATE
+    spec = replace(
+        SUITE_BY_NAME[cfg["scene"]],
+        width=cfg["width"],
+        height=cfg["height"],
+        spp=cfg["spp"],
+    )
+    bsdf = RenderCombo("path", execution_mode, spectral=True)
+    bsdf_env = RenderCombo("path", execution_mode, ("env",), spectral=True)
+    bsdf_img = render_combo(spec, bsdf, CORPUS_DIR)
+    env_img = render_combo(spec, bsdf_env, CORPUS_DIR)
+
+    assert np.isfinite(bsdf_img).all()
+    assert np.isfinite(env_img).all()
+    assert float(bsdf_img.mean()) > 1e-4, "spectral IBL control render is black"
+
+    measured = metrics.compute_metrics(env_img, bsdf_img)
+    print(f"[{spec.name}] {bsdf_env.label} vs {bsdf.label}  {measured.summary()}")
+    assert measured.relmse <= cfg["relmse"], (
+        f"{execution_mode}: spectral environment proposal relMSE "
+        f"{measured.relmse:.4f} > recorded {cfg['relmse']:.4f}"
+    )
+    assert measured.flip <= cfg["flip"], (
+        f"{execution_mode}: spectral environment proposal FLIP "
+        f"{measured.flip:.4f} > recorded {cfg['flip']:.4f}"
+    )
 
 
 @pytest.mark.gpu

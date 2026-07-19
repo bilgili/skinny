@@ -619,7 +619,7 @@ scope below). See [Spectral.md](docs/Spectral.md).
 |--------|----------|
 | Integrator / execution | **Path, BDPT, or SPPM.** Path/BDPT run under megakernel + wavefront; SPPM is wavefront-only (no megakernel photon pass). Megakernel path/BDPT is GPU-validated; wavefront (all three) is CPU-verified + merged, with the GPU self-consistency + prism/pbrt-truth gates now measured on Metal (suite scenes; white-furnace + full-corpus pending). Out-of-envelope combos are refused at startup. |
 | Materials | **Flat only** — a skin/subsurface/heterogeneous-volume scene under `--spectral` is refused. |
-| Layers | No neural proposal, no ReSTIR reuse (both refused under `--spectral`). |
+| Sampling layers | Spectral **path** supports the analytic `bsdf`, `bsdf,env`, and `env` directional-proposal presets in megakernel + wavefront; the environment proposal reuses the existing env CDF and full mixture-pdf MIS. BDPT/SPPM keep their native sampling. No neural proposal or ReSTIR reuse (both refused under `--spectral`). |
 | Dispersion | Path + BDPT carry hero-λ Cauchy glass dispersion; **SPPM has no dispersion** (v1 limit — it would break the per-pass photon/visible-point wavelength coherence). |
 | Samples | 4 hero-rotated wavelengths over 360–830 nm (pbrt visible-λ pdf); CIE film resolve to the existing RGBA32F accumulation. |
 

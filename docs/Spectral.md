@@ -78,9 +78,9 @@ and the companions share the same path geometry.
 | Property | Value |
 | --- | --- |
 | Integrator | **Path, BDPT, and SPPM.** Path/BDPT run under both execution modes; SPPM is wavefront-only (no megakernel photon pass). See [Bidirectional transport](#bidirectional-transport-bdpt) and [Wavefront spectral transport](#wavefront-spectral-transport). |
-| Execution mode | **Megakernel and wavefront.** Wavefront carries hero-λ transport for all three integrators (change `spectral-wavefront`, wired + CPU-verified + merged; GPU-render gates pending). |
+| Execution mode | **Megakernel and wavefront.** Wavefront carries hero-λ transport for all three integrators (change `spectral-wavefront`, wired + CPU-verified + merged); spectral environment-proposal convergence is GPU-gated in both modes. |
 | Materials | **Flat only** (`UsdPreviewSurface` / `standard_surface` / `OpenPBR` / Python-material flats). Skin / subsurface / heterogeneous-volume scenes are refused at startup; a non-flat hit inside the loop terminates the path rather than mis-shade. |
-| Reuse / guiding | **None.** ReSTIR reuse and the neural proposal are refused. |
+| Proposals / reuse | Spectral **path** supports analytic `bsdf`, `bsdf,env`, and `env` proposals in megakernel + wavefront. BDPT/SPPM keep native sampling. ReSTIR reuse and the neural proposal are refused. |
 | Wavelengths | **4** hero-rotated, drawn from pbrt's visible-λ importance pdf. |
 | Film | CIE resolve (Wyman CMF) into the **existing RGBA32F accumulation** — exposure / tonemap / readback are untouched. |
 | Backends | Vulkan and native Metal, at parity (compile-time `-DSKINNY_SPECTRAL` on both). |
@@ -90,10 +90,10 @@ The spectral transport is a **deliberately separate integrator**
 `BSDFSample` / `LightSample` / `BounceResult` into `float4` would break every
 `float3` assignment across the flat / skin / python / BDPT / record tree. Instead
 `SpectralPathTracer` carries a `float4` `Spectrum` throughput/radiance itself and
-**reuses the RGB flat `sample()`** for the wavelength-independent geometry (the
-sampled direction `wi`, its solid-angle pdf, delta-ness), recolouring per
-wavelength. The RGB build never imports `spectrum.slang` or
-`path_spectral.slang`, so its SPIR-V is **byte-unchanged**.
+reuses the shared directional-proposal seam for wavelength-independent geometry
+(the sampled direction `wi`, its solid-angle mixture pdf, and delta-ness),
+recolouring the chosen direction per wavelength. The RGB build never imports
+`spectrum.slang` or `path_spectral.slang`, so its SPIR-V is **byte-unchanged**.
 
 ![Hero-wavelength megakernel: draw 4 λ, per-λ transport, CIE film resolve, shared accumulation](diagrams/spectral/pipeline.svg)
 
@@ -203,10 +203,11 @@ illuminant resolves to unit radiance and the shader matches the mirror bit-for-b
 
 The bounce loop is a standard unidirectional path tracer, but throughput and
 radiance are `Spectrum` (a `float4` bundle) and every material/light product is
-formed **per wavelength**. The BSDF *geometry* (`wi`, its pdf, delta-ness) comes
-from the RGB `mat.sample()` — it is wavelength-independent — and only the
-**response** is recoloured, so the non-delta throughput weight per wavelength
-reproduces the RGB sample weight exactly:
+formed **per wavelength**. Proposal *geometry* (`wi`, the full mixture pdf, and
+delta-ness) comes from `sampleBounceDirection` — it is wavelength-independent —
+and only the **response** is recoloured. With the default BSDF proposal this
+collapses to the material's native sample; with `bsdf,env` it becomes a
+one-sample-MIS mixture:
 
 ![beta ∗= f(lambda, wo→wi)/p(wi); L += beta ⊙ L_NEE(lambda)](diagrams/spectral/bounce-weight.svg)
 
@@ -216,6 +217,15 @@ reproduces the RGB sample weight exactly:
   pdf, the MIS power heuristic, the mixture proposal pdf — is the **same** value
   the RGB NEE uses (`mixtureProposalPdf` on the RGB material), so direct and
   indirect stay MIS-consistent.
+- **Environment proposal** (`--proposals bsdf,env` or `env`) reuses the existing
+  environment CDF and `envPdf`; it adds no spectral buffer, descriptor, or pass.
+  A continuous proposal mixture uses the opacity-aware
+  `flatResponseNEE / mixturePdf` per wavelength because `mat.evaluate()` includes
+  the stochastic surface-branch opacity in its density. The BSDF-only fast path
+  retains the original conditional `flatResponseS / samplePdf` estimator.
+  The generating mixture density is carried into environment-miss,
+  emissive-hit, and sphere-hit MIS. The megakernel and wavefront spectral path
+  use the same proposal contract.
 - **Russian roulette** and **MIS** stay scalar: they weight the whole bundle at
   once (RR keys off `max(β)` across the 4 lanes).
 - **Emission** at a flat hit is MIS-gated exactly as the RGB path
@@ -225,7 +235,8 @@ reproduces the RGB sample weight exactly:
 `materials/flat/flat_lobes.slang::flatBsdfResponseSpectral` is the per-λ mirror of
 `flatBsdfResponse`: colored reflectances are passed pre-upsampled, the Schlick
 term evaluates per-λ on `F0`, and every scalar lobe weight is identical to the RGB
-sample, so `response/pdf` reproduces the RGB weight.
+material. Dividing by the shared proposal seam's returned density gives the
+spectral one-sample-MIS weight.
 
 The per-λ NEE machinery (`SpectralFlatColors`, `upsampleFlatColors`,
 `flatResponseS/NEE`, `spectralAllLightsNEE`) lives in

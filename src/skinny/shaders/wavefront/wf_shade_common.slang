@@ -89,8 +89,9 @@ void wfTerminate(uint i, inout WavefrontPathState s, Spectrum radiance, RNG rng)
 }
 
 // Finish a bounce given the material's BounceResult: accumulate emission +
-// direct light, Russian roulette, spawn the next ray, BSDF-sampled sphere-light
-// MIS, and store (or terminate). Verbatim from the fused bounce tail.
+// direct light, Russian roulette, spawn the next ray, proposal-sampled
+// sphere-light MIS, and store (or terminate). Verbatim from the fused bounce
+// tail.
 void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, BounceResult br)
 {
     Spectrum throughput = s.throughput;   // Spectrum == float3 in the RGB build
@@ -99,10 +100,11 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
 
 #if defined(SKINNY_SPECTRAL)
     // ── Spectral flat bounce (mirror integrators/path_spectral.slang) ──
-    // Reuse the RGB br geometry (bsdfSample.wi/pdf/delta/transmitted) but recolor
-    // every radiance-carrying term per hero wavelength. The flat catch-all
-    // (wfPathShade) also compiles this under the define but is unreachable — the
-    // scene-level refusal blocks non-flat materials under spectral.
+    // Reuse the proposal seam's scalar br geometry
+    // (bsdfSample.wi/mixture-pdf/delta/transmitted) but recolor every
+    // radiance-carrying term per hero wavelength. The flat catch-all
+    // (wfPathShade) also compiles this under the define but is unreachable —
+    // the scene-level refusal blocks non-flat materials under spectral.
     SampledWavelengths sw = s.sw;
     FlatMaterial mat = loadFlatMaterial(h);
     uint metalId = flatMaterials[h.materialId].conductorMetalId;
@@ -187,8 +189,9 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
 
     throughput *= br.bsdfSample.weight;
 #else
-    // Spectral throughput update (mirror path_spectral). Reuse the RGB sampled
-    // direction; recolor the weight per wavelength. First: hero-λ dispersion.
+    // Spectral throughput update (mirror path_spectral). Reuse the
+    // proposal-sampled direction and full mixture pdf; recolor the weight per
+    // wavelength. First: hero-λ dispersion.
     float3 wiT = worldToTangent(br.bsdfSample.wi, Tsp, Bsp, Nsp);
     // Dispersive dielectric (Group 6.4): a delta refraction (pdf 0) through a
     // named glass (glassCauchyB > 0) crossing the interface (woSp.z·wiT.z < 0)
@@ -210,11 +213,13 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
         br.bsdfSample.transmitted  = nd.z < 0.0;
         sw                         = terminateSecondary(sw);
     }
-    // Non-delta lobe: response/pdf reproduces the RGB sample weight per λ. Delta
-    // glass (pdf 0): the RGB weight is the transmission tint, upsampled.
+    // Non-delta lobe: the shared helper preserves the BSDF-only conditional-pdf
+    // estimator and applies opacity when the pdf is a full proposal mixture.
+    // Delta glass (pdf 0) passes through unmixed.
     Spectrum weightS;
     if (br.bsdfSample.pdf > 0.0)
-        weightS = flatResponseS(mat, cols, woSp, wiT) / br.bsdfSample.pdf;
+        weightS = flatProposalWeightS(
+            mat, cols, woSp, wiT, br.bsdfSample.pdf);
     else
         weightS = cols.transmission;
     throughput *= weightS;
@@ -253,7 +258,7 @@ void wfFinishShade(uint i, WavefrontPathState s, inout RNG rng, HitInfo h, Bounc
     r.origin    = h.position + spawnOffset;
     r.direction = br.bsdfSample.wi;
 
-    // BSDF-sampled sphere-light hit: MIS against the NEE estimate.
+    // Proposal-sampled sphere-light hit: MIS against the NEE estimate.
     NearestSphereHit sph = intersectSphereLights(r, 1e30, fc.numSphereLights);
     HitInfo hNext = traceScene(fc, r);
     float geom_t = hNext.hit ? hNext.t : 1e30;

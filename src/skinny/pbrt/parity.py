@@ -161,7 +161,7 @@ class ParityResult:
 INTEGRATORS = ("path", "bdpt", "sppm", "mlt")
 EXECUTION_MODES = ("megakernel", "wavefront")
 # Proposal/reuse axes exercised by the matrix (beyond the bare baseline).
-PROPOSAL_AXES = ("neural",)
+PROPOSAL_AXES = ("env", "neural")
 REUSE_AXES = ("restir-di",)
 
 # Capability gate for the spectral axis (change spectral-rendering) — the single
@@ -193,6 +193,10 @@ class RenderCombo:
     @property
     def has_neural(self) -> bool:
         return "neural" in self.proposals
+
+    @property
+    def has_env_proposal(self) -> bool:
+        return "env" in self.proposals
 
     @property
     def has_reuse(self) -> bool:
@@ -269,17 +273,20 @@ def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
 
     v1 (megakernel) admitted path/bdpt under the megakernel; the
     ``spectral-wavefront`` change extends the envelope to the **wavefront**
-    execution mode too, for path, bdpt and sppm (flat materials, BSDF proposal,
-    no reuse). SPPM has no megakernel path (photon pass is wavefront-only), so
-    ``sppm`` is refused under the megakernel; the neural proposal and ReSTIR
-    reuse remain unsupported under spectral (wavefront-only reuse/proposal axes
-    that spectral does not yet cover). Returns ``(ok, reason)`` with a specific
-    reason per out-of-scope axis. Mirrors ``cli_common.reject_spectral_unsupported``.
+    execution mode too, for path, bdpt and sppm (flat materials, no reuse).
+    The analytic environment proposal is admitted on spectral path only; BDPT
+    and SPPM retain native BSDF sampling. SPPM has no megakernel path (photon
+    pass is wavefront-only), so ``sppm`` is refused under the megakernel; the
+    neural proposal and ReSTIR reuse remain unsupported under spectral. Returns
+    ``(ok, reason)`` with a specific reason per out-of-scope axis. Mirrors
+    ``cli_common.reject_spectral_unsupported``.
     """
     if combo.integrator not in ("path", "bdpt", "sppm"):
         return False, f"spectral supports path/bdpt/sppm; {combo.integrator.upper()} unsupported"
     if combo.has_neural:
         return False, "spectral is incompatible with the neural proposal (v1)"
+    if combo.has_env_proposal and combo.integrator != "path":
+        return False, "spectral environment proposal requires the path integrator"
     if combo.has_reuse:
         return False, "spectral is incompatible with ReSTIR reuse (v1)"
     if scene.material_class != "flat":
@@ -315,8 +322,8 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
             return False, "MLT is wavefront-only"
         if combo.spectral:
             return False, "spectral MLT is outside the v1 envelope (RGB only)"
-        if combo.has_neural or combo.has_reuse:
-            return False, "MLT is layer-free (no neural proposal, no ReSTIR reuse)"
+        if combo.proposals or combo.has_reuse:
+            return False, "MLT is layer-free (no directional proposal, no ReSTIR reuse)"
         if scene.material_class != "flat":
             return False, "MLT is flat-material only (no skin/subsurface/volume chains)"
         if not mlt_capability.MLT_IMPLEMENTED:
@@ -329,6 +336,14 @@ def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
             return False, "neural proposal requires the path integrator (BDPT ignores it)"
         if scene.material_class != "flat":
             return False, "neural proposal is flat-material only"
+    # Analytic environment directional proposal: consumed by the path
+    # integrator's bounce seam in either execution mode, on flat materials.
+    # BDPT/SPPM/MLT keep their native sampling and must not advertise the axis.
+    if combo.has_env_proposal:
+        if combo.integrator != "path":
+            return False, "environment proposal requires the path integrator"
+        if scene.material_class != "flat":
+            return False, "environment proposal is flat-material only"
     # ReSTIR DI direct-light reuse: wavefront + path only (it reuses the path
     # tracer's NEE reservoirs; BDPT/SPPM have their own light handling).
     if combo.has_reuse:
@@ -377,8 +392,12 @@ def all_combos() -> list[RenderCombo]:
             for reuse in REUSE_AXES:
                 combos.append(RenderCombo(integ, mode, (), reuse))
             # spectral axis — the bare variant per integrator×mode; combo_is_valid
-            # keeps (path, megakernel) and (bdpt, megakernel) on flat scenes.
+            # keeps the valid transport/proposal envelope on flat scenes.
             combos.append(RenderCombo(integ, mode, (), "none", spectral=True))
+            for prop in PROPOSAL_AXES:
+                combos.append(RenderCombo(
+                    integ, mode, (prop,), "none", spectral=True,
+                ))
     return combos
 
 
@@ -397,7 +416,7 @@ def combo_axis_class(combo: RenderCombo) -> str:
     so a spectral wavefront path is a ``"mode"`` delta against the spectral
     anchor (not conflated with the RGB→spectral shift).
     """
-    if combo.has_neural or combo.has_reuse:
+    if combo.proposals or combo.has_reuse:
         return "unbiased"
     if combo.integrator == "sppm":
         return "sppm"

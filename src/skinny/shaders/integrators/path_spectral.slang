@@ -31,7 +31,7 @@ import materials.flat.flat_lobes;      // flatBsdfResponseSpectral
 import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
-import sampling.proposal;              // ProposalContext, mixtureProposalPdf (scalar MIS companion)
+import sampling.proposal;              // ProposalContext, sampleBounceDirection, mixtureProposalPdf
 import integrators.spectral_flat_common; // SpectralFlatColors, upsampleFlatColors, flatResponseS, spectralAllLightsNEE (hoisted, shared with bdpt_spectral)
 
 static const uint SPECTRAL_MAX_BOUNCES = 6;
@@ -52,9 +52,9 @@ struct SpectralPathTracer
         HitInfo  h          = firstHit;
         Ray      r          = ray;
 
-        float misBsdfPdf       = -1.0;
+        float misProposalPdf    = -1.0;
         bool  spawnedBySpecular = false;
-        float prevBsdfPdf      = -1.0;
+        float prevProposalPdf   = -1.0;
 
         for (uint skip = 0u; skip < 32u && h.hit && isCutoutTransparent(h); skip++)
         {
@@ -70,8 +70,8 @@ struct SpectralPathTracer
                     r.direction, fc.envIntensity, effectiveFurnaceMode(h.materialId));
                 Spectrum envR = upsampleIlluminantBound(envRgb, sw);
                 float w = 1.0;
-                if (misBsdfPdf > 0.0)
-                    w = powerHeuristic(misBsdfPdf, envPdf(r.direction));
+                if (misProposalPdf > 0.0)
+                    w = powerHeuristic(misProposalPdf, envPdf(r.direction));
                 radiance += throughput * envR * w;
                 break;
             }
@@ -103,9 +103,15 @@ struct SpectralPathTracer
             // Direct lighting (spectral NEE).
             radiance += throughput * spectralAllLightsNEE(mat, cols, h, N, T, B, wo, sw, rng);
 
-            // BSDF sample: reuse the RGB flat draw for the λ-independent geometry
-            // (wi, pdf, delta-ness, transmission). Emission is the surface's own.
-            BSDFSample bs = mat.sample(wo, rng);
+            // Directional-proposal sample: proposal selection, wi, and the full
+            // mixture pdf are scalar / wavelength-independent. Recolor the
+            // chosen direction per wavelength below; ignore the helper's RGB
+            // weight. BSDF-only takes sampleBounceDirection's native fast path.
+            ProposalContext pctx;
+            pctx.woT = wo; pctx.N = N; pctx.T = T; pctx.B = B;
+            pctx.position = h.position; pctx.materialId = h.materialId;
+            pctx.neuralValid = false;   // spectral neural inference is refused
+            BSDFSample bs = sampleBounceDirection(mat, pctx, rng);
 
             // Emission at this hit (emissive flat), MIS-gated exactly as the RGB
             // path (emissive-triangle-bsdf-hit-mis). lum uses the RGB emission.
@@ -128,7 +134,7 @@ struct SpectralPathTracer
                 float pdfLightSA = (cosLight > 1e-6 && fc.emissiveTotalPower > 0.0)
                     ? lum * (h.t * h.t) / (fc.emissiveTotalPower * cosLight)
                     : 1e30;
-                float wBSDF = powerHeuristic(prevBsdfPdf, pdfLightSA);
+                float wBSDF = powerHeuristic(prevProposalPdf, pdfLightSA);
                 radiance += throughput * emis * wBSDF;
             }
 
@@ -164,12 +170,13 @@ struct SpectralPathTracer
                 sw              = terminateSecondary(sw);
             }
 
-            // Spectral throughput update. Non-delta lobe: response/pdf reproduces
-            // the RGB sample weight per wavelength. Delta glass (pdf 0): the RGB
-            // weight is transmissionColor — upsample it as a reflectance.
+            // Spectral throughput update. Non-delta lobe: the shared helper
+            // preserves the BSDF-only conditional-pdf estimator and applies
+            // opacity to the response when bs.pdf is a full proposal-mixture
+            // density. Delta glass (pdf 0) passes through unmixed.
             Spectrum weightS;
             if (bs.pdf > 0.0)
-                weightS = flatResponseS(mat, cols, wo, bs.wi) / bs.pdf;
+                weightS = flatProposalWeightS(mat, cols, wo, bs.wi, bs.pdf);
             else
                 weightS = cols.transmission;
             throughput *= weightS;
@@ -185,10 +192,10 @@ struct SpectralPathTracer
             }
 
             bool envNeeActive = (effectiveFurnaceMode(h.materialId) == 0u);
-            misBsdfPdf = (envNeeActive && !bs.transmitted && bs.pdf > 0.0)
-                       ? bs.pdf : -1.0;
+            misProposalPdf = (envNeeActive && !bs.transmitted && bs.pdf > 0.0)
+                           ? bs.pdf : -1.0;
             spawnedBySpecular = (bs.pdf <= 0.0);
-            prevBsdfPdf = spawnedBySpecular ? -1.0 : bs.pdf;
+            prevProposalPdf = spawnedBySpecular ? -1.0 : bs.pdf;
 
             float3 wiWorld = tangentToWorld(bs.wi, T, B, N);
             float3 spawnOffset = bs.transmitted ? -h.normal * 0.002 : h.normal * 0.002;

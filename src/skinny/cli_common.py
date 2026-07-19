@@ -291,9 +291,10 @@ def reject_spectral_unsupported(
     or the wavefront execution mode (SPPM under wavefront only, as in RGB — that
     ``sppm`` + explicit ``--execution-mode megakernel`` refusal lives in
     :func:`reject_sppm_without_wavefront`, not here, so it stays a single source
-    of truth for both RGB and spectral). Flat materials only. What is still refused:
-    a non-BSDF directional proposal (environment-importance or neural) and
-    ReSTIR reuse. Raises ``SystemExit``.
+    of truth for both RGB and spectral). Flat materials only. The spectral
+    ``path`` integrator admits the analytic BSDF and environment-importance
+    proposals; BDPT/SPPM retain native BSDF sampling. The neural directional
+    proposal and ReSTIR reuse remain refused. Raises ``SystemExit``.
 
     Scene-level unsupported transport (a skin/subsurface or heterogeneous-volume
     scene) is refused later, at renderer setup, where the material set is known —
@@ -301,22 +302,31 @@ def reject_spectral_unsupported(
     """
     if not spectral:
         return
-    del integrator, execution_mode  # accepted for path/bdpt/sppm × mega/wavefront
-    # Only the native BSDF proposal is supported. A non-BSDF proposal
-    # (environment-importance or neural) draws the bounce direction from a
-    # mixture the spectral path does not sample — it uses the material's native
-    # sample() while NEE's MIS companion assumes the mixture pdf, biasing
-    # direct+indirect coupling. Refuse the whole non-BSDF set; mixture sampling
-    # under spectral is a follow-up.
-    extra_proposals = [
-        p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
+    del execution_mode  # accepted for path/bdpt/sppm × mega/wavefront
+    # The analytic environment proposal shares the wavelength-independent
+    # direction/pdf seam with RGB; the spectral path recolors its selected
+    # direction per hero wavelength. Stateful neural inference remains outside
+    # the spectral envelope.
+    unsupported_proposals = [
+        p.strip()
+        for p in (proposals or "").split(",")
+        if p.strip() and p.strip() not in {"bsdf", "env"}
     ]
-    if extra_proposals:
+    if unsupported_proposals:
         raise SystemExit(
-            f"skinny: --spectral supports only the BSDF proposal (got "
-            f"--proposals {proposals}). The environment/neural directional proposals "
-            "draw the bounce from a mixture the spectral path does not sample, "
-            "which biases MIS — they are a spectral follow-up."
+            f"skinny: --spectral supports only the analytic BSDF/environment "
+            f"proposals (got --proposals {proposals}). The neural directional "
+            "proposal and its stateful inference path are not supported under "
+            "spectral."
+        )
+    proposal_tokens = {
+        p.strip() for p in (proposals or "").split(",") if p.strip()
+    }
+    if "env" in proposal_tokens and integrator != "path":
+        raise SystemExit(
+            f"skinny: --spectral --proposals {proposals} requires "
+            "--integrator path — spectral BDPT/SPPM retain their native BSDF "
+            "sampling and do not consume the directional-proposal seam."
         )
     if reuse and reuse not in ("none",):
         raise SystemExit(

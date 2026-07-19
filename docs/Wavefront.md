@@ -894,6 +894,17 @@ scalar `misWeight` via the color-free `asRgb` projection — one MIS
 implementation, shared with the megakernel; the s=1 splat resolves λ → linear
 sRGB before the atomic add.
 
+**Analytic directional proposals.** Spectral path lanes use the same
+`sampleBounceDirection` seam as RGB, so `bsdf`, `bsdf,env`, and `env` work under
+wavefront without new state. `flat_bounce.slang` supplies the selected
+world-space direction and full scalar mixture pdf; `wfFinishShade` evaluates
+the opacity-aware `flatResponseNEE` at the lane's hero wavelengths for a
+continuous mixture and divides by that density. The BSDF-only fast path keeps
+its original conditional `flatResponseS / samplePdf` estimator. Spectral NEE
+and escaped/sphere/emissive MIS use the same mixture companion. Neural
+proposals remain refused under spectral; BDPT and SPPM retain their native
+sampling strategies.
+
 **SPPM per-pass λ (D5).** SPPM draws **one shared hero-wavelength set per pass**
 (`sppmPassWavelengths`) so photons and eye visible points agree — the per-λ
 product φ = β ⊗ f_r is coherent. Each pass's φ is resolved λ → linear sRGB

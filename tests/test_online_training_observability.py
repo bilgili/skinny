@@ -21,7 +21,13 @@ from skinny.sampling.neural_replay import ReplayBuffer
 from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
 from skinny.sampling.path_records import RECORD_DTYPE
 
-_PRESETS = [("BSDF", "bsdf"), ("BSDF + Neural", "bsdf,neural")]
+_PRESETS = [
+    ("BSDF", "bsdf"),
+    ("BSDF + Neural", "bsdf,neural"),
+    ("BSDF + Env", "bsdf,env"),
+    ("Env", "env"),
+    ("Neural", "neural"),
+]
 
 
 def _records(n: int, tag: float) -> np.ndarray:
@@ -45,7 +51,7 @@ def _matrix_fake(**overrides):
         _requested_execution_mode="wavefront",
         effective_execution_mode_index=EXECUTION_WAVEFRONT,
         execution_mode_fallback_active=False,
-        integrator_modes=["Path", "BDPT"],
+        integrator_modes=["Path", "BDPT", "SPPM"],
         integrator_index=0,
         proposal_preset_index=1,           # bsdf,neural
         _PROPOSAL_PRESETS=_PRESETS,
@@ -146,10 +152,9 @@ def test_execution_mode_pin_shows_in_status():
     assert rows["execution-mode"].resolved == "megakernel"
 
 
-def test_spectral_pins_proposals_to_bsdf():
-    # Under --spectral the megakernel samples BSDF-only (path_spectral reuses the
-    # native BSDF sampler; a non-BSDF proposal would desync the NEE MIS companion).
-    # The config matrix must REPORT that pin, not echo a non-BSDF selection.
+def test_spectral_pins_neural_proposals_to_analytic_subset():
+    # Spectral keeps analytic proposals but strips neural. The config matrix must
+    # report the pin rather than echo a neural selection the renderer cannot run.
     fake = _matrix_fake(_spectral=True, proposal_preset_index=1)  # bsdf,neural
     fake._neural_active = lambda: False
     rows = _rows(fake)
@@ -167,6 +172,47 @@ def test_spectral_pins_proposals_to_bsdf():
     prows = _rows(plain)
     assert prows["proposals"].resolved == "bsdf"
     assert "spectral pin" not in prows["proposals"].status
+
+    # Neural-only has no supported analytic member, so it also falls back to
+    # BSDF and reports the pin.
+    neural = _matrix_fake(_spectral=True, proposal_preset_index=4)
+    neural._neural_active = lambda: False
+    nrows = _rows(neural)
+    assert nrows["proposals"].requested == "neural"
+    assert nrows["proposals"].resolved == "bsdf"
+    assert "spectral pin" in nrows["proposals"].status
+
+
+def test_spectral_environment_proposals_are_active_and_unpinned():
+    for preset_index, token in ((2, "bsdf,env"), (3, "env")):
+        fake = _matrix_fake(_spectral=True, proposal_preset_index=preset_index)
+        fake._neural_active = lambda: False
+
+        rows = _rows(fake)
+        assert rows["proposals"].requested == token
+        assert rows["proposals"].resolved == token
+        assert "spectral pin" not in rows["proposals"].status
+
+        active = Renderer._active_proposals(fake)
+        assert ",".join(p.cli_token for p in active) == token
+
+
+def test_spectral_non_path_integrators_pin_environment_proposal_to_bsdf():
+    for integrator_index in (1, 2):  # BDPT, SPPM
+        fake = _matrix_fake(
+            _spectral=True,
+            integrator_index=integrator_index,
+            proposal_preset_index=2,  # bsdf,env
+        )
+        fake._neural_active = lambda: False
+
+        rows = _rows(fake)
+        assert rows["proposals"].requested == "bsdf,env"
+        assert rows["proposals"].resolved == "bsdf"
+        assert "spectral pin" in rows["proposals"].status
+
+        active = Renderer._active_proposals(fake)
+        assert [p.cli_token for p in active] == ["bsdf"]
 
 
 def test_spectral_integrator_passthrough_path_bdpt_sppm():

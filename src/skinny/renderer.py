@@ -97,6 +97,26 @@ _SPPM_METAL_PHOTON_BATCH_DEFAULT = 65536
 _MLT_METAL_CHAIN_BATCH_DEFAULT = 16384
 
 
+def _spectral_analytic_proposal_token(
+    token: str,
+    *,
+    allow_environment: bool,
+) -> str:
+    """Resolve a proposal preset to the analytic spectral subset.
+
+    BSDF and environment importance sampling are wavelength-independent and
+    supported by the spectral path. Stateful neural inference is not; remove it
+    and fall back to BSDF if no analytic proposal remains.
+    """
+    supported = {"bsdf", "env"} if allow_environment else {"bsdf"}
+    analytic = [
+        part.strip()
+        for part in str(token).split(",")
+        if part.strip() in supported
+    ]
+    return ",".join(analytic) or "bsdf"
+
+
 def _sppm_photon_group_pmf(
     powers: tuple[float, float, float, float],
     present: tuple[bool, bool, bool, bool],
@@ -8994,19 +9014,21 @@ class Renderer:
     def _active_proposals(self) -> list:
         """Active directional proposals for the current preset index."""
         from skinny.sampling import parse_proposals
-        # Spectral v1 is BSDF-proposal-only. The megakernel spectral integrator
-        # (path_spectral.slang) draws the bounce from the material's native
-        # sample() while its NEE MIS companion reads fc.proposalMask — so a
-        # non-BSDF proposal biases MIS. The startup CLI guard
-        # (reject_spectral_unsupported) refuses an explicit non-BSDF --proposals,
-        # but proposal selection is ALSO persisted and runtime-switchable on the
-        # interactive front-ends; clamp here so no persisted/preset/runtime state
-        # can bypass the guard and desync the bounce from the NEE companion.
-        if self._spectral:
-            return parse_proposals("bsdf")
         n = len(self._PROPOSAL_PRESETS)
         idx = max(0, min(int(self.proposal_preset_index), n - 1))
-        return parse_proposals(self._PROPOSAL_PRESETS[idx][1])
+        token = self._PROPOSAL_PRESETS[idx][1]
+        # Spectral path tracing supports the analytic BSDF/environment subset.
+        # Proposal selection is persisted and runtime-switchable, so strip the
+        # unsupported neural bit here as well as refusing it on explicit CLI
+        # startup. BDPT/SPPM do not consume the proposal seam, so they also
+        # resolve to native BSDF sampling. An empty subset safely falls back to
+        # the BSDF baseline.
+        if self._spectral:
+            token = _spectral_analytic_proposal_token(
+                token,
+                allow_environment=(int(self.integrator_index) == 0),
+            )
+        return parse_proposals(token)
 
     def _active_integrator_index(self) -> int:
         """The integrator actually dispatched. Spectral now spans PATH (0),
@@ -9329,24 +9351,31 @@ class Renderer:
         rows.append(cr.ConfigRow("integrator", req_integ, req_integ, cr.ON))
 
         # proposals: requested = the selected preset token; resolved = what the
-        # renderer actually samples. Spectral v1 pins the mixture to BSDF-only
-        # (see _active_proposals), so the resolved column must report that pin
-        # rather than echo the requested token — otherwise the status surface
-        # claims an env/neural mixture the spectral megakernel never samples.
+        # renderer actually samples. Spectral retains the analytic BSDF/env
+        # subset and strips neural (see _active_proposals), so the resolved
+        # column reports a pin only when the requested token actually changes.
         idx = max(0, min(int(self.proposal_preset_index),
                          len(self._PROPOSAL_PRESETS) - 1))
         prop_tok = self._PROPOSAL_PRESETS[idx][1]
-        if self._spectral and prop_tok != "bsdf":
+        resolved_prop_tok = (
+            _spectral_analytic_proposal_token(
+                prop_tok,
+                allow_environment=(int(self.integrator_index) == 0),
+            )
+            if self._spectral
+            else prop_tok
+        )
+        if resolved_prop_tok != prop_tok:
             # Fold the requested token into the STATUS (not just the requested
             # column): matrix_signature dedups re-prints on resolved+status only,
-            # so with resolved pinned to "bsdf" a runtime proposal switch would
-            # otherwise leave the matrix stale. Carrying prop_tok in the status
-            # makes the signature flip when the user changes the preset live.
-            rows.append(cr.ConfigRow("proposals", prop_tok, "bsdf",
+            # so a runtime switch between pinned presets must also change status.
+            rows.append(cr.ConfigRow("proposals", prop_tok, resolved_prop_tok,
                                      f"{cr.ON} (spectral pin; requested {prop_tok})"))
         else:
             prop_status = "neural ACTIVE" if self._neural_active() else cr.ON
-            rows.append(cr.ConfigRow("proposals", prop_tok, prop_tok, prop_status))
+            rows.append(cr.ConfigRow(
+                "proposals", prop_tok, resolved_prop_tok, prop_status,
+            ))
 
         # The training stack rows only matter when online training is requested;
         # mark them n/a otherwise so the matrix reads cleanly with the loop off.

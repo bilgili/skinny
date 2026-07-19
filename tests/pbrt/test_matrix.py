@@ -50,6 +50,23 @@ def test_neural_requires_wavefront_path_flat():
     assert not ok and "flat-material" in reason
 
 
+def test_environment_proposal_requires_path_flat_in_both_modes():
+    flat = _flat_scene()
+    for mode in parity.EXECUTION_MODES:
+        assert parity.combo_is_valid(
+            RenderCombo("path", mode, ("env",)), flat,
+        )[0]
+    for integrator in ("bdpt", "sppm", "mlt"):
+        ok, reason = parity.combo_is_valid(
+            RenderCombo(integrator, "wavefront", ("env",)), flat,
+        )
+        assert not ok and ("path integrator" in reason or "layer-free" in reason)
+    ok, reason = parity.combo_is_valid(
+        RenderCombo("path", "wavefront", ("env",)), _sss_scene(),
+    )
+    assert not ok and "flat-material" in reason
+
+
 def test_mlt_is_wavefront_only():
     ok, reason = parity.combo_is_valid(RenderCombo("mlt", "megakernel"), _flat_scene())
     assert not ok and "wavefront-only" in reason
@@ -142,11 +159,14 @@ def test_enumerate_flat_scene():
     assert "bdpt|wavefront" in labels
     assert "sppm|wavefront" in labels
     assert "path|wavefront|neural" in labels
+    assert "path|megakernel|env" in labels
+    assert "path|wavefront|env" in labels
     assert "path|wavefront|restir-di" in labels
     # excluded by design
     assert "sppm|megakernel" not in labels
     assert "bdpt|wavefront|neural" not in labels
     assert "path|megakernel|neural" not in labels
+    assert "bdpt|wavefront|env" not in labels
     assert "bdpt|wavefront|restir-di" not in labels  # ReSTIR DI is path-only
 
 
@@ -312,6 +332,30 @@ def test_spectral_with_neural_skipped():
     assert not ok and "neural" in reason
 
 
+def test_spectral_environment_proposal_is_path_only_and_enumerated():
+    flat = _flat_scene()
+    expected = {
+        RenderCombo("path", mode, ("env",), spectral=True)
+        for mode in parity.EXECUTION_MODES
+    }
+    for combo in expected:
+        ok, reason = parity.combo_is_valid(combo, flat)
+        assert ok, reason
+        assert parity.combo_axis_class(combo) == "unbiased"
+        assert parity.self_consistency_anchor(combo) == parity.SPECTRAL_ANCHOR
+    for integrator in ("bdpt", "sppm"):
+        ok, reason = parity.combo_is_valid(
+            RenderCombo(integrator, "wavefront", ("env",), spectral=True),
+            flat,
+        )
+        assert not ok and "path integrator" in reason
+    rendered = {
+        c for c in parity.enumerate_combos(flat)
+        if c.spectral and c.has_env_proposal
+    }
+    assert rendered == expected
+
+
 def test_spectral_with_reuse_skipped():
     ok, reason = parity.combo_is_valid(
         RenderCombo("path", "megakernel", (), "restir-di", spectral=True), _flat_scene())
@@ -334,6 +378,8 @@ def test_spectral_envelope_is_path_bdpt_both_modes_and_sppm_wavefront():
     # (ships True) these are exactly the spectral entries in the rendered set.
     expected = {RenderCombo("path", "megakernel", spectral=True),
                 RenderCombo("path", "wavefront", spectral=True),
+                RenderCombo("path", "megakernel", ("env",), spectral=True),
+                RenderCombo("path", "wavefront", ("env",), spectral=True),
                 RenderCombo("bdpt", "megakernel", spectral=True),
                 RenderCombo("bdpt", "wavefront", spectral=True),
                 RenderCombo("sppm", "wavefront", spectral=True)}

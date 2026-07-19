@@ -521,8 +521,21 @@ def test_reject_spectral_envelope_ok_when_wired(monkeypatch):
     monkeypatch.setattr(spectral_capability, "SPECTRAL_IMPLEMENTED", True)
     reject_spectral_unsupported(True, "path", "megakernel", None, None)
     reject_spectral_unsupported(True, "path", "megakernel", "", "none")
+    reject_spectral_unsupported(True, "path", "megakernel", "bsdf,env", "none")
+    reject_spectral_unsupported(True, "path", "megakernel", "env", "none")
     # BDPT is in the megakernel spectral envelope (change spectral-bdpt-megakernel).
     reject_spectral_unsupported(True, "bdpt", "megakernel", None, None)
+
+
+def test_reject_spectral_environment_proposal_requires_path():
+    from skinny.cli_common import reject_spectral_unsupported
+
+    for integrator in ("bdpt", "sppm"):
+        with pytest.raises(SystemExit) as ei:
+            reject_spectral_unsupported(
+                True, integrator, "wavefront", "bsdf,env", None,
+            )
+        assert "--integrator path" in str(ei.value)
 
 
 def test_reject_spectral_sppm_accepted():
@@ -547,8 +560,11 @@ def test_reject_spectral_wavefront_accepted():
 def test_reject_spectral_neural_raises():
     from skinny.cli_common import reject_spectral_unsupported
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as ei:
         reject_spectral_unsupported(True, "path", "megakernel", "bsdf,neural", None)
+    message = str(ei.value)
+    assert "neural" in message
+    assert "BSDF/environment" in message
 
 
 def test_reject_spectral_reuse_raises():

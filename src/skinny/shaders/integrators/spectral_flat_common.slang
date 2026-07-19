@@ -82,6 +82,22 @@ Spectrum flatResponseNEE(FlatMaterial mat, SpectralFlatColors c, float3 wo, floa
     return flatResponseS(mat, c, wo, wi) * mat.data.mat.opacity;
 }
 
+// Per-wavelength throughput weight for a direction returned by the proposal
+// seam. The BSDF-only fast path returns FlatMaterial.sample()'s CONDITIONAL
+// continuous-lobe pdf; stochastic branch selection supplies the opacity factor,
+// so the historical flatResponseS/pdf estimator must stay unchanged. A genuine
+// mixture instead returns mat.evaluate()'s UNCONDITIONAL BSDF component
+// (opacity*pdf) plus the other proposal densities, so its numerator must carry
+// the matching opacity factor via flatResponseNEE.
+Spectrum flatProposalWeightS(
+    FlatMaterial mat, SpectralFlatColors c, float3 wo, float3 wi, float proposalPdf)
+{
+    Spectrum response = (fc.proposalMask == PROPOSAL_BSDF)
+                      ? flatResponseS(mat, c, wo, wi)
+                      : flatResponseNEE(mat, c, wo, wi);
+    return response / proposalPdf;
+}
+
 // ── Spectral NEE (flat-only) ─────────────────────────────────────
 // Mirrors nee.slang's allLightsNEE, but the BSDF response is per wavelength
 // (flatResponseS) and each RGB light/env radiance upsamples as an illuminant, so

@@ -9,6 +9,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Spectral environment directional proposal** (change
+  `spectral-environment-proposal`). Spectral path tracing now supports the
+  analytic `--proposals bsdf,env` and `--proposals env` presets under both
+  megakernel and wavefront execution. Proposal directions and their full
+  one-sample-MIS density stay scalar, while the opacity-aware spectral response
+  and environment radiance are evaluated per hero wavelength; environment-miss,
+  emissive-hit, sphere-hit, and NEE weights all use the same generating mixture
+  pdf. The BSDF-only fast path keeps its original conditional estimator. The
+  environment proposal reuses the existing CDF bindings and adds no GPU state.
+  Interactive spectral selections preserve their analytic subset and report a
+  pin only when stripping unsupported neural proposals; neural and ReSTIR
+  remain outside the spectral envelope.
 - **Scene-graph light creation** (change `scene-graph-light-controls`). The Qt
   and Panel/web scene-graph editors now expose an **Add light** menu for
   DistantLight, SphereLight, DomeLight, RectLight, and DiskLight. New prims are
