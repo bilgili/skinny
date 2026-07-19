@@ -348,8 +348,9 @@ cleanup all happen there. The GUI builds controls against a lightweight proxy
 that reads immutable snapshots and posts renderer mutations (camera input,
 zoom/focus toggles, scene loads, parameter edits, and render-target resize)
 through a command queue. The main Qt thread paints the latest emitted frame and
-stays responsive while the renderer is accumulating. Deep inspector docks that
-need live renderer internals are gated until their snapshot-backed ports land.
+stays responsive while the renderer is accumulating. All five View-menu tool
+docks are proxy-backed and live: they read worker-built snapshots and post
+mutations through the same queue.
 
 Any `.usda` / `.usdc` / `.usdz` file with MaterialX-bound or
 `UsdPreviewSurface`-bound materials will load. The renderer has been tested
@@ -383,6 +384,56 @@ server-side and decoded via WebCodecs in the browser.
 
 Keyboard-driven loop with no Qt overhead. Useful for fast iteration on the
 render pipeline or Slang code where the Qt event loop gets in the way.
+
+### MCP scene control (`--mcp`)
+
+Let an MCP client (Claude, or any other) inspect and edit the scene of a
+**running** `skinny` or `skinny-gui` session while you watch the viewport.
+
+```bash
+pip install -e ".[mcp]"          # optional extra; --mcp errors without it
+.venv/bin/skinny-gui --backend metal --mcp
+```
+
+Startup prints the registration command:
+
+```bash
+claude mcp add --transport http skinny http://127.0.0.1:8765/mcp \
+  --header "Authorization: Bearer $(cat ~/.skinny/mcp_token)"
+```
+
+Three tools, addressed by USD prim path:
+
+| Tool | Purpose |
+|------|---------|
+| `scene_list(path, depth, kind)` | Tree structure — no property values. Filter by `kind` (`material`, `light_dir`, `light_sphere`, `light_env`, `instance`, `renderer_camera`) |
+| `scene_get(path)` | One node's properties, with editable flags and bounds |
+| `scene_set(path, property, value)` | Write one property |
+
+Edits take the same code path as the equivalent Scene Graph dock edit, so both
+behave identically. (One exemption: the dock's *file-chooser* flows for HDR and
+lens files keep their own dialog and async error handling; the routing decision
+is still shared, so a client reaches the same renderer verb.) The docks stay live and enabled while a client is connected;
+concurrent edits are last-write-wins, and every result reports the current scene
+and material versions.
+
+**Security.** Off by default. Binds `127.0.0.1` only (the port option takes a
+port number, never a host). Requests carrying an `Origin` header are refused and
+`Host` is validated, so a page in your browser cannot drive the renderer. Every
+request needs the bearer token from `~/.skinny/mcp_token` (overridable with
+`SKINNY_MCP_TOKEN`). On POSIX the file is created mode `0600` and re-validated
+on every read (no-follow open, owner and mode checked on the same descriptor).
+**On Windows those checks do not apply** — the primitives they use do not exist
+there, so the token is only as protected as your user profile directory. Refusing `Origin` also blocks
+browser-hosted MCP clients such as the MCP Inspector — a deliberate trade.
+
+`--mcp-port` overrides the default `8765`. If the port is already bound (a second
+session), the renderer starts normally with MCP disabled rather than exiting.
+
+**v1 limits:** no save/export tool — material, light, and instance edits mutate
+in-memory render state and bypass USD, so an export would silently omit them; no
+node add/remove; and no image tool, so the client edits without seeing the
+result. Watch the viewport.
 
 ### Headless rendering (`skinny-render`)
 

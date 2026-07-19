@@ -88,10 +88,77 @@ viewport (owned on the worker as `renderer.debug_viewport`, emitting a `DebugFra
 each frame via `RenderViewport.debug_frame_ready`). No dock issues a GPU call or
 blocks on a `Future` from the GUI thread.
 
+### The command queue is front-end-neutral (`render_session.py`)
+
+`RenderCommandQueue` and `QtRendererProxy` live at `src/skinny/render_session.py`,
+not under `ui/qt/` — the module never imported Qt, and it now has callers outside
+the Qt front-end (`skinny.ui.qt.render_session` re-exports for compatibility).
+Two rules follow:
+
+- **The queue executes commands, callers do not.** `run_pending(target, on_error=None)`
+  invokes each callback and settles its reply future. `drain()` only removes
+  pending commands; a caller that drains and loops the callbacks itself must
+  settle every reply, or awaited calls hang to their timeout. Both the Qt worker
+  and the GLFW main loop call `run_pending`.
+- **Every non-owning thread marshals through it — reads included.** Off-thread
+  reads race too: the scene graph is rebuilt on the streaming load thread and
+  swapped into `renderer.scene_graph`, so reading it from another thread can
+  observe a swap mid-flight.
+
+The GLFW front-end (`app.py`) owns a queue and calls `run_pending` once per
+iteration, immediately after `glfw.poll_events()` and before `renderer.update(dt)`
+— the same position the Qt worker drains at. The call is unconditional, so
+ordering does not depend on optional features being enabled.
+
+### MCP scene control (`mcp_server.py`, `mcp_auth.py`)
+
+Opt-in (`--mcp`, off by default), the interactive front-ends host an MCP server on
+a daemon thread that exposes the live scene graph to an MCP client — three
+path-addressed tools, `scene_list` / `scene_get` / `scene_set` (change
+`mcp-scene-control`). It attaches to the running renderer; it never builds one.
+
+The server thread holds only the proxy (Qt) or the bare queue (GLFW) — never the
+`Renderer` and never the GPU context, so it cannot extend a `MetalContext`
+lifetime. Reads *and* writes are marshalled through the queue and awaited with a
+timeout: node resolution, validation, and dispatch all have to run on the render
+thread, and the client needs a definitive applied-or-rejected answer. The cost is
+that MCP writes do not coalesce (`post_with_reply` takes no `coalesce_key`), so a
+client sweep is paced by the round-trip; the dock's own slider drags still
+coalesce through the proxy verbs. A request that times out is cancelled, and
+`run_pending` skips cancelled commands, so a write cannot land after the client
+was told it failed.
+
+Property writes route through `apply_scene_property` in `ui/scene_edit_actions.py`,
+**shared with the Scene Graph dock**. Dispatch cannot be derived from a
+`(path, property)` pair alone — material parameters live on Shader prims that
+carry no `renderer_ref` and resolve by an ancestor walk to the enclosing Material,
+and a transform component write recomposes from its sibling components. One
+function, two callers, so an agent edit and a dock edit cannot drift. The dock's
+file-chooser flows (HDR, lens) are the one exemption — against the proxy those
+calls return a `Future`, not a bool, so they keep their own async handling; the
+routing decision still lives in the shared function.
+
+Security is four independent layers (`mcp_auth.py`): off by default; loopback bind
+asserted at socket creation; `Origin`-bearing requests refused and `Host`
+validated; and a persistent bearer token at `~/.skinny/mcp_token` compared
+with `hmac.compare_digest`. The token file is `0600` and re-validated per read
+(no-follow open, owner/mode checked on the same descriptor) **on POSIX only** —
+Windows lacks those primitives, so there the file relies on profile-directory
+access control; recorded as a known gap. The socket is created by the front-end, not the server
+runtime, which is what makes the loopback assertion and the bind-collision path
+reachable before startup reports success. uvicorn's signal handlers are explicitly
+suppressed — they would otherwise overwrite `MetalContext`'s chained SIGINT/SIGTERM
+teardown (see **Metal dispatch hygiene**).
+
+v1 exposes no save/export tool, no node add/remove, and no image tool.
+
 ### Per-Frame Render Loop (GLFW debug)
 
-1. `app.main()`: GLFW poll → `InputHandler.update(dt)` → `renderer.update(dt)`
-   → `renderer.render()`.
+1. `app.main()`: GLFW poll → `commands.run_pending(renderer)` →
+   `InputHandler.update(dt)` → `renderer.update(dt)` → `renderer.render()`.
+   The drain is unconditional (it does not depend on `--mcp`), and sits before
+   input so a command posted by another thread lands in the same frame ordering
+   the Qt worker gives it.
 2. `renderer.render()` presents directly via the swapchain (windowed mode).
 
 ### Per-Frame Render Loop (Web)

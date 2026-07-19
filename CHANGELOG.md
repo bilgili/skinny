@@ -9,6 +9,69 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP scene control** (change `mcp-scene-control`). New opt-in `--mcp` /
+  `--mcp-port` flags (env `SKINNY_MCP` / `SKINNY_MCP_PORT`) on the interactive
+  front-ends host an MCP server inside the running renderer process, exposing the
+  live scene graph to an MCP client through three path-addressed tools:
+  `scene_list` (structure only, depth-bounded, filterable by node kind),
+  `scene_get` (one node's properties with editable flags and bounds), and
+  `scene_set`. Requires the new `[mcp]` extra; `--mcp` without it fails at startup
+  with an install hint. The server attaches to the renderer already running and
+  never constructs one, holding only the command queue — never the `Renderer` or
+  the GPU context.
+
+  Property writes route through the new shared `apply_scene_property`
+  (`ui/scene_edit_actions.py`), which the Qt Scene Graph dock now also calls, so
+  an MCP edit and a dock edit execute the same dispatch. Out-of-bounds writes are
+  rejected quoting the bounds rather than clamped (the published ranges are editor
+  affordances — clamping would make a client less capable than the operator and
+  silently alter a render); properties marked growable are exempt.
+
+  Security: off by default; binds `127.0.0.1` only, asserted at socket creation;
+  refuses requests carrying an `Origin` header and validates `Host`; requires a
+  persistent bearer token at `~/.skinny/mcp_token` (env `SKINNY_MCP_TOKEN`)
+  compared with `hmac.compare_digest`. The token file is `0600` and re-validated
+  on each read on POSIX; Windows lacks the no-follow/ownership primitives, so
+  there it relies on profile-directory access control. Startup prints the client registration
+  command referencing the token *file*, never its value. A port collision leaves
+  the renderer running with MCP disabled. uvicorn's signal handlers are suppressed
+  so `MetalContext`'s SIGINT/SIGTERM teardown chain survives.
+
+  Writes are validated against the property's declared type as well as its bounds,
+  so a client cannot coerce a string into a boolean or push a non-finite number
+  into a material override. A tool failure raises an MCP error rather than
+  returning an error payload that would be reported as a successful call, and a
+  request that times out is cancelled so it cannot apply after the client was told
+  it failed.
+
+  The token file is read through a single descriptor with owner/regular-file/mode
+  checks, and published atomically so concurrent first-time starts converge on one
+  token instead of clobbering each other. POSIX-only calls are guarded, so `--mcp`
+  works on Windows and the printed registration command uses PowerShell syntax
+  there.
+
+  v1 exposes no save/export tool (material, light, and instance edits bypass USD,
+  so an export would silently omit them), no node add/remove, and no image tool.
+
+### Changed
+
+- **`RenderCommandQueue` and `QtRendererProxy` moved** from
+  `skinny/ui/qt/render_session.py` to `skinny/render_session.py`; the old path
+  re-exports every name, so existing imports are unaffected. The module never
+  imported Qt — only its location was Qt-specific.
+- **`RenderCommandQueue.run_pending(target, on_error=None)`** now owns the
+  execute-and-reply loop that was inlined in the Qt render worker. `drain()`
+  removes pending commands without executing them; callers should prefer
+  `run_pending`, which settles reply futures so an awaited command cannot hang to
+  its timeout.
+- **`RenderCommandQueue` honours cancellation.** `run_pending` skips commands whose
+  reply future was already cancelled, so a caller that timed out cannot have its
+  mutation applied later.
+- **The GLFW front-end (`skinny`) owns and drains a command queue** each main-loop
+  iteration, after `glfw.poll_events()` and before `renderer.update(dt)`, so a
+  non-owning thread can mutate renderer state safely. Unconditional — it does not
+  depend on `--mcp`.
+
 - **Spectral environment directional proposal** (change
   `spectral-environment-proposal`). Spectral path tracing now supports the
   analytic `--proposals bsdf,env` and `--proposals env` presets under both

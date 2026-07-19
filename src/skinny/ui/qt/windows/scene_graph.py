@@ -27,9 +27,9 @@ from skinny.ui.qt.dialogs import get_open_file_name
 from skinny.ui.scene_edit_actions import (
     SUPPORTED_LIGHT_TYPES,
     add_parent_for_node,
+    apply_scene_property,
     has_editable_stage,
     is_deletable,
-    trs_to_matrix,
 )
 
 _USD_PICKER_FILTER = "USD (*.usda *.usdc *.usdz);;All files (*)"
@@ -451,19 +451,7 @@ class SceneGraphDock(QDockWidget):
         def on_toggle(checked: bool) -> None:
             value = bool(checked)
             prop.value = value
-            toggle = prop.metadata.get("toggle", "node")
-            if toggle == "subtree":
-                self.renderer.apply_subtree_enabled(node.path, value)
-                return
-            ref = node.renderer_ref
-            if ref is None:
-                return
-            # Camera bool params (lens_enabled, ...) are camera scalars,
-            # not enable-flags on a scene record.
-            if ref.kind == "renderer_camera":
-                self.renderer.apply_camera_param(prop.name, value)
-                return
-            self.renderer.apply_node_enabled(node.path, value)
+            self._apply_property(node, prop, value)
 
         cb.toggled.connect(on_toggle)
         layout.addWidget(cb)
@@ -696,75 +684,17 @@ class SceneGraphDock(QDockWidget):
     def _apply_property(
         self, node: SceneGraphNode, prop: SceneGraphProperty, value: Any,
     ) -> None:
-        ref = node.renderer_ref
-        if ref is None:
-            ref = self._find_shader_material_ref(node)
-            if ref is None:
-                return
-        if ref.kind == "material":
-            self.renderer.apply_material_override(ref.index, prop.name, value)
-        elif ref.kind in ("light_dir", "light_sphere", "light_env"):
-            light_type = {
-                "light_dir": "dir",
-                "light_sphere": "sphere",
-                "light_env": "env",
-            }[ref.kind]
-            self.renderer.apply_light_override(light_type, ref.index, prop.name, value)
-        elif ref.kind == "renderer_camera":
-            self.renderer.apply_camera_param(prop.name, value)
+        apply_scene_property(
+            self.renderer, node, prop, value, graph=self.renderer.scene_graph,
+        )
 
     def _apply_vec3_property(
         self, node: SceneGraphNode, prop: SceneGraphProperty,
         values: tuple[float, float, float],
     ) -> None:
-        ref = node.renderer_ref
-        if ref is not None and ref.kind == "renderer_camera":
-            axis_kind = prop.metadata.get("camera_axis", "")
-            if axis_kind == "target":
-                keys = ("target_x", "target_y", "target_z")
-            elif axis_kind == "position":
-                keys = ("position_x", "position_y", "position_z")
-            else:
-                return
-            for k, v in zip(keys, values):
-                self.renderer.apply_camera_param(k, float(v))
-            return
-        is_authored_light = node.type_name in SUPPORTED_LIGHT_TYPES
-        if ref is None and not is_authored_light:
-            return
-        if ref is not None and ref.kind != "instance" and not is_authored_light:
-            return
-
-        # TRS for an instance needs all three vectors. Walk the active
-        # property panel to pick up the live values for the other two.
-        translate = scale = (0.0, 0.0, 0.0)
-        rotate = (0.0, 0.0, 0.0)
-        for p in node.properties:
-            if p.name == "translate":
-                translate = values if p is prop else p.value
-            elif p.name == "rotate":
-                rotate = values if p is prop else p.value
-            elif p.name == "scale":
-                scale = values if p is prop else p.value
-        # Author to the stage (edit layer) so the move persists and is captured
-        # by "Save edits"; falls back to the runtime path if no stage is loaded.
-        if getattr(self.renderer, "_usd_stage", None) is not None:
-            self.renderer.set_transform(node.path, trs_to_matrix(translate, rotate, scale))
-        else:
-            self.renderer.apply_instance_transform(node.path, translate, rotate, scale)
-
-    def _find_shader_material_ref(self, node: SceneGraphNode):
-        graph = self.renderer.scene_graph
-        if graph is None:
-            return None
-        parts = node.path.rstrip("/").split("/")
-        for i in range(len(parts) - 1, 0, -1):
-            parent_path = "/".join(parts[:i]) or "/"
-            parent = find_node_by_path(graph, parent_path)
-            if parent is not None and parent.renderer_ref is not None:
-                if parent.renderer_ref.kind == "material":
-                    return parent.renderer_ref
-        return None
+        apply_scene_property(
+            self.renderer, node, prop, values, graph=self.renderer.scene_graph,
+        )
 
     # ── Per-tick refresh ──────────────────────────────────────────
 

@@ -30,6 +30,7 @@ import numpy as np
 
 from skinny.cli_common import (
     add_render_flags,
+    reject_mcp_unsupported,
     reject_mlt_unsupported,
     reject_spectral_unsupported,
     reject_sppm_without_wavefront,
@@ -81,6 +82,8 @@ class MainWindow(QMainWindow):
         width: int = 640,
         height: int = 480,
         spectral: bool = False,
+        mcp: bool = False,
+        mcp_port: int = 0,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -99,6 +102,13 @@ class MainWindow(QMainWindow):
             encoding=encoding,
             sppm_glossy_roughness=sppm_glossy_roughness,
         )
+        # Optional MCP control surface. Handed the GUI-thread proxy, so every
+        # edit crosses to the render worker through the same queue the docks
+        # use. A bind collision leaves the GUI running without it.
+        if mcp:
+            from skinny.mcp_server import start as _mcp_start
+            _mcp_start(self.renderer, mcp_port)
+
         config = QtRendererConfig(
             scene_path=scene_path,
             gpu_pref=gpu_pref,
@@ -693,6 +703,7 @@ def main() -> None:
     reject_spectral_unsupported(
         getattr(args, "spectral", False), _startup_integrator, args.execution_mode,
         getattr(args, "proposals", None), getattr(args, "reuse", None))
+    reject_mcp_unsupported(bool(getattr(args, "mcp", False)))
 
     try:
         backend = select_backend(args.backend, persisted=saved_settings.get("backend"))
@@ -731,7 +742,9 @@ def main() -> None:
                      encoding=encoding_value,
                      sppm_glossy_roughness=sppm_glossy_roughness_value,
                      width=args.width, height=args.height,
-                     spectral=getattr(args, "spectral", False))
+                     spectral=getattr(args, "spectral", False),
+                     mcp=bool(getattr(args, "mcp", False)),
+                     mcp_port=getattr(args, "mcp_port", 0))
     win.show()
     sys.exit(app.exec())
 

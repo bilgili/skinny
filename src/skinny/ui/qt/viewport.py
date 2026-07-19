@@ -197,16 +197,7 @@ class _RenderWorker(QObject):
                 dt = now - prev
                 prev = now
 
-                for command in self._commands.drain():
-                    try:
-                        result = command.callback(self.renderer)
-                    except Exception as exc:  # noqa: BLE001
-                        if command.reply is not None:
-                            command.reply.set_exception(exc)
-                        self.error.emit(repr(exc))
-                    else:
-                        if command.reply is not None:
-                            command.reply.set_result(result)
+                self._commands.run_pending(self.renderer, on_error=self.error.emit)
                 self.renderer.update(dt)
                 self._maybe_online_training(dt)
                 pixels = self.renderer.render_headless()
