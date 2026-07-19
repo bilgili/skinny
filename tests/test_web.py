@@ -230,11 +230,16 @@ class TestParamGrouping:
 
     @staticmethod
     def _bucket(params):
-        # Mirror build_main_ui: classify each param, drop empty groups.
+        # Mirror build_main_ui: drop fallback-light params (IBL + Direct
+        # Light are not in the sidebar at all), classify the rest, drop
+        # empty groups.
+        from skinny.params import is_fallback_light_param
         from skinny.ui.build_app_ui import _classify
 
         groups: dict[str, list] = {}
         for p in params:
+            if is_fallback_light_param(p):
+                continue
             groups.setdefault(_classify(p), []).append(p)
         return groups
 
@@ -243,11 +248,7 @@ class TestParamGrouping:
 
         params = [
             ParamSpec("Preset", "preset_index", "discrete", choice_source="presets"),
-            ParamSpec("Environment", "env_index", "discrete", choice_source="environments"),
-            ParamSpec("IBL intensity", "env_intensity", "continuous", 0.05, 0.0, 3.0),
             ParamSpec("Melanin", "mtlx.layer_top_melanin", "continuous", 0.01, 0.0, 1.0),
-            ParamSpec("Light elevation", "light_elevation", "continuous", 5.0, -90.0, 90.0),
-            ParamSpec("Light color R", "light_color_r", "continuous", 0.05, 0.0, 1.0),
             ParamSpec("Normal map strength", "normal_map_strength", "continuous", 0.05, 0.0, 2.0),
             ParamSpec("Integrator", "integrator_index", "discrete", choice_source="integrator_modes"),
             ParamSpec("Reuse", "reuse_index", "discrete", choice_source="reuse_modes"),
@@ -257,11 +258,11 @@ class TestParamGrouping:
         assert "Render" in groups
         assert "ReSTIR" in groups
         assert "Skin" in groups
-        assert "IBL" in groups
-        assert "Direct Light" in groups
         assert "Detail" in groups
 
-    def test_group_params_light_split(self):
+    def test_group_params_fallback_light_excluded(self):
+        """IBL + Direct Light params are dropped from the sidebar entirely —
+        no GUI section for them."""
         from skinny.params import ParamSpec
 
         params = [
@@ -274,8 +275,7 @@ class TestParamGrouping:
                       choice_source="direct_light_modes"),
         ]
         groups = self._bucket(params)
-        assert len(groups["IBL"]) == 2
-        assert len(groups["Direct Light"]) == 4
+        assert groups == {}
 
     def test_group_params_preset_in_skin(self):
         from skinny.params import ParamSpec
@@ -304,13 +304,12 @@ class TestParamGrouping:
         assert "IBL" not in groups
         assert "Direct Light" not in groups
 
-    def test_direct_light_in_direct_light_group(self):
-        from skinny.params import ParamSpec
-        from skinny.ui.build_app_ui import _classify
+    def test_direct_light_is_a_fallback_light_param(self):
+        from skinny.params import ParamSpec, is_fallback_light_param
 
         p = ParamSpec("Direct light", "direct_light_index", "discrete",
                       choice_source="direct_light_modes")
-        assert _classify(p) == "Direct Light"
+        assert is_fallback_light_param(p)
 
     def test_reuse_and_restir_tuning_form_the_restir_group(self):
         from skinny.params import ParamSpec

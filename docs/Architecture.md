@@ -698,12 +698,14 @@ data-driven "Scene Controls" `DynamicSection` in `build_main_ui` renders one
 widget per control across all front-ends, shown only when the stage declares
 controls. Authored `skinny:ui:default` values apply at load.
 
-The shared UI tree also marks the top-level `IBL` and `Direct Light` sections
-conditional on `Renderer.uses_default_lights`. Qt hides each complete group;
-Panel rebuilds the accordion entries so headings and bodies both disappear;
-the GLFW debug host filters the same fallback parameters from its keyboard/HUD
-list. Runtime resync transitions update all three without rebuilding the
-renderer.
+The shared UI tree (`build_app_ui.py`) has no `IBL` or `Direct Light`
+sections — those fallback-light params (`env_index`, `env_intensity`,
+`direct_light_index`, `light_*`) are excluded from the Qt/Panel sidebar
+entirely (`_group_params` skips any `is_fallback_light_param`); the light
+color/direction dedicated widgets were removed along with them. The GLFW
+debug host is unaffected — it still filters the same fallback parameters
+from its own keyboard/HUD list via `build_visible_params`, conditional on
+`Renderer.uses_default_lights`.
 
 ### Scene Graph Inspector (`scene_graph.py`, `ui/qt/windows/scene_graph.py`)
 

@@ -7,6 +7,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **IBL and Direct Light sidebar controls.** The Qt and Panel/web sidebars no
+  longer show the `IBL` (Environment, IBL intensity) or `Direct Light`
+  (Direct light on/off, light color, light direction) sections —
+  `build_app_ui.py` drops every fallback-light param
+  (`env_index`/`env_intensity`/`direct_light_index`/`light_*`) from the
+  sidebar tree entirely (`is_fallback_light_param`). The underlying
+  renderer state, CLI flags (`--no-direct`, `--env-intensity`, ...), and the
+  GLFW debug host's keyboard/HUD controls are unaffected.
+
 ### Added
 
 - **MCP scene control** (change `mcp-scene-control`). New opt-in `--mcp` /
