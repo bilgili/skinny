@@ -104,10 +104,12 @@ later or silently doing nothing. Specifically:
   active at launch — an explicit `--integrator`, else the persisted integrator
   on the interactive front-ends — so a persisted `sppm`/`mlt` under an
   explicitly-forced `megakernel` is refused too.
-- When the integrator is explicitly `mlt` AND any of `--spectral`,
-  `--online-training`, a neural proposal in the mixture, or ReSTIR DI reuse is
-  requested, the front-ends SHALL raise a usage error naming the incompatible
-  option — MLT v1 is RGB, layer-free, wavefront-only.
+- When the integrator is explicitly `mlt` AND any of `--online-training`, a
+  neural proposal in the mixture, or ReSTIR DI reuse is requested, the
+  front-ends SHALL raise a usage error naming the incompatible option — MLT is
+  layer-free and wavefront-only. `--spectral --integrator mlt` SHALL NOT be
+  refused (change `spectral-mlt`): it starts the spectral MLT wavefront
+  session.
 
 The validation SHALL run after the execution mode is resolved and SHALL be shared
 across all front-ends (`skinny`, `skinny-gui`, `skinny-web`, `skinny-render`).
@@ -161,13 +163,20 @@ integrator × `megakernel` guard SHALL consider the effective startup integrator
   to drop the flag or use `--execution-mode wavefront`, and exits without
   initializing the GPU
 
-#### Scenario: mlt + spectral / neural / ReSTIR / online-training exits with an error
+#### Scenario: mlt + neural / ReSTIR / online-training exits with an error
 
 - **WHEN** a front-end is launched with `--integrator mlt` plus any of
-  `--spectral`, `--proposals bsdf,neural`, ReSTIR DI reuse, or
-  `--online-training`
+  `--proposals bsdf,neural`, ReSTIR DI reuse, or `--online-training` (with or
+  without `--spectral`)
 - **THEN** it prints a clear error naming the incompatible option and exits
   without initializing the GPU
+
+#### Scenario: mlt + spectral does not error
+
+- **WHEN** a front-end is launched with `--integrator mlt --spectral` on a
+  flat-material scene
+- **THEN** startup proceeds into the spectral MLT wavefront session with no
+  unsupported-combination error
 
 #### Scenario: persisted sppm + explicit megakernel exits with an error
 

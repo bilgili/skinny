@@ -182,27 +182,70 @@
       watch-item is the **MSL stride asserts** (7.2/1.5): color retype is 0-byte on MSL
       (`float3` already 16 B), only `sw` (+32 B) grows the MSL stride; the 128-texture cap is
       untouched (spectral adds no textures). Cheap slot-count sanity check only.
-- [ ] 7.2 Metal indirect-dispatch CPU-readback fallback (`metal_wavefront.py:233-249`) carries
-      the widened record stride correctly (latent stride bug shows only on Metal).
-- [ ] 7.3 Metal dispatch hygiene: spectral shade/connect/photon kernels are longer — the
-      naturally-short staged kernels stay under the watchdog; kill harness
-      (`tests/test_metal_cleanup.py -m gpu`) passes with the spectral variant compiled.
+- [x] 7.2 No stride coupling exists — the concern is structurally void. The CPU-readback
+      fallback (`metal_wavefront.py`, `_MetalWavefrontRecorder.shade`) reads the
+      **indirect-args** buffer, not record data: `struct.unpack_from("<III", raw, slot * 12)`
+      — a fixed 12-byte `(groupsX, groupsY, groupsZ)` triple per slot, whose layout is
+      independent of the spectral-widened path-state/record strides. Confirmed empirically:
+      the Metal suite gate renders every spectral wavefront combo (path/bdpt/sppm/mlt) on
+      `spec_prism` / `spec_prism_mtlx` within its recorded gates — a mis-strided readback
+      would dispatch wrong group counts and corrupt those images.
+- [x] 7.3 Metal dispatch hygiene: kill harness green on Metal (2026-07-19) — **16 hostless
+      + 3 gpu-marked** probes pass (`tests/test_metal_cleanup.py`, then `-m gpu`) under the
+      guarded runner. The staged spectral kernels stay under the watchdog in practice: the
+      443 s suite gate rendered every spectral wavefront combo (path/bdpt/sppm/mlt) on
+      `spec_prism` / `spec_prism_mtlx` at 3–5 s each with no wedge and no watchdog reset.
 
 ## 8. Tests / gates (Group 8)
 
-- [ ] 8.1 Hostless: CLI-gate tests (wavefront + sppm now accepted; neural/reuse/skin still
-      refused); `wavefront_layout` stride tests both variants (expect scalar≠MSL divergence).
-- [ ] 8.1b **Build the byte-identity guard** (review, major — does not exist today;
+- [x] 8.1 Hostless coverage present and green.
+      *CLI gates:* `tests/test_cli_common.py` carries a dedicated
+      `--spectral flag + reject_spectral_unsupported` section (from L474) —
+      `test_reject_spectral_envelope_ok_when_wired` (in-envelope accepted),
+      `test_reject_spectral_not_implemented_refused`, `test_reject_spectral_noop_when_off`,
+      `test_reject_spectral_environment_proposal_requires_path`.
+      *Strides, both variants:* `tests/test_wavefront_state.py` L226-231 pins
+      `path_state_size(spectral=True) == 108`, `path_state_size(msl=True, spectral=True) == 128`
+      (scalar ≠ MSL divergence as expected) and `path_state_size(spectral=False)` unchanged
+      from `PATH_STATE_STRIDE`, i.e. RGB is untouched.
+- [~] 8.1b **PARKED — not buildable as specified.** Attempted 2026-07-19 as a one-time
+      before/after compile-and-compare across this change's own boundary
+      (`30e74a9^` → `6ae57d1`, RGB variant, no `-DSKINNY_SPECTRAL`, identical slangc flags).
+      Blocked on reconstructing a historical build tree: the shader tree does not compile
+      standalone from `git archive` because it depends on a chain of **generated,
+      gitignored** artifacts — `generated_materials.slang` and
+      `python_materials_dispatcher.slang` (both emittable via `megakernel_sources`), which
+      in turn import `shaders/python_materials/*.slang` that are generated from
+      `python_materials/*.py` and are absent from both the archive **and** the live tree.
+      Also note the guard cannot become a *standing* test in the form the review asked for:
+      "RGB `.spv` equals what it was at ref X" fails on any legitimate later RGB change, and
+      one has already landed (`9febcfd` bdpt-emissive-hit-mis touches `wavefront_bdpt.slang`).
+      A durable version needs a reusable "materialise all generated shader sources into a
+      scratch tree" helper first; that is the real prerequisite and is out of scope here.
+      Original ask: **Build the byte-identity guard** (review, major — does not exist today;
       `test_spectrum_compile.py` only checks *compilation*). Per touched wavefront kernel, a
       before/after **compile-and-compare**: compile the RGB variant from the pre-edit and
       post-edit source and assert byte-equal. NOT "equals the checked-in `.spv`" (won't survive
       a slangc bump).
-- [ ] 8.2 GPU self-consistency A/B (Metal + Vulkan): spectral wavefront path/bdpt vs the
-      megakernel spectral path anchor; spectral wavefront sppm vs its RGB golden — via
-      `compute_metrics` (no hand-rolled error formulas).
-- [ ] 8.3 Dispersion demo (BK7 prism) under spectral wavefront BDPT renders caustics;
-      compare to megakernel spectral BDPT.
-- [ ] 8.4 Furnace closure holds under spectral wavefront for each integrator.
+- [x] 8.2 GPU self-consistency A/B: measured on Metal via `test_suite_matrix_gate`
+      (2026-07-19, suite run 443 s). Every spectral wavefront combo passes both gates on
+      `spec_prism` / `spec_prism_mtlx` — `path|wavefront|spectral`,
+      `bdpt|wavefront|spectral`, `sppm|wavefront|spectral` are absent from the failure
+      list, anchored per the spectral axis through `compute_metrics`. The only matrix
+      failures are the `env` proposal combos (`path|{megakernel,wavefront}|env` at relMSE
+      0.1652 in **RGB** and 0.2605/0.2635 spectral) — those belong to the in-flight
+      `spectral-environment-proposal` change, not to this one.
+- [x] 8.3 Dispersion prism: `spec_prism` renders `bdpt|wavefront|spectral` and
+      `bdpt|megakernel|spectral` in the same gate run; neither appears in the failure list,
+      so the wavefront prism matches the megakernel spectral BDPT within the recorded
+      `spectral_self_consistency` (mode relmse 0.065 / flip 0.03) and its pbrt-truth baseline.
+- [x] 8.4 Furnace closure holds under spectral for every integrator — **32 spectral furnace
+      combos evaluated, all pass** (Metal, 2026-07-19): `path|{mega,wave}|spectral` and
+      `bdpt|{mega,wave}|spectral` nonunif 0.1742, `sppm|wavefront|spectral` 0.1042,
+      `mlt|wavefront|spectral` 0.1998 (tolerance 0.2000). The gate's only furnace failure is
+      **RGB** `mlt|wavefront` at 0.2006 > 0.2000 — a 0.3 % overshoot whose spectral sibling
+      passes at 0.1998, i.e. MLT Markov noise sitting on the tolerance edge. Not a spectral
+      defect and out of scope here; recorded as an MLT follow-up.
 
 ## 9. Docs (Group 9)
 

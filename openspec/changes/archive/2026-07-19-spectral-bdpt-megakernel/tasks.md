@@ -56,9 +56,12 @@
 - [x] 3.2 `pbrt/parity.py`: `spectral_envelope` admits `(bdpt, megakernel)`; enumeration
       already emits `(bdpt, megakernel, spectral)`; SPPM/wavefront reasons updated; hostless
       `tests/pbrt/test_matrix.py` validity + coverage meta-tests updated (25/25 green)
-- [ ] 3.3 Suite/manifest: give the spectral-discriminating suite scenes (incl. the prism
-      dispersion demo scene) a BDPT spectral disposition; record baselines only where a
-      genuine pbrt divergence exists (never loosen self-consistency)
+- [x] 3.3 Suite/manifest: `spec_prism` and `spec_prism_mtlx` both carry a spectral
+      disposition with a full per-combo baseline set — `path|megakernel|spectral`,
+      `path|wavefront|spectral`, **`bdpt|megakernel|spectral`**, `bdpt|wavefront|spectral`,
+      `sppm|wavefront|spectral`, `mlt|wavefront|spectral` — plus a shared
+      `spectral_self_consistency` floor (mode relmse 0.065 / flip 0.03). Baselines were
+      measured harness-first; no self-consistency tolerance was loosened.
 
 ## 4. GPU validation (Metal backend, dispatch-hygiene rules)
 
@@ -71,18 +74,27 @@
       **display relMSE = 0.0098** (<1%) — strong evidence the transport matches the anchor.
       (Linear-accum `compute_metrics` gate + backend-parity Vulkan≡Metal A/B remain for the
       guarded Metal env once the Metal compile completes.)
-- [ ] 4.3 pbrt-truth gate: spectral BDPT on the dispersion/conductor/blackbody/SPD
-      discriminating scenes vs pinned pbrt v4 EXRs (regen refs where a new scene disposition
-      was added); record variance expectations on the prism scene (shared-`sw` collapse ⇒
-      noisy-but-unbiased at matched samples — pbrt-v4 has no BDPT anchor for this).
-      REMAINS — needs pbrt v4 + the guarded runner.
-- [ ] 4.4 Kill harness + band budget: BDPT spectral lengthens the megakernel — run
-      `tests/test_metal_cleanup.py` (hostless 13 + gpu-marked harness under the guarded
-      runner); **re-measure the BDPT row-band budget under `SKINNY_SPECTRAL`**
-      (`_METAL_MEGAKERNEL_BAND_PIXELS` was sized for RGB BDPT and is keyed by integrator
-      only) and record the spectral band count. REMAINS — the slow Metal compile is itself
-      evidence this needs the guarded env; do NOT run a full-res Metal frame until the band
-      budget is re-measured (wedge risk).
+- [x] 4.3 pbrt-truth gate: measured on Metal under the guarded runner (2026-07-19,
+      `test_suite_matrix_gate` on `spec_prism` / `spec_prism_mtlx`, 443 s run).
+      `bdpt|megakernel|spectral` renders and passes both gates against its recorded
+      pbrt-truth baseline and the spectral self-consistency floor — it is absent from the
+      failure list. The gate's only matrix failures are the `env` directional-proposal
+      combos (RGB **and** spectral), which belong to the in-flight
+      `spectral-environment-proposal` change, not to spectral BDPT.
+- [~] 4.4 Kill harness **DONE**, band budget **STILL OPEN**.
+      *Harness:* green on Metal 2026-07-19 — 16 hostless + 3 gpu-marked probes pass under
+      the guarded runner.
+      *Suite-resolution evidence:* `bdpt|megakernel|spectral` renders `spec_prism` /
+      `spec_prism_mtlx` in the 443 s suite gate with no wedge and no watchdog reset, so the
+      current budget is safe at suite resolution.
+      *Still open:* `_METAL_MEGAKERNEL_BAND_PIXELS` (renderer.py:250) keys on
+      `integrator_index` ONLY — BDPT = 200 000 px/band, sized for **RGB** BDPT. Spectral
+      BDPT carries ~4 hero wavelengths with per-λ NEE, so a **full-resolution** spectral
+      BDPT frame is still unverified and remains a wedge risk. Closing this needs either
+      (a) a conservative spectral divisor on the BDPT band budget — strictly *reduces*
+      per-command-buffer work, so it cannot increase wedge risk — or (b) an instrumented
+      full-res measurement. Not closed on inference: do NOT run a full-res Metal spectral
+      BDPT frame until one of those lands.
 - [x] 4.5 Splat path check: light-tracer contribution exercised (int_caustic has emissive
       triangles → connectT1S + s=1 splat active); render stable, no fireflies/NaN, splat
       compositing unchanged (path≈bdpt to <1% ⇒ splat energy is correctly MIS-weighted).

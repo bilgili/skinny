@@ -35,28 +35,27 @@ validity table over the axes `integrator ∈ {Path, BDPT, SPPM, MLT}`, `executio
 {megakernel, wavefront}`, `proposals ⊇ {neural}`, `reuse ⊇ {ReSTIR DI}`, and
 `spectral ∈ {off, on}`. The table SHALL mirror the documented compatibility matrix. Every
 (scene × combo) SHALL be either exercised or skipped with an explicit, machine-readable
-reason; no valid combo SHALL be silently dropped. The spectral **envelope** SHALL admit only
-`(Path, megakernel)` without proposal or reuse layers, on flat-material scenes without
-subsurface/skin or heterogeneous-volume transport; the wavefront execution mode is a recorded
-spectral skip until the wavefront follow-up lands. An envelope-eligible spectral combo SHALL
-enter the rendered set only once the megakernel spectral transport is wired (a capability
-gate); while unwired it SHALL be a recorded "not yet wired" skip and SHALL be absent from the
-rendered set, so the matrix never renders a spectral combo as an ordinary RGB frame and gates
-it as if it were spectral.
+reason; no valid combo SHALL be silently dropped. The spectral **envelope** SHALL admit
+`path`/`bdpt` under either execution mode, `sppm` under the wavefront mode, and `mlt` under
+the wavefront mode — all without proposal or reuse layers, on flat-material scenes without
+subsurface/skin or heterogeneous-volume transport. An envelope-eligible spectral combo SHALL
+enter the rendered set only once its transport is wired (the live capability gates —
+`SPECTRAL_IMPLEMENTED`, and `MLT_IMPLEMENTED` for the `mlt` combo); while unwired it SHALL be
+a recorded "not yet wired" skip and SHALL be absent from the rendered set, so the matrix never
+renders a spectral combo as an ordinary RGB frame and gates it as if it were spectral.
 
 #### Scenario: SPPM is wavefront-only
 - **WHEN** the matrix is enumerated for any scene
 - **THEN** `(SPPM, megakernel)` is skipped with reason "SPPM is wavefront-only"
 - **AND** `(SPPM, wavefront)` is present in the rendered set
 
-#### Scenario: MLT is wavefront-only, RGB-only, and layer-free
+#### Scenario: MLT is wavefront-only and layer-free
 - **WHEN** the matrix is enumerated for any scene
 - **THEN** `(MLT, megakernel)` is skipped with reason "MLT is wavefront-only"
-- **AND** every `(MLT, spectral)` / MLT+neural / MLT+ReSTIR combo is skipped
-  with a recorded reason
-- **AND** `(MLT, wavefront)` is present in the rendered set for flat-material
-  scenes, while skin/subsurface/volume-dominated scenes record an
-  out-of-envelope skip
+- **AND** every MLT+neural / MLT+ReSTIR combo is skipped with a recorded reason
+- **AND** `(MLT, wavefront)` and `(MLT, wavefront, spectral)` are present in
+  the rendered set for flat-material scenes, while skin/subsurface/volume-
+  dominated scenes record an out-of-envelope skip
 
 #### Scenario: neural proposal requires wavefront and a flat material scene
 - **WHEN** the matrix is enumerated for a subsurface/skin scene (e.g. the SSS dragon)
@@ -68,20 +67,20 @@ it as if it were spectral.
 - **WHEN** the matrix is enumerated
 - **THEN** no `BDPT` combo carries the neural proposal (skipped by design)
 
-#### Scenario: spectral envelope is Path-megakernel-only without layers
+#### Scenario: spectral envelope admits path/bdpt/sppm/mlt without layers
 - **WHEN** the spectral envelope is evaluated for a flat-material scene
-- **THEN** every `(BDPT, spectral)` / `(SPPM, spectral)` / `(MLT, spectral)` /
-  `(wavefront, spectral)` / spectral+proposal / spectral+reuse combo is rejected
-  with a recorded reason
-- **AND** `(Path, megakernel, spectral)` is the only envelope-eligible spectral combo
+- **THEN** spectral+proposal and spectral+reuse combos are rejected with a
+  recorded reason, `(SPPM, megakernel, spectral)` and `(MLT, megakernel,
+  spectral)` are rejected as wavefront-only, and the envelope-eligible spectral
+  combos are `path`/`bdpt` under either execution mode plus `sppm` and `mlt`
+  under the wavefront mode
 
 #### Scenario: spectral combos are gated until the transport is wired
-- **WHEN** the matrix is enumerated while the megakernel spectral transport is not yet wired
-  (the capability gate is off)
-- **THEN** the envelope-eligible `(Path, megakernel, spectral)` combo is skipped with a
-  "not yet wired" reason and is absent from the rendered set
-- **AND** once the transport is wired (the capability gate is on), `(Path, megakernel,
-  spectral)` is present in the rendered set for a flat-material scene
+- **WHEN** the matrix is enumerated while a spectral transport capability gate is off
+- **THEN** the envelope-eligible spectral combos it guards are skipped with a
+  "not yet wired" reason and are absent from the rendered set
+- **AND** once the gate is on, those combos are present in the rendered set for a
+  flat-material scene
 
 #### Scenario: spectral skips volume and skin scenes
 - **WHEN** the matrix is enumerated for a scene with heterogeneous media or skin/subsurface
@@ -304,10 +303,15 @@ furnace disposition (tolerance or recorded baseline).
 Spectral combos SHALL be gated by pbrt-truth versus the checked-in (spectrally rendered)
 pbrt v4 reference EXRs. On scenes whose pbrt divergence is attributable to RGB reduction, the
 spectral combo's recorded pbrt-truth measurement SHALL be at or below the RGB combo's; no
-tolerance or baseline SHALL be loosened to admit a spectral combo. The mode-equivalence
-(mega≡wave) assertion SHALL be a recorded skip for spectral combos with reason "spectral is
-megakernel-only" until the wavefront follow-up; the spectral-versus-RGB anchor delta SHALL be
-reported, not asserted tight.
+tolerance or baseline SHALL be loosened to admit a spectral combo. With spectral transport
+available in both execution modes, the mode-equivalence (mega≡wave) assertion SHALL apply to
+spectral `path`/`bdpt` combos exactly as it does to their RGB counterparts — wavefront spectral
+anchoring to the **megakernel spectral path** image within the recorded self-consistency
+tolerance — and SHALL no longer be a blanket "spectral is megakernel-only" skip. The one
+retained skip SHALL be spectral `bdpt` on an out-of-gamut dispersion (light-tracer splat)
+scene, whose per-splat gamut clamp is nonlinear and differs by splat granularity between the
+fused and staged pipelines; that skip SHALL record its reason. The spectral-versus-RGB anchor
+delta SHALL still be reported, not asserted tight.
 
 #### Scenario: spectral tightens a spectrum-authored scene
 
@@ -316,11 +320,19 @@ reported, not asserted tight.
 - **THEN** the spectral combo's exposure-aligned relMSE/FLIP against the pbrt reference is at
   or below the RGB combo's recorded measurement
 
-#### Scenario: mode-equivalence is a recorded spectral skip
+#### Scenario: spectral mode-equivalence is asserted
 
-- **WHEN** the self-consistency gate enumerates a spectral combo
-- **THEN** the mega≡wave assertion reports a skip with reason "spectral is megakernel-only"
-  instead of failing or passing silently
+- **WHEN** the self-consistency gate enumerates a spectral `path` or `bdpt` combo in the
+  wavefront execution mode on an in-gamut (non-dispersion-splat) scene
+- **THEN** its accumulated image is asserted equivalent to the megakernel spectral path image
+  within the recorded tolerance, not skipped
+
+#### Scenario: spectral BDPT dispersion splat stays a recorded skip
+
+- **WHEN** the self-consistency gate enumerates spectral `bdpt` on an out-of-gamut dispersion
+  (light-tracer splat) scene
+- **THEN** the mega≡wave assertion records a skip naming the per-splat clamp granularity, rather
+  than failing or asserting tight
 
 ### Requirement: Coverage meta-test spans the spectral axis
 
@@ -384,4 +396,57 @@ prim and the dangling path, while retaining the existing fallback behavior
 - **WHEN** a USD scene whose DomeLight references a missing `.hdr` is loaded
 - **THEN** a warning naming the DomeLight prim and the unresolved path is
   printed, and the scene still renders under the built-in environment
+
+### Requirement: Spectral wavefront combos are valid rendered combos
+
+The validity table SHALL admit `(path, wavefront, spectral)`, `(bdpt, wavefront, spectral)`,
+and `(sppm, wavefront, spectral)` into the rendered set (flat materials, BSDF proposal, no
+reuse). Spectral SPPM SHALL be gated for self-consistency against the **spectral** path anchor
+(the megakernel spectral path image), NOT the RGB golden — on a spectrum-authored scene
+spectral and RGB differ by construction, so an RGB anchor would be invalid; if
+spectral-path-anchoring is infeasible, spectral SPPM SHALL instead be gated by pbrt-truth only,
+with no RGB-golden self-consistency claim. The self-consistency gate SHALL select the anchor
+image per the spectral axis, so a spectral combo is never compared against an RGB anchor. The
+remaining spectral rejections — the neural directional proposal, ReSTIR reuse, and
+skin/subsurface/heterogeneous-volume scenes — SHALL stay recorded exclusions.
+
+#### Scenario: spectral wavefront combos render and gate
+
+- **WHEN** the parity matrix enumerates the spectral axis under the wavefront execution mode
+- **THEN** the `path`, `bdpt`, and `sppm` integrators are admitted as rendered combos and gated
+  against pbrt truth and the appropriate self-consistency anchor
+
+#### Scenario: spectral SPPM validity entry exists
+
+- **WHEN** the coverage meta-test enumerates `sppm` on the spectral axis
+- **THEN** a validity entry exists (rendered under wavefront), so the build does not fail for a
+  missing spectral SPPM combo
+
+### Requirement: Spectral MLT combo is dual-gated against spectral anchors
+
+The `(mlt, wavefront, spectral)` combo SHALL be gated by pbrt-truth against
+spectral reference EXRs regenerated by the pinned pbrt v4 binary running
+`Integrator "mlt"` (pbrt's MLT is spectral natively), and by self-consistency
+against the **spectral** `(path, wavefront)` anchor — never an RGB anchor —
+with its own recorded tolerance measured harness-first, allowing a per-scene
+baseline where dispersion demands it (the BK7 prism scene). No RGB MLT
+tolerance and no existing spectral tolerance SHALL be loosened to admit the
+combo. Scenes authoring pbrt `maxcomponentvalue` SHALL NOT enter the
+spectral-MLT gated set without a recorded note of the clamp asymmetry (the
+path anchor clamps per sample; the MLT splat path never clamps, matching
+pbrt's unclamped `AddSplat`).
+
+#### Scenario: spectral MLT renders and gates in the suite sweep
+
+- **WHEN** the GPU parity sweep enumerates suite scenes on the spectral axis
+- **THEN** `(mlt, wavefront, spectral)` is rendered for flat-material scenes
+  and asserted against both the spectral pbrt-mlt truth EXR and the spectral
+  Path-wavefront anchor within recorded tolerances
+
+#### Scenario: spectral MLT anchor is never RGB
+
+- **WHEN** the self-consistency gate selects the anchor for
+  `(mlt, wavefront, spectral)`
+- **THEN** the anchor is the spectral `(path, wavefront)` image, selected per
+  the spectral axis
 

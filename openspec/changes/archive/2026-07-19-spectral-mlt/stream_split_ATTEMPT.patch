@@ -1,0 +1,14 @@
+1058a1059,1067
+> #if defined(SKINNY_MLT)
+>         // Same PSS stream partition as bdpt.slang (pbrt lightStreamIndex). Without
+>         // it the whole spectral BDPT sample consumes ONE stream, so the dimension
+>         // index (streamIndex + 3*sampleIndex) climbs monotonically across eye +
+>         // light + connections: measured peak 160 of MLT_MAX_DIMS=192 vs 88 for RGB.
+>         // Overflowing that budget lands in ensureReady()'s escape hatch, which
+>         // returns a fresh hash NOT restored on reject — breaking detailed balance.
+>         rng.startStream(1u);
+> #endif
+1076a1086,1088
+> #if defined(SKINNY_MLT)
+>         rng.startStream(2u);   // pbrt connectionStreamIndex (mirrors bdpt.slang)
+> #endif
