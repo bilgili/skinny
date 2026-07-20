@@ -549,9 +549,11 @@ Routing depends on the resolved property and node, **not** on `(path, name)`:
 material parameters sit on Shader prims with no `renderer_ref` and resolve by
 ancestor walk; a transform component recomposes from its siblings.
 
-### `skinny.mcp_server` / `skinny.mcp_auth` — MCP control surface
+### `skinny.mcp_server` / `skinny.mcp_auth` / `skinny.mcp_paths` — MCP control surface
 
-Requires the `[mcp]` extra. Opt-in via `--mcp`.
+Requires the `[mcp]` extra. Opt-in via `--mcp` on `skinny` (GLFW) or
+`skinny-gui` (Qt) — the only two front-ends that host a render-thread command
+queue for it; `skinny-web` and `skinny-render` suppress the flag entirely.
 
 ```python
 # skinny.mcp_server
@@ -560,9 +562,27 @@ class SceneTools:                                     # proxy or bare queue
     def scene_list(path="/", depth=2, kind=None) -> dict
     def scene_get(path) -> dict
     def scene_set(path, property, value) -> dict
+    # Structural tools (mcp-scene-structure): each returns
+    # {"status": "done", "path": ..., **versions} once the render-thread work
+    # finishes, or {"status": "pending", "job_id": ...} if it outlasts a ~2s
+    # inline grace period -- poll scene_job_status for the eventual result.
+    def scene_add_model(usd_path, name=None, parent=None,
+                         translate=None, rotate_euler_deg=None, scale=None,
+                         matrix=None) -> dict
+    def scene_add_primitive(type, color=None, roughness=None, metallic=None,
+                             name=None, parent=None,
+                             translate=None, rotate_euler_deg=None, scale=None,
+                             matrix=None) -> dict          # Sphere/Cube/Cylinder/Cone/Capsule/Plane
+    def scene_add_light(light_type, intensity=None, color=None,
+                         name=None, parent=None,
+                         translate=None, rotate_euler_deg=None, scale=None,
+                         matrix=None) -> dict              # DistantLight/SphereLight/DomeLight/RectLight/DiskLight
+    def scene_remove(path) -> dict                        # non-destructive deactivation
+    def scene_save(path) -> dict                           # path required; structural edits only, see caveat below
+    def scene_job_status(job_id) -> dict                   # never blocks; pending/done/failed
 def build_app(tools, token, port)                     # guarded ASGI app
-def serve(proxy_or_queue, port, sock) -> Thread       # daemon; installs NO signal handlers
-def start(proxy_or_queue, port) -> Thread | None      # None if the port is taken
+def serve(proxy_or_queue, port, sock, roots=None) -> Thread  # daemon; installs NO signal handlers
+def start(proxy_or_queue, port, roots=None) -> Thread | None # None if the port is taken
 
 # skinny.mcp_auth
 TOKEN_FILE, LOOPBACK_HOST
@@ -571,6 +591,11 @@ def token_is_from_env() -> bool                       # True when the env overri
 def bind_loopback_socket(port) -> socket.socket       # asserts loopback
 def check_request(headers, token, port) -> str | None # None allows; Origin/Host/token guards
 def registration_command(port) -> str                 # references the token file, not its value
+
+# skinny.mcp_paths — filesystem allowlist for the structural tools
+def resolve_roots(cli_value, env=None) -> list[str]   # --mcp-roots > SKINNY_MCP_ROOTS > temp dirs + cwd
+def check_path(path, roots) -> str | None             # None allows; else a reason naming path + roots
+def validate_added_subtree(stage, prim, pre_layers, roots) -> None  # raises ValueError on an escape
 ```
 
 **Token file, platform note.** On POSIX the file is created mode `0600` and
@@ -581,6 +606,23 @@ as protected as the profile directory holding it. Recorded as a known platform
 gap rather than implied to be equivalent. Publication is always an atomic
 exclusive `os.link`; there is no non-exclusive fallback, so a filesystem without
 hard links refuses to start and directs the operator to `SKINNY_MCP_TOKEN`.
+
+**Filesystem allowlist.** Every path a structural tool touches — a model
+reference, a save destination, an asset-typed `scene_set` write (texture/lens
+files) — must resolve (through symlinks) inside the configured roots, default
+`[tempfile.gettempdir(), "/tmp", cwd]` (both temp spellings matter: they differ
+on macOS), overridable with `--mcp-roots dir[,dir...]` or `SKINNY_MCP_ROOTS`.
+For `scene_add_model` the check extends past the argument: after the reference
+composes and its payloads load, every newly introduced USD layer and every
+resolved asset attribute in the added subtree must also stay inside the
+roots, or the add is rolled back. This is a guardrail against a misdirected
+tool call within one trust domain (the MCP client is a local agent with its
+own file access already) — not a sandbox against an adversarial client.
+
+**Partial save.** `scene_save` persists the USD edit layer, so it captures
+structural edits — adds, removes, transforms — but **not** property edits made
+via `scene_set`, which mutate in-memory render state without authoring to USD.
+This mirrors the graphical editor's own save action.
 
 ## 7. Settings & presets
 
