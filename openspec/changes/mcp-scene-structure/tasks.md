@@ -119,4 +119,5 @@
 - [x] 6.2 `README.md` if MCP flags are listed there; CHANGELOG entry.
 - [x] 6.3 `ruff check src/`, full hostless pytest, `openspec validate
       mcp-scene-structure`.
-- [ ] 6.4 Codex pre-merge review; fold findings; merge from worktree.
+- [x] 6.4 Codex pre-merge review — **skipped by explicit user request**
+      (`skip the codex review`); not merged, worktree left in place.
