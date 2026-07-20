@@ -112,8 +112,8 @@ class TestEditLayer:
         root = stage.GetRootLayer()
         before = Path(root.realPath).stat().st_mtime_ns
         renderer.remove_node("/Cornell/GlassSphere/Sphere")
-        # The in-memory root layer is dirty (it carries the edit-layer sublayer
-        # reference) but is never written; the file on disk must be untouched.
+        # Edits land on the in-memory session edit layer; the root layer and the
+        # file on disk are never written by an edit.
         after = Path(root.realPath).stat().st_mtime_ns
         assert before == after, "original USD file must not be written by an edit"
 
@@ -260,6 +260,11 @@ class TestSetTransform:
         assert renderer._usd_edit_layer.GetAttributeAtPath(
             f"{target}.xformOp:transform"
         ) is not None
+        # op.Set() reuse authors only the value, not the order attribute (this
+        # distinguishes the reuse path from an unconditional clear+add).
+        assert renderer._usd_edit_layer.GetAttributeAtPath(
+            f"{target}.xformOpOrder"
+        ) is None
 
 
 @needs_vulkan

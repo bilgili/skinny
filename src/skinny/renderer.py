@@ -1595,9 +1595,9 @@ class Renderer:
         # geometry upload; the runtime scene-graph editing API resolves
         # add/remove/transform targets through it.
         self._prim_to_instances: dict[str, list[int]] = {}
-        # Non-destructive in-memory edit sublayer (Sdf.Layer) + its default
-        # on-disk save path. Attached on USD load so runtime scene-graph edits
-        # never touch the original file; persisted only via save_edits().
+        # Non-destructive in-memory edit layer (the stage session layer) + its
+        # default on-disk save path. Attached on USD load so runtime scene-graph
+        # edits never touch the original file; persisted only via save_edits().
         self._usd_edit_layer = None
         self._edit_layer_default_path: str | None = None
 
@@ -3462,7 +3462,7 @@ class Renderer:
             # Keep the stage around so scene-graph edits (DomeLight HDR
             # path, etc.) can mutate USD prim attrs as the source of truth.
             self._usd_stage = stage
-            # Attach the non-destructive edit sublayer so the runtime
+            # Attach the non-destructive session edit layer so the runtime
             # scene-graph editing API authors there, never the original file.
             self._attach_edit_layer()
             # Build the playback clock + animated-prim index from the stage.
@@ -6088,26 +6088,11 @@ class Renderer:
         self._reupload_instance_transforms()
 
     def _author_local_transform(self, xformable, matrix) -> None:
-        """Author ``matrix`` (numpy 4x4, USD row-major convention) as the prim's
-        single ``xformOp:transform`` in the active edit target.
-
-        When the prim already carries exactly one ``xformOp:transform``, set that
-        op's value in the edit target (a value-over that wins from the session
-        layer) instead of clear+add: ``ClearXformOpOrder`` only clears the
-        current edit target, so with a transform op authored in a stronger layer
-        the subsequent ``AddTransformOp`` would see a duplicate in the composed
-        order and raise. The clear+add path remains the fallback for the fresh
-        (no ops) and unusual multi-op cases.
-        """
-        from pxr import Gf, UsdGeom
-        arr = np.asarray(matrix, dtype=float).reshape(16)
-        gm = Gf.Matrix4d(*[float(x) for x in arr])
-        ops = xformable.GetOrderedXformOps()
-        if len(ops) == 1 and ops[0].GetOpType() == UsdGeom.XformOp.TypeTransform:
-            ops[0].Set(gm)
-            return
-        xformable.ClearXformOpOrder()
-        xformable.AddTransformOp().Set(gm)
+        """Author ``matrix`` as the prim's single ``xformOp:transform`` in the
+        active edit target. Pure logic in `skinny.usd_edit` so it is unit-tested
+        without a GPU renderer."""
+        from skinny.usd_edit import author_local_transform
+        author_local_transform(xformable, matrix)
 
     def _unique_prim_path(self, base: str) -> str:
         """``base`` if free, else ``base_1``, ``base_2``, … (avoids prim clash)."""

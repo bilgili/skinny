@@ -38,5 +38,5 @@
 
 ## 7. Review + merge
 - [x] 7.1 xhigh design review subagent on this design; fold findings.
-- [ ] 7.2 codex pre-merge review; fold findings.
+- [x] 7.2 codex pre-merge review; fold findings.
 - [ ] 7.3 `openspec validate session-edit-layer --strict`; archive after merge.

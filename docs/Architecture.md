@@ -660,8 +660,9 @@ the root layer and so cannot override a file-authored opinion: `set_transform`
 on a prim whose `xformOp:transform` lives in the loaded file would raise a
 duplicate-op error and any value it authored would be silently ignored.
 `set_transform` authors via `_author_local_transform`, which reuses an existing
-single `xformOp:transform` op with `op.Set()` (a value-over that wins from the
-session layer) and falls back to clear+add only for the fresh / multi-op cases. The editing API — `add_model()` (define an
+single non-inverse `xformOp:transform` op with `op.Set()` (a value-over that
+wins from the session layer) and falls back to clear+add only for the fresh /
+inverse / multi-op cases (`skinny.usd_edit.author_local_transform`). The editing API — `add_model()` (define an
 `Xform` + `AddReference`, optional `validate(stage, added_prim)` callback run
 post-recompose/pre-resync so a policy layer can veto and roll back before the
 resync pays for itself), `add_primitive()` (change `mcp-scene-structure`:
