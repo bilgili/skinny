@@ -5829,27 +5829,27 @@ class Renderer:
         return str(p.parent / f"{p.stem}.edits.usda")
 
     def _attach_edit_layer(self) -> None:
-        """Attach a non-destructive edit sublayer to ``self._usd_stage``.
+        """Route non-destructive edits to ``self._usd_stage``'s session layer.
 
-        Creates an in-memory (anonymous) ``Sdf.Layer``, inserts it as the
-        strongest sublayer of the root layer, and makes it the stage edit
-        target. Runtime scene-graph edits author here, so the original file is
-        never modified; ``save_edits()`` persists this layer on request. No-op
-        if no stage is loaded or an edit layer is already attached.
+        Makes the stage's session layer the edit target. The session layer sits
+        ABOVE the entire root layer stack in strength, so an edit overrides any
+        opinion authored in the root/file layer -- unlike a root SUBLAYER, which
+        is WEAKER than the root layer and therefore cannot override a
+        file-authored attribute (a `set_transform` on a prim whose
+        `xformOp:transform` lives in the file would be silently ignored, and the
+        clear+add author path would raise a duplicate-op error). The session
+        layer is in-memory and is never written to disk by an edit; the original
+        file is untouched. ``save_edits()`` persists these overrides on request.
+        No-op if no stage is loaded or an edit layer is already attached.
         """
         stage = self._usd_stage
         if stage is None or self._usd_edit_layer is not None:
             return
-        from pxr import Sdf, Usd
-        edit_layer = Sdf.Layer.CreateAnonymous("skinny_edits.usda")
-        root = stage.GetRootLayer()
-        # subLayerPaths[0] is the STRONGEST sublayer in USD's local layer stack.
-        # Inserting in memory dirties the root layer object but never writes it.
-        if edit_layer.identifier not in root.subLayerPaths:
-            root.subLayerPaths.insert(0, edit_layer.identifier)
+        from pxr import Usd
+        edit_layer = stage.GetSessionLayer()
         stage.SetEditTarget(Usd.EditTarget(edit_layer))
         self._usd_edit_layer = edit_layer
-        self._edit_layer_default_path = self._default_edit_path(root)
+        self._edit_layer_default_path = self._default_edit_path(stage.GetRootLayer())
 
     def set_usd_scene(self, scene: "Scene", stage=None) -> None:
         """Make `scene` the active USD scene synchronously and upload it.
@@ -6089,10 +6089,23 @@ class Renderer:
 
     def _author_local_transform(self, xformable, matrix) -> None:
         """Author ``matrix`` (numpy 4x4, USD row-major convention) as the prim's
-        single ``xformOp:transform`` in the active edit target."""
-        from pxr import Gf
+        single ``xformOp:transform`` in the active edit target.
+
+        When the prim already carries exactly one ``xformOp:transform``, set that
+        op's value in the edit target (a value-over that wins from the session
+        layer) instead of clear+add: ``ClearXformOpOrder`` only clears the
+        current edit target, so with a transform op authored in a stronger layer
+        the subsequent ``AddTransformOp`` would see a duplicate in the composed
+        order and raise. The clear+add path remains the fallback for the fresh
+        (no ops) and unusual multi-op cases.
+        """
+        from pxr import Gf, UsdGeom
         arr = np.asarray(matrix, dtype=float).reshape(16)
         gm = Gf.Matrix4d(*[float(x) for x in arr])
+        ops = xformable.GetOrderedXformOps()
+        if len(ops) == 1 and ops[0].GetOpType() == UsdGeom.XformOp.TypeTransform:
+            ops[0].Set(gm)
+            return
         xformable.ClearXformOpOrder()
         xformable.AddTransformOp().Set(gm)
 
@@ -6454,10 +6467,10 @@ class Renderer:
         if root is not None and root.anonymous:
             # A synthesized stage (scene_create) has no backing file: its /World
             # prim and stage metadata (defaultPrim / upAxis / metersPerUnit) live
-            # on the anonymous root, not the edit sublayer. Exporting only the
-            # edit layer would drop them, so the saved file would reopen at USD's
-            # 0.01 m/unit default. Export the composed stage instead — complete
-            # and self-contained.
+            # on the anonymous root, not the session edit layer. Exporting only
+            # the edit layer would drop them, so the saved file would reopen at
+            # USD's 0.01 m/unit default. Export the composed stage instead —
+            # complete and self-contained (session overrides fold in too).
             self._usd_stage.Export(str(target))
         else:
             self._usd_edit_layer.Export(str(target))

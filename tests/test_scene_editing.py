@@ -96,12 +96,15 @@ def bare_renderer():
 class TestEditLayer:
     def test_edit_layer_attached(self, editor):
         renderer, stage = editor
-        from pxr import Usd
         assert renderer._usd_edit_layer is not None
-        # The edit layer is the strongest sublayer + the stage edit target.
-        assert stage.GetRootLayer().subLayerPaths[0] == renderer._usd_edit_layer.identifier
+        # The edit target is the session layer — stronger than the whole root
+        # layer stack, so an override wins over a file-authored opinion. A root
+        # SUBLAYER (the old design) is weaker than root and could not.
+        assert renderer._usd_edit_layer == stage.GetSessionLayer()
         assert stage.GetEditTarget().GetLayer() == renderer._usd_edit_layer
-        # Non-destructive: edits go to an in-memory anonymous layer, never the file.
+        # No editing sublayer is inserted into the root's sublayer stack.
+        assert renderer._usd_edit_layer.identifier not in stage.GetRootLayer().subLayerPaths
+        # Non-destructive: the session layer is in-memory, never written by an edit.
         assert renderer._usd_edit_layer.anonymous is True
 
     def test_original_file_untouched_by_edit(self, editor):
@@ -225,6 +228,38 @@ class TestSetTransform:
         renderer, _ = editor
         with pytest.raises(ValueError):
             renderer.set_transform("/Cornell/NoSuchPrim", np.eye(4, dtype=np.float32))
+
+    def test_override_file_authored_transform(self, editor):
+        """A prim whose xformOp:transform is authored in the loaded FILE can be
+        overridden: no duplicate-op throw, the composed transform follows the
+        override, and the file's own opinion is untouched (non-destructive).
+
+        Regression for session-edit-layer: the old weak edit SUBLAYER could not
+        override a root opinion — set_transform raised 'xformOp:transform already
+        exists in xformOpOrder', and any value it authored was silently ignored.
+        """
+        from pxr import Gf, Sdf, UsdGeom
+        renderer, stage = editor
+        target = "/Cornell/TallBlock"  # an Xform with a file-authored transform
+        prim = stage.GetPrimAtPath(target)
+        assert prim and prim.IsValid()
+        root = stage.GetRootLayer()
+        before_root = root.GetAttributeAtPath(f"{target}.xformOp:transform").default
+
+        m = np.eye(4, dtype=np.float32)
+        m[3, 0] = 123.0  # translate far along +X
+        renderer.set_transform(target, m)  # must NOT raise
+
+        composed = UsdGeom.Xformable(prim).GetLocalTransformation()
+        assert composed.ExtractTranslation()[0] == pytest.approx(123.0), \
+            "session-layer override must win over the file-authored transform"
+        # The file's opinion in the root layer is unchanged (non-destructive).
+        after_root = root.GetAttributeAtPath(f"{target}.xformOp:transform").default
+        assert Gf.Matrix4d(after_root) == Gf.Matrix4d(before_root)
+        # The override lives in the session (edit) layer, not the root.
+        assert renderer._usd_edit_layer.GetAttributeAtPath(
+            f"{target}.xformOp:transform"
+        ) is not None
 
 
 @needs_vulkan
