@@ -66,8 +66,11 @@ _None — all changes extend two existing capabilities._
   remove auto-created parents (matching `add_light`); optional
   `validate(stage, added_prim)` hook on `add_model`; `add_light` gains optional
   `intensity` / `color` authored at define time.
-- Front-end CLI plumbing — `--mcp-roots` / `SKINNY_MCP_ROOTS` (all four
-  front-ends, shared parser in `cli_common.py`).
+- Front-end CLI plumbing — `--mcp-roots` / `SKINNY_MCP_ROOTS`, shared parser
+  in `cli_common.py`. Wired into the two front-ends that actually host an MCP
+  server (`skinny`/`app.py`, `skinny-gui`/`ui/qt/app.py`); `skinny-web` and
+  `skinny-render` already suppress `--mcp` entirely (no render-thread queue to
+  host it on) and need no `--mcp-roots` either.
 - Docs: `docs/PythonAPI.md` (MCP section), `docs/Architecture.md`.
 - Tests: hostless fake-renderer suites next to the existing MCP tests
   (`tests/test_mcp_*`), plus scene-editing tests for `add_primitive`.
