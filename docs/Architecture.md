@@ -651,10 +651,18 @@ diagnostic override.
 ### Runtime Scene-Graph Editing (`renderer.py`)
 
 The loaded `Usd.Stage` is the authoritative scene model; the flat `Scene` +
-GPU buffers are a derived cache. `Renderer._attach_edit_layer()` inserts an
-in-memory anonymous `Sdf.Layer` as the strongest sublayer and sets it as the
-edit target, so every runtime edit is authored there and the original file is
-never written until `save_edits()`. The editing API — `add_model()` (define an
+GPU buffers are a derived cache. `Renderer._attach_edit_layer()` sets the
+stage's **session layer** as the edit target (change `session-edit-layer`), so
+every runtime edit is authored there and the original file is never written
+until `save_edits()`. The session layer is used because it is stronger than the
+whole root layer stack — a root *sublayer* (the earlier design) is weaker than
+the root layer and so cannot override a file-authored opinion: `set_transform`
+on a prim whose `xformOp:transform` lives in the loaded file would raise a
+duplicate-op error and any value it authored would be silently ignored.
+`set_transform` authors via `_author_local_transform`, which reuses an existing
+single non-inverse `xformOp:transform` op with `op.Set()` (a value-over that
+wins from the session layer) and falls back to clear+add only for the fresh /
+inverse / multi-op cases (`skinny.usd_edit.author_local_transform`). The editing API — `add_model()` (define an
 `Xform` + `AddReference`, optional `validate(stage, added_prim)` callback run
 post-recompose/pre-resync so a policy layer can veto and roll back before the
 resync pays for itself), `add_primitive()` (change `mcp-scene-structure`:
