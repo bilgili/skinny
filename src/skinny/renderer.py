@@ -8030,14 +8030,42 @@ class Renderer:
             print(f"[skinny] HDR load failed: {exc}", flush=True)
             return False
 
-        authored_dome = (
+        # Branch on the active lighting authority, NOT on whether an
+        # environment already exists. A dome authored via `add_light` starts
+        # with no `texture:file`, so `_usd_scene.environment` is None even
+        # though the authored scene owns the authority — keying on
+        # `environment is not None` would (wrongly) route the edit to the
+        # fallback default-lights library, which the authored authority never
+        # reads, leaving the dome dark until a full stage resync.
+        authored_scene = (
             self._is_usd_active()
+            and not self.uses_default_lights
             and self._usd_scene is not None
-            and self._usd_scene.environment is not None
         )
-        if authored_dome:
-            self._usd_scene.environment.name = env.name
-            self._usd_scene.environment.data = env.data
+        if authored_scene:
+            from skinny.scene import LightEnvHDR
+            cur = self._usd_scene.environment
+            if cur is None:
+                # No prior environment (freshly added dome): construct one so
+                # the authority-selected environment is non-null and
+                # contributes. Fold the dome prim's color×intensity×exposure
+                # into a scalar intensity, matching `_extract_dome_light`.
+                intensity = 1.0
+                prim = self._find_dome_light_prim(env_index)
+                if prim is not None:
+                    try:
+                        from pxr import UsdLux
+                        from skinny.usd_loader import _light_color_radiance
+                        rad = _light_color_radiance(UsdLux.LightAPI(prim))
+                        intensity = float(np.dot(
+                            rad, np.array([0.2126, 0.7152, 0.0722], np.float32)))
+                    except Exception:
+                        pass
+                self._usd_scene.environment = LightEnvHDR(
+                    name=env.name, data=env.data, intensity=intensity)
+            else:
+                cur.name = env.name
+                cur.data = env.data
         else:
             if 0 <= env_index < len(self.environments):
                 self.environments[env_index] = env

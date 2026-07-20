@@ -7,6 +7,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dome-light texture edit ignored on a textureless dome** (change
+  `fix-added-dome-texture-authority`). Setting a `UsdLuxDomeLight`'s
+  `texture:file` from the scene-graph panel did nothing when the dome had no
+  environment at edit time — the common case being a dome just created with
+  "Add light" — because `apply_dome_light_texture` branched on whether an
+  environment already existed instead of on the active lighting authority, and
+  routed the edit to the fallback default-lights library the authored authority
+  never reads. The texture uploaded but contributed zero light until a full
+  stage resync (which an enable off/on toggle happened to trigger). The method
+  now keys on `uses_default_lights` and constructs the authored `LightEnvHDR`
+  (folding the dome prim's color·intensity·exposure into its scalar intensity)
+  when the authored scene has none, so the texture contributes on the next
+  frame. A dome authored with a texture already worked and is unchanged.
+
 ### Removed
 
 - **IBL and Direct Light sidebar controls.** The Qt and Panel/web sidebars no
