@@ -35,6 +35,7 @@ from skinny.cli_common import (
     reject_spectral_unsupported,
     reject_sppm_without_wavefront,
     resolve_execution_mode,
+    resolve_mcp_roots,
     resolve_walk,
     startup_integrator_name,
     validate_render_flags,
@@ -84,6 +85,7 @@ class MainWindow(QMainWindow):
         spectral: bool = False,
         mcp: bool = False,
         mcp_port: int = 0,
+        mcp_roots: "list[str] | None" = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Skinny")
@@ -107,7 +109,7 @@ class MainWindow(QMainWindow):
         # use. A bind collision leaves the GUI running without it.
         if mcp:
             from skinny.mcp_server import start as _mcp_start
-            _mcp_start(self.renderer, mcp_port)
+            _mcp_start(self.renderer, mcp_port, roots=mcp_roots)
 
         config = QtRendererConfig(
             scene_path=scene_path,
@@ -744,7 +746,8 @@ def main() -> None:
                      width=args.width, height=args.height,
                      spectral=getattr(args, "spectral", False),
                      mcp=bool(getattr(args, "mcp", False)),
-                     mcp_port=getattr(args, "mcp_port", 0))
+                     mcp_port=getattr(args, "mcp_port", 0),
+                     mcp_roots=resolve_mcp_roots(args))
     win.show()
     sys.exit(app.exec())
 

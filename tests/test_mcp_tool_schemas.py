@@ -38,8 +38,12 @@ def _schemas(server) -> dict[str, dict]:
     return {t.name: t.inputSchema for t in tools}
 
 
-def test_all_three_tools_are_advertised(server) -> None:
-    assert set(_schemas(server)) == {"scene_list", "scene_get", "scene_set"}
+def test_all_nine_tools_are_advertised(server) -> None:
+    assert set(_schemas(server)) == {
+        "scene_list", "scene_get", "scene_set",
+        "scene_add_model", "scene_add_primitive", "scene_add_light",
+        "scene_remove", "scene_save", "scene_job_status",
+    }
 
 
 def test_no_tool_advertises_args_kwargs(server) -> None:
@@ -65,6 +69,36 @@ def test_scene_set_advertises_path_property_value(server) -> None:
     schema = _schemas(server)["scene_set"]
     assert {"path", "property", "value"} <= set(schema["properties"])
     assert set(schema.get("required", [])) == {"path", "property", "value"}
+
+
+def test_scene_add_model_advertises_its_real_parameters(server) -> None:
+    props = _schemas(server)["scene_add_model"]["properties"]
+    assert {"usd_path", "name", "parent", "translate", "matrix"} <= set(props)
+
+
+def test_scene_add_primitive_advertises_its_real_parameters(server) -> None:
+    props = _schemas(server)["scene_add_primitive"]["properties"]
+    assert {"type", "color", "roughness", "metallic"} <= set(props)
+
+
+def test_scene_add_light_advertises_its_real_parameters(server) -> None:
+    props = _schemas(server)["scene_add_light"]["properties"]
+    assert {"light_type", "intensity", "color"} <= set(props)
+
+
+def test_scene_remove_advertises_path(server) -> None:
+    schema = _schemas(server)["scene_remove"]
+    assert schema.get("required") == ["path"]
+
+
+def test_scene_save_advertises_path(server) -> None:
+    schema = _schemas(server)["scene_save"]
+    assert schema.get("required") == ["path"]
+
+
+def test_scene_job_status_advertises_job_id(server) -> None:
+    schema = _schemas(server)["scene_job_status"]
+    assert schema.get("required") == ["job_id"]
 
 
 def test_tool_descriptions_survive_wrapping(server) -> None:

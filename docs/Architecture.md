@@ -110,12 +110,15 @@ iteration, immediately after `glfw.poll_events()` and before `renderer.update(dt
 — the same position the Qt worker drains at. The call is unconditional, so
 ordering does not depend on optional features being enabled.
 
-### MCP scene control (`mcp_server.py`, `mcp_auth.py`)
+### MCP scene control (`mcp_server.py`, `mcp_auth.py`, `mcp_paths.py`)
 
-Opt-in (`--mcp`, off by default), the interactive front-ends host an MCP server on
-a daemon thread that exposes the live scene graph to an MCP client — three
-path-addressed tools, `scene_list` / `scene_get` / `scene_set` (change
-`mcp-scene-control`). It attaches to the running renderer; it never builds one.
+Opt-in (`--mcp`, off by default), the interactive front-ends (`skinny`, `skinny-gui`
+— the two that own a render-thread command queue) host an MCP server on a daemon
+thread that exposes the live scene graph to an MCP client: three path-addressed
+inspection/property tools, `scene_list` / `scene_get` / `scene_set`, plus six
+structural tools, `scene_add_model` / `scene_add_primitive` / `scene_add_light` /
+`scene_remove` / `scene_save` / `scene_job_status` (changes `mcp-scene-control`,
+`mcp-scene-structure`). It attaches to the running renderer; it never builds one.
 
 The server thread holds only the proxy (Qt) or the bare queue (GLFW) — never the
 `Renderer` and never the GPU context, so it cannot extend a `MetalContext`
@@ -150,7 +153,39 @@ reachable before startup reports success. uvicorn's signal handlers are explicit
 suppressed — they would otherwise overwrite `MetalContext`'s chained SIGINT/SIGTERM
 teardown (see **Metal dispatch hygiene**).
 
-v1 exposes no save/export tool, no node add/remove, and no image tool.
+v1 exposed no save/export tool and no node add/remove; `mcp-scene-structure`
+provides both, so only a rendered-image tool remains excluded (an edit resets
+progressive accumulation, so an immediate readback would return near-noise).
+
+**Structural tools (`mcp-scene-structure`).** `scene_add_model` /
+`scene_add_primitive` / `scene_add_light` author into the renderer's
+non-destructive USD edit sublayer (see **usd-scene-editing**) the same way the
+Scene Graph dock's add actions do; `scene_add_primitive` additionally authors a
+dedicated `UsdShade`/`UsdPreviewSurface` material bound to the new gprim, since
+an unbound prim resolves to the protected fallback material slot and could
+never be re-colored. `scene_remove` deactivates (non-destructive); `scene_save`
+writes the edit layer but — like the dock's own save — captures only
+structural edits, not `scene_set` property overrides, which mutate in-memory
+render state without touching USD.
+
+Every path a structural tool touches is checked against `mcp_paths.py`'s
+allowlist (`--mcp-roots` / `SKINNY_MCP_ROOTS`, default: platform temp dirs +
+cwd) — a guardrail against a misdirected call within the MCP client's own trust
+domain, not a sandbox. For `scene_add_model` the check runs *inside* the
+posted render-thread closure, both on the argument and, via an optional
+`validate(stage, added_prim)` callback `add_model` invokes post-recompose/
+pre-resync, on the layers and asset attributes the reference newly pulls in
+(payloads loaded and instance proxies traversed first, so both escape routes
+are covered) — a violation rolls the prim back through the renderer's own
+rollback path.
+
+A model add can outlast a flat request timeout, and a cancelled-but-already-
+running one would leave the client unsure whether the scene changed. Structural
+tools instead wait a short (~2s) inline grace period, returning the result
+directly if it lands in time or a `job_id` to poll via `scene_job_status`
+otherwise — FastMCP runs tool bodies on the event loop with no thread hop, so
+this is a deliberate, bounded stall rather than a background task; polling
+itself never blocks.
 
 ### Per-Frame Render Loop (GLFW debug)
 
@@ -620,11 +655,22 @@ GPU buffers are a derived cache. `Renderer._attach_edit_layer()` inserts an
 in-memory anonymous `Sdf.Layer` as the strongest sublayer and sets it as the
 edit target, so every runtime edit is authored there and the original file is
 never written until `save_edits()`. The editing API — `add_model()` (define an
-`Xform` + `AddReference`), `add_light()` (define one of the five supported
-`UsdLux` schemas with explicit defaults), `remove_node()` (`SetActive(False)`),
-`set_transform()` (author `xformOp:transform`), `save_edits()`, and
-`list_nodes()` — authors inside a scoped `Usd.EditContext`. Add/remove/light
-creation trigger a geometry resync (`_resync_geometry_from_stage`: re-read via
+`Xform` + `AddReference`, optional `validate(stage, added_prim)` callback run
+post-recompose/pre-resync so a policy layer can veto and roll back before the
+resync pays for itself), `add_primitive()` (change `mcp-scene-structure`:
+define one of the six analytic gprims `usd_gprims.tessellate_gprim` meshes,
+plus a dedicated bound `UsdShade`/`UsdPreviewSurface` material — never authored
+bare, since an unbound prim resolves to the protected fallback material slot),
+`add_light()` (define one of the five supported `UsdLux` schemas with
+editor-friendly defaults, optionally overridden by `intensity`/`color` args so
+a caller isn't limited to a post-creation edit that a save wouldn't capture),
+`remove_node()` (`SetActive(False)`), `set_transform()` (author
+`xformOp:transform`), `save_edits()`, and `list_nodes()` — authors inside a
+scoped `Usd.EditContext`. `add_model`'s and `add_light`'s failure/veto rollback
+removes not just the authored prim but every parent `Xform` the call itself
+created, so a rolled-back add under a not-yet-existing parent path leaves the
+edit layer exactly as it was. Add/remove/light/primitive creation trigger a
+geometry resync (`_resync_geometry_from_stage`: re-read via
 `load_scene_from_stage`, mesh cache keeps unchanged prims free, runtime
 `enabled` flags carried by prim path). `set_transform` uses a transform-only
 fast path for geometry (`_reupload_instance_transforms`, no re-bake) and a full

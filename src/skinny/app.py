@@ -31,6 +31,7 @@ from skinny.cli_common import (
     reject_spectral_unsupported,
     reject_sppm_without_wavefront,
     resolve_execution_mode,
+    resolve_mcp_roots,
     resolve_walk,
     startup_integrator_name,
     validate_render_flags,
@@ -680,7 +681,7 @@ def main() -> None:
         # lifetime. A bind collision leaves the renderer running without it.
         if getattr(args, "mcp", False):
             from skinny.mcp_server import start as _mcp_start
-            _mcp_start(commands, args.mcp_port)
+            _mcp_start(commands, args.mcp_port, roots=resolve_mcp_roots(args))
 
         # --online-training prerequisite gate (change online-training-trigger). The
         # static prerequisites (wavefront + a neural proposal) are known now, so

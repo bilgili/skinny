@@ -402,20 +402,48 @@ claude mcp add --transport http skinny http://127.0.0.1:8765/mcp \
   --header "Authorization: Bearer $(cat ~/.skinny/mcp_token)"
 ```
 
-Three tools, addressed by USD prim path:
+Nine tools, addressed by USD prim path:
 
 | Tool | Purpose |
 |------|---------|
 | `scene_list(path, depth, kind)` | Tree structure — no property values. Filter by `kind` (`material`, `light_dir`, `light_sphere`, `light_env`, `instance`, `renderer_camera`) |
 | `scene_get(path)` | One node's properties, with editable flags and bounds |
 | `scene_set(path, property, value)` | Write one property |
+| `scene_add_model(usd_path, name, parent, translate/rotate_euler_deg/scale or matrix)` | Reference a USD file into the scene |
+| `scene_add_primitive(type, color, roughness, metallic, name, parent, transform)` | Add a Sphere/Cube/Cylinder/Cone/Capsule/Plane with its own editable material |
+| `scene_add_light(light_type, intensity, color, name, parent, transform)` | Add a DistantLight/SphereLight/DomeLight/RectLight/DiskLight |
+| `scene_remove(path)` | Deactivate a node (non-destructive) |
+| `scene_save(path)` | Write the USD edit layer — structural edits only, see below |
+| `scene_job_status(job_id)` | Poll a structural tool that returned `{"status": "pending", ...}` |
 
-Edits take the same code path as the equivalent Scene Graph dock edit, so both
-behave identically. (One exemption: the dock's *file-chooser* flows for HDR and
-lens files keep their own dialog and async error handling; the routing decision
-is still shared, so a client reaches the same renderer verb.) The docks stay live and enabled while a client is connected;
-concurrent edits are last-write-wins, and every result reports the current scene
-and material versions.
+Property edits take the same code path as the equivalent Scene Graph dock
+edit, so both behave identically. (One exemption: the dock's *file-chooser*
+flows for HDR and lens files keep their own dialog and async error handling;
+the routing decision is still shared, so a client reaches the same renderer
+verb.) Structural adds author into the same non-destructive USD edit layer
+the dock's Add model / Add light buttons do. The docks stay live and enabled
+while a client is connected; concurrent edits are last-write-wins, and every
+result reports the current scene and material versions.
+
+**Structural tools.** A model/primitive/light add waits briefly (~2s) for the
+render thread and returns its result directly; a bigger add (a large
+referenced scene) instead returns `{"status": "pending", "job_id": ...}` to
+poll via `scene_job_status` rather than being cancelled — a cancelled-but-
+already-running add would otherwise leave you unsure whether the scene
+changed. `scene_add_primitive` always authors its own bound material (never a
+bare gprim), so `color`/`roughness`/`metallic` — and later `scene_set` edits
+on the same material node — actually take effect. `scene_remove` refuses the
+root and the renderer's synthesized `/Skinny/*` nodes.
+
+**Filesystem allowlist.** Every path a structural tool touches — a model
+reference, a save destination, an asset-typed `scene_set` write — must resolve
+inside `--mcp-roots dir[,dir...]` / `SKINNY_MCP_ROOTS` (default: the platform
+temp directories and the current working directory). For `scene_add_model` the
+check also follows the reference: any USD layer or asset the referenced file
+newly pulls in must stay inside the roots too, or the add is rolled back. This
+guards against a misdirected tool call — the MCP client already has full
+filesystem access on this machine, so it is not a sandbox against an
+adversarial one.
 
 **Security.** Off by default. Binds `127.0.0.1` only (the port option takes a
 port number, never a host). Requests carrying an `Origin` header are refused and
@@ -430,10 +458,11 @@ browser-hosted MCP clients such as the MCP Inspector — a deliberate trade.
 `--mcp-port` overrides the default `8765`. If the port is already bound (a second
 session), the renderer starts normally with MCP disabled rather than exiting.
 
-**v1 limits:** no save/export tool — material, light, and instance edits mutate
-in-memory render state and bypass USD, so an export would silently omit them; no
-node add/remove; and no image tool, so the client edits without seeing the
-result. Watch the viewport.
+**v1 limits:** no image tool, so the client edits without seeing the result —
+watch the viewport. `scene_save` captures structural edits (adds, removes,
+transforms) but **not** `scene_set` property edits, which mutate in-memory
+render state without authoring to USD — the same partial-save behavior the
+dock's own Save edits button has.
 
 ### Headless rendering (`skinny-render`)
 

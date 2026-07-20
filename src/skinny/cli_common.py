@@ -330,6 +330,19 @@ def reject_mcp_unsupported(mcp: bool) -> None:
         )
 
 
+def resolve_mcp_roots(args) -> "list[str]":
+    """Resolve ``--mcp-roots`` / ``SKINNY_MCP_ROOTS`` to the MCP structural
+    tools' filesystem allowlist (see ``mcp_paths.resolve_roots`` for the
+    flag > env > default precedence). Shared by every front-end that starts
+    the MCP server, so they resolve identically. Tolerant of a ``Namespace``
+    without a ``mcp_roots`` attribute (front-ends that suppress ``--mcp``
+    never read this).
+    """
+    from skinny.mcp_paths import resolve_roots
+
+    return resolve_roots(getattr(args, "mcp_roots", None), os.environ.get("SKINNY_MCP_ROOTS"))
+
+
 def reject_spectral_unsupported(
     spectral: bool,
     integrator: str | None,
@@ -564,6 +577,15 @@ def add_render_flags(
                  "SKINNY_MCP_PORT env). A port number only — the bind address is "
                  "always loopback and cannot be configured. If the port is already "
                  "bound, the renderer starts normally with MCP disabled.",
+        )
+        parser.add_argument(
+            "--mcp-roots", default=None, metavar="DIR[,DIR...]",
+            help="Comma-separated directories the MCP structural tools (model/"
+                 "primitive/light add, save, and asset-typed property writes) "
+                 "may read or write (+ SKINNY_MCP_ROOTS env). Default: the "
+                 "platform temporary directories and the current working "
+                 "directory. A guardrail against a misdirected tool call within "
+                 "the same trust domain as the MCP client — not a sandbox.",
         )
     if lobe_samplers:
         parser.add_argument(

@@ -6037,6 +6037,7 @@ class Renderer:
         parent_prim_path: str = "/World",
         name: "str | None" = None,
         transform=None,
+        validate=None,
     ) -> str:
         """Add a USD model to the live stage by reference and return its prim path.
 
@@ -6044,8 +6045,16 @@ class Renderer:
         reference to ``usd_path``, authors ``transform`` (identity when omitted),
         then re-reads the stage so the new geometry uploads. Accepts USD only.
 
+        ``validate``, when given, is called as ``validate(stage, added_prim)``
+        after the reference has recomposed but before the geometry re-sync, so a
+        policy layer (the MCP path allowlist) can inspect the composed result —
+        newly introduced layers and asset-valued attributes — and veto the add.
+        A raised exception from ``validate`` triggers the same rollback as an
+        authoring failure and propagates to the caller.
+
         Raises ``ValueError`` for a missing/invalid path (no stage mutation) and
-        rolls back the authored prim if the re-read fails.
+        rolls back the authored prim -- and any parent prims this call created --
+        if the re-read fails or ``validate`` rejects the result.
         """
         stage = self._usd_stage
         if stage is None or self._usd_edit_layer is None:
@@ -6062,23 +6071,44 @@ class Renderer:
         if Sdf.Layer.FindOrOpen(str(p)) is None:
             raise ValueError(f"add_model: not a valid USD file: {usd_path}")
         leaf = name or Tf.MakeValidIdentifier(p.stem)
-        parent = parent_prim_path.rstrip("/")
-        prim_path = self._unique_prim_path(f"{parent}/{leaf}")
-        created = False
+        parent = parent_prim_path.rstrip("/") or "/"
+        prim_path = self._unique_prim_path(
+            f"/{leaf}" if parent == "/" else f"{parent}/{leaf}"
+        )
+        parent_parts = [part for part in parent.split("/") if part]
+        parent_paths = [
+            "/" + "/".join(parent_parts[:i])
+            for i in range(1, len(parent_parts) + 1)
+        ]
+        missing_parent_paths = [
+            path for path in parent_paths
+            if not stage.GetPrimAtPath(path).IsValid()
+        ]
+        resync_started = False
         try:
             with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
-                if parent and not stage.GetPrimAtPath(parent).IsValid():
+                if parent != "/" and not stage.GetPrimAtPath(parent).IsValid():
                     UsdGeom.Xform.Define(stage, parent)
                 xform = UsdGeom.Xform.Define(stage, prim_path)
-                created = True
                 xform.GetPrim().GetReferences().AddReference(str(p))
                 if transform is not None:
                     self._author_local_transform(xform, transform)
+            if validate is not None:
+                validate(stage, xform.GetPrim())
+            resync_started = True
             self._resync_geometry_from_stage()
         except Exception:
-            if created:
-                with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if stage.GetPrimAtPath(prim_path).IsValid():
                     stage.RemovePrim(prim_path)
+                for created_parent_path in reversed(missing_parent_paths):
+                    if stage.GetPrimAtPath(created_parent_path).IsValid():
+                        stage.RemovePrim(created_parent_path)
+            if resync_started:
+                try:
+                    self._resync_geometry_from_stage()
+                except Exception:  # preserve the original creation failure
+                    pass
             raise
         return prim_path
 
@@ -6088,6 +6118,8 @@ class Renderer:
         parent_prim_path: str = "/World",
         name: "str | None" = None,
         transform=None,
+        intensity: "float | None" = None,
+        color=None,
     ) -> str:
         """Author a supported ``UsdLux`` light and return its unique prim path.
 
@@ -6095,6 +6127,10 @@ class Renderer:
         explicit property-editor-friendly defaults, and triggers the same full
         stage resync as add/remove edits. ``light_type`` must be one of
         DistantLight, SphereLight, DomeLight, RectLight, or DiskLight.
+
+        ``intensity`` and ``color`` (a 3-tuple), when given, are authored at
+        define time instead of the fixed defaults -- a post-creation property
+        write would not persist to a saved edit layer.
         """
         stage = self._usd_stage
         if stage is None or self._usd_edit_layer is None:
@@ -6137,8 +6173,11 @@ class Renderer:
                 if parent != "/" and not stage.GetPrimAtPath(parent).IsValid():
                     UsdGeom.Xform.Define(stage, parent)
                 light = schema.Define(stage, prim_path)
-                light.CreateColorAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
-                light.CreateIntensityAttr().Set(1.0)
+                r, g, b = color if color is not None else (1.0, 1.0, 1.0)
+                light.CreateColorAttr().Set(Gf.Vec3f(float(r), float(g), float(b)))
+                light.CreateIntensityAttr().Set(
+                    float(intensity) if intensity is not None else 1.0
+                )
                 light.CreateExposureAttr().Set(0.0)
                 if light_type == "DistantLight":
                     light.CreateAngleAttr().Set(0.53)
@@ -6157,6 +6196,114 @@ class Renderer:
             self._resync_geometry_from_stage()
         except Exception:
             with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if stage.GetPrimAtPath(prim_path).IsValid():
+                    stage.RemovePrim(prim_path)
+                for created_parent_path in reversed(missing_parent_paths):
+                    if stage.GetPrimAtPath(created_parent_path).IsValid():
+                        stage.RemovePrim(created_parent_path)
+            if resync_started:
+                try:
+                    self._resync_geometry_from_stage()
+                except Exception:  # preserve the original creation failure
+                    pass
+            raise
+        return prim_path
+
+    def add_primitive(
+        self,
+        prim_type: str,
+        parent_prim_path: str = "/World",
+        name: "str | None" = None,
+        transform=None,
+        color=None,
+        roughness: "float | None" = None,
+        metallic: "float | None" = None,
+    ) -> str:
+        """Author an analytic gprim with its own bound preview-surface material.
+
+        Defines one of Sphere/Cube/Cylinder/Cone/Capsule/Plane -- the types
+        ``usd_gprims.tessellate_gprim`` meshes -- in the active edit layer,
+        together with a dedicated ``UsdShade`` material carrying a
+        ``UsdPreviewSurface`` shader, and binds it. A primitive is never
+        authored bare: an unbound prim resolves to the protected fallback
+        material slot (index 0) and could never be re-colored afterwards.
+
+        Returns the gprim's unique prim path.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("add_primitive requires a loaded USD stage")
+
+        from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
+
+        schemas = {
+            "Sphere": UsdGeom.Sphere,
+            "Cube": UsdGeom.Cube,
+            "Cylinder": UsdGeom.Cylinder,
+            "Cone": UsdGeom.Cone,
+            "Capsule": UsdGeom.Capsule,
+            "Plane": UsdGeom.Plane,
+        }
+        schema = schemas.get(str(prim_type))
+        if schema is None:
+            supported = ", ".join(schemas)
+            raise ValueError(
+                f"add_primitive: unsupported primitive type {prim_type!r}; "
+                f"expected one of {supported}"
+            )
+
+        parent = str(parent_prim_path or "/World").rstrip("/") or "/"
+        leaf = Tf.MakeValidIdentifier(name or str(prim_type))
+        prim_path = self._unique_prim_path(
+            f"/{leaf}" if parent == "/" else f"{parent}/{leaf}"
+        )
+        material_path = self._unique_prim_path(f"{prim_path}_material")
+        parent_parts = [part for part in parent.split("/") if part]
+        parent_paths = [
+            "/" + "/".join(parent_parts[:i])
+            for i in range(1, len(parent_parts) + 1)
+        ]
+        missing_parent_paths = [
+            path for path in parent_paths
+            if not stage.GetPrimAtPath(path).IsValid()
+        ]
+        resync_started = False
+        try:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if parent != "/" and not stage.GetPrimAtPath(parent).IsValid():
+                    UsdGeom.Xform.Define(stage, parent)
+                gprim = schema.Define(stage, prim_path)
+                if transform is not None:
+                    self._author_local_transform(
+                        UsdGeom.Xformable(gprim.GetPrim()), transform,
+                    )
+
+                material = UsdShade.Material.Define(stage, material_path)
+                shader = UsdShade.Shader.Define(
+                    stage, f"{material_path}/PreviewSurface"
+                )
+                shader.CreateIdAttr("UsdPreviewSurface")
+                r, g, b = color if color is not None else (0.8, 0.8, 0.8)
+                shader.CreateInput(
+                    "diffuseColor", Sdf.ValueTypeNames.Color3f,
+                ).Set(Gf.Vec3f(float(r), float(g), float(b)))
+                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(
+                    float(roughness) if roughness is not None else 0.5
+                )
+                shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(
+                    float(metallic) if metallic is not None else 0.0
+                )
+                material.CreateSurfaceOutput().ConnectToSource(
+                    shader.ConnectableAPI(), "surface",
+                )
+                UsdShade.MaterialBindingAPI.Apply(gprim.GetPrim())
+                UsdShade.MaterialBindingAPI(gprim.GetPrim()).Bind(material)
+            resync_started = True
+            self._resync_geometry_from_stage()
+        except Exception:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if stage.GetPrimAtPath(material_path).IsValid():
+                    stage.RemovePrim(material_path)
                 if stage.GetPrimAtPath(prim_path).IsValid():
                     stage.RemovePrim(prim_path)
                 for created_parent_path in reversed(missing_parent_paths):

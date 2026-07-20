@@ -8,6 +8,7 @@ configuration.
 from __future__ import annotations
 
 import argparse
+import os
 
 import pytest
 
@@ -15,6 +16,7 @@ from skinny.cli_common import (
     DEFAULT_MCP_PORT,
     add_render_flags,
     reject_mcp_unsupported,
+    resolve_mcp_roots,
 )
 
 
@@ -64,6 +66,36 @@ def test_flags_suppressed_for_non_hosting_front_ends() -> None:
     p = _parser(mcp=False)
     with pytest.raises(SystemExit):
         p.parse_args(["--mcp"])
+
+
+def test_mcp_roots_flag_defaults_to_none(monkeypatch) -> None:
+    monkeypatch.delenv("SKINNY_MCP_ROOTS", raising=False)
+    args = _parser().parse_args([])
+    assert args.mcp_roots is None
+
+
+def test_mcp_roots_flag_parses_comma_separated(monkeypatch) -> None:
+    args = _parser().parse_args(["--mcp-roots", "/a,/b"])
+    assert args.mcp_roots == "/a,/b"
+
+
+def test_resolve_mcp_roots_uses_flag(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("SKINNY_MCP_ROOTS", raising=False)
+    args = _parser().parse_args(["--mcp-roots", str(tmp_path)])
+    assert resolve_mcp_roots(args) == [os.path.realpath(tmp_path)]
+
+
+def test_resolve_mcp_roots_uses_env_when_no_flag(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("SKINNY_MCP_ROOTS", str(tmp_path))
+    args = _parser().parse_args([])
+    assert resolve_mcp_roots(args) == [os.path.realpath(tmp_path)]
+
+
+def test_resolve_mcp_roots_tolerates_missing_attribute(monkeypatch) -> None:
+    """A front-end that suppresses --mcp never sets mcp_roots on its Namespace."""
+    monkeypatch.delenv("SKINNY_MCP_ROOTS", raising=False)
+    bare = argparse.Namespace()
+    assert resolve_mcp_roots(bare)  # does not raise; falls to the default
 
 
 def test_reject_is_a_noop_when_mcp_is_off() -> None:

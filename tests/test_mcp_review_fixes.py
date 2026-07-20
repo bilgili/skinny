@@ -373,7 +373,10 @@ def test_lens_file_value_is_not_written_back(tmp_path) -> None:
     )
 
     queue = RenderCommandQueue()
-    tools = SceneTools(queue, timeout=2.0)
+    # roots must cover the fixture's lens path -- scene_set now root-checks
+    # every asset-typed write (mcp-scene-structure change), a deliberate
+    # tightening of the pre-change "any string" behavior this test relied on.
+    tools = SceneTools(queue, timeout=2.0, roots=[os.path.realpath("/lenses")])
     stop = threading.Event()
 
     def loop():

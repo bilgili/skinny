@@ -80,6 +80,47 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   v1 exposes no save/export tool (material, light, and instance edits bypass USD,
   so an export would silently omit them), no node add/remove, and no image tool.
 
+- **MCP structural scene tools** (change `mcp-scene-structure`). Six new tools
+  let an MCP client compose a scene, not just tune one: `scene_add_model`
+  (reference a USD file), `scene_add_primitive` (Sphere/Cube/Cylinder/Cone/
+  Capsule/Plane with a dedicated bound `UsdPreviewSurface` material — never
+  authored bare, since an unbound prim lands on the protected fallback
+  material slot), `scene_add_light` (the same five `UsdLux` types the dock
+  offers, with optional `intensity`/`color` authored at creation),
+  `scene_remove` (non-destructive deactivation, refuses the root and
+  synthesized `/Skinny/*` nodes), `scene_save` (writes the USD edit layer —
+  structural edits only; `scene_set` property edits mutate in-memory state
+  without touching USD, mirroring the dock's own save button), and
+  `scene_job_status`. Structural tools wait a short (~2s) inline grace period
+  and return their result directly, or degrade to a pollable `job_id` for
+  slower adds rather than being cancelled — a cancelled-but-already-running
+  add would otherwise leave the outcome ambiguous. Add tools accept a
+  transform as translate/rotate-Euler-degrees/scale or a raw 4x4 matrix
+  (mutually exclusive).
+
+  New `--mcp-roots dir[,dir...]` flag (env `SKINNY_MCP_ROOTS`) confines every
+  filesystem path a structural tool touches — a model reference, a save
+  destination, an asset-typed `scene_set` write — to a configurable allowlist
+  (default: the platform temp directories, both spellings that differ on
+  macOS, plus the current working directory). For `scene_add_model` the check
+  extends past the argument: after the reference composes and its payloads
+  load, every newly introduced USD layer and every resolved asset attribute
+  in the added subtree must also resolve inside the roots (instanced
+  prototypes traversed too), or the add is rolled back — a new
+  `Renderer.add_model(validate=...)` seam runs the check post-recompose,
+  pre-resync, reusing the existing rollback. This is a guardrail against a
+  misdirected tool call within the MCP client's own trust domain (it already
+  has full filesystem access on this machine), not a sandbox.
+
+  `Renderer.add_model`'s failure rollback now also removes parent `Xform`
+  prims the call itself created (previously only `add_light`'s did), so a
+  rolled-back add under a not-yet-existing parent leaves the edit layer
+  exactly as it was. **BREAKING** (spec only): the `mcp-scene-control`
+  scenarios asserting no save/add/remove tools are advertised are replaced by
+  scenarios asserting they are — no existing client depended on their
+  absence. An existing `scene_set` write of an out-of-root `texture_file` or
+  `lens_file` path, previously accepted as any string, is now rejected.
+
 ### Changed
 
 - **`RenderCommandQueue` and `QtRendererProxy` moved** from
