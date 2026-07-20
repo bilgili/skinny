@@ -5499,6 +5499,11 @@ class Renderer:
             return
         if not scene.instances:
             self._prim_to_instances = {}
+            # Reset the TLAS to zero records — otherwise _num_instances keeps its
+            # prior value (the analytic head's 1 on a fresh renderer, or N from a
+            # replaced scene), leaving ghost geometry walked by rays. Covers a
+            # freshly created empty scene AND removing a scene's last instance.
+            self._upload_instances([])
             if self.uses_default_lights:
                 self._upload_distant_lights([])
             else:
@@ -5901,6 +5906,75 @@ class Renderer:
             self._frame_camera_to_scene(scene)  # animated authored camera
         self._upload_usd_scene()              # every call: geometry + materials + lights
 
+    def create_empty_scene(self) -> None:
+        """Synthesize a bare editable in-memory USD stage and make it active.
+
+        Gives the renderer a fresh editable stage — a single ``/World`` Xform
+        default prim (Y-up, 1 m/unit), no authored geometry/lights/camera — so
+        the runtime scene-graph editing API (`add_model`/`add_primitive`/
+        `add_light`/`save_edits`) works with no scene ever loaded from disk. The
+        MCP `scene_create` tool routes here.
+
+        `/World` is load-bearing: the add helpers parent new prims under it.
+        Lights/dome/camera are intentionally omitted — `_resync_geometry_from_stage`
+        re-injects the synthetic `/Skinny/DefaultLight`+`DefaultDome`+`MainCamera`,
+        so authoring real ones would only create duplicates. Any previously
+        loaded stage + edit layer are replaced (caller enforces the refuse/force
+        policy).
+        """
+        from pxr import Usd, UsdGeom
+
+        from skinny.usd_loader import load_scene_from_stage
+
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+        world = UsdGeom.Xform.Define(stage, "/World")
+        stage.SetDefaultPrim(world.GetPrim())
+
+        # Reset stale per-scene state carried by the load path so force-replacing
+        # a Z-up / animated scene doesn't inherit its rotation or clock. A fresh
+        # Y-up empty stage wants exactly these defaults.
+        self.clock = PlaybackClock()
+        self._anim_index = None
+        self._skeletal = None
+        self._usd_controls = []
+        self._usd_up_axis_rt = None
+        self._usd_bake_done = None
+        self.film_max_component = 0.0
+        # The new stage declares no authored camera; a replaced scene may have
+        # left the renderer horizontally mirrored or in USD-camera mode, where
+        # input dispatch would call look() on the OrbitCamera and raise. Return
+        # to a valid free-look/orbit state.
+        self._camera_mirror = False
+        if self.camera_mode == "usd":
+            self.camera_mode = "orbit"
+
+        # An empty stage has no mesh/gprim geometry — allow_empty returns a
+        # well-formed empty Scene rather than raising.
+        scene = load_scene_from_stage(
+            stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin, allow_empty=True,
+        )
+        # Adopt the new stage's physical scale (metersPerUnit 1 -> 1000 mm/unit)
+        # so a force-replace doesn't render later skin/volume content at the
+        # previous scene's scale (self.mm_per_unit is a separate renderer field).
+        self.mm_per_unit = float(scene.mm_per_unit)
+
+        # Enter the USD-active state (mirrors set_usd_scene): the label append is
+        # required, not just the index — sites index self.models[_usd_model_index].
+        if self._usd_model_index < 0:
+            self.models.append("USD: (empty)")
+            self._usd_model_index = len(self.models) - 1
+        self.model_index = self._usd_model_index
+
+        self._usd_scene = scene
+        self._usd_stage = stage
+        self._usd_edit_layer = None
+        self._attach_edit_layer()
+        # Builds scene_graph, re-injects synthetic default light/dome/camera,
+        # uploads (empty TLAS via the zero-instance branch), bumps versions.
+        self._resync_geometry_from_stage()
+
     # ── Runtime scene-graph editing (usd-scene-editing) ─────────────────
 
     def _resync_geometry_from_stage(self) -> None:
@@ -5933,6 +6007,7 @@ class Renderer:
         }
         new_scene = load_scene_from_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
+            allow_empty=True,
         )
         for inst in new_scene.instances:
             if inst.prim_path in prev_inst_enabled:
@@ -6375,7 +6450,17 @@ class Renderer:
             raise ValueError(
                 "save_edits: no path given and no default (in-memory stage)"
             )
-        self._usd_edit_layer.Export(str(target))
+        root = self._usd_stage.GetRootLayer() if self._usd_stage is not None else None
+        if root is not None and root.anonymous:
+            # A synthesized stage (scene_create) has no backing file: its /World
+            # prim and stage metadata (defaultPrim / upAxis / metersPerUnit) live
+            # on the anonymous root, not the edit sublayer. Exporting only the
+            # edit layer would drop them, so the saved file would reopen at USD's
+            # 0.01 m/unit default. Export the composed stage instead — complete
+            # and self-contained.
+            self._usd_stage.Export(str(target))
+        else:
+            self._usd_edit_layer.Export(str(target))
         return str(target)
 
     def list_nodes(self) -> "list[dict]":

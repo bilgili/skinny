@@ -69,6 +69,13 @@ class FakeRenderer:
         self.calls.append(("save_edits", path))
         return path
 
+    def create_empty_scene(self):
+        self._maybe_delay()
+        self.calls.append(("create_empty_scene",))
+        # Mimic the real method: a fresh editable stage is now present.
+        self._usd_stage = FakeStage()
+        self._usd_edit_layer = object()
+
 
 class Proxy:
     def __init__(self, queue) -> None:
@@ -130,6 +137,35 @@ def h(roots):
     harness = Harness(roots=roots)
     yield harness
     harness.close()
+
+
+# ── scene_create ─────────────────────────────────────────────────────
+
+def test_create_on_empty_renderer_builds_editable_stage(roots) -> None:
+    h = Harness(has_stage=False, roots=roots)
+    try:
+        result = h.tools.scene_create()
+        assert result["status"] == "done"
+        assert "path" not in result  # versions-only; nothing written to disk
+        assert result["material_version"] == 7
+        assert h.renderer.calls == [("create_empty_scene",)]
+        # An editable stage exists now, so structural edits would be admitted.
+        assert h.renderer._usd_stage is not None
+        assert h.renderer._usd_edit_layer is not None
+    finally:
+        h.close()
+
+
+def test_create_refuses_when_stage_already_loaded(h) -> None:
+    with pytest.raises(SceneToolError, match="already loaded; pass force=true"):
+        h.tools.scene_create()
+    assert h.renderer.calls == []  # the stage was left intact
+
+
+def test_create_force_replaces_existing_stage(h) -> None:
+    result = h.tools.scene_create(force=True)
+    assert result["status"] == "done"
+    assert h.renderer.calls == [("create_empty_scene",)]
 
 
 # ── scene_add_model ──────────────────────────────────────────────────

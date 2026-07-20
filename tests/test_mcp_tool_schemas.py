@@ -38,9 +38,9 @@ def _schemas(server) -> dict[str, dict]:
     return {t.name: t.inputSchema for t in tools}
 
 
-def test_all_nine_tools_are_advertised(server) -> None:
+def test_all_ten_tools_are_advertised(server) -> None:
     assert set(_schemas(server)) == {
-        "scene_list", "scene_get", "scene_set",
+        "scene_list", "scene_get", "scene_set", "scene_create",
         "scene_add_model", "scene_add_primitive", "scene_add_light",
         "scene_remove", "scene_save", "scene_job_status",
     }
@@ -69,6 +69,14 @@ def test_scene_set_advertises_path_property_value(server) -> None:
     schema = _schemas(server)["scene_set"]
     assert {"path", "property", "value"} <= set(schema["properties"])
     assert set(schema.get("required", [])) == {"path", "property", "value"}
+
+
+def test_scene_create_advertises_force_bool(server) -> None:
+    schema = _schemas(server)["scene_create"]
+    force = schema["properties"]["force"]
+    assert force.get("type") == "boolean"
+    # force is optional (defaults to False) — not a required parameter.
+    assert "force" not in schema.get("required", [])
 
 
 def test_scene_add_model_advertises_its_real_parameters(server) -> None:

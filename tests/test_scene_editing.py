@@ -73,6 +73,23 @@ def _render(renderer, frames: int = 4) -> bytes:
     return raw
 
 
+@pytest.fixture()
+def bare_renderer():
+    """Renderer with NO scene loaded — the state scene_create starts from."""
+    from skinny.renderer import Renderer
+    from skinny.vk_context import VulkanContext
+
+    ctx = VulkanContext(window=None, width=96, height=96)
+    renderer = Renderer(
+        vk_ctx=ctx, shader_dir=SHADER_DIR, hdr_dir=HDR_DIR, tattoo_dir=TATTOO_DIR,
+    )
+    try:
+        yield renderer
+    finally:
+        renderer.cleanup()
+        ctx.destroy()
+
+
 @needs_vulkan
 @needs_usd
 @pytest.mark.gpu
@@ -243,3 +260,99 @@ class TestPrimIndexConsistency:
         for i, inst in enumerate(renderer._usd_scene.instances):
             if inst.prim_path:
                 assert i in renderer._prim_to_instances[inst.prim_path]
+
+
+@needs_vulkan
+@needs_usd
+@pytest.mark.gpu
+class TestCreateEmptyScene:
+    def test_creates_editable_stage_with_world(self, bare_renderer):
+        r = bare_renderer
+        assert r._usd_stage is None  # no scene loaded yet
+        r.create_empty_scene()
+        # Editable stage now present -> structural edits are admitted.
+        assert r._usd_stage is not None
+        assert r._usd_edit_layer is not None
+        assert r._usd_stage.GetPrimAtPath("/World").IsValid()
+        # No authored geometry; the TLAS is empty (no analytic-head ghost).
+        assert r._usd_scene.instances == []
+        assert r._num_instances == 0
+        # Physical scale adopted from the new stage (metersPerUnit 1).
+        assert r.mm_per_unit == pytest.approx(1000.0)
+
+    def test_save_created_scene_roundtrips_metadata(self, bare_renderer, tmp_path):
+        from pxr import Usd, UsdGeom
+        r = bare_renderer
+        r.create_empty_scene()
+        r.add_primitive("Sphere", parent_prim_path="/World", name="Ball")
+        out = tmp_path / "created.usda"
+        written = r.save_edits(str(out))
+        assert Path(written).exists()
+        reopened = Usd.Stage.Open(written)
+        # The seed root data must survive the save (P1): without it the file
+        # reopens at USD's 0.01 m/unit default.
+        assert reopened.GetDefaultPrim().GetName() == "World"
+        assert str(UsdGeom.GetStageUpAxis(reopened)) == "Y"
+        assert UsdGeom.GetStageMetersPerUnit(reopened) == pytest.approx(1.0)
+        assert reopened.GetPrimAtPath("/World").IsValid()
+        assert reopened.GetPrimAtPath("/World/Ball").IsValid()
+
+    def test_save_created_empty_preserves_world_and_units(self, bare_renderer, tmp_path):
+        from pxr import Usd, UsdGeom
+        r = bare_renderer
+        r.create_empty_scene()  # nothing added
+        out = tmp_path / "empty.usda"
+        r.save_edits(str(out))
+        reopened = Usd.Stage.Open(str(out))
+        assert UsdGeom.GetStageMetersPerUnit(reopened) == pytest.approx(1.0)
+        assert reopened.GetPrimAtPath("/World").IsValid()
+
+    def test_created_scene_is_enumerable_and_lit(self, bare_renderer):
+        r = bare_renderer
+        r.create_empty_scene()
+        # list_nodes walks the editable stage -> carries the authored /World.
+        assert "/World" in {n["path"] for n in r.list_nodes()}
+        # The synthetic default light/dome/camera live in the derived scene
+        # graph (the MCP scene_list surface), not on the editable stage.
+        graph_paths: set[str] = set()
+        stack = [r.scene_graph]
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            graph_paths.add(node.path)
+            stack.extend(node.children)
+        assert "/World" in graph_paths
+        assert any(p.startswith("/Skinny/") for p in graph_paths)
+
+    def test_add_primitive_after_create(self, bare_renderer):
+        r = bare_renderer
+        r.create_empty_scene()
+        path = r.add_primitive("Sphere", parent_prim_path="/World", name="Ball")
+        assert path == "/World/Ball"
+        assert r._usd_stage.GetPrimAtPath(path).IsValid()
+        assert len(r._usd_scene.instances) >= 1
+
+    def test_created_scene_renders_without_analytic_head(self, bare_renderer):
+        r = bare_renderer
+        r.create_empty_scene()
+        # Must render the (empty) USD scene, not silently fall back to the
+        # analytic head — _usd_model_index stays the active model slot.
+        _render(r)
+        assert r.model_index == r._usd_model_index
+        assert r._num_instances == 0
+
+    def test_force_replace_from_loaded_scene(self, editor):
+        renderer, _ = editor
+        assert len(renderer._usd_scene.instances) > 0
+        # Simulate a session left in USD-camera / mirrored state.
+        renderer.camera_mode = "usd"
+        renderer._camera_mirror = True
+        renderer.create_empty_scene()
+        assert renderer._usd_scene.instances == []
+        assert renderer._num_instances == 0
+        assert renderer._usd_stage.GetPrimAtPath("/World").IsValid()
+        # Camera state reset so a drag can't call look() on the OrbitCamera.
+        assert renderer.camera_mode != "usd"
+        assert renderer._camera_mirror is False
+        assert renderer.mm_per_unit == pytest.approx(1000.0)
