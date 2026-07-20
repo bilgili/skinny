@@ -1948,8 +1948,15 @@ def _read_open_stage(
     use_usd_mtlx_plugin: bool = False,
     keep_stage: bool = False,
     source_label: Optional[str] = None,
+    allow_empty: bool = False,
 ) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]], Optional["Usd.Stage"]]:
-    """Serial read of an already-open USD stage. See `_read_usd_stage`."""
+    """Serial read of an already-open USD stage. See `_read_usd_stage`.
+
+    ``allow_empty`` permits a stage with no mesh/gprim geometry (returns an
+    empty ``Scene`` with only lights/camera/units) instead of raising — used by
+    the runtime editing path where a stage can legitimately be geometry-less
+    (a freshly created scene, or one whose last instance was just removed).
+    """
     label = source_label or (stage.GetRootLayer().identifier or "<anonymous stage>")
     eval_time = time if time is not None else Usd.TimeCode.Default()
 
@@ -1987,7 +1994,7 @@ def _read_open_stage(
         )
         prim_data.append((source, transform, material_id))
 
-    if not prim_data:
+    if not prim_data and not allow_empty:
         raise ValueError(
             f"USD stage {label} contains no usable mesh or gprim geometry"
         )
@@ -2570,14 +2577,18 @@ def load_scene_from_stage(
     *,
     time: Optional[Usd.TimeCode] = None,
     use_usd_mtlx_plugin: bool = False,
+    allow_empty: bool = False,
 ) -> Scene:
     """Read an already-open USD stage and return a fully-baked `Scene`.
 
     Same as `load_scene_from_usd` but takes a `Usd.Stage` the caller owns
     (e.g. one they mutate between frames). Blocking; bakes meshes in parallel.
+    ``allow_empty`` returns an empty ``Scene`` for a geometry-less stage rather
+    than raising (see ``_read_open_stage``).
     """
     scene, prim_data, _ = _read_open_stage(
         stage, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
+        allow_empty=allow_empty,
     )
     cache_index = load_cache_index()
 

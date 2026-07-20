@@ -368,6 +368,34 @@ class SceneTools:
 
     # ── Structural tools ────────────────────────────────────────────
 
+    def scene_create(self, force: bool = False) -> dict:
+        """Create a fresh, empty, editable scene so structural editing can begin
+        without a scene having been loaded from disk.
+
+        Synthesizes an in-memory USD stage holding a single ``/World`` Xform
+        (Y-up, 1 m/unit) and attaches a non-destructive edit layer, so the
+        ``scene_add_*`` tools and ``scene_save`` work immediately. The renderer's
+        synthetic default light, dome, and camera appear in the scene graph, so
+        the created scene is lit and enumerable.
+
+        Refuses when an editable stage is already loaded -- replacing it would
+        silently discard unsaved structural edits. Pass ``force = true`` to
+        replace the current stage with a fresh empty one anyway.
+
+        Returns the scene version counters only; the stage is anonymous until
+        ``scene_save`` writes it to an allowed root.
+        """
+        def write(renderer) -> dict:
+            if has_editable_stage(renderer) and not force:
+                raise SceneToolError(
+                    "a scene is already loaded; pass force=true to replace it "
+                    "and discard unsaved structural edits"
+                )
+            renderer.create_empty_scene()
+            return {**_versions(renderer)}
+
+        return self._structural(write)
+
     def scene_add_model(
         self,
         usd_path: str,
@@ -734,6 +762,7 @@ def build_app(tools: SceneTools, token: str, port: int):
 
     for tool in (
         tools.scene_list, tools.scene_get, tools.scene_set,
+        tools.scene_create,
         tools.scene_add_model, tools.scene_add_primitive, tools.scene_add_light,
         tools.scene_remove, tools.scene_save, tools.scene_job_status,
     ):
