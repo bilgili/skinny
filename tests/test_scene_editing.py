@@ -277,6 +277,35 @@ class TestCreateEmptyScene:
         # No authored geometry; the TLAS is empty (no analytic-head ghost).
         assert r._usd_scene.instances == []
         assert r._num_instances == 0
+        # Physical scale adopted from the new stage (metersPerUnit 1).
+        assert r.mm_per_unit == pytest.approx(1000.0)
+
+    def test_save_created_scene_roundtrips_metadata(self, bare_renderer, tmp_path):
+        from pxr import Usd, UsdGeom
+        r = bare_renderer
+        r.create_empty_scene()
+        r.add_primitive("Sphere", parent_prim_path="/World", name="Ball")
+        out = tmp_path / "created.usda"
+        written = r.save_edits(str(out))
+        assert Path(written).exists()
+        reopened = Usd.Stage.Open(written)
+        # The seed root data must survive the save (P1): without it the file
+        # reopens at USD's 0.01 m/unit default.
+        assert reopened.GetDefaultPrim().GetName() == "World"
+        assert str(UsdGeom.GetStageUpAxis(reopened)) == "Y"
+        assert UsdGeom.GetStageMetersPerUnit(reopened) == pytest.approx(1.0)
+        assert reopened.GetPrimAtPath("/World").IsValid()
+        assert reopened.GetPrimAtPath("/World/Ball").IsValid()
+
+    def test_save_created_empty_preserves_world_and_units(self, bare_renderer, tmp_path):
+        from pxr import Usd, UsdGeom
+        r = bare_renderer
+        r.create_empty_scene()  # nothing added
+        out = tmp_path / "empty.usda"
+        r.save_edits(str(out))
+        reopened = Usd.Stage.Open(str(out))
+        assert UsdGeom.GetStageMetersPerUnit(reopened) == pytest.approx(1.0)
+        assert reopened.GetPrimAtPath("/World").IsValid()
 
     def test_created_scene_is_enumerable_and_lit(self, bare_renderer):
         r = bare_renderer
@@ -316,7 +345,14 @@ class TestCreateEmptyScene:
     def test_force_replace_from_loaded_scene(self, editor):
         renderer, _ = editor
         assert len(renderer._usd_scene.instances) > 0
+        # Simulate a session left in USD-camera / mirrored state.
+        renderer.camera_mode = "usd"
+        renderer._camera_mirror = True
         renderer.create_empty_scene()
         assert renderer._usd_scene.instances == []
         assert renderer._num_instances == 0
         assert renderer._usd_stage.GetPrimAtPath("/World").IsValid()
+        # Camera state reset so a drag can't call look() on the OrbitCamera.
+        assert renderer.camera_mode != "usd"
+        assert renderer._camera_mirror is False
+        assert renderer.mm_per_unit == pytest.approx(1000.0)

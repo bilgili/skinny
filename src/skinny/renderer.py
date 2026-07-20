@@ -5942,12 +5942,23 @@ class Renderer:
         self._usd_up_axis_rt = None
         self._usd_bake_done = None
         self.film_max_component = 0.0
+        # The new stage declares no authored camera; a replaced scene may have
+        # left the renderer horizontally mirrored or in USD-camera mode, where
+        # input dispatch would call look() on the OrbitCamera and raise. Return
+        # to a valid free-look/orbit state.
+        self._camera_mirror = False
+        if self.camera_mode == "usd":
+            self.camera_mode = "orbit"
 
         # An empty stage has no mesh/gprim geometry — allow_empty returns a
         # well-formed empty Scene rather than raising.
         scene = load_scene_from_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin, allow_empty=True,
         )
+        # Adopt the new stage's physical scale (metersPerUnit 1 -> 1000 mm/unit)
+        # so a force-replace doesn't render later skin/volume content at the
+        # previous scene's scale (self.mm_per_unit is a separate renderer field).
+        self.mm_per_unit = float(scene.mm_per_unit)
 
         # Enter the USD-active state (mirrors set_usd_scene): the label append is
         # required, not just the index — sites index self.models[_usd_model_index].
@@ -6439,7 +6450,17 @@ class Renderer:
             raise ValueError(
                 "save_edits: no path given and no default (in-memory stage)"
             )
-        self._usd_edit_layer.Export(str(target))
+        root = self._usd_stage.GetRootLayer() if self._usd_stage is not None else None
+        if root is not None and root.anonymous:
+            # A synthesized stage (scene_create) has no backing file: its /World
+            # prim and stage metadata (defaultPrim / upAxis / metersPerUnit) live
+            # on the anonymous root, not the edit sublayer. Exporting only the
+            # edit layer would drop them, so the saved file would reopen at USD's
+            # 0.01 m/unit default. Export the composed stage instead — complete
+            # and self-contained.
+            self._usd_stage.Export(str(target))
+        else:
+            self._usd_edit_layer.Export(str(target))
         return str(target)
 
     def list_nodes(self) -> "list[dict]":
