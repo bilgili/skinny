@@ -69,4 +69,4 @@
 - [x] 7.1 `openspec validate mcp-scene-create --strict`.
 - [x] 7.2 Run hostless tests + `ruff check src/` on changed files.
 - [x] 7.3 Codex (or review-subagent fallback) pre-merge review; fold findings.
-- [ ] 7.4 Merge the worktree to main; archive the change.
+- [x] 7.4 Merge the worktree to main; archive the change.
