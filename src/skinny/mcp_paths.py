@@ -4,8 +4,10 @@ The MCP client is a local AI agent with its own file tools, on the same
 loopback+token trust domain as the renderer process (see the module docstring
 of ``mcp_server.py``). This is a guardrail against agent mistakes -- pointing a
 tool at the wrong path -- not a sandbox boundary; residual gaps (resolver
-plugins, edits made outside this server) are accepted and documented, not
-implied closed.
+plugins, value clips -- which load their target layers lazily per time-sample
+rather than at add time, so neither the layer-stack diff nor the attribute walk
+below is guaranteed to see them -- and edits made outside this server) are
+accepted and documented, not implied closed.
 
 Enforcement happens at three points, all funneled through ``check_path``:
 the tool argument itself, the layer stack a model add newly composes, and the

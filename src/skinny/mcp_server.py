@@ -244,7 +244,10 @@ class SceneTools:
             result = job.future.result()
         except SceneToolError as exc:
             return {"status": "failed", "job_id": job_id, "error": str(exc)}
-        except (ValueError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - report any renderer-thrown
+            # failure (ValueError/RuntimeError/pxr.Tf.ErrorException/...) as a
+            # retry-grade result rather than letting it escape as a transport
+            # error; a poll must always resolve to done/failed, never raise.
             return {
                 "status": "failed", "job_id": job_id,
                 "error": f"{type(exc).__name__}: {exc}",
@@ -636,7 +639,7 @@ def _coerce(prop, value):
     if type_name == "vec3f":
         return _vector(prop, value, 3)
 
-    if type_name in ("string", "token", "asset", "texture_file", "lens_file"):
+    if type_name in _ASSET_PROPERTY_TYPES or type_name in ("string", "token"):
         if not isinstance(value, str):
             raise SceneToolError(f"{prop.name} expects a string, got {value!r}")
         return value
@@ -720,8 +723,10 @@ def build_app(tools: SceneTools, token: str, port: int):
                 return fn(*args, **kwargs)
             except SceneToolError as exc:
                 raise ToolError(str(exc)) from exc
-            except (ValueError, RuntimeError) as exc:
-                # Renderer exceptions arrive here via Future.result().
+            except Exception as exc:  # noqa: BLE001 - renderer exceptions
+                # (ValueError/RuntimeError/pxr.Tf.ErrorException/...) arrive
+                # here via Future.result(); report every one as a tool
+                # failure rather than letting it escape as a transport error.
                 raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
         call.__signature__ = inspect.signature(fn)
