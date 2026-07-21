@@ -385,3 +385,117 @@ def test_preset_inputs_mtime_cache():
     assert path in m._PRESET_INPUT_CACHE
     second = m.list_preset_inputs("marble_solid")
     assert first == second  # served from cache, same result
+
+
+# ─── Editable-input descriptors (design D5, finding #2) ───────────────
+
+def test_descriptors_carry_type_default_and_declared_range():
+    """A template's promoted inputs surface with their DECLARED type/default/
+    range — octaves is an int accepting 1..8, scale reaches its 64 maximum, and
+    colorA keeps its authored default — not a bare 0..1 float 0.0 (finding #2)."""
+    r = m.synthesize({"template": "noise", "params": {}}, "N")
+    d = r.descriptors
+    assert d["octaves"]["type"] == "int"
+    assert d["octaves"]["default"] == 4
+    assert d["octaves"]["range"] == [1, 8]
+    assert d["octaves"]["uniforms"] == r.mapping["octaves"]
+    assert d["scale"]["type"] == "float"
+    assert d["scale"]["range"] == [0.01, 64.0]
+    assert d["colorA"]["type"] == "color3"
+    assert d["colorA"]["default"] == [0.9, 0.9, 0.85]
+
+
+def test_raw_graph_expose_range_from_material_ranges():
+    """A raw-graph `expose: true` float whose name matches a known material
+    range advertises that range; otherwise it is unbounded (finding #2)."""
+    spec = {
+        "model": "standard_surface",
+        "graph": {
+            "nodes": {
+                "m": {"type": "multiply", "output": "color3",
+                      "in1": [0.5, 0.5, 0.5],
+                      "in2": {"expose": True, "value": 0.5, "name": "roughness"}},
+            },
+            "connections": [["m.out", "base_color"]],
+        },
+    }
+    r = m.synthesize(spec, "RG")
+    assert r.descriptors["roughness"]["type"] == "float"
+    assert r.descriptors["roughness"]["range"] == [0.04, 1.0]
+    assert r.descriptors["roughness"]["default"] == 0.5
+
+
+def test_sidecar_persists_descriptors_roundtrip(tmp_path):
+    store = m.SessionMaterialStore(str(tmp_path))
+    r = m.synthesize({"template": "noise", "params": {}}, "D")
+    store.write_document("D", r.document_xml, r.descriptors)
+    assert store.read_mapping("D") == r.descriptors
+
+
+def test_write_document_refuses_overwrite(tmp_path):
+    """A second write to the same name is refused unless explicit (finding #5)."""
+    store = m.SessionMaterialStore(str(tmp_path))
+    store.write_document("X", "<materialx/>", None)
+    with pytest.raises(MaterialSpecError):
+        store.write_document("X", "<other/>", None)
+    # explicit overwrite is allowed
+    store.write_document("X", "<other/>", None, overwrite=True)
+    assert (tmp_path / "X.mtlx").read_text() == "<other/>"
+
+
+# ─── Preset identity descriptors (design D3, finding #3) ──────────────
+
+def test_preset_identity_descriptors_identity_mapped():
+    """A curated preset's descriptors map each writable key to itself so the
+    scene graph surfaces exactly the advertised keys (finding #3)."""
+    d = m.identity_descriptors_for_file(m.resolve_preset("marble_solid"))
+    assert d
+    for name, desc in d.items():
+        assert desc["uniforms"] == [name]
+        assert desc["type"] in ("float", "color3", "int")
+    # list_preset_inputs is exactly the descriptor keys
+    assert set(m.list_preset_inputs("marble_solid")) == set(d)
+
+
+# ─── Preview schema == authored inputs (design D4, finding #9) ────────
+
+def test_preview_schema_advertised_equals_authorable():
+    from skinny import usd_material_edit as ume
+    advertised = set(m.model_param_schema("preview"))
+    authored = {name for name, _t, _d in ume._PREVIEW_INPUTS}
+    assert advertised == authored
+
+
+def test_preview_rejects_non_authorable_input():
+    # `normal` reflects on the full UsdPreviewSurface schema but the inline
+    # author path drops it — discovery == authoring, so it is refused.
+    with pytest.raises(MaterialSpecError):
+        m.validate_spec({"model": "preview", "params": {"normal": [0.0, 0.0, 1.0]}})
+
+
+# ─── Graph finite-check + connection suffix (design D4, finding #10) ──
+
+def test_graph_non_finite_node_param_rejected():
+    spec = {
+        "model": "standard_surface",
+        "graph": {
+            "nodes": {"m": {"type": "multiply", "output": "color3",
+                            "in1": [0.5, 0.5, 0.5], "in2": float("inf")}},
+            "connections": [["m.out", "base_color"]],
+        },
+    }
+    with pytest.raises(MaterialSpecError):
+        m.validate_spec(spec)
+
+
+def test_graph_bad_connection_output_suffix_rejected():
+    spec = {
+        "model": "standard_surface",
+        "graph": {
+            "nodes": {"pos": {"type": "position"}},
+            "connections": [["pos.DOES_NOT_EXIST", "base_color"]],
+        },
+    }
+    with pytest.raises(MaterialSpecError) as e:
+        m.validate_spec(spec)
+    assert "DOES_NOT_EXIST" in str(e.value)

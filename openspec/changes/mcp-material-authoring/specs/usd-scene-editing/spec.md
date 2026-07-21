@@ -128,9 +128,11 @@ input controls via the existing material-override path.
   be re-anchored relative to the export target and session documents copied
   the same way. Reload for this branch means re-attaching the exported
   overlay to the original scene.
-- Curated presets whose documents reference texture files SHALL keep
-  absolute references into the renderer's assets directory rather than
-  being copied without their textures.
+- All curated presets SHALL keep absolute references into the renderer's
+  assets directory and are never copied — texture-bearing docs would lose
+  their textures if copied without walking filename-typed inputs, and the
+  widened all-presets rule keeps save classification a single
+  session-dir-vs-assets-dir test.
 
 #### Scenario: Created-scene save is self-contained
 

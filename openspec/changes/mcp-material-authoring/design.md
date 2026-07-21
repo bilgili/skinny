@@ -249,14 +249,17 @@ too:
   is defined as: re-open the original scene and re-attach the exported
   layer as the edit layer — the overlay is not claimed to be a standalone
   scene.
-- **Texture carve-out (review M5).** Curated presets that reference
-  textures (`wood_tiled`, `brass_tiled`, `default_uv_image`) are *not*
-  copied; their references stay absolute into `assets/`, because copying
-  the doc without walking its filename-typed inputs would silently drop
-  textures to the fallback slot. The saved scene is self-contained *except*
-  for curated-preset assets, exactly like any scene referencing renderer
-  assets. Synthesized documents (textureless by the v1 whitelist) are
-  always copied.
+- **Curated-preset carve-out (review M5, widened at codex review #11).**
+  ALL curated presets — not only the texture-bearing ones — keep absolute
+  references into `assets/` and are never copied. The original motive was
+  texture safety (copying a doc without walking its filename-typed inputs
+  silently drops textures to the fallback slot); the widened rule is
+  deliberate: curated presets are renderer configuration in the same trust
+  domain as the assets directory, and a saved scene referencing them is
+  exactly as repository-dependent as any scene referencing renderer HDRs.
+  The saved scene is self-contained *except* for curated-preset assets.
+  Synthesized documents (textureless by the v1 whitelist) are always
+  copied.
 
 ### D8 — Participation is binding-driven; `scene_add_material` says so
 
@@ -273,13 +276,17 @@ of participation. Scene-graph presence of the unbound holder is whatever
 stage enumeration already provides; its editable properties appear once the
 material is loaded (bound).
 
-### D9 — Graph adds are jobs, not fast calls
+### D9 — First binds of graph materials are jobs, not fast calls
 
-Review M6: any new nodegraph target changes `_graph_set_signature()`, which
-rebuilds the megakernel pipeline on the render thread — a full compile.
-Structural tools already degrade to pollable jobs past a grace period;
-graph-material adds and first binds will essentially always take that path,
-and the tool docs say so. GPU tests budget one compile per distinct graph
+Review M6, reconciled with D8 at codex review #12: a nodegraph enters
+`_graph_set_signature()` only when the material becomes live — participation
+is binding-driven (D8), so an *unbound* `scene_add_material` performs no
+compile and stays fast; it is the **first bind** (or an add-plus-bind via
+`scene_add_primitive(material=…)`) that changes the signature and rebuilds
+the megakernel pipeline on the render thread — a full compile. Structural
+tools already degrade to pollable jobs past a grace period; first binds of
+graph materials will essentially always take that path, and the tool docs
+say so. GPU tests budget one compile per distinct graph
 set change and respect the one-guarded-Metal-process rule. Batching
 (N materials, one resync) is deliberately deferred to a follow-up.
 

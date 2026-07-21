@@ -130,6 +130,20 @@ _MODEL_NODE_STRING: dict[str, str] = {
 }
 
 
+# UsdPreviewSurface inputs the inline author path (`usd_material_edit.
+# author_preview_material` / `_PREVIEW_INPUTS`) actually writes. The reflected
+# nodedef exposes the FULL surface — `normal`/`displacement`/`occlusion` are
+# texture/connection-typed and `useSpecularWorkflow`/`opacityThreshold`/
+# `opacityMode` are mode inputs the inline author silently drops. Discovery AND
+# validation restrict to exactly this author-able subset (design D4/finding #9)
+# so a spec can never accept a `preview` param that authoring would ignore. Keep
+# in sync with `usd_material_edit._PREVIEW_INPUTS`.
+_PREVIEW_AUTHORABLE: frozenset[str] = frozenset({
+    "diffuseColor", "emissiveColor", "specularColor", "roughness", "metallic",
+    "clearcoat", "clearcoatRoughness", "opacity", "ior",
+})
+
+
 def _shader_inputs(model: str) -> dict[str, str]:
     """`{input_name: mtlx_type}` for a shader model, reflected + cached.
 
@@ -146,6 +160,20 @@ def _shader_inputs(model: str) -> dict[str, str]:
             i.getName(): i.getType() for i in nd.getActiveInputs()
         }
     return _SHADER_INPUTS_CACHE[model]
+
+
+def _model_input_schema(model: str) -> dict[str, str]:
+    """Author-able `{input_name: mtlx_type}` for a shader model (finding #9).
+
+    Restricts `preview` to `_PREVIEW_AUTHORABLE`; `standard_surface` passes the
+    full reflected schema (its flat inputs are all authored on the shader prim).
+    The single source both `_validate_shader_params` and `model_param_schema`
+    read, so advertised == authored.
+    """
+    schema = _shader_inputs(model)
+    if model == "preview":
+        return {k: v for k, v in schema.items() if k in _PREVIEW_AUTHORABLE}
+    return schema
 
 
 _SHARED_LIBRARY: Optional[MaterialLibrary] = None
@@ -226,6 +254,22 @@ def _finite_number(label: str, value: Any) -> float:
     return fv
 
 
+def _finite_check_node_value(label: str, value: Any) -> None:
+    """Reject NaN/Inf in a graph node's constant value (finding #10).
+
+    Recurses into list/tuple (colour/vector constants). Strings (node names,
+    filenames) and booleans are left alone — only numeric leaves are checked.
+    """
+    if isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            _finite_check_node_value(f"{label}[{i}]", v)
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    if not math.isfinite(float(value)):
+        raise MaterialSpecError(f"{label} must be finite, got {value!r}")
+
+
 def _as_color3(label: str, value: Any) -> list[float]:
     if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
         raise MaterialSpecError(f"{label} expects 3 numbers, got {value!r}")
@@ -254,7 +298,7 @@ def _validate_shader_params(model: str, params: dict) -> dict:
     """
     if not isinstance(params, dict):
         raise MaterialSpecError(f"params must be an object, got {params!r}")
-    schema = _shader_inputs(model)
+    schema = _model_input_schema(model)
     out: dict[str, Any] = {}
     for key, value in params.items():
         mtype = schema.get(key)
@@ -295,7 +339,7 @@ def model_param_schema(model: str) -> dict[str, dict]:
             "type": mtype,
             "range": list(_MATERIAL_FLOAT_RANGES[pname]) if pname in _MATERIAL_FLOAT_RANGES else None,
         }
-        for pname, mtype in _shader_inputs(model).items()
+        for pname, mtype in _model_input_schema(model).items()
     }
 
 
@@ -325,17 +369,41 @@ def _validate_graph(graph: dict) -> dict:
                 f"node {nname!r} uses unsupported type {cat!r}; "
                 f"supported node types: {supported}"
             )
+        # Finite-check every constant numeric/color the node authors so a NaN/Inf
+        # cannot reach the generated MaterialX (finding #10). `_connect` inputs
+        # carry no value; an exposed input's value rides under `value`.
+        for key, raw in ndef.items():
+            if key in ("type", "output"):
+                continue
+            if isinstance(raw, dict):
+                if raw.get("_connect"):
+                    continue
+                value = raw.get("value")
+            else:
+                value = raw
+            _finite_check_node_value(f"{nname}.{key}", value)
 
     ss_inputs = _shader_inputs("standard_surface")
     for conn in connections:
         if not isinstance(conn, (list, tuple)) or len(conn) != 2:
             raise MaterialSpecError(f"connection must be [src, target], got {conn!r}")
         src, tgt = conn
-        src_node = str(src).split(".", 1)[0]
+        src_str = str(src)
+        src_node = src_str.split(".", 1)[0]
         if src_node not in nodes:
             raise MaterialSpecError(
                 f"connection source references missing node {src_node!r}"
             )
+        # Validate the `.out`-style output suffix: whitelisted nodes are single-
+        # output, so only the canonical `out` is valid — a bogus `pos.NOPE` token
+        # must not silently pass (finding #10).
+        if "." in src_str:
+            suffix = src_str.split(".", 1)[1]
+            if suffix != "out":
+                raise MaterialSpecError(
+                    f"connection source {src_str!r}: unknown output {suffix!r}; "
+                    f"only 'out' is a valid output name"
+                )
         tgt_str = str(tgt)
         head = tgt_str.split(".", 1)[0]
         if "." in tgt_str and head in nodes:
@@ -578,7 +646,28 @@ def expand_template(name: str, params: dict) -> dict:
                 )
             resolved[tp.name] = fv
     graph = TEMPLATES[name]["builder"](resolved)
+    _annotate_template_descriptors(graph, schema)
     return {"model": "standard_surface", "params": {}, "graph": graph}
+
+
+def _annotate_template_descriptors(graph: dict, schema: list[TemplateParam]) -> None:
+    """Stamp each exposed graph input with its `TemplateParam` kind + bounds so
+    descriptor derivation (design D5/finding #2) advertises the declared type and
+    range instead of inferring a bare 0..1 float. Templates own these; a raw-graph
+    `expose: true` input carries neither and falls back to value-inference +
+    `_MATERIAL_FLOAT_RANGES`.
+    """
+    by_name = {tp.name: tp for tp in schema}
+    for ndef in graph.get("nodes", {}).values():
+        if not isinstance(ndef, dict):
+            continue
+        for raw in ndef.values():
+            if not (isinstance(raw, dict) and raw.get("expose")):
+                continue
+            tp = by_name.get(raw.get("name"))
+            if tp is not None:
+                raw["kind"] = tp.kind
+                raw["range"] = list(tp.bounds) if tp.bounds else None
 
 
 def template_param_schema(name: str) -> dict[str, dict]:
@@ -745,6 +834,79 @@ class SynthesisResult:
     mapping: dict[str, list[str]] = field(default_factory=dict)
     # The promoted logical keys a client can `scene_set` (mapping keys).
     editable_inputs: list[str] = field(default_factory=list)
+    # Full editable-input DESCRIPTORS persisted to the sidecar + Material
+    # (design D5/finding #2): `{name: {"uniforms": [...], "type": "float"|
+    # "color3"|"int", "default": <authored value>, "range": [lo, hi] | None}}`.
+    # The scene graph builds correctly-typed, correctly-bounded, authored-default
+    # properties from these — the old `{name: [uniforms]}` shape lost type/
+    # default/range and surfaced every input as a 0..1 float.
+    descriptors: dict[str, dict] = field(default_factory=dict)
+
+
+def _descriptor_kind(mtlx_type: "str | None") -> str:
+    """Collapse an mtlx/param type to the descriptor's coarse kind."""
+    if mtlx_type in ("color3", "color4"):
+        return "color3"
+    if mtlx_type in ("integer", "int"):
+        return "int"
+    return "float"
+
+
+def _collect_exposed(spec: dict) -> dict[str, dict]:
+    """`{iface_name: {"value", "kind", "range"}}` for every promoted graph input.
+
+    Walks the normalized spec's graph nodes (not the built doc) so the authored
+    value — and, for template inputs, the `TemplateParam`-stamped kind/range —
+    are available for descriptor derivation. Deduped by interface name (a
+    shattered input feeding N node inputs shares one authored value).
+    """
+    graph = spec.get("graph") or {}
+    promote_all = bool(spec.get("_promote_all"))
+    out: dict[str, dict] = {}
+    for nname, ndef in graph.get("nodes", {}).items():
+        if not isinstance(ndef, dict):
+            continue
+        for key, raw in ndef.items():
+            if key in ("type", "output") or not isinstance(raw, dict):
+                continue
+            if raw.get("_connect"):
+                continue
+            if raw.get("expose") or promote_all:
+                iface = raw.get("name") or f"{nname}_{key}"
+                out.setdefault(iface, {
+                    "value": raw.get("value"),
+                    "kind": raw.get("kind"),   # template-stamped, else None
+                    "range": raw.get("range"),
+                })
+    return out
+
+
+def _build_descriptors(spec: dict, mapping: dict[str, list[str]]) -> dict[str, dict]:
+    """Editable-input descriptors from the spec + gen mapping (design D5).
+
+    Only inputs the generator actually emitted uniforms for (mapping keys) become
+    descriptors. Type comes from the template-stamped kind, else value inference;
+    default is the authored value; range is the template bound, else
+    `_MATERIAL_FLOAT_RANGES` for a name match on a float input, else None
+    (unbounded finite).
+    """
+    exposed = _collect_exposed(spec)
+    descriptors: dict[str, dict] = {}
+    for iface, uniforms in mapping.items():
+        meta = exposed.get(iface, {})
+        value = meta.get("value")
+        kind = meta.get("kind") or _infer_const_type(iface, value)
+        dtype = _descriptor_kind(kind)
+        rng = meta.get("range")
+        if rng is None and dtype == "float" and iface in _MATERIAL_FLOAT_RANGES:
+            rng = list(_MATERIAL_FLOAT_RANGES[iface])
+        descriptors[iface] = {
+            "uniforms": list(uniforms),
+            "type": dtype,
+            "default": value,
+            "range": rng,
+        }
+    return descriptors
 
 
 def _promoted_interface_inputs(doc: mx.Document) -> dict[str, list[tuple[str, str]]]:
@@ -848,6 +1010,7 @@ def synthesize(spec: dict, material_name: str) -> SynthesisResult:
         document_xml=mx.writeToXmlString(doc),
         mapping=mapping,
         editable_inputs=sorted(mapping),
+        descriptors=_build_descriptors(spec, mapping),
     )
 
 
@@ -855,15 +1018,29 @@ def synthesize(spec: dict, material_name: str) -> SynthesisResult:
 
 
 class SessionMaterialStore:
-    """Owns a tempdir of synthesized ``.mtlx`` files + mapping sidecars.
+    """Owns a tempdir of synthesized ``.mtlx`` files + editability sidecars.
 
     One file per material, named after the material prim, so the loader
     (group 2) and the renderer (group 3) can reference / re-read it by prim
     name. The directory is server configuration in the same trust domain as
     the preset catalog (design D2) — clients never address it, so it is not
-    constrained to the allowed roots. A sidecar ``<name>.json`` persists the
-    logical→uniform mapping beside the document so a later consumer can read
-    the editability contract straight off disk.
+    constrained to the allowed roots.
+
+    Sidecar schema (``<name>.json``) — the editability contract read straight
+    off disk by ``usd_loader._read_mtlx_mapping_sidecar`` (design D5)::
+
+        {"logical_inputs": {
+            "<logical input name>": {
+                "uniforms": ["<gen uniform>", ...],   # fan-out write targets
+                "type":     "float" | "color3" | "int",
+                "default":  <authored value> | null,  # unedited control value
+                "range":    [lo, hi] | null            # null = unbounded finite
+            }, ...
+        }}
+
+    The pre-descriptor shape ``{"<name>": ["<uniform>", ...]}`` is still read
+    (upgraded on load with null type/default/range → then value inference), so
+    older sidecars keep working.
     """
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
@@ -880,14 +1057,26 @@ class SessionMaterialStore:
         self,
         material_name: str,
         xml: str,
-        mapping: Optional[dict[str, list[str]]] = None,
+        mapping: Optional[dict] = None,
+        *,
+        overwrite: bool = False,
     ) -> str:
         """Write ``<name>.mtlx`` (+ optional sidecar); return the absolute path.
 
         Flushed to disk before returning (design D2: a resync re-reads the
-        document from disk, so it must be present first).
+        document from disk, so it must be present first). Refuses to clobber an
+        existing document unless ``overwrite=True`` (design D6/finding #5): the
+        name reservation upstream should already keep two concurrent requests
+        from colliding, and this makes a lost-update structurally impossible
+        rather than merely unlikely — a second request that reached the same
+        name fails loudly instead of overwriting the first's file.
         """
         path = self.path_for(material_name)
+        if not overwrite and path.exists():
+            raise MaterialSpecError(
+                f"session material {material_name!r} already exists at {path}; "
+                f"refusing to overwrite (name collision)"
+            )
         path.write_text(xml, encoding="utf-8")
         if mapping is not None:
             self.sidecar_for(material_name).write_text(
@@ -896,8 +1085,8 @@ class SessionMaterialStore:
             )
         return str(path.resolve())
 
-    def read_mapping(self, material_name: str) -> dict[str, list[str]]:
-        """Read the persisted logical→uniform mapping from the sidecar."""
+    def read_mapping(self, material_name: str) -> dict:
+        """Read the persisted editability sidecar (descriptors or legacy map)."""
         sidecar = self.sidecar_for(material_name)
         if not sidecar.exists():
             return {}
@@ -914,34 +1103,67 @@ class SessionMaterialStore:
 
 # ─── Preset editable-input reflection (design D5, mtime-cached) ───────
 
-# {preset_path: (mtime, [editable input names])}
-_PRESET_INPUT_CACHE: dict[str, tuple[float, list[str]]] = {}
+# {mtlx_path: (mtime, {logical name: descriptor})}
+_PRESET_INPUT_CACHE: dict[str, tuple[float, dict[str, dict]]] = {}
 
 
-def list_preset_inputs(name: str) -> list[str]:
-    """Editable input names for a curated preset, via gen reflection.
+def _reflect_identity_descriptors(doc: mx.Document, target: str) -> dict[str, dict]:
+    """Identity descriptor map from a doc's gen dry-run (design D3/finding #3).
 
-    Runs the same GPU-free dry-run as synthesis on the preset file and returns
-    the generated uniform names (the *writable keys*, per design D5 — parsing
-    ``.mtlx`` inputs would report non-writable interface names). Cached by file
-    mtime so a repeated call does not re-run the generator.
+    Each generated uniform is its own logical input (identity mapping) so a
+    curated preset's advertised keys are exactly its writable scene-graph
+    properties. Type comes from the reflected ``UniformField``, default from its
+    authored value, range from ``_MATERIAL_FLOAT_RANGES`` on a name match.
+    filename/string uniforms (textures, framerange tokens) are skipped — not
+    ``scene_set``-able scalars.
     """
-    path = resolve_preset(name)
+    _cm, frag = _gen_dry_run(doc, target)
+    # Graph preset (marble): frag uniforms are the writable keys. Constant-shader
+    # preset (chrome/glass/jade): the std_surface param uniforms are.
+    fields = list(frag.uniform_block) if frag is not None else list(_cm.uniform_block)
+    descriptors: dict[str, dict] = {}
+    for u in fields:
+        if u.type_name in ("filename", "string"):
+            continue
+        dtype = _descriptor_kind(u.type_name)
+        rng = (
+            list(_MATERIAL_FLOAT_RANGES[u.name])
+            if dtype == "float" and u.name in _MATERIAL_FLOAT_RANGES else None
+        )
+        descriptors[u.name] = {
+            "uniforms": [u.name],
+            "type": dtype,
+            "default": u.default,
+            "range": rng,
+        }
+    return descriptors
+
+
+def identity_descriptors_for_file(path: str) -> dict[str, dict]:
+    """mtime-cached identity descriptors for a curated/plain ``.mtlx`` file.
+
+    The loader attaches these to a preset material that ships no sidecar (design
+    D3/finding #3), so its advertised keys (``material_list``) are exactly the
+    editable scene-graph properties. Runs the GPU-free gen dry-run once per file
+    (mtime-cached); callers bound *which* files this runs on (e.g. only the
+    curated corpus / session dir) so it is not run over arbitrary user materials.
+    """
     mtime = os.path.getmtime(path)
     cached = _PRESET_INPUT_CACHE.get(path)
     if cached is not None and cached[0] == mtime:
-        return list(cached[1])
-
+        return {k: dict(v) for k, v in cached[1].items()}
     doc = mx.createDocument()
     mx.readFromXmlFile(doc, path)
     target = _find_surfacematerial(doc)
-    _cm, frag = _gen_dry_run(doc, target)
-    if frag is not None:
-        inputs = [u.name for u in frag.uniform_block]
-    else:
-        # Constant-shader preset (chrome/glass/jade): editable keys are the
-        # standard_surface param uniforms (parameter_overrides keys).
-        inputs = [u.name for u in _cm.uniform_block]
+    descriptors = _reflect_identity_descriptors(doc, target)
+    _PRESET_INPUT_CACHE[path] = (mtime, descriptors)
+    return {k: dict(v) for k, v in descriptors.items()}
 
-    _PRESET_INPUT_CACHE[path] = (mtime, inputs)
-    return list(inputs)
+
+def list_preset_inputs(name: str) -> list[str]:
+    """Editable input names for a curated preset (the *writable keys*, design D5).
+
+    The keys of the identity descriptor map — gen uniform names, never parsed
+    ``.mtlx`` interface names (which are not writable keys). mtime-cached.
+    """
+    return sorted(identity_descriptors_for_file(resolve_preset(name)))

@@ -195,6 +195,35 @@ def test_file_backed_overlay_reanchor(tmp_path):
     assert refs[0].assetPath == "materials/SynthMat.mtlx"
 
 
+def test_relative_reference_resolves_against_authoring_layer(tmp_path):
+    """A relative `.mtlx` reference resolves against the layer that authored it,
+    not the CWD or root layer's assumed dir (finding #6) — so a saved file-backed
+    overlay referencing `materials/Foo.mtlx` beside it reloads from a moved dir."""
+    from pxr import Usd, UsdGeom, UsdShade
+    bundle = tmp_path / "bundle"
+    _write_mtlx(bundle / "materials", "Foo")
+    root_path = bundle / "scene.usda"
+    stage = Usd.Stage.CreateNew(str(root_path))
+    UsdGeom.Xform.Define(stage, "/World")
+    ume.ensure_materials_scope(stage)
+    mat = UsdShade.Material.Define(stage, "/Materials/Foo")
+    # A RELATIVE reference authored on the file-backed root layer.
+    mat.GetPrim().GetReferences().AddReference("materials/Foo.mtlx")
+    stage.GetRootLayer().Save()
+
+    resolved = ume.collect_material_holders(stage)["/Materials/Foo"]
+    assert Path(resolved).is_absolute()
+    assert Path(resolved) == (bundle / "materials" / "Foo.mtlx").resolve()
+
+    # resolve_layer_asset_path leaves an absolute path untouched, and an
+    # anonymous layer (no anchor) passes the path through as-authored.
+    abspath = str((bundle / "materials" / "Foo.mtlx").resolve())
+    assert ume.resolve_layer_asset_path(stage.GetRootLayer(), abspath) == abspath
+    anon_stage = Usd.Stage.CreateInMemory()  # hold the stage so the layer stays live
+    anon = anon_stage.GetRootLayer()
+    assert ume.resolve_layer_asset_path(anon, "rel/x.mtlx") == "rel/x.mtlx"
+
+
 # ── Rollback cleanliness ──────────────────────────────────────────────
 
 

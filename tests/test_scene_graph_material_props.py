@@ -83,6 +83,29 @@ def test_unedited_logical_input_shows_default():
     assert props["colorB"].value == (0.0, 0.0, 0.0)
 
 
+def test_descriptor_int_and_range_surface_typed_with_authored_default():
+    """A persisted descriptor's explicit type/default/range win over inference
+    (finding #2): octaves is an int spinning over 1..8 starting at its authored
+    4, scale reaches its 64 max — not a 0..1 float defaulting to 0."""
+    stage = _stage_with_material("Marble")
+    mat = _Mat("Marble", logical_inputs={
+        "octaves": {"uniforms": ["noise_octaves"], "type": "int",
+                    "default": 4, "range": [1, 8]},
+        "scale": {"uniforms": ["scaled_in2"], "type": "float",
+                  "default": 6.0, "range": [0.01, 64.0]},
+    })
+    sg = build_scene_graph(stage, _Scene([mat]))
+    props = _props(find_node_by_path(sg, "/Materials/Marble"))
+    assert props["octaves"].type_name == "int"
+    assert props["octaves"].value == 4
+    assert props["octaves"].metadata["min"] == 1
+    assert props["octaves"].metadata["max"] == 8
+    assert props["octaves"].metadata["fanout"] == ["noise_octaves"]
+    assert props["scale"].type_name == "float"
+    assert props["scale"].value == 6.0
+    assert props["scale"].metadata["max"] == 64.0
+
+
 def test_constant_mtlx_material_exposes_override_keys():
     """A constant-shader `.mtlx` material (no graph, has an mtlx_document) exposes
     its parameter-override keys; a name that is not an override is absent."""

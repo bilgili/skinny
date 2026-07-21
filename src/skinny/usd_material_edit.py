@@ -20,6 +20,7 @@ Contract highlights:
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -136,8 +137,38 @@ def collect_material_holders(stage) -> dict[str, str]:
     return holders
 
 
+def resolve_layer_asset_path(layer, asset_path: str) -> str:
+    """Resolve a reference's `assetPath` against the layer that authored it.
+
+    A relative `.mtlx` reference is meaningless without its authoring layer's
+    anchor (finding #6): a file-backed overlay's `materials/Foo.mtlx` resolves
+    against the overlay's directory, not the root layer's or the CWD. An absolute
+    path is returned unchanged; an anonymous layer (the session layer, whose
+    references are absolute by design D2) has no anchor, so the path is returned
+    as-authored.
+    """
+    if os.path.isabs(asset_path):
+        return asset_path
+    # Anonymous layers (the session layer, whose refs are absolute by D2) have no
+    # filesystem anchor — ComputeAbsolutePath can't resolve against them (and on an
+    # expired handle it raises), so pass the path through as-authored.
+    if getattr(layer, "anonymous", False):
+        return asset_path
+    computed = layer.ComputeAbsolutePath(asset_path)
+    if computed:
+        return computed
+    real = getattr(layer, "realPath", "")
+    if real:
+        return str((Path(real).parent / asset_path).resolve())
+    return asset_path
+
+
 def _holder_reference_asset(stage, holder_path) -> Optional[str]:
-    """Absolute `.mtlx` asset path referenced by a holder, from any layer."""
+    """Absolute `.mtlx` asset path referenced by a holder, from any layer.
+
+    Each `assetPath` is resolved against the layer that authored it (finding #6)
+    so a relative reference in a file-backed overlay resolves correctly.
+    """
     for layer in (stage.GetRootLayer(), stage.GetSessionLayer()):
         if layer is None:
             continue
@@ -151,7 +182,7 @@ def _holder_reference_asset(stage, holder_path) -> Optional[str]:
             + list(ref_list.explicitItems)
         ):
             if ref.assetPath.endswith(".mtlx"):
-                return ref.assetPath
+                return resolve_layer_asset_path(layer, ref.assetPath)
     return None
 
 

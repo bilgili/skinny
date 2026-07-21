@@ -45,6 +45,8 @@ class FakeRenderer:
         self._usd_stage = Usd.Stage.CreateInMemory()
         self._usd_edit_layer = self._usd_stage.GetSessionLayer()
         self._usd_stage.SetEditTarget(Usd.EditTarget(self._usd_edit_layer))
+        # `has_editable_stage` now also gates on adopted scene metadata (finding #4).
+        self._usd_scene = object()
         self.calls: list[tuple] = []
         self.add_material_calls = 0
 
@@ -88,18 +90,38 @@ class FakeRenderer:
 
     def add_primitive(self, prim_type, parent_prim_path="/World", name=None,
                        transform=None, color=None, roughness=None, metallic=None,
-                       skip_inline_material=False):
+                       skip_inline_material=False, bind_material_path=None):
+        if bind_material_path is not None:
+            skip_inline_material = True
         self.calls.append(("add_primitive", prim_type, parent_prim_path, name,
-                            color, roughness, metallic, skip_inline_material))
+                            color, roughness, metallic, skip_inline_material,
+                            bind_material_path))
         path = f"{parent_prim_path}/{name or prim_type}"
         UsdGeom.Sphere.Define(self._usd_stage, path)
-        if not skip_inline_material:
+        if bind_material_path is not None:
+            # Transactional add+bind (finding #8): validate + author the binding
+            # in-line so a failure removes the just-created prim.
+            mat_prim = self._usd_stage.GetPrimAtPath(bind_material_path)
+            if not (mat_prim and mat_prim.IsValid()):
+                self._usd_stage.RemovePrim(path)
+                raise ValueError(
+                    f"add_primitive: material not found: {bind_material_path}"
+                )
+            ume.author_binding(self._usd_stage, path, bind_material_path)
+        elif not skip_inline_material:
             mat_path = f"{path}_material"
             ume.ensure_materials_scope(self._usd_stage)
             # Not under /Materials in the real renderer, but presence is
             # irrelevant here -- these tests never assert on the inline path.
             UsdGeom.Scope.Define(self._usd_stage, mat_path)
         return path
+
+    def remove_node(self, prim_path):
+        # Rollback helper: mirror the renderer's non-destructive deactivate.
+        self.calls.append(("remove_node", prim_path))
+        prim = self._usd_stage.GetPrimAtPath(prim_path)
+        if prim and prim.IsValid():
+            prim.SetActive(False)
 
 
 class Proxy:
@@ -237,6 +259,33 @@ def test_two_same_template_adds_get_distinct_names(h) -> None:
     assert h.renderer.add_material_calls == 2
 
 
+def test_concurrent_same_template_adds_reserve_distinct_names(h) -> None:
+    """Two threads adding the same template at once must reserve distinct salted
+    names under `_name_lock` — never pick the same name and clobber each other's
+    session file (finding #5). Both succeed, both `.mtlx` files survive."""
+    results: list = []
+    errors: list = []
+    barrier = threading.Barrier(2)
+
+    def add() -> None:
+        try:
+            barrier.wait()
+            results.append(h.tools.scene_add_material({"template": "noise"}))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=add) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert errors == []
+    assert len({r["path"] for r in results}) == 2  # distinct names
+    files = sorted(p.name for p in h.tools._material_store.dir.glob("*.mtlx"))
+    assert len(files) == 2  # neither clobbered the other
+
+
 def test_add_material_preview_form_live_false(h) -> None:
     result = h.tools.scene_add_material({"model": "preview", "params": {"roughness": 0.3}})
     assert result["live"] is False
@@ -272,12 +321,19 @@ def test_bind_material_happy_path_bumps_version(h) -> None:
 # ── scene_add_primitive(material=...) end-to-end composition ─────────
 
 def test_add_primitive_material_by_preset_name_creates_and_binds(h) -> None:
+    from pxr import UsdShade
     result = h.tools.scene_add_primitive("Sphere", material="marble_solid", name="Ball")
     assert result["path"] == "/World/Ball"
     assert result["material_path"].startswith("/Materials/")
     kinds = [c[0] for c in h.renderer.calls]
-    assert "add_material" in kinds and "bind_material" in kinds
-    assert kinds.index("add_material") < kinds.index("bind_material")
+    # The bind is now authored inside add_primitive (transactional, finding #8),
+    # not a separate bind_material call: the material is created first, then the
+    # primitive add binds it atomically.
+    assert "add_material" in kinds
+    assert kinds.index("add_material") < kinds.index("add_primitive")
+    prim = h.renderer._usd_stage.GetPrimAtPath("/World/Ball")
+    bound, _rel = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+    assert str(bound.GetPath()) == result["material_path"]
 
 
 def test_add_primitive_material_by_existing_path_binds_without_creating(h) -> None:

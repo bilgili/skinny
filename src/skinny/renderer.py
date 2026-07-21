@@ -6011,6 +6011,16 @@ class Renderer:
             lt.prim_path: lt.enabled
             for lt in (*scene.lights_dir, *scene.lights_sphere) if lt.prim_path
         }
+        # Live material overrides (scene_set / slider edits) live only on the
+        # Scene objects + graph cache; a structural resync re-reads materials
+        # from disk and would drop them (finding #7 — edit colorA, add a light,
+        # the edit vanishes). Snapshot the prior overrides by stable material
+        # name so they can be re-applied onto the same-named reloaded materials.
+        prev_mat_overrides = {
+            m.name: dict(m.parameter_overrides)
+            for m in scene.materials
+            if getattr(m, "name", None) and m.parameter_overrides
+        }
         new_scene = load_scene_from_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
             allow_empty=True,
@@ -6021,6 +6031,14 @@ class Renderer:
         for lt in (*new_scene.lights_dir, *new_scene.lights_sphere):
             if lt.prim_path in prev_light_enabled:
                 lt.enabled = prev_light_enabled[lt.prim_path]
+        # Re-apply the preserved overrides onto same-named materials (prior edit
+        # wins over the reloaded loader default). `_gen_scene_materials` below
+        # reseeds `_material_graph_overrides` from `parameter_overrides`, so the
+        # graph-uniform cache is restored by this same merge — no separate step.
+        for m in new_scene.materials:
+            saved = prev_mat_overrides.get(getattr(m, "name", None))
+            if saved:
+                m.parameter_overrides = {**m.parameter_overrides, **saved}
         # Swap instances + materials together so material_ids stay consistent;
         # take the re-read lights + environment + camera too so deleting one
         # drops it.
@@ -6298,6 +6316,7 @@ class Renderer:
         roughness: "float | None" = None,
         metallic: "float | None" = None,
         skip_inline_material: bool = False,
+        bind_material_path: "str | None" = None,
     ) -> str:
         """Author an analytic gprim with its own bound preview-surface material.
 
@@ -6315,11 +6334,20 @@ class Renderer:
         first would leave it an orphaned, unbound sibling prim.
         ``color``/``roughness``/``metallic`` are ignored in that case.
 
+        ``bind_material_path`` (finding #8) makes the add-plus-bind
+        transactional: the binding to that existing ``/Materials`` holder is
+        authored inside the *same* edit scope as the gprim, so a bind failure
+        (or a resync failure after it) rolls the primitive back with the binding
+        rather than leaving a bare prim or an orphaned binding. Implies
+        ``skip_inline_material``.
+
         Returns the gprim's unique prim path.
         """
         stage = self._usd_stage
         if stage is None or self._usd_edit_layer is None:
             raise RuntimeError("add_primitive requires a loaded USD stage")
+        if bind_material_path is not None:
+            skip_inline_material = True
 
         from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
@@ -6389,6 +6417,28 @@ class Renderer:
                     )
                     UsdShade.MaterialBindingAPI.Apply(gprim.GetPrim())
                     UsdShade.MaterialBindingAPI(gprim.GetPrim()).Bind(material)
+
+                if bind_material_path is not None:
+                    # Bind an existing holder inside the same edit scope so the
+                    # add + bind is one transaction (finding #8): a validation or
+                    # authoring failure here raises before the resync and the
+                    # except block below removes the just-created prim.
+                    from skinny import usd_material_edit as ume
+                    from skinny.usd_loader import _prim_has_mtlx_reference
+                    mat_prim = stage.GetPrimAtPath(bind_material_path)
+                    if not (mat_prim and mat_prim.IsValid()):
+                        raise ValueError(
+                            f"add_primitive: material not found: {bind_material_path}"
+                        )
+                    is_mat = bool(UsdShade.Material(mat_prim))
+                    if not is_mat and not _prim_has_mtlx_reference(
+                        stage, mat_prim.GetPath()
+                    ):
+                        raise ValueError(
+                            f"add_primitive: {bind_material_path} is neither "
+                            f"Material-typed nor carries a .mtlx reference"
+                        )
+                    ume.author_binding(stage, prim_path, bind_material_path)
             resync_started = True
             self._resync_geometry_from_stage()
         except Exception:

@@ -178,15 +178,16 @@ the existing no-such-property error.
 
 ### Requirement: Graph-material structural calls degrade to jobs
 
-Graph-material adds and first binds SHALL be documented and treated as
-calls that degrade to pollable jobs (`scene_job_status`): adding or
-first-binding a nodegraph material changes the scene's graph-set signature
-and triggers a full pipeline rebuild on the render thread, so these calls
-are expected to exceed the inline grace period. This is the existing structural-job mechanism, not a new one.
+First binds of graph materials (including add-plus-bind composition via
+`scene_add_primitive(material=…)`) SHALL be documented and treated as calls
+that degrade to pollable jobs (`scene_job_status`): participation is
+binding-driven, so an unbound add compiles nothing, and it is the first
+bind that changes the scene's graph-set signature and triggers a full
+pipeline rebuild on the render thread, exceeding the inline grace period. This is the existing structural-job mechanism, not a new one.
 
-#### Scenario: Graph add returns a job
+#### Scenario: First bind returns a job
 
-- **WHEN** a client adds and binds a procedural graph material on a loaded
-  scene
+- **WHEN** a client binds a procedural graph material (or adds-and-binds it
+  in one `scene_add_primitive` call) on a loaded scene
 - **THEN** the call may return a job id, and polling `scene_job_status`
-  eventually reports the completed result with the material path
+  eventually reports the completed result

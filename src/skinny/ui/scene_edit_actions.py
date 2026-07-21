@@ -36,9 +36,20 @@ SUPPORTED_LIGHT_TYPES = (
 
 
 def has_editable_stage(renderer) -> bool:
-    """Whether scene-edit operations can author into an active USD edit layer."""
+    """Whether scene-edit operations can author into an active USD edit layer.
+
+    Also requires the scene metadata to be adopted (``_usd_scene`` set). The
+    async USD loader publishes ``_usd_stage``/``_usd_edit_layer`` from its
+    background thread *before* the render thread adopts ``_usd_scene``, so
+    without this gate ``has_editable_stage`` would go true in a window where an
+    MCP structural op could mutate the stage concurrently with the loader (its
+    edit then clobbered when pre-edit metadata is adopted). Every legitimate
+    editable state (``create_empty_scene``/``set_usd_scene``) sets all three
+    together, so requiring ``_usd_scene`` only closes the loader race.
+    """
     return (
-        getattr(renderer, "_usd_stage", None) is not None
+        getattr(renderer, "_usd_scene", None) is not None
+        and getattr(renderer, "_usd_stage", None) is not None
         and getattr(renderer, "_usd_edit_layer", None) is not None
     )
 

@@ -806,15 +806,19 @@ def _collect_mtlx_asset_paths(stage: Usd.Stage) -> set[str]:
     """Find .mtlx asset paths referenced by the stage's root AND session layers.
 
     The session layer is scanned too (mcp-material-authoring, design D2) so a
-    holder prim authored there by `add_material` — references there carry
-    *absolute* asset paths, since the anonymous session layer has no anchor for
-    relative ones — is discovered by material intake. Root-layer discovery is
-    byte-unchanged: the same recursive prim-spec walk is just run over both
-    layers' root prim specs.
+    holder prim authored there by `add_material` is discovered by material
+    intake. Each reference's `assetPath` is resolved against the layer that
+    authored it (finding #6): a relative reference in a file-backed overlay
+    resolves against the overlay's own directory, not the root layer's or the
+    CWD, so a saved overlay reloads from a moved directory. Session-layer
+    references are absolute (the anonymous layer has no anchor) and pass through
+    unchanged.
     """
+    from skinny.usd_material_edit import resolve_layer_asset_path
+
     paths: set[str] = set()
 
-    def _visit(spec: "Sdf.PrimSpec") -> None:
+    def _visit(spec: "Sdf.PrimSpec", layer) -> None:
         ref_list = spec.referenceList
         for ref in (
             list(ref_list.prependedItems)
@@ -822,15 +826,15 @@ def _collect_mtlx_asset_paths(stage: Usd.Stage) -> set[str]:
             + list(ref_list.explicitItems)
         ):
             if ref.assetPath.endswith(".mtlx"):
-                paths.add(ref.assetPath)
+                paths.add(resolve_layer_asset_path(layer, ref.assetPath))
         for child_spec in spec.nameChildren:
-            _visit(child_spec)
+            _visit(child_spec, layer)
 
     for layer in (stage.GetRootLayer(), stage.GetSessionLayer()):
         if layer is None:
             continue
         for prim_spec in layer.rootPrims:
-            _visit(prim_spec)
+            _visit(prim_spec, layer)
     return paths
 
 
@@ -869,6 +873,34 @@ def _read_mtlx_mapping_sidecar(mtlx_file: Path) -> dict[str, list]:
     return mapping if isinstance(mapping, dict) else {}
 
 
+def _is_curated_preset(mtlx_file: Path) -> bool:
+    """True when `mtlx_file` lives under the curated preset corpus (finding #3).
+
+    Bounds the gen-reflection cost of `_preset_identity_descriptors` to the
+    server-owned preset directory — an arbitrary user `.mtlx` never triggers it.
+    """
+    from skinny.mtlx_synthesis import _PRESET_DIR
+    try:
+        mtlx_file.resolve().relative_to(_PRESET_DIR.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _preset_identity_descriptors(mtlx_file: Path) -> dict:
+    """mtime-cached identity descriptors for a curated preset (design D3).
+
+    Never fails the load: a reflection error logs and yields no editable
+    properties rather than dropping the material.
+    """
+    from skinny import mtlx_synthesis
+    try:
+        return mtlx_synthesis.identity_descriptors_for_file(str(mtlx_file))
+    except Exception as e:  # noqa: BLE001 — reflection is best-effort editability
+        log.warning("preset descriptor reflection failed for %s: %s", mtlx_file.name, e)
+        return {}
+
+
 def _load_mtlx_materials(
     stage: Usd.Stage, stage_dir: Path,
 ) -> dict[str, Material]:
@@ -904,9 +936,15 @@ def _load_mtlx_materials(
         # Logical-input → gen-uniform mapping sidecar written beside a
         # session-synthesized document (mcp-material-authoring, design D5). Read
         # once per file and attached to every Material it yields so the scene
-        # graph can surface editable properties; empty for curated/plain docs
-        # with no sidecar.
+        # graph can surface editable properties.
         logical_inputs = _read_mtlx_mapping_sidecar(mtlx_file)
+        # A curated preset ships NO sidecar; attach identity descriptors from gen
+        # reflection so its advertised keys (material_list) are exactly the
+        # editable scene-graph properties (design D3/finding #3). Bounded to the
+        # curated corpus + mtime-cached so this never runs the generator over an
+        # arbitrary user .mtlx on every resync.
+        if not logical_inputs and _is_curated_preset(mtlx_file):
+            logical_inputs = _preset_identity_descriptors(mtlx_file)
         for node in doc.getMaterialNodes():
             mat_name = node.getName()
             overrides: dict[str, object] = {}
