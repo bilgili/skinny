@@ -107,13 +107,18 @@ class Material:
     # to know which source file to load for the active scene.
     python_module: Optional[str] = None
 
-    # Logical-input → generated-uniform-name mapping for a synthesized
-    # MaterialX material (mcp-material-authoring, design D5). Read off the
-    # `<name>.json` sidecar beside the `.mtlx` file at load time by
-    # `_load_mtlx_materials`; empty for curated/plain materials. The scene
-    # graph surfaces its keys as editable properties and `scene_set` fans a
-    # single logical edit out to every uniform the input controls.
-    logical_inputs: dict[str, list] = field(default_factory=dict)
+    # Editable-input descriptors for a synthesized/graph MaterialX material
+    # (mcp-material-authoring, design D5): `{logical name: {uniforms, type,
+    # default, range}}` (a legacy `{name: [uniforms]}` list is upgraded on load).
+    # Read off the `<name>.json` sidecar beside the `.mtlx` file by
+    # `_load_mtlx_materials`, or synthesized as identity descriptors for a curated
+    # GRAPH preset. **Empty for constant-shader presets** (chrome/glass/jade) and
+    # plain USD materials — those surface their `parameter_overrides` keys directly
+    # on the scene-graph node instead (a constant preset advertises the flat-pack
+    # keys `pack_flat_material` reads; finding B). The scene graph surfaces these
+    # descriptor keys as editable properties and `scene_set` fans a single logical
+    # edit out to every uniform the input controls.
+    logical_inputs: dict[str, object] = field(default_factory=dict)
 
     # The bound material prim's full stage path (e.g. ``/ScopeA/Foo``), set at
     # load. A stable, globally-unique identity — unlike ``name`` (the prim leaf),

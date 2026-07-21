@@ -493,20 +493,51 @@ def test_vector3_override_packs_as_sequence_not_zeroed():
 
 # ─── Constant vs graph preset advertised keys (finding #3) ────────────
 
-def test_constant_preset_advertises_canonical_packer_keys():
-    """A constant-shader preset (chrome) advertises the canonical std_surface
-    keys the flat packer consumes — NOT the shader-prefixed reflection uniforms
-    (SR_chrome_*), which the packer never reads so edits were no-ops (#3)."""
+def test_constant_preset_advertises_flat_pack_keys():
+    """A constant-shader preset (chrome) advertises the FlatMaterialParams keys
+    pack_flat_material actually reads (diffuseColor/metallic/roughness) — NOT the
+    std_surface input names (base_color/metalness), which are dual-authored but
+    the ACTIVE path-tracing packer never reads, so those edits were no-ops (B)."""
     inputs = m.list_preset_inputs("chrome")
     assert inputs
     assert not any(i.startswith("SR_") for i in inputs)
-    # every advertised key is a std_surface param the packer consumes
-    assert set(inputs) <= set(m.model_param_schema("standard_surface"))
-    assert {"base_color", "metalness"} <= set(inputs)
-    # a folded input the loader pops is never advertised (it is not exposed)
+    # the writable keys are the flat-pack (UsdPreviewSurface-style) names
+    assert {"diffuseColor", "metallic", "roughness", "specular"} <= set(inputs)
+    # the std_surface input names themselves are NOT advertised (they are no-ops)
+    assert "base_color" not in inputs
+    assert "metalness" not in inputs
+    assert "specular_roughness" not in inputs
+    # a folded input with no packer route is never advertised
     assert "base" not in inputs
     # constant preset → loader must NOT attach these as logical_inputs
     assert m.preset_is_graph(m.resolve_preset("chrome")) is False
+
+
+def test_constant_preset_advertised_keys_change_flat_pack_bytes():
+    """Discriminating gate (finding B): setting each key chrome advertises via
+    parameter_overrides MUST change pack_flat_material's output — proving every
+    advertised key has a real route into the active path-tracing pack, not the
+    inert binding-19 std_surface pack."""
+    from skinny.renderer import pack_flat_material
+    from skinny.scene import Material
+
+    base = pack_flat_material(Material(name="c", parameter_overrides={}))
+    # sample values that differ from the flat-pack defaults so the bytes move
+    probes = {
+        "diffuseColor": (0.11, 0.22, 0.33),
+        "roughness": 0.37,
+        "metallic": 1.0,
+        "specular": 0.13,
+        "specular_color": (0.2, 0.4, 0.6),
+    }
+    advertised = set(m.list_preset_inputs("chrome"))
+    tested = advertised & set(probes)
+    assert tested, "no advertised chrome key had a probe value"
+    for key in tested:
+        packed = pack_flat_material(
+            Material(name="c", parameter_overrides={key: probes[key]})
+        )
+        assert packed != base, f"advertised key {key!r} did not move the flat pack"
 
 
 def test_graph_preset_advertises_reflection_uniforms():

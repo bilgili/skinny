@@ -6581,7 +6581,9 @@ class Renderer:
             ume.author_binding(stage, prim_path, material_path)
         self._resync_geometry_from_stage()
 
-    def discard_created_prim(self, prim_path: str) -> None:
+    def discard_created_prim(
+        self, prim_path: str, *, remove_empty_materials_scope: bool = False,
+    ) -> None:
         """Hard-remove an edit-layer prim spec authored earlier in this call.
 
         For rolling back a prim created in the SAME transactional call
@@ -6591,6 +6593,13 @@ class Renderer:
         reuse the name) — this deletes the spec, so the name is immediately
         reusable. Matches ``add_material`` / ``add_primitive``'s own rollback.
         A missing prim is a no-op. Re-reads the stage afterward.
+
+        ``remove_empty_materials_scope`` (finding E): when a failed add-plus-bind
+        auto-created the ``/Materials`` scope in this call, removing just the
+        holder would leave an orphan empty scope — ``add_material``'s own rollback
+        removes the scope it created, so mirror that here. Only removes it when the
+        caller signals this call created it AND it is now childless, so a scope
+        holding other holders (or a pre-existing one) is never touched.
         """
         stage = self._usd_stage
         if stage is None or self._usd_edit_layer is None:
@@ -6599,6 +6608,10 @@ class Renderer:
         with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
             if stage.GetPrimAtPath(prim_path).IsValid():
                 stage.RemovePrim(prim_path)
+            if remove_empty_materials_scope:
+                scope = stage.GetPrimAtPath("/Materials")
+                if scope.IsValid() and not any(scope.GetChildren()):
+                    stage.RemovePrim("/Materials")
         self._resync_geometry_from_stage()
 
     def remove_node(self, prim_path: str) -> None:

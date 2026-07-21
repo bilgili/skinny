@@ -176,9 +176,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   material plan: an anonymous-root (`scene_create`) export post-processes the
   flattened stage to re-author `/Materials` references and copy synthesized
   `.mtlx` documents into a `materials/` subdirectory; a file-backed root's
-  overlay export re-anchors references in place. Texture-bearing curated
-  presets (`wood_tiled`, `brass_tiled`, `default_uv_image`) keep absolute
-  references into `assets/` on save rather than being copied.
+  overlay export re-anchors references in place. **All** curated presets —
+  constant (`chrome`/`glass`/`jade`) as well as texture-bearing
+  (`wood_tiled`, `brass_tiled`, `default_uv_image`) — keep absolute references
+  into `assets/` on save rather than being copied (the save keys on session-dir
+  membership, not on texture presence).
 
 ### Changed
 

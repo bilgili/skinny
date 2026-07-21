@@ -200,10 +200,19 @@ rails" claim:
   "no property X on path" error — the spec scenario says exactly that, not
   "not editable".
 
-`material_list`'s per-preset editable inputs come from the same gen
-reflection, run per preset file and cached by file mtime (review m5) —
-never from parsing `.mtlx` inputs directly, which reports names that are
-not writable keys.
+`material_list`'s per-preset editable inputs are resolved per preset file and
+cached by file mtime (review m5). For a **graph** preset the writable keys come
+from the gen reflection (the generated fragment's uniforms, identity-mapped) —
+never from raw reflection prefixes nor from parsing `.mtlx` interface names
+directly, which report names that are not writable keys. For a **constant**
+preset (chrome/glass/jade — no `GraphFragment`) the reflection returns
+shader-prefixed folded uniforms with no route into the active flat pack, so the
+descriptors are instead built by reading the authored standard_surface shader
+inputs and mapping each to the `FlatMaterialParams` override key
+`pack_flat_material` reads (`base_color`→`diffuseColor`, `metalness`→`metallic`,
+…, via `_STD_SURFACE_TO_FLAT_PACK`); inputs with no packer route are not
+advertised (finding B). This is the one place a constant preset deliberately
+reads authored shader inputs — the mapped packer key is the writable key.
 
 ### D6 — Element-name salting, a naming contract, and preset dedup
 

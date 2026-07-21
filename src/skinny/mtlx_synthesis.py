@@ -1046,7 +1046,7 @@ class SessionMaterialStore:
         {"logical_inputs": {
             "<logical input name>": {
                 "uniforms": ["<gen uniform>", ...],   # fan-out write targets
-                "type":     "float" | "color3" | "int",
+                "type":     "float"|"color3"|"int"|"bool"|"vector2"|"vector3",
                 "default":  <authored value> | null,  # unedited control value
                 "range":    [lo, hi] | null            # null = unbounded finite
             }, ...
@@ -1120,13 +1120,35 @@ class SessionMaterialStore:
 # {mtlx_path: (mtime, is_graph, {logical name: descriptor})}
 _PRESET_INPUT_CACHE: dict[str, tuple[float, bool, dict[str, dict]]] = {}
 
-# std_surface inputs the loader folds into other override keys before exposing
-# them (base→diffuse scale, emission→emissiveColor, transmission→opacity), so a
-# constant preset must not advertise them: the loaded material exposes the
-# folded target, not these. Mirrors `_load_mtlx_materials`'s pops in usd_loader.
-_CONSTANT_FOLDED_INPUTS = frozenset(
-    {"base", "emission", "emission_color", "transmission"}
-)
+# standard_surface shader-input name → the FlatMaterialParams override key
+# `renderer.pack_flat_material` ACTUALLY reads (finding B, round 3). The active
+# path-tracing pack reads UsdPreviewSurface-style keys (diffuseColor / metallic /
+# roughness / …); the canonical std_surface binding-19 pack
+# (`pack_std_surface_params`) is inert for current path tracing. A constant
+# preset must therefore advertise the PACKER key as its writable name — that is
+# what `parameter_overrides` holds (the loader dual-authors both, so the key
+# round-trips) and what `scene_set` must write to reach the packer. Advertising
+# the std_surface input name (`base_color`) made every edit a silent no-op.
+#
+# Only inputs `pack_flat_material` reads with a clean 1:1 route are listed. Folded
+# inputs (`base` scales diffuse, `emission`/`emission_color`→emissiveColor,
+# `transmission`→opacity) have no direct packer key, so they are intentionally
+# absent — not advertised (honest, per design D5). Keep in sync with the override
+# keys `pack_flat_material` consumes in renderer.py.
+_STD_SURFACE_TO_FLAT_PACK: dict[str, str] = {
+    "base_color":         "diffuseColor",
+    "specular_roughness": "roughness",
+    "metalness":          "metallic",
+    "specular":           "specular",
+    "specular_color":     "specular_color",
+    "specular_IOR":       "ior",
+    "transmission_color": "transmission_color",
+    "diffuse_roughness":  "diffuse_roughness",
+    "coat":               "coat",
+    "coat_roughness":     "coat_roughness",
+    "coat_color":         "coat_color",
+    "coat_IOR":           "coat_IOR",
+}
 
 
 def _surfaceshader_node(doc: mx.Document, target: str):
@@ -1141,24 +1163,26 @@ def _surfaceshader_node(doc: mx.Document, target: str):
 
 
 def _constant_preset_descriptors(doc: mx.Document, target: str) -> dict[str, dict]:
-    """Canonical editable descriptors for a constant-shader preset (finding #3).
+    """Editable descriptors for a constant-shader preset (finding B, round 3).
 
-    Keys are the shader's authored standard_surface input names — exactly the
-    ``parameter_overrides`` keys the flat packer consumes (``pack_std_surface_
-    params``) and the scene graph surfaces for a constant-shader material — NOT
-    the generator's shader-prefixed reflection uniforms (``SR_chrome_base``),
-    which the packer never reads, so advertising those made every edit a silent
-    no-op. Folded inputs (``_CONSTANT_FOLDED_INPUTS``) and texture/graph-driven
-    inputs are skipped (they are not scalar ``scene_set`` keys).
+    Keys are the FlatMaterialParams override keys ``renderer.pack_flat_material``
+    reads (``diffuseColor`` / ``metallic`` / ``roughness`` / …) — mapped from the
+    shader's authored standard_surface input names via ``_STD_SURFACE_TO_FLAT_PACK``.
+    The prior revision advertised the std_surface names themselves (``base_color``);
+    those are dual-authored into ``parameter_overrides`` but the ACTIVE path-tracing
+    packer never reads them, so every advertised edit was a silent no-op. An input
+    with no clean packer route (folded ``base``/``emission``/``transmission``, or a
+    param the flat pack ignores) is not in the map and is not advertised — honest
+    per design D5. Texture/graph-driven inputs are also skipped (not scalar keys).
     """
     shader = _surfaceshader_node(doc, target)
     descriptors: dict[str, dict] = {}
     if shader is None:
         return descriptors
     for inp in shader.getInputs():
-        name = inp.getName()
-        if name in _CONSTANT_FOLDED_INPUTS:
-            continue
+        packer_key = _STD_SURFACE_TO_FLAT_PACK.get(inp.getName())
+        if packer_key is None:
+            continue  # no route into pack_flat_material → not advertised
         itype = inp.getType()
         if itype in ("filename", "string"):
             continue
@@ -1169,11 +1193,11 @@ def _constant_preset_descriptors(doc: mx.Document, target: str) -> dict[str, dic
             value = list(value.asTuple())
         dtype = _descriptor_kind(itype)
         rng = (
-            list(_MATERIAL_FLOAT_RANGES[name])
-            if dtype == "float" and name in _MATERIAL_FLOAT_RANGES else None
+            list(_MATERIAL_FLOAT_RANGES[packer_key])
+            if dtype == "float" and packer_key in _MATERIAL_FLOAT_RANGES else None
         )
-        descriptors[name] = {
-            "uniforms": [name], "type": dtype, "default": value, "range": rng,
+        descriptors[packer_key] = {
+            "uniforms": [packer_key], "type": dtype, "default": value, "range": rng,
         }
     return descriptors
 
@@ -1186,10 +1210,12 @@ def _reflect_identity_descriptors(
     Graph preset (marble): the generated fragment's uniforms are the writable
     keys, identity-mapped, so the advertised keys are exactly the reflection
     uniforms. Constant-shader preset (chrome/glass/jade — no GraphFragment): the
-    canonical standard_surface param keys the flat packer consumes, NOT the
-    shader-prefixed reflection uniforms (finding #3). ``is_graph`` lets the
-    loader attach these as ``logical_inputs`` only for graph presets — a constant
-    preset relies on the scene graph's parameter-override branch instead.
+    FlatMaterialParams override keys ``pack_flat_material`` reads (``diffuseColor``
+    / ``metallic`` / …), mapped from the authored standard_surface inputs, NOT the
+    shader-prefixed reflection uniforms nor the std_surface names themselves
+    (finding B). ``is_graph`` lets the loader attach these as ``logical_inputs``
+    only for graph presets — a constant preset relies on the scene graph's
+    parameter-override branch instead.
     """
     _cm, frag = _gen_dry_run(doc, target)
     if frag is None:
@@ -1235,9 +1261,9 @@ def identity_descriptors_for_file(path: str) -> dict[str, dict]:
     """mtime-cached editable descriptors for a curated/plain ``.mtlx`` file.
 
     Graph preset: identity-mapped reflection uniforms. Constant preset: the
-    canonical std_surface keys the packer consumes (finding #3). The loader
-    attaches these as ``logical_inputs`` only for graph presets; ``material_list``
-    advertises them for both.
+    FlatMaterialParams override keys ``pack_flat_material`` reads (finding B). The
+    loader attaches these as ``logical_inputs`` only for graph presets;
+    ``material_list`` advertises them for both.
     """
     return _reflect_preset_cached(path)[1]
 
@@ -1255,8 +1281,9 @@ def preset_is_graph(path: str) -> bool:
 def list_preset_inputs(name: str) -> list[str]:
     """Editable input names for a curated preset (the *writable keys*, design D5).
 
-    Graph preset: reflection uniform names. Constant preset: canonical
-    std_surface keys the packer consumes (finding #3) — never parsed ``.mtlx``
-    interface names (which are not writable keys). mtime-cached.
+    Graph preset: reflection uniform names. Constant preset: the FlatMaterialParams
+    override keys ``pack_flat_material`` reads (finding B) — never parsed ``.mtlx``
+    interface names nor std_surface names (neither is a writable packer key).
+    mtime-cached.
     """
     return sorted(identity_descriptors_for_file(resolve_preset(name)))

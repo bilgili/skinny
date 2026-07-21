@@ -14,8 +14,11 @@ Contract highlights:
   explicit — verified — else `SetTargets`), never prepend/append, so a session
   binding *replaces* a file-authored one under LIVRPS rather than merging.
 - Save post-process re-anchors `.mtlx` references and copies session-synthesized
-  documents into a `materials/` bundle; curated (texture-bearing) presets keep
-  absolute references into the assets tree (design D7 texture carve-out).
+  documents into a `materials/` bundle; **all** curated presets — constant
+  (chrome/glass/jade) as well as texture-bearing — keep their absolute references
+  into the assets tree (design D7: the save keys on session-dir membership, not on
+  whether a preset has textures; copying a textured preset would additionally drop
+  its texture files, which motivated the carve-out).
 """
 
 from __future__ import annotations

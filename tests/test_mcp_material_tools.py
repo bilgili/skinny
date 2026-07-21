@@ -130,12 +130,17 @@ class FakeRenderer:
         if prim and prim.IsValid():
             prim.SetActive(False)
 
-    def discard_created_prim(self, prim_path):
+    def discard_created_prim(self, prim_path, *, remove_empty_materials_scope=False):
         # Hard-remove (finding #8/E): delete the spec so the name is reusable,
-        # unlike remove_node's tombstone. Mirrors the real renderer.
+        # unlike remove_node's tombstone. Mirrors the real renderer. Also removes
+        # an auto-created empty /Materials scope when signalled (finding E).
         self.calls.append(("discard_created_prim", prim_path))
         if self._usd_stage.GetPrimAtPath(prim_path).IsValid():
             self._usd_stage.RemovePrim(prim_path)
+        if remove_empty_materials_scope:
+            scope = self._usd_stage.GetPrimAtPath("/Materials")
+            if scope.IsValid() and not list(scope.GetChildren()):
+                self._usd_stage.RemovePrim("/Materials")
 
 
 class Proxy:
@@ -416,3 +421,57 @@ def test_failed_add_bind_allows_same_name_retry(h) -> None:
     h.renderer.fail_next_add_primitive = False
     result = h.tools.scene_add_primitive("Sphere", material="marble_solid", name="Ball2")
     assert result["material_path"].startswith("/Materials/")
+
+
+def test_failed_add_bind_removes_auto_created_materials_scope(h) -> None:
+    """A failed add+bind that auto-created the /Materials scope must tear the empty
+    scope down too, not just the holder — a fresh scene ends with no /Materials
+    prim (finding E)."""
+    assert not h.renderer._usd_stage.GetPrimAtPath("/Materials").IsValid()  # fresh
+    h.renderer.fail_next_add_primitive = True
+    with pytest.raises(ValueError, match="post-bind failure"):
+        h.tools.scene_add_primitive("Sphere", material="marble_solid", name="Ball")
+    # holder AND the auto-created empty scope are gone
+    assert not h.renderer._usd_stage.GetPrimAtPath("/Materials").IsValid()
+
+
+def test_failed_add_bind_keeps_prepopulated_materials_scope(h) -> None:
+    """The scope teardown only fires for a scope THIS call created: a /Materials
+    holding another holder survives a failed add+bind (finding E)."""
+    h.tools.scene_add_material({"preset": "marble_solid"})  # pre-populates /Materials
+    assert h.renderer._usd_stage.GetPrimAtPath("/Materials").IsValid()
+    h.renderer.fail_next_add_primitive = True
+    with pytest.raises(ValueError, match="post-bind failure"):
+        h.tools.scene_add_primitive("Sphere", material="chrome", name="Ball")
+    scope = h.renderer._usd_stage.GetPrimAtPath("/Materials")
+    assert scope.IsValid() and list(scope.GetChildren())  # pre-existing scope kept
+
+
+# ── Template add+bind: no orphan .mtlx after a rollback (finding C) ────
+
+def test_template_add_bind_readiness_failure_deletes_file(h) -> None:
+    """A template material=... add whose write-closure readiness check fails must
+    not orphan the .mtlx the plan wrote eagerly on the MCP thread (finding C)."""
+    store = h.tools._material_store
+    h.renderer._usd_scene = None  # has_editable_stage -> False in the write closure
+    with pytest.raises(SceneToolError, match="editable"):
+        h.tools.scene_add_primitive("Sphere", material="noise", name="Ball")
+    assert list(store.dir.glob("*.mtlx")) == []  # no orphan document
+    assert list(store.dir.glob("*.json")) == []  # no orphan sidecar
+
+
+def test_template_add_bind_cleanup_deletes_file_even_if_discard_raises(h) -> None:
+    """A resync failure inside discard_created_prim during rollback must not skip
+    the session-file deletion (the caller swallows that exception) — finding C."""
+    store = h.tools._material_store
+    h.renderer.fail_next_add_primitive = True  # force the post-bind rollback path
+    orig = h.renderer.discard_created_prim
+
+    def boom(p, **kw):
+        orig(p, **kw)  # still record + remove the holder
+        raise RuntimeError("resync blew up inside discard")
+
+    h.renderer.discard_created_prim = boom
+    with pytest.raises(ValueError, match="post-bind failure"):
+        h.tools.scene_add_primitive("Sphere", material="noise", name="Ball")
+    assert list(store.dir.glob("*.mtlx")) == []  # file deleted despite discard raising

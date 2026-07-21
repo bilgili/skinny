@@ -176,21 +176,27 @@ def test_vector_and_bool_fanout_route_to_material_not_trs_or_enable():
 
 def test_constant_preset_advertised_keys_exposed_and_not_suppressed():
     """For a constant-shader preset the advertised material_list keys are the
-    canonical packer keys, and they are all surfaced on the scene-graph node
-    without suppressing the prior canonical controls (finding #3)."""
+    FlatMaterialParams packer keys, and they are all surfaced on the scene-graph
+    node — because the loader dual-authors both the packer key (diffuseColor) and
+    the std_surface name (base_color) into parameter_overrides (finding B)."""
     from skinny import mtlx_synthesis as msyn
     advertised = set(msyn.list_preset_inputs("chrome"))
+    # the packer keys the constant preset now advertises
+    assert {"diffuseColor", "metallic", "roughness"} <= advertised
     # a chrome-like loaded material: constant preset -> empty logical_inputs,
-    # parameter_overrides carry the canonical std_surface keys the packer reads.
+    # parameter_overrides carry BOTH the packer keys pack_flat_material reads AND
+    # the dual-authored std_surface names (exactly what _load_mtlx_materials emits).
     stage = _stage_with_material("chrome")
     mat = _Mat("chrome", parameter_overrides={
-        "base_color": (0.9, 0.9, 0.9), "metalness": 1.0, "specular": 1.0,
-        "specular_color": (1.0, 1.0, 1.0), "specular_roughness": 0.05,
+        "diffuseColor": (0.9, 0.9, 0.9), "base_color": (0.9, 0.9, 0.9),
+        "metallic": 1.0, "metalness": 1.0, "specular": 1.0,
+        "specular_color": (1.0, 1.0, 1.0),
+        "roughness": 0.05, "specular_roughness": 0.05,
     }, mtlx_document=object())
     sg = build_scene_graph(stage, _Scene([mat]))
     props = set(_props(find_node_by_path(sg, "/Materials/chrome")))
-    assert advertised <= props        # every advertised key is editable
-    assert "base_color" in props      # the prior canonical control is not suppressed
+    assert advertised <= props        # every advertised (packer) key is editable
+    assert "base_color" in props      # the dual-authored std name is not suppressed
 
 
 def test_constant_mtlx_material_exposes_override_keys():

@@ -79,3 +79,80 @@ def test_panel_surfaces_arbitrary_resync_failure(monkeypatch):
     assert alert.visible is True
     assert alert.alert_type == "danger"
     assert "synthetic loader failure" in alert.object
+
+
+# ── Material logical-input widgets route to the override path (finding A) ──
+
+
+class _MatRenderer:
+    scene_graph = None
+
+    def __init__(self):
+        self.overrides = []          # (index, {uniform: value})
+        self.enabled = []            # (path, value)  — must stay empty for material props
+        self.transforms = []         # (path, matrix) — must stay empty for material props
+        self._usd_stage = None
+
+    def apply_material_overrides(self, index, values):
+        self.overrides.append((index, dict(values)))
+
+    def apply_material_override(self, index, key, value):
+        self.overrides.append((index, {key: value}))
+
+    def apply_node_enabled(self, path, value):
+        self.enabled.append((path, value))
+
+    def apply_subtree_enabled(self, path, value):
+        self.enabled.append((path, value))
+
+    def set_transform(self, path, matrix):
+        self.transforms.append((path, matrix))
+
+    def apply_instance_transform(self, *a):
+        self.transforms.append(a)
+
+
+def _mat_node():
+    from skinny.scene_graph import RendererRef, SceneGraphNode
+    return SceneGraphNode(
+        path="/Materials/M", name="M", type_name="Material",
+        children=[], properties=[], renderer_ref=RendererRef("material", 3),
+    )
+
+
+def test_panel_material_bool_routes_to_override_not_enable():
+    """A material logical-input bool carries fan-out uniforms; the panel must route
+    it to apply_material_overrides, NOT the node-enable toggle (finding A(i))."""
+    from skinny.scene_graph import SceneGraphProperty
+
+    rend = _MatRenderer()
+    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    node = _mat_node()
+    prop = SceneGraphProperty(
+        name="flag", display_name="flag", type_name="bool", value=False,
+        editable=True, metadata={"fanout": ["u_flag"]},
+    )
+    w = windows._build_scene_prop_widget(session, node, prop)
+    w.value = True
+    assert rend.overrides == [(3, {"u_flag": True})]
+    assert rend.enabled == []  # not misrouted to node-enable
+
+
+def test_panel_material_vec3_routes_to_override_not_transform():
+    """A material logical-input vector fans out to gen uniforms; the panel must
+    route it to apply_material_overrides, NOT the TRS transform (finding A(i))."""
+    from skinny.scene_graph import SceneGraphProperty
+
+    rend = _MatRenderer()
+    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    node = _mat_node()
+    prop = SceneGraphProperty(
+        name="dir", display_name="dir", type_name="vec3f", value=(0.0, 0.0, 0.0),
+        editable=True, metadata={"fanout": ["u_dir"]},
+    )
+    node.properties = [prop]
+    row = windows._build_scene_prop_widget(session, node, prop)
+    row[0].value = 1.0  # nudge X → commits the whole vector
+    assert rend.overrides and rend.overrides[-1][0] == 3
+    assert set(rend.overrides[-1][1]) == {"u_dir"}
+    assert rend.transforms == []  # not misrouted to a transform write

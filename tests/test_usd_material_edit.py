@@ -128,6 +128,39 @@ def test_same_leaf_materials_get_distinct_source_prim_path():
     assert paths == {"/World/ScopeA/Foo", "/World/ScopeB/Foo"}  # distinct identity
 
 
+def test_same_leaf_mtlx_bindings_do_not_share_overrides_dict():
+    """The `.mtlx` sidecar table keys entries by LEAF name, so two prims binding
+    a same-leaf material draw the SAME source Material. `_merge_prim_overrides`
+    must hand each binding an independent `parameter_overrides` dict — otherwise
+    `apply_material_override`'s in-place edit on one prim silently mutates the
+    other (finding D)."""
+    from dataclasses import replace
+
+    from pxr import Sdf, Usd
+
+    from skinny import usd_loader
+    from skinny.scene import Material
+
+    stage = Usd.Stage.CreateInMemory()  # empty → prim lookups miss (no-customData path)
+    src = Material(name="Foo", parameter_overrides={"diffuseColor": (0.5, 0.5, 0.5)})
+
+    # two bindings under distinct prim paths, mirroring the call-site replace()
+    a = replace(
+        usd_loader._merge_prim_overrides(stage, Sdf.Path("/A/Foo"), src),
+        source_prim_path="/A/Foo",
+    )
+    b = replace(
+        usd_loader._merge_prim_overrides(stage, Sdf.Path("/B/Foo"), src),
+        source_prim_path="/B/Foo",
+    )
+    assert a.parameter_overrides is not b.parameter_overrides
+    assert a.parameter_overrides is not src.parameter_overrides
+
+    a.parameter_overrides["diffuseColor"] = (0.9, 0.1, 0.1)  # edit one binding
+    assert b.parameter_overrides["diffuseColor"] == (0.5, 0.5, 0.5)  # other intact
+    assert src.parameter_overrides["diffuseColor"] == (0.5, 0.5, 0.5)  # table intact
+
+
 # ── Anonymous-root save post-process → self-contained bundle ───────────
 
 

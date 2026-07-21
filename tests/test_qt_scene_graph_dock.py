@@ -116,3 +116,76 @@ def test_add_light_requires_edit_layer_for_enablement_and_dispatch() -> None:
         dock._timer.stop()
         dock.deleteLater()
         app.processEvents()
+
+
+# ── Editable int / vec2f material-input widgets (finding A(ii)) ────────
+
+
+class _MatRendererStub(_LightRendererStub):
+    def __init__(self):
+        super().__init__()
+        self.overrides = []  # (index, {uniform: value})
+
+    def apply_material_overrides(self, index, values):
+        self.overrides.append((index, dict(values)))
+
+
+def _mat_node_with(prop):
+    from skinny.scene_graph import RendererRef, SceneGraphNode
+    return SceneGraphNode(
+        path="/Materials/M", name="M", type_name="Material",
+        children=[], properties=[prop], renderer_ref=RendererRef("material", 2),
+    )
+
+
+def test_dock_int_widget_is_editable_and_routes_to_override() -> None:
+    from PySide6.QtWidgets import QSpinBox
+
+    from skinny.scene_graph import SceneGraphProperty
+
+    app = QApplication.instance() or QApplication([])
+    renderer = _MatRendererStub()
+    dock = Dock(renderer)
+    try:
+        prop = SceneGraphProperty(
+            name="octaves", display_name="octaves", type_name="int", value=4,
+            editable=True, metadata={"fanout": ["u_octaves"], "min": 1, "max": 8},
+        )
+        node = _mat_node_with(prop)
+        row = dock._build_property_widget(node, prop)
+        spins = row.findChildren(QSpinBox)
+        assert len(spins) == 1  # an editable int spinbox, not a read-only label
+        assert (spins[0].minimum(), spins[0].maximum()) == (1, 8)
+        spins[0].setValue(6)
+        assert renderer.overrides == [(2, {"u_octaves": 6})]  # fan-out to override
+    finally:
+        dock._timer.stop()
+        dock.deleteLater()
+        app.processEvents()
+
+
+def test_dock_vec2_widget_is_editable_and_routes_to_override() -> None:
+    from PySide6.QtWidgets import QDoubleSpinBox
+
+    from skinny.scene_graph import SceneGraphProperty
+
+    app = QApplication.instance() or QApplication([])
+    renderer = _MatRendererStub()
+    dock = Dock(renderer)
+    try:
+        prop = SceneGraphProperty(
+            name="uv", display_name="uv", type_name="vec2f", value=(0.0, 0.0),
+            editable=True, metadata={"fanout": ["u_uv"]},
+        )
+        node = _mat_node_with(prop)
+        row = dock._build_property_widget(node, prop)
+        spins = row.findChildren(QDoubleSpinBox)
+        assert len(spins) == 2  # two-component editable vector
+        spins[0].setValue(0.5)
+        spins[0].editingFinished.emit()
+        assert renderer.overrides and renderer.overrides[-1][0] == 2
+        assert set(renderer.overrides[-1][1]) == {"u_uv"}  # fan-out to override
+    finally:
+        dock._timer.stop()
+        dock.deleteLater()
+        app.processEvents()

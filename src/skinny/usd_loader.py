@@ -1078,6 +1078,25 @@ def _load_mtlx_materials(
     return result
 
 
+def _independent_material(mat: Material) -> Material:
+    """Return *mat* with fresh copies of every mutable dict it carries.
+
+    A same-leaf `.mtlx` material bound under two different prim paths is drawn
+    from the SAME `mtlx_materials` table entry; `replace(..., source_prim_path=…)`
+    is a shallow copy, so both per-binding entries would otherwise share ONE
+    `parameter_overrides` dict — and `renderer.apply_material_override` mutates it
+    in place, so editing one prim's override would silently change the other
+    (finding D). Unshare the dicts here so each binding owns its own state.
+    """
+    return replace(
+        mat,
+        parameter_overrides=dict(mat.parameter_overrides),
+        texture_paths=dict(mat.texture_paths),
+        texture_bindings=dict(mat.texture_bindings),
+        logical_inputs=dict(mat.logical_inputs),
+    )
+
+
 def _merge_prim_overrides(
     stage: Usd.Stage, material_path: "Sdf.Path", mtlx_mat: Material,
 ) -> Material:
@@ -1085,17 +1104,19 @@ def _merge_prim_overrides(
     customData merged into its `parameter_overrides`.
 
     Mirrors the `skinnyOverrides` merge `_extract_material` does on the
-    plugin-present intake. Returns a copy (never mutates the shared
-    `mtlx_materials` entry); a no-op when the prim carries no overrides.
+    plugin-present intake. ALWAYS returns an independent copy (fresh mutable
+    dicts) so a per-binding entry never aliases the shared `mtlx_materials`
+    table entry (finding D), even when the prim carries no overrides.
     """
+    merged_mat = _independent_material(mtlx_mat)
     target_prim = stage.GetPrimAtPath(material_path)
     if not (target_prim and target_prim.IsValid()):
-        return mtlx_mat
+        return merged_mat
     cd = target_prim.GetCustomData()
     skinny_overrides = cd.get("skinnyOverrides") if cd else None
     if not hasattr(skinny_overrides, "items"):
-        return mtlx_mat
-    merged = dict(mtlx_mat.parameter_overrides)
+        return merged_mat
+    merged = merged_mat.parameter_overrides
     for k, v in skinny_overrides.items():
         merged[str(k)] = v
     # The subsurface medium coefficients (subsurface_sigma_*) live in
@@ -1106,7 +1127,7 @@ def _merge_prim_overrides(
     # or when there is no medium). Mirrors `_extract_material`, which merges the
     # customData first and then derives.
     _derive_opacity_from_subsurface(merged)
-    return replace(mtlx_mat, parameter_overrides=merged)
+    return merged_mat
 
 
 def _prim_has_mtlx_reference(stage: Usd.Stage, prim_path: "Sdf.Path") -> bool:

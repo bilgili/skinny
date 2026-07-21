@@ -538,8 +538,11 @@ class SceneTools:
         )
 
         def write(renderer) -> dict:
-            if not has_editable_stage(renderer):
-                raise SceneToolError("no editable USD stage is loaded")
+            # The material plan owns its OWN readiness check (finding C): a template
+            # plan wrote its `.mtlx` file eagerly on the MCP thread, so a readiness
+            # failure here — before the plan runs — would orphan that file. Each
+            # plan now checks readiness itself and cleans up any file it wrote, so
+            # the top-level check guards only the inline-seed path below.
             if material_plan is not None:
                 mat_path, cleanup = material_plan(renderer)
                 try:
@@ -558,6 +561,8 @@ class SceneTools:
                     "path": path, "material_path": mat_path,
                     **_versions(renderer),
                 }
+            if not has_editable_stage(renderer):
+                raise SceneToolError("no editable USD stage is loaded")
             path = renderer.add_primitive(
                 type, parent_prim_path=parent_path, name=name, transform=transform,
                 color=color_value, roughness=roughness, metallic=metallic,
@@ -579,7 +584,12 @@ class SceneTools:
         removes a holder this call freshly created -- never a deduped reuse.
         """
         if material.startswith("/"):
-            return lambda renderer: (material, None)
+            def plan(renderer):
+                if not has_editable_stage(renderer):
+                    raise SceneToolError("no editable USD stage is loaded")
+                return material, None
+
+            return plan
 
         presets = mtlx_synthesis.list_presets()
         if material in presets:
@@ -589,11 +599,22 @@ class SceneTools:
             def plan(renderer):
                 if not has_editable_stage(renderer):
                     raise SceneToolError("no editable USD stage is loaded")
+                # Did THIS call create the /Materials scope? If so, its rollback
+                # must remove the (then-empty) scope too, not just the holder
+                # (finding E).
+                scope_existed = renderer._usd_stage.GetPrimAtPath(
+                    "/Materials"
+                ).IsValid()
                 path, created = _add_or_dedup_preset(renderer, holder_name, preset_path)
                 # Hard-remove a freshly-created holder on rollback (finding #8/E)
                 # so a same-name retry is not blocked by an active=false tombstone
                 # (a deduped reuse is never torn down).
-                cleanup = (lambda r, p=path: r.discard_created_prim(p)) if created else None
+                drop_scope = created and not scope_existed
+                cleanup = (
+                    (lambda r, p=path, s=drop_scope: r.discard_created_prim(
+                        p, remove_empty_materials_scope=s))
+                    if created else None
+                )
                 return path, cleanup
 
             return plan
@@ -605,15 +626,30 @@ class SceneTools:
             )
 
             def plan(renderer):
+                # `_add_synth_material` owns the readiness check + eager-file
+                # cleanup: the `.mtlx` was written on the MCP thread above, and it
+                # deletes that file on ANY failure (readiness miss / holder
+                # collision). The write closure runs this plan before its own
+                # readiness check so that cleanup always gets a chance (finding C).
+                scope_existed = renderer._usd_stage.GetPrimAtPath(
+                    "/Materials"
+                ).IsValid()
                 path = self._add_synth_material(renderer, candidate, written_path)
+                drop_scope = not scope_existed  # this call auto-created the scope
 
-                def cleanup(r, p=path, name=candidate):
-                    # Hard-remove the spec (finding #8/E): remove_node deactivates
-                    # (a tombstone the same-name collision check would then block
-                    # forever); this deletes the edit-layer spec so the name is
-                    # reusable, matching add_material's own rollback.
-                    r.discard_created_prim(p)
-                    self._material_store.delete(name)
+                def cleanup(r, p=path, name=candidate, s=drop_scope):
+                    # Delete the file even if the prim discard raises (finding C): a
+                    # resync failure inside discard_created_prim must not skip the
+                    # file deletion (the caller swallows this exception). Hard-remove
+                    # the spec (finding #8/E): remove_node only deactivates (a
+                    # tombstone the same-name collision check would then block
+                    # forever); discard deletes the edit-layer spec so the name is
+                    # reusable, matching add_material's own rollback — and removes
+                    # the auto-created empty /Materials scope too (finding E).
+                    try:
+                        r.discard_created_prim(p, remove_empty_materials_scope=s)
+                    finally:
+                        self._material_store.delete(name)
 
                 return path, cleanup
 
