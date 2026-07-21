@@ -16,6 +16,7 @@ an explicit material binding share it.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field, replace
@@ -802,11 +803,22 @@ def _resolve_ng_input_value(
 
 
 def _collect_mtlx_asset_paths(stage: Usd.Stage) -> set[str]:
-    """Find .mtlx asset paths referenced by the stage's root layer."""
-    root_layer = stage.GetRootLayer()
+    """Find .mtlx asset paths referenced by the stage's root AND session layers.
+
+    The session layer is scanned too (mcp-material-authoring, design D2) so a
+    holder prim authored there by `add_material` is discovered by material
+    intake. Each reference's `assetPath` is resolved against the layer that
+    authored it (finding #6): a relative reference in a file-backed overlay
+    resolves against the overlay's own directory, not the root layer's or the
+    CWD, so a saved overlay reloads from a moved directory. Session-layer
+    references are absolute (the anonymous layer has no anchor) and pass through
+    unchanged.
+    """
+    from skinny.usd_material_edit import resolve_layer_asset_path
+
     paths: set[str] = set()
 
-    def _visit(spec: "Sdf.PrimSpec") -> None:
+    def _visit(spec: "Sdf.PrimSpec", layer) -> None:
         ref_list = spec.referenceList
         for ref in (
             list(ref_list.prependedItems)
@@ -814,12 +826,15 @@ def _collect_mtlx_asset_paths(stage: Usd.Stage) -> set[str]:
             + list(ref_list.explicitItems)
         ):
             if ref.assetPath.endswith(".mtlx"):
-                paths.add(ref.assetPath)
+                paths.add(resolve_layer_asset_path(layer, ref.assetPath))
         for child_spec in spec.nameChildren:
-            _visit(child_spec)
+            _visit(child_spec, layer)
 
-    for prim_spec in root_layer.rootPrims:
-        _visit(prim_spec)
+    for layer in (stage.GetRootLayer(), stage.GetSessionLayer()):
+        if layer is None:
+            continue
+        for prim_spec in layer.rootPrims:
+            _visit(prim_spec, layer)
     return paths
 
 
@@ -837,6 +852,60 @@ def _resolve_layer_asset(
         return p
     log.warning("could not resolve asset %r (stage_dir=%s)", asset_path, stage_dir)
     return None
+
+
+def _read_mtlx_mapping_sidecar(mtlx_file: Path) -> dict[str, list]:
+    """Read the `logical_inputs` map from a `<stem>.json` beside a `.mtlx` file.
+
+    The sidecar is written by `mtlx_synthesis.SessionMaterialStore` for a
+    synthesized material (design D5). Returns `{}` when absent or unreadable so
+    curated presets and plain USD materials carry no mapping.
+    """
+    sidecar = mtlx_file.with_suffix(".json")
+    if not sidecar.exists():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — a broken sidecar must not fail load
+        log.warning("failed to read mapping sidecar %s: %s", sidecar.name, e)
+        return {}
+    mapping = data.get("logical_inputs", {})
+    return mapping if isinstance(mapping, dict) else {}
+
+
+def _is_curated_preset(mtlx_file: Path) -> bool:
+    """True when `mtlx_file` lives under the curated preset corpus (finding #3).
+
+    Bounds the gen-reflection cost of `_preset_identity_descriptors` to the
+    server-owned preset directory — an arbitrary user `.mtlx` never triggers it.
+    """
+    from skinny.mtlx_synthesis import _PRESET_DIR
+    try:
+        mtlx_file.resolve().relative_to(_PRESET_DIR.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _graph_preset_identity_descriptors(mtlx_file: Path) -> dict:
+    """mtime-cached identity descriptors for a *graph* curated preset (finding #3).
+
+    Only a graph preset (marble) attaches reflection identity descriptors as
+    ``logical_inputs``. A constant-shader preset (chrome/glass/jade) returns
+    ``{}`` here so the scene graph surfaces its ``parameter_overrides`` keys
+    instead — the canonical keys the flat packer consumes; attaching the
+    shader-prefixed reflection uniforms (``SR_chrome_base``) made every advertised
+    edit a silent no-op. Never fails the load: a reflection error logs and yields
+    no editable properties rather than dropping the material.
+    """
+    from skinny import mtlx_synthesis
+    try:
+        if not mtlx_synthesis.preset_is_graph(str(mtlx_file)):
+            return {}
+        return mtlx_synthesis.identity_descriptors_for_file(str(mtlx_file))
+    except Exception as e:  # noqa: BLE001 — reflection is best-effort editability
+        log.warning("preset descriptor reflection failed for %s: %s", mtlx_file.name, e)
+        return {}
 
 
 def _load_mtlx_materials(
@@ -871,6 +940,20 @@ def _load_mtlx_materials(
             continue
 
         mtlx_dir = mtlx_file.parent
+        # Logical-input → gen-uniform mapping sidecar written beside a
+        # session-synthesized document (mcp-material-authoring, design D5). Read
+        # once per file and attached to every Material it yields so the scene
+        # graph can surface editable properties.
+        logical_inputs = _read_mtlx_mapping_sidecar(mtlx_file)
+        # A curated GRAPH preset ships NO sidecar; attach identity descriptors
+        # from gen reflection so its advertised keys (material_list) are exactly
+        # the editable scene-graph properties (design D3/finding #3). Bounded to
+        # the curated corpus + mtime-cached so this never runs the generator over
+        # an arbitrary user .mtlx on every resync. A CONSTANT-shader preset gets
+        # {} here so the scene graph surfaces its parameter_overrides keys (the
+        # canonical keys the flat packer consumes) instead.
+        if not logical_inputs and _is_curated_preset(mtlx_file):
+            logical_inputs = _graph_preset_identity_descriptors(mtlx_file)
         for node in doc.getMaterialNodes():
             mat_name = node.getName()
             overrides: dict[str, object] = {}
@@ -978,6 +1061,7 @@ def _load_mtlx_materials(
                 texture_paths=textures,
                 mtlx_target_name=mat_name,
                 mtlx_document=doc,
+                logical_inputs=dict(logical_inputs),
             )
 
     if result:
@@ -994,6 +1078,25 @@ def _load_mtlx_materials(
     return result
 
 
+def _independent_material(mat: Material) -> Material:
+    """Return *mat* with fresh copies of every mutable dict it carries.
+
+    A same-leaf `.mtlx` material bound under two different prim paths is drawn
+    from the SAME `mtlx_materials` table entry; `replace(..., source_prim_path=…)`
+    is a shallow copy, so both per-binding entries would otherwise share ONE
+    `parameter_overrides` dict — and `renderer.apply_material_override` mutates it
+    in place, so editing one prim's override would silently change the other
+    (finding D). Unshare the dicts here so each binding owns its own state.
+    """
+    return replace(
+        mat,
+        parameter_overrides=dict(mat.parameter_overrides),
+        texture_paths=dict(mat.texture_paths),
+        texture_bindings=dict(mat.texture_bindings),
+        logical_inputs=dict(mat.logical_inputs),
+    )
+
+
 def _merge_prim_overrides(
     stage: Usd.Stage, material_path: "Sdf.Path", mtlx_mat: Material,
 ) -> Material:
@@ -1001,17 +1104,19 @@ def _merge_prim_overrides(
     customData merged into its `parameter_overrides`.
 
     Mirrors the `skinnyOverrides` merge `_extract_material` does on the
-    plugin-present intake. Returns a copy (never mutates the shared
-    `mtlx_materials` entry); a no-op when the prim carries no overrides.
+    plugin-present intake. ALWAYS returns an independent copy (fresh mutable
+    dicts) so a per-binding entry never aliases the shared `mtlx_materials`
+    table entry (finding D), even when the prim carries no overrides.
     """
+    merged_mat = _independent_material(mtlx_mat)
     target_prim = stage.GetPrimAtPath(material_path)
     if not (target_prim and target_prim.IsValid()):
-        return mtlx_mat
+        return merged_mat
     cd = target_prim.GetCustomData()
     skinny_overrides = cd.get("skinnyOverrides") if cd else None
     if not hasattr(skinny_overrides, "items"):
-        return mtlx_mat
-    merged = dict(mtlx_mat.parameter_overrides)
+        return merged_mat
+    merged = merged_mat.parameter_overrides
     for k, v in skinny_overrides.items():
         merged[str(k)] = v
     # The subsurface medium coefficients (subsurface_sigma_*) live in
@@ -1022,29 +1127,34 @@ def _merge_prim_overrides(
     # or when there is no medium). Mirrors `_extract_material`, which merges the
     # customData first and then derives.
     _derive_opacity_from_subsurface(merged)
-    return replace(mtlx_mat, parameter_overrides=merged)
+    return merged_mat
 
 
 def _prim_has_mtlx_reference(stage: Usd.Stage, prim_path: "Sdf.Path") -> bool:
-    """True when the root-layer spec at *prim_path* carries a `.mtlx` reference.
+    """True when the root OR session layer spec at *prim_path* carries a `.mtlx`
+    reference.
 
     Identifies an exporter-authored MaterialX-backed material `over` (the
     exporter authors the `.mtlx` reference on the root layer — see
-    `mtlx_emit.author_mtlx_reference`). Used to scope the preloaded-table
-    preemption so a coincidentally same-named plain-USD material is never
-    shadowed by an unrelated sidecar entry.
+    `mtlx_emit.author_mtlx_reference`) *or* a holder authored in the session
+    layer by `add_material` (mcp-material-authoring, design D2). Used to scope
+    the preloaded-table preemption so a coincidentally same-named plain-USD
+    material is never shadowed by an unrelated sidecar entry.
     """
-    spec = stage.GetRootLayer().GetPrimAtPath(prim_path)
-    if spec is None:
-        return False
-    ref_list = spec.referenceList
-    for ref in (
-        list(ref_list.prependedItems)
-        + list(ref_list.appendedItems)
-        + list(ref_list.explicitItems)
-    ):
-        if ref.assetPath.endswith(".mtlx"):
-            return True
+    for layer in (stage.GetRootLayer(), stage.GetSessionLayer()):
+        if layer is None:
+            continue
+        spec = layer.GetPrimAtPath(prim_path)
+        if spec is None:
+            continue
+        ref_list = spec.referenceList
+        for ref in (
+            list(ref_list.prependedItems)
+            + list(ref_list.appendedItems)
+            + list(ref_list.explicitItems)
+        ):
+            if ref.assetPath.endswith(".mtlx"):
+                return True
     return False
 
 
@@ -1085,7 +1195,10 @@ def _resolve_binding_from_mtlx_table(
                     mtlx_mat = _merge_prim_overrides(stage, target_path, mtlx_mat)
                     idx = len(materials)
                     material_index[target_str] = idx
-                    materials.append(mtlx_mat)
+                    # Carry the bound prim path as this entry's unique identity
+                    # (finding #7/D); replace() gives it its own object so a
+                    # same-leaf material bound in another scope does not alias.
+                    materials.append(replace(mtlx_mat, source_prim_path=target_str))
                     return idx
         ancestor = ancestor.GetParent()
     return None
@@ -1156,7 +1269,10 @@ def _resolve_material_binding(
                             )
                             idx = len(materials)
                             material_index[target_str] = idx
-                            materials.append(mtlx_mat)
+                            # Unique per-binding identity (finding #7/D).
+                            materials.append(
+                                replace(mtlx_mat, source_prim_path=target_str)
+                            )
                             return idx
                     target_prim = stage.GetPrimAtPath(target_path)
                     if target_prim and target_prim.IsValid():
@@ -1177,6 +1293,7 @@ def _resolve_material_binding(
         return cached
 
     extracted = _extract_material(bound)
+    extracted.source_prim_path = mat_path
     material_index[mat_path] = len(materials)
     materials.append(extracted)
     return material_index[mat_path]

@@ -2032,6 +2032,12 @@ class Renderer:
         self._scene_graph_fragments: list = []
         self._material_graph_ids: dict[int, int] = {}
         self._material_graph_overrides: dict[int, dict] = {}
+        # Directory holding session-synthesized `.mtlx` documents added via
+        # `add_material` (mcp-material-authoring, design D2/D7). Set the first
+        # time a synthesized material is added; used at save time to tell a
+        # session document (copy into the saved bundle) from a curated preset
+        # (keep an absolute assets reference — the texture carve-out).
+        self._material_session_dir: "str | None" = None
         # The single combined graph-param buffer (all graphs share one
         # matId-major byte buffer at GRAPH_BINDING_BASE — change
         # combine-graph-param-buffers). None until the first graph upload.
@@ -6005,6 +6011,21 @@ class Renderer:
             lt.prim_path: lt.enabled
             for lt in (*scene.lights_dir, *scene.lights_sphere) if lt.prim_path
         }
+        # Live material overrides (scene_set / slider edits) live only on the
+        # Scene objects + graph cache; a structural resync re-reads materials
+        # from disk and would drop them (finding #7 — edit colorA, add a light,
+        # the edit vanishes). Snapshot the prior overrides by the material's
+        # stable prim path (falling back to its leaf name) so they re-apply onto
+        # the same material, not a same-named one in another scope (/ScopeA/Foo
+        # vs /ScopeB/Foo would cross-apply if keyed by leaf name — finding #7/D).
+        def _mat_key(m):
+            return getattr(m, "source_prim_path", None) or getattr(m, "name", None)
+
+        prev_mat_overrides = {
+            _mat_key(m): dict(m.parameter_overrides)
+            for m in scene.materials
+            if _mat_key(m) and m.parameter_overrides
+        }
         new_scene = load_scene_from_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
             allow_empty=True,
@@ -6015,6 +6036,14 @@ class Renderer:
         for lt in (*new_scene.lights_dir, *new_scene.lights_sphere):
             if lt.prim_path in prev_light_enabled:
                 lt.enabled = prev_light_enabled[lt.prim_path]
+        # Re-apply the preserved overrides onto same-named materials (prior edit
+        # wins over the reloaded loader default). `_gen_scene_materials` below
+        # reseeds `_material_graph_overrides` from `parameter_overrides`, so the
+        # graph-uniform cache is restored by this same merge — no separate step.
+        for m in new_scene.materials:
+            saved = prev_mat_overrides.get(_mat_key(m))
+            if saved:
+                m.parameter_overrides = {**m.parameter_overrides, **saved}
         # Swap instances + materials together so material_ids stay consistent;
         # take the re-read lights + environment + camera too so deleting one
         # drops it.
@@ -6291,6 +6320,8 @@ class Renderer:
         color=None,
         roughness: "float | None" = None,
         metallic: "float | None" = None,
+        skip_inline_material: bool = False,
+        bind_material_path: "str | None" = None,
     ) -> str:
         """Author an analytic gprim with its own bound preview-surface material.
 
@@ -6301,11 +6332,27 @@ class Renderer:
         authored bare: an unbound prim resolves to the protected fallback
         material slot (index 0) and could never be re-colored afterwards.
 
+        ``skip_inline_material`` (mcp-material-authoring, design D6) omits
+        the inline material entirely -- the caller (``scene_add_primitive``
+        with a ``material`` argument) binds an existing or freshly-created
+        ``/Materials`` holder instead, and authoring the usual inline one
+        first would leave it an orphaned, unbound sibling prim.
+        ``color``/``roughness``/``metallic`` are ignored in that case.
+
+        ``bind_material_path`` (finding #8) makes the add-plus-bind
+        transactional: the binding to that existing ``/Materials`` holder is
+        authored inside the *same* edit scope as the gprim, so a bind failure
+        (or a resync failure after it) rolls the primitive back with the binding
+        rather than leaving a bare prim or an orphaned binding. Implies
+        ``skip_inline_material``.
+
         Returns the gprim's unique prim path.
         """
         stage = self._usd_stage
         if stage is None or self._usd_edit_layer is None:
             raise RuntimeError("add_primitive requires a loaded USD stage")
+        if bind_material_path is not None:
+            skip_inline_material = True
 
         from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
 
@@ -6330,7 +6377,10 @@ class Renderer:
         prim_path = self._unique_prim_path(
             f"/{leaf}" if parent == "/" else f"{parent}/{leaf}"
         )
-        material_path = self._unique_prim_path(f"{prim_path}_material")
+        material_path = (
+            None if skip_inline_material
+            else self._unique_prim_path(f"{prim_path}_material")
+        )
         parent_parts = [part for part in parent.split("/") if part]
         parent_paths = [
             "/" + "/".join(parent_parts[:i])
@@ -6351,31 +6401,54 @@ class Renderer:
                         UsdGeom.Xformable(gprim.GetPrim()), transform,
                     )
 
-                material = UsdShade.Material.Define(stage, material_path)
-                shader = UsdShade.Shader.Define(
-                    stage, f"{material_path}/PreviewSurface"
-                )
-                shader.CreateIdAttr("UsdPreviewSurface")
-                r, g, b = color if color is not None else (0.8, 0.8, 0.8)
-                shader.CreateInput(
-                    "diffuseColor", Sdf.ValueTypeNames.Color3f,
-                ).Set(Gf.Vec3f(float(r), float(g), float(b)))
-                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(
-                    float(roughness) if roughness is not None else 0.5
-                )
-                shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(
-                    float(metallic) if metallic is not None else 0.0
-                )
-                material.CreateSurfaceOutput().ConnectToSource(
-                    shader.ConnectableAPI(), "surface",
-                )
-                UsdShade.MaterialBindingAPI.Apply(gprim.GetPrim())
-                UsdShade.MaterialBindingAPI(gprim.GetPrim()).Bind(material)
+                if material_path is not None:
+                    material = UsdShade.Material.Define(stage, material_path)
+                    shader = UsdShade.Shader.Define(
+                        stage, f"{material_path}/PreviewSurface"
+                    )
+                    shader.CreateIdAttr("UsdPreviewSurface")
+                    r, g, b = color if color is not None else (0.8, 0.8, 0.8)
+                    shader.CreateInput(
+                        "diffuseColor", Sdf.ValueTypeNames.Color3f,
+                    ).Set(Gf.Vec3f(float(r), float(g), float(b)))
+                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(
+                        float(roughness) if roughness is not None else 0.5
+                    )
+                    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(
+                        float(metallic) if metallic is not None else 0.0
+                    )
+                    material.CreateSurfaceOutput().ConnectToSource(
+                        shader.ConnectableAPI(), "surface",
+                    )
+                    UsdShade.MaterialBindingAPI.Apply(gprim.GetPrim())
+                    UsdShade.MaterialBindingAPI(gprim.GetPrim()).Bind(material)
+
+                if bind_material_path is not None:
+                    # Bind an existing holder inside the same edit scope so the
+                    # add + bind is one transaction (finding #8): a validation or
+                    # authoring failure here raises before the resync and the
+                    # except block below removes the just-created prim.
+                    from skinny import usd_material_edit as ume
+                    from skinny.usd_loader import _prim_has_mtlx_reference
+                    mat_prim = stage.GetPrimAtPath(bind_material_path)
+                    if not (mat_prim and mat_prim.IsValid()):
+                        raise ValueError(
+                            f"add_primitive: material not found: {bind_material_path}"
+                        )
+                    is_mat = bool(UsdShade.Material(mat_prim))
+                    if not is_mat and not _prim_has_mtlx_reference(
+                        stage, mat_prim.GetPath()
+                    ):
+                        raise ValueError(
+                            f"add_primitive: {bind_material_path} is neither "
+                            f"Material-typed nor carries a .mtlx reference"
+                        )
+                    ume.author_binding(stage, prim_path, bind_material_path)
             resync_started = True
             self._resync_geometry_from_stage()
         except Exception:
             with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
-                if stage.GetPrimAtPath(material_path).IsValid():
+                if material_path is not None and stage.GetPrimAtPath(material_path).IsValid():
                     stage.RemovePrim(material_path)
                 if stage.GetPrimAtPath(prim_path).IsValid():
                     stage.RemovePrim(prim_path)
@@ -6389,6 +6462,157 @@ class Renderer:
                     pass
             raise
         return prim_path
+
+    def add_material(
+        self,
+        name: str,
+        *,
+        mtlx_path: "str | None" = None,
+        preview_params: "dict | None" = None,
+        session_dir: "str | None" = None,
+        on_rollback=None,
+    ) -> str:
+        """Author a material holder under ``/Materials`` in the session edit layer.
+
+        Two forms (mcp-material-authoring, design D2):
+        - ``mtlx_path`` — a typed ``UsdShade.Material`` holder carrying an
+          absolute ``.mtlx`` reference (curated preset or session-synthesized
+          document). The holder prim name is ``name`` **exactly** (the naming
+          contract the loader's binding resolution requires); a clash raises so
+          the caller dedups presets / salts synthesized names beforehand.
+        - ``preview_params`` — an inline ``UsdPreviewSurface`` material with the
+          full editable input set; the holder name is uniquified.
+
+        ``session_dir`` marks a synthesized document's store directory so
+        ``save_edits`` classifies it correctly. ``on_rollback`` (e.g. delete the
+        session ``.mtlx``) runs if authoring fails — keeping the renderer
+        decoupled from the synthesis module. Rollback removes the holder and an
+        auto-created ``/Materials`` scope. The material is created but **not live**
+        until a geometry prim binds it (design D8). Returns the holder prim path.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("add_material requires a loaded USD stage")
+        if (mtlx_path is None) == (preview_params is None):
+            raise ValueError(
+                "add_material requires exactly one of mtlx_path or preview_params"
+            )
+        from pxr import Tf, Usd
+        from skinny import usd_material_edit as ume
+
+        leaf = Tf.MakeValidIdentifier(name)
+        if mtlx_path is not None:
+            holder_path = f"/Materials/{leaf}"
+            if stage.GetPrimAtPath(holder_path).IsValid():
+                raise ValueError(
+                    f"add_material: /Materials/{leaf} already exists; "
+                    f"dedup presets and salt synthesized names before calling"
+                )
+        else:
+            holder_path = self._unique_prim_path(f"/Materials/{leaf}")
+
+        if session_dir is not None:
+            self._material_session_dir = session_dir
+
+        created_scope = False
+        resync_started = False
+        try:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                created_scope = ume.ensure_materials_scope(stage)
+                if mtlx_path is not None:
+                    ume.author_material_holder(stage, holder_path, mtlx_path)
+                else:
+                    ume.author_preview_material(stage, holder_path, preview_params or {})
+            resync_started = True
+            self._resync_geometry_from_stage()
+        except Exception:
+            with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+                if stage.GetPrimAtPath(holder_path).IsValid():
+                    stage.RemovePrim(holder_path)
+                if created_scope and stage.GetPrimAtPath("/Materials").IsValid():
+                    stage.RemovePrim("/Materials")
+            if on_rollback is not None:
+                try:
+                    on_rollback()
+                except Exception:  # rollback is best-effort
+                    pass
+            if resync_started:
+                try:
+                    self._resync_geometry_from_stage()
+                except Exception:  # preserve the original creation failure
+                    pass
+            raise
+        return holder_path
+
+    def bind_material(self, prim_path: str, material_path: str) -> None:
+        """Bind ``material_path`` to ``prim_path`` in the session edit layer.
+
+        Validates both paths (mcp-material-authoring, design D6/M4): the geometry
+        prim must exist and be a bindable ``Gprim`` (Mesh / analytic gprim); the
+        material must exist and be either ``Material``-typed or carry a ``.mtlx``
+        reference. Authors explicit binding targets so the session binding
+        *replaces* any file-authored binding (LIVRPS), then resyncs — which loads
+        the newly bound material and restarts accumulation.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("bind_material requires a loaded USD stage")
+        from pxr import Usd, UsdGeom, UsdShade
+        from skinny import usd_material_edit as ume
+        from skinny.usd_loader import _prim_has_mtlx_reference
+
+        prim = stage.GetPrimAtPath(prim_path)
+        if not (prim and prim.IsValid()):
+            raise ValueError(f"bind_material: prim not found: {prim_path}")
+        if not prim.IsA(UsdGeom.Gprim):
+            raise ValueError(
+                f"bind_material: {prim_path} is not bindable geometry (Gprim)"
+            )
+        mat_prim = stage.GetPrimAtPath(material_path)
+        if not (mat_prim and mat_prim.IsValid()):
+            raise ValueError(f"bind_material: material not found: {material_path}")
+        is_material = bool(UsdShade.Material(mat_prim))
+        if not is_material and not _prim_has_mtlx_reference(stage, mat_prim.GetPath()):
+            raise ValueError(
+                f"bind_material: {material_path} is neither Material-typed nor "
+                f"carries a .mtlx reference"
+            )
+        with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+            ume.author_binding(stage, prim_path, material_path)
+        self._resync_geometry_from_stage()
+
+    def discard_created_prim(
+        self, prim_path: str, *, remove_empty_materials_scope: bool = False,
+    ) -> None:
+        """Hard-remove an edit-layer prim spec authored earlier in this call.
+
+        For rolling back a prim created in the SAME transactional call
+        (mcp-material-authoring, finding #8/E). Unlike ``remove_node`` — which
+        *deactivates* (an ``active=false`` tombstone that ``add_material``'s
+        holder-collision check would then treat as a live prim and refuse to
+        reuse the name) — this deletes the spec, so the name is immediately
+        reusable. Matches ``add_material`` / ``add_primitive``'s own rollback.
+        A missing prim is a no-op. Re-reads the stage afterward.
+
+        ``remove_empty_materials_scope`` (finding E): when a failed add-plus-bind
+        auto-created the ``/Materials`` scope in this call, removing just the
+        holder would leave an orphan empty scope — ``add_material``'s own rollback
+        removes the scope it created, so mirror that here. Only removes it when the
+        caller signals this call created it AND it is now childless, so a scope
+        holding other holders (or a pre-existing one) is never touched.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("discard_created_prim requires a loaded USD stage")
+        from pxr import Usd
+        with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+            if stage.GetPrimAtPath(prim_path).IsValid():
+                stage.RemovePrim(prim_path)
+            if remove_empty_materials_scope:
+                scope = stage.GetPrimAtPath("/Materials")
+                if scope.IsValid() and not any(scope.GetChildren()):
+                    stage.RemovePrim("/Materials")
+        self._resync_geometry_from_stage()
 
     def remove_node(self, prim_path: str) -> None:
         """Remove a node by deactivating its prim (non-destructive) and re-reading.
@@ -6448,7 +6672,15 @@ class Renderer:
             raise ValueError(
                 "save_edits: no path given and no default (in-memory stage)"
             )
-        root = self._usd_stage.GetRootLayer() if self._usd_stage is not None else None
+        stage = self._usd_stage
+        root = stage.GetRootLayer() if stage is not None else None
+        # Material holders and their referenced `.mtlx` documents, read off the
+        # LIVE stage before an export flattens the reference arcs away
+        # (mcp-material-authoring, design D7).
+        from skinny import usd_material_edit as ume
+        holders = ume.collect_material_holders(stage) if stage is not None else {}
+        save_dir = str(Path(str(target)).resolve().parent)
+
         if root is not None and root.anonymous:
             # A synthesized stage (scene_create) has no backing file: its /World
             # prim and stage metadata (defaultPrim / upAxis / metersPerUnit) live
@@ -6456,9 +6688,25 @@ class Renderer:
             # the edit layer would drop them, so the saved file would reopen at
             # USD's 0.01 m/unit default. Export the composed stage instead —
             # complete and self-contained (session overrides fold in too).
-            self._usd_stage.Export(str(target))
+            stage.Export(str(target))
+            flattened = True
         else:
             self._usd_edit_layer.Export(str(target))
+            flattened = False
+
+        # Post-process the saved layer: re-anchor `.mtlx` references, copy
+        # session-synthesized documents into a `materials/` bundle, strip the
+        # flatten residue (anonymous branch only). Curated presets keep absolute
+        # references (texture carve-out). No-op when no holders were authored.
+        if holders:
+            from pxr import Sdf
+            saved_layer = Sdf.Layer.FindOrOpen(str(target))
+            if saved_layer is not None:
+                ume.finalize_saved_materials(
+                    saved_layer, holders, save_dir,
+                    self._material_session_dir, flattened=flattened,
+                )
+                saved_layer.Save()
         return str(target)
 
     def list_nodes(self) -> "list[dict]":
@@ -7241,6 +7489,35 @@ class Renderer:
             self._material_graph_overrides.setdefault(
                 material_id, {}
             )[key] = value
+        self._upload_flat_materials(mats)
+        self._material_version += 1
+
+    def apply_material_overrides(
+        self, material_id: int, values: "dict[str, object]"
+    ) -> None:
+        """Apply several parameter overrides to one material in a single pass.
+
+        The fan-out write path for a synthesized MaterialX material
+        (mcp-material-authoring, design D5): one logical `scene_set` maps to N
+        generated uniforms, and all of them must land in the same edit so the
+        re-upload and accumulation reset happen exactly once. Mirrors
+        `apply_material_override` (including the graph-overrides cache mirror)
+        but uploads and bumps `_material_version` a single time for the batch.
+        """
+        if self._usd_scene is None or not values:
+            return
+        mats = self._usd_scene.materials
+        if material_id <= 0 or material_id >= len(mats):
+            return
+        graph_cache = (
+            self._material_graph_overrides.setdefault(material_id, {})
+            if material_id in self._material_graph_ids
+            else None
+        )
+        for key, value in values.items():
+            mats[material_id].parameter_overrides[key] = value
+            if graph_cache is not None:
+                graph_cache[key] = value
         self._upload_flat_materials(mats)
         self._material_version += 1
 

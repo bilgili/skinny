@@ -115,10 +115,12 @@ ordering does not depend on optional features being enabled.
 Opt-in (`--mcp`, off by default), the interactive front-ends (`skinny`, `skinny-gui`
 — the two that own a render-thread command queue) host an MCP server on a daemon
 thread that exposes the live scene graph to an MCP client: three path-addressed
-inspection/property tools, `scene_list` / `scene_get` / `scene_set`, plus six
+inspection/property tools, `scene_list` / `scene_get` / `scene_set`; eight
 structural tools, `scene_add_model` / `scene_add_primitive` / `scene_add_light` /
-`scene_remove` / `scene_save` / `scene_job_status` (changes `mcp-scene-control`,
-`mcp-scene-structure`). It attaches to the running renderer; it never builds one.
+`scene_remove` / `scene_save` / `scene_job_status` / `scene_add_material` /
+`scene_bind_material`; and one renderer-free discovery tool, `material_list`
+(changes `mcp-scene-control`, `mcp-scene-structure`, `mcp-material-authoring`).
+It attaches to the running renderer; it never builds one.
 
 The server thread holds only the proxy (Qt) or the bare queue (GLFW) — never the
 `Renderer` and never the GPU context, so it cannot extend a `MetalContext`
@@ -167,6 +169,28 @@ never be re-colored. `scene_remove` deactivates (non-destructive); `scene_save`
 writes the edit layer but — like the dock's own save — captures only
 structural edits, not `scene_set` property overrides, which mutate in-memory
 render state without touching USD.
+
+**Material authoring (`mcp-material-authoring`).** `material_list` is a
+renderer-free discovery call over `mtlx_synthesis`'s catalogs (curated preset
+directory listing + gen-reflected editable inputs, model schemas, the node
+whitelist, the template registry) — it never touches the render thread, so it
+cannot drift from what a spec actually accepts. `scene_add_material` validates
+its spec and, for a synthesized document, runs the Slang generator as a
+GPU-free dry-run entirely on the MCP thread before any prim or file exists;
+only the resulting stage write (typed `UsdShade.Material` holder + `.mtlx`
+reference) happens inside a posted closure. A created material's result always
+reports `live: false` — participation is binding-driven (design D8): a
+material is loaded, rendered, and exposes its editable properties only once
+`scene_bind_material` (or `scene_add_primitive`'s `material` argument) binds
+it, which replaces rather than merges with any file-authored binding. Adding
+the same curated preset twice returns the existing holder instead of a
+duplicate (fixed element names cannot resolve to two prims); synthesized and
+template materials are never deduped. A synthesized material's first bind
+changes the scene's graph-set signature and rebuilds the render pipeline, so
+it — more than a plain structural add — is expected to degrade to a pollable
+job. `scene_add_primitive` grows an optional `material` argument (a preset/
+template name, or an existing `/Materials/...` path) that replaces its inline
+seeded material; it is rejected together with `color`/`roughness`/`metallic`.
 
 Every path a structural tool touches is checked against `mcp_paths.py`'s
 allowlist (`--mcp-roots` / `SKINNY_MCP_ROOTS`, default: platform temp dirs +

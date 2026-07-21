@@ -7,6 +7,15 @@ Path-addressed inspection/property tools (``scene_list`` / ``scene_get`` /
 already edits. Attaches to a renderer that is already running; it never
 builds one.
 
+**Material authoring (mcp-material-authoring)** adds a read-only discovery
+tool (``material_list``, renderer-free) and two structural tools
+(``scene_add_material``, ``scene_bind_material``) plus a ``material``
+argument on ``scene_add_primitive``. Spec validation and MaterialX synthesis
+run on the MCP thread, entirely before any stage or filesystem write
+(``mtlx_synthesis``); only stage authoring and resync happen inside a posted
+closure. A created material is not live (rendered, loaded, editable) until a
+primitive binds it -- see each tool's docstring.
+
 **Filesystem trust (design D2, mcp-scene-structure):** every tool argument
 naming a path -- a model to reference, a save destination, an asset-typed
 property write -- is checked against a configurable allowlist (``mcp_paths``).
@@ -52,12 +61,15 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from skinny import mtlx_synthesis
 from skinny.mcp_auth import check_request, load_or_create_token, registration_command
 from skinny.mcp_paths import check_path, resolve_roots, validate_added_subtree
+from skinny.mtlx_synthesis import MaterialSpecError
 from skinny.scene_graph import compose_trs_matrix, find_node_by_path, scene_graph_to_dict
 from skinny.ui.scene_edit_actions import apply_scene_property, has_editable_stage, is_deletable
 
@@ -203,6 +215,18 @@ class SceneTools:
         )
         self._jobs: "dict[str, _Job]" = {}
         self._jobs_lock = threading.Lock()
+        # Owns the tempdir every synthesized material's .mtlx (+ mapping
+        # sidecar) is flushed to, before the structural closure that
+        # references it is posted (design D2/D9). One store per SceneTools
+        # instance -- i.e. per server process.
+        self._material_store = mtlx_synthesis.SessionMaterialStore()
+        # Serializes synthesized-name picking so two concurrent material adds
+        # can't choose the same salted name and clobber each other's session
+        # file before the first's rollback is installed (design D6/finding #5).
+        # A name stays reserved from pick until its `.mtlx` exists (the file then
+        # guards reuse via write_document's refuse-overwrite).
+        self._name_lock = threading.Lock()
+        self._reserved_names: set[str] = set()
 
     def _prune_jobs_locked(self) -> None:
         now = time.monotonic()
@@ -452,6 +476,7 @@ class SceneTools:
         color=None,
         roughness: "float | None" = None,
         metallic: "float | None" = None,
+        material: "str | None" = None,
         name: "str | None" = None,
         parent: "str | None" = None,
         translate=None,
@@ -463,12 +488,37 @@ class SceneTools:
 
         ``type`` is one of Sphere, Cube, Cylinder, Cone, Capsule, Plane -- the
         gprim types the loader tessellates. The primitive is never authored
-        bare: a dedicated preview-surface material is authored and bound
-        alongside it, since an unbound prim would resolve to the protected
-        fallback material slot and its appearance could never be edited
-        afterwards. ``color``, ``roughness``, and ``metallic`` seed that
-        material; omitted ones get sensible defaults.
+        bare: an unbound prim would resolve to the protected fallback
+        material slot and its appearance could never be edited afterwards.
+
+        With no ``material``, behavior is unchanged: a dedicated inline
+        preview-surface material is authored and bound alongside the
+        primitive, seeded by ``color``/``roughness``/``metallic`` (omitted
+        ones get sensible defaults).
+
+        ``material`` (mcp-material-authoring, design D6) replaces that inline
+        material with a curated preset, a procedural template, or an
+        existing bound material -- distinguished by a leading ``/``: a
+        ``/Materials/...`` path binds that exact prim (erroring if absent);
+        any other string must name a known preset or template and is created
+        (with preset dedup) as if by ``scene_add_material``, then bound.
+        Supplying ``material`` together with ``color``/``roughness``/
+        ``metallic`` is rejected as ambiguous -- an inline seed and a bound
+        material are two different ways to skin the primitive.
+
+        A synthesized (template) material's first bind changes the scene's
+        graph-set signature and rebuilds the render pipeline (design D9), so
+        a ``material=<template>`` call is more likely than a plain add to
+        degrade to a pollable job (``scene_job_status``).
         """
+        if material is not None and (
+            color is not None or roughness is not None or metallic is not None
+        ):
+            raise SceneToolError(
+                "scene_add_primitive: 'material' cannot be combined with "
+                "'color', 'roughness', or 'metallic' -- bind a material or "
+                "seed an inline preview material, not both"
+            )
         transform = _resolve_transform(
             translate=translate, rotate_euler_deg=rotate_euler_deg,
             scale=scale, matrix=matrix,
@@ -476,7 +526,41 @@ class SceneTools:
         color_value = _as_vec3("color", color) if color is not None else None
         parent_path = parent or "/World"
 
+        # Material creation (if a name, not a path) is deferred into the write
+        # closure so the whole create + add-primitive + bind is one atomic
+        # render-thread transaction (finding #8): if the bind (or the resync
+        # after it) fails, the just-created material is torn down with the
+        # primitive rather than left orphaned. The MCP-thread synthesis (dry-run
+        # + file flush) for a template still runs here, before the closure is
+        # posted (design D9: the bind is the step expected to degrade to a job).
+        material_plan = (
+            self._resolve_material_plan(material) if material is not None else None
+        )
+
         def write(renderer) -> dict:
+            # The material plan owns its OWN readiness check (finding C): a template
+            # plan wrote its `.mtlx` file eagerly on the MCP thread, so a readiness
+            # failure here — before the plan runs — would orphan that file. Each
+            # plan now checks readiness itself and cleans up any file it wrote, so
+            # the top-level check guards only the inline-seed path below.
+            if material_plan is not None:
+                mat_path, cleanup = material_plan(renderer)
+                try:
+                    path = renderer.add_primitive(
+                        type, parent_prim_path=parent_path, name=name,
+                        transform=transform, bind_material_path=mat_path,
+                    )
+                except Exception:
+                    if cleanup is not None:
+                        try:
+                            cleanup(renderer)
+                        except Exception:  # rollback is best-effort
+                            pass
+                    raise
+                return {
+                    "path": path, "material_path": mat_path,
+                    **_versions(renderer),
+                }
             if not has_editable_stage(renderer):
                 raise SceneToolError("no editable USD stage is loaded")
             path = renderer.add_primitive(
@@ -484,6 +568,343 @@ class SceneTools:
                 color=color_value, roughness=roughness, metallic=metallic,
             )
             return {"path": path, **_versions(renderer)}
+
+        return self._structural(write)
+
+    def _resolve_material_plan(self, material: str):
+        """Return a render-thread callable resolving ``scene_add_primitive``'s
+        ``material`` to ``(material_path, cleanup)``.
+
+        A leading ``/`` means an existing ``/Materials/...`` path -- bound as-is
+        with no cleanup. Otherwise ``material`` must be a known preset (created
+        with dedup) or template name (synthesized fresh); anything else is an
+        explicit error listing both catalogs. The returned callable runs inside
+        the caller's write closure so material creation and the primitive
+        add+bind share one rollback scope (finding #8); ``cleanup`` (or ``None``)
+        removes a holder this call freshly created -- never a deduped reuse.
+        """
+        if material.startswith("/"):
+            def plan(renderer):
+                if not has_editable_stage(renderer):
+                    raise SceneToolError("no editable USD stage is loaded")
+                return material, None
+
+            return plan
+
+        presets = mtlx_synthesis.list_presets()
+        if material in presets:
+            holder_name = mtlx_synthesis.preset_holder_name(material)
+            preset_path = presets[material]
+
+            def plan(renderer):
+                if not has_editable_stage(renderer):
+                    raise SceneToolError("no editable USD stage is loaded")
+                # Did THIS call create the /Materials scope? If so, its rollback
+                # must remove the (then-empty) scope too, not just the holder
+                # (finding E).
+                scope_existed = renderer._usd_stage.GetPrimAtPath(
+                    "/Materials"
+                ).IsValid()
+                path, created = _add_or_dedup_preset(renderer, holder_name, preset_path)
+                # Hard-remove a freshly-created holder on rollback (finding #8/E)
+                # so a same-name retry is not blocked by an active=false tombstone
+                # (a deduped reuse is never torn down).
+                drop_scope = created and not scope_existed
+                cleanup = (
+                    (lambda r, p=path, s=drop_scope: r.discard_created_prim(
+                        p, remove_empty_materials_scope=s))
+                    if created else None
+                )
+                return path, cleanup
+
+            return plan
+
+        if material in mtlx_synthesis.TEMPLATES:
+            normalized = mtlx_synthesis.validate_spec({"template": material})
+            candidate, written_path = self._synthesize_and_stage_material(
+                normalized, None, material,
+            )
+
+            def plan(renderer):
+                # `_add_synth_material` owns the readiness check + eager-file
+                # cleanup: the `.mtlx` was written on the MCP thread above, and it
+                # deletes that file on ANY failure (readiness miss / holder
+                # collision). It also samples `/Materials` scope pre-existence
+                # AFTER its readiness gate, so a None `_usd_stage` can no longer
+                # raise an unguarded AttributeError before cleanup runs (finding C).
+                path, drop_scope = self._add_synth_material(
+                    renderer, candidate, written_path,
+                )
+
+                def cleanup(r, p=path, name=candidate, s=drop_scope):
+                    # Delete the file even if the prim discard raises (finding C): a
+                    # resync failure inside discard_created_prim must not skip the
+                    # file deletion (the caller swallows this exception). Hard-remove
+                    # the spec (finding #8/E): remove_node only deactivates (a
+                    # tombstone the same-name collision check would then block
+                    # forever); discard deletes the edit-layer spec so the name is
+                    # reusable, matching add_material's own rollback — and removes
+                    # the auto-created empty /Materials scope too (finding E).
+                    try:
+                        r.discard_created_prim(p, remove_empty_materials_scope=s)
+                    finally:
+                        self._material_store.delete(name)
+
+                return path, cleanup
+
+            return plan
+
+        available_presets = ", ".join(sorted(presets)) or "(none)"
+        available_templates = ", ".join(sorted(mtlx_synthesis.TEMPLATES)) or "(none)"
+        raise SceneToolError(
+            f"scene_add_primitive: material {material!r} is not a "
+            f"/Materials/... path, a known preset, or a known template; "
+            f"presets: {available_presets}; templates: {available_templates}"
+        )
+
+    def material_list(self) -> dict:
+        """Discovery: everything needed to build a valid ``scene_add_material``
+        spec, in one call (mcp-material-authoring).
+
+        Renderer-free -- it never touches the render thread, only
+        ``mtlx_synthesis``'s catalogs (derived from disk / the whitelist /
+        the template registry at call time, so this can never hand-drift
+        from what a spec actually accepts). Per-preset editable inputs are
+        mtime-cached per preset file: a graph preset reflects its generated
+        gen uniforms, while a constant-shader preset maps its authored
+        standard_surface inputs to the flat-pack keys the active path tracer
+        reads (``FLAT_PACK_WRITABLE_KEYS``). The first call after a preset file
+        changes may be slow (the gen dry-run runs then) -- acceptable for a
+        discovery call.
+
+        Returns ``{"presets": [{"name", "editable_inputs"}], "models":
+        {"preview": {...}, "standard_surface": {...}}, "graph_nodes": [...],
+        "templates": {name: {...}}}``.
+        """
+        presets = [
+            {"name": preset_name, "editable_inputs": mtlx_synthesis.list_preset_inputs(preset_name)}
+            for preset_name in sorted(mtlx_synthesis.list_presets())
+        ]
+        models = {
+            model: mtlx_synthesis.model_param_schema(model)
+            for model in ("preview", "standard_surface")
+        }
+        templates = {
+            template_name: mtlx_synthesis.template_param_schema(template_name)
+            for template_name in sorted(mtlx_synthesis.TEMPLATES)
+        }
+        return {
+            "presets": presets,
+            "models": models,
+            "graph_nodes": list(mtlx_synthesis.NODE_WHITELIST),
+            "templates": templates,
+        }
+
+    def _synthesize_and_stage_material(
+        self, normalized_spec: dict, requested_name: "str | None", default_base: str,
+    ) -> "tuple[str, str]":
+        """MCP-thread synth (design D9): reserve a unique salted name, run the
+        generator dry-run, flush the session ``.mtlx`` (+ descriptor sidecar) --
+        all *before* any stage closure is posted, so a rejected spec never
+        touches the stage and never leaves a file behind.
+
+        Name picking is reserved under ``_name_lock`` (finding #5): the candidate
+        must miss the current ``/Materials`` children, any in-flight reservation,
+        AND any existing session file, so two concurrent adds cannot pick the same
+        name and clobber. The reservation is released once the ``.mtlx`` exists
+        (the file then guards reuse via ``write_document``'s refuse-overwrite) or
+        on any failure, which also deletes whatever was written.
+        """
+        from pxr import Tf
+
+        base = Tf.MakeValidIdentifier(requested_name or default_base)
+
+        def read(renderer) -> "set[str]":
+            if not has_editable_stage(renderer):
+                raise SceneToolError("no editable USD stage is loaded")
+            scope = renderer._usd_stage.GetPrimAtPath("/Materials")
+            if scope and scope.IsValid():
+                return {child.GetName() for child in scope.GetChildren()}
+            return set()
+
+        existing = self._read(read)
+        with self._name_lock:
+            candidate = base
+            i = 1
+            while (
+                candidate in existing
+                or candidate in self._reserved_names
+                or self._material_store.path_for(candidate).exists()
+            ):
+                candidate = f"{base}_{i}"
+                i += 1
+            self._reserved_names.add(candidate)
+
+        try:
+            result = mtlx_synthesis.synthesize(normalized_spec, candidate)
+            written_path = self._material_store.write_document(
+                candidate, result.document_xml, result.descriptors,
+            )
+        except MaterialSpecError as exc:
+            self._material_store.delete(candidate)
+            raise SceneToolError(str(exc)) from exc
+        except Exception:
+            self._material_store.delete(candidate)
+            raise
+        finally:
+            with self._name_lock:
+                self._reserved_names.discard(candidate)
+        return candidate, written_path
+
+    def _add_synth_material(
+        self, renderer, candidate: str, written_path: str,
+    ) -> "tuple[str, bool]":
+        """``add_material`` for a synthesized doc, deleting its session file on
+        ANY failure after the file was written (finding #5).
+
+        The stage-readiness check and ``add_material``'s holder-collision guard
+        both raise *before* ``add_material`` wires its own rollback, so without
+        this wrapper either one orphans the just-written ``.mtlx`` + sidecar.
+        Deleting the file also releases the name (``write_document``'s
+        refuse-overwrite keyed off the file). ``delete`` is idempotent.
+
+        Returns ``(path, created_scope)`` where ``created_scope`` is True when
+        this call auto-created the ``/Materials`` scope (so a caller building a
+        rollback knows to tear the empty scope down). The scope pre-existence is
+        sampled AFTER the readiness gate so a None ``_usd_stage`` raises through
+        the file-cleanup path here rather than an unguarded ``AttributeError`` at
+        the call site that would leak the written document (finding C, round 4).
+        """
+        if not has_editable_stage(renderer):
+            self._material_store.delete(candidate)
+            raise SceneToolError("no editable USD stage is loaded")
+        scope_existed = renderer._usd_stage.GetPrimAtPath("/Materials").IsValid()
+        try:
+            path = renderer.add_material(
+                candidate, mtlx_path=written_path,
+                session_dir=str(self._material_store.dir),
+            )
+        except Exception:
+            self._material_store.delete(candidate)
+            raise
+        return path, not scope_existed
+
+    def scene_add_material(self, spec: dict, name: "str | None" = None) -> dict:
+        """Create a material holder under ``/Materials`` (mcp-material-authoring,
+        design D2/D4/D8).
+
+        ``spec`` is exactly one of: ``{"preset": name}`` (curated corpus,
+        server-resolved -- never a client path); ``{"model": "preview"|
+        "standard_surface", "params": {...}, "graph": {...}?}`` (flat params,
+        optionally an explicit nodegraph on standard_surface); or
+        ``{"template": name, "params": {...}}`` (a server-owned procedural
+        recipe that expands to a standard_surface graph). Call ``material_list``
+        for the exact catalogs and schemas. Validation -- and, for a
+        synthesized document, the Slang generator dry-run -- runs entirely on
+        this call before any stage or filesystem write: a rejected spec never
+        creates a prim, a file, or bumps a version counter.
+
+        ``name`` seeds the holder prim name for the ``preview`` and
+        ``standard_surface``/``template`` forms (uniquified if taken; default
+        ``"Material"`` or the template name). It is rejected for a preset
+        spec -- design D6's naming contract fixes a preset holder's name to
+        the curated document's surfacematerial element name, which ``name``
+        cannot override.
+
+        Adding a preset that already has a ``/Materials`` holder returns the
+        existing holder's path instead of creating a duplicate (design D6:
+        a curated document's element name is fixed, so a second holder could
+        never resolve anyway). Synthesized/template materials are never
+        deduplicated -- each call builds a fresh, name-salted document.
+
+        The result's ``live`` is always ``False``: participation is
+        binding-driven (design D8) -- a material is loaded, rendered, and
+        exposes its editable properties only once a primitive binds it
+        (``scene_bind_material`` or ``scene_add_primitive(material=...)``).
+        A synthesized material's *first* bind, not this call, is what
+        changes the scene's graph-set signature and is expected to degrade
+        to a pollable job (design D9).
+        """
+        try:
+            normalized = mtlx_synthesis.validate_spec(spec)
+        except MaterialSpecError as exc:
+            raise SceneToolError(str(exc)) from exc
+
+        form = normalized["form"]
+
+        if form == "preset":
+            if name is not None:
+                raise SceneToolError(
+                    "scene_add_material: 'name' is not accepted for a preset "
+                    "spec -- the holder prim name is fixed to the curated "
+                    "document's surfacematerial element name"
+                )
+            holder_name = mtlx_synthesis.preset_holder_name(normalized["preset"])
+            preset_path = normalized["path"]
+
+            def write(renderer) -> dict:
+                if not has_editable_stage(renderer):
+                    raise SceneToolError("no editable USD stage is loaded")
+                path, _created = _add_or_dedup_preset(renderer, holder_name, preset_path)
+                return {"path": path, "live": False, **_versions(renderer)}
+
+            return self._structural(write)
+
+        if form == "preview":
+            material_name = name or "Material"
+            params = normalized["params"]
+
+            def write(renderer) -> dict:
+                if not has_editable_stage(renderer):
+                    raise SceneToolError("no editable USD stage is loaded")
+                path = renderer.add_material(material_name, preview_params=params)
+                return {"path": path, "live": False, **_versions(renderer)}
+
+            return self._structural(write)
+
+        # form == "standard_surface": a raw graph/flat spec, or an expanded
+        # template (validate_spec lost the original template name, so read
+        # it off the *raw* client spec for the default base name).
+        default_base = spec.get("template") if isinstance(spec, dict) else None
+        candidate, written_path = self._synthesize_and_stage_material(
+            normalized, name, default_base or "Material",
+        )
+
+        def write(renderer) -> dict:
+            path, _drop_scope = self._add_synth_material(
+                renderer, candidate, written_path,
+            )
+            return {"path": path, "live": False, **_versions(renderer)}
+
+        return self._structural(write)
+
+    def scene_bind_material(self, prim_path: str, material_path: str) -> dict:
+        """Bind ``material_path`` to ``prim_path`` (mcp-material-authoring,
+        design D6): the moment of participation for a material created by
+        ``scene_add_material`` (design D8) -- it becomes live (loaded,
+        rendered, editable) only now.
+
+        Authors explicit binding-relationship targets (set, not prepended),
+        so this *replaces* rather than merges with any file-authored binding
+        under LIVRPS; rebinding an already-bound prim is last-write-wins.
+        Errors when ``prim_path`` doesn't exist or isn't bindable geometry,
+        when ``material_path`` doesn't exist, or when it is neither
+        ``Material``-typed nor carries a ``.mtlx`` reference (renderer
+        checks, surfaced as-is).
+
+        A material's *first* bind changes the scene's graph-set signature
+        and triggers a full render-pipeline rebuild (design D9) -- expect
+        this call to degrade to a pollable job (``scene_job_status``) past
+        the inline grace period more often than a plain structural add.
+        """
+        def write(renderer) -> dict:
+            if not has_editable_stage(renderer):
+                raise SceneToolError("no editable USD stage is loaded")
+            renderer.bind_material(prim_path, material_path)
+            return {
+                "prim_path": prim_path, "material_path": material_path,
+                **_versions(renderer),
+            }
 
         return self._structural(write)
 
@@ -567,6 +988,25 @@ class SceneTools:
             return {"path": written, **_versions(renderer)}
 
         return self._structural(write)
+
+
+def _add_or_dedup_preset(renderer, holder_name: str, preset_path: str) -> "tuple[str, bool]":
+    """Return ``(holder_path, created)`` for a preset (design D6).
+
+    Reuses the existing ``/Materials`` holder if one already references
+    ``preset_path`` (dedup, ``created=False``); else authors a new one
+    (``created=True``). The flag lets a transactional caller (finding #8) know
+    whether it may remove the holder on a later failure -- a deduped reuse must
+    never be torn down. Must run on the render thread -- it reads the live
+    composed stage.
+    """
+    from skinny import usd_material_edit as ume
+
+    resolved_abs = str(Path(preset_path).resolve())
+    for holder_path, asset in ume.collect_material_holders(renderer._usd_stage).items():
+        if str(Path(asset).resolve()) == resolved_abs:
+            return holder_path, False
+    return renderer.add_material(holder_name, mtlx_path=preset_path), True
 
 
 def _as_vec3(label: str, value) -> tuple:
@@ -667,6 +1107,9 @@ def _coerce(prop, value):
     if type_name == "vec3f":
         return _vector(prop, value, 3)
 
+    if type_name == "vec2f":
+        return _vector(prop, value, 2)
+
     if type_name in _ASSET_PROPERTY_TYPES or type_name in ("string", "token"):
         if not isinstance(value, str):
             raise SceneToolError(f"{prop.name} expects a string, got {value!r}")
@@ -765,6 +1208,7 @@ def build_app(tools: SceneTools, token: str, port: int):
         tools.scene_create,
         tools.scene_add_model, tools.scene_add_primitive, tools.scene_add_light,
         tools.scene_remove, tools.scene_save, tools.scene_job_status,
+        tools.material_list, tools.scene_add_material, tools.scene_bind_material,
     ):
         server.tool()(_wrap(tool))
 

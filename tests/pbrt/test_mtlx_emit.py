@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pathlib
+
 import pytest
 
 mx = pytest.importorskip("MaterialX")
@@ -187,7 +189,13 @@ def _build_stage_with_glass(tmp_path):
 def test_reference_collected_by_loader(tmp_path):
     usd_path = _build_stage_with_glass(tmp_path)
     stage = Usd.Stage.Open(str(usd_path))
-    assert usd_loader._collect_mtlx_asset_paths(stage) == {"scene.mtlx"}
+    # Collection resolves each authored asset path against its authoring layer
+    # (mcp-material-authoring: overlays must reload from any directory), so the
+    # relative reference comes back as an absolute path beside the stage.
+    collected = usd_loader._collect_mtlx_asset_paths(stage)
+    assert {pathlib.Path(c).resolve() for c in collected} == {
+        (tmp_path / "scene.mtlx").resolve()
+    }
 
 
 def test_no_shadowing_preview_surface(tmp_path):

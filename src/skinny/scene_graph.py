@@ -212,7 +212,7 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
         elif prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DiskLight):
             _add_light_props(node, prim, time)
         elif _is_shade_material(prim):
-            _add_material_props(node, prim, time, material_map)
+            _add_material_props(node, prim, time, material_map, scene)
         elif _is_shade_shader(prim):
             _add_shader_props(node, prim, time, material_map)
         elif prim.IsA(UsdGeom.Camera):
@@ -414,7 +414,7 @@ def _decompose_matrix(gf_matrix) -> tuple[tuple, tuple, tuple]:
 
 
 def _add_material_props(
-    node: SceneGraphNode, prim, time, material_map: dict[str, int],
+    node: SceneGraphNode, prim, time, material_map: dict[str, int], scene=None,
 ) -> None:
     mat_name = prim.GetName()
     idx = material_map.get(mat_name)
@@ -440,6 +440,206 @@ def _add_material_props(
                 type_name="string", value=str(hint),
                 editable=False, metadata={},
             ))
+
+    # Editable properties for live MaterialX-fallback materials
+    # (mcp-material-authoring, design D5). A synthesized graph material carries
+    # a logical→uniform mapping; a constant-shader `.mtlx` material (chrome /
+    # glass / jade — no in-stage Shader prim, so `_add_shader_props` never runs)
+    # surfaces its parameter-override keys directly. Plain UsdPreviewSurface
+    # materials are skipped here: their editable inputs already surface on the
+    # child Shader node.
+    mat = (
+        scene.materials[idx]
+        if scene is not None and idx is not None and idx < len(scene.materials)
+        else None
+    )
+    if mat is not None:
+        _inject_material_editable_props(node, mat)
+
+
+def _normalize_descriptor(desc) -> dict:
+    """Upgrade a legacy ``[uniforms]`` sidecar entry to a full descriptor.
+
+    Older sidecars (and hand-built test fixtures) store ``{name: [uniforms]}``;
+    descriptors are ``{name: {uniforms, type, default, range}}`` (design D5/
+    finding #2). A list becomes a descriptor with null type/default/range so the
+    property builder falls back to name/value inference, exactly as before.
+    """
+    if isinstance(desc, dict):
+        return desc
+    uniforms = list(desc) if isinstance(desc, (list, tuple)) else []
+    return {"uniforms": uniforms, "type": None, "default": None, "range": None}
+
+
+def _inject_material_editable_props(node: SceneGraphNode, mat) -> None:
+    """Surface a live MaterialX-fallback material's editable inputs on its node.
+
+    Graph materials (non-empty ``logical_inputs``) list one property per
+    promoted logical input, built from its persisted descriptor (correct type,
+    declared range, authored default) with its value read back from the current
+    override state and its edit fanned out — via ``metadata['fanout']`` — to
+    every generated uniform the input drives. Constant-shader ``.mtlx`` materials
+    expose their ``parameter_overrides`` keys one-to-one. An as-yet-unedited
+    input shows its authored default (or a type-appropriate zero).
+    """
+    logical = getattr(mat, "logical_inputs", None) or {}
+    overrides = getattr(mat, "parameter_overrides", None) or {}
+    seen: set[str] = {p.name for p in node.properties}
+
+    if logical:
+        for name, raw_desc in logical.items():
+            if name in seen:
+                continue
+            desc = _normalize_descriptor(raw_desc)
+            uni_list = list(desc.get("uniforms") or [])
+            value = next(
+                (overrides[u] for u in uni_list if u in overrides), None
+            )
+            if value is None:
+                value = desc.get("default")
+            prop = _material_descriptor_property(name, value, desc, fanout=uni_list)
+            if prop is not None:
+                node.properties.append(prop)
+                seen.add(name)
+        return
+
+    # Constant-shader `.mtlx` material: only inject when there is no in-stage
+    # Shader prim (i.e. a fallback-loaded MaterialX doc), which is exactly the
+    # `mtlx_document`-carrying case.
+    if getattr(mat, "mtlx_document", None) is None:
+        return
+    # Filter to the keys the ACTIVE path-tracing packer actually reads. The
+    # loader dual-authors raw std_surface aliases (`base_color` alongside
+    # `diffuseColor`) into `parameter_overrides` for pack_std_surface_params;
+    # exposing the raw aliases here made them editable no-ops in the path tracer
+    # (pack_flat_material reads only the flat keys) — finding B, round 4.
+    from skinny.mtlx_synthesis import FLAT_PACK_WRITABLE_KEYS
+    for name, value in overrides.items():
+        if name in seen or name not in FLAT_PACK_WRITABLE_KEYS:
+            continue
+        prop = _material_input_property(name, value, fanout=None)
+        if prop is not None:
+            node.properties.append(prop)
+            seen.add(name)
+
+
+def _material_descriptor_property(
+    name: str, value, desc: dict, *, fanout: "list | None",
+) -> "SceneGraphProperty | None":
+    """Build one editable property from a persisted descriptor (design D5).
+
+    An explicit descriptor ``type`` (``"color3"``/``"int"``/``"float"``) and
+    ``range`` win over name/value inference, so a template ``octaves`` surfaces
+    as an int accepting its 2..8 values instead of a 0..1 float, and ``scale``
+    reaches its declared maximum. When the descriptor carries no type (a legacy
+    upgraded entry), this falls through to ``_material_input_property``'s
+    name/value inference — identical to the pre-descriptor behavior.
+    """
+    dtype = desc.get("type")
+    if dtype is None:
+        return _material_input_property(name, value, fanout=fanout)
+
+    meta: dict = {}
+    if fanout:
+        meta["fanout"] = list(fanout)
+
+    if dtype == "color3":
+        color = _to_float_tuple(value, 3) if value is not None else (0.0, 0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="color3f",
+            value=color or (0.0, 0.0, 0.0), editable=True, metadata=meta,
+        )
+    # A reflected vector uniform must surface as a 2/3-sequence property, not a
+    # scalar float (finding #2): the runtime packer reads the components, so a
+    # scalar write zeroes the vector. vec2f/vec3f transport past the material
+    # fan-out branch in apply_scene_property (the fan-out guard runs first, so
+    # they never hit the TRS/vec3f path).
+    if dtype == "vector3":
+        vec = _to_float_tuple(value, 3) if value is not None else (0.0, 0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="vec3f",
+            value=vec or (0.0, 0.0, 0.0), editable=True, metadata=meta,
+        )
+    if dtype == "vector2":
+        vec = _to_float_tuple(value, 2) if value is not None else (0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="vec2f",
+            value=vec or (0.0, 0.0), editable=True, metadata=meta,
+        )
+    if dtype == "bool":
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="bool",
+            value=bool(value) if value is not None else False,
+            editable=True, metadata=meta,
+        )
+    if dtype == "int":
+        ival = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+        rng = desc.get("range")
+        if rng and len(rng) == 2:
+            meta.update({"min": rng[0], "max": rng[1]})
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="int",
+            value=ival, editable=True, metadata=meta,
+        )
+    # float (default)
+    fval = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    rng = desc.get("range")
+    if rng and len(rng) == 2:
+        lo, hi = rng[0], rng[1]
+    else:
+        lo, hi = 0.0, max(1.0, fval * 2.0)
+    meta.update({"min": lo, "max": hi})
+    return SceneGraphProperty(
+        name=name, display_name=name, type_name="float",
+        value=fval, editable=True, metadata=meta,
+    )
+
+
+def _material_input_property(
+    name: str, value, *, fanout: "list | None",
+) -> "SceneGraphProperty | None":
+    """Build one editable material property, or None for an unrepresentable value.
+
+    Colour is detected by name (``_MATERIAL_COLOR_NAMES`` or a ``color``-bearing
+    name) or a 3/4-vector value; bounds come from ``_MATERIAL_FLOAT_RANGES``.
+    ``fanout`` (the mapped gen-uniform names) rides in metadata so the property
+    dispatcher can apply one logical edit to every uniform at once.
+    """
+    meta: dict = {}
+    if fanout:
+        meta["fanout"] = list(fanout)
+
+    is_color = (
+        name in _MATERIAL_COLOR_NAMES
+        or "color" in name.lower()
+        or (isinstance(value, (list, tuple)) and len(value) in (3, 4))
+    )
+    if is_color:
+        color = _to_float_tuple(value, 3) if value is not None else (0.0, 0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="color3f",
+            value=color or (0.0, 0.0, 0.0), editable=True, metadata=meta,
+        )
+
+    if isinstance(value, bool):
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="bool",
+            value=value, editable=True, metadata=meta,
+        )
+    if isinstance(value, int) and not isinstance(value, bool):
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="int",
+            value=int(value), editable=True, metadata=meta,
+        )
+
+    rng = _MATERIAL_FLOAT_RANGES.get(name)
+    fval = float(value) if isinstance(value, (int, float)) else 0.0
+    lo, hi = rng if rng is not None else (0.0, max(1.0, fval * 2.0))
+    meta.update({"min": lo, "max": hi})
+    return SceneGraphProperty(
+        name=name, display_name=name, type_name="float",
+        value=fval, editable=True, metadata=meta,
+    )
 
 
 def _add_shader_props(

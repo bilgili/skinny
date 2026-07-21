@@ -15,8 +15,8 @@ from PySide6.QtCore import Qt, QSignalBlocker, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox,
-    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSplitter,
-    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from skinny.scene_graph import (
@@ -414,9 +414,17 @@ class SceneGraphDock(QDockWidget):
             self._add_color(layout, node, prop)
         elif prop.type_name == "vec3f" and prop.editable:
             self._add_vec3(layout, node, prop)
+        elif prop.type_name == "vec2f" and prop.editable:
+            self._add_vec2(layout, node, prop)
+        elif prop.type_name == "int" and prop.editable:
+            self._add_int(layout, node, prop)
         elif prop.type_name == "vec3f":
             v = prop.value
             layout.addWidget(QLabel(f"({v[0]:.3f}, {v[1]:.3f}, {v[2]:.3f})"))
+            layout.addStretch(1)
+        elif prop.type_name == "vec2f":
+            v = prop.value
+            layout.addWidget(QLabel(f"({v[0]:.3f}, {v[1]:.3f})"))
             layout.addStretch(1)
         elif prop.type_name == "color3f":
             self._add_color_readonly(layout, prop)
@@ -604,6 +612,59 @@ class SceneGraphDock(QDockWidget):
 
         for s in spins:
             s.editingFinished.connect(commit)
+
+    def _add_vec2(
+        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
+    ) -> None:
+        """Two-component editable vector (finding A(ii)). A reflected vector2
+        material uniform must surface as a 2-sequence so the runtime packer reads
+        both components; the shared ``apply_scene_property`` fan-out guard routes
+        the (x, y) tuple to the material-override path."""
+        v = prop.value
+        spins: list[QDoubleSpinBox] = []
+        for i, axis in enumerate(("X", "Y")):
+            layout.addWidget(QLabel(axis))
+            s = QDoubleSpinBox()
+            s.setRange(-1e6, 1e6); s.setDecimals(4); s.setSingleStep(0.05)
+            with QSignalBlocker(s):
+                s.setValue(float(v[i]))
+            spins.append(s)
+            layout.addWidget(s)
+
+        def commit() -> None:
+            try:
+                values = tuple(float(s.value()) for s in spins)
+            except (TypeError, ValueError):
+                return
+            prop.value = values
+            self._apply_property(node, prop, values)
+
+        for s in spins:
+            s.editingFinished.connect(commit)
+
+    def _add_int(
+        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
+    ) -> None:
+        """Integer spinbox (finding A(ii)) — e.g. a template ``octaves`` int input,
+        bounded by its declared range. Routes through the shared property path
+        (the fan-out guard reaches the material override for a descriptor int)."""
+        spin = QSpinBox()
+        lo = prop.metadata.get("min")
+        hi = prop.metadata.get("max")
+        spin.setRange(
+            int(lo) if isinstance(lo, (int, float)) else -1_000_000,
+            int(hi) if isinstance(hi, (int, float)) else 1_000_000,
+        )
+        with QSignalBlocker(spin):
+            spin.setValue(int(prop.value) if prop.value is not None else 0)
+
+        def on_change(v: int) -> None:
+            prop.value = int(v)
+            self._apply_property(node, prop, int(v))
+
+        spin.valueChanged.connect(on_change)
+        layout.addWidget(spin)
+        layout.addStretch(1)
 
     def _add_lens_file(
         self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,

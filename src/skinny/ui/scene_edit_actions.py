@@ -36,9 +36,20 @@ SUPPORTED_LIGHT_TYPES = (
 
 
 def has_editable_stage(renderer) -> bool:
-    """Whether scene-edit operations can author into an active USD edit layer."""
+    """Whether scene-edit operations can author into an active USD edit layer.
+
+    Also requires the scene metadata to be adopted (``_usd_scene`` set). The
+    async USD loader publishes ``_usd_stage``/``_usd_edit_layer`` from its
+    background thread *before* the render thread adopts ``_usd_scene``, so
+    without this gate ``has_editable_stage`` would go true in a window where an
+    MCP structural op could mutate the stage concurrently with the loader (its
+    edit then clobbered when pre-edit metadata is adopted). Every legitimate
+    editable state (``create_empty_scene``/``set_usd_scene``) sets all three
+    together, so requiring ``_usd_scene`` only closes the loader race.
+    """
     return (
-        getattr(renderer, "_usd_stage", None) is not None
+        getattr(renderer, "_usd_scene", None) is not None
+        and getattr(renderer, "_usd_stage", None) is not None
         and getattr(renderer, "_usd_edit_layer", None) is not None
     )
 
@@ -139,6 +150,22 @@ def apply_scene_property(
     ref = node.renderer_ref
     type_name = getattr(prop, "type_name", "")
 
+    # A material logical-input edit (design D5) carries fan-out uniform names and
+    # must reach the material-override path regardless of its transport type_name
+    # (finding #2): a vector3 input transports as "vec3f" and a boolean as
+    # "bool", both of which the TRS/enable branches below would otherwise capture
+    # and misroute. Only descriptor-backed material properties carry fan-out, so
+    # this never intercepts a transform component or an enable flag.
+    fanout = prop.metadata.get("fanout") if prop.metadata else None
+    if fanout:
+        mat_ref = ref if (ref is not None and ref.kind == "material") \
+            else find_material_ref(graph, node)
+        if mat_ref is not None and mat_ref.kind == "material":
+            renderer.apply_material_overrides(
+                mat_ref.index, {uniform: value for uniform in fanout},
+            )
+            return None
+
     # Compound TRS write: recompose from the node's sibling components.
     if type_name == "vec3f":
         return _apply_vec3(renderer, node, prop, value, ref)
@@ -181,7 +208,17 @@ def apply_scene_property(
             return f"no renderer reference for {node.path!r}"
 
     if ref.kind == "material":
-        renderer.apply_material_override(ref.index, prop.name, value)
+        # A promoted logical input (synthesized MaterialX material) fans one
+        # edit out to every generated uniform it drives (mcp-material-authoring,
+        # design D5); `metadata['fanout']` carries those uniform names. Plain
+        # material inputs write the single named override.
+        fanout = prop.metadata.get("fanout") if prop.metadata else None
+        if fanout:
+            renderer.apply_material_overrides(
+                ref.index, {uniform: value for uniform in fanout},
+            )
+        else:
+            renderer.apply_material_override(ref.index, prop.name, value)
         return None
     if ref.kind in _LIGHT_KIND_TO_TYPE:
         renderer.apply_light_override(

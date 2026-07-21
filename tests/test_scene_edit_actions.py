@@ -9,10 +9,38 @@ import numpy as np
 from skinny.ui.scene_edit_actions import (
     SUPPORTED_LIGHT_TYPES,
     add_parent_for_node,
+    has_editable_stage,
     is_deletable,
     trs_to_matrix,
 )
 from skinny.scene_graph import RendererRef, SceneGraphNode
+
+
+class TestHasEditableStage:
+    """Finding #4: the editable gate also requires adopted scene metadata, so the
+    async-loader window where the stage/edit-layer are published before the scene
+    is not treated as editable."""
+
+    class _R:
+        pass
+
+    def _r(self, *, stage, edit_layer, scene):
+        r = self._R()
+        r._usd_stage = stage
+        r._usd_edit_layer = edit_layer
+        r._usd_scene = scene
+        return r
+
+    def test_stage_and_layer_without_scene_is_not_editable(self):
+        # The loader window: stage + edit layer published, scene not yet adopted.
+        assert has_editable_stage(self._r(stage=object(), edit_layer=object(), scene=None)) is False
+
+    def test_all_three_present_is_editable(self):
+        assert has_editable_stage(self._r(stage=object(), edit_layer=object(), scene=object())) is True
+
+    def test_missing_stage_or_layer_is_not_editable(self):
+        assert has_editable_stage(self._r(stage=None, edit_layer=object(), scene=object())) is False
+        assert has_editable_stage(self._r(stage=object(), edit_layer=None, scene=object())) is False
 
 
 def _node(path: str, type_name: str, ref: RendererRef | None = None) -> SceneGraphNode:

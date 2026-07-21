@@ -32,6 +32,10 @@ class FakeRenderer:
         self._scene_graph_version = 3
         self._usd_stage = FakeStage() if has_stage else None
         self._usd_edit_layer = object() if has_stage else None
+        # `has_editable_stage` now also gates on adopted scene metadata (finding
+        # #4) so the async-loader stage-published-before-scene window is not
+        # treated as editable.
+        self._usd_scene = object() if has_stage else None
         self._slow = slow
         self.calls: list[tuple] = []
 
@@ -72,9 +76,10 @@ class FakeRenderer:
     def create_empty_scene(self):
         self._maybe_delay()
         self.calls.append(("create_empty_scene",))
-        # Mimic the real method: a fresh editable stage is now present.
+        # Mimic the real method: a fresh editable stage + adopted scene present.
         self._usd_stage = FakeStage()
         self._usd_edit_layer = object()
+        self._usd_scene = object()
 
 
 class Proxy:

@@ -403,6 +403,21 @@ class QtRendererProxy:
             coalesce_key=f"mat_override:{index}:{name}",
         )
 
+    def apply_material_overrides(self, index: int, values: "dict[str, Any]") -> None:
+        """Fan-out material edit: post ONE render-thread callback (mcp-material-
+        authoring, design D5). The Qt Scene Graph dock routes a promoted logical
+        input through ``apply_scene_property``, which calls this batched verb; the
+        proxy must mirror the singular ``apply_material_override`` or the dock edit
+        would raise ``AttributeError`` on the GUI thread. Coalesced on the fan-out
+        key set so repeated drags of one logical slider collapse while edits to
+        distinct inputs of the same material stay separate.
+        """
+        vals = dict(values)
+        self.post(
+            lambda r, i=index, v=vals: r.apply_material_overrides(i, v),
+            coalesce_key=f"mat_overrides:{index}:{','.join(sorted(vals))}",
+        )
+
     def apply_light_override(
         self, light_type: str, index: int, name: str, value: Any,
     ) -> None:

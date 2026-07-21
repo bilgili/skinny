@@ -252,18 +252,24 @@ def _build_scene_prop_widget(
     if prop.type_name == "bool" and prop.editable:
         w = pn.widgets.Checkbox(name=prop.display_name, value=bool(prop.value))
 
-        def on_bool(event, p=prop, n=node):
+        def on_bool(event, p=prop, n=node, r=ref):
             value = bool(event.new)
             p.value = value
-            toggle = p.metadata.get("toggle", "node")
             with session._lock:
+                # A material logical-input bool carries fan-out uniforms and must
+                # reach the material-override path, not the node-enable toggle
+                # (finding A, mirroring scene_edit_actions' fan-out-first guard).
+                if _material_fanout(p) and r is not None and r.kind == "material":
+                    _apply_prop_value(renderer, r, p, value)
+                    return
+                toggle = p.metadata.get("toggle", "node")
                 if toggle == "subtree":
                     renderer.apply_subtree_enabled(n.path, value)
                 else:
-                    r = n.renderer_ref
-                    if r is None:
+                    rr = n.renderer_ref
+                    if rr is None:
                         return
-                    if r.kind == "renderer_camera":
+                    if rr.kind == "renderer_camera":
                         renderer.apply_camera_param(p.name, value)
                     else:
                         renderer.apply_node_enabled(n.path, value)
@@ -338,10 +344,53 @@ def _build_scene_prop_widget(
         def on_vec3(_e, p=prop, r=ref, ws=spins):
             vals = tuple(float(w.value) for w in ws)
             with session._lock:
+                # A material logical-input vector fans out to gen uniforms and must
+                # reach the material-override path, not the TRS transform recompose
+                # (finding A, mirroring scene_edit_actions' fan-out-first guard).
+                if _material_fanout(p) and r is not None and r.kind == "material":
+                    _apply_prop_value(renderer, r, p, vals)
+                    return
                 _apply_vec3_value(renderer, r, node, p, vals)
 
         for w in spins:
             w.param.watch(on_vec3, "value")
+        return pn.Row(*spins)
+
+    if prop.type_name == "int" and prop.editable:
+        w = pn.widgets.IntInput(
+            name=prop.display_name, value=int(prop.value),
+            start=prop.metadata.get("min"), end=prop.metadata.get("max"),
+        )
+
+        def on_int(event, p=prop, r=ref):
+            with session._lock:
+                # Fan-out-aware (finding A): a material descriptor int (e.g.
+                # `octaves`) reaches its gen uniforms via _apply_prop_value.
+                _apply_prop_value(renderer, r, p, int(event.new))
+
+        w.param.watch(on_int, "value")
+        return w
+
+    if prop.type_name == "vec2f" and prop.editable:
+        v = prop.value
+        spins = [
+            pn.widgets.FloatInput(
+                name=f"{prop.display_name} {axis}",
+                value=float(v[i]), step=0.05,
+            )
+            for i, axis in enumerate("XY")
+        ]
+
+        def on_vec2(_e, p=prop, r=ref, ws=spins):
+            vals = tuple(float(w.value) for w in ws)
+            with session._lock:
+                # vec2f only transports as a material fan-out (never a TRS
+                # component), so route straight through _apply_prop_value
+                # (finding A).
+                _apply_prop_value(renderer, r, p, vals)
+
+        for w in spins:
+            w.param.watch(on_vec2, "value")
         return pn.Row(*spins)
 
     if prop.type_name == "vec3f":
@@ -361,11 +410,27 @@ def _build_scene_prop_widget(
     return pn.pane.Markdown(f"**{prop.display_name}**: {val_str}")
 
 
+def _material_fanout(prop) -> "list | None":
+    """The mapped gen-uniform names a material logical-input edit fans out to,
+    or None. A descriptor-backed material property (design D5) writes to these
+    uniforms, NOT its logical ``prop.name`` — for a graph preset the two differ,
+    so writing ``prop.name`` is a silent no-op (finding A)."""
+    meta = getattr(prop, "metadata", None)
+    fanout = meta.get("fanout") if meta else None
+    return list(fanout) if fanout else None
+
+
 def _apply_prop_value(renderer, ref, prop, value) -> None:
     if ref is None:
         return
     if ref.kind == "material":
-        renderer.apply_material_override(ref.index, prop.name, value)
+        fanout = _material_fanout(prop)
+        if fanout:
+            renderer.apply_material_overrides(
+                ref.index, {uniform: value for uniform in fanout}
+            )
+        else:
+            renderer.apply_material_override(ref.index, prop.name, value)
     elif ref.kind in ("light_dir", "light_sphere"):
         light_type = "dir" if ref.kind == "light_dir" else "sphere"
         renderer.apply_light_override(light_type, ref.index, prop.name, value)

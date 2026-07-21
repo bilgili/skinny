@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import os
 
+import pathlib
+
 import pytest
 
 mx = pytest.importorskip("MaterialX")
@@ -65,7 +67,12 @@ def test_export_writes_usda_and_mtlx_sidecar(tmp_path):
     out = _export_mtlx(tmp_path, "glass_arealight.pbrt")
     stage = Usd.Stage.Open(out)
     # The .mtlx sidecar is referenced from the stage (collectible by the loader).
-    assert usd_loader._collect_mtlx_asset_paths(stage) == {"out.mtlx"}
+    # Collection resolves against the authoring layer (mcp-material-authoring),
+    # so the sidecar reference comes back absolute, beside the exported stage.
+    collected = usd_loader._collect_mtlx_asset_paths(stage)
+    assert {pathlib.Path(c).resolve() for c in collected} == {
+        pathlib.Path(out).with_name("out.mtlx").resolve()
+    }
 
 
 def test_no_shadowing_preview_surface_authored(tmp_path):

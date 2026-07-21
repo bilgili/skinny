@@ -177,6 +177,26 @@ def test_apply_material_override_posts_coalesced_command() -> None:
     assert calls == [(2, "base_color", (0.0, 1.0, 0.0))]
 
 
+def test_apply_material_overrides_batched_posts_one_command() -> None:
+    """The Scene Graph dock fans a promoted logical input out through the batched
+    verb; the proxy must mirror it or the dock edit raises AttributeError on the
+    GUI thread (finding #1)."""
+    queue = RenderCommandQueue()
+    proxy = _proxy(queue)
+    calls: list[tuple] = []
+
+    class Target:
+        def apply_material_overrides(self, index, values) -> None:
+            calls.append((index, dict(values)))
+
+    proxy.apply_material_overrides(1, {"colorA_r": 0.5, "colorA_g": 0.2})
+
+    commands = queue.drain()
+    assert len(commands) == 1
+    commands[0].callback(Target())
+    assert calls == [(1, {"colorA_r": 0.5, "colorA_g": 0.2})]
+
+
 def test_add_model_returns_future_resolved_by_worker() -> None:
     queue = RenderCommandQueue()
     proxy = _proxy(queue)
