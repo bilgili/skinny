@@ -331,19 +331,48 @@ def remove_node(self, prim_path: str) -> None                           # :6145
 def set_transform(self, prim_path: str, matrix) -> None                 # :6161
 def save_edits(self, path: str | None = None) -> str                    # :6191
 def list_nodes(self) -> list[dict]                                      # :6206
+def add_material(self, name, *, mtlx_path=None, preview_params=None,
+                  session_dir=None, on_rollback=None) -> str            # :6411
+def bind_material(self, prim_path: str, material_path: str) -> None     # :6492
+def apply_material_override(self, material_id, key, value) -> None      # :7381
+def apply_material_overrides(self, material_id, values: dict) -> None   # :7407
 ```
 
 - `set_usd_scene` is the synchronous headless scene-swap. It does **not** build
   the scene-graph model, so the edit API below is unavailable after a bare swap.
 - The edit API (`add_model` / `add_light` / `remove_node` / `set_transform` /
-  `save_edits` / `list_nodes`) requires a **USD stage with an attached edit
-  layer** (the interactive load path); each raises `RuntimeError` otherwise.
-  `add_model` returns the new prim path (USD only — OBJ raises `ValueError`).
-  `add_light` accepts `DistantLight`, `SphereLight`, `DomeLight`, `RectLight`,
-  or `DiskLight`, returns a unique prim path, authors explicit defaults, and
-  immediately resyncs the scene. `remove_node` deactivates non-destructively;
-  `save_edits` defaults to `<scene>.edits.usda`; `list_nodes` returns
-  `[{"path", "type", "active"}, …]`.
+  `save_edits` / `list_nodes` / `add_material` / `bind_material`) requires a
+  **USD stage with an attached edit layer** (the interactive load path); each
+  raises `RuntimeError` otherwise. `add_model` returns the new prim path (USD
+  only — OBJ raises `ValueError`). `add_light` accepts `DistantLight`,
+  `SphereLight`, `DomeLight`, `RectLight`, or `DiskLight`, returns a unique
+  prim path, authors explicit defaults, and immediately resyncs the scene.
+  `remove_node` deactivates non-destructively; `save_edits` defaults to
+  `<scene>.edits.usda`; `list_nodes` returns `[{"path", "type", "active"}, …]`.
+- `add_material` (mcp-material-authoring, design D2) authors a typed
+  `UsdShade.Material` holder under `/Materials` in the session edit layer:
+  exactly one of `mtlx_path` (an absolute `.mtlx` reference — curated preset
+  or synthesized document; the holder name must equal `name` exactly, the D6
+  naming contract the loader's binding resolution requires) or
+  `preview_params` (an inline `UsdPreviewSurface`, holder name uniquified) is
+  given. `session_dir`/`on_rollback` let a synthesized document's session
+  `.mtlx` file participate in `save_edits` classification and rollback without
+  coupling the renderer to `mtlx_synthesis`. The material is created but
+  **not live** — not loaded, rendered, or editable — until a geometry prim
+  binds it (design D8); returns the holder prim path.
+- `bind_material` (design D6) validates both paths — `prim_path` must be a
+  bindable `Gprim`, `material_path` must exist and be either
+  `Material`-typed or carry a `.mtlx` reference — then authors an explicit
+  binding-relationship target (set, not prepended) so the session binding
+  *replaces* rather than merges with any file-authored one under LIVRPS, and
+  resyncs, which loads the newly bound material and restarts accumulation.
+- `apply_material_override` mutates one `parameter_overrides` key on a scene
+  material and re-uploads (used by control-panel slider drags).
+  `apply_material_overrides` (design D5, the fan-out write path for a
+  synthesized material's logical inputs, which a generator dry-run may map to
+  several generated uniform names) applies a whole `{key: value}` dict in one
+  pass, re-uploading and bumping `_material_version` exactly once for the
+  batch rather than once per key.
 
 ### Public attributes set programmatically
 
@@ -570,7 +599,7 @@ class SceneTools:                                     # proxy or bare queue
                          translate=None, rotate_euler_deg=None, scale=None,
                          matrix=None) -> dict
     def scene_add_primitive(type, color=None, roughness=None, metallic=None,
-                             name=None, parent=None,
+                             material=None, name=None, parent=None,
                              translate=None, rotate_euler_deg=None, scale=None,
                              matrix=None) -> dict          # Sphere/Cube/Cylinder/Cone/Capsule/Plane
     def scene_add_light(light_type, intensity=None, color=None,
@@ -580,6 +609,12 @@ class SceneTools:                                     # proxy or bare queue
     def scene_remove(path) -> dict                        # non-destructive deactivation
     def scene_save(path) -> dict                           # path required; structural edits only, see caveat below
     def scene_job_status(job_id) -> dict                   # never blocks; pending/done/failed
+    # Material authoring (mcp-material-authoring): material_list is renderer-free
+    # (touches only mtlx_synthesis, never the render thread); the other two are
+    # structural tools with the same {"status": ..., **versions} envelope above.
+    def material_list() -> dict                           # presets/models/graph_nodes/templates catalogs
+    def scene_add_material(spec, name=None) -> dict        # {"preset"|"model"|"template": ...} -> {"path", "live": False, ...}
+    def scene_bind_material(prim_path, material_path) -> dict  # binds/rebinds; the moment a material goes live
 def build_app(tools, token, port)                     # guarded ASGI app
 def serve(proxy_or_queue, port, sock, roots=None) -> Thread  # daemon; installs NO signal handlers
 def start(proxy_or_queue, port, roots=None) -> Thread | None # None if the port is taken
@@ -618,6 +653,25 @@ resolved asset attribute in the added subtree must also stay inside the
 roots, or the add is rolled back. This is a guardrail against a misdirected
 tool call within one trust domain (the MCP client is a local agent with its
 own file access already) — not a sandbox against an adversarial client.
+
+**Material authoring (mcp-material-authoring).** `scene_add_material`'s `spec`
+is exactly one of `{"preset": name}` (curated corpus under
+`assets/Usd-Mtlx-Example/materials/`, server-resolved by dict lookup, never a
+client path), `{"model": "preview"|"standard_surface", "params": {...},
+"graph": {...}?}`, or `{"template": name, "params": {...}}` — see
+`skinny.mtlx_synthesis.NODE_WHITELIST` for the gen-proven nodegraph node types
+(`checker`/`checkerboard` is not in it — this MaterialX build names the node
+`checkerboard`, so the literal `checker` fails its dry-run and the node and
+its would-be template are both dropped) and `mtlx_synthesis.TEMPLATES` for the
+server-owned procedural recipes (`noise`, `marble_veins`). Validation and, for
+a synthesized document, a GPU-free Slang generator dry-run run entirely on the
+call before any prim or file is written. The result always reports
+`"live": False`: a material is loaded, rendered, and editable only once
+`scene_bind_material` (or `scene_add_primitive`'s `material` argument) binds
+it. Re-adding the same preset returns the existing `/Materials` holder
+(dedup); synthesized/template materials are never deduped. A synthesized
+material's first bind changes the render pipeline's graph-set signature and
+is expected to degrade to a pollable job more often than a plain add.
 
 **Partial save.** `scene_save` persists the USD edit layer, so it captures
 structural edits — adds, removes, transforms — but **not** property edits made

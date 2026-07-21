@@ -402,7 +402,7 @@ claude mcp add --transport http skinny http://127.0.0.1:8765/mcp \
   --header "Authorization: Bearer $(cat ~/.skinny/mcp_token)"
 ```
 
-Nine tools, addressed by USD prim path:
+13 tools, addressed by USD prim path:
 
 | Tool | Purpose |
 |------|---------|
@@ -411,8 +411,11 @@ Nine tools, addressed by USD prim path:
 | `scene_set(path, property, value)` | Write one property |
 | `scene_create(force)` | Start a fresh empty editable scene (a bare `/World`) so edits work with no scene loaded; refuses if one is already loaded unless `force=true` |
 | `scene_add_model(usd_path, name, parent, translate/rotate_euler_deg/scale or matrix)` | Reference a USD file into the scene |
-| `scene_add_primitive(type, color, roughness, metallic, name, parent, transform)` | Add a Sphere/Cube/Cylinder/Cone/Capsule/Plane with its own editable material |
+| `scene_add_primitive(type, color, roughness, metallic, material, name, parent, transform)` | Add a Sphere/Cube/Cylinder/Cone/Capsule/Plane with its own editable material, or bind `material` (a preset/template name, or an existing `/Materials/...` path) instead of the inline `color`/`roughness`/`metallic` seed |
 | `scene_add_light(light_type, intensity, color, name, parent, transform)` | Add a DistantLight/SphereLight/DomeLight/RectLight/DiskLight |
+| `material_list()` | Discovery: curated preset catalog (with editable inputs), the `preview`/`standard_surface` parametric schemas, the nodegraph node whitelist, and the procedural template schemas — renderer-free, everything needed to build a `scene_add_material` spec |
+| `scene_add_material(spec, name)` | Create a `/Materials` holder from a curated preset, a parametric UsdPreviewSurface/standard_surface, or a procedural template; not live (not rendered, loaded, or editable) until bound |
+| `scene_bind_material(prim_path, material_path)` | Bind (or rebind) a material to a geometry prim — the moment a material becomes live; replaces any file-authored binding |
 | `scene_remove(path)` | Deactivate a node (non-destructive) |
 | `scene_save(path)` | Write the USD edit layer — structural edits only, see below |
 | `scene_job_status(job_id)` | Poll a structural tool that returned `{"status": "pending", ...}` |
@@ -435,6 +438,35 @@ changed. `scene_add_primitive` always authors its own bound material (never a
 bare gprim), so `color`/`roughness`/`metallic` — and later `scene_set` edits
 on the same material node — actually take effect. `scene_remove` refuses the
 root and the renderer's synthesized `/Skinny/*` nodes.
+
+**Material authoring.** `scene_add_material` accepts exactly one spec form —
+`{"preset": name}` (curated corpus under `assets/Usd-Mtlx-Example/materials/`,
+resolved server-side by name, never a client-supplied path), `{"model":
+"preview"|"standard_surface", "params": {...}, "graph": {...}?}` (flat
+parameters, optionally an explicit MaterialX nodegraph on `standard_surface`),
+or `{"template": name, "params": {...}}` (a server-owned procedural recipe —
+`noise` or `marble_veins` — that expands to a `standard_surface` graph). A raw
+nodegraph's node types are restricted to a generator-proven whitelist
+(`fractal3d`, `noise2d`, `noise3d`, `position`, `texcoord`, `mix`, `multiply`,
+`add`, `subtract`, `sin`, `power`, `dotproduct`, `ramplr`, `ramptb`) — no
+`checker`/`checkerboard` node in v1, so no checker template either. Every
+spec is validated and, for a synthesized document, run through a GPU-free
+Slang generator dry-run before any prim or file is created; a rejected spec
+never touches the stage. Adding the same preset twice returns the existing
+`/Materials` holder instead of creating a duplicate (curated documents have
+fixed element names); synthesized/template materials are never deduped.
+
+The result of `scene_add_material` always reports `"live": false` —
+participation is binding-driven, so a created material is loaded, rendered,
+and exposes its editable properties only once `scene_bind_material` or
+`scene_add_primitive(material=...)` binds it. A synthesized material's
+*first* bind (not the add) changes the scene's graph-set signature and
+rebuilds the render pipeline, so it degrades to a pollable job
+(`scene_job_status`) more often than a plain structural add. On `scene_save`,
+texture-bearing curated presets (`wood_tiled`, `brass_tiled`,
+`default_uv_image`) keep absolute references into `assets/` rather than being
+copied beside the saved scene; synthesized documents (textureless by the v1
+whitelist) are always copied alongside it.
 
 **Filesystem allowlist.** Every path a structural tool touches — a model
 reference, a save destination, an asset-typed `scene_set` write — must resolve

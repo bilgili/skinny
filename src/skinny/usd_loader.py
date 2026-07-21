@@ -16,6 +16,7 @@ an explicit material binding share it.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field, replace
@@ -802,8 +803,15 @@ def _resolve_ng_input_value(
 
 
 def _collect_mtlx_asset_paths(stage: Usd.Stage) -> set[str]:
-    """Find .mtlx asset paths referenced by the stage's root layer."""
-    root_layer = stage.GetRootLayer()
+    """Find .mtlx asset paths referenced by the stage's root AND session layers.
+
+    The session layer is scanned too (mcp-material-authoring, design D2) so a
+    holder prim authored there by `add_material` — references there carry
+    *absolute* asset paths, since the anonymous session layer has no anchor for
+    relative ones — is discovered by material intake. Root-layer discovery is
+    byte-unchanged: the same recursive prim-spec walk is just run over both
+    layers' root prim specs.
+    """
     paths: set[str] = set()
 
     def _visit(spec: "Sdf.PrimSpec") -> None:
@@ -818,8 +826,11 @@ def _collect_mtlx_asset_paths(stage: Usd.Stage) -> set[str]:
         for child_spec in spec.nameChildren:
             _visit(child_spec)
 
-    for prim_spec in root_layer.rootPrims:
-        _visit(prim_spec)
+    for layer in (stage.GetRootLayer(), stage.GetSessionLayer()):
+        if layer is None:
+            continue
+        for prim_spec in layer.rootPrims:
+            _visit(prim_spec)
     return paths
 
 
@@ -837,6 +848,25 @@ def _resolve_layer_asset(
         return p
     log.warning("could not resolve asset %r (stage_dir=%s)", asset_path, stage_dir)
     return None
+
+
+def _read_mtlx_mapping_sidecar(mtlx_file: Path) -> dict[str, list]:
+    """Read the `logical_inputs` map from a `<stem>.json` beside a `.mtlx` file.
+
+    The sidecar is written by `mtlx_synthesis.SessionMaterialStore` for a
+    synthesized material (design D5). Returns `{}` when absent or unreadable so
+    curated presets and plain USD materials carry no mapping.
+    """
+    sidecar = mtlx_file.with_suffix(".json")
+    if not sidecar.exists():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — a broken sidecar must not fail load
+        log.warning("failed to read mapping sidecar %s: %s", sidecar.name, e)
+        return {}
+    mapping = data.get("logical_inputs", {})
+    return mapping if isinstance(mapping, dict) else {}
 
 
 def _load_mtlx_materials(
@@ -871,6 +901,12 @@ def _load_mtlx_materials(
             continue
 
         mtlx_dir = mtlx_file.parent
+        # Logical-input → gen-uniform mapping sidecar written beside a
+        # session-synthesized document (mcp-material-authoring, design D5). Read
+        # once per file and attached to every Material it yields so the scene
+        # graph can surface editable properties; empty for curated/plain docs
+        # with no sidecar.
+        logical_inputs = _read_mtlx_mapping_sidecar(mtlx_file)
         for node in doc.getMaterialNodes():
             mat_name = node.getName()
             overrides: dict[str, object] = {}
@@ -978,6 +1014,7 @@ def _load_mtlx_materials(
                 texture_paths=textures,
                 mtlx_target_name=mat_name,
                 mtlx_document=doc,
+                logical_inputs=dict(logical_inputs),
             )
 
     if result:
@@ -1026,25 +1063,30 @@ def _merge_prim_overrides(
 
 
 def _prim_has_mtlx_reference(stage: Usd.Stage, prim_path: "Sdf.Path") -> bool:
-    """True when the root-layer spec at *prim_path* carries a `.mtlx` reference.
+    """True when the root OR session layer spec at *prim_path* carries a `.mtlx`
+    reference.
 
     Identifies an exporter-authored MaterialX-backed material `over` (the
     exporter authors the `.mtlx` reference on the root layer — see
-    `mtlx_emit.author_mtlx_reference`). Used to scope the preloaded-table
-    preemption so a coincidentally same-named plain-USD material is never
-    shadowed by an unrelated sidecar entry.
+    `mtlx_emit.author_mtlx_reference`) *or* a holder authored in the session
+    layer by `add_material` (mcp-material-authoring, design D2). Used to scope
+    the preloaded-table preemption so a coincidentally same-named plain-USD
+    material is never shadowed by an unrelated sidecar entry.
     """
-    spec = stage.GetRootLayer().GetPrimAtPath(prim_path)
-    if spec is None:
-        return False
-    ref_list = spec.referenceList
-    for ref in (
-        list(ref_list.prependedItems)
-        + list(ref_list.appendedItems)
-        + list(ref_list.explicitItems)
-    ):
-        if ref.assetPath.endswith(".mtlx"):
-            return True
+    for layer in (stage.GetRootLayer(), stage.GetSessionLayer()):
+        if layer is None:
+            continue
+        spec = layer.GetPrimAtPath(prim_path)
+        if spec is None:
+            continue
+        ref_list = spec.referenceList
+        for ref in (
+            list(ref_list.prependedItems)
+            + list(ref_list.appendedItems)
+            + list(ref_list.explicitItems)
+        ):
+            if ref.assetPath.endswith(".mtlx"):
+                return True
     return False
 
 

@@ -212,7 +212,7 @@ def build_scene_graph(stage, scene, time=None) -> SceneGraphNode:
         elif prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DiskLight):
             _add_light_props(node, prim, time)
         elif _is_shade_material(prim):
-            _add_material_props(node, prim, time, material_map)
+            _add_material_props(node, prim, time, material_map, scene)
         elif _is_shade_shader(prim):
             _add_shader_props(node, prim, time, material_map)
         elif prim.IsA(UsdGeom.Camera):
@@ -414,7 +414,7 @@ def _decompose_matrix(gf_matrix) -> tuple[tuple, tuple, tuple]:
 
 
 def _add_material_props(
-    node: SceneGraphNode, prim, time, material_map: dict[str, int],
+    node: SceneGraphNode, prim, time, material_map: dict[str, int], scene=None,
 ) -> None:
     mat_name = prim.GetName()
     idx = material_map.get(mat_name)
@@ -440,6 +440,110 @@ def _add_material_props(
                 type_name="string", value=str(hint),
                 editable=False, metadata={},
             ))
+
+    # Editable properties for live MaterialX-fallback materials
+    # (mcp-material-authoring, design D5). A synthesized graph material carries
+    # a logical→uniform mapping; a constant-shader `.mtlx` material (chrome /
+    # glass / jade — no in-stage Shader prim, so `_add_shader_props` never runs)
+    # surfaces its parameter-override keys directly. Plain UsdPreviewSurface
+    # materials are skipped here: their editable inputs already surface on the
+    # child Shader node.
+    mat = (
+        scene.materials[idx]
+        if scene is not None and idx is not None and idx < len(scene.materials)
+        else None
+    )
+    if mat is not None:
+        _inject_material_editable_props(node, mat)
+
+
+def _inject_material_editable_props(node: SceneGraphNode, mat) -> None:
+    """Surface a live MaterialX-fallback material's editable inputs on its node.
+
+    Graph materials (non-empty ``logical_inputs``) list one property per
+    promoted logical input, its value read back from the current override state
+    and its edit fanned out — via ``metadata['fanout']`` — to every generated
+    uniform the input drives. Constant-shader ``.mtlx`` materials expose their
+    ``parameter_overrides`` keys one-to-one. Values round-trip current overrides;
+    an as-yet-unedited input shows a type-appropriate default.
+    """
+    logical = getattr(mat, "logical_inputs", None) or {}
+    overrides = getattr(mat, "parameter_overrides", None) or {}
+    seen: set[str] = {p.name for p in node.properties}
+
+    if logical:
+        for name, uniforms in logical.items():
+            if name in seen:
+                continue
+            uni_list = list(uniforms) if isinstance(uniforms, (list, tuple)) else []
+            value = next(
+                (overrides[u] for u in uni_list if u in overrides), None
+            )
+            prop = _material_input_property(name, value, fanout=uni_list)
+            if prop is not None:
+                node.properties.append(prop)
+                seen.add(name)
+        return
+
+    # Constant-shader `.mtlx` material: only inject when there is no in-stage
+    # Shader prim (i.e. a fallback-loaded MaterialX doc), which is exactly the
+    # `mtlx_document`-carrying case.
+    if getattr(mat, "mtlx_document", None) is None:
+        return
+    for name, value in overrides.items():
+        if name in seen:
+            continue
+        prop = _material_input_property(name, value, fanout=None)
+        if prop is not None:
+            node.properties.append(prop)
+            seen.add(name)
+
+
+def _material_input_property(
+    name: str, value, *, fanout: "list | None",
+) -> "SceneGraphProperty | None":
+    """Build one editable material property, or None for an unrepresentable value.
+
+    Colour is detected by name (``_MATERIAL_COLOR_NAMES`` or a ``color``-bearing
+    name) or a 3/4-vector value; bounds come from ``_MATERIAL_FLOAT_RANGES``.
+    ``fanout`` (the mapped gen-uniform names) rides in metadata so the property
+    dispatcher can apply one logical edit to every uniform at once.
+    """
+    meta: dict = {}
+    if fanout:
+        meta["fanout"] = list(fanout)
+
+    is_color = (
+        name in _MATERIAL_COLOR_NAMES
+        or "color" in name.lower()
+        or (isinstance(value, (list, tuple)) and len(value) in (3, 4))
+    )
+    if is_color:
+        color = _to_float_tuple(value, 3) if value is not None else (0.0, 0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="color3f",
+            value=color or (0.0, 0.0, 0.0), editable=True, metadata=meta,
+        )
+
+    if isinstance(value, bool):
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="bool",
+            value=value, editable=True, metadata=meta,
+        )
+    if isinstance(value, int) and not isinstance(value, bool):
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="int",
+            value=int(value), editable=True, metadata=meta,
+        )
+
+    rng = _MATERIAL_FLOAT_RANGES.get(name)
+    fval = float(value) if isinstance(value, (int, float)) else 0.0
+    lo, hi = rng if rng is not None else (0.0, max(1.0, fval * 2.0))
+    meta.update({"min": lo, "max": hi})
+    return SceneGraphProperty(
+        name=name, display_name=name, type_name="float",
+        value=fval, editable=True, metadata=meta,
+    )
 
 
 def _add_shader_props(

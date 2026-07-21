@@ -121,6 +121,65 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   absence. An existing `scene_set` write of an out-of-root `texture_file` or
   `lens_file` path, previously accepted as any string, is now rejected.
 
+- **MCP material authoring** (change `mcp-material-authoring`). Three new
+  tools let an MCP client build and bind materials, not just primitives:
+  `material_list` (renderer-free discovery — the curated `.mtlx` preset
+  catalog with gen-reflected editable inputs, the `preview`/
+  `standard_surface` parametric schemas, the nodegraph node whitelist, and
+  the procedural template schemas, all derived live from disk/the whitelist/
+  the template registry so this can never drift from what a spec accepts),
+  `scene_add_material` (creates a typed `UsdShade.Material` holder under
+  `/Materials` from a curated preset, a parametric UsdPreviewSurface or
+  standard_surface with an optional nodegraph, or a server-owned procedural
+  template — validated, and for a synthesized document gen-dry-run-gated,
+  entirely before any prim or file is written), and `scene_bind_material`
+  (binds/rebinds a material to a geometry prim with explicit binding
+  targets, replacing rather than merging with any file-authored binding).
+  `scene_add_primitive` gains an optional `material` argument (a preset/
+  template name, or an existing `/Materials/...` path) that replaces its
+  inline `color`/`roughness`/`metallic` material; the two are mutually
+  exclusive.
+
+  New GPU-free `skinny/mtlx_synthesis.py`: spec validation (preset/model/
+  template forms), a generator-proven nodegraph node whitelist (`fractal3d`,
+  `noise2d`, `noise3d`, `position`, `texcoord`, `mix`, `multiply`, `add`,
+  `subtract`, `sin`, `power`, `dotproduct`, `ramplr`, `ramptb` — no
+  `checker`/`checkerboard`; this MaterialX build only compiles the node
+  under the `checkerboard` name, so the literal `checker` fails its per-node
+  dry-run and both the node and its would-be template are dropped), two
+  procedural templates (`noise`, `marble_veins`), MaterialX document
+  synthesis with element-name salting, and a GPU-free Slang generator
+  dry-run that gates every synthesized document and derives its logical
+  input → generated-uniform-name mapping.
+
+  A created material is never live on its own: participation is
+  binding-driven, so `scene_add_material` always returns `"live": false`,
+  and a material is loaded, rendered, and editable only once a bind occurs. A
+  synthesized material's *first* bind (not the add) changes the scene's
+  graph-set signature and rebuilds the render pipeline, so it degrades to a
+  pollable job (`scene_job_status`) more often than a plain structural add.
+  Re-adding the same curated preset returns the existing `/Materials` holder
+  instead of a duplicate (fixed element names couldn't resolve to two prims
+  anyway); synthesized and template materials are never deduplicated.
+
+  Loader intake (`usd_loader.py`) now scans the session edit layer's prim
+  specs for `.mtlx` asset references and bindings, not only the root layer,
+  so a session-authored material becomes visible once bound (root-layer
+  behavior unchanged). The scene graph injects editable properties onto live
+  material nodes from the persisted logical-input mapping (graph materials)
+  or `parameter_overrides` keys (constant-shader `.mtlx` materials), so
+  `scene_set` can reach them; a `scene_set` fans out through
+  `Renderer.apply_material_overrides` to every mapped generated uniform in
+  one re-upload. `Renderer.add_material` / `bind_material` follow the same
+  edit-layer + rollback + resync discipline as `add_primitive` (rollback
+  also deletes the session `.mtlx` file). `save_edits` grew a branch-aware
+  material plan: an anonymous-root (`scene_create`) export post-processes the
+  flattened stage to re-author `/Materials` references and copy synthesized
+  `.mtlx` documents into a `materials/` subdirectory; a file-backed root's
+  overlay export re-anchors references in place. Texture-bearing curated
+  presets (`wood_tiled`, `brass_tiled`, `default_uv_image`) keep absolute
+  references into `assets/` on save rather than being copied.
+
 ### Changed
 
 - **`RenderCommandQueue` and `QtRendererProxy` moved** from

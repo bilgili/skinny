@@ -107,6 +107,14 @@ class Material:
     # to know which source file to load for the active scene.
     python_module: Optional[str] = None
 
+    # Logical-input → generated-uniform-name mapping for a synthesized
+    # MaterialX material (mcp-material-authoring, design D5). Read off the
+    # `<name>.json` sidecar beside the `.mtlx` file at load time by
+    # `_load_mtlx_materials`; empty for curated/plain materials. The scene
+    # graph surfaces its keys as editable properties and `scene_set` fans a
+    # single logical edit out to every uniform the input controls.
+    logical_inputs: dict[str, list] = field(default_factory=dict)
+
 
 # ─── Geometry ─────────────────────────────────────────────────────────
 

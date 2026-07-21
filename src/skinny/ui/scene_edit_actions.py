@@ -181,7 +181,17 @@ def apply_scene_property(
             return f"no renderer reference for {node.path!r}"
 
     if ref.kind == "material":
-        renderer.apply_material_override(ref.index, prop.name, value)
+        # A promoted logical input (synthesized MaterialX material) fans one
+        # edit out to every generated uniform it drives (mcp-material-authoring,
+        # design D5); `metadata['fanout']` carries those uniform names. Plain
+        # material inputs write the single named override.
+        fanout = prop.metadata.get("fanout") if prop.metadata else None
+        if fanout:
+            renderer.apply_material_overrides(
+                ref.index, {uniform: value for uniform in fanout},
+            )
+        else:
+            renderer.apply_material_override(ref.index, prop.name, value)
         return None
     if ref.kind in _LIGHT_KIND_TO_TYPE:
         renderer.apply_light_override(
