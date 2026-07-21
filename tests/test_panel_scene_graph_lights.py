@@ -156,3 +156,42 @@ def test_panel_material_vec3_routes_to_override_not_transform():
     assert rend.overrides and rend.overrides[-1][0] == 3
     assert set(rend.overrides[-1][1]) == {"u_dir"}
     assert rend.transforms == []  # not misrouted to a transform write
+
+
+def test_panel_material_int_editable_routes_to_override(monkeypatch):
+    """A material descriptor int (e.g. `octaves`) renders an editable IntInput and
+    fans out to its gen uniform via _apply_prop_value (finding A, round 4)."""
+    from skinny.scene_graph import SceneGraphProperty
+
+    rend = _MatRenderer()
+    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    node = _mat_node()
+    prop = SceneGraphProperty(
+        name="octaves", display_name="octaves", type_name="int", value=3,
+        editable=True, metadata={"fanout": ["u_octaves"], "min": 2, "max": 8},
+    )
+    w = windows._build_scene_prop_widget(session, node, prop)
+    assert isinstance(w, pn.widgets.IntInput)  # editable, not read-only Markdown
+    w.value = 5
+    assert rend.overrides == [(3, {"u_octaves": 5})]
+
+
+def test_panel_material_vec2_editable_routes_to_override(monkeypatch):
+    """A material descriptor vec2f renders a two-field editable Row and commits the
+    whole vector through _apply_prop_value (finding A, round 4)."""
+    from skinny.scene_graph import SceneGraphProperty
+
+    rend = _MatRenderer()
+    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    node = _mat_node()
+    prop = SceneGraphProperty(
+        name="uv_scale", display_name="uv_scale", type_name="vec2f",
+        value=(1.0, 1.0), editable=True, metadata={"fanout": ["u_uv"]},
+    )
+    node.properties = [prop]
+    row = windows._build_scene_prop_widget(session, node, prop)
+    assert len(row) == 2  # two editable float fields, not read-only Markdown
+    row[0].value = 2.0  # nudge U → commits the whole vector
+    assert rend.overrides and rend.overrides[-1][0] == 3
+    assert set(rend.overrides[-1][1]) == {"u_uv"}
+    assert rend.overrides[-1][1]["u_uv"] == (2.0, 1.0)

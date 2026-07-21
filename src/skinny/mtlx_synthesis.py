@@ -25,7 +25,11 @@ Public surface
 ``synthesize``         validate → build → gen dry-run → ``SynthesisResult``
                        (document XML, logical→uniform mapping, editable keys).
 ``SessionMaterialStore``   tempdir-backed ``.mtlx`` lifecycle with sidecar.
-``list_preset_inputs``     mtime-cached gen reflection of a curated preset.
+``list_preset_inputs``     mtime-cached editable keys of a curated preset — a
+                           graph preset reflects its gen uniforms; a
+                           constant-shader preset maps its authored
+                           standard_surface inputs to the flat-pack keys the
+                           active path tracer reads (`FLAT_PACK_WRITABLE_KEYS`).
 ``preset_holder_name``     the curated document's surfacematerial element name
                            (the D6 naming contract `add_material`'s ``name``
                            must match for a preset).
@@ -835,11 +839,13 @@ class SynthesisResult:
     # The promoted logical keys a client can `scene_set` (mapping keys).
     editable_inputs: list[str] = field(default_factory=list)
     # Full editable-input DESCRIPTORS persisted to the sidecar + Material
-    # (design D5/finding #2): `{name: {"uniforms": [...], "type": "float"|
-    # "color3"|"int", "default": <authored value>, "range": [lo, hi] | None}}`.
-    # The scene graph builds correctly-typed, correctly-bounded, authored-default
-    # properties from these — the old `{name: [uniforms]}` shape lost type/
-    # default/range and surfaced every input as a 0..1 float.
+    # (design D5/finding #2): `{name: {"uniforms": [...], "type": <kind>,
+    # "default": <authored value>, "range": [lo, hi] | None}}`, where <kind> is
+    # the coarse descriptor kind from `_descriptor_kind` over the full type
+    # lattice (`float`/`color3`/`vector2`/`vector3`/`int`/`bool`), NOT just
+    # float|color3|int. The scene graph builds correctly-typed, correctly-bounded,
+    # authored-default properties from these — the old `{name: [uniforms]}` shape
+    # lost type/default/range and surfaced every input as a 0..1 float.
     descriptors: dict[str, dict] = field(default_factory=dict)
 
 
@@ -1150,6 +1156,26 @@ _STD_SURFACE_TO_FLAT_PACK: dict[str, str] = {
     "coat_IOR":           "coat_IOR",
 }
 
+# UsdPreviewSurface override names `pack_flat_material` reads directly
+# (renderer.py) that are NOT reached through a std_surface alias — the loader's
+# emission/opacity folds author these. Keep in sync with pack_flat_material.
+_PREVIEW_SURFACE_FLAT_KEYS: frozenset = frozenset(
+    {"opacity", "opacityThreshold", "emissiveColor"}
+)
+
+# The one authoritative set of `parameter_overrides` keys the ACTIVE path-tracing
+# packer (`renderer.pack_flat_material`) actually consumes: the std_surface→flat
+# targets ∪ the preview-surface names it reads directly. The loader dual-authors
+# raw std_surface aliases (e.g. `base_color` alongside `diffuseColor`) into
+# `parameter_overrides` for OTHER consumers (`pack_std_surface_params`); those
+# raw aliases are editable no-ops in the path tracer, so the editable surface
+# (constant-preset descriptors + the scene-graph constant-material injection)
+# filters to this set — finding B, round 4. Both callers derive from here so the
+# two can never drift.
+FLAT_PACK_WRITABLE_KEYS: frozenset = (
+    frozenset(_STD_SURFACE_TO_FLAT_PACK.values()) | _PREVIEW_SURFACE_FLAT_KEYS
+)
+
 
 def _surfaceshader_node(doc: mx.Document, target: str):
     """The surfaceshader node feeding surfacematerial ``target`` (or None)."""
@@ -1181,7 +1207,7 @@ def _constant_preset_descriptors(doc: mx.Document, target: str) -> dict[str, dic
         return descriptors
     for inp in shader.getInputs():
         packer_key = _STD_SURFACE_TO_FLAT_PACK.get(inp.getName())
-        if packer_key is None:
+        if packer_key is None or packer_key not in FLAT_PACK_WRITABLE_KEYS:
             continue  # no route into pack_flat_material → not advertised
         itype = inp.getType()
         if itype in ("filename", "string"):

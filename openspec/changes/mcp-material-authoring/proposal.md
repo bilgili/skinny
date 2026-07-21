@@ -12,7 +12,10 @@ does). Material generation and binding is the missing half of scene authoring.
 ## What Changes
 
 - New MCP tool `material_list`: one discovery call returning the curated
-  `.mtlx` preset catalog (editable inputs via generator reflection), the
+  `.mtlx` preset catalog (editable inputs per preset: graph presets via
+  generator reflection, constant-shader presets via their authored
+  standard_surface inputs mapped to the flat-pack keys the active path tracer
+  reads), the
   parametric model schemas (UsdPreviewSurface and MaterialX
   standard_surface), the supported nodegraph node types, and the procedural
   template schemas.

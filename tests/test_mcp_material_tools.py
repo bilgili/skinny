@@ -460,6 +460,20 @@ def test_template_add_bind_readiness_failure_deletes_file(h) -> None:
     assert list(store.dir.glob("*.json")) == []  # no orphan sidecar
 
 
+def test_template_add_bind_null_stage_deletes_file(h) -> None:
+    """Clearing `_usd_stage` (not `_usd_scene`) must still delete the eagerly
+    written file: the plan used to deref `_usd_stage.GetPrimAtPath` before the
+    cleanup wrapper ran, so a None stage raised AttributeError and leaked the
+    .mtlx + sidecar (finding C, round 4). The scope sample now sits behind the
+    readiness gate inside `_add_synth_material`."""
+    store = h.tools._material_store
+    h.renderer._usd_stage = None  # has_editable_stage -> False; deref would crash
+    with pytest.raises(SceneToolError, match="editable"):
+        h.tools.scene_add_primitive("Sphere", material="noise", name="Ball")
+    assert list(store.dir.glob("*.mtlx")) == []  # no orphan document
+    assert list(store.dir.glob("*.json")) == []  # no orphan sidecar
+
+
 def test_template_add_bind_cleanup_deletes_file_even_if_discard_raises(h) -> None:
     """A resync failure inside discard_created_prim during rollback must not skip
     the session-file deletion (the caller swallows that exception) — finding C."""

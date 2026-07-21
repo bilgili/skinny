@@ -40,7 +40,8 @@
 
 - [x] 2.1 `usd_loader.py`: extend `_collect_mtlx_asset_paths` and
       `_prim_has_mtlx_reference` to scan session-layer prim specs
-      (absolute asset paths); root-layer behavior byte-unchanged
+      (absolute asset paths); root-layer discovery coverage unchanged,
+      but returned paths are now layer-anchored absolute (finding #6)
 - [x] 2.2 Hostless intake tests: session-authored reference discovered and
       loaded once bound; unbound holder not loaded (binding-driven
       participation); root-layer scenes (demo file) unchanged
@@ -81,8 +82,10 @@
 ## 4. MCP tool surface
 
 - [x] 4.1 `material_list` tool: catalog + model schemas + whitelist +
-      template schemas; per-preset editable inputs via gen reflection
-      cached by file mtime
+      template schemas; per-preset editable inputs cached by file mtime —
+      graph presets via gen reflection, constant-shader presets via their
+      authored standard_surface inputs mapped to the flat-pack keys the
+      active path tracer reads
 - [x] 4.2 `scene_add_material` tool: validate + dry-run on MCP thread
       BEFORE posting the structural closure; renderer `add_material` on
       render thread; result carries path + `live: false` + version

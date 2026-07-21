@@ -508,8 +508,14 @@ def _inject_material_editable_props(node: SceneGraphNode, mat) -> None:
     # `mtlx_document`-carrying case.
     if getattr(mat, "mtlx_document", None) is None:
         return
+    # Filter to the keys the ACTIVE path-tracing packer actually reads. The
+    # loader dual-authors raw std_surface aliases (`base_color` alongside
+    # `diffuseColor`) into `parameter_overrides` for pack_std_surface_params;
+    # exposing the raw aliases here made them editable no-ops in the path tracer
+    # (pack_flat_material reads only the flat keys) — finding B, round 4.
+    from skinny.mtlx_synthesis import FLAT_PACK_WRITABLE_KEYS
     for name, value in overrides.items():
-        if name in seen:
+        if name in seen or name not in FLAT_PACK_WRITABLE_KEYS:
             continue
         prop = _material_input_property(name, value, fanout=None)
         if prop is not None:

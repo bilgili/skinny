@@ -629,13 +629,12 @@ class SceneTools:
                 # `_add_synth_material` owns the readiness check + eager-file
                 # cleanup: the `.mtlx` was written on the MCP thread above, and it
                 # deletes that file on ANY failure (readiness miss / holder
-                # collision). The write closure runs this plan before its own
-                # readiness check so that cleanup always gets a chance (finding C).
-                scope_existed = renderer._usd_stage.GetPrimAtPath(
-                    "/Materials"
-                ).IsValid()
-                path = self._add_synth_material(renderer, candidate, written_path)
-                drop_scope = not scope_existed  # this call auto-created the scope
+                # collision). It also samples `/Materials` scope pre-existence
+                # AFTER its readiness gate, so a None `_usd_stage` can no longer
+                # raise an unguarded AttributeError before cleanup runs (finding C).
+                path, drop_scope = self._add_synth_material(
+                    renderer, candidate, written_path,
+                )
 
                 def cleanup(r, p=path, name=candidate, s=drop_scope):
                     # Delete the file even if the prim discard raises (finding C): a
@@ -670,10 +669,13 @@ class SceneTools:
         Renderer-free -- it never touches the render thread, only
         ``mtlx_synthesis``'s catalogs (derived from disk / the whitelist /
         the template registry at call time, so this can never hand-drift
-        from what a spec actually accepts). Per-preset editable inputs come
-        from a generator reflection run per preset file, mtime-cached, so
-        the first call after a preset file changes may be slow -- acceptable
-        for a discovery call.
+        from what a spec actually accepts). Per-preset editable inputs are
+        mtime-cached per preset file: a graph preset reflects its generated
+        gen uniforms, while a constant-shader preset maps its authored
+        standard_surface inputs to the flat-pack keys the active path tracer
+        reads (``FLAT_PACK_WRITABLE_KEYS``). The first call after a preset file
+        changes may be slow (the gen dry-run runs then) -- acceptable for a
+        discovery call.
 
         Returns ``{"presets": [{"name", "editable_inputs"}], "models":
         {"preview": {...}, "standard_surface": {...}}, "graph_nodes": [...],
@@ -754,7 +756,9 @@ class SceneTools:
                 self._reserved_names.discard(candidate)
         return candidate, written_path
 
-    def _add_synth_material(self, renderer, candidate: str, written_path: str) -> str:
+    def _add_synth_material(
+        self, renderer, candidate: str, written_path: str,
+    ) -> "tuple[str, bool]":
         """``add_material`` for a synthesized doc, deleting its session file on
         ANY failure after the file was written (finding #5).
 
@@ -763,18 +767,27 @@ class SceneTools:
         this wrapper either one orphans the just-written ``.mtlx`` + sidecar.
         Deleting the file also releases the name (``write_document``'s
         refuse-overwrite keyed off the file). ``delete`` is idempotent.
+
+        Returns ``(path, created_scope)`` where ``created_scope`` is True when
+        this call auto-created the ``/Materials`` scope (so a caller building a
+        rollback knows to tear the empty scope down). The scope pre-existence is
+        sampled AFTER the readiness gate so a None ``_usd_stage`` raises through
+        the file-cleanup path here rather than an unguarded ``AttributeError`` at
+        the call site that would leak the written document (finding C, round 4).
         """
         if not has_editable_stage(renderer):
             self._material_store.delete(candidate)
             raise SceneToolError("no editable USD stage is loaded")
+        scope_existed = renderer._usd_stage.GetPrimAtPath("/Materials").IsValid()
         try:
-            return renderer.add_material(
+            path = renderer.add_material(
                 candidate, mtlx_path=written_path,
                 session_dir=str(self._material_store.dir),
             )
         except Exception:
             self._material_store.delete(candidate)
             raise
+        return path, not scope_existed
 
     def scene_add_material(self, spec: dict, name: "str | None" = None) -> dict:
         """Create a material holder under ``/Materials`` (mcp-material-authoring,
@@ -858,7 +871,9 @@ class SceneTools:
         )
 
         def write(renderer) -> dict:
-            path = self._add_synth_material(renderer, candidate, written_path)
+            path, _drop_scope = self._add_synth_material(
+                renderer, candidate, written_path,
+            )
             return {"path": path, "live": False, **_versions(renderer)}
 
         return self._structural(write)

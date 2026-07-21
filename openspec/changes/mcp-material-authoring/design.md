@@ -60,8 +60,10 @@ GPU-free validation and reflection step.
 
 - One discovery tool that tells an agent everything it can build: presets,
   parametric schemas, supported graph nodes, templates — with editable-input
-  names that are the *actual writable keys* (gen reflection, not `.mtlx`
-  parsing).
+  names that are the *actual writable keys*. A graph preset reflects its gen
+  uniforms; a constant-shader preset maps its authored standard_surface inputs
+  to the flat-pack keys the active path tracer reads (`FLAT_PACK_WRITABLE_KEYS`),
+  never raw `.mtlx` input names (which are editable no-ops in the path tracer).
 - Create materials in four spec forms: curated preset, parametric
   UsdPreviewSurface, parametric standard_surface with optional procedural
   nodegraph, server-owned template.
@@ -117,8 +119,9 @@ generated materials. Two corrections from review:
   scan the session layer's prim specs. Session-layer references are
   authored with **absolute** asset paths (the session layer is anonymous —
   there is nothing to anchor relative paths to; `_read_open_stage` falls
-  back to `Path.cwd()` for anonymous roots). Root-layer behavior is
-  byte-unchanged.
+  back to `Path.cwd()` for anonymous roots). Root-layer discovery coverage is
+  unchanged, but returned paths are now layer-anchored absolute — resolved via
+  the authoring layer rather than the composed stage (finding #6).
 
 Session `.mtlx` files live in a server-owned session directory (tempdir
 based). The directory is server configuration in the same trust domain as

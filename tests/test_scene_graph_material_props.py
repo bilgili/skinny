@@ -174,11 +174,13 @@ def test_vector_and_bool_fanout_route_to_material_not_trs_or_enable():
     ]
 
 
-def test_constant_preset_advertised_keys_exposed_and_not_suppressed():
+def test_constant_preset_advertised_keys_exposed_raw_aliases_filtered():
     """For a constant-shader preset the advertised material_list keys are the
-    FlatMaterialParams packer keys, and they are all surfaced on the scene-graph
-    node — because the loader dual-authors both the packer key (diffuseColor) and
-    the std_surface name (base_color) into parameter_overrides (finding B)."""
+    FlatMaterialParams packer keys, and only those are surfaced on the scene-graph
+    node. The loader dual-authors both the packer key (diffuseColor) and the raw
+    std_surface alias (base_color) into parameter_overrides; the raw alias is an
+    editable no-op in the path tracer (pack_flat_material reads only flat keys),
+    so it is filtered from the editable surface (finding B, round 4)."""
     from skinny import mtlx_synthesis as msyn
     advertised = set(msyn.list_preset_inputs("chrome"))
     # the packer keys the constant preset now advertises
@@ -196,24 +198,30 @@ def test_constant_preset_advertised_keys_exposed_and_not_suppressed():
     sg = build_scene_graph(stage, _Scene([mat]))
     props = set(_props(find_node_by_path(sg, "/Materials/chrome")))
     assert advertised <= props        # every advertised (packer) key is editable
-    assert "base_color" in props      # the dual-authored std name is not suppressed
+    # the dual-authored raw std_surface aliases are editable no-ops → filtered out
+    assert not ({"base_color", "metalness", "specular_roughness"} & props)
 
 
 def test_constant_mtlx_material_exposes_override_keys():
     """A constant-shader `.mtlx` material (no graph, has an mtlx_document) exposes
-    its parameter-override keys; a name that is not an override is absent."""
+    its flat-packer override keys; a raw std_surface alias and a non-authored name
+    are both absent (finding B, round 4)."""
     stage = _stage_with_material("Glass")
     mat = _Mat(
         "Glass",
-        parameter_overrides={"roughness": 0.1, "base_color": (0.9, 0.9, 1.0)},
+        parameter_overrides={
+            "roughness": 0.1, "diffuseColor": (0.9, 0.9, 1.0),
+            "base_color": (0.9, 0.9, 1.0),  # raw alias → filtered
+        },
         mtlx_document=object(),
     )
     sg = build_scene_graph(stage, _Scene([mat]))
     props = _props(find_node_by_path(sg, "/Materials/Glass"))
-    assert "roughness" in props and "base_color" in props
-    assert props["base_color"].type_name == "color3f"
+    assert "roughness" in props and "diffuseColor" in props
+    assert props["diffuseColor"].type_name == "color3f"
     assert props["roughness"].type_name == "float"
-    assert "specular" not in props  # non-authored → absent (no-such-property)
+    assert "base_color" not in props  # raw std_surface alias → editable no-op, filtered
+    assert "opacity" not in props  # non-authored → absent (no-such-property)
 
 
 def test_plain_material_without_mtlx_gets_no_injected_props():

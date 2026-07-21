@@ -10,10 +10,11 @@ parametric model parameter schemas for `preview` and `standard_surface`,
 the whitelisted nodegraph node types, and the procedural template schemas.
 The result SHALL be derived from server-side sources at call time (preset
 directory listing, synthesis whitelist, template registry). Per-preset
-editable inputs SHALL come from generator reflection over the preset
-document (cacheable per file modification time), never from parsing `.mtlx`
-input declarations directly — reflection names are the actual writable
-keys; parsed names are not.
+editable inputs SHALL be the actual writable keys (cacheable per file
+modification time): for a graph preset, the generator-reflected gen uniforms;
+for a constant-shader preset, its authored standard_surface inputs mapped to
+the flat-pack keys the active path tracer reads. Neither form SHALL advertise
+raw parsed `.mtlx` input names that are editable no-ops in the path tracer.
 
 #### Scenario: One call arms the client
 
@@ -178,12 +179,13 @@ the existing no-such-property error.
 
 ### Requirement: Graph-material structural calls degrade to jobs
 
-First binds of graph materials (including add-plus-bind composition via
-`scene_add_primitive(material=…)`) SHALL be documented and treated as calls
-that degrade to pollable jobs (`scene_job_status`): participation is
-binding-driven, so an unbound add compiles nothing, and it is the first
-bind that changes the scene's graph-set signature and triggers a full
-pipeline rebuild on the render thread, exceeding the inline grace period. This is the existing structural-job mechanism, not a new one.
+First binds of graph materials SHALL be treated as calls that degrade to
+pollable jobs (`scene_job_status`), including add-plus-bind composition via
+`scene_add_primitive(material=…)`: participation is binding-driven, so an
+unbound add compiles nothing, and it is the first bind that changes the
+scene's graph-set signature and triggers a full pipeline rebuild on the
+render thread, exceeding the inline grace period. This is the existing
+structural-job mechanism, not a new one.
 
 #### Scenario: First bind returns a job
 

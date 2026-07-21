@@ -356,6 +356,43 @@ def _build_scene_prop_widget(
             w.param.watch(on_vec3, "value")
         return pn.Row(*spins)
 
+    if prop.type_name == "int" and prop.editable:
+        w = pn.widgets.IntInput(
+            name=prop.display_name, value=int(prop.value),
+            start=prop.metadata.get("min"), end=prop.metadata.get("max"),
+        )
+
+        def on_int(event, p=prop, r=ref):
+            with session._lock:
+                # Fan-out-aware (finding A): a material descriptor int (e.g.
+                # `octaves`) reaches its gen uniforms via _apply_prop_value.
+                _apply_prop_value(renderer, r, p, int(event.new))
+
+        w.param.watch(on_int, "value")
+        return w
+
+    if prop.type_name == "vec2f" and prop.editable:
+        v = prop.value
+        spins = [
+            pn.widgets.FloatInput(
+                name=f"{prop.display_name} {axis}",
+                value=float(v[i]), step=0.05,
+            )
+            for i, axis in enumerate("XY")
+        ]
+
+        def on_vec2(_e, p=prop, r=ref, ws=spins):
+            vals = tuple(float(w.value) for w in ws)
+            with session._lock:
+                # vec2f only transports as a material fan-out (never a TRS
+                # component), so route straight through _apply_prop_value
+                # (finding A).
+                _apply_prop_value(renderer, r, p, vals)
+
+        for w in spins:
+            w.param.watch(on_vec2, "value")
+        return pn.Row(*spins)
+
     if prop.type_name == "vec3f":
         v = prop.value
         return pn.pane.Markdown(

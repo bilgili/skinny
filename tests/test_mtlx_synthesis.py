@@ -531,9 +531,9 @@ def test_constant_preset_advertised_keys_change_flat_pack_bytes():
         "specular_color": (0.2, 0.4, 0.6),
     }
     advertised = set(m.list_preset_inputs("chrome"))
-    tested = advertised & set(probes)
-    assert tested, "no advertised chrome key had a probe value"
-    for key in tested:
+    unprobed = advertised - set(probes)
+    assert not unprobed, f"advertised chrome keys with no byte-gate probe: {unprobed}"
+    for key in advertised:
         packed = pack_flat_material(
             Material(name="c", parameter_overrides={key: probes[key]})
         )
