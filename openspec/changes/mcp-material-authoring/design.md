@@ -79,15 +79,16 @@ GPU-free validation and reflection step.
   consumed as-is. Node types the generator cannot compile are refused at
   validation.
 - No client-supplied texture/image inputs in spec forms (`image`/
-  `tiledimage` excluded from the v1 whitelist). Texture-bearing curated
-  presets keep absolute references into `assets/` on save (D7 carve-out).
+  `tiledimage` excluded from the v1 whitelist). All curated presets keep
+  absolute references into `assets/` on save (D7 carve-out).
 - No editing of curated `.mtlx` files; presets are read-only sources.
 - No promise that unexposed graph constants are editable — they are absent
   from the property set and a `scene_set` on them is the existing
   "no property" error.
 - No material deletion tool (`scene_remove` deactivates; bound geometry
   falls to the fallback slot on next resync — accepted).
-- No mitigation of the per-add pipeline rebuild beyond documenting it (D9);
+- No mitigation of the first-bind pipeline rebuild beyond documenting it
+  (D9);
   batching is a possible v1.1.
 
 ## Decisions

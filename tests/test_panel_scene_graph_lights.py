@@ -18,6 +18,8 @@ class _Renderer:
     _scene_graph_version = 0
     _usd_stage = object()
     _usd_edit_layer = object()
+    # `has_editable_stage` now also gates on adopted scene metadata (finding #4).
+    _usd_scene = object()
 
     def __init__(self, failure: Exception | None = None):
         self.failure = failure

@@ -463,10 +463,10 @@ and exposes its editable properties only once `scene_bind_material` or
 *first* bind (not the add) changes the scene's graph-set signature and
 rebuilds the render pipeline, so it degrades to a pollable job
 (`scene_job_status`) more often than a plain structural add. On `scene_save`,
-texture-bearing curated presets (`wood_tiled`, `brass_tiled`,
-`default_uv_image`) keep absolute references into `assets/` rather than being
-copied beside the saved scene; synthesized documents (textureless by the v1
-whitelist) are always copied alongside it.
+all curated presets keep absolute references into `assets/` rather than being
+copied beside the saved scene (copying a texture-bearing doc such as
+`wood_tiled` without its textures would silently break it); synthesized
+documents (textureless by the v1 whitelist) are always copied alongside it.
 
 **Filesystem allowlist.** Every path a structural tool touches — a model
 reference, a save destination, an asset-typed `scene_set` write — must resolve

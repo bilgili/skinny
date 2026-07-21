@@ -115,6 +115,15 @@ class Material:
     # single logical edit out to every uniform the input controls.
     logical_inputs: dict[str, list] = field(default_factory=dict)
 
+    # The bound material prim's full stage path (e.g. ``/ScopeA/Foo``), set at
+    # load. A stable, globally-unique identity — unlike ``name`` (the prim leaf),
+    # which collides across scopes (``/ScopeA/Foo`` vs ``/ScopeB/Foo``). Used to
+    # key the override-preservation snapshot across a structural resync so live
+    # edits are re-applied to the right same-pathed material, not cross-applied
+    # to a same-named one (mcp-material-authoring, finding #7/D). ``None`` for the
+    # flat fallback and any material loaded before this field existed.
+    source_prim_path: Optional[str] = None
+
 
 # ─── Geometry ─────────────────────────────────────────────────────────
 

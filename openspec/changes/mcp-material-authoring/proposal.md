@@ -47,8 +47,8 @@ does). Material generation and binding is the missing half of scene authoring.
   the same edit-layer + rollback + resync discipline as `add_primitive`
   (rollback also deletes session `.mtlx` files), and a branch-aware
   `save_edits` extension (flattened-export post-process for created scenes;
-  overlay re-anchor for file-backed scenes; texture-bearing presets keep
-  absolute asset references).
+  overlay re-anchor for file-backed scenes; all curated presets keep
+  absolute asset references and are never copied).
 
 ## Capabilities
 
@@ -65,7 +65,8 @@ does). Material generation and binding is the missing half of scene authoring.
 - `mcp-scene-control`: adds the three material tools and the
   `scene_add_primitive` `material` argument to the advertised tool surface,
   with self-describing results (including not-live-until-bound and
-  job-degradation expectations for graph adds), server-side preset
+  job-degradation expectations for first binds of graph materials —
+  unbound adds compile nothing), server-side preset
   resolution, and logical-name property editing on live materials.
 - `usd-scene-editing`: adds material authoring and binding as edit-layer
   structural edits — typed `/Materials` holders, session-layer `.mtlx`

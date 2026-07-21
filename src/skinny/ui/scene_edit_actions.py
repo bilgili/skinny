@@ -150,6 +150,22 @@ def apply_scene_property(
     ref = node.renderer_ref
     type_name = getattr(prop, "type_name", "")
 
+    # A material logical-input edit (design D5) carries fan-out uniform names and
+    # must reach the material-override path regardless of its transport type_name
+    # (finding #2): a vector3 input transports as "vec3f" and a boolean as
+    # "bool", both of which the TRS/enable branches below would otherwise capture
+    # and misroute. Only descriptor-backed material properties carry fan-out, so
+    # this never intercepts a transform component or an enable flag.
+    fanout = prop.metadata.get("fanout") if prop.metadata else None
+    if fanout:
+        mat_ref = ref if (ref is not None and ref.kind == "material") \
+            else find_material_ref(graph, node)
+        if mat_ref is not None and mat_ref.kind == "material":
+            renderer.apply_material_overrides(
+                mat_ref.index, {uniform: value for uniform in fanout},
+            )
+            return None
+
     # Compound TRS write: recompose from the node's sibling components.
     if type_name == "vec3f":
         return _apply_vec3(renderer, node, prop, value, ref)

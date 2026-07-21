@@ -49,6 +49,7 @@ class FakeRenderer:
         self._usd_scene = object()
         self.calls: list[tuple] = []
         self.add_material_calls = 0
+        self.fail_next_add_primitive = False
 
     def add_material(self, name, *, mtlx_path=None, preview_params=None,
                       session_dir=None, on_rollback=None):
@@ -108,6 +109,12 @@ class FakeRenderer:
                     f"add_primitive: material not found: {bind_material_path}"
                 )
             ume.author_binding(self._usd_stage, path, bind_material_path)
+            if self.fail_next_add_primitive:
+                # Simulate a post-bind failure (e.g. resync): mirror the real
+                # add_primitive rollback by removing the just-created prim, then
+                # raise so the caller's cleanup tears down the fresh material.
+                self._usd_stage.RemovePrim(path)
+                raise ValueError("add_primitive: simulated post-bind failure")
         elif not skip_inline_material:
             mat_path = f"{path}_material"
             ume.ensure_materials_scope(self._usd_stage)
@@ -122,6 +129,13 @@ class FakeRenderer:
         prim = self._usd_stage.GetPrimAtPath(prim_path)
         if prim and prim.IsValid():
             prim.SetActive(False)
+
+    def discard_created_prim(self, prim_path):
+        # Hard-remove (finding #8/E): delete the spec so the name is reusable,
+        # unlike remove_node's tombstone. Mirrors the real renderer.
+        self.calls.append(("discard_created_prim", prim_path))
+        if self._usd_stage.GetPrimAtPath(prim_path).IsValid():
+            self._usd_stage.RemovePrim(prim_path)
 
 
 class Proxy:
@@ -354,3 +368,51 @@ def test_add_primitive_material_by_missing_path_errors(h) -> None:
 def test_add_primitive_material_unknown_name_lists_catalogs(h) -> None:
     with pytest.raises(SceneToolError, match="presets:.*templates:|templates:.*presets:"):
         h.tools.scene_add_primitive("Sphere", material="not_a_thing")
+
+
+# ── Session-file rollback: no orphan after a post-write failure (finding #5) ──
+
+def test_add_synth_material_deletes_file_on_readiness_failure(h) -> None:
+    """A stage-readiness failure raised before add_material's own rollback wiring
+    must still delete the just-written session file, not orphan it (finding #5)."""
+    store = h.tools._material_store
+    written = store.write_document("Orphan", "<materialx/>", None)
+    assert store.path_for("Orphan").exists()
+    h.renderer._usd_scene = None  # has_editable_stage -> False after the write
+    with pytest.raises(SceneToolError, match="editable"):
+        h.tools._add_synth_material(h.renderer, "Orphan", str(written))
+    assert not store.path_for("Orphan").exists()
+    assert not store.sidecar_for("Orphan").exists()
+
+
+def test_add_synth_material_deletes_file_on_holder_collision(h) -> None:
+    """add_material's holder-collision ValueError is raised outside its rollback
+    path, so the wrapper must delete the session file on collision (finding #5)."""
+    store = h.tools._material_store
+    written = store.write_document("Dup", "<materialx/>", None)
+    ume.ensure_materials_scope(h.renderer._usd_stage)
+    ume.author_material_holder(h.renderer._usd_stage, "/Materials/Dup", str(written))
+    with pytest.raises(ValueError, match="already exists"):
+        h.tools._add_synth_material(h.renderer, "Dup", str(written))
+    assert not store.path_for("Dup").exists()
+
+
+# ── add+bind rollback hard-removes so the name is reusable (finding #8/E) ──
+
+def test_failed_add_bind_allows_same_name_retry(h) -> None:
+    """A failed transactional add+bind must hard-remove the freshly-created
+    holder (not leave an active=false tombstone), so a same-name retry succeeds
+    instead of colliding forever (finding #8/E)."""
+    h.renderer.fail_next_add_primitive = True
+    with pytest.raises(ValueError, match="post-bind failure"):
+        h.tools.scene_add_primitive("Sphere", material="marble_solid", name="Ball")
+    # The rollback hard-removed the holder (discard, not a tombstone deactivate).
+    assert any(c[0] == "discard_created_prim" for c in h.renderer.calls)
+    assert not any(c[0] == "remove_node" for c in h.renderer.calls)
+    holders = ume.collect_material_holders(h.renderer._usd_stage)
+    assert holders == {}  # no lingering holder blocks reuse
+
+    # A same-preset retry now re-creates and binds cleanly.
+    h.renderer.fail_next_add_primitive = False
+    result = h.tools.scene_add_primitive("Sphere", material="marble_solid", name="Ball2")
+    assert result["material_path"].startswith("/Materials/")

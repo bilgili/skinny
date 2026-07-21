@@ -452,9 +452,70 @@ def test_preset_identity_descriptors_identity_mapped():
     assert d
     for name, desc in d.items():
         assert desc["uniforms"] == [name]
-        assert desc["type"] in ("float", "color3", "int")
+        # Full type lattice (finding #2): a reflected vector uniform keeps its
+        # vector kind instead of collapsing to a scalar float.
+        assert desc["type"] in ("float", "color3", "int", "bool", "vector2", "vector3")
+    # marble's add_xyz_in2 is a vector3 uniform — it must NOT collapse to float.
+    assert d["add_xyz_in2"]["type"] == "vector3"
     # list_preset_inputs is exactly the descriptor keys
     assert set(m.list_preset_inputs("marble_solid")) == set(d)
+
+
+# ─── Descriptor type lattice (finding #2) ─────────────────────────────
+
+def test_descriptor_kind_covers_full_type_lattice():
+    """bool/vector kinds must not collapse to a scalar float (finding #2)."""
+    assert m._descriptor_kind("boolean") == "bool"
+    assert m._descriptor_kind("bool") == "bool"
+    assert m._descriptor_kind("vector2") == "vector2"
+    assert m._descriptor_kind("vector3") == "vector3"
+    assert m._descriptor_kind("vector4") == "vector3"
+    assert m._descriptor_kind("color3") == "color3"
+    assert m._descriptor_kind("color4") == "color3"
+    assert m._descriptor_kind("integer") == "int"
+    assert m._descriptor_kind("float") == "float"
+    assert m._descriptor_kind(None) == "float"
+
+
+def test_vector3_override_packs_as_sequence_not_zeroed():
+    """A vector3 edit must reach the packer as a 3-sequence; the scalar a
+    collapsed 'float' descriptor produced fills zeros instead (finding #2)."""
+    import struct
+
+    from skinny.materialx_runtime import UniformField, pack_uniform_block
+    fld = UniformField(name="add_xyz_in2", type_name="vector3", offset=0, size=12)
+    packed = pack_uniform_block([fld], {"add_xyz_in2": [0.25, 0.5, 0.75]})
+    assert struct.unpack_from("<3f", packed, 0) == (0.25, 0.5, 0.75)
+    # a scalar float override (the pre-fix descriptor shape) cannot fill 3 comps
+    zeroed = pack_uniform_block([fld], {"add_xyz_in2": 0.5})
+    assert struct.unpack_from("<3f", zeroed, 0) == (0.0, 0.0, 0.0)
+
+
+# ─── Constant vs graph preset advertised keys (finding #3) ────────────
+
+def test_constant_preset_advertises_canonical_packer_keys():
+    """A constant-shader preset (chrome) advertises the canonical std_surface
+    keys the flat packer consumes — NOT the shader-prefixed reflection uniforms
+    (SR_chrome_*), which the packer never reads so edits were no-ops (#3)."""
+    inputs = m.list_preset_inputs("chrome")
+    assert inputs
+    assert not any(i.startswith("SR_") for i in inputs)
+    # every advertised key is a std_surface param the packer consumes
+    assert set(inputs) <= set(m.model_param_schema("standard_surface"))
+    assert {"base_color", "metalness"} <= set(inputs)
+    # a folded input the loader pops is never advertised (it is not exposed)
+    assert "base" not in inputs
+    # constant preset → loader must NOT attach these as logical_inputs
+    assert m.preset_is_graph(m.resolve_preset("chrome")) is False
+
+
+def test_graph_preset_advertises_reflection_uniforms():
+    """A graph preset (marble) keeps its gen reflection uniforms as writable
+    keys and is flagged as a graph preset (#3)."""
+    inputs = set(m.list_preset_inputs("marble_solid"))
+    assert m.preset_is_graph(m.resolve_preset("marble_solid")) is True
+    assert "add_xyz_in2" in inputs  # a reflection uniform, not a canonical key
+    assert not (inputs <= set(m.model_param_schema("standard_surface")))
 
 
 # ─── Preview schema == authored inputs (design D4, finding #9) ────────

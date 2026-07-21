@@ -543,6 +543,29 @@ def _material_descriptor_property(
             name=name, display_name=name, type_name="color3f",
             value=color or (0.0, 0.0, 0.0), editable=True, metadata=meta,
         )
+    # A reflected vector uniform must surface as a 2/3-sequence property, not a
+    # scalar float (finding #2): the runtime packer reads the components, so a
+    # scalar write zeroes the vector. vec2f/vec3f transport past the material
+    # fan-out branch in apply_scene_property (the fan-out guard runs first, so
+    # they never hit the TRS/vec3f path).
+    if dtype == "vector3":
+        vec = _to_float_tuple(value, 3) if value is not None else (0.0, 0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="vec3f",
+            value=vec or (0.0, 0.0, 0.0), editable=True, metadata=meta,
+        )
+    if dtype == "vector2":
+        vec = _to_float_tuple(value, 2) if value is not None else (0.0, 0.0)
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="vec2f",
+            value=vec or (0.0, 0.0), editable=True, metadata=meta,
+        )
+    if dtype == "bool":
+        return SceneGraphProperty(
+            name=name, display_name=name, type_name="bool",
+            value=bool(value) if value is not None else False,
+            editable=True, metadata=meta,
+        )
     if dtype == "int":
         ival = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
         rng = desc.get("range")

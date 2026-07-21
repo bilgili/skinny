@@ -887,14 +887,21 @@ def _is_curated_preset(mtlx_file: Path) -> bool:
         return False
 
 
-def _preset_identity_descriptors(mtlx_file: Path) -> dict:
-    """mtime-cached identity descriptors for a curated preset (design D3).
+def _graph_preset_identity_descriptors(mtlx_file: Path) -> dict:
+    """mtime-cached identity descriptors for a *graph* curated preset (finding #3).
 
-    Never fails the load: a reflection error logs and yields no editable
-    properties rather than dropping the material.
+    Only a graph preset (marble) attaches reflection identity descriptors as
+    ``logical_inputs``. A constant-shader preset (chrome/glass/jade) returns
+    ``{}`` here so the scene graph surfaces its ``parameter_overrides`` keys
+    instead — the canonical keys the flat packer consumes; attaching the
+    shader-prefixed reflection uniforms (``SR_chrome_base``) made every advertised
+    edit a silent no-op. Never fails the load: a reflection error logs and yields
+    no editable properties rather than dropping the material.
     """
     from skinny import mtlx_synthesis
     try:
+        if not mtlx_synthesis.preset_is_graph(str(mtlx_file)):
+            return {}
         return mtlx_synthesis.identity_descriptors_for_file(str(mtlx_file))
     except Exception as e:  # noqa: BLE001 — reflection is best-effort editability
         log.warning("preset descriptor reflection failed for %s: %s", mtlx_file.name, e)
@@ -938,13 +945,15 @@ def _load_mtlx_materials(
         # once per file and attached to every Material it yields so the scene
         # graph can surface editable properties.
         logical_inputs = _read_mtlx_mapping_sidecar(mtlx_file)
-        # A curated preset ships NO sidecar; attach identity descriptors from gen
-        # reflection so its advertised keys (material_list) are exactly the
-        # editable scene-graph properties (design D3/finding #3). Bounded to the
-        # curated corpus + mtime-cached so this never runs the generator over an
-        # arbitrary user .mtlx on every resync.
+        # A curated GRAPH preset ships NO sidecar; attach identity descriptors
+        # from gen reflection so its advertised keys (material_list) are exactly
+        # the editable scene-graph properties (design D3/finding #3). Bounded to
+        # the curated corpus + mtime-cached so this never runs the generator over
+        # an arbitrary user .mtlx on every resync. A CONSTANT-shader preset gets
+        # {} here so the scene graph surfaces its parameter_overrides keys (the
+        # canonical keys the flat packer consumes) instead.
         if not logical_inputs and _is_curated_preset(mtlx_file):
-            logical_inputs = _preset_identity_descriptors(mtlx_file)
+            logical_inputs = _graph_preset_identity_descriptors(mtlx_file)
         for node in doc.getMaterialNodes():
             mat_name = node.getName()
             overrides: dict[str, object] = {}
@@ -1165,7 +1174,10 @@ def _resolve_binding_from_mtlx_table(
                     mtlx_mat = _merge_prim_overrides(stage, target_path, mtlx_mat)
                     idx = len(materials)
                     material_index[target_str] = idx
-                    materials.append(mtlx_mat)
+                    # Carry the bound prim path as this entry's unique identity
+                    # (finding #7/D); replace() gives it its own object so a
+                    # same-leaf material bound in another scope does not alias.
+                    materials.append(replace(mtlx_mat, source_prim_path=target_str))
                     return idx
         ancestor = ancestor.GetParent()
     return None
@@ -1236,7 +1248,10 @@ def _resolve_material_binding(
                             )
                             idx = len(materials)
                             material_index[target_str] = idx
-                            materials.append(mtlx_mat)
+                            # Unique per-binding identity (finding #7/D).
+                            materials.append(
+                                replace(mtlx_mat, source_prim_path=target_str)
+                            )
                             return idx
                     target_prim = stage.GetPrimAtPath(target_path)
                     if target_prim and target_prim.IsValid():
@@ -1257,6 +1272,7 @@ def _resolve_material_binding(
         return cached
 
     extracted = _extract_material(bound)
+    extracted.source_prim_path = mat_path
     material_index[mat_path] = len(materials)
     materials.append(extracted)
     return material_index[mat_path]

@@ -106,6 +106,93 @@ def test_descriptor_int_and_range_surface_typed_with_authored_default():
     assert props["scale"].metadata["max"] == 64.0
 
 
+def test_vector3_descriptor_surfaces_as_sequence_property():
+    """A reflected vector3 input surfaces as a vec3f (3-sequence) property, not a
+    scalar float the runtime packer would zero (finding #2)."""
+    stage = _stage_with_material("Marble")
+    mat = _Mat("Marble", logical_inputs={
+        "add_xyz_in2": {"uniforms": ["add_xyz_in2"], "type": "vector3",
+                        "default": [0.1, 0.2, 0.3], "range": None},
+    })
+    sg = build_scene_graph(stage, _Scene([mat]))
+    prop = _props(find_node_by_path(sg, "/Materials/Marble"))["add_xyz_in2"]
+    assert prop.type_name == "vec3f"
+    assert prop.value == (0.1, 0.2, 0.3)
+    assert prop.metadata["fanout"] == ["add_xyz_in2"]
+
+
+def test_vector2_descriptor_surfaces_as_sequence_property():
+    """A reflected vector2 input surfaces as a vec2f (2-sequence) (finding #2)."""
+    stage = _stage_with_material("Marble")
+    mat = _Mat("Marble", logical_inputs={
+        "uv": {"uniforms": ["uv"], "type": "vector2", "default": [0.5, 0.25],
+               "range": None},
+    })
+    sg = build_scene_graph(stage, _Scene([mat]))
+    prop = _props(find_node_by_path(sg, "/Materials/Marble"))["uv"]
+    assert prop.type_name == "vec2f"
+    assert prop.value == (0.5, 0.25)
+
+
+def test_bool_descriptor_surfaces_as_bool_property():
+    """A reflected boolean input surfaces as a bool, not a 0..1 float (#2)."""
+    stage = _stage_with_material("Marble")
+    mat = _Mat("Marble", logical_inputs={
+        "flag": {"uniforms": ["flag"], "type": "bool", "default": True,
+                 "range": None},
+    })
+    sg = build_scene_graph(stage, _Scene([mat]))
+    prop = _props(find_node_by_path(sg, "/Materials/Marble"))["flag"]
+    assert prop.type_name == "bool"
+    assert prop.value is True
+
+
+def test_vector_and_bool_fanout_route_to_material_not_trs_or_enable():
+    """A vec3f/bool MATERIAL input carries fan-out, so it reaches the material-
+    override path — the TRS (vec3f) / enable (bool) branches would otherwise
+    capture and misroute it (finding #2). _MockRenderer has no TRS/enable verbs,
+    so a misroute would raise."""
+    stage = _stage_with_material("Marble")
+    mat = _Mat("Marble", logical_inputs={
+        "add_xyz_in2": {"uniforms": ["ax", "ay"], "type": "vector3",
+                        "default": [0.0, 0.0, 0.0], "range": None},
+        "flag": {"uniforms": ["fl"], "type": "bool", "default": False,
+                 "range": None},
+    })
+    sg = build_scene_graph(stage, _Scene([mat]))
+    node = find_node_by_path(sg, "/Materials/Marble")
+    props = _props(node)
+    idx = node.renderer_ref.index
+
+    rend = _MockRenderer()
+    assert apply_scene_property(rend, node, props["add_xyz_in2"], [1.0, 2.0, 3.0], graph=sg) is None
+    assert apply_scene_property(rend, node, props["flag"], True, graph=sg) is None
+    assert rend.single == []
+    assert rend.batched == [
+        (idx, {"ax": [1.0, 2.0, 3.0], "ay": [1.0, 2.0, 3.0]}),
+        (idx, {"fl": True}),
+    ]
+
+
+def test_constant_preset_advertised_keys_exposed_and_not_suppressed():
+    """For a constant-shader preset the advertised material_list keys are the
+    canonical packer keys, and they are all surfaced on the scene-graph node
+    without suppressing the prior canonical controls (finding #3)."""
+    from skinny import mtlx_synthesis as msyn
+    advertised = set(msyn.list_preset_inputs("chrome"))
+    # a chrome-like loaded material: constant preset -> empty logical_inputs,
+    # parameter_overrides carry the canonical std_surface keys the packer reads.
+    stage = _stage_with_material("chrome")
+    mat = _Mat("chrome", parameter_overrides={
+        "base_color": (0.9, 0.9, 0.9), "metalness": 1.0, "specular": 1.0,
+        "specular_color": (1.0, 1.0, 1.0), "specular_roughness": 0.05,
+    }, mtlx_document=object())
+    sg = build_scene_graph(stage, _Scene([mat]))
+    props = set(_props(find_node_by_path(sg, "/Materials/chrome")))
+    assert advertised <= props        # every advertised key is editable
+    assert "base_color" in props      # the prior canonical control is not suppressed
+
+
 def test_constant_mtlx_material_exposes_override_keys():
     """A constant-shader `.mtlx` material (no graph, has an mtlx_document) exposes
     its parameter-override keys; a name that is not an override is absent."""

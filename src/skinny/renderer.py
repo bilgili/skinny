@@ -6014,12 +6014,17 @@ class Renderer:
         # Live material overrides (scene_set / slider edits) live only on the
         # Scene objects + graph cache; a structural resync re-reads materials
         # from disk and would drop them (finding #7 — edit colorA, add a light,
-        # the edit vanishes). Snapshot the prior overrides by stable material
-        # name so they can be re-applied onto the same-named reloaded materials.
+        # the edit vanishes). Snapshot the prior overrides by the material's
+        # stable prim path (falling back to its leaf name) so they re-apply onto
+        # the same material, not a same-named one in another scope (/ScopeA/Foo
+        # vs /ScopeB/Foo would cross-apply if keyed by leaf name — finding #7/D).
+        def _mat_key(m):
+            return getattr(m, "source_prim_path", None) or getattr(m, "name", None)
+
         prev_mat_overrides = {
-            m.name: dict(m.parameter_overrides)
+            _mat_key(m): dict(m.parameter_overrides)
             for m in scene.materials
-            if getattr(m, "name", None) and m.parameter_overrides
+            if _mat_key(m) and m.parameter_overrides
         }
         new_scene = load_scene_from_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
@@ -6036,7 +6041,7 @@ class Renderer:
         # reseeds `_material_graph_overrides` from `parameter_overrides`, so the
         # graph-uniform cache is restored by this same merge — no separate step.
         for m in new_scene.materials:
-            saved = prev_mat_overrides.get(getattr(m, "name", None))
+            saved = prev_mat_overrides.get(_mat_key(m))
             if saved:
                 m.parameter_overrides = {**m.parameter_overrides, **saved}
         # Swap instances + materials together so material_ids stay consistent;
@@ -6574,6 +6579,26 @@ class Renderer:
             )
         with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
             ume.author_binding(stage, prim_path, material_path)
+        self._resync_geometry_from_stage()
+
+    def discard_created_prim(self, prim_path: str) -> None:
+        """Hard-remove an edit-layer prim spec authored earlier in this call.
+
+        For rolling back a prim created in the SAME transactional call
+        (mcp-material-authoring, finding #8/E). Unlike ``remove_node`` — which
+        *deactivates* (an ``active=false`` tombstone that ``add_material``'s
+        holder-collision check would then treat as a live prim and refuse to
+        reuse the name) — this deletes the spec, so the name is immediately
+        reusable. Matches ``add_material`` / ``add_primitive``'s own rollback.
+        A missing prim is a no-op. Re-reads the stage afterward.
+        """
+        stage = self._usd_stage
+        if stage is None or self._usd_edit_layer is None:
+            raise RuntimeError("discard_created_prim requires a loaded USD stage")
+        from pxr import Usd
+        with Usd.EditContext(stage, Usd.EditTarget(self._usd_edit_layer)):
+            if stage.GetPrimAtPath(prim_path).IsValid():
+                stage.RemovePrim(prim_path)
         self._resync_geometry_from_stage()
 
     def remove_node(self, prim_path: str) -> None:

@@ -590,7 +590,10 @@ class SceneTools:
                 if not has_editable_stage(renderer):
                     raise SceneToolError("no editable USD stage is loaded")
                 path, created = _add_or_dedup_preset(renderer, holder_name, preset_path)
-                cleanup = (lambda r, p=path: r.remove_node(p)) if created else None
+                # Hard-remove a freshly-created holder on rollback (finding #8/E)
+                # so a same-name retry is not blocked by an active=false tombstone
+                # (a deduped reuse is never torn down).
+                cleanup = (lambda r, p=path: r.discard_created_prim(p)) if created else None
                 return path, cleanup
 
             return plan
@@ -602,16 +605,14 @@ class SceneTools:
             )
 
             def plan(renderer):
-                if not has_editable_stage(renderer):
-                    raise SceneToolError("no editable USD stage is loaded")
-                path = renderer.add_material(
-                    candidate, mtlx_path=written_path,
-                    session_dir=str(self._material_store.dir),
-                    on_rollback=lambda: self._material_store.delete(candidate),
-                )
+                path = self._add_synth_material(renderer, candidate, written_path)
 
                 def cleanup(r, p=path, name=candidate):
-                    r.remove_node(p)
+                    # Hard-remove the spec (finding #8/E): remove_node deactivates
+                    # (a tombstone the same-name collision check would then block
+                    # forever); this deletes the edit-layer spec so the name is
+                    # reusable, matching add_material's own rollback.
+                    r.discard_created_prim(p)
                     self._material_store.delete(name)
 
                 return path, cleanup
@@ -717,6 +718,28 @@ class SceneTools:
                 self._reserved_names.discard(candidate)
         return candidate, written_path
 
+    def _add_synth_material(self, renderer, candidate: str, written_path: str) -> str:
+        """``add_material`` for a synthesized doc, deleting its session file on
+        ANY failure after the file was written (finding #5).
+
+        The stage-readiness check and ``add_material``'s holder-collision guard
+        both raise *before* ``add_material`` wires its own rollback, so without
+        this wrapper either one orphans the just-written ``.mtlx`` + sidecar.
+        Deleting the file also releases the name (``write_document``'s
+        refuse-overwrite keyed off the file). ``delete`` is idempotent.
+        """
+        if not has_editable_stage(renderer):
+            self._material_store.delete(candidate)
+            raise SceneToolError("no editable USD stage is loaded")
+        try:
+            return renderer.add_material(
+                candidate, mtlx_path=written_path,
+                session_dir=str(self._material_store.dir),
+            )
+        except Exception:
+            self._material_store.delete(candidate)
+            raise
+
     def scene_add_material(self, spec: dict, name: "str | None" = None) -> dict:
         """Create a material holder under ``/Materials`` (mcp-material-authoring,
         design D2/D4/D8).
@@ -799,13 +822,7 @@ class SceneTools:
         )
 
         def write(renderer) -> dict:
-            if not has_editable_stage(renderer):
-                raise SceneToolError("no editable USD stage is loaded")
-            path = renderer.add_material(
-                candidate, mtlx_path=written_path,
-                session_dir=str(self._material_store.dir),
-                on_rollback=lambda: self._material_store.delete(candidate),
-            )
+            path = self._add_synth_material(renderer, candidate, written_path)
             return {"path": path, "live": False, **_versions(renderer)}
 
         return self._structural(write)
@@ -1038,6 +1055,9 @@ def _coerce(prop, value):
 
     if type_name == "vec3f":
         return _vector(prop, value, 3)
+
+    if type_name == "vec2f":
+        return _vector(prop, value, 2)
 
     if type_name in _ASSET_PROPERTY_TYPES or type_name in ("string", "token"):
         if not isinstance(value, str):

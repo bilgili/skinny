@@ -55,6 +55,8 @@ class _LightRendererStub:
     scene_graph = None
     _usd_stage = object()
     _usd_edit_layer = object()
+    # `has_editable_stage` now also gates on adopted scene metadata (finding #4).
+    _usd_scene = object()
     _scene_graph_id = 0
     _scene_graph_version = 0
 

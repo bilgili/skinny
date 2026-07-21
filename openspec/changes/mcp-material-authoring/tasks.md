@@ -70,7 +70,7 @@
       flattened layer (re-author `/Materials` references relative to the
       saved file, strip flatten residue, copy synthesized docs to
       `materials/`); file-backed — re-anchor overlay references + copy
-      docs; texture-bearing curated presets keep absolute assets
+      docs; all curated presets keep absolute assets
       references
 - [x] 3.4 Hostless USD-semantics tests (pxr direct, no renderer import):
       session explicit-target binding overrides file-authored binding
@@ -92,7 +92,7 @@
 - [x] 4.4 `scene_add_primitive` `material=` argument: name →
       create/dedup + bind, path → bind-existing (error if absent), refuse
       alongside color/roughness/metallic
-- [x] 4.5 Tool docs: graph adds and first binds degrade to pollable jobs
+- [x] 4.5 Tool docs: first binds of graph materials degrade to pollable jobs
       (pipeline rebuild) — document in docstrings/spec text
 - [x] 4.6 Hostless tool tests: arg validation, error texts, spec-error
       leaves versions unchanged, dedup, ambiguous-composition refusal

@@ -844,11 +844,25 @@ class SynthesisResult:
 
 
 def _descriptor_kind(mtlx_type: "str | None") -> str:
-    """Collapse an mtlx/param type to the descriptor's coarse kind."""
+    """Collapse an mtlx/param type to the descriptor's coarse kind.
+
+    Covers the real type lattice (finding #2): a boolean stays a boolean and a
+    vector2/vector3 stays a multi-component sequence. Collapsing them to "float"
+    (the old behavior) surfaced a reflected boolean/vector uniform as a scalar
+    0..1 float, so a scene-graph edit wrote one scalar where the runtime packer
+    expects a 2/3-sequence — silently zeroing the vector (materialx_runtime
+    `_scalar_tuple`).
+    """
     if mtlx_type in ("color3", "color4"):
         return "color3"
     if mtlx_type in ("integer", "int"):
         return "int"
+    if mtlx_type in ("boolean", "bool"):
+        return "bool"
+    if mtlx_type == "vector2":
+        return "vector2"
+    if mtlx_type in ("vector3", "vector4"):
+        return "vector3"
     return "float"
 
 
@@ -1103,26 +1117,85 @@ class SessionMaterialStore:
 
 # ─── Preset editable-input reflection (design D5, mtime-cached) ───────
 
-# {mtlx_path: (mtime, {logical name: descriptor})}
-_PRESET_INPUT_CACHE: dict[str, tuple[float, dict[str, dict]]] = {}
+# {mtlx_path: (mtime, is_graph, {logical name: descriptor})}
+_PRESET_INPUT_CACHE: dict[str, tuple[float, bool, dict[str, dict]]] = {}
+
+# std_surface inputs the loader folds into other override keys before exposing
+# them (base→diffuse scale, emission→emissiveColor, transmission→opacity), so a
+# constant preset must not advertise them: the loaded material exposes the
+# folded target, not these. Mirrors `_load_mtlx_materials`'s pops in usd_loader.
+_CONSTANT_FOLDED_INPUTS = frozenset(
+    {"base", "emission", "emission_color", "transmission"}
+)
 
 
-def _reflect_identity_descriptors(doc: mx.Document, target: str) -> dict[str, dict]:
-    """Identity descriptor map from a doc's gen dry-run (design D3/finding #3).
+def _surfaceshader_node(doc: mx.Document, target: str):
+    """The surfaceshader node feeding surfacematerial ``target`` (or None)."""
+    mat = doc.getNode(target)
+    if mat is None:
+        return None
+    ss = mat.getInput("surfaceshader")
+    if ss is None or not ss.getNodeName():
+        return None
+    return doc.getNode(ss.getNodeName())
 
-    Each generated uniform is its own logical input (identity mapping) so a
-    curated preset's advertised keys are exactly its writable scene-graph
-    properties. Type comes from the reflected ``UniformField``, default from its
-    authored value, range from ``_MATERIAL_FLOAT_RANGES`` on a name match.
-    filename/string uniforms (textures, framerange tokens) are skipped — not
-    ``scene_set``-able scalars.
+
+def _constant_preset_descriptors(doc: mx.Document, target: str) -> dict[str, dict]:
+    """Canonical editable descriptors for a constant-shader preset (finding #3).
+
+    Keys are the shader's authored standard_surface input names — exactly the
+    ``parameter_overrides`` keys the flat packer consumes (``pack_std_surface_
+    params``) and the scene graph surfaces for a constant-shader material — NOT
+    the generator's shader-prefixed reflection uniforms (``SR_chrome_base``),
+    which the packer never reads, so advertising those made every edit a silent
+    no-op. Folded inputs (``_CONSTANT_FOLDED_INPUTS``) and texture/graph-driven
+    inputs are skipped (they are not scalar ``scene_set`` keys).
+    """
+    shader = _surfaceshader_node(doc, target)
+    descriptors: dict[str, dict] = {}
+    if shader is None:
+        return descriptors
+    for inp in shader.getInputs():
+        name = inp.getName()
+        if name in _CONSTANT_FOLDED_INPUTS:
+            continue
+        itype = inp.getType()
+        if itype in ("filename", "string"):
+            continue
+        if inp.getNodeName() or inp.getAttribute("nodegraph"):
+            continue  # texture / graph-driven — not a scalar scene_set key
+        value = inp.getValue()
+        if hasattr(value, "asTuple"):
+            value = list(value.asTuple())
+        dtype = _descriptor_kind(itype)
+        rng = (
+            list(_MATERIAL_FLOAT_RANGES[name])
+            if dtype == "float" and name in _MATERIAL_FLOAT_RANGES else None
+        )
+        descriptors[name] = {
+            "uniforms": [name], "type": dtype, "default": value, "range": rng,
+        }
+    return descriptors
+
+
+def _reflect_identity_descriptors(
+    doc: mx.Document, target: str,
+) -> "tuple[dict[str, dict], bool]":
+    """``(descriptors, is_graph)`` from a doc's gen dry-run (design D3/finding #3).
+
+    Graph preset (marble): the generated fragment's uniforms are the writable
+    keys, identity-mapped, so the advertised keys are exactly the reflection
+    uniforms. Constant-shader preset (chrome/glass/jade — no GraphFragment): the
+    canonical standard_surface param keys the flat packer consumes, NOT the
+    shader-prefixed reflection uniforms (finding #3). ``is_graph`` lets the
+    loader attach these as ``logical_inputs`` only for graph presets — a constant
+    preset relies on the scene graph's parameter-override branch instead.
     """
     _cm, frag = _gen_dry_run(doc, target)
-    # Graph preset (marble): frag uniforms are the writable keys. Constant-shader
-    # preset (chrome/glass/jade): the std_surface param uniforms are.
-    fields = list(frag.uniform_block) if frag is not None else list(_cm.uniform_block)
+    if frag is None:
+        return _constant_preset_descriptors(doc, target), False
     descriptors: dict[str, dict] = {}
-    for u in fields:
+    for u in frag.uniform_block:
         if u.type_name in ("filename", "string"):
             continue
         dtype = _descriptor_kind(u.type_name)
@@ -1136,34 +1209,54 @@ def _reflect_identity_descriptors(doc: mx.Document, target: str) -> dict[str, di
             "default": u.default,
             "range": rng,
         }
-    return descriptors
+    return descriptors, True
 
 
-def identity_descriptors_for_file(path: str) -> dict[str, dict]:
-    """mtime-cached identity descriptors for a curated/plain ``.mtlx`` file.
+def _reflect_preset_cached(path: str) -> "tuple[bool, dict[str, dict]]":
+    """``(is_graph, descriptors)`` for a curated ``.mtlx`` file, mtime-cached.
 
-    The loader attaches these to a preset material that ships no sidecar (design
-    D3/finding #3), so its advertised keys (``material_list``) are exactly the
-    editable scene-graph properties. Runs the GPU-free gen dry-run once per file
-    (mtime-cached); callers bound *which* files this runs on (e.g. only the
-    curated corpus / session dir) so it is not run over arbitrary user materials.
+    Runs the GPU-free gen dry-run once per file; callers bound *which* files this
+    runs on (the curated corpus / session dir) so it never runs the generator
+    over an arbitrary user material.
     """
     mtime = os.path.getmtime(path)
     cached = _PRESET_INPUT_CACHE.get(path)
     if cached is not None and cached[0] == mtime:
-        return {k: dict(v) for k, v in cached[1].items()}
+        return cached[1], {k: dict(v) for k, v in cached[2].items()}
     doc = mx.createDocument()
     mx.readFromXmlFile(doc, path)
     target = _find_surfacematerial(doc)
-    descriptors = _reflect_identity_descriptors(doc, target)
-    _PRESET_INPUT_CACHE[path] = (mtime, descriptors)
-    return {k: dict(v) for k, v in descriptors.items()}
+    descriptors, is_graph = _reflect_identity_descriptors(doc, target)
+    _PRESET_INPUT_CACHE[path] = (mtime, is_graph, descriptors)
+    return is_graph, {k: dict(v) for k, v in descriptors.items()}
+
+
+def identity_descriptors_for_file(path: str) -> dict[str, dict]:
+    """mtime-cached editable descriptors for a curated/plain ``.mtlx`` file.
+
+    Graph preset: identity-mapped reflection uniforms. Constant preset: the
+    canonical std_surface keys the packer consumes (finding #3). The loader
+    attaches these as ``logical_inputs`` only for graph presets; ``material_list``
+    advertises them for both.
+    """
+    return _reflect_preset_cached(path)[1]
+
+
+def preset_is_graph(path: str) -> bool:
+    """True when a curated ``.mtlx`` file is a graph (procedural) preset.
+
+    A graph preset's editable keys are reflection uniforms attached as
+    ``logical_inputs``; a constant preset instead exposes its
+    ``parameter_overrides`` keys via the scene graph (finding #3). mtime-cached.
+    """
+    return _reflect_preset_cached(path)[0]
 
 
 def list_preset_inputs(name: str) -> list[str]:
     """Editable input names for a curated preset (the *writable keys*, design D5).
 
-    The keys of the identity descriptor map — gen uniform names, never parsed
-    ``.mtlx`` interface names (which are not writable keys). mtime-cached.
+    Graph preset: reflection uniform names. Constant preset: canonical
+    std_surface keys the packer consumes (finding #3) — never parsed ``.mtlx``
+    interface names (which are not writable keys). mtime-cached.
     """
     return sorted(identity_descriptors_for_file(resolve_preset(name)))

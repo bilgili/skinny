@@ -88,6 +88,46 @@ def test_binding_untyped_mtlx_holder_uses_explicit_settargets(tmp_path):
     assert spec.targetPathList.isExplicit
 
 
+# ── Override-preservation identity: same-leaf materials do not collide (D) ──
+
+
+def _preview_material(stage, mat_path, color):
+    from pxr import Gf, Sdf, UsdShade
+    mat = UsdShade.Material.Define(stage, mat_path)
+    shader = UsdShade.Shader.Define(stage, mat_path + "/Surface")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+    mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    return mat
+
+
+def test_same_leaf_materials_get_distinct_source_prim_path():
+    """Two materials sharing a leaf name in different scopes (/ScopeA/Foo vs
+    /ScopeB/Foo) must load with distinct `source_prim_path` so the override-
+    preservation snapshot keys them apart instead of cross-applying (finding
+    #7/D). Keyed by leaf name alone they would collide."""
+    from pxr import Usd, UsdGeom, UsdShade
+    from skinny.usd_loader import load_scene_from_stage
+
+    stage = Usd.Stage.CreateInMemory()
+    world = UsdGeom.Xform.Define(stage, "/World")
+    stage.SetDefaultPrim(world.GetPrim())
+    for scope, color in (("ScopeA", (0.9, 0.1, 0.1)), ("ScopeB", (0.1, 0.1, 0.9))):
+        UsdGeom.Scope.Define(stage, f"/World/{scope}")
+        _preview_material(stage, f"/World/{scope}/Foo", color)
+        gprim = UsdGeom.Sphere.Define(stage, f"/World/{scope}/Ball")
+        UsdShade.MaterialBindingAPI.Apply(gprim.GetPrim())
+        UsdShade.MaterialBindingAPI(gprim.GetPrim()).Bind(
+            UsdShade.Material(stage.GetPrimAtPath(f"/World/{scope}/Foo"))
+        )
+
+    scene = load_scene_from_stage(stage)
+    foos = [m for m in scene.materials if getattr(m, "name", None) == "Foo"]
+    assert len(foos) == 2  # both same-leaf materials loaded
+    paths = {m.source_prim_path for m in foos}
+    assert paths == {"/World/ScopeA/Foo", "/World/ScopeB/Foo"}  # distinct identity
+
+
 # ── Anonymous-root save post-process → self-contained bundle ───────────
 
 
