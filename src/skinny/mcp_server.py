@@ -2,10 +2,10 @@
 
 Path-addressed inspection/property tools (``scene_list`` / ``scene_get`` /
 ``scene_set``) plus structural tools (``scene_add_model`` /
-``scene_add_primitive`` / ``scene_add_light`` / ``scene_remove`` /
-``scene_save`` / ``scene_job_status``) over the scene-graph model the Qt dock
-already edits. Attaches to a renderer that is already running; it never
-builds one.
+``scene_import_glb`` / ``scene_add_primitive`` / ``scene_add_light`` /
+``scene_remove`` / ``scene_save`` / ``scene_job_status``) over the scene-graph
+model the Qt dock already edits. Attaches to a renderer that is already
+running; it never builds one.
 
 **Material authoring (mcp-material-authoring)** adds a read-only discovery
 tool (``material_list``, renderer-free) and two structural tools
@@ -469,6 +469,57 @@ class SceneTools:
             return {"path": path, **_versions(renderer)}
 
         return self._structural(write)
+
+    def scene_import_glb(
+        self,
+        glb_path: str,
+        name: "str | None" = None,
+        parent: "str | None" = None,
+        out_dir: "str | None" = None,
+        overwrite: bool = False,
+        translate=None,
+        rotate_euler_deg=None,
+        scale=None,
+        matrix=None,
+    ) -> dict:
+        """Convert a GLB to USD and reference it into the scene in one call.
+
+        The conversion is a built-in, platform-independent pure-Python step
+        (pygltflib + pxr; macOS, Linux, Windows). Both ``glb_path`` and the
+        resolved output directory must resolve inside the allowed roots; the
+        produced ``.usdc`` is then handed to ``scene_add_model``, inheriting
+        its subtree validation and job-degradation behavior. ``out_dir``
+        defaults to a ``<stem>_usd`` directory beside the GLB; an existing
+        conversion there is refused unless ``overwrite=True``.
+
+        Conversion runs synchronously on the tool thread before any renderer
+        mutation, so a very large GLB blocks this one call for the conversion's
+        duration (the pollable job covers only the add, not the conversion). A
+        GLB using an unsupported glTF feature (Draco, sparse accessors,
+        skinning, animation) is refused with an error naming the feature.
+        """
+        from pathlib import Path as _Path
+        from skinny.glb_import import convert_glb_to_usd, GlbImportError
+
+        reason = check_path(glb_path, self._roots)
+        if reason is not None:
+            raise SceneToolError(reason)
+        glb = _Path(glb_path)
+        target_dir = _Path(out_dir) if out_dir else glb.parent / f"{glb.stem}_usd"
+        reason = check_path(str(target_dir), self._roots)
+        if reason is not None:
+            raise SceneToolError(reason)
+
+        try:
+            usd_path = convert_glb_to_usd(glb, target_dir, overwrite=overwrite)
+        except GlbImportError as exc:
+            raise SceneToolError(f"GLB import failed: {exc}") from exc
+
+        return self.scene_add_model(
+            str(usd_path), name=name, parent=parent,
+            translate=translate, rotate_euler_deg=rotate_euler_deg,
+            scale=scale, matrix=matrix,
+        )
 
     def scene_add_primitive(
         self,
@@ -1206,7 +1257,8 @@ def build_app(tools: SceneTools, token: str, port: int):
     for tool in (
         tools.scene_list, tools.scene_get, tools.scene_set,
         tools.scene_create,
-        tools.scene_add_model, tools.scene_add_primitive, tools.scene_add_light,
+        tools.scene_add_model, tools.scene_import_glb,
+        tools.scene_add_primitive, tools.scene_add_light,
         tools.scene_remove, tools.scene_save, tools.scene_job_status,
         tools.material_list, tools.scene_add_material, tools.scene_bind_material,
     ):

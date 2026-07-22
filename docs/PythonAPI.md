@@ -598,6 +598,18 @@ class SceneTools:                                     # proxy or bare queue
     def scene_add_model(usd_path, name=None, parent=None,
                          translate=None, rotate_euler_deg=None, scale=None,
                          matrix=None) -> dict
+    # glb-asset-import: convert a GLB to USD (built-in pure-Python converter,
+    # pygltflib + pxr; macOS/Linux/Windows) and reference it in one call. Both
+    # glb_path and the resolved out_dir must resolve inside the allowed roots;
+    # the produced .usdc is handed to scene_add_model (same subtree validation
+    # + job degradation). out_dir defaults to <stem>_usd beside the GLB; an
+    # existing conversion is refused unless overwrite=True. Conversion runs
+    # synchronously on the tool thread (a large GLB blocks this call for its
+    # duration -- the pollable job covers only the add). An out-of-scope glTF
+    # feature (Draco, sparse accessors, skinning, animation) errors by name.
+    def scene_import_glb(glb_path, name=None, parent=None, out_dir=None,
+                         overwrite=False, translate=None, rotate_euler_deg=None,
+                         scale=None, matrix=None) -> dict
     def scene_add_primitive(type, color=None, roughness=None, metallic=None,
                              material=None, name=None, parent=None,
                              translate=None, rotate_euler_deg=None, scale=None,
@@ -631,6 +643,15 @@ def registration_command(port) -> str                 # references the token fil
 def resolve_roots(cli_value, env=None) -> list[str]   # --mcp-roots > SKINNY_MCP_ROOTS > temp dirs + cwd
 def check_path(path, roots) -> str | None             # None allows; else a reason naming path + roots
 def validate_added_subtree(stage, prim, pre_layers, roots) -> None  # raises ValueError on an escape
+
+# skinny.glb_import — pure-Python GLB→USD converter (backs scene_import_glb)
+class GlbImportError(Exception)                       # malformed GLB or unsupported glTF feature
+def convert_glb_to_usd(glb_path, out_dir, *, overwrite=False) -> Path  # → the authored .usdc
+# Scope: single-asset generator output (TRELLIS.2 & co.) — meshes with
+# POSITION/NORMAL/TEXCOORD_0, embedded PNG/JPEG/WebP images, pbrMetallicRoughness.
+# Node transforms, instancing, morph targets, skinning, animation, Draco/meshopt/
+# quantization, sparse accessors, and external image URIs are refused by name.
+# Normal/emissive/occlusion textures and secondary UV sets are not imported.
 ```
 
 **Token file, platform note.** On POSIX the file is created mode `0600` and

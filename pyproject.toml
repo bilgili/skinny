@@ -23,6 +23,8 @@ dependencies = [
     # bindings; Radiance .hdr writes are done inline (RGBE, numpy-only).
     "imageio>=2.34",
     "OpenEXR>=3.3",
+    # GLB (binary glTF) parsing for the GLB→USD asset importer (glb_import.py).
+    "pygltflib>=1.16",
     # MaterialX (incl. GenSlang) and OpenUSD+usdMtlx come from our own builds
     # published as GitHub Release wheels (MaterialX 1.39.6 / OpenUSD v26.05), not
     # PyPI's `MaterialX` / `usd-core`. materialx-python-standalone provides

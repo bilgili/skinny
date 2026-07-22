@@ -306,6 +306,14 @@ def _resolve_texture_binding(input_obj: UsdShade.Input) -> Optional[TextureBindi
 
     asset = file_input.Get()
     if asset is None:
+        # The `file` value may be authored as a connection to a Material
+        # interface input (or through a NodeGraph) rather than locally —
+        # the shape Apple's glTF→USD conversion emits
+        # (`file <- Material0.baseColorTexture`). Resolve through the same
+        # value-producing-attribute walk used for connected constants; this
+        # follows interface inputs and NodeGraph indirection canonically.
+        asset = _resolve_connected_value(file_input)
+    if asset is None:
         return None
     asset_path = (
         getattr(asset, "resolvedPath", None) or getattr(asset, "path", None) or str(asset)
@@ -337,13 +345,129 @@ def _resolve_texture_binding(input_obj: UsdShade.Input) -> Optional[TextureBindi
         source_color_space=color_space,
         wrap_s=_wrap_attr("wrapS"),
         wrap_t=_wrap_attr("wrapT"),
+        uv_transform=_resolve_st_transform(src_shader),
     )
+
+
+# UsdTransform2d spec defaults (UsdUVTexture st input feeds through it).
+_UV_TRANSFORM_IDENTITY = (1.0, 1.0, 0.0, 0.0, 0.0)
+
+
+def _resolve_st_transform(
+    tex_shader: UsdShade.Shader,
+) -> Optional[tuple[float, float, float, float, float]]:
+    """Capture a `UsdTransform2d` sitting on a UsdUVTexture's `st` input.
+
+    Returns ``(scale_x, scale_y, translation_x, translation_y, rotation_deg)``
+    or ``None`` when the st input is fed directly by a primvar reader (no
+    transform) — the common case, kept as ``None`` so the loader's UV path
+    stays bit-identical. glTF-derived USD authors ``scale (1, -1)``,
+    ``translation (0, 1)`` here (the V-flip).
+    """
+    # All pxr access is wrapped: a texture graph reached through the usdMtlx
+    # plugin can hand back an expired prim, and a transform we can't read
+    # falls back to identity (no bake) — the loader's existing defensive style.
+    try:
+        st_input = tex_shader.GetInput("st")
+        if st_input is None or not st_input.HasConnectedSource():
+            return None
+        src_info = st_input.GetConnectedSource()
+        if not src_info:
+            return None
+        src_prim = src_info[0].GetPrim()
+        if not src_prim:
+            return None
+        xf = UsdShade.Shader(src_prim)
+        if not xf or xf.GetIdAttr().Get() != "UsdTransform2d":
+            return None
+    except Exception:
+        return None
+
+    def _float2(name: str, default: tuple[float, float]) -> tuple[float, float]:
+        try:
+            inp = xf.GetInput(name)
+            v = inp.Get() if inp is not None else None
+            if v is None:
+                return default
+            return float(v[0]), float(v[1])
+        except Exception:
+            return default
+
+    def _float(name: str, default: float) -> float:
+        try:
+            inp = xf.GetInput(name)
+            v = inp.Get() if inp is not None else None
+            return float(v) if v is not None else default
+        except Exception:
+            return default
+
+    sx, sy = _float2("scale", (1.0, 1.0))
+    tx, ty = _float2("translation", (0.0, 0.0))
+    rot = _float("rotation", 0.0)
+    transform = (sx, sy, tx, ty, rot)
+    if transform == _UV_TRANSFORM_IDENTITY:
+        return None
+    return transform
 
 
 def _resolve_texture_input(input_obj: UsdShade.Input) -> Optional[Path]:
     """Back-compat wrapper: returns just the resolved file path."""
     binding = _resolve_texture_binding(input_obj)
     return binding.path if binding is not None else None
+
+
+def _majority_uv_transform(
+    material: "Material",
+) -> Optional[tuple[float, float, float, float, float]]:
+    """The UsdTransform2d shared by the majority of a material's texture
+    bindings, or None when the majority author none. A binding without a
+    transform votes for identity, so a single transformed texture cannot
+    outvote several untransformed ones. Warns on disagreement — no known
+    producer authors differing transforms across one material's textures."""
+    if not material.texture_bindings:
+        return None
+    counts: dict[tuple, int] = {}
+    for b in material.texture_bindings.values():
+        key = b.uv_transform if b.uv_transform is not None else _UV_TRANSFORM_IDENTITY
+        counts[key] = counts.get(key, 0) + 1
+    top = max(counts, key=lambda k: counts[k])
+    if len(counts) > 1:
+        print(
+            f"[skinny] material {material.name!r}: texture bindings disagree on "
+            f"UsdTransform2d; applying majority {top}"
+        )
+    return None if top == _UV_TRANSFORM_IDENTITY else top
+
+
+def _bake_uv_transform(source: MeshSource, material: "Material") -> None:
+    """Bake a material's UsdTransform2d into ``source.uvs`` in place.
+
+    The transform is defined in raw USD st-space, but ``source.uvs`` already
+    carries the loader's USD→skinny V-flip (``_read_mesh_attrs``). So the net
+    operation is ``flip( T( flip(uvs) ) )``: undo the flip to recover raw st,
+    apply the affine (UsdTransform2d order: scale, rotate, translate), re-flip.
+    Identity/absent transform is a no-op, leaving the UV array bit-identical.
+    For the glTF V-flip ``(1, -1, 0, 1, 0)`` this collapses to the raw glTF
+    texcoords — the correct upright result.
+    """
+    if source.uvs is None or source.uvs.size == 0:
+        return
+    xf = _majority_uv_transform(material)
+    if xf is None:
+        return
+    sx, sy, tx, ty, rot = xf
+    raw = source.uvs.astype(np.float32).copy()
+    raw[:, 1] = 1.0 - raw[:, 1]                 # undo convention flip → raw st
+    st = raw * np.array([sx, sy], dtype=np.float32)
+    if rot != 0.0:                              # CCW, UsdTransform2d spec
+        rad = math.radians(rot)
+        c, s = math.cos(rad), math.sin(rad)
+        st = np.stack(
+            [st[:, 0] * c - st[:, 1] * s, st[:, 0] * s + st[:, 1] * c], axis=1
+        )
+    st = st + np.array([tx, ty], dtype=np.float32)
+    st[:, 1] = 1.0 - st[:, 1]                   # re-apply convention flip
+    source.uvs = st.astype(np.float32)
 
 
 def _resolve_connected_value(inp: UsdShade.Input) -> object:
@@ -2104,11 +2228,16 @@ def _read_open_stage(
         if source is None:
             continue
 
-        source.content_hash = compute_source_hash(source)
         transform = _world_transform(prim, eval_time)
         material_id = _resolve_material_binding(
             prim, materials, material_index, mtlx_materials,
         )
+        # Bake any UsdTransform2d on the bound material's textures into the
+        # mesh UVs BEFORE hashing, so the persistent mesh cache keys on the
+        # post-transform UVs — shared geometry under materials with differing
+        # transforms must not collide on one cache entry (usd-texture-intake).
+        _bake_uv_transform(source, materials[material_id])
+        source.content_hash = compute_source_hash(source)
         prim_data.append((source, transform, material_id))
 
     if not prim_data and not allow_empty:
