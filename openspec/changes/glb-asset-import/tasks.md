@@ -35,4 +35,4 @@
 - [x] 5.1 `docs/PythonAPI.md`: `scene_import_glb` tool contract (params, errors, job degradation)
 - [x] 5.2 `docs/Architecture.md`: loader texture-resolution notes (interface-connected file, UsdTransform2d bake) in the USD loader section
 - [x] 5.3 `README.md`: asset-import workflow (`scene_import_glb` one-call path on all platforms; Apple `usdextract` as the manual macOS alternative), including the local TRELLIS.2 pipeline as the worked example
-- [ ] 5.4 `openspec validate glb-asset-import` clean; fold design-review findings; codex pre-merge review before merge
+- [x] 5.4 `openspec validate glb-asset-import` clean; fold design-review findings; codex pre-merge review before merge
