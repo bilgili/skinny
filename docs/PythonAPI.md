@@ -643,6 +643,15 @@ def registration_command(port) -> str                 # references the token fil
 def resolve_roots(cli_value, env=None) -> list[str]   # --mcp-roots > SKINNY_MCP_ROOTS > temp dirs + cwd
 def check_path(path, roots) -> str | None             # None allows; else a reason naming path + roots
 def validate_added_subtree(stage, prim, pre_layers, roots) -> None  # raises ValueError on an escape
+
+# skinny.glb_import — pure-Python GLB→USD converter (backs scene_import_glb)
+class GlbImportError(Exception)                       # malformed GLB or unsupported glTF feature
+def convert_glb_to_usd(glb_path, out_dir, *, overwrite=False) -> Path  # → the authored .usdc
+# Scope: single-asset generator output (TRELLIS.2 & co.) — meshes with
+# POSITION/NORMAL/TEXCOORD_0, embedded PNG/JPEG/WebP images, pbrMetallicRoughness.
+# Node transforms, instancing, morph targets, skinning, animation, Draco/meshopt/
+# quantization, sparse accessors, and external image URIs are refused by name.
+# Normal/emissive/occlusion textures and secondary UV sets are not imported.
 ```
 
 **Token file, platform note.** On POSIX the file is created mode `0600` and

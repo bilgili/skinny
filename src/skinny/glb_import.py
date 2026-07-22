@@ -41,6 +41,10 @@ _COMPONENT_DTYPE = {
     5126: np.float32,
 }
 _TYPE_COUNT = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
+# Divisor for glTF `normalized` integer accessors (KHR spec §3.6.2.2).
+_NORMALIZE_DIV = {
+    np.int8: 127.0, np.uint8: 255.0, np.int16: 32767.0, np.uint16: 65535.0,
+}
 
 
 class GlbImportError(Exception):
@@ -64,7 +68,8 @@ def convert_glb_to_usd(
     usd_path = out_dir / f"{glb_path.stem}.usdc"
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    if not overwrite and any(out_dir.glob("*.usd*")):
+    if not overwrite and (any(out_dir.glob("*.usd*"))
+                          or any(out_dir.glob("texture_*.png"))):
         raise GlbImportError(
             f"conversion already exists in {out_dir} (pass overwrite=true to replace)"
         )
@@ -86,6 +91,23 @@ def convert_glb_to_usd(
     if gltf.animations:
         raise GlbImportError("GLB uses unsupported feature: animation")
 
+    # The converter emits meshes at identity (single-asset generator output);
+    # a node transform or an instanced mesh would be silently misplaced, so
+    # refuse loudly rather than drop it (design scope: local generator output).
+    mesh_ref_count: dict[int, int] = {}
+    for node in gltf.nodes or []:
+        if node.mesh is None:
+            continue
+        mesh_ref_count[node.mesh] = mesh_ref_count.get(node.mesh, 0) + 1
+        if node.matrix is not None or node.translation is not None or \
+                node.rotation is not None or node.scale is not None:
+            raise GlbImportError(
+                "GLB uses unsupported feature: node transforms "
+                "(mesh is not authored at identity)"
+            )
+    if any(c > 1 for c in mesh_ref_count.values()):
+        raise GlbImportError("GLB uses unsupported feature: mesh instancing")
+
     blob = gltf.binary_blob() or b""
 
     def _accessor(index: int) -> np.ndarray:
@@ -97,12 +119,35 @@ def convert_glb_to_usd(
             raise GlbImportError(f"unsupported accessor componentType {acc.componentType}")
         ncomp = _TYPE_COUNT[acc.type]
         bv = gltf.bufferViews[acc.bufferView]
-        start = (bv.byteOffset or 0) + (acc.byteOffset or 0)
-        count = acc.count * ncomp
-        data = np.frombuffer(
-            blob, dtype=dtype, count=count, offset=start
-        ).astype(np.float32 if dtype == np.float32 else np.int64)
-        return data.reshape(acc.count, ncomp) if ncomp > 1 else data
+        itemsize = np.dtype(dtype).itemsize
+        elem = ncomp * itemsize
+        stride = bv.byteStride or elem
+        base = (bv.byteOffset or 0) + (acc.byteOffset or 0)
+        # Validate the read stays inside the bufferView and the buffer, so a
+        # malformed accessor errors instead of reading adjacent data.
+        span = (acc.count - 1) * stride + elem if acc.count else 0
+        bv_end = (bv.byteOffset or 0) + (bv.byteLength or 0)
+        if base + span > bv_end or bv_end > len(blob):
+            raise GlbImportError(f"accessor {index} reads past its bufferView/buffer")
+        if stride == elem:
+            arr = np.frombuffer(
+                blob, dtype=dtype, count=acc.count * ncomp, offset=base
+            ).reshape(acc.count, ncomp)
+        else:
+            # Interleaved buffer view: gather each element across the stride.
+            raw = np.frombuffer(blob, dtype=np.uint8, count=span, offset=base)
+            sel = (np.arange(acc.count)[:, None] * stride
+                   + np.arange(elem)[None, :]).reshape(-1)
+            arr = raw[sel].reshape(acc.count, elem).view(dtype).reshape(acc.count, ncomp)
+        if getattr(acc, "normalized", False) and dtype in _NORMALIZE_DIV:
+            arr = arr.astype(np.float32) / _NORMALIZE_DIV[dtype]
+            if dtype in (np.int8, np.int16):
+                arr = np.maximum(arr, -1.0)
+        elif dtype == np.float32:
+            arr = arr.astype(np.float32)
+        else:
+            arr = arr.astype(np.int64)
+        return arr.reshape(-1) if ncomp == 1 else arr
 
     textures_by_image = _extract_images(gltf, blob, out_dir)
 
@@ -123,6 +168,8 @@ def convert_glb_to_usd(
                 raise GlbImportError(
                     f"unsupported primitive mode {prim.mode} (only triangles)"
                 )
+            if getattr(prim, "targets", None):
+                raise GlbImportError("GLB uses unsupported feature: morph targets")
             attrs = prim.attributes
             if attrs.POSITION is None:
                 continue
@@ -196,7 +243,12 @@ def _extract_images(gltf, blob: bytes, out_dir: Path) -> dict:
             import base64
             data = base64.b64decode(img.uri.split(",", 1)[1])
         if data is None:
-            continue
+            # External (file-relative) image URI: refuse rather than silently
+            # fall the material back to a constant. Generator GLBs embed images.
+            raise GlbImportError(
+                f"image {i} is an external URI ({img.uri!r}); only embedded "
+                "images are supported"
+            )
         try:
             decoded = Image.open(io.BytesIO(data)).convert("RGB")
         except Exception as exc:
@@ -240,7 +292,7 @@ def _author_materials(stage, gltf, textures_by_image, UsdShade, Sdf, Gf) -> dict
         st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
         st_out = st_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
 
-        def _texture(name: str, filename: str, colorspace: str):
+        def _texture(name, filename, colorspace, scale=None):
             tex = UsdShade.Shader.Define(stage, f"{mat_path}/{name}")
             tex.CreateIdAttr("UsdUVTexture")
             tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(f"./{filename}")
@@ -248,22 +300,30 @@ def _author_materials(stage, gltf, textures_by_image, UsdShade, Sdf, Gf) -> dict
             tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set(colorspace)
             tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
             tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+            # glTF final value = texture × factor; UsdUVTexture `scale` multiplies
+            # the sampled RGBA per channel, so the factor rides here.
+            if scale is not None and tuple(scale) != (1.0, 1.0, 1.0, 1.0):
+                tex.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(*scale))
             return tex
 
+        bcf = (pbr.baseColorFactor if pbr and pbr.baseColorFactor else [1.0, 1.0, 1.0, 1.0])
         base_file = _tex_file(pbr.baseColorTexture.index) if (pbr and pbr.baseColorTexture) else None
         if base_file:
-            tex = _texture("diffuseColor", base_file, "sRGB")
+            tex = _texture("diffuseColor", base_file, "sRGB",
+                           scale=(float(bcf[0]), float(bcf[1]), float(bcf[2]), 1.0))
             out = tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
             surface.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(out)
         elif pbr and pbr.baseColorFactor:
-            f = pbr.baseColorFactor
             surface.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
-                Gf.Vec3f(float(f[0]), float(f[1]), float(f[2]))
+                Gf.Vec3f(float(bcf[0]), float(bcf[1]), float(bcf[2]))
             )
 
+        mf = float(pbr.metallicFactor if pbr and pbr.metallicFactor is not None else 1.0)
+        rf = float(pbr.roughnessFactor if pbr and pbr.roughnessFactor is not None else 1.0)
         mr_file = _tex_file(pbr.metallicRoughnessTexture.index) if (pbr and pbr.metallicRoughnessTexture) else None
         if mr_file:
-            tex = _texture("metallicRoughness", mr_file, "raw")
+            # metallic reads .b, roughness reads .g; scale each by its factor.
+            tex = _texture("metallicRoughness", mr_file, "raw", scale=(1.0, rf, mf, 1.0))
             m_out = tex.CreateOutput("b", Sdf.ValueTypeNames.Float)
             r_out = tex.CreateOutput("g", Sdf.ValueTypeNames.Float)
             surface.CreateInput("metallic", Sdf.ValueTypeNames.Float).ConnectToSource(m_out)

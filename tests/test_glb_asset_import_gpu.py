@@ -3,8 +3,10 @@
 Converts a small textured GLB with the in-repo converter and renders it on the
 Metal backend, asserting the textured surface carries the texture's saturated
 color — i.e. the texture resolves and applies end-to-end, not the flat white a
-dropped binding would leave. Exact binding/UV correctness is covered hostlessly
-in test_glb_asset_import.py; this is the on-GPU end-to-end lock-in.
+dropped binding would leave. This guards texture *application*, not orientation:
+exact UV correctness (the V-flip cancelling to raw glTF texcoords) is asserted
+deterministically hostless in test_glb_asset_import.py::test_vflip_bakes_to_raw_uv,
+which is a stronger and flake-free orientation gate than a rendered patch.
 
 Run (guarded, one Metal process at a time — ZERO-SWAP):
     PYTHONPATH=src SKINNY_BACKEND=metal ./bin/python3.13 -m pytest \

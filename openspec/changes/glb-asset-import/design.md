@@ -30,7 +30,9 @@ MCP agents drive scene assembly through `mcp_server.py` structural tools (`scene
 **Non-Goals:**
 - Running or managing TRELLIS.2 itself (server, weights, Modly extension) — separate concern, nothing in-repo depends on it.
 - glTF opacity/transmission, normal maps, emissive, occlusion intake — only the channels the flat-material binder already consumes (`diffuseColor`, `roughness`, `metallic`) are in scope; others remain future work.
-- Full glTF 2.0 coverage in the converter — scope is the asset shape local generators emit (single/multi mesh, POSITION/NORMAL/TEXCOORD_0, embedded PNG/JPEG/WebP images, pbrMetallicRoughness); Draco compression, sparse accessors, skinning, animation, and vendor extensions are refused with a clear error naming the unsupported feature.
+- Full glTF 2.0 coverage in the converter — scope is the asset shape local generators emit (single/multi mesh, POSITION/NORMAL/TEXCOORD_0, embedded PNG/JPEG/WebP images, pbrMetallicRoughness). Out-of-scope features that would silently corrupt or misplace an import are **refused by name**: Draco/meshopt/quantization, sparse accessors, skinning, animation, morph targets, node transforms, mesh instancing, and external image URIs. Features that merely degrade fidelity are **not imported** and left as a documented gap rather than refused: normal/occlusion/emissive textures, secondary UV sets, alpha modes. The accessor decoder honors `byteStride` (interleaved buffers) and `normalized` integers and bounds-checks every read.
+
+  Deliberately-accepted residual gaps (post-review, change scoped to generator output): a `UsdTransform2d` reached only through a `NodeGraph` output on a texture's `st` (no known producer authors this — usdextract and this converter author it directly); and the `check_path`→convert TOCTOU window, which is identical to the existing `scene_add_model` contract and inside the same "guardrail against agent mistakes, not a sandbox against an adversary" threat model, not a new exposure.
 - Per-texture arbitrary UV transforms in the shader (see D2).
 
 ## Decisions

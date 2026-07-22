@@ -384,21 +384,21 @@ def _resolve_st_transform(
         return None
 
     def _float2(name: str, default: tuple[float, float]) -> tuple[float, float]:
-        inp = xf.GetInput(name)
-        v = inp.Get() if inp is not None else None
-        if v is None:
-            return default
         try:
+            inp = xf.GetInput(name)
+            v = inp.Get() if inp is not None else None
+            if v is None:
+                return default
             return float(v[0]), float(v[1])
-        except (TypeError, ValueError, IndexError):
+        except Exception:
             return default
 
     def _float(name: str, default: float) -> float:
-        inp = xf.GetInput(name)
-        v = inp.Get() if inp is not None else None
         try:
+            inp = xf.GetInput(name)
+            v = inp.Get() if inp is not None else None
             return float(v) if v is not None else default
-        except (TypeError, ValueError):
+        except Exception:
             return default
 
     sx, sy = _float2("scale", (1.0, 1.0))
@@ -420,25 +420,23 @@ def _majority_uv_transform(
     material: "Material",
 ) -> Optional[tuple[float, float, float, float, float]]:
     """The UsdTransform2d shared by the majority of a material's texture
-    bindings, or None when none author one. Warns on disagreement — no known
+    bindings, or None when the majority author none. A binding without a
+    transform votes for identity, so a single transformed texture cannot
+    outvote several untransformed ones. Warns on disagreement — no known
     producer authors differing transforms across one material's textures."""
-    transforms = [
-        b.uv_transform
-        for b in material.texture_bindings.values()
-        if b.uv_transform is not None
-    ]
-    if not transforms:
+    if not material.texture_bindings:
         return None
     counts: dict[tuple, int] = {}
-    for t in transforms:
-        counts[t] = counts.get(t, 0) + 1
+    for b in material.texture_bindings.values():
+        key = b.uv_transform if b.uv_transform is not None else _UV_TRANSFORM_IDENTITY
+        counts[key] = counts.get(key, 0) + 1
     top = max(counts, key=lambda k: counts[k])
     if len(counts) > 1:
         print(
             f"[skinny] material {material.name!r}: texture bindings disagree on "
             f"UsdTransform2d; applying majority {top}"
         )
-    return top
+    return None if top == _UV_TRANSFORM_IDENTITY else top
 
 
 def _bake_uv_transform(source: MeshSource, material: "Material") -> None:
