@@ -50,6 +50,14 @@ class TextureBinding:
     source_color_space: str = "auto"  # "sRGB", "raw", "auto"
     wrap_s: str = "repeat"        # "repeat", "clamp", "mirror", "black"
     wrap_t: str = "repeat"
+    # UsdTransform2d applied to `st` upstream of this UsdUVTexture, as
+    # (scale_x, scale_y, translation_x, translation_y, rotation_degrees).
+    # None means identity/absent. glTF-derived USD authors the V-flip
+    # (1, -1, 0, 1, 0) here. The loader bakes this into mesh UVs at load
+    # time (usd-texture-intake), so the renderer never reads it.
+    uv_transform: Optional[
+        tuple[float, float, float, float, float]
+    ] = None
 
 
 @dataclass

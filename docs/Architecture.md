@@ -649,6 +649,24 @@ per-input channel selectors into `channelMask` (4 bits per input), so the
 shader fetches the correct channel and applies the right normal-map convention
 without per-texture branches.
 
+The `file` value is resolved through `GetValueProducingAttributes`
+(`_resolve_texture_binding`), so a `UsdUVTexture.inputs:file` authored as a
+*connection* to a Material interface input — the shape Apple's glTF→USD
+conversion and many DCC exporters emit (`file <- Material0.baseColorTexture`) —
+resolves instead of dropping to flat white (change `glb-asset-import`, spec
+`usd-texture-intake`). A `UsdTransform2d` on a texture's `st` chain
+(`_resolve_st_transform`) is captured as `TextureBinding.uv_transform` and
+**baked into the mesh UVs at load** (`_bake_uv_transform`), applied in raw USD
+st-space before the loader's existing USD→skinny V-convention flip: the net
+`flip(T(flip(uvs)))` collapses the glTF `scale (1,-1)`/`translation (0,1)`
+V-flip and the convention flip back to the raw glTF texcoords. Identity/absent
+transform short-circuits (UV output bit-identical); the per-prim build loop
+resolves the material and bakes UVs **before** computing the mesh content hash,
+so shared geometry under materials with differing transforms keys distinct mesh
+cache entries. The converter that produces such assets from a GLB is
+`glb_import.py` (pure-Python pygltflib + pxr), reachable one-call through the
+`scene_import_glb` MCP tool.
+
 ### Default-Light Synthesis Policy (`renderer.py`)
 
 The central `Renderer.uses_default_lights` decision grants lighting authority

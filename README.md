@@ -411,6 +411,7 @@ claude mcp add --transport http skinny http://127.0.0.1:8765/mcp \
 | `scene_set(path, property, value)` | Write one property |
 | `scene_create(force)` | Start a fresh empty editable scene (a bare `/World`) so edits work with no scene loaded; refuses if one is already loaded unless `force=true` |
 | `scene_add_model(usd_path, name, parent, translate/rotate_euler_deg/scale or matrix)` | Reference a USD file into the scene |
+| `scene_import_glb(glb_path, name, parent, out_dir, overwrite, transform)` | Convert a GLB to USD (built-in pure-Python converter, works on macOS/Linux/Windows) and reference it in one call — the drop-in path for image-to-3D output (e.g. TRELLIS.2). Refuses out-of-scope glTF (Draco, skinning, animation) by name |
 | `scene_add_primitive(type, color, roughness, metallic, material, name, parent, transform)` | Add a Sphere/Cube/Cylinder/Cone/Capsule/Plane with its own editable material, or bind `material` (a preset/template name, or an existing `/Materials/...` path) instead of the inline `color`/`roughness`/`metallic` seed |
 | `scene_add_light(light_type, intensity, color, name, parent, transform)` | Add a DistantLight/SphereLight/DomeLight/RectLight/DiskLight |
 | `material_list()` | Discovery: curated preset catalog (with editable inputs), the `preview`/`standard_surface` parametric schemas, the nodegraph node whitelist, and the procedural template schemas — renderer-free, everything needed to build a `scene_add_material` spec |
@@ -643,6 +644,28 @@ author intent and therefore suppress the fallback pair.
 | `skin_sphere_light_demo.usda` | Skin under sphere lighting |
 | `test_scene.usda` | Multi-material test scene |
 | `three_materials_demo.usda` | Marble + wood + brass MaterialX nodegraphs |
+
+#### Importing generated GLB assets (image-to-3D)
+
+Local image-to-3D models (e.g. **TRELLIS.2**) emit textured `.glb` meshes with
+PBR materials (base color + packed metallic-roughness). Bring one into a scene
+in one step with the `scene_import_glb` MCP tool — it runs a built-in
+pure-Python GLB→USD converter (`skinny.glb_import`, pygltflib + pxr; the same
+on macOS, Linux, and Windows, no external tools) and references the result:
+
+```python
+from skinny.glb_import import convert_glb_to_usd
+usd = convert_glb_to_usd("crown.glb", "crown_usd/")   # → crown_usd/crown.usdc + textures
+```
+
+The converter authors a UsdPreviewSurface network the renderer reads directly:
+base color and packed metallic (`.b`) / roughness (`.g`) as `UsdUVTexture`
+nodes, UVs pre-flipped to USD's V convention. Out-of-scope glTF features (Draco
+compression, sparse accessors, skinning, animation) are refused by name. On
+macOS, Apple's system `usdextract` is an alternative that produces
+interface-connected texture inputs and a `UsdTransform2d` V-flip; the loader
+resolves both shapes too, so externally-converted USD renders correctly as
+well.
 
 ## Rendering Modes
 

@@ -598,6 +598,18 @@ class SceneTools:                                     # proxy or bare queue
     def scene_add_model(usd_path, name=None, parent=None,
                          translate=None, rotate_euler_deg=None, scale=None,
                          matrix=None) -> dict
+    # glb-asset-import: convert a GLB to USD (built-in pure-Python converter,
+    # pygltflib + pxr; macOS/Linux/Windows) and reference it in one call. Both
+    # glb_path and the resolved out_dir must resolve inside the allowed roots;
+    # the produced .usdc is handed to scene_add_model (same subtree validation
+    # + job degradation). out_dir defaults to <stem>_usd beside the GLB; an
+    # existing conversion is refused unless overwrite=True. Conversion runs
+    # synchronously on the tool thread (a large GLB blocks this call for its
+    # duration -- the pollable job covers only the add). An out-of-scope glTF
+    # feature (Draco, sparse accessors, skinning, animation) errors by name.
+    def scene_import_glb(glb_path, name=None, parent=None, out_dir=None,
+                         overwrite=False, translate=None, rotate_euler_deg=None,
+                         scale=None, matrix=None) -> dict
     def scene_add_primitive(type, color=None, roughness=None, metallic=None,
                              material=None, name=None, parent=None,
                              translate=None, rotate_euler_deg=None, scale=None,
