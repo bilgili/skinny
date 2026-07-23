@@ -175,13 +175,18 @@ class TestPlanckBlackbody:
     numpy ``spectral.blackbody_emission`` at the 4 hero wavelengths."""
 
     def test_matches_mirror(self, spectrum_harness):
+        # The harness compiles spectrum.slang WITHOUT -DSKINNY_SPECTRAL, so
+        # `Spectrum` is float3 and test_planck only fills SPECTRUM_N lanes
+        # (.w stays 0 in the RGB build) — compare exactly that many.
+        n = int(spectrum_harness.test_spectrumWidth())
         errs: list[float] = []
         for temp in (3000.0, 5500.0, 6500.0):
             for u in _US:
                 sw = spectral.sample_wavelengths(u)
                 ref = spectral.blackbody_emission(sw, temp)
                 gpu = spectrum_harness.test_planck(float(u), float(temp))
-                _assert_close(gpu, ref, f"planck(u={u}, T={temp})", errs)
+                gpu_lanes = [float(x) for x in gpu][:n]
+                _assert_close(gpu_lanes, ref[:n], f"planck(u={u}, T={temp})", errs)
         print(f"\nplanckSpectrum max rel err: {max(errs):.3e}")
 
 

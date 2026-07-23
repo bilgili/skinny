@@ -60,6 +60,13 @@ float4 test_planck(float u, float temperature)
     return r;
 }
 
+// Carrier width of this compile (4 spectral / 3 RGB) so the Python test knows
+// how many test_planck lanes are meaningful.
+float test_spectrumWidth()
+{
+    return float(SPECTRUM_N);
+}
+
 // The upsample wrappers take the sRGB table (res/scale/data) and D65 curve as
 // explicit function PARAMETERS rather than reading the module globals: slangpy
 // binds a numpy array straight to a `StructuredBuffer<float>` parameter, so the
