@@ -1,0 +1,133 @@
+# renderer-module-structure — Delta Specification
+
+Change: `renderer-module-carveout`. New capability: structural requirements on
+the renderer host layer so pure logic is hostless-testable and backend-paired
+orchestration lives behind the existing pass-object seams — as a pure
+refactor, bit-identical, with the metal-backend spec preserved verbatim.
+
+## ADDED Requirements
+
+### Requirement: MLT chain-state orchestration lives in a dedicated module with a hostless-testable pure core
+
+The renderer's MLT host orchestration SHALL live in a dedicated module
+outside `renderer.py`, alongside the existing pure `mlt_bootstrap.py` core —
+covering the per-reset replay seed derivation, the
+mutation-iterations-per-frame budget, the uniform-tail-active predicate, and
+the bootstrap round-trip sequencing (bootstrap dispatch → weight readback →
+chain-seed resample → seed upload → chain-init dispatch → `b` publication).
+The seed derivation, iterations budget, and tail predicate MUST be pure
+functions importable and testable without a GPU device or a constructed
+renderer, and the seed formula MUST remain numerically identical to the
+current implementation (its cross-process reproducibility underpins the
+parity gate's MLT determinism). Both backends SHALL drive the bootstrap
+round-trip through the single shared sequence, supplying only their own
+submit/upload primitives.
+
+#### Scenario: Pure MLT core is hostless-testable
+
+- **WHEN** the MLT chain-state module's seed, iterations-per-frame, and
+  uniform-tail-predicate functions are imported in a test process with no GPU
+  device and no `Renderer` instance
+- **THEN** they evaluate successfully, and the seed function returns exactly
+  the same integers as the pre-carve-out `Renderer._next_mlt_seed` for the
+  same `frame_index` values
+
+#### Scenario: MLT rendering is bit-identical after the extraction
+
+- **WHEN** an MLT suite scene is rendered at equal budget on either backend
+  before and after the MLT chain-state extraction
+- **THEN** the two images are bit-identical (same seed, same chains, same
+  splats), and the parity matrix MLT combos pass with unchanged measured
+  values and unchanged tolerances
+
+### Requirement: Frame-constant derivation is pure and separate from byte packing
+
+Every derived value in the frame-constant packing path SHALL be computed by
+pure, device-free functions in a dedicated module — camera view/projection
+inverses, the lens FOV-framing ratio and sensor half-height, the detail-flag
+bitfield, the exposure/imaging-ratio fold, the emissive total power, and the
+proposal-mask/reuse capability folding (including the megakernel neural-bit
+strip and mixture renormalisation) — with the packing method consuming their
+results as plain values. The packing method MUST NOT gain or
+lose side effects, and the packed byte stream MUST remain byte-identical for
+every state combination. Serialization itself (append order, offsets,
+reflection-driven MSL relocation) remains the scope of the
+`reflection-owned-byte-layouts` change and is out of scope here.
+
+#### Scenario: Derivation is hostless-testable
+
+- **WHEN** the derivation module's functions (detail flags, lens framing,
+  exposure fold, sampling-capability folding) are exercised in a test process
+  with no GPU device
+- **THEN** they return correct values for representative inputs — including
+  the lens-active framing ratio, the missing-map detail-flag masking, and the
+  neural-on-megakernel strip-and-renormalise case — without constructing a
+  `Renderer`
+
+#### Scenario: Packed uniforms are byte-identical
+
+- **WHEN** the frame-constant blob is packed before and after the derivation
+  extraction for a state matrix covering lens on/off, detail maps on/off,
+  each integrator, both execution modes, and the neural-on-megakernel case
+- **THEN** the packed bytes are equal in every case, on both the Vulkan and
+  the Metal (reflected MSL) packing paths
+
+### Requirement: Wavefront integrator pass construction and dispatch route through the pass-object seam
+
+Construction of the staged wavefront passes (path, BDPT, SPPM, MLT) SHALL be
+supplied by per-backend factories in the backend modules
+(`vk_wavefront` / `metal_wavefront`), and the renderer SHALL hold one
+ensure/cache path per integrator — keyed by the existing rebuild keys, whose
+values MUST NOT change — instead of per-backend `_ensure_*` /
+`_ensure_*_metal` method pairs. Per-frame dispatch SHALL go through the
+existing pass-object surfaces (`record_dispatch`/`record_frame` on Vulkan,
+`dispatch_frame` on Metal) with backend divergence confined to the backend
+adapters, mirroring the `wavefront_driver.WavefrontRecorder` precedent. The
+ensure path MUST preserve every existing unbuildable-pass None fallback
+(e.g. MLT/SPPM in a megakernel-mode session fall back to the path tracer,
+never crash) exactly as before the move. This
+requirement reduces renderer-resident `is_metal`/`_metal` sites; it MUST NOT
+alter the metal-backend capability's mandate that Vulkan-only paths
+short-circuit safely on Metal, and MUST NOT introduce a new backend
+abstraction layer beyond the existing duck-typed surfaces.
+
+#### Scenario: One ensure path per integrator
+
+- **WHEN** the renderer builds or rebuilds a staged wavefront pass for any
+  integrator on either backend
+- **THEN** it does so through a single backend-agnostic ensure path calling
+  the active backend's pass factory, and the rebuild key computed for the
+  pass equals the pre-carve-out key value for the same renderer state
+
+#### Scenario: Wavefront rendering is bit-identical across the seam move
+
+- **WHEN** the parity matrix wavefront combos (path, BDPT, SPPM, MLT; RGB and
+  spectral) run on both backends after the pass-seam extraction
+- **THEN** every combo passes its pbrt-truth and self-consistency gates with
+  unchanged measured values, unchanged baselines, and unchanged tolerances
+
+### Requirement: Every carve-out stage lands independently with bit-identity gates
+
+Each extraction stage of the renderer module carve-out SHALL be an
+independently landable unit (one PR-able task group) that leaves the renderer
+fully functional, and SHALL be gated before merge by: no modification to any
+file under `src/skinny/shaders/` (hence RGB `.spv` byte-unchanged), a green
+parity matrix with no baseline or tolerance edits, and the stage's specific
+bit-identity check (golden byte equality or bit-identical images). Follow-on
+clusters (USD live-edit, gizmo overlay, detail maps) SHALL be extracted in
+subsequent OpenSpec changes following the documented pattern, not in this
+change.
+
+#### Scenario: A stage merges under the bit-identity gate
+
+- **WHEN** a carve-out stage is proposed for merge
+- **THEN** its diff touches no shader source, the parity matrix passes with
+  unchanged recorded values, and the stage's golden-byte or bit-identical
+  image check passes on both backends
+
+#### Scenario: Follow-on clusters are deferred, not smuggled
+
+- **WHEN** the final carve-out stage of this change is complete
+- **THEN** the USD live-edit, gizmo overlay, and detail-map clusters remain
+  in `renderer.py`, and the documented extraction pattern names them, their
+  ordering, and the gate each future change must carry
