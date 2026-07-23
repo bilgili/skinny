@@ -177,6 +177,8 @@ def test_interactive_front_ends_recheck_persisted_mlt():
 
 
 def test_state_hash_still_includes_integrator_index():
-    src = _read("renderer.py")
-    start = src.index("def _current_state_hash")
-    assert "self.integrator_index" in src[start:start + 2000]
+    # Registry-derived hash (change param-registry-accumulation-reset):
+    # integrator_index must be a resets_accumulation contributor.
+    from skinny.params import STATIC_PARAMS
+    spec = next(p for p in STATIC_PARAMS if p.path == "integrator_index")
+    assert spec.resets_accumulation

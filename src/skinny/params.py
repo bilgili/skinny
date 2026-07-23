@@ -8,6 +8,7 @@ without pulling in GLFW.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -46,14 +47,37 @@ class ParamSpec:
     lo: float = 0.0
     hi: float = 0.0
     choice_source: str | None = None  # for discrete: attribute on renderer
+    # Accumulation-reset semantics (change param-registry-accumulation-reset).
+    # Default True — an undeclared new param fails safe with a visible spurious
+    # reset, never silent stale accumulation. Only post-process controls
+    # (tonemap_index, exposure) opt out.
+    resets_accumulation: bool = True
+    # Hash-value coercion override. None → derived from `kind` (continuous →
+    # float, discrete → int). The four continuous ReSTIR count params declare
+    # `int` here to preserve the legacy int() cast in the state hash (a
+    # fractional saved value changing within the same integer must not reset).
+    hash_coercion: Callable[[object], object] | None = None
 
 
-def _cont(name: str, path: str, step: float, lo: float, hi: float) -> ParamSpec:
-    return ParamSpec(name, path, "continuous", step, lo, hi)
+def _cont(
+    name: str, path: str, step: float, lo: float, hi: float,
+    resets_accumulation: bool = True,
+    hash_coercion: Callable[[object], object] | None = None,
+) -> ParamSpec:
+    return ParamSpec(
+        name, path, "continuous", step, lo, hi,
+        resets_accumulation=resets_accumulation, hash_coercion=hash_coercion,
+    )
 
 
-def _disc(name: str, path: str, choice_source: str) -> ParamSpec:
-    return ParamSpec(name, path, "discrete", choice_source=choice_source)
+def _disc(
+    name: str, path: str, choice_source: str,
+    resets_accumulation: bool = True,
+) -> ParamSpec:
+    return ParamSpec(
+        name, path, "discrete", choice_source=choice_source,
+        resets_accumulation=resets_accumulation,
+    )
 
 
 # ── Execution backend (orthogonal to the integrator axis) ──────────
@@ -124,17 +148,25 @@ STATIC_PARAMS: list[ParamSpec] = [
     # and reset accumulation. Integer sliders use step 1.
     _disc("ReSTIR regime",     "restir_regime_index",         "restir_regime_modes"),
     _disc("ReSTIR combine",    "restir_biased",               "restir_combination_modes"),
-    _cont("ReSTIR M light",    "restir_m_light",              1.0, 1.0, 64.0),
-    _cont("ReSTIR M bsdf",     "restir_m_bsdf",               1.0, 0.0, 8.0),
-    _cont("ReSTIR neighbours", "restir_spatial_k",            1.0, 0.0, 8.0),
+    _cont("ReSTIR M light",    "restir_m_light",              1.0, 1.0, 64.0,
+          hash_coercion=int),
+    _cont("ReSTIR M bsdf",     "restir_m_bsdf",               1.0, 0.0, 8.0,
+          hash_coercion=int),
+    _cont("ReSTIR neighbours", "restir_spatial_k",            1.0, 0.0, 8.0,
+          hash_coercion=int),
     _cont("ReSTIR radius",     "restir_spatial_radius",       1.0, 1.0, 64.0),
-    _cont("ReSTIR M cap",      "restir_m_cap",                1.0, 1.0, 64.0),
+    _cont("ReSTIR M cap",      "restir_m_cap",                1.0, 1.0, 64.0,
+          hash_coercion=int),
     # Execution mode (megakernel | wavefront) is a command-line / session
     # selection (`--execution-mode`), fixed at renderer construction — not a
     # runtime GUI toggle. So it is intentionally absent from STATIC_PARAMS
     # (no Combo, no settings snapshot). See Renderer.__init__(execution_mode=).
-    _disc("Tonemap",           "tonemap_index",               "tonemap_modes"),
-    _cont("Exposure (EV)",     "exposure",                    0.1, -10.0, 10.0),
+    # Post-process only — applied at tonemap over the finished accumulation
+    # buffer, so changes never reset accumulation (the sole opt-outs).
+    _disc("Tonemap",           "tonemap_index",               "tonemap_modes",
+          resets_accumulation=False),
+    _cont("Exposure (EV)",     "exposure",                    0.1, -10.0, 10.0,
+          resets_accumulation=False),
     _disc("Furnace mode",      "furnace_index",               "furnace_modes"),
     _disc("Model",             "model_index",                 "models"),
     _disc("Detail maps",       "detail_maps_index",           "detail_maps_modes"),
@@ -176,6 +208,69 @@ STATIC_PARAMS: list[ParamSpec] = [
 # to get the live list including dynamic material params; older code that
 # imports ALL_PARAMS directly still gets the static base.
 ALL_PARAMS = STATIC_PARAMS
+
+
+def _hashable_value(v: object) -> object:
+    """Coerce mtlx_overrides values into something hash()-friendly."""
+    if isinstance(v, (list, tuple)):
+        return tuple(float(x) for x in v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    return v
+
+
+@dataclass(frozen=True)
+class AccumStateProvider:
+    """A non-param contributor to the accumulation state hash.
+
+    `extractor(renderer)` returns a hashable value (duck-typed — params.py
+    stays hostless-importable, no renderer import). A provider may declare
+    that it covers a parameter-path prefix wholesale: the `mtlx_overrides`
+    provider covers every `mtlx.*` param (static and dynamic) through the
+    overrides dict, preserving today's semantics for unset overrides (they
+    ride `material_version`, not per-param defaults).
+    """
+    name: str
+    extractor: Callable[[object], object]
+    covers_prefix: str | None = None
+
+
+# Accumulation-affecting state that is not a user-facing parameter (change
+# param-registry-accumulation-reset). One home, hostless-enumerable;
+# `Renderer._current_state_hash` derives its tuple from STATIC_PARAMS
+# (resets_accumulation=True, minus provider-covered prefixes) + this list.
+ACCUM_STATE_PROVIDERS: list[AccumStateProvider] = [
+    AccumStateProvider("camera", lambda r: r.camera.state_signature()),
+    # E-4: user-direct MaterialX field overrides — sort for stable hash.
+    AccumStateProvider(
+        "mtlx_overrides",
+        lambda r: tuple(sorted(
+            (k, _hashable_value(v)) for k, v in r.mtlx_overrides.items()
+        )),
+        covers_prefix="mtlx.",
+    ),
+    AccumStateProvider("material_version", lambda r: int(r._material_version)),
+    # Heterogeneous-medium grid identity (nanovdb-volume-rendering): swapping
+    # the density grid changes every volume pixel. σ/g edits ride material_version.
+    AccumStateProvider("volume_grid_key", lambda r: r._volume_grid_key),
+    # Film per-sample radiance clamp (film-maxcomponent-clamp): changes every pixel.
+    AccumStateProvider("film_max_component", lambda r: float(r.film_max_component)),
+    # Improper-camera mirror: changing it flips the image.
+    AccumStateProvider("camera_mirror", lambda r: bool(r._camera_mirror)),
+    # USD playback time — changes every frame while playing (1 spp in motion).
+    AccumStateProvider("usd_time_code", lambda r: float(r.clock.current_time_code)),
+    # SPPM per-pass tuning overrides (sppm-glossy-final-gather): getattr
+    # preserves the legacy absent-attribute tolerance.
+    AccumStateProvider(
+        "sppm_radius_override",
+        lambda r: getattr(r, "_sppm_radius_override", None)),
+    AccumStateProvider(
+        "sppm_photons_override",
+        lambda r: getattr(r, "_sppm_photons_override", None)),
+    AccumStateProvider(
+        "sppm_glossy_roughness_override",
+        lambda r: getattr(r, "_sppm_glossy_roughness_override", None)),
+]
 
 
 _GANGED_MTLX_FIELDS: dict[str, list[str]] = {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import math
+import operator
 import struct
 import threading
 import time
@@ -42,8 +43,11 @@ from skinny.mesh_cache import (
     save_cached_mesh,
 )
 from skinny.params import (
+    ACCUM_STATE_PROVIDERS,
     EXECUTION_MEGAKERNEL,
     EXECUTION_WAVEFRONT,
+    STATIC_PARAMS,
+    _hashable_value as _hashable_value,  # re-export: ui/qt/windows/bxdf.py imports from here
     clamp_mode_index,
     effective_execution_mode,
 )
@@ -368,13 +372,32 @@ def _encode_channel_mask(channels: dict[str, str]) -> int:
     return mask & 0xFFFFFFFF
 
 
-def _hashable_value(v: object) -> object:
-    """Coerce mtlx_overrides values into something hash()-friendly."""
-    if isinstance(v, (list, tuple)):
-        return tuple(float(x) for x in v)
-    if isinstance(v, (int, float)):
-        return float(v)
-    return v
+_ACCUM_HASH_RESOLVERS: list[tuple] | None = None
+
+
+def _accum_hash_resolvers() -> list[tuple]:
+    """(attrgetter, coerce) pairs for the registry-derived state hash.
+
+    Built once per process — STATIC_PARAMS is fixed, so the resolver list is
+    too. Coercion defaults from the param kind (continuous→float,
+    discrete→int) unless the ParamSpec declares a ``hash_coercion`` override
+    (the four continuous ReSTIR count params keep their legacy int() cast).
+    """
+    global _ACCUM_HASH_RESOLVERS
+    if _ACCUM_HASH_RESOLVERS is None:
+        covered = [
+            p.covers_prefix for p in ACCUM_STATE_PROVIDERS if p.covers_prefix
+        ]
+        _ACCUM_HASH_RESOLVERS = [
+            (
+                operator.attrgetter(p.path),
+                p.hash_coercion or (float if p.kind == "continuous" else int),
+            )
+            for p in STATIC_PARAMS
+            if p.resets_accumulation
+            and not any(p.path.startswith(pre) for pre in covered)
+        ]
+    return _ACCUM_HASH_RESOLVERS
 
 
 def _light_value_to_vec3(value: object) -> np.ndarray:
@@ -1759,8 +1782,8 @@ class Renderer:
         # every lobe (the default; the all-native selection is bit-identical to the
         # pre-change renderer). Modes are data-driven from the registry so each
         # lobe offers only valid strategies (basis VNDF on coat/spec,
-        # uniform-hemisphere on diffuse). Hashed into _current_state_hash so a
-        # change resets accumulation.
+        # uniform-hemisphere on diffuse). Reset-on-change: declared in the
+        # params.py registry (ParamSpec.resets_accumulation).
         from skinny.sampling import (
             LOBE_COAT,
             LOBE_DIFFUSE,
@@ -1792,8 +1815,8 @@ class Renderer:
         self.restir_combination_modes: list[str] = ["Unbiased (GRIS)", "Biased (ΣM)"]
         self.restir_biased = 0
         # ReSTIR tuning (push-constant only — refreshed per frame, no pass
-        # rebuild). Gated visible in the UI when ReSTIR DI is active; folded into
-        # _current_state_hash so changes reset accumulation.
+        # rebuild). Gated visible in the UI when ReSTIR DI is active; reset
+        # semantics declared in the params.py registry (resets_accumulation).
         self.restir_m_light = 8        # initial light-sampled candidates
         self.restir_m_bsdf = 1         # initial BSDF-sampled candidates
         self.restir_spatial_k = 5      # spatial neighbours
@@ -1873,7 +1896,7 @@ class Renderer:
         # Display exposure (EV stops) and tonemap operator applied at the
         # end of main_pass.slang after progressive accumulation. These are
         # post-process knobs so they do not invalidate the accumulation
-        # buffer and are excluded from `_current_state_hash`.
+        # buffer — the sole resets_accumulation=False opt-outs in params.py.
         self.tonemap_modes: list[str] = ["ACES", "Reinhard", "Hable", "Linear"]
         self.tonemap_index = 0
         self.exposure = 0.0
@@ -1915,8 +1938,9 @@ class Renderer:
 
         # Heterogeneous-medium density grid state (nanovdb-volume-rendering).
         # `_volume_grid_key` identifies the uploaded grid ((asset, value_max);
-        # None = the always-bound 1×1×1 zero fallback) and feeds
-        # `_current_state_hash` so a grid swap resets accumulation.
+        # None = the always-bound 1×1×1 zero fallback) and feeds the
+        # `volume_grid_key` provider (params.py ACCUM_STATE_PROVIDERS) so a
+        # grid swap resets accumulation.
         # `_volume_world_to_uvw` / `_volume_value_max` feed pack_flat_material.
         self._volume_grid_key: "Optional[tuple]" = None
         self._volume_world_to_uvw = None   # (3, 4) float32 or None (identity)
@@ -2129,7 +2153,8 @@ class Renderer:
 
     # ── Execution backend (megakernel | wavefront) ──────────────────
     # The mode is fixed at construction (CLI `--execution-mode`), so there is
-    # no runtime setter / cycler and it is excluded from `_current_state_hash`.
+    # no runtime setter / cycler and it is deliberately absent from the
+    # params.py accumulation registry (no ParamSpec, no provider).
 
     @property
     def _scene_set0_layout(self):
@@ -4616,9 +4641,9 @@ class Renderer:
         )
 
         # Bumped any time apply_material_override mutates a scene material's
-        # parameter_overrides. Hashed into _current_state_hash so the
-        # progressive accumulation resets on a slider drag in the
-        # per-material panel.
+        # parameter_overrides. Feeds the `material_version` provider
+        # (params.py ACCUM_STATE_PROVIDERS) so progressive accumulation
+        # resets on a slider drag in the per-material panel.
         self._material_version: int = 0
 
         # Offscreen output image + readback buffer. Always created — used by
@@ -8931,7 +8956,8 @@ class Renderer:
         (nz, ny, nx) order. The previous texture is destroyed and replaced; a
         scene with no grid restores the 1×1×1 zero fallback. Also caches the
         world→uvw rows + value max for `pack_flat_material`'s σ folds, and the
-        grid identity key for `_current_state_hash` (accumulation reset).
+        grid identity key hashed via the `volume_grid_key` provider
+        (params.py ACCUM_STATE_PROVIDERS — accumulation reset).
         Call BEFORE the scene's material upload so volume materials pack against
         the fresh grid state.
         """
@@ -10902,70 +10928,22 @@ class Renderer:
         return base.tobytes()
 
     def _current_state_hash(self) -> int:
-        """Hash camera + material + light state. Changes reset the accumulation."""
-        parts = (
-            self.camera.state_signature(),
-            float(self.light_elevation), float(self.light_azimuth),
-            float(self.light_intensity),
-            float(self.light_color_r), float(self.light_color_g), float(self.light_color_b),
-            int(self.env_index),
-            int(self.direct_light_index),
-            int(self.model_index),
-            int(self.tattoo_index),
-            float(self.tattoo_density),
-            int(self.scatter_index),
-            int(self.integrator_index),
-            # Scene-sampling seam: changing the proposal mixture or reuse mode
-            # resets accumulation so the new configuration converges cleanly.
-            int(self.proposal_preset_index),
-            int(self.reuse_index),
-            # Per-lobe sampler selection (flat BSDF) — same reset semantics.
-            int(self.coat_sampler_index),
-            int(self.spec_sampler_index),
-            int(self.diff_sampler_index),
-            int(self.restir_regime_index),
-            bool(self.restir_biased),
-            int(self.restir_m_light), int(self.restir_m_bsdf),
-            int(self.restir_spatial_k), float(self.restir_spatial_radius),
-            int(self.restir_m_cap),
-            # execution_mode_index is fixed for the session (CLI-selected), so
-            # it never changes mid-session and is omitted from the hash.
-            float(self.env_intensity),
-            int(self.furnace_index),
-            float(self.mm_per_unit),
-            # Heterogeneous-medium grid identity (nanovdb-volume-rendering):
-            # swapping the density grid (scene change) changes every volume
-            # pixel, so reset accumulation. Material σ/g edits ride on
-            # `_material_version` like every other override edit.
-            self._volume_grid_key,
-            # Film per-sample radiance clamp (change film-maxcomponent-clamp):
-            # changing it changes every pixel, so reset accumulation.
-            float(self.film_max_component),
-            # Improper-camera mirror: changing it flips the image, so reset accum.
-            bool(self._camera_mirror),
-            # pbrt film exposure controls (change pbrt-radiometric-parity): retuning
-            # ISO / exposure time rescales every pixel, so reset accumulation.
-            float(self.film.iso), float(self.film.exposure_time),
-            int(self.detail_maps_index),
-            float(self.normal_map_strength),
-            float(self.displacement_scale_mm),
-            int(self.preset_index),
-            int(self._material_version),
-            # USD playback time — while playing this changes every frame so
-            # accumulation resets (1 spp in motion); stable when paused.
-            float(self.clock.current_time_code),
-            # E-4: user-direct MaterialX field overrides — sort for stable hash
-            tuple(sorted(
-                (k, _hashable_value(v)) for k, v in self.mtlx_overrides.items()
-            )),
-            # SPPM per-pass tuning overrides (change sppm-glossy-final-gather):
-            # changing any resets accumulation so an A/B (e.g. glossy threshold 0
-            # vs the tuned default on one reused renderer) converges cleanly
-            # instead of accumulating across configurations.
-            getattr(self, "_sppm_radius_override", None),
-            getattr(self, "_sppm_photons_override", None),
-            getattr(self, "_sppm_glossy_roughness_override", None),
-        )
+        """Hash camera + material + light state. Changes reset the accumulation.
+
+        Derived from the params.py registry (change
+        param-registry-accumulation-reset): every STATIC_PARAMS entry with
+        ``resets_accumulation=True`` — minus provider-covered prefixes
+        (``mtlx.*`` rides the ``mtlx_overrides`` provider dict) — coerced per
+        its kind (continuous→float, discrete→int) or its declared
+        ``hash_coercion`` override, followed by each ``ACCUM_STATE_PROVIDERS``
+        extractor in registry order. Adding a ParamSpec IS registering it
+        here; new non-param state registers a provider. Invariant gated by
+        tests/test_accum_reset_registry.py. (execution_mode_index stays out:
+        fixed for the session, CLI-selected.)
+        """
+        parts = tuple(
+            coerce(get(self)) for get, coerce in _accum_hash_resolvers()
+        ) + tuple(p.extractor(self) for p in ACCUM_STATE_PROVIDERS)
         return hash(parts)
 
     def update(self, dt: float) -> None:
