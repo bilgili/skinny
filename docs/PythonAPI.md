@@ -440,7 +440,7 @@ Adjustable parameters are addressed by a **`path` string** resolved on the
 
 ```python
 @dataclass
-class ParamSpec:                                      # :40
+class ParamSpec:                                      # :41
     name: str
     path: str                       # e.g. "mtlx.skin_bsdf_roughness"
     kind: str                       # "continuous" | "discrete"
@@ -448,9 +448,19 @@ class ParamSpec:                                      # :40
     lo: float = 0.0
     hi: float = 0.0
     choice_source: str | None = None  # discrete: renderer attribute holding the choice list
+    resets_accumulation: bool = True
+    hash_coercion: Callable[[object], object] | None = None
 ```
 
-### `path` resolution (`_get_nested` / `_set_nested`, `params.py:214` / `:255`)
+`Renderer._current_state_hash()` derives its parameter-backed contributors from
+the `ParamSpec` entries whose `resets_accumulation` flag is true. Continuous
+parameters contribute as `float`, discrete parameters as `int`, unless
+`hash_coercion` supplies a legacy-compatible override. Non-parameter state is
+registered through the frozen `AccumStateProvider` records in
+`ACCUM_STATE_PROVIDERS`; a provider may use `covers_prefix` to cover a family of
+parameter paths, as the `mtlx_overrides` provider does for `mtlx.*`.
+
+### `path` resolution (`_get_nested` / `_set_nested`, `params.py:348` / `:389`)
 
 > These two are **module-private functions** in `params.py` (not `Renderer`
 > methods), but they are the load-bearing mechanism behind every slider/preset.

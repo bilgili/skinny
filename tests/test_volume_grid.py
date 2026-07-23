@@ -222,18 +222,20 @@ class TestWorldToUvw:
 
 class TestStateHashCoverage:
     def test_volume_grid_key_is_hashed(self):
-        """`_current_state_hash` must include the volume-grid identity so a
-        grid swap resets progressive accumulation (source-inspection, same
-        precedent as tests/test_sppm_selection.py)."""
-        import inspect
-
-        import skinny.renderer as renderer_mod
-        src = inspect.getsource(renderer_mod.Renderer)
-        start = src.index("def _current_state_hash")
-        body = src[start:start + 4000]
-        assert "self._volume_grid_key" in body, (
-            "_current_state_hash must hash _volume_grid_key "
+        """The volume-grid identity must be a registered accumulation-state
+        provider (change param-registry-accumulation-reset) so a grid swap
+        resets progressive accumulation."""
+        from skinny.params import ACCUM_STATE_PROVIDERS
+        provider = next(
+            (p for p in ACCUM_STATE_PROVIDERS if p.name == "volume_grid_key"),
+            None)
+        assert provider is not None, (
+            "volume_grid_key must be an ACCUM_STATE_PROVIDERS entry "
             "(accumulation reset on density-grid swap)")
+
+        class _Fake:
+            _volume_grid_key = ("asset.nvdb", 2.5)
+        assert provider.extractor(_Fake()) == ("asset.nvdb", 2.5)
 
 
 class TestCloudPacking:

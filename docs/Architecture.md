@@ -597,7 +597,8 @@ converges to the same image.
 - **Exposure** — `fc.exposure` (EV stops, applied as `2^EV`) before tonemapping.
 - **Tonemap operator** — `fc.tonemapMode`: 0 = ACES filmic (Narkowicz),
   1 = Reinhard, 2 = Hable/Uncharted 2, 3 = Linear clamp. Exposure and tonemap
-  are post-process knobs — changing them does **not** reset accumulation.
+  are post-process knobs — changing them does **not** reset accumulation
+  (the sole `resets_accumulation=False` opt-outs in the `params.py` registry).
 - **Tool readback** (binding 30, `toolBuffer`) — one-shot probes that write
   per-pixel data back to the CPU: scene pick (`fc.pickArmed` + `fc.pickPixel`
   → `HitInfo`), the BXDF visualiser (`TOOL_MODE_BXDF`), and a BSSRDF probe
@@ -757,8 +758,9 @@ re-evaluates only the indexed prims at `current_time_code`: animated transforms
 recompute the world matrix (`_world_transform`) and re-upload only those TLAS
 `instance_buffer` records (no mesh rebake / BVH rebuild); animated lights are
 re-extracted; an animated USD camera feeds a follower used in `camera_mode ==
-"usd"`. `current_time_code` is folded into `_current_state_hash`, so playback
-resets accumulation (1 spp in motion, converges when paused). A built-in
+"usd"`. `current_time_code` feeds the `usd_time_code` accumulation-state
+provider (`params.py:ACCUM_STATE_PROVIDERS` → `_current_state_hash`), so
+playback resets accumulation (1 spp in motion, converges when paused). A built-in
 transport (play/pause, normalized scrubber, fps) lives in the shared spec tree,
 shown only when the stage has animation.
 
@@ -1655,7 +1657,7 @@ a build-time requirement (generated `.slang` files are checked into git).
 | `mesh.py` | `Mesh`, `MeshSource` | OBJ loading, subdivision, displacement, BVH construction |
 | `mesh_cache.py` | — | On-disk BVH cache (zstd-compressed vertex/index/BVH blobs, `~/.skinny/mesh_cache/`) |
 | `environment.py` | `Environment` | HDR env map loading (.hdr decoder), built-in presets |
-| `params.py` | `ParamSpec` | Shared parameter definitions, get/set helpers, persistence |
+| `params.py` | `ParamSpec`, `AccumStateProvider` | Shared parameter definitions, get/set helpers, persistence; accumulation-reset registry (`ParamSpec.resets_accumulation` + `ACCUM_STATE_PROVIDERS`) |
 | `hardware.py` | `GpuInfo`, `GpuVendor` | GPU enumeration, vendor detection, encoder selection |
 | `video_encoder.py` | `VideoEncoder` | H264/JPEG encoding with hw-aware fallback, Annex B→AVCC |
 | `scene_graph.py` | `SceneGraphNode`, `SceneGraphProperty`, `RendererRef` | USD prim hierarchy tree model with typed editable properties |
@@ -1742,7 +1744,18 @@ tail.
   Python side must match exactly.
 - **Progressive accumulation**: running mean in linear HDR. One NaN permanently
   poisons a pixel — guarded in `main_pass.slang` (reject NaN / inf / negative
-  before accumulation).
+  before accumulation). The reset trigger, `Renderer._current_state_hash`, is
+  **derived from the `params.py` registry** (change
+  param-registry-accumulation-reset): every `ParamSpec` with
+  `resets_accumulation=True` (the default; only `tonemap_index`/`exposure` opt
+  out) contributes, coerced per its kind or declared `hash_coercion` override
+  (the four continuous ReSTIR count params keep their legacy `int()` cast),
+  plus the named non-param contributors in `ACCUM_STATE_PROVIDERS` (camera
+  signature, `mtlx_overrides` dict — covering all `mtlx.*` params wholesale —
+  material version, volume-grid key, film clamp, camera mirror, USD time code,
+  SPPM overrides). Adding a `ParamSpec` IS registering its reset semantics;
+  the contributor-set invariant is gated hostlessly by
+  `tests/test_accum_reset_registry.py`.
 - **Furnace mode**: `main_pass.slang` flags energy-conservation violations
   in pink. Supports both global (`fc.furnaceMode`) and per-material (bit 10
   in `materialTypes[]`) furnace probes via `effectiveFurnaceMode()`. Every
