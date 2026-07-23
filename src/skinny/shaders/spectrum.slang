@@ -84,6 +84,10 @@ SampledWavelengths terminateSecondary(SampledWavelengths sw)
 // 2hc²/(λ⁵·(exp(hc/λk_BT)−1)), λ in metres. Un-normalized; the per-emitter
 // luminance match is a host-computed scalar (spectral.blackbody_scale), applied
 // by the caller — never here. Returns 0 for a non-positive temperature.
+// Loops SPECTRUM_N (not a hardcoded 4): `Spectrum` is float3 in the RGB build
+// (the kernel-test harness compiles this module without -DSKINNY_SPECTRAL), and
+// a fixed 4-lane write on float3 is rejected by the Metal backend (`.w` on a
+// 3-vector) even though SPIR-V silently tolerated it.
 Spectrum planckSpectrum(SampledWavelengths sw, float temperature)
 {
     if (temperature <= 0.0)
@@ -93,7 +97,7 @@ Spectrum planckSpectrum(SampledWavelengths sw, float temperature)
     const float kb = 1.3806488e-23;    // Boltzmann constant (J/K)
     Spectrum L;
     [ForceUnroll]
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < SPECTRUM_N; ++i)
     {
         float lam = sw.lambda[i] * 1e-9;                 // nm → m
         float lam5 = lam * lam * lam * lam * lam;
