@@ -17,7 +17,20 @@ from __future__ import annotations
 import argparse
 import os
 
-from skinny import mlt_capability, spectral_capability
+from skinny import render_envelope
+
+
+def _envelope_mode(execution_mode: str | None) -> str:
+    """The predicate's execution-mode value for a CLI ``--execution-mode``.
+
+    Only an explicit ``megakernel`` — or a missing value, whose front-end default
+    is the megakernel — pins the fused dispatch. Anything else, including an
+    as-yet-unresolved ``auto``, is *not* the megakernel and must not trip a
+    megakernel refusal: :func:`validate_render_flags` runs **before**
+    :func:`resolve_execution_mode` on the interactive front-ends, so ``auto``
+    genuinely reaches the guards.
+    """
+    return "megakernel" if (execution_mode or "megakernel") == "megakernel" else "wavefront"
 
 # path → integrator_index, mirroring the renderer's integrator ordering.
 INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
@@ -149,7 +162,7 @@ def validate_render_flags(args) -> None:
         reject_sppm_without_wavefront(integrator, getattr(args, "execution_mode", "megakernel"))
         return
     if integrator == "mlt":
-        # MLT is wavefront-only and RGB/layer-free in v1; the persisted-mlt case
+        # MLT is wavefront-only and layer-free in v1; the persisted-mlt case
         # (which this CLI-keyed guard cannot see) is re-checked by the
         # interactive front-ends via reject_mlt_unsupported.
         reject_mlt_unsupported(
@@ -164,11 +177,16 @@ def validate_render_flags(args) -> None:
     if integrator != "bdpt":
         return
     proposals = getattr(args, "proposals", None) or ""
-    online = bool(getattr(args, "online_training", False))
-    neural = "neural" in proposals
-    if not (neural or online):
+    verdict = render_envelope.evaluate(render_envelope.EnvelopeQuery(
+        integrator=integrator,
+        execution_mode=_envelope_mode(getattr(args, "execution_mode", None)),
+        proposals=render_envelope.parse_proposals(proposals),
+        online_training=bool(getattr(args, "online_training", False)),
+    ))
+    code = verdict.first_code(*render_envelope.CLI_GUARD_CODES["validate_render_flags"])
+    if code is None:
         return
-    what = ("--online-training" if online
+    what = ("--online-training" if code == render_envelope.ONLINE_TRAINING_PATH_ONLY
             else "the neural proposal (--proposals …,neural)")
     raise SystemExit(
         f"skinny: {what} is incompatible with --integrator bdpt — BDPT does not "
@@ -228,8 +246,15 @@ def reject_sppm_without_wavefront(integrator: str | None, execution_mode: str | 
     (via :func:`validate_render_flags`) and the interactive case where ``sppm``
     comes from the persisted setting while ``--execution-mode megakernel`` was
     explicitly forced — which ``validate_render_flags`` (keyed on the CLI
-    ``--integrator``) cannot see. Raises ``SystemExit``; a no-op otherwise."""
-    if integrator == "sppm" and (execution_mode or "megakernel") == "megakernel":
+    ``--integrator``) cannot see. Raises ``SystemExit``; a no-op otherwise.
+
+    A thin adapter over :mod:`skinny.render_envelope`: the rule lives there, this
+    guard owns only the code it enforces and the prose it prints."""
+    verdict = render_envelope.evaluate(render_envelope.EnvelopeQuery(
+        integrator=integrator or "path",
+        execution_mode=_envelope_mode(execution_mode),
+    ))
+    if verdict.first_code(*render_envelope.CLI_GUARD_CODES["reject_sppm_without_wavefront"]):
         raise SystemExit(
             "skinny: --integrator sppm has no megakernel path — SPPM "
             "(Stochastic Progressive Photon Mapping) shares a global "
@@ -261,47 +286,59 @@ def reject_mlt_unsupported(
     :func:`validate_render_flags` cannot see. While the transport is not wired
     (``mlt_capability.MLT_IMPLEMENTED`` is False, referenced live so a test
     monkeypatch takes effect), ``mlt`` is refused outright rather than
-    silently rendering another integrator. Raises ``SystemExit``."""
+    silently rendering another integrator. Raises ``SystemExit``.
+
+    A thin adapter over :mod:`skinny.render_envelope`: the rules live there, this
+    guard owns only which codes it enforces, in which precedence (not-yet-wired
+    before the megakernel refusal — the opposite of the matrix's canonical order,
+    because an unimplemented integrator is the more useful thing to say), and the
+    prose for each. The early return keeps every other integrator untouched: the
+    online-training clause is shared with the bdpt guard, which owns its own
+    wording."""
     if integrator != "mlt":
         return
-    if not mlt_capability.MLT_IMPLEMENTED:
-        raise SystemExit(
+    verdict = render_envelope.evaluate(render_envelope.EnvelopeQuery(
+        integrator=integrator,
+        execution_mode=_envelope_mode(execution_mode),
+        proposals=render_envelope.parse_proposals(proposals),
+        reuse=reuse or "none",
+        spectral=bool(spectral),  # admitted (change spectral-mlt); no code owned
+        online_training=bool(online_training),
+    ))
+    prose = {
+        render_envelope.MLT_NOT_WIRED: (
             "skinny: --integrator mlt is not yet implemented — the PSSMLT "
             "wavefront transport (change mlt-integrator) is a work in "
             "progress. Registration, refusals, and the parity-matrix wiring "
             "have landed, but no MLT render path runs yet, so the integrator "
             "is refused instead of silently rendering the path tracer."
-        )
-    if (execution_mode or "megakernel") == "megakernel":
-        raise SystemExit(
+        ),
+        render_envelope.MLT_WAVEFRONT_ONLY: (
             "skinny: --integrator mlt has no megakernel path — MLT mutates "
             "Markov chains through the staged wavefront BDPT kernels and "
             "shares bootstrap/normalization state across pixels. Drop the "
             "explicit --execution-mode megakernel (mlt auto-selects "
             "wavefront) or pass --execution-mode wavefront."
-        )
-    del spectral  # spectral MLT supported (change spectral-mlt)
-    extra_proposals = [
-        p.strip() for p in (proposals or "").split(",") if p.strip() and p.strip() != "bsdf"
-    ]
-    if extra_proposals:
-        raise SystemExit(
+        ),
+        render_envelope.MLT_NO_PROPOSALS: (
             f"skinny: --integrator mlt supports only the BSDF proposal (got "
             f"--proposals {proposals}) — a non-BSDF directional proposal inside "
             "a Markov-chain mutation would change the target function MLT "
             "normalizes against."
-        )
-    if reuse and reuse not in ("none",):
-        raise SystemExit(
+        ),
+        render_envelope.MLT_NO_REUSE: (
             f"skinny: --integrator mlt is incompatible with --reuse {reuse} — "
             "reservoir reuse (ReSTIR DI) is not supported under MLT."
-        )
-    if online_training:
-        raise SystemExit(
+        ),
+        render_envelope.ONLINE_TRAINING_PATH_ONLY: (
             "skinny: --online-training is incompatible with --integrator mlt — "
             "MLT does not consume the neural directional proposal the training "
             "loop exists to improve."
-        )
+        ),
+    }
+    code = verdict.first_code(*render_envelope.CLI_GUARD_CODES["reject_mlt_unsupported"])
+    if code is not None:
+        raise SystemExit(prose[code])
 
 
 def reject_mcp_unsupported(mcp: bool) -> None:
@@ -364,51 +401,56 @@ def reject_spectral_unsupported(
     Scene-level unsupported transport (a skin/subsurface or heterogeneous-volume
     scene) is refused later, at renderer setup, where the material set is known —
     this CLI guard covers only the flag-level combinations.
+
+    A thin adapter over :mod:`skinny.render_envelope`: the rules live there, this
+    guard owns only which codes it enforces and their prose. It deliberately does
+    **not** own the wavefront-only codes (the integrator-specific guards do) nor
+    the flat-material code (the renderer scene gate does), so a spectral SPPM
+    under the megakernel passes here and is refused by its own guard.
     """
     if not spectral:
         return
-    del execution_mode  # integrator-specific guards own wavefront-only modes
-    # The analytic environment proposal shares the wavelength-independent
-    # direction/pdf seam with RGB; the spectral path recolors its selected
-    # direction per hero wavelength. Stateful neural inference remains outside
-    # the spectral envelope.
-    unsupported_proposals = [
-        p.strip()
-        for p in (proposals or "").split(",")
-        if p.strip() and p.strip() not in {"bsdf", "env"}
-    ]
-    if unsupported_proposals:
-        raise SystemExit(
+    verdict = render_envelope.evaluate(render_envelope.EnvelopeQuery(
+        integrator=integrator or "path",
+        execution_mode=_envelope_mode(execution_mode),
+        proposals=render_envelope.parse_proposals(proposals),
+        reuse=reuse or "none",
+        spectral=True,
+    ))
+    prose = {
+        # The analytic environment proposal shares the wavelength-independent
+        # direction/pdf seam with RGB; the spectral path recolors its selected
+        # direction per hero wavelength. Stateful neural inference remains
+        # outside the spectral envelope.
+        render_envelope.SPECTRAL_NO_NEURAL: (
             f"skinny: --spectral supports only the analytic BSDF/environment "
             f"proposals (got --proposals {proposals}). The neural directional "
             "proposal and its stateful inference path are not supported under "
             "spectral."
-        )
-    proposal_tokens = {
-        p.strip() for p in (proposals or "").split(",") if p.strip()
-    }
-    if "env" in proposal_tokens and integrator != "path":
-        raise SystemExit(
+        ),
+        render_envelope.SPECTRAL_ENV_PATH_ONLY: (
             f"skinny: --spectral --proposals {proposals} requires "
             "--integrator path — spectral BDPT/SPPM/MLT retain their native "
             "BSDF sampling and do not consume the directional-proposal seam."
-        )
-    if reuse and reuse not in ("none",):
-        raise SystemExit(
+        ),
+        render_envelope.SPECTRAL_NO_REUSE: (
             f"skinny: --spectral is incompatible with --reuse {reuse} — reservoir "
             "reuse (ReSTIR DI) is not supported under spectral."
-        )
-    # The envelope is satisfied, but the megakernel spectral transport (Group 5)
-    # is not wired yet — the renderer would silently produce an RGB frame. Refuse
-    # rather than mislead. Gated by the shared capability flag (flip it with the
-    # transport to enable). Referenced live so a test monkeypatch takes effect.
-    if not spectral_capability.SPECTRAL_IMPLEMENTED:
-        raise SystemExit(
+        ),
+        # The envelope is satisfied, but the spectral transport is not wired yet —
+        # the renderer would silently produce an RGB frame. Refuse rather than
+        # mislead. Gated by the shared capability flag the predicate reads live,
+        # so a test monkeypatch takes effect.
+        render_envelope.SPECTRAL_NOT_WIRED: (
             "skinny: --spectral is not yet implemented — the hero-wavelength "
             "megakernel transport is a work in progress. The data, importer, CLI, "
             "and shader-source foundation have landed, but no spectral render path "
             "runs yet, so the flag is refused instead of silently rendering RGB."
-        )
+        ),
+    }
+    code = verdict.first_code(*render_envelope.CLI_GUARD_CODES["reject_spectral_unsupported"])
+    if code is not None:
+        raise SystemExit(prose[code])
 
 
 def apply_sppm_glossy_roughness(renderer, args) -> None:

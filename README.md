@@ -701,8 +701,14 @@ headless `skinny-render` keeps its own `--width` / `--height` (default
 
 ### Compatibility matrix
 
-What runs where. Authoritative cross-cutting view of backend × execution mode ×
-neural × interop.
+What runs where — backend × execution mode × integrator × neural × interop.
+
+These tables **document** `src/skinny/render_envelope.py`, which is the source of
+truth: one predicate answers "does combo X run, and if not, why", and the parity
+matrix, every CLI startup refusal, and the renderer's spectral scene gate all
+derive their answer from it. A hostless doc-sync check asserts the key envelope
+facts below still match the predicate, so an envelope change that skips the docs
+fails a test.
 
 **Backend × feature parity** — `--backend metal` is at full parity with
 `--backend vulkan` for the renderer; non-renderer GPU work differs.
