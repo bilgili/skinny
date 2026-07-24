@@ -1309,3 +1309,161 @@ class MetalWavefrontMltPass:
         self._bind_map = {}
         self._entries = {}
         self.default_tex = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-backend pass factory (change renderer-module-carveout, Stage C).
+#
+# `ensure_pass(renderer, integrator)` absorbs the construction bodies of the
+# renderer's former `_ensure_wavefront_*_metal` twins: the None-fallback gates,
+# the rebuild keys, the cache compare, the pass + sub-pass construction, the
+# graph/std-surface re-relocation. Values move verbatim. The renderer keeps one
+# `_ensure_wavefront_pass(integrator)` dispatching here (Metal) or to
+# `vk_wavefront.ensure_pass` (Vulkan). MLT returns None on the Vulkan-only path
+# (the Metal MLT pass has no None-gate — it binds by name), preserving the
+# megakernel-fallback semantics through the renderer dispatcher.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def ensure_pass(r, integrator: str):
+    if integrator == "path":
+        return _ensure_path(r)
+    if integrator == "bdpt":
+        return _ensure_bdpt(r)
+    if integrator == "sppm":
+        return _ensure_sppm(r)
+    if integrator == "mlt":
+        return _ensure_mlt(r)
+    raise ValueError(f"unknown wavefront integrator: {integrator!r}")
+
+
+def _ensure_path(r):
+    """Metal staged wavefront path tracer. None before the scene bindings exist."""
+    from skinny.renderer import MATERIAL_TYPE_FLAT
+    if r._scene_bindings is None:
+        return None
+    has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in r._material_types)
+    reuse_mode = int(r._active_reuse().reuse_mode)
+    _rcfg = getattr(r, "_restir_config", None)
+    wf_record = bool(getattr(r, "_wf_record_active", False))
+    key = (r.width, r.height, has_nonflat,
+           r._graph_set_signature(), reuse_mode,
+           int(r.restir_regime_index) if reuse_mode == 1 else None,
+           tuple(sorted(_rcfg.items())) if _rcfg else None,
+           r._neural_active(), wf_record)
+    if r._wavefront_path_pass is not None and r._wf_path_pass_dims == key:
+        if r._restir_pass is not None:
+            r._restir_pass.config = r._restir_build_config()
+        return r._wavefront_path_pass
+    r._destroy_wavefront_path_pass()
+    num_pixels = r.width * r.height
+    cap = int(getattr(r, "_wf_stream_cap", None) or MetalWavefrontPathPass.STREAM_CAP)
+    stream_size = max(1, min(num_pixels, cap))
+    r._wavefront_path_pass = MetalWavefrontPathPass(
+        r.ctx, r.shader_dir, stream_size, num_pixels,
+        build_catchall=has_nonflat,
+        record_capacity=(stream_size if wf_record else 0),
+        graph_fragments=list(r._scene_graph_fragments),
+        neural_config=r._effective_neural_config(),
+        neural_active=r._neural_active(),
+        records_active=wf_record,
+        spectral=r._spectral,
+    )
+    r._restir_pass = None
+    if reuse_mode == 1:  # RESTIR_DI
+        r._restir_pass = MetalRestirDiPass(
+            r.ctx, r.shader_dir, stream_size,
+            config=r._restir_build_config(),
+        )
+        r._wavefront_path_pass.set_restir(r._restir_pass)
+    r._neural_pass = None
+    if r._neural_active():
+        r._sync_neural_weights()
+        r._neural_pass = MetalNeuralProposalPass(
+            r.ctx, r.shader_dir, r._wavefront_path_pass,
+            stream_size, network_version=r._neural_network_version,
+            neural_config=r._effective_neural_config(),
+        )
+        r._wavefront_path_pass.set_neural(r._neural_pass)
+    r._wf_path_pass_dims = key
+    # The scene-build uploads ran before any Metal reflection existed, so the
+    # per-graph SSBOs and std-surface records were packed at scalar offsets.
+    # Re-relocate them now that this pass exposes the reflected MSL layouts.
+    r._upload_graph_param_buffers()
+    mats = getattr(r, "_last_uploaded_materials", None)
+    if mats:
+        r._upload_flat_materials(mats)
+    return r._wavefront_path_pass
+
+
+def _ensure_bdpt(r):
+    """Metal staged wavefront BDPT pass. None before the scene bindings exist."""
+    from skinny.renderer import _METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES
+    if r._scene_bindings is None:
+        return None
+    heavy = r._has_heavy_nonflat()
+    key = (r.width, r.height, r.bdpt_walk_mode,
+           r._graph_set_signature(), heavy)
+    if r._wavefront_bdpt_pass is not None and r._wf_bdpt_pass_dims == key:
+        return r._wavefront_bdpt_pass
+    r._destroy_wavefront_bdpt_pass()
+    num_pixels = r.width * r.height
+    cap = int(getattr(r, "_wf_stream_cap", None) or MetalWavefrontBdptPass.STREAM_CAP)
+    if heavy:  # bound the heavy per-tile eye submit (see the band constant)
+        cap = min(cap, _METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES)
+    stream_size = max(1, min(num_pixels, cap))
+    r._wavefront_bdpt_pass = MetalWavefrontBdptPass(
+        r.ctx, r.shader_dir, stream_size, num_pixels,
+        walk_mode=r.bdpt_walk_mode,
+        graph_fragments=list(r._scene_graph_fragments),
+        spectral=r._spectral,
+    )
+    r._wf_bdpt_pass_dims = key
+    r._upload_graph_param_buffers()
+    mats = getattr(r, "_last_uploaded_materials", None)
+    if mats:
+        r._upload_flat_materials(mats)
+    return r._wavefront_bdpt_pass
+
+
+def _ensure_sppm(r):
+    """Metal staged wavefront SPPM pass. None before the scene bindings exist;
+    the caller falls back to the path tracer."""
+    from skinny.renderer import _METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES
+    if r._scene_bindings is None:
+        return None
+    heavy = r._has_heavy_nonflat()
+    key = (r.width, r.height, r._graph_set_signature(), heavy)
+    if r._wavefront_sppm_pass is not None and r._wf_sppm_pass_dims == key:
+        return r._wavefront_sppm_pass
+    r._destroy_wavefront_sppm_pass()
+    num_pixels = r.width * r.height
+    cap = int(getattr(r, "_wf_stream_cap", None) or MetalWavefrontSppmPass.STREAM_CAP)
+    if heavy:  # bound the heavy per-tile eye submit (see the band constant)
+        cap = min(cap, _METAL_WAVEFRONT_HEAVY_EYE_BAND_LANES)
+    stream_size = max(1, min(num_pixels, cap))
+    r._wavefront_sppm_pass = MetalWavefrontSppmPass(
+        r.ctx, r.shader_dir, stream_size, num_pixels,
+        graph_fragments=list(r._scene_graph_fragments),
+        neural_config=r._effective_neural_config(),
+        spectral=r._spectral)
+    r._wf_sppm_pass_dims = key
+    return r._wavefront_sppm_pass
+
+
+def _ensure_mlt(r):
+    """Metal staged wavefront MLT pass. Metal binds by name, so there are no
+    scene-set slots 52–57 to rebind: the pass merges its chain buffers into the
+    per-dispatch bind map itself."""
+    key = r._mlt_pass_key()
+    if r._wavefront_mlt_pass is not None and r._wf_mlt_pass_dims == key:
+        return r._wavefront_mlt_pass
+    r._destroy_wavefront_mlt_pass()
+    r._wavefront_mlt_pass = MetalWavefrontMltPass(
+        r.ctx, r.shader_dir,
+        num_pixels=r.width * r.height,
+        num_chains=int(r.mlt_num_chains),
+        bootstrap_samples=int(r.mlt_bootstrap_samples),
+        spectral=r._spectral)
+    r._wf_mlt_pass_dims = key
+    return r._wavefront_mlt_pass

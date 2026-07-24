@@ -1909,3 +1909,186 @@ class WavefrontPasses:
         for buf in self.buffers.values():
             buf.destroy()
         self.buffers = {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-backend pass factory (change renderer-module-carveout, Stage C).
+#
+# `ensure_pass(renderer, integrator)` absorbs the construction bodies of the
+# renderer's former `_ensure_wavefront_{path,bdpt,sppm,mlt}_pass` Vulkan twins:
+# the None-fallback gates, the rebuild keys, the cache compare, the pass +
+# sub-pass construction, and the descriptor-set 52–57 MLT rebind. Values move
+# verbatim — the keys and gates are exactly the pre-carve-out ones. The renderer
+# keeps one `_ensure_wavefront_pass(integrator)` that dispatches here (Vulkan)
+# or to `metal_wavefront.ensure_pass` (Metal); the `_destroy_wavefront_*` and
+# `_restir_build_config` helpers stay on the renderer and are called through `r`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def ensure_pass(r, integrator: str):
+    if integrator == "path":
+        return _ensure_path(r)
+    if integrator == "bdpt":
+        return _ensure_bdpt(r)
+    if integrator == "sppm":
+        return _ensure_sppm(r)
+    if integrator == "mlt":
+        return _ensure_mlt(r)
+    raise ValueError(f"unknown wavefront integrator: {integrator!r}")
+
+
+def _ensure_path(r):
+    """Staged wavefront path tracer (Vulkan). None on a non-Vulkan backend or
+    before the scene bindings exist."""
+    from skinny.renderer import MATERIAL_TYPE_FLAT
+    if not hasattr(r.ctx, "compute_queue"):
+        return None
+    if r._scene_bindings is None or r.descriptor_sets is None:
+        return None
+    has_nonflat = any(int(t) != MATERIAL_TYPE_FLAT for t in r._material_types)
+    reuse_mode = int(r._active_reuse().reuse_mode)
+    _rcfg = getattr(r, "_restir_config", None)
+    wf_record = bool(getattr(r, "_wf_record_active", False))
+    key = (r.width, r.height, has_nonflat, reuse_mode,
+           int(r.restir_regime_index) if reuse_mode == 1 else None,
+           tuple(sorted(_rcfg.items())) if _rcfg else None,
+           r._neural_active(), wf_record)
+    if r._wavefront_path_pass is not None and r._wf_path_pass_dims == key:
+        if r._restir_pass is not None:
+            r._restir_pass.config = r._restir_build_config()
+        return r._wavefront_path_pass
+    r._destroy_wavefront_path_pass()
+    from skinny.wavefront_layout import path_state_size
+    num_pixels = r.width * r.height
+    cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
+    stream_size = max(1, min(num_pixels, cap))
+    path_state_stride = path_state_size(spectral=r._spectral)
+    r._wf_path_state_buf = r._gpu.StorageBuffer(r.ctx, stream_size * path_state_stride)
+    r._wf_path_hit_buf = r._gpu.StorageBuffer(
+        r.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
+    r._wavefront_path_pass = WavefrontPathPass(
+        r.ctx, r.shader_dir, r._scene_set0_layout,
+        r._wf_path_state_buf.buffer, r._wf_path_state_buf.size,
+        r._wf_path_hit_buf.buffer, r._wf_path_hit_buf.size,
+        stream_size, num_pixels, build_catchall=has_nonflat,
+        record_capacity=(stream_size if wf_record else 0),
+        neural_config=r._effective_neural_config(),
+        spectral=r._spectral,
+    )
+    r._restir_pass = None
+    if reuse_mode == 1:  # RESTIR_DI
+        r._restir_pass = RestirDiPass(
+            r.ctx, r.shader_dir, r._scene_set0_layout,
+            r._wf_path_state_buf.buffer, r._wf_path_state_buf.size,
+            r._wf_path_hit_buf.buffer, r._wf_path_hit_buf.size,
+            stream_size, config=r._restir_build_config(),
+        )
+        r._wavefront_path_pass.set_restir(r._restir_pass)
+    r._neural_pass = None
+    if r._neural_active():
+        r._sync_neural_weights()
+        r._neural_pass = WavefrontNeuralProposalPass(
+            r.ctx, r.shader_dir, r._scene_set0_layout,
+            r._wf_path_state_buf.buffer, r._wf_path_state_buf.size,
+            r._wf_path_hit_buf.buffer, r._wf_path_hit_buf.size,
+            r._wavefront_path_pass.neural_buf.buffer,
+            r._wavefront_path_pass.neural_buf.size,
+            stream_size, network_version=r._neural_network_version,
+            neural_config=r._effective_neural_config(),
+        )
+        r._wavefront_path_pass.set_neural(r._neural_pass)
+    r._wf_path_pass_dims = key
+    return r._wavefront_path_pass
+
+
+def _ensure_bdpt(r):
+    """Staged wavefront BDPT pass (Vulkan)."""
+    if not hasattr(r.ctx, "compute_queue"):
+        return None
+    if r._scene_bindings is None or r.descriptor_sets is None:
+        return None
+    if (r._wavefront_bdpt_pass is not None
+            and r._wf_bdpt_pass_dims == (r.width, r.height)):
+        return r._wavefront_bdpt_pass
+    r._destroy_wavefront_bdpt_pass()
+    num_pixels = r.width * r.height
+    cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
+    stream_size = max(1, min(num_pixels, cap))
+    vert_stride = WavefrontBdptPass.VERTEX_STRIDE
+    aux_stride = WavefrontBdptPass.AUX_STRIDE
+    if r._spectral:
+        from skinny.wavefront_layout import bdpt_vertex_size, wf_bdpt_aux_size
+        vert_stride = max(vert_stride, bdpt_vertex_size(spectral=True))
+        aux_stride = max(aux_stride, wf_bdpt_aux_size(spectral=True))
+    vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * vert_stride
+    aux_bytes = stream_size * aux_stride
+    r._wf_bdpt_eye_buf = r._gpu.StorageBuffer(r.ctx, vert_bytes)
+    r._wf_bdpt_light_buf = r._gpu.StorageBuffer(r.ctx, vert_bytes)
+    r._wf_bdpt_aux_buf = r._gpu.StorageBuffer(r.ctx, aux_bytes)
+    r._wavefront_bdpt_pass = WavefrontBdptPass(
+        r.ctx, r.shader_dir, r._scene_set0_layout,
+        r._wf_bdpt_eye_buf.buffer, r._wf_bdpt_light_buf.buffer,
+        r._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
+        stream_size, num_pixels, walk_mode=r.bdpt_walk_mode,
+        spectral=r._spectral,
+    )
+    r._wf_bdpt_pass_dims = (r.width, r.height)
+    return r._wavefront_bdpt_pass
+
+
+def _ensure_sppm(r):
+    """Staged wavefront SPPM pass (Vulkan). None before scene bindings exist;
+    the caller falls back to the path tracer."""
+    if not hasattr(r.ctx, "compute_queue"):
+        return None
+    if r._scene_bindings is None or r.descriptor_sets is None:
+        return None
+    key = (r.width, r.height)
+    if r._wavefront_sppm_pass is not None and r._wf_sppm_pass_dims == key:
+        return r._wavefront_sppm_pass
+    r._destroy_wavefront_sppm_pass()
+    num_pixels = r.width * r.height
+    cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontSppmPass.STREAM_CAP)
+    stream_size = max(1, min(num_pixels, cap))
+    r._wavefront_sppm_pass = WavefrontSppmPass(
+        r.ctx, r.shader_dir, r._scene_set0_layout, stream_size, num_pixels,
+        spectral=r._spectral)
+    r._wf_sppm_pass_dims = key
+    return r._wavefront_sppm_pass
+
+
+def _ensure_mlt(r):
+    """Staged wavefront MLT pass (Vulkan). None when the scene set-0 layout lacks
+    the MLT bindings 52–57 (a megakernel-mode session); the caller falls back to
+    the path tracer like SPPM does."""
+    if not hasattr(r.ctx, "compute_queue"):
+        return None
+    if r._scene_bindings is None or r.descriptor_sets is None:
+        return None
+    if not getattr(r._scene_bindings, "mlt_bindings", False):
+        return None
+    key = r._mlt_pass_key()
+    if r._wavefront_mlt_pass is not None and r._wf_mlt_pass_dims == key:
+        return r._wavefront_mlt_pass
+    r._destroy_wavefront_mlt_pass()
+    r._wavefront_mlt_pass = WavefrontMltPass(
+        r.ctx, r.shader_dir, r._scene_set0_layout,
+        num_pixels=r.width * r.height,
+        num_chains=int(r.mlt_num_chains),
+        bootstrap_samples=int(r.mlt_bootstrap_samples),
+        spectral=r._spectral)
+    # Rebind the scene descriptor sets' MLT slots (52–57) from the creation-time
+    # dummies to this pass's chain buffers.
+    for ds in r.descriptor_sets:
+        writes = [
+            vk.VkWriteDescriptorSet(
+                dstSet=ds, dstBinding=b, dstArrayElement=0, descriptorCount=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[vk.VkDescriptorBufferInfo(
+                    buffer=buf.buffer, offset=0, range=buf.size)],
+            )
+            for b, buf in r._wavefront_mlt_pass.descriptor_bindings
+        ]
+        vk.vkUpdateDescriptorSets(r.ctx.device, len(writes), writes, 0, None)
+    r._wf_mlt_pass_dims = key
+    return r._wavefront_mlt_pass

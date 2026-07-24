@@ -1195,7 +1195,12 @@ upsampling model, exact sources, and film resolve are documented in
 execution mode — staged path + BDPT integrators, ReSTIR DI reuse, and the
 neural directional proposal — runs on the native Metal backend at parity with
 Vulkan. The stage orders live in the backend-neutral `wavefront_driver.py`;
-`metal_wavefront.py` supplies the Metal pass classes (per-entry in-process
+pass *construction* lives in per-backend factories `vk_wavefront.ensure_pass`
+/ `metal_wavefront.ensure_pass(renderer, integrator)` (change
+`renderer-module-carveout`, Stage C) — the renderer holds one
+`_ensure_wavefront_pass(integrator)` dispatcher as the single `is_metal` seam,
+with the rebuild keys and None-fallback gates preserved verbatim inside the
+factories. `metal_wavefront.py` supplies the Metal pass classes (per-entry in-process
 pipelines, queue buffers sized from the **reflected MSL strides**, one
 `MetalFrameEncoder` per frame with global barriers, and the CPU
 slot-count-readback fallback while slang-rhi's Metal indirect dispatch is a

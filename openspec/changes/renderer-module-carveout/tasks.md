@@ -84,7 +84,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
 
 ## 3. Stage C — wavefront pass-object seam
 
-- [ ] 3.1 Move pass construction into per-backend factories:
+- [x] 3.1 Move pass construction into per-backend factories:
       `vk_wavefront.build_pass(integrator, ...)` absorbs the bodies of
       `_ensure_wavefront_{path,bdpt,sppm,mlt}_pass` (including the MLT
       descriptor-set 52–57 rebind, relocated next to `WavefrontMltPass`);
@@ -98,7 +98,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       gate turns megakernel-mode MLT selection from path-fallback into a
       crash. Re-point the `tests/test_mlt_host.py` greps for the MLT
       ensure/destroy/dispatch wiring at the factory/new call sites.
-- [ ] 3.2 Collapse the renderer to one `_ensure_wavefront_pass(integrator)`
+- [x] 3.2 Collapse the renderer to one `_ensure_wavefront_pass(integrator)`
       (cache + key compare + factory call + destroy-on-key-change) and fold
       the 3 Metal wavefront frame-dispatch bodies (`_render_wavefront_metal`
       — shared by path/BDPT — plus the SPPM and MLT variants) into one
@@ -106,16 +106,16 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       bootstrap round-trip for MLT), leaving `_record_wavefront_dispatch`
       (Vulkan) and the Metal encoder entry points separate per the
       metal-backend spec.
-- [ ] 3.3 Key-equality unit tests: new key tuples equal the pre-carve-out
+- [x] 3.3 Key-equality unit tests: new key tuples equal the pre-carve-out
       values for representative states (reuse none↔ReSTIR, neural on/off,
       record mode, dims, spectral).
-- [ ] 3.4 Gate: full parity-matrix wavefront sweep green on both backends
+- [x] 3.4 Gate: full parity-matrix wavefront sweep green on both backends
       (path/BDPT/SPPM/MLT, RGB + spectral) with unchanged measured values;
       runtime-toggle smoke per backend (none↔ReSTIR, neural on/off,
       integrator cycling) recorded in the PR; `tests/test_metal_cleanup.py`
       -m gpu under the guarded runner (context lifecycle touched); no shader
       diff.
-- [ ] 3.5 Docs: `docs/Wavefront.md` pass-construction/seam wording;
+- [x] 3.5 Docs: `docs/Wavefront.md` pass-construction/seam wording;
       `docs/Architecture.md` module map.
 
 ## 4. Stage D — extraction pattern + follow-on ordering

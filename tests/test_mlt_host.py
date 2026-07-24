@@ -78,11 +78,19 @@ def test_nonfinite_entries_zeroed_not_drawn():
 # ── renderer wiring (source-level, no GPU) ───────────────────────────────────
 
 def test_renderer_has_mlt_pass_lifecycle():
+    # After the Stage-C pass-seam carve-out the MLT pass construction lives in
+    # the per-backend factories; the renderer keeps the ensure dispatcher, the
+    # destroy helper, and the bootstrap round-trip.
     src = _read("renderer.py")
-    for sym in ("_ensure_wavefront_mlt_pass", "_destroy_wavefront_mlt_pass",
-                "_run_wavefront_mlt_bootstrap", "mlt_chain.run_bootstrap",
-                "WavefrontMltPass"):
+    for sym in ("_ensure_wavefront_pass", "_destroy_wavefront_mlt_pass",
+                "_run_wavefront_mlt_bootstrap", "mlt_chain.run_bootstrap"):
         assert sym in src, f"renderer.py must reference {sym}"
+    # Construction moved to the backend factories.
+    assert "WavefrontMltPass" in _read("vk_wavefront.py")
+    assert "MetalWavefrontMltPass" in _read("metal_wavefront.py")
+    for mod in ("vk_wavefront.py", "metal_wavefront.py"):
+        assert "def ensure_pass" in _read(mod), f"{mod} must expose ensure_pass"
+        assert "def _ensure_mlt" in _read(mod)
     # The host CDF resample is reached through the carved-out chain module
     # (change renderer-module-carveout), not inline in the renderer.
     assert "resample_chain_seeds" in _read("mlt_chain.py")
@@ -94,7 +102,7 @@ def test_renderer_dispatch_branch_selects_mlt():
     body = src[start:start + 4000]
     assert "integrator_index == 3" in body, \
         "_record_wavefront_dispatch must branch on the MLT integrator index"
-    assert "_ensure_wavefront_mlt_pass" in body
+    assert '_ensure_wavefront_pass("mlt")' in body
     assert "record_frame" in body
 
 
@@ -120,16 +128,18 @@ def test_renderer_packs_mlt_uniform_tail_in_shader_order():
 
 
 def test_metal_dispatch_selects_mlt_pass():
-    # Task 5.6 replaced the "adapter pending" NotImplementedError with the real
-    # Metal branch. MLT must be selected BEFORE the SPPM/BDPT/path branches,
-    # exactly like the Vulkan `_record_wavefront_dispatch` order.
+    # After Stage C the Metal frame path routes every integrator through the one
+    # `_ensure_wavefront_pass` dispatcher; the integrator→token map picks MLT
+    # (index 3) so the Metal MLT factory is selected, and an unbuildable pass
+    # falls back to the megakernel.
     src = _read("renderer.py")
     start = src.index("def _render_scene_metal")
     body = src[start:start + 3000]
-    assert "integrator_index == 3" in body
-    assert "_ensure_wavefront_mlt_pass_metal" in body
-    assert body.index("integrator_index == 3") < body.index("integrator_index == 2"), \
-        "the MLT branch must precede SPPM's"
+    assert '{3: "mlt", 2: "sppm", 1: "bdpt"}' in body
+    assert "_ensure_wavefront_pass(integrator)" in body
+    assert "_render_wavefront_metal(staged, integrator)" in body
+    assert "_render_megakernel_metal()" in body, \
+        "an unbuildable staged pass must fall back to the megakernel"
 
 
 def test_metal_mlt_pass_and_recorder_exist():
