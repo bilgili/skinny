@@ -21,4 +21,4 @@
 - [x] 4.2 `ruff check src/` clean (re-export block via `__all__` or `# noqa: F401`).
 - [x] 4.3 Update `docs/Architecture.md` → Parity Matrix Harness with the `parity_core`/`parity` split; no CLAUDE.md/README behavior wording changes needed (surface unchanged).
 - [x] 4.4 Sequencing check before merge: if `unified-render-envelope-predicate` has landed, rebase so its `combo_is_valid`/`spectral_envelope` delegation sits in `parity_core.py`; if not landed, note in that change's proposal that its parity edits target `parity_core.py`.
-- [ ] 4.5 `openspec validate parity-pure-core-split` clean; archive after merge.
+- [x] 4.5 `openspec validate parity-pure-core-split` clean; archive after merge.
