@@ -33,9 +33,14 @@ comparison.
 The parity harness SHALL derive the set of rendered combinations from a single
 validity table over the axes `integrator ∈ {Path, BDPT, SPPM, MLT}`, `execution_mode ∈
 {megakernel, wavefront}`, `proposals ⊇ {neural}`, `reuse ⊇ {ReSTIR DI}`, and
-`spectral ∈ {off, on}`. The table SHALL mirror the documented compatibility matrix. Every
+`spectral ∈ {off, on}`. The table SHALL be derived from the shared render-envelope
+predicate (`skinny.render_envelope`) — the same predicate the CLI refusal guards and
+the renderer scene-level gate consume — and SHALL NOT restate envelope rules as
+independent logic; the documented compatibility matrix (CLAUDE.md / README) is
+documentation of that predicate, not an independent source the table mirrors. Every
 (scene × combo) SHALL be either exercised or skipped with an explicit, machine-readable
-reason; no valid combo SHALL be silently dropped. The spectral **envelope** SHALL admit
+reason taken from the predicate's verdict; no valid combo SHALL be silently dropped.
+The spectral **envelope** SHALL admit
 `path`/`bdpt` under either execution mode, `sppm` under the wavefront mode, and `mlt` under
 the wavefront mode — all without proposal or reuse layers, on flat-material scenes without
 subsurface/skin or heterogeneous-volume transport. An envelope-eligible spectral combo SHALL
@@ -86,6 +91,16 @@ renders a spectral combo as an ordinary RGB frame and gates it as if it were spe
 - **WHEN** the matrix is enumerated for a scene with heterogeneous media or skin/subsurface
   materials
 - **THEN** every spectral combo is skipped with a recorded reason
+
+#### Scenario: matrix validity and CLI refusals cannot diverge
+- **WHEN** the validity of a combination is compared between the parity matrix
+  and the CLI refusal guards
+- **THEN** both derive from the same render-envelope predicate verdict: a combo
+  the CLI refuses is never in the matrix's rendered set, and a combo in the
+  rendered set is never CLI-refused — while one-sided CLI acceptances
+  (violation codes owned by no guard, e.g. the runtime-stripped neural
+  proposal under the megakernel) are recorded in the predicate's
+  code-ownership data
 
 ### Requirement: megakernel and wavefront produce the same image
 For any integrator that runs in both execution modes, the harness SHALL assert

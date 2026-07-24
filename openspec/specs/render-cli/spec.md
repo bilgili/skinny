@@ -86,7 +86,26 @@ fixed for the session.
 
 The CLI front-ends SHALL validate the parsed render flags at startup and SHALL
 exit with a clear error when a combination cannot work, rather than crashing
-later or silently doing nothing. Specifically:
+later or silently doing nothing. Each refusal decision SHALL be derived from
+the shared render-envelope predicate (`skinny.render_envelope`): a guard builds
+the combination from the parsed args and the resolved execution mode
+(tolerating a parsed `Namespace` that omits an axis a front-end suppresses,
+via defaults — as today), consults the predicate's verdict — an ordered list
+of **all** violated rule codes — and scans it for the codes that guard
+**owns**, recorded as code-ownership data in the predicate module, in the
+guard's own precedence. No envelope **rule** SHALL be restated as independent
+logic inside a guard; a guard owns only its code selection and the code→prose
+mapping. A guard's precedence among its owned codes SHALL match today's
+behavior (e.g. the MLT guard reports the not-yet-wired refusal before the
+megakernel refusal, though the parity matrix's precedence over the same two
+codes is the opposite — both derived from the same verdict). Violation codes
+owned by no guard SHALL NOT cause a CLI refusal: a neural proposal under the
+megakernel with the path integrator is accepted at the CLI (the renderer
+strips the neural bit at runtime), as is an environment proposal on
+integrators where only the parity matrix skips it — these one-sided
+acceptances are recorded in the ownership data. The user-facing refusal text
+SHALL remain equivalent to the pre-unification messages (same incompatibility
+named, same suggested fix). Specifically:
 
 - When the integrator is explicitly `bdpt` AND either `--online-training` is set
   or the directional-proposal mixture includes the neural proposal, the
@@ -193,6 +212,23 @@ integrator × `megakernel` guard SHALL consider the effective startup integrator
   `--integrator mlt` (with or without an explicit `--execution-mode wavefront`),
   or with no explicit `--integrator`
 - **THEN** startup proceeds normally with no error
+
+#### Scenario: refusal decisions come from the shared predicate
+
+- **WHEN** any of the above refusals trips
+- **THEN** the decision was produced by scanning the shared render-envelope
+  predicate's verdict for the guard's owned codes (not by envelope rules local
+  to the guard), and the printed message is equivalent to the pre-unification
+  wording for that combination
+
+#### Scenario: unowned violation codes do not refuse at the CLI
+
+- **WHEN** a front-end is launched with `--integrator path --proposals
+  bsdf,neural` and an explicit `--execution-mode megakernel`
+- **THEN** startup proceeds with no error even though the parity matrix skips
+  that combination (the renderer strips the neural bit at runtime) — the
+  neural-wavefront-only violation code is owned by no CLI guard, per the
+  recorded code-ownership data
 
 ### Requirement: Render-area resolution flags
 
