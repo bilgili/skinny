@@ -8,7 +8,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
 
 ## 1. Stage A — MLT chain-state module
 
-- [ ] 1.1 Add `src/skinny/mlt_chain.py`: pure `next_seed(frame_index)`
+- [x] 1.1 Add `src/skinny/mlt_chain.py`: pure `next_seed(frame_index)`
       (crc32 formula moved verbatim from `Renderer._next_mlt_seed`),
       `iterations_per_frame(width, height, num_chains)`,
       `uniform_tail_active(integrator_index, is_metal, execution_mode_is_wavefront,
@@ -16,20 +16,20 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       upload_uniforms, submit)` round-trip (seed → uniforms upload →
       bootstrap → readback → `mlt_bootstrap.resample_chain_seeds` → seed
       upload → init → publish `b` → uniforms re-upload).
-- [ ] 1.2 Hostless tests (`tests/test_mlt_chain.py`, no GPU): pin exact
+- [x] 1.2 Hostless tests (`tests/test_mlt_chain.py`, no GPU): pin exact
       `next_seed` integers for several `frame_index` values against the
       pre-carve-out formula; cover the tail-predicate truth table (Vulkan
       always-on at integrator 3, Metal gated on wavefront + pass built) and
       the iterations budget; drive `run_bootstrap` with a stub pass to assert
       call order and `b`/`seeded` publication.
-- [ ] 1.3 Rewire `renderer.py`: `_next_mlt_seed`, `_mlt_uniform_tail_active`,
+- [x] 1.3 Rewire `renderer.py`: `_next_mlt_seed`, `_mlt_uniform_tail_active`,
       `_mlt_iterations_per_frame` delegate to (or are replaced by calls into)
       `mlt_chain`; `_run_wavefront_mlt_bootstrap` and
       `_run_wavefront_mlt_bootstrap_metal` collapse onto
       `mlt_chain.run_bootstrap` with backend-supplied callables
       (`_submit_one_shot_compute` + scene-set lambdas on Vulkan; the pass's
       own submits on Metal). Delete the superseded bodies.
-- [ ] 1.3a Re-point `tests/test_mlt_host.py` at the new authority: the
+- [x] 1.3a Re-point `tests/test_mlt_host.py` at the new authority: the
       `inspect.getsource(Renderer._next_mlt_seed)` assertion and the
       seed-independence checks (:214–226) move to `mlt_chain.next_seed`;
       relocate the seed-independence docstring note (renderer.py:2452) with
@@ -37,21 +37,21 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       `param-registry-accumulation-reset` (which pledges to preserve that
       note) and `reflection-owned-byte-layouts` — whichever change lands
       second owns the note's pointer.
-- [ ] 1.4 Gate: hostless suites green (`tests/test_mlt_chain.py` + existing
+- [x] 1.4 Gate: hostless suites green (`tests/test_mlt_chain.py` + existing
       MLT hostless tests); one MLT suite scene (`int_caustic`) rendered at
       equal budget bit-identical to pre-stage on Metal; parity-matrix MLT
       combos pass with unchanged measured values; no `src/skinny/shaders/`
       diff.
-- [ ] 1.5 Docs: `docs/MetropolisLightTransport.md` host-orchestration section
+- [x] 1.5 Docs: `docs/MetropolisLightTransport.md` host-orchestration section
       + `docs/Architecture.md` module map entry for `mlt_chain.py`.
 
 ## 2. Stage B — frame-constant derivation module
 
-- [ ] 2.1 Catalogue `_pack_uniforms` side effects (`_sync_lens_buffer`,
+- [x] 2.1 Catalogue `_pack_uniforms` side effects (`_sync_lens_buffer`,
       `_warn_neural_megakernel_once`, `_sppm_metal_photon_batch` stash, any
       others found) in a short comment block; these keep their exact call
       sites.
-- [ ] 2.2 Golden-blob capture test first (same commit, red/green): snapshot
+- [x] 2.2 Golden-blob capture test first (same commit, red/green): snapshot
       `_pack_uniforms()` and `_pack_uniforms_msl()` bytes across the state
       matrix (lens on/off, detail maps on/off, each integrator, both
       execution modes, neural-on-megakernel strip case) and assert byte
@@ -59,7 +59,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       hostless: it constructs `Renderer`s, and execution mode is fixed per
       session, so it runs as two guarded processes (megakernel + wavefront)
       under the metal-dispatch-hygiene runner, one Metal process at a time.
-- [ ] 2.3 Add `src/skinny/frame_derive.py`: pure `detail_flags(master,
+- [x] 2.3 Add `src/skinny/frame_derive.py`: pure `detail_flags(master,
       nrm_ok, rgh_ok, dsp_ok, baked)`, `film_half_height_world(va_mm,
       focal_mm, mm_per_unit, lens_active_count, lens_film_distance_world)`,
       `exposure_stops(exposure_ev, imaging_ratio)`,
@@ -67,24 +67,24 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       execution_mode_is_wavefront) -> (mask, alpha, reuse_mode,
       neural_stripped)`. No dataclass bundle (design D2); camera inverses
       stay as the two `np.linalg.inv` lines unless a helper falls out free.
-- [ ] 2.4 Hostless tests (`tests/test_frame_derive.py`): lens framing ratio
+- [x] 2.4 Hostless tests (`tests/test_frame_derive.py`): lens framing ratio
       on/off, missing-map masking in `detail_flags`, imaging-ratio fold edge
       (ratio ≤ 0), neural strip + renormalise incl. the neural-only →
       `{bsdf}` fallback and the empty-mask guard.
-- [ ] 2.5 Rewire `_pack_uniforms` to call the pure functions at the existing
+- [x] 2.5 Rewire `_pack_uniforms` to call the pure functions at the existing
       append sites — no append statement moves (Metal MSL relocation table
       depends on append order); the warn-once fires off the returned
       `neural_stripped` flag at the same site.
-- [ ] 2.6 Gate: golden-blob test green on both packing paths; parity matrix
+- [x] 2.6 Gate: golden-blob test green on both packing paths; parity matrix
       green with unchanged values; no shader diff. Ordering with
       `reflection-owned-byte-layouts` is soft (merge-conflict avoidance
       only); note the land order in both changes when they overlap in time.
-- [ ] 2.7 Docs: `docs/Architecture.md` module map entry for
+- [x] 2.7 Docs: `docs/Architecture.md` module map entry for
       `frame_derive.py`.
 
 ## 3. Stage C — wavefront pass-object seam
 
-- [ ] 3.1 Move pass construction into per-backend factories:
+- [x] 3.1 Move pass construction into per-backend factories:
       `vk_wavefront.build_pass(integrator, ...)` absorbs the bodies of
       `_ensure_wavefront_{path,bdpt,sppm,mlt}_pass` (including the MLT
       descriptor-set 52–57 rebind, relocated next to `WavefrontMltPass`);
@@ -98,7 +98,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       gate turns megakernel-mode MLT selection from path-fallback into a
       crash. Re-point the `tests/test_mlt_host.py` greps for the MLT
       ensure/destroy/dispatch wiring at the factory/new call sites.
-- [ ] 3.2 Collapse the renderer to one `_ensure_wavefront_pass(integrator)`
+- [x] 3.2 Collapse the renderer to one `_ensure_wavefront_pass(integrator)`
       (cache + key compare + factory call + destroy-on-key-change) and fold
       the 3 Metal wavefront frame-dispatch bodies (`_render_wavefront_metal`
       — shared by path/BDPT — plus the SPPM and MLT variants) into one
@@ -106,28 +106,55 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       bootstrap round-trip for MLT), leaving `_record_wavefront_dispatch`
       (Vulkan) and the Metal encoder entry points separate per the
       metal-backend spec.
-- [ ] 3.3 Key-equality unit tests: new key tuples equal the pre-carve-out
+- [x] 3.3 Key-equality unit tests: new key tuples equal the pre-carve-out
       values for representative states (reuse none↔ReSTIR, neural on/off,
       record mode, dims, spectral).
-- [ ] 3.4 Gate: full parity-matrix wavefront sweep green on both backends
-      (path/BDPT/SPPM/MLT, RGB + spectral) with unchanged measured values;
-      runtime-toggle smoke per backend (none↔ReSTIR, neural on/off,
-      integrator cycling) recorded in the PR; `tests/test_metal_cleanup.py`
-      -m gpu under the guarded runner (context lifecycle touched); no shader
-      diff.
-- [ ] 3.5 Docs: `docs/Wavefront.md` pass-construction/seam wording;
+- [x] 3.4 Gate: **spot-gated** wavefront parity (user-approved subset, not a
+      full sweep — see the change notes) — bit-identical pre/post on the
+      representative combos path/BDPT/SPPM Metal RGB, path Metal spectral, and
+      path/MLT/BDPT Vulkan RGB (maxdiff 0.0); SPPM/MLT spectral both backends,
+      ReSTIR-DI and neural render combos, and BDPT spectral covered by the
+      key-equality tests + the runtime-toggle smoke instead. Runtime-toggle
+      smoke per backend (none↔ReSTIR, neural on/off, integrator cycling);
+      `tests/test_metal_cleanup.py` -m gpu under the guarded runner (context
+      lifecycle touched); no shader diff.
+- [x] 3.5 Docs: `docs/Wavefront.md` pass-construction/seam wording;
       `docs/Architecture.md` module map.
 
 ## 4. Stage D — extraction pattern + follow-on ordering
 
-- [ ] 4.1 Write the one-page extraction pattern in `docs/Architecture.md`
+- [x] 4.1 Write the one-page extraction pattern in `docs/Architecture.md`
       (pure core → unchanged call sites → backend factories → bit-identity
       gate → one stage per PR) and the follow-on order: detail maps, gizmo
       overlay, USD live-edit — each a future OpenSpec change with its own
       gate.
-- [ ] 4.2 Update CLAUDE.md architecture notes (renderer module carve-out
+- [x] 4.2 Update CLAUDE.md architecture notes (renderer module carve-out
       state + new module pointers); sweep the remaining Markdown docs per the
       documentation-upkeep rule.
-- [ ] 4.3 `openspec validate renderer-module-carveout` clean; record final
+- [x] 4.3 `openspec validate renderer-module-carveout` clean; record final
       renderer-resident `is_metal`/`_metal` site count (baseline 117) in the
       change notes.
+
+## Change notes (task 4.3)
+
+- **`is_metal`/`_metal` site count** (renderer.py, lines containing either
+  token): **117 → 98** (−19) across Stages A–C. Stage C's pass-factory collapse
+  did the bulk (the 8 `_ensure_wavefront_*` twins + 3 `_render_wavefront_*_metal`
+  bodies folded to one dispatcher each). `renderer.py` shrank **12093 → 11609
+  lines** (−484).
+- **New modules:** `src/skinny/mlt_chain.py`, `src/skinny/frame_derive.py`;
+  factory surface added to `src/skinny/vk_wavefront.py` /
+  `src/skinny/metal_wavefront.py` (`ensure_pass(renderer, integrator)`).
+- **No shader touched** — `git diff --stat -- src/skinny/shaders/` empty in every
+  stage; RGB `.spv` byte-unchanged.
+- **Gates:** 26 (mlt_chain) + 19 (frame_derive) + 16 (pass keys) new hostless
+  tests; the gpu golden-blob gate (`tests/test_pack_uniforms_golden.py`, 28
+  blobs, both modes); bit-identical renders — Stage A MLT (Metal RGB/spectral,
+  Vulkan RGB), Stage B path|megakernel, Stage C 7 wavefront combos
+  (path/bdpt/sppm Metal RGB, path Metal spectral, path/mlt/bdpt Vulkan RGB) all
+  maxdiff 0.0; runtime-toggle smoke both backends.
+- **Spot-gate scope (Stage C, user-approved):** full pbrt-truth renders were run
+  for the representative subset above; NOT re-rendered — sppm/mlt spectral both
+  backends, ReSTIR-DI and neural render combos, bdpt spectral — these are
+  covered by the key-equality tests + the runtime-toggle smoke rather than a
+  full parity-matrix sweep.

@@ -40,15 +40,27 @@ dispatch:
 - **Gate** (`renderer.py:7147-7158`, headless `7367-7377`): when
   `effective_execution_mode_index == EXECUTION_WAVEFRONT`, call
   `staged.record_dispatch(cmd, descriptor_sets[f])` instead of `vkCmdDispatch`.
-- **Selection:** `integrator_index == 1` → `_ensure_wavefront_bdpt_pass()`; else
-  `_ensure_wavefront_path_pass()`; if no scene yet → `WavefrontEnvPass`
-  (env-only fallback). `WAVEFRONT_BDPT_SUPPORTED = True` (`renderer.py:915`), so
+- **Selection:** one dispatcher `renderer._ensure_wavefront_pass(integrator)`
+  routes `"path" / "bdpt" / "sppm" / "mlt"`; if no scene yet →
+  `WavefrontEnvPass` (env-only fallback). `WAVEFRONT_BDPT_SUPPORTED = True`, so
   wavefront BDPT is live and no longer falls back to the megakernel.
-- **Lifecycle:** passes build lazily and cache on dims —
-  `_ensure_wavefront_path_pass` keys on `(width, height, build_catchall)`
-  (`renderer.py:1424-1462`), `_ensure_wavefront_bdpt_pass` on `(width, height)`
-  (`1475-1507`). Both reuse the megakernel's set-0 layout via
-  `self._scene_set0_layout` (`renderer.py:1351-1356`) — wavefront binds the
+- **Pass construction lives in per-backend factories** (change
+  `renderer-module-carveout`, Stage C): `vk_wavefront.ensure_pass(renderer,
+  integrator)` and `metal_wavefront.ensure_pass(renderer, integrator)` own the
+  None-fallback gates, the rebuild keys, the cache compare, and the pass +
+  sub-pass build (including the Vulkan MLT descriptor-set 52–57 rebind). The
+  renderer's `_ensure_wavefront_pass` is the single `is_metal` seam that
+  dispatches to the active backend's factory; the `_destroy_wavefront_*`
+  helpers and `_restir_build_config` stay on the renderer. A `None` return
+  preserves the megakernel-mode fallback (an unbuildable SPPM/MLT pass drops to
+  the path tracer — Metal — or the env pass — Vulkan — never crashes).
+- **Lifecycle:** passes build lazily and cache on a per-backend rebuild key.
+  Vulkan path keys on `(width, height, has_nonflat, reuse_mode, restir_regime,
+  restir_cfg, neural, wf_record)`; Vulkan BDPT/SPPM on `(width, height)`; the
+  Metal keys add `_graph_set_signature()` and the heavy-eye flag. The key
+  values are unchanged by the carve-out (`tests/test_wavefront_pass_keys.py`
+  pins them against the pre-carve-out formulas). Both backends reuse the
+  megakernel's set-0 layout via `self._scene_set0_layout` — wavefront binds the
   **same scene descriptor set 0**, so the UBO, materials, lights, textures, and
   env CDFs are shared verbatim.
 
@@ -974,7 +986,8 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 
 | File | Role |
 |------|------|
-| `vk_wavefront.py` | orchestration, all 3 pass classes, per-stage dispatch |
+| `vk_wavefront.py` | orchestration, all 3 pass classes, per-stage dispatch, `ensure_pass(renderer, integrator)` Vulkan pass factory |
+| `metal_wavefront.py` (`ensure_pass`) | Metal pass factory — the `_ensure_wavefront_*_metal` twins (change `renderer-module-carveout`) |
 | `wavefront_driver.py` | backend-neutral stage orders (`record_path_loop` / `record_bdpt_loop`, `WavefrontRecorder` protocol) — shared by Vulkan + Metal |
 | `metal_wavefront.py` | Metal recorder + pass classes (path / BDPT / ReSTIR / neural) — in-process Slang→Metal, reflected-MSL buffer sizing |
 | `wavefront_layout.py` | state stride + queue sizing (Python mirror; `msl=` strides for Metal) |
@@ -995,6 +1008,7 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 | `vk_wavefront.py` (`RestirDiPass`) | ReSTIR DI pass set (reservoirs A/B + G-buffer, bounce-0 hook, 36-B RestirPC) |
 | `vk_compute.py:302-345` | per-material wavefront shade codegen |
 | `renderer.py:7147-7158` / `7367-7377` | wavefront render gate (windowed / headless) |
-| `renderer.py:1424-1462` / `1475-1507` | path / BDPT pass lifecycle |
+| `renderer.py` (`_ensure_wavefront_pass`) | one ensure/cache dispatcher per integrator; the single `is_metal` seam to the backend factories |
+| `tests/test_wavefront_pass_keys.py` | key-equality guard: factory rebuild keys pinned to the pre-carve-out formulas |
 | `renderer.py:915` | `WAVEFRONT_BDPT_SUPPORTED` |
 | `tests/test_wavefront_state.py` | struct-layout lock |
