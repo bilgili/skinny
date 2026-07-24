@@ -47,11 +47,11 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
 
 ## 2. Stage B — frame-constant derivation module
 
-- [ ] 2.1 Catalogue `_pack_uniforms` side effects (`_sync_lens_buffer`,
+- [x] 2.1 Catalogue `_pack_uniforms` side effects (`_sync_lens_buffer`,
       `_warn_neural_megakernel_once`, `_sppm_metal_photon_batch` stash, any
       others found) in a short comment block; these keep their exact call
       sites.
-- [ ] 2.2 Golden-blob capture test first (same commit, red/green): snapshot
+- [x] 2.2 Golden-blob capture test first (same commit, red/green): snapshot
       `_pack_uniforms()` and `_pack_uniforms_msl()` bytes across the state
       matrix (lens on/off, detail maps on/off, each integrator, both
       execution modes, neural-on-megakernel strip case) and assert byte
@@ -59,7 +59,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       hostless: it constructs `Renderer`s, and execution mode is fixed per
       session, so it runs as two guarded processes (megakernel + wavefront)
       under the metal-dispatch-hygiene runner, one Metal process at a time.
-- [ ] 2.3 Add `src/skinny/frame_derive.py`: pure `detail_flags(master,
+- [x] 2.3 Add `src/skinny/frame_derive.py`: pure `detail_flags(master,
       nrm_ok, rgh_ok, dsp_ok, baked)`, `film_half_height_world(va_mm,
       focal_mm, mm_per_unit, lens_active_count, lens_film_distance_world)`,
       `exposure_stops(exposure_ev, imaging_ratio)`,
@@ -67,19 +67,19 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       execution_mode_is_wavefront) -> (mask, alpha, reuse_mode,
       neural_stripped)`. No dataclass bundle (design D2); camera inverses
       stay as the two `np.linalg.inv` lines unless a helper falls out free.
-- [ ] 2.4 Hostless tests (`tests/test_frame_derive.py`): lens framing ratio
+- [x] 2.4 Hostless tests (`tests/test_frame_derive.py`): lens framing ratio
       on/off, missing-map masking in `detail_flags`, imaging-ratio fold edge
       (ratio ≤ 0), neural strip + renormalise incl. the neural-only →
       `{bsdf}` fallback and the empty-mask guard.
-- [ ] 2.5 Rewire `_pack_uniforms` to call the pure functions at the existing
+- [x] 2.5 Rewire `_pack_uniforms` to call the pure functions at the existing
       append sites — no append statement moves (Metal MSL relocation table
       depends on append order); the warn-once fires off the returned
       `neural_stripped` flag at the same site.
-- [ ] 2.6 Gate: golden-blob test green on both packing paths; parity matrix
+- [x] 2.6 Gate: golden-blob test green on both packing paths; parity matrix
       green with unchanged values; no shader diff. Ordering with
       `reflection-owned-byte-layouts` is soft (merge-conflict avoidance
       only); note the land order in both changes when they overlap in time.
-- [ ] 2.7 Docs: `docs/Architecture.md` module map entry for
+- [x] 2.7 Docs: `docs/Architecture.md` module map entry for
       `frame_derive.py`.
 
 ## 3. Stage C — wavefront pass-object seam

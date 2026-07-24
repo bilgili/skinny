@@ -50,7 +50,7 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
-from skinny import mlt_chain, render_envelope
+from skinny import frame_derive, mlt_chain, render_envelope
 from skinny.cli_common import resolve_walk
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
@@ -10483,15 +10483,10 @@ class Renderer:
         # Bit 4: normal map already baked into vertex normals (shader skips
         #        its own normal-map sample for mesh hits so we don't
         #        double-apply the same perturbation).
-        master = 1 if self.detail_maps_index == 0 else 0
         nrm_ok, rgh_ok, dsp_ok = self._detail_available
-        flags = (
-            master
-            | ((1 if nrm_ok else 0) << 1)
-            | ((1 if rgh_ok else 0) << 2)
-            | ((1 if dsp_ok else 0) << 3)
-            | ((1 if self._baked_normals else 0) << 4)
-        )
+        flags = frame_derive.detail_flags(
+            self.detail_maps_index == 0, nrm_ok, rgh_ok, dsp_ok,
+            self._baked_normals)
         data += struct.pack("I", flags)                              # 4 bytes
         data += struct.pack("f", float(self.normal_map_strength))    # 4 bytes
         data += struct.pack("f", float(self.displacement_scale_mm))  # 4 bytes
@@ -10532,11 +10527,9 @@ class Renderer:
         # does through the pinhole.
         va_mm = float(getattr(self.camera, "vertical_aperture_mm", 24.0))
         focal_mm = float(getattr(self.camera, "focal_length_mm", 50.0))
-        mm_per_unit = max(float(self.scene.mm_per_unit), 1e-6)
-        film_half_h_world = 0.5 * va_mm / mm_per_unit
-        if self._lens_active_count > 0 and focal_mm > 1e-3:
-            ratio = self._lens_film_distance_world / (focal_mm / mm_per_unit)
-            film_half_h_world *= ratio
+        film_half_h_world = frame_derive.film_half_height_world(
+            va_mm, focal_mm, self.scene.mm_per_unit,
+            self._lens_active_count, self._lens_film_distance_world)
         data += struct.pack("f", film_half_h_world)                        # 4 bytes
         # emissiveTotalPower (reuses the retired irisZ slot): Σ(area·Rec709-lum)
         # over emissive triangles, read by the path tracer's BSDF-hit MIS weight.
@@ -10572,8 +10565,8 @@ class Renderer:
         # reproduces it with no shader/UBO change. The linear-HDR readback applies
         # the same ratio multiplicatively (read_accumulation_hdr consumers), so
         # display and linear stay consistent. ratio 1.0 ⇒ +0 stops ⇒ unchanged.
-        ratio = self.film.imaging_ratio()
-        exposure_ev = float(self.exposure) + (math.log2(ratio) if ratio > 0.0 else 0.0)
+        exposure_ev = frame_derive.exposure_stops(
+            self.exposure, self.film.imaging_ratio())
         data += struct.pack("f", exposure_ev)                         # 4 bytes
         data += struct.pack("I", int(self.tonemap_index))             # 4 bytes
         # Pluggable scene-sampling seam — proposalMask + reuseMode + the
@@ -10583,32 +10576,18 @@ class Renderer:
         # bounce takes the BSDF fast path, bit-identical to the pre-seam build.
         from skinny.sampling import proposal_mask_and_alpha
         prop_mask, prop_alpha = proposal_mask_and_alpha(self._active_proposals())
-        # Reuse capability gate: ReSTIR DI is wavefront-only (multi-pass). On
-        # the megakernel (either device) the reuseMode folds to 0 (identity) so
-        # the shader's depth-0 reuseDirect gate stays inert — stock NEE. On the
-        # wavefront backend both Vulkan and Metal run ReSTIR (phase 5); the
-        # pass builders construct the ReSTIR sub-pass under the same condition.
-        reuse_mode = int(self._active_reuse().reuse_mode)
-        if self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
-            reuse_mode = 0
-        # Neural proposal (bit2) is wavefront-only — the MLP runs as a compute
-        # pre-pass (vk_wavefront.WavefrontNeuralProposalPass), infeasible inline
-        # in the megakernel (MoltenVK big-kernel limit). On the megakernel strip
-        # the bit and renormalise the mixture over the analytic remainder, then
-        # warn once so the request is reported, not silently dropped.
-        if (prop_mask & 0x4) and self.effective_execution_mode_index != EXECUTION_WAVEFRONT:
+        # Fold the proposal mixture + reuse mode against the backend's
+        # capabilities (frame_derive): ReSTIR DI reuse is wavefront-only, so it
+        # zeroes to identity NEE on the megakernel; the neural bit (a wavefront
+        # compute pre-pass, infeasible inline in the megakernel) is stripped and
+        # the mixture renormalised there. warn-once fires off the returned flag
+        # so the dropped request is reported, not silently swallowed.
+        prop_mask, prop_alpha, reuse_mode, neural_stripped = \
+            frame_derive.fold_sampling_capabilities(
+                prop_mask, prop_alpha, int(self._active_reuse().reuse_mode),
+                self.effective_execution_mode_index)
+        if neural_stripped:
             self._warn_neural_megakernel_once()
-            prop_mask &= ~0x4
-            a = list(prop_alpha)
-            a[2] = 0.0
-            s = sum(a) or 1.0
-            prop_alpha = (a[0] / s, a[1] / s, a[2] / s, a[3] / s)
-            if prop_mask == 0:
-                # Neural-only on the megakernel: stripping the bit leaves an empty
-                # mixture. Fold back to the {bsdf} fast path so the bounce still has
-                # a valid proposal (rather than a zero mask / zero alpha).
-                prop_mask = 0x1
-                prop_alpha = (1.0, 0.0, 0.0, 0.0)
         data += struct.pack("II", int(prop_mask), reuse_mode)         # 8 bytes
         data += struct.pack("4f", *prop_alpha)                        # 16 bytes
         # Per-lobe sampler selection (flatLobeSamplers): one uint, 8 bits/lobe

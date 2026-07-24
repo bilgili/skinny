@@ -1690,6 +1690,7 @@ a build-time requirement (generated `.slang` files are checked into git).
 | `web_app.py` | `SkinnySession`, `VideoStreamHandler` | Panel web app, per-session renderer, Tornado video WS |
 | `renderer.py` | `Renderer`, `SkinParameters`, `OrbitCamera`, `FreeCamera`, `TexturePool` | GPU resource orchestration, per-frame dispatch |
 | `mlt_chain.py` | — | MLT host chain state, device-free: replay seed (`next_seed`), mutation budget, uniform-tail predicate, and the bootstrap round-trip both backends drive (see [MetropolisLightTransport.md](MetropolisLightTransport.md)) |
+| `frame_derive.py` | — | Pure frame-constant derivation consumed by `_pack_uniforms` at its append sites: detail-flag bitfield, lens FOV-framing sensor half-height, exposure/imaging-ratio fold, proposal-mask/reuse capability folding (byte serialization stays in the packer) |
 | `vk_context.py` | `VulkanContext`, `SwapchainInfo` | Vulkan 1.3 instance, device, swapchain (+ headless mode) |
 | `vk_compute.py` | `ComputePipeline`, `UniformBuffer`, `StorageImage`, `StorageBuffer`, `SampledImage`, `ReadbackBuffer`, `HudOverlay` | Shader compilation (Slang→SPIR-V), GPU resource types |
 | `gfx/backend.py` | `Backend`, `BackendCaps` | Backend ABC |
