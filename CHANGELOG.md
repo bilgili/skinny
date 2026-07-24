@@ -184,6 +184,25 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Renderer module carve-out (Stages A–C)** (change
+  `renderer-module-carveout`). Three clusters peeled off the 12k-line
+  `renderer.py` as a pure, bit-identical refactor — no shader touched, RGB
+  `.spv` byte-unchanged, parity matrix values unchanged. New
+  `mlt_chain.py` holds the MLT host chain state (replay seed, mutation budget,
+  uniform-tail predicate, the bootstrap round-trip both backends drive); new
+  `frame_derive.py` holds the pure frame-constant derivation `_pack_uniforms`
+  calls at its append sites (detail-flag bitfield, lens FOV-framing half-height,
+  exposure/imaging-ratio fold, proposal-mask/reuse capability folding); and the
+  wavefront pass construction moved into per-backend factories
+  `vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass(renderer,
+  integrator)`, collapsing the 8 `_ensure_wavefront_*` twins to one
+  `_ensure_wavefront_pass(integrator)` dispatcher and the 3 Metal render bodies
+  to one. `renderer.py` −484 lines; `is_metal`/`_metal` sites 85→67. Gated by a
+  golden byte-equality snapshot of the packed uniforms, MLT/path/bdpt/sppm
+  bit-identical renders on both backends, and rebuild-key equality tests. The
+  reusable extraction pattern + follow-on order (detail maps → gizmo → USD
+  live-edit) is documented in Architecture.md.
+
 - **`RenderCommandQueue` and `QtRendererProxy` moved** from
   `skinny/ui/qt/render_session.py` to `skinny/render_session.py`; the old path
   re-exports every name, so existing imports are unaffected. The module never

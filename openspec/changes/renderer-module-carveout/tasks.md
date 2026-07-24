@@ -120,14 +120,38 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
 
 ## 4. Stage D — extraction pattern + follow-on ordering
 
-- [ ] 4.1 Write the one-page extraction pattern in `docs/Architecture.md`
+- [x] 4.1 Write the one-page extraction pattern in `docs/Architecture.md`
       (pure core → unchanged call sites → backend factories → bit-identity
       gate → one stage per PR) and the follow-on order: detail maps, gizmo
       overlay, USD live-edit — each a future OpenSpec change with its own
       gate.
-- [ ] 4.2 Update CLAUDE.md architecture notes (renderer module carve-out
+- [x] 4.2 Update CLAUDE.md architecture notes (renderer module carve-out
       state + new module pointers); sweep the remaining Markdown docs per the
       documentation-upkeep rule.
-- [ ] 4.3 `openspec validate renderer-module-carveout` clean; record final
+- [x] 4.3 `openspec validate renderer-module-carveout` clean; record final
       renderer-resident `is_metal`/`_metal` site count (baseline 117) in the
       change notes.
+
+## Change notes (task 4.3)
+
+- **`is_metal`/`_metal` site count** (renderer.py, lines containing either
+  token): **117 → 98** (−19) across Stages A–C. Stage C's pass-factory collapse
+  did the bulk (the 8 `_ensure_wavefront_*` twins + 3 `_render_wavefront_*_metal`
+  bodies folded to one dispatcher each). `renderer.py` shrank **12093 → 11609
+  lines** (−484).
+- **New modules:** `src/skinny/mlt_chain.py`, `src/skinny/frame_derive.py`;
+  factory surface added to `src/skinny/vk_wavefront.py` /
+  `src/skinny/metal_wavefront.py` (`ensure_pass(renderer, integrator)`).
+- **No shader touched** — `git diff --stat -- src/skinny/shaders/` empty in every
+  stage; RGB `.spv` byte-unchanged.
+- **Gates:** 26 (mlt_chain) + 19 (frame_derive) + 16 (pass keys) new hostless
+  tests; the gpu golden-blob gate (`tests/test_pack_uniforms_golden.py`, 28
+  blobs, both modes); bit-identical renders — Stage A MLT (Metal RGB/spectral,
+  Vulkan RGB), Stage B path|megakernel, Stage C 7 wavefront combos
+  (path/bdpt/sppm Metal RGB, path Metal spectral, path/mlt/bdpt Vulkan RGB) all
+  maxdiff 0.0; runtime-toggle smoke both backends.
+- **Spot-gate scope (Stage C, user-approved):** full pbrt-truth renders were run
+  for the representative subset above; NOT re-rendered — sppm/mlt spectral both
+  backends, ReSTIR-DI and neural render combos, bdpt spectral — these are
+  covered by the key-equality tests + the runtime-toggle smoke rather than a
+  full parity-matrix sweep.

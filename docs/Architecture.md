@@ -1726,6 +1726,64 @@ a build-time requirement (generated `.slang` files are checked into git).
 
 ---
 
+## Renderer carve-out pattern (change `renderer-module-carveout`)
+
+`renderer.py` accumulated a decade of features onto one class. The carve-out
+pattern peels a self-contained cluster off `Renderer` without changing a single
+rendered pixel, so the pure logic becomes hostless-testable and the
+backend-paired orchestration collapses behind the existing seams. The precedent
+that proves it works is already in-tree: `wavefront_driver.py` holds the staged
+loop once behind a duck-typed recorder, and `mlt_bootstrap.py` holds the pure
+resample. Landed stages: `mlt_chain.py` (MLT host chain state),
+`frame_derive.py` (frame-constant derivation), and the wavefront pass factories
+(`vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass`).
+
+**The five steps** — apply in order, one stage per PR:
+
+1. **Identify the cluster's pure core** — the state→values computation with no
+   device, no `self` mutation (seed math, a bitfield, a framing ratio, a
+   capability fold). If a value is `f(scalars) → scalar`, it is pure.
+2. **Extract it as module-level functions** with the renderer calling them at
+   the *unchanged* call sites. No dataclass bundle unless one falls out free —
+   per-site pure functions keep the diff mechanical and the byte stream
+   provably identical. Side-effectful calls (buffer syncs, warn-once, stashes)
+   keep their exact site and order; a computation that also warned returns a
+   flag the renderer acts on.
+3. **Move backend-paired orchestration behind the existing seams** — the
+   `WavefrontRecorder` protocol for stage order, per-backend `build_pass` /
+   `ensure_pass` factories for construction. No new abstraction layer, no
+   removal of the mandated `is_metal` short-circuits (the `metal-backend` spec
+   is preserved verbatim); the goal is *volume in one file*, not the seam's
+   existence. Every None-fallback gate (an unbuildable pass → path/env
+   fallback) moves verbatim — a dropped gate turns a graceful fallback into a
+   crash.
+4. **Gate with bit-identity + the parity matrix.** Prefer the strongest check
+   the cluster admits: a golden byte-equality snapshot of the packed output
+   (stronger than image parity, captured pre-refactor on the same commit,
+   green after), or a bit-identical render (same seed ⇒ same image). Then the
+   parity matrix must pass with **unchanged** measured values — no baseline or
+   tolerance edits — and `git diff --stat` must show no `src/skinny/shaders/`
+   change (RGB `.spv` byte-unchanged follows). For a device-bound move with no
+   pure core, add key-equality unit tests + a runtime-toggle smoke so the
+   rebuild-key paths the matrix doesn't exercise are still covered.
+5. **One stage per PR**, independently landable and revertable.
+
+**Follow-on order** (each a future OpenSpec change carrying its own gate):
+
+| Cluster | Why the order | Gate |
+|---------|---------------|------|
+| Detail maps | Smallest, nearly pure (texture-stat → flags/strengths); a `frame_derive`-shaped extraction | Golden bytes + parity matrix |
+| Gizmo overlay | Medium; segment-buffer math is pure, the upload is the seam | Bit-identical overlay render |
+| USD live-edit | Largest; threads + async load + scene-graph mutation, so last | Scene-mutation parity + the scene-graph snapshot tests |
+
+Sibling changes own adjacent scope and are **not** part of this pattern's
+stages: `reflection-owned-byte-layouts` owns the values→bytes serialization
+(`_pack_uniforms` / `_pack_uniforms_msl` offsets + MSL reflection);
+`param-registry-accumulation-reset` owns the accumulation state hash. A
+carve-out stage must route *around* both.
+
+---
+
 ## Shader Module Dependency Graph
 
 ![Shader module dependency graph: common.slang feeds interfaces/bindings/scene-trace, which feed cameras/samplers/lights and the material implementations (flat, skin, debug, generated graphs), which feed the path and BDPT integrators, which feed main_pass.slang.](diagrams/shader_dependency_graph.svg)
