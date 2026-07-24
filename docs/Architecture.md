@@ -903,11 +903,33 @@ with no window or event loop. Key symbols:
 
 ---
 
-## Parity Matrix Harness (`pbrt/parity.py`, `pbrt/metrics.py`, `tests/pbrt/`)
+## Parity Matrix Harness (`pbrt/parity_core.py`, `pbrt/parity.py`, `pbrt/metrics.py`, `tests/pbrt/`)
 
 A standing regression that renders every supported renderer **combination**
 against a reference and against itself, so adding a feature re-tests all
 renderers automatically.
+
+**Two modules, one surface.** `pbrt/parity_core.py` holds the **pure, hostless**
+half — the `SceneSpec` manifest schema + `load_manifest`, the `RenderCombo`
+matrix and the `combo_is_valid` / `spectral_envelope` delegation to
+`render_envelope`, the anchor/axis-class bookkeeping, the self-consistency
+tolerance tables + `self_consistency_tol`, the result builders, and the
+`render_log_path` helpers. It imports only stdlib, numpy, the capability flags,
+`metrics` and `render_envelope`, so the matrix logic is exercisable with no GPU,
+no renderer and no USD (`pxr`). `pbrt/parity.py` is the **GPU render adapter**
+(`render_linear`, `render_combo`, `evaluate`, `scene_has_environment` and the
+scene-source/env helpers), with the renderer *and* `import_pbrt` imported lazily
+inside the functions that need them. It re-exports the core by an explicit import
+block — including the consumed private names `_DEFAULT_SELF_CONSISTENCY`,
+`_DEFAULT_SPECTRAL_SELF_CONSISTENCY` and `_render_log` — so every historical
+`from skinny.pbrt.parity import …` resolves unchanged; `tests/pbrt/test_parity_core.py`
+pins that surface.
+
+The spectral tolerance table is **derived**, not duplicated:
+`_DEFAULT_SPECTRAL_SELF_CONSISTENCY` = `_DEFAULT_SELF_CONSISTENCY` overlaid with
+`_SPECTRAL_TOL_OVERLAY` (the only two rows that genuinely widen — `mode.relmse`
+0.02→0.03 and `integrator.relmse` 0.06→0.09). A new tolerance class is therefore
+written once, and a pinned-literal test fails on any drift in either table.
 
 **Validity table (one source of truth).** A `RenderCombo(integrator,
 execution_mode, proposals, reuse)` is a point in the matrix; `combo_is_valid`
