@@ -911,14 +911,36 @@ renderers automatically.
 
 **Validity table (one source of truth).** A `RenderCombo(integrator,
 execution_mode, proposals, reuse)` is a point in the matrix; `combo_is_valid`
-prunes it per the [Compatibility matrix](../README.md#compatibility-matrix):
-SPPM is wavefront-only; the neural directional proposal is wavefront + path +
+prunes it — but it states no rule itself. Every envelope rule lives in
+**`skinny/render_envelope.py`**, the shared render-envelope predicate: SPPM and
+MLT are wavefront-only; the neural directional proposal is wavefront + path +
 flat-material only (BDPT ignores it); ReSTIR DI direct-light reuse is path +
-wavefront; a scene flagged `megakernel_ok: false` (e.g. the 28.8M-tri dragon,
-which OOMs the megakernel) is wavefront-only. Every skip carries an explicit
-reason; `enumerate_combos(scene)` yields the valid set, anchor-first. A coverage
-meta-test fails if an integrator the app exposes (`renderer.integrator_modes`)
-has no table entry — a new integrator without a matrix row breaks the build.
+wavefront; spectral is flat-material only with no neural proposal and no reuse; a
+scene flagged `megakernel_ok: false` (e.g. the 28.8M-tri dragon, which OOMs the
+megakernel) is wavefront-only. The [Compatibility
+matrix](../README.md#compatibility-matrix) documents that predicate.
+
+`render_envelope.evaluate(query)` returns **every** violated rule as an ordered
+list of `(code, reason)` pairs, never just the first, because its three consumers
+need different ones:
+
+| Consumer | Selects | Why |
+|----------|---------|-----|
+| `parity.combo_is_valid` / `spectral_envelope` | first violation in canonical order | reproduces the matrix's historical skip reasons and precedence |
+| the four CLI guards in `cli_common.py` | the codes each guard owns (`CLI_GUARD_CODES`), in the guard's own precedence | `reject_mlt_unsupported` reports not-yet-wired *before* the megakernel refusal — the opposite of the matrix — and `path`+neural under the megakernel must be **accepted** (the renderer strips the bit at runtime) while `bdpt`+neural is refused, though both trip the same first rule |
+| the renderer's spectral scene gate (`renderer.py`, material-pack time) | `RENDERER_SCENE_CODES` only | the CLI cannot see the material set; scanning only the flat-material code means the gate never newly refuses at runtime what is elsewhere a recorded skip |
+
+Consumers own only code selection and prose — never a rule. Codes owned by no CLI
+guard are recorded in `CLI_UNOWNED_CODES`, so one-sided acceptance is data, not an
+oversight. The capability flags `SPECTRAL_IMPLEMENTED` / `MLT_IMPLEMENTED` stay
+the kill-switches, read live at evaluation time. `tests/test_render_envelope.py`
+holds a committed snapshot of the full cartesian query space (including the
+capability-flag-off variants) as a permanent golden.
+
+Every skip carries an explicit reason; `enumerate_combos(scene)` yields the valid
+set, anchor-first. A coverage meta-test fails if an integrator the app exposes
+(`renderer.integrator_modes`) has no table entry — a new integrator without a
+predicate rule breaks the build, now for the CLI and the matrix at once.
 
 **Dual gate.** Each valid combo renders once (linear-HDR accumulation) and feeds
 two gates: **pbrt-truth** (`pbrt_truth_result` — exposure-aligned relMSE/FLIP vs

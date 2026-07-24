@@ -1,7 +1,11 @@
 """Single source of truth for whether spectral rendering is wired.
 
-The `--spectral` flag, its startup refusals (``cli_common``), and the parity
-matrix's spectral axis (``pbrt.parity``) all key off this one constant.
+This constant has exactly one consumer: :mod:`skinny.render_envelope`, the shared
+render-envelope predicate, which reads it **live** at evaluation time (never
+captured at import, so a test monkeypatch takes effect). The `--spectral` flag's
+startup refusals (``cli_common``), the parity matrix's spectral axis
+(``pbrt.parity``), and the renderer's spectral scene gate all key off it through
+that predicate rather than reading it themselves.
 
 The hero-wavelength spectral megakernel transport (change ``spectral-rendering``
 Groups 4–6) is **wired and GPU-validated**: the path+megakernel+flat v1 envelope

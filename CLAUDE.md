@@ -247,8 +247,14 @@ GPU work, in code or in tests, must go through it**:
 ## Compatibility matrix
 
 Cross-cutting view of backend × execution mode × neural × online training.
-Authoritative source for "does combo X actually run?". User-facing wording is
-in `README.md` → **Compatibility matrix**; keep the two in sync.
+
+**`src/skinny/render_envelope.py` is the source of truth for "does combo X
+actually run?"** — one predicate, consumed by the parity validity table, all four
+CLI startup guards, and the renderer's spectral scene gate. These tables (and the
+user-facing ones in `README.md` → **Compatibility matrix**) *document* that
+predicate; they are no longer a second copy to hand-mirror. Change the predicate
+first, then update both tables — a hostless doc-sync check
+(`tests/test_render_envelope.py`) fails if the key envelope facts drift apart.
 
 **Backend × feature parity:**
 
@@ -362,14 +368,19 @@ specs.
 **When you add or change a renderer feature, wire it into the matrix — do not
 ship it untested across combos:**
 
-- **New integrator** → add it to `parity.INTEGRATORS` and the `combo_is_valid`
-  rules (mirror this file's Compatibility matrix above). The coverage meta-test
+- **New integrator** → add it to `render_envelope.INTEGRATORS` and give it rules
+  in `render_envelope.evaluate` (which `parity.combo_is_valid` and the CLI guards
+  both consume — one registration now covers the matrix *and* the CLI); then
+  document it in the Compatibility matrix above. The coverage meta-test
   (`test_coverage_meta_app_integrators_covered`) **fails the build** if
   `renderer.integrator_modes` exposes an integrator with no validity entry, so
   this is enforced, not optional.
-- **New execution mode / proposal / reuse axis** → extend `EXECUTION_MODES` /
-  `PROPOSAL_AXES` / `REUSE_AXES` + `combo_is_valid`; keep the wording in sync
-  with the Compatibility matrix table above and README.
+- **New execution mode / proposal / reuse axis** → add the rule to
+  `render_envelope.evaluate` (+ `EXECUTION_MODES` there) and extend the matrix's
+  enumeration axes `PROPOSAL_AXES` / `REUSE_AXES`; if a CLI guard should refuse
+  the new code, record it in `render_envelope.CLI_GUARD_CODES` and map it to prose
+  in that guard — otherwise list it in `CLI_UNOWNED_CODES` so the one-sided
+  acceptance is deliberate. Update the Compatibility matrix above and README.
 - **New BSDF lobe / sampler / material / shader change** → it is already swept by
   every existing combo; run the gate (below) and, if a combo legitimately shifts,
   re-measure and update the manifest `measured`/`baseline`, never loosen a

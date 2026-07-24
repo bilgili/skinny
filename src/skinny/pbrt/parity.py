@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from skinny import mlt_capability, spectral_capability
+from skinny import render_envelope
 
 from . import metrics
 from .api import import_pbrt
@@ -154,12 +154,14 @@ class ParityResult:
 
 # ─── render combination matrix ────────────────────────────────────────────
 #
-# One data-driven validity table mirrors the CLAUDE.md / README compatibility
-# matrix. A combo is a point in (integrator × execution_mode × proposals ×
-# reuse); ``combo_is_valid`` is the single source of truth for which combos run.
+# A combo is a point in (integrator × execution_mode × proposals × reuse ×
+# spectral). Which of them actually run is NOT restated here: ``combo_is_valid``
+# delegates to :mod:`skinny.render_envelope`, the single statement of the render
+# envelope shared with the CLI refusal guards and the renderer's scene gate. The
+# CLAUDE.md / README compatibility tables document that predicate.
 
-INTEGRATORS = ("path", "bdpt", "sppm", "mlt")
-EXECUTION_MODES = ("megakernel", "wavefront")
+INTEGRATORS = render_envelope.INTEGRATORS
+EXECUTION_MODES = render_envelope.EXECUTION_MODES
 # Proposal/reuse axes exercised by the matrix (beyond the bare baseline).
 PROPOSAL_AXES = ("env", "neural")
 REUSE_AXES = ("restir-di",)
@@ -267,6 +269,22 @@ def spectral_selfconsistency_assertable(combo: RenderCombo, scene: SceneSpec) ->
     return True
 
 
+def _query(combo: RenderCombo, scene: SceneSpec, *, spectral: bool | None = None):
+    """The :mod:`skinny.render_envelope` query for *combo* rendered on *scene*.
+
+    The matrix never enables online training, so that axis stays at its default.
+    """
+    return render_envelope.EnvelopeQuery(
+        integrator=combo.integrator,
+        execution_mode=combo.execution_mode,
+        proposals=tuple(combo.proposals),
+        reuse=combo.reuse,
+        spectral=combo.spectral if spectral is None else spectral,
+        material_class=scene.material_class,
+        megakernel_ok=scene.megakernel_ok,
+    )
+
+
 def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     """The intended spectral validity envelope, independent of whether the
     transport is wired yet (:data:`SPECTRAL_IMPLEMENTED`).
@@ -280,107 +298,31 @@ def spectral_envelope(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
     path (photon / Markov-chain passes are wavefront-only), so both are refused
     under the megakernel; the neural proposal and ReSTIR reuse remain
     unsupported under spectral. Returns ``(ok, reason)`` with a specific reason
-    per out-of-scope axis. Mirrors ``cli_common.reject_spectral_unsupported``.
+    per out-of-scope axis.
+
+    A thin view over :func:`skinny.render_envelope.evaluate` — this function owns
+    only which verdict codes make up the *spectral scope* (and their precedence,
+    which is spectral-axis-first, unlike the canonical order), never a rule.
+    Spectral is forced on: the question is what the envelope *would* admit.
     """
-    if combo.integrator not in ("path", "bdpt", "sppm", "mlt"):
-        return False, f"spectral supports path/bdpt/sppm/mlt; {combo.integrator.upper()} unsupported"
-    if combo.has_neural:
-        return False, "spectral is incompatible with the neural proposal (v1)"
-    if combo.has_env_proposal and combo.integrator != "path":
-        return False, "spectral environment proposal requires the path integrator"
-    if combo.has_reuse:
-        return False, "spectral is incompatible with ReSTIR reuse (v1)"
-    if scene.material_class != "flat":
-        return False, "spectral is flat-material only (v1); no skin/subsurface/volume"
-    # SPPM and MLT have no megakernel path (photon / Markov-chain passes are
-    # wavefront-only). Spectral MLT (change spectral-mlt) shares that constraint.
-    if combo.integrator in ("sppm", "mlt") and combo.execution_mode != "wavefront":
-        return False, f"{combo.integrator.upper()} is wavefront-only"
-    return True, ""
+    verdict = render_envelope.evaluate(_query(combo, scene, spectral=True))
+    reason = verdict.reason_for(*render_envelope.SPECTRAL_ENVELOPE_CODES)
+    return (reason is None), (reason or "")
 
 
 def combo_is_valid(combo: RenderCombo, scene: SceneSpec) -> tuple[bool, str]:
-    """Return ``(valid, reason)``. Mirrors the documented compatibility matrix.
+    """Return ``(valid, reason)`` from the shared render-envelope predicate.
+
+    Every rule lives in :mod:`skinny.render_envelope` — the same statement the
+    CLI refusal guards and the renderer's spectral scene gate consume, so a combo
+    this table renders can never be one the CLI refuses. The matrix takes the
+    **first** violation in the predicate's canonical order, which is this
+    function's historical precedence.
 
     A skipped combo always carries an explicit reason; nothing is dropped
     silently.
     """
-    if combo.integrator not in INTEGRATORS:
-        return False, f"unknown integrator {combo.integrator!r}"
-    if combo.execution_mode not in EXECUTION_MODES:
-        return False, f"unknown execution_mode {combo.execution_mode!r}"
-    # SPPM has no megakernel path.
-    if combo.integrator == "sppm" and combo.execution_mode != "wavefront":
-        return False, "SPPM is wavefront-only"
-    # MLT (PSSMLT over BDPT, changes mlt-integrator / spectral-mlt):
-    # wavefront-only, RGB or spectral, layer-free, flat-material scenes only —
-    # the fixed primary-sample dimension
-    # budget is only boundable without volumetric/subsurface transport, and the
-    # wavefront non-flat path-fallback is not extended into Markov chains
-    # (mixing estimators inside a chain). Gated on MLT_IMPLEMENTED (referenced
-    # live, monkeypatchable) so combos are recorded "not yet wired" skips until
-    # the transport lands — never silently rendered as another integrator.
-    if combo.integrator == "mlt":
-        if combo.execution_mode != "wavefront":
-            return False, "MLT is wavefront-only"
-        # Spectral MLT (change spectral-mlt): admitted — the target function is
-        # the spectral BDPT estimator, wavefront + flat only, same as RGB MLT.
-        if combo.proposals or combo.has_reuse:
-            return False, "MLT is layer-free (no directional proposal, no ReSTIR reuse)"
-        if scene.material_class != "flat":
-            return False, "MLT is flat-material only (no skin/subsurface/volume chains)"
-        if not mlt_capability.MLT_IMPLEMENTED:
-            return False, "MLT transport not yet wired — change mlt-integrator group 5"
-    # Neural directional proposal: wavefront + path + flat material only.
-    if combo.has_neural:
-        if combo.execution_mode != "wavefront":
-            return False, "neural proposal is wavefront-only"
-        if combo.integrator != "path":
-            return False, "neural proposal requires the path integrator (BDPT ignores it)"
-        if scene.material_class != "flat":
-            return False, "neural proposal is flat-material only"
-    # Analytic environment directional proposal: consumed by the path
-    # integrator's bounce seam in either execution mode, on flat materials.
-    # BDPT/SPPM/MLT keep their native sampling and must not advertise the axis.
-    if combo.has_env_proposal:
-        if combo.integrator != "path":
-            return False, "environment proposal requires the path integrator"
-        if scene.material_class != "flat":
-            return False, "environment proposal is flat-material only"
-    # ReSTIR DI direct-light reuse: wavefront + path only (it reuses the path
-    # tracer's NEE reservoirs; BDPT/SPPM have their own light handling).
-    if combo.has_reuse:
-        if combo.execution_mode != "wavefront":
-            return False, "ReSTIR DI reuse is wavefront-only"
-        if combo.integrator != "path":
-            return False, "ReSTIR DI reuse is exercised on the path integrator"
-    # Heterogeneous participating media (nanovdb-volume-rendering): the volume
-    # walk is wired into the Path integrator only. BDPT's connection strategies
-    # and SPPM's photon pass have no medium transport (recorded exclusions,
-    # follow-up changes), and the ReSTIR reuse axis is untested with media.
-    if scene.material_class == "volume":
-        if combo.integrator != "path":
-            return False, f"{combo.integrator.upper()} has no volume transport (follow-up)"
-        if combo.has_reuse:
-            return False, "ReSTIR DI reuse untested with volume media (follow-up)"
-    # Spectral render variant (changes spectral-rendering / spectral-wavefront).
-    # The envelope is path/bdpt under either execution mode plus sppm/mlt under
-    # wavefront, over flat materials (no neural, no reuse; environment proposal
-    # on path only). Out-of-scope combos take their specific envelope reason. An
-    # in-envelope combo is only rendered once the transport is wired
-    # (SPECTRAL_IMPLEMENTED); until then it is a recorded "not yet wired" skip
-    # so the sweep never renders it as RGB.
-    # Mirrors reject_spectral_unsupported.
-    if combo.spectral:
-        ok, reason = spectral_envelope(combo, scene)
-        if not ok:
-            return False, reason
-        if not spectral_capability.SPECTRAL_IMPLEMENTED:
-            return False, "spectral transport not yet wired — megakernel Group 5 follow-up"
-    # Heavy geometry that OOMs the megakernel.
-    if combo.execution_mode == "megakernel" and not scene.megakernel_ok:
-        return False, "geometry exceeds megakernel budget"
-    return True, ""
+    return render_envelope.evaluate(_query(combo, scene)).first()
 
 
 def all_combos() -> list[RenderCombo]:

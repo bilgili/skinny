@@ -51,6 +51,7 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
+from skinny import render_envelope
 from skinny.cli_common import resolve_walk
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
@@ -7257,7 +7258,7 @@ class Renderer:
         # non-flat pixels black.
         if self._spectral:
             nonflat = sorted({int(t) for t in types if int(t) != MATERIAL_TYPE_FLAT})
-            if nonflat:
+            if nonflat and render_envelope.spectral_refuses_material_types(nonflat):
                 raise SystemExit(
                     "skinny: --spectral supports only flat materials in v1 "
                     "(UsdPreviewSurface / standard_surface / OpenPBR), but this scene "

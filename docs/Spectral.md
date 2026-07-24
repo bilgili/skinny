@@ -573,7 +573,10 @@ bundle never escapes the integrator.
 | XYZ → sRGB | `xyzToLinearSRGB` | `spectrum.slang` |
 | Host buffers + `--spectral` wiring | `renderer._spectral` block | `renderer.py` |
 | Capability gate | `SPECTRAL_IMPLEMENTED` | `spectral_capability.py` |
-| Parity axis | `spectral_envelope` / `combo_is_valid` | `pbrt/parity.py` |
+| Spectral envelope rules | `evaluate` (`SPECTRAL_*` codes) | `render_envelope.py` |
+| Parity axis (delegates) | `spectral_envelope` / `combo_is_valid` | `pbrt/parity.py` |
+| CLI refusal (delegates) | `reject_spectral_unsupported` | `cli_common.py` |
+| Scene flat-only gate (delegates) | `spectral_refuses_material_types` | `render_envelope.py` ← `renderer.py` |
 
 ## Verification
 
