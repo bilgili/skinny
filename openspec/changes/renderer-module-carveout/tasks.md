@@ -109,12 +109,15 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
 - [x] 3.3 Key-equality unit tests: new key tuples equal the pre-carve-out
       values for representative states (reuse none↔ReSTIR, neural on/off,
       record mode, dims, spectral).
-- [x] 3.4 Gate: full parity-matrix wavefront sweep green on both backends
-      (path/BDPT/SPPM/MLT, RGB + spectral) with unchanged measured values;
-      runtime-toggle smoke per backend (none↔ReSTIR, neural on/off,
-      integrator cycling) recorded in the PR; `tests/test_metal_cleanup.py`
-      -m gpu under the guarded runner (context lifecycle touched); no shader
-      diff.
+- [x] 3.4 Gate: **spot-gated** wavefront parity (user-approved subset, not a
+      full sweep — see the change notes) — bit-identical pre/post on the
+      representative combos path/BDPT/SPPM Metal RGB, path Metal spectral, and
+      path/MLT/BDPT Vulkan RGB (maxdiff 0.0); SPPM/MLT spectral both backends,
+      ReSTIR-DI and neural render combos, and BDPT spectral covered by the
+      key-equality tests + the runtime-toggle smoke instead. Runtime-toggle
+      smoke per backend (none↔ReSTIR, neural on/off, integrator cycling);
+      `tests/test_metal_cleanup.py` -m gpu under the guarded runner (context
+      lifecycle touched); no shader diff.
 - [x] 3.5 Docs: `docs/Wavefront.md` pass-construction/seam wording;
       `docs/Architecture.md` module map.
 

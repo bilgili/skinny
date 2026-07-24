@@ -2061,6 +2061,12 @@ def _ensure_mlt(r):
     """Staged wavefront MLT pass (Vulkan). None when the scene set-0 layout lacks
     the MLT bindings 52–57 (a megakernel-mode session); the caller falls back to
     the path tracer like SPPM does."""
+    # `_ensure_wavefront_pass` is the routing authority (Metal → metal_wavefront),
+    # so this is unreachable on Metal via the dispatcher — but the pre-carve-out
+    # `_ensure_wavefront_mlt_pass` returned None on `is_metal`, so preserve the
+    # guard verbatim to keep a direct Vulkan-factory call safe on a Metal host.
+    if r.is_metal:
+        return None
     if not hasattr(r.ctx, "compute_queue"):
         return None
     if r._scene_bindings is None or r.descriptor_sets is None:

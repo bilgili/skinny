@@ -149,6 +149,14 @@ def test_vk_mlt_key_is_dims_and_chain_config():
     _drive_cache_hit(r, "mlt", vk, (r.width, r.height, 4096, 2048))
 
 
+def test_vk_mlt_factory_returns_none_on_a_metal_host():
+    # The pre-carve-out `_ensure_wavefront_mlt_pass` returned None on `is_metal`;
+    # the dispatcher routes Metal to metal_wavefront, but a direct Vulkan-factory
+    # call on a Metal host must still be safe (codex pre-merge review).
+    r = _StubRenderer(is_metal=True)
+    assert vk.ensure_pass(r, "mlt") is None
+
+
 # ── Metal ────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("reuse,neural,rec,nonflat,graph", [

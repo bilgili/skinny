@@ -197,10 +197,15 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass(renderer,
   integrator)`, collapsing the 8 `_ensure_wavefront_*` twins to one
   `_ensure_wavefront_pass(integrator)` dispatcher and the 3 Metal render bodies
-  to one. `renderer.py` −484 lines; `is_metal`/`_metal` sites 85→67. Gated by a
-  golden byte-equality snapshot of the packed uniforms, MLT/path/bdpt/sppm
-  bit-identical renders on both backends, and rebuild-key equality tests. The
-  reusable extraction pattern + follow-on order (detail maps → gizmo → USD
+  to one. `renderer.py` −484 lines; `is_metal`/`_metal` line-hits 117→98. Gated
+  by a golden byte-equality snapshot of the packed uniforms, rebuild-key
+  equality tests, a runtime-toggle smoke on both backends, and a
+  representative bit-identical render subset (path/BDPT/SPPM Metal RGB, path
+  Metal spectral, path/MLT/BDPT Vulkan RGB — all maxdiff 0.0). The Stage-C
+  parity check was **spot-gated**, not a full sweep: SPPM/MLT spectral on both
+  backends, ReSTIR-DI and neural render combos, and BDPT spectral were left to
+  the key-equality tests + toggle smoke rather than full pbrt-truth renders.
+  The reusable extraction pattern + follow-on order (detail maps → gizmo → USD
   live-edit) is documented in Architecture.md.
 
 - **`RenderCommandQueue` and `QtRendererProxy` moved** from
