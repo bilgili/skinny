@@ -8,7 +8,6 @@ import operator
 import struct
 import threading
 import time
-import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -51,7 +50,7 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
-from skinny import render_envelope
+from skinny import mlt_chain, render_envelope
 from skinny.cli_common import resolve_walk
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
@@ -2450,46 +2449,12 @@ class Renderer:
 
     def _mlt_uniform_tail_active(self) -> bool:
         """Whether ``_pack_uniforms`` must emit the ``#if defined(SKINNY_MLT)``
-        FrameConstants tail — i.e. the dispatched shader's ``fc`` actually has
-        those fields (codex pre-merge review).
-
-        Vulkan uses one oversized shared UBO, so appending the tail whenever
-        MLT is the integrator is harmless — only the MLT ``.spv`` reads the
-        offsets. Metal packs the blob per-dispatch and the drift guard asserts
-        the blob length equals the reflected ``fc`` size, so the tail is packed
-        ONLY when the Metal MLT wavefront pass is the real consumer: integrator
-        3, wavefront mode, and the pass built. A megakernel-fallback MLT
-        selection (execution mode != wavefront) or any non-MLT integrator gets
-        the base layout, no tail — otherwise runtime integrator cycling crashes
-        uniform packing."""
-        if self.integrator_index != 3:
-            return False
-        if not self.is_metal:
-            return True
-        return (self.effective_execution_mode_index == EXECUTION_WAVEFRONT
-                and self._wavefront_mlt_pass is not None)
-
-    def _next_mlt_seed(self) -> int:
-        """Per-reset MLT replay seed (design D3): stable across an accumulation
-        run, decorrelated between consecutive resets, and REPRODUCIBLE ACROSS
-        PROCESSES — the parity gate re-renders in a fresh interpreter and must
-        get the same chains (design D6's deterministic budget mapping).
-
-        Deliberately NOT derived from `_current_state_hash()`. That hash exists
-        for change detection, where only equality *within* one process matters,
-        and it hashes tuples containing str (`state_signature()` leads with
-        "orbit"/"free") — so PYTHONHASHSEED randomizes it per process. Seeding
-        MLT from it made every render irreproducible: the same scene scored
-        self-consistency relMSE 0.17 / 0.25 / 1.10 across three runs, which is
-        pass-or-fail by luck. `frame_index` alone already decorrelates resets
-        (it advances between them) and is deterministic in a headless render,
-        so it is both necessary and sufficient here.
-        """
-        # frame_index is a monotonic counter and mltSeed is a u32 shader field,
-        # so mask to 32 bits — a signed "<i" pack raises struct.error past 2**31
-        # (codex pre-merge review).
-        return zlib.crc32(
-            struct.pack("<I", int(self.frame_index) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        FrameConstants tail. Predicate + rationale live in
+        `mlt_chain.uniform_tail_active` (change renderer-module-carveout)."""
+        return mlt_chain.uniform_tail_active(
+            self.integrator_index, self.is_metal,
+            self.effective_execution_mode_index,
+            self._wavefront_mlt_pass is not None)
 
     def _ensure_wavefront_mlt_pass_metal(self):
         """Build (once) the native-Metal staged MLT pass (change
@@ -2560,11 +2525,10 @@ class Renderer:
         self._wf_mlt_pass_dims = None
 
     def _mlt_iterations_per_frame(self) -> int:
-        """Mutation iterations per accumulation frame: ~1 mutation/pixel/frame
-        (`mpp_actual = iterations × nChains / pixels` is packed into the MLT
-        uniform tail so the resolve divides by the ACTUAL budget, design D4)."""
-        pixels = max(1, self.width * self.height)
-        return max(1, round(pixels / max(1, int(self.mlt_num_chains))))
+        """Mutation iterations per accumulation frame — see
+        `mlt_chain.iterations_per_frame`."""
+        return mlt_chain.iterations_per_frame(
+            self.width, self.height, self.mlt_num_chains)
 
     def _submit_one_shot_compute(self, record_fn) -> None:
         """Allocate, record, submit, and wait one command buffer on the compute
@@ -2587,27 +2551,18 @@ class Renderer:
         vk.vkFreeCommandBuffers(self.ctx.device, self.ctx.command_pool, 1, [cmd])
 
     def _run_wavefront_mlt_bootstrap(self, mlt, scene_set) -> None:
-        """Synchronous MLT (re)seed at an accumulation reset (design D3):
-        bootstrap dispatch → weight readback → host CDF resample (b + chain
-        seeds) → seed upload → chain-init dispatch. Runs like other one-shot
-        GPU work — its own submits, awaited before the frame records."""
-        from skinny.mlt_bootstrap import resample_chain_seeds
-
-        self._mlt_seed = self._next_mlt_seed()
-        mlt.b = 0.0
-        mlt.seeded = False
-        # The bootstrap/init kernels read fc.mltSeed — re-upload before they run.
-        self.uniform_buffer.upload(self._pack_uniforms())
-        self._submit_one_shot_compute(lambda c: mlt.record_bootstrap(c, scene_set))
-        weights = mlt.read_bootstrap_weights()
-        b, seeds = resample_chain_seeds(weights, mlt.num_chains, self._mlt_seed)
-        mlt.upload_chain_seeds(seeds)
-        self._submit_one_shot_compute(lambda c: mlt.record_init(c, scene_set))
-        mlt.b = b
-        mlt.seeded = True
-        # The frame's resolve reads fc.mltB — re-upload now that b is known
-        # (the frame command buffer has not been submitted yet).
-        self.uniform_buffer.upload(self._pack_uniforms())
+        """Synchronous MLT (re)seed at an accumulation reset — the Vulkan
+        binding of the shared `mlt_chain.run_bootstrap` round-trip: one-shot
+        command buffers for the two phases, the persistent UBO for the
+        seed/`b` re-uploads."""
+        self._mlt_seed = mlt_chain.next_seed(self.frame_index)
+        record = {"bootstrap": mlt.record_bootstrap, "init": mlt.record_init}
+        mlt_chain.run_bootstrap(
+            mlt, seed=self._mlt_seed,
+            submit=lambda phase: self._submit_one_shot_compute(
+                lambda c: record[phase](c, scene_set)),
+            upload_uniforms=lambda: self.uniform_buffer.upload(
+                self._pack_uniforms()))
 
     def _record_wavefront_dispatch(self, cmd, scene_set):
         """Record the active wavefront integrator's dispatch into ``cmd`` —
@@ -10388,29 +10343,21 @@ class Renderer:
         `dispatch_bootstrap` / `dispatch_init` encoders (each ends in a
         `MetalFrameEncoder.submit`, which drains), so the weight readback
         between them sees finished GPU work without an explicit wait."""
-        from skinny.mlt_bootstrap import resample_chain_seeds
-
-        self._mlt_seed = self._next_mlt_seed()
-        mlt.b = 0.0
-        mlt.seeded = False
+        self._mlt_seed = mlt_chain.next_seed(self.frame_index)
         binds = self._build_metal_binds()
         textures = [(s.texture if s is not None else None)
                     for s in self.texture_pool._slots]
         batch = self._mlt_metal_chain_batch()
-        # Packed AFTER _mlt_seed is set: the bootstrap/init kernels read
-        # fc.mltSeed, and on Metal the blob is a per-dispatch argument (no
-        # persistent uniform buffer to re-upload as on Vulkan).
-        mlt.dispatch_bootstrap(
-            binds=binds, uniform_blob=self._pack_uniforms_msl(),
-            bindless_textures=textures, chain_batch=batch)
-        weights = mlt.read_bootstrap_weights()
-        b, seeds = resample_chain_seeds(weights, mlt.num_chains, self._mlt_seed)
-        mlt.upload_chain_seeds(seeds)
-        mlt.dispatch_init(
-            binds=binds, uniform_blob=self._pack_uniforms_msl(),
-            bindless_textures=textures, chain_batch=batch)
-        mlt.b = b
-        mlt.seeded = True
+        dispatch = {"bootstrap": mlt.dispatch_bootstrap, "init": mlt.dispatch_init}
+
+        # The blob is packed AFTER _mlt_seed is set and inside the phase (a
+        # per-dispatch argument on Metal — no persistent uniform buffer to
+        # re-upload as on Vulkan, hence upload_uniforms=None).
+        def _submit(phase):
+            dispatch[phase](binds=binds, uniform_blob=self._pack_uniforms_msl(),
+                            bindless_textures=textures, chain_batch=batch)
+
+        mlt_chain.run_bootstrap(mlt, seed=self._mlt_seed, submit=_submit)
 
     def _mlt_metal_chain_batch(self) -> int:
         """Per-dispatch chain breadth for the Metal MLT phases (design D7,

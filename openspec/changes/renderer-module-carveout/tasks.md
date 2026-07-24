@@ -8,7 +8,7 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
 
 ## 1. Stage A — MLT chain-state module
 
-- [ ] 1.1 Add `src/skinny/mlt_chain.py`: pure `next_seed(frame_index)`
+- [x] 1.1 Add `src/skinny/mlt_chain.py`: pure `next_seed(frame_index)`
       (crc32 formula moved verbatim from `Renderer._next_mlt_seed`),
       `iterations_per_frame(width, height, num_chains)`,
       `uniform_tail_active(integrator_index, is_metal, execution_mode_is_wavefront,
@@ -16,20 +16,20 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       upload_uniforms, submit)` round-trip (seed → uniforms upload →
       bootstrap → readback → `mlt_bootstrap.resample_chain_seeds` → seed
       upload → init → publish `b` → uniforms re-upload).
-- [ ] 1.2 Hostless tests (`tests/test_mlt_chain.py`, no GPU): pin exact
+- [x] 1.2 Hostless tests (`tests/test_mlt_chain.py`, no GPU): pin exact
       `next_seed` integers for several `frame_index` values against the
       pre-carve-out formula; cover the tail-predicate truth table (Vulkan
       always-on at integrator 3, Metal gated on wavefront + pass built) and
       the iterations budget; drive `run_bootstrap` with a stub pass to assert
       call order and `b`/`seeded` publication.
-- [ ] 1.3 Rewire `renderer.py`: `_next_mlt_seed`, `_mlt_uniform_tail_active`,
+- [x] 1.3 Rewire `renderer.py`: `_next_mlt_seed`, `_mlt_uniform_tail_active`,
       `_mlt_iterations_per_frame` delegate to (or are replaced by calls into)
       `mlt_chain`; `_run_wavefront_mlt_bootstrap` and
       `_run_wavefront_mlt_bootstrap_metal` collapse onto
       `mlt_chain.run_bootstrap` with backend-supplied callables
       (`_submit_one_shot_compute` + scene-set lambdas on Vulkan; the pass's
       own submits on Metal). Delete the superseded bodies.
-- [ ] 1.3a Re-point `tests/test_mlt_host.py` at the new authority: the
+- [x] 1.3a Re-point `tests/test_mlt_host.py` at the new authority: the
       `inspect.getsource(Renderer._next_mlt_seed)` assertion and the
       seed-independence checks (:214–226) move to `mlt_chain.next_seed`;
       relocate the seed-independence docstring note (renderer.py:2452) with
@@ -37,12 +37,12 @@ D3's bit-identity checks. GPU runs follow CLAUDE.md Metal dispatch hygiene
       `param-registry-accumulation-reset` (which pledges to preserve that
       note) and `reflection-owned-byte-layouts` — whichever change lands
       second owns the note's pointer.
-- [ ] 1.4 Gate: hostless suites green (`tests/test_mlt_chain.py` + existing
+- [x] 1.4 Gate: hostless suites green (`tests/test_mlt_chain.py` + existing
       MLT hostless tests); one MLT suite scene (`int_caustic`) rendered at
       equal budget bit-identical to pre-stage on Metal; parity-matrix MLT
       combos pass with unchanged measured values; no `src/skinny/shaders/`
       diff.
-- [ ] 1.5 Docs: `docs/MetropolisLightTransport.md` host-orchestration section
+- [x] 1.5 Docs: `docs/MetropolisLightTransport.md` host-orchestration section
       + `docs/Architecture.md` module map entry for `mlt_chain.py`.
 
 ## 2. Stage B — frame-constant derivation module

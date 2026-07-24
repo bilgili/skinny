@@ -129,6 +129,28 @@ records, and initializes its independent mutation RNG stream.
 Bootstrap is repeated whenever a scene, camera, integrator parameter, or other
 accumulation-defining state changes.
 
+### Host orchestration (`mlt_chain.py`)
+
+The device-free half of the host layer lives in `mlt_chain.py`, outside the
+renderer (change `renderer-module-carveout`). It is importable and testable
+with no GPU device and no constructed `Renderer`:
+
+| Function | Role |
+| --- | --- |
+| `next_seed(frame_index)` | per-reset replay seed — `crc32` over `frame_index`, deliberately **not** the change-detection state hash, which `PYTHONHASHSEED` randomizes per process. Cross-process reproducibility is what the parity gate's MLT determinism rests on, so its integers are pinned by unit test |
+| `iterations_per_frame(w, h, chains)` | ~1 mutation/pixel/frame; feeds `mpp_actual` into the uniform tail |
+| `uniform_tail_active(integrator, is_metal, mode, pass_built)` | whether the `SKINNY_MLT` FrameConstants tail is packed — always on for MLT on Vulkan (one oversized shared UBO), gated on wavefront + a built pass on Metal (the blob must match the dispatched pipeline's reflected `fc`) |
+| `run_bootstrap(mlt, seed, submit, upload_uniforms)` | the round-trip above, sequenced **once** for both backends |
+
+`run_bootstrap` is device-free because the backend supplies its own primitives:
+Vulkan passes a `submit` that records the pass's `record_bootstrap`/`record_init`
+into a one-shot command buffer, plus an `upload_uniforms` that re-uploads the
+persistent UBO around the phases (the kernels read `fc.mltSeed`, the resolve
+reads `fc.mltB`). Metal passes a `submit` that drives the pass's own
+`dispatch_bootstrap`/`dispatch_init` encoders and **no** `upload_uniforms` — its
+blob is a per-dispatch argument packed inside the phase. Because the sequence
+itself is shared, the two backends' bootstrap orders cannot drift apart.
+
 ## Phase 2 — primary-sample state
 
 One GPU lane maps to one persistent Markov chain. The default is 16,384 chains.
@@ -296,6 +318,7 @@ bit-identical execution-mode parity used by independent-sample path tracing.
 | `shaders/integrators/bdpt.slang` | RGB target estimator |
 | `shaders/integrators/bdpt_spectral.slang` | spectral target estimator |
 | `mlt_bootstrap.py` | host CDF, normalization `b`, chain-seed resampling |
+| `mlt_chain.py` | replay seed, mutation budget, uniform-tail predicate, shared bootstrap round-trip |
 | `wavefront_driver.py` | backend-neutral stage order and batching |
 | `wavefront_layout.py` | chain structs, strides, and buffer sizes |
 | `vk_wavefront.py` | Vulkan pass and recorder |

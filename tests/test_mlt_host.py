@@ -80,9 +80,12 @@ def test_nonfinite_entries_zeroed_not_drawn():
 def test_renderer_has_mlt_pass_lifecycle():
     src = _read("renderer.py")
     for sym in ("_ensure_wavefront_mlt_pass", "_destroy_wavefront_mlt_pass",
-                "_run_wavefront_mlt_bootstrap", "resample_chain_seeds",
+                "_run_wavefront_mlt_bootstrap", "mlt_chain.run_bootstrap",
                 "WavefrontMltPass"):
         assert sym in src, f"renderer.py must reference {sym}"
+    # The host CDF resample is reached through the carved-out chain module
+    # (change renderer-module-carveout), not inline in the renderer.
+    assert "resample_chain_seeds" in _read("mlt_chain.py")
 
 
 def test_renderer_dispatch_branch_selects_mlt():
@@ -161,18 +164,43 @@ def test_metal_mlt_binds_the_chain_buffers_by_name():
         assert name in body, f"Metal MLT pass must bind {name}"
 
 
+def test_bootstrap_round_trip_order_is_shared_by_both_backends():
+    # The host round-trip — bootstrap → readback → resample → seed upload →
+    # init → publish b — is sequenced ONCE in `mlt_chain.run_bootstrap`
+    # (change renderer-module-carveout); the backends supply only their submit
+    # primitive, so the two orders cannot drift apart.
+    body = _read("mlt_chain.py")
+    body = body[body.index("def run_bootstrap"):]
+    order = ['submit("bootstrap")', "mlt.read_bootstrap_weights(",
+             "resample_chain_seeds(weights", "mlt.upload_chain_seeds(",
+             'submit("init")', "mlt.b = b"]
+    at = [body.index(sym) for sym in order]
+    assert at == sorted(at), f"MLT bootstrap steps out of order: {order}"
+
+
 def test_renderer_metal_mlt_bootstrap_round_trip():
+    # The Metal binding: both phases route to the pass's own dispatch encoders,
+    # and no uniform re-upload is supplied (the blob is a per-dispatch arg).
     src = _read("renderer.py")
     start = src.index("def _run_wavefront_mlt_bootstrap_metal")
     body = src[start:start + 2500]
-    # Same host round-trip as Vulkan, in order: bootstrap → readback →
-    # resample → seed upload → init. Anchored on the CALL sites (the
-    # `resample_chain_seeds` import sits above them all).
-    order = ["mlt.dispatch_bootstrap(", "mlt.read_bootstrap_weights(",
-             "resample_chain_seeds(weights", "mlt.upload_chain_seeds(",
-             "mlt.dispatch_init("]
-    at = [body.index(sym) for sym in order]
-    assert at == sorted(at), f"Metal MLT bootstrap steps out of order: {order}"
+    assert '"bootstrap": mlt.dispatch_bootstrap' in body
+    assert '"init": mlt.dispatch_init' in body
+    call = body[body.index("mlt_chain.run_bootstrap("):]
+    assert call.startswith(
+        "mlt_chain.run_bootstrap(mlt, seed=self._mlt_seed, submit=_submit)")
+
+
+def test_renderer_vulkan_mlt_bootstrap_round_trip():
+    # The Vulkan binding: both phases are one-shot command buffers recording
+    # the pass's record_*, and the persistent UBO carries the seed/`b` writes.
+    src = _read("renderer.py")
+    start = src.index("def _run_wavefront_mlt_bootstrap(")
+    body = src[start:start + 2500]
+    assert '"bootstrap": mlt.record_bootstrap' in body
+    assert '"init": mlt.record_init' in body
+    assert "self._submit_one_shot_compute(" in body
+    assert "upload_uniforms=lambda: self.uniform_buffer.upload(" in body
 
 
 def _renderer_module():
@@ -218,11 +246,12 @@ def test_mlt_seed_is_stable_across_processes():
     # that hash covers tuples containing str, so PYTHONHASHSEED randomizes it
     # per process and the same scene scored relMSE 0.17 / 0.25 / 1.10 across
     # three runs. Assert the derivation is hash()-free and str-free.
-    R = _renderer_module()
-    src = inspect.getsource(R.Renderer._next_mlt_seed)
+    from skinny import mlt_chain
+    src = inspect.getsource(mlt_chain.next_seed)
     assert "zlib.crc32" in src
     assert "_current_state_hash" not in src.split('"""')[-1], \
-        "_next_mlt_seed must not derive from the randomized change-detection hash"
+        "mlt_chain.next_seed must not derive from the randomized " \
+        "change-detection hash"
 
     # Same frame_index → same seed, in a subprocess with a DIFFERENT hash seed.
     probe = (
@@ -253,11 +282,16 @@ def test_mlt_uniform_tail_gated_on_active_consumer():
     # is packed only when the MLT wavefront pass is the real consumer —
     # otherwise a runtime switch to path, or a megakernel-fallback MLT
     # selection, desyncs the blob and trips the drift-guard assertion.
-    R = _renderer_module()
-    tail = inspect.getsource(R.Renderer._mlt_uniform_tail_active)
+    from skinny import mlt_chain
+    tail = inspect.getsource(mlt_chain.uniform_tail_active)
     assert "integrator_index != 3" in tail
-    assert "EXECUTION_WAVEFRONT" in tail and "self.is_metal" in tail
-    assert "_wavefront_mlt_pass is not None" in tail
+    assert "EXECUTION_WAVEFRONT" in tail and "is_metal" in tail
+    # …and the renderer feeds it the live pass-built / mode state.
+    call = _read("renderer.py")
+    call = call[call.index("def _mlt_uniform_tail_active"):][:600]
+    assert "mlt_chain.uniform_tail_active(" in call
+    assert "self.is_metal" in call and "self.effective_execution_mode_index" in call
+    assert "self._wavefront_mlt_pass is not None" in call
 
     # The layout source routes through the predicate; the scalar packer's tail
     # is driven either by the predicate (Vulkan direct call) or by the target
@@ -299,8 +333,8 @@ def test_mlt_metal_chain_batch_defaults_to_one_batch_at_default_chains():
 def test_mlt_seed_masks_frame_index_to_u32():
     # codex pre-merge review: a signed "<i" pack raises past 2**31; mltSeed is a
     # u32 shader field, so the pack must mask to 32 bits.
-    R = _renderer_module()
-    src = inspect.getsource(R.Renderer._next_mlt_seed)
+    from skinny import mlt_chain
+    src = inspect.getsource(mlt_chain.next_seed)
     assert 'struct.pack("<I"' in src and "& 0xFFFFFFFF" in src
     assert 'struct.pack("<i"' not in src
 
@@ -310,8 +344,8 @@ def test_both_backends_share_one_seed_derivation():
     # for reasons unrelated to the backend (this is what made the int_caustic
     # gate look Metal-specific when it was not).
     src = _read("renderer.py")
-    assert src.count("self._mlt_seed = self._next_mlt_seed()") == 2, \
-        "both bootstrap paths must route through _next_mlt_seed"
+    assert src.count("self._mlt_seed = mlt_chain.next_seed(self.frame_index)") == 2, \
+        "both bootstrap paths must route through mlt_chain.next_seed"
     assert "_mlt_seed = hash(" not in src, "no call site may re-introduce hash()"
 
 
