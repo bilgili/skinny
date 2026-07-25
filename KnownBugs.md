@@ -82,3 +82,45 @@ that Metal material textures are repeat/repeat.
 `inputs:wrapT = "clamp"` (or mirror) and is sampled past v=1 (e.g. `uvtiling > 1`
 or UVs outside [0,1]); render `--backend metal` vs `--backend vulkan` → Metal
 tiles where Vulkan clamps.
+
+---
+
+## 3. pbrt material mapping: four frozen divergences between the two export flavours
+
+**Observed:** 2026-07-25, while extracting the shared resolver (change
+`pbrt-material-shared-resolver`). All four **predate** that change and were
+preserved deliberately — the change's gate is byte-identical importer output, so
+fixing any of them there would have silently changed committed `.usda` fixtures.
+Each is flavour-gated in `resolve_material` with a comment pointing here.
+
+**1. `coatedconductor` base-metal roughness reads a different param per flavour.**
+pbrt-v4 spells the metal's roughness `conductor.roughness` (the top-level
+`roughness` drives the *coat*). The `-mtlx` path reads `conductor.roughness`
+(correct); the UsdPreviewSurface path reads top-level `roughness`, so on a
+`coatedconductor` that sets both, the two exports render a differently-rough
+metal. **Fix:** read `conductor.roughness` on both, regenerate the affected
+`.usda` fixtures, and diff the parity baselines (no suite or corpus scene uses
+`coatedconductor` today, so add one — `tests/pbrt/fixtures/all_mtypes.pbrt`
+covers the import-level behaviour but renders nothing).
+
+**2. Three pbrt params are read only on the `-mtlx` path** —
+`diffusetransmission` `transmittance`, `subsurface` `reflectance`/`radius`, and
+`interface.eta` on `coateddiffuse`/`coatedconductor`. UsdPreviewSurface has no
+input for any of them, so the value would be dropped anyway; what is *lost* is
+the report signal — a texture-bound or unrecognised one of these produces a note
+(and possibly an EXACT→APPROX escalation) on the `-mtlx` import and nothing at
+all on the plain one. **Fix:** decide per param whether the note is worth the
+divergence, then read unconditionally and re-baseline the reports.
+
+**3. `_subsurface_overrides` crashes on a texture-bound `reflectance`.**
+`materials._subsurface_overrides` reads it with `ParamSet.rgb`, which raises
+`ValueError` on a texture-typed param (both flavours; the promoting accessors
+exist precisely to avoid this). **Repro:** `Material "subsurface" "texture
+reflectance" "sometex"` → `could not convert string to float: 'sometex'`.
+
+**4. `media.subsurface_overrides` crashes on a named-spectrum `eta`.**
+`api._author_material` calls it in addition to the `materials.py` twin, but only
+the latter has the named-glass guard; the `media.py` one reads `ParamSet.floats`
+straight. **Repro:** `Material "subsurface" "spectrum eta" "glass-BK7"` →
+`could not convert string to float: 'glass-BK7'`. The two `subsurface_overrides`
+implementations should be one.

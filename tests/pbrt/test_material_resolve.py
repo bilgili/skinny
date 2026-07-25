@@ -1,0 +1,432 @@
+"""Hostless tests for the shared pbrt material resolver (change:
+pbrt-material-shared-resolver).
+
+``resolve_material`` is the single owner of pbrt-param interpretation; these
+assert the *resolved intermediate* directly, so a param read, default, note or
+status escalation is pinned once instead of twice through the two mappers.
+``test_materials.py`` / ``test_materials_mtlx.py`` remain the output-level lock.
+"""
+
+from __future__ import annotations
+
+import ast
+import inspect
+import textwrap
+
+import pytest
+
+from skinny.pbrt import materials as M
+from skinny.pbrt.parser import parse_directives
+from skinny.pbrt.report import APPROX, EXACT
+from skinny.pbrt.tokenizer import tokenize
+
+
+def _mat(text):
+    from skinny.pbrt.state import PbrtMaterial
+
+    (d,) = parse_directives(tokenize(text))
+    return PbrtMaterial(d.type_arg() or "", d.params)
+
+
+def _res(text, flavor=M.USD, **kw):
+    return M.resolve_material(_mat(text), flavor=flavor, **kw)
+
+
+class _Tex:
+    """Minimal stand-in for a parsed pbrt Texture directive."""
+
+    def __init__(self, klass="imagemap", filename="t.png", datatype="spectrum"):
+        self.klass = klass
+        self.datatype = datatype
+        (d,) = parse_directives(tokenize(f'Material "x" "string filename" "{filename}"'))
+        self.params = d.params
+
+
+def _textures(**kw):
+    return dict(kw)
+
+
+# --------------------------------------------------------------------------- #
+# per-material-type resolved form
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_empty_and_none_resolve_to_grey_base(flavor):
+    for src in ('Material ""', 'Material "none"'):
+        res = _res(src, flavor)
+        assert res.lobes["base_color"].const == [0.5, 0.5, 0.5]
+        assert res.status == EXACT
+        assert res.notes == []
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_interface_is_a_lobeless_null_boundary(flavor):
+    res = _res('Material "interface"', flavor)
+    assert res.lobes["base_color"].const == [0.0, 0.0, 0.0]
+    assert res.lobes["metallic"] == 0.0
+    assert res.lobes["roughness"].pv.const == 1.0
+    assert res.notes == [
+        "interface -> null boundary material (no BSDF lobes); routes to volume path"]
+    # a null boundary is an exact translation, not an approximation
+    assert res.status == EXACT
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_diffuse_reads_reflectance_and_pins_roughness(flavor):
+    res = _res('Material "diffuse" "rgb reflectance" [0.2 0.4 0.6]', flavor)
+    assert res.lobes["base_color"].const == [0.2, 0.4, 0.6]
+    assert res.lobes["roughness"].pv.const == 1.0
+    assert "metallic" not in res.lobes
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_conductor_is_metallic_with_a_specular_tint_matching_base(flavor):
+    res = _res('Material "conductor" "rgb reflectance" [0.9 0.7 0.3] "float roughness" 0.25',
+               flavor)
+    assert res.lobes["metallic"] == 1.0
+    assert res.lobes["base_color"].const == [0.9, 0.7, 0.3]
+    # roughness 0.25 -> alpha 0.5 -> usd roughness sqrt(0.5)
+    assert res.lobes["roughness"].pv.const == pytest.approx(0.5 ** 0.5)
+    # the tint mirrors the resolved conductor base colour (here the authored
+    # reflectance, which short-circuits the eta/k chain)
+    assert res.lobes["specular_color"] == pytest.approx([0.9, 0.7, 0.3])
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_conductor_without_reflectance_tints_from_the_resolved_ior(flavor):
+    res = _res('Material "conductor" "spectrum eta" "metal-Au-eta" "spectrum k" "metal-Au-k"',
+               flavor)
+    assert res.lobes["specular_color"] == pytest.approx(res.lobes["base_color"].const)
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_dielectric_resolves_full_transmission_and_eta(flavor):
+    res = _res('Material "dielectric" "float eta" 1.7', flavor)
+    assert res.lobes["base_color"].const == [1.0, 1.0, 1.0]
+    assert res.lobes["transmission"] == 1.0
+    assert res.lobes["transmission_color"] == [1.0, 1.0, 1.0]
+    assert res.lobes["ior"] == pytest.approx(1.7)
+    assert "thin_walled" not in res.lobes
+    assert res.status == EXACT
+
+
+def test_thindielectric_is_approx_with_flavor_worded_note():
+    usd = _res('Material "thindielectric"', M.USD)
+    mtlx = _res('Material "thindielectric"', M.MTLX)
+    assert usd.lobes["thin_walled"] is True and mtlx.lobes["thin_walled"] is True
+    assert usd.status == APPROX and mtlx.status == APPROX
+    assert usd.notes == ["thindielectric approximated as thin dielectric"]
+    assert mtlx.notes == ["thindielectric approximated as thin-walled transmissive surface"]
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_coateddiffuse_coat_roughness_comes_from_top_level_roughness(flavor):
+    # pbrt spells the interface (coat) roughness as the top-level `roughness`;
+    # both targets take it from the same shared calibration chain.
+    res = _res('Material "coateddiffuse" "float roughness" 0.25', flavor)
+    assert res.lobes["coat"] == 1.0
+    assert res.lobes["coat_color"] == [1.0, 1.0, 1.0]
+    assert res.lobes["coat_roughness"].pv.const == pytest.approx(0.5 ** 0.5)
+    # the base lobe stays fully rough (the coat carries the specular)
+    assert res.lobes["roughness"].pv.const == 1.0
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_coatedconductor_coat_roughness_reads_interface_roughness(flavor):
+    res = _res('Material "coatedconductor" "float interface.roughness" 0.4', flavor)
+    assert res.lobes["coat"] == 1.0
+    assert res.lobes["coat_roughness"] == pytest.approx(0.4)
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_diffusetransmission_is_half_transmissive_and_approx(flavor):
+    res = _res('Material "diffusetransmission"', flavor)
+    assert res.lobes["base_color"].const == [0.25, 0.25, 0.25]
+    assert res.lobes["transmission"] == 0.5
+    assert res.status == APPROX
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_unknown_material_degrades_to_diffuse_grey(flavor):
+    res = _res('Material "wibble"', flavor)
+    assert res.lobes == {}
+    assert res.status == APPROX
+    assert res.notes == ["unknown material 'wibble' best-effort as diffuse grey"]
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_emissive_rgb_rides_as_a_neutral_lobe_last(flavor):
+    res = _res('Material "diffuse"', flavor, emissive_rgb=[7.0, 5.0, 3.0])
+    assert res.lobes["emission_rgb"] == [7.0, 5.0, 3.0]
+    assert list(res.lobes)[-1] == "emission_rgb"
+
+
+def test_missing_material_resolves_as_diffuse_over_an_empty_paramset():
+    # an emissive shape may carry no material at all
+    res = M.resolve_material(None, emissive_rgb=[1.0, 1.0, 1.0], flavor=M.USD)
+    assert res.lobes["base_color"].const == [0.5, 0.5, 0.5]
+    assert res.status == EXACT
+
+
+# --------------------------------------------------------------------------- #
+# named spectra (7 metals / 7 glasses d-line)
+# --------------------------------------------------------------------------- #
+
+def test_named_glass_eta_resolves_to_its_d_line_ior():
+    from skinny.pbrt.data import spectral_tables as st
+
+    res = _res('Material "dielectric" "spectrum eta" "glass-BK7"')
+    assert res.lobes["ior"] == pytest.approx(st.named_glass_ior_d("glass-BK7"))
+    assert res.notes == []  # an exact substitution, not a fallback
+
+
+def test_unrecognised_named_eta_degrades_with_a_note():
+    res = _res('Material "dielectric" "spectrum eta" "glass-ZZ9"')
+    assert res.lobes["ior"] == pytest.approx(1.5)
+    assert res.notes == ["named spectrum 'glass-ZZ9' on eta unrecognised; used default 1.5"]
+
+
+def test_named_metal_eta_drives_the_conductor_base_colour():
+    from skinny.pbrt import spectra
+
+    res = _res('Material "conductor" "spectrum eta" "metal-Au-eta" "spectrum k" "metal-Au-k"')
+    assert res.lobes["base_color"].const == pytest.approx(
+        list(spectra.named_metal_reflectance_rgb("au")))
+    assert res.notes == []
+
+
+def test_unknown_named_metal_falls_back_to_copper_with_a_note():
+    res = _res('Material "conductor" "spectrum eta" "metal-Xx-eta"')
+    assert res.notes == [
+        "named spectrum 'metal-Xx-eta' on conductor eta unrecognised; defaulted to copper"]
+
+
+# --------------------------------------------------------------------------- #
+# texture bindings
+# --------------------------------------------------------------------------- #
+
+def test_texture_bound_reflectance_rides_on_the_base_colour_lobe():
+    res = _res('Material "diffuse" "texture reflectance" "t"', textures=_textures(t=_Tex()))
+    pv = res.lobes["base_color"]
+    assert pv.is_tex and pv.tex[0].endswith("t.png")
+    assert pv.const == [0.5, 0.5, 0.5]  # the constant stays the fallback
+    assert res.status == EXACT
+
+
+def test_unresolvable_texture_notes_and_escalates_to_approx():
+    res = _res('Material "diffuse" "texture reflectance" "t"',
+               textures=_textures(t=_Tex(klass="checkerboard")))
+    assert res.notes == [
+        "texture 'checkerboard-unused' on reflectance unresolved/unsupported; used default"
+        .replace("checkerboard-unused", "t")]
+    assert res.status == APPROX
+
+
+def test_texture_bound_roughness_uses_a_mid_fallback_and_flags_the_missing_remap():
+    res = _res('Material "conductor" "texture roughness" "t"', textures=_textures(t=_Tex()))
+    rr = res.lobes["roughness"]
+    assert rr.pv.const == 0.5 and rr.pv.is_tex
+    assert "roughness texture connected; perceptual remap not applied to texture (approx)" \
+        in res.notes
+
+
+@pytest.mark.parametrize("flavor,target", [(M.USD, "USD input"),
+                                           (M.MTLX, "standard_surface input")])
+def test_texture_on_a_scalar_only_input_is_worded_for_the_flavor(flavor, target):
+    res = _res('Material "dielectric" "texture eta" "t"', flavor, textures=_textures(t=_Tex()))
+    assert res.lobes["ior"] == pytest.approx(1.5)
+    assert f"eta texture not supported on {target}; used scalar default" in res.notes
+
+
+# --------------------------------------------------------------------------- #
+# anisotropy: resolved unreduced, reduced by adapter policy
+# --------------------------------------------------------------------------- #
+
+def test_anisotropic_roughness_resolves_to_unreduced_alphas():
+    res = _res('Material "conductor" "float uroughness" 0.04 "float vroughness" 0.36')
+    rr = res.lobes["roughness"]
+    assert rr.is_aniso and rr.pv is None
+    assert rr.alpha_u == pytest.approx(0.2)  # sqrt(0.04)
+    assert rr.alpha_v == pytest.approx(0.6)  # sqrt(0.36)
+
+
+def test_usd_collapses_anisotropy_to_the_geometric_mean_mtlx_keeps_both_axes():
+    src = 'Material "conductor" "float uroughness" 0.04 "float vroughness" 0.36'
+    rr = _res(src).lobes["roughness"]
+    usd = M._usd_roughness(rr)
+    mtlx_pv, aniso = M._mtlx_roughness(rr)
+    assert usd.const == pytest.approx(((0.2 * 0.6) ** 0.5) ** 0.5)
+    ru, rv = 0.2 ** 0.5, 0.6 ** 0.5
+    assert mtlx_pv.const == pytest.approx(0.5 * (ru + rv))
+    assert aniso == pytest.approx(1.0 - ru / rv)
+
+
+def test_only_the_usd_flavor_notes_the_anisotropy_collapse():
+    src = 'Material "conductor" "float uroughness" 0.04 "float vroughness" 0.36'
+    note = "anisotropic roughness reduced to isotropic (geometric mean)"
+    assert note in _res(src, M.USD).notes
+    assert note not in _res(src, M.MTLX).notes
+
+
+def test_isotropic_roughness_reduces_to_zero_anisotropy():
+    rr = _res('Material "conductor" "float roughness" 0.25').lobes["roughness"]
+    assert not rr.is_aniso
+    assert M._mtlx_roughness(rr)[1] == 0.0
+    assert M._usd_roughness(rr) is rr.pv
+
+
+# --------------------------------------------------------------------------- #
+# subsurface coefficient precedence
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_subsurface_carries_medium_coefficients_and_is_approx(flavor):
+    res = _res('Material "subsurface" "rgb sigma_a" [0.02 0.08 0.2] '
+               '"rgb sigma_s" [2.5 3.2 4.0] "float g" 0.4 "float eta" 1.4', flavor)
+    assert res.lobes["subsurface"] == 1.0
+    assert res.lobes["ior"] == pytest.approx(1.4)
+    assert res.lobes["subsurface_sigma_a"] == pytest.approx([0.02, 0.08, 0.2])
+    assert res.lobes["subsurface_sigma_s"] == pytest.approx([2.5, 3.2, 4.0])
+    assert res.lobes["subsurface_g"] == pytest.approx(0.4)
+    assert res.lobes["subsurface_eta"] == pytest.approx(1.4)
+    assert res.status == APPROX
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_subsurface_named_preset_beats_the_defaults(flavor):
+    named = _res('Material "subsurface" "string name" "skin1"', flavor)
+    plain = _res('Material "subsurface"', flavor)
+    assert named.lobes["subsurface_sigma_s"] != plain.lobes["subsurface_sigma_s"]
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_subsurface_scale_multiplies_the_coefficients(flavor):
+    one = _res('Material "subsurface" "rgb sigma_a" [1 2 3] "rgb sigma_s" [4 5 6]', flavor)
+    two = _res('Material "subsurface" "rgb sigma_a" [1 2 3] "rgb sigma_s" [4 5 6] '
+               '"float scale" 2', flavor)
+    assert two.lobes["subsurface_sigma_a"] == pytest.approx(
+        [2 * v for v in one.lobes["subsurface_sigma_a"]])
+
+
+# --------------------------------------------------------------------------- #
+# flavour gates: the mtlx-only reads must not happen under the usd flavour
+# (no value, no note, no EXACT -> APPROX escalation)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("src,lobe,param", [
+    ('Material "diffusetransmission" "texture transmittance" "t"',
+     "transmission_color", "transmittance"),
+    ('Material "coateddiffuse" "texture interface.eta" "t"', "coat_ior", "interface.eta"),
+    ('Material "coatedconductor" "texture interface.eta" "t"', "coat_ior", "interface.eta"),
+])
+def test_mtlx_only_reads_are_absent_under_the_usd_flavor(src, lobe, param):
+    textures = _textures(t=_Tex(klass="checkerboard"))  # unresolvable -> would note
+    usd = _res(src, M.USD, textures=textures)
+    mtlx = _res(src, M.MTLX, textures=textures)
+    assert lobe not in usd.lobes
+    assert lobe in mtlx.lobes
+    assert not any(param in n for n in usd.notes)
+    assert any(param in n for n in mtlx.notes)
+
+
+def test_subsurface_colour_and_radius_are_mtlx_only():
+    usd = _res('Material "subsurface" "rgb reflectance" [0.7 0.4 0.3] "rgb radius" [0.9 0.6 0.4]',
+               M.USD)
+    mtlx = _res('Material "subsurface" "rgb reflectance" [0.7 0.4 0.3] "rgb radius" [0.9 0.6 0.4]',
+                M.MTLX)
+    assert "subsurface_color" not in usd.lobes and "subsurface_radius" not in usd.lobes
+    assert mtlx.lobes["subsurface_color"] == pytest.approx([0.7, 0.4, 0.3])
+    assert mtlx.lobes["subsurface_radius"] == pytest.approx([0.9, 0.6, 0.4])
+
+
+def test_usd_flavor_does_not_escalate_on_an_mtlx_only_unresolvable_texture():
+    src = 'Material "diffusetransmission" "texture transmittance" "t"'
+    textures = _textures(t=_Tex(klass="checkerboard"))
+    # both are APPROX for their own reason (the diffusetransmission branch), but
+    # only the mtlx flavour records the unresolved-texture note
+    assert not any("unresolved/unsupported" in n for n in _res(src, M.USD, textures=textures).notes)
+    assert any("unresolved/unsupported" in n for n in _res(src, M.MTLX, textures=textures).notes)
+
+
+def test_coatedconductor_base_roughness_param_spelling_is_frozen_per_flavor():
+    # DRIFT (frozen, follow-up): pbrt-v4 spells it `conductor.roughness`; only
+    # the mtlx pipeline reads that spelling, the USD one reads top-level
+    # `roughness`. Preserved deliberately — fixing it changes committed fixtures.
+    src = 'Material "coatedconductor" "float conductor.roughness" 0.04 "float roughness" 0.64'
+    usd = _res(src, M.USD).lobes["roughness"].pv.const
+    mtlx = _res(src, M.MTLX).lobes["roughness"].pv.const
+    assert mtlx == pytest.approx(0.2 ** 0.5)   # sqrt(sqrt(0.04))
+    assert usd == pytest.approx(0.8 ** 0.5)    # sqrt(sqrt(0.64))
+    assert usd != mtlx
+
+
+# --------------------------------------------------------------------------- #
+# note ORDER (accessor notes interleave with branch notes in read order)
+# --------------------------------------------------------------------------- #
+
+def test_notes_are_in_read_order():
+    res = _res('Material "conductor" "spectrum eta" "metal-Xx-eta" "texture roughness" "t"',
+               M.USD, textures=_textures(t=_Tex(klass="checkerboard")))
+    assert res.notes == [
+        "named spectrum 'metal-Xx-eta' on conductor eta unrecognised; defaulted to copper",
+        "texture 't' on roughness unresolved/unsupported; used default",
+    ]
+
+
+def test_mtlx_coatedconductor_note_order_follows_its_read_order():
+    res = _res('Material "coatedconductor" "texture interface.eta" "e" '
+               '"texture interface.roughness" "r"',
+               M.MTLX, textures=_textures(e=_Tex(), r=_Tex()))
+    assert res.notes == [
+        "conductor IOR unresolved; defaulted to copper",
+        "interface.eta texture not supported on standard_surface input; used scalar default",
+        "interface.roughness texture not supported on standard_surface input; used scalar default",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# the adapters are emit-only: no ParamSet reads survive outside the resolver
+# --------------------------------------------------------------------------- #
+
+#: the promoting accessors — calling either means a pbrt param was read.
+_ACCESSORS = frozenset({"get_float_texture", "get_spectrum_texture", "resolve_texture"})
+#: ``ParamSet`` reader methods, flagged only on a ParamSet-shaped receiver
+#: (``p``/``params``/``<x>.params``) so a plain ``dict.get`` on a lobe map is not
+#: mistaken for a param read.
+_PARAMSET_METHODS = frozenset({"get", "string", "rgb", "floats", "bool", "float", "spectrum"})
+_PARAMSET_NAMES = frozenset({"p", "params"})
+
+
+def _is_paramset(node) -> bool:
+    return ((isinstance(node, ast.Name) and node.id in _PARAMSET_NAMES)
+            or (isinstance(node, ast.Attribute) and node.attr == "params"))
+
+
+def _reads_in(func):
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Name) and fn.id in _ACCESSORS:
+            found.add(fn.id)
+        elif (isinstance(fn, ast.Attribute) and fn.attr in _PARAMSET_METHODS
+                and _is_paramset(fn.value)):
+            found.add(f"params.{fn.attr}")
+    return found
+
+
+@pytest.mark.parametrize("adapter", [M.map_material, M.map_material_mtlx])
+def test_adapters_perform_zero_pbrt_param_reads(adapter):
+    assert _reads_in(adapter) == set(), (
+        f"{adapter.__name__} reads pbrt params directly; interpretation belongs "
+        "in resolve_material")
+
+
+def test_the_read_gate_is_sensitive():
+    # negative control: the resolver itself obviously does read params, so the
+    # detector is not vacuously passing
+    reads = _reads_in(M.resolve_material)
+    assert "get_float_texture" in reads and "get_spectrum_texture" in reads
+    assert any(r.startswith("params.") for r in reads)
