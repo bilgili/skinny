@@ -10,6 +10,12 @@ from pathlib import Path
 
 import vulkan as vk
 
+from skinny.shader_variants import (
+    Family,
+    ShaderVariantKey,
+    Target,
+    slangc_flags,
+)
 from skinny.vk_context import VulkanContext
 
 
@@ -321,23 +327,19 @@ class ComputePipeline:
         #     custom nodedefs. Their `#include "lib/mx_closure_type.glsl"`
         #     resolves to the shader_dir shim above.
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        flags = (
-            "-target", "spirv",
-            "-entry", self.entry_point,
-            "-stage", "compute",
-            "-I", str(self.shader_dir),
-            "-I", str(mtlx_genslang),
-            # Tells the genslang impls to omit gen-prelude-only paths
-            # (e.g. mx_environment_irradiance) so they compile standalone
-            # in skinny's compute pipeline. The MaterialX gen path doesn't
-            # set this and keeps the gen-provided helpers.
-            "-D", "SKINNY_COMPUTE_PIPELINE=1",
-            "-fvk-use-scalar-layout",
-        )
-        # Spectral variant: distinct define ⇒ distinct cache key (flags are
-        # hashed into `_cache_key`), so the RGB and spectral SPIR-V never alias.
-        if self.spectral:
-            flags = (*flags, "-D", "SKINNY_SPECTRAL=1")
+        # Defines come from the variant key (shader_variants.py). The megakernel
+        # family's base define tells the genslang impls to omit gen-prelude-only
+        # paths (e.g. mx_environment_irradiance) so they compile standalone in
+        # skinny's compute pipeline; the MaterialX gen path doesn't set it and
+        # keeps the gen-provided helpers. The spectral define is spliced AFTER
+        # `-fvk-use-scalar-layout` (the recorded historical position — the flag
+        # tuple is hashed positionally into `_cache_key`, so the RGB and
+        # spectral SPIR-V never alias and existing cache entries stay valid).
+        flags = slangc_flags(
+            ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL,
+                             spectral=self.spectral),
+            entry=self.entry_point,
+            include_paths=(self.shader_dir, mtlx_genslang))
 
         cache_dir = self._build_dir() / self._CACHE_DIRNAME
         key = self._cache_key(src, flags)
@@ -1105,15 +1107,10 @@ class PreviewPipeline:
         if slangc is None:
             raise RuntimeError("slangc not found on PATH — install the Slang compiler")
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        flags = (
-            "-target", "spirv",
-            "-entry", self.entry_point,
-            "-stage", "compute",
-            "-I", str(self.shader_dir),
-            "-I", str(mtlx_genslang),
-            "-D", "SKINNY_COMPUTE_PIPELINE=1",
-            "-fvk-use-scalar-layout",
-        )
+        flags = slangc_flags(
+            ShaderVariantKey(Target.VULKAN, Family.PREVIEW),
+            entry=self.entry_point,
+            include_paths=(self.shader_dir, mtlx_genslang))
         cache_dir = self._build_dir() / ComputePipeline._CACHE_DIRNAME
         key = self._cache_key(src, flags)
         cached = cache_dir / f"{key}.spv"

@@ -1846,6 +1846,66 @@ blob 600 B.
    derived layout once per program+variant, so drift in either direction raises
    before an upload.
 
+## Shader variant key (`shader_variants.py`, change `shader-variant-key-module`)
+
+A compiled kernel's identity is a point in a variant matrix, and
+`src/skinny/shader_variants.py` is its **one owner**. Before it, each backend
+re-derived its own define list at its own compile site (11 emission sites across
+`vk_compute` / `vk_wavefront` / `metal_compute` / `metal_wavefront`), so
+"Vulkan and Metal agree per variant" was convention, not code.
+
+`ShaderVariantKey` is a frozen value over six axes:
+
+| Axis | Values |
+|------|--------|
+| `target` | `VULKAN` (`slangc` → SPIR-V, flat `-D` tokens) \| `METAL` (in-process SlangPy session, defines dict) |
+| `family` | `MEGAKERNEL` \| `WAVEFRONT` \| `WAVEFRONT_FOUNDATION` \| `PREVIEW` \| `DEBUG_RASTER` |
+| `spectral` | `SKINNY_SPECTRAL=1` + `_spectral` filename suffix |
+| `mlt` | `SKINNY_MLT=1` + `_mlt` tag — wavefront only (this is what keeps the megakernel SPIR-V byte-unchanged by the MLT axis) |
+| `metal_neural` / `metal_records` | `SKINNY_METAL_NEURAL` / `SKINNY_METAL_RECORDS` — the Metal argument-table gates, METAL-target only |
+| `neural` | a composed `NeuralBuildConfig` — the `NF_*` defines and the `L6B24H96…` cache slug stay owned by `sampling/neural_weights.py` and are **never** re-derived here |
+
+`__post_init__` enforces a `(target, family)` validity table —
+`WAVEFRONT_FOUNDATION` is Vulkan-only (Metal compiles every wavefront kernel
+through the full CP+METAL+WAVEFRONT session), `DEBUG_RASTER` is Metal-only (the
+Vulkan debug viewport is a graphics rasteriser) — plus the axis rules, so
+illegal combinations raise instead of being silently dropped.
+
+Three derivations, all from one shared internal define table:
+
+- `slangc_defines()` → the Vulkan `-D` tokens as **named ordered segments**
+  (`base` / `spectral` / `neural` / `mlt`);
+- `slangc_flags(key, entry=…, include_paths=…)` → the full `slangc` flag tuple,
+  splicing those segments at each family's **recorded historical position**
+  relative to `-fvk-use-scalar-layout`. Three distinct orders exist (megakernel
+  and preview put the spectral define *after* the flag; the foundation compile
+  puts the flag *before* its define; the wavefront full-tree compile puts every
+  segment *before* it) and the flag tuple is hashed **positionally** into the
+  `build/spv_cache` blake2b key — so a single contiguous block could not
+  reproduce the existing cache keys. Keeping the positions is what makes the
+  migration a no-flush change.
+- `session_defines()` → a fresh complete dict for the SlangPy Metal session.
+  Assign it in **one** statement: `SlangCompilerOptions.defines` is
+  copy-on-read, so `opts.defines[k] = v` mutates a throwaway.
+- `cache_token()` → the `.spv` filename tag (`""` for the default key,
+  `_<neural slug>` then `_mlt` then `_spectral`).
+
+Two named constants keep the deliberate divergences reviewable instead of
+folklore: `METAL_ONLY_DEFINES` (the defines with no Vulkan counterpart) and
+`RECORDED_ASYMMETRIES` — currently one entry, `sppm-neural-defines`: the Metal
+SPPM pass compiles with the active `NF_*` defines while the Vulkan SPPM compile
+passes none (vacuous at the default config, which emits zero `NF_*` flags;
+aligning them is a follow-up change).
+
+`tests/test_shader_variants.py` is the drift gate. It holds **permanent**
+goldens transcribed from the pre-refactor tree (flag tuples, defines dicts,
+filename tags), asserts cross-backend agreement for every family valid on both
+targets, and greps the four backend modules to prove no compile site
+hand-assembles a variant define any more. The host sizers in
+`wavefront_layout.py` keep their `spectral=` / `msl=` signatures, but the
+wavefront passes read those booleans off the same `ShaderVariantKey` their
+kernels compiled with, so shader defines and host sizing cannot disagree.
+
 ## FrameConstants Layout
 
 Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment. The

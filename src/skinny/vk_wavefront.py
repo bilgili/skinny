@@ -21,20 +21,27 @@ from pathlib import Path
 
 import vulkan as vk
 
+from skinny.shader_variants import (
+    Family,
+    ShaderVariantKey,
+    Target,
+    slangc_flags,
+)
 from skinny.vk_compute import StorageBuffer
 from skinny.wavefront_layout import queue_buffer_sizes
 
 
 def _slang_flags(shader_dir: Path, entry: str) -> tuple[str, ...]:
-    # SKINNY_WAVEFRONT marks every wavefront-pass compile so shared shader code
-    # (e.g. the subsurface dispatch in path.slang) can select the wavefront-only
-    # estimator — the 3D interior subsurface walk — while the megakernel
-    # (vk_compute.py, no such define) keeps the watchdog-safe 1D slab.
-    return (
-        "-target", "spirv", "-entry", entry, "-stage", "compute",
-        "-I", str(shader_dir), "-fvk-use-scalar-layout",
-        "-D", "SKINNY_WAVEFRONT=1",
-    )
+    # The WAVEFRONT_FOUNDATION family's base define (SKINNY_WAVEFRONT) marks
+    # every wavefront-pass compile so shared shader code (e.g. the subsurface
+    # dispatch in path.slang) can select the wavefront-only estimator — the 3D
+    # interior subsurface walk — while the megakernel (vk_compute.py, no such
+    # define) keeps the watchdog-safe 1D slab. This site is the one that puts
+    # `-fvk-use-scalar-layout` BEFORE the define (shader_variants.slangc_flags
+    # holds the recorded splice position).
+    return slangc_flags(
+        ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT_FOUNDATION),
+        entry=entry, include_paths=(shader_dir,))
 
 
 def _compile_spv(shader_dir: Path, module: str, entry: str) -> Path:
@@ -444,37 +451,39 @@ class WavefrontEnvPass:
         vk.vkDestroyShaderModule(self.ctx.device, self._module, None)
 
 
+def _wavefront_key(spectral: bool = False, mlt: bool = False,
+                   neural_config=None) -> ShaderVariantKey:
+    """The Vulkan wavefront full-tree variant key for this compile request."""
+    return ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT,
+                            spectral=bool(spectral), mlt=bool(mlt),
+                            neural=neural_config)
+
+
 def _compile_full_spv(shader_dir: Path, module: str, entry: str, out_name: str,
-                      defines: tuple[str, ...] = (), tag: str = "",
-                      spectral: bool = False) -> Path:
+                      key: ShaderVariantKey | None = None) -> Path:
     """Compile a wavefront kernel that pulls in the full material/integrator
     tree (integrators.path → skin/python/flat materials), so it needs the same
-    include paths + define as the megakernel. Writes to a per-entry .spv so
+    include paths + defines as the megakernel. Writes to a per-entry .spv so
     sibling entries from one module don't clobber each other.
 
-    ``defines`` are extra ``-D`` tokens (the neural size/precision config —
-    study change neural-precision-size-study); ``tag`` is folded into the .spv
-    filename so distinct configs never clobber each other's module (the pipeline
-    cache key). The default config passes ``defines=()`` and ``tag=""`` → the
-    flags + filename are unchanged → byte-identical to the shipped kernel.
-
-    ``spectral`` adds the ``-DSKINNY_SPECTRAL=1`` compile define (matching the
-    megakernel's ComputePipeline spectral variant) and a distinct ``_spectral``
-    .spv name so the spectral wavefront kernels never alias the RGB cache
-    (spectral-wavefront 5.2)."""
+    ``key`` (default: the plain RGB wavefront key) carries every variant axis:
+    the neural size/precision config (study change neural-precision-size-study),
+    MLT, and spectral. Its ``cache_token()`` is folded into the .spv filename so
+    distinct variants never clobber each other's module — the default key's
+    token is ``""`` → filename unchanged → byte-identical to the shipped kernel.
+    All define segments are spliced BEFORE ``-fvk-use-scalar-layout`` here (this
+    site's recorded historical position; see ``shader_variants.slangc_flags``)."""
     src = shader_dir / f"{module}.slang"
-    spectral_suffix = "_spectral" if spectral else ""
-    out = shader_dir / f"{out_name}{tag}{spectral_suffix}.spv"
+    key = key if key is not None else _wavefront_key()
+    out = shader_dir / f"{out_name}{key.cache_token()}.spv"
     slangc = shutil.which("slangc")
     if slangc is None:
         raise RuntimeError("slangc not found on PATH — install the Slang compiler")
     mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
     cmd = [
-        slangc, str(src), "-target", "spirv", "-entry", entry, "-stage", "compute",
-        "-I", str(shader_dir), "-I", str(mtlx_genslang),
-        "-D", "SKINNY_COMPUTE_PIPELINE=1", "-D", "SKINNY_WAVEFRONT=1",
-        *(("-D", "SKINNY_SPECTRAL=1") if spectral else ()),
-        *defines, "-fvk-use-scalar-layout",
+        slangc, str(src),
+        *slangc_flags(key, entry=entry,
+                      include_paths=(shader_dir, mtlx_genslang)),
         "-o", str(out),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -617,8 +626,11 @@ class WavefrontPathPass:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
         self._neural_config = neural_config
-        self._nf_defines = neural_config.slang_defines()
-        self._nf_tag = f"_{neural_config.cache_tag}" if self._nf_defines else ""
+        # One key per compile request: every kernel below compiles from it, and
+        # the host sizers read `spectral`/`msl` off the same value, so shader
+        # defines and host sizing cannot disagree (design D6).
+        self._variant_key = _wavefront_key(spectral=self._spectral,
+                                           neural_config=neural_config)
         # Optional reuse plugin (ReSTIR DI) — scheduled at bounce 0 between the
         # primary intersect and the shade. None = identity reuse (stock NEE).
         self._restir = None
@@ -643,8 +655,7 @@ class WavefrontPathPass:
         modules = {}
         for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name,
-                                    defines=self._nf_defines, tag=self._nf_tag,
-                                    spectral=self._spectral)
+                                    self._variant_key)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -924,8 +935,12 @@ class WavefrontSppmPass:
 
         modules = {}
         for entry, out_name in self._ENTRIES:
+            # No neural defines — see shader_variants.RECORDED_ASYMMETRIES
+            # ("sppm-neural-defines"): the Metal SPPM pass compiles with the
+            # active NF_* defines, this one does not. Vacuous at the default
+            # config (zero NF_* flags); aligning them is a follow-up change.
             spv = _compile_full_spv(shader_dir, "integrators/wavefront_sppm", entry, out_name,
-                                    spectral=self._spectral)
+                                    _wavefront_key(spectral=self._spectral))
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -1129,7 +1144,7 @@ class WavefrontMltPass:
             # SpectralBDPTIntegrator target never aliases the RGB MLT cache.
             spv = _compile_full_spv(
                 shader_dir, "wavefront/wavefront_mlt", entry, out_name,
-                defines=("-D", "SKINNY_MLT=1"), tag="_mlt", spectral=self.spectral)
+                _wavefront_key(mlt=True, spectral=self.spectral))
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -1265,11 +1280,9 @@ class WavefrontNeuralProposalPass:
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
-        nf_defines = neural_config.slang_defines()
-        nf_tag = f"_{neural_config.cache_tag}" if nf_defines else ""
         spv = _compile_full_spv(shader_dir, "wavefront/neural_proposal_pass",
                                 "wfNeuralProposal", "wavefront/_wfneural",
-                                defines=nf_defines, tag=nf_tag)
+                                _wavefront_key(neural_config=neural_config))
         code = spv.read_bytes()
         self._module = vk.vkCreateShaderModule(
             ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -1752,7 +1765,7 @@ class WavefrontBdptPass:
         modules = {}
         for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name,
-                                    spectral=self._spectral)
+                                    _wavefront_key(spectral=self._spectral))
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -1962,7 +1975,10 @@ def _ensure_path(r):
     num_pixels = r.width * r.height
     cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
     stream_size = max(1, min(num_pixels, cap))
-    path_state_stride = path_state_size(spectral=r._spectral)
+    # One variant key for this compile request — the pass compiles from it and
+    # the host sizer below reads its axes, so the two cannot drift (design D6).
+    variant = _wavefront_key(spectral=r._spectral)
+    path_state_stride = path_state_size(spectral=variant.spectral)
     r._wf_path_state_buf = r._gpu.StorageBuffer(r.ctx, stream_size * path_state_stride)
     r._wf_path_hit_buf = r._gpu.StorageBuffer(
         r.ctx, stream_size * WavefrontPathPass.HIT_STRIDE)
@@ -1973,7 +1989,7 @@ def _ensure_path(r):
         stream_size, num_pixels, build_catchall=has_nonflat,
         record_capacity=(stream_size if wf_record else 0),
         neural_config=r._effective_neural_config(),
-        spectral=r._spectral,
+        spectral=variant.spectral,
     )
     r._restir_pass = None
     if reuse_mode == 1:  # RESTIR_DI

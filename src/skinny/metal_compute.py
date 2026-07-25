@@ -41,6 +41,7 @@ from skinny.megakernel_sources import (  # noqa: F401  (re-export)
     python_material_ids,
     scan_python_materials,
 )
+from skinny.shader_variants import Family, ShaderVariantKey, Target
 
 # Metal trims the bindless flat-material texture pool to fit Apple Metal's
 # 128-texture compute-argument limit alongside the discrete maps (design D8).
@@ -673,10 +674,9 @@ class ComputePipeline:
         # property whose getter returns a fresh copy, so `opts.defines[k] = v`
         # mutates a throwaway and is silently lost (the spectral define never
         # reached the compile → the megakernel ran the RGB variant).
-        defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
-        if self.spectral:
-            defines["SKINNY_SPECTRAL"] = "1"
-        opts.defines = defines
+        opts.defines = ShaderVariantKey(
+            Target.METAL, Family.MEGAKERNEL,
+            spectral=self.spectral).session_defines()
         # Match the Vulkan `slangc` path's matrix layout. slangc defaults to
         # column-major (HLSL/Slang default — the Vulkan flags never override it)
         # and both the `_pack_uniforms` camera matrices and the `Instance`
@@ -992,7 +992,7 @@ class PreviewPipelineMetal:
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
         opts = spy.SlangCompilerOptions()
         opts.include_paths = [self.shader_dir, mtlx_genslang]
-        opts.defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1"}
+        opts.defines = ShaderVariantKey(Target.METAL, Family.PREVIEW).session_defines()
         # Column-major matches the megakernel path so the shared `fc` camera
         # matrices read identically (see ComputePipeline._build).
         opts.matrix_layout = spy.SlangMatrixLayout.column_major
@@ -1136,7 +1136,8 @@ class DebugRasterMetal:
         spy = self._spy
         opts = spy.SlangCompilerOptions()
         opts.include_paths = [self.shader_dir]
-        opts.defines = {"SKINNY_METAL": "1"}
+        opts.defines = ShaderVariantKey(
+            Target.METAL, Family.DEBUG_RASTER).session_defines()
         session = dev.create_slang_session(compiler_options=opts)
         src = self.shader_dir / "debug_raster.slang"
         module = session.load_module_from_source(

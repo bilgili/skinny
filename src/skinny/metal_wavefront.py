@@ -36,25 +36,24 @@ import struct
 from pathlib import Path
 
 from skinny.metal_compute import MetalFrameEncoder, StorageBuffer
+from skinny.shader_variants import Family, ShaderVariantKey, Target
 from skinny.wavefront_driver import record_bdpt_loop, record_path_loop
 from skinny.wavefront_layout import path_state_size, rec_vertex_size
 
 
-def _defines_dict(tokens: tuple[str, ...]) -> dict[str, str]:
-    """Convert the slangc-style ``("-D", "K=V", …)`` neural-config tokens into
-    the ``{name: value}`` dict a SlangPy session takes. Default config → empty
-    tuple → empty dict → byte-identical compile options."""
-    out: dict[str, str] = {}
-    it = iter(tokens)
-    for tok in it:
-        if tok != "-D":
-            continue
-        kv = next(it, None)
-        if kv is None:
-            break
-        name, _, value = kv.partition("=")
-        out[name] = value if value else "1"
-    return out
+def _wavefront_key(spectral: bool = False, mlt: bool = False,
+                   neural_config=None, metal_neural: bool = False,
+                   metal_records: bool = False) -> ShaderVariantKey:
+    """The Metal wavefront variant key for this pass's compile request.
+
+    Mirrors ``vk_wavefront._wavefront_key`` on the Metal target — the shared
+    axes (spectral, mlt, neural) are identical by construction; only the
+    Metal-only argument-table gates are extra (``METAL_ONLY_DEFINES``)."""
+    return ShaderVariantKey(Target.METAL, Family.WAVEFRONT,
+                            spectral=bool(spectral), mlt=bool(mlt),
+                            neural=neural_config,
+                            metal_neural=bool(metal_neural),
+                            metal_records=bool(metal_records))
 
 
 def _reflect_uniform_layout(program) -> tuple[dict[str, tuple[int, int]], int]:
@@ -99,23 +98,23 @@ def _reflect_element(program, name: str):
     return fields, stride
 
 
-def _metal_slang_session(ctx, shader_dir: Path, extra_defines: dict | None = None):
+def _metal_slang_session(ctx, shader_dir: Path, key: ShaderVariantKey | None = None):
     """In-process Slang→Metal session — identical compiler surface to the
     Metal megakernel (`metal_compute.ComputePipeline._build`): MSL layout
     (no scalar-layout flag), column-major matrices so the Vulkan-packed
     camera/instance matrices read identically, and the same include + define
-    set as the Vulkan ``_compile_full_spv`` wavefront kernels."""
+    set as the Vulkan ``_compile_full_spv`` wavefront kernels.
+
+    The wavefront family's ``SKINNY_WAVEFRONT`` mirrors the Vulkan wavefront
+    compile (vk_wavefront.py): it selects the wavefront-only 3D interior
+    subsurface walk in shared shader code (path.slang), while the Metal
+    megakernel (metal_compute.py, MEGAKERNEL family) omits it → 1D slab."""
     spy = ctx._spy
     mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
     opts = spy.SlangCompilerOptions()
     opts.include_paths = [shader_dir, mtlx_genslang]
-    # SKINNY_WAVEFRONT mirrors the Vulkan wavefront compile (vk_wavefront.py): it
-    # selects the wavefront-only 3D interior subsurface walk in shared shader code
-    # (path.slang). The Metal megakernel (metal_compute.py) omits it → 1D slab.
-    defines = {"SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_METAL": "1",
-               "SKINNY_WAVEFRONT": "1"}
-    defines.update(extra_defines or {})
-    opts.defines = defines
+    # One complete dict, assigned ONCE — `opts.defines` is copy-on-read.
+    opts.defines = (key if key is not None else _wavefront_key()).session_defines()
     opts.matrix_layout = spy.SlangMatrixLayout.column_major
     return ctx.device.create_slang_session(compiler_options=opts)
 
@@ -403,9 +402,9 @@ class MetalNeuralProposalPass:
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
-        defines = _defines_dict(neural_config.slang_defines())
-        defines["SKINNY_METAL_NEURAL"] = "1"
-        session = _metal_slang_session(ctx, Path(shader_dir), defines)
+        session = _metal_slang_session(
+            ctx, Path(shader_dir),
+            _wavefront_key(neural_config=neural_config, metal_neural=True))
         src_path = Path(shader_dir) / "wavefront" / "neural_proposal_pass.slang"
         module = session.load_module_from_source(
             "neural_proposal_pass", src_path.read_text(encoding="utf-8"),
@@ -488,14 +487,13 @@ class MetalWavefrontPathPass:
         # wf_records emitters + the binding-36/37 record append, compiled in
         # only while online training is armed — the default render stays
         # byte-identical and keeps its slot headroom.
-        defines = _defines_dict(neural_config.slang_defines())
-        if self.neural_active:
-            defines["SKINNY_METAL_NEURAL"] = "1"
-        if self.records_active:
-            defines["SKINNY_METAL_RECORDS"] = "1"
-        if self._spectral:
-            defines["SKINNY_SPECTRAL"] = "1"
-        session = _metal_slang_session(ctx, self.shader_dir, defines)
+        # One key per compile request: the kernels compile from it and the host
+        # sizers below read `spectral`/`msl` off the same value, so shader
+        # defines and host sizing cannot disagree (design D6).
+        self._variant_key = _wavefront_key(
+            spectral=self._spectral, neural_config=neural_config,
+            metal_neural=self.neural_active, metal_records=self.records_active)
+        session = _metal_slang_session(ctx, self.shader_dir, self._variant_key)
 
         src_path = self.shader_dir / "wavefront" / "wavefront_path.slang"
         module = session.load_module_from_source(
@@ -516,19 +514,22 @@ class MetalWavefrontPathPass:
         gen = self._entries["wfPathGenerate"].program
         isect = self._entries["wfPathIntersect"].program
         flat = self._entries["wfPathShadeFlat"].program
+        # Sizer axes come off the key the kernels above compiled with (D6).
+        msl = self._variant_key.target is Target.METAL
+        spectral = self._variant_key.spectral
         state_stride = (_reflect_element(gen, "wfState") or (None, 0))[1]
-        expected = path_state_size(msl=True, spectral=self._spectral)
+        expected = path_state_size(msl=msl, spectral=spectral)
         if state_stride and state_stride != expected:
             raise RuntimeError(
                 f"reflected Metal WavefrontPathState stride {state_stride}B != "
-                f"wavefront_layout.path_state_size(msl=True, spectral={self._spectral}) "
+                f"wavefront_layout.path_state_size(msl={msl}, spectral={spectral}) "
                 f"{expected}B — update the GPU-free mirror (task 1.5)")
         self.state_stride = state_stride or expected
         self.hit_stride = (_reflect_element(isect, "wfHits") or (None, 0))[1] or 128
         self.neural_stride = (_reflect_element(flat, "wfNeural") or (None, 0))[1] or 48
         rec_ref = (_reflect_element(gen, "wfRecStack")
                    or _reflect_element(flat, "wfRecStack"))
-        self.rec_vertex_stride = (rec_ref or (None, 0))[1] or rec_vertex_size(msl=True)
+        self.rec_vertex_stride = (rec_ref or (None, 0))[1] or rec_vertex_size(msl=msl)
 
         # ── Buffers (task 2.4: backend-neutral wrappers, MSL sizing) ─
         # Mirrors the Vulkan pass's set-1 contents; bound by the Slang global
@@ -783,10 +784,11 @@ class MetalWavefrontSppmPass:
         if neural_config is None:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
-        defines = _defines_dict(neural_config.slang_defines())
-        if self._spectral:
-            defines["SKINNY_SPECTRAL"] = "1"
-        session = _metal_slang_session(ctx, self.shader_dir, defines)
+        # Compiles WITH the active neural NF_* defines while the Vulkan SPPM
+        # compile passes none — shader_variants.RECORDED_ASYMMETRIES
+        # ("sppm-neural-defines"). Vacuous at the default config.
+        session = _metal_slang_session(ctx, self.shader_dir, _wavefront_key(
+            spectral=self._spectral, neural_config=neural_config))
         src_path = self.shader_dir / "integrators" / "wavefront_sppm.slang"
         module = session.load_module_from_source(
             "wavefront_sppm", src_path.read_text(encoding="utf-8"), str(src_path))
@@ -933,8 +935,7 @@ class MetalWavefrontBdptPass:
         # kernels, which compile with the plain define set. Spectral adds
         # SKINNY_SPECTRAL to match the Vulkan spectral bdpt compile.
         session = _metal_slang_session(
-            ctx, self.shader_dir,
-            {"SKINNY_SPECTRAL": "1"} if self._spectral else None)
+            ctx, self.shader_dir, _wavefront_key(spectral=self._spectral))
         src_path = self.shader_dir / "wavefront" / "wavefront_bdpt.slang"
         module = session.load_module_from_source(
             "wavefront_bdpt", src_path.read_text(encoding="utf-8"), str(src_path))
@@ -1173,10 +1174,9 @@ class MetalWavefrontMltPass:
         # target with SKINNY_SPECTRAL. The MSL uniform layout is reflected from
         # the actual compiled program below, so the SKINNY_MLT tail offsets are
         # keyed off the spectral layout automatically (design D6).
-        defines = {"SKINNY_MLT": "1"}
-        if self.spectral:
-            defines["SKINNY_SPECTRAL"] = "1"
-        session = _metal_slang_session(ctx, self.shader_dir, defines)
+        session = _metal_slang_session(
+            ctx, self.shader_dir,
+            _wavefront_key(mlt=True, spectral=self.spectral))
         src_path = self.shader_dir / "wavefront" / "wavefront_mlt.slang"
         module = session.load_module_from_source(
             "wavefront_mlt", src_path.read_text(encoding="utf-8"), str(src_path))
