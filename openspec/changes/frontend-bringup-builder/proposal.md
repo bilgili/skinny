@@ -49,7 +49,9 @@ structural instead of manual.
   staged in two steps so front-ends that defer context creation (Qt render
   thread, per-session web) can plan first and construct later:
   1. **plan** — resolve + all refusal guards, one canonical order, persisted
-     settings as an optional input, `prog`-prefixed refusal messages;
+     settings as an optional input, and the `prog`-prefixed `SystemExit` wrap
+     for a backend-selection failure (the guards keep their own fixed `skinny:`
+     prefix, unchanged on every front-end);
   2. **create** — `make_context` + `Renderer(...)` from the plan, with
      destroy-on-failure, injectable context factory for hostless tests.
 - Migrate the four front-ends onto it, one at a time, refusal-parity checked.

@@ -6,8 +6,9 @@
       run each front-end's guard path (sppm+explicit-megakernel, mlt
       out-of-envelope, spectral out-of-envelope, mcp unsupported, unknown/
       unavailable backend, persisted-sppm interactive case) and record exact
-      `SystemExit` messages incl. `skinny:` / `skinny-gui:` /
-      `skinny-render:` / `skinny-web:` prefixes.
+      `SystemExit` messages incl. their prefixes — the guards' fixed `skinny:`
+      on every front-end, and `skinny:` / `skinny-gui:` / `skinny-render:` /
+      `skinny-web:` on a backend-selection failure.
 - [x] 1.2 Record the two current guard orders (interactive: validate → resolve
       → rejects; non-interactive: resolve → validate) in the fixtures so the
       canonical order can be proven refusal-equivalent — including the actual

@@ -112,7 +112,9 @@ SHALL accept an injectable context factory, and a hostless test suite SHALL
 exercise the plan and create steps against a stub factory — asserting the
 canonical guard order's accept/refuse outcomes across the guard matrix
 (integrator × execution mode × spectral × persisted-vs-CLI), the exact refusal
-messages including each front-end's program prefix, the persisted-precedence
+messages including their prefixes (the guards' fixed `skinny:`, and the
+invoking front-end's program name on a backend-selection failure — see the
+asymmetry recorded above), the persisted-precedence
 behavior of both the persisting and non-persisting configurations, and the
 destroy-on-failure guarantee.
 
