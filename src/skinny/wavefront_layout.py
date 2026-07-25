@@ -22,49 +22,37 @@ Two layouts (design B / change metal-wavefront-parity):
 
 from __future__ import annotations
 
-# Scalar-layout byte sizes for the field types the record uses. All are
-# multiples of 4 with alignment <= 4, so the struct packs tightly with no
-# interior padding.
-SLANG_SCALAR_SIZES: dict[str, int] = {
-    "float": 4,
-    "float2": 8,
-    "float3": 12,
-    "float4": 16,
-    "uint": 4,
-    "int": 4,
-    "bool": 4,  # Slang stores bool as a 32-bit value in a buffer (scalar layout)
-}
+from skinny import slang_layout
+from skinny.slang_layout import (  # noqa: F401  (re-exported for call sites/tests)
+    SLANG_MSL_ALIGNS,
+    SLANG_MSL_SIZES,
+    SLANG_SCALAR_SIZES,
+)
 
-# MSL (Metal target) byte sizes + alignments. Slang pads ``float3`` to 16 B
-# (size *and* alignment) on Metal; every other field keeps its natural
-# size==alignment. A struct's stride rounds up to its largest member alignment.
-SLANG_MSL_SIZES: dict[str, int] = {
-    "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
-    "bool": 1,
-}
-SLANG_MSL_ALIGNS: dict[str, int] = {
-    "float": 4, "float2": 8, "float3": 16, "float4": 16, "uint": 4, "int": 4,
-    "bool": 1,
-}
+# Since change reflection-owned-byte-layouts every field list below is DERIVED
+# from the authoritative `.slang` declaration by `slang_layout` — this module
+# keeps its public constants/sizers as a thin facade over that authority, so a
+# field reorder/retype in a shader struct changes these strides instead of
+# silently disagreeing with them.
 
 
-def _struct_stride(fields: list[tuple[str, str]], *, msl: bool) -> int:
+def _fields(struct: str, spectral: bool = False) -> list[tuple[str, str]]:
+    """``[(field_name, slang_type), …]`` in declaration order (this module's
+    historical ordering — `slang_layout` returns (type, name))."""
+    return [(n, t) for t, n in slang_layout.struct_fields(struct, spectral=spectral)]
+
+
+def _stride(struct: str, *, msl: bool, spectral: bool = False) -> int:
     """Byte stride of a record struct under the scalar (Vulkan) or MSL (Metal)
     layout. Scalar packs tightly (all alignments <= 4); MSL walks per-field
     alignment and rounds the total up to the struct's largest member alignment.
     """
-    if not msl:
-        return sum(SLANG_SCALAR_SIZES[t] for _, t in fields)
-    offset = 0
-    struct_align = 1
-    for _, t in fields:
-        align = SLANG_MSL_ALIGNS[t]
-        struct_align = max(struct_align, align)
-        offset = (offset + align - 1) // align * align
-        offset += SLANG_MSL_SIZES[t]
-    return (offset + struct_align - 1) // struct_align * struct_align
+    if msl:
+        return slang_layout.msl_stride(struct, spectral=spectral)
+    return slang_layout.scalar_stride(struct, spectral=spectral)
 
-# (field_name, slang_type) in declaration order — must match the Slang struct.
+
+# (field_name, slang_type) in declaration order — parsed from the Slang struct.
 # In the spectral build (change spectral-wavefront) the color roles carry
 # `Spectrum` = float4 (vs float3 RGB) and the struct appends `SampledWavelengths`
 # (two float4: lambda, pdf) — see wavefront_state.slang. The two variants diverge
@@ -72,34 +60,14 @@ def _struct_stride(fields: list[tuple[str, str]], *, msl: bool) -> int:
 # MSL already pads float3→16 B so the color retype is 0-byte on Metal and only sw
 # (+32 B) grows the MSL stride.
 
-
-def _path_state_fields(spectral: bool) -> list[tuple[str, str]]:
-    col = "float4" if spectral else "float3"
-    fields: list[tuple[str, str]] = [
-        ("rayOrigin",  "float3"),
-        ("rayDir",     "float3"),
-        ("throughput", col),
-        ("radiance",   col),
-        ("pixelIndex", "uint"),
-        ("rngState",   "uint"),
-        ("depth",      "uint"),
-        ("flags",      "uint"),
-        ("bsdfPdf",    "float"),
-    ]
-    if spectral:
-        # SampledWavelengths { float4 lambda; float4 pdf; }
-        fields += [("sw_lambda", "float4"), ("sw_pdf", "float4")]
-    return fields
-
-
 # RGB field list (back-compat: existing call sites and tests reference FIELDS).
-FIELDS: list[tuple[str, str]] = _path_state_fields(spectral=False)
+FIELDS: list[tuple[str, str]] = _fields("WavefrontPathState")
 
 
 def path_state_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of WavefrontPathState — scalar (default) or MSL (``msl=True``),
     RGB (default) or spectral (``spectral=True``)."""
-    return _struct_stride(_path_state_fields(spectral), msl=msl)
+    return _stride("WavefrontPathState", msl=msl, spectral=spectral)
 
 
 PATH_STATE_STRIDE = path_state_size()              # 68 B (scalar / Vulkan)
@@ -128,20 +96,12 @@ INDIRECT_ARGS_STRIDE = 3 * _UINT  # 12 B
 # 1-element dummies. `tests/test_wavefront_state.py` locks this to the Slang struct.
 REC_MAX_BOUNCES = 6  # lockstep with REC_MAX_BOUNCES (path_record_common.slang)
 
-REC_VERTEX_FIELDS: list[tuple[str, str]] = [
-    ("pos",     "float3"),
-    ("normal",  "float3"),
-    ("wo",      "float3"),
-    ("wiLocal", "float3"),
-    ("L_k",     "float3"),
-    ("beta_in", "float3"),
-    ("depth",   "uint"),
-]
+REC_VERTEX_FIELDS: list[tuple[str, str]] = _fields("RecVertex")
 
 
 def rec_vertex_size(*, msl: bool = False) -> int:
     """Byte stride of RecVertex — scalar (default) or MSL (``msl=True``)."""
-    return _struct_stride(REC_VERTEX_FIELDS, msl=msl)
+    return _stride("RecVertex", msl=msl)
 
 
 REC_VERTEX_STRIDE = rec_vertex_size()              # 76 B (scalar / Vulkan)
@@ -198,70 +158,25 @@ VP_ACTIVE = 1 << 0  # a valid visible point was stored this pass
 # layout is byte-identical to before (phiR/G/B → phi0/1/2 is a name-only change).
 
 
-def _visible_point_fields(spectral: bool) -> list[tuple[str, str]]:
-    col = "float4" if spectral else "float3"
-    fields: list[tuple[str, str]] = [
-        ("pos",           "float3"),
-        ("ns",            "float3"),
-        ("wo",            "float3"),
-        ("beta",          col),
-        ("ld",            col),
-        ("albedo",        "float3"),
-        ("F0",            "float3"),
-        ("coatColor",     "float3"),
-        ("roughness",     "float"),
-        ("metallic",      "float"),
-        ("specular",      "float"),
-        ("ior",           "float"),
-        ("opacity",       "float"),
-        ("coat",          "float"),
-        ("coatRoughness", "float"),
-        ("coatIOR",       "float"),
-        ("transmissionColor", "float3"),
-        ("specularColor",     "float3"),
-        ("diffuseRoughness",  "float"),
-    ]
-    if spectral:
-        fields.append(("conductorMetalId", "uint"))
-    fields += [
-        ("tau",           "float3"),
-        ("flags",         "uint"),
-        ("radius",        "float"),
-        ("n",             "float"),
-    ]
-    return fields
-
-
-def _sppm_accum_fields(spectral: bool) -> list[tuple[str, str]]:
-    # phiR/G/B are the RGB channels (kept byte-identical); phiW is the 4th spectral
-    # hero-λ slot (RGBA convention), present only under SKINNY_SPECTRAL.
-    fields: list[tuple[str, str]] = [
-        ("phiR", "uint"),
-        ("phiG", "uint"),
-        ("phiB", "uint"),
-    ]
-    if spectral:
-        fields.append(("phiW", "uint"))
-    fields.append(("m", "uint"))
-    return fields
-
-
 # RGB field lists (back-compat: existing call sites + tests reference these).
-VISIBLE_POINT_FIELDS: list[tuple[str, str]] = _visible_point_fields(spectral=False)
-SPPM_ACCUM_FIELDS: list[tuple[str, str]] = _sppm_accum_fields(spectral=False)
+# Spectral adds `conductorMetalId` to VisiblePoint and the 4th hero-λ flux slot
+# `phiW` to SppmAccum — both `#if defined(SKINNY_SPECTRAL)`-gated in the shader
+# and resolved per variant by the parser.
+VISIBLE_POINT_FIELDS: list[tuple[str, str]] = _fields("VisiblePoint")
+SPPM_ACCUM_FIELDS: list[tuple[str, str]] = _fields("SppmAccum")
 
 
 def visible_point_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of VisiblePoint — scalar (default) or MSL (``msl=True``),
     RGB (default) or spectral (``spectral=True``)."""
-    return _struct_stride(_visible_point_fields(spectral), msl=msl)
+    return _stride("VisiblePoint", msl=msl, spectral=spectral)
 
 
 def sppm_accum_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of SppmAccum — scalar (default) or MSL (``msl=True``). All
     fields are uint, so the scalar and MSL strides are identical (RGB 16 B /
     spectral 20 B)."""
-    return _struct_stride(_sppm_accum_fields(spectral), msl=msl)
+    return _stride("SppmAccum", msl=msl, spectral=spectral)
 
 
 VISIBLE_POINT_STRIDE = visible_point_size()              # 180 B (scalar / Vulkan)
@@ -310,60 +225,16 @@ def sppm_buffer_sizes(num_pixels: int, *, msl: bool = False,
 # spectral stride against a test. RGB is byte-identical to the pre-spectral build.
 
 
-def _bdpt_vertex_fields(spectral: bool) -> list[tuple[str, str]]:
-    col = "float4" if spectral else "float3"
-    return [
-        ("kind",       "uint"),
-        ("position",   "float3"),
-        ("N",          "float3"),
-        ("throughput", col),
-        ("emission",   col),
-        ("pdfFwd",     "float"),
-        ("pdfRev",     "float"),
-        ("isDelta",    "bool"),
-        ("onLight",    "bool"),
-        ("matId",      "uint"),
-        ("uv",         "float2"),
-        ("posObject",  "float3"),
-        ("geoN",       "float3"),
-        ("tangent",    "float3"),
-        ("hasTangent", "bool"),
-    ]
-
-
-def _wf_bdpt_aux_fields(spectral: bool) -> list[tuple[str, str]]:
-    col = "float4" if spectral else "float3"
-    fields: list[tuple[str, str]] = [
-        ("eyeLen",        "int"),
-        ("lightLen",      "int"),
-        ("rngState",      "uint"),
-        ("lensWeight",    "float"),
-        ("pixel",         "uint"),
-        ("escaped",       col),
-        ("radiance",      col),
-        ("ewRayO",        "float3"),
-        ("ewRayD",        "float3"),
-        ("ewThroughput",  col),
-        ("ewPdfFwdOmega", "float"),
-        ("ewMisBsdfPdf",  "float"),
-        ("ewFlags",       "uint"),
-    ]
-    if spectral:
-        # SampledWavelengths { float4 lambda; float4 pdf; }
-        fields += [("sw_lambda", "float4"), ("sw_pdf", "float4")]
-    return fields
-
-
 def bdpt_vertex_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of BDPTVertex — scalar (default) or MSL (``msl=True``),
     RGB (default) or spectral (``spectral=True``)."""
-    return _struct_stride(_bdpt_vertex_fields(spectral), msl=msl)
+    return _stride("BDPTVertex", msl=msl, spectral=spectral)
 
 
 def wf_bdpt_aux_size(*, msl: bool = False, spectral: bool = False) -> int:
     """Byte stride of WfBdptAux — scalar (default) or MSL (``msl=True``),
     RGB (default) or spectral (``spectral=True``)."""
-    return _struct_stride(_wf_bdpt_aux_fields(spectral), msl=msl)
+    return _stride("WfBdptAux", msl=msl, spectral=spectral)
 
 
 BDPT_VERTEX_STRIDE = bdpt_vertex_size()                             # 120 B (scalar)
@@ -407,45 +278,19 @@ def sppm_grid_buffer_sizes(num_pixels: int) -> dict[str, int]:
 MLT_MAX_DIMS = 192          # must match common.slang MLT_MAX_DIMS
 MLT_RECORD_SLOTS = 8        # eye record + up to BDPT_MAX_VERTS-1 light splats
 
-_MLT_PRIMARY_SAMPLE_FIELDS: list[tuple[str, str]] = [
-    ("value",       "float"),
-    ("valueBackup", "float"),
-    ("lastMod",     "uint"),
-    ("modBackup",   "uint"),
-]
-
-_MLT_CHAIN_META_FIELDS: list[tuple[str, str]] = [
-    ("rngState",               "uint"),
-    ("currentIteration",       "uint"),
-    ("lastLargeStepIteration", "uint"),
-    ("seedIndex",              "uint"),
-    ("cCurrent",               "float"),
-    ("nRecords",               "uint"),
-    ("pad0",                   "uint"),
-    ("pad1",                   "uint"),
-]
-
-_MLT_RECORD_FIELDS: list[tuple[str, str]] = [
-    ("pixel", "uint"),
-    ("r",     "float"),
-    ("g",     "float"),
-    ("b",     "float"),
-]
-
-
 def mlt_primary_sample_size(*, msl: bool = False) -> int:
     """Byte stride of MltPrimarySample (16 B on both layouts)."""
-    return _struct_stride(_MLT_PRIMARY_SAMPLE_FIELDS, msl=msl)
+    return _stride("MltPrimarySample", msl=msl)
 
 
 def mlt_chain_meta_size(*, msl: bool = False) -> int:
     """Byte stride of MltChainMeta (32 B on both layouts)."""
-    return _struct_stride(_MLT_CHAIN_META_FIELDS, msl=msl)
+    return _stride("MltChainMeta", msl=msl)
 
 
 def mlt_record_size(*, msl: bool = False) -> int:
     """Byte stride of MltRecord (16 B on both layouts)."""
-    return _struct_stride(_MLT_RECORD_FIELDS, msl=msl)
+    return _stride("MltRecord", msl=msl)
 
 
 def mlt_buffer_sizes(num_chains: int, bootstrap_samples: int, *,

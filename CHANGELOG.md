@@ -184,6 +184,36 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Reflection-owned byte layouts** (change `reflection-owned-byte-layouts`).
+  New `src/skinny/slang_layout.py` owns the byte layouts the host mirrors from
+  a Slang struct — the `FrameConstants` uniform block, the material param
+  records, and the wavefront/SPPM/BDPT/MLT record family (`SkinParameters`'
+  std140 UBO, `INSTANCE_STRIDE` and the light-buffer records stay
+  single-authored, deferred to a follow-up): it parses the authoritative `.slang`
+  declaration and derives both scalar (Vulkan `-fvk-use-scalar-layout`) and MSL
+  (Metal) offsets/strides, resolving `SKINNY_SPECTRAL` / `SKINNY_MLT` /
+  `SKINNY_METAL` per variant and raising on any gate, declaration form, or field
+  type it cannot classify. The hand-authored tables it replaces are gone:
+  `_FC_SCALAR_FIELDS` / `_FC_SCALAR_FIELDS_MLT` / `_FC_MLT_FIELDS` /
+  `_TILE_ORIGIN_Y_OFFSET` and the `_VK_UNIFORM_BUFFER_BYTES` bound (now sized
+  against the longest, MLT, blob), `_STD_SURFACE_FIELDS`, the
+  `FLAT_MATERIAL_STRIDE` / `STD_SURFACE_STRIDE` constants and the
+  `FlatMaterialParams` comment offset map, `wavefront_layout.py`'s private field
+  lists (its public API is unchanged), and both duplicate Slang parsers that
+  lived in `tests/`. `FrameConstants` keeps its blob rule — `tileOriginY`
+  relocated to the tail so `mltSigma` lands at 564 where the Vulkan MLT SPIR-V
+  expects it — now expressed once in the module. Drift now fails a test instead
+  of garbling GPU output: hostless goldens for every owned struct's scalar
+  stride (plus the MSL strides the Metal allocator sizes against), its declared
+  `(type, name)` list, and the `fc` blob order (`tests/test_slang_layout.py`, 97 tests), a new gpu-marked lock that the
+  derived MSL `fc` layout equals live Metal reflection (656 B RGB / 688 B MLT —
+  the ground truth for the new `float4x4`/`uint2`/`uint3`/nested rules), the
+  same for `StdSurfaceParams`, a coverage guard at `_pack_uniforms` covering the
+  Vulkan upload path, and a live-reflection-vs-derived cross-check in
+  `_pack_uniforms_msl`. Pure refactor: no `.slang` touched, packer bytes
+  identical over a material corpus, and `int_caustic` on Metal bit-identical
+  pre/post for path/bdpt × megakernel/wavefront and mlt/wavefront.
+
 - **Renderer module carve-out (Stages A–C)** (change
   `renderer-module-carveout`). Three clusters peeled off the 12k-line
   `renderer.py` as a pure, bit-identical refactor — no shader touched, RGB

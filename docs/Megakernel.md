@@ -312,9 +312,13 @@ resource layer is resolved once by `resource_module(ctx)` (`vk_compute` vs
 `metal_compute`), so the renderer's construction sites are backend-agnostic; see
 [Architecture.md § Backend selection](Architecture.md#backend-selection).
 
-**MSL uniform layout (`FrameConstants fc`, binding 0).** Slang pads `float3` to
-16 B on the Metal target, so the reflected MSL block is **592 B / 16-align** vs
-the Vulkan scalar **512 B / 4-align** (the embedded `Camera` is 288 B vs 272 B).
+**MSL uniform layout (`FrameConstants fc`, binding 0).** Slang pads `float3` and
+`uint3` to 16 B on the Metal target, so the reflected MSL block is **656 B /
+16-align** (**688 B** under the `SKINNY_MLT` tail) vs the Vulkan scalar **568 B /
+4-align** (**600 B** with the tail; the embedded `Camera` is 288 B vs 272 B).
+Both sides are derived from the declaration by `slang_layout` and the reflected
+layout is cross-checked against it — see
+[Architecture.md § Byte-layout ownership](Architecture.md#byte-layout-ownership-slang_layoutpy-change-reflection-owned-byte-layouts).
 `_pack_uniforms_msl` reuses the Vulkan scalar blob from `_pack_uniforms` verbatim
 and relocates each field to its **reflected** MSL offset (`pipeline.uniform_layout`
 — never hardcoded; e.g. `camera.position`@256, `focusPlaneOrigin`@416,

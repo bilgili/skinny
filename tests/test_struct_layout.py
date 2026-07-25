@@ -28,6 +28,17 @@ class TestPythonPackingSizes:
         from skinny.renderer import FLAT_MATERIAL_STRIDE
 
         assert FLAT_MATERIAL_STRIDE == 256
+        # Derived from the Slang declaration since change
+        # reflection-owned-byte-layouts — the float4-wrapped rows the packer
+        # writes into must sit where the struct declares them.
+        from skinny import slang_layout
+
+        rows = slang_layout.scalar_layout("FlatMaterialParams").offsets
+        assert rows["_worldToUvw0"][0] == 192
+        assert rows["_worldToUvw1"][0] == 208
+        assert rows["_worldToUvw2"][0] == 224
+        assert rows["_cloudDensityWispinessFrequency"][0] == 240
+        assert rows["_transmissionColorDiffuseRough"][0] == 128
 
     def test_flat_material_pack_size(self):
         from skinny.renderer import pack_flat_material

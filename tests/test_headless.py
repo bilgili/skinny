@@ -197,11 +197,15 @@ class TestRendererHeadless:
         renderer, _ = renderer_and_ctx
         renderer.update(0.016)
         data = renderer._pack_uniforms()
-        # FrameConstants UBO: 476 bytes through proposalAlpha + 4 for the
-        # flatLobeSamplers uint tail + 28 for the neural-proposal tail
-        # (sceneBoundsMin 12 + sceneBoundsExtent 12 + neuralNetworkVersion 4)
-        # + 4 for the recordMode uint tail (wavefront-native path records).
-        assert len(data) == 512, f"Expected 512 bytes, got {len(data)}"
+        # The blob length is owned by `slang_layout` (change
+        # reflection-owned-byte-layouts): it is the FrameConstants declaration's
+        # scalar size under the host blob rule, so appending a field to the
+        # Slang struct updates this expectation automatically instead of
+        # leaving a stale hand-tracked constant here.
+        from skinny import slang_layout
+
+        expected = slang_layout.fc_blob_size()
+        assert len(data) == expected, f"Expected {expected} bytes, got {len(data)}"
 
     def test_pack_uniforms_direct_flag(self, renderer_and_ctx):
         renderer, _ = renderer_and_ctx

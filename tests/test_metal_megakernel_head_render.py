@@ -108,12 +108,18 @@ def test_metal_megakernel_head_render():
         assert renderer._backend_render_ready
 
         # Task 6.3 — MSL uniform-offset drift pin: the packed Metal `fc` blob
-        # length equals the reflected MSL struct size (592 B / 16-align, §1.2),
-        # and the Vulkan scalar blob `_pack_uniforms` consumes is byte-length
-        # unchanged (512 B). Either drifting silently mis-places every field.
-        assert renderer.pipeline.uniform_size == 592, renderer.pipeline.uniform_size
+        # length equals the reflected MSL struct size, and the Vulkan scalar
+        # blob `_pack_uniforms` produces matches the derived blob length.
+        # Either drifting silently mis-places every field. Both expectations
+        # come from `slang_layout` (change reflection-owned-byte-layouts)
+        # rather than hand-tracked constants that go stale as fields are added.
+        from skinny import slang_layout
+
+        assert renderer.pipeline.uniform_size == slang_layout.msl_stride(
+            "FrameConstants"), renderer.pipeline.uniform_size
         assert len(renderer._pack_uniforms_msl()) == renderer.pipeline.uniform_size
-        assert len(renderer._pack_uniforms()) == 512, len(renderer._pack_uniforms())
+        assert len(renderer._pack_uniforms()) == slang_layout.fc_blob_size(), \
+            len(renderer._pack_uniforms())
 
         # Dispatch one head-render frame. The camera is framed to the loaded
         # head, so the tonemapped offscreen frame must not be all black — the

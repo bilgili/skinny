@@ -320,7 +320,7 @@ bit-identical execution-mode parity used by independent-sample path tracing.
 | `mlt_bootstrap.py` | host CDF, normalization `b`, chain-seed resampling |
 | `mlt_chain.py` | replay seed, mutation budget, uniform-tail predicate, shared bootstrap round-trip |
 | `wavefront_driver.py` | backend-neutral stage order and batching |
-| `wavefront_layout.py` | chain structs, strides, and buffer sizes |
+| `wavefront_layout.py` | chain structs, strides, and buffer sizes (strides derived from `wavefront_mlt.slang` / `common.slang` by `slang_layout.py`) |
 | `vk_wavefront.py` | Vulkan pass and recorder |
 | `metal_wavefront.py` | native Metal pass and recorder |
 | `renderer.py` | lifecycle, reset/bootstrap, dispatch, uniforms, defaults |

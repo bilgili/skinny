@@ -18,9 +18,11 @@ now so the future port is a no-op.
 
 Two halves:
 
-* **Host invariant (always, no GPU):** ``_STD_SURFACE_FIELDS`` covers the whole
-  256 B scalar record with no gap/overlap, and ``pack_std_surface_params_msl``
-  relocates fields to the offsets a given layout dictates.
+* **Host invariant (always, no GPU):** the derived ``StdSurfaceParams`` scalar
+  layout (``slang_layout``, change reflection-owned-byte-layouts) covers the
+  whole 256 B scalar record with no gap/overlap, and
+  ``pack_std_surface_params_msl`` relocates fields to the offsets a given layout
+  dictates.
 
 * **Metal round-trip (guarded by a real Metal device, NOT the megakernel gate —
   this builds only a tiny struct-probe kernel, no MTLCompilerService spike):**
@@ -49,7 +51,6 @@ import pytest
 try:
     from skinny.renderer import (
         STD_SURFACE_STRIDE,
-        _STD_SURFACE_FIELDS,
         pack_std_surface_params,
         pack_std_surface_params_msl,
     )
@@ -91,11 +92,16 @@ class _WoodStub:
 
 
 def test_std_surface_scalar_fields_cover_256():
-    """`_STD_SURFACE_FIELDS` is the relocation table; it must tile the entire
+    """The derived scalar layout is the relocation table; it must tile the entire
     scalar record exactly (no gap/overlap) or the MSL relocation drops bytes."""
-    total = sum(n for _, n in _STD_SURFACE_FIELDS) * 4
+    from skinny import slang_layout
+    entries = slang_layout.scalar_layout("StdSurfaceParams").entries
+    total = sum(size for _, size in entries)
     assert total == STD_SURFACE_STRIDE, (
-        f"_STD_SURFACE_FIELDS covers {total} B, expected {STD_SURFACE_STRIDE}")
+        f"derived StdSurfaceParams layout covers {total} B, expected "
+        f"{STD_SURFACE_STRIDE}")
+    # The packer's output length is the same authority, hostlessly.
+    assert len(pack_std_surface_params(_WoodStub())) == total
 
 
 def test_std_surface_msl_relocation_places_fields():
@@ -155,6 +161,15 @@ void computeMain(uint3 t : SV_DispatchThreadID) {
     stride = int(getattr(etl, "stride", 0) or etl.size)
     assert stride > STD_SURFACE_STRIDE, (
         f"expected MSL stride > {STD_SURFACE_STRIDE} (float3 padding), got {stride}")
+    # MSL ground truth for the derived layout (change
+    # reflection-owned-byte-layouts, task 4.3): what `slang_layout` computes from
+    # mtlx_std_surface.slang must equal what Slang's Metal target emits — which
+    # also catches drift between the real shader and the inline probe copy above.
+    from skinny import slang_layout
+
+    derived = slang_layout.msl_layout("StdSurfaceParams")
+    assert derived.stride == stride, (derived.stride, stride)
+    assert {n: derived.offsets[n] for n, _ in derived.entries} == layout
 
     scalar = pack_std_surface_params(_WoodStub())
     msl = pack_std_surface_params_msl(scalar, layout, stride)

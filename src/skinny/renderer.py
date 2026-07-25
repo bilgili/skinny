@@ -50,7 +50,7 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
-from skinny import frame_derive, mlt_chain, render_envelope
+from skinny import frame_derive, mlt_chain, render_envelope, slang_layout
 from skinny.cli_common import resolve_walk
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
@@ -175,73 +175,30 @@ def _sppm_photon_budget(pixels: int, pmf_env: float,
     return int(round(int(pixels) / max(1.0 - pmf_env, 1.0 / cap)))
 
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
-# matching `_pack_uniforms`'s append order exactly. Used only by the Metal MSL
-# packer (`_pack_uniforms_msl`, design D3) to relocate each field from the Vulkan
-# scalar blob into the MSL struct at its reflected offset — `float3` fields keep
-# 12 scalar bytes but land in a 16-byte MSL slot. Names match the compiled
-# module's reflected field names (the embedded `Camera` is `camera.<field>`).
-# A drift guard asserts the cumulative size equals `len(_pack_uniforms())`.
-_FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = (
-    ("camera.viewInverse", 64), ("camera.projInverse", 64),
-    ("camera.view", 64), ("camera.proj", 64),
-    ("camera.position", 12), ("camera.fov", 4),
-    ("frameIndex", 4), ("accumFrame", 4), ("time", 4), ("width", 4), ("height", 4),
-    ("numDistantLights", 4), ("useMesh", 4), ("tattooDensity", 4), ("envIntensity", 4),
-    ("furnaceMode", 4), ("mmPerUnit", 4), ("detailFlags", 4), ("normalMapStrength", 4),
-    ("displacementScaleMM", 4), ("numInstances", 4), ("numSphereLights", 4),
-    ("numEmissiveTriangles", 4), ("integratorType", 4), ("numGizmoSegments", 4),
-    ("numLensElements", 4), ("filmDistance", 4), ("rearZ", 4), ("rearAperture", 4),
-    ("frontZ", 4), ("filmHalfH", 4), ("emissiveTotalPower", 4), ("numPupilBounds", 4),
-    ("filmDiagRadiusW", 4), ("focusOverlay", 4), ("focusPlaneOrigin", 12),
-    ("focusPlaneNormal", 12), ("zoomMin", 8), ("zoomMax", 8), ("lensVignetteDebug", 4),
-    ("pickPixel", 8), ("pickArmed", 4), ("exposure", 4), ("tonemapMode", 4),
-    ("proposalMask", 4), ("reuseMode", 4), ("proposalAlpha", 16), ("flatLobeSamplers", 4),
-    ("sceneBoundsMin", 12), ("sceneBoundsExtent", 12), ("neuralNetworkVersion", 4),
-    ("recordMode", 4), ("cameraMirror", 4),
-    # SPPM per-pass photon-mapping tail (change photon-mapping-sppm).
-    ("sppmInitialRadius", 4), ("sppmCellSize", 4), ("sppmGridRes", 12),
-    ("sppmPhotonsEmitted", 4),
-    # Glossy / near-specular eye-walk continuation threshold (change sppm-glossy-final-gather).
-    ("sppmGlossyContinueRoughness", 4),
-    # Film per-sample radiance clamp (pbrt `maxcomponentvalue`, change
-    # film-maxcomponent-clamp). 0 = disabled.
-    ("filmMaxComponent", 4),
-    # SPPM photon-emission group selection pmf (change
-    # sppm-power-proportional-photon-groups): P(emissive/sphere/distant/env),
-    # power-proportional, normalized host-side. Zeros when integrator != SPPM.
-    ("sppmGroupPmfE", 4), ("sppmGroupPmfS", 4), ("sppmGroupPmfD", 4),
-    ("sppmGroupPmfEnv", 4),
-    # Metal megakernel watchdog tiling (change metal-megakernel-watchdog-tiling):
-    # row-band Y origin for this dispatch. 0 from the base packer (Vulkan always
-    # dispatches the full frame); the Metal megakernel path patches it per band.
-    ("tileOriginY", 4),
-)
+# matching `_pack_uniforms`'s append order exactly — DERIVED from the Slang
+# declaration by `slang_layout` (change reflection-owned-byte-layouts), never
+# hand-listed. Used by the Metal MSL packer (`_pack_uniforms_msl`, design D3) to
+# relocate each field from the Vulkan scalar blob into the MSL struct at its
+# reflected offset — `float3` fields keep 12 scalar bytes but land in a 16-byte
+# MSL slot. Names match the compiled module's reflected field names (the embedded
+# `Camera` is `camera.<field>`). The `_FC_SCALAR_FIELDS_MLT` variant carries the
+# `#if defined(SKINNY_MLT)` tail BEFORE the trailing `tileOriginY` word (the
+# module's blob rule): in the Vulkan MLT SPIR-V `tileOriginY` does not exist, so
+# `mltSigma` must land at 564 where the filler would be. A drift guard at each
+# pack site asserts the cumulative size equals `len(_pack_uniforms())`.
+_FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = slang_layout.fc_scalar_blob()
+_FC_SCALAR_FIELDS_MLT: tuple[tuple[str, int], ...] = slang_layout.fc_scalar_blob(
+    mlt=True)
 
-# The `#if defined(SKINNY_MLT)` FrameConstants tail (change mlt-integrator).
-# `_pack_uniforms` appends these ONLY when the MLT wavefront pass is the
-# consumer — every other pipeline's struct ends at `tileOriginY` above, so the
-# RGB SPIR-V and the non-MLT MSL layouts are byte-unchanged. Field order
-# matches common.slang's gated block exactly; the scalar blob carries the tail
-# BEFORE the trailing `tileOriginY` word (see `_pack_uniforms`), which is why
-# this is a separate table rather than an extension of the one above.
-_FC_MLT_FIELDS: tuple[tuple[str, int], ...] = (
-    ("mltSigma", 4), ("mltLargeStepProb", 4), ("mltB", 4), ("mltMppActual", 4),
-    ("mltNumChains", 4), ("mltChainBase", 4), ("mltMaxDepth", 4), ("mltSeed", 4),
-)
-
-# Scalar-blob field order for an MLT pack: the MLT tail sits where the Vulkan
-# filler word would be, and `tileOriginY` follows it. `_pack_uniforms_msl`
-# relocates by NAME from reflection, so this order need not match the MSL
-# struct's — only the scalar blob it walks.
-_FC_SCALAR_FIELDS_MLT: tuple[tuple[str, int], ...] = (
-    _FC_SCALAR_FIELDS[:-1] + _FC_MLT_FIELDS + _FC_SCALAR_FIELDS[-1:]
-)
+# The `#if defined(SKINNY_MLT)` FrameConstants tail alone (change mlt-integrator)
+# — the fields the MLT blob adds, between `sppmGroupPmfEnv` and `tileOriginY`.
+_FC_MLT_FIELDS: tuple[tuple[str, int], ...] = _FC_SCALAR_FIELDS_MLT[-9:-1]
 
 # Byte offset of the `tileOriginY` u32 at the tail of the `_pack_uniforms` scalar
 # blob, so the Metal band loop can patch it in place without a full re-pack.
 # MLT never uses this (the megakernel band loop is the only patcher, and MLT is
 # wavefront-only) — under an MLT pack the word moves by the tail's 32 B.
-_TILE_ORIGIN_Y_OFFSET = sum(sz for _, sz in _FC_SCALAR_FIELDS) - 4
+_TILE_ORIGIN_Y_OFFSET = slang_layout.fc_tile_origin_y_offset()
 
 # Target pixels per Metal megakernel command buffer, per integrator, before the
 # frame is split into more row bands (change metal-megakernel-watchdog-tiling).
@@ -284,9 +241,11 @@ _METAL_PREVIEW_MAX_SIZE = 512
 # 512 B buffer dropped the 513–516 B field on Vulkan while Metal, sized from
 # reflection, was fine). Kept 16-aligned with headroom so adding a few more
 # scalar-tail fields doesn't need another bump. The import-time assert below
-# ties it to the field table so it can never fall behind unnoticed.
+# ties it to the DERIVED blob length (`slang_layout`, change
+# reflection-owned-byte-layouts) — the MLT variant, which is the longest blob
+# any Vulkan upload carries — so it can never fall behind unnoticed.
 _VK_UNIFORM_BUFFER_BYTES = 768
-assert _VK_UNIFORM_BUFFER_BYTES >= sum(sz for _, sz in _FC_SCALAR_FIELDS), (
+assert _VK_UNIFORM_BUFFER_BYTES >= slang_layout.fc_blob_size(mlt=True), (
     "Vulkan UBO too small for the FrameConstants scalar blob — bump "
     "_VK_UNIFORM_BUFFER_BYTES")
 
@@ -303,26 +262,17 @@ MAX_LENS_ELEMENTS = 32
 # aligned so consecutive instances don't need padding.
 INSTANCE_STRIDE = 144
 
-# Per-material flat-shading record consumed by main_pass.slang's
-# non-skin BSDF dispatch. Layout (scalar/std430-compatible):
-#    0: diffuseColor (vec3, 12) + roughness (float, packs into trailing 4)
-#   16: metallic + specular + opacity + diffuseTextureIdx
-#   32: roughnessTextureIdx + metallicTextureIdx + normalTextureIdx + emissiveTextureIdx
-#   48: emissiveColor (vec3, 12) + ior (float)
-#   64: coat + coatRoughness + coatIOR + opacityTextureIdx
-#   80: coatColor (vec3, 12) + opacityThreshold
-#   96: normalScale (vec3, 12) + channelMask (uint, packed channel selectors)
-#  112: normalBias  (vec3, 12) + _pad (4 B)
-#  128: transmissionColor (vec3, 12) + diffuseRoughness (float)  [Stage-2]
-#  144: specularColor (vec3, 12) + _pad1 (4 B)                   [Stage-2]
-#  160: medium σ_a (vec3, 12) + medium g (float)                 [subsurface/volume]
-#  176: medium σ_s (vec3, 12) + mediumKind (uint)                [subsurface/volume]
-#  192: worldToUvw row 0 (vec4)                                  [volume]
-#  208: worldToUvw row 1 (vec4)                                  [volume]
-#  224: worldToUvw row 2 (vec4)                                  [volume]
-#  240: cloud density + wispiness + frequency + pad (vec4)       [MEDIUM_CLOUD]
-# 256 B / record, naturally 16-byte aligned.
-FLAT_MATERIAL_STRIDE = 256
+# Per-material flat-shading record consumed by main_pass.slang's non-skin BSDF
+# dispatch. The struct is `FlatMaterialParams` (common.slang), declared as
+# float4-wrapped rows so the MSL and SPIR-V layouts are byte-identical (no Metal
+# repack). Its per-row byte offsets are DERIVED from that declaration by
+# `slang_layout` (change reflection-owned-byte-layouts) — read them there rather
+# than from a comment map:
+#     slang_layout.scalar_layout("FlatMaterialParams").offsets
+# The sub-offsets *inside* each float4 row (e.g. diffuseColor.xyz + roughness in
+# row 0) are packer-internal, not struct fields — see `pack_flat_material`'s
+# docstring for that map.
+FLAT_MATERIAL_STRIDE = slang_layout.scalar_stride("FlatMaterialParams")  # 256 B
 FLAT_MATERIAL_CAPACITY_INIT = 16
 
 # Channel-selector codes packed into FlatMaterialParams.channelMask. Five
@@ -477,8 +427,9 @@ SPECTRAL_EMITTER_STRIDE = 8
 
 # StdSurfaceParams record (binding 19): full MaterialX standard_surface
 # parameters packed in scalar layout matching the Slang struct in
-# mtlx_std_surface.slang.  256 B / record.
-STD_SURFACE_STRIDE = 256
+# mtlx_std_surface.slang (256 B / record) — stride DERIVED from that declaration
+# (change reflection-owned-byte-layouts).
+STD_SURFACE_STRIDE = slang_layout.scalar_stride("StdSurfaceParams")
 STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 
 # Tool-buffer (binding 30) dispatch modes. Slot 0.x of the tool buffer selects
@@ -987,29 +938,15 @@ def pack_std_surface_params(material) -> bytes:
     )
 
 
-# StdSurfaceParams fields in struct order as (name, float-count). Names match
-# the Slang struct in mtlx_std_surface.slang and `pack_std_surface_params`'s
-# scalar (std430) packing — scalar offset of each field is the running byte sum
-# (float3 = 12 B, no 16-B promotion). Used by `pack_std_surface_params_msl` to
-# relocate the scalar record into Metal's MSL layout (where float3 → 16 B), keyed
-# by the reflected field names. Total must equal STD_SURFACE_STRIDE (256 B).
-_STD_SURFACE_FIELDS: tuple[tuple[str, int], ...] = (
-    ("base_color", 3), ("base", 1), ("diffuse_roughness", 1), ("metalness", 1),
-    ("specular", 1), ("specular_roughness", 1), ("specular_color", 3),
-    ("specular_IOR", 1), ("specular_anisotropy", 1), ("specular_rotation", 1),
-    ("transmission", 1), ("transmission_depth", 1), ("transmission_color", 3),
-    ("transmission_scatter_anisotropy", 1), ("transmission_scatter", 3),
-    ("transmission_dispersion", 1), ("transmission_extra_roughness", 1),
-    ("subsurface", 1), ("subsurface_scale", 1), ("subsurface_anisotropy", 1),
-    ("subsurface_color", 3), ("_pad0", 1), ("subsurface_radius", 3), ("sheen", 1),
-    ("sheen_color", 3), ("sheen_roughness", 1), ("coat", 1), ("coat_roughness", 1),
-    ("coat_anisotropy", 1), ("coat_rotation", 1), ("coat_IOR", 1),
-    ("coat_affect_color", 1), ("coat_affect_roughness", 1), ("_pad1", 1),
-    ("coat_color", 3), ("thin_film_thickness", 1), ("thin_film_IOR", 1),
-    ("emission", 1), ("emission_color", 3), ("_pad2", 1), ("opacity", 3),
-    ("thin_walled", 1), ("_pad3", 1), ("_pad4", 1),
-)
-assert sum(n for _, n in _STD_SURFACE_FIELDS) * 4 == STD_SURFACE_STRIDE
+# StdSurfaceParams scalar layout — ordered (field-name, byte-size), DERIVED from
+# the Slang struct in mtlx_std_surface.slang (change
+# reflection-owned-byte-layouts). Matches `pack_std_surface_params`'s scalar
+# (std430) packing: each field's scalar offset is the running byte sum (float3 =
+# 12 B, no 16-B promotion). `pack_std_surface_params_msl` walks it to relocate
+# the scalar record into Metal's MSL layout (where float3 → 16 B), keyed by the
+# reflected field names.
+_STD_SURFACE_SCALAR_ENTRIES: tuple[tuple[str, int], ...] = tuple(
+    slang_layout.scalar_layout("StdSurfaceParams").entries)
 
 
 def pack_std_surface_params_msl(
@@ -1019,8 +956,8 @@ def pack_std_surface_params_msl(
     12 B) into Metal's reflected MSL element layout for
     `StructuredBuffer<StdSurfaceParams>` (binding 19), where Slang pads every
     `float3` to 16 B and grows the element stride past 256 B (≈400). Each field's
-    bytes move from its scalar offset (the running sum over `_STD_SURFACE_FIELDS`)
-    to its reflected MSL offset (`layout[name]`). Same design-D3 repack the skin
+    bytes move from its scalar offset (the running sum over the derived
+    `_STD_SURFACE_SCALAR_ENTRIES`) to its reflected MSL offset (`layout[name]`). Same design-D3 repack the skin
     params (`_pack_mtlx_skin_array_msl`) get; without it every field after
     `base_color` is misread on Metal (metalness reads specular, specular reads
     specular_roughness, coat → 0, …). (Graph params no longer need this — change
@@ -1037,12 +974,14 @@ def pack_std_surface_params_msl(
     the float4-wrapped, MSL-safe FlatMaterialParams at binding 13)."""
     rec = bytearray(stride)
     off = 0
-    for name, nfloats in _STD_SURFACE_FIELDS:
-        size = nfloats * 4
+    for name, size in _STD_SURFACE_SCALAR_ENTRIES:
         moff = layout.get(name)
         if moff is not None:
             rec[moff[0]:moff[0] + size] = scalar[off:off + size]
         off += size
+    assert off == len(scalar), (
+        f"StdSurfaceParams field table covers {off} B but the scalar record is "
+        f"{len(scalar)} B")
     return bytes(rec)
 
 
@@ -9723,14 +9662,53 @@ class Renderer:
         bext = np.maximum(np.asarray(wb[1], dtype=np.float32) - bmin, 1e-6).astype(np.float32)
         return bmin, bext
 
+    @staticmethod
+    def _check_msl_uniform_layout(src, layout: dict, size: int, *,
+                                  mlt: bool) -> None:
+        """Cross-check the compiled program's LIVE `fc` reflection against the
+        layout `slang_layout` derives from the Slang declaration (change
+        reflection-owned-byte-layouts, task 2.5).
+
+        The Metal packer keeps taking its offsets from reflection (the
+        `metal-backend` contract); this only asserts the two authorities agree,
+        so drift in EITHER direction — a shader struct the module mis-parses, or
+        a compile whose reflected layout is not what the host derived — raises
+        before an upload instead of mis-packing. Run once per (program, variant):
+        the layout is fixed for a compiled program's lifetime."""
+        seen = getattr(src, "_skinny_fc_layout_checked", None)
+        if seen is None:
+            seen = set()
+            try:
+                src._skinny_fc_layout_checked = seen
+            except AttributeError:  # pragma: no cover - exotic layout source
+                pass
+        if mlt in seen:
+            return
+        derived = slang_layout.msl_layout("FrameConstants", mlt=mlt)
+        if derived.stride != size:
+            raise RuntimeError(
+                f"reflected MSL `fc` size {size} B but slang_layout derives "
+                f"{derived.stride} B (mlt={mlt}) — FrameConstants and its host "
+                "mirror have drifted")
+        bad = {name: (off_size, derived.offsets.get(name))
+               for name, off_size in layout.items()
+               if derived.offsets.get(name) != off_size}
+        if bad:
+            raise RuntimeError(
+                f"reflected MSL `fc` layout disagrees with slang_layout "
+                f"(mlt={mlt}); reflected vs derived: {bad}")
+        seen.add(mlt)
+
     def _pack_uniforms_msl(self, layout_source=None) -> bytes:
         """Pack the `fc` uniform block to the Metal Shading Language struct layout
         (design D3). Reuses `_pack_uniforms` (the Vulkan scalar blob) verbatim and
         relocates every field to its reflected MSL offset, so the field *values*
         can never drift between backends — only their placement differs (Slang pads
-        `float3` to 16 B on Metal, making the struct 592 B vs the 512 B scalar
-        blob). Offsets come from the compiled module's reflection
-        (`pipeline.uniform_layout`), never a hand-maintained table. Uploaded via
+        `float3`/`uint3` to 16 B on Metal, making the struct 656 B — 688 B under
+        the MLT tail — vs the 568/600 B scalar blob). Offsets come from the
+        compiled module's reflection (`pipeline.uniform_layout`), never a
+        hand-maintained table, and are cross-checked against the layout derived
+        from the Slang declaration (`_check_msl_uniform_layout`). Uploaded via
         `set_data` byte blobs only (design D4).
 
         `layout_source` overrides the default `_msl_layout_source` — the material
@@ -9748,6 +9726,7 @@ class Renderer:
         # the drift guard fires (codex pre-merge review). Drive `_pack_uniforms`
         # off `"mltSigma" in layout` so the blob and the field table always agree.
         has_tail = "mltSigma" in layout
+        self._check_msl_uniform_layout(src, layout, size, mlt=has_tail)
         scalar = self._pack_uniforms(mlt_tail=has_tail)
         fields = _FC_SCALAR_FIELDS_MLT if has_tail else _FC_SCALAR_FIELDS
         out = bytearray(size)
@@ -10330,7 +10309,23 @@ class Renderer:
         # `distantLights` SSBO at binding 20 (uploaded by
         # _upload_distant_lights). The shader iterates `numDistantLights`
         # entries via DirectionalLightImpl (ILight).
-        return bytes(data)
+        #
+        # Coverage guard (change reflection-owned-byte-layouts, task 2.3): the
+        # derived field table must cover this blob EXACTLY. Generalizes the Metal
+        # relocation guard in `_pack_uniforms_msl` to every consumer, including
+        # the Vulkan upload path — an append here that the Slang struct does not
+        # declare (or a declared field this body forgot to append) now fails at
+        # the pack site instead of silently mis-relocating on Metal / running off
+        # the end of the UBO on Vulkan.
+        blob = bytes(data)
+        fields = _FC_SCALAR_FIELDS_MLT if emit_tail else _FC_SCALAR_FIELDS
+        table_bytes = sum(sz for _, sz in fields)
+        assert table_bytes == len(blob), (
+            f"FrameConstants field table covers {table_bytes} B but "
+            f"_pack_uniforms produced {len(blob)} B "
+            f"(mlt_tail={emit_tail}) — the Slang struct and the packer body "
+            "have drifted")
+        return blob
 
     def _ensure_env_uploaded(self) -> None:
         """Upload current env to GPU if it has changed (called once per switch).
