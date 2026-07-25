@@ -22,7 +22,11 @@ builds one per session on a background thread.
 **Canonical order** (``startup_integrator_name`` → ``resolve_execution_mode`` →
 ``validate_render_flags`` → ``reject_sppm_without_wavefront`` →
 ``reject_mlt_unsupported`` → ``reject_spectral_unsupported`` →
-``reject_mcp_unsupported`` → ``select_backend``) matches the
+``reject_mcp_unsupported`` → ``resolve_walk`` → encoding + neural build config
+→ ``select_backend``). ``select_backend`` is deliberately **last**: it is the
+only step that constructs a GPU device, so every way a launch can be refused —
+including the two env-defaulted inputs argparse never validates — is exhausted
+before a Metal device exists. Resolving before validating matches the
 ``resolve_execution_mode`` docstring and the ``render-cli`` spec's "validation
 SHALL run after the execution mode is resolved". It is a superset of both
 pre-existing orders: the non-interactive pair already resolved first, and the
@@ -40,6 +44,15 @@ startup-integrator resolution, the persisted backend feed
 feed the neural build config. The flag > env > persisted > auto precedence
 itself is unchanged — it lives inside those resolvers already; this module only
 decides *whether* the persisted value is offered.
+
+**Refusal prefixes are asymmetric, deliberately.** Only the backend-selection
+failure is wrapped here, as ``SystemExit(f"{prog}: …")``. The guards in
+:mod:`skinny.cli_common` print their own hard-coded ``skinny:`` prefix on every
+front-end (the MCP guard prints none), exactly as they did when each front-end
+called them directly. Repointing them at ``prog`` would change user-visible
+output on three front-ends, which this behaviour-preserving change does not do;
+``tests/test_bringup.py`` pins the asymmetry so it stays a decision rather than
+an oversight.
 
 The builder ends at a constructed ``(ctx, renderer)``: post-construction
 renderer state (``skinny``'s persisted overrides, integrator / reuse indices,
@@ -122,11 +135,14 @@ class BringupPlan:
             self.backend, window=window, width=width, height=height,
             gpu_preference=gpu_preference,
         )
-        if renderer_factory is None:
-            from skinny.renderer import Renderer
-
-            renderer_factory = Renderer
         try:
+            # Inside the guard: the default factory's import is itself fallible
+            # (`skinny.renderer` pulls in the `vulkan` extension at module load)
+            # and would otherwise leak the context we just built.
+            if renderer_factory is None:
+                from skinny.renderer import Renderer
+
+                renderer_factory = Renderer
             renderer = renderer_factory(
                 vk_ctx=ctx,
                 execution_mode=self.execution_mode,
@@ -197,13 +213,19 @@ def plan_bringup(args, prog: str, persisted: dict | None = None) -> BringupPlan:
     )
     reject_mcp_unsupported(bool(getattr(args, "mcp", False)))
 
-    # The remaining fallible plan input. `--bdpt-walk` has no argparse
-    # `choices=` (it accepts a deprecated alias), and its default comes from
-    # SKINNY_BDPT_WALK — which argparse does not validate — so a bad value only
-    # surfaces here. Resolve it before the GPU probe below, not after: every way
-    # a launch can be refused should be exhausted before a Metal device is
-    # constructed.
+    # The remaining fallible plan inputs, resolved before the GPU probe below —
+    # every way a launch can fail should be exhausted before a Metal device is
+    # constructed. Both take their default from an environment variable, and
+    # argparse validates neither: `--bdpt-walk` has no `choices=` at all (it
+    # accepts a deprecated alias, so `resolve_walk` owns validation), and an
+    # argparse *default* is never checked against `choices=`, so
+    # `SKINNY_ENCODING=BAD` reaches `resolve_encoding` inside
+    # `neural_config_from_args`. A bad value in either raises `ValueError` here
+    # rather than after a device probe.
     bdpt_walk = resolve_walk(getattr(args, "bdpt_walk", "fused"))
+    encoding = _resolve_encoding_value(args, persisted)
+    args.encoding = encoding
+    neural_config = neural_config_from_args(args)
 
     # Last, so every flag-level refusal happens before the GPU probe.
     try:
@@ -212,8 +234,6 @@ def plan_bringup(args, prog: str, persisted: dict | None = None) -> BringupPlan:
     except RuntimeError as exc:
         raise SystemExit(f"{prog}: {exc}")
 
-    encoding = _resolve_encoding_value(args, persisted)
-    args.encoding = encoding
     return BringupPlan(
         prog=prog,
         backend=backend,
@@ -222,5 +242,5 @@ def plan_bringup(args, prog: str, persisted: dict | None = None) -> BringupPlan:
         spectral=bool(getattr(args, "spectral", False)),
         bdpt_walk=bdpt_walk,
         encoding=encoding,
-        neural_config=neural_config_from_args(args),
+        neural_config=neural_config,
     )

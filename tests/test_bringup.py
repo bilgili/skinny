@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import types
 
 import pytest
 
@@ -294,40 +295,83 @@ def test_refusal_messages_are_verbatim(case):
     assert str(excinfo.value) == expected
 
 
-def test_spectral_neural_refusal_message_is_verbatim():
+@pytest.mark.parametrize("token", ["neural", "bsdf,neural"])
+def test_spectral_neural_refusal_message_is_verbatim(token):
     """Kept separate: the spectral guard interpolates the proposal token, so the
-    message is checked for both a bare-neural and a mixed-proposal spelling."""
+    golden is parameterized over both spellings rather than truncated."""
     parser = _parser("skinny", FRONTENDS["skinny"])
-    for token in ("neural", "bsdf,neural"):
-        with pytest.raises(SystemExit) as excinfo:
-            plan_bringup(parser.parse_args(["--spectral", "--proposals", token]),
-                         "skinny", persisted={})
-        assert str(excinfo.value).startswith(
-            f"skinny: --spectral supports only the analytic BSDF/environment "
-            f"proposals (got --proposals {token}). The neural")
+    with pytest.raises(SystemExit) as excinfo:
+        plan_bringup(parser.parse_args(["--spectral", "--proposals", token]),
+                     "skinny", persisted={})
+    assert str(excinfo.value) == (
+        f"skinny: --spectral supports only the analytic BSDF/environment "
+        f"proposals (got --proposals {token}). The neural directional proposal "
+        f"and its stateful inference path are not supported under spectral."
+    )
 
 
 # ── the MCP axis ─────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("prog", ["skinny", "skinny-gui"])
-def test_mcp_guard_runs_for_every_frontend_that_exposes_the_flag(prog, monkeypatch):
-    """`--mcp` is refused when the optional server dependency is missing. Before
-    this change only the interactive pair called this guard at all; it is now
-    part of the shared sequence, so it must fire from there."""
+def _stub_mcp_import(monkeypatch, fastmcp):
+    """Make `from mcp.server.fastmcp import FastMCP` yield `fastmcp`, or raise
+    ImportError when it is None."""
     import builtins
 
     real_import = builtins.__import__
 
-    def no_mcp(name, *a, **kw):
+    def fake(name, globals=None, locals=None, fromlist=(), level=0):
         if name.startswith("mcp"):
-            raise ImportError("stubbed missing")
-        return real_import(name, *a, **kw)
+            if fastmcp is None:
+                raise ImportError("stubbed missing")
+            return types.SimpleNamespace(
+                server=types.SimpleNamespace(
+                    fastmcp=types.SimpleNamespace(FastMCP=fastmcp)),
+                FastMCP=fastmcp)
+        return real_import(name, globals, locals, fromlist, level)
 
-    monkeypatch.setattr(builtins, "__import__", no_mcp)
+    monkeypatch.setattr(builtins, "__import__", fake)
+
+
+class _ModernFastMCP:
+    def streamable_http_app(self):  # present ⇒ mcp>=1.8
+        ...
+
+
+class _AncientFastMCP:
+    pass  # no streamable_http_app ⇒ imports cleanly, fails at first request
+
+
+# Both refusal branches of reject_mcp_unsupported, pinned in full. Before this
+# change only the interactive pair called this guard at all; it is now part of
+# the shared sequence, so it must fire from there. The guard prints no prefix.
+MCP_REFUSALS = {
+    "missing": (None,
+                "--mcp needs the optional MCP server dependency.\n"
+                "  Install it with:  pip install -e '.[mcp]'"),
+    "too-old": (_AncientFastMCP,
+                "--mcp needs mcp>=1.8 (this build lacks streamable_http_app).\n"
+                "  Upgrade with:  pip install -e '.[mcp]' --upgrade"),
+}
+
+
+@pytest.mark.parametrize("prog", ["skinny", "skinny-gui"])
+@pytest.mark.parametrize("case", sorted(MCP_REFUSALS))
+def test_mcp_guard_runs_for_every_frontend_that_exposes_the_flag(
+        prog, case, monkeypatch):
+    fastmcp, expected = MCP_REFUSALS[case]
+    _stub_mcp_import(monkeypatch, fastmcp)
     parser = _parser(prog, FRONTENDS[prog])
     with pytest.raises(SystemExit) as excinfo:
         plan_bringup(parser.parse_args(["--mcp"]), prog, persisted={})
-    assert str(excinfo.value).startswith("--mcp needs the optional MCP server dependency.")
+    assert str(excinfo.value) == expected
+
+
+@pytest.mark.parametrize("prog", ["skinny", "skinny-gui"])
+def test_mcp_guard_accepts_a_supported_server(prog, monkeypatch):
+    _stub_mcp_import(monkeypatch, _ModernFastMCP)
+    parser = _parser(prog, FRONTENDS[prog])
+    assert plan_bringup(parser.parse_args(["--mcp"]), prog,
+                        persisted={}).backend == "vulkan"
 
 
 def test_mcp_guard_is_a_noop_without_the_flag():
@@ -352,6 +396,20 @@ def test_no_backend_probe_when_a_guard_refuses(monkeypatch):
         plan_bringup(parser.parse_args(
             ["--integrator", "sppm", "--execution-mode", "megakernel"]),
             "skinny", persisted={})
+    assert probed == []
+
+
+def test_bad_encoding_is_rejected_before_the_backend_probe(monkeypatch):
+    """Same trap as --bdpt-walk from the other direction: argparse never checks
+    a *default* against `choices=`, so SKINNY_ENCODING supplies an unvalidated
+    value that only `resolve_encoding` rejects."""
+    probed = []
+    monkeypatch.setattr(backend_select, "metal_available",
+                        lambda: (probed.append(1), (False, "stub"))[1])
+    monkeypatch.setenv("SKINNY_ENCODING", "E9")
+    parser = _parser("skinny", FRONTENDS["skinny"])
+    with pytest.raises(ValueError):
+        plan_bringup(parser.parse_args([]), "skinny", persisted={})
     assert probed == []
 
 
@@ -505,6 +563,28 @@ def test_create_destroys_the_context_when_the_renderer_raises(exc):
     with pytest.raises(exc):
         _stub_plan().create(context_factory=lambda *a, **k: ctx,
                             renderer_factory=boom)
+    assert ctx.destroyed
+
+
+def test_create_destroys_the_context_when_the_default_renderer_import_fails(
+        monkeypatch):
+    """The default `renderer_factory` imports `skinny.renderer`, which pulls in
+    the `vulkan` extension at module load — a fallible step that happens after
+    the context exists, so it must be inside the destroy guard too."""
+    import builtins
+
+    ctx = _StubContext()
+    real_import = builtins.__import__
+
+    def fake(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "skinny.renderer":
+            raise ImportError("stubbed: no vulkan runtime")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    monkeypatch.delitem(__import__("sys").modules, "skinny.renderer", raising=False)
+    with pytest.raises(ImportError, match="no vulkan runtime"):
+        _stub_plan().create(context_factory=lambda *a, **k: ctx)
     assert ctx.destroyed
 
 

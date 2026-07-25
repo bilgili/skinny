@@ -1134,7 +1134,22 @@ resolve the flags:
 **Canonical order** (`startup_integrator_name` → `resolve_execution_mode` →
 `validate_render_flags` → `reject_sppm_without_wavefront` →
 `reject_mlt_unsupported` → `reject_spectral_unsupported` →
-`reject_mcp_unsupported` → `select_backend`). It matches the
+`reject_mcp_unsupported` → `resolve_walk` → encoding + neural build config →
+`select_backend`). `select_backend` is deliberately **last** — it is the only
+step that constructs a GPU device, so every way a launch can be refused is
+exhausted before one exists. That includes the two inputs argparse never
+validates: `--bdpt-walk` has no `choices=` at all (it accepts a deprecated
+alias), and an argparse *default* is never checked against `choices=`, so
+`SKINNY_BDPT_WALK` / `SKINNY_ENCODING` both reach the plan unchecked and are
+rejected here rather than after a device probe.
+
+Refusal prefixes are asymmetric, deliberately: only the backend-selection
+failure is wrapped as `SystemExit(f"{prog}: …")`. The `cli_common` guards print
+their own fixed `skinny:` prefix on every front-end (the MCP guard prints none),
+exactly as they did when each front-end called them directly — repointing them
+would change user-visible output on three front-ends.
+
+The resolve-before-validate order matches the
 `resolve_execution_mode` docstring and the `render-cli` requirement that
 "validation SHALL run after the execution mode is resolved" — which the two
 interactive front-ends previously violated, validating *before* resolving and
@@ -1216,9 +1231,10 @@ in `backend_select.py`, used by every front-end:
   backend-agnostic. No front-end constructs a context directly, and since change
   `frontend-bringup-builder` none of them calls `make_context` directly either:
   it is reached through
-  [`BringupPlan.create`](#front-end-bring-up-bringuppy-change-frontend-bringup-builder),
-  which is also where `select_backend`'s `RuntimeError` becomes a
-  `{prog}:`-prefixed `SystemExit`. `app.py` and `skinny-gui` persist/restore the
+  [`BringupPlan.create`](#front-end-bring-up-bringuppy-change-frontend-bringup-builder).
+  `select_backend` is called from the sibling `plan_bringup` step, which is
+  where its `RuntimeError` becomes a `{prog}:`-prefixed `SystemExit`.
+  `app.py` and `skinny-gui` persist/restore the
   selected backend like the other render flags — they are the two front-ends
   that hand their settings dict to `plan_bringup(persisted=…)`.
 

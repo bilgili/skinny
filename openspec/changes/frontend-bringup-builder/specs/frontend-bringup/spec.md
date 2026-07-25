@@ -22,9 +22,15 @@ sequence SHALL make it effective on all front-ends without per-front-end edits.
   (for example `--integrator sppm --execution-mode megakernel`, an
   out-of-envelope `--spectral` combination, or an unsupported `--mcp`)
 - **THEN** the launch is refused by the shared bring-up sequence with the same
-  refusal semantics and message text as before this change, prefixed with that
-  front-end's program name (`skinny:`, `skinny-gui:`, `skinny-render:`,
-  `skinny-web:`)
+  refusal semantics and byte-identical message text as before this change
+
+Message prefixes are asymmetric and SHALL stay so: the shared refusal guards
+print their own fixed `skinny:` prefix on every front-end (the MCP guard prints
+none), while a backend-selection failure is prefixed with the invoking
+front-end's program name (`skinny:`, `skinny-gui:`, `skinny-render:`,
+`skinny-web:`). That is the pre-change behavior on all four; repointing the
+guard prefixes at the invoking program would be a user-visible output change
+and is out of scope here.
 
 #### Scenario: A guard added to the shared sequence covers every front-end
 
