@@ -1792,8 +1792,10 @@ carve-out stage must route *around* both.
 
 ## Byte-layout ownership (`slang_layout.py`, change `reflection-owned-byte-layouts`)
 
-Every byte layout the host mirrors from a Slang struct has **one owner**:
-`src/skinny/slang_layout.py`. It parses the authoritative `.slang` declaration
+The byte layouts the host mirrors from a Slang struct have **one owner**:
+`src/skinny/slang_layout.py` (the structs listed below — `SkinParameters`'
+std140 UBO, `INSTANCE_STRIDE` and the light-buffer records remain
+single-authored at their packers and are a documented follow-up). It parses the authoritative `.slang` declaration
 and computes both dialects the renderer speaks — **scalar** (Vulkan,
 `-fvk-use-scalar-layout`: offsets are a pure running sum, so the declared field
 order *is* the reflection equivalent, hostlessly) and **MSL** (Metal: `float3` /

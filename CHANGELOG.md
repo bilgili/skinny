@@ -185,8 +185,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Reflection-owned byte layouts** (change `reflection-owned-byte-layouts`).
-  New `src/skinny/slang_layout.py` is the single owner of every byte layout the
-  host mirrors from a Slang struct: it parses the authoritative `.slang`
+  New `src/skinny/slang_layout.py` owns the byte layouts the host mirrors from
+  a Slang struct — the `FrameConstants` uniform block, the material param
+  records, and the wavefront/SPPM/BDPT/MLT record family (`SkinParameters`'
+  std140 UBO, `INSTANCE_STRIDE` and the light-buffer records stay
+  single-authored, deferred to a follow-up): it parses the authoritative `.slang`
   declaration and derives both scalar (Vulkan `-fvk-use-scalar-layout`) and MSL
   (Metal) offsets/strides, resolving `SKINNY_SPECTRAL` / `SKINNY_MLT` /
   `SKINNY_METAL` per variant and raising on any gate, declaration form, or field
@@ -201,7 +204,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   relocated to the tail so `mltSigma` lands at 564 where the Vulkan MLT SPIR-V
   expects it — now expressed once in the module. Drift now fails a test instead
   of garbling GPU output: hostless goldens for every stride plus the `fc` field
-  order (`tests/test_slang_layout.py`, 66 tests), a new gpu-marked lock that the
+  order (`tests/test_slang_layout.py`, 88 tests), a new gpu-marked lock that the
   derived MSL `fc` layout equals live Metal reflection (656 B RGB / 688 B MLT —
   the ground truth for the new `float4x4`/`uint2`/`uint3`/nested rules), the
   same for `StdSurfaceParams`, a coverage guard at `_pack_uniforms` covering the

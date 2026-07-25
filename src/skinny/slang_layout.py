@@ -146,6 +146,8 @@ def parse_struct_fields(
     body = _struct_body(src, struct_name)
     fields: list[tuple[str, str]] = []
     gate_stack: list[bool] = []
+    # An attribute may sit on its own line, above the declaration it applies to.
+    pending_attr = False
     for raw in body.splitlines():
         line = raw.split("//", 1)[0].strip()
         if not line:
@@ -176,14 +178,17 @@ def parse_struct_fields(
         # an attribute like `[[vk::offset(16)]]` changes where the field lands,
         # and honouring the declaration order while erasing the attribute would
         # emit a confidently wrong offset. Raise instead.
-        had_attr = False
+        had_attr = pending_attr
         while True:
             stripped = _ATTR_PREFIX.sub("", line)
             if stripped == line:
                 break
             line, had_attr = stripped, True
         if not line:
+            # Attribute on its own line — it applies to the NEXT declaration.
+            pending_attr = True
             continue
+        pending_attr = False
         if had_attr and line.endswith(";") and "(" not in line:
             raise SlangLayoutError(
                 f"{struct_name}: attributed field declaration {line!r} — the "

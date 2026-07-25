@@ -90,27 +90,52 @@ def test_declared_fields_match_golden(key):
     assert fields == _DECLARED_FIELD_GOLDENS[key]
 
 
+# FrameConstants declared fields (SKINNY_METAL + SKINNY_MLT), typed, in FULL —
+# the partial head/tail lock left the middle of the struct open to the same
+# same-width retype hole (`exposure` float→uint) the typed goldens exist to
+# close. The base variant is this list minus the `mlt*` tail.
+_FC_DECLARED_MLT = [
+    ("Camera", "camera"), ("uint", "frameIndex"), ("uint", "accumFrame"),
+    ("float", "time"), ("uint", "width"), ("uint", "height"),
+    ("uint", "numDistantLights"), ("uint", "useMesh"),
+    ("float", "tattooDensity"), ("float", "envIntensity"),
+    ("uint", "furnaceMode"), ("float", "mmPerUnit"), ("uint", "detailFlags"),
+    ("float", "normalMapStrength"), ("float", "displacementScaleMM"),
+    ("uint", "numInstances"), ("uint", "numSphereLights"),
+    ("uint", "numEmissiveTriangles"), ("uint", "integratorType"),
+    ("uint", "numGizmoSegments"), ("uint", "numLensElements"),
+    ("float", "filmDistance"), ("float", "rearZ"), ("float", "rearAperture"),
+    ("float", "frontZ"), ("float", "filmHalfH"),
+    ("float", "emissiveTotalPower"), ("uint", "numPupilBounds"),
+    ("float", "filmDiagRadiusW"), ("uint", "focusOverlay"),
+    ("float3", "focusPlaneOrigin"), ("float3", "focusPlaneNormal"),
+    ("float2", "zoomMin"), ("float2", "zoomMax"),
+    ("uint", "lensVignetteDebug"), ("uint2", "pickPixel"),
+    ("uint", "pickArmed"), ("float", "exposure"), ("uint", "tonemapMode"),
+    ("uint", "proposalMask"), ("uint", "reuseMode"),
+    ("float4", "proposalAlpha"), ("uint", "flatLobeSamplers"),
+    ("float3", "sceneBoundsMin"), ("float3", "sceneBoundsExtent"),
+    ("uint", "neuralNetworkVersion"), ("uint", "recordMode"),
+    ("uint", "cameraMirror"), ("float", "sppmInitialRadius"),
+    ("float", "sppmCellSize"), ("uint3", "sppmGridRes"),
+    ("uint", "sppmPhotonsEmitted"), ("float", "sppmGlossyContinueRoughness"),
+    ("float", "filmMaxComponent"), ("float", "sppmGroupPmfE"),
+    ("float", "sppmGroupPmfS"), ("float", "sppmGroupPmfD"),
+    ("float", "sppmGroupPmfEnv"), ("uint", "tileOriginY"),
+    ("float", "mltSigma"), ("float", "mltLargeStepProb"), ("float", "mltB"),
+    ("float", "mltMppActual"), ("uint", "mltNumChains"),
+    ("uint", "mltChainBase"), ("uint", "mltMaxDepth"), ("uint", "mltSeed"),
+]
+
+
 def test_frame_constants_declared_fields_are_typed_locked():
-    """Same retype/reorder lock for FrameConstants, whose blob golden below
-    carries only (name, size)."""
-    base = sl.struct_fields("FrameConstants", metal=True)
-    mlt = sl.struct_fields("FrameConstants", metal=True, mlt=True)
-    assert base[:8] == [
-        ("Camera", "camera"), ("uint", "frameIndex"), ("uint", "accumFrame"),
-        ("float", "time"), ("uint", "width"), ("uint", "height"),
-        ("uint", "numDistantLights"), ("uint", "useMesh"),
-    ]
-    assert base[-5:] == [
-        ("float", "sppmGroupPmfE"), ("float", "sppmGroupPmfS"),
-        ("float", "sppmGroupPmfD"), ("float", "sppmGroupPmfEnv"),
-        ("uint", "tileOriginY"),
-    ]
-    assert mlt[-9:] == [
-        ("uint", "tileOriginY"), ("float", "mltSigma"),
-        ("float", "mltLargeStepProb"), ("float", "mltB"),
-        ("float", "mltMppActual"), ("uint", "mltNumChains"),
-        ("uint", "mltChainBase"), ("uint", "mltMaxDepth"), ("uint", "mltSeed"),
-    ]
+    """Full typed lock — every FrameConstants field, not just head and tail."""
+    assert sl.struct_fields("FrameConstants", metal=True, mlt=True) == \
+        _FC_DECLARED_MLT
+    assert sl.struct_fields("FrameConstants", metal=True) == [
+        f for f in _FC_DECLARED_MLT if not f[1].startswith("mlt")]
+    # The embedded Camera is locked by _DECLARED_FIELD_GOLDENS above.
+    assert ("Camera", "camera") in _FC_DECLARED_MLT
 
 
 @pytest.mark.parametrize("struct,kwargs,golden", _SCALAR_GOLDENS)
@@ -283,11 +308,21 @@ def test_attributed_field_declaration_raises():
         sl.parse_struct_fields(src, "Weird")
 
 
-def test_attribute_only_line_is_skipped():
-    """A line that is just an attribute (e.g. `[mutating]` above a method) is
-    not a field and must not be misread as one."""
-    attr_only = "struct Weird {\n [mutating]\n float a;\n};"
-    assert sl.parse_struct_fields(attr_only, "Weird") == [("float", "a")]
+def test_attribute_on_its_own_line_still_attributes_the_next_field():
+    """An attribute may sit on its own line above the declaration it applies to
+    — that split form must raise exactly like the same-line form, or a
+    `[[vk::offset(…)]]` above its field is silently lost (codex round-3)."""
+    split = "struct Weird {\n float3 a;\n [[vk::offset(16)]]\n float b;\n};"
+    with pytest.raises(SlangLayoutError, match="attributed field declaration"):
+        sl.parse_struct_fields(split, "Weird")
+
+
+def test_attribute_above_a_method_is_skipped():
+    """`[mutating]` above a METHOD is not a field attribute — methods are not
+    layout, so the struct still parses."""
+    src = ("struct Weird {\n float a;\n [mutating]\n"
+           " void bump(float d) { a += d; }\n};")
+    assert sl.parse_struct_fields(src, "Weird") == [("float", "a")]
 
 
 def test_unresolvable_gate_raises():

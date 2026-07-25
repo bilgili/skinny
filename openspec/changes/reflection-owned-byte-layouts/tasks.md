@@ -138,7 +138,7 @@
 ## Change notes (implementation)
 
 * **Stage 0** — `src/skinny/slang_layout.py` + `tests/test_slang_layout.py`
-  (66 hostless tests). Every golden stride matched the hand-authored value on
+  (88 hostless tests after the codex rounds). Every golden stride matched the hand-authored value on
   the first derivation, including the 568 B / 600 B `fc` blobs and
   `mltSigma@564`.
 * **Type coverage** — `float4x4` (64 / 64@16), `uint2` (8 / 8@8), `uint3`
