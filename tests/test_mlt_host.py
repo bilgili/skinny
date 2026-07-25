@@ -146,7 +146,9 @@ def test_metal_mlt_pass_and_recorder_exist():
     src = _read("metal_wavefront.py")
     assert "class MetalWavefrontMltPass" in src
     assert "class _MetalMltRecorder" in src
-    assert '"SKINNY_MLT": "1"' in src, "MLT kernels must compile under SKINNY_MLT"
+    # The define itself is owned by shader_variants.py (change
+    # shader-variant-key-module); this pass must ask for the MLT axis.
+    assert "_wavefront_key(mlt=True" in src, "MLT kernels must compile under SKINNY_MLT"
     for entry in ("wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"):
         assert entry in src
 
@@ -370,8 +372,11 @@ def test_vk_wavefront_has_mlt_pass_and_recorder():
     src = _read("vk_wavefront.py")
     assert "class WavefrontMltPass" in src
     assert "class _VkMltRecorder" in src
-    assert '"SKINNY_MLT=1"' in src, "MLT kernels must compile under -DSKINNY_MLT=1"
-    assert 'tag="_mlt"' in src, "MLT .spv names must never alias the RGB kernels"
+    # The define and the `_mlt` .spv tag are owned by shader_variants.py
+    # (change shader-variant-key-module) — `ShaderVariantKey(mlt=True)` emits
+    # -DSKINNY_MLT=1 and a `_mlt` cache_token, both golden-pinned in
+    # tests/test_shader_variants.py. This pass must ask for the MLT axis.
+    assert "_wavefront_key(mlt=True" in src, "MLT kernels must compile under -DSKINNY_MLT=1"
     for entry in ("wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"):
         assert entry in src
 

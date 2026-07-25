@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import struct
 import subprocess
@@ -10,6 +9,14 @@ from pathlib import Path
 
 import vulkan as vk
 
+from skinny.shader_variants import (
+    Family,
+    ShaderVariantKey,
+    Target,
+    slangc_flags,
+    spv_cache_fetch,
+    spv_cache_key,
+)
 from skinny.vk_context import VulkanContext
 
 
@@ -277,33 +284,10 @@ class ComputePipeline:
         return Path(__file__).resolve().parents[2] / "build"
 
     def _cache_key(self, src: Path, flags: tuple[str, ...]) -> str:
-        """Stable hash over the Slang source tree + compile flags.
-
-        Walks every `.slang` file under shader_dir (including the
-        aggregator + per-graph generated/ files written this turn) and
-        every `.slang` under mtlx/genslang. Content hashing is necessary
-        because some files (generated_materials.slang) change per scene
-        without their mtime changing in a predictable way.
-        """
-        h = hashlib.blake2b(digest_size=16)
-        h.update(self.entry_point.encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(src).encode("utf-8"))
-        h.update(b"\0")
-        for flag in flags:
-            h.update(flag.encode("utf-8"))
-            h.update(b"\0")
-        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        roots = [self.shader_dir, mtlx_genslang]
-        for root in roots:
-            if not root.exists():
-                continue
-            for path in sorted(root.rglob("*.slang")):
-                h.update(str(path.relative_to(root)).encode("utf-8"))
-                h.update(b"\0")
-                h.update(path.read_bytes())
-                h.update(b"\0")
-        return h.hexdigest()
+        """Stable hash over the Slang source tree + compile flags — see
+        `shader_variants.spv_cache_key`, which owns the derivation for both
+        this pipeline and `PreviewPipeline` (it used to be duplicated)."""
+        return spv_cache_key(self.entry_point, src, flags, self.shader_dir)
 
     def _compile_slang(self) -> Path:
         # Codegen already ran in __init__ (before emission) so the genslang
@@ -321,34 +305,25 @@ class ComputePipeline:
         #     custom nodedefs. Their `#include "lib/mx_closure_type.glsl"`
         #     resolves to the shader_dir shim above.
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        flags = (
-            "-target", "spirv",
-            "-entry", self.entry_point,
-            "-stage", "compute",
-            "-I", str(self.shader_dir),
-            "-I", str(mtlx_genslang),
-            # Tells the genslang impls to omit gen-prelude-only paths
-            # (e.g. mx_environment_irradiance) so they compile standalone
-            # in skinny's compute pipeline. The MaterialX gen path doesn't
-            # set this and keeps the gen-provided helpers.
-            "-D", "SKINNY_COMPUTE_PIPELINE=1",
-            "-fvk-use-scalar-layout",
-        )
-        # Spectral variant: distinct define ⇒ distinct cache key (flags are
-        # hashed into `_cache_key`), so the RGB and spectral SPIR-V never alias.
-        if self.spectral:
-            flags = (*flags, "-D", "SKINNY_SPECTRAL=1")
+        # Defines come from the variant key (shader_variants.py). The megakernel
+        # family's base define tells the genslang impls to omit gen-prelude-only
+        # paths (e.g. mx_environment_irradiance) so they compile standalone in
+        # skinny's compute pipeline; the MaterialX gen path doesn't set it and
+        # keeps the gen-provided helpers. The spectral define is spliced AFTER
+        # `-fvk-use-scalar-layout` (the recorded historical position — the flag
+        # tuple is hashed positionally into `_cache_key`, so the RGB and
+        # spectral SPIR-V never alias and existing cache entries stay valid).
+        flags = slangc_flags(
+            ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL,
+                             spectral=self.spectral),
+            entry=self.entry_point,
+            include_paths=(self.shader_dir, mtlx_genslang))
 
         cache_dir = self._build_dir() / self._CACHE_DIRNAME
         key = self._cache_key(src, flags)
         cached = cache_dir / f"{key}.spv"
-        if cached.exists():
-            shutil.copyfile(cached, out)
-            # Bump mtime so LRU eviction keeps recently-used entries.
-            try:
-                cached.touch()
-            except OSError:
-                pass
+        # Hit ⇒ return before `slangc` is ever invoked.
+        if spv_cache_fetch(cache_dir, key, out):
             return out
 
         cmd = [slangc, str(src), *flags, "-o", str(out)]
@@ -1078,25 +1053,7 @@ class PreviewPipeline:
         return Path(__file__).resolve().parents[2] / "build"
 
     def _cache_key(self, src: Path, flags: tuple[str, ...]) -> str:
-        h = hashlib.blake2b(digest_size=16)
-        h.update(self.entry_point.encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(src).encode("utf-8"))
-        h.update(b"\0")
-        for flag in flags:
-            h.update(flag.encode("utf-8"))
-            h.update(b"\0")
-        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        roots = [self.shader_dir, mtlx_genslang]
-        for root in roots:
-            if not root.exists():
-                continue
-            for path in sorted(root.rglob("*.slang")):
-                h.update(str(path.relative_to(root)).encode("utf-8"))
-                h.update(b"\0")
-                h.update(path.read_bytes())
-                h.update(b"\0")
-        return h.hexdigest()
+        return spv_cache_key(self.entry_point, src, flags, self.shader_dir)
 
     def _compile_slang(self) -> Path:
         src = self.shader_dir / f"{self.entry_module}.slang"
@@ -1105,24 +1062,15 @@ class PreviewPipeline:
         if slangc is None:
             raise RuntimeError("slangc not found on PATH — install the Slang compiler")
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        flags = (
-            "-target", "spirv",
-            "-entry", self.entry_point,
-            "-stage", "compute",
-            "-I", str(self.shader_dir),
-            "-I", str(mtlx_genslang),
-            "-D", "SKINNY_COMPUTE_PIPELINE=1",
-            "-fvk-use-scalar-layout",
-        )
+        flags = slangc_flags(
+            ShaderVariantKey(Target.VULKAN, Family.PREVIEW),
+            entry=self.entry_point,
+            include_paths=(self.shader_dir, mtlx_genslang))
         cache_dir = self._build_dir() / ComputePipeline._CACHE_DIRNAME
         key = self._cache_key(src, flags)
         cached = cache_dir / f"{key}.spv"
-        if cached.exists():
-            shutil.copyfile(cached, out)
-            try:
-                cached.touch()
-            except OSError:
-                pass
+        # Hit ⇒ return before `slangc` is ever invoked.
+        if spv_cache_fetch(cache_dir, key, out):
             return out
         cmd = [slangc, str(src), *flags, "-o", str(out)]
         result = subprocess.run(cmd, capture_output=True, text=True)
