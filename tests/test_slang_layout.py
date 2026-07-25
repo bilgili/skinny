@@ -317,6 +317,32 @@ def test_attribute_on_its_own_line_still_attributes_the_next_field():
         sl.parse_struct_fields(split, "Weird")
 
 
+def test_initialized_field_is_not_mistaken_for_a_method():
+    """`float b = float(0);` is a FIELD. A bare "line contains `(` ⇒ method"
+    test drops it silently and shifts every offset after it (codex round-4)."""
+    src = "struct Weird {\n float3 a;\n float b = float(0);\n float c;\n};"
+    assert sl.parse_struct_fields(src, "Weird") == [
+        ("float3", "a"), ("float", "b"), ("float", "c")]
+    # …and an attributed initialized field still raises.
+    attributed = "struct Weird {\n [[vk::offset(4)]] float b = float(0);\n};"
+    with pytest.raises(SlangLayoutError, match="attributed field declaration"):
+        sl.parse_struct_fields(attributed, "Weird")
+
+
+def test_methods_are_still_skipped():
+    """Real methods (definition or declaration) carry no layout."""
+    defn = "struct Weird {\n float a;\n float area(float x) { return x; }\n};"
+    assert sl.parse_struct_fields(defn, "Weird") == [("float", "a")]
+    decl = "struct Weird {\n float a;\n void f(int x);\n};"
+    assert sl.parse_struct_fields(decl, "Weird") == [("float", "a")]
+
+
+def test_array_member_raises_rather_than_guessing():
+    """Array members are not supported; they must fail loudly, not silently."""
+    with pytest.raises(SlangLayoutError, match="unrecognised declaration"):
+        sl.parse_struct_fields("struct Weird {\n float v[4];\n};", "Weird")
+
+
 def test_attribute_above_a_method_is_skipped():
     """`[mutating]` above a METHOD is not a field attribute — methods are not
     layout, so the struct still parses."""

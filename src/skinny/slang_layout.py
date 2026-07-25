@@ -1,8 +1,13 @@
-"""Single derived authority for every host-mirrored GPU byte layout
+"""Derived authority for the host-mirrored GPU byte layouts registered below
 (change ``reflection-owned-byte-layouts``).
 
+Owns the ``FrameConstants`` uniform block, the material param records, and the
+wavefront/SPPM/BDPT/MLT record family — see ``STRUCT_SOURCES``. NOT yet owned
+(single-authored at their packers, deferred follow-up): ``SkinParameters``'
+std140 UBO, ``INSTANCE_STRIDE``, and the light-buffer records.
+
 The host↔GPU interface is a byte-offset agreement with the Slang structs. This
-module derives each mirrored struct's ordered field list by **parsing the
+module derives each registered struct's ordered field list by **parsing the
 authoritative ``.slang`` declaration**, then computes offsets/strides for both
 layout dialects the renderer speaks:
 
@@ -102,6 +107,13 @@ _SKIP_PREFIXES = ("property", "static", "typealias", "{", "}", "#pragma")
 #: Leading Slang/HLSL attribute on a declaration — `[[a::b(1)]]` or `[foo]`.
 _ATTR_PREFIX = re.compile(r"^(?:\[\[.*?\]\]|\[[^\]]*\])\s*")
 
+#: A field declaration: `type name;`, optionally with an initializer, which may
+#: itself contain parentheses (`float b = float(0);`). Matching this BEFORE the
+#: "line contains `(` ⇒ method" heuristic is what keeps an initialized field
+#: from being silently dropped.
+_FIELD_DECL = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^;]*)?;")
+
 
 class SlangLayoutError(RuntimeError):
     """A mirrored struct could not be fully classified — never guess an offset."""
@@ -189,24 +201,29 @@ def parse_struct_fields(
             pending_attr = True
             continue
         pending_attr = False
-        if had_attr and line.endswith(";") and "(" not in line:
+        # Classify BEFORE the method heuristic below: a field may carry an
+        # initializer that contains parentheses (`float b = float(0);`), which a
+        # bare "line contains (" test would misread as a method and drop
+        # silently, shifting every offset after it (codex round-4 finding).
+        decl = _FIELD_DECL.fullmatch(line)
+        if decl is None and "(" in line:
+            continue  # method / constructor / operator — not layout
+        if had_attr and decl is not None:
             raise SlangLayoutError(
                 f"{struct_name}: attributed field declaration {line!r} — the "
                 "attribute may change the field's offset and this module does "
                 "not interpret attributes; add explicit support before "
                 "mirroring this struct")
-        if line.startswith(_SKIP_PREFIXES) or "(" in line:
+        if line.startswith(_SKIP_PREFIXES):
             continue
-        fm = re.fullmatch(
-            r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", line)
-        if not fm:
+        if decl is None:
             raise SlangLayoutError(
                 f"{struct_name}: unrecognised declaration {line!r}")
-        ftype = _norm_type(fm.group(1), spectral=spectral)
+        ftype = _norm_type(decl.group(1), spectral=spectral)
         if ftype not in SLANG_SCALAR_SIZES and ftype not in STRUCT_SOURCES:
             raise SlangLayoutError(
                 f"{struct_name}: unknown field type {ftype!r} in {line!r}")
-        fields.append((ftype, fm.group(2)))
+        fields.append((ftype, decl.group(2)))
     if gate_stack:
         raise SlangLayoutError(f"{struct_name}: unbalanced #if in struct body")
     return fields
