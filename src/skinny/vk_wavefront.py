@@ -933,14 +933,16 @@ class WavefrontSppmPass:
         # per-pass hero-wavelength resolve; RGB (default) stays byte-identical.
         self._spectral = bool(spectral)
 
+        # No neural defines — see shader_variants.RECORDED_ASYMMETRIES
+        # ("sppm-neural-defines"): the Metal SPPM pass compiles with the active
+        # NF_* defines, this one does not. Vacuous at the default config (zero
+        # NF_* flags); aligning them is a follow-up change. One key for the
+        # compile AND the host sizing below, so they cannot drift (design D6).
+        self._variant_key = _wavefront_key(spectral=self._spectral)
         modules = {}
         for entry, out_name in self._ENTRIES:
-            # No neural defines — see shader_variants.RECORDED_ASYMMETRIES
-            # ("sppm-neural-defines"): the Metal SPPM pass compiles with the
-            # active NF_* defines, this one does not. Vacuous at the default
-            # config (zero NF_* flags); aligning them is a follow-up change.
             spv = _compile_full_spv(shader_dir, "integrators/wavefront_sppm", entry, out_name,
-                                    _wavefront_key(spectral=self._spectral))
+                                    self._variant_key)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -949,7 +951,8 @@ class WavefrontSppmPass:
         grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
         # Spectral (Spectrum beta/ld + conductorMetalId; 4-channel SppmAccum)
         # widens both per-pixel buffers; RGB (spectral=False) stays byte-identical.
-        sppm_sizes = sppm_buffer_sizes(self.num_pixels, spectral=self._spectral)
+        sppm_sizes = sppm_buffer_sizes(self.num_pixels,
+                                       spectral=self._variant_key.spectral)
         self._buffers = {}
         self._buffers["visible_points"] = StorageBuffer(ctx, sppm_sizes["visible_points"])
         self._buffers["accum"] = StorageBuffer(ctx, sppm_sizes["sppm_accum"])

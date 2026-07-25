@@ -1868,8 +1868,17 @@ re-derived its own define list at its own compile site (11 emission sites across
 `__post_init__` enforces a `(target, family)` validity table —
 `WAVEFRONT_FOUNDATION` is Vulkan-only (Metal compiles every wavefront kernel
 through the full CP+METAL+WAVEFRONT session), `DEBUG_RASTER` is Metal-only (the
-Vulkan debug viewport is a graphics rasteriser) — plus the axis rules, so
-illegal combinations raise instead of being silently dropped.
+Vulkan debug viewport is a graphics rasteriser) — plus the axis rules: the
+Metal gates are METAL-only, `mlt` and a composed `NeuralBuildConfig` are
+wavefront-only, and `spectral` exists on megakernel + wavefront only.
+
+**An axis a family cannot carry is refused, never accepted and then dropped.**
+That distinction is the whole point: `cache_token()` folds the neural slug and
+the spectral/MLT suffixes into the `.spv` filename, so a key that *accepted* an
+axis its emission path ignored would name one variant on disk and compile
+another. Every arm of `slangc_flags()` therefore emits all four segments (the
+ones a family cannot carry are provably empty), with an assertion that every
+declared define reached the flag tuple.
 
 Three derivations, all from one shared internal define table:
 

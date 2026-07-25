@@ -787,8 +787,9 @@ class MetalWavefrontSppmPass:
         # Compiles WITH the active neural NF_* defines while the Vulkan SPPM
         # compile passes none — shader_variants.RECORDED_ASYMMETRIES
         # ("sppm-neural-defines"). Vacuous at the default config.
-        session = _metal_slang_session(ctx, self.shader_dir, _wavefront_key(
-            spectral=self._spectral, neural_config=neural_config))
+        self._variant_key = _wavefront_key(spectral=self._spectral,
+                                           neural_config=neural_config)
+        session = _metal_slang_session(ctx, self.shader_dir, self._variant_key)
         src_path = self.shader_dir / "integrators" / "wavefront_sppm.slang"
         module = session.load_module_from_source(
             "wavefront_sppm", src_path.read_text(encoding="utf-8"), str(src_path))
@@ -797,13 +798,16 @@ class MetalWavefrontSppmPass:
         # Reflected VisiblePoint stride must match the host MSL mirror. Spectral
         # widens it (Spectrum beta/ld + conductorMetalId); RGB stays identical.
         eye = self._entries["wfSppmEye"].program
-        vp_expected = visible_point_size(msl=True, spectral=self._spectral)
+        # Sizer axes come off the key these kernels compiled with (design D6).
+        msl = self._variant_key.target is Target.METAL
+        spectral = self._variant_key.spectral
+        vp_expected = visible_point_size(msl=msl, spectral=spectral)
         vp_stride = (_reflect_element(eye, "sppmVisiblePoints") or (None, 0))[1]
         if vp_stride and vp_stride != vp_expected:
             raise RuntimeError(
                 f"reflected Metal VisiblePoint stride {vp_stride}B != "
-                f"wavefront_layout.visible_point_size(msl=True, spectral="
-                f"{self._spectral}) {vp_expected}B")
+                f"wavefront_layout.visible_point_size(msl={msl}, spectral="
+                f"{spectral}) {vp_expected}B")
         self.vp_stride = vp_stride or vp_expected
 
         # MSL reflection surface for the renderer's relocators (the pass is the
@@ -823,7 +827,7 @@ class MetalWavefrontSppmPass:
         self.graph_param_layouts: dict = {}
 
         grid_sizes = sppm_grid_buffer_sizes(self.num_pixels)
-        acc_stride = sppm_accum_size(msl=True, spectral=self._spectral)
+        acc_stride = sppm_accum_size(msl=msl, spectral=spectral)
         self.buffers: dict[str, StorageBuffer] = {
             "visible_points": StorageBuffer(ctx, self.num_pixels * self.vp_stride),
             "accum": StorageBuffer(ctx, self.num_pixels * acc_stride),
@@ -1174,9 +1178,9 @@ class MetalWavefrontMltPass:
         # target with SKINNY_SPECTRAL. The MSL uniform layout is reflected from
         # the actual compiled program below, so the SKINNY_MLT tail offsets are
         # keyed off the spectral layout automatically (design D6).
-        session = _metal_slang_session(
-            ctx, self.shader_dir,
-            _wavefront_key(mlt=True, spectral=self.spectral))
+        # One key for the compile AND the host sizing below (design D6).
+        self._variant_key = _wavefront_key(mlt=True, spectral=self.spectral)
+        session = _metal_slang_session(ctx, self.shader_dir, self._variant_key)
         src_path = self.shader_dir / "wavefront" / "wavefront_mlt.slang"
         module = session.load_module_from_source(
             "wavefront_mlt", src_path.read_text(encoding="utf-8"), str(src_path))
@@ -1202,7 +1206,8 @@ class MetalWavefrontMltPass:
         # rgb is 3 floats, not a float3), so the MSL and Vulkan-scalar strides
         # agree — but size through the `msl=True` mirror anyway and assert the
         # result against reflection rather than assuming the two never diverge.
-        sizes = mlt_buffer_sizes(self.num_chains, self.bootstrap_samples, msl=True)
+        sizes = mlt_buffer_sizes(self.num_chains, self.bootstrap_samples,
+                                 msl=self._variant_key.target is Target.METAL)
         for name, key, count in (
             ("mltChainMeta", "mlt_chain_meta", self.num_chains),
             ("mltBootstrapWeights", "mlt_bootstrap_weights", self.bootstrap_samples),

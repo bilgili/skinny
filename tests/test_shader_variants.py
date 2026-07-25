@@ -16,6 +16,7 @@ Two layers:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -195,7 +196,164 @@ GOLDEN_CACHE_TOKENS: dict[str, tuple[str, ShaderVariantKey]] = {
 }
 
 
+# ── 1.1 goldens: every wavefront kernel, per call site ───────────────
+# (entry, out_name) transcribed from the `_compile_full_spv` loops in
+# vk_wavefront.py. Pinning only one representative kernel would let a wrong
+# key or token at another call site pass, so every kernel is checked — and
+# `test_kernel_goldens_cover_every_compile_site` fails if the source grows a
+# kernel this list does not carry.
+
+WAVEFRONT_KERNELS: dict[str, tuple[tuple[str, str], ...]] = {
+    # WavefrontPathPass — the catch-all wfPathShade is built only for non-flat scenes
+    "path": (
+        ("wfPathGenerate", "wavefront/_wfpath_generate"),
+        ("wfPathIntersect", "wavefront/_wfpath_intersect"),
+        ("wfBuildArgs", "wavefront/_wfpath_buildargs"),
+        ("wfScatter", "wavefront/_wfpath_scatter"),
+        ("wfPathShadeFlat", "wavefront/_wfpath_shade_flat"),
+        ("wfPathResolve", "wavefront/_wfpath_resolve"),
+        ("wfPathShade", "wavefront/_wfpath_shade"),
+    ),
+    "sppm": (
+        ("wfSppmEye", "integrators/_wfsppm_eye"),
+        ("wfSppmGridCount", "integrators/_wfsppm_grid_count"),
+        ("wfSppmGridScanBlock", "integrators/_wfsppm_scan_block"),
+        ("wfSppmGridScanBlockSums", "integrators/_wfsppm_scan_sums"),
+        ("wfSppmGridScanAdd", "integrators/_wfsppm_scan_add"),
+        ("wfSppmGridScatter", "integrators/_wfsppm_scatter"),
+        ("wfSppmPhotonTrace", "integrators/_wfsppm_photon"),
+        ("wfSppmUpdate", "integrators/_wfsppm_update"),
+    ),
+    "mlt": (
+        ("wfMltBootstrap", "wavefront/_wfmlt_bootstrap"),
+        ("wfMltInit", "wavefront/_wfmlt_init"),
+        ("wfMltMutate", "wavefront/_wfmlt_mutate"),
+        ("wfMltResolve", "wavefront/_wfmlt_resolve"),
+    ),
+    "restir": (
+        ("restirFill", "restir/_restir_fill"),
+        ("restirSpatial", "restir/_restir_spatial"),
+        ("restirResolve", "restir/_restir_resolve"),
+    ),
+    "bdpt": (
+        ("wfBdptClassify", "wavefront/_wfbdpt_classify"),
+        ("wfBdptBuildArgs", "wavefront/_wfbdpt_buildargs"),
+        ("wfBdptScatter", "wavefront/_wfbdpt_scatter"),
+        ("wfBdptConnectNee", "wavefront/_wfbdpt_connect_nee"),
+        ("wfBdptConnectFull", "wavefront/_wfbdpt_connect_full"),
+        ("wfBdptResolve", "wavefront/_wfbdpt_resolve"),
+        ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
+        ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
+        ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
+        ("wfBdptWalk", "wavefront/_wfbdpt_walk"),
+        ("wfBdptLightTail", "wavefront/_wfbdpt_light_tail"),
+        ("wfBdptGenLight", "wavefront/_wfbdpt_gen_light"),
+        ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
+        ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
+    ),
+    # WavefrontNeuralProposalPass — the one site not written as a tuple literal
+    "neural": (("wfNeuralProposal", "wavefront/_wfneural"),),
+}
+
+# The key each call site builds (mirrors the `_wavefront_key(...)` calls).
+SITE_KEYS = {
+    "path": ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT),
+    "sppm": ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT),
+    "mlt": ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT, mlt=True),
+    "restir": ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT),
+    "bdpt": ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT),
+    "neural": ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT),
+}
+
+
 # ── Goldens ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("site", sorted(WAVEFRONT_KERNELS))
+def test_every_wavefront_kernel_flag_tuple_and_filename(site):
+    """Per-kernel flag tuple AND `.spv` out-name, for every compile site."""
+    key = SITE_KEYS[site]
+    expect_tag = "_mlt" if site == "mlt" else ""
+    assert key.cache_token() == expect_tag
+    for entry, out_name in WAVEFRONT_KERNELS[site]:
+        defines = (("-D", "SKINNY_MLT=1"),) if site == "mlt" else ()
+        assert slangc_flags(key, entry=entry, include_paths=INC2) == _full(
+            entry, *[tok for d in defines for tok in d])
+        assert f"{out_name}{key.cache_token()}.spv" == f"{out_name}{expect_tag}.spv"
+
+
+def test_kernel_goldens_cover_every_compile_site():
+    """A kernel added to a `_compile_full_spv` loop must join the golden list —
+    otherwise a wrong key/token at the new site would go unchecked."""
+    src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
+    declared = set(re.findall(r'\(\s*"(wf\w+|restir\w+)"\s*,\s*"([\w/]+)"\s*\)', src))
+    pinned = {pair for pairs in WAVEFRONT_KERNELS.values() for pair in pairs}
+    assert declared - pinned == set(), "unpinned wavefront kernels"
+
+
+def test_wavefront_rgb_kernels_carry_no_variant_defines():
+    """Guarantee (1): with spectral=False and the default neural config, the RGB
+    wavefront kernels compile with exactly the base define pair."""
+    key = ShaderVariantKey(Target.VULKAN, Family.WAVEFRONT,
+                           neural=NeuralBuildConfig())
+    assert _parsed(key.slangc_defines()) == {
+        "SKINNY_COMPUTE_PIPELINE": "1", "SKINNY_WAVEFRONT": "1"}
+    assert key.cache_token() == ""
+
+
+def test_migrated_flags_hash_to_the_pre_refactor_cache_key():
+    """`vk_compute._cache_key` folds the flag tuple into blake2b positionally,
+    after the entry point and source path and before the source-tree walk — all
+    three refactor-invariant. So equal flag tuples ⇒ equal cache key ⇒ the
+    existing `build/spv_cache` entries stay valid with no flush. Hashing just
+    the flag contribution keeps this test hostless and free of shader-tree
+    churn. (Measured end-to-end on the real tree during the migration: the
+    megakernel RGB / spectral / preview keys were byte-equal before and after.)"""
+    def flag_digest(flags):
+        h = hashlib.blake2b(digest_size=16)
+        for flag in flags:
+            h.update(flag.encode("utf-8"))
+            h.update(b"\0")
+        return h.hexdigest()
+
+    for name, (golden, key, entry, inc) in GOLDEN_VULKAN_FLAGS.items():
+        after = slangc_flags(key, entry=entry, include_paths=inc)
+        assert flag_digest(golden) == flag_digest(after), name
+
+
+def test_no_key_silently_drops_a_declared_define():
+    """The BLOCK case: an axis a family cannot carry must be REFUSED, never
+    accepted and then dropped — `cache_token()` would otherwise name a variant
+    the compile does not build."""
+    for family in (Family.MEGAKERNEL, Family.WAVEFRONT,
+                   Family.WAVEFRONT_FOUNDATION, Family.PREVIEW):
+        for axes in _axes_for(family):
+            key = ShaderVariantKey(Target.VULKAN, family, **axes)
+            flags = slangc_flags(key, entry="e", include_paths=INC2)
+            emitted = {kv for tok, kv in zip(flags, flags[1:]) if tok == "-D"}
+            declared = {kv for seg in key.slangc_defines() for kv in seg
+                        if kv != "-D"}
+            assert declared == emitted, f"{family} {axes}"
+            # A token in the filename with no matching define would be worse:
+            # the cache would name a variant that was never compiled.
+            if key.cache_token():
+                assert declared - {"SKINNY_COMPUTE_PIPELINE=1",
+                                   "SKINNY_WAVEFRONT=1"}, key
+
+
+@pytest.mark.parametrize("family", [Family.PREVIEW, Family.WAVEFRONT_FOUNDATION])
+def test_families_without_a_spectral_or_neural_compile_refuse_those_axes(family):
+    with pytest.raises(ValueError, match="megakernel/wavefront-only"):
+        ShaderVariantKey(Target.VULKAN, family, spectral=True)
+    with pytest.raises(ValueError, match="wavefront-only"):
+        ShaderVariantKey(Target.VULKAN, family, neural=NEURAL)
+
+
+def test_megakernel_refuses_a_neural_build_config():
+    with pytest.raises(ValueError, match="wavefront-only"):
+        ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL, neural=NEURAL)
+
+
+
 
 @pytest.mark.parametrize("name", sorted(GOLDEN_VULKAN_FLAGS))
 def test_vulkan_flag_tuples_match_pre_refactor_goldens(name):
@@ -221,9 +379,14 @@ _BOTH_TARGET_FAMILIES = (Family.MEGAKERNEL, Family.WAVEFRONT, Family.PREVIEW)
 
 
 def _axes_for(family):
-    """Every axis combination legal for `family` (mlt is wavefront-only)."""
-    for spectral in (False, True):
-        for neural in (None, NeuralBuildConfig(), NEURAL):
+    """Every axis combination legal for `family`: mlt and a neural build config
+    are wavefront-only; spectral exists on megakernel + wavefront only."""
+    spectrals = ((False, True) if family in (Family.MEGAKERNEL, Family.WAVEFRONT)
+                 else (False,))
+    neurals = ((None, NeuralBuildConfig(), NEURAL)
+               if family is Family.WAVEFRONT else (None,))
+    for spectral in spectrals:
+        for neural in neurals:
             yield {"spectral": spectral, "neural": neural, "mlt": False}
             if family is Family.WAVEFRONT:
                 yield {"spectral": spectral, "neural": neural, "mlt": True}

@@ -153,6 +153,19 @@ class ShaderVariantKey:
         if self.mlt and self.family is not Family.WAVEFRONT:
             raise ValueError(
                 f"mlt=True is wavefront-only, got family={self.family.name}")
+        # An axis a family cannot carry must be REFUSED, never accepted and then
+        # dropped at emission: `cache_token()` would name a variant the compile
+        # does not build. The neural NF_* defines reach only the wavefront
+        # full-tree kernels; the preview / foundation / debug-raster compiles
+        # take no spectral variant either.
+        if self.neural is not None and self.family is not Family.WAVEFRONT:
+            raise ValueError(
+                f"a neural build config is wavefront-only, got "
+                f"family={self.family.name}")
+        if self.spectral and self.family not in (Family.MEGAKERNEL, Family.WAVEFRONT):
+            raise ValueError(
+                f"spectral=True is megakernel/wavefront-only, got "
+                f"family={self.family.name}")
 
     # ── Shared define table ───────────────────────────────────────
 
@@ -229,8 +242,19 @@ def slangc_flags(key: ShaderVariantKey, *, entry: str,
     for path in include_paths:
         head = (*head, "-I", str(path))
     scalar = "-fvk-use-scalar-layout"
+    # EVERY segment is emitted in each arm — a segment a family cannot carry is
+    # already empty (`__post_init__` refuses those keys), so no axis can be
+    # silently dropped into a compile that `cache_token()` names differently.
     if key.family in (Family.MEGAKERNEL, Family.PREVIEW):
-        return (*head, *segs.base, scalar, *segs.spectral)
-    if key.family is Family.WAVEFRONT_FOUNDATION:
-        return (*head, scalar, *segs.base)
-    return (*head, *segs.base, *segs.spectral, *segs.neural, *segs.mlt, scalar)
+        flags = (*head, *segs.base, scalar, *segs.spectral, *segs.neural, *segs.mlt)
+    elif key.family is Family.WAVEFRONT_FOUNDATION:
+        flags = (*head, scalar, *segs.base, *segs.spectral, *segs.neural, *segs.mlt)
+    else:
+        flags = (*head, *segs.base, *segs.spectral, *segs.neural, *segs.mlt, scalar)
+    # Belt-and-braces: every define the key declares reached the flag tuple.
+    emitted = {kv for tok, kv in zip(flags, flags[1:]) if tok == "-D"}
+    declared = {kv for seg in segs for kv in seg if kv != "-D"}
+    if declared - emitted:  # pragma: no cover - unreachable while the arms agree
+        raise AssertionError(
+            f"slangc_flags dropped defines {sorted(declared - emitted)} for {key}")
+    return flags
