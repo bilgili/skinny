@@ -92,7 +92,15 @@ STRUCT_SOURCES: dict[str, str] = {
 
 # Lines inside a struct body that are not field declarations. Anything else that
 # is not a recognised declaration raises rather than being skipped silently.
-_SKIP_PREFIXES = ("property", "static", "typealias", "[", "{", "}", "#pragma")
+# NOTE: `[` is deliberately NOT here — an attributed declaration
+# (`[[vk::offset(16)]] float b;`) is a real field, and skipping it would drop a
+# field silently and shift every offset after it. Attributes are stripped
+# instead (`_ATTR_PREFIX`), and a line that is only an attribute (e.g.
+# `[mutating]` on the next line's method) reduces to empty and is skipped.
+_SKIP_PREFIXES = ("property", "static", "typealias", "{", "}", "#pragma")
+
+#: Leading Slang/HLSL attribute on a declaration — `[[a::b(1)]]` or `[foo]`.
+_ATTR_PREFIX = re.compile(r"^(?:\[\[.*?\]\]|\[[^\]]*\])\s*")
 
 
 class SlangLayoutError(RuntimeError):
@@ -161,6 +169,16 @@ def parse_struct_fields(
             raise SlangLayoutError(
                 f"{struct_name}: unsupported preprocessor directive {line!r}")
         if not all(gate_stack):
+            continue
+        # Strip any leading attributes so an attributed field is still parsed as
+        # a field (never silently dropped); a line that is nothing but an
+        # attribute reduces to empty here.
+        while True:
+            stripped = _ATTR_PREFIX.sub("", line)
+            if stripped == line:
+                break
+            line = stripped
+        if not line:
             continue
         if line.startswith(_SKIP_PREFIXES) or "(" in line:
             continue
