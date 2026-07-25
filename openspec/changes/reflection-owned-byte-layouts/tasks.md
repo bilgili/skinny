@@ -119,7 +119,7 @@
 
 ## 5. Verification and docs (Stage 4)
 
-- [ ] 5.1 Full hostless sweep: `.venv/bin/pytest` (layout tests, matrix
+- [x] 5.1 Full hostless sweep: `.venv/bin/pytest` (layout tests, matrix
       construction, metrics, import) — zero regressions.
 - [x] 5.2 gpu-marked layout locks + kill-harness rules respected:
       `PYTHONPATH=src SKINNY_BACKEND=metal ./bin/python3.13 -m pytest
@@ -169,5 +169,20 @@
   (was grepping renderer source text for `("sppmGroupPmfE", 4)`),
   `test_struct_layout`, `test_metal_std_surface_layout`, and both duplicate
   parsers in `test_wavefront_state` / `test_sppm_state`.
+* **Hostless sweep (5.1)** — 1761 passed / 53 skipped; the 28 failures + 49
+  errors are byte-for-byte the SAME 77-item set on clean `main` at the same
+  interpreter (test_web, test_skin_optics, test_sampling, test_mis,
+  test_sampling_parity, …), i.e. pre-existing and untouched by this change.
+* **Codex pre-merge gate** — three rounds. Round 1 died mid-verify but confirmed
+  the migration byte-identical and found two gate escapes; round 2 returned
+  BLOCK on both, now fixed: an attributed field declaration is REJECTED (the
+  first fix kept the field but erased `[[vk::offset(…)]]`, which would place it
+  by running sum — a confidently wrong offset), and the goldens pin the declared
+  `(type, name)` so a same-width retype (`float`→`uint`) can no longer pass
+  every stride/offset/reflected-size check. Stale 592/512/640 B figures in
+  `docs/Megakernel.md`, `docs/PhotonMapping.md` and the packer docstring
+  corrected. The Medium finding (a same-width value swap inside the
+  `_pack_uniforms` body still passes the length-only guard) is consciously
+  dismissed — it is the documented v1 trade-off; offset-driven packing is v2.
 * **Out of scope, unchanged** — `SkinParameters.pack()` (std140),
   `INSTANCE_STRIDE`, the light-buffer records; see the design's Open Questions.
