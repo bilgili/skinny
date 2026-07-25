@@ -600,7 +600,8 @@ class WavefrontPathPass:
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
                  stream_size: int, num_pixels: int, build_catchall: bool = True,
                  record_capacity: int = 0, neural_config=None,
-                 spectral: bool = False) -> None:
+                 spectral: bool = False,
+                 variant_key: ShaderVariantKey | None = None) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)   # slots in the path-state buffer
         self.num_pixels = int(num_pixels)     # total pixels to cover, tiled
@@ -608,7 +609,10 @@ class WavefrontPathPass:
         # Spectral wavefront variant (spectral-wavefront 5.2): compiles the staged
         # kernels with -DSKINNY_SPECTRAL so the shared carriers/helpers take their
         # hero-wavelength spectral branch. RGB (default) stays byte-identical.
-        self._spectral = bool(spectral)
+        # When the caller hands in the key it also sized the buffers from, THAT
+        # key is authoritative — design D6's same-key invariant then holds by
+        # construction rather than by the two happening to agree.
+        self._spectral = variant_key.spectral if variant_key else bool(spectral)
         # Wavefront-native path records (change wavefront-native-path-records):
         # per-lane vertex stack (binding 9) + stacked count (binding 10) in this
         # pass's set 1, in SEPARATE buffers (NOT inside the by-value-copied
@@ -629,8 +633,8 @@ class WavefrontPathPass:
         # One key per compile request: every kernel below compiles from it, and
         # the host sizers read `spectral`/`msl` off the same value, so shader
         # defines and host sizing cannot disagree (design D6).
-        self._variant_key = _wavefront_key(spectral=self._spectral,
-                                           neural_config=neural_config)
+        self._variant_key = variant_key or _wavefront_key(
+            spectral=self._spectral, neural_config=neural_config)
         # Optional reuse plugin (ReSTIR DI) — scheduled at bounce 0 between the
         # primary intersect and the shade. None = identity reuse (stock NEE).
         self._restir = None
@@ -1724,7 +1728,8 @@ class WavefrontBdptPass:
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
                  stream_size: int, num_pixels: int,
-                 walk_mode: str = "fused", spectral: bool = False) -> None:
+                 walk_mode: str = "fused", spectral: bool = False,
+                 variant_key: ShaderVariantKey | None = None) -> None:
         self.ctx = ctx
         self.stream_size = int(stream_size)
         self.num_pixels = int(num_pixels)
@@ -1732,8 +1737,9 @@ class WavefrontBdptPass:
             raise ValueError(f"unknown bdpt walk_mode {walk_mode!r} (expected {self.WALK_MODES})")
         self.walk_mode = walk_mode
         # Spectral wavefront variant (spectral-wavefront 5.2): per-λ eye/light
-        # walks + splat resolve; RGB (default) stays byte-identical.
-        self._spectral = bool(spectral)
+        # walks + splat resolve; RGB (default) stays byte-identical. A
+        # caller-supplied key is authoritative — see WavefrontPathPass (D6).
+        self._spectral = variant_key.spectral if variant_key else bool(spectral)
 
         # The connect counting sort (classify / build_args / scatter) + split
         # connect (nee / full, indirect) + resolve are shared by all walk modes;
@@ -1767,7 +1773,7 @@ class WavefrontBdptPass:
             ] + shared
         # One key for the compile AND any host sizing keyed off this pass
         # (design D6), like the path and SPPM passes.
-        self._variant_key = _wavefront_key(spectral=self._spectral)
+        self._variant_key = variant_key or _wavefront_key(spectral=self._spectral)
         modules = {}
         for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name,
@@ -1981,9 +1987,11 @@ def _ensure_path(r):
     num_pixels = r.width * r.height
     cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontPathPass.STREAM_CAP)
     stream_size = max(1, min(num_pixels, cap))
-    # One variant key for this compile request — the pass compiles from it and
-    # the host sizer below reads its axes, so the two cannot drift (design D6).
-    variant = _wavefront_key(spectral=r._spectral)
+    # ONE variant key for this compile request: the sizer below reads its axes
+    # and the pass compiles every kernel from the very same object (design D6),
+    # so the invariant is structural, not a coincidence of equal values.
+    variant = _wavefront_key(spectral=r._spectral,
+                             neural_config=r._effective_neural_config())
     path_state_stride = path_state_size(spectral=variant.spectral)
     r._wf_path_state_buf = r._gpu.StorageBuffer(r.ctx, stream_size * path_state_stride)
     r._wf_path_hit_buf = r._gpu.StorageBuffer(
@@ -1995,7 +2003,7 @@ def _ensure_path(r):
         stream_size, num_pixels, build_catchall=has_nonflat,
         record_capacity=(stream_size if wf_record else 0),
         neural_config=r._effective_neural_config(),
-        spectral=variant.spectral,
+        variant_key=variant,
     )
     r._restir_pass = None
     if reuse_mode == 1:  # RESTIR_DI
@@ -2036,9 +2044,9 @@ def _ensure_bdpt(r):
     num_pixels = r.width * r.height
     cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
     stream_size = max(1, min(num_pixels, cap))
-    # One variant key for this compile request — the pass compiles from it and
-    # the vertex/aux sizers below read its axes, so the two cannot drift
-    # (design D6; same seam as the path and SPPM passes).
+    # ONE variant key: the vertex/aux sizers below read its axes and the pass
+    # compiles every kernel from the very same object (design D6; same seam as
+    # the path and SPPM passes).
     variant = _wavefront_key(spectral=r._spectral)
     vert_stride = WavefrontBdptPass.VERTEX_STRIDE
     aux_stride = WavefrontBdptPass.AUX_STRIDE
@@ -2056,7 +2064,7 @@ def _ensure_bdpt(r):
         r._wf_bdpt_eye_buf.buffer, r._wf_bdpt_light_buf.buffer,
         r._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
         stream_size, num_pixels, walk_mode=r.bdpt_walk_mode,
-        spectral=variant.spectral,
+        variant_key=variant,
     )
     r._wf_bdpt_pass_dims = (r.width, r.height)
     return r._wavefront_bdpt_pass

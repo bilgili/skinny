@@ -283,6 +283,60 @@ def test_every_wavefront_kernel_flag_tuple_and_filename(site):
         assert f"{out_name}{key.cache_token()}.spv" == f"{out_name}{expect_tag}.spv"
 
 
+def _fn_source(module: str, name: str) -> str:
+    src = (SRC / module).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == name)
+    return ast.get_source_segment(src, fn) or ""
+
+
+@pytest.mark.parametrize("factory, pass_cls", [
+    ("_ensure_path", "WavefrontPathPass"),
+    ("_ensure_bdpt", "WavefrontBdptPass"),
+])
+def test_sizing_and_compile_share_one_key_object(factory, pass_cls):
+    """Design D6 / spec "Sizers agree with defines by construction": the
+    `spectral`/`msl` values handed to the wavefront_layout sizers must come
+    from the SAME ShaderVariantKey that produced the compile defines.
+
+    Passing `spectral=variant.spectral` into a constructor that then rebuilds
+    its own key makes the two merely *equal*, not the same — a later edit to
+    either derivation reintroduces the drift this change exists to remove. So
+    the factories hand the key itself down via `variant_key=`, and the pass
+    prefers it."""
+    body = _fn_source("vk_wavefront.py", factory)
+    assert "variant_key=variant" in body, (
+        f"{factory} must hand its sizing key to {pass_cls}, not re-derive it")
+    # The receiving constructor must actually declare that keyword — these are
+    # Vulkan-only paths, so a typo would surface at runtime, not at import.
+    src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
+    cls = next(n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.ClassDef) and n.name == pass_cls)
+    init = next(n for n in cls.body
+                if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    kwargs = {a.arg for a in init.args.args} | {a.arg for a in init.args.kwonlyargs}
+    assert "variant_key" in kwargs, f"{pass_cls}.__init__ has no variant_key"
+    # ...and it must NOT also pass the loose boolean, which would reintroduce
+    # a second, independently-derived source of truth.
+    assert "spectral=r._spectral," not in body.replace(
+        "_wavefront_key(spectral=r._spectral", "")
+
+
+def test_sppm_sizes_from_the_key_it_compiled_with():
+    """SPPM builds its key inside the pass rather than taking a hand-down, so
+    the invariant is checked at the other end: the sizer call must read the
+    stored key, never a loose `self._spectral`."""
+    body = _fn_source("vk_wavefront.py", "__init__")  # first __init__ is enough
+    src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
+    sppm = next(n for n in ast.walk(ast.parse(src))
+                if isinstance(n, ast.ClassDef) and n.name == "WavefrontSppmPass")
+    body = ast.get_source_segment(src, sppm) or ""
+    assert "sppm_buffer_sizes(self.num_pixels,\n" in body
+    assert "spectral=self._variant_key.spectral)" in body
+    assert "sppm_buffer_sizes(self.num_pixels, spectral=self._spectral)" not in body
+
+
 def test_kernel_goldens_cover_every_compile_site():
     """A kernel added to a `_compile_full_spv` loop must join the golden list —
     otherwise a wrong key/token at the new site would go unchecked."""

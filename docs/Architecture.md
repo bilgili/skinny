@@ -1862,15 +1862,16 @@ re-derived its own define list at its own compile site (11 emission sites across
 | `family` | `MEGAKERNEL` \| `WAVEFRONT` \| `WAVEFRONT_FOUNDATION` \| `PREVIEW` \| `DEBUG_RASTER` |
 | `spectral` | `SKINNY_SPECTRAL=1` + `_spectral` filename suffix |
 | `mlt` | `SKINNY_MLT=1` + `_mlt` tag — wavefront only (this is what keeps the megakernel SPIR-V byte-unchanged by the MLT axis) |
-| `metal_neural` / `metal_records` | `SKINNY_METAL_NEURAL` / `SKINNY_METAL_RECORDS` — the Metal argument-table gates, METAL-target only |
+| `metal_neural` / `metal_records` | `SKINNY_METAL_NEURAL` / `SKINNY_METAL_RECORDS` — the Metal argument-table gates. METAL-target **and** wavefront-family only: both defines are live in `bindings.slang` / `path_record_common.slang`, which the megakernel also includes, so a megakernel key carrying one would silently change that kernel's binding table |
 | `neural` | a composed `NeuralBuildConfig` — the `NF_*` defines and the `L6B24H96…` cache slug stay owned by `sampling/neural_weights.py` and are **never** re-derived here |
 
 `__post_init__` enforces a `(target, family)` validity table —
 `WAVEFRONT_FOUNDATION` is Vulkan-only (Metal compiles every wavefront kernel
 through the full CP+METAL+WAVEFRONT session), `DEBUG_RASTER` is Metal-only (the
-Vulkan debug viewport is a graphics rasteriser) — plus the axis rules: the
-Metal gates are METAL-only, `mlt` and a composed `NeuralBuildConfig` are
-wavefront-only, and `spectral` exists on megakernel + wavefront only.
+Vulkan debug viewport is a graphics rasteriser) — plus the axis rules: `mlt`,
+a composed `NeuralBuildConfig` and the two Metal gates are wavefront-only (the
+gates additionally METAL-only), and `spectral` exists on megakernel + wavefront
+only.
 
 **An axis a family cannot carry is refused, never accepted and then dropped.**
 That distinction is the whole point: `cache_token()` folds the neural slug and
