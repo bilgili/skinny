@@ -160,9 +160,17 @@ def parse_struct_fields(
     gate_stack: list[bool] = []
     # An attribute may sit on its own line, above the declaration it applies to.
     pending_attr = False
+    # Depth of any nested block (a method or property body). Lines are otherwise
+    # classified independently, so without this a LOCAL declaration inside a
+    # multiline method body (`float local = float(0);`) would be appended as a
+    # phantom struct field and shift every offset after it (codex round-5).
+    block_depth = 0
     for raw in body.splitlines():
         line = raw.split("//", 1)[0].strip()
         if not line:
+            continue
+        if block_depth:
+            block_depth += line.count("{") - line.count("}")
             continue
         if line.startswith("#"):
             gm = re.fullmatch(r"#if\s+defined\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", line)
@@ -207,7 +215,10 @@ def parse_struct_fields(
         # silently, shifting every offset after it (codex round-4 finding).
         decl = _FIELD_DECL.fullmatch(line)
         if decl is None and "(" in line:
-            continue  # method / constructor / operator — not layout
+            # Method / constructor / operator — not layout. Its body (this line's
+            # trailing `{`, or a `{` on the following line) is swallowed whole.
+            block_depth += line.count("{") - line.count("}")
+            continue
         if had_attr and decl is not None:
             raise SlangLayoutError(
                 f"{struct_name}: attributed field declaration {line!r} — the "
@@ -215,6 +226,9 @@ def parse_struct_fields(
                 "not interpret attributes; add explicit support before "
                 "mirroring this struct")
         if line.startswith(_SKIP_PREFIXES):
+            # Non-field construct (property, static const, a bare brace opening a
+            # method body on its own line, …) — swallow any block it opens.
+            block_depth += line.count("{") - line.count("}")
             continue
         if decl is None:
             raise SlangLayoutError(

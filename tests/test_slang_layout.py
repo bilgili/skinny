@@ -337,6 +337,27 @@ def test_methods_are_still_skipped():
     assert sl.parse_struct_fields(decl, "Weird") == [("float", "a")]
 
 
+@pytest.mark.parametrize("body", [
+    # brace on the following line
+    " float area(float x)\n {\n     float local = float(0);\n"
+    "     return max(local, x);\n }\n",
+    # brace on the signature line
+    " float area(float x) {\n     float local = 1.0;\n     return local;\n }\n",
+    # nested block inside the method body
+    " float area(float x) {\n     if (x > 0) { float inner = 2.0;"
+    " return inner; }\n     return 0;\n }\n",
+    # multiline property accessor
+    " property float scaled\n {\n     get { float t = 2.0; return a * t; }\n }\n",
+], ids=["brace-next-line", "brace-same-line", "nested-block", "property"])
+def test_locals_inside_multiline_bodies_are_not_fields(body):
+    """A local declaration inside a method or property body is NOT a struct
+    field. Classifying lines independently made `float local = float(0);` a
+    phantom field that shifted every offset after it (codex round-5)."""
+    src = "struct Weird {\n float a;\n" + body + " float b;\n};"
+    assert sl.parse_struct_fields(src, "Weird") == [("float", "a"),
+                                                    ("float", "b")]
+
+
 def test_array_member_raises_rather_than_guessing():
     """Array members are not supported; they must fail loudly, not silently."""
     with pytest.raises(SlangLayoutError, match="unrecognised declaration"):
