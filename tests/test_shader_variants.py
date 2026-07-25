@@ -16,7 +16,6 @@ Two layers:
 
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 
@@ -34,6 +33,8 @@ from skinny.shader_variants import (
     ShaderVariantKey,
     Target,
     slangc_flags,
+    spv_cache_fetch,
+    spv_cache_key,
 )
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "skinny"
@@ -290,6 +291,26 @@ def test_kernel_goldens_cover_every_compile_site():
     assert declared - pinned == set(), "unpinned wavefront kernels"
 
 
+def test_every_wavefront_compile_routes_through_the_two_flag_builders():
+    """The guard above recognises `(entry, out_name)` tuple literals, so a
+    kernel compiled by calling `slangc_flags` directly could slip past it.
+    Keep the two builders (`_slang_flags` for the foundation kernels,
+    `_compile_full_spv` for the full tree) the only callers."""
+    src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
+    # Function bodies that legitimately call slangc_flags, by def line.
+    allowed = {"_slang_flags", "_compile_full_spv"}
+    current = None
+    offenders = []
+    for line in src.splitlines():
+        m = re.match(r"def (\w+)\(", line)
+        if m:
+            current = m.group(1)
+        if "slangc_flags(" in line and not line.lstrip().startswith(("#", '"')):
+            if current not in allowed:
+                offenders.append((current, line.strip()))
+    assert offenders == [], f"slangc_flags called outside {allowed}: {offenders}"
+
+
 def test_wavefront_rgb_kernels_carry_no_variant_defines():
     """Guarantee (1): with spectral=False and the default neural config, the RGB
     wavefront kernels compile with exactly the base define pair."""
@@ -300,24 +321,96 @@ def test_wavefront_rgb_kernels_carry_no_variant_defines():
     assert key.cache_token() == ""
 
 
-def test_migrated_flags_hash_to_the_pre_refactor_cache_key():
-    """`vk_compute._cache_key` folds the flag tuple into blake2b positionally,
-    after the entry point and source path and before the source-tree walk — all
-    three refactor-invariant. So equal flag tuples ⇒ equal cache key ⇒ the
-    existing `build/spv_cache` entries stay valid with no flush. Hashing just
-    the flag contribution keeps this test hostless and free of shader-tree
-    churn. (Measured end-to-end on the real tree during the migration: the
-    megakernel RGB / spectral / preview keys were byte-equal before and after.)"""
-    def flag_digest(flags):
-        h = hashlib.blake2b(digest_size=16)
-        for flag in flags:
-            h.update(flag.encode("utf-8"))
-            h.update(b"\0")
-        return h.hexdigest()
+# ── spv_cache: keys and the cache-hit branch ─────────────────────────
+# `spv_cache_key` / `spv_cache_fetch` own what `vk_compute.ComputePipeline` and
+# `PreviewPipeline` used to duplicate, so the real derivation is reachable here
+# without importing vulkan. A fixture tree (not the live shader tree) keeps the
+# pinned digest free of per-scene codegen churn.
 
+@pytest.fixture
+def fake_tree(tmp_path):
+    shaders = tmp_path / "shaders"
+    (shaders / "wavefront").mkdir(parents=True)
+    (tmp_path / "mtlx" / "genslang").mkdir(parents=True)
+    (shaders / "main_pass.slang").write_text("// main\n", encoding="utf-8")
+    (shaders / "wavefront" / "wavefront_path.slang").write_text("// wf\n",
+                                                                encoding="utf-8")
+    (tmp_path / "mtlx" / "genslang" / "skin.slang").write_text("// mtlx\n",
+                                                               encoding="utf-8")
+    return shaders
+
+
+#: blake2b-128 of the fixture tree above with the megakernel RGB flag tuple.
+#: A change here means the cache key derivation moved — every existing
+#: `build/spv_cache` entry would be orphaned, so this must not drift silently.
+#: The hashed source path and include paths are fixed strings (not `tmp_path`),
+#: since `spv_cache_key` folds `str(src)` in verbatim; only the tree *content*
+#: comes from the fixture, and that is hashed by path RELATIVE to its root.
+PINNED_FIXTURE_KEY = "fc6ff23f7523a847e174572599cdf9f7"
+PINNED_SRC = Path("shaders/main_pass.slang")
+
+
+def _fixture_flags(shaders, key):
+    return slangc_flags(key, entry="mainImage",
+                        include_paths=(shaders, shaders.parent / "mtlx" / "genslang"))
+
+
+def test_spv_cache_key_is_pinned(fake_tree):
+    key = ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL)
+    flags = slangc_flags(key, entry="mainImage", include_paths=INC2)
+    got = spv_cache_key("mainImage", PINNED_SRC, flags, fake_tree)
+    assert got == PINNED_FIXTURE_KEY
+
+
+def test_migrated_flags_produce_the_pre_refactor_cache_key(fake_tree):
+    """The no-flush guarantee, through the REAL derivation: for every golden
+    site, the pre-refactor literal flag tuple and the tuple the module now
+    emits hash to the same `build/spv_cache` key over one fixed tree."""
+    src = fake_tree / "main_pass.slang"
     for name, (golden, key, entry, inc) in GOLDEN_VULKAN_FLAGS.items():
         after = slangc_flags(key, entry=entry, include_paths=inc)
-        assert flag_digest(golden) == flag_digest(after), name
+        assert (spv_cache_key(entry, src, golden, fake_tree)
+                == spv_cache_key(entry, src, after, fake_tree)), name
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda f: (*f[:-1],),                       # a dropped flag
+    lambda f: (*f, "-D", "SKINNY_SPECTRAL=1"),  # an added define
+    lambda f: (f[-1], *f[:-1]),                 # the SAME flags, reordered
+])
+def test_cache_key_is_sensitive_to_the_flag_tuple(fake_tree, mutate):
+    """Negative control for the test above: the key really does depend on the
+    flags, positionally — reordering alone changes it, which is exactly why
+    each site must splice the define segments at its recorded position."""
+    key = ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL)
+    src = fake_tree / "main_pass.slang"
+    flags = _fixture_flags(fake_tree, key)
+    assert (spv_cache_key("mainImage", src, flags, fake_tree)
+            != spv_cache_key("mainImage", src, mutate(flags), fake_tree))
+
+
+def test_cache_key_tracks_shader_tree_content(fake_tree):
+    key = ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL)
+    src = fake_tree / "main_pass.slang"
+    flags = _fixture_flags(fake_tree, key)
+    before = spv_cache_key("mainImage", src, flags, fake_tree)
+    (fake_tree / "wavefront" / "wavefront_path.slang").write_text("// edited\n",
+                                                                  encoding="utf-8")
+    assert spv_cache_key("mainImage", src, flags, fake_tree) != before
+
+
+def test_cache_fetch_hit_copies_and_miss_reports_false(tmp_path):
+    """The branch that makes a rebuild skip `slangc`: a hit copies the cached
+    module out and returns True (the caller returns immediately); a miss
+    returns False so the caller falls through to the compile."""
+    cache_dir = tmp_path / "spv_cache"
+    cache_dir.mkdir()
+    out = tmp_path / "main_pass.spv"
+    assert spv_cache_fetch(cache_dir, "deadbeef", out) is False
+    assert not out.exists()
+    (cache_dir / "deadbeef.spv").write_bytes(b"SPV-BYTES")
+    assert spv_cache_fetch(cache_dir, "deadbeef", out) is True
+    assert out.read_bytes() == b"SPV-BYTES"
 
 
 def test_no_key_silently_drops_a_declared_define():

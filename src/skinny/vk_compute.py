@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import struct
 import subprocess
@@ -15,6 +14,8 @@ from skinny.shader_variants import (
     ShaderVariantKey,
     Target,
     slangc_flags,
+    spv_cache_fetch,
+    spv_cache_key,
 )
 from skinny.vk_context import VulkanContext
 
@@ -283,33 +284,10 @@ class ComputePipeline:
         return Path(__file__).resolve().parents[2] / "build"
 
     def _cache_key(self, src: Path, flags: tuple[str, ...]) -> str:
-        """Stable hash over the Slang source tree + compile flags.
-
-        Walks every `.slang` file under shader_dir (including the
-        aggregator + per-graph generated/ files written this turn) and
-        every `.slang` under mtlx/genslang. Content hashing is necessary
-        because some files (generated_materials.slang) change per scene
-        without their mtime changing in a predictable way.
-        """
-        h = hashlib.blake2b(digest_size=16)
-        h.update(self.entry_point.encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(src).encode("utf-8"))
-        h.update(b"\0")
-        for flag in flags:
-            h.update(flag.encode("utf-8"))
-            h.update(b"\0")
-        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        roots = [self.shader_dir, mtlx_genslang]
-        for root in roots:
-            if not root.exists():
-                continue
-            for path in sorted(root.rglob("*.slang")):
-                h.update(str(path.relative_to(root)).encode("utf-8"))
-                h.update(b"\0")
-                h.update(path.read_bytes())
-                h.update(b"\0")
-        return h.hexdigest()
+        """Stable hash over the Slang source tree + compile flags — see
+        `shader_variants.spv_cache_key`, which owns the derivation for both
+        this pipeline and `PreviewPipeline` (it used to be duplicated)."""
+        return spv_cache_key(self.entry_point, src, flags, self.shader_dir)
 
     def _compile_slang(self) -> Path:
         # Codegen already ran in __init__ (before emission) so the genslang
@@ -344,13 +322,8 @@ class ComputePipeline:
         cache_dir = self._build_dir() / self._CACHE_DIRNAME
         key = self._cache_key(src, flags)
         cached = cache_dir / f"{key}.spv"
-        if cached.exists():
-            shutil.copyfile(cached, out)
-            # Bump mtime so LRU eviction keeps recently-used entries.
-            try:
-                cached.touch()
-            except OSError:
-                pass
+        # Hit ⇒ return before `slangc` is ever invoked.
+        if spv_cache_fetch(cache_dir, key, out):
             return out
 
         cmd = [slangc, str(src), *flags, "-o", str(out)]
@@ -1080,25 +1053,7 @@ class PreviewPipeline:
         return Path(__file__).resolve().parents[2] / "build"
 
     def _cache_key(self, src: Path, flags: tuple[str, ...]) -> str:
-        h = hashlib.blake2b(digest_size=16)
-        h.update(self.entry_point.encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(src).encode("utf-8"))
-        h.update(b"\0")
-        for flag in flags:
-            h.update(flag.encode("utf-8"))
-            h.update(b"\0")
-        mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
-        roots = [self.shader_dir, mtlx_genslang]
-        for root in roots:
-            if not root.exists():
-                continue
-            for path in sorted(root.rglob("*.slang")):
-                h.update(str(path.relative_to(root)).encode("utf-8"))
-                h.update(b"\0")
-                h.update(path.read_bytes())
-                h.update(b"\0")
-        return h.hexdigest()
+        return spv_cache_key(self.entry_point, src, flags, self.shader_dir)
 
     def _compile_slang(self) -> Path:
         src = self.shader_dir / f"{self.entry_module}.slang"
@@ -1114,12 +1069,8 @@ class PreviewPipeline:
         cache_dir = self._build_dir() / ComputePipeline._CACHE_DIRNAME
         key = self._cache_key(src, flags)
         cached = cache_dir / f"{key}.spv"
-        if cached.exists():
-            shutil.copyfile(cached, out)
-            try:
-                cached.touch()
-            except OSError:
-                pass
+        # Hit ⇒ return before `slangc` is ever invoked.
+        if spv_cache_fetch(cache_dir, key, out):
             return out
         cmd = [slangc, str(src), *flags, "-o", str(out)]
         result = subprocess.run(cmd, capture_output=True, text=True)

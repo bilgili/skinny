@@ -30,6 +30,8 @@ default ``pytest`` sweep.
 
 from __future__ import annotations
 
+import hashlib
+import shutil
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple
@@ -216,6 +218,61 @@ class ShaderVariantKey:
         nf = self._neural_tokens()
         neural = f"_{self.neural.cache_tag}" if nf else ""
         return f"{neural}{'_mlt' if self.mlt else ''}{'_spectral' if self.spectral else ''}"
+
+
+def spv_cache_key(entry_point: str, src: "Path", flags: tuple[str, ...],
+                  shader_dir: "Path") -> str:
+    """Stable hash over the Slang source tree + compile flags — the
+    ``build/spv_cache/<key>.spv`` name.
+
+    Walks every ``.slang`` under ``shader_dir`` (including the aggregator +
+    per-graph generated files written this turn) and every ``.slang`` under
+    ``mtlx/genslang``. Content hashing is necessary because some files
+    (``generated_materials.slang``) change per scene without their mtime
+    changing predictably.
+
+    **The flags are folded in positionally**, which is why each compile site
+    must splice the variant-key define segments at its recorded position (see
+    :func:`slangc_flags`): reordering the tuple changes the key and silently
+    misses the whole cache. Entry point, source path and tree content are the
+    other inputs — all three unchanged by a define-ownership refactor, so equal
+    flag tuples mean equal keys and no cache flush.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    h.update(entry_point.encode("utf-8"))
+    h.update(b"\0")
+    h.update(str(src).encode("utf-8"))
+    h.update(b"\0")
+    for flag in flags:
+        h.update(flag.encode("utf-8"))
+        h.update(b"\0")
+    mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
+    for root in (shader_dir, mtlx_genslang):
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*.slang")):
+            h.update(str(path.relative_to(root)).encode("utf-8"))
+            h.update(b"\0")
+            h.update(path.read_bytes())
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def spv_cache_fetch(cache_dir: "Path", key: str, out: "Path") -> bool:
+    """Cache hit → copy ``<cache_dir>/<key>.spv`` to ``out`` and return True;
+    the caller returns immediately and never invokes ``slangc``. Miss → False.
+
+    Touches the cached entry so LRU eviction keeps recently-used variants.
+    """
+    cached = cache_dir / f"{key}.spv"
+    if not cached.exists():
+        return False
+    shutil.copyfile(cached, out)
+    try:
+        cached.touch()
+    except OSError:
+        pass
+    return True
 
 
 def slangc_flags(key: ShaderVariantKey, *, entry: str,

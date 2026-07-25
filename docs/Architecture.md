@@ -1899,6 +1899,15 @@ Three derivations, all from one shared internal define table:
 - `cache_token()` → the `.spv` filename tag (`""` for the default key,
   `_<neural slug>` then `_mlt` then `_spectral`).
 
+The module also owns the **`build/spv_cache` derivation** that `vk_compute`
+duplicated across `ComputePipeline` and `PreviewPipeline`: `spv_cache_key()`
+(blake2b-128 over entry point + source path + the flag tuple + every `.slang`
+under `shaders/` and `mtlx/genslang/`) and `spv_cache_fetch()` (hit → copy the
+cached module out, touch it for LRU, and return before `slangc` is invoked).
+Both pipelines now delegate. Because the flags are folded in **positionally**,
+this is the mechanism that makes the splice positions load-bearing: reorder a
+flag tuple and every existing cache entry is orphaned.
+
 Two named constants keep the deliberate divergences reviewable instead of
 folklore: `METAL_ONLY_DEFINES` (the defines with no Vulkan counterpart) and
 `RECORDED_ASYMMETRIES` — currently one entry, `sppm-neural-defines`: the Metal
@@ -1908,9 +1917,14 @@ aligning them is a follow-up change).
 
 `tests/test_shader_variants.py` is the drift gate. It holds **permanent**
 goldens transcribed from the pre-refactor tree (flag tuples, defines dicts,
-filename tags), asserts cross-backend agreement for every family valid on both
-targets, and greps the four backend modules to prove no compile site
-hand-assembles a variant define any more. The host sizers in
+filename tags, and every wavefront kernel's entry + `.spv` out-name), pins the
+`spv_cache_key` digest over a fixture tree, asserts cross-backend agreement for
+every family valid on both targets, and greps the four backend modules to prove
+no compile site hand-assembles a variant define any more.
+`tests/test_spv_cache_hit.py` (`gpu`-marked, since it imports the
+vulkan-importing `vk_compute`) proves the payoff end to end: a rebuild over an
+unchanged tree returns the cached module with `subprocess.run` patched to fail,
+and a one-character shader edit falls through to `slangc`. The host sizers in
 `wavefront_layout.py` keep their `spectral=` / `msl=` signatures, but the
 wavefront passes read those booleans off the same `ShaderVariantKey` their
 kernels compiled with, so shader defines and host sizing cannot disagree.

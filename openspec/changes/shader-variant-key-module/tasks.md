@@ -15,6 +15,12 @@
       distinct orders exist).
 - [x] 1.2 Record blake2b `_cache_key` values for the Vulkan megakernel and
       preview pipelines over a pinned source tree (cache-hit check for 4.2).
+      Landed as a **committed** gate rather than a one-off measurement: the
+      duplicated `_cache_key` bodies moved to hostless
+      `shader_variants.spv_cache_key` (both pipelines delegate), so
+      `tests/test_shader_variants.py` pins the digest over a fixture tree and
+      asserts the pre-refactor literal tuples and the module's tuples hash
+      equal, with reorder/edit negative controls.
 
 ## 2. Module + tests (no consumers yet)
 
@@ -50,7 +56,12 @@
       tuples equal the 1.1 goldens (order and spelling).
 - [x] 3.2 Verify cache-hit incl. the spectral megakernel: `_cache_key` values
       equal 1.2 and a rebuild over an unchanged tree reuses the cached `.spv`
-      without invoking `slangc`.
+      without invoking `slangc`. Committed as `tests/test_spv_cache_hit.py`
+      (`gpu`-marked — it imports the vulkan-importing `vk_compute`, so it is
+      DESELECTED, never silently skipped, in the default sweep): the warm-cache
+      rebuild runs with `subprocess.run` patched to fail, and an edited tree
+      must fall through to `slangc`. Negative-controlled by disabling the
+      cache-hit branch and confirming the test goes red.
 - [x] 3.3 Migrate `vk_wavefront._slang_flags` (`SKINNY_WAVEFRONT` spliced
       **after** the scalar-layout flag), `_compile_full_spv` (all segments
       **before** it + `cache_token()` for the filename tag), and the MLT
