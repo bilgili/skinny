@@ -80,6 +80,64 @@ def test_rebuild_over_an_unchanged_tree_reuses_the_cache_without_slangc(
     assert out.read_bytes() == b"CACHED-SPIRV"
 
 
+@pytest.mark.parametrize("spectral", [False, True])
+def test_megakernel_warm_cache_returns_before_slangc(tree, monkeypatch, spectral):
+    """The spectral megakernel is the case the spec calls out by name: its
+    `SKINNY_SPECTRAL` define follows `-fvk-use-scalar-layout` in the hashed
+    flag tuple, so it is the variant most sensitive to a splice-position
+    change. Drive `ComputePipeline._compile_slang` itself for both variants.
+    """
+    from skinny import vk_compute
+
+    tmp_path, shaders = tree
+    (shaders / "main_pass.slang").write_text("// mega\n", encoding="utf-8")
+    build_dir = tmp_path / "build"
+
+    pipe = vk_compute.ComputePipeline.__new__(vk_compute.ComputePipeline)
+    pipe.shader_dir = shaders
+    pipe.entry_module = "main_pass"
+    pipe.entry_point = "mainImage"
+    pipe.spectral = spectral
+    pipe._build_dir = lambda: build_dir
+
+    flags = slangc_flags(
+        ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL, spectral=spectral),
+        entry="mainImage",
+        include_paths=(shaders, shaders.parent / "mtlx" / "genslang"))
+    assert (("-D", "SKINNY_SPECTRAL=1") == flags[-2:]) is spectral
+    key = pipe._cache_key(shaders / "main_pass.slang", flags)
+    cache_dir = build_dir / vk_compute.ComputePipeline._CACHE_DIRNAME
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    payload = b"CACHED-SPECTRAL" if spectral else b"CACHED-RGB"
+    (cache_dir / f"{key}.spv").write_bytes(payload)
+
+    def _no_slangc(*a, **kw):
+        raise AssertionError("slangc was invoked despite a warm cache")
+
+    monkeypatch.setattr(vk_compute.subprocess, "run", _no_slangc)
+    monkeypatch.setattr(vk_compute.shutil, "which", lambda _: "/usr/bin/slangc")
+
+    assert pipe._compile_slang().read_bytes() == payload
+
+
+def test_rgb_and_spectral_megakernels_never_share_a_cache_entry(tree):
+    """...and the two must not alias: a shared key would serve RGB SPIR-V to a
+    spectral session (or the reverse) straight out of the warm cache."""
+    tmp_path, shaders = tree
+    (shaders / "main_pass.slang").write_text("// mega\n", encoding="utf-8")
+    pipe = _preview_pipeline(shaders, tmp_path / "build")
+    pipe.entry_module, pipe.entry_point = "main_pass", "mainImage"
+    src = shaders / "main_pass.slang"
+    inc = (shaders, shaders.parent / "mtlx" / "genslang")
+    keys = {
+        pipe._cache_key(src, slangc_flags(
+            ShaderVariantKey(Target.VULKAN, Family.MEGAKERNEL, spectral=s),
+            entry="mainImage", include_paths=inc))
+        for s in (False, True)
+    }
+    assert len(keys) == 2
+
+
 def test_a_changed_shader_tree_misses_the_cache(tree, monkeypatch):
     """Negative control — without it, a cache lookup that always "hit" would
     pass the test above."""

@@ -16,6 +16,7 @@ Two layers:
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -295,23 +296,52 @@ def test_every_wavefront_compile_routes_through_the_two_flag_builders():
     """The guard above recognises `(entry, out_name)` tuple literals, so a
     kernel compiled by calling `slangc_flags` directly could slip past it.
     Keep the two builders (`_slang_flags` for the foundation kernels,
-    `_compile_full_spv` for the full tree) the only callers."""
-    src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
-    # Function bodies that legitimately call slangc_flags, by def line.
-    # Indented `def`s count too: matching only column-zero ones would leave
-    # `current` stuck on the last module-level function, so a call inside any
-    # later CLASS METHOD would be misattributed to the allowed set.
+    `_compile_full_spv` for the full tree) the only callers.
+
+    Walks the AST rather than scanning lines: a textual scan has to guess at
+    the enclosing scope and can be dodged by spacing (`slangc_flags (…)`),
+    parenthesised or aliased references, `async def`, or a nested function
+    that reuses an allowed name. The tree answers "which function encloses
+    this call" exactly. (Fully dynamic dispatch — `getattr(mod, name)()` —
+    remains out of reach of any static check; nothing in the tree does that.)
+    """
     allowed = {"_slang_flags", "_compile_full_spv"}
-    current = None
+    tree = ast.parse((SRC / "vk_wavefront.py").read_text(encoding="utf-8"))
+
     offenders = []
-    for line in src.splitlines():
-        m = re.match(r"\s*def (\w+)\(", line)
-        if m:
-            current = m.group(1)
-        if "slangc_flags(" in line and not line.lstrip().startswith(("#", '"')):
-            if current not in allowed:
-                offenders.append((current, line.strip()))
+
+    def walk(node, enclosing):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                walk(child, child.name)
+                continue
+            if isinstance(child, ast.Call):
+                func = child.func
+                # Unwrap `(slangc_flags)(…)` and attribute access alike.
+                name = (func.id if isinstance(func, ast.Name)
+                        else getattr(func, "attr", None))
+                if name == "slangc_flags" and enclosing not in allowed:
+                    offenders.append((enclosing, child.lineno))
+            walk(child, enclosing)
+
+    walk(tree, None)
     assert offenders == [], f"slangc_flags called outside {allowed}: {offenders}"
+
+
+def test_the_flag_builder_guard_actually_sees_the_calls():
+    """Negative control for the guard: it must find the two legitimate call
+    sites. Without this, a guard that matched nothing at all would pass."""
+    tree = ast.parse((SRC / "vk_wavefront.py").read_text(encoding="utf-8"))
+    callers = {
+        fn.name
+        for fn in ast.walk(tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        and (call.func.id if isinstance(call.func, ast.Name)
+             else getattr(call.func, "attr", None)) == "slangc_flags"
+    }
+    assert callers == {"_slang_flags", "_compile_full_spv"}
 
 
 def test_wavefront_rgb_kernels_carry_no_variant_defines():

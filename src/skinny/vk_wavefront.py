@@ -1765,10 +1765,13 @@ class WavefrontBdptPass:
                 ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
                 ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
             ] + shared
+        # One key for the compile AND any host sizing keyed off this pass
+        # (design D6), like the path and SPPM passes.
+        self._variant_key = _wavefront_key(spectral=self._spectral)
         modules = {}
         for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_bdpt", entry, out_name,
-                                    _wavefront_key(spectral=self._spectral))
+                                    self._variant_key)
             code = spv.read_bytes()
             modules[entry] = vk.vkCreateShaderModule(
                 ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -2033,12 +2036,16 @@ def _ensure_bdpt(r):
     num_pixels = r.width * r.height
     cap = int(getattr(r, "_wf_stream_cap", None) or WavefrontBdptPass.STREAM_CAP)
     stream_size = max(1, min(num_pixels, cap))
+    # One variant key for this compile request — the pass compiles from it and
+    # the vertex/aux sizers below read its axes, so the two cannot drift
+    # (design D6; same seam as the path and SPPM passes).
+    variant = _wavefront_key(spectral=r._spectral)
     vert_stride = WavefrontBdptPass.VERTEX_STRIDE
     aux_stride = WavefrontBdptPass.AUX_STRIDE
-    if r._spectral:
+    if variant.spectral:
         from skinny.wavefront_layout import bdpt_vertex_size, wf_bdpt_aux_size
-        vert_stride = max(vert_stride, bdpt_vertex_size(spectral=True))
-        aux_stride = max(aux_stride, wf_bdpt_aux_size(spectral=True))
+        vert_stride = max(vert_stride, bdpt_vertex_size(spectral=variant.spectral))
+        aux_stride = max(aux_stride, wf_bdpt_aux_size(spectral=variant.spectral))
     vert_bytes = stream_size * WavefrontBdptPass.BDPT_MAX_VERTS * vert_stride
     aux_bytes = stream_size * aux_stride
     r._wf_bdpt_eye_buf = r._gpu.StorageBuffer(r.ctx, vert_bytes)
@@ -2049,7 +2056,7 @@ def _ensure_bdpt(r):
         r._wf_bdpt_eye_buf.buffer, r._wf_bdpt_light_buf.buffer,
         r._wf_bdpt_aux_buf.buffer, vert_bytes, aux_bytes,
         stream_size, num_pixels, walk_mode=r.bdpt_walk_mode,
-        spectral=r._spectral,
+        spectral=variant.spectral,
     )
     r._wf_bdpt_pass_dims = (r.width, r.height)
     return r._wavefront_bdpt_pass
