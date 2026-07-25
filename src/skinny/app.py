@@ -21,27 +21,15 @@ from skinny.params import (
     ParamSpec, build_visible_params,
     _get_nested, _set_nested, _snapshot_params, _apply_saved_params,
 )
+from skinny.bringup import plan_bringup
 from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
     apply_sppm_glossy_roughness,
-    neural_config_from_args,
-    reject_mcp_unsupported,
-    reject_mlt_unsupported,
-    reject_spectral_unsupported,
-    reject_sppm_without_wavefront,
-    resolve_execution_mode,
     resolve_mcp_roots,
-    resolve_walk,
-    startup_integrator_name,
-    validate_render_flags,
-)
-from skinny.backend_select import (
-    make_context,
-    select_backend,
 )
 from skinny.render_session import RenderCommandQueue
-from skinny.renderer import Renderer
+from skinny.renderer import Renderer  # noqa: F401 — re-exported; built by BringupPlan.create
 from skinny.settings import ensure_dirs, load_settings, save_settings
 
 # Render-area size comes from the shared --width/--height flags (default
@@ -511,45 +499,21 @@ def main() -> None:
     )
     add_render_flags(parser)
     args = parser.parse_args()
-    # Reject impossible combos (e.g. bdpt + neural/online-training) up front.
-    validate_render_flags(args)
 
     scene_path: Path | None = args.scene or args.usd
 
     ensure_dirs()
     saved = load_settings()
 
-    # Execution mode 'auto' (the default) derives from the startup integrator —
-    # explicit --integrator, else the persisted integrator, else 'path'. An
-    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Resolved here,
-    # before any GPU/GLFW init, and fixed for the session. validate_render_flags
-    # (above) is keyed on the CLI --integrator and ran before the persisted
-    # integrator was known, so re-check the resolved mode against the effective
-    # startup integrator: a persisted sppm under an explicitly-forced
-    # --execution-mode megakernel must still be refused before the GPU comes up.
-    _startup_integrator = startup_integrator_name(
-        args.integrator, saved.get("params", {}).get("integrator_index"))
-    args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
-    reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
-    reject_mlt_unsupported(
-        _startup_integrator, args.execution_mode,
-        spectral=bool(getattr(args, "spectral", False)),
-        proposals=getattr(args, "proposals", None),
-        reuse=getattr(args, "reuse", None),
-        online_training=bool(getattr(args, "online_training", False)))
-    reject_spectral_unsupported(
-        getattr(args, "spectral", False), _startup_integrator, args.execution_mode,
-        getattr(args, "proposals", None), getattr(args, "reuse", None))
-    reject_mcp_unsupported(bool(getattr(args, "mcp", False)))
-
-    # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
-    # > auto). In this foundation phase auto resolves to Vulkan; an explicit
-    # Resolve the backend (auto → Metal on Apple Silicon, else Vulkan). An
-    # explicit, unavailable --backend metal errors clearly rather than crashing.
-    try:
-        backend = select_backend(args.backend, persisted=saved.get("backend"))
-    except RuntimeError as exc:
-        raise SystemExit(f"skinny: {exc}")
+    # Shared bring-up (change frontend-bringup-builder): resolve the startup
+    # integrator, execution mode and backend, and run every refusal guard, in
+    # the one canonical order — before any GPU/GLFW init, fixed for the session.
+    # `skinny` persists, so the settings dict is offered: the persisted
+    # integrator feeds startup-integrator resolution (a persisted sppm under an
+    # explicitly-forced --execution-mode megakernel is refused, which the
+    # CLI-keyed validate_render_flags alone cannot see), the persisted backend
+    # feeds selection, and the persisted encoding feeds the neural build config.
+    plan = plan_bringup(args, prog="skinny", persisted=saved)
 
     if not glfw.init():
         raise RuntimeError("Failed to initialise GLFW")
@@ -572,37 +536,25 @@ def main() -> None:
         if isinstance(x, (int, float)) and isinstance(y, (int, float)):
             glfw.set_window_pos(window, int(x), int(y))
 
-    vk_ctx = make_context(backend, window, args.width, args.height)
+    # Deferred half of the shared bring-up: the context needs the GLFW window,
+    # so `create` runs here rather than beside the plan. Kept outside the try so
+    # a failed construction destroys the context exactly once (create's own
+    # destroy-on-failure), as before — the `finally` below owns the happy path.
+    # The persisted --encoding restore is already folded into the plan's neural
+    # build config (E0 → None → the renderer's default → byte-identical SPIR-V).
+    repo_root = Path(__file__).resolve().parents[2]
+    vk_ctx, renderer = plan.create(
+        window=window, width=args.width, height=args.height,
+        shader_dir=Path(__file__).parent / "shaders",
+        hdr_dir=repo_root / "hdrs",
+        tattoo_dir=repo_root / "tattoos",
+        usd_scene_path=scene_path,
+        use_usd_mtlx_plugin=args.usdMtlx,
+        neural_handoff=args.neural_handoff,
+        neural_trainer=args.neural_trainer,
+        train_precision=args.train_precision,
+    )
     try:
-
-        repo_root = Path(__file__).resolve().parents[2]
-        # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):
-        # CLI/env wins; else restore the persisted value. It is a build dim, so it is
-        # threaded into the neural build config at construction (recompiles the neural
-        # .spv). E0 keeps neural_config=None → the renderer's default → byte-identical.
-        encoding_value = args.encoding
-        if "--encoding" not in sys.argv and not os.environ.get("SKINNY_ENCODING"):
-            saved_encoding = saved.get("encoding")
-            if saved_encoding in ("E0", "E1", "E3"):
-                encoding_value = saved_encoding
-        args.encoding = encoding_value
-        neural_cfg = neural_config_from_args(args)
-        renderer = Renderer(
-            vk_ctx=vk_ctx,
-            shader_dir=Path(__file__).parent / "shaders",
-            hdr_dir=repo_root / "hdrs",
-            tattoo_dir=repo_root / "tattoos",
-            usd_scene_path=scene_path,
-            use_usd_mtlx_plugin=args.usdMtlx,
-            execution_mode=args.execution_mode,
-            bdpt_walk=resolve_walk(args.bdpt_walk),
-            neural_handoff=args.neural_handoff,
-            neural_trainer=args.neural_trainer,
-            train_precision=args.train_precision,
-            neural_config=neural_cfg,
-            spectral=getattr(args, "spectral", False),
-        )
-
         # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
         if "--neural-handoff" not in sys.argv and not os.environ.get("SKINNY_NEURAL_HANDOFF"):
             saved_handoff = saved.get("neural_handoff")
@@ -729,7 +681,7 @@ def main() -> None:
 
         try:
             out: dict = {
-                "backend": backend,
+                "backend": plan.backend,
                 "vulkan_window": _window_pos_dict(window),
                 "params": _snapshot_params(renderer, input_handler.params),
                 "camera": _snapshot_camera(renderer),

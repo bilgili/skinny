@@ -16,11 +16,13 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter, QWheelEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from skinny.backend_select import make_context
-from skinny.cli_common import INTEGRATOR_INDEX, apply_sppm_glossy_roughness, resolve_encoding
+from skinny.bringup import BringupPlan
+from skinny.cli_common import (
+    INTEGRATOR_INDEX,
+    apply_sppm_glossy_roughness,
+    neural_config_from_args,
+)
 from skinny.params import _snapshot_params, build_all_params
-from skinny.renderer import Renderer
-from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
 from skinny.sampling import parse_lobe_samplers
 from skinny.ui.gizmo_input import GizmoMouseController
 from skinny.ui.qt.camera_input import CameraDispatcher
@@ -50,11 +52,18 @@ class _RenderWorker(QObject):
         self,
         config: QtRendererConfig,
         command_queue: RenderCommandQueue,
+        plan: BringupPlan | None = None,
     ) -> None:
         super().__init__()
         self.renderer = None
         self.ctx = None
         self._config = config
+        # Startup bring-up plan (change frontend-bringup-builder). `main()`
+        # already ran every guard; `_build_renderer` runs the deferred `create`
+        # step here, on the render thread. `None` only when a Qt surface is
+        # constructed outside `skinny-gui`'s main() — the config's own fields
+        # then stand in, as before this change.
+        self._plan = plan
         self._commands = command_queue
         self._running = True
         # --online-training (change online-training-trigger): enable lazily once
@@ -68,29 +77,37 @@ class _RenderWorker(QObject):
         # carries the REFUSED/WAITING/APPROVED reason, so the worker no longer
         # prints its own one-shot refused/armed lines.
     def _build_renderer(self):
+        """Deferred half of the shared bring-up, on the render thread.
+
+        The guards ran once in `skinny-gui`'s `main()`; here the plan just
+        builds the context and the `Renderer`. Everything applied to the
+        constructed renderer below stays Qt's.
+        """
         cfg = self._config
-        ctx = make_context(
-            cfg.backend, window=None, width=cfg.width, height=cfg.height,
-            gpu_preference=cfg.gpu_pref,
-        )
+        plan = self._plan
+        if plan is None:
+            # Qt surface built outside skinny-gui's main() (embedding, tests):
+            # the config's already-resolved fields become the plan directly.
+            plan = BringupPlan(
+                prog="skinny-gui", backend=cfg.backend,
+                execution_mode=cfg.execution_mode, startup_integrator="path",
+                spectral=cfg.spectral, bdpt_walk=cfg.bdpt_walk,
+                encoding=cfg.encoding,
+                neural_config=neural_config_from_args(
+                    argparse.Namespace(encoding=cfg.encoding)),
+            )
         repo_root = Path(__file__).resolve().parents[3]
-        neural_cfg = None
-        if resolve_encoding(cfg.encoding) is not Encoding.E0:
-            neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(cfg.encoding))
-        renderer = Renderer(
-            vk_ctx=ctx,
+        ctx, renderer = plan.create(
+            window=None, width=cfg.width, height=cfg.height,
+            gpu_preference=cfg.gpu_pref,
             shader_dir=Path(__file__).resolve().parents[1].parent / "shaders",
             hdr_dir=repo_root / "hdrs",
             tattoo_dir=repo_root / "tattoos",
             usd_scene_path=cfg.scene_path,
             use_usd_mtlx_plugin=cfg.use_usd_mtlx,
-            execution_mode=cfg.execution_mode,
-            bdpt_walk=cfg.bdpt_walk,
             neural_handoff=cfg.neural_handoff,
             neural_trainer=cfg.neural_trainer,
             train_precision=cfg.train_precision,
-            neural_config=neural_cfg,
-            spectral=cfg.spectral,
         )
         renderer._requested_backend = cfg.requested_backend
         renderer._online_training_requested = bool(cfg.online_training)
@@ -265,6 +282,7 @@ class RenderViewport(QWidget):
         config: QtRendererConfig,
         proxy: QtRendererProxy,
         command_queue: RenderCommandQueue,
+        plan: BringupPlan | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -309,7 +327,7 @@ class RenderViewport(QWidget):
         # Start the worker thread.
         self._thread = QThread(self)
         self._worker = _RenderWorker(
-            config, self._commands,
+            config, self._commands, plan,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

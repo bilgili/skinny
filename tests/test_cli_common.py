@@ -632,9 +632,17 @@ def test_spectral_explicit_wavefront_accepted_end_to_end(monkeypatch):
 
 
 def test_all_frontends_wire_the_spectral_gate():
-    # Every front-end that exposes --spectral (via add_render_flags) must call
+    # Every front-end that exposes --spectral (via add_render_flags) must reach
     # reject_spectral_unsupported at startup, else --spectral silently no-ops to
     # RGB on that front-end (regression guard: skinny-gui once bypassed it).
+    # Since change frontend-bringup-builder the guard is reached through the
+    # shared bring-up sequence rather than a per-front-end call, so the gate is
+    # two-sided: the sequence owns the call, and each front-end runs it.
+    bringup = (_SRC / "bringup.py").read_text()
+    assert "reject_spectral_unsupported(" in bringup, (
+        "bringup.py owns the shared guard sequence but never calls "
+        "reject_spectral_unsupported — every front-end would lose the gate at once"
+    )
     frontends = [
         _SRC / "app.py",
         _SRC / "headless.py",
@@ -644,7 +652,8 @@ def test_all_frontends_wire_the_spectral_gate():
     for fe in frontends:
         src = fe.read_text()
         assert "add_render_flags(" in src, f"{fe.name}: expected to expose the shared flags"
-        assert "reject_spectral_unsupported(" in src, (
-            f"{fe.name}: exposes --spectral but never calls reject_spectral_unsupported — "
-            f"a --spectral run would silently render RGB there"
+        assert "plan_bringup(" in src or "reject_spectral_unsupported(" in src, (
+            f"{fe.name}: exposes --spectral but neither runs the shared bring-up "
+            f"sequence nor calls reject_spectral_unsupported — a --spectral run "
+            f"would silently render RGB there"
         )

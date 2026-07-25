@@ -16,13 +16,8 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 
-from skinny.cli_common import (
-    add_render_flags,
-    reject_spectral_unsupported,
-    resolve_execution_mode,
-    resolve_walk,
-    validate_render_flags,
-)
+from skinny.bringup import BringupPlan, plan_bringup
+from skinny.cli_common import add_render_flags, neural_config_from_args, resolve_walk
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -142,6 +137,7 @@ class HeadlessRenderer:
     """
 
     def __init__(self, width: int, height: int, *, gpu: Optional[str] = None,
+                 plan: Optional[BringupPlan] = None,
                  backend: str = "vulkan",
                  execution_mode: str = "megakernel", bdpt_walk: str = "fused",
                  proposals: Optional[str] = None, reuse: Optional[str] = None,
@@ -149,31 +145,29 @@ class HeadlessRenderer:
                  encoding: Optional[str] = None,
                  spectral: bool = False) -> None:
         import skinny
-        from skinny.backend_select import make_context
-        from skinny.cli_common import resolve_encoding
-        from skinny.renderer import Renderer
-        from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
 
-        self.ctx = make_context(
-            backend, window=None, width=width, height=height, gpu_preference=gpu
-        )
-        # Conditioner encoding (axis 2, change renderer-conditioner-encoding): a
-        # build dim. E0/None keeps neural_config=None → the renderer's default →
-        # byte-identical SPIR-V; E1/E3 recompiles the neural .spv.
-        neural_cfg = None
-        if encoding is not None and resolve_encoding(encoding) is not Encoding.E0:
-            neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(encoding))
-        try:
-            self.renderer = Renderer(
-                vk_ctx=self.ctx,
-                shader_dir=Path(skinny.__file__).resolve().parent / "shaders",
-                hdr_dir=_repo_root() / "hdrs",
-                tattoo_dir=_repo_root() / "tattoos",
-                execution_mode=execution_mode,
-                bdpt_walk=resolve_walk(bdpt_walk),
-                neural_config=neural_cfg,
-                spectral=spectral,
+        if plan is None:
+            # Direct API use (tests, the parity harness, Python callers): the
+            # guards already ran — or there were no flags to guard — so the
+            # kwargs become a plan directly. `skinny-render`'s main() passes the
+            # guarded plan from plan_bringup instead. Conditioner encoding
+            # (axis 2) is a build dim: E0/None keeps neural_config=None → the
+            # renderer's default → byte-identical SPIR-V.
+            plan = BringupPlan(
+                prog="skinny-render", backend=backend,
+                execution_mode=execution_mode, startup_integrator="path",
+                spectral=spectral, bdpt_walk=resolve_walk(bdpt_walk),
+                encoding=encoding,
+                neural_config=neural_config_from_args(
+                    argparse.Namespace(encoding=encoding)),
             )
+        self.ctx, self.renderer = plan.create(
+            window=None, width=width, height=height, gpu_preference=gpu,
+            shader_dir=Path(skinny.__file__).resolve().parent / "shaders",
+            hdr_dir=_repo_root() / "hdrs",
+            tattoo_dir=_repo_root() / "tattoos",
+        )
+        try:
             # Scene-sampling seam selection (mirrors the interactive front-ends).
             if proposals is not None:
                 self.renderer.proposal_preset_index = \
@@ -379,24 +373,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     ns = _build_parser().parse_args(argv)
-    # Derive the execution mode from the integrator when 'auto' (the default);
-    # an explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. No
-    # persistence here, so the startup integrator is --integrator (else 'path').
-    ns.execution_mode = resolve_execution_mode(ns.execution_mode, ns.integrator or "path")
-    # Reject impossible combos (e.g. bdpt + neural/online-training) up front.
-    validate_render_flags(ns)
-    reject_spectral_unsupported(
-        getattr(ns, "spectral", False), ns.integrator or "path", ns.execution_mode,
-        getattr(ns, "proposals", None), getattr(ns, "reuse", None))
-    from skinny.backend_select import select_backend
-
-    # skinny-render is non-interactive (no persisted setting): resolve the
-    # backend from --backend / SKINNY_BACKEND / auto. auto resolves to Metal on
-    # Apple Silicon, else Vulkan; an explicit, unavailable --backend metal errors.
-    try:
-        backend = select_backend(ns.backend)
-    except RuntimeError as exc:
-        raise SystemExit(f"skinny-render: {exc}")
+    # Shared bring-up: resolve the execution mode + backend and run every
+    # refusal guard, in the one canonical order (skinny.bringup). skinny-render
+    # is non-interactive — no persisted settings participate (persisted=None),
+    # so resolution is flags + environment + auto only.
+    plan = plan_bringup(ns, prog="skinny-render")
     opts = dict(
         samples=ns.samples, integrator=ns.integrator or "path", tonemap=ns.tonemap,
         exposure=ns.exposure, env_intensity=ns.env_intensity,
@@ -404,13 +385,9 @@ def main(argv: Optional[list] = None) -> int:
         sppm_glossy_roughness=ns.sppm_glossy_roughness,
     )
     try:
-        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu, backend=backend,
-                              execution_mode=ns.execution_mode,
-                              bdpt_walk=ns.bdpt_walk,
+        with HeadlessRenderer(ns.width, ns.height, gpu=ns.gpu, plan=plan,
                               proposals=ns.proposals, reuse=ns.reuse,
-                              lobe_samplers=ns.lobe_samplers,
-                              encoding=ns.encoding,
-                              spectral=getattr(ns, "spectral", False)) as r:
+                              lobe_samplers=ns.lobe_samplers) as r:
             if ns.animate:
                 frames = _parse_frames(ns.frames) if ns.frames else None
                 paths = r.render_animation(

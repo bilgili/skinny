@@ -29,39 +29,36 @@ from tornado.ioloop import IOLoop
 from tornado.web import RequestHandler
 from tornado.websocket import WebSocketHandler
 
+from skinny.bringup import BringupPlan, plan_bringup
 from skinny.cli_common import (
     INTEGRATOR_INDEX,
     add_render_flags,
     apply_sppm_glossy_roughness,
-    reject_spectral_unsupported,
-    resolve_execution_mode,
-    resolve_walk,
-    validate_render_flags,
 )
 from skinny.params import _set_nested
-from skinny.backend_select import (
-    make_context,
-    select_backend,
-)
-from skinny.renderer import Renderer
+from skinny.renderer import Renderer  # noqa: F401 — type annotation only; built by BringupPlan.create
 from skinny.video_encoder import VideoEncoder
 
 log = logging.getLogger(__name__)
 
 # ── Module-level config (set by main) ────────────────────────────────
 
-_BACKEND: str = "vulkan"
+#: The startup bring-up plan (change frontend-bringup-builder). main() runs the
+#: shared guard sequence once; each session's background initializer calls
+#: `_PLAN.create(...)` later, on its own thread, with no guard re-run. The
+#: default mirrors the pre-plan defaults for a session created without main().
+_PLAN: BringupPlan = BringupPlan(
+    prog="skinny-web", backend="vulkan", execution_mode="megakernel",
+    startup_integrator="path", spectral=False, bdpt_walk="fused",
+    encoding="E0", neural_config=None,
+)
 _GPU_PREFERENCE: str = "auto"
 _USD_PATH: Path | None = None
 _USE_USD_MTLX: bool = False
-_EXECUTION_MODE: str = "megakernel"
-_BDPT_WALK: str = "fused"
 _INTEGRATOR: str | None = None
 _REUSE: str | None = None
 _LOBE_SAMPLERS: str | None = None
-_ENCODING: str = "E0"   # axis-2 conditioner encoding (change renderer-conditioner-encoding)
 _SPPM_GLOSSY_ROUGHNESS: float | None = None  # SPPM glossy-continue threshold (None → built-in)
-_SPECTRAL: bool = False  # hero-wavelength spectral megakernel variant (--spectral)
 
 
 # ── Session management ───────────────────────────────────────────────
@@ -99,33 +96,22 @@ class SkinnySession:
     def initialize(self) -> None:
         """Heavy initialization — run from a background thread."""
         try:
-            self._log_init(f"Creating {_BACKEND} context...")
-            self.ctx = make_context(
-                _BACKEND, window=None, width=1280, height=720,
-                gpu_preference=_GPU_PREFERENCE,
-            )
-            self._log_init(f"GPU: {self.ctx.gpu_info.name}")
-
+            self._log_init(f"Creating {_PLAN.backend} context...")
             self._log_init("Initializing renderer (shaders, meshes, materials)...")
             repo_root = Path(__file__).resolve().parents[2]
-            # Conditioner encoding (axis 2): a build dim. E0 → None → byte-identical.
-            from skinny.cli_common import resolve_encoding
-            from skinny.sampling.neural_weights import Encoding, NeuralBuildConfig
-            neural_cfg = None
-            if resolve_encoding(_ENCODING) is not Encoding.E0:
-                neural_cfg = NeuralBuildConfig(encoding=resolve_encoding(_ENCODING))
-            self.renderer = Renderer(
-                vk_ctx=self.ctx,
+            # Deferred half of the shared bring-up: context + Renderer from the
+            # plan main() already validated, on this session's own thread. The
+            # session-specific constructor inputs are pass-through kwargs.
+            self.ctx, self.renderer = _PLAN.create(
+                window=None, width=1280, height=720,
+                gpu_preference=_GPU_PREFERENCE,
                 shader_dir=Path(__file__).parent / "shaders",
                 hdr_dir=repo_root / "hdrs",
                 tattoo_dir=repo_root / "tattoos",
                 usd_scene_path=_USD_PATH,
                 use_usd_mtlx_plugin=_USE_USD_MTLX,
-                execution_mode=_EXECUTION_MODE,
-                bdpt_walk=_BDPT_WALK,
-                neural_config=neural_cfg,
-                spectral=_SPECTRAL,
             )
+            self._log_init(f"GPU: {self.ctx.gpu_info.name}")
             if _INTEGRATOR is not None:
                 self.renderer.integrator_index = INTEGRATOR_INDEX[_INTEGRATOR]
             if _REUSE is not None:
@@ -716,41 +702,24 @@ def main() -> None:
     # shared --width/--height render-area flags (would otherwise be a no-op flag).
     add_render_flags(parser, proposals=False, resolution=False, mcp=False)
     args = parser.parse_args()
-    # Derive the execution mode from the integrator when 'auto' (the default); an
-    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. The web server
-    # is stateless across runs, so the startup integrator is --integrator (else
-    # 'path'). Fixed for the session.
-    args.execution_mode = resolve_execution_mode(args.execution_mode, args.integrator or "path")
-    # Reject impossible combos (e.g. bdpt + --online-training) up front.
-    validate_render_flags(args)
-    reject_spectral_unsupported(
-        getattr(args, "spectral", False), args.integrator or "path", args.execution_mode,
-        getattr(args, "proposals", None), getattr(args, "reuse", None))
+    # Shared bring-up (change frontend-bringup-builder): resolve the execution
+    # mode + backend and run every refusal guard, in the one canonical order.
+    # The web server is multi-session and stateless across runs, so no persisted
+    # settings participate (persisted=None) — flags + environment + auto only.
+    # Only the plan step runs here; each session creates its own context and
+    # renderer from this plan on its background thread.
+    plan = plan_bringup(args, prog="skinny-web")
 
-    # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > auto). The
-    # web server is multi-session and stateless across runs (no persisted
-    # setting). auto resolves to Metal on Apple Silicon, else Vulkan; an explicit,
-    # unavailable --backend metal errors clearly rather than crashing.
-    try:
-        resolved_backend = select_backend(args.backend)
-    except RuntimeError as exc:
-        raise SystemExit(f"skinny-web: {exc}")
-
-    global _BACKEND, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX, _EXECUTION_MODE
-    global _BDPT_WALK, _INTEGRATOR, _REUSE, _LOBE_SAMPLERS, _ENCODING
-    global _SPPM_GLOSSY_ROUGHNESS, _SPECTRAL
-    _BACKEND = resolved_backend
+    global _PLAN, _GPU_PREFERENCE, _USD_PATH, _USE_USD_MTLX
+    global _INTEGRATOR, _REUSE, _LOBE_SAMPLERS, _SPPM_GLOSSY_ROUGHNESS
+    _PLAN = plan
     _GPU_PREFERENCE = args.gpu
     _USD_PATH = args.scene or args.usd
     _USE_USD_MTLX = args.usdMtlx
-    _EXECUTION_MODE = args.execution_mode
-    _BDPT_WALK = resolve_walk(args.bdpt_walk)
     _INTEGRATOR = args.integrator
     _REUSE = args.reuse
     _LOBE_SAMPLERS = args.lobe_samplers
-    _ENCODING = args.encoding
     _SPPM_GLOSSY_ROUGHNESS = args.sppm_glossy_roughness
-    _SPECTRAL = getattr(args, "spectral", False)
     SkinnySession.MAX_SESSIONS = args.max_sessions
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

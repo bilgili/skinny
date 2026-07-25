@@ -170,10 +170,19 @@ def test_bsdf_only_proposals_accepted(_implemented):
 # ── Front-end wiring is present (source-level) ──────────────────────────────
 
 def test_interactive_front_ends_recheck_persisted_mlt():
+    # Since change frontend-bringup-builder the re-check lives in the shared
+    # bring-up sequence, which the interactive front-ends must invoke *with*
+    # their persisted settings — offering `persisted=` is exactly what makes the
+    # persisted-mlt case visible to the guard.
+    bringup = _read("bringup.py")
+    assert "reject_mlt_unsupported(" in bringup, \
+        "bringup.py owns the shared guard sequence but never calls reject_mlt_unsupported"
     for rel in ("app.py", "ui/qt/app.py"):
         src = _read(rel)
-        assert "reject_mlt_unsupported(" in src, \
-            f"{rel} must re-check the persisted-mlt case via reject_mlt_unsupported"
+        assert "reject_mlt_unsupported(" in src or "persisted=saved" in src, (
+            f"{rel} must re-check the persisted-mlt case — either directly via "
+            f"reject_mlt_unsupported or by running plan_bringup with persisted="
+        )
 
 
 def test_state_hash_still_includes_integrator_index():
