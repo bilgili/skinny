@@ -228,7 +228,14 @@ def test_mlt_msl_field_table_inserts_tail_before_tile_origin():
     # `_pack_uniforms_msl` walks a field table over the scalar blob, so the
     # table must describe the MLT pack EXACTLY: the 32 B tail sits where the
     # Vulkan filler word would be, and tileOriginY stays last.
+    #
+    # PERMANENT blob-order lock. Since change reflection-owned-byte-layouts the
+    # tables are derived by `slang_layout` from the FrameConstants declaration
+    # under its blob rule, so this also pins that rule's output.
+    from skinny import slang_layout
     R = _renderer_module()
+    assert R._FC_SCALAR_FIELDS == slang_layout.fc_scalar_blob()
+    assert R._FC_SCALAR_FIELDS_MLT == slang_layout.fc_scalar_blob(mlt=True)
     base = [n for n, _ in R._FC_SCALAR_FIELDS]
     mlt = [n for n, _ in R._FC_SCALAR_FIELDS_MLT]
     assert base[-1] == "tileOriginY" and mlt[-1] == "tileOriginY"

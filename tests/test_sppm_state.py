@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from skinny import slang_layout
+
 from skinny.wavefront_layout import (
     SLANG_MSL_ALIGNS,
     SLANG_MSL_SIZES,
@@ -32,8 +34,6 @@ from skinny.wavefront_layout import (
     VISIBLE_POINT_STRIDE_SPECTRAL,
     VISIBLE_POINT_STRIDE_SPECTRAL_MSL,
     VP_ACTIVE,
-    _sppm_accum_fields,
-    _visible_point_fields,
     sppm_accum_size,
     sppm_buffer_sizes,
     sppm_grid_buffer_sizes,
@@ -47,37 +47,24 @@ _SPPM_SLANG = _SHADERS / "integrators" / "sppm_state.slang"
 _HARNESS = _ROOT / "tests" / "harnesses" / "test_sppm_state_harness.slang"
 
 
-def _norm_type(t: str, *, spectral: bool) -> str:
-    """Normalize the `Spectrum` typealias to its concrete type for the variant
-    (float3 in the RGB build, float4 under SKINNY_SPECTRAL)."""
-    return ("float4" if spectral else "float3") if t == "Spectrum" else t
+# The Slang struct parser lives in `src/skinny/slang_layout.py` since change
+# reflection-owned-byte-layouts (this file used to carry its own copy). The
+# assertions below are unchanged — they now lock the shared parser and the
+# derived field lists to the shader source.
 
 
-def _parse_struct_fields(
-    src: str, struct_name: str, *, spectral: bool = False
-) -> list[tuple[str, str]]:
-    """Return [(slang_type, field_name), …] in declaration order for the named
-    struct, ignoring comments + helper functions. Resolves
-    `#if defined(SKINNY_SPECTRAL)` blocks per ``spectral`` (spectral-wavefront D5)
-    and normalizes the `Spectrum` typealias to its concrete type."""
-    m = re.search(rf"struct\s+{struct_name}\s*\{{(.*?)\}}\s*;", src, re.DOTALL)
-    assert m, f"struct {struct_name} not found"
-    fields: list[tuple[str, str]] = []
-    in_spectral_block = False
-    for raw in m.group(1).splitlines():
-        line = raw.split("//", 1)[0].strip()
-        if line.startswith("#if defined(SKINNY_SPECTRAL)"):
-            in_spectral_block = True
-            continue
-        if line.startswith("#endif"):
-            in_spectral_block = False
-            continue
-        if in_spectral_block and not spectral:
-            continue
-        fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", line)
-        if fm:
-            fields.append((_norm_type(fm.group(1), spectral=spectral), fm.group(2)))
-    return fields
+def _parse_struct_fields(src: str, struct_name: str, *, spectral: bool = False):
+    return slang_layout.parse_struct_fields(src, struct_name, spectral=spectral)
+
+
+def _visible_point_fields(spectral: bool):
+    return [(n, t) for t, n in
+            slang_layout.struct_fields("VisiblePoint", spectral=spectral)]
+
+
+def _sppm_accum_fields(spectral: bool):
+    return [(n, t) for t, n in
+            slang_layout.struct_fields("SppmAccum", spectral=spectral)]
 
 
 # ── strides ──────────────────────────────────────────────────────────

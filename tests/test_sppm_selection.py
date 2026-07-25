@@ -131,8 +131,13 @@ def test_pack_uniforms_appends_group_pmf():
         "_pack_uniforms must pack the 4 pmf floats between filmMaxComponent and tileOriginY"
     assert i_pmf < i_tile
     # The Metal MSL relocation table must carry the same four fields in order.
-    for f in ("sppmGroupPmfE", "sppmGroupPmfS", "sppmGroupPmfD", "sppmGroupPmfEnv"):
-        assert f'("{f}", 4)' in src, f"_FC_SCALAR_FIELDS must list {f}"
+    # Derived from the Slang declaration since change reflection-owned-byte-layouts,
+    # so this reads the table rather than the renderer source text.
+    from skinny import slang_layout
+    names = [n for n, _ in slang_layout.fc_scalar_blob()]
+    idx = [names.index(f) for f in
+           ("sppmGroupPmfE", "sppmGroupPmfS", "sppmGroupPmfD", "sppmGroupPmfEnv")]
+    assert idx == sorted(idx), "fc field table must list the pmf fields in order"
 
 
 def test_group_pmf_power_proportional():
