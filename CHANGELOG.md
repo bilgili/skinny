@@ -203,8 +203,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lived in `tests/`. `FrameConstants` keeps its blob rule — `tileOriginY`
   relocated to the tail so `mltSigma` lands at 564 where the Vulkan MLT SPIR-V
   expects it — now expressed once in the module. Drift now fails a test instead
-  of garbling GPU output: hostless goldens for every stride plus the `fc` field
-  order (`tests/test_slang_layout.py`, 97 tests), a new gpu-marked lock that the
+  of garbling GPU output: hostless goldens for every owned struct's scalar
+  stride (plus the MSL strides the Metal allocator sizes against), its declared
+  `(type, name)` list, and the `fc` blob order (`tests/test_slang_layout.py`, 97 tests), a new gpu-marked lock that the
   derived MSL `fc` layout equals live Metal reflection (656 B RGB / 688 B MLT —
   the ground truth for the new `float4x4`/`uint2`/`uint3`/nested rules), the
   same for `StdSurfaceParams`, a coverage guard at `_pack_uniforms` covering the

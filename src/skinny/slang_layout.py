@@ -231,6 +231,13 @@ def parse_struct_fields(
         # bare "line contains (" test would misread as a method and drop
         # silently, shifting every offset after it (codex round-4 finding).
         decl = _FIELD_DECL.fullmatch(line)
+        if decl is None and line.endswith(";") and _has_top_level_comma(line):
+            # Mixed multi-declarator (`float x, y = float(0);`): parens make the
+            # method heuristic below swallow it, so catch it here. Commas inside
+            # a parameter list sit at bracket depth > 0 and do not trip this.
+            raise SlangLayoutError(
+                f"{struct_name}: unrecognised declaration {line!r} — multiple "
+                "declarators on one line are not supported; split them")
         if decl is None and "(" in line:
             # Method / constructor / operator — not layout. Its body (this line's
             # trailing `{`, or a `{` on the following line) is swallowed whole.

@@ -368,13 +368,22 @@ def test_multi_declarator_raises_in_both_forms():
     bare = "struct Weird {\n float x, y;\n};"
     with pytest.raises(SlangLayoutError, match="unrecognised declaration"):
         sl.parse_struct_fields(bare, "Weird")
+    # Mixed form: parens would otherwise send it to the method skip.
+    mixed = "struct Weird {\n float x, y = float(0);\n};"
+    with pytest.raises(SlangLayoutError, match="multiple declarators"):
+        sl.parse_struct_fields(mixed, "Weird")
 
 
 def test_commas_inside_an_initializer_call_are_not_multi_declarators():
-    """`float3 v = float3(0, 1, 2);` is ONE declarator."""
+    """`float3 v = float3(0, 1, 2);` is ONE declarator, and a method's parameter
+    commas must not be mistaken for declarators either."""
     src = "struct Weird {\n float3 v = float3(0, 1, 2);\n float b;\n};"
     assert sl.parse_struct_fields(src, "Weird") == [("float3", "v"),
                                                     ("float", "b")]
+    method = ("struct Weird {\n float a;\n void f(int x, int y);\n"
+              " float g(int x, int y) { return 0; }\n float b;\n};")
+    assert sl.parse_struct_fields(method, "Weird") == [("float", "a"),
+                                                       ("float", "b")]
 
 
 def test_array_member_raises_rather_than_guessing():
