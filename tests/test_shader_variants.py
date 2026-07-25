@@ -298,11 +298,14 @@ def test_every_wavefront_compile_routes_through_the_two_flag_builders():
     `_compile_full_spv` for the full tree) the only callers."""
     src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
     # Function bodies that legitimately call slangc_flags, by def line.
+    # Indented `def`s count too: matching only column-zero ones would leave
+    # `current` stuck on the last module-level function, so a call inside any
+    # later CLASS METHOD would be misattributed to the allowed set.
     allowed = {"_slang_flags", "_compile_full_spv"}
     current = None
     offenders = []
     for line in src.splitlines():
-        m = re.match(r"def (\w+)\(", line)
+        m = re.match(r"\s*def (\w+)\(", line)
         if m:
             current = m.group(1)
         if "slangc_flags(" in line and not line.lstrip().startswith(("#", '"')):
