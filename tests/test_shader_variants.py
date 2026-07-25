@@ -288,6 +288,10 @@ def test_kernel_goldens_cover_every_compile_site():
     otherwise a wrong key/token at the new site would go unchecked."""
     src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
     declared = set(re.findall(r'\(\s*"(wf\w+|restir\w+)"\s*,\s*"([\w/]+)"\s*\)', src))
+    # One-directional on its own, so it would pass vacuously if the pattern
+    # ever stopped matching (a reformat splitting a tuple across lines, an
+    # entry-point prefix rename). Pin the count too.
+    assert len(declared) == 36, f"kernel scan found {len(declared)}, expected 36"
     pinned = {pair for pairs in WAVEFRONT_KERNELS.values() for pair in pairs}
     assert declared - pinned == set(), "unpinned wavefront kernels"
 
@@ -567,8 +571,6 @@ def test_no_vulkan_key_emits_a_metal_only_define():
     for family in (Family.MEGAKERNEL, Family.WAVEFRONT,
                    Family.WAVEFRONT_FOUNDATION, Family.PREVIEW):
         for axes in _axes_for(family):
-            if family is Family.WAVEFRONT_FOUNDATION and axes["mlt"]:
-                continue
             key = ShaderVariantKey(Target.VULKAN, family, **axes)
             assert not (set(_parsed(key.slangc_defines())) & METAL_ONLY_DEFINES)
 
@@ -605,6 +607,14 @@ def test_megakernel_never_carries_the_mlt_axis():
      "METAL-only"),
     ({"target": Target.METAL, "family": Family.PREVIEW, "mlt": True},
      "wavefront-only"),
+    # The Metal gates are family-gated too: both defines are live in
+    # bindings.slang / path_record_common.slang, which the megakernel includes.
+    ({"target": Target.METAL, "family": Family.MEGAKERNEL, "metal_records": True},
+     "wavefront-only"),
+    ({"target": Target.METAL, "family": Family.MEGAKERNEL, "metal_neural": True},
+     "wavefront-only"),
+    ({"target": Target.METAL, "family": Family.DEBUG_RASTER, "metal_records": True},
+     "wavefront-only"),
 ])
 def test_invalid_combinations_raise(kwargs, match):
     with pytest.raises(ValueError, match=match):
@@ -619,18 +629,54 @@ def test_slangc_flags_refuses_a_metal_key():
 
 # ── No hand-assembled variant defines remain outside the module ──────
 
+#: Three emission idioms, all of which existed pre-refactor:
+#:   "SKINNY_X=1"                    slangc token
+#:   {"SKINNY_X": "1"}               defines dict literal
+#:   defines["SKINNY_X"] = "1"       subscript assignment (metal_wavefront had
+#:                                   SIX of these; omitting it would let the
+#:                                   exact form this change removed come back)
 _VARIANT_DEFINES = re.compile(
     r"SKINNY_(COMPUTE_PIPELINE|WAVEFRONT|SPECTRAL|MLT|METAL"
-    r"|METAL_NEURAL|METAL_RECORDS)\s*(=1[\"']|[\"']\s*:)")
+    r"|METAL_NEURAL|METAL_RECORDS)\s*(=1[\"']|[\"']\s*:|[\"']\s*\]\s*=)")
 
 
 @pytest.mark.parametrize("module", [
     "vk_compute.py", "vk_wavefront.py", "metal_compute.py", "metal_wavefront.py",
 ])
 def test_consumers_do_not_hand_assemble_variant_defines(module):
-    """Emission of a variant define into a flag tuple (`"SKINNY_X=1"`) or a
-    defines dict (`"SKINNY_X": "1"`) outside shader_variants.py."""
+    """Emission of a variant define into a flag tuple (`"SKINNY_X=1"`), a
+    defines dict (`{"SKINNY_X": "1"}`) or a subscript assignment
+    (`defines["SKINNY_X"] = "1"`) outside shader_variants.py."""
     text = (SRC / module).read_text(encoding="utf-8")
-    hits = [line for line in text.splitlines()
+    assert _emitted_variant_defines(text) == [], \
+        f"{module} still emits variant defines"
+
+
+def _emitted_variant_defines(text: str) -> list[str]:
+    return [line for line in text.splitlines()
             if _VARIANT_DEFINES.search(line) and not line.lstrip().startswith("#")]
-    assert hits == [], f"{module} still emits variant defines: {hits}"
+
+
+@pytest.mark.parametrize("module, idiom", [
+    ("vk_compute.py", '"SKINNY_COMPUTE_PIPELINE=1"'),
+    ("vk_wavefront.py", '"SKINNY_MLT=1"'),
+    ("metal_compute.py", '{"SKINNY_METAL": "1"}'),
+    ("metal_wavefront.py", 'defines["SKINNY_SPECTRAL"] = "1"'),
+])
+def test_the_hand_assembly_guard_catches_every_idiom(module, idiom):
+    """Negative control, run against the PRE-REFACTOR sources: the guard must
+    fire on each of the three emission idioms that existed before this change.
+    The subscript form is the one a narrower regex misses — `metal_wavefront`
+    carried six of them, so a guard blind to it would go green while the exact
+    construct this change removed crept back."""
+    import subprocess
+
+    before = subprocess.run(
+        ["git", "-C", str(SRC.parents[1]), "show", f"51c2d17:src/skinny/{module}"],
+        capture_output=True, text=True)
+    if before.returncode != 0:  # base commit not present (shallow clone)
+        pytest.skip("base commit 51c2d17 unavailable")
+    hits = _emitted_variant_defines(before.stdout)
+    assert hits, f"guard is blind to every define in the pre-refactor {module}"
+    assert any(idiom in line for line in hits), \
+        f"guard misses the {idiom!r} idiom in the pre-refactor {module}"

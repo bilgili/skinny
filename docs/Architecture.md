@@ -1880,7 +1880,7 @@ another. Every arm of `slangc_flags()` therefore emits all four segments (the
 ones a family cannot carry are provably empty), with an assertion that every
 declared define reached the flag tuple.
 
-Three derivations, all from one shared internal define table:
+Four derivations, all from one shared internal define table:
 
 - `slangc_defines()` → the Vulkan `-D` tokens as **named ordered segments**
   (`base` / `spectral` / `neural` / `mlt`);

@@ -152,6 +152,15 @@ class ShaderVariantKey:
             raise ValueError(
                 f"metal_neural/metal_records are METAL-only, got target="
                 f"{self.target.name}")
+        # Family-gate them too, like every other axis: both defines are live in
+        # bindings.slang / path_record_common.slang, which the megakernel also
+        # includes, so an accepted-but-meaningless gate on a MEGAKERNEL key
+        # would silently change that kernel's binding table.
+        if ((self.metal_neural or self.metal_records)
+                and self.family is not Family.WAVEFRONT):
+            raise ValueError(
+                f"metal_neural/metal_records are wavefront-only, got "
+                f"family={self.family.name}")
         if self.mlt and self.family is not Family.WAVEFRONT:
             raise ValueError(
                 f"mlt=True is wavefront-only, got family={self.family.name}")
