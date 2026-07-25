@@ -2,7 +2,7 @@
 
 ## 1. Layout module (Stage 0)
 
-- [ ] 1.1 Create `src/skinny/slang_layout.py`: consolidate BOTH parser copies
+- [x] 1.1 Create `src/skinny/slang_layout.py`: consolidate BOTH parser copies
       (`tests/test_wavefront_state.py::_parse_struct_fields` and the
       near-duplicate at `tests/test_sppm_state.py:56`) into one module.
       Resolvable preprocessor gates are exactly `SKINNY_SPECTRAL`,
@@ -10,7 +10,7 @@
       behind `SKINNY_METAL` at common.slang:414 — a two-define whitelist
       cannot parse it); parser raises on any other gate, declaration form,
       or field type.
-- [ ] 1.2 Add scalar + MSL layout math (reuse/share
+- [x] 1.2 Add scalar + MSL layout math (reuse/share
       `wavefront_layout._struct_stride`, `SLANG_SCALAR_SIZES`,
       `SLANG_MSL_SIZES`/`SLANG_MSL_ALIGNS`) AND extend the type tables for
       what FrameConstants needs but the existing tables lack: `float4x4`
@@ -20,7 +20,7 @@
       rules are provisional until the task-2.4 gpu lock confirms them.
       Expose per (struct, variant): ordered fields, scalar offsets/stride,
       MSL offsets/stride; lazy, cached per (file mtime, struct, variant).
-- [ ] 1.3 Register the owned structs and their source files:
+- [x] 1.3 Register the owned structs and their source files:
       `FrameConstants` + `FlatMaterialParams` (`common.slang`),
       `StdSurfaceParams` (`mtlx_std_surface.slang`), `WavefrontPathState`
       (`wavefront/wavefront_state.slang`), `RecVertex`
@@ -32,7 +32,7 @@
       `FrameConstants` registers with the design-D1 scalar-blob rule:
       declared fields in variant order, `tileOriginY` always present and
       relocated to the tail (after the MLT tail when present).
-- [ ] 1.4 Hostless module tests (`tests/test_slang_layout.py`), each golden
+- [x] 1.4 Hostless module tests (`tests/test_slang_layout.py`), each golden
       labelled by axis: path state 68 scalar / 96 MSL (RGB), RecVertex
       76 scalar / 112 MSL, VisiblePoint 180 scalar / 240 MSL (RGB),
       SppmAccum 16 RGB / 20 spectral (scalar==MSL), BDPTVertex scalar
