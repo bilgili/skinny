@@ -1213,10 +1213,14 @@ in `backend_select.py`, used by every front-end:
   `backend_name`/`is_metal` predicate, and the capability flags). `gpu_info`
   carries `.name`, `.is_discrete`, and `.preferred_h264_encoder` on both
   backends, so the front-ends' status line and the video encoder stay
-  backend-agnostic. The four
-  front-ends (`app.py`, `headless.py`, `ui/qt/app.py`, `web_app.py`) call
-  `make_context` instead of constructing a context directly; `app.py` and
-  `skinny-gui` persist/restore the selected backend like the other render flags.
+  backend-agnostic. No front-end constructs a context directly, and since change
+  `frontend-bringup-builder` none of them calls `make_context` directly either:
+  it is reached through
+  [`BringupPlan.create`](#front-end-bring-up-bringuppy-change-frontend-bringup-builder),
+  which is also where `select_backend`'s `RuntimeError` becomes a
+  `{prog}:`-prefixed `SystemExit`. `app.py` and `skinny-gui` persist/restore the
+  selected backend like the other render flags — they are the two front-ends
+  that hand their settings dict to `plan_bringup(persisted=…)`.
 
 The renderer builds its GPU resources through whichever sibling module matches
 the context, resolved once by `resource_module(ctx)` (keyed on `ctx.is_metal`):

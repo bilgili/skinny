@@ -112,7 +112,11 @@ class BringupPlan:
 
         The context is destroyed if renderer construction raises, so a failed
         bring-up never leaks a live GPU context (the rule
-        ``metal-dispatch-hygiene`` makes structural on Metal).
+        ``metal-dispatch-hygiene`` makes structural on Metal). The handler
+        catches ``BaseException``, not ``Exception``: renderer construction
+        compiles shaders and can run for seconds, so a Ctrl-C landing inside it
+        is an ordinary event — and on Metal a leaked context is not merely
+        untidy, it wedges GPU capacity until reboot.
         """
         ctx = context_factory(
             self.backend, window=window, width=width, height=height,
@@ -131,7 +135,7 @@ class BringupPlan:
                 spectral=self.spectral,
                 **renderer_kwargs,
             )
-        except Exception:
+        except BaseException:
             ctx.destroy()
             raise
         return ctx, renderer
@@ -193,6 +197,14 @@ def plan_bringup(args, prog: str, persisted: dict | None = None) -> BringupPlan:
     )
     reject_mcp_unsupported(bool(getattr(args, "mcp", False)))
 
+    # The remaining fallible plan input. `--bdpt-walk` has no argparse
+    # `choices=` (it accepts a deprecated alias), and its default comes from
+    # SKINNY_BDPT_WALK — which argparse does not validate — so a bad value only
+    # surfaces here. Resolve it before the GPU probe below, not after: every way
+    # a launch can be refused should be exhausted before a Metal device is
+    # constructed.
+    bdpt_walk = resolve_walk(getattr(args, "bdpt_walk", "fused"))
+
     # Last, so every flag-level refusal happens before the GPU probe.
     try:
         backend = select_backend(
@@ -208,7 +220,7 @@ def plan_bringup(args, prog: str, persisted: dict | None = None) -> BringupPlan:
         execution_mode=args.execution_mode,
         startup_integrator=startup_integrator,
         spectral=bool(getattr(args, "spectral", False)),
-        bdpt_walk=resolve_walk(getattr(args, "bdpt_walk", "fused")),
+        bdpt_walk=bdpt_walk,
         encoding=encoding,
         neural_config=neural_config_from_args(args),
     )

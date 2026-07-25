@@ -228,50 +228,152 @@ def test_unavailable_metal_refuses_with_the_frontend_prefix(prog):
     )
 
 
-# Exact refusal strings, pinned on top of the differential check so a reword
-# that moves both sides at once still fails. The guards themselves print a
-# fixed `skinny:` prefix on every front-end (only select_backend's failure is
-# {prog}-prefixed) — that asymmetry is pre-existing behaviour, pinned here.
+# Exact refusal strings, pinned **in full** as independent goldens. The
+# differential check above compares the canonical order against the transcribed
+# legacy orders — both of which call the same live guard functions, so a reword
+# would move both sides together and pass. These literals are the second side
+# of that: they fail on any change to the user-visible text.
+#
+# Note the guards print a fixed `skinny:` prefix on *every* front-end; only
+# select_backend's failure carries the caller's `{prog}`. That asymmetry is
+# pre-existing behaviour this change deliberately preserved (rewording it would
+# break users' scripts and greps), so it is pinned here rather than fixed.
 REFUSAL_MESSAGES = {
     "sppm-megakernel": (
         ["--integrator", "sppm", "--execution-mode", "megakernel"],
-        "skinny: --integrator sppm has no megakernel path",
+        "skinny: --integrator sppm has no megakernel path — SPPM (Stochastic "
+        "Progressive Photon Mapping) shares a global visible-point / photon-grid "
+        "structure across pixels. Drop the explicit --execution-mode megakernel "
+        "(sppm auto-selects wavefront) or pass --execution-mode wavefront.",
     ),
     "mlt-megakernel": (
         ["--integrator", "mlt", "--execution-mode", "megakernel"],
-        "skinny: --integrator mlt has no megakernel path",
+        "skinny: --integrator mlt has no megakernel path — MLT mutates Markov "
+        "chains through the staged wavefront BDPT kernels and shares "
+        "bootstrap/normalization state across pixels. Drop the explicit "
+        "--execution-mode megakernel (mlt auto-selects wavefront) or pass "
+        "--execution-mode wavefront.",
     ),
     "bdpt-neural": (
         ["--integrator", "bdpt", "--proposals", "bsdf,neural"],
-        "skinny: the neural proposal (--proposals …,neural) is incompatible "
-        "with --integrator bdpt",
+        "skinny: the neural proposal (--proposals …,neural) is incompatible with "
+        "--integrator bdpt — BDPT does not consume the neural directional "
+        "proposal (it samples directions with native BSDF sampling, on every "
+        "backend and execution mode). Use --integrator path for neural guiding / "
+        "online training.",
     ),
     "bdpt-online-training": (
         ["--integrator", "bdpt", "--online-training"],
-        "skinny: --online-training is incompatible with --integrator bdpt",
+        "skinny: --online-training is incompatible with --integrator bdpt — BDPT "
+        "does not consume the neural directional proposal (it samples directions "
+        "with native BSDF sampling, on every backend and execution mode). Use "
+        "--integrator path for neural guiding / online training.",
     ),
     "mlt-online-training": (
         ["--integrator", "mlt", "--online-training"],
-        "skinny: --online-training is incompatible with --integrator mlt",
+        "skinny: --online-training is incompatible with --integrator mlt — MLT "
+        "does not consume the neural directional proposal the training loop "
+        "exists to improve.",
     ),
     "mlt-proposals": (
         ["--integrator", "mlt", "--proposals", "neural"],
-        "skinny: --integrator mlt supports only the BSDF proposal",
-    ),
-    "spectral-neural": (
-        ["--spectral", "--proposals", "bsdf,neural"],
-        "skinny: --spectral supports only the analytic BSDF/environment proposals",
+        "skinny: --integrator mlt supports only the BSDF proposal (got "
+        "--proposals neural) — a non-BSDF directional proposal inside a "
+        "Markov-chain mutation would change the target function MLT normalizes "
+        "against.",
     ),
 }
 
 
 @pytest.mark.parametrize("case", sorted(REFUSAL_MESSAGES))
 def test_refusal_messages_are_verbatim(case):
-    argv, expected_prefix = REFUSAL_MESSAGES[case]
+    argv, expected = REFUSAL_MESSAGES[case]
     parser = _parser("skinny", FRONTENDS["skinny"])
     with pytest.raises(SystemExit) as excinfo:
         plan_bringup(parser.parse_args(argv), "skinny", persisted={})
-    assert str(excinfo.value).startswith(expected_prefix)
+    assert str(excinfo.value) == expected
+
+
+def test_spectral_neural_refusal_message_is_verbatim():
+    """Kept separate: the spectral guard interpolates the proposal token, so the
+    message is checked for both a bare-neural and a mixed-proposal spelling."""
+    parser = _parser("skinny", FRONTENDS["skinny"])
+    for token in ("neural", "bsdf,neural"):
+        with pytest.raises(SystemExit) as excinfo:
+            plan_bringup(parser.parse_args(["--spectral", "--proposals", token]),
+                         "skinny", persisted={})
+        assert str(excinfo.value).startswith(
+            f"skinny: --spectral supports only the analytic BSDF/environment "
+            f"proposals (got --proposals {token}). The neural")
+
+
+# ── the MCP axis ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("prog", ["skinny", "skinny-gui"])
+def test_mcp_guard_runs_for_every_frontend_that_exposes_the_flag(prog, monkeypatch):
+    """`--mcp` is refused when the optional server dependency is missing. Before
+    this change only the interactive pair called this guard at all; it is now
+    part of the shared sequence, so it must fire from there."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_mcp(name, *a, **kw):
+        if name.startswith("mcp"):
+            raise ImportError("stubbed missing")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_mcp)
+    parser = _parser(prog, FRONTENDS[prog])
+    with pytest.raises(SystemExit) as excinfo:
+        plan_bringup(parser.parse_args(["--mcp"]), prog, persisted={})
+    assert str(excinfo.value).startswith("--mcp needs the optional MCP server dependency.")
+
+
+def test_mcp_guard_is_a_noop_without_the_flag():
+    """The non-interactive front-ends suppress `--mcp` entirely, so the shared
+    sequence must tolerate a Namespace with no `mcp` attribute."""
+    parser = _parser("skinny-web", FRONTENDS["skinny-web"])
+    args = parser.parse_args([])
+    assert not hasattr(args, "mcp")
+    assert plan_bringup(args, "skinny-web").backend == "vulkan"
+
+
+# ── refusals happen before the GPU is touched ────────────────────────
+
+def test_no_backend_probe_when_a_guard_refuses(monkeypatch):
+    """Every flag-level refusal must land before `select_backend` probes for a
+    Metal device — constructing one is the expensive, machine-affecting step."""
+    probed = []
+    monkeypatch.setattr(backend_select, "metal_available",
+                        lambda: (probed.append(1), (False, "stub"))[1])
+    parser = _parser("skinny", FRONTENDS["skinny"])
+    with pytest.raises(SystemExit):
+        plan_bringup(parser.parse_args(
+            ["--integrator", "sppm", "--execution-mode", "megakernel"]),
+            "skinny", persisted={})
+    assert probed == []
+
+
+def test_bad_bdpt_walk_is_rejected_before_the_backend_probe(monkeypatch):
+    """`--bdpt-walk` has no argparse `choices=` and takes its default from
+    SKINNY_BDPT_WALK, which argparse never validates — so a bad value reaches
+    the plan. It must be rejected before the GPU probe."""
+    probed = []
+    monkeypatch.setattr(backend_select, "metal_available",
+                        lambda: (probed.append(1), (False, "stub"))[1])
+    monkeypatch.setenv("SKINNY_BDPT_WALK", "not-a-walk")
+    parser = _parser("skinny", FRONTENDS["skinny"])
+    with pytest.raises(ValueError, match="unknown bdpt walk"):
+        plan_bringup(parser.parse_args([]), "skinny", persisted={})
+    assert probed == []
+
+
+def test_deprecated_bdpt_walk_alias_still_normalizes():
+    parser = _parser("skinny", FRONTENDS["skinny"])
+    plan = plan_bringup(parser.parse_args(["--bdpt-walk", "megakernel"]),
+                        "skinny", persisted={})
+    assert plan.bdpt_walk == "fused"
 
 
 # ── persisted precedence ─────────────────────────────────────────────
@@ -390,13 +492,17 @@ def test_create_passes_plan_fields_and_forwards_kwargs():
     assert seen["renderer"]["neural_handoff"] == "shared"
 
 
-def test_create_destroys_the_context_when_the_renderer_raises():
+@pytest.mark.parametrize("exc", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_create_destroys_the_context_when_the_renderer_raises(exc):
+    """Including the BaseException cases: renderer construction compiles
+    shaders and runs for seconds, so a Ctrl-C inside it is ordinary — and a
+    leaked Metal context wedges GPU capacity until reboot."""
     ctx = _StubContext()
 
     def boom(**kw):
-        raise RuntimeError("renderer exploded")
+        raise exc("renderer exploded")
 
-    with pytest.raises(RuntimeError, match="renderer exploded"):
+    with pytest.raises(exc):
         _stub_plan().create(context_factory=lambda *a, **k: ctx,
                             renderer_factory=boom)
     assert ctx.destroyed
