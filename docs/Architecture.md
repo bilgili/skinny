@@ -1790,9 +1790,61 @@ carve-out stage must route *around* both.
 
 ---
 
+## Byte-layout ownership (`slang_layout.py`, change `reflection-owned-byte-layouts`)
+
+Every byte layout the host mirrors from a Slang struct has **one owner**:
+`src/skinny/slang_layout.py`. It parses the authoritative `.slang` declaration
+and computes both dialects the renderer speaks — **scalar** (Vulkan,
+`-fvk-use-scalar-layout`: offsets are a pure running sum, so the declared field
+order *is* the reflection equivalent, hostlessly) and **MSL** (Metal: `float3` /
+`uint3` pad to 16 B, struct rounds up to its largest member alignment). Packers
+and allocators are consumers; no hand-maintained field/offset table remains.
+
+| Owned struct | Source | Consumer |
+|---|---|---|
+| `FrameConstants` (+ `Camera`) | `common.slang` | `_FC_SCALAR_FIELDS*`, `_TILE_ORIGIN_Y_OFFSET`, `_VK_UNIFORM_BUFFER_BYTES` bound, `_pack_uniforms_msl` |
+| `FlatMaterialParams` | `common.slang` | `FLAT_MATERIAL_STRIDE` |
+| `StdSurfaceParams` | `mtlx_std_surface.slang` | `STD_SURFACE_STRIDE`, `pack_std_surface_params_msl` |
+| `WavefrontPathState`, `RecVertex`, `VisiblePoint`, `SppmAccum`, `BDPTVertex`, `WfBdptAux`, MLT chain structs | wavefront/SPPM/BDPT/MLT shaders | `wavefront_layout.py` sizers (public API unchanged) |
+
+**Variants.** Exactly three preprocessor gates are resolvable —
+`SKINNY_SPECTRAL`, `SKINNY_MLT`, `SKINNY_METAL` — resolved per query. Anything
+else (unknown gate, unknown field type, unrecognised declaration form)
+**raises**: an unparseable struct is a test failure, never a guessed offset.
+
+**The `FrameConstants` blob rule.** Declaration order is *not* host blob order.
+`tileOriginY` is `SKINNY_METAL`-gated and declared *before* the `SKINNY_MLT`
+tail, but `_pack_uniforms` always appends it **last** — so under an MLT pack
+`mltSigma` lands at 564, exactly where the Vulkan MLT SPIR-V (which has no
+`tileOriginY` at all) expects it, and the trailing word is benign filler inside
+the oversized UBO. `fc_scalar_blob()` applies that rule; base blob 568 B, MLT
+blob 600 B.
+
+**Drift gates, three layers, none optional:**
+
+1. **Hostless (primary)** — `tests/test_slang_layout.py` pins every derived
+   stride to a golden, checks gap/overlap coverage, locks the `fc` field order,
+   and asserts the raise-on-unknown paths. Goldens are *not* derived, so a
+   parser change and a shader change moving together still trip a visible
+   failure. The existing `wavefront_layout` / `test_struct_layout` /
+   `test_sppm_state` / `test_mlt_host` locks stay at full strength, now reading
+   the module.
+2. **gpu-marked MSL ground truth** — `tests/test_metal_fc_layout.py` (`fc`, RGB
+   and MLT) plus the `_reflect_msl_layout` locks in `test_wavefront_state.py`
+   and the `StdSurfaceParams` round-trip assert the derived MSL offsets equal
+   what Slang's Metal target actually emits. This is what validates the
+   `float4x4` / `uint2` / `uint3` / nested-struct rules.
+3. **Runtime** — `_pack_uniforms` asserts the derived table covers the blob it
+   just produced (both backends); `_pack_uniforms_msl` still packs from **live**
+   reflection (the `metal-backend` contract) and cross-checks it against the
+   derived layout once per program+variant, so drift in either direction raises
+   before an upload.
+
 ## FrameConstants Layout
 
-Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment.
+Compiled with `-fvk-use-scalar-layout` — float3 has 4-byte alignment. The
+authoritative field order/offsets are derived from the declaration by
+`slang_layout` (see above); this table is the human-readable gloss.
 
 | Offset | Type | Field |
 |--------|------|-------|

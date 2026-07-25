@@ -283,8 +283,10 @@ SPPM — expected MCMC behavior.
 
 ## 2. Stream state & material bucketing
 
-**Path-state record** `WavefrontPathState` (`wavefront_state.slang:15-26`,
-Python mirror `wavefront_layout.py:28-46`): **AoS**, scalar layout, **68 B
+**Path-state record** `WavefrontPathState` (`wavefront_state.slang:15-26`;
+the Python side is DERIVED from that declaration by `slang_layout.py` and
+surfaced through `wavefront_layout.py`, change `reflection-owned-byte-layouts`):
+**AoS**, scalar layout, **68 B
 stride** — `rayOrigin/rayDir/throughput/radiance` (4× float3) +
 `pixelIndex/rngState/depth/flags` (uint) + `bsdfPdf` (float). `flags` bits:
 `PATH_FLAG_ALIVE=1`, `PATH_FLAG_SPECULAR=2`. `tests/test_wavefront_state.py`
@@ -990,7 +992,7 @@ body calling the same `evaluateBounce` / MIS / proposal-seam code.
 | `metal_wavefront.py` (`ensure_pass`) | Metal pass factory — the `_ensure_wavefront_*_metal` twins (change `renderer-module-carveout`) |
 | `wavefront_driver.py` | backend-neutral stage orders (`record_path_loop` / `record_bdpt_loop`, `WavefrontRecorder` protocol) — shared by Vulkan + Metal |
 | `metal_wavefront.py` | Metal recorder + pass classes (path / BDPT / ReSTIR / neural) — in-process Slang→Metal, reflected-MSL buffer sizing |
-| `wavefront_layout.py` | state stride + queue sizing (Python mirror; `msl=` strides for Metal) |
+| `wavefront_layout.py` | state stride + queue sizing (facade over `slang_layout.py`, which parses the strides out of the `.slang` structs; `msl=` strides for Metal) |
 | `shaders/wavefront/wavefront_path.slang` | path kernels (`_wfpath_*`) |
 | `shaders/wavefront/wavefront_bdpt.slang` | BDPT kernels (`_wfbdpt_*`) |
 | `shaders/wavefront/wf_shade_common.slang` | set-1 bindings + `wfFinishShade` + slot routing |
