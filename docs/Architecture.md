@@ -1824,9 +1824,13 @@ blob 600 B.
 
 **Drift gates, three layers, none optional:**
 
-1. **Hostless (primary)** — `tests/test_slang_layout.py` pins every derived
-   stride to a golden, checks gap/overlap coverage, locks the `fc` field order,
-   and asserts the raise-on-unknown paths. Goldens are *not* derived, so a
+1. **Hostless (primary)** — `tests/test_slang_layout.py` pins each owned
+   struct's scalar stride (and the MSL stride for the structs the Metal
+   allocator sizes against) to a golden, pins the declared `(type, name)` list
+   per struct so a same-size swap or same-width retype cannot slip through,
+   checks gap/overlap coverage, locks the `fc` blob order, and asserts the
+   raise-on-unknown paths (unknown gate/type, attributed field, multi-declarator,
+   array member, locals inside a method body). Goldens are *not* derived, so a
    parser change and a shader change moving together still trip a visible
    failure. The existing `wavefront_layout` / `test_struct_layout` /
    `test_sppm_state` / `test_mlt_host` locks stay at full strength, now reading

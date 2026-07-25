@@ -358,6 +358,25 @@ def test_locals_inside_multiline_bodies_are_not_fields(body):
                                                     ("float", "b")]
 
 
+def test_multi_declarator_raises_in_both_forms():
+    """`float x = float(0), y = float(0);` must not yield only `x` — dropping
+    `y` shifts every offset after it (codex round-6). The bare form already
+    failed to match; both are now loud."""
+    init = "struct Weird {\n float x = float(0), y = float(0);\n};"
+    with pytest.raises(SlangLayoutError, match="multiple declarators"):
+        sl.parse_struct_fields(init, "Weird")
+    bare = "struct Weird {\n float x, y;\n};"
+    with pytest.raises(SlangLayoutError, match="unrecognised declaration"):
+        sl.parse_struct_fields(bare, "Weird")
+
+
+def test_commas_inside_an_initializer_call_are_not_multi_declarators():
+    """`float3 v = float3(0, 1, 2);` is ONE declarator."""
+    src = "struct Weird {\n float3 v = float3(0, 1, 2);\n float b;\n};"
+    assert sl.parse_struct_fields(src, "Weird") == [("float3", "v"),
+                                                    ("float", "b")]
+
+
 def test_array_member_raises_rather_than_guessing():
     """Array members are not supported; they must fail loudly, not silently."""
     with pytest.raises(SlangLayoutError, match="unrecognised declaration"):

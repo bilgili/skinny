@@ -119,7 +119,7 @@
 
 ## 5. Verification and docs (Stage 4)
 
-- [x] 5.1 Full hostless sweep: `.venv/bin/pytest` (layout tests, matrix
+- [x] 5.1 Full hostless sweep: `PYTHONPATH=src .venv/bin/pytest` (layout tests, matrix
       construction, metrics, import) — zero regressions.
 - [x] 5.2 gpu-marked layout locks + kill-harness rules respected:
       `PYTHONPATH=src SKINNY_BACKEND=metal ./bin/python3.13 -m pytest
@@ -138,7 +138,7 @@
 ## Change notes (implementation)
 
 * **Stage 0** — `src/skinny/slang_layout.py` + `tests/test_slang_layout.py`
-  (88 hostless tests after the codex rounds). Every golden stride matched the hand-authored value on
+  (97 hostless tests after the codex rounds). Every golden stride matched the hand-authored value on
   the first derivation, including the 568 B / 600 B `fc` blobs and
   `mltSigma@564`.
 * **Type coverage** — `float4x4` (64 / 64@16), `uint2` (8 / 8@8), `uint3`

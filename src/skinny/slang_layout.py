@@ -110,9 +110,26 @@ _ATTR_PREFIX = re.compile(r"^(?:\[\[.*?\]\]|\[[^\]]*\])\s*")
 #: A field declaration: `type name;`, optionally with an initializer, which may
 #: itself contain parentheses (`float b = float(0);`). Matching this BEFORE the
 #: "line contains `(` ⇒ method" heuristic is what keeps an initialized field
-#: from being silently dropped.
+#: from being silently dropped. The initializer is captured so a multi-declarator
+#: (`float x = float(0), y = float(0);`) can be rejected rather than silently
+#: yielding only its first name.
 _FIELD_DECL = re.compile(
-    r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^;]*)?;")
+    r"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(=[^;]*)?;")
+
+
+def _has_top_level_comma(text: str) -> bool:
+    """True if ``text`` has a comma outside any bracket — i.e. it declares more
+    than one name. Commas *inside* an initializer call (`float3(0, 0, 0)`) are
+    part of one declarator and do not count."""
+    depth = 0
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth <= 0:
+            return True
+    return False
 
 
 class SlangLayoutError(RuntimeError):
@@ -233,6 +250,13 @@ def parse_struct_fields(
         if decl is None:
             raise SlangLayoutError(
                 f"{struct_name}: unrecognised declaration {line!r}")
+        if _has_top_level_comma(decl.group(3) or ""):
+            # `float x = float(0), y = float(0);` — the regex would yield only
+            # `x` and drop `y`, shifting every offset after it. The bare form
+            # (`float x, y;`) already fails to match at all; make both loud.
+            raise SlangLayoutError(
+                f"{struct_name}: unrecognised declaration {line!r} — multiple "
+                "declarators on one line are not supported; split them")
         ftype = _norm_type(decl.group(1), spectral=spectral)
         if ftype not in SLANG_SCALAR_SIZES and ftype not in STRUCT_SOURCES:
             raise SlangLayoutError(
