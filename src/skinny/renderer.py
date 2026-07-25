@@ -9704,9 +9704,11 @@ class Renderer:
         (design D3). Reuses `_pack_uniforms` (the Vulkan scalar blob) verbatim and
         relocates every field to its reflected MSL offset, so the field *values*
         can never drift between backends — only their placement differs (Slang pads
-        `float3` to 16 B on Metal, making the struct 592 B vs the 512 B scalar
-        blob). Offsets come from the compiled module's reflection
-        (`pipeline.uniform_layout`), never a hand-maintained table. Uploaded via
+        `float3`/`uint3` to 16 B on Metal, making the struct 656 B — 688 B under
+        the MLT tail — vs the 568/600 B scalar blob). Offsets come from the
+        compiled module's reflection (`pipeline.uniform_layout`), never a
+        hand-maintained table, and are cross-checked against the layout derived
+        from the Slang declaration (`_check_msl_uniform_layout`). Uploaded via
         `set_data` byte blobs only (design D4).
 
         `layout_source` overrides the default `_msl_layout_source` — the material

@@ -51,119 +51,66 @@ _MSL_GOLDENS = [
 ]
 
 
-# Golden FIELD ORDER per owned struct — hand-transcribed from the `.slang`
-# declarations. A stride pin alone cannot see a same-size field swap (two float4
-# rows, two uints), and the `wavefront_layout` / `test_sppm_state` locks now
-# compare derived lists against derived lists, so this is the independent leg
-# that catches a reorder. Update it consciously, together with the shader.
-_FIELD_ORDER_GOLDENS = {
-    ("FlatMaterialParams", ()): [
-        ("_diffuseColorRoughness", 16), ("metallic", 4), ("specular", 4),
-        ("opacity", 4), ("diffuseTextureIdx", 4), ("roughnessTextureIdx", 4),
-        ("metallicTextureIdx", 4), ("normalTextureIdx", 4),
-        ("emissiveTextureIdx", 4), ("_emissiveColorIor", 16), ("coat", 4),
-        ("coatRoughness", 4), ("coatIOR", 4), ("opacityTextureIdx", 4),
-        ("_coatColorOpacityThreshold", 16), ("_normalScaleChannelMask", 16),
-        ("_normalBiasPad", 16), ("_transmissionColorDiffuseRough", 16),
-        ("_specularColorPad", 16), ("_mediumSigmaA_g", 16),
-        ("_mediumSigmaS_kind", 16), ("_worldToUvw0", 16), ("_worldToUvw1", 16),
-        ("_worldToUvw2", 16), ("_cloudDensityWispinessFrequency", 16),
-    ],
-    ("StdSurfaceParams", ()): [
-        ("base_color", 12), ("base", 4), ("diffuse_roughness", 4),
-        ("metalness", 4), ("specular", 4), ("specular_roughness", 4),
-        ("specular_color", 12), ("specular_IOR", 4), ("specular_anisotropy", 4),
-        ("specular_rotation", 4), ("transmission", 4),
-        ("transmission_depth", 4), ("transmission_color", 12),
-        ("transmission_scatter_anisotropy", 4), ("transmission_scatter", 12),
-        ("transmission_dispersion", 4), ("transmission_extra_roughness", 4),
-        ("subsurface", 4), ("subsurface_scale", 4),
-        ("subsurface_anisotropy", 4), ("subsurface_color", 12), ("_pad0", 4),
-        ("subsurface_radius", 12), ("sheen", 4), ("sheen_color", 12),
-        ("sheen_roughness", 4), ("coat", 4), ("coat_roughness", 4),
-        ("coat_anisotropy", 4), ("coat_rotation", 4), ("coat_IOR", 4),
-        ("coat_affect_color", 4), ("coat_affect_roughness", 4), ("_pad1", 4),
-        ("coat_color", 12), ("thin_film_thickness", 4), ("thin_film_IOR", 4),
-        ("emission", 4), ("emission_color", 12), ("_pad2", 4), ("opacity", 12),
-        ("thin_walled", 4), ("_pad3", 4), ("_pad4", 4),
-    ],
-    ("WavefrontPathState", ()): [
-        ("rayOrigin", 12), ("rayDir", 12), ("throughput", 12),
-        ("radiance", 12), ("pixelIndex", 4), ("rngState", 4), ("depth", 4),
-        ("flags", 4), ("bsdfPdf", 4),
-    ],
-    ("WavefrontPathState", ("spectral",)): [
-        ("rayOrigin", 12), ("rayDir", 12), ("throughput", 16),
-        ("radiance", 16), ("pixelIndex", 4), ("rngState", 4), ("depth", 4),
-        ("flags", 4), ("bsdfPdf", 4), ("sw.lambda", 16), ("sw.pdf", 16),
-    ],
-    ("RecVertex", ()): [
-        ("pos", 12), ("normal", 12), ("wo", 12), ("wiLocal", 12), ("L_k", 12),
-        ("beta_in", 12), ("depth", 4),
-    ],
-    ("VisiblePoint", ()): [
-        ("pos", 12), ("ns", 12), ("wo", 12), ("beta", 12), ("ld", 12),
-        ("albedo", 12), ("F0", 12), ("coatColor", 12), ("roughness", 4),
-        ("metallic", 4), ("specular", 4), ("ior", 4), ("opacity", 4),
-        ("coat", 4), ("coatRoughness", 4), ("coatIOR", 4),
-        ("transmissionColor", 12), ("specularColor", 12),
-        ("diffuseRoughness", 4), ("tau", 12), ("flags", 4), ("radius", 4),
-        ("n", 4),
-    ],
-    ("VisiblePoint", ("spectral",)): [
-        ("pos", 12), ("ns", 12), ("wo", 12), ("beta", 16), ("ld", 16),
-        ("albedo", 12), ("F0", 12), ("coatColor", 12), ("roughness", 4),
-        ("metallic", 4), ("specular", 4), ("ior", 4), ("opacity", 4),
-        ("coat", 4), ("coatRoughness", 4), ("coatIOR", 4),
-        ("transmissionColor", 12), ("specularColor", 12),
-        ("diffuseRoughness", 4), ("conductorMetalId", 4), ("tau", 12),
-        ("flags", 4), ("radius", 4), ("n", 4),
-    ],
-    ("SppmAccum", ()): [("phiR", 4), ("phiG", 4), ("phiB", 4), ("m", 4)],
-    ("SppmAccum", ("spectral",)): [
-        ("phiR", 4), ("phiG", 4), ("phiB", 4), ("phiW", 4), ("m", 4)],
-    ("BDPTVertex", ()): [
-        ("kind", 4), ("position", 12), ("N", 12), ("throughput", 12),
-        ("emission", 12), ("pdfFwd", 4), ("pdfRev", 4), ("isDelta", 4),
-        ("onLight", 4), ("matId", 4), ("uv", 8), ("posObject", 12),
-        ("geoN", 12), ("tangent", 12), ("hasTangent", 4),
-    ],
-    ("BDPTVertex", ("spectral",)): [
-        ("kind", 4), ("position", 12), ("N", 12), ("throughput", 16),
-        ("emission", 16), ("pdfFwd", 4), ("pdfRev", 4), ("isDelta", 4),
-        ("onLight", 4), ("matId", 4), ("uv", 8), ("posObject", 12),
-        ("geoN", 12), ("tangent", 12), ("hasTangent", 4),
-    ],
-    ("WfBdptAux", ()): [
-        ("eyeLen", 4), ("lightLen", 4), ("rngState", 4), ("lensWeight", 4),
-        ("pixel", 4), ("escaped", 12), ("radiance", 12), ("ewRayO", 12),
-        ("ewRayD", 12), ("ewThroughput", 12), ("ewPdfFwdOmega", 4),
-        ("ewMisBsdfPdf", 4), ("ewFlags", 4),
-    ],
-    ("WfBdptAux", ("spectral",)): [
-        ("eyeLen", 4), ("lightLen", 4), ("rngState", 4), ("lensWeight", 4),
-        ("pixel", 4), ("escaped", 16), ("radiance", 16), ("ewRayO", 12),
-        ("ewRayD", 12), ("ewThroughput", 16), ("ewPdfFwdOmega", 4),
-        ("ewMisBsdfPdf", 4), ("ewFlags", 4), ("sw.lambda", 16), ("sw.pdf", 16),
-    ],
-    ("MltPrimarySample", ()): [
-        ("value", 4), ("valueBackup", 4), ("lastMod", 4), ("modBackup", 4)],
-    ("MltChainMeta", ()): [
-        ("rngState", 4), ("currentIteration", 4),
-        ("lastLargeStepIteration", 4), ("seedIndex", 4), ("cCurrent", 4),
-        ("nRecords", 4), ("pad0", 4), ("pad1", 4),
-    ],
-    ("MltRecord", ()): [("pixel", 4), ("r", 4), ("g", 4), ("b", 4)],
+# Golden DECLARED FIELDS per owned struct — (slang type, field name) in
+# declaration order, hand-transcribed from the `.slang` sources. Types are
+# pinned, not just names/sizes: a stride pin cannot see a same-size field swap,
+# and neither a stride nor an offset nor Slang's reflected field *size* can see
+# a same-width RETYPE (`float`→`uint`, `float3`→`uint3`) that changes how the
+# GPU interprets bytes the host packs. The `wavefront_layout` / `test_sppm_state`
+# locks now compare derived lists against derived lists, so this is the
+# independent leg. Update it consciously, together with the shader.
+_DECLARED_FIELD_GOLDENS = {
+    ("FlatMaterialParams", ()): [('float4', '_diffuseColorRoughness'), ('float', 'metallic'), ('float', 'specular'), ('float', 'opacity'), ('uint', 'diffuseTextureIdx'), ('uint', 'roughnessTextureIdx'), ('uint', 'metallicTextureIdx'), ('uint', 'normalTextureIdx'), ('uint', 'emissiveTextureIdx'), ('float4', '_emissiveColorIor'), ('float', 'coat'), ('float', 'coatRoughness'), ('float', 'coatIOR'), ('uint', 'opacityTextureIdx'), ('float4', '_coatColorOpacityThreshold'), ('float4', '_normalScaleChannelMask'), ('float4', '_normalBiasPad'), ('float4', '_transmissionColorDiffuseRough'), ('float4', '_specularColorPad'), ('float4', '_mediumSigmaA_g'), ('float4', '_mediumSigmaS_kind'), ('float4', '_worldToUvw0'), ('float4', '_worldToUvw1'), ('float4', '_worldToUvw2'), ('float4', '_cloudDensityWispinessFrequency')],
+    ("StdSurfaceParams", ()): [('float3', 'base_color'), ('float', 'base'), ('float', 'diffuse_roughness'), ('float', 'metalness'), ('float', 'specular'), ('float', 'specular_roughness'), ('float3', 'specular_color'), ('float', 'specular_IOR'), ('float', 'specular_anisotropy'), ('float', 'specular_rotation'), ('float', 'transmission'), ('float', 'transmission_depth'), ('float3', 'transmission_color'), ('float', 'transmission_scatter_anisotropy'), ('float3', 'transmission_scatter'), ('float', 'transmission_dispersion'), ('float', 'transmission_extra_roughness'), ('float', 'subsurface'), ('float', 'subsurface_scale'), ('float', 'subsurface_anisotropy'), ('float3', 'subsurface_color'), ('float', '_pad0'), ('float3', 'subsurface_radius'), ('float', 'sheen'), ('float3', 'sheen_color'), ('float', 'sheen_roughness'), ('float', 'coat'), ('float', 'coat_roughness'), ('float', 'coat_anisotropy'), ('float', 'coat_rotation'), ('float', 'coat_IOR'), ('float', 'coat_affect_color'), ('float', 'coat_affect_roughness'), ('float', '_pad1'), ('float3', 'coat_color'), ('float', 'thin_film_thickness'), ('float', 'thin_film_IOR'), ('float', 'emission'), ('float3', 'emission_color'), ('float', '_pad2'), ('float3', 'opacity'), ('uint', 'thin_walled'), ('float', '_pad3'), ('float', '_pad4')],
+    ("WavefrontPathState", ()): [('float3', 'rayOrigin'), ('float3', 'rayDir'), ('float3', 'throughput'), ('float3', 'radiance'), ('uint', 'pixelIndex'), ('uint', 'rngState'), ('uint', 'depth'), ('uint', 'flags'), ('float', 'bsdfPdf')],
+    ("WavefrontPathState", ('spectral',)): [('float3', 'rayOrigin'), ('float3', 'rayDir'), ('float4', 'throughput'), ('float4', 'radiance'), ('uint', 'pixelIndex'), ('uint', 'rngState'), ('uint', 'depth'), ('uint', 'flags'), ('float', 'bsdfPdf'), ('SampledWavelengths', 'sw')],
+    ("RecVertex", ()): [('float3', 'pos'), ('float3', 'normal'), ('float3', 'wo'), ('float3', 'wiLocal'), ('float3', 'L_k'), ('float3', 'beta_in'), ('uint', 'depth')],
+    ("VisiblePoint", ()): [('float3', 'pos'), ('float3', 'ns'), ('float3', 'wo'), ('float3', 'beta'), ('float3', 'ld'), ('float3', 'albedo'), ('float3', 'F0'), ('float3', 'coatColor'), ('float', 'roughness'), ('float', 'metallic'), ('float', 'specular'), ('float', 'ior'), ('float', 'opacity'), ('float', 'coat'), ('float', 'coatRoughness'), ('float', 'coatIOR'), ('float3', 'transmissionColor'), ('float3', 'specularColor'), ('float', 'diffuseRoughness'), ('float3', 'tau'), ('uint', 'flags'), ('float', 'radius'), ('float', 'n')],
+    ("VisiblePoint", ('spectral',)): [('float3', 'pos'), ('float3', 'ns'), ('float3', 'wo'), ('float4', 'beta'), ('float4', 'ld'), ('float3', 'albedo'), ('float3', 'F0'), ('float3', 'coatColor'), ('float', 'roughness'), ('float', 'metallic'), ('float', 'specular'), ('float', 'ior'), ('float', 'opacity'), ('float', 'coat'), ('float', 'coatRoughness'), ('float', 'coatIOR'), ('float3', 'transmissionColor'), ('float3', 'specularColor'), ('float', 'diffuseRoughness'), ('uint', 'conductorMetalId'), ('float3', 'tau'), ('uint', 'flags'), ('float', 'radius'), ('float', 'n')],
+    ("SppmAccum", ()): [('uint', 'phiR'), ('uint', 'phiG'), ('uint', 'phiB'), ('uint', 'm')],
+    ("SppmAccum", ('spectral',)): [('uint', 'phiR'), ('uint', 'phiG'), ('uint', 'phiB'), ('uint', 'phiW'), ('uint', 'm')],
+    ("BDPTVertex", ()): [('uint', 'kind'), ('float3', 'position'), ('float3', 'N'), ('float3', 'throughput'), ('float3', 'emission'), ('float', 'pdfFwd'), ('float', 'pdfRev'), ('bool', 'isDelta'), ('bool', 'onLight'), ('uint', 'matId'), ('float2', 'uv'), ('float3', 'posObject'), ('float3', 'geoN'), ('float3', 'tangent'), ('bool', 'hasTangent')],
+    ("BDPTVertex", ('spectral',)): [('uint', 'kind'), ('float3', 'position'), ('float3', 'N'), ('float4', 'throughput'), ('float4', 'emission'), ('float', 'pdfFwd'), ('float', 'pdfRev'), ('bool', 'isDelta'), ('bool', 'onLight'), ('uint', 'matId'), ('float2', 'uv'), ('float3', 'posObject'), ('float3', 'geoN'), ('float3', 'tangent'), ('bool', 'hasTangent')],
+    ("WfBdptAux", ()): [('int', 'eyeLen'), ('int', 'lightLen'), ('uint', 'rngState'), ('float', 'lensWeight'), ('uint', 'pixel'), ('float3', 'escaped'), ('float3', 'radiance'), ('float3', 'ewRayO'), ('float3', 'ewRayD'), ('float3', 'ewThroughput'), ('float', 'ewPdfFwdOmega'), ('float', 'ewMisBsdfPdf'), ('uint', 'ewFlags')],
+    ("WfBdptAux", ('spectral',)): [('int', 'eyeLen'), ('int', 'lightLen'), ('uint', 'rngState'), ('float', 'lensWeight'), ('uint', 'pixel'), ('float4', 'escaped'), ('float4', 'radiance'), ('float3', 'ewRayO'), ('float3', 'ewRayD'), ('float4', 'ewThroughput'), ('float', 'ewPdfFwdOmega'), ('float', 'ewMisBsdfPdf'), ('uint', 'ewFlags'), ('SampledWavelengths', 'sw')],
+    ("MltPrimarySample", ()): [('float', 'value'), ('float', 'valueBackup'), ('uint', 'lastMod'), ('uint', 'modBackup')],
+    ("MltChainMeta", ()): [('uint', 'rngState'), ('uint', 'currentIteration'), ('uint', 'lastLargeStepIteration'), ('uint', 'seedIndex'), ('float', 'cCurrent'), ('uint', 'nRecords'), ('uint', 'pad0'), ('uint', 'pad1')],
+    ("MltRecord", ()): [('uint', 'pixel'), ('float', 'r'), ('float', 'g'), ('float', 'b')],
+    ("Camera", ()): [('float4x4', 'viewInverse'), ('float4x4', 'projInverse'), ('float4x4', 'view'), ('float4x4', 'proj'), ('float3', 'position'), ('float', 'fov')],
+    ("SampledWavelengths", ()): [('float4', 'lambda'), ('float4', 'pdf')],
 }
 
 
-@pytest.mark.parametrize("key", list(_FIELD_ORDER_GOLDENS),
+@pytest.mark.parametrize("key", list(_DECLARED_FIELD_GOLDENS),
                          ids=lambda k: f"{k[0]}{'_spectral' if k[1] else ''}")
-def test_field_order_matches_golden(key):
-    """Catches a same-size field swap, which no stride pin can see."""
+def test_declared_fields_match_golden(key):
+    """Catches a same-size field swap AND a same-width retype."""
     struct, flags = key
-    layout = sl.scalar_layout(struct, spectral="spectral" in flags)
-    assert layout.entries == _FIELD_ORDER_GOLDENS[key]
+    fields = sl.struct_fields(struct, spectral="spectral" in flags)
+    assert fields == _DECLARED_FIELD_GOLDENS[key]
+
+
+def test_frame_constants_declared_fields_are_typed_locked():
+    """Same retype/reorder lock for FrameConstants, whose blob golden below
+    carries only (name, size)."""
+    base = sl.struct_fields("FrameConstants", metal=True)
+    mlt = sl.struct_fields("FrameConstants", metal=True, mlt=True)
+    assert base[:8] == [
+        ("Camera", "camera"), ("uint", "frameIndex"), ("uint", "accumFrame"),
+        ("float", "time"), ("uint", "width"), ("uint", "height"),
+        ("uint", "numDistantLights"), ("uint", "useMesh"),
+    ]
+    assert base[-5:] == [
+        ("float", "sppmGroupPmfE"), ("float", "sppmGroupPmfS"),
+        ("float", "sppmGroupPmfD"), ("float", "sppmGroupPmfEnv"),
+        ("uint", "tileOriginY"),
+    ]
+    assert mlt[-9:] == [
+        ("uint", "tileOriginY"), ("float", "mltSigma"),
+        ("float", "mltLargeStepProb"), ("float", "mltB"),
+        ("float", "mltMppActual"), ("uint", "mltNumChains"),
+        ("uint", "mltChainBase"), ("uint", "mltMaxDepth"), ("uint", "mltSeed"),
+    ]
 
 
 @pytest.mark.parametrize("struct,kwargs,golden", _SCALAR_GOLDENS)
@@ -326,18 +273,19 @@ def test_unknown_field_type_raises():
         sl.parse_struct_fields(src, "Weird")
 
 
-def test_attributed_field_is_parsed_not_dropped():
-    """An attributed declaration is still a field. Skipping it would silently
-    drop the field AND shift every offset after it (codex pre-merge finding)."""
+def test_attributed_field_declaration_raises():
+    """An attributed field is neither dropped nor silently un-attributed
+    (codex pre-merge findings). Skipping it would lose a field and shift every
+    offset after it; honouring declaration order while erasing e.g.
+    `[[vk::offset(16)]]` would emit a confidently WRONG offset. So: raise."""
     src = "struct Weird {\n float3 a;\n [[vk::offset(16)]] float b;\n};"
-    assert sl.parse_struct_fields(src, "Weird") == [("float3", "a"),
-                                                    ("float", "b")]
-    # …and an attributed field of an unknown type still raises.
-    bad = "struct Weird {\n [[vk::offset(0)]] quaternion q;\n};"
-    with pytest.raises(SlangLayoutError, match="unknown field type"):
-        sl.parse_struct_fields(bad, "Weird")
-    # A line that is only an attribute (e.g. `[mutating]` above a method) is
-    # skipped, not misread as a field.
+    with pytest.raises(SlangLayoutError, match="attributed field declaration"):
+        sl.parse_struct_fields(src, "Weird")
+
+
+def test_attribute_only_line_is_skipped():
+    """A line that is just an attribute (e.g. `[mutating]` above a method) is
+    not a field and must not be misread as one."""
     attr_only = "struct Weird {\n [mutating]\n float a;\n};"
     assert sl.parse_struct_fields(attr_only, "Weird") == [("float", "a")]
 

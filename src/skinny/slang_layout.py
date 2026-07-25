@@ -170,16 +170,26 @@ def parse_struct_fields(
                 f"{struct_name}: unsupported preprocessor directive {line!r}")
         if not all(gate_stack):
             continue
-        # Strip any leading attributes so an attributed field is still parsed as
-        # a field (never silently dropped); a line that is nothing but an
-        # attribute reduces to empty here.
+        # Strip any leading attributes. A line that is nothing but an attribute
+        # (e.g. `[mutating]` above a method) reduces to empty and is skipped;
+        # an attribute ON a field declaration is NOT skipped and NOT ignored —
+        # an attribute like `[[vk::offset(16)]]` changes where the field lands,
+        # and honouring the declaration order while erasing the attribute would
+        # emit a confidently wrong offset. Raise instead.
+        had_attr = False
         while True:
             stripped = _ATTR_PREFIX.sub("", line)
             if stripped == line:
                 break
-            line = stripped
+            line, had_attr = stripped, True
         if not line:
             continue
+        if had_attr and line.endswith(";") and "(" not in line:
+            raise SlangLayoutError(
+                f"{struct_name}: attributed field declaration {line!r} — the "
+                "attribute may change the field's offset and this module does "
+                "not interpret attributes; add explicit support before "
+                "mirroring this struct")
         if line.startswith(_SKIP_PREFIXES) or "(" in line:
             continue
         fm = re.fullmatch(

@@ -516,13 +516,15 @@ tile layout the path pass uses.
 ### FrameConstants tail
 
 Five fields are appended to `FrameConstants` (`common.slang`), packed by both
-`_pack_uniforms` and `_pack_uniforms_msl` via `_FC_SCALAR_FIELDS`, read only by
+`_pack_uniforms` and `_pack_uniforms_msl` via the derived `_FC_SCALAR_FIELDS`
+table (`slang_layout`, change `reflection-owned-byte-layouts`), read only by
 the SPPM kernels (`integratorType == 2`); +28 B, within the 768 B UBO (the
 import-time `_VK_UNIFORM_BUFFER_BYTES` assert self-guards). The scalar blob grows
 540 → 544 B; on Metal the new 4-byte float tips the reflected `fc` struct past its
-prior trailing padding, so the MSL `fc` size grows **592 → 640 B** (verified live
-under guarded Metal; `_pack_uniforms_msl` sizes from the reflection, so the Metal
-megakernel self-adapts — only the `_MSL_FC_BYTES` test pin is hand-tracked):
+prior trailing padding, so the MSL `fc` size grew **592 → 640 B** at the time of
+this change (it is **656 B** today, 688 B under the MLT tail — verified live
+under guarded Metal by `tests/test_metal_fc_layout.py`; `_pack_uniforms_msl`
+sizes from the reflection, so the Metal megakernel self-adapts):
 
 | Field | Type | Meaning |
 |---|---|---|
