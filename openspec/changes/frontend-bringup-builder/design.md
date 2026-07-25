@@ -57,7 +57,7 @@ inside `SkinnySession.initialize()`.
 | Persisted settings feed resolution (integrator, backend, encoding, …) | yes | yes | no | no |
 | Explicit `reject_sppm/mlt/mcp` re-checks (persisted-integrator cases) | yes | yes | no (CLI-keyed `validate_render_flags` suffices — no persistence) | no |
 | `select_backend(persisted=…)` | yes | yes | no | no |
-| Refusal `SystemExit` prefix | `skinny:` | `skinny-gui:` | `skinny-render:` | `skinny-web:` |
+| Backend-failure `SystemExit` prefix (the guards print a fixed `skinny:` on all four) | `skinny:` | `skinny-gui:` | `skinny-render:` | `skinny-web:` |
 | Flag-set knobs (`add_render_flags`) | full | `proposals=False` | `resolution=False, mcp=False` | `proposals=False, resolution=False, mcp=False` |
 | Context surface | GLFW window, in `main` | deferred to Qt render thread | `window=None` + `gpu_preference`, immediate | `window=None` + `gpu_preference`, deferred per session, background thread |
 | Post-construction persisted overrides on `Renderer` | yes (6 keys) | via `MainWindow`/render thread | no (explicit ctor args) | no (globals → ctor args) |

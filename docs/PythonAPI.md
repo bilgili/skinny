@@ -102,18 +102,21 @@ Reuse one GPU context for many renders (pipeline compiles once). Use as a
 context manager.
 
 ```python
-class HeadlessRenderer:                                                  # :125
+class HeadlessRenderer:                                                  # :128
     def __init__(self, width, height, *, gpu=None,
+                 plan=None,                    # a skinny.bringup.BringupPlan
+                 backend="vulkan",
                  execution_mode="megakernel", bdpt_walk="fused",
-                 proposals=None, reuse=None): ...                        # :136
-    def __enter__(self) -> "HeadlessRenderer": ...                       # :163
-    def __exit__(self, *exc) -> None: ...                               # :166
-    def cleanup(self) -> None: ...                                       # :169
-    def render_to_array(self, source, *, samples=64, time=None, **opts) -> np.ndarray   # :192
+                 proposals=None, reuse=None, lobe_samplers=None,
+                 encoding=None, spectral=False): ...                     # :139
+    def __enter__(self) -> "HeadlessRenderer": ...                       # :188
+    def __exit__(self, *exc) -> None: ...                               # :191
+    def cleanup(self) -> None: ...                                       # :194
+    def render_to_array(self, source, *, samples=64, time=None, **opts) -> np.ndarray   # :229
     def render_scene(self, source, output, *, samples=64, time=None,
-                     format=None, **opts) -> None                        # :205
+                     format=None, **opts) -> None                        # :245
     def render_animation(self, source, outdir, *, samples=64,
-                         frames=None, fps=None, ext="png", **opts) -> list # :221
+                         frames=None, fps=None, ext="png", **opts) -> list # :263
 ```
 
 | Method | Returns | Notes |
@@ -121,6 +124,13 @@ class HeadlessRenderer:                                                  # :125
 | `render_to_array` | `np.ndarray` `(H, W, 4)` uint8 RGBA8 (a `.copy()`) | tonemapped/sRGB display pixels |
 | `render_scene` | `None` | writes a file via `save_screenshot`; LDR `{png,jpeg,bmp}` or HDR `{exr,hdr}` |
 | `render_animation` | `list[Path]` | one file per timecode, `frame_{i:0Nd}.{ext}`; `fps` accepted but unused |
+
+`plan` is the `skinny-render` CLI's path: `main()` runs the shared bring-up
+guards (`skinny.bringup.plan_bringup`) and hands the resulting `BringupPlan`
+in, so the context and `Renderer` are built by `plan.create(...)`. Direct
+Python callers leave it `None` and pass the individual kwargs — those become a
+plan internally, so there is one construction path either way (see
+[Architecture.md § Front-end bring-up](Architecture.md#front-end-bring-up-bringuppy-change-frontend-bringup-builder)).
 
 ```python
 with sk.HeadlessRenderer(1024, 1024, execution_mode="wavefront") as r:

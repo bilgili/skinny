@@ -28,18 +28,8 @@ from PySide6.QtWidgets import (
 
 import numpy as np
 
-from skinny.cli_common import (
-    add_render_flags,
-    reject_mcp_unsupported,
-    reject_mlt_unsupported,
-    reject_spectral_unsupported,
-    reject_sppm_without_wavefront,
-    resolve_execution_mode,
-    resolve_mcp_roots,
-    resolve_walk,
-    startup_integrator_name,
-    validate_render_flags,
-)
+from skinny.bringup import BringupPlan, plan_bringup
+from skinny.cli_common import add_render_flags, resolve_mcp_roots
 from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
 from skinny.settings import (
     ensure_dirs,
@@ -52,7 +42,6 @@ from skinny.settings import (
 from skinny.ui.build_app_ui import AppCallbacks, build_main_ui
 from skinny.ui.qt.backend import QtTreeBuilder
 from skinny.ui.qt.viewport import RenderViewport
-from skinny.backend_select import select_backend
 from skinny.ui.qt.render_session import (
     QtRendererConfig,
     QtRendererProxy,
@@ -72,6 +61,7 @@ class MainWindow(QMainWindow):
         self, scene_path: Path | None, gpu_pref: str, use_usd_mtlx: bool,
         execution_mode: str = "megakernel", bdpt_walk: str = "fused",
         initial_integrator: str | None = None,
+        plan: BringupPlan | None = None,
         neural_handoff: str = "file", neural_trainer: str = "auto",
         train_precision: str = "fp32", online_training: bool = False,
         reuse: str | None = None,
@@ -148,8 +138,11 @@ class MainWindow(QMainWindow):
         placeholder.setFixedSize(0, 0)
         self.setCentralWidget(placeholder)
 
+        # The startup bring-up plan travels *alongside* QtRendererConfig (whose
+        # signatures stay Qt-owned) down to the render worker, which runs the
+        # deferred `create` step on the render thread.
         self.viewport = RenderViewport(
-            config, self.renderer, self._commands, parent=self)
+            config, self.renderer, self._commands, plan=plan, parent=self)
         render_dock = QDockWidget("Render", self)
         # objectName is required by QMainWindow.saveState/restoreState.
         render_dock.setObjectName("render")
@@ -672,54 +665,25 @@ def main() -> None:
     # the Proposals combobox owns proposal selection at runtime (and persists it).
     add_render_flags(parser, proposals=False)
     args = parser.parse_args()
-    # Reject impossible combos (e.g. bdpt + --online-training) up front.
-    validate_render_flags(args)
 
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s",
     )
 
-    # Resolve the GPU backend (precedence: --backend > SKINNY_BACKEND > persisted
-    # > auto). auto resolves to Metal on Apple Silicon, else Vulkan; an explicit,
-    # unavailable --backend metal errors clearly rather than crashing.
     saved_settings = load_settings()
 
-    # Execution mode 'auto' (the default) derives from the startup integrator —
-    # explicit --integrator, else the persisted integrator, else 'path'. An
-    # explicit --execution-mode / SKINNY_EXECUTION_MODE still wins. Fixed for the
-    # session. Resolve + guard this BEFORE select_backend (which probes the GPU):
-    # validate_render_flags (above) is keyed on the CLI --integrator and ran
-    # before the persisted integrator was known, so a persisted sppm under an
-    # explicitly-forced --execution-mode megakernel must be refused here, before
-    # the backend probe touches the GPU.
-    _startup_integrator = startup_integrator_name(
-        args.integrator, saved_settings.get("params", {}).get("integrator_index"))
-    args.execution_mode = resolve_execution_mode(args.execution_mode, _startup_integrator)
-    reject_sppm_without_wavefront(_startup_integrator, args.execution_mode)
-    reject_mlt_unsupported(
-        _startup_integrator, args.execution_mode,
-        spectral=bool(getattr(args, "spectral", False)),
-        proposals=getattr(args, "proposals", None),
-        reuse=getattr(args, "reuse", None),
-        online_training=bool(getattr(args, "online_training", False)))
-    reject_spectral_unsupported(
-        getattr(args, "spectral", False), _startup_integrator, args.execution_mode,
-        getattr(args, "proposals", None), getattr(args, "reuse", None))
-    reject_mcp_unsupported(bool(getattr(args, "mcp", False)))
-
-    try:
-        backend = select_backend(args.backend, persisted=saved_settings.get("backend"))
-    except RuntimeError as exc:
-        raise SystemExit(f"skinny-gui: {exc}")
-
-    # --encoding (axis-2 conditioner encoding, change renderer-conditioner-encoding):
-    # CLI/env wins; else restore the persisted value (a build dim, fixed for the
-    # session).
-    encoding_value = args.encoding
-    if "--encoding" not in sys.argv and not os.environ.get("SKINNY_ENCODING"):
-        saved_encoding = saved_settings.get("encoding")
-        if saved_encoding in ("E0", "E1", "E3"):
-            encoding_value = saved_encoding
+    # Shared bring-up (change frontend-bringup-builder): resolve the startup
+    # integrator, execution mode and backend, and run every refusal guard, in
+    # the one canonical order — every flag-level refusal happens before the
+    # backend probe touches the GPU. `skinny-gui` persists, so the settings dict
+    # is offered: the persisted integrator feeds startup-integrator resolution
+    # (a persisted sppm under an explicitly-forced --execution-mode megakernel
+    # is refused, which the CLI-keyed validate_render_flags alone cannot see),
+    # the persisted backend feeds selection, and the persisted --encoding
+    # (a build dim, fixed for the session) feeds the neural build config. Only
+    # the plan step runs here — the context and renderer are constructed later,
+    # on the Qt render thread, from this plan.
+    plan = plan_bringup(args, prog="skinny-gui", persisted=saved_settings)
 
     # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
     # else restore the persisted override. None leaves the renderer's built-in.
@@ -731,20 +695,21 @@ def main() -> None:
             sppm_glossy_roughness_value = float(saved_sgr)
 
     app = QApplication(sys.argv)
-    win = MainWindow(args.scene, args.gpu, args.usdMtlx, args.execution_mode,
-                     resolve_walk(args.bdpt_walk), args.integrator,
+    win = MainWindow(args.scene, args.gpu, args.usdMtlx, plan.execution_mode,
+                     plan.bdpt_walk, args.integrator,
+                     plan=plan,
                      neural_handoff=args.neural_handoff,
                      neural_trainer=args.neural_trainer,
                      train_precision=args.train_precision,
                      online_training=args.online_training,
                      reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers,
-                     backend=backend,
+                     backend=plan.backend,
                      requested_backend=args.backend,
-                     encoding=encoding_value,
+                     encoding=plan.encoding,
                      sppm_glossy_roughness=sppm_glossy_roughness_value,
                      width=args.width, height=args.height,
-                     spectral=getattr(args, "spectral", False),
+                     spectral=plan.spectral,
                      mcp=bool(getattr(args, "mcp", False)),
                      mcp_port=getattr(args, "mcp_port", 0),
                      mcp_roots=resolve_mcp_roots(args))

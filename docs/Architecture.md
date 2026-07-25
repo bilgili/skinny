@@ -893,7 +893,10 @@ Edits flow back through `MaterialLibrary` and trigger a graph rebuild
 with no window or event loop. Key symbols:
 
 - `HeadlessRenderer(w, h)` — context-manager that owns `VulkanContext` +
-  `Renderer`; pipeline compiles once, then `render_to_array(stage)` /
+  `Renderer` (built through the shared
+  [bring-up builder](#front-end-bring-up-bringuppy-change-frontend-bringup-builder)'s
+  `create` stage, so destroy-on-failure and the plan-carried build dims are the
+  same as every front-end's); pipeline compiles once, then `render_to_array(stage)` /
   `render_scene(stage, path)` / `render_animation(stage, outdir)` can be
   called repeatedly with a mutated `Usd.Stage` per frame.
 - Module-level `render_scene` / `render_to_array` / `render_animation` —
@@ -1109,6 +1112,101 @@ readback into a `QImage` via `RenderViewport`.
 
 ---
 
+## Front-end bring-up (`bringup.py`, change `frontend-bringup-builder`)
+
+Turning parsed render flags into a running renderer — resolve the startup
+integrator and execution mode, run every refusal guard, select the backend,
+build the context, build the `Renderer` — has **one owner**: `src/skinny/bringup.py`.
+All four front-ends (`skinny` → `app.py`, `skinny-gui` → `ui/qt/app.py`,
+`skinny-render` → `headless.py`, `skinny-web` → `web_app.py`) call it; a new
+refusal guard added to the sequence is effective on all four with no
+per-front-end edit. Front-ends keep only surface-specific wiring (GLFW window,
+Qt threading, web server/session lifecycle, MCP flag plumbing).
+
+**Two stages**, because two front-ends cannot construct the context where they
+resolve the flags:
+
+| Stage | Call | What it does |
+|---|---|---|
+| plan | `plan_bringup(args, prog, persisted=None)` | all resolution + all refusal guards → a frozen `BringupPlan` |
+| create | `plan.create(window=…, width=…, height=…, gpu_preference=…, **renderer_kwargs)` | `make_context` + `Renderer(...)`, destroy-on-failure. Runs later, on another thread, no guard re-run |
+
+**Canonical order** (`startup_integrator_name` → `resolve_execution_mode` →
+`validate_render_flags` → `reject_sppm_without_wavefront` →
+`reject_mlt_unsupported` → `reject_spectral_unsupported` →
+`reject_mcp_unsupported` → `resolve_walk` → encoding + neural build config →
+`select_backend`). `select_backend` is deliberately **last** — it is the only
+step that constructs a GPU device, so every way a launch can be refused is
+exhausted before one exists. That includes the two inputs argparse never
+validates: `--bdpt-walk` has no `choices=` at all (it accepts a deprecated
+alias), and an argparse *default* is never checked against `choices=`, so
+`SKINNY_BDPT_WALK` / `SKINNY_ENCODING` both reach the plan unchecked and are
+rejected here rather than after a device probe.
+
+Refusal prefixes are asymmetric, deliberately: only the backend-selection
+failure is wrapped as `SystemExit(f"{prog}: …")`. The `cli_common` guards print
+their own fixed `skinny:` prefix on every front-end (the MCP guard prints none),
+exactly as they did when each front-end called them directly — repointing them
+would change user-visible output on three front-ends.
+
+The resolve-before-validate order matches the
+`resolve_execution_mode` docstring and the `render-cli` requirement that
+"validation SHALL run after the execution mode is resolved" — which the two
+interactive front-ends previously violated, validating *before* resolving and
+compensating with explicit `reject_*` re-checks. That old order was only
+refusal-equivalent by accident: it fed the unresolved string `"auto"` into
+guards, and `cli_common._envelope_mode` maps `"auto"` to `"wavefront"`, so the
+pre-resolution megakernel check was a silent no-op.
+`tests/test_bringup.py` transcribes **both** pre-refactor orders and diffs the
+canonical one against them across the whole guard matrix (integrator ×
+execution mode × spectral × proposals × reuse × online-training ×
+persisted-vs-CLI × backend), plus verbatim refusal-message pins.
+
+**The plan/pass-through split.** `BringupPlan` carries only the guard-vetted
+fields that are the same everywhere — `backend`, `execution_mode`,
+`startup_integrator`, `spectral`, `bdpt_walk`, `encoding`, `neural_config` —
+and `create` hands those to `Renderer` itself. Front-end-specific constructor
+inputs (`usd_scene_path`, `use_usd_mtlx_plugin`, shader/hdr/tattoo dirs,
+`neural_handoff` / `neural_trainer` / `train_precision`) are forwarded verbatim
+as `**renderer_kwargs`. Post-construction renderer state stays at the call
+sites: `skinny`'s persisted overrides, the web session's and Qt's
+integrator/reuse indices and lobe samplers, `headless`'s proposal preset.
+
+**Persistence is the caller's one knob** (`persisted=`), mirroring which
+front-ends persist today. `skinny` / `skinny-gui` pass the settings dict — the
+persisted integrator feeds startup-integrator resolution (so a persisted `sppm`
+under an explicitly-forced `--execution-mode megakernel` is refused, which the
+CLI-keyed `validate_render_flags` alone cannot see), the persisted backend feeds
+`select_backend`, and the persisted `--encoding` feeds the neural build config.
+`skinny-render` / `skinny-web` pass nothing, so resolution stays flags +
+environment + `auto` only. The flag > env > persisted > auto precedence itself
+is unchanged — it lives inside `select_backend` / `resolve_execution_mode`;
+this module only decides *whether* the persisted value is offered.
+
+**Where `create` runs per front-end:**
+
+| Front-end | plan at | create at |
+|---|---|---|
+| `skinny` | `app.py` `main()`, after `load_settings()` | `main()`, after the GLFW window exists |
+| `skinny-gui` | `ui/qt/app.py` `main()`, before `QApplication` | `ui/qt/viewport.py` `_RenderWorker._build_renderer`, on the render thread |
+| `skinny-render` | `headless.py` `main()` | `HeadlessRenderer.__init__` |
+| `skinny-web` | `web_app.py` `main()` (stored as `_PLAN`) | `SkinnySession.initialize()`, per session, on its background thread |
+
+The Qt plan travels *alongside* `QtRendererConfig` (`MainWindow(plan=…)` →
+`RenderViewport(plan=…)` → `_RenderWorker(plan)`) — `render_session.py`
+signatures are untouched, and the other front-ends are never routed through
+Qt's config object. `HeadlessRenderer` and `_build_renderer` accept
+`plan=None` for direct API use (tests, the parity harness, an embedded Qt
+surface): their already-resolved kwargs become a plan directly, so there is
+still exactly one construction path.
+
+Only the guard *sequence* moved. `cli_common.py` (the guards) and
+`backend_select.py` (backend resolution + context construction) are unchanged —
+the builder composes them, and their own hostless tests stay authoritative for
+the pieces.
+
+---
+
 ## Backend selection
 
 The active GPU backend is resolved once per session by a single shared resolver
@@ -1130,10 +1228,15 @@ in `backend_select.py`, used by every front-end:
   `backend_name`/`is_metal` predicate, and the capability flags). `gpu_info`
   carries `.name`, `.is_discrete`, and `.preferred_h264_encoder` on both
   backends, so the front-ends' status line and the video encoder stay
-  backend-agnostic. The four
-  front-ends (`app.py`, `headless.py`, `ui/qt/app.py`, `web_app.py`) call
-  `make_context` instead of constructing a context directly; `app.py` and
-  `skinny-gui` persist/restore the selected backend like the other render flags.
+  backend-agnostic. No front-end constructs a context directly, and since change
+  `frontend-bringup-builder` none of them calls `make_context` directly either:
+  it is reached through
+  [`BringupPlan.create`](#front-end-bring-up-bringuppy-change-frontend-bringup-builder).
+  `select_backend` is called from the sibling `plan_bringup` step, which is
+  where its `RuntimeError` becomes a `{prog}:`-prefixed `SystemExit`.
+  `app.py` and `skinny-gui` persist/restore the
+  selected backend like the other render flags — they are the two front-ends
+  that hand their settings dict to `plan_bringup(persisted=…)`.
 
 The renderer builds its GPU resources through whichever sibling module matches
 the context, resolved once by `resource_module(ctx)` (keyed on `ctx.is_metal`):
