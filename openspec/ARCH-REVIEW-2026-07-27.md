@@ -1,88 +1,84 @@
 # Architecture review — 2026-07-27
 
-Ten deepening proposals, each adversarially design-reviewed against the tree at
-`8247148`. Proposals are **as originally written**; each change directory
-carries a `review.md` with the objections. Fold before implementing.
+Ten deepening proposals from a second architecture pass (deep-module lens) over
+the surface the 2026-07-23 round left behind. That round produced 8 changes, 7
+of which have landed; these are what those left.
 
-The earlier round (`arch-deepening-proposals`, 2026-07-23) produced 8 changes,
-7 of which have landed. These are what those left behind.
+Proposal-only. Nothing implemented. All pass `openspec validate --strict`.
 
-## Cross-change findings
+## The architectural view
 
-### `src/skinny/gfx/` is an abandoned backend abstraction
+Every candidate here makes the same move the previous round made: **a fact
+mirrored across N call sites gets one owner, derived from an authoritative
+source, with a hostless gate that fails on drift.**
 
-2,501 lines — `Device` / `Queue` / `CommandList` / `ComputePipeline` / `Buffer`
-ABCs, a `BackendCaps` capability record, a full Vulkan implementation
-(`gfx/vulkan/`, 1,159 lines), a `NotImplementedError` Metal stub. **Zero
-importers** in `src/` or `tests/`. It defines its own `select_backend`
-(`gfx/__init__.py:57`), colliding by name with `backend_select.select_backend`,
-and its stated premise is false (`gfx/__init__.py:9`: "default is Vulkan
-everywhere").
+Four of the ten extend capabilities the previous round created:
 
-This is `gpu-backend-adapter`'s undisclosed predecessor and evidence that
-"declare the interface first" has already stalled here once, at zero consumers.
-**Resolve it before that change starts.**
+| previous change | capability it created | extended by |
+|---|---|---|
+| `renderer-module-carveout` | `renderer-module-structure` | `renderer-gpu-resource-set`, `renderer-pure-core-extraction`, `frame-plan-split` |
+| `reflection-owned-byte-layouts` | `shader-byte-layouts` | `flat-material-field-table` |
+| `unified-render-envelope-predicate` | `render-envelope` | `choice-table-owners` defers to it |
 
-### Live bugs the reviews surfaced, independent of any refactor
+The other six mint new capabilities at seams that do not have an owner yet:
+the backend adapter, scene intake, session settings, the renderer command
+interface, and the UI node spec.
 
-| bug | evidence |
-|---|---|
-| Web: an `mtlx.*` slider mutates `mtlx_overrides` while the render thread iterates it → `RuntimeError: dictionary changed size during iteration`; `_render_loop` has no `try`, so the render thread dies and the stream freezes permanently | `params.py:247-249` vs `renderer.py:10541`; `web_app.py:149-181` |
-| Web: dome-light property edits are a silent no-op — Panel's copied dispatcher handles only `light_dir`/`light_sphere`, dropping `light_env` | `ui/panel/windows.py:434` vs `scene_edit_actions.py:91-95` |
-| Web: `renderer.resize` runs from the IOLoop thread with no lock, destroying the offscreen image / readback / accum while the render thread may be inside `render_headless()` — `resize_render_target` is never set on the web `AppCallbacks` | `build_app_ui.py:279-281`, `web_app.py:534-546` |
-| Qt: Animation transport (Play / Time / FPS) is already dead — those setters write through `renderer.clock`, and the proxy's `clock` is a local mirror, so nothing posts | `build_app_ui.py:196-207`, `render_session.py:290` |
-| Settings: two front-ends erase five of each other's keys on exit; a top-level merge would still lose the `params` and `last_dirs` sub-dict entries | `settings.py:60-65`, `params.py:304-306`, `settings.py:70-83` |
-| Headless screenshots composite the **previous** frame's HUD — `render_headless` never calls `_build_hud_bytes` and copies stale staging | `renderer.py:10876` vs `:10609` |
-| Qt debug dock: `Key_D` → `show_dof_planes` missing; GLFW has the identical WASD conflict and binds it anyway | `debug_viewport.py:2333` vs `qt/windows/debug_viewport.py:344-347` |
-| `render_headless`'s binding-1 rewrite is vestigial; two comments describe behaviour that does not exist | `renderer.py:10833-10846`, `:10830-10832`, `:4307-4309` |
-| `vk_wavefront.py:597 REC_VERTEX_STRIDE = 76` is a hand-typed copy of a shader-derived value | `wavefront_layout.py:107` |
-| `prepare_usd_streaming` has zero call sites but is published in the Python API docs | `usd_loader.py:2853`, `docs/PythonAPI.md:541` |
-| `backend_select.py:16-19` docstring still says `auto` resolves to Vulkan everywhere, contradicting its own `select_backend` docstring and CLAUDE.md | — |
+## The ten changes
 
-### Two structural lessons
+| change | capability | strength |
+|---|---|---|
+| `renderer-gpu-resource-set` | `renderer-module-structure` (ADD) | **Strong** |
+| `gpu-backend-adapter` | `gpu-backend-adapter` (NEW) + `metal-backend` (MOD) | **Strong** |
+| `scene-intake-interface` | `scene-intake` (NEW) | **Strong** |
+| `flat-material-field-table` | `shader-byte-layouts` (ADD) | **Strong** |
+| `session-settings-owner` | `session-settings` (NEW) | **Strong** — live data loss |
+| `renderer-command-interface` | `renderer-command-interface` (NEW) + `qt-render-threading` (MOD) | **Strong** — unsynchronised writes |
+| `renderer-pure-core-extraction` | `renderer-module-structure` (ADD) | **Strong** |
+| `frame-plan-split` | `renderer-module-structure` (ADD) | Worth exploring |
+| `ui-spec-scene-properties` | `usd-scene-editing-ui` (MOD) | Worth exploring |
+| `choice-table-owners` | `choice-table-ownership` (NEW) | Worth exploring |
 
-**Derived beats captured.** `flat-material-field-table` proposed pinning lane
-assignment from the current packer; the lanes are already declared in 24
-`property` accessors in `common.slang:110-141`, which `slang_layout.py:105`
-deliberately discards. Pinning one side from the other makes the gate vacuous.
+## Where the mass sits
 
-**Check for the cheap version first.** `renderer-pure-core-extraction` proposed
-moving 1,330 lines to escape a module-scope `import vulkan`; a lazy proxy plus
-moving one import into `TYPE_CHECKING` achieves more, in ~2 lines, because it
-also unskips the tests that need the `Renderer` class itself.
+`renderer.py` is 11,604 lines — 17% of the Python host and 6× the next module.
+Every renderer-cluster candidate is a piece of it.
 
-## Execution order
+- **40** live `is_metal` branches in `renderer.py`, plus 15 Metal-only methods
+- **15** function-local imports of `usd_loader` privates, invisible in the
+  import graph
+- **273** byte-packing sites; 5 route through `slang_layout`
+- **1** module-scope `import vulkan` gating every hostless renderer test
+
+## Top recommendation
+
+**`renderer-gpu-resource-set`.** 1,342 lines with no external module importing
+them — the cluster in `renderer.py` where deepening has the least chance of
+breaking a caller. It pairs allocation with destruction (today 7,800 lines
+apart), absorbs 10 of the 40 backend branches, and gives `gpu-backend-adapter`
+its first honest consumer.
+
+Then `gpu-backend-adapter` — the interface the resource set reveals.
+
+`session-settings-owner` and `renderer-pure-core-extraction` are independent
+and small; land them whenever. `session-settings-owner` fixes live data loss,
+so prefer sooner.
+
+## Dependency order
 
 ```
-1  web-panel-dispatcher-fix     dome-light no-op, ~90 lines deleted   (from ui-spec review)
-2  session-settings-owner       folded in place, ready
-3  renderer-vk-lazy-import      ~2 lines                              (from pure-core review)
-4  renderer-command-interface   dict-crash + resize race + dead Qt clock
-5  gfx-disposition              revive or delete 2,501 dead lines
-6  renderer-gpu-resource-set    shrunk
-7  gpu-backend-adapter          split into 3-4; only after 5
-8  choice-table-owners          shrunk; must not collapse the meta-gates
-9  flat-material-field-table    rewrite on property-accessor derivation
-10 scene-intake-interface       reshape: 3 trigger fns over one _adopt
-–  frame-plan-split             fold into 7, or drop
+renderer-pure-core-extraction  →  flat-material-field-table
+renderer-gpu-resource-set      →  gpu-backend-adapter  →  frame-plan-split
+scene-intake-interface         →  frame-plan-split
+
+independent, any time:  session-settings-owner · renderer-command-interface
+                        ui-spec-scene-properties · choice-table-owners
 ```
 
-Items 1–4 are the payload: small, near-hostless, and each fixes a live bug.
-
-## Per-change verdicts
-
-| change | verdict |
-|---|---|
-| `session-settings-owner` | survives; scope halved; **findings folded in place** — its `review.md` records the delta |
-| `renderer-gpu-resource-set` | survives, shrinks. Not zero external callers — one test slices `renderer.py` source text using `def _build_metal_binds` as terminator |
-| `renderer-command-interface` | survives, re-anchor. Headline exhibit is dead code; the real races are worse. Cut headless-through-queue |
-| `scene-intake-interface` | survives, reshape. Five adoption paths, not three; one `SceneUpdate` needs ~12 trigger-conditioned fields |
-| `choice-table-owners` | survives, shrinks. 11 divergences not 6; consolidation would make three build gates tautological |
-| `flat-material-field-table` | premise wrong in three places — rewrite before scheduling |
-| `gpu-backend-adapter` | blocked on `gfx/`; split into 3-4; capability record largely already exists as `ctx.supports_*` |
-| `renderer-pure-core-extraction` | collapses to ~2 lines |
-| `frame-plan-split` | duplication is 27 lines, not the block; fold into `gpu-backend-adapter` stage 4 or drop |
-| `ui-spec-scene-properties` | drop as scoped — net **+100** lines, and its gate test cannot exist. Replaced by a ~90-line deletion |
+Three changes ADD to `renderer-module-structure` — archive them in the order
+`renderer-pure-core-extraction` → `renderer-gpu-resource-set` →
+`frame-plan-split`, or the deltas apply against the wrong base. This is the
+same hazard the spectral trio hit.
 
 ## Report
 
