@@ -9,6 +9,49 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A parameter edit could freeze a web session's video stream permanently**
+  (change `review-surfaced-defects`). The Panel sidebar wrote the live renderer
+  from the browser's thread, so an `mtlx.*` slider — which inserts its own key
+  plus its ganged siblings — made the render thread's accumulation-state hash
+  raise `RuntimeError: dictionary keys changed during iteration` while iterating
+  the same mapping. `_render_loop` had no guard, so the thread exited while the
+  session stayed marked running: the stream froze for good with nothing surfaced
+  to the browser. The web front-end now binds the shared control tree to a
+  marshalling proxy (writes become commands the render thread applies between
+  frames, coalesced per path), and the render loop reports a raising iteration
+  and continues — or, if it never recovers, stops visibly.
+- **Resolution changes on the web ran the renderer's resize from the Tornado
+  IOLoop thread** (change `review-surfaced-defects`), destroying and recreating
+  the offscreen image, readback buffer, accumulation image and HUD overlay while
+  the render thread could be inside them. The web front-end now supplies the
+  `resize_render_target` callback, routed to the session's own locked resize so
+  the resize → encoder rebuild → frame drain → WebSocket notify ordering is
+  preserved. A front-end that offers the control and omits the callback is now a
+  startup error instead of a silent unsynchronised call.
+- **The Qt animation transport did nothing** (change `review-surfaced-defects`).
+  Play / Time / FPS wrote through `renderer.clock`, and the GUI proxy holds its
+  own `PlaybackClock`, so every write landed in the mirror and posted nothing.
+  Transport writes now marshal to the render thread like any other renderer
+  mutation.
+- **Dome-light property edits were a silent no-op in `skinny-web`** (change
+  `review-surfaced-defects`). The Panel scene-graph panel reimplemented the
+  shared property dispatcher and its copy handled only `light_dir`/
+  `light_sphere`, so a `light_env` edit fell through every branch — and because
+  the copy returned nothing where the shared function returns a reason, the drop
+  was not reportable either. The copy is deleted; the panel calls
+  `apply_scene_property` and surfaces its reason in the status line.
+- **Screenshots and headless frames composited a stale HUD** (change
+  `review-surfaced-defects`). The HUD staging buffer was filled only on the
+  windowed Vulkan path but copied by the offscreen one too, so a screenshot
+  showed the previous frame's text; both Metal paths returned before the fill
+  entirely and only ever showed the zero mask written at init. Fill and copy now
+  happen in one place that every render path calls. Renders that set no HUD text
+  are byte-unchanged.
+- **Camera Debug `D` did not toggle the depth-of-field planes in `skinny-gui`**
+  (change `review-surfaced-defects`). The Qt dock returned early for every
+  movement key, so `D` reached the strafe channel but never the toggle table —
+  the GLFW viewport serves both from the same key. Now bound in both channels,
+  with auto-repeat filtered so holding `D` to strafe does not flip the toggle.
 - **Dome-light texture edit ignored on a textureless dome** (change
   `fix-added-dome-texture-authority`). Setting a `UsdLuxDomeLight`'s
   `texture:file` from the scene-graph panel did nothing when the dome had no
@@ -25,6 +68,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- **`usd_loader.prepare_usd_streaming`** (change `review-surfaced-defects`). It
+  had no call site in `src/`, `tests/` or `scripts/` and could not serve the
+  streaming path it was named for — that path calls `_read_usd_stage` directly
+  because it needs the stage this wrapper discarded. Removed from
+  `docs/PythonAPI.md` with it.
+- **The offscreen path's per-frame rewrite of descriptor binding 1** (change
+  `review-surfaced-defects`). Every write of that binding targets the same
+  offscreen image and the windowed path blits rather than rebinding, so the
+  rewrite was dead work; the two comments describing the windowed path as
+  rebinding are corrected.
 - **IBL and Direct Light sidebar controls.** The Qt and Panel/web sidebars no
   longer show the `IBL` (Environment, IBL intensity) or `Direct Light`
   (Direct light on/off, light color, light direction) sections —

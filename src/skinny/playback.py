@@ -70,3 +70,23 @@ class PlaybackClock:
     def set_normalized(self, t: float) -> None:
         """Set the current time code from a 0-1 normalized scrubber value."""
         self.current_time_code = self.start_time_code + t * self.range
+
+
+#: The transport writes a front-end may make to a clock. Named rather than
+#: performed inline so a proxy can post the same verb it applied locally --
+#: `setattr(renderer.clock, ...)` from a GUI thread is a renderer mutation that
+#: has to reach the owning thread (qt-render-threading), and a proxy holding its
+#: own `PlaybackClock` would otherwise absorb it silently.
+CLOCK_VERBS = ("playing", "normalized", "playback_fps")
+
+
+def apply_clock_verb(clock: PlaybackClock, verb: str, value) -> None:
+    """Apply one transport write to ``clock``."""
+    if verb == "playing":
+        clock.playing = bool(value)
+    elif verb == "normalized":
+        clock.set_normalized(float(value))
+    elif verb == "playback_fps":
+        clock.playback_fps = float(value)
+    else:
+        raise ValueError(f"unknown clock verb: {verb!r}")

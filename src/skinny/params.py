@@ -419,6 +419,27 @@ def _set_nested(obj, path, value):
     setattr(obj, parts[-1], value)
 
 
+def set_param_value(obj, path: str, value) -> None:
+    """Write one renderer parameter by path — the single seam every control uses.
+
+    Prefers the target's own ``set_path`` when it has one. A marshalling proxy
+    exposes that verb to route the write to the renderer's owning thread; the
+    live renderer does not, and is written directly.
+
+    Calling ``_set_nested`` on a proxy instead is a hole rather than a shortcut:
+    it resolves the intermediate objects itself, so an ``mtlx.*`` path reaches
+    through the proxy to the mapping behind it and inserts a key with no
+    marshalling at all — which is exactly what let a web slider raise
+    ``dictionary keys changed during iteration`` on the render thread, and what
+    made the same edit land in a Qt proxy's mirror and post nothing.
+    """
+    setter = getattr(obj, "set_path", None)
+    if callable(setter):
+        setter(path, value)
+    else:
+        _set_nested(obj, path, value)
+
+
 # preset_index intentionally stays out of the saved snapshot: the user's
 # custom preset list can change between sessions, so a stored index loses
 # meaning. The underlying param values restore themselves directly.

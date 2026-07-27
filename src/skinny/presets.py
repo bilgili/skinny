@@ -70,8 +70,17 @@ PRESETS: list[Preset] = [
 
 
 def apply_preset(renderer, preset: Preset) -> None:
-    from skinny.params import _SKIN_TO_MTLX, _set_nested
+    """Write every value in ``preset`` through the shared parameter seam.
+
+    `set_param_value`, not `_set_nested`: a preset is a bulk parameter write and
+    ``renderer`` may be a marshalling proxy, which `_set_nested` would resolve
+    straight through to the live object behind it — the `mtlx.*` entries here
+    are exactly the unsynchronised inserts that froze a web render thread. The
+    queue drains all pending commands before a frame, so a preset still lands
+    whole.
+    """
+    from skinny.params import _SKIN_TO_MTLX, set_param_value
 
     for path, value in preset.values.items():
         path = _SKIN_TO_MTLX.get(path, path)
-        _set_nested(renderer, path, value)
+        set_param_value(renderer, path, value)

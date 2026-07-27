@@ -28,7 +28,10 @@ from skinny.shader_variants import (
     slangc_flags,
 )
 from skinny.vk_compute import StorageBuffer
-from skinny.wavefront_layout import queue_buffer_sizes
+from skinny.wavefront_layout import (
+    REC_VERTEX_STRIDE as _REC_VERTEX_STRIDE,
+    queue_buffer_sizes,
+)
 
 
 def _slang_flags(shader_dir: Path, entry: str) -> tuple[str, ...]:
@@ -594,7 +597,9 @@ class WavefrontPathPass:
 
     HIT_STRIDE = 96  # ≥ sizeof(HitInfo) (≈92 B scalar) — headroom
     NEURAL_STRIDE = 32  # = sizeof(WfNeuralSample) (interfaces.slang): wi,pdf,version,valid,2×pad
-    REC_VERTEX_STRIDE = 76  # = sizeof(RecVertex) (wavefront/wf_records.slang): 6×float3 + uint
+    # Derived from the Slang declaration, never hand-typed
+    # (reflection-owned-byte-layouts): 76 B scalar, 6×float3 + uint.
+    REC_VERTEX_STRIDE = _REC_VERTEX_STRIDE
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,

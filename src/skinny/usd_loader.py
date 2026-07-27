@@ -2700,18 +2700,23 @@ def resolve_control_binding(renderer, spec: "ControlSpec"):
     return inert closures + a warning rather than raising, so a bad declaration
     leaves the widget present-but-dead instead of breaking the panel.
     """
-    from skinny.params import _get_nested, _set_nested
+    # `set_param_value`, not `_set_nested`: the renderer these bind to may be a
+    # marshalling proxy, and `_set_nested` resolves through it to the live object
+    # behind — an `mtlx.*` write would insert into the renderer's own mapping
+    # from the GUI thread (the web freeze) or into a proxy mirror that posts
+    # nothing (the Qt drop). See `params.set_param_value`.
+    from skinny.params import _get_nested, set_param_value
 
     kind, _, rest = spec.target.partition(":")
 
     if kind == "renderer":
         return (lambda: _get_nested(renderer, rest),
-                lambda v: _set_nested(renderer, rest, v))
+                lambda v: set_param_value(renderer, rest, v))
 
     if kind == "mtlx":
         path = "mtlx." + rest
         return (lambda: _get_nested(renderer, path),
-                lambda v: _set_nested(renderer, path, v))
+                lambda v: set_param_value(renderer, path, v))
 
     if kind == "material":
         mat_name, _, inp = rest.partition(":")
@@ -2848,24 +2853,6 @@ def load_scene_from_stage(
 
     scene.instances.extend(instances)
     return scene
-
-
-def prepare_usd_streaming(
-    stage_path: Path,
-    *,
-    time: Optional[Usd.TimeCode] = None,
-    use_usd_mtlx_plugin: bool = False,
-) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]]]:
-    """Read USD stage metadata (fast), return prim data for background baking.
-
-    The returned Scene has materials, lights, camera, and mm_per_unit
-    populated. Its instances list contains only emissive-light quads;
-    mesh instances should be baked in the background via `bake_usd_prim`.
-    """
-    scene, prim_data, _ = _read_usd_stage(
-        stage_path, time=time, use_usd_mtlx_plugin=use_usd_mtlx_plugin,
-    )
-    return scene, prim_data
 
 
 def summarize(scene: Scene) -> str:

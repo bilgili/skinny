@@ -5,7 +5,7 @@ visible control. Both the Qt desktop backend and the Panel web backend
 walk the same tree, so adding a control here adds it everywhere.
 
 Renderer-only state (params, presets, materials, environments) is bound
-via closures over `params._get_nested` / `_set_nested` and the renderer's
+via closures over `params._get_nested` / `set_param_value` and the renderer's
 own action API. Backend-specific actions (open child windows, save a
 screenshot to a path) come in through the `AppCallbacks` dataclass.
 """
@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Callable
 
 from skinny.params import (
-    ParamSpec, RESOLUTION_PRESETS, _get_nested, _set_nested,
-    build_all_params, is_fallback_light_param,
+    ParamSpec, RESOLUTION_PRESETS, _get_nested,
+    build_all_params, is_fallback_light_param, set_param_value,
 )
+from skinny.playback import apply_clock_verb
 from skinny.presets import apply_preset
 from skinny.ui.spec import Section, UIBuilder
 
@@ -145,7 +146,7 @@ def _add_param(ui: UIBuilder, renderer, p: ParamSpec) -> None:
         ui.slider(
             p.name,
             getter=lambda path=p.path: float(_get_nested(renderer, path)),
-            setter=lambda v, path=p.path: _set_param_value(renderer, path, float(v)),
+            setter=lambda v, path=p.path: set_param_value(renderer, path, float(v)),
             lo=p.lo, hi=p.hi, step=p.step,
         )
         return
@@ -157,13 +158,13 @@ def _add_param(ui: UIBuilder, renderer, p: ParamSpec) -> None:
 
     if p.path == "preset_index":
         def _set(idx: int, path: str = "preset_index") -> None:
-            _set_param_value(renderer, path, int(idx))
+            set_param_value(renderer, path, int(idx))
             presets = getattr(renderer, "presets", [])
             if 0 <= idx < len(presets):
                 apply_preset(renderer, presets[idx])
     else:
         def _set(idx: int, path: str = p.path) -> None:
-            _set_param_value(renderer, path, int(idx))
+            set_param_value(renderer, path, int(idx))
 
     ui.combo(
         p.name, getter=_get, setter=_set,
@@ -171,12 +172,20 @@ def _add_param(ui: UIBuilder, renderer, p: ParamSpec) -> None:
     )
 
 
-def _set_param_value(renderer, path: str, value) -> None:
-    setter = getattr(renderer, "set_path", None)
+def _set_clock_value(renderer, verb: str, value) -> None:
+    """Route one animation-transport write through the renderer's marshaller.
+
+    `setattr(renderer.clock, ...)` is a renderer mutation reached through a
+    sub-object, so it has to be posted like any other (qt-render-threading). A
+    proxy holding its own `PlaybackClock` absorbed these writes into the mirror
+    and posted nothing, which left the Qt transport dead while satisfying the
+    letter of "marshal writes of renderer state".
+    """
+    setter = getattr(renderer, "set_clock_state", None)
     if callable(setter):
-        setter(path, value)
+        setter(verb, value)
     else:
-        _set_nested(renderer, path, value)
+        apply_clock_verb(renderer.clock, verb, value)
 
 
 # ── Animation transport ────────────────────────────────────────────
@@ -193,18 +202,18 @@ def _add_animation_controls(ui: UIBuilder, renderer) -> None:
     ui.checkbox(
         "Play",
         getter=lambda: bool(renderer.clock.playing),
-        setter=lambda v: setattr(renderer.clock, "playing", bool(v)),
+        setter=lambda v: _set_clock_value(renderer, "playing", bool(v)),
     )
     ui.slider(
         "Time",
         getter=lambda: float(renderer.clock.normalized),
-        setter=lambda v: renderer.clock.set_normalized(float(v)),
+        setter=lambda v: _set_clock_value(renderer, "normalized", float(v)),
         lo=0.0, hi=1.0, step=0.001,
     )
     ui.int_spin(
         "FPS",
         getter=lambda: int(round(renderer.clock.playback_fps)),
-        setter=lambda v: setattr(renderer.clock, "playback_fps", float(v)),
+        setter=lambda v: _set_clock_value(renderer, "playback_fps", float(v)),
         lo=1, hi=240,
     )
 
@@ -275,11 +284,19 @@ def _add_scene_controls(ui: UIBuilder, renderer) -> None:
 
 
 def _add_resolution(ui: UIBuilder, renderer, resize_fn=None) -> None:
+    # No direct-renderer fallback: it silently turned a missing wire into an
+    # unsynchronised `renderer.resize` from the caller's thread, which destroys
+    # and recreates the offscreen image, readback buffer, accumulation image and
+    # HUD overlay while the render thread may be inside them. A front-end that
+    # offers the control supplies the callback (qt-render-threading).
+    if resize_fn is None:
+        raise ValueError(
+            "AppCallbacks.resize_render_target is required: the resolution "
+            "control must resize on the renderer's owning thread"
+        )
+
     def _apply(w: int, h: int) -> tuple[int, int]:
-        if resize_fn is not None:
-            return resize_fn(int(w), int(h))
-        renderer.resize(int(w), int(h))
-        return int(renderer.width), int(renderer.height)
+        return resize_fn(int(w), int(h))
 
     ui.resolution_picker(
         presets=RESOLUTION_PRESETS,

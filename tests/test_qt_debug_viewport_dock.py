@@ -61,3 +61,85 @@ def test_worker_renders_debug_frame_in_viewport_loop() -> None:
     assert "render_embedded" in src
     assert "self.debug_frame_ready.emit(" in src
     assert "_debug_viewport_active" in src
+
+
+# ── Camera Debug key map: reconciled or recorded ──────────────────────
+# usd-scene-editing-ui: interaction bindings for a control surface present in
+# more than one front-end are reconciled, or each divergence recorded with its
+# reason and asserted here.
+
+#: The GLFW `DebugViewport._on_key` chain, transcribed. Key name -> the state it
+#: toggles or the method it calls. Asserted against the source below, so a change
+#: to one of the two maps without the other fails.
+GLFW_DEBUG_KEYS = {
+    "C": "_toggle_cam_mode",
+    "F": "_reset_debug_camera",
+    "M": "show_mesh_wires",
+    "G": "show_grid",
+    "P": "show_focus_plane",
+    "I": "show_render_area",
+    "O": "ortho_mode",
+    "D": "show_dof_planes",
+    "T": "view_top",
+    "B": "view_back",
+    "L": "view_left",
+    "SPACE": "show_hud",
+    # Recorded divergence: the GLFW viewport owns an OS window it can close.
+    # The Qt surface is a QDockWidget closed by its own title bar / the View
+    # menu, so a key binding for it would duplicate a chrome affordance.
+    "ESCAPE": "close",
+}
+
+#: Movement keys, held rather than pressed. Identical on both front-ends.
+MOVEMENT = ("W", "A", "S", "D", "Q", "E")
+
+
+def _qt_key_name(key) -> str:
+    from PySide6.QtCore import Qt
+
+    return {getattr(Qt, f"Key_{n}"): n for n in
+            list("CFMGPIOTBLDWASQE") + ["Space"]}[key].upper()
+
+
+def test_qt_debug_dock_key_map_matches_the_glfw_viewport() -> None:
+    qt_map = {_qt_key_name(k): name for k, (_kind, name) in
+              dv.PRESS_ACTIONS.items()}
+    expected = {k: v for k, v in GLFW_DEBUG_KEYS.items() if k != "ESCAPE"}
+    assert qt_map == expected
+
+
+def test_glfw_debug_key_map_is_what_was_transcribed() -> None:
+    from skinny.debug_viewport import DebugViewport
+
+    src = inspect.getsource(DebugViewport._on_key)
+    for key, target in GLFW_DEBUG_KEYS.items():
+        assert f"glfw.KEY_{key}" in src, key
+        assert target in src, target
+
+
+def test_dof_plane_toggle_is_bound_in_both_channels() -> None:
+    """`D` is a movement key *and* the depth-of-field plane toggle on the GLFW
+    viewport; the Qt dock returned early for every movement key and dropped the
+    toggle (review-surfaced-defects defect 5)."""
+    from PySide6.QtCore import Qt
+
+    assert Qt.Key_D in dv.MOVEMENT_KEYS
+    assert dv.PRESS_ACTIONS[Qt.Key_D] == ("toggle", "show_dof_planes")
+
+    body = inspect.getsource(Dock.keyPressEvent)
+    # Movement keys stop early only when they carry no press action, and a held
+    # strafe must not flip the toggle via auto-repeat.
+    assert "key not in PRESS_ACTIONS or event.isAutoRepeat()" in body
+
+
+def test_movement_keys_agree_across_front_ends() -> None:
+    from skinny.debug_viewport import DebugViewport
+
+    assert tuple(_qt_key_name(k) for k in dv.MOVEMENT_KEYS) == MOVEMENT
+    # GLFW polls the held keys in `update`; Qt polls `_wasd` on a timer.
+    src = inspect.getsource(DebugViewport.update)
+    for name in MOVEMENT:
+        assert f"glfw.KEY_{name}" in src, name
+    qt_src = inspect.getsource(Dock._poll_wasd)
+    for name in MOVEMENT:
+        assert f"Qt.Key_{name if name != 'SPACE' else 'Space'}" in qt_src, name

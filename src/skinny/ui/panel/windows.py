@@ -24,6 +24,7 @@ from skinny.bxdf_math import eval_grid, render_lobe_image
 from skinny.mtlx_graph_view import (
     NodeGraphView, NodeView, build_view,
 )
+from skinny.ui.scene_edit_actions import apply_scene_property
 
 
 # ── Shared helpers ────────────────────────────────────────────────
@@ -194,7 +195,7 @@ def build_scene_graph_pane(
             props_col.append(pn.pane.Markdown("*(no properties)*"))
             return
         for prop in node.properties:
-            w = _build_scene_prop_widget(session, node, prop)
+            w = _build_scene_prop_widget(session, node, prop, report=_set_status)
             if w is not None:
                 props_col.append(w)
 
@@ -241,38 +242,32 @@ def build_scene_graph_pane(
 
 
 def _build_scene_prop_widget(
-    session, node, prop,
+    session, node, prop, report=None,
 ) -> pn.viewable.Viewable | None:
-    """Build one widget for a SceneGraphProperty edit. Routes through
-    ``Renderer.apply_*`` so accumulation resets fire.
+    """Build one widget for a SceneGraphProperty edit.
+
+    Every edit routes through the shared ``apply_scene_property`` dispatcher —
+    never a local copy of it. The copy this replaced handled only
+    ``light_dir``/``light_sphere``, so a dome-light (``light_env``) edit fell
+    through every branch into a silent no-op, and because it returned ``None``
+    where the shared function returns a reason string, the failure was not even
+    reportable. ``report(msg, kind)`` surfaces that reason in the status line.
     """
     renderer = session.renderer
-    ref = node.renderer_ref or _find_material_ancestor(renderer, node)
+
+    def _apply(p, value) -> None:
+        with session._lock:
+            reason = apply_scene_property(renderer, node, p, value)
+        if reason and report is not None:
+            report(f"{p.display_name}: {reason}", "warning")
 
     if prop.type_name == "bool" and prop.editable:
         w = pn.widgets.Checkbox(name=prop.display_name, value=bool(prop.value))
 
-        def on_bool(event, p=prop, n=node, r=ref):
+        def on_bool(event, p=prop):
             value = bool(event.new)
             p.value = value
-            with session._lock:
-                # A material logical-input bool carries fan-out uniforms and must
-                # reach the material-override path, not the node-enable toggle
-                # (finding A, mirroring scene_edit_actions' fan-out-first guard).
-                if _material_fanout(p) and r is not None and r.kind == "material":
-                    _apply_prop_value(renderer, r, p, value)
-                    return
-                toggle = p.metadata.get("toggle", "node")
-                if toggle == "subtree":
-                    renderer.apply_subtree_enabled(n.path, value)
-                else:
-                    rr = n.renderer_ref
-                    if rr is None:
-                        return
-                    if rr.kind == "renderer_camera":
-                        renderer.apply_camera_param(p.name, value)
-                    else:
-                        renderer.apply_node_enabled(n.path, value)
+            _apply(p, value)
 
         w.param.watch(on_bool, "value")
         return w
@@ -289,9 +284,8 @@ def _build_scene_prop_widget(
                 value=float(prop.value),
             )
 
-            def on_change(event, p=prop, r=ref, sl=w):
-                with session._lock:
-                    _apply_prop_value(renderer, r, p, float(event.new))
+            def on_change(event, p=prop, sl=w):
+                _apply(p, float(event.new))
                 if float(event.new) > sl.end:
                     sl.end = float(event.new)
 
@@ -303,9 +297,8 @@ def _build_scene_prop_widget(
             step=step, value=float(prop.value),
         )
 
-        def on_change_plain(event, p=prop, r=ref):
-            with session._lock:
-                _apply_prop_value(renderer, r, p, float(event.new))
+        def on_change_plain(event, p=prop):
+            _apply(p, float(event.new))
 
         w.param.watch(on_change_plain, "value")
         return w
@@ -320,13 +313,12 @@ def _build_scene_prop_widget(
         )
         cw = pn.widgets.ColorPicker(name=prop.display_name, value=hex_color)
 
-        def on_color(event, p=prop, r=ref):
+        def on_color(event, p=prop):
             h = event.new.lstrip("#")
             rf = int(h[0:2], 16) / 255.0
             gf = int(h[2:4], 16) / 255.0
             bf = int(h[4:6], 16) / 255.0
-            with session._lock:
-                _apply_prop_value(renderer, r, p, (rf, gf, bf))
+            _apply(p, (rf, gf, bf))
 
         cw.param.watch(on_color, "value")
         return cw
@@ -341,16 +333,10 @@ def _build_scene_prop_widget(
             for i, axis in enumerate("XYZ")
         ]
 
-        def on_vec3(_e, p=prop, r=ref, ws=spins):
-            vals = tuple(float(w.value) for w in ws)
-            with session._lock:
-                # A material logical-input vector fans out to gen uniforms and must
-                # reach the material-override path, not the TRS transform recompose
-                # (finding A, mirroring scene_edit_actions' fan-out-first guard).
-                if _material_fanout(p) and r is not None and r.kind == "material":
-                    _apply_prop_value(renderer, r, p, vals)
-                    return
-                _apply_vec3_value(renderer, r, node, p, vals)
+        def on_vec3(_e, p=prop, ws=spins):
+            # The shared dispatcher checks material fan-out first, so a logical
+            # input vector reaches the override path instead of the TRS recompose.
+            _apply(p, tuple(float(w.value) for w in ws))
 
         for w in spins:
             w.param.watch(on_vec3, "value")
@@ -362,11 +348,8 @@ def _build_scene_prop_widget(
             start=prop.metadata.get("min"), end=prop.metadata.get("max"),
         )
 
-        def on_int(event, p=prop, r=ref):
-            with session._lock:
-                # Fan-out-aware (finding A): a material descriptor int (e.g.
-                # `octaves`) reaches its gen uniforms via _apply_prop_value.
-                _apply_prop_value(renderer, r, p, int(event.new))
+        def on_int(event, p=prop):
+            _apply(p, int(event.new))
 
         w.param.watch(on_int, "value")
         return w
@@ -381,13 +364,8 @@ def _build_scene_prop_widget(
             for i, axis in enumerate("XY")
         ]
 
-        def on_vec2(_e, p=prop, r=ref, ws=spins):
-            vals = tuple(float(w.value) for w in ws)
-            with session._lock:
-                # vec2f only transports as a material fan-out (never a TRS
-                # component), so route straight through _apply_prop_value
-                # (finding A).
-                _apply_prop_value(renderer, r, p, vals)
+        def on_vec2(_e, p=prop, ws=spins):
+            _apply(p, tuple(float(w.value) for w in ws))
 
         for w in spins:
             w.param.watch(on_vec2, "value")
@@ -408,85 +386,6 @@ def _build_scene_prop_widget(
         f"{prop.value:.4f}" if isinstance(prop.value, float) else str(prop.value)
     )
     return pn.pane.Markdown(f"**{prop.display_name}**: {val_str}")
-
-
-def _material_fanout(prop) -> "list | None":
-    """The mapped gen-uniform names a material logical-input edit fans out to,
-    or None. A descriptor-backed material property (design D5) writes to these
-    uniforms, NOT its logical ``prop.name`` — for a graph preset the two differ,
-    so writing ``prop.name`` is a silent no-op (finding A)."""
-    meta = getattr(prop, "metadata", None)
-    fanout = meta.get("fanout") if meta else None
-    return list(fanout) if fanout else None
-
-
-def _apply_prop_value(renderer, ref, prop, value) -> None:
-    if ref is None:
-        return
-    if ref.kind == "material":
-        fanout = _material_fanout(prop)
-        if fanout:
-            renderer.apply_material_overrides(
-                ref.index, {uniform: value for uniform in fanout}
-            )
-        else:
-            renderer.apply_material_override(ref.index, prop.name, value)
-    elif ref.kind in ("light_dir", "light_sphere"):
-        light_type = "dir" if ref.kind == "light_dir" else "sphere"
-        renderer.apply_light_override(light_type, ref.index, prop.name, value)
-    elif ref.kind == "renderer_camera":
-        renderer.apply_camera_param(prop.name, value)
-
-
-def _apply_vec3_value(renderer, ref, node, prop, values) -> None:
-    if ref is not None and ref.kind == "renderer_camera":
-        axis_kind = prop.metadata.get("camera_axis", "")
-        if axis_kind == "target":
-            keys = ("target_x", "target_y", "target_z")
-        elif axis_kind == "position":
-            keys = ("position_x", "position_y", "position_z")
-        else:
-            return
-        for k, v in zip(keys, values):
-            renderer.apply_camera_param(k, v)
-        return
-    from skinny.ui.scene_edit_actions import SUPPORTED_LIGHT_TYPES
-    is_authored_light = node.type_name in SUPPORTED_LIGHT_TYPES
-    if ref is None and not is_authored_light:
-        return
-    if ref is not None and ref.kind != "instance" and not is_authored_light:
-        return
-    translate = scale = (0.0, 0.0, 0.0)
-    rotate = (0.0, 0.0, 0.0)
-    for p in node.properties:
-        if p.name == "translate":
-            translate = values if p is prop else p.value
-        elif p.name == "rotate":
-            rotate = values if p is prop else p.value
-        elif p.name == "scale":
-            scale = values if p is prop else p.value
-    # Author to the stage (edit layer) so the move persists and is captured by
-    # "Save edits"; fall back to the runtime path if no stage is loaded.
-    if getattr(renderer, "_usd_stage", None) is not None:
-        from skinny.ui.scene_edit_actions import trs_to_matrix
-        renderer.set_transform(node.path, trs_to_matrix(translate, rotate, scale))
-    else:
-        renderer.apply_instance_transform(node.path, translate, rotate, scale)
-
-
-def _find_material_ancestor(renderer, node):
-    from skinny.scene_graph import find_node_by_path
-    graph = renderer.scene_graph
-    if graph is None:
-        return None
-    parts = node.path.rstrip("/").split("/")
-    for i in range(len(parts) - 1, 0, -1):
-        parent_path = "/".join(parts[:i]) or "/"
-        parent = find_node_by_path(graph, parent_path)
-        if parent is not None and parent.renderer_ref is not None:
-            if parent.renderer_ref.kind == "material":
-                return parent.renderer_ref
-    return None
 
 
 # ── BXDF Visualizer ───────────────────────────────────────────────

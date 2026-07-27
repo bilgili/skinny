@@ -19,7 +19,7 @@ from threading import Lock
 from typing import Any
 
 from skinny.params import STATIC_PARAMS, _set_nested
-from skinny.playback import PlaybackClock
+from skinny.playback import PlaybackClock, apply_clock_verb
 from skinny.scene_graph import copy_scene_graph
 
 
@@ -356,6 +356,28 @@ class QtRendererProxy:
     def load_model_from_path(self, path: Path) -> None:
         self.post(lambda renderer, path=Path(path): renderer.load_model_from_path(path))
 
+    def set_clock_state(self, verb: str, value: Any) -> None:
+        """Apply one animation-transport write locally *and* on the owning thread.
+
+        The proxy holds its own `PlaybackClock` so the transport widgets have
+        something to read; writing only that mirror is a silent no-op, which is
+        what left Play / Time / FPS dead. Sub-object writes marshal like any
+        other renderer mutation (qt-render-threading).
+
+        Audit of the proxy's other locally-held renderer objects: `film` is
+        written through `set_path` (`film.iso`, `film.exposure_time`), which
+        already updates the mirror under `_suppress_posts` and then posts the
+        same `_set_nested` — marshalled. `scene_graph` and `camera` are
+        replaced wholesale by `apply_scene_state` from a worker snapshot and
+        never edited in place; their edits route through the `apply_*` verbs,
+        which post. The clock was the only unposted one.
+        """
+        apply_clock_verb(self.clock, verb, value)
+        self.post(
+            lambda r, verb=verb, value=value: apply_clock_verb(r.clock, verb, value),
+            coalesce_key=f"clock:{verb}",
+        )
+
     # ── Scene Graph dock surface ──────────────────────────────────────────
     # Reads come from a worker-built `SceneStateSnapshot`; mutations post to the
     # render worker. The four edits whose result the GUI uses (add/save/texture/
@@ -560,6 +582,72 @@ class QtRendererProxy:
             setattr(renderer, name, value)
 
         self.post(set_attr, coalesce_key=f"attr:{name}")
+
+
+class MarshalledRenderer:
+    """A read-through, write-posting view of a live renderer.
+
+    The other proxy shape. `QtRendererProxy` mirrors renderer state so a GUI can
+    read it without touching the renderer at all; this one keeps no state and
+    reads straight through, for a front-end whose widgets already poll the live
+    object (the Panel/web sidebar). What it guarantees is the write direction:
+    every write becomes a command the owning thread runs between frames.
+
+    Holding no mirror is what makes it safe against sub-object writes — there is
+    no local `clock` for a transport write to be absorbed into.
+
+    ``renderer_getter`` is called per access rather than the renderer being
+    captured, because a session builds its renderer asynchronously.
+    """
+
+    #: Renderer verbs this proxy marshals. Anything else matching ``apply_*`` is
+    #: REFUSED rather than passed through to the live object: passing it through
+    #: would run a renderer mutation on the caller's thread while reading as
+    #: "every write is a command". A new verb is one line here.
+    _MARSHALLED_VERBS = ("apply_material_override",)
+
+    def __init__(self, command_queue: "RenderCommandQueue", renderer_getter) -> None:
+        object.__setattr__(self, "_commands", command_queue)
+        object.__setattr__(self, "_get_renderer", renderer_getter)
+
+    def post(self, callback, *, coalesce_key: str | None = None) -> None:
+        self._commands.post(callback, coalesce_key=coalesce_key)
+
+    def request(self, callback) -> Future[Any]:
+        return self._commands.post_with_reply(callback)
+
+    def set_path(self, path: str, value: Any) -> None:
+        self.post(
+            lambda r, path=path, value=value: _set_nested(r, path, value),
+            coalesce_key=f"param:{path}",
+        )
+
+    def set_clock_state(self, verb: str, value: Any) -> None:
+        self.post(
+            lambda r, verb=verb, value=value: apply_clock_verb(r.clock, verb, value),
+            coalesce_key=f"clock:{verb}",
+        )
+
+    def apply_material_override(self, index: int, name: str, value: Any) -> None:
+        self.post(
+            lambda r, i=int(index), n=name, v=value: r.apply_material_override(i, n, v),
+            coalesce_key=f"material:{index}:{name}",
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("apply_") and name not in self._MARSHALLED_VERBS:
+            raise AttributeError(
+                f"{name!r} is a renderer mutation with no marshalled verb on "
+                f"{type(self).__name__}; add it to _MARSHALLED_VERBS rather than "
+                f"calling it on the live renderer from this thread"
+            )
+        return getattr(self._get_renderer(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self.post(
+            lambda r, name=name, value=value: setattr(r, name, value),
+            coalesce_key=f"attr:{name}",
+        )
 
 
 @dataclass(frozen=True)
