@@ -42,11 +42,20 @@ sidecar of `standard_surface` materials (referenced from the stage; the
 as exact / approx / skipped. See [PbrtImport.md](PbrtImport.md) for the full
 mapping and the parity matrix.
 
+`skinny.pbrt.materials.resolve_material(pbrt_material, *, emissive_rgb=None,
+textures=None, base_dir=None, flavor) -> ResolvedMaterial` is the single owner of
+pbrt-param interpretation (`flavor` is `materials.USD` or `materials.MTLX`). The
+returned `ResolvedMaterial` carries `lobes` (an **ordered** target-neutral map:
+`base_color`, `roughness` as a `ResolvedRoughness`, `metallic`, `ior`,
+`transmission`, `coat_*`, `subsurface*`, `emission_rgb`, the `subsurface_sigma_*`
+override keys), `status`, and `notes`.
+
 `skinny.pbrt.materials.map_material_mtlx(pbrt_material, *, emissive_rgb=None,
 textures=None, base_dir=None) -> (inputs, tex_inputs, status, notes)` is the
 sibling of `map_material` that targets Autodesk `standard_surface` input names
 (filling `transmission`/`coat`/`subsurface`/`specular_anisotropy`/`thin_walled`
-that UsdPreviewSurface drops). `skinny.pbrt.mtlx_emit.write_mtlx_document(...)` /
+that UsdPreviewSurface drops). Both are thin emit adapters over
+`resolve_material` and perform no `ParamSet` reads of their own. `skinny.pbrt.mtlx_emit.write_mtlx_document(...)` /
 `author_mtlx_reference(...)` author the `.mtlx` document and the stage reference
 the loader resolves.
 

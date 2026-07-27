@@ -41,7 +41,7 @@ dropped.
 | Graphics state | `state.py` | CTM stack, named materials/textures, area-light state, reverse-orientation, `ObjectInstance` instancing → IR |
 | Transforms | `transform.py` | column-vector 4×4; left→right-handed bridge |
 | Spectra → RGB | `spectra.py` | CIE (analytic) + blackbody + named metals |
-| Materials | `materials.py` | pbrt material → UsdPreviewSurface |
+| Materials | `materials.py` | pbrt material → one resolver → UsdPreviewSurface / `standard_surface` |
 | Lights | `lights.py` | pbrt light → UsdLux / emissive mesh |
 | Camera | `camera.py` | `perspective` fov-axis conversion; `realistic` lens |
 | Media/SSS | `media.py` | homogeneous + subsurface best-effort via `customData` |
@@ -58,6 +58,44 @@ to **world-space points with an identity transform**, which sidesteps USD xform
 handedness entirely; the camera and lights use authored xforms verified against
 the loader.
 
+### Material mapping: one resolver, two emit adapters
+
+pbrt materials are authored to two targets — UsdPreviewSurface (plain) and
+MaterialX `standard_surface` (`-mtlx`). The *interpretation* of pbrt params
+happens **once**, in `materials.resolve_material` (change
+`pbrt-material-shared-resolver`): which params each of the 11 material types
+reads, with what defaults, texture promotion through the pbrt-style promoting
+accessors, named-spectrum substitution, the roughness calibration chain below,
+and the subsurface coefficient precedence. It returns a target-agnostic
+`ResolvedMaterial` — an **ordered** map of neutral lobes (`base_color`,
+`roughness`, `metallic`, `ior`, `transmission`, `coat_*`, `subsurface*`,
+`emission_rgb`, …) plus the report `status` and `notes`.
+
+`map_material` and `map_material_mtlx` are thin adapters over it with unchanged
+signatures and `(inputs, tex_inputs, status, notes)` returns. They read no
+`ParamSet` at all — a hostless gate (`tests/pbrt/test_material_resolve.py`)
+fails the build if a param read reappears in one — and own only what the target
+vocabulary forces: input renaming, anisotropy reduction policy, transmission
+encoding (`opacity` gate vs `transmission`), emission encoding (`emissiveColor`
+vs unit `emission` weight + `emission_color`), `value_type` derivation, and
+dropping the lobes the target cannot express. **Lobe order is load-bearing**:
+each adapter seeds its base inputs then applies lobes in resolved order, which
+reproduces both targets' historical input ordering and hence their emitted bytes.
+
+So a new pbrt material param is wired exactly once. The gotcha it removes:
+previously every param had to be added to both mappers, and a miss diverged the
+two exports silently — which had already happened.
+
+The resolver takes a `flavor` (`usd`/`mtlx`), a deliberate wart. Reading a param
+has side effects — an unresolved texture appends a note and escalates
+EXACT→APPROX, and notes/statuses are import *output* — so the few reads that are
+one-sided or divergent between the two pipelines today are **frozen** behind that
+flag rather than unified, each with a named follow-up: `coatedconductor` base
+roughness spelling (`conductor.roughness` under mtlx, top-level `roughness` under
+usd), and the mtlx-only `transmittance`, subsurface `reflectance`/`radius`, and
+`interface.eta` on both coated types. Under `usd` those reads do not happen at
+all — no value, no note, no escalation.
+
 ### Roughness calibration (parity-critical)
 
 - pbrt v4: `alpha = sqrt(roughness)` when `remaproughness` (default), else
@@ -66,8 +104,10 @@ the loader.
   straight through).
 - therefore the emitted `usd_roughness = sqrt(alpha)`.
 
-Anisotropic `uroughness`/`vroughness` are reduced to an isotropic alpha
-(geometric mean) and flagged.
+Anisotropic `uroughness`/`vroughness` resolve **unreduced** (both GGX alphas, so
+neither target round-trips through a `sqrt`): UsdPreviewSurface then collapses
+them to the isotropic geometric mean and flags it, `standard_surface` keeps a
+mean `specular_roughness` + `specular_anisotropy`.
 
 ### Spectrum → RGB
 

@@ -1,4 +1,29 @@
-"""pbrt material -> UsdPreviewSurface mapping (design D4).
+"""pbrt material mapping: one resolver, two emit adapters.
+
+:func:`resolve_material` is the **single owner** of pbrt-param interpretation —
+which params each material type reads, with what defaults, texture promotion,
+named-spectrum substitution, the roughness calibration chain and the subsurface
+coefficient precedence. It returns a target-agnostic :class:`ResolvedMaterial`
+(ordered neutral lobes + status + notes). :func:`map_material`
+(UsdPreviewSurface) and :func:`map_material_mtlx` (MaterialX standard_surface)
+are thin adapters over it and read no ``ParamSet`` themselves, so a new pbrt
+param is wired exactly once. A hostless gate in
+``tests/pbrt/test_material_resolve.py`` fails the build if a param read
+reappears in an adapter.
+
+What stays in an adapter is only what the target's vocabulary forces: input
+renaming, anisotropy reduction policy, transmission encoding (``opacity`` gate
+vs ``transmission``), emission encoding (``emissiveColor`` vs unit ``emission``
+weight + ``emission_color``), ``value_type`` derivation, and *dropping* lobes
+the target cannot express. Lobe ORDER is load-bearing: each adapter seeds its
+base inputs then applies lobes in resolved order, which reproduces both targets'
+historical input ordering (and hence their emitted bytes).
+
+The ``flavor`` argument on the resolver is a deliberate wart: reading a param
+has side effects (an unresolved texture appends a note and escalates
+EXACT→APPROX, and notes/statuses are import output), so the handful of reads
+that are one-sided or divergent between the two pipelines today are gated
+rather than unified. Each gate names its follow-up.
 
 Roughness calibration chain (parity-critical):
 
@@ -8,8 +33,9 @@ Roughness calibration chain (parity-critical):
   straight through to the GGX perceptual roughness).
 * therefore ``usd_roughness = sqrt(alpha)``.
 
-Anisotropic ``uroughness``/``vroughness`` are reduced to an isotropic alpha via
-the geometric mean and flagged.
+Anisotropic ``uroughness``/``vroughness`` resolve **unreduced** (both alphas);
+UsdPreviewSurface collapses them to the isotropic geometric mean and flags it,
+standard_surface keeps a mean + ``specular_anisotropy``.
 """
 
 from __future__ import annotations
@@ -32,6 +58,15 @@ _TEXTURABLE = {
 # UsdPreviewSurface input -> connection value_type, derived from _TEXTURABLE so
 # the map stays the one source of truth (consumed by api._author_texture).
 _USD_INPUT_KIND = {usd_in: vt for usd_in, vt in _TEXTURABLE.values()}
+
+#: Authoring flavours the resolver is invoked with. The flavour exists only to
+#: freeze reads that are one-sided or divergent between the two pipelines today
+#: (see :func:`resolve_material`); a read is *not* performed under a flavour
+#: whose mapper does not perform it today, because the promoting accessors
+#: append notes and escalate EXACT→APPROX as a side effect of reading, and notes
+#: and statuses are import output.
+USD = "usd"
+MTLX = "mtlx"
 
 
 def resolve_texture(name: str, textures, base_dir=None, _depth: int = 0):
@@ -190,13 +225,44 @@ def alpha_to_usd_roughness(alpha: float) -> float:
     return math.sqrt(max(alpha, 0.0))
 
 
-def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None) -> ParamValue:
-    """Resolve roughness as a ParamValue (const usd_roughness, optional texture).
+@dataclass(frozen=True)
+class ResolvedRoughness:
+    """Roughness resolved to its *unreduced* form; the reduction is adapter policy.
 
-    A texture-bound ``roughness``/``uroughness``/``vroughness`` connects the
-    texture and uses a mid scalar fallback (the perceptual sqrt remap cannot be
-    applied to a USD texture connection without an extra node — flagged approx).
-    The all-constant path reproduces the prior isotropic/anisotropic chain.
+    Exactly one shape is populated:
+
+    * ``pv`` — the isotropic (or texture-bound) result, already calibrated
+      through ``pbrt_roughness_to_alpha`` → ``alpha_to_usd_roughness``;
+    * ``alpha_u``/``alpha_v`` — the two GGX alphas of an anisotropic
+      ``uroughness``/``vroughness`` pair, *before* any collapse, so each adapter
+      applies its own policy (UsdPreviewSurface collapses to the isotropic
+      geometric mean, standard_surface keeps a mean + ``specular_anisotropy``).
+      The alphas — not the perceptual roughnesses — are carried because the
+      UsdPreviewSurface collapse operates on alphas; round-tripping through
+      ``sqrt`` would perturb the last bits.
+    """
+
+    pv: ParamValue | None = None
+    alpha_u: float | None = None
+    alpha_v: float | None = None
+
+    @property
+    def is_aniso(self) -> bool:
+        return self.pv is None
+
+
+def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None,
+                       flavor: str) -> ResolvedRoughness:
+    """Resolve ``roughness``/``uroughness``/``vroughness`` for either target.
+
+    A texture-bound axis connects the texture and uses a mid scalar fallback
+    (the perceptual sqrt remap cannot be applied to a texture connection without
+    an extra node — flagged approx). The all-constant path yields either the
+    isotropic calibrated roughness or the unreduced alpha pair.
+
+    ``flavor`` only gates the anisotropy *note*: the UsdPreviewSurface target
+    loses the two axes in its collapse and says so, standard_surface represents
+    them faithfully and has nothing to report.
     """
     remap = params.bool("remaproughness", True)
     # resolve all three via the texture-safe accessor (never float() a texture name)
@@ -208,15 +274,38 @@ def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None
         notes.append(
             "roughness texture connected; perceptual remap not applied to texture (approx)"
         )
-        return ParamValue(0.5, tex)
+        return ResolvedRoughness(ParamValue(0.5, tex))
     if "uroughness" in params or "vroughness" in params:
-        au = pbrt_roughness_to_alpha(urough.const, remap)
-        av = pbrt_roughness_to_alpha(vrough.const, remap)
-        notes.append("anisotropic roughness reduced to isotropic (geometric mean)")
-        alpha = math.sqrt(max(au, 1e-8) * max(av, 1e-8))
-    else:
-        alpha = pbrt_roughness_to_alpha(rough.const, remap)
+        if flavor == USD:
+            notes.append("anisotropic roughness reduced to isotropic (geometric mean)")
+        return ResolvedRoughness(
+            alpha_u=pbrt_roughness_to_alpha(urough.const, remap),
+            alpha_v=pbrt_roughness_to_alpha(vrough.const, remap),
+        )
+    return ResolvedRoughness(
+        ParamValue(alpha_to_usd_roughness(pbrt_roughness_to_alpha(rough.const, remap)))
+    )
+
+
+def _usd_roughness(rr: ResolvedRoughness) -> ParamValue:
+    """UsdPreviewSurface reduction: anisotropic axes collapse to their geometric mean."""
+    if not rr.is_aniso:
+        return rr.pv
+    alpha = math.sqrt(max(rr.alpha_u, 1e-8) * max(rr.alpha_v, 1e-8))
     return ParamValue(alpha_to_usd_roughness(alpha))
+
+
+def _mtlx_roughness(rr: ResolvedRoughness) -> tuple[ParamValue, float]:
+    """standard_surface reduction: mean perceptual roughness + ``specular_anisotropy``.
+
+    ``specular_anisotropy`` in ``[0, 1)`` encodes the axis ratio (0 == isotropic).
+    """
+    if not rr.is_aniso:
+        return rr.pv, 0.0
+    ru = alpha_to_usd_roughness(rr.alpha_u)
+    rv = alpha_to_usd_roughness(rr.alpha_v)
+    hi, lo = max(ru, rv), min(ru, rv)
+    return ParamValue(0.5 * (ru + rv)), (0.0 if hi <= 1e-8 else (1.0 - lo / hi))
 
 
 def _conductor_basecolor(params, notes: list[str]):
@@ -292,45 +381,6 @@ def material_spectral_overrides(pbrt_material) -> dict:
 # its own change (see `pbrt-named-spectra` design, Non-Goals).
 
 
-def _resolve_roughness_mtlx(params, notes: list[str], *, textures=None, base_dir=None):
-    """Resolve roughness for a standard_surface target.
-
-    Returns ``(roughness_pv, anisotropy)``:
-
-    * ``roughness_pv`` is a :class:`ParamValue` carrying the constant
-      ``specular_roughness`` (and an optional texture connection), calibrated
-      through the *exact same* chain as :func:`map_material`
-      (``pbrt_roughness_to_alpha`` → ``alpha_to_usd_roughness``).
-    * ``anisotropy`` is a ``specular_anisotropy`` in ``(-1, 1)`` derived from
-      ``uroughness``/``vroughness``; ``0.0`` when isotropic.
-
-    Unlike the UsdPreviewSurface path this does **not** collapse anisotropic
-    roughness to the isotropic geometric mean — standard_surface has a dedicated
-    ``specular_anisotropy`` slot, so the two axes are represented faithfully.
-    """
-    remap = params.bool("remaproughness", True)
-    rough = get_float_texture(params, "roughness", 0.0, textures=textures, base_dir=base_dir, notes=notes)
-    urough = get_float_texture(params, "uroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
-    vrough = get_float_texture(params, "vroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
-    tex = rough.tex or urough.tex or vrough.tex
-    if tex is not None:
-        notes.append(
-            "roughness texture connected; perceptual remap not applied to texture (approx)"
-        )
-        return ParamValue(0.5, tex), 0.0
-    if "uroughness" in params or "vroughness" in params:
-        ru = alpha_to_usd_roughness(pbrt_roughness_to_alpha(urough.const, remap))
-        rv = alpha_to_usd_roughness(pbrt_roughness_to_alpha(vrough.const, remap))
-        # standard_surface: specular_roughness is the mean perceptual roughness,
-        # specular_anisotropy in [0,1) encodes the axis ratio (0 == isotropic).
-        spec_rough = 0.5 * (ru + rv)
-        hi, lo = max(ru, rv), min(ru, rv)
-        anisotropy = 0.0 if hi <= 1e-8 else (1.0 - lo / hi)
-        return ParamValue(spec_rough), anisotropy
-    alpha = pbrt_roughness_to_alpha(rough.const, remap)
-    return ParamValue(alpha_to_usd_roughness(alpha)), 0.0
-
-
 def _subsurface_overrides(p) -> dict:
     """Resolve pbrt `subsurface` inputs → medium-coefficient override keys
     (`subsurface_sigma_a/_s` mm⁻¹, `subsurface_g`, `subsurface_eta`) via the
@@ -372,17 +422,264 @@ def _subsurface_overrides(p) -> dict:
     }
 
 
+@dataclass
+class ResolvedMaterial:
+    """Target-agnostic result of interpreting a pbrt material's parameters.
+
+    ``lobes`` is an **ordered** mapping from a small target-neutral vocabulary
+    (``base_color``, ``roughness``, ``metallic``, ``ior``, ``transmission``,
+    ``coat_*``, ``subsurface*``, ``emission_rgb``, the ``subsurface_sigma_*``
+    override keys, …) to the resolved value: a :class:`ParamValue` for the
+    texture-connectable lobes, a :class:`ResolvedRoughness` for roughness, a
+    plain scalar/list otherwise. Order is load-bearing — each adapter seeds its
+    own base inputs and then applies the lobes in this order, which is what
+    reproduces both targets' historical input ordering (and hence their bytes).
+
+    ``notes`` are in read order (accessor notes interleaved with branch notes)
+    and ``status`` already carries the branch escalations plus the
+    unresolved-texture postlude.
+    """
+
+    lobes: dict
+    status: str
+    notes: list[str]
+
+
+def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None,
+                     flavor: str) -> ResolvedMaterial:
+    """Interpret a pbrt material's parameters — the single owner of that job.
+
+    Which params a material type reads, with what defaults, texture promotion,
+    named-spectrum substitution, the roughness calibration chain and the
+    subsurface coefficient precedence all live here; :func:`map_material` and
+    :func:`map_material_mtlx` are thin emit adapters over the result and read no
+    ``ParamSet`` themselves.
+
+    *flavor* (``USD`` / ``MTLX``) gates the handful of reads that are one-sided
+    or divergent between the two pipelines today. It is a wart, not a design
+    goal: reading a param has side effects (an unresolved texture appends a note
+    and escalates EXACT→APPROX), so resolving a param the UsdPreviewSurface path
+    never reads today would change its report output. Each gate is commented
+    with the follow-up that removes it.
+    """
+    from .report import APPROX, EXACT
+
+    notes: list[str] = []
+    lobes: dict = {}
+    status = EXACT
+    mtype = pbrt_material.type if pbrt_material else "diffuse"
+    # an emissive shape may carry no material; use an empty set so reads default
+    p = pbrt_material.params if pbrt_material else ParamSet()
+    mtlx = flavor == MTLX
+
+    def reflectance(default):
+        return get_spectrum_texture(
+            p, "reflectance", default, textures=textures, base_dir=base_dir, notes=notes
+        )
+
+    def roughness():
+        return _resolve_roughness(p, notes, textures=textures, base_dir=base_dir, flavor=flavor)
+
+    def scalar(name, default):
+        # Neither target has a texture input for these (ior / coat IOR / coat
+        # roughness); a texture binding degrades to the scalar default with a
+        # note worded for the target that drops it.
+        pv = get_float_texture(p, name, default, textures=textures, base_dir=base_dir, notes=notes)
+        if pv.is_tex:
+            target = "standard_surface input" if mtlx else "USD input"
+            notes.append(f"{name} texture not supported on {target}; used scalar default")
+        return pv.const
+
+    if mtype in ("", "none"):
+        lobes["base_color"] = ParamValue([0.5, 0.5, 0.5])
+    elif mtype == "interface":
+        # pbrt null/boundary material: no BSDF lobes at all, the shape exists
+        # only to bound a MediumInterface. Encode as a lobe-less flat material
+        # (zero base colour; the UsdPreviewSurface adapter leaves opacity at its
+        # fully-opaque default so the flat opacity=0 glass/refraction branch does
+        # NOT fire). api._author_material additionally sets the
+        # "volume_interface" skinnyOverrides marker so the renderer-side routing
+        # predicate does not have to sniff lobe values.
+        lobes["base_color"] = ParamValue([0.0, 0.0, 0.0])
+        lobes["metallic"] = 0.0
+        lobes["roughness"] = ResolvedRoughness(ParamValue(1.0))
+        notes.append("interface -> null boundary material (no BSDF lobes); routes to volume path")
+    elif mtype == "diffuse":
+        lobes["base_color"] = reflectance([0.5, 0.5, 0.5])
+        lobes["roughness"] = ResolvedRoughness(ParamValue(1.0))
+    elif mtype == "conductor":
+        lobes["metallic"] = 1.0
+        base = _conductor_basecolor(p, notes)
+        lobes["base_color"] = reflectance(base)
+        lobes["roughness"] = roughness()
+        # conductors carry a specular tint matching the base reflectance
+        lobes["specular_color"] = list(base)
+    elif mtype in ("dielectric", "thindielectric"):
+        lobes["base_color"] = ParamValue([1.0, 1.0, 1.0])
+        lobes["transmission"] = 1.0
+        lobes["transmission_color"] = [1.0, 1.0, 1.0]
+        lobes["ior"] = scalar("eta", 1.5)
+        lobes["roughness"] = roughness()
+        if mtype == "thindielectric":
+            lobes["thin_walled"] = True
+            status = APPROX
+            notes.append(
+                "thindielectric approximated as thin-walled transmissive surface" if mtlx
+                else "thindielectric approximated as thin dielectric"
+            )
+    elif mtype == "coateddiffuse":
+        lobes["base_color"] = reflectance([0.5, 0.5, 0.5])
+        lobes["roughness"] = ResolvedRoughness(ParamValue(1.0))
+        lobes["coat"] = 1.0
+        lobes["coat_color"] = [1.0, 1.0, 1.0]
+        if mtlx:
+            # FLAVOUR GATE (one-sided read; follow-up: wire interface.eta on the
+            # UsdPreviewSurface path too). UsdPreviewSurface has no coat IOR
+            # input, so today's map_material never reads `interface.eta` — and
+            # must keep not reading it, or a texture-bound one would add a note.
+            lobes["coat_ior"] = scalar("interface.eta", 1.5)
+        # pbrt `coateddiffuse` carries its interface (coat) roughness in the
+        # top-level `roughness` param. (The earlier `interface.roughness` lookup
+        # never matched, defaulting the coat roughness to 0 and diverging from
+        # the UsdPreviewSurface export.) Reuse the shared calibration chain.
+        lobes["coat_roughness"] = roughness()
+    elif mtype == "coatedconductor":
+        lobes["metallic"] = 1.0
+        base = _conductor_basecolor(p, notes)
+        lobes["base_color"] = reflectance(base)
+        lobes["specular_color"] = list(base)
+        if mtlx:
+            # FLAVOUR GATE (drift 1; follow-up: make the UsdPreviewSurface path
+            # read `conductor.roughness` too, with fixture regen). pbrt-v4 spells
+            # the base metal's roughness `conductor.roughness`; only the mtlx
+            # pipeline reads that spelling today, the USD one reads the
+            # top-level `roughness` (which drives the coat) instead.
+            rv = get_float_texture(p, "conductor.roughness", 0.0,
+                                   textures=textures, base_dir=base_dir, notes=notes)
+            if rv.is_tex:
+                lobes["roughness"] = ResolvedRoughness(ParamValue(0.5, rv.tex))
+                notes.append(
+                    "roughness texture connected; perceptual remap not applied to texture (approx)"
+                )
+            else:
+                remap = p.bool("remaproughness", True)
+                lobes["roughness"] = ResolvedRoughness(
+                    ParamValue(alpha_to_usd_roughness(pbrt_roughness_to_alpha(rv.const, remap)))
+                )
+        else:
+            lobes["roughness"] = roughness()
+        lobes["coat"] = 1.0
+        lobes["coat_color"] = [1.0, 1.0, 1.0]
+        if mtlx:
+            # FLAVOUR GATE (one-sided read; same follow-up as coateddiffuse).
+            lobes["coat_ior"] = scalar("interface.eta", 1.5)
+        lobes["coat_roughness"] = scalar("interface.roughness", 0.0)
+    elif mtype == "diffusetransmission":
+        lobes["base_color"] = reflectance([0.25, 0.25, 0.25])
+        lobes["transmission"] = 0.5
+        if mtlx:
+            # FLAVOUR GATE (one-sided read; follow-up: the UsdPreviewSurface path
+            # drops `transmittance` entirely — it has no transmission colour
+            # input — so it must not read it either).
+            lobes["transmission_color"] = get_spectrum_texture(
+                p, "transmittance", [0.25, 0.25, 0.25],
+                textures=textures, base_dir=base_dir, notes=notes,
+            ).const
+        status = APPROX
+        notes.append(
+            "diffusetransmission approximated as base + partial transmission" if mtlx
+            else "diffusetransmission approximated as diffuse + partial opacity"
+        )
+    elif mtype == "subsurface":
+        lobes["base_color"] = ParamValue([1.0, 1.0, 1.0])
+        lobes["subsurface"] = 1.0
+        lobes["ior"] = scalar("eta", 1.33)
+        if mtlx:
+            # FLAVOUR GATE (one-sided reads; follow-up: UsdPreviewSurface has no
+            # subsurface colour/radius inputs and reads neither today).
+            lobes["subsurface_color"] = get_spectrum_texture(
+                p, "reflectance", [1.0, 1.0, 1.0],
+                textures=textures, base_dir=base_dir, notes=notes,
+            ).const
+            lobes["subsurface_radius"] = list(p.rgb("radius", [1.0, 1.0, 1.0]))
+        # Stage-2 (pbrt-subsurface-volumetric): carry the volumetric medium
+        # coefficients (σ_a, σ_s, g, eta) via the pbrt precedence, so the renderer
+        # can shade a real interior random walk. The std_surface weight/color/radius
+        # above stay for the preview closure + back-compat; on the
+        # UsdPreviewSurface side the opacity=0 boundary remains the transitional
+        # fallback. Emitted identically by both adapters.
+        lobes.update(_subsurface_overrides(p))
+        status = APPROX
+        notes.append(
+            "subsurface -> standard_surface subsurface + volumetric medium coeffs (σ_a/σ_s/g)"
+            if mtlx else
+            "subsurface -> dielectric boundary + volumetric medium coeffs (σ_a/σ_s/g)"
+        )
+    else:
+        status = APPROX
+        notes.append(f"unknown material '{mtype}' best-effort as diffuse grey")
+
+    if emissive_rgb is not None:
+        lobes["emission_rgb"] = list(emissive_rgb)
+
+    # an unresolved/unsupported texture binding degrades to its scalar/rgb default
+    # (handled in the accessors) -> surface as APPROX.
+    if status == EXACT and any("unresolved/unsupported" in n for n in notes):
+        status = APPROX
+
+    return ResolvedMaterial(lobes, status, notes)
+
+
+#: neutral lobe -> UsdPreviewSurface input, for the lobes that are a plain
+#: rename. Lobes absent from this map and not special-cased in the adapter are
+#: dropped: UsdPreviewSurface is the subset target (no coat colour/IOR, no
+#: specular tint, no transmission colour, no subsurface colour/radius).
+_USD_LOBES = {
+    "base_color": "diffuseColor",
+    "metallic": "metallic",
+    "ior": "ior",
+    "coat": "clearcoat",
+    "subsurface_sigma_a": "subsurface_sigma_a",
+    "subsurface_sigma_s": "subsurface_sigma_s",
+    "subsurface_g": "subsurface_g",
+    "subsurface_eta": "subsurface_eta",
+}
+
+#: neutral lobe -> standard_surface input, likewise.
+_MTLX_LOBES = {
+    "base_color": "base_color",
+    "metallic": "metalness",
+    "ior": "specular_IOR",
+    "specular_color": "specular_color",
+    "transmission": "transmission",
+    "transmission_color": "transmission_color",
+    "thin_walled": "thin_walled",
+    "coat": "coat",
+    "coat_color": "coat_color",
+    "coat_ior": "coat_IOR",
+    "subsurface": "subsurface",
+    "subsurface_color": "subsurface_color",
+    "subsurface_radius": "subsurface_radius",
+    "subsurface_sigma_a": "subsurface_sigma_a",
+    "subsurface_sigma_s": "subsurface_sigma_s",
+    "subsurface_g": "subsurface_g",
+    "subsurface_eta": "subsurface_eta",
+}
+
+
 def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None):
     """Map a pbrt material to Autodesk ``standard_surface`` inputs.
 
-    Sibling of :func:`map_material`. Where ``map_material`` targets the
-    UsdPreviewSurface subset (base_color/roughness/metallic/opacity/ior),
-    this fills the richer ``standard_surface`` slots that
-    ``pack_std_surface_params`` / ``_STD_SURFACE_TO_FLAT`` /
-    ``_load_mtlx_materials`` read — ``transmission``/``transmission_color``,
-    ``coat``/``coat_color``/``coat_IOR``, ``subsurface``/``subsurface_color``/
-    ``subsurface_radius``, ``specular_anisotropy``, ``thin_walled`` — so the
-    exported ``.mtlx`` carries pbrt values UsdPreviewSurface drops.
+    A thin emit adapter over :func:`resolve_material` (which owns every pbrt
+    param read): this function only translates the resolved lobes into
+    standard_surface vocabulary. Where :func:`map_material` targets the
+    UsdPreviewSurface subset (base_color/roughness/metallic/opacity/ior), this
+    fills the richer ``standard_surface`` slots that ``pack_std_surface_params``
+    / ``_STD_SURFACE_TO_FLAT`` / ``_load_mtlx_materials`` read —
+    ``transmission``/``transmission_color``, ``coat``/``coat_color``/
+    ``coat_IOR``, ``subsurface``/``subsurface_color``/``subsurface_radius``,
+    ``specular_anisotropy``, ``thin_walled`` — so the exported ``.mtlx`` carries
+    pbrt values UsdPreviewSurface drops.
 
     Returns ``(inputs, tex_inputs, status, notes)`` with the **same shape** as
     :func:`map_material`: ``inputs`` are constant standard_surface inputs,
@@ -391,23 +688,18 @@ def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_d
     {"color3f","float"}), ``status`` is one of report.EXACT/APPROX/SKIPPED.
 
     The roughness calibration chain is bit-for-bit identical to
-    :func:`map_material` (``pbrt_roughness_to_alpha`` → ``alpha_to_usd_roughness``)
-    so ``-mtlx`` and the UsdPreviewSurface export agree on roughness; anisotropic
-    ``uroughness``/``vroughness`` map to ``specular_roughness`` +
+    :func:`map_material` (both consume the same :class:`ResolvedRoughness`);
+    anisotropic ``uroughness``/``vroughness`` map to ``specular_roughness`` +
     ``specular_anisotropy`` instead of collapsing to the geometric mean.
     """
-    from .report import APPROX, EXACT
-
-    notes: list[str] = []
+    res = resolve_material(pbrt_material, emissive_rgb=emissive_rgb,
+                           textures=textures, base_dir=base_dir, flavor=MTLX)
     inputs: dict = {
         "base_color": [0.5, 0.5, 0.5],
         "metalness": 0.0,
         "specular_roughness": 0.5,
     }
     tex_inputs: dict = {}
-    status = EXACT
-    mtype = pbrt_material.type if pbrt_material else "diffuse"
-    p = pbrt_material.params if pbrt_material else ParamSet()
 
     def put(std_in, pv):
         """Apply a ParamValue: constant input + optional texture connection.
@@ -421,137 +713,41 @@ def map_material_mtlx(pbrt_material, *, emissive_rgb=None, textures=None, base_d
             value_type = "color3f" if isinstance(pv.const, (list, tuple)) else "float"
             tex_inputs[std_in] = (path, color_space, value_type)
 
-    def reflectance(default):
-        return get_spectrum_texture(
-            p, "reflectance", default, textures=textures, base_dir=base_dir, notes=notes
-        )
-
-    def roughness():
-        return _resolve_roughness_mtlx(p, notes, textures=textures, base_dir=base_dir)
-
-    def scalar(name, default):
-        # standard_surface has no texture input for these (specular_IOR /
-        # coat_IOR); a texture binding degrades to the scalar default with a note.
-        pv = get_float_texture(p, name, default, textures=textures, base_dir=base_dir, notes=notes)
-        if pv.is_tex:
-            notes.append(f"{name} texture not supported on standard_surface input; used scalar default")
-        return pv.const
-
-    if mtype in ("", "none"):
-        inputs["base_color"] = [0.5, 0.5, 0.5]
-    elif mtype == "interface":
-        # See map_material's "interface" branch: null boundary, no BSDF lobes.
-        inputs["base_color"] = [0.0, 0.0, 0.0]
-        inputs["metalness"] = 0.0
-        inputs["specular_roughness"] = 1.0
-        notes.append("interface -> null boundary material (no BSDF lobes); routes to volume path")
-    elif mtype == "diffuse":
-        put("base_color", reflectance([0.5, 0.5, 0.5]))
-        inputs["specular_roughness"] = 1.0
-    elif mtype == "conductor":
-        inputs["metalness"] = 1.0
-        base = _conductor_basecolor(p, notes)
-        put("base_color", reflectance(base))
-        rv, aniso = roughness()
-        put("specular_roughness", rv)
-        if aniso != 0.0:
-            inputs["specular_anisotropy"] = aniso
-        # conductors carry a specular tint matching the base reflectance
-        inputs["specular_color"] = list(base)
-    elif mtype in ("dielectric", "thindielectric"):
-        inputs["base_color"] = [1.0, 1.0, 1.0]
-        inputs["transmission"] = 1.0
-        inputs["transmission_color"] = [1.0, 1.0, 1.0]
-        inputs["specular_IOR"] = scalar("eta", 1.5)
-        rv, aniso = roughness()
-        put("specular_roughness", rv)
-        if aniso != 0.0:
-            inputs["specular_anisotropy"] = aniso
-        if mtype == "thindielectric":
-            inputs["thin_walled"] = True
-            status = APPROX
-            notes.append("thindielectric approximated as thin-walled transmissive surface")
-    elif mtype == "coateddiffuse":
-        put("base_color", reflectance([0.5, 0.5, 0.5]))
-        inputs["specular_roughness"] = 1.0
-        inputs["coat"] = 1.0
-        inputs["coat_color"] = [1.0, 1.0, 1.0]
-        inputs["coat_IOR"] = scalar("interface.eta", 1.5)
-        # pbrt `coateddiffuse` carries its interface (coat) roughness in the
-        # top-level `roughness` param — the same source map_material reads for
-        # clearcoatRoughness. (The earlier `interface.roughness` lookup never
-        # matched, defaulting the coat roughness to 0 and diverging from the
-        # UsdPreviewSurface export.) Reuse the shared calibration chain.
-        rv, _aniso = roughness()
-        inputs["coat_roughness"] = rv.const
-    elif mtype == "coatedconductor":
-        inputs["metalness"] = 1.0
-        base = _conductor_basecolor(p, notes)
-        put("base_color", reflectance(base))
-        inputs["specular_color"] = list(base)
-        # conductor.roughness drives the metal base; interface.* drive the coat
-        rv = get_float_texture(p, "conductor.roughness", 0.0, textures=textures, base_dir=base_dir, notes=notes)
-        if rv.is_tex:
-            put("specular_roughness", ParamValue(0.5, rv.tex))
-            notes.append("roughness texture connected; perceptual remap not applied to texture (approx)")
+    for key, val in res.lobes.items():
+        if key == "base_color":
+            put("base_color", val)
+        elif key == "roughness":
+            pv, aniso = _mtlx_roughness(val)
+            put("specular_roughness", pv)
+            if aniso != 0.0:
+                inputs["specular_anisotropy"] = aniso
+        elif key == "coat_roughness":
+            inputs["coat_roughness"] = _mtlx_roughness(val)[0].const \
+                if isinstance(val, ResolvedRoughness) else val
+        elif key == "emission_rgb":
+            # standard_surface emission is weight(scalar) x emission_color; the
+            # round-trip (_load_mtlx_materials) recovers emissiveColor = emission
+            # * emission_color and ONLY when emission > 0. Author the unit weight
+            # too, else an area-light material's radiance is dropped and the
+            # scene renders black (emission_color alone never round-trips).
+            inputs["emission"] = 1.0
+            inputs["emission_color"] = list(val)
         else:
-            remap = p.bool("remaproughness", True)
-            inputs["specular_roughness"] = alpha_to_usd_roughness(
-                pbrt_roughness_to_alpha(rv.const, remap)
-            )
-        inputs["coat"] = 1.0
-        inputs["coat_color"] = [1.0, 1.0, 1.0]
-        inputs["coat_IOR"] = scalar("interface.eta", 1.5)
-        inputs["coat_roughness"] = scalar("interface.roughness", 0.0)
-    elif mtype == "diffusetransmission":
-        put("base_color", reflectance([0.25, 0.25, 0.25]))
-        inputs["transmission"] = 0.5
-        rt = get_spectrum_texture(
-            p, "transmittance", [0.25, 0.25, 0.25], textures=textures, base_dir=base_dir, notes=notes
-        )
-        inputs["transmission_color"] = rt.const
-        status = APPROX
-        notes.append("diffusetransmission approximated as base + partial transmission")
-    elif mtype == "subsurface":
-        inputs["base_color"] = [1.0, 1.0, 1.0]
-        inputs["subsurface"] = 1.0
-        inputs["specular_IOR"] = scalar("eta", 1.33)
-        ss = get_spectrum_texture(
-            p, "reflectance", [1.0, 1.0, 1.0], textures=textures, base_dir=base_dir, notes=notes
-        )
-        inputs["subsurface_color"] = ss.const
-        radius = p.rgb("radius", [1.0, 1.0, 1.0])
-        inputs["subsurface_radius"] = list(radius)
-        # Stage-2 (pbrt-subsurface-volumetric): carry the volumetric medium
-        # coefficients (σ_a, σ_s, g, eta) via the pbrt precedence, so the renderer
-        # can shade a real interior random walk. The std_surface weight/color/radius
-        # above stay for the preview closure + back-compat.
-        inputs.update(_subsurface_overrides(p))
-        status = APPROX
-        notes.append("subsurface -> standard_surface subsurface + volumetric medium coeffs (σ_a/σ_s/g)")
-    else:
-        status = APPROX
-        notes.append(f"unknown material '{mtype}' best-effort as diffuse grey")
+            std_in = _MTLX_LOBES.get(key)
+            if std_in is not None:
+                inputs[std_in] = val
 
-    if emissive_rgb is not None:
-        # standard_surface emission is weight(scalar) x emission_color; the
-        # round-trip (_load_mtlx_materials) recovers emissiveColor = emission *
-        # emission_color and ONLY when emission > 0. Author the unit weight too,
-        # else an area-light material's radiance is dropped and the scene renders
-        # black (emission_color alone never round-trips).
-        inputs["emission"] = 1.0
-        inputs["emission_color"] = list(emissive_rgb)
-
-    # an unresolved/unsupported texture binding degrades to its scalar/rgb default
-    # (handled in the accessors) -> surface as APPROX.
-    if status == EXACT and any("unresolved/unsupported" in n for n in notes):
-        status = APPROX
-
-    return inputs, tex_inputs, status, notes
+    return inputs, tex_inputs, res.status, res.notes
 
 
 def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=None):
     """Map a pbrt material to UsdPreviewSurface inputs.
+
+    A thin emit adapter over :func:`resolve_material` (which owns every pbrt
+    param read): this function only translates the resolved lobes into
+    UsdPreviewSurface vocabulary, collapsing what the subset target cannot
+    express (anisotropy to its geometric mean, transmission to ``opacity``,
+    coat colour / specular tint / subsurface colour dropped entirely).
 
     Returns (inputs, tex_inputs, status, notes): ``inputs`` are constant
     UsdPreviewSurface inputs, ``tex_inputs`` maps a UsdPreviewSurface input name
@@ -559,15 +755,15 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
     (``value_type`` in {"color3f","float"}), and ``status`` is one of
     report.EXACT/APPROX/SKIPPED.
 
-    Every textureable parameter is resolved through the promoting accessors
-    (``get_float_texture``/``get_spectrum_texture``, mirroring pbrt's
-    ``GetFloatTexture``/``GetSpectrumTexture``), so a texture-bound value yields a
-    connection on its *own* USD input while a constant yields a plain input -- one
-    uniform pass, no float-vs-texture branching, nothing assumed to be diffuse.
+    Every textureable parameter is resolved (in the resolver) through the
+    promoting accessors (``get_float_texture``/``get_spectrum_texture``,
+    mirroring pbrt's ``GetFloatTexture``/``GetSpectrumTexture``), so a
+    texture-bound value yields a connection on its *own* USD input while a
+    constant yields a plain input -- one uniform pass, no float-vs-texture
+    branching, nothing assumed to be diffuse.
     """
-    from .report import APPROX, EXACT
-
-    notes: list[str] = []
+    res = resolve_material(pbrt_material, emissive_rgb=emissive_rgb,
+                           textures=textures, base_dir=base_dir, flavor=USD)
     inputs: dict = {
         "diffuseColor": [0.5, 0.5, 0.5],
         "metallic": 0.0,
@@ -575,10 +771,7 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
         "opacity": 1.0,
     }
     tex_inputs: dict = {}
-    status = EXACT
-    mtype = pbrt_material.type if pbrt_material else "diffuse"
-    # an emissive shape may carry no material; use an empty set so reads default
-    p = pbrt_material.params if pbrt_material else ParamSet()
+    notes = res.notes
 
     def put(usd_in, pv):
         """Apply a ParamValue: constant input + optional texture connection."""
@@ -587,91 +780,31 @@ def map_material(pbrt_material, *, emissive_rgb=None, textures=None, base_dir=No
             path, color_space = pv.tex
             tex_inputs[usd_in] = (path, color_space, _USD_INPUT_KIND.get(usd_in, "float"))
 
-    def reflectance(default):
-        return get_spectrum_texture(
-            p, "reflectance", default, textures=textures, base_dir=base_dir, notes=notes
-        )
+    for key, val in res.lobes.items():
+        if key == "base_color":
+            put("diffuseColor", val)
+        elif key == "roughness":
+            put("roughness", _usd_roughness(val))
+        elif key == "transmission":
+            # UsdPreviewSurface has no transmission input: a transmissive lobe
+            # opens skinny's refraction gate through opacity instead (a fully
+            # transmissive dielectric is opacity 0).
+            inputs["opacity"] = 1.0 - float(val)
+        elif key == "subsurface":
+            # the opacity=0 dielectric boundary is the transitional fallback;
+            # the real transport rides the subsurface_* medium coefficients.
+            inputs["opacity"] = 0.0
+        elif key == "coat_roughness":
+            pv = _usd_roughness(val) if isinstance(val, ResolvedRoughness) else ParamValue(val)
+            inputs["clearcoatRoughness"] = pv.const
+            if pv.is_tex:
+                notes.append(
+                    "coat roughness texture not connected on USD clearcoatRoughness; used scalar")
+        elif key == "emission_rgb":
+            inputs["emissiveColor"] = list(val)
+        else:
+            usd_in = _USD_LOBES.get(key)
+            if usd_in is not None:
+                inputs[usd_in] = val
 
-    def roughness():
-        return _resolve_roughness(p, notes, textures=textures, base_dir=base_dir)
-
-    def scalar(name, default):
-        # USD has no texture input for these (ior / clearcoatRoughness); a texture
-        # binding degrades to the scalar default with a note.
-        pv = get_float_texture(p, name, default, textures=textures, base_dir=base_dir, notes=notes)
-        if pv.is_tex:
-            notes.append(f"{name} texture not supported on USD input; used scalar default")
-        return pv.const
-
-    if mtype in ("", "none"):
-        inputs["diffuseColor"] = [0.5, 0.5, 0.5]
-    elif mtype == "interface":
-        # pbrt null/boundary material: no BSDF lobes at all, the shape exists
-        # only to bound a MediumInterface. Encode as a lobe-less flat material
-        # (zero diffuse, fully opaque so the flat opacity=0 glass/refraction
-        # branch does NOT fire). api._author_material additionally sets the
-        # "volume_interface" skinnyOverrides marker so the renderer-side
-        # routing predicate does not have to sniff lobe values.
-        inputs["diffuseColor"] = [0.0, 0.0, 0.0]
-        inputs["metallic"] = 0.0
-        inputs["roughness"] = 1.0
-        inputs["opacity"] = 1.0
-        notes.append("interface -> null boundary material (no BSDF lobes); routes to volume path")
-    elif mtype == "diffuse":
-        put("diffuseColor", reflectance([0.5, 0.5, 0.5]))
-        inputs["roughness"] = 1.0
-    elif mtype == "conductor":
-        inputs["metallic"] = 1.0
-        put("diffuseColor", reflectance(_conductor_basecolor(p, notes)))
-        put("roughness", roughness())
-    elif mtype in ("dielectric", "thindielectric"):
-        inputs["diffuseColor"] = [1.0, 1.0, 1.0]
-        inputs["opacity"] = 0.0  # open skinny's transmission/refraction gate
-        inputs["ior"] = scalar("eta", 1.5)
-        put("roughness", roughness())
-        if mtype == "thindielectric":
-            status = APPROX
-            notes.append("thindielectric approximated as thin dielectric")
-    elif mtype == "coateddiffuse":
-        put("diffuseColor", reflectance([0.5, 0.5, 0.5]))
-        inputs["roughness"] = 1.0
-        inputs["clearcoat"] = 1.0
-        rv = roughness()
-        inputs["clearcoatRoughness"] = rv.const
-        if rv.is_tex:
-            notes.append("coat roughness texture not connected on USD clearcoatRoughness; used scalar")
-    elif mtype == "coatedconductor":
-        inputs["metallic"] = 1.0
-        put("diffuseColor", reflectance(_conductor_basecolor(p, notes)))
-        put("roughness", roughness())
-        inputs["clearcoat"] = 1.0
-        inputs["clearcoatRoughness"] = scalar("interface.roughness", 0.0)
-    elif mtype == "diffusetransmission":
-        put("diffuseColor", reflectance([0.25, 0.25, 0.25]))
-        inputs["opacity"] = 0.5
-        status = APPROX
-        notes.append("diffusetransmission approximated as diffuse + partial opacity")
-    elif mtype == "subsurface":
-        inputs["diffuseColor"] = [1.0, 1.0, 1.0]
-        inputs["opacity"] = 0.0
-        inputs["ior"] = scalar("eta", 1.33)
-        # Stage-2 (pbrt-subsurface-volumetric): carry the volumetric medium
-        # coefficients (σ_a, σ_s, g, eta) via the pbrt precedence. The renderer
-        # routes these to MATERIAL_TYPE_SUBSURFACE (interior random walk); the
-        # opacity=0 boundary above remains the transitional fallback.
-        inputs.update(_subsurface_overrides(p))
-        status = APPROX
-        notes.append("subsurface -> dielectric boundary + volumetric medium coeffs (σ_a/σ_s/g)")
-    else:
-        status = APPROX
-        notes.append(f"unknown material '{mtype}' best-effort as diffuse grey")
-
-    if emissive_rgb is not None:
-        inputs["emissiveColor"] = list(emissive_rgb)
-
-    # an unresolved/unsupported texture binding degrades to its scalar/rgb default
-    # (handled in the accessors) -> surface as APPROX.
-    if status == EXACT and any("unresolved/unsupported" in n for n in notes):
-        status = APPROX
-
-    return inputs, tex_inputs, status, notes
+    return inputs, tex_inputs, res.status, notes
