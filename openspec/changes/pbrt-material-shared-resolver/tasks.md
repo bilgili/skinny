@@ -59,7 +59,7 @@
       empty diff required (importer output byte-identical, no `.usda` fixture
       regen).
 - [x] 5.2 Full hostless `tests/pbrt/` sweep green.
-- [ ] 5.3 GPU: confirming-suite authoring-equivalence gate
+- [x] 5.3 GPU: confirming-suite authoring-equivalence gate
       (`tests/pbrt/test_suite.py`, plain-USD ≡ MaterialX) green on Metal, no
       baseline/tolerance changes (headless env rules from CLAUDE.md).
 
@@ -69,5 +69,5 @@
       and any materials.py docstrings referencing the twin pipelines.
 - [x] 6.2 File follow-up notes for the frozen drifts (coatedconductor base
       roughness spelling; diffusetransmission transmittance on the USD path).
-- [ ] 6.3 `openspec validate pbrt-material-shared-resolver` clean; codex
+- [x] 6.3 `openspec validate pbrt-material-shared-resolver` clean; codex
       pre-merge review; archive after merge.

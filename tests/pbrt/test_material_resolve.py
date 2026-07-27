@@ -216,9 +216,7 @@ def test_texture_bound_reflectance_rides_on_the_base_colour_lobe():
 def test_unresolvable_texture_notes_and_escalates_to_approx():
     res = _res('Material "diffuse" "texture reflectance" "t"',
                textures=_textures(t=_Tex(klass="checkerboard")))
-    assert res.notes == [
-        "texture 'checkerboard-unused' on reflectance unresolved/unsupported; used default"
-        .replace("checkerboard-unused", "t")]
+    assert res.notes == ["texture 't' on reflectance unresolved/unsupported; used default"]
     assert res.status == APPROX
 
 
@@ -422,6 +420,30 @@ def test_adapters_perform_zero_pbrt_param_reads(adapter):
     assert _reads_in(adapter) == set(), (
         f"{adapter.__name__} reads pbrt params directly; interpretation belongs "
         "in resolve_material")
+
+
+@pytest.mark.parametrize("adapter", [M.map_material, M.map_material_mtlx])
+def test_adapters_only_ever_hand_the_material_to_the_resolver(adapter):
+    """The structural half of the gate above.
+
+    ``_reads_in`` is syntactic, so it could be walked around by aliasing the
+    ParamSet (``q = pbrt_material.params; q.get(...)``). This closes that: the
+    adapter may mention ``pbrt_material`` *only* as an argument of the
+    ``resolve_material`` call, so there is nothing to alias in the first place.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(adapter)))
+    handed_over = {
+        id(a) for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "resolve_material"
+        for a in list(node.args) + [k.value for k in node.keywords]
+    }
+    leaked = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and n.id == "pbrt_material"
+              and isinstance(n.ctx, ast.Load) and id(n) not in handed_over]
+    assert not leaked, (
+        f"{adapter.__name__} touches pbrt_material outside the resolve_material "
+        f"call (lines {[n.lineno for n in leaked]})")
 
 
 def test_the_read_gate_is_sensitive():
