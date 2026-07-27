@@ -1,0 +1,158 @@
+# Design review — gpu-backend-adapter
+
+Adversarial review, 2026-07-27, against the tree at `8247148`. Recorded rather
+than folded, so the original proposal and the objections both survive.
+**Fold before implementing.**
+
+**Verdict: blocked, then split into three or four.** A meaningful share of the
+proposed work is already done or already has an owner, and the change has an
+undisclosed predecessor sitting in the tree.
+
+## MAJOR
+
+**M1 — A prior attempt at this exact interface already exists: `src/skinny/gfx/`.**
+2,501 lines — `Device` / `Queue` / `CommandList` / `ComputePipeline` / `Buffer`
+ABCs, a capability record (`gfx/backend.py:22` `BackendCaps`), a full Vulkan
+implementation (`gfx/vulkan/`, 1,159 lines), and a `NotImplementedError` Metal
+stub (`gfx/metal/__init__.py:14`). **Zero importers** (`grep -rn "from
+skinny.gfx" src/ tests/` → nothing), zero tests. It defines its own
+`select_backend` (`gfx/__init__.py:57`), colliding by name with
+`backend_select.select_backend`, and its premise is now false
+(`gfx/__init__.py:9`: "default is Vulkan everywhere").
+
+This is the strongest single finding across all ten reviews: the "declare the
+interface first" approach already stalled here once, at zero consumers. The
+proposal must open with revive-or-delete, and if delete, that deletion is
+evidence that belongs in the risk section.
+
+**M2 — The capability record already exists, on the context objects.**
+`metal_context.py:190-205` declares `supports_external_memory`,
+`supports_external_semaphore`, `supports_shared_memory`, `supports_fp16_storage`,
+`supports_fp16_compute`, `supports_indirect_dispatch`; `vk_context.py:217-218,
+256-257` declares the same family; they are read by name at
+`metal_compute.py:928`, `metal_wavefront.py:234`, `renderer.py:3845`,
+`renderer.py:9163-9164`. Three of D1's seven capabilities are renames of flags
+that already work. As written the change creates a second competing vocabulary.
+Extend `supports_*`; scope D1 to what is genuinely new (`descriptor_sets`,
+`gpu_skinning`, `bindless_capacity`, watchdog).
+
+**M3 — D3 is wrong: the `compute_queue` probe is dead at 6 of 7 sites, and
+"fixing" one breaks Metal.** All four `vk_wavefront` factories re-check
+`descriptor_sets is None` on the next line (`:1969+1971`, `:2036+2038`,
+`:2076+2078`, `:2104+2106`), and `descriptor_sets` **is** `None` on Metal
+(`renderer.py:3649`); `_ensure_mlt` additionally opens with `if r.is_metal:
+return None` (`:2100`). So all four already refuse — "three rely on the caller"
+is false. `renderer.py:2186` is only reached from a Vulkan recorder (`:2340`).
+The only site with a consequence is `renderer.py:5283` `_build_skinning_passes`,
+where Metal falls into `import vk_skinning` and is swallowed by a broad
+`except` at `:5316` with a "GPU skinning unavailable" print.
+
+Worse: `renderer.py:1775` (`hasattr(...) or self.is_metal`) is **accidentally
+correct** — both backends run wavefront, so capability-ising it would strip
+`"Wavefront"` from `execution_modes` on Metal. Delete it, don't convert it. (The
+comment at `:1785-1786` claiming it collapses wavefront→megakernel on Metal is
+already stale.)
+
+The proposed measurement — diff the Metal wavefront suite images — passes
+vacuously; none of the six dead sites are on that path. Correct measurement:
+load a skinned USD scene on Metal, assert no "GPU skinning unavailable" print.
+
+**M4 — The argument-domain claim is stale.** `vk_compute.py:29`
+`_vk_format_token` and `:45` `_vk_address_token` already accept the same neutral
+string vocabulary as Metal, with a docstring saying so, applied at `:1412-1414`.
+Every caller passes strings (`renderer.py:568-570`). Only the *default values*
+differ in spelling; `_VKFORMAT_INTS`/`_VK_ADDRESS_INTS` have no live caller.
+Stage 2 collapses to a default alignment plus a ~6-line deletion. The one real
+drift is `SampledImage.upload_sync(rgba_f32)` vs `(data)` — note
+`StorageBuffer.upload_sync(data)` and `SampledImage3D.upload_sync(voxels)`
+already agree, so "any keyword call breaks on one backend" is false.
+
+**M5 — "Zero module-level function overlap" is false, and the missed overlap is
+the fix pattern.** Both modules re-export `GRAPH_BINDING_BASE`,
+`emit_megakernel_aggregator`, `emit_megakernel_sources`, `python_material_ids`,
+`scan_python_materials` from the Vulkan-free `megakernel_sources`
+(`vk_compute.py:64-72`, `metal_compute.py:37-44`). That extraction is the
+working precedent for everything this change wants.
+
+**M6 — The hostless conformance test cannot import `vk_compute`.**
+`vk_compute.py:10` is a module-scope `import vulkan as vk`; without
+`DYLD_LIBRARY_PATH` it raises `OSError: Cannot find Vulkan SDK version`, which
+`pytest.importorskip("vulkan")` does **not** catch — so the test errors, and
+broadening the guard makes it a vacuous pass. This repo has hit that failure
+twice already. The surface descriptor must live in a `vulkan`-free module (the
+`megakernel_sources` pattern) or be a checked-in fixture regenerated by a gated
+job.
+
+**M7 — D4's binding-coverage scenario is not implementable.** Vulkan does no
+reflection at all — `_create_descriptor_set_layout` (`:369-740`) is a
+hand-written static list, and over-provision is deliberate (`renderer.py:2415`).
+Metal reflection needs a live device (`metal_compute.py:691`, `:714`). A
+device-free adapter has nothing to reflect against. The check already exists as
+`tests/test_metal_megakernel_binding_map.py`, device-bound by necessity. Drop
+the scenario or restate it as "recorded bind names vs a checked-in reflection
+fixture", regenerated like the `.spv` goldens. Keep the ordering scenario.
+
+**M8 — D1 is insufficient; sampled branches map to none of the seven
+capabilities.** Vendor name *is* the payload at `renderer.py:9416`, `:9479`.
+Host byte layout, not device capability: `:3707`/`:6611`, `_pack_uniforms_msl`
+(`:9702`), `_check_msl_uniform_layout` (`:9666`), `_pack_mtlx_skin_array_msl`
+(`:3176`), `mlt_chain.uniform_tail_active` (`mlt_chain.py:55-73`) — that is
+`slang_layout.py`'s domain. Frame-submission model (`:4202`, `:4224`, `:10565`,
+`:10809`) is uncovered. Watchdog needs **numbers**, not a bool (`:9843`,
+`:9953`, `:10252`). And `specs/metal-backend/spec.md:12` requires megakernel
+record sourcing to be gated on a declared capability that D1's list does not
+contain — the design contradicts its own spec delta. Task 1.2 must run first and
+the record be derived from its output; add a `name` field for display strings.
+
+**M9 — Stage order inverts the characterization test.** Task 1.1 pins today's
+surface; Stage 2 renames it; Stage 3 then asserts "fails on any drift from the
+1.1 fixture" — the rename *is* that drift. Reorder: 1 (probes) → 3 (recording
+adapter + conformance pinning today's surface) → 2 (renames, test proves the
+one-sided table shrank) → 4.
+
+**M10 — Two of the five one-sided classes are not fixed by the stated tasks.**
+Unifying `PreviewPipeline`/`PreviewPipelineMetal` under one name does not remove
+the branch at `renderer.py:7115-7129`: the constructors take different arguments,
+and the spec constrains shared methods only. And `DebugRasterMetal`'s
+counterpart is the Vulkan *graphics* rasteriser in `debug_viewport.py` (render
+pass, framebuffers, depth buffer, GLFW window) — folding it means moving a
+graphics/present surface the declared interface does not cover. Split preview +
+debug-dock unification into its own change.
+
+## MINOR
+
+- **No `BINDLESS_TEXTURE_CAPACITY` shader define exists.**
+  `shaders/bindings.slang:38,49` hard-code `[119]`/`[128]` inside
+  `#if defined(SKINNY_METAL)`; `shader_variants.py` has no such token. D6's risk
+  and gate 6.2 target a mechanism that isn't there — and *introducing* a define
+  makes gate 6.2 unsatisfiable, since `spv_cache_key` hashes the flag tuple
+  positionally. Lazy version satisfying the scenario: a ~5-line test that
+  regexes both literals out of `bindings.slang` and asserts equality with each
+  module's constant.
+- **"No consumer reaches past the seam" can never go green as written.**
+  `renderer.py` has 106 raw `vk.vk*` calls and imports `vk_compute` by name at
+  `:2418`, `:2470` (Vulkan-only builders); `_rgba_f32_to_rgba8` at `:9970` is
+  inside a Metal-only method. Exactly one genuine violation:
+  `self._gpu._make_sampler(...)` at `:1482`. Narrow the scenario to it.
+- `MetalFrameEncoder` in D5's one-sided table contradicts What-Changes: if
+  "dispatch a frame" joins the interface, it is the Metal *implementation*.
+- `renderer.py:2340` calls `_ensure_wavefront_env_pass().record_dispatch(cmd)`
+  with no `None` check; changing that guard's truth value must add one.
+- Citation drift: `_backend_render_ready` is `:2163` not `:2172`;
+  `debug_viewport.py` has 4 live branches (761/835/902/917), not 5.
+- **Counts that check out**, so they need not be re-derived: 40 live `is_metal`
+  in renderer; 12 `descriptor_sets is None`; 5 compounded; 7 `compute_queue`
+  probes; 106 raw `vk.vk*`; `MetalContext.compute_queue = None` at
+  `metal_context.py:300`; 128 vs 119; 15 Metal-only renderer methods.
+- Adjacent stale doc to fix while in the file: `backend_select.py:16-19` still
+  says `auto` resolves to Vulkan everywhere because "Metal shaded skin color is
+  not yet at parity", contradicting `select_backend`'s own docstring at `:62-66`
+  and CLAUDE.md.
+
+## Recommended split
+
+1. `gfx/` disposition — revive or delete; fold the capability record into the
+   existing `ctx.supports_*`.
+2. Dead-probe removal + the `bindings.slang` literal test.
+3. Recording adapter, ordering scope only.
+4. Preview + debug-dock unification, separately.
