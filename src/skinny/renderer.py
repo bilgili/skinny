@@ -51,6 +51,11 @@ from skinny.params import (
     effective_execution_mode,
 )
 from skinny import frame_derive, mlt_chain, render_envelope, slang_layout
+from skinny.gpu_resources import (
+    DECLARATIONS as _GPU_DECLARATIONS,
+    ResourceSizes,
+    SceneResourceSet,
+)
 from skinny.cli_common import resolve_walk
 from skinny.playback import PlaybackClock
 from skinny.presets import PRESETS, Preset
@@ -3670,6 +3675,143 @@ class Renderer:
         """Back-compat shim; the unified builder handles both paths."""
         self._build_pipeline_for_current_graphs()
 
+    def _spectral_table_arrays(self) -> dict:
+        """Load the static pbrt spectral tables (bindings 45-48) as flat float32
+        arrays. Their element counts are allocation inputs, so this runs before
+        the resource set is built; the arrays are uploaded straight after."""
+        from skinny.pbrt import spectral as _spectral_mirror
+        from skinny.pbrt.data import spectral_tables
+        res, scale, data = spectral_tables.load_srgb_upsample_table()
+        # Upload the UNIT-LUMINANCE-normalized D65 (pbrt whitepoint), matching
+        # spectral.upsample_illuminant so the GPU upsampleIlluminant ≡ the numpy
+        # mirror. Raw D65 (~100× luminance) would make every emitter blow out.
+        d65 = _spectral_mirror.d65_normalized()
+        if res != 64:
+            raise ValueError(
+                f"spectral upsample table res must be 64, got {res}")
+        if d65.size != 95:
+            raise ValueError(
+                f"spectral D65 SPD must have 95 samples, got {d65.size}")
+        # Named-conductor eta/k (Group 6.2, binding 48): every metal in
+        # _SPECTRAL_METAL_ORDER (shader ids 1..N), each [eta(95) | k(95)] on the
+        # 360-830/5nm grid, concatenated → N·190 floats. Order MUST match
+        # namedMetalEtaK's (metalId-1)*190 indexing in bindings.slang, and N MUST
+        # match SPECTRAL_METAL_COUNT there — a shader bound below N silently drops
+        # the extra metals to RGB Schlick.
+        metal_blocks = []
+        for name in _SPECTRAL_METAL_ORDER:
+            ek = spectral_tables.named_metal_spectrum(name)
+            if ek is None:
+                raise ValueError(f"spectral: missing named-metal curve '{name}'")
+            eta, k = ek
+            if eta.size != 95 or k.size != 95:
+                raise ValueError(
+                    f"spectral metal '{name}' eta/k must be 95 samples, "
+                    f"got {eta.size}/{k.size}")
+            metal_blocks.append(np.asarray(eta, dtype=np.float32).ravel())
+            metal_blocks.append(np.asarray(k, dtype=np.float32).ravel())
+        return {
+            "scale": np.ascontiguousarray(scale, dtype=np.float32).ravel(),
+            "data": np.ascontiguousarray(data, dtype=np.float32).ravel(order="C"),
+            "d65": np.ascontiguousarray(d65, dtype=np.float32).ravel(),
+            "metals": np.ascontiguousarray(
+                np.concatenate(metal_blocks), dtype=np.float32),
+        }
+
+    def _resource_sizes(self, spectral_arrays: dict) -> ResourceSizes:
+        """Gather the allocation inputs the declarations in `gpu_resources`
+        consume. The formulas live with the declarations; these are the scene-
+        and capacity-dependent numbers only the renderer knows."""
+        from skinny.environment import ENV_HEIGHT, ENV_WIDTH
+        from skinny.sampling.path_records import RECORD_STRIDE
+
+        # Mesh storage budget — sized for the largest source mesh (displacement
+        # doesn't change vertex/triangle counts). BVH node count is <= 2·tri
+        # count at our leaf size of 4, but we over-size to keep headroom, which
+        # is cheaper than reallocating on rebake.
+        max_v = max(
+            (src.positions.shape[0] for src in self._mesh_sources),
+            default=self._dummy_mesh.num_vertices,
+        )
+        max_t = max(
+            (src.tri_idx.shape[0] for src in self._mesh_sources),
+            default=self._dummy_mesh.num_triangles,
+        )
+        v_size = max_v * 32 + 256
+        i_size = max_t * 12 + 256
+        b_size = max(max_t * 32, self._dummy_mesh.num_nodes * 32) + 256
+        # USD-side budget: when a USD scene is supplied the buffers must hold
+        # every loaded mesh concatenated back-to-back. Take the max of the legacy
+        # OBJ rebake budget and the USD concat total so toggling between USD and
+        # OBJ slots never overflows.
+        if self._usd_scene is not None and self._usd_scene.instances:
+            v_size = max(v_size, sum(
+                inst.mesh.num_vertices * 32
+                for inst in self._usd_scene.instances) + 256)
+            i_size = max(i_size, sum(
+                inst.mesh.num_triangles * 12
+                for inst in self._usd_scene.instances) + 256)
+            b_size = max(b_size, sum(
+                inst.mesh.num_nodes * 32
+                for inst in self._usd_scene.instances) + 256)
+
+        # Under `--neural-handoff interop` the weight buffers are GPU-shareable,
+        # per backend (change metal-neural-interop, design D4): on Vulkan they
+        # are CUDA-exportable (VK_KHR_external_memory; a guarded no-op on devices
+        # without the extension); on Metal the weights+biases live in UMA shared
+        # storage the interop publisher writes in place at the frame-boundary
+        # swap. The file handoff uses plain device-local buffers everywhere.
+        interop = (self._neural_handoff_kind == "interop")
+        external = interop and not self.is_metal
+        shared = (interop and self.is_metal
+                  and getattr(self.ctx, "supports_shared_memory", False))
+
+        return ResourceSizes(
+            width=self.width, height=self.height,
+            uniform_bytes=self.uniform_size,
+            material_capacity=self.material_capacity,
+            # On Metal the per-element stride grows (each `float3` pads to 16 B
+            # in MSL) and the pipeline reflection that yields the exact stride is
+            # built lazily, so size each slot at a safe 256 B ceiling (≥ any MSL
+            # stride for the 164 B / 27-field record). The MSL repack writes
+            # records at the reflected stride; the buffer only needs to be large
+            # enough.
+            mtlx_skin_slot_bytes=(
+                256 if self.is_metal else self.mtlx_skin_record_size),
+            instance_capacity=self.instance_capacity,
+            emissive_tri_capacity=self.emissive_tri_capacity,
+            gizmo_capacity=self.gizmo_segment_capacity,
+            gizmo_stride=self.gizmo_segment_stride,
+            lens_element_capacity=self.lens_element_capacity,
+            lens_element_stride=self.lens_element_stride,
+            lens_pupil_capacity=self.lens_pupil_capacity,
+            lens_pupil_stride=self.lens_pupil_stride,
+            vertex_bytes=v_size, index_bytes=i_size, bvh_bytes=b_size,
+            env_width=ENV_WIDTH, env_height=ENV_HEIGHT,
+            tattoo_width=TATTOO_WIDTH, tattoo_height=TATTOO_HEIGHT,
+            detail_res=DETAIL_TEX_RES,
+            neural_weight_bytes=len(self._neural_dummy_weight_bytes),
+            neural_bias_bytes=len(self._neural_dummy_bias_bytes),
+            neural_header_bytes=len(self._neural_dummy_header_bytes),
+            neural_external=external, neural_shared=shared,
+            record_stride=RECORD_STRIDE,
+            flat_material_stride=FLAT_MATERIAL_STRIDE,
+            std_surface_stride=STD_SURFACE_STRIDE,
+            sphere_light_capacity=SPHERE_LIGHT_CAPACITY,
+            sphere_light_stride=SPHERE_LIGHT_STRIDE,
+            distant_light_capacity=DISTANT_LIGHT_CAPACITY,
+            distant_light_stride=DISTANT_LIGHT_STRIDE,
+            emissive_tri_stride=EMISSIVE_TRI_STRIDE,
+            instance_stride=INSTANCE_STRIDE,
+            spectral_emitter_stride=SPECTRAL_EMITTER_STRIDE,
+            spectral_light_spd_stride=SPECTRAL_LIGHT_SPD_STRIDE,
+            spectral_scale_floats=spectral_arrays.get("scale", _EMPTY_F32).size,
+            spectral_data_floats=spectral_arrays.get("data", _EMPTY_F32).size,
+            spectral_d65_floats=spectral_arrays.get("d65", _EMPTY_F32).size,
+            spectral_metals_floats=spectral_arrays.get(
+                "metals", _EMPTY_F32).size,
+        )
+
     def _init_gpu(self) -> None:
         # Pipeline + descriptor pool/sets are built lazily by
         # `_build_pipeline_for_current_graphs`, triggered from
@@ -3687,285 +3829,143 @@ class Renderer:
         self.descriptor_pool = None
         self.descriptor_sets = None
 
+        # ── allocation inputs ───────────────────────────────────────────
+        # Everything the declarations in `gpu_resources` need in order to size
+        # themselves. Capacities live on the renderer because the growth paths
+        # bump them; the declarations turn them into byte sizes.
+
         # Uniform buffer — FrameConstants + SkinParams + light. Sized with
         # headroom over the scalar blob (see _VK_UNIFORM_BUFFER_BYTES): the
         # upload path truncates silently, so this must stay ≥ len(_pack_uniforms()).
         self.uniform_size = _VK_UNIFORM_BUFFER_BYTES
-        self.uniform_buffer = self._gpu.UniformBuffer(self.ctx, self.uniform_size)
-
         # Per-material skin UBO array (binding 15). StructuredBuffer of
         # MtlxSkinParams, one per material slot — only skin-typed slots
-        # (mtlx_target_name == "M_skinny_skin_default") carry data; other
-        # slots are zeroed. Filled per-frame via _pack_mtlx_skin_array.
-        # Each record is 164 scalar-layout bytes (27 fields, no vec3 padding).
-        # _init_materialx_runtime may have set this already from reflection.
+        # (mtlx_target_name == "M_skinny_skin_default") carry data; other slots
+        # are zeroed. Each record is 164 scalar-layout bytes (27 fields, no vec3
+        # padding). _init_materialx_runtime may have set this from reflection.
         if not hasattr(self, 'mtlx_skin_record_size') or self.mtlx_skin_record_size == 0:
             self.mtlx_skin_record_size = 164
-        # On Metal the per-element stride grows (each `float3` pads to 16 B in MSL),
-        # and the pipeline reflection that yields the exact stride is built lazily
-        # after this point — so size each slot at a safe 256 B ceiling (≥ any MSL
-        # stride for the 164 B / 27-field record). The MSL repack writes records at
-        # the reflected stride; the buffer only needs to be large enough.
-        slot_bytes = 256 if self.is_metal else self.mtlx_skin_record_size
-        self.mtlx_skin_buffer = self._gpu.StorageBuffer(
-            self.ctx,
-            self.material_capacity * slot_bytes + 256,
+        self._dummy_mesh = dummy_mesh()
+        # TLAS instance buffer — one record per renderable mesh instance. Sized
+        # for INSTANCE_CAPACITY entries up front so the upload path can grow into
+        # multi-mesh scenes without reallocation.
+        self.instance_capacity = 16
+        # EMISSIVE_TRI_CAPACITY is only the initial capacity —
+        # _upload_emissive_triangles grows it to the actual emissive-triangle
+        # count (no silent 256-cap; change emissive-mesh-nee).
+        self.emissive_tri_capacity: int = EMISSIVE_TRI_CAPACITY
+        from skinny.gizmo import (
+            GIZMO_SEGMENT_CAPACITY, GIZMO_SEGMENT_STRIDE, TransformGizmo,
         )
-        # Seed with current SkinParameters → MaterialX defaults so the
-        # buffer is valid on frame 0.
-        seed = self._pack_mtlx_skin_array()
-        if seed:
-            self.mtlx_skin_buffer.upload_sync(seed)
-
-        # Persistent HDR accumulation image (progressive convergence).
-        # transfer_src=True so screenshot path can copy raw float radiance
-        # to a host-visible staging buffer for EXR/HDR export.
-        self.accum_image = self._gpu.StorageImage(
-            self.ctx, self.width, self.height, transfer_src=True,
-        )
-
-        # Per-frame HUD overlay (R8 alpha mask rasterised by Pillow).
-        # Pre-zero the staging buffer so the GPU image starts clean even if
-        # render() never gets to upload before render_headless() / a
-        # screenshot dispatch reads it.
-        self.hud_overlay = self._gpu.HudOverlay(self.ctx, self.width, self.height)
-        self.hud_overlay.upload(bytes(self.width * self.height))
-
-        # HDR environment texture (RGBA32F, equirectangular).
-        from skinny.environment import ENV_HEIGHT, ENV_WIDTH
-        self.env_image = self._gpu.SampledImage(self.ctx, ENV_WIDTH, ENV_HEIGHT)
-
-        # Heterogeneous-medium density grid (binding 26, `volumeDensity`,
-        # nanovdb-volume-rendering). ALWAYS bound — PARTIALLY_BOUND-style gating
-        # is not available for a single binding, so a 1×1×1 zero texture stands
-        # in until a scene with a UsdVol.Volume grid loads (same always-bound
-        # pattern as the env/tattoo maps); densityAt then reads 0 everywhere.
-        # Replaced (destroy + re-create + rebind) per scene by _sync_volume_grid.
-        self.volume_density_image = self._gpu.SampledImage3D(self.ctx, 1, 1, 1)
-        self.volume_density_image.upload_sync(np.zeros((1, 1, 1), np.float16))
-        # Environment importance-sampling CDFs — ONE combined buffer (binding 31,
-        # `envDistCdf`): the marginal CDF ([ENV_HEIGHT+1] floats) followed by the
-        # conditional CDF ([ENV_HEIGHT*(ENV_WIDTH+1)] floats) at element offset
-        # ENV_HEIGHT+1 (change combine-graph-param-buffers — frees a Metal buffer
-        # slot). Uploaded by _ensure_env_uploaded; drives env NEE + MIS.
-        self.env_dist_buffer = self._gpu.StorageBuffer(
-            self.ctx, ((ENV_HEIGHT + 1) + ENV_HEIGHT * (ENV_WIDTH + 1)) * 4)
-        # Env sphere luminance integral ∫L dω (Φ_env = πR²·envIntensity·∫L dω)
-        # — an SPPM photon-group power input, cached alongside the importance
-        # CDF. MUST default before the _ensure_env_uploaded() call below (which
-        # computes it); a later re-init would clobber the computed value and
-        # silently zero the env photon group.
-        self._env_lum_integral: float = 0.0
-        self._ensure_env_uploaded()
-
-        # Hero-wavelength spectral upsample tables (bindings 45/46/47), created
-        # ONCE and only for the spectral megakernel variant — the RGB path
-        # allocates nothing here. Static pbrt data: the sRGB→spectrum sigmoid
-        # table (scale grid + [3,res,res,res,3] cube, res==64) and the CIE D65
-        # SPD (95 samples on the 360-830/5 nm grid). Uploaded C-order float32.
-        self._spectral_scale_buffer = None
-        self._spectral_data_buffer = None
-        self._spectral_d65_buffer = None
-        self._spectral_metals_buffer = None
-        # Per-emissive-triangle blackbody metadata (binding 49, Group 6.1): a
-        # float2 (temperature_K, scale) parallel-indexed to emissive_tri_buffer
-        # (binding 18). Allocated below alongside the triangle buffer, spectral
-        # variant only. scale = spectral.blackbody_scale(T, emissiveColor).
-        self._spectral_emitters_buffer = None
-        if self._spectral:
-            from skinny.pbrt import spectral as _spectral_mirror
-            from skinny.pbrt.data import spectral_tables
-            res, scale, data = spectral_tables.load_srgb_upsample_table()
-            # Upload the UNIT-LUMINANCE-normalized D65 (pbrt whitepoint), matching
-            # spectral.upsample_illuminant so the GPU upsampleIlluminant ≡ the numpy
-            # mirror. Raw D65 (~100× luminance) would make every emitter blow out.
-            d65 = _spectral_mirror.d65_normalized()
-            if res != 64:
-                raise ValueError(
-                    f"spectral upsample table res must be 64, got {res}")
-            if d65.size != 95:
-                raise ValueError(
-                    f"spectral D65 SPD must have 95 samples, got {d65.size}")
-            scale_arr = np.ascontiguousarray(scale, dtype=np.float32).ravel()
-            data_arr = np.ascontiguousarray(data, dtype=np.float32).ravel(order="C")
-            d65_arr = np.ascontiguousarray(d65, dtype=np.float32).ravel()
-            self._spectral_scale_buffer = self._gpu.StorageBuffer(
-                self.ctx, scale_arr.size * 4)
-            self._spectral_scale_buffer.upload_sync(scale_arr.tobytes())
-            self._spectral_data_buffer = self._gpu.StorageBuffer(
-                self.ctx, data_arr.size * 4)
-            self._spectral_data_buffer.upload_sync(data_arr.tobytes())
-            self._spectral_d65_buffer = self._gpu.StorageBuffer(
-                self.ctx, d65_arr.size * 4)
-            self._spectral_d65_buffer.upload_sync(d65_arr.tobytes())
-            # Named-conductor eta/k (Group 6.2, binding 48): every metal in
-            # _SPECTRAL_METAL_ORDER (shader ids 1..N), each [eta(95) | k(95)] on the
-            # 360-830/5nm grid, concatenated → N·190 floats. Order MUST match
-            # namedMetalEtaK's (metalId-1)*190 indexing in bindings.slang, and N MUST
-            # match SPECTRAL_METAL_COUNT there — a shader bound below N silently drops
-            # the extra metals to RGB Schlick.
-            metal_blocks = []
-            for name in _SPECTRAL_METAL_ORDER:
-                ek = spectral_tables.named_metal_spectrum(name)
-                if ek is None:
-                    raise ValueError(f"spectral: missing named-metal curve '{name}'")
-                eta, k = ek
-                if eta.size != 95 or k.size != 95:
-                    raise ValueError(
-                        f"spectral metal '{name}' eta/k must be 95 samples, "
-                        f"got {eta.size}/{k.size}")
-                metal_blocks.append(np.asarray(eta, dtype=np.float32).ravel())
-                metal_blocks.append(np.asarray(k, dtype=np.float32).ravel())
-            metals_arr = np.ascontiguousarray(
-                np.concatenate(metal_blocks), dtype=np.float32)
-            self._spectral_metals_buffer = self._gpu.StorageBuffer(
-                self.ctx, metals_arr.size * 4)
-            self._spectral_metals_buffer.upload_sync(metals_arr.tobytes())
-
-        # Neural-proposal frozen weights (bindings 33/34/35). Sized for the fixed
+        self.gizmo_segment_capacity = GIZMO_SEGMENT_CAPACITY
+        self.gizmo_segment_stride = GIZMO_SEGMENT_STRIDE
+        # Thick-lens elements: 16-byte float4 (radius_world, thickness_world,
+        # ior, half_aperture_world), capped at MAX_LENS_ELEMENTS so the SSBO size
+        # is fixed at startup. Exit-pupil bounds: 64 × float4 per film-radius bin
+        # (PBRT's `BoundExitPupil`).
+        self.lens_element_capacity = MAX_LENS_ELEMENTS
+        self.lens_element_stride = 16   # float4
+        self.lens_pupil_capacity = 64
+        self.lens_pupil_stride = 16
+        # Neural-proposal frozen weights (bindings 33/34/35): sized for the fixed
         # flow architecture and seeded with a dummy (zero) net so the inline flow
-        # inverse in proposal.slang always has valid descriptors, even with the
+        # inverse in proposal.slang always has valid descriptors even with the
         # neural proposal inactive. Real per-scene weights overwrite them on
         # activation (_sync_neural_weights). The same dummy is the 1a bring-up net.
         from skinny.sampling.neural_weights import make_dummy_weights
         _ncfg = self._effective_neural_config()
         _nw = make_dummy_weights(_ncfg)
-        _nwb = _nw.weight_bytes_for(_ncfg.precision)   # half bytes in the fp16 modes
-        _nbb = _nw.bias_bytes_for(_ncfg.precision)
-        # Under `--neural-handoff interop` the weight buffers are GPU-shareable,
-        # per backend (change metal-neural-interop, design D4): on Vulkan they
-        # are CUDA-exportable (VK_KHR_external_memory, task 5.1; a guarded no-op
-        # on devices without the extension); on Metal the weights+biases live in
-        # UMA shared storage the interop publisher writes in place at the
-        # frame-boundary swap. Binding 35 (layer headers) is immutable after
-        # build and stays device-local on Metal. The file handoff uses plain
-        # device-local buffers everywhere.
-        _interop_neural = (self._neural_handoff_kind == "interop")
-        _is_metal = bool(getattr(self.ctx, "is_metal", False))
-        _ext_neural = _interop_neural and not _is_metal
-        _shared_neural = (_interop_neural and _is_metal
-                          and getattr(self.ctx, "supports_shared_memory", False))
-        self.neural_weights_buffer = self._gpu.StorageBuffer(
-            self.ctx, max(len(_nwb), 4), external=_ext_neural, shared=_shared_neural)
-        self.neural_biases_buffer = self._gpu.StorageBuffer(
-            self.ctx, max(len(_nbb), 4), external=_ext_neural, shared=_shared_neural)
-        self.neural_layers_buffer = self._gpu.StorageBuffer(self.ctx, max(len(_nw.header_bytes), 4), external=_ext_neural)
-        self.neural_weights_buffer.upload_sync(_nwb)
-        self.neural_biases_buffer.upload_sync(_nbb)
-        self.neural_layers_buffer.upload_sync(_nw.header_bytes)
-        self._neural_weights_loaded = None   # path of the net currently uploaded (None = dummy)
+        self._neural_dummy_weight_bytes = _nw.weight_bytes_for(_ncfg.precision)
+        self._neural_dummy_bias_bytes = _nw.bias_bytes_for(_ncfg.precision)
+        self._neural_dummy_header_bytes = _nw.header_bytes
+        # Hero-wavelength spectral tables (bindings 45-48), the spectral variant
+        # only — the RGB path allocates nothing here.
+        spectral_arrays = self._spectral_table_arrays() if self._spectral else {}
+
+        # ── the inventory ───────────────────────────────────────────────
+        # One declaration per resource owns its allocation, its binding on both
+        # backends, and its destruction (change renderer-gpu-resource-set).
+        self._gpu_set = SceneResourceSet(
+            self.ctx, self._gpu, self._resource_sizes(spectral_arrays),
+            spectral=self._spectral, texture_pool_factory=TexturePool,
+        )
+
+        # ── seeding ─────────────────────────────────────────────────────
+        # Every resource starts valid so frame 0 can dispatch before any scene,
+        # material or texture has loaded.
+
+        seed = self._pack_mtlx_skin_array()
+        if seed:
+            self.mtlx_skin_buffer.upload_sync(seed)
+        # Per-frame HUD overlay (R8 alpha mask rasterised by Pillow). Pre-zero the
+        # staging buffer so the GPU image starts clean even if render() never gets
+        # to upload before render_headless() / a screenshot dispatch reads it.
+        self.hud_overlay.upload(bytes(self.width * self.height))
+        # Heterogeneous-medium density grid (binding 26, `volumeDensity`,
+        # nanovdb-volume-rendering). ALWAYS bound — PARTIALLY_BOUND-style gating
+        # is not available for a single binding, so a 1×1×1 zero texture stands in
+        # until a scene with a UsdVol.Volume grid loads (same always-bound pattern
+        # as the env/tattoo maps); densityAt then reads 0 everywhere. Replaced per
+        # scene by _sync_volume_grid.
+        self.volume_density_image.upload_sync(np.zeros((1, 1, 1), np.float16))
+        # Env sphere luminance integral ∫L dω (Φ_env = πR²·envIntensity·∫L dω) —
+        # an SPPM photon-group power input, cached alongside the importance CDF.
+        # MUST default before _ensure_env_uploaded(), which computes it; a later
+        # re-init would clobber the computed value and silently zero the env
+        # photon group.
+        self._env_lum_integral: float = 0.0
+        self._ensure_env_uploaded()
+        if self._spectral:
+            self._spectral_scale_buffer.upload_sync(
+                spectral_arrays["scale"].tobytes())
+            self._spectral_data_buffer.upload_sync(
+                spectral_arrays["data"].tobytes())
+            self._spectral_d65_buffer.upload_sync(
+                spectral_arrays["d65"].tobytes())
+            self._spectral_metals_buffer.upload_sync(
+                spectral_arrays["metals"].tobytes())
+        self.neural_weights_buffer.upload_sync(self._neural_dummy_weight_bytes)
+        self.neural_biases_buffer.upload_sync(self._neural_dummy_bias_bytes)
+        self.neural_layers_buffer.upload_sync(self._neural_dummy_header_bytes)
+        self._neural_weights_loaded = None   # path of the net uploaded (None = dummy)
         # Interop handoff (task 5.2): an exportable timeline semaphore orders the
         # CUDA weight-write vs the Vulkan read. Allocated only under
         # `--neural-handoff interop` on Vulkan; a guarded no-op
         # (export_handle()→None) on devices without external-semaphore support.
-        # Vulkan-only interop primitive — imported lazily so the Metal path
-        # (`_ext_neural` False there; its sync is the frame-boundary in-place
-        # write, no semaphore) never pulls in `vulkan` (task 2.3).
-        if _ext_neural:
+        # Vulkan-only interop primitive — imported lazily so the Metal path (whose
+        # sync is the frame-boundary in-place write, no semaphore) never pulls in
+        # `vulkan` (task 2.3).
+        if self._gpu_set.sizes.neural_external:
             from skinny.vk_compute import ExternalTimelineSemaphore
             self.neural_timeline_semaphore = ExternalTimelineSemaphore(self.ctx)
         else:
             self.neural_timeline_semaphore = None
-
         # Neural training-record dump (bindings 36/37, task 5.1). 1-element dummy
         # append buffer + counter so the descriptors are always valid; the
         # `mainImageRecord` entry never runs except inside dump_path_records,
         # which reallocates `record_buffer` to the per-frame capacity, binds it,
         # and reads it back. `mainImage` never touches these (dead-stripped).
-        from skinny.sampling.path_records import RECORD_STRIDE
-        self.record_buffer = self._gpu.StorageBuffer(self.ctx, RECORD_STRIDE)   # 1 dummy record
-        self.record_counter = self._gpu.StorageBuffer(self.ctx, 8)             # [count, capacity]
         self._record_pipeline = None   # lazily-built mainImageRecord ComputePipeline
         self._drain_buffer = None      # persistent live-drain target (task 1.2)
-
         # Tattoo texture (RGBA32F, spherical UV). Seeded with a blank so the
         # descriptor is valid even before the user flips off "None".
-        self.tattoo_image = self._gpu.SampledImage(self.ctx, TATTOO_WIDTH, TATTOO_HEIGHT)
         self.tattoo_image.upload_sync(blank_tattoo_data())
         self._ensure_tattoo_uploaded()
-
-        # Per-model detail maps — RGBA8, 2K square. Three images cover
-        # normal / roughness / displacement respectively. Seeded with
-        # blanks so the descriptors are valid on frame 1.
-        self.normal_image = self._gpu.SampledImage(
-            self.ctx, DETAIL_TEX_RES, DETAIL_TEX_RES,
-            format="rgba8_unorm", bytes_per_pixel=4,
-        )
-        self.roughness_image = self._gpu.SampledImage(
-            self.ctx, DETAIL_TEX_RES, DETAIL_TEX_RES,
-            format="rgba8_unorm", bytes_per_pixel=4,
-        )
-        self.displacement_image = self._gpu.SampledImage(
-            self.ctx, DETAIL_TEX_RES, DETAIL_TEX_RES,
-            format="rgba8_unorm", bytes_per_pixel=4,
-        )
+        # Per-model detail maps — RGBA8, 2K square. Normal / roughness /
+        # displacement, seeded blank so the descriptors are valid on frame 1.
         self.normal_image.upload_sync(blank_normal_bytes())
         self.roughness_image.upload_sync(blank_roughness_bytes())
         self.displacement_image.upload_sync(blank_displacement_bytes())
-
-        # Mesh storage buffers — always bound even when the SDF path is
-        # active, so the shader's StructuredBuffer bindings are valid.
-        # Sized for the largest source mesh (displacement doesn't change
-        # vertex/triangle counts).
-        self._dummy_mesh = dummy_mesh()
-        max_v = max(
-            (src.positions.shape[0] for src in self._mesh_sources),
-            default=self._dummy_mesh.num_vertices,
-        )
-        max_t = max(
-            (src.tri_idx.shape[0] for src in self._mesh_sources),
-            default=self._dummy_mesh.num_triangles,
-        )
-        # BVH node count is <= 2·tri_count with our leaf size of 4, but
-        # we over-size to keep headroom — cheaper than reallocation on rebake.
-        v_size = max_v * 32 + 256
-        i_size = max_t * 12 + 256
-        b_size = max(max_t * 32, self._dummy_mesh.num_nodes * 32) + 256
-
-        # USD-side budget: when a USD scene is supplied, the buffers must
-        # hold every loaded mesh concatenated back-to-back. Take the max
-        # of the legacy OBJ rebake budget and the USD concat total so
-        # toggling between USD and OBJ slots never overflows.
-        if self._usd_scene is not None and self._usd_scene.instances:
-            usd_v_bytes = sum(
-                inst.mesh.num_vertices * 32 for inst in self._usd_scene.instances
-            )
-            usd_i_bytes = sum(
-                inst.mesh.num_triangles * 12 for inst in self._usd_scene.instances
-            )
-            usd_b_bytes = sum(
-                inst.mesh.num_nodes * 32 for inst in self._usd_scene.instances
-            )
-            v_size = max(v_size, usd_v_bytes + 256)
-            i_size = max(i_size, usd_i_bytes + 256)
-            b_size = max(b_size, usd_b_bytes + 256)
-        self.vertex_buffer = self._gpu.StorageBuffer(self.ctx, v_size)
-        self.index_buffer = self._gpu.StorageBuffer(self.ctx, i_size)
-        self.bvh_buffer = self._gpu.StorageBuffer(self.ctx, b_size)
-        # Upload the dummy mesh so the buffers are valid on first frame
-        # even before the user picks a real mesh (or if none are present).
+        # Upload the dummy mesh so the buffers are valid on the first frame even
+        # before the user picks a real mesh (or if none are present).
         self._upload_mesh(self._dummy_mesh)
-
-        # TLAS instance buffer — one record per renderable mesh instance.
-        # Phase B always carries exactly one identity-transform instance, so
-        # the GPU's broad-phase loop is mathematically a no-op pass-through
-        # to the BLAS traversal. Sized for INSTANCE_CAPACITY entries up front
-        # so the upload path can grow into multi-mesh scenes (Phase D)
-        # without reallocation.
-        self.instance_capacity = 16
-        self.instance_buffer = self._gpu.StorageBuffer(
-            self.ctx, self.instance_capacity * INSTANCE_STRIDE + 256
-        )
+        # Phase B always carries exactly one identity-transform instance, so the
+        # GPU's broad-phase loop is mathematically a no-op pass-through to the
+        # BLAS traversal.
         self._upload_instances([np.eye(4, dtype=np.float32)], material_ids=[0])
         self._num_instances = 1
-
-        # Flat-material parameter buffer — one record per scene material.
-        # Sized for FLAT_MATERIAL_CAPACITY entries up front.
-        self.flat_material_buffer = self._gpu.StorageBuffer(
-            self.ctx, self.material_capacity * FLAT_MATERIAL_STRIDE + 256
-        )
-        # Initialize with one zeroed record so the buffer is valid even
-        # before any USD scene is loaded.
+        # Flat-material parameters — one zeroed record so the buffer is valid
+        # even before any USD scene is loaded.
         self.flat_material_buffer.upload_sync(b"\x00" * FLAT_MATERIAL_STRIDE)
         self._num_flat_materials = 0
         # Per-material blackbody emission (binding 51, Group 6.1 follow-up),
@@ -3973,36 +3973,20 @@ class Renderer:
         # indexed by materialId. Lets a camera-visible / BSDF-hit blackbody emitter
         # use the exact Planck SPD (matching NEE) instead of the RGB upsample.
         # Sized/grown parallel to flat_material_buffer; zeros ⇒ RGB upsample.
-        self._spectral_mat_emission_buffer = None
         if self._spectral:
-            self._spectral_mat_emission_buffer = self._gpu.StorageBuffer(
-                self.ctx, self.material_capacity * SPECTRAL_EMITTER_STRIDE + 16
-            )
             self._spectral_mat_emission_buffer.upload_sync(
                 b"\x00" * (self.material_capacity * SPECTRAL_EMITTER_STRIDE)
             )
-
-        # Bindless texture array (binding 14). Slots are populated lazily by
-        # `_upload_flat_materials` from each Material.texture_paths entry.
-        self.texture_pool = TexturePool(self.ctx, self._gpu)
-
-        # Per-material type-code buffer (binding 16). One uint per slot,
-        # written each time _upload_flat_materials runs.
-        self.material_types_buffer = self._gpu.StorageBuffer(
-            self.ctx, self.material_capacity * 4 + 16
-        )
+        # Per-material type codes (binding 16), one uint per slot, rewritten each
+        # time _upload_flat_materials runs. Seeded with MATERIAL_TYPE_FLAT so no
+        # slot defaults to skin.
         self._material_types: list[int] = [MATERIAL_TYPE_FLAT]
-        # Seed with MATERIAL_TYPE_FLAT so no slot defaults to skin.
         init_types = bytearray()
         for _ in range(self.material_capacity):
             init_types += struct.pack("I", MATERIAL_TYPE_FLAT)
         self.material_types_buffer.upload_sync(bytes(init_types))
-
-        # Sphere-light buffer (binding 17). Filled from
-        # scene.lights_sphere; fc.numSphereLights bounds the active range.
-        self.sphere_lights_buffer = self._gpu.StorageBuffer(
-            self.ctx, SPHERE_LIGHT_CAPACITY * SPHERE_LIGHT_STRIDE + 16
-        )
+        # Sphere lights (binding 17), filled from scene.lights_sphere;
+        # fc.numSphereLights bounds the active range.
         self.sphere_lights_buffer.upload_sync(
             b"\x00" * (SPHERE_LIGHT_CAPACITY * SPHERE_LIGHT_STRIDE)
         )
@@ -4011,15 +3995,10 @@ class Renderer:
         # power distribution (Φ_S = 4π²·Σ(lum·r²)); refreshed by every
         # _upload_sphere_lights call so live light edits stay consistent.
         self._sphere_power_sum: float = 0.0
-
-        # Distant-light buffer (binding 20). Filled from scene.lights_dir;
-        # fc.numDistantLights bounds the active range. Replaces the legacy
-        # single lightDirection/lightRadiance uniforms so the integrators
-        # can iterate every authored distant light via DirectionalLightImpl
-        # (ILight).
-        self.distant_lights_buffer = self._gpu.StorageBuffer(
-            self.ctx, DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE + 16
-        )
+        # Distant lights (binding 20), filled from scene.lights_dir;
+        # fc.numDistantLights bounds the active range. Replaces the legacy single
+        # lightDirection/lightRadiance uniforms so the integrators can iterate
+        # every authored distant light via DirectionalLightImpl (ILight).
         self.distant_lights_buffer.upload_sync(
             b"\x00" * (DISTANT_LIGHT_CAPACITY * DISTANT_LIGHT_STRIDE)
         )
@@ -4029,8 +4008,7 @@ class Renderer:
         # _sppm_group_pmf_override (a 4-tuple) bypasses the power distribution
         # and packs verbatim — the forced-group flux-normalization probe hook
         # ([0,0,0,1] = all-env). NOTE: the companion _env_lum_integral is
-        # initialized *before* the env buffer construction above —
-        # _ensure_env_uploaded() already ran at construction and a default here
+        # initialized *before* _ensure_env_uploaded() above — a default here
         # would clobber the computed integral (env pmf silently 0).
         self._distant_lum_sum: float = 0.0
         self._sppm_group_pmf_override: tuple | None = None
@@ -4038,24 +4016,13 @@ class Renderer:
         # spectral variant only — fixed capacity (distant lights never grow past
         # DISTANT_LIGHT_CAPACITY), so no rebind path. Filled in
         # _upload_distant_lights; zeros when no light carries an SPD.
-        self._spectral_light_spd_buffer = None
         if self._spectral:
-            self._spectral_light_spd_buffer = self._gpu.StorageBuffer(
-                self.ctx, DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE + 16
-            )
             self._spectral_light_spd_buffer.upload_sync(
                 b"\x00" * (DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE)
             )
-
-        # Emissive-triangle buffer (binding 18). Built from scene instances
-        # whose material has non-zero emissiveColor. The shader samples one
-        # triangle per pixel per frame for next-event estimation. EMISSIVE_TRI_CAPACITY
-        # is only the initial capacity — _upload_emissive_triangles grows it to the
-        # actual emissive-triangle count (no silent 256-cap; change emissive-mesh-nee).
-        self.emissive_tri_capacity: int = EMISSIVE_TRI_CAPACITY
-        self.emissive_tri_buffer = self._gpu.StorageBuffer(
-            self.ctx, self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE + 16
-        )
+        # Emissive triangles (binding 18), built from scene instances whose
+        # material has non-zero emissiveColor. The shader samples one triangle
+        # per pixel per frame for next-event estimation.
         self.emissive_tri_buffer.upload_sync(
             b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
         )
@@ -4064,9 +4031,6 @@ class Renderer:
         # sized/grown parallel to emissive_tri_buffer. Spectral variant only, so
         # the RGB descriptor layout stays byte-identical.
         if self._spectral:
-            self._spectral_emitters_buffer = self._gpu.StorageBuffer(
-                self.ctx, self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE + 16
-            )
             self._spectral_emitters_buffer.upload_sync(
                 b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
             )
@@ -4076,38 +4040,19 @@ class Renderer:
         # Test hook (change emissive-mesh-nee): force uniform-by-index emissive
         # selection (build the inline CDF uniform) for the power-vs-uniform A/B.
         self._emissive_uniform_selection: bool = False
-
-        # StdSurfaceParams buffer (binding 19). One 256-byte record per
-        # material slot, carrying the full MaterialX standard_surface input
-        # set for evalStdSurfaceBSDF in mtlx_std_surface.slang.
-        self.std_surface_buffer = self._gpu.StorageBuffer(
-            self.ctx, self.material_capacity * STD_SURFACE_STRIDE + 16
-        )
+        # StdSurfaceParams (binding 19). One 256-byte record per material slot,
+        # carrying the full MaterialX standard_surface input set for
+        # evalStdSurfaceBSDF in mtlx_std_surface.slang.
         self.std_surface_buffer.upload_sync(
             b"\x00" * (self.material_capacity * STD_SURFACE_STRIDE)
         )
-
         # BDPT light-tracer splat buffer (binding 21). 3 × uint32 per pixel
         # (Q22.10 fixed-point, atomic-add target). Cleared via fill_zero_sync
         # whenever the accumulation resets so the running mean stays correct.
-        self.light_splat_buffer = self._gpu.StorageBuffer(
-            self.ctx, self.width * self.height * 3 * 4
-        )
         self.light_splat_buffer.fill_zero_sync()
-
-        # Gizmo segment buffer (binding 22). Holds at most
-        # GIZMO_SEGMENT_CAPACITY 32-byte records (2 float2 endpoints, float3
-        # colour, float half-width). Repacked every frame from
+        # Gizmo segments (binding 22): 32-byte records (2 float2 endpoints,
+        # float3 colour, float half-width), repacked every frame from
         # ``self.gizmo`` when the user has selected an instance.
-        from skinny.gizmo import (
-            GIZMO_SEGMENT_CAPACITY, GIZMO_SEGMENT_STRIDE, TransformGizmo,
-        )
-        self.gizmo_segment_capacity = GIZMO_SEGMENT_CAPACITY
-        self.gizmo_segment_stride = GIZMO_SEGMENT_STRIDE
-        self.gizmo_segments_buffer = self._gpu.StorageBuffer(
-            self.ctx,
-            self.gizmo_segment_capacity * self.gizmo_segment_stride + 16,
-        )
         self.gizmo_segments_buffer.upload_sync(
             b"\x00" * (self.gizmo_segment_capacity * self.gizmo_segment_stride)
         )
@@ -4116,26 +4061,17 @@ class Renderer:
         self.show_focus_overlay: bool = False
         self.lens_vignette_debug: bool = False
 
-        # Viewport zoom-rect: a sub-rectangle of the output (in
-        # normalised pixel coords) that gets stretched to fill the
-        # window. (0,0)→(1,1) means no zoom; tighter bounds magnify a
-        # selected region without moving the camera.
+        # Viewport zoom-rect: a sub-rectangle of the output (in normalised pixel
+        # coords) that gets stretched to fill the window. (0,0)→(1,1) means no
+        # zoom; tighter bounds magnify a selected region without moving the camera.
         self.zoom_rect: list[float] = [0.0, 0.0, 1.0, 1.0]
-        # Live drag rectangle (pixel coords) — drawn as a yellow outline
-        # via the gizmo segment list while the user picks a sub-region.
+        # Live drag rectangle (pixel coords) — drawn as a yellow outline via the
+        # gizmo segment list while the user picks a sub-region.
         self._zoom_drag_overlay: Optional[tuple[float, float, float, float]] = None
 
-        # Thick-lens element buffer (binding 23). Each element is a
-        # 16-byte float4: (radius_world, thickness_world, ior, half_aperture_world).
-        # Capped at MAX_LENS_ELEMENTS so the SSBO size is fixed at startup.
-        # Repacked from the active camera's `LensSystem` whenever the lens
-        # signature changes; otherwise reused frame to frame.
-        self.lens_element_capacity = MAX_LENS_ELEMENTS
-        self.lens_element_stride = 16   # float4
-        self.lens_elements_buffer = self._gpu.StorageBuffer(
-            self.ctx,
-            self.lens_element_capacity * self.lens_element_stride + 16,
-        )
+        # Lens state. The element buffer is repacked from the active camera's
+        # `LensSystem` whenever the lens signature changes; otherwise reused
+        # frame to frame.
         self.lens_elements_buffer.upload_sync(
             b"\x00" * (self.lens_element_capacity * self.lens_element_stride)
         )
@@ -4148,17 +4084,9 @@ class Renderer:
         self._lens_active_count: int = 0
         self._lens_film_diag_world: float = 0.0
         self._lens_num_pupil_bounds: int = 0
-        # Exit-pupil bounds buffer (binding 24): 64 × float4
-        # (xMin, xMax, yMin, yMax) per film-radius bin. PBRT's
-        # `BoundExitPupil`. Lets the shader sample only the rear-disk
-        # subregion that produces non-vignetted rays for each pixel,
-        # keeping the rendered area full-screen even at small fstops.
-        self.lens_pupil_capacity = 64
-        self.lens_pupil_stride = 16
-        self.lens_pupil_buffer = self._gpu.StorageBuffer(
-            self.ctx,
-            self.lens_pupil_capacity * self.lens_pupil_stride + 16,
-        )
+        # Exit-pupil bounds (binding 24) let the shader sample only the rear-disk
+        # subregion that produces non-vignetted rays for each pixel, keeping the
+        # rendered area full-screen even at small fstops.
         self.lens_pupil_buffer.upload_sync(
             b"\x00" * (self.lens_pupil_capacity * self.lens_pupil_stride)
         )
@@ -4169,22 +4097,8 @@ class Renderer:
         # resets on a slider drag in the per-material panel.
         self._material_version: int = 0
 
-        # Offscreen output image + readback buffer. Always created — this is the
-        # only thing binding 1 ever points at, on every path: render_headless()
-        # (web + screenshot), save_screenshot(), and windowed render(), which
-        # blits it into the acquired swapchain image rather than rebinding.
-        # Must be created before _create_descriptors, which writes binding 1.
-        self._offscreen_output = self._gpu.StorageImage(
-            self.ctx, self.width, self.height,
-            format="rgba8_unorm",
-            transfer_src=True,
-        )
-        self._readback = self._gpu.ReadbackBuffer(self.ctx, self.width, self.height)
-
-        # BXDF visualizer output (binding 30). Host-visible SSBO holding
-        # the picked HitInfo and (future) BXDF eval grid. Sized for a
-        # 128 × 64 float4 lobe grid + 32-slot header, plus headroom.
-        self.tool_buffer = self._gpu.HostStorageBuffer(self.ctx, 128 * 64 * 16 + 4096)
+        # BXDF visualizer output (binding 30). Host-visible SSBO holding the
+        # picked HitInfo and (future) BXDF eval grid.
         self._pick_armed: bool = False
         self._pick_pixel: tuple[int, int] = (0, 0)
         self._pick_frame_count: int = 0
@@ -4235,54 +4149,20 @@ class Renderer:
         self.current_frame = 0
 
     def _create_descriptors(self) -> None:
-        pool_sizes = [
-            vk.VkDescriptorPoolSize(
-                type=vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                # One UBO per descriptor set (FrameConstants at binding 0).
-                descriptorCount=MAX_FRAMES_IN_FLIGHT,
-            ),
-            vk.VkDescriptorPoolSize(
-                type=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                descriptorCount=MAX_FRAMES_IN_FLIGHT,
-            ),
-        ]
-        # Storage-image descriptors per frame: swapchain + accumulation + HUD.
-        pool_sizes[1] = vk.VkDescriptorPoolSize(
-            type=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            descriptorCount=MAX_FRAMES_IN_FLIGHT * 3,
-        )
-        pool_sizes.append(
-            vk.VkDescriptorPoolSize(
-                type=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                # env + tattoo + n/r/d + volume density grid (6)
-                # + bindless flat-material array.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT * (6 + self._gpu.BINDLESS_TEXTURE_CAPACITY),
-            )
-        )
-        # Storage buffers per frame: vertices, indices, BVH nodes, TLAS
-        # instances, flat-material params, material type codes,
-        # per-material skin UBO array, sphere lights, emissive triangles,
-        # StdSurfaceParams, plus the ONE combined MaterialX graph-param buffer
-        # (binding GRAPH_BINDING_BASE) when the scene carries any graph.
+        """Allocate the Vulkan descriptor pool + sets and let the resource set
+        write every binding. Pool sizes are counted from the active declarations
+        rather than a hand-maintained tally; the writes and their order live with
+        the declarations (change renderer-gpu-resource-set)."""
+        # The ONE combined MaterialX graph-param buffer (binding
+        # GRAPH_BINDING_BASE) is present only when the scene carries any graph;
+        # the MLT chain buffers (52-57) only on the wavefront
+        # (`scene_bindings_only`) layout.
         graph_slot = 1 if (getattr(self, "_scene_graph_fragments", []) or []) else 0
-        pool_sizes.append(
-            vk.VkDescriptorPoolSize(
-                type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                # 17 fixed = vertices+indices+bvh+instances+flatMaterials+
-                #      materialTypes+mtlxSkin+sphereLights+emissiveTris+
-                #      stdSurface+lightSplat+gizmoSegments+
-                #      lensElements+lensPupilBounds+distantLights+toolBuffer+
-                #      envDistCdf (one combined env CDF buffer).
-                # +3 neural weights (33/34/35) +2 record dump (36/37) = 22.
-                # +7 spectral buffers (45/46/47 upsample + 48 conductor eta/k +
-                # 49 emissive blackbody + 50 distant-light SPD + 51 per-material
-                # blackbody) only for the spectral megakernel variant.
-                # +6 MLT chain buffers (52–57, change mlt-integrator/spectral-mlt) only on
-                # the wavefront (`scene_bindings_only`) layout.
-                descriptorCount=MAX_FRAMES_IN_FLIGHT
-                * (22 + graph_slot + (7 if self._spectral else 0)
-                   + (6 if getattr(self._scene_bindings, "mlt_bindings", False) else 0)),
-            )
+        mlt = bool(getattr(self._scene_bindings, "mlt_bindings", False))
+        pool_sizes = self._gpu_set.pool_sizes(
+            frames_in_flight=MAX_FRAMES_IN_FLIGHT,
+            graph_slot=graph_slot,
+            mlt_bindings=mlt,
         )
         pool_info = vk.VkDescriptorPoolCreateInfo(
             flags=0x00000002,  # VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
@@ -4303,568 +4183,18 @@ class Renderer:
         self.descriptor_sets = vk.vkAllocateDescriptorSets(
             self.ctx.device, alloc_info
         )
-
-        # Write descriptors (UBO at binding 0, accumulation image at binding 2).
-        # Binding 1 (swapchain image) is updated per-frame in render() because
-        # the acquired image index changes. In headless mode, binding 1 points
-        # to the persistent offscreen output image and is written here once.
-        for ds in self.descriptor_sets:
-            buf_info = vk.VkDescriptorBufferInfo(
-                buffer=self.uniform_buffer.buffer,
-                offset=0,
-                range=self.uniform_size,
-            )
-            accum_info = vk.VkDescriptorImageInfo(
-                imageView=self.accum_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            )
-            hud_info = vk.VkDescriptorImageInfo(
-                imageView=self.hud_overlay.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            )
-            env_info = vk.VkDescriptorImageInfo(
-                sampler=self.env_image.sampler,
-                imageView=self.env_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            )
-            tattoo_info = vk.VkDescriptorImageInfo(
-                sampler=self.tattoo_image.sampler,
-                imageView=self.tattoo_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            )
-            normal_info = vk.VkDescriptorImageInfo(
-                sampler=self.normal_image.sampler,
-                imageView=self.normal_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            )
-            rough_info = vk.VkDescriptorImageInfo(
-                sampler=self.roughness_image.sampler,
-                imageView=self.roughness_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            )
-            disp_info = vk.VkDescriptorImageInfo(
-                sampler=self.displacement_image.sampler,
-                imageView=self.displacement_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            )
-            # Heterogeneous-medium density grid (binding 26, always bound —
-            # the 1×1×1 zero fallback until a scene grid uploads; per-scene
-            # swaps re-write via _rebind_volume_descriptor).
-            volume_info = vk.VkDescriptorImageInfo(
-                sampler=self.volume_density_image.sampler,
-                imageView=self.volume_density_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            )
-            vtx_info = vk.VkDescriptorBufferInfo(
-                buffer=self.vertex_buffer.buffer, offset=0, range=self.vertex_buffer.size,
-            )
-            idx_info = vk.VkDescriptorBufferInfo(
-                buffer=self.index_buffer.buffer, offset=0, range=self.index_buffer.size,
-            )
-            bvh_info = vk.VkDescriptorBufferInfo(
-                buffer=self.bvh_buffer.buffer, offset=0, range=self.bvh_buffer.size,
-            )
-            inst_info = vk.VkDescriptorBufferInfo(
-                buffer=self.instance_buffer.buffer, offset=0, range=self.instance_buffer.size,
-            )
-            mat_info = vk.VkDescriptorBufferInfo(
-                buffer=self.flat_material_buffer.buffer,
-                offset=0,
-                range=self.flat_material_buffer.size,
-            )
-            mtlx_skin_info = vk.VkDescriptorBufferInfo(
-                buffer=self.mtlx_skin_buffer.buffer,
-                offset=0,
-                range=self.mtlx_skin_buffer.size,
-            )
-            mat_types_info = vk.VkDescriptorBufferInfo(
-                buffer=self.material_types_buffer.buffer,
-                offset=0,
-                range=self.material_types_buffer.size,
-            )
-            sphere_lights_info = vk.VkDescriptorBufferInfo(
-                buffer=self.sphere_lights_buffer.buffer,
-                offset=0,
-                range=self.sphere_lights_buffer.size,
-            )
-            emissive_tri_info = vk.VkDescriptorBufferInfo(
-                buffer=self.emissive_tri_buffer.buffer,
-                offset=0,
-                range=self.emissive_tri_buffer.size,
-            )
-            std_surface_info = vk.VkDescriptorBufferInfo(
-                buffer=self.std_surface_buffer.buffer,
-                offset=0,
-                range=self.std_surface_buffer.size,
-            )
-            light_splat_info = vk.VkDescriptorBufferInfo(
-                buffer=self.light_splat_buffer.buffer,
-                offset=0,
-                range=self.light_splat_buffer.size,
-            )
-            gizmo_info = vk.VkDescriptorBufferInfo(
-                buffer=self.gizmo_segments_buffer.buffer,
-                offset=0,
-                range=self.gizmo_segments_buffer.size,
-            )
-            lens_info = vk.VkDescriptorBufferInfo(
-                buffer=self.lens_elements_buffer.buffer,
-                offset=0,
-                range=self.lens_elements_buffer.size,
-            )
-            lens_pupil_info = vk.VkDescriptorBufferInfo(
-                buffer=self.lens_pupil_buffer.buffer,
-                offset=0,
-                range=self.lens_pupil_buffer.size,
-            )
-            distant_lights_info = vk.VkDescriptorBufferInfo(
-                buffer=self.distant_lights_buffer.buffer,
-                offset=0,
-                range=self.distant_lights_buffer.size,
-            )
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=0,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    pBufferInfo=[buf_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=2,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[accum_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=3,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[hud_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=4,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    pImageInfo=[env_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=5,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[vtx_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=6,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[idx_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=7,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[bvh_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=8,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    pImageInfo=[tattoo_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=9,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    pImageInfo=[normal_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=10,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    pImageInfo=[rough_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=11,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    pImageInfo=[disp_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=26,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    pImageInfo=[volume_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=12,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[inst_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=13,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[mat_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=15,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[mtlx_skin_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=16,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[mat_types_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=17,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[sphere_lights_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=18,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[emissive_tri_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=19,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[std_surface_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=21,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[light_splat_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=22,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[gizmo_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=23,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[lens_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=24,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[lens_pupil_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds,
-                    dstBinding=20,
-                    dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[distant_lights_info],
-                ),
-            ]
-            output_info = vk.VkDescriptorImageInfo(
-                imageView=self._offscreen_output.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            )
-            writes.append(vk.VkWriteDescriptorSet(
-                dstSet=ds,
-                dstBinding=1,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                pImageInfo=[output_info],
-            ))
-            tool_info = vk.VkDescriptorBufferInfo(
-                buffer=self.tool_buffer.buffer, offset=0, range=self.tool_buffer.size,
-            )
-            writes.append(vk.VkWriteDescriptorSet(
-                dstSet=ds,
-                dstBinding=30,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pBufferInfo=[tool_info],
-            ))
-            env_dist_info = vk.VkDescriptorBufferInfo(
-                buffer=self.env_dist_buffer.buffer, offset=0,
-                range=self.env_dist_buffer.size,
-            )
-            writes.append(vk.VkWriteDescriptorSet(
-                dstSet=ds,
-                dstBinding=31,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pBufferInfo=[env_dist_info],
-            ))
-            # Neural proposal weights (33/34/35). Always bound (dummy net when
-            # inactive) so the inline flow inverse in proposal.slang has valid
-            # descriptors on every pipeline that uses this layout.
-            for _b, _buf in ((33, self.neural_weights_buffer),
-                             (34, self.neural_biases_buffer),
-                             (35, self.neural_layers_buffer),
-                             # Training-record dump (36 = PathRecord append, 37 =
-                             # counter); dummies until dump_path_records rebinds.
-                             (36, self.record_buffer),
-                             (37, self.record_counter)):
-                writes.append(vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[vk.VkDescriptorBufferInfo(
-                        buffer=_buf.buffer, offset=0, range=_buf.size)],
-                ))
-            # MLT chain buffers (52–57, change mlt-integrator/spectral-mlt) — only the
-            # wavefront (`scene_bindings_only`) layout declares them; dummies
-            # until `_ensure_wavefront_mlt_pass` rebinds the real chain
-            # buffers (the 36/37 record-dump precedent).
-            if getattr(self._scene_bindings, "mlt_bindings", False):
-                for _b in (52, 53, 54, 55, 56, 57):
-                    writes.append(vk.VkWriteDescriptorSet(
-                        dstSet=ds, dstBinding=_b, dstArrayElement=0, descriptorCount=1,
-                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        pBufferInfo=[vk.VkDescriptorBufferInfo(
-                            buffer=self.record_counter.buffer, offset=0,
-                            range=self.record_counter.size)],
-                    ))
-            # Spectral upsample tables (45/46/47) — only the spectral variant's
-            # layout declares these bindings; the RGB path writes nothing.
-            if self._spectral:
-                for _b, _buf in ((45, self._spectral_scale_buffer),
-                                 (46, self._spectral_data_buffer),
-                                 (47, self._spectral_d65_buffer),
-                                 (48, self._spectral_metals_buffer),
-                                 (49, self._spectral_emitters_buffer),
-                                 (50, self._spectral_light_spd_buffer),
-                                 (51, self._spectral_mat_emission_buffer)):
-                    writes.append(vk.VkWriteDescriptorSet(
-                        dstSet=ds, dstBinding=_b, dstArrayElement=0,
-                        descriptorCount=1,
-                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        pBufferInfo=[vk.VkDescriptorBufferInfo(
-                            buffer=_buf.buffer, offset=0, range=_buf.size)],
-                    ))
-            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
-
-    def _rebind_scene_descriptors(self) -> None:
-        """Re-write descriptor bindings 12, 13, 15, 16 after buffer reallocation."""
-        # Metal has no Vulkan descriptor sets; `_build_metal_binds` re-reads each
-        # buffer reference fresh at every dispatch, so a realloc is picked up
-        # automatically. Without this guard the Vulkan `VkDescriptorBufferInfo`
-        # call below fails on a slangpy buffer with
-        # `TypeError: an integer is required` (e.g. a 20+-instance scene grows the
-        # instance buffer and trips the rebind mid-stream).
-        if self.is_metal:
-            return
-        inst_info = vk.VkDescriptorBufferInfo(
-            buffer=self.instance_buffer.buffer, offset=0,
-            range=self.instance_buffer.size,
-        )
-        mat_info = vk.VkDescriptorBufferInfo(
-            buffer=self.flat_material_buffer.buffer, offset=0,
-            range=self.flat_material_buffer.size,
-        )
-        mtlx_skin_info = vk.VkDescriptorBufferInfo(
-            buffer=self.mtlx_skin_buffer.buffer, offset=0,
-            range=self.mtlx_skin_buffer.size,
-        )
-        mat_types_info = vk.VkDescriptorBufferInfo(
-            buffer=self.material_types_buffer.buffer, offset=0,
-            range=self.material_types_buffer.size,
-        )
-        for ds in self.descriptor_sets:
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=12, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[inst_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=13, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[mat_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=15, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[mtlx_skin_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=16, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[mat_types_info],
-                ),
-            ]
-            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
-
-    def _rebind_aux_material_descriptors(self) -> None:
-        """Re-write descriptor binding 19 after buffer reallocation."""
-        # Vulkan-only (see `_rebind_scene_descriptors`): Metal rebinds the live
-        # std_surface buffer at dispatch, so this is a no-op there.
-        if self.is_metal:
-            return
-        ss_info = vk.VkDescriptorBufferInfo(
-            buffer=self.std_surface_buffer.buffer, offset=0,
-            range=self.std_surface_buffer.size,
-        )
-        for ds in self.descriptor_sets:
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=19, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[ss_info],
-                ),
-            ]
-            # Spectral (Group 6.1 follow-up): binding 51 grows with the material
-            # buffer, so rewrite it here too or it points at the freed buffer.
-            if self._spectral and self._spectral_mat_emission_buffer is not None:
-                writes.append(vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=51, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[vk.VkDescriptorBufferInfo(
-                        buffer=self._spectral_mat_emission_buffer.buffer, offset=0,
-                        range=self._spectral_mat_emission_buffer.size)],
-                ))
-            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
-
-    def _rebind_emissive_descriptors(self) -> None:
-        """Re-write descriptor binding 18 after the emissive-triangle buffer grows
-        (change emissive-mesh-nee)."""
-        # Vulkan-only (see `_rebind_scene_descriptors`): native Metal re-reads the
-        # live emissive_tri_buffer reference at dispatch, so this is a no-op there.
-        if self.is_metal:
-            return
-        emissive_tri_info = vk.VkDescriptorBufferInfo(
-            buffer=self.emissive_tri_buffer.buffer, offset=0,
-            range=self.emissive_tri_buffer.size,
-        )
-        for ds in self.descriptor_sets:
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=18, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[emissive_tri_info],
-                ),
-            ]
-            # Spectral (Group 6.1): the parallel-indexed spectralEmitters buffer
-            # (binding 49) is destroyed+recreated in the SAME growth step, so its
-            # descriptor must be rewritten here too — otherwise binding 49 keeps
-            # pointing at the freed buffer and emitterBlackbody() reads stale memory.
-            if self._spectral and self._spectral_emitters_buffer is not None:
-                writes.append(vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=49, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[vk.VkDescriptorBufferInfo(
-                        buffer=self._spectral_emitters_buffer.buffer, offset=0,
-                        range=self._spectral_emitters_buffer.size)],
-                ))
-            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
-
-    def _rebind_mesh_descriptors(self) -> None:
-        """Re-write descriptor bindings 5, 6, 7 after buffer reallocation."""
-        # Vulkan-only (see `_rebind_scene_descriptors`): Metal rebinds the live
-        # vertex/index/BVH buffers at dispatch, so this is a no-op there. The mesh-
-        # grow path ("growing mesh buffers …") on a 20+-instance scene hits this
-        # first, otherwise crashing with `TypeError: an integer is required`.
-        if self.is_metal:
-            return
-        vtx_info = vk.VkDescriptorBufferInfo(
-            buffer=self.vertex_buffer.buffer, offset=0, range=self.vertex_buffer.size,
-        )
-        idx_info = vk.VkDescriptorBufferInfo(
-            buffer=self.index_buffer.buffer, offset=0, range=self.index_buffer.size,
-        )
-        bvh_info = vk.VkDescriptorBufferInfo(
-            buffer=self.bvh_buffer.buffer, offset=0, range=self.bvh_buffer.size,
-        )
-        for ds in self.descriptor_sets:
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=5, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[vtx_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=6, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[idx_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=7, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[bvh_info],
-                ),
-            ]
-            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+        # Binding 1 (the output image) points at the persistent offscreen image
+        # on every path: windowed render() blits it into the acquired swapchain
+        # image rather than rebinding, so it is written here once like the rest.
+        self._gpu_set.bind_vulkan(self.descriptor_sets, mlt_bindings=mlt)
 
     def _ensure_mesh_buffer_capacity(
         self, num_vertices: int, num_triangles: int, num_nodes: int,
     ) -> None:
-        """Grow mesh storage buffers if needed, rebinding descriptors."""
+        """Grow mesh storage buffers if needed. The resource set reallocates and
+        rebinds from the same declarations, so there is no separate rebind to
+        remember (and nothing to skip on Metal, which re-reads the buffer
+        references at dispatch)."""
         v_need = num_vertices * 32 + 256
         i_need = num_triangles * 12 + 256
         b_need = num_nodes * 32 + 256
@@ -4888,24 +4218,16 @@ class Renderer:
             f"bvh {self.bvh_buffer.size}→{b_new}"
         )
 
-        self.vertex_buffer.destroy()
-        self.index_buffer.destroy()
-        self.bvh_buffer.destroy()
-
-        self.vertex_buffer = self._gpu.StorageBuffer(self.ctx, v_new)
-        self.index_buffer = self._gpu.StorageBuffer(self.ctx, i_new)
-        self.bvh_buffer = self._gpu.StorageBuffer(self.ctx, b_new)
-
-        # Metal binds mesh buffers by reference at dispatch (no Vulkan descriptor
-        # sets — `descriptor_sets is None`), so the next dispatch picks up the
-        # freshly-allocated buffers automatically; the descriptor rewrite is a
-        # Vulkan-only step. It is also skipped when the descriptor sets don't
-        # exist yet (a large mesh can grow the buffers before the pipeline build
-        # allocates them — e.g. loading a big OBJ before the lazy build runs); the
-        # subsequent `_build_pipeline_for_current_graphs` writes the descriptors
-        # against the current buffers.
-        if not self.is_metal and self.descriptor_sets is not None:
-            self._rebind_mesh_descriptors()
+        # `descriptor_sets` is None when a large mesh grows the buffers before
+        # the lazy pipeline build allocates them (e.g. loading a big OBJ); the
+        # subsequent `_build_pipeline_for_current_graphs` then writes the
+        # descriptors against the current buffers.
+        self._gpu_set.replace(
+            {"vertex_buffer": (v_new,),
+             "index_buffer": (i_new,),
+             "bvh_buffer": (b_new,)},
+            descriptor_sets=self.descriptor_sets,
+        )
         self.vertex_buffer.upload_sync(self._dummy_mesh.vertex_bytes)
         self.index_buffer.upload_sync(self._dummy_mesh.index_bytes)
         self.bvh_buffer.upload_sync(self._dummy_mesh.bvh_bytes)
@@ -6361,21 +5683,18 @@ class Renderer:
                 )
             return
 
-        # Grow (and rebind) the buffer to hold every emissive triangle, doubling
-        # capacity like material_capacity. Vulkan re-writes binding 18; native
-        # Metal re-reads the buffer reference fresh at dispatch (no-op rebind).
+        # Grow the buffer to hold every emissive triangle, doubling capacity like
+        # material_capacity. The parallel-indexed spectralEmitters buffer
+        # (binding 49) grows in the same step — declaring the capacity once
+        # regrows and rebinds both, so 49 can no longer be left pointing at the
+        # freed buffer while 18 is rewritten.
         if n > self.emissive_tri_capacity:
             self.emissive_tri_capacity = max(n, self.emissive_tri_capacity * 2)
-            self.emissive_tri_buffer.destroy()
-            self.emissive_tri_buffer = self._gpu.StorageBuffer(
-                self.ctx, self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE + 16
+            self._gpu_set.sizes.emissive_tri_capacity = self.emissive_tri_capacity
+            self._gpu_set.regrow(
+                "emissive_tri_buffer", "_spectral_emitters_buffer",
+                descriptor_sets=self.descriptor_sets,
             )
-            if self._spectral and self._spectral_emitters_buffer is not None:
-                self._spectral_emitters_buffer.destroy()
-                self._spectral_emitters_buffer = self._gpu.StorageBuffer(
-                    self.ctx, self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE + 16
-                )
-            self._rebind_emissive_descriptors()
 
         uniform = bool(getattr(self, "_emissive_uniform_selection", False))
         data = bytearray()
@@ -6600,30 +5919,15 @@ class Renderer:
             new_cap = max(len(materials), self.material_capacity * 2)
             self.material_capacity = new_cap
             self._per_material_furnace = [False] * new_cap
-            self.flat_material_buffer.destroy()
-            self.flat_material_buffer = self._gpu.StorageBuffer(
-                self.ctx, new_cap * FLAT_MATERIAL_STRIDE + 256
+            # Every per-material-slot buffer is sized from the same capacity, so
+            # they regrow and rebind together from their declarations.
+            self._gpu_set.sizes.material_capacity = new_cap
+            self._gpu_set.regrow(
+                "flat_material_buffer", "material_types_buffer",
+                "mtlx_skin_buffer", "std_surface_buffer",
+                "_spectral_mat_emission_buffer",
+                descriptor_sets=self.descriptor_sets,
             )
-            self.material_types_buffer.destroy()
-            self.material_types_buffer = self._gpu.StorageBuffer(
-                self.ctx, new_cap * 4 + 16
-            )
-            self.mtlx_skin_buffer.destroy()
-            mtlx_slot_bytes = 256 if self.is_metal else self.mtlx_skin_record_size
-            self.mtlx_skin_buffer = self._gpu.StorageBuffer(
-                self.ctx, new_cap * mtlx_slot_bytes + 256
-            )
-            self.std_surface_buffer.destroy()
-            self.std_surface_buffer = self._gpu.StorageBuffer(
-                self.ctx, new_cap * STD_SURFACE_STRIDE + 16
-            )
-            if self._spectral and self._spectral_mat_emission_buffer is not None:
-                self._spectral_mat_emission_buffer.destroy()
-                self._spectral_mat_emission_buffer = self._gpu.StorageBuffer(
-                    self.ctx, new_cap * SPECTRAL_EMITTER_STRIDE + 16
-                )
-            self._rebind_scene_descriptors()
-            self._rebind_aux_material_descriptors()
         # Python-material slots route through MATERIAL_TYPE_PYTHON, but
         # `flatMaterials[matId]` still holds the UsdPreviewSurface inputs
         # that the generated `_pyMatInputs_<id>` adapter reads. Pack flat
@@ -6827,8 +6131,10 @@ class Renderer:
         # so this never grows there.
         needed = self.material_capacity * ss_stride + 16
         if self.std_surface_buffer.size < needed:
-            self.std_surface_buffer.destroy()
-            self.std_surface_buffer = self._gpu.StorageBuffer(self.ctx, needed)
+            self._gpu_set.replace(
+                {"std_surface_buffer": (needed,)},
+                descriptor_sets=self.descriptor_sets,
+            )
         self.std_surface_buffer.upload_sync(
             bytes(ss_data[: self.material_capacity * ss_stride])
         )
@@ -6930,21 +6236,12 @@ class Renderer:
         # Defensive: a slangc empty-graph fallback may leave the binding absent.
         if not self._scene_graph_bindings:
             return
-        info = vk.VkDescriptorBufferInfo(
-            buffer=self._graph_params_combined.buffer,
-            offset=0,
-            range=self._graph_params_combined.size,
+        # Not a declared resource — its lifetime follows the scene graph, not the
+        # renderer — but the descriptor write itself goes through the set.
+        self._gpu_set.write_binding(
+            GRAPH_BINDING_BASE, self._graph_params_combined,
+            self.descriptor_sets,
         )
-        for ds in self.descriptor_sets:
-            write = vk.VkWriteDescriptorSet(
-                dstSet=ds,
-                dstBinding=GRAPH_BINDING_BASE,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pBufferInfo=[info],
-            )
-            vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
 
     def _upload_material_types(self) -> None:
         """Pack per-material type+flags into binding 16.
@@ -8435,38 +7732,12 @@ class Renderer:
         textures) for every descriptor set. PARTIALLY_BOUND lets unfilled
         slots stay invalid — the shader gates reads behind a sentinel idx.
         """
-        # Metal has no Vulkan descriptor sets (`descriptor_sets is None`); the
-        # bindless pool is bound by name straight from `texture_pool` at dispatch
-        # (see `_build_pipeline_for_current_graphs`), so this Vulkan descriptor-
-        # write is a no-op. The pipeline-build path already skips it, but
-        # `_upload_flat_materials` calls it unconditionally on every material
-        # upload — without this guard the Metal leg crashes there with
-        # `TypeError: 'NoneType' object is not iterable`.
-        if self.is_metal:
-            return
-        filled = self.texture_pool.filled_slots()
-        if not filled:
-            return
-        writes: list = []
-        for ds in self.descriptor_sets:
-            for slot_idx, sampled in filled:
-                info = vk.VkDescriptorImageInfo(
-                    sampler=sampled.sampler,
-                    imageView=sampled.view,
-                    imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                )
-                writes.append(
-                    vk.VkWriteDescriptorSet(
-                        dstSet=ds,
-                        dstBinding=14,
-                        dstArrayElement=slot_idx,
-                        descriptorCount=1,
-                        descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        pImageInfo=[info],
-                    )
-                )
-        if writes:
-            vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
+        # The bindless pool is one declaration like any other, so this is the
+        # same rebind path the buffers use: on Metal it does nothing (the pool
+        # is bound by name straight from `texture_pool` at dispatch), and it is
+        # a no-op before the descriptor sets exist.
+        self._gpu_set.rebind(
+            ["texture_pool"], descriptor_sets=self.descriptor_sets)
 
     def _sync_volume_grid(self, scene) -> None:
         """Upload the scene's density grid (nanovdb-volume-rendering) once per
@@ -8488,10 +7759,13 @@ class Renderer:
         if key == self._volume_grid_key:
             return
         self._volume_grid_key = key
-        if self.volume_density_image is not None:
-            self.volume_density_image.destroy()
+        # Declaring the new extent replaces the texture AND rewrites binding 26
+        # in one step; there is no separate rebind to forget.
         if vg is None:
-            self.volume_density_image = self._gpu.SampledImage3D(self.ctx, 1, 1, 1)
+            self._gpu_set.replace(
+                {"volume_density_image": (1, 1, 1)},
+                descriptor_sets=self.descriptor_sets,
+            )
             self.volume_density_image.upload_sync(np.zeros((1, 1, 1), np.float16))
             self._volume_world_to_uvw = None
             self._volume_value_max = 1.0
@@ -8504,7 +7778,10 @@ class Renderer:
             # Reader layout is (nx, ny, nz); GPU upload wants (D, H, W) = (nz, ny, nx).
             voxels = np.ascontiguousarray(
                 np.transpose(dens, (2, 1, 0)).astype(np.float16))
-            self.volume_density_image = self._gpu.SampledImage3D(self.ctx, nx, ny, nz)
+            self._gpu_set.replace(
+                {"volume_density_image": (nx, ny, nz)},
+                descriptor_sets=self.descriptor_sets,
+            )
             self.volume_density_image.upload_sync(voxels)
             self._volume_world_to_uvw = np.asarray(vg.world_to_uvw, np.float32)
             self._volume_value_max = vmax
@@ -8512,33 +7789,6 @@ class Renderer:
                 f"[skinny] volume grid uploaded: {nx}x{ny}x{nz} R16F "
                 f"({nx * ny * nz * 2 / 1e6:.0f} MB), value_max {vmax:.4g}"
             )
-        self._rebind_volume_descriptor()
-
-    def _rebind_volume_descriptor(self) -> None:
-        """Vulkan-only: rewrite binding 26 (volumeDensity) after the 3D texture
-        was replaced. Metal binds the live `volume_density_image` by name at
-        every dispatch (`_build_metal_binds`), so a swap is picked up
-        automatically there; before the Vulkan descriptor sets exist the initial
-        `_create_descriptors` writes the binding against the current image."""
-        if self.is_metal or self.descriptor_sets is None:
-            return
-        info = vk.VkDescriptorImageInfo(
-            sampler=self.volume_density_image.sampler,
-            imageView=self.volume_density_image.view,
-            imageLayout=vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        )
-        writes = [
-            vk.VkWriteDescriptorSet(
-                dstSet=ds,
-                dstBinding=26,
-                dstArrayElement=0,
-                descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                pImageInfo=[info],
-            )
-            for ds in self.descriptor_sets
-        ]
-        vk.vkUpdateDescriptorSets(self.ctx.device, len(writes), writes, 0, None)
 
     # Shared-buffer element strides (bytes). Must match the packers in mesh.py
     # and the grow math in _ensure_mesh_buffer_capacity.
@@ -8708,11 +7958,9 @@ class Renderer:
         if len(transforms) > self.instance_capacity:
             new_cap = max(len(transforms), self.instance_capacity * 2)
             self.instance_capacity = new_cap
-            self.instance_buffer.destroy()
-            self.instance_buffer = self._gpu.StorageBuffer(
-                self.ctx, self.instance_capacity * INSTANCE_STRIDE + 256
-            )
-            self._rebind_scene_descriptors()
+            self._gpu_set.sizes.instance_capacity = new_cap
+            self._gpu_set.regrow(
+                "instance_buffer", descriptor_sets=self.descriptor_sets)
 
         data = bytearray()
         for xform, mat_id, (n_off, t_off, v_off) in zip(
@@ -9747,75 +8995,29 @@ class Renderer:
         """Map every Metal megakernel shader global → its native SlangPy resource
         (bind-by-name, design D2). The pipeline filters to the names the compiled
         module actually references, so binding an unused name is harmless and a
-        dead-stripped one is simply skipped."""
-        b = {
-            # Storage buffers (bindings 5-7, 12-24, 30-37).
-            "meshVertices": self.vertex_buffer.buffer,
-            "meshIndices": self.index_buffer.buffer,
-            "bvhNodes": self.bvh_buffer.buffer,
-            "instances": self.instance_buffer.buffer,
-            "flatMaterials": self.flat_material_buffer.buffer,
-            "materialTypes": self.material_types_buffer.buffer,
-            "mtlxSkin": self.mtlx_skin_buffer.buffer,
-            "sphereLights": self.sphere_lights_buffer.buffer,
-            "emissiveTriangles": self.emissive_tri_buffer.buffer,
-            "stdSurfaceParams": self.std_surface_buffer.buffer,
-            "distantLights": self.distant_lights_buffer.buffer,
-            "lightSplatBuffer": self.light_splat_buffer.buffer,
-            "gizmoSegments": self.gizmo_segments_buffer.buffer,
-            "lensElements": self.lens_elements_buffer.buffer,
-            "exitPupilBounds": self.lens_pupil_buffer.buffer,
-            "toolBuffer": self.tool_buffer.buffer,
-            "envDistCdf": self.env_dist_buffer.buffer,
-            "neuralWeights": self.neural_weights_buffer.buffer,
-            "neuralBiases": self.neural_biases_buffer.buffer,
-            "neuralLayers": self.neural_layers_buffer.buffer,
-            "recordBuf": self.record_buffer.buffer,
-            "recordCounter": self.record_counter.buffer,
-            # Storage images (bindings 1-3).
-            "outputBuffer": self._offscreen_output.texture,
-            "accumBuffer": self.accum_image.texture,
-            "hudMask": self.hud_overlay.texture,
-            # Shared bindless-pool sampler (binding 38, design D8).
-            "commonSampler": self._metal_common_sampler,
-        }
-        # Discrete maps: combined `Sampler2D`/`Sampler3D` is unsupported on Metal,
-        # so each is a `Texture2D`/`Texture3D` + its own `SamplerState`
-        # (bindings 4/8-11/26 + 39-44, design D8). `volumeDensity` is the
-        # heterogeneous-medium density grid (nanovdb-volume-rendering) — always
-        # bound (1×1×1 zero fallback), re-read fresh here every dispatch so a
-        # per-scene texture swap needs no descriptor bookkeeping on Metal.
-        for name, img in (
-            ("envMap", self.env_image), ("tattooMap", self.tattoo_image),
-            ("normalMap", self.normal_image), ("roughnessMap", self.roughness_image),
-            ("displacementMap", self.displacement_image),
-            ("volumeDensity", self.volume_density_image),
-        ):
-            b[name] = img.texture
-            b[name + "Sampler"] = img.sampler
+        dead-stripped one is simply skipped.
+
+        Every declared resource — buffers, storage images, and the discrete
+        `Texture2D`/`Texture3D` + `SamplerState` pairs Metal needs because a
+        combined `Sampler2D`/`Sampler3D` is unsupported there — comes from the
+        same declaration list the Vulkan descriptor writes come from. Only the
+        two globals that are not declared resources are added here.
+        """
+        b = self._gpu_set.metal_binds()
+        # Shared bindless-pool sampler (binding 38, design D8) — owned by the
+        # renderer, not the resource set: it is one sampler standing in for the
+        # 128 a combined `Sampler2D[]` would emit.
+        b["commonSampler"] = self._metal_common_sampler
         # Per-graph MaterialX param SSBOs (globals `graphParams_<sanitized>`,
-        # binding GRAPH_BINDING_BASE). Bind-by-name like every other resource;
-        # one combined buffer shared by every graph (the Slang global is
-        # `graphParamsCombined`, change combine-graph-param-buffers). Contents
-        # are scalar-packed in `_upload_graph_param_buffers` — `Load<T>` reads
-        # the same scalar layout on Metal and SPIR-V, so no MSL relocation.
+        # binding GRAPH_BINDING_BASE). One combined buffer shared by every graph
+        # (the Slang global is `graphParamsCombined`, change
+        # combine-graph-param-buffers). Contents are scalar-packed in
+        # `_upload_graph_param_buffers` — `Load<T>` reads the same scalar layout
+        # on Metal and SPIR-V, so no MSL relocation. Its lifetime follows the
+        # scene graph rather than the resource set.
         combined = getattr(self, "_graph_params_combined", None)
         if combined is not None:
             b["graphParamsCombined"] = combined.buffer
-        # Spectral upsample tables (bindings 45/46/47) — only the spectral
-        # megakernel variant references these names; Metal silently skips
-        # unbound names, but only add when the buffers exist.
-        if self._spectral and self._spectral_scale_buffer is not None:
-            b["spectralScale"] = self._spectral_scale_buffer.buffer
-            b["spectralData"] = self._spectral_data_buffer.buffer
-            b["spectralD65"] = self._spectral_d65_buffer.buffer
-            b["spectralMetals"] = self._spectral_metals_buffer.buffer
-            if self._spectral_emitters_buffer is not None:
-                b["spectralEmitters"] = self._spectral_emitters_buffer.buffer
-            if self._spectral_light_spd_buffer is not None:
-                b["spectralLightSpd"] = self._spectral_light_spd_buffer.buffer
-            if self._spectral_mat_emission_buffer is not None:
-                b["spectralMatEmission"] = self._spectral_mat_emission_buffer.buffer
         return b
 
     def _render_megakernel_metal(self) -> None:
@@ -11012,80 +10214,23 @@ class Renderer:
 
         self.ctx.wait_idle()
 
-        self._offscreen_output.destroy()
-        self._readback.destroy()
-        self.accum_image.destroy()
-        self.hud_overlay.destroy()
-
         self.width = width
         self.height = height
         self.ctx.width = width
         self.ctx.height = height
 
-        self._offscreen_output = self._gpu.StorageImage(
-            self.ctx, width, height,
-            format="rgba8_unorm",
-            transfer_src=True,
-        )
-        self._readback = self._gpu.ReadbackBuffer(self.ctx, width, height)
-        self.accum_image = self._gpu.StorageImage(
-            self.ctx, width, height, transfer_src=True,
-        )
-        self.hud_overlay = self._gpu.HudOverlay(self.ctx, width, height)
+        # The declarations tagged size-dependent — binding 1 (offscreen output),
+        # binding 2 (accumulation), binding 3 (HUD overlay) and the readback
+        # staging buffer — are recreated and rebound together. Vulkan binds them
+        # through a persistent descriptor set, so the set-0 entries must be
+        # re-pointed at the fresh images; Metal has no persistent descriptor set
+        # (the dispatch binds them by reference each frame), and the set's one
+        # binding step already knows the difference.
+        self._gpu_set.resize(width, height, descriptor_sets=self.descriptor_sets)
         self.hud_overlay.upload(bytes(width * height))
-
-        # Vulkan binds these images through a persistent descriptor set, so the
-        # set-0 entries must be re-pointed at the freshly recreated images. Metal
-        # has no persistent descriptor set — the megakernel dispatch binds
-        # `accum_image.texture` / `_offscreen_output.texture` by reference each
-        # frame, so the new images are picked up automatically.
-        if not self.is_metal:
-            self._rewrite_size_dependent_descriptors()
 
         self.accum_frame = 0
         self._last_state_hash = None
-
-    def _rewrite_size_dependent_descriptors(self) -> None:
-        """Re-write the descriptor entries that point at images recreated
-        by resize(): binding 1 (offscreen output), binding 2 (accumulation),
-        binding 3 (HUD overlay).
-        """
-        for ds in self.descriptor_sets:
-            output_info = vk.VkDescriptorImageInfo(
-                imageView=self._offscreen_output.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            )
-            accum_info = vk.VkDescriptorImageInfo(
-                imageView=self.accum_image.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            )
-            hud_info = vk.VkDescriptorImageInfo(
-                imageView=self.hud_overlay.view,
-                imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            )
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=1, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[output_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=2, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[accum_info],
-                ),
-                vk.VkWriteDescriptorSet(
-                    dstSet=ds, dstBinding=3, dstArrayElement=0,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[hud_info],
-                ),
-            ]
-            vk.vkUpdateDescriptorSets(
-                self.ctx.device, len(writes), writes, 0, None,
-            )
 
     def read_accumulation_hdr(self) -> tuple[np.ndarray, int]:
         """Copy the float32 RGBA accumulation image to the host. Returns
@@ -11255,13 +10400,9 @@ class Renderer:
         """Point descriptor binding 36 (the PathRecord append buffer) at ``buf``
         across all frames-in-flight descriptor sets."""
         vk.vkDeviceWaitIdle(self.ctx.device)
-        for ds in self.descriptor_sets:
-            write = vk.VkWriteDescriptorSet(
-                dstSet=ds, dstBinding=36, dstArrayElement=0, descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pBufferInfo=[vk.VkDescriptorBufferInfo(
-                    buffer=buf.buffer, offset=0, range=buf.size)])
-            vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
+        # The drain buffer is rebuilt per frame capacity, so it stays outside the
+        # declared inventory; the write goes through the set all the same.
+        self._gpu_set.write_binding(36, buf, self.descriptor_sets)
 
     def _dispatch_record(self, descriptor_set) -> None:
         """One-shot dispatch of the ``mainImageRecord`` entry over the frame."""
@@ -11407,10 +10548,11 @@ class Renderer:
                 header[0:4] = _struct.pack("<I", capacity)   # capacity @ 0
                 self._drain_buffer.upload_sync(bytes(header))  # count @ 60 = 0
                 # Route through the bind-by-name dict: every dispatch binds
-                # `recordBuf` from self.record_buffer.
-                if self.record_buffer is not None:
-                    self.record_buffer.destroy()
-                self.record_buffer = self._drain_buffer
+                # `recordBuf` from self.record_buffer. Ownership moves to the
+                # resource set, which destroys the slot once — `cleanup` used to
+                # free the drain buffer AND the record_buffer slot it had been
+                # aliased into, a double destroy waiting on this path.
+                self._gpu_set.adopt("record_buffer", self._drain_buffer)
             self._wf_record_capacity = capacity
             return capacity
         if (self._drain_buffer is None
@@ -11543,72 +10685,32 @@ class Renderer:
 
         if self.descriptor_pool is not None:
             vk.vkDestroyDescriptorPool(self.ctx.device, self.descriptor_pool, None)
-        self.texture_pool.destroy()
         if getattr(self, "_graph_params_combined", None) is not None:
             self._graph_params_combined.destroy()
             self._graph_params_combined = None
-        self.std_surface_buffer.destroy()
-        self.emissive_tri_buffer.destroy()
-        self.sphere_lights_buffer.destroy()
-        self.distant_lights_buffer.destroy()
-        self.material_types_buffer.destroy()
-        self.flat_material_buffer.destroy()
-        self.instance_buffer.destroy()
-        self.bvh_buffer.destroy()
-        self.index_buffer.destroy()
-        self.vertex_buffer.destroy()
-        self.displacement_image.destroy()
-        self.roughness_image.destroy()
-        self.normal_image.destroy()
-        self.tattoo_image.destroy()
-        self.env_image.destroy()
-        # Heterogeneous-medium density grid (binding 26).
-        if getattr(self, "volume_density_image", None) is not None:
-            self.volume_density_image.destroy()
-            self.volume_density_image = None
-        # Env importance-sampling CDFs (bindings 31/32) — allocated once in
-        # _init_gpu; were previously never freed (surfaced by the record-dump's
-        # clean-teardown check).
-        self.env_dist_buffer.destroy()
-        # Spectral buffers (bindings 45/46/47 upsample + 48 conductor eta/k) —
-        # only allocated for the spectral megakernel variant.
-        for _sb in (self._spectral_scale_buffer, self._spectral_data_buffer,
-                    self._spectral_d65_buffer, self._spectral_metals_buffer,
-                    self._spectral_emitters_buffer, self._spectral_light_spd_buffer,
-                    self._spectral_mat_emission_buffer):
-            if _sb is not None:
-                _sb.destroy()
-        self.hud_overlay.destroy()
-        self.accum_image.destroy()
-        self._offscreen_output.destroy()
-        self._readback.destroy()
-        self.uniform_buffer.destroy()
-        self.mtlx_skin_buffer.destroy()
         # Interop handoff (task 5.2): release the CUDA imports (external memory +
-        # semaphore + stream) BEFORE freeing the Vulkan objects they reference.
+        # semaphore + stream) BEFORE freeing the buffers they reference.
         if getattr(self, "_neural_publisher", None) is not None:
             _close = getattr(self._neural_publisher, "close", None)
             if _close is not None:
                 _close()
-        self.neural_weights_buffer.destroy()
-        self.neural_biases_buffer.destroy()
-        self.neural_layers_buffer.destroy()
         if getattr(self, "neural_timeline_semaphore", None) is not None:
             self.neural_timeline_semaphore.destroy()
             self.neural_timeline_semaphore = None
         if getattr(self, "_record_pipeline", None) is not None:
             self._record_pipeline.destroy()
             self._record_pipeline = None
-        if getattr(self, "_drain_buffer", None) is not None:
+        # The Metal record-drain path adopts the drain buffer INTO the
+        # `record_buffer` slot, so the set owns it from then on; destroying it
+        # here as well would be a double free.
+        if (getattr(self, "_drain_buffer", None) is not None
+                and not self._gpu_set.owns(self._drain_buffer)):
             self._drain_buffer.destroy()
-            self._drain_buffer = None
-        self.record_buffer.destroy()
-        self.record_counter.destroy()
-        self.light_splat_buffer.destroy()
-        self.gizmo_segments_buffer.destroy()
-        self.lens_elements_buffer.destroy()
-        self.lens_pupil_buffer.destroy()
-        self.tool_buffer.destroy()
+        self._drain_buffer = None
+        # Every declared resource, destroyed from the same list it was allocated
+        # from — a resource can no longer be added in one place and forgotten in
+        # another (change renderer-gpu-resource-set).
+        self._gpu_set.close()
         if getattr(self, "_preview_pipeline", None) is not None:
             self._preview_pipeline.destroy()
             self._preview_pipeline = None
@@ -11628,3 +10730,30 @@ class Renderer:
             self._scene_bindings.destroy()
             self._scene_bindings = None
             self.pipeline = None
+
+
+# ── GPU resource access (change renderer-gpu-resource-set) ──────────────
+#
+# `SceneResourceSet` owns every GPU resource; the renderer reads them by the
+# attribute names they have always had, so the ~120 `self.<resource>` sites
+# inside this module (and the handful outside it) are unchanged. These are
+# deliberately read-only: a resource is replaced by declaring the new size
+# through the set (`_gpu_set.replace` / `.resize` / `.adopt`), which reallocates
+# AND rebinds from the same declaration. Assigning here would recreate exactly
+# the split this change removed — the allocation in one place, the descriptor
+# rewrite forgotten in another.
+_EMPTY_F32 = np.zeros(0, dtype=np.float32)
+
+
+def _resource_property(attr: str) -> property:
+    def getter(self):
+        gpu_set = self.__dict__.get("_gpu_set")
+        return None if gpu_set is None else gpu_set.get(attr)
+
+    getter.__name__ = attr
+    return property(getter, doc=f"GPU resource {attr!r}, owned by `_gpu_set`.")
+
+
+for _decl in _GPU_DECLARATIONS:
+    setattr(Renderer, _decl.attr, _resource_property(_decl.attr))
+del _decl

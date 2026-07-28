@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 from pxr import Gf, Usd, UsdGeom, UsdLux
 
+from skinny.gpu_resources import SceneResourceSet
 from skinny.renderer import Renderer
 from skinny.scene import LightEnvHDR, Scene, environment_contribution_intensity
 from skinny.scene_graph import build_scene_graph, inject_default_lights
@@ -58,7 +59,9 @@ def _editor() -> tuple[Renderer, Usd.Stage]:
     r._last_env_index = (-1, -1)
     r.env_index = 0
     r.environments = []
-    r.env_image = MagicMock()  # stub the GPU upload
+    # Resource attributes are read-only properties owned by `_gpu_set`
+    # (change renderer-gpu-resource-set), so stub the owner.
+    r._gpu_set = SceneResourceSet.stub(env_image=MagicMock())
     r._scene_graph = build_scene_graph(stage, r._usd_scene)
     r._default_light_stage = _default_light_stage()
     r._attach_edit_layer()

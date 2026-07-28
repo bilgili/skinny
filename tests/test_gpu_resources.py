@@ -335,6 +335,38 @@ def test_spectral_declarations_absent_from_the_rgb_layout():
         assert rgb.get(attr) is None
 
 
+# ── no descriptor write survives outside the set ────────────────────────
+
+
+RENDERER_SRC = (
+    Path(__file__).parent.parent / "src" / "skinny" / "renderer.py").read_text()
+
+
+def test_renderer_hand_rolls_no_descriptor_write():
+    """Source gate, same shape as the shader-variant-key grep gate.
+
+    Every descriptor write for the renderer's inventory goes through
+    `SceneResourceSet`. A `VkWriteDescriptorSet` reappearing in `renderer.py`
+    means the inventory is being bound from two places again — exactly the
+    split this change removed, and the one that let binding 49 keep pointing at
+    a freed buffer while 18 was rewritten. For a resource whose lifetime is not
+    the renderer's, use `SceneResourceSet.write_binding`.
+    """
+    assert "VkWriteDescriptorSet" not in RENDERER_SRC
+    assert "vkUpdateDescriptorSets" not in RENDERER_SRC
+
+
+def test_no_per_method_backend_guard_returns_remain():
+    """The five `is_metal` / `descriptor_sets is None` early-returns that used
+    to open each `_rebind_*` helper must not come back: backend divergence is
+    decided once, at the set's binding step."""
+    for gone in ("_rebind_scene_descriptors", "_rebind_aux_material_descriptors",
+                 "_rebind_emissive_descriptors", "_rebind_mesh_descriptors",
+                 "_rebind_volume_descriptor",
+                 "_rewrite_size_dependent_descriptors"):
+        assert gone not in RENDERER_SRC, f"{gone} came back"
+
+
 def test_pool_sizes_counted_from_declarations():
     """The descriptor-pool tally is derived, not hand-maintained — it must
     still reproduce the pre-change counts (22 storage buffers, 3 storage

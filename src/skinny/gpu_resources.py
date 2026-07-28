@@ -502,6 +502,28 @@ class SceneResourceSet:
             if decl.active(self.spectral):
                 self._resources[decl.attr] = self._allocate(decl)
 
+    @classmethod
+    def stub(cls, **resources) -> "SceneResourceSet":
+        """A set holding the given resources and nothing else, allocating
+        nothing.
+
+        For tests that construct a `Renderer` via `__new__` and need one or two
+        GPU resources faked. The renderer's resource attributes are read-only
+        properties — assigning one would reallocate without rebinding, which is
+        the split this module exists to prevent — so a test stubs the owner
+        instead of the attribute.
+        """
+        rset = cls.__new__(cls)
+        rset.ctx = None
+        rset._gpu = None
+        rset.sizes = None
+        rset.spectral = False
+        rset.is_metal = False
+        rset._resources = dict(resources)
+        rset._closed = False
+        rset._texture_pool_factory = None
+        return rset
+
     # ── allocation ──────────────────────────────────────────────────────
 
     def _allocate(self, decl: ResourceDecl, args: tuple | None = None):
@@ -543,13 +565,51 @@ class SceneResourceSet:
         to destroy, re-create and then remember to call the matching
         ``_rebind_*_descriptors`` now state only the new sizes.
         """
-        for attr, args in allocs.items():
-            decl = BY_ATTR[attr]
+        # Destroy the whole group before allocating any of it, matching the
+        # mesh-grow site this replaced (all three buffers freed, then all three
+        # re-created) so a large grow does not transiently hold both copies.
+        for attr in allocs:
             old = self._resources.get(attr)
             if old is not None:
                 old.destroy()
-            self._resources[attr] = self._allocate(decl, args)
+                self._resources[attr] = None
+        for attr, args in allocs.items():
+            self._resources[attr] = self._allocate(BY_ATTR[attr], args)
         self.rebind(allocs.keys(), descriptor_sets=descriptor_sets)
+
+    def regrow(self, *attrs: str, descriptor_sets=None) -> None:
+        """Reallocate the named declarations at the sizes their own formulas
+        now yield, after a capacity on :attr:`sizes` was bumped.
+
+        The growth sites state the new *capacity*, never the new byte size —
+        the ``cap * STRIDE + slack`` arithmetic stays in the declaration, so it
+        cannot drift between the initial allocation and a later grow. Names
+        that are not active (a spectral-only buffer in an RGB session) are
+        skipped.
+        """
+        live = [a for a in attrs if self._resources.get(a) is not None]
+        if live:
+            self.replace({a: BY_ATTR[a].args(self.sizes) for a in live},
+                         descriptor_sets=descriptor_sets)
+
+    def adopt(self, attr: str, resource) -> None:
+        """Put an externally-built resource into a declared slot, destroying
+        whatever occupied it.
+
+        The Metal record-drain path swaps a per-frame drain buffer into
+        ``record_buffer`` so the bind-by-name table routes it to ``recordBuf``.
+        Ownership transfers to the set, so the caller must not also destroy it
+        — before this, ``cleanup`` freed the drain buffer *and* the
+        record_buffer slot it had been aliased into, a latent double destroy.
+        """
+        old = self._resources.get(attr)
+        if old is not None and old is not resource:
+            old.destroy()
+        self._resources[attr] = resource
+
+    def owns(self, resource) -> bool:
+        """True when the set holds this object in one of its slots."""
+        return any(r is resource for r in self._resources.values())
 
     def resize(self, width: int, height: int, *, descriptor_sets=None) -> None:
         """Recreate the viewport-sized resources and rebind them."""
@@ -628,6 +688,29 @@ class SceneResourceSet:
             pBufferInfo=[vk.VkDescriptorBufferInfo(
                 buffer=res.buffer, offset=0, range=res.size)],
         )
+
+    def write_binding(self, binding: int, resource, descriptor_sets, *,
+                      descriptor: str = BUFFER) -> None:
+        """Point one descriptor binding at a resource the set does not own.
+
+        Two resources have a scene-graph lifetime rather than the renderer's:
+        the combined MaterialX graph-param buffer (rebuilt per scene graph) and
+        the record-drain buffer (rebuilt per frame capacity). They are not
+        declarations, but the *write* still goes through here so no call site
+        hand-rolls a ``VkWriteDescriptorSet`` — the mechanics stay in one place
+        even where the lifetime does not.
+        """
+        if self.is_metal or descriptor_sets is None:
+            return
+        import vulkan as vk
+
+        decl = ResourceDecl(
+            attr="<external>", kind="", args=lambda s: (),
+            binding=binding, descriptor=descriptor,
+        )
+        for ds in descriptor_sets:
+            write = self._write(ds, decl, resource)
+            vk.vkUpdateDescriptorSets(self.ctx.device, 1, [write], 0, None)
 
     def _bindless_writes(self, ds, pool) -> list:
         """Binding 14, one write per filled slot. PARTIALLY_BOUND lets unfilled
