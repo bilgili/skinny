@@ -94,6 +94,17 @@ is swappable. `NeuralTrainer` stays the orchestrator (replay sampling →
 | `mlx` | `MlxTrainingBackend` | GPU training on Apple-Silicon Metal via Apple MLX (change `mlx-neural-trainer`, optional `[mlx]` extra). Mirrors the numpy oracle's flow math op-for-op on `mlx.core` arrays — the parity target — but with MLX autodiff and a hand-rolled bias-corrected Adam (same global grad-norm clip), so a one-step update from identical weights matches the oracle for the bulk of the net (the few outliers are Adam sign-flips on dead weights). Bakes the same fp32 NFW1. `--train-precision fp16` runs the flow in `float16` over fp32 masters with a runtime fall-back to fp32 on a non-finite step. Raises clearly off an Apple-Silicon Metal host. |
 | `auto` (default) | precedence `cuda > mlx > cpu` | cuda if torch+CUDA, else mlx when the `[mlx]` extra is importable on an Apple-Silicon Metal host, else cpu (numpy oracle). |
 
+Every backend draws its per-step minibatch from one owner,
+`training_backends._minibatch_rng(t)`. The draw belongs to the training step
+index, not to the framework that runs the step. Two properties follow. Each
+backend repeats the same batch sequence on a repeated run. The numpy-versus-torch
+parity gate compares two implementations on one batch. The torch backend drew
+from torch's global generator until this owner existed, so it trained on a
+different sample than the oracle. One Adam step moves each weight by `lr·sign(g)`,
+so each sign disagreement put the two backends 2·lr apart: the two agreed only to
+2e-3, and the recorded 5e-4 tolerance could not hold. On the shared stream the
+two agree to 9.4e-6, and the losses agree to 2.1e-7.
+
 **Train vs. infer precision are independent dials** (post-training quantization).
 Training always bakes **fp32** weights — the on-disk/handoff format never changes —
 so the inference precision is a separate upload-time cast + shader variant:

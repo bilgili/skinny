@@ -30,7 +30,10 @@ from skinny.sampling.training_backends import TorchTrainingBackend
 
 
 def _torch_ready() -> bool:
-    return TorchTrainingBackend(device="cpu").is_available()
+    if pytest is None:                     # spline_flow venv: no pytest, no conftest
+        return TorchTrainingBackend(device="cpu").is_available()
+    from tests.conftest import torch_backend_ready
+    return torch_backend_ready()
 
 
 if pytest is not None:
@@ -44,6 +47,13 @@ if pytest is not None:
 def _device() -> str:
     import torch
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _torch_backend() -> TorchTrainingBackend:
+    """These tests gate the torch loop itself, so the backend is explicit —
+    ``TrainerConfig.backend='auto'`` would resolve by host (CUDA, else MLX on this
+    Mac, else the numpy oracle) and never exercise it."""
+    return TorchTrainingBackend(device=_device())
 
 
 def _concentrated_records(n: int, rng, *, lobe=(0.3, 0.9, 0.2)) -> np.ndarray:
