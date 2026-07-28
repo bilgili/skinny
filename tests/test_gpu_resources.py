@@ -90,6 +90,12 @@ class FakeResource:
         self.destroyed = True
         self._log.append(self)
 
+    def upload_sync(self, data):
+        self.uploaded = data
+
+    def fill_zero_sync(self):
+        self.uploaded = b""
+
 
 class FakeTexturePool:
     def __init__(self, ctx, gpu):
@@ -328,6 +334,101 @@ def test_resize_regrows_the_bdpt_light_splat_buffer():
     assert rset.light_splat_buffer is not old
     assert old.destroyed
     assert rset.light_splat_buffer.args == (128 * 256 * 3 * 4,)
+
+
+def test_adopt_destroys_the_displaced_occupant_exactly_once():
+    """The Metal record-drain grow path: `adopt` is the SINGLE destroyer of the
+    slot it displaces.
+
+    `FakeResource.destroy` asserts on a second call, so a double free fails here
+    rather than on a device. This is the shape codex found: the caller also
+    freed the outgoing drain buffer, which by then WAS the `record_buffer` slot
+    occupant, so `adopt` destroyed it again.
+    """
+    rset, gpu = build()
+    dummy = rset.record_buffer
+    drain1 = FakeResource("StorageBuffer", (4096,), {}, gpu.destroy_log)
+    rset.adopt("record_buffer", drain1)
+    assert dummy.destroyed and not drain1.destroyed
+    assert rset.record_buffer is drain1
+    assert rset.owns(drain1)
+
+    # Grow: the caller must NOT free drain1 itself — `owns()` tells it not to.
+    drain2 = FakeResource("StorageBuffer", (8192,), {}, gpu.destroy_log)
+    rset.adopt("record_buffer", drain2)
+    assert drain1.destroyed and not drain2.destroyed
+    assert rset.record_buffer is drain2
+
+    # Teardown frees the adopted buffer once, and only once.
+    rset.close()
+    assert drain2.destroyed
+
+
+def test_adopt_of_the_same_object_is_not_a_self_destroy():
+    rset, gpu = build()
+    drain = FakeResource("StorageBuffer", (4096,), {}, gpu.destroy_log)
+    rset.adopt("record_buffer", drain)
+    rset.adopt("record_buffer", drain)
+    assert not drain.destroyed
+    assert rset.record_buffer is drain
+
+
+def test_owns_reports_slot_membership():
+    rset, gpu = build()
+    stranger = FakeResource("StorageBuffer", (16,), {}, gpu.destroy_log)
+    assert rset.owns(rset.vertex_buffer)
+    assert not rset.owns(stranger)
+
+
+def test_metal_record_drain_grow_does_not_double_free():
+    """Drives the real renderer path, not just `adopt`'s contract.
+
+    `_ensure_wf_record_drain` on Metal allocates a drain buffer and adopts it
+    into the `record_buffer` slot. On a later grow the caller must leave the
+    outgoing buffer to `adopt` — freeing it itself frees the slot occupant, and
+    `adopt` then frees it a second time. Reachable only with Metal + the record
+    drain + a capacity increase, which no image gate exercises.
+
+    Reverting the `owns()` guard in `_ensure_wf_record_drain` makes this fail
+    with "StorageBuffer destroyed twice".
+    """
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    rset, gpu = build()
+    r = Renderer.__new__(Renderer)  # bypass __init__ — no GPU/context needed
+    r.is_metal = True
+    r.ctx = FakeCtx(is_metal=True)
+    r._gpu = gpu
+    r._gpu_set = rset
+    r._drain_buffer = None
+    r.width, r.height = 64, 64
+
+    first = r._ensure_wf_record_drain(max_records_per_frame=64)
+    adopted = r.record_buffer
+    assert adopted is r._drain_buffer
+    assert first == 64
+
+    # Grow: a bigger capacity forces a fresh allocation.
+    r._ensure_wf_record_drain(max_records_per_frame=4096)
+    assert adopted.destroyed, "the displaced drain buffer must be freed once"
+    assert r.record_buffer is r._drain_buffer
+    assert not r.record_buffer.destroyed
+
+    rset.close()  # FakeResource.destroy asserts on a second free
+
+
+def test_metal_bindless_names_the_pool_slots():
+    """Binding 14's Metal identity belongs to the declaration list, not to each
+    dispatch site — the megakernel and the preview dock both take it from
+    here."""
+    rset, _ = build(is_metal=True)
+    name, slots = rset.metal_bindless()
+    assert name == "flatMaterialTextures"
+    assert len(slots) == len(rset.texture_pool._slots)
+    assert all(s is None for s in slots)
 
 
 def test_rebind_is_a_no_op_on_metal():

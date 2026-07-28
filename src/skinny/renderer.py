@@ -6598,11 +6598,7 @@ class Renderer:
             yaw, pitch, distance, fov_tan,
         )
         binds = self._build_metal_binds()
-        bindless = (
-            "flatMaterialTextures",
-            [(s.texture if s is not None else None)
-             for s in self.texture_pool._slots],
-        )
+        bindless = self._gpu_set.metal_bindless()
         self._preview_pipeline.dispatch(
             size,
             push_bytes=push_bytes,
@@ -9027,10 +9023,7 @@ class Renderer:
         if mtlx_bytes:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
         binds = self._build_metal_binds()
-        bindless = (
-            "flatMaterialTextures",
-            [(s.texture if s is not None else None) for s in self.texture_pool._slots],
-        )
+        bindless = self._gpu_set.metal_bindless()
         # Row-band tiling bounds each committed command buffer under the macOS GPU
         # watchdog (change metal-megakernel-watchdog-tiling). The tileOriginY u32 is
         # patched at its reflected MSL offset per band.
@@ -10543,7 +10536,13 @@ class Renderer:
         if self.is_metal:
             size = 64 + capacity * RECORD_STRIDE   # header + records
             if self._drain_buffer is None or self._drain_buffer.size < size:
-                if self._drain_buffer is not None:
+                # Do NOT free the outgoing drain buffer here once it has been
+                # adopted: it IS the `record_buffer` slot occupant, and `adopt`
+                # below destroys whatever it displaces. Freeing it here too is
+                # the same double destroy this seam exists to close, just moved
+                # from teardown to the grow path.
+                if (self._drain_buffer is not None
+                        and not self._gpu_set.owns(self._drain_buffer)):
                     self._drain_buffer.destroy()
                 self._drain_buffer = self._gpu.StorageBuffer(self.ctx, size)
                 header = bytearray(64)
@@ -10551,9 +10550,8 @@ class Renderer:
                 self._drain_buffer.upload_sync(bytes(header))  # count @ 60 = 0
                 # Route through the bind-by-name dict: every dispatch binds
                 # `recordBuf` from self.record_buffer. Ownership moves to the
-                # resource set, which destroys the slot once — `cleanup` used to
-                # free the drain buffer AND the record_buffer slot it had been
-                # aliased into, a double destroy waiting on this path.
+                # resource set, which is then the single destroyer of the slot —
+                # on this grow, and at teardown.
                 self._gpu_set.adopt("record_buffer", self._drain_buffer)
             self._wf_record_capacity = capacity
             return capacity
