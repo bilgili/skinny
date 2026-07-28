@@ -7,6 +7,8 @@ pbrt-precedence coefficients — NOT the cruder ``volume_*`` stand-in.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from skinny.pbrt.api import import_pbrt
@@ -109,9 +111,12 @@ def test_texture_bound_eta_degrades_and_is_reported_once(tmp_path):
     cd = _skinny_overrides(stage)
     assert cd["ior"] == pytest.approx(ETA_DEFAULT)
     assert cd["subsurface_eta"] == pytest.approx(cd["ior"])
-    # One read, one note — not one per reader of the same param.
+    # One read, one note — not one per reader of the same param. Matched on the
+    # bare param name: the wording differs between an unresolvable texture
+    # ("texture 'x' on eta unresolved") and a resolvable one ("eta texture not
+    # supported on USD input"), and either must appear exactly once.
     detail = " ".join(e.detail for e in report.entries if e.detail)
-    assert detail.count("on eta") == 1
+    assert len(re.findall(r"\beta\b", detail)) == 1, detail
 
 
 def test_renderer_detects_and_tags_subsurface():

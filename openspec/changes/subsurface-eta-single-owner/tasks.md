@@ -19,14 +19,18 @@
 - [x] 2.2 `resolve_material`'s subsurface branch passes `lobes["ior"]` into it,
       and spells the default `subsurface.ETA_DEFAULT`.
 - [x] 2.3 Promote the builder to a public `subsurface_medium_overrides(params,
-      eta=None)`; when `eta` is None it resolves through `get_float_texture`
-      with `notes=None`.
+      eta)`. `eta` is REQUIRED — the `eta=None` self-resolving fallback was a
+      second contract, and a pre-merge review measured it re-resolving `eta` on
+      the emission path (see 6.1).
 
-## 3. media.py delegates
+## 3. media.py consumes the resolved intermediate
 
-- [x] 3.1 `media.subsurface_overrides` calls the resolver's builder and applies
-      only the mm-per-unit division and the `ior` carry.
-- [x] 3.2 Its own `ParamSet` reads are removed; the docstring records the split.
+- [x] 3.1 `media.subsurface_overrides` takes the mapper's `inputs` dict and
+      applies only the mm-per-unit division and the `ior` carry. `api`
+      hands it `inputs` at both authoring sites.
+- [x] 3.2 It receives no `ParamSet` at all; the docstring records the split, and
+      the five emitted keys are enumerated rather than spread, so a key added to
+      the resolver cannot land on `skinnyOverrides` unrouted.
 
 ## 4. Gates
 
@@ -61,4 +65,36 @@
       it arrives with the unmerged `flat-material-field-table` change. That
       change must state the `ior`/`subsurface_eta` agreement is structural, not
       empirical.
-- [x] 5.4 `openspec validate --strict`; codex pre-merge review.
+- [x] 5.4 `openspec validate --strict`; pre-merge review (group 6).
+
+## 6. Pre-merge review fold
+
+The codex runtime stalled (8h, no log output, cancelled), so the review ran
+through the fallback review subagent, per the standing rule.
+
+- [x] 6.1 BLOCKER, folded — the "one eta resolution" claim was FALSE as first
+      implemented. `api._author_material` calls `map_material` AND
+      `media.subsurface_overrides` separately, so `eta` was resolved twice per
+      material (measured: 2 calls to `get_float_texture` for `eta` per import),
+      and the emitter's copy is the one that reaches the stage. Fixed by having
+      emission consume the resolved intermediate. A test now counts the calls and
+      fails at two, and asserts the shader `ior` equals the `skinnyOverrides`
+      `ior` — the pair that could genuinely diverge.
+- [x] 6.2 `eta=None` sentinel removed (it existed only for 6.1's second caller).
+- [x] 6.3 `{**coeffs, …}` spread replaced with the five explicit keys.
+- [x] 6.4 `_PARAMSET_METHODS` gained `int`/`ints`; the phantom `spectrum`
+      (not a `ParamSet` method) removed. The structural gate now pins the
+      signature, which no rename or missing method name can evade.
+- [x] 6.5 Test-quality fixes: the note assertion matched a string that only
+      appears for an UNRESOLVABLE texture (an imagemap binding would have made it
+      a false failure) — now matches the bare param name. The `slang_layout.
+      INTAKE_ONLY_KEYS` citation, which does not exist in `src/` on this branch,
+      now cites `material_pack.pack_flat_material` directly.
+- [x] 6.6 Verified-fine, no action: KnownBugs item 3 (checked empirically — all
+      six params raise on both a texture and a named-spectrum binding, in both
+      call paths); `1.33` → `ETA_DEFAULT` equivalence; no `ior` conflict between
+      the shader input and the override (the loader applies overrides last and
+      both descend from one `eta`); no import cycle.
+- [x] 6.7 Re-gated after the fold: 836 passed / 16 pre-existing failures,
+      `ruff check src/skinny` clean, `openspec validate --strict` valid, and the
+      byte-identity check still shows 74 of 74 real scenes unchanged.

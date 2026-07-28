@@ -381,22 +381,21 @@ def material_spectral_overrides(pbrt_material) -> dict:
 # its own change (see `pbrt-named-spectra` design, Non-Goals).
 
 
-def subsurface_medium_overrides(p, eta=None) -> dict:
+def subsurface_medium_overrides(p, eta) -> dict:
     """Resolve pbrt `subsurface` inputs → medium-coefficient override keys
     (`subsurface_sigma_a/_s` mm⁻¹, `subsurface_g`, `subsurface_eta`) via the
     pbrt-v4 precedence (skinny.pbrt.subsurface). These ride on parameter_overrides
     for the renderer to pack into the volumetric medium.
 
-    This is the ONE reader of a `subsurface` material's medium params. Three
-    callers share it: both mappers (through :func:`resolve_material`, which passes
-    the `eta` it already resolved for the `ior` lobe) and
-    :func:`skinny.pbrt.media.subsurface_overrides`, which gets a raw `ParamSet`
-    from the authoring pass and so passes no `eta`. `media` adds what the USD
-    stage owns on top — the mm-per-scene-unit division and the `ior` carry — and
-    reads no pbrt param itself, so the precedence order, the defaults and the
-    named-spectrum rule cannot drift between the two modules.
+    This is the ONE reader of a `subsurface` material's medium params, called
+    from exactly one place — :func:`resolve_material`, which passes the `eta` it
+    already resolved for the `ior` lobe. `eta` is a required argument, not an
+    optional one: an `eta=None` fallback would be a second contract, and the
+    caller that wanted it (`media.subsurface_overrides`) now takes the resolved
+    lobes instead of a `ParamSet`, so `eta` is resolved once per material rather
+    than once per consumer.
     """
-    from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
+    from .subsurface import subsurface_coefficients, SCALE_DEFAULT
 
     name = p.string("name", None)
     sigma_a = p.rgb("sigma_a", None)
@@ -404,14 +403,6 @@ def subsurface_medium_overrides(p, eta=None) -> dict:
     reflectance = p.rgb("reflectance", None)
     mfp = p.rgb("mfp", None)
     g_f = p.floats("g", [0.0])
-    if eta is None:
-        # `eta` accepts three pbrt param types — a numeric constant, a named
-        # spectrum (a recognised glass resolves to its d-line index) and a texture
-        # binding. `get_float_texture` is the accessor that handles all three;
-        # `floats` raises on the latter two. `notes=None`: a caller that resolved
-        # `eta` for the `ior` lobe reported any degradation there already, and one
-        # read must not produce two notes.
-        eta = get_float_texture(p, "eta", ETA_DEFAULT).const
     scale_f = p.floats("scale", [SCALE_DEFAULT])
     coeffs = subsurface_coefficients(
         name=name, sigma_a=sigma_a, sigma_s=sigma_s,

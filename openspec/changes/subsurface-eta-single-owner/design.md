@@ -46,24 +46,32 @@ belongs to `media.py`, which owns every other `skinnyOverrides` medium payload.
 Data flow after the change:
 
 ```
-api._author_material          -> media.subsurface_overrides(params)
-api._author_material_mtlx     ->   materials.subsurface_medium_overrides(params)
-                                     -> subsurface.subsurface_coefficients(...)
-                                   + mm-per-unit division
-                                   + "ior" carry
+api._author_material       -> materials.map_material(pbrt_material)
+api._author_material_mtlx       -> resolve_material
+                                     -> get_float_texture(p, "eta")   <- THE read
+                                     -> subsurface_medium_overrides(p, eta)
+                                          -> subsurface_coefficients(...)
+                                -> inputs {subsurface_sigma_a/_s/_g/_eta, ior, ...}
+                           -> media.subsurface_overrides(inputs)
+                                + mm-per-unit division
+                                + "ior" carry
 ```
 
-`media.subsurface_overrides` performs no `ParamSet` read of its own.
+`media.subsurface_overrides` never sees a `ParamSet`. Both `_USD_LOBES` and
+`_MTLX_LOBES` identity-map the four `subsurface_*` lobes, so `inputs` carries
+them on either flavour.
 
-### D2 — The resolver reads `eta` once and passes the value down
+### D2 — `eta` is read once, in the resolver, and both lanes descend from it
 
 `resolve_material` already resolves `eta` for `lobes["ior"]` through
 `get_float_texture`, which handles all three parameter types. That resolved
 float is passed into the coefficient builder as an argument.
 
-`subsurface_medium_overrides(params, eta=None)` resolves `eta` itself when the
-caller supplies none. `media.subsurface_overrides` is such a caller: `api` hands
-it a raw `ParamSet` and there is no resolver result in scope.
+`eta` is a **required** argument, not an optional one. An `eta=None` fallback
+would be a second contract — "interpret these params" versus "interpret these
+params, I already resolved eta" — and the two differ in the accessor arguments
+used and in note routing. The only caller that wanted the fallback was
+`media.subsurface_overrides`, and D1 removes its need for one.
 
 `subsurface.subsurface_coefficients` returns `eta` unchanged on every precedence
 branch, so `subsurface_eta == ior` holds for all four branches.
@@ -73,20 +81,27 @@ It fixes the reported crash in two lines. It also leaves two precedence chains
 that already differ in three ways, and leaves the texture-bound `eta` crash in
 both. The next divergence costs nothing to introduce.
 
-**Discarded alternative:** delete `materials._subsurface_overrides` and have
-`api` read the coefficients from the resolver's lobes. `api` would then apply
-the unit division to lobe values, which puts a stage convention inside the
-authoring loop, and the resolved lobes are asserted by two hostless tests
-(`test_subsurface_coeffs.py`, `test_material_resolve.py`) that exist to prove the
-two mappers agree.
+**Discarded alternative:** keep `media.subsurface_overrides(params)` and have it
+call the resolver's builder with `eta=None`. This was the first implementation
+and a pre-merge review measured it wrong: `api._author_material` calls
+`map_material` **and** `media.subsurface_overrides` separately, so `eta` was
+resolved **twice per material** — and the emitter's copy is the one that reaches
+the stage, since `_OVERRIDE_ONLY_INPUTS` filters the resolver's `subsurface_eta`
+out of the shader inputs and the loader applies `skinnyOverrides` last. That
+leaves one implementation but two invocations, which is not the same guarantee:
+the two calls are not even argument-equivalent (the resolver passes
+`textures=`/`base_dir=`, the emitter passed neither), so the moment the `ior`
+lane gains real texture support the textures-blind lane silently wins. D1 as
+written — emission consumes the resolved intermediate — is what makes the
+agreement structural.
 
-### D3 — The resolved `eta` carries no note at the coefficient site
+### D3 — One read means one note, with nothing to suppress
 
-`resolve_material` appends a note when a texture-bound `eta` degrades to the
-scalar default. The coefficient builder must not append a second note for the
-same read, or the import report gains a duplicate line and the report baselines
-shift. When the builder resolves `eta` itself it passes `notes=None`, which is
-what site 2 does today.
+`resolve_material` appends a note when a texture-bound or unrecognised-spectrum
+`eta` degrades to the pbrt default. Because there is now exactly one read, there
+is exactly one note — no site has to pass `notes=None` to suppress a duplicate.
+Under the discarded `eta=None` variant the second reader *did* need that
+suppression, which is another way of seeing that it was a second read.
 
 ## Risks
 
@@ -96,3 +111,7 @@ what site 2 does today.
 - **`ior` default.** Site 1 spells the default `1.33` as a literal; the
   coefficient chain spells it `subsurface.ETA_DEFAULT`, which is `1.33`. The
   change makes site 1 use the named constant so one edit moves both.
+- **Emission contract goes implicit.** `media.subsurface_overrides` spells its
+  five emitted keys out rather than spreading the resolved dict, so a key added
+  to the resolver cannot silently land on `skinnyOverrides` and from there in
+  `Material.parameter_overrides`.

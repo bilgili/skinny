@@ -36,10 +36,9 @@ The spec `pbrt-material-resolution` already requires exactly one reader:
 coefficient precedence."* `media.subsurface_overrides` violates that requirement.
 
 **Downstream consequence.** `material_pack.pack_flat_material` reads the boundary
-IOR from the `ior` lane and never reads `subsurface_eta`
-(`slang_layout.INTAKE_ONLY_KEYS`). The two values must agree, or the rendered
-boundary IOR does not match the authored glass. Today they agree by coincidence,
-because every corpus scene writes a numeric `eta`.
+IOR from the `ior` lane and never reads `subsurface_eta`. The two values must
+agree, or the rendered boundary IOR does not match the authored glass. Today they
+agree by coincidence, because every corpus scene writes a numeric `eta`.
 
 ## What Changes
 
@@ -47,14 +46,22 @@ because every corpus scene writes a numeric `eta`.
 including the `eta` rule. `media.py` owns the USD emission convention: the mm
 per scene unit pre-division and the `ior` carry. Neither owns both.
 
+**`media.subsurface_overrides` consumes the resolved intermediate.** It takes the
+mapper's `inputs` dict — which carries the neutral `subsurface_sigma_a`/`_s`/
+`_g`/`_eta` lobes verbatim on both flavours — and adds only the unit convention
+and the `ior` carry. It receives no `ParamSet` and resolves nothing.
+
 **One `eta` resolution per material.** `resolve_material` reads `eta` once,
 through `get_float_texture`, and passes the resolved float to the coefficient
-builder. `lobes["ior"]` and `subsurface_eta` then carry one value by
-construction, not by coincidence.
+builder. Because emission consumes that same resolved result, the shader's `ior`
+input and the `ior` on `skinnyOverrides` descend from one read.
 
-**`media.subsurface_overrides` delegates.** It calls the resolver's coefficient
-builder and applies only the unit convention and the `ior` carry. Its own
-`ParamSet` reads are removed.
+Handing `media.py` a `ParamSet` instead would leave *one implementation* but
+*two invocations*: `api._author_material` calls the mapper and the emitter
+separately, so the emitter would re-resolve `eta` independently — and it is the
+emitter's value that reaches the stage, because `_OVERRIDE_ONLY_INPUTS` filters
+the resolver's `subsurface_eta` out of the authored shader inputs and the loader
+applies `skinnyOverrides` after the shader inputs.
 
 ## Impact
 

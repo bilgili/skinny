@@ -15,9 +15,11 @@ form; neither mapper may read pbrt `ParamSet` values directly except through
 the resolver.
 
 The stage-emission module (`pbrt/media.py`) MUST NOT read pbrt `ParamSet`
-values for a material either. It SHALL obtain subsurface medium coefficients
-from the resolver and add only what the USD stage owns: the mm-per-scene-unit
-convention, and the `ior` key the renderer reads the boundary IOR from.
+values for a material either, and MUST NOT be given one. It SHALL consume the
+resolver's resolved intermediate and add only what the USD stage owns: the
+mm-per-scene-unit convention, and the `ior` key the renderer reads the boundary
+IOR from. The keys it emits SHALL be enumerated at the emission site, so a key
+added to the resolver cannot reach `Material.parameter_overrides` unrouted.
 
 #### Scenario: New pbrt param is wired once
 
@@ -48,12 +50,13 @@ convention, and the `ior` key the renderer reads the boundary IOR from.
 
 #### Scenario: Stage emission holds no second copy of the coefficient chain
 
-- **WHEN** `pbrt/media.py` is scanned for `ParamSet` reads of a material's
-  parameters (`params.get`/`.string`/`.rgb`/`.floats`/`.float`/`.bool`) inside
-  the subsurface path
-- **THEN** none exist — a hostless test asserts the subsurface medium payload is
-  built by calling the resolver, so the precedence order, the defaults and the
-  named-spectrum rule cannot drift between the two modules
+- **WHEN** `pbrt/media.py`'s subsurface path is scanned for `ParamSet` reads
+  (`params.get`/`.string`/`.rgb`/`.floats`/`.float`/`.bool`/`.int`/`.ints`) and
+  for a `ParamSet`-shaped parameter
+- **THEN** neither exists — hostless tests assert the emission function takes the
+  resolved intermediate and nothing else, so the precedence order, the defaults
+  and the named-spectrum rule cannot drift between the two modules, and no
+  renamed local can smuggle a `ParamSet` past the syntactic check
 
 ## ADDED Requirements
 
@@ -85,6 +88,15 @@ to the pbrt default with a note. No `eta` value SHALL raise.
   named glass, unrecognised spectrum, spectrum file, or texture-bound
 - **THEN** the resolved `ior` lobe and the `subsurface_eta` override hold the
   same float, because one resolution produced both
+
+#### Scenario: The import performs exactly one eta resolution
+
+- **WHEN** a pbrt scene containing one `subsurface` material is imported, and the
+  calls to the resolving accessor for `eta` are counted
+- **THEN** the count is one, and the authored UsdPreviewSurface `ior` shader
+  input equals the `ior` on `skinnyOverrides` — the emission module consumes the
+  resolver's result instead of re-reading the parameter, so the value the loader
+  applies last is the value the resolver produced
 
 #### Scenario: A degrading eta is reported once
 
