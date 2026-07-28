@@ -45,12 +45,12 @@
 ## 6. Gates
 
 - [x] 6.1 `ruff check src/`; full hostless `pytest`.
-- [ ] 6.2 GPU: confirming-scene suite authoring-equivalence gate (plain USD ≡
+- [x] 6.2 GPU: confirming-scene suite authoring-equivalence gate (plain USD ≡
       MaterialX) green — this is the gate that would catch a vocabulary slip.
-- [ ] 6.3 Parity matrix dual gate unchanged.
-- [ ] 6.4 Docs: `docs/Architecture.md` byte-layout section, `docs/PbrtImport.md`
+- [x] 6.3 Parity matrix dual gate unchanged.
+- [x] 6.4 Docs: `docs/Architecture.md` byte-layout section, `docs/PbrtImport.md`
       override key vocabulary.
-- [ ] 6.5 `openspec validate flat-material-field-table --strict`.
+- [x] 6.5 `openspec validate flat-material-field-table --strict`.
 
 ## Note
 
