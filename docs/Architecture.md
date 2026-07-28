@@ -1850,7 +1850,14 @@ a build-time requirement (generated `.slang` files are checked into git).
 | `ui/build_app_ui.py` | `AppCallbacks`, `build_main_ui` | Builds shared sidebar tree |
 | `ui/panel/backend.py` | `PanelTreeBuilder` | Walks the spec tree, instantiates Panel widgets |
 | `web_app.py` | `SkinnySession`, `VideoStreamHandler` | Panel web app, per-session renderer, Tornado video WS |
-| `renderer.py` | `Renderer`, `SkinParameters`, `OrbitCamera`, `FreeCamera`, `TexturePool` | GPU resource orchestration, per-frame dispatch |
+| `renderer.py` | `Renderer` | GPU resource orchestration, per-frame dispatch |
+| `material_pack.py` | `pack_flat_material`, `pack_std_surface_params`, `pack_std_surface_params_msl`, `FLAT_MATERIAL_STRIDE`, `STD_SURFACE_STRIDE`, `MATERIAL_TYPE_*`, `MEDIUM_*` | Flat-material and standard-surface record packing, device-free (see [The device-free pure core](#the-device-free-pure-core-change-renderer-pure-core-extraction)) |
+| `camera.py` | `CameraBase`, `OrbitCamera`, `FreeCamera`, `_perspective`, `_look_at` | Camera models and their projection/view math, device-free |
+| `film_io.py` | `FilmParameters`, `_write_exr`, `_write_hdr_rgbe` | Film exposure controls and the HDR image writers, device-free |
+| `sppm_budget.py` | — | SPPM photon-emission budget and group-selection pmf, device-free |
+| `texture_pool.py` | `TexturePool` | Bindless flat-material texture pool; takes the backend's resource module, so it imports no GPU package |
+| `skin_params.py` | `SkinParameters` | Layered-skin record and its std140 `pack`, device-free |
+| `renderer_helpers.py` | — | Small device-free helpers: instance basis, light colour coercion, spectral proposal token |
 | `mlt_chain.py` | — | MLT host chain state, device-free: replay seed (`next_seed`), mutation budget, uniform-tail predicate, and the bootstrap round-trip both backends drive (see [MetropolisLightTransport.md](MetropolisLightTransport.md)) |
 | `frame_derive.py` | — | Pure frame-constant derivation consumed by `_pack_uniforms` at its append sites: detail-flag bitfield, lens FOV-framing sensor half-height, exposure/imaging-ratio fold, proposal-mask/reuse capability folding (byte serialization stays in the packer) |
 | `vk_context.py` | `VulkanContext`, `SwapchainInfo` | Vulkan 1.3 instance, device, swapchain (+ headless mode) |
@@ -1893,9 +1900,10 @@ that proves it works is already in-tree: `wavefront_driver.py` holds the staged
 loop once behind a duck-typed recorder, and `mlt_bootstrap.py` holds the pure
 resample. Landed stages: `mlt_chain.py` (MLT host chain state),
 `frame_derive.py` (frame-constant derivation), the wavefront pass factories
-(`vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass`), and
+(`vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass`),
 `gpu_resources.py` (the GPU resource inventory — the largest stage so far, 858
-lines out).
+lines out), and the seven device-free modules of the **pure core** (see
+[below](#the-device-free-pure-core-change-renderer-pure-core-extraction)).
 
 **The five steps** — apply in order, one stage per PR:
 
@@ -1940,6 +1948,53 @@ stages: `reflection-owned-byte-layouts` owns the values→bytes serialization
 (`_pack_uniforms` / `_pack_uniforms_msl` offsets + MSL reflection);
 `param-registry-accumulation-reset` owns the accumulation state hash. A
 carve-out stage must route *around* both.
+
+---
+
+## The device-free pure core (change `renderer-pure-core-extraction`)
+
+`renderer.py` imports `vulkan` at module scope. Every symbol above the
+`Renderer` class therefore needed the Vulkan SDK to import — on a machine whose
+default backend is Metal. The failure mode was **silent**: a test that could not
+import the module skipped, and a skip looks like a pass in the run output. The
+packers that produce the bytes the Metal backend uploads could only run where the
+Vulkan SDK happened to be installed.
+
+The module-scope core now lives in seven modules that import no GPU package.
+Split by subject, not gathered into one container — each module has a consumer
+that wants exactly it:
+
+| Module | Owns | Consumer that wanted it |
+|--------|------|-------------------------|
+| `material_pack.py` | `pack_flat_material`, `pack_std_surface_params`, `pack_std_surface_params_msl`, the material strides, the `MATERIAL_TYPE_*` / `MEDIUM_*` codes, the override readers, the named-conductor id map | the flat-material layout gates, on either backend |
+| `camera.py` | `_perspective`, `_look_at`, `_hero_yaw_pitch`, `_orbit_distance_cap`, `CameraBase` / `OrbitCamera` / `FreeCamera` | `debug_viewport.py` |
+| `film_io.py` | `FilmParameters`, `_write_exr`, `_write_hdr_rgbe` | the parity harness |
+| `sppm_budget.py` | `_sppm_photon_group_pmf`, `_sppm_photon_budget` | the SPPM selection tests |
+| `texture_pool.py` | `TexturePool` | a hostless test with a fake resource module |
+| `skin_params.py` | `SkinParameters` and its std140 `pack` | the skin path |
+| `renderer_helpers.py` | `_instance_local_basis`, `_light_value_to_vec3`, `_spectral_analytic_proposal_token` | the gizmo, the light upload, the spectral gate |
+
+**`renderer` re-exports every moved name**, so no source call site changed.
+**Tests may not use that re-export.** A test that imports `skinny.renderer`
+still drags in `vulkan`, so it demonstrates nothing about hostlessness; tests
+import from the module that owns the symbol. `tests/test_pure_core_modules.py`
+holds the gate. It imports each module in a subprocess in which every GPU
+package (`vulkan`, `slangpy`) is blocked at the meta path, asserts no GPU
+package reaches `sys.modules`, asserts no module imports `renderer` back, and
+asserts — from the AST, so the check itself stays hostless — that `renderer`
+re-exports every name the seven modules declare. Adding a module to the
+device-free side means adding it to `PURE_MODULES` there.
+
+The move is textual and changed nothing observable: every constant value, every
+packed byte for a spread of materials, every camera matrix, both image-writer
+outputs and the pool's slot behaviour were captured before and compared after.
+Both backends render the same scene to a byte-identical PNG.
+
+`TexturePool` moves even though it *holds* GPU objects, because it never
+*imports* one — its constructor takes the backend's resource module. What stays
+behind is anything the `Renderer` class body owns, plus the scene-record strides
+(instance, sphere/distant light, emissive triangle), which have no consumer
+outside `renderer.py` and so would gain a module without gaining a test.
 
 ---
 

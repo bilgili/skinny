@@ -51,7 +51,7 @@ def test_metal_debug_viewport_embedded_render():
     try:
         from skinny.debug_viewport import DebugViewport
         from skinny.metal_context import MetalContext
-        from skinny.renderer import OrbitCamera
+        from skinny.camera import OrbitCamera
     except OSError as exc:
         pytest.skip(f"import needs the Vulkan SDK on the dylib path: {exc}")
 

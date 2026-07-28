@@ -236,14 +236,11 @@ def test_rgb_only_material_authors_no_override():
 
 
 def _renderer():
-    # `skinny.renderer` imports `vulkan` at module load, which needs VULKAN_SDK +
-    # DYLD_LIBRARY_PATH on the library path (see CLAUDE.md) — absent under a plain
-    # `.venv/bin/pytest`. That surfaces as OSError("Cannot find Vulkan SDK version"),
-    # NOT ImportError, so pytest.importorskip does not catch it.
-    try:
-        import skinny.renderer as r
-    except (ImportError, OSError) as exc:  # pragma: no cover - env-dependent
-        pytest.skip(f"skinny.renderer unavailable (needs VULKAN_SDK on the lib path): {exc}")
+    # The named-conductor id map moved to the device-free `material_pack` module
+    # (change renderer-pure-core-extraction), so this no longer needs the Vulkan
+    # SDK on the dynamic-library path — the id-map gate now runs on every host
+    # instead of skipping silently on a Metal-only one.
+    import skinny.material_pack as r
     return r
 
 

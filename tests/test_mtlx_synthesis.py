@@ -518,7 +518,7 @@ def test_constant_preset_advertised_keys_change_flat_pack_bytes():
     parameter_overrides MUST change pack_flat_material's output — proving every
     advertised key has a real route into the active path-tracing pack, not the
     inert binding-19 std_surface pack."""
-    from skinny.renderer import pack_flat_material
+    from skinny.material_pack import pack_flat_material
     from skinny.scene import Material
 
     base = pack_flat_material(Material(name="c", parameter_overrides={}))

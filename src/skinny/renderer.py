@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import abc
 import math
 import operator
 import struct
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import numpy as np
 import vulkan as vk
@@ -18,8 +16,7 @@ import vulkan as vk
 from PIL import Image, ImageDraw, ImageFont
 
 from skinny.environment import Environment, load_environments
-from skinny.pbrt.data import CONDUCTOR_METAL_ID
-from skinny.scene import CameraOverride, LensSystem, Scene, build_default_scene
+from skinny.scene import CameraOverride, Scene, build_default_scene
 from skinny.head_textures import (
     DETAIL_TEX_RES,
     blank_displacement_bytes,
@@ -46,11 +43,72 @@ from skinny.params import (
     EXECUTION_MEGAKERNEL,
     EXECUTION_WAVEFRONT,
     STATIC_PARAMS,
-    _hashable_value as _hashable_value,  # re-export: ui/qt/windows/bxdf.py imports from here
     clamp_mode_index,
     effective_execution_mode,
 )
 from skinny import frame_derive, mlt_chain, render_envelope, slang_layout
+# Device-free core, extracted per subject (change renderer-pure-core-extraction).
+# These modules import no GPU package, so the packers, camera math, film writers
+# and photon-budget math are testable on a host with no Vulkan SDK. The names are
+# re-exported here so every existing source call site keeps working; TESTS import
+# them from the module that owns them, because a test that reaches through
+# `skinny.renderer` still drags in `vulkan` and so proves nothing about
+# hostlessness (design D2). A hostless subprocess gate
+# (`tests/test_pure_core_modules.py`) fails if any of them acquires a GPU import.
+from skinny.camera import (  # noqa: F401 — re-export
+    CameraBase,
+    FreeCamera,
+    OrbitCamera,
+    _hero_yaw_pitch,
+    _look_at,
+    _orbit_distance_cap,
+    _perspective,
+)
+from skinny.film_io import (  # noqa: F401 — re-export
+    FilmParameters,
+    _write_exr,
+    _write_hdr_rgbe,
+)
+from skinny.material_pack import (  # noqa: F401 — re-export
+    FLAT_MATERIAL_CAPACITY_INIT,
+    FLAT_MATERIAL_STRIDE,
+    MATERIAL_TYPE_FLAT,
+    MATERIAL_TYPE_PYTHON,
+    MATERIAL_TYPE_SKIN,
+    MATERIAL_TYPE_SUBSURFACE,
+    MATERIAL_TYPE_VOLUME,
+    MEDIUM_CLOUD,
+    MEDIUM_HOMOGENEOUS,
+    MEDIUM_NANOVDB,
+    STD_SURFACE_CAPACITY,
+    STD_SURFACE_STRIDE,
+    _CHANNEL_CODE,
+    _CHANNEL_SHIFT,
+    _CONDUCTOR_METAL_ID,
+    _FLAT_DEFAULT_DIFFUSE,
+    _SPECTRAL_METAL_ORDER,
+    _STD_SURFACE_SCALAR_ENTRIES,
+    _encode_channel_mask,
+    _material_is_subsurface,
+    _material_is_volume,
+    _override_color3,
+    _override_float,
+    pack_flat_material,
+    pack_std_surface_params,
+    pack_std_surface_params_msl,
+)
+from skinny.renderer_helpers import (  # noqa: F401 — re-export
+    _instance_local_basis,
+    _light_value_to_vec3,
+    _spectral_analytic_proposal_token,
+)
+from skinny.skin_params import SkinParameters  # noqa: F401 — re-export
+from skinny.sppm_budget import (  # noqa: F401 — re-export
+    _SPPM_ENV_PHOTON_BUDGET_CAP,
+    _sppm_photon_budget,
+    _sppm_photon_group_pmf,
+)
+from skinny.texture_pool import TexturePool  # noqa: F401 — re-export
 from skinny.gpu_resources import (
     DECLARATIONS as _GPU_DECLARATIONS,
     ResourceSizes,
@@ -65,11 +123,9 @@ from skinny.vk_context import VulkanContext
 # GPU-resource classes (StorageBuffer, ComputePipeline, …) are resolved per
 # backend at runtime via `backend_select.resource_module(ctx)` → `self._gpu.*`
 # (vk_compute on Vulkan, metal_compute on Metal) so this module never imports
-# `vulkan` on a Metal-only host (task 2.3). The single remaining type annotation
-# (`SampledImage`) is pulled in under TYPE_CHECKING — never executed at runtime,
-# so it forces no import on any backend.
-if TYPE_CHECKING:
-    from skinny.vk_compute import SampledImage
+# `vulkan` on a Metal-only host (task 2.3). The last `SampledImage` annotation
+# left with `TexturePool` (change renderer-pure-core-extraction) and is pulled in
+# under TYPE_CHECKING there.
 
 WORKGROUP_SIZE = 8
 MAX_FRAMES_IN_FLIGHT = 2
@@ -105,79 +161,6 @@ _SPPM_METAL_PHOTON_BATCH_DEFAULT = 65536
 # SKINNY_MLT_METAL_CHAIN_BATCH; 0 disables tiling (single full dispatch).
 _MLT_METAL_CHAIN_BATCH_DEFAULT = 16384
 
-
-def _spectral_analytic_proposal_token(
-    token: str,
-    *,
-    allow_environment: bool,
-) -> str:
-    """Resolve a proposal preset to the analytic spectral subset.
-
-    BSDF and environment importance sampling are wavelength-independent and
-    supported by the spectral path. Stateful neural inference is not; remove it
-    and fall back to BSDF if no analytic proposal remains.
-    """
-    supported = {"bsdf", "env"} if allow_environment else {"bsdf"}
-    analytic = [
-        part.strip()
-        for part in str(token).split(",")
-        if part.strip() in supported
-    ]
-    return ",".join(analytic) or "bsdf"
-
-
-def _sppm_photon_group_pmf(
-    powers: tuple[float, float, float, float],
-    present: tuple[bool, bool, bool, bool],
-) -> tuple[float, float, float, float]:
-    """Photon-emission group selection pmf (emissive, sphere, distant, env),
-    proportional to each group's emitted power (change
-    sppm-power-proportional-photon-groups). Per-photon flux then equalises
-    across groups (Φ_g / p_g ≈ Φ_total) — the pbrt light-power distribution —
-    which kills the sparse huge env splats that uniform 1/G selection produced.
-
-    Absent groups get 0. Non-finite or negative powers are treated as 0. When
-    the total usable power is 0 (or every power was non-finite) the pmf falls
-    back to uniform over the *present* groups — the pre-change behavior.
-    """
-    clean = [
-        p if (present[i] and math.isfinite(p) and p > 0.0) else 0.0
-        for i, p in enumerate(powers)
-    ]
-    total = sum(clean)
-    if total > 0.0 and math.isfinite(total):
-        return tuple(p / total for p in clean)
-    n_present = sum(1 for b in present if b)
-    if n_present == 0:
-        return (0.0, 0.0, 0.0, 0.0)
-    return tuple((1.0 / n_present) if b else 0.0 for b in present)
-
-
-# Ceiling on the env-aware photon-budget multiplier (change
-# sppm-env-photon-budget): pmfEnv → 1 would send the budget to infinity, and ×8
-# already cuts the env noise component by √8 ≈ 2.8 (measured exact on
-# glass_caustics_test.usda) at negligible photon-stage cost.
-_SPPM_ENV_PHOTON_BUDGET_CAP = 8.0
-
-
-def _sppm_photon_budget(pixels: int, pmf_env: float,
-                        cap: float = _SPPM_ENV_PHOTON_BUDGET_CAP) -> int:
-    """Env-aware per-pass photon count (change sppm-env-photon-budget).
-
-    ``pixels / (1 - pmfEnv)`` keeps the EXPECTED non-env photon count at
-    exactly ``pixels`` (the flat pre-env budget) and rides the env group's
-    photons on top of it instead of diluting the local lights — env photons
-    deposit only after ≥1 bounce from a disc covering the whole scene bounding
-    sphere, so at one-per-pixel they are sparse fat splats (speckle). Capped at
-    ``cap``× so an env-dominated pmf can't run away; ``pmfEnv == 0`` returns
-    ``pixels`` exactly (env-free scenes stay bit-identical). ``pmf_env`` is
-    clamped to [0, 1] and treated as 0 when non-finite — the pmf override hook
-    is unvalidated.
-    """
-    if not math.isfinite(pmf_env):
-        pmf_env = 0.0
-    pmf_env = min(max(pmf_env, 0.0), 1.0)
-    return int(round(int(pixels) / max(1.0 - pmf_env, 1.0 / cap)))
 
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
 # matching `_pack_uniforms`'s append order exactly — DERIVED from the Slang
@@ -267,65 +250,6 @@ MAX_LENS_ELEMENTS = 32
 # aligned so consecutive instances don't need padding.
 INSTANCE_STRIDE = 144
 
-# Per-material flat-shading record consumed by main_pass.slang's non-skin BSDF
-# dispatch. The struct is `FlatMaterialParams` (common.slang), declared as
-# float4-wrapped rows so the MSL and SPIR-V layouts are byte-identical (no Metal
-# repack). Its per-row byte offsets are DERIVED from that declaration by
-# `slang_layout` (change reflection-owned-byte-layouts) — read them there rather
-# than from a comment map:
-#     slang_layout.scalar_layout("FlatMaterialParams").offsets
-# The sub-offsets *inside* each float4 row (e.g. diffuseColor.xyz + roughness in
-# row 0) are packer-internal, not struct fields — see `pack_flat_material`'s
-# docstring for that map.
-FLAT_MATERIAL_STRIDE = slang_layout.scalar_stride("FlatMaterialParams")  # 256 B
-FLAT_MATERIAL_CAPACITY_INIT = 16
-
-# Channel-selector codes packed into FlatMaterialParams.channelMask. Five
-# scalar texture inputs (diffuse, roughness, metallic, opacity, emissive)
-# carry a 4-bit channel index each — 20 bits total, leaving room for
-# future inputs without changing the buffer layout.
-_CHANNEL_CODE = {"rgb": 0, "r": 1, "g": 2, "b": 3, "a": 4}
-_CHANNEL_SHIFT = {
-    "diffuseColor":  0,
-    "roughness":     4,
-    "metallic":      8,
-    "opacity":      12,
-    "emissiveColor": 16,
-}
-
-
-def _instance_local_basis(transform: np.ndarray) -> np.ndarray:
-    """World-space directions of an instance's local X/Y/Z axes — the
-    normalized rows of the row-vector-convention transform's upper 3x3.
-    Used by the local-space transform gizmo. Falls back to the matching world
-    axis for any degenerate (zero-length) row."""
-    m = np.asarray(transform, dtype=np.float64)
-    basis = np.eye(3, dtype=np.float64)
-    for i in range(3):
-        row = m[i, :3]
-        n = float(np.linalg.norm(row))
-        if n > 1e-9:
-            basis[i] = row / n
-    return basis
-
-
-def _encode_channel_mask(channels: dict[str, str]) -> int:
-    """Pack per-input channel selectors into the FlatMaterialParams uint.
-
-    Each entry maps an UsdPreviewSurface input name to a channel string
-    ("rgb"/"r"/"g"/"b"/"a"). Unknown channels fall back to "rgb" (0),
-    which makes the shader read whatever the input's natural fetch already
-    expected — i.e. zero is the "do nothing different" code.
-    """
-    mask = 0
-    for input_name, ch in channels.items():
-        shift = _CHANNEL_SHIFT.get(input_name)
-        if shift is None:
-            continue
-        code = _CHANNEL_CODE.get(ch, 0)
-        mask |= (code & 0xF) << shift
-    return mask & 0xFFFFFFFF
-
 
 _ACCUM_HASH_RESOLVERS: list[tuple] | None = None
 
@@ -354,50 +278,6 @@ def _accum_hash_resolvers() -> list[tuple]:
         ]
     return _ACCUM_HASH_RESOLVERS
 
-
-def _light_value_to_vec3(value: object) -> np.ndarray:
-    """Convert a color/vec3 value (tuple, list, Gf.Vec3f) to float32 array."""
-    if hasattr(value, "asTuple"):
-        value = value.asTuple()
-    if isinstance(value, (list, tuple)):
-        return np.array([float(value[0]), float(value[1]), float(value[2])], np.float32)
-    return np.array([float(value)] * 3, np.float32)
-
-# Material type codes consumed by main_pass.slang's dispatcher.
-MATERIAL_TYPE_SKIN = 0  # any mtlx_target_name pointing at the layered-skin
-                         # material — routes to the inline skin BSSRDF/specular
-                         # path. Only active when explicitly authored.
-MATERIAL_TYPE_FLAT = 1  # UsdPreviewSurface-style standard surface — routes
-                         # to evalFlatMaterial's bounded path tracer.
-MATERIAL_TYPE_PYTHON = 3  # Python-authored slangpile material (one of
-                          # `python_materials/*.py`) — routes through the
-                          # generated dispatcher in
-                          # `shaders/python_materials_dispatcher.slang`.
-                          # Python material index packed into upper byte of
-                          # `materialTypes[matId]` (MATERIAL_PYMAT_SHIFT).
-MATERIAL_TYPE_SUBSURFACE = 4  # pbrt `subsurface`: a smooth dielectric boundary +
-                          # a homogeneous interior medium (σ_a, σ_s, HG g),
-                          # transported by the interior random walk
-                          # (`materials/subsurface/subsurface_walk.slang`). The
-                          # medium coefficients are packed inline into
-                          # FlatMaterialParams (binding 13) — no new buffer
-                          # (Metal 31-buffer cap) — and read via `resolveMedium`.
-                          # Detected from non-zero `subsurface_sigma_*` overrides.
-MATERIAL_TYPE_VOLUME = 5  # Free-standing participating medium bounded by a pbrt
-                          # `Material "interface"` shape (nanovdb-volume-rendering):
-                          # index-matched pass-through boundary + the medium walk
-                          # (`materials/subsurface/volume_walk.slang`). Detected
-                          # from the importer's explicit `volume_interface` marker
-                          # (`_material_is_volume`); σ/g/worldToUvw are packed
-                          # inline into FlatMaterialParams (160..240), mediumKind
-                          # = MEDIUM_NANOVDB (1) when a density grid is present
-                          # (else MEDIUM_HOMOGENEOUS for a homogeneous interior).
-
-# Medium source kinds (bindings.slang MEDIUM_*): the density-seam dispatch tag
-# packed into FlatMaterialParams.mediumKind.
-MEDIUM_HOMOGENEOUS = 0
-MEDIUM_NANOVDB = 1
-MEDIUM_CLOUD = 2  # pbrt procedural cloud: analytic fBm density, no texture
 
 # Sphere-light record (binding 17): vec3 position, float radius, vec3
 # radiance, float pad. 32 B / record, naturally 16-byte aligned.
@@ -430,12 +310,6 @@ EMISSIVE_TRI_CAPACITY = 256
 # a plain-RGB emitter carries (0, 0) so the shader falls back to the RGB upsample.
 SPECTRAL_EMITTER_STRIDE = 8
 
-# StdSurfaceParams record (binding 19): full MaterialX standard_surface
-# parameters packed in scalar layout matching the Slang struct in
-# mtlx_std_surface.slang (256 B / record) — stride DERIVED from that declaration
-# (change reflection-owned-byte-layouts).
-STD_SURFACE_STRIDE = slang_layout.scalar_stride("StdSurfaceParams")
-STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 
 # Tool-buffer (binding 30) dispatch modes. Slot 0.x of the tool buffer selects
 # how main_pass.mainImage / runFrame behave for the frame; these mirror the
@@ -446,995 +320,6 @@ STD_SURFACE_CAPACITY = FLAT_MATERIAL_CAPACITY_INIT
 # the modes are mutually exclusive (only one is armed at a time).
 TOOL_MODE_STRUCTURAL = 4
 TOOL_STRUCT_AOV_BASE = 16  # float4 slots; past the 16-slot header/pick region
-
-# Default diffuse for materials whose UsdPreviewSurface diffuseColor is
-# texture-connected rather than constant — mid-grey keeps unbound prims
-# visible until bindless textures (Phase C-4) actually sample the file.
-_FLAT_DEFAULT_DIFFUSE = (0.72, 0.72, 0.72)
-
-
-def _override_float(overrides: dict, key: str, default: float) -> float:
-    val = overrides.get(key)
-    if val is None:
-        return float(default)
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def _override_color3(overrides: dict, key: str, default: tuple) -> tuple:
-    val = overrides.get(key)
-    if val is None:
-        return tuple(float(c) for c in default)
-    # USD Gf.Vec3f exposes index access; numpy / tuple do too.
-    try:
-        return float(val[0]), float(val[1]), float(val[2])
-    except (TypeError, IndexError, ValueError):
-        return tuple(float(c) for c in default)
-
-
-def _material_is_subsurface(material) -> bool:
-    """True when a material carries a non-zero subsurface interior medium
-    (`subsurface_sigma_a` / `subsurface_sigma_s`, mm⁻¹).
-
-    Such materials route to MATERIAL_TYPE_SUBSURFACE so the GPU runs the
-    volumetric interior random walk (`subsurface_walk.slang`) instead of the flat
-    opacity=0 delta-refraction (clear-glass) fallback. A free-standing fog
-    `MediumInterface` carries `volume_*` keys (not `subsurface_*`), so it is left
-    on the flat/dielectric path — only a pbrt `Material "subsurface"` matches.
-    """
-    overrides = getattr(material, "parameter_overrides", None) or {}
-    sa = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
-    ss = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
-    return any(c > 0.0 for c in sa) or any(c > 0.0 for c in ss)
-
-
-def _material_is_volume(material) -> bool:
-    """True for a free-standing medium boundary (pbrt ``Material "interface"``).
-
-    Keys off the importer's explicit ``volume_interface: True`` marker
-    (`pbrt/api.py` sets it only for interface-typed materials carrying a
-    `MediumInterface`), never lobe-value sniffing — so genuine cutout/glass
-    materials can't be captured. Such materials route to MATERIAL_TYPE_VOLUME:
-    the index-matched pass-through medium walk (`volume_walk.slang`).
-    """
-    overrides = getattr(material, "parameter_overrides", None) or {}
-    return bool(overrides.get("volume_interface"))
-
-
-class TexturePool:
-    """Bindless flat-material texture pool (binding 14 in main_pass.slang).
-
-    Owns up to BINDLESS_TEXTURE_CAPACITY SampledImage slots. Materials
-    point at slots by index; unused slots stay None and are gated off by
-    PARTIALLY_BOUND on the descriptor binding plus a sentinel index in
-    the material record.
-
-    Deduplication is by file path: two materials referencing the same
-    PNG share one slot. Allocation is monotonic; we don't free slots
-    mid-session because materials don't change after scene load.
-    """
-
-    SENTINEL = 0xFFFFFFFF
-
-    def __init__(self, ctx, gpu) -> None:
-        self.ctx = ctx
-        # GPU-resource module (vk_compute / metal_compute) — the pool's bindless
-        # capacity follows the active backend's cap (Metal trims to fit its
-        # 128-texture / 16-sampler argument limit, design D8).
-        self._gpu = gpu
-        self._capacity = int(gpu.BINDLESS_TEXTURE_CAPACITY)
-        self._slots = [None] * self._capacity
-        self._by_path: dict[str, int] = {}
-        self._next_slot = 0
-
-    # Backend-neutral wrap tokens (resolved per backend inside SampledImage).
-    _WRAP_TOKENS = {
-        "repeat": "repeat", "clamp": "clamp", "mirror": "mirror",
-        "black": "black", "useMetadata": "repeat",
-    }
-
-    def add_or_get(
-        self,
-        path: Path,
-        *,
-        linear: bool = False,
-        wrap_s: str = "repeat",
-        wrap_t: str = "repeat",
-    ) -> int:
-        """Decode the file at `path` and return the array slot it lives in.
-
-        Subsequent calls with the same (path, linear, wrap_s, wrap_t) tuple
-        return the cached slot. Returns SENTINEL when the file can't be
-        loaded (missing/corrupt).
-
-        `linear=True` uploads as VK_FORMAT_R8G8B8A8_UNORM (no gamma decode) —
-        use for normal, roughness, metallic, and other non-colour data textures.
-        `wrap_s` / `wrap_t` come from USD's per-texture
-        `inputs:wrapS` / `inputs:wrapT`. Two materials referencing the same
-        file with different wrap modes get distinct slots (each owns its
-        own sampler).
-        """
-        key = str(path.resolve()) if path.is_absolute() else str(path)
-        if linear:
-            key += ":linear"
-        key += f":{wrap_s}/{wrap_t}"
-        cached = self._by_path.get(key)
-        if cached is not None:
-            return cached
-        try:
-            img = Image.open(path).convert("RGBA")
-        except (FileNotFoundError, OSError):
-            return self.SENTINEL
-        if self._next_slot >= self._capacity:
-            return self.SENTINEL
-        w, h = img.size
-        fmt = "rgba8_unorm" if linear else "rgba8_srgb"
-        addr_u = self._WRAP_TOKENS.get(wrap_s, "repeat")
-        addr_v = self._WRAP_TOKENS.get(wrap_t, "repeat")
-        slot = self._gpu.SampledImage(
-            self.ctx, w, h,
-            format=fmt,
-            bytes_per_pixel=4,
-            address_mode_u=addr_u,
-            address_mode_v=addr_v,
-        )
-        slot.upload_sync(img.tobytes())
-        idx = self._next_slot
-        self._slots[idx] = slot
-        self._by_path[key] = idx
-        self._next_slot += 1
-        return idx
-
-    def filled_slots(self) -> list[tuple[int, SampledImage]]:
-        """(slot_index, SampledImage) pairs for every populated slot."""
-        return [(i, s) for i, s in enumerate(self._slots) if s is not None]
-
-    def destroy(self) -> None:
-        for slot in self._slots:
-            if slot is not None:
-                slot.destroy()
-        self._slots = []
-
-
-# Named-conductor id (Group 6.2). Defined in skinny.pbrt.data (a GPU-free module)
-# so the importer, this upload, and the shader gate share one source of truth that
-# a hostless test can pin — see CONDUCTOR_METAL_ID's docstring for the append-only
-# rule. Aliased to the historical private name used throughout this module.
-_CONDUCTOR_METAL_ID = CONDUCTOR_METAL_ID
-
-#: spectralMetals upload order — index i holds the metal with id i+1. Derived, so
-#: the id↔offset invariant is structural rather than two lists kept in sync by hand.
-_SPECTRAL_METAL_ORDER = tuple(
-    k for k, _ in sorted(_CONDUCTOR_METAL_ID.items(), key=lambda kv: kv[1])
-)
-
-
-def pack_flat_material(
-    material,
-    diffuse_texture_idx: int = 0xFFFFFFFF,
-    roughness_texture_idx: int = 0xFFFFFFFF,
-    metallic_texture_idx: int = 0xFFFFFFFF,
-    normal_texture_idx: int = 0xFFFFFFFF,
-    emissive_texture_idx: int = 0xFFFFFFFF,
-    opacity_texture_idx: int = 0xFFFFFFFF,
-    *,
-    normal_scale: tuple[float, float, float] = (2.0, 2.0, 2.0),
-    normal_bias: tuple[float, float, float] = (-1.0, -1.0, -1.0),
-    channel_mask: int = 0,
-    volume_world_to_uvw=None,
-    volume_value_max: float = 1.0,
-    mm_per_unit: float = 1.0,
-    spectral: bool = False,
-) -> bytes:
-    """Pack a Material's overrides into FLAT_MATERIAL_STRIDE bytes
-    (FlatMaterialParams).
-
-    Layout (scalar/std430 compatible — `float3` packs at 4-byte alignment):
-       0: diffuseColor.r/g/b      (vec3 → 12 B)
-      12: roughness               (float)
-      16: metallic                (float)
-      20: specular                (float)
-      24: opacity                 (float)
-      28: diffuseTextureIdx       (uint; 0xFFFFFFFF = use constant)
-      32: roughnessTextureIdx     (uint; sentinel = use constant)
-      36: metallicTextureIdx      (uint; sentinel = use constant)
-      40: normalTextureIdx        (uint; sentinel = use mesh normal)
-      44: emissiveTextureIdx      (uint; sentinel = use emissive const)
-      48: emissiveColor.r/g/b     (vec3 → 12 B)
-      60: ior                     (float; index of refraction, default 1.5)
-      64: coat                    (float; clear coat weight 0..1)
-      68: coatRoughness           (float)
-      72: coatIOR                 (float)
-      76: opacityTextureIdx       (uint; sentinel = use constant)
-      80: coatColor.r/g/b         (vec3 → 12 B)
-      92: opacityThreshold        (float; cutout alpha threshold)
-      96: normalScale.x/y/z       (vec3 → 12 B; UsdUVTexture inputs:scale.xyz)
-     108: channelMask             (uint; packed per-input channel selectors)
-     112: normalBias.x/y/z        (vec3 → 12 B; UsdUVTexture inputs:bias.xyz)
-     124: _pad                    (uint; reserved)
-     128: transmissionColor.r/g/b (vec3 → 12 B; Stage-2; fallback diffuseColor)
-     140: diffuseRoughness        (float; Stage-2 Oren-Nayar; 0 ⇒ Lambert)
-     144: specularColor.r/g/b     (vec3 → 12 B; Stage-2; fallback white)
-     156: _pad1                   (uint; reserved)
-     160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
-     172: medium g                (float; medium HG anisotropy)
-     176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
-     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0 / MEDIUM_NANOVDB=1
-                                   / MEDIUM_CLOUD=2; eta reuses ior)
-     192: worldToUvw row 0        (vec4; volume; identity row (1,0,0,0) else)
-     208: worldToUvw row 1        (vec4; volume; identity row (0,1,0,0) else)
-     224: worldToUvw row 2        (vec4; volume; identity row (0,0,1,0) else)
-     240: cloudDensity            (float; MEDIUM_CLOUD only; else 0)
-     244: cloudWispiness          (float; MEDIUM_CLOUD only; else 0)
-     248: cloudFrequency          (float; MEDIUM_CLOUD only; else 0)
-     252: _pad2                   (float; reserved)
-
-    Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
-    override reproduces the prior behavior — transmissionColor defaults to
-    diffuseColor (so the delta-transmission weight is unchanged), specularColor
-    defaults to white, and diffuseRoughness defaults to 0 (exact Lambert).
-
-    Volume materials (nanovdb-volume-rendering; `_material_is_volume`) pack the
-    free-standing medium in the same 160..192 slots plus the world→uvw rows:
-    `volume_world_to_uvw` is the loader's (3, 4) math-convention affine
-    (VolumeGrid.world_to_uvw); non-volume materials get identity rows, so the
-    pre-existing 0..192 prefix bytes are only ever *extended*, never shifted.
-
-    Procedural cloud media (pbrt-cloud-procedural-medium; overrides carry
-    `volume_cloud: True`) pack `mediumKind = MEDIUM_CLOUD` plus the appended
-    240..256 float4 (density/wispiness/frequency — pbrt `CloudMedium` params,
-    evaluated analytically in-shader); the world→uvw rows come from the
-    material's own `volume_world_to_uvw` override (world→medium-local, folded
-    by the importer from the medium CTM) rather than the scene grid, and no
-    grid `value_max` fold applies (there is no density texture).
-    """
-    overrides = material.parameter_overrides
-    diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
-    roughness = _override_float(overrides, "roughness", 0.5)
-    metallic = _override_float(overrides, "metallic", 0.0)
-    specular = _override_float(overrides, "specular", 0.5)
-    opacity = _override_float(overrides, "opacity", 1.0)
-    emissive = _override_color3(overrides, "emissiveColor", (0.0, 0.0, 0.0))
-    ior = _override_float(overrides, "ior", 1.5)
-    coat = _override_float(overrides, "coat", 0.0)
-    coat_roughness = _override_float(overrides, "coat_roughness", 0.0)
-    coat_ior_raw = overrides.get("coat_IOR")
-    coat_ior = float(coat_ior_raw) if coat_ior_raw is not None else 1.5
-    coat_color = _override_color3(overrides, "coat_color", (1.0, 1.0, 1.0))
-    opacity_threshold = _override_float(overrides, "opacityThreshold", 0.0)
-    # Stage-2 rich inputs. transmission_color falls back to the diffuse albedo so
-    # the delta-transmission weight (was `albedo`) is byte-unchanged when absent.
-    transmission_color = _override_color3(overrides, "transmission_color", diffuse)
-    specular_color = _override_color3(overrides, "specular_color", (1.0, 1.0, 1.0))
-    diffuse_roughness = _override_float(overrides, "diffuse_roughness", 0.0)
-    # Named-conductor identity (Group 6.2): the importer preserves the metal name
-    # on skinnyOverrides["conductor_metal"]; map to the shader id (_CONDUCTOR_METAL_ID,
-    # ids 1..N, else 0 = RGB Schlick F0). Packed into the spare _specularColorPad.w
-    # (read as asuint by conductorMetalId). SPECTRAL-ONLY: only the spectral
-    # conductor Fresnel reads it, so gate the id on `spectral` (like glassCauchyB)
-    # — the RGB pack keeps the literal 0 in that lane, byte-identical to baseline.
-    # The importer authors conductor_metal regardless of --spectral, so computing
-    # it unconditionally would perturb the RGB material buffer for a named metal.
-    conductor_metal_id = 0
-    if spectral:
-        conductor_metal_id = _CONDUCTOR_METAL_ID.get(
-            str(overrides.get("conductor_metal", "")).strip().lower(), 0)
-    # Named-glass dispersion (Group 6.4): the importer preserves the glass name on
-    # skinnyOverrides["glass_dispersion"]; the Cauchy fit is n(λ)=A+B/λ_µm². The
-    # base index A becomes the scalar `ior` lane (exact); B rides the spare
-    # _normalBiasPad.w (glassCauchyB). 0 = constant-IOR (non-dispersive), so every
-    # non-glass material keeps the old literal-0 pad → RGB pack byte-identical.
-    # Only the spectral variant substitutes Cauchy A here; the RGB build keeps the
-    # authored `ior`. That authored value is NOT the old generic 1.5 default any
-    # more: since `pbrt-named-spectra`, the importer resolves a named glass to its
-    # d-line index (materials._named_spectrum_scalar), so `glass-LASF9` arrives as
-    # 1.850 in both builds. The two agree at the d-line and differ only by
-    # dispersion — the RGB build has no wavelength to disperse over.
-    glass_cauchy_b = 0.0
-    _gd = overrides.get("glass_dispersion")
-    if spectral and _gd is not None:
-        from skinny.pbrt.data.spectral_tables import named_glass_cauchy
-        _ab = named_glass_cauchy(_gd)
-        if _ab is not None:
-            ior = float(_ab[0])
-            glass_cauchy_b = float(_ab[1])
-    # Subsurface medium (pbrt-subsurface-volumetric), packed inline (no new SSBO —
-    # Metal 31-buffer cap). σ in mm⁻¹; zero for non-medium materials. Boundary
-    # eta reuses `ior`.
-    medium_sigma_a = _override_color3(overrides, "subsurface_sigma_a", (0.0, 0.0, 0.0))
-    medium_sigma_s = _override_color3(overrides, "subsurface_sigma_s", (0.0, 0.0, 0.0))
-    medium_g = _override_float(overrides, "subsurface_g", 0.0)
-    medium_kind = MEDIUM_HOMOGENEOUS
-    # Cloud scalars (MEDIUM_CLOUD only; zeros keep the bytes inert elsewhere).
-    cloud_density = cloud_wispiness = cloud_frequency = 0.0
-    # World→uvw rows (volume; identity elsewhere so the bytes are inert).
-    w2u = ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0))
-    if _material_is_volume(material):
-        # Free-standing medium (nanovdb-volume-rendering). TWO folds on σ:
-        #  * `volume_value_max` — the density texture is normalized to [0,1] by
-        #    dividing by the grid's value max at upload, so folding value_max
-        #    into σ here makes the normalized texel exactly the density
-        #    multiplier (and the global majorant exactly the packed σ_t).
-        #  * `1 / mm_per_unit` — the walk's convention is σ in mm⁻¹ with world
-        #    distances × mmPerUnit (traverseMediumSegment), while the importer
-        #    carries pbrt σ per *scene unit*; pre-dividing makes the walk's
-        #    optical depth σ_packed·d_world·mmPerUnit == σ_pbrt·d_world.
-        # NOTE: σ is folded at pack time with the renderer's live mm_per_unit;
-        # a later mm_per_unit change re-packs via the material upload path.
-        mmu = max(float(mm_per_unit), 1e-6)
-        # Grid-backed media dispatch to the density texture; the procedural
-        # cloud evaluates pbrt's fBm density analytically in-shader; a
-        # homogeneous free-standing interior (no grid asset) keeps densityAt ≡ 1.
-        if overrides.get("volume_cloud"):
-            medium_kind = MEDIUM_CLOUD
-            cloud_density = _override_float(overrides, "cloud_density", 1.0)
-            cloud_wispiness = _override_float(overrides, "cloud_wispiness", 1.0)
-            cloud_frequency = _override_float(overrides, "cloud_frequency", 5.0)
-        elif overrides.get("volume_grid_asset"):
-            medium_kind = MEDIUM_NANOVDB
-        # else: homogeneous free-standing interior (medium_kind already
-        # MEDIUM_HOMOGENEOUS from the initializer above).
-        # `volume_value_max` is a *grid* normalization fold (texels divided by
-        # the grid max at upload) — it must not scale the analytic kinds.
-        fold = (float(volume_value_max) if medium_kind == MEDIUM_NANOVDB
-                else 1.0) / mmu
-        vs_a = _override_color3(overrides, "volume_sigma_a", (0.0, 0.0, 0.0))
-        vs_s = _override_color3(overrides, "volume_sigma_s", (0.0, 0.0, 0.0))
-        medium_sigma_a = tuple(c * fold for c in vs_a)
-        medium_sigma_s = tuple(c * fold for c in vs_s)
-        medium_g = _override_float(overrides, "volume_g", 0.0)
-        ior = 1.0  # index-matched pass-through boundary (eta reuses the ior slot)
-        # World→[0,1]³ rows: the cloud carries its own importer-folded
-        # medium-local affine on the material overrides; the grid kind uses the
-        # loader's per-scene grid affine (`volume_world_to_uvw` arg).
-        rows = overrides.get("volume_world_to_uvw") if medium_kind == MEDIUM_CLOUD \
-            else volume_world_to_uvw
-        if rows is not None:
-            m = np.asarray([float(v) for v in np.ravel(rows)], np.float32).reshape(3, 4)
-            w2u = tuple(tuple(float(v) for v in row) for row in m)
-    return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff f  fff f  fff I  fff f fff I"
-        " ffff ffff ffff ffff",
-        diffuse[0], diffuse[1], diffuse[2],
-        roughness, metallic, specular, opacity,
-        int(diffuse_texture_idx) & 0xFFFFFFFF,
-        int(roughness_texture_idx) & 0xFFFFFFFF,
-        int(metallic_texture_idx) & 0xFFFFFFFF,
-        int(normal_texture_idx) & 0xFFFFFFFF,
-        int(emissive_texture_idx) & 0xFFFFFFFF,
-        emissive[0], emissive[1], emissive[2],
-        ior,
-        coat, coat_roughness, coat_ior,
-        int(opacity_texture_idx) & 0xFFFFFFFF,
-        coat_color[0], coat_color[1], coat_color[2],
-        opacity_threshold,
-        float(normal_scale[0]), float(normal_scale[1]), float(normal_scale[2]),
-        int(channel_mask) & 0xFFFFFFFF,
-        float(normal_bias[0]), float(normal_bias[1]), float(normal_bias[2]),
-        float(glass_cauchy_b),
-        transmission_color[0], transmission_color[1], transmission_color[2],
-        diffuse_roughness,
-        specular_color[0], specular_color[1], specular_color[2],
-        int(conductor_metal_id) & 0xFFFFFFFF,
-        medium_sigma_a[0], medium_sigma_a[1], medium_sigma_a[2],
-        medium_g,
-        medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
-        int(medium_kind) & 0xFFFFFFFF,
-        w2u[0][0], w2u[0][1], w2u[0][2], w2u[0][3],
-        w2u[1][0], w2u[1][1], w2u[1][2], w2u[1][3],
-        w2u[2][0], w2u[2][1], w2u[2][2], w2u[2][3],
-        float(cloud_density), float(cloud_wispiness), float(cloud_frequency), 0.0,
-    )
-
-
-def pack_std_surface_params(material) -> bytes:
-    """Pack a Material's overrides into 256 bytes (StdSurfaceParams).
-
-    Layout matches the Slang struct in mtlx_std_surface.slang (scalar layout).
-    UsdPreviewSurface names are mapped to standard_surface equivalents.
-    """
-    o = material.parameter_overrides
-
-    def _f(key, usd_key=None, default=0.0):
-        v = o.get(key)
-        if v is None and usd_key:
-            v = o.get(usd_key)
-        if v is None:
-            return float(default)
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return float(default)
-
-    def _c3(key, usd_key=None, default=(0.0, 0.0, 0.0)):
-        v = o.get(key)
-        if v is None and usd_key:
-            v = o.get(usd_key)
-        if v is None:
-            return tuple(float(c) for c in default)
-        try:
-            return float(v[0]), float(v[1]), float(v[2])
-        except (TypeError, IndexError, ValueError):
-            return tuple(float(c) for c in default)
-
-    base_color = _c3("base_color", "diffuseColor", (0.8, 0.8, 0.8))
-    base = _f("base", default=1.0)
-    diffuse_roughness = _f("diffuse_roughness", default=0.0)
-    metalness = _f("metalness", "metallic", 0.0)
-    specular = _f("specular", default=1.0)
-    specular_roughness = _f("specular_roughness", "roughness", 0.5)
-    specular_color = _c3("specular_color", default=(1.0, 1.0, 1.0))
-    specular_IOR = _f("specular_IOR", "ior", 1.5)
-    specular_anisotropy = _f("specular_anisotropy", default=0.0)
-    specular_rotation = _f("specular_rotation", default=0.0)
-    transmission = _f("transmission", default=0.0)
-    transmission_depth = _f("transmission_depth", default=0.0)
-    transmission_color = _c3("transmission_color", default=(1.0, 1.0, 1.0))
-    transmission_scatter_aniso = _f("transmission_scatter_anisotropy", default=0.0)
-    transmission_scatter = _c3("transmission_scatter", default=(0.0, 0.0, 0.0))
-    transmission_dispersion = _f("transmission_dispersion", default=0.0)
-    transmission_extra_roughness = _f("transmission_extra_roughness", default=0.0)
-    subsurface = _f("subsurface", default=0.0)
-    subsurface_scale = _f("subsurface_scale", default=1.0)
-    subsurface_anisotropy = _f("subsurface_anisotropy", default=0.0)
-    subsurface_color = _c3("subsurface_color", default=(1.0, 1.0, 1.0))
-    subsurface_radius = _c3("subsurface_radius", default=(1.0, 1.0, 1.0))
-    sheen = _f("sheen", default=0.0)
-    sheen_color = _c3("sheen_color", default=(1.0, 1.0, 1.0))
-    sheen_roughness = _f("sheen_roughness", default=0.3)
-    coat = _f("coat", default=0.0)
-    coat_roughness = _f("coat_roughness", default=0.1)
-    coat_anisotropy = _f("coat_anisotropy", default=0.0)
-    coat_rotation = _f("coat_rotation", default=0.0)
-    coat_IOR = _f("coat_IOR", default=1.5)
-    coat_affect_color = _f("coat_affect_color", default=0.0)
-    coat_affect_roughness = _f("coat_affect_roughness", default=0.0)
-    coat_color = _c3("coat_color", default=(1.0, 1.0, 1.0))
-    thin_film_thickness = _f("thin_film_thickness", default=0.0)
-    thin_film_IOR = _f("thin_film_IOR", default=1.5)
-    emission = _f("emission", default=0.0)
-    emission_color = _c3("emission_color", "emissiveColor", (1.0, 1.0, 1.0))
-
-    if emission == 0.0 and "emissiveColor" in o:
-        ec = o["emissiveColor"]
-        try:
-            if float(ec[0]) > 0 or float(ec[1]) > 0 or float(ec[2]) > 0:
-                emission = 1.0
-        except (TypeError, IndexError, ValueError):
-            pass
-
-    opacity = _c3("opacity", default=(1.0, 1.0, 1.0))
-    if "opacity" in o and not hasattr(o["opacity"], "__getitem__"):
-        try:
-            f = float(o["opacity"])
-            opacity = (f, f, f)
-        except (TypeError, ValueError):
-            pass
-
-    thin_walled = int(_f("thin_walled", default=0))
-
-    return struct.pack(
-        "ffffffff"      # 0-32:   base_color(3), base, diffuse_roughness, metalness, specular, specular_roughness
-        "ffffffff"      # 32-64:  specular_color(3), specular_IOR, specular_anisotropy, specular_rotation, transmission, transmission_depth
-        "ffffffff"      # 64-96:  transmission_color(3), scatter_aniso, transmission_scatter(3), dispersion
-        "ffffffff"      # 96-128: extra_roughness, subsurface, subsurface_scale, subsurface_aniso, subsurface_color(3), _pad0
-        "ffffffff"      # 128-160: subsurface_radius(3), sheen, sheen_color(3), sheen_roughness
-        "ffffffff"      # 160-192: coat, coat_roughness, coat_aniso, coat_rotation, coat_IOR, coat_affect_color, coat_affect_roughness, _pad1
-        "ffffffff"      # 192-224: coat_color(3), thin_film_thickness, thin_film_IOR, emission, emission_color.r, emission_color.g
-        "fffffIff",     # 224-256: emission_color.b, _pad2, opacity(3), thin_walled, _pad3, _pad4
-        base_color[0], base_color[1], base_color[2], base,
-        diffuse_roughness, metalness, specular, specular_roughness,
-        specular_color[0], specular_color[1], specular_color[2], specular_IOR,
-        specular_anisotropy, specular_rotation, transmission, transmission_depth,
-        transmission_color[0], transmission_color[1], transmission_color[2], transmission_scatter_aniso,
-        transmission_scatter[0], transmission_scatter[1], transmission_scatter[2], transmission_dispersion,
-        transmission_extra_roughness, subsurface, subsurface_scale, subsurface_anisotropy,
-        subsurface_color[0], subsurface_color[1], subsurface_color[2], 0.0,
-        subsurface_radius[0], subsurface_radius[1], subsurface_radius[2], sheen,
-        sheen_color[0], sheen_color[1], sheen_color[2], sheen_roughness,
-        coat, coat_roughness, coat_anisotropy, coat_rotation,
-        coat_IOR, coat_affect_color, coat_affect_roughness, 0.0,
-        coat_color[0], coat_color[1], coat_color[2], thin_film_thickness,
-        thin_film_IOR, emission, emission_color[0], emission_color[1],
-        emission_color[2], 0.0, opacity[0], opacity[1], opacity[2],
-        thin_walled, 0.0, 0.0,
-    )
-
-
-# StdSurfaceParams scalar layout — ordered (field-name, byte-size), DERIVED from
-# the Slang struct in mtlx_std_surface.slang (change
-# reflection-owned-byte-layouts). Matches `pack_std_surface_params`'s scalar
-# (std430) packing: each field's scalar offset is the running byte sum (float3 =
-# 12 B, no 16-B promotion). `pack_std_surface_params_msl` walks it to relocate
-# the scalar record into Metal's MSL layout (where float3 → 16 B), keyed by the
-# reflected field names.
-_STD_SURFACE_SCALAR_ENTRIES: tuple[tuple[str, int], ...] = tuple(
-    slang_layout.scalar_layout("StdSurfaceParams").entries)
-
-
-def pack_std_surface_params_msl(
-    scalar: bytes, layout: dict[str, tuple[int, int]], stride: int
-) -> bytes:
-    """Relocate a scalar-packed `pack_std_surface_params` record (256 B, float3 =
-    12 B) into Metal's reflected MSL element layout for
-    `StructuredBuffer<StdSurfaceParams>` (binding 19), where Slang pads every
-    `float3` to 16 B and grows the element stride past 256 B (≈400). Each field's
-    bytes move from its scalar offset (the running sum over the derived
-    `_STD_SURFACE_SCALAR_ENTRIES`) to its reflected MSL offset (`layout[name]`). Same design-D3 repack the skin
-    params (`_pack_mtlx_skin_array_msl`) get; without it every field after
-    `base_color` is misread on Metal (metalness reads specular, specular reads
-    specular_roughness, coat → 0, …). (Graph params no longer need this — change
-    combine-graph-param-buffers reads them via `ByteAddressBuffer.Load<T>`, which
-    is scalar on both targets.)
-
-    FORWARD-LOOKING / currently inert: binding 19 is read only by
-    `preview_pass.slang` (the BXDF/std_surface visualiser), which is a Vulkan-only
-    `PreviewPipeline` — Vulkan reads the scalar layout directly, and the Metal
-    megakernel dead-strips binding 19 entirely (`loadStdSurfaceParams` is
-    uncalled), so on Metal this relocation only activates once a Metal pipeline
-    actually references `stdSurfaceParams`. It is the layout-correct path for that
-    future port, not a fix for any image today (the path-traced flat BSDF reads
-    the float4-wrapped, MSL-safe FlatMaterialParams at binding 13)."""
-    rec = bytearray(stride)
-    off = 0
-    for name, size in _STD_SURFACE_SCALAR_ENTRIES:
-        moff = layout.get(name)
-        if moff is not None:
-            rec[moff[0]:moff[0] + size] = scalar[off:off + size]
-        off += size
-    assert off == len(scalar), (
-        f"StdSurfaceParams field table covers {off} B but the scalar record is "
-        f"{len(scalar)} B")
-    return bytes(rec)
-
-
-@dataclass
-class SkinParameters:
-    """Physically-based skin parameters.
-
-    Layered skin model: epidermis -> dermis -> subcutaneous fat.
-    Absorption and scattering coefficients are spectral (RGB approximation).
-    """
-
-    # Epidermis
-    melanin_fraction: float = 0.15
-    epidermis_thickness_mm: float = 0.1
-
-    # Dermis
-    hemoglobin_fraction: float = 0.05
-    blood_oxygenation: float = 0.75
-    dermis_thickness_mm: float = 1.0
-
-    # Subcutaneous
-    subcut_thickness_mm: float = 3.0
-
-    # Scattering
-    scattering_coefficient: np.ndarray = field(
-        default_factory=lambda: np.array([3.7, 4.4, 5.05], dtype=np.float32)
-    )
-    anisotropy_g: float = 0.8
-
-    # Surface
-    roughness: float = 0.35
-    ior: float = 1.4
-
-    # Sub-millimeter surface detail (pores + vellus hair). Defaults to 0 so
-    # loading a pre-detail preset renders identically to pre-change output.
-    pore_density: float = 0.0
-    pore_depth: float = 0.0
-    hair_density: float = 0.0
-    hair_tilt: float = 0.0
-
-    def pack(self) -> bytes:
-        """Pack into std140-compatible bytes matching the Slang SkinParams struct.
-
-        std140 layout (offsets in bytes):
-          0: melaninFraction      (float)
-          4: hemoglobinFraction   (float)
-          8: bloodOxygenation     (float)
-         12: epidermisThickness   (float)
-         16: dermisThickness      (float)
-         20: subcutThickness      (float)
-         24: <8 bytes padding>    (align float3 to 16)
-         32: scatteringCoeff      (float3, 12 bytes)
-         44: anisotropy           (float, fills vec3 trailing slot)
-         48: roughness            (float)
-         52: ior                  (float)
-         56: poreDensity          (float)
-         60: poreDepth            (float)
-         64: hairDensity          (float)
-         68: hairTilt             (float)
-         72: <8 bytes padding>    (struct rounds to 16)
-        Total: 80 bytes
-        """
-        return struct.pack(
-            "6f 2I 3f f 2f 4f 2I",
-            self.melanin_fraction,
-            self.hemoglobin_fraction,
-            self.blood_oxygenation,
-            self.epidermis_thickness_mm,
-            self.dermis_thickness_mm,
-            self.subcut_thickness_mm,
-            0, 0,                                # 8 bytes padding
-            *self.scattering_coefficient,
-            self.anisotropy_g,
-            self.roughness,
-            self.ior,
-            self.pore_density,
-            self.pore_depth,
-            self.hair_density,
-            self.hair_tilt,
-            0, 0,                                # 8 bytes struct tail padding
-        )
-
-
-def _perspective(
-    fov_deg: float, aspect: float, near: float = 0.1, far: float = 100.0,
-) -> np.ndarray:
-    """Reverse-depth perspective projection matrix (stored transposed for GPU).
-
-    Math (OpenGL/Vulkan infinite-far convention, z_near = 0.1, z_far = 100):
-        f   = 1 / tan(fov/2)
-        P   = [[f/a,  0,        0,          0],
-               [0,    f,        0,          0],
-               [0,    0,  far/(n-f), n·far/(n-f)],
-               [0,    0,       -1,          0]]
-
-    numpy stores row-major → GPU reads column-major → receives Pᵀ → correct.
-    """
-    fov_rad = np.radians(fov_deg)
-    f = 1.0 / np.tan(fov_rad / 2.0)
-    proj = np.zeros((4, 4), dtype=np.float32)
-    proj[0, 0] = f / aspect
-    proj[1, 1] = f
-    proj[2, 2] = far / (near - far)
-    proj[2, 3] = -1.0
-    proj[3, 2] = (near * far) / (near - far)
-    return proj
-
-
-def _look_at(pos: np.ndarray, forward: np.ndarray,
-             world_up: Optional[np.ndarray] = None) -> np.ndarray:
-    """View matrix from camera position and forward direction (stored transposed).
-
-    Math (camera basis via cross-product):
-        r = normalize(forward × up)      (right axis)
-        u = r × forward                  (up axis, re-orthogonalised)
-        V = [[r.x,  r.y,  r.z, −r·pos],
-             [u.x,  u.y,  u.z, −u·pos],
-             [−d.x, −d.y, −d.z, d·pos],
-             [0,    0,    0,    1     ]]
-
-    where d = forward. Stored transposed for the same numpy/GPU convention as
-    _perspective — the GPU reads column-major and recovers V.
-    """
-    # Returns V^T — numpy row-major, GPU reads column-major → cancels back to V.
-    # `world_up` is the reference up; an authored camera (CameraOverride.up) feeds
-    # its own up here so non-Y-up pbrt cameras keep their roll. Default +Y ⇒ the
-    # prior basis, byte-identical for Y-up / interactive cameras.
-    if world_up is None:
-        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    else:
-        world_up = np.asarray(world_up, dtype=np.float32).reshape(3)
-    right = np.cross(forward, world_up)
-    rn = np.linalg.norm(right)
-    if rn < 1e-6:
-        # Degenerate: up ∥ forward. Fall back to a secondary world axis so the
-        # basis stays finite and orthonormal (no zero `right`).
-        alt = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        if abs(float(np.dot(forward, alt))) > 0.9:
-            alt = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        right = np.cross(forward, alt)
-        rn = np.linalg.norm(right)
-    right = right / max(rn, 1e-6)
-    up = np.cross(right, forward)
-    view = np.eye(4, dtype=np.float32)
-    view[:3, 0] = right
-    view[:3, 1] = up
-    view[:3, 2] = -forward
-    view[3, 0] = -np.dot(right, pos)
-    view[3, 1] = -np.dot(up, pos)
-    view[3, 2] = np.dot(forward, pos)
-    return view
-
-
-def _hero_yaw_pitch() -> tuple[float, float]:
-    """Default 3/4 hero-view orbit angles (radians): yaw 30°, pitch 15°."""
-    return float(np.radians(30.0)), float(np.radians(15.0))
-
-
-def _orbit_distance_cap(longest_dim: float) -> float:
-    """Initial max orbit distance for a scene whose longest AABB edge is
-    ``longest_dim``.
-
-    At least 10× the longest dimension so large scenes can be framed and
-    zoomed out, never below the legacy 50-unit floor for small scenes. This is
-    the *initial* ceiling only — ``OrbitCamera.set_distance`` raises
-    ``max_distance`` past this when the user types or zooms further out.
-    """
-    return float(max(50.0, 10.0 * longest_dim))
-
-
-class CameraBase(abc.ABC):
-    """PBRT CameraBase analogue — abstract camera-model surface.
-
-    Concrete subclasses (OrbitCamera, FreeCamera) are `@dataclass`es that
-    own their controller state. The base contributes the methods that
-    every camera shares: the projection matrix and the common slice of
-    the change-detection signature (the fields the lens-buffer sync /
-    accumulation-reset paths read off the camera).
-
-    Subclasses must expose attribute `position: np.ndarray` and implement
-    `forward`, `view_matrix`, and `state_signature`. `position` is not
-    declared abstract here because dataclass subclasses use either a
-    field (FreeCamera) or a computed `@property` (OrbitCamera), and an
-    abstract `@property` in the base would collide with the field form.
-    """
-
-    # Attributes every subclass is expected to provide. Listed for typing
-    # / readers; concrete declarations live in the @dataclass subclasses.
-    fov: float
-    near: float
-    far: float
-    fstop: float
-    focus_distance: float
-    focal_length_mm: float
-    vertical_aperture_mm: float
-    lens: Optional["LensSystem"]
-
-    @abc.abstractmethod
-    def forward(self) -> np.ndarray: ...
-
-    @abc.abstractmethod
-    def view_matrix(self) -> np.ndarray: ...
-
-    @abc.abstractmethod
-    def state_signature(self) -> tuple: ...
-
-    def projection_matrix(self, aspect: float) -> np.ndarray:
-        return _perspective(self.fov, aspect, self.near, self.far)
-
-    def _common_signature(self) -> tuple:
-        """Camera-model slice of state_signature (lens + intrinsics).
-
-        Subclasses concatenate their controller state with this tuple so
-        the accumulation-reset path notices changes to either side.
-        """
-        return (
-            float(self.fov), float(self.near), float(self.far),
-            float(self.fstop), float(self.focus_distance),
-            float(self.focal_length_mm), float(self.vertical_aperture_mm),
-            self.lens.signature() if self.lens is not None else ("lens", "none"),
-        )
-
-
-@dataclass
-class OrbitCamera(CameraBase):
-    """Camera that rotates around a target point (default: centre of the SDF head).
-
-    The head's y-extent is roughly [-0.94, +1.15] and its z-extent [-0.80, +0.97],
-    so target=(0, 0.1, 0.05) pins the pivot to its visual centroid. If you orbit
-    around the world origin instead, the head drifts noticeably around the frame
-    because that origin sits near the jaw/throat rather than the head's middle.
-    """
-
-    target: np.ndarray = field(
-        default_factory=lambda: np.array([0.0, 0.1, 0.05], dtype=np.float32)
-    )
-    # World-space up used to build the view basis. Defaults to +Y (the prior
-    # behavior); an authored camera (_override_to_orbit) sets this to its up so a
-    # non-Y-up pbrt camera keeps its roll.
-    up: np.ndarray = field(
-        default_factory=lambda: np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    )
-    distance: float = 3.0
-    yaw: float = 0.0
-    pitch: float = 0.0
-    fov: float = 45.0
-    near: float = 0.1
-    far: float = 100.0
-    fstop: float = 0.0          # 0 ⇒ wide open; >0 closes the iris to f/N
-    focus_distance: float = 0.0  # 0 ⇒ track orbit distance
-    focal_length_mm: float = 50.0  # used with fstop to drive iris diameter
-    vertical_aperture_mm: float = 24.0  # sensor height in mm; used by the lens path
-    lens: Optional["LensSystem"] = None  # PBRT-style thick lens; None ⇒ pinhole
-    # Upper clamp for `distance` (wheel zoom, UI slider, auto-frame). Scales
-    # with scene size — the renderer raises it to ≥4× the longest scene
-    # dimension when a model loads so large scenes can be framed/zoomed out.
-    max_distance: float = 50.0
-
-    @property
-    def position(self) -> np.ndarray:
-        """Camera world position from spherical orbit coordinates.
-
-        Math (spherical → Cartesian):
-            x = d · cos(pitch) · sin(yaw)
-            y = d · sin(pitch)
-            z = d · cos(pitch) · cos(yaw)
-
-        where  d     = orbit distance
-               yaw   = azimuth angle (radians)
-               pitch = elevation angle (radians, clamped ±89°)
-        """
-        x = self.distance * np.cos(self.pitch) * np.sin(self.yaw)
-        y = self.distance * np.sin(self.pitch)
-        z = self.distance * np.cos(self.pitch) * np.cos(self.yaw)
-        return self.target + np.array([x, y, z], dtype=np.float32)
-
-    def orbit(self, dx: float, dy: float) -> None:
-        self.yaw -= dx * 0.005
-        self.pitch += dy * 0.005
-        self.pitch = float(np.clip(self.pitch, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
-
-    def set_distance(self, value: float) -> None:
-        """Set the orbit distance to any value ≥ 0.5, growing ``max_distance``
-        to fit.
-
-        ``max_distance`` is the current ceiling (slider range + wheel-zoom
-        limit). Writing a larger distance raises it so the UI stays consistent;
-        it never shrinks here — only a re-frame/model-load resets it. The 1e9
-        cap is a degeneracy guard (bounds inf and int-slider precision loss),
-        effectively unbounded for real scenes.
-        """
-        v = float(np.clip(value, 0.5, 1e9))
-        if v > self.max_distance:
-            self.max_distance = v
-        self.distance = v
-
-    def zoom(self, delta: float) -> None:
-        self.set_distance(self.distance * (1.0 - delta * 0.1))
-
-    def pan(self, dx: float, dy: float) -> None:
-        f = self.target - self.position
-        f = f / np.linalg.norm(f)
-        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        right = np.cross(f, world_up)
-        right = right / np.linalg.norm(right)
-        up = np.cross(right, f)
-        scale = self.distance * 0.002
-        self.target = self.target + (-right * dx + up * dy) * scale
-
-    def forward(self) -> np.ndarray:
-        f = self.target - self.position
-        return f / max(np.linalg.norm(f), 1e-6)
-
-    def view_matrix(self) -> np.ndarray:
-        return _look_at(self.position, self.forward(), self.up)
-
-    def state_signature(self) -> tuple:
-        return (
-            "orbit",
-            float(self.yaw), float(self.pitch), float(self.distance),
-            float(self.target[0]), float(self.target[1]), float(self.target[2]),
-            float(self.up[0]), float(self.up[1]), float(self.up[2]),
-        ) + self._common_signature()
-
-
-@dataclass
-class FreeCamera(CameraBase):
-    """FPS-style camera: WASD translates, mouse look rotates yaw/pitch."""
-
-    position: np.ndarray = field(
-        default_factory=lambda: np.array([0.0, 0.0, 3.0], dtype=np.float32)
-    )
-    yaw: float = 0.0
-    pitch: float = 0.0
-    fov: float = 45.0
-    move_speed: float = 1.5   # world units / second
-    near: float = 0.1
-    far: float = 100.0
-    fstop: float = 0.0
-    focus_distance: float = 0.0
-    focal_length_mm: float = 50.0
-    vertical_aperture_mm: float = 24.0
-    lens: Optional["LensSystem"] = None
-
-    def forward(self) -> np.ndarray:
-        cp = np.cos(self.pitch)
-        return np.array([
-            np.sin(self.yaw) * cp,
-            np.sin(self.pitch),
-            -np.cos(self.yaw) * cp,
-        ], dtype=np.float32)
-
-    def _right_vec(self) -> np.ndarray:
-        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        r = np.cross(self.forward(), world_up)
-        return r / max(np.linalg.norm(r), 1e-6)
-
-    def look(self, dx: float, dy: float) -> None:
-        self.yaw += dx * 0.005
-        self.pitch -= dy * 0.005
-        self.pitch = float(np.clip(self.pitch, -np.pi / 2 + 0.01, np.pi / 2 - 0.01))
-
-    def move(self, forward: float, right: float, up: float, dt: float) -> None:
-        step = self.move_speed * dt
-        self.position = (
-            self.position
-            + self.forward() * (forward * step)
-            + self._right_vec() * (right * step)
-            + np.array([0.0, 1.0, 0.0], dtype=np.float32) * (up * step)
-        )
-
-    def zoom(self, delta: float) -> None:
-        # Scroll changes movement speed in free mode.
-        self.move_speed = float(np.clip(self.move_speed * (1.0 + delta * 0.1), 0.05, 50.0))
-
-    def view_matrix(self) -> np.ndarray:
-        return _look_at(self.position, self.forward())
-
-    def state_signature(self) -> tuple:
-        return (
-            "free",
-            float(self.position[0]), float(self.position[1]), float(self.position[2]),
-            float(self.yaw), float(self.pitch),
-        ) + self._common_signature()
-
-
-def _write_exr(path: str, rgb: np.ndarray) -> None:
-    """Write float32 RGB to a scanline EXR via the Academy OpenEXR bindings."""
-    import OpenEXR
-
-    rgb = np.ascontiguousarray(rgb, dtype=np.float32)
-    header = {
-        "compression": OpenEXR.ZIP_COMPRESSION,
-        "type": OpenEXR.scanlineimage,
-    }
-    channels = {
-        "R": np.ascontiguousarray(rgb[..., 0]),
-        "G": np.ascontiguousarray(rgb[..., 1]),
-        "B": np.ascontiguousarray(rgb[..., 2]),
-    }
-    OpenEXR.File(header, channels).write(path)
-
-
-def _write_hdr_rgbe(path: str, rgb: np.ndarray) -> None:
-    """Write float32 RGB to a Radiance .hdr (RGBE) file. No external deps."""
-    rgb = np.maximum(rgb, 0.0).astype(np.float32, copy=False)
-    h, w, _ = rgb.shape
-    max_c = rgb.max(axis=2)
-    mantissa, exponent = np.frexp(max_c)
-    safe = max_c > 1e-32
-    scale = np.where(safe, mantissa * 256.0 / np.where(safe, max_c, 1.0), 0.0)
-    rgbe = np.zeros((h, w, 4), dtype=np.uint8)
-    for i in range(3):
-        rgbe[..., i] = np.clip(
-            np.round(rgb[..., i] * scale), 0.0, 255.0,
-        ).astype(np.uint8)
-    rgbe[..., 3] = np.where(
-        safe, np.clip(exponent + 128, 0, 255), 0,
-    ).astype(np.uint8)
-    header = (
-        b"#?RADIANCE\n"
-        b"FORMAT=32-bit_rle_rgbe\n"
-        b"\n"
-        + f"-Y {h} +X {w}\n".encode("ascii")
-    )
-    with open(path, "wb") as fh:
-        fh.write(header)
-        fh.write(rgbe.tobytes())
-
-
-@dataclass
-class FilmParameters:
-    """pbrt film exposure controls, live on the renderer (change
-    pbrt-radiometric-parity).
-
-    `iso` and `exposure_time` are read from the authored camera
-    (`skinny:film:iso` / `skinny:film:exposureTime`) and define the imaging
-    ratio `exposure_time · iso / 100`, a global linear output scale on the
-    rendered radiance (applied to the linear-HDR readback and folded into the
-    display exposure). Defaults (100 / 1.0) ⇒ ratio 1.0 ⇒ a byte-identical render.
-    Exposed in the UI as `film.iso` / `film.exposure_time` so they retune live.
-    """
-
-    iso: float = 100.0
-    exposure_time: float = 1.0
-
-    def imaging_ratio(self) -> float:
-        return float(self.exposure_time) * float(self.iso) / 100.0
 
 
 class Renderer:

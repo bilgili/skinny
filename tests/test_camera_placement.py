@@ -124,10 +124,9 @@ class TestCameraOverrideCorrection:
                                    np.array([0, -1, 0], np.float32), atol=1e-5)
 
 
-@needs_renderer
 class TestHeroOrientation:
     def test_hero_angles_applied(self):
-        from skinny.renderer import OrbitCamera, _hero_yaw_pitch
+        from skinny.camera import OrbitCamera, _hero_yaw_pitch
         yaw, pitch = _hero_yaw_pitch()
         np.testing.assert_allclose(yaw, np.radians(30.0), atol=1e-6)
         np.testing.assert_allclose(pitch, np.radians(15.0), atol=1e-6)
@@ -146,7 +145,7 @@ class TestResetReframes:
     class _Stub:
         """Minimal stand-in exposing only what reset_camera reads/writes."""
         def __init__(self):
-            from skinny.renderer import OrbitCamera, FreeCamera
+            from skinny.camera import OrbitCamera, FreeCamera
             self.orbit_camera = OrbitCamera()
             self.free_camera = FreeCamera()
             self.camera_mode = "free"
@@ -196,14 +195,15 @@ class TestResetReframes:
 @needs_renderer
 class TestDistanceCap:
     def test_cap_floor_and_scaling(self):
-        from skinny.renderer import _orbit_distance_cap
+        from skinny.camera import _orbit_distance_cap
         assert _orbit_distance_cap(2.0) == 50.0       # small scene → 50 floor
         assert _orbit_distance_cap(5.0) == 50.0       # boundary: 10×5 == 50
         assert _orbit_distance_cap(20.0) == 200.0     # large scene → 10×longest
 
     def test_frame_mesh_sets_cap(self):
         import types
-        from skinny.renderer import Renderer, OrbitCamera
+        from skinny.camera import OrbitCamera
+        from skinny.renderer import Renderer
         stub = types.SimpleNamespace(orbit_camera=OrbitCamera())
         # A 40-unit-tall mesh: longest dim 40 → cap = max(50, 400) = 400.
         positions = np.array(
@@ -215,7 +215,7 @@ class TestDistanceCap:
         assert stub.orbit_camera.distance <= 400.0
 
     def test_set_distance_grows_max(self):
-        from skinny.renderer import OrbitCamera
+        from skinny.camera import OrbitCamera
         cam = OrbitCamera()                  # max_distance defaults to 50
         cam.set_distance(120.0)
         assert cam.distance == 120.0
@@ -225,7 +225,7 @@ class TestDistanceCap:
         assert cam.max_distance == 120.0
 
     def test_set_distance_clamps_floor_and_guard(self):
-        from skinny.renderer import OrbitCamera
+        from skinny.camera import OrbitCamera
         cam = OrbitCamera()
         cam.set_distance(-5.0)
         assert cam.distance == 0.5           # lower floor
@@ -234,7 +234,7 @@ class TestDistanceCap:
         assert cam.max_distance == 1e9
 
     def test_zoom_grows_past_ceiling(self):
-        from skinny.renderer import OrbitCamera
+        from skinny.camera import OrbitCamera
         cam = OrbitCamera()
         cam.max_distance = 200.0
         cam.distance = 199.0
@@ -244,7 +244,7 @@ class TestDistanceCap:
         assert cam.max_distance == cam.distance
 
     def test_scene_graph_slider_uses_max_distance(self):
-        from skinny.renderer import OrbitCamera
+        from skinny.camera import OrbitCamera
         from skinny.scene_graph import SceneGraphNode, inject_renderer_camera
         cam = OrbitCamera()
         cam.max_distance = 160.0
@@ -257,7 +257,8 @@ class TestDistanceCap:
 
     def test_apply_camera_param_distance_grows(self):
         import types
-        from skinny.renderer import Renderer, OrbitCamera
+        from skinny.camera import OrbitCamera
+        from skinny.renderer import Renderer
         cam = OrbitCamera()                  # max_distance defaults to 50
         stub = types.SimpleNamespace(
             camera=cam, camera_mode="orbit", _material_version=0,
@@ -268,7 +269,7 @@ class TestDistanceCap:
 
     def test_restore_honors_large_distance(self):
         import types
-        from skinny.renderer import OrbitCamera
+        from skinny.camera import OrbitCamera
         from skinny.app import _apply_saved_camera
         stub = types.SimpleNamespace(orbit_camera=OrbitCamera(), free_camera=None)
         _apply_saved_camera(stub, {"orbit": {"distance": 250.0}})

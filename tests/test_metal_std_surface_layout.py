@@ -47,16 +47,11 @@ import struct
 import numpy as np
 import pytest
 
-# skinny.renderer imports `vulkan` unconditionally; skip cleanly without the SDK.
-try:
-    from skinny.renderer import (
-        STD_SURFACE_STRIDE,
-        pack_std_surface_params,
-        pack_std_surface_params_msl,
-    )
-except OSError as exc:  # pragma: no cover - environment dependent
-    pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}",
-                allow_module_level=True)
+from skinny.material_pack import (
+    STD_SURFACE_STRIDE,
+    pack_std_surface_params,
+    pack_std_surface_params_msl,
+)
 
 # StdSurfaceParams struct verbatim from mtlx_std_surface.slang — kept inline so
 # the Metal round-trip compiles a tiny kernel (no megakernel / closures import).

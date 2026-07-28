@@ -29,18 +29,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-# skinny.renderer imports `vulkan` unconditionally; skip cleanly without it.
-try:
-    from skinny.renderer import (
-        FLAT_MATERIAL_STRIDE,
-        MEDIUM_HOMOGENEOUS,
-        MEDIUM_NANOVDB,
-        _material_is_volume,
-        pack_flat_material,
-    )
-except OSError as exc:  # pragma: no cover - environment dependent
-    pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}",
-                allow_module_level=True)
+from skinny.material_pack import (
+    FLAT_MATERIAL_STRIDE,
+    MEDIUM_HOMOGENEOUS,
+    MEDIUM_NANOVDB,
+    _material_is_volume,
+    pack_flat_material,
+)
 
 from skinny.pbrt import transform as T
 from skinny.usd_loader import _PBRT_TO_USD_B, compute_volume_world_to_uvw
@@ -257,7 +252,7 @@ class TestCloudPacking:
         return SimpleNamespace(parameter_overrides=overrides)
 
     def test_cloud_kind_and_scalars(self):
-        from skinny.renderer import MEDIUM_CLOUD
+        from skinny.material_pack import MEDIUM_CLOUD
 
         data = pack_flat_material(self._cloud_material(), mm_per_unit=1000.0)
         assert len(data) == FLAT_MATERIAL_STRIDE == 256
