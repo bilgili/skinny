@@ -104,10 +104,28 @@
       **Bit-identical to `main`** (maxdiff 0). Descriptor writes re-captured
       post-change match the golden binding-for-binding, in order. The
       Metal-vs-Vulkan maxdiff of 1 is pre-existing (same on `main`).
-- [ ] 6.4 Parity matrix self-consistency gate unchanged — identical, not close.
+- [x] 6.4 Parity matrix self-consistency gate unchanged — identical, not close.
+      `SKINNY_BACKEND=metal pytest tests/pbrt/test_parity.py -k matrix`:
+      **20 passed, 1 skipped, 1 xfailed, 0 failed** (112 renders, 28 min).
+      No manifest, no per-combo `baseline` and no tolerance was touched —
+      `git diff` against `tests/pbrt/corpus/manifest.json` and `tests/assets` is
+      empty, and `src/skinny/shaders/` is byte-identical to `main`, so nothing
+      was loosened to make the gate pass.
+      The 1 skip is pre-existing and cannot be caused by this change: Metal
+      spectral wavefront BDPT, where `wfBdptWalk` declares 41 globals and
+      overflows Metal's 31-buffer argument table (the documented
+      `SKINNY_METAL_RECORDS` limit — the harness's own error message names it).
+      It is decided entirely by shader source + build defines, and
+      `src/skinny/shaders/`, `shader_variants.py`, `vk_wavefront.py` and
+      `metal_wavefront.py` are all untouched here.
+      NOTE ON PROVENANCE: a first sweep (also 20 passed / 1 skipped / 1 xfailed)
+      was discarded as a gate because an unrelated background task edited the
+      worktree mid-run. This result comes from a detached worktree pinned to the
+      change's own commit, with a clean tree verified before and after.
 - [x] 6.5 `tests/test_metal_cleanup.py` including the gpu-marked kill harness
       (context lifecycle changed). 13 hostless + 3 gpu-marked, all pass.
 - [x] 6.6 Docs: `docs/Architecture.md` module map + carve-out section.
       New § GPU resource inventory, a pointer from the Descriptor Binding Map,
       the carve-out landed-stages list, and a CLAUDE.md architecture entry.
-- [ ] 6.7 `openspec validate renderer-gpu-resource-set --strict`.
+- [x] 6.7 `openspec validate renderer-gpu-resource-set --strict`.
+      Valid. `openspec validate --all --strict` also passes: 85/85.

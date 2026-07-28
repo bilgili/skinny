@@ -84,13 +84,23 @@ rebind was a separate call to remember. That duplication is what let binding 49
 
 ## Deliberately NOT changed
 
-- **`light_splat_buffer` is not recreated by `resize()`.** It is sized
-  `width * height * 3 * 4` and indexed per pixel, but `resize()` recreates only
-  the four size-dependent images. Growing the viewport therefore leaves the BDPT
-  light-tracer splatting past the end of a stale buffer. This is pre-existing
-  and fixing it would change rendered output, which this pure-refactor change is
-  gated against — so the declaration deliberately reproduces today's behaviour
-  (it is *not* tagged `size_dependent`). Filed separately.
+- **`light_splat_buffer` is not recreated by `resize()`** — *within this
+  change*. It is sized `width * height * 3 * 4` and indexed per pixel, but
+  `resize()` recreated only the four size-dependent images, so growing the
+  viewport left the BDPT light-tracer splatting past the end of a stale buffer.
+  Pre-existing, and fixing it changes rendered output on the resize path, which
+  this pure-refactor change is gated against — so the declaration here
+  reproduces today's behaviour and is *not* tagged `size_dependent`.
+
+  Fixed immediately afterwards as a **separate commit on this branch**
+  (`fix(renderer): resize the BDPT light-splat buffer with the viewport`), which
+  is exactly the payoff this change was for: once the inventory is
+  declaration-owned, the fix is one flag — `size_dependent=True` — and
+  `SceneResourceSet.resize()` recreates and rebinds it with the rest. Before
+  this change the same fix would have meant edits in three places. That commit
+  carries its own on-device verification (mid-session 128²→256²→192² resize
+  under `--integrator bdpt`, Metal and Vulkan × megakernel and wavefront); the
+  parity-matrix gate below was measured at this change's own commit, before it.
 - **Binding numbers are not derived** from `bindings.slang` (design D2). They
   are relocated next to the allocation, not re-sourced.
 - **The descriptor pool and sets** stay in `_create_descriptors`: they are
@@ -113,6 +123,20 @@ rebind was a separate call to remember. That duplication is what let binding 49
 - **Bit-identity:** `suite/mat_diffuse` @128², 24 frames, maxdiff **0** vs
   `main` on Metal megakernel, Metal wavefront and Vulkan megakernel. (Metal vs
   Vulkan differ by 1 — pre-existing, identical on `main`.)
+- **Parity matrix:** 20 passed, 1 skipped, 1 xfailed, 0 failed (112 renders).
+  No manifest, `baseline` or tolerance edited; `src/skinny/shaders/` is
+  byte-identical to `main`. The single skip is pre-existing — Metal spectral
+  wavefront BDPT overflows Metal's 31-buffer argument table (`wfBdptWalk`
+  declares 41 globals), which is decided by shader source and build defines,
+  none of which this change touches.
+
+  Run on a **detached worktree pinned to this change's commit**, tree verified
+  clean before and after. An earlier sweep with the same counts was discarded as
+  a gate: an unrelated background task edited the worktree at 09:44, inside that
+  run's 09:29–09:50 window. It almost certainly still measured the right code
+  (pytest imports both modules at collection, ~15 min before the edit, and the
+  edit only affects `resize()`, which the harness never calls) — but "almost
+  certainly" is not what "identical, not close" asks for.
 - **Hostless sweep:** 2466 passed; the 7 failures are pre-existing and identical
   to `main`.
 - `ruff` clean. Note that bare `ruff check src/` inspects **0 files** here (the
