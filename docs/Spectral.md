@@ -384,8 +384,14 @@ macOS cannot cancel it:
    bounded to it; restore semantics are unchanged because every dimension with
    `lastMod == currentIteration` lies below that bound.
 
-Both fixes are output-neutral: pre-change Vulkan, post-change Vulkan and post-change Metal
-render `int_caustic` bit-identically, and RGB MLT is bit-identical across the change.
+Both fixes are output-neutral: pre-change Vulkan and post-change Vulkan render
+`int_caustic` bit-identically, and RGB MLT is bit-identical across the change.
+Post-change Metal was recorded as bit-identical to that Vulkan image at the
+budget it was measured at (64×64, 8 spp, 512 chains — Metal had no pre-change
+image, because the pre-change kernel hung). Do not generalize that
+cross-backend equality: Metal and Vulkan are **not** bit-identical to each
+other in general, they agree within the film-splat quantum (see
+[MetropolisLightTransport.md § Cross-backend equivalence](MetropolisLightTransport.md#cross-backend-equivalence)).
 
 ## Exact spectral sources
 

@@ -264,6 +264,36 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **MLT cross-backend equivalence restated — the bit-identity claim was wrong**
+  (change `mlt-cross-backend-equivalence`). The compatibility matrix, README,
+  `docs/Wavefront.md` and `docs/Spectral.md` all said MLT renders bit-identically
+  on Vulkan and native Metal. That was one measurement from change `spectral-mlt`
+  (task 4.3) taken at `int_caustic` 64×64, 8 spp, 512 chains — and the same
+  change then raised that scene 256 ⇒ 512 spp without re-measuring. At the
+  manifest budget (128×128, 512 spp, 16384 chains) the backends differ: RGB
+  maxdiff 1.348e-4 / relMSE 5.302e-10 / FLIP 2.949e-6, spectral maxdiff 4.181e-3
+  / relMSE 5.150e-08 / FLIP 1.779e-6. **Not a defect** — the difference is a whole
+  number of Q24.8 film-splat quanta, `q = b / (256 · mpp_actual · frames)`. RGB at
+  the manifest budget is 69.959·`q` (`q` = 1.9270e-6), and the separate 64×64,
+  8 spp, 512-chain RGB run is 6.000·`q` (`q` = 1.2880e-4). So the difference is
+  the `uint(radiance × 256.0)` truncation in `mltFilmSplat` flipping one unit when
+  the SPIR-V and MSL compilations of the same Slang source differ in their last
+  bits (fma contraction, transcendentals). Chain divergence would be
+  Markov-noise-sized, eight orders larger. Spectral is the same story with a
+  longer tail: 99.2 % of pixels agree exactly and most of the rest sit at ±1–2·`q`,
+  but a few reach hundreds of quanta and the maximum is 2161·`q` — hero-wavelength
+  sampling inverts a wavelength pdf, so a last-bit difference there can move a
+  sampled wavelength rather than only flip a truncation boundary. Controls: each backend renders
+  pixel-identical to itself in a fresh process (`maxdiff 0.0` on both), and the
+  host normalization `b` differs by 2.9e-10 relative — enough to prove ULP
+  differences exist, far too small to be the image difference. The
+  `metropolis-light-transport` spec now **owns** the equivalence class
+  (per-backend bit-reproducible, cross-backend bounded by the splat quantum, a
+  budget required beside any cross-backend number) and the documents derive from
+  it; previously the spec said only "at parity" and never defined it, which is
+  what let the documents invent one. Docs-and-spec only: no renderer behavior
+  changed, no tolerance or baseline was touched.
+
 - **Reflection-owned byte layouts** (change `reflection-owned-byte-layouts`).
   New `src/skinny/slang_layout.py` owns the byte layouts the host mirrors from
   a Slang struct — the `FrameConstants` uniform block, the material param
@@ -372,8 +402,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `emitterHitMisWeightT0S`, plus a device-side `mltProposalRecords` buffer,
   binding 57) and `RNG.reject()`'s fixed 192-entry restore scan (now bounded by
   `RNG.maxDim` to the dimensions actually touched). Both are output-neutral:
-  pre-change Vulkan, post-change Vulkan and post-change Metal all render
-  bit-identically, and RGB MLT is unchanged.
+  pre-change Vulkan and post-change Vulkan render bit-identically, and RGB MLT is
+  unchanged. Post-change Metal was recorded as bit-identical to that Vulkan image
+  at the budget it was measured at (64×64, 8 spp, 512 chains). Superseded by
+  change `mlt-cross-backend-equivalence`: that cross-backend equality does **not**
+  generalize to other budgets — see the entry above.
 
 - **MLT integrator — PSSMLT over BDPT** (change `mlt-integrator`). A fourth
   integrator, `--integrator mlt` (index 3), joining `path`/`bdpt`/`sppm`:
@@ -390,8 +423,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spectral / neural / ReSTIR / online-training and non-flat scenes refused at
   startup (recorded parity skips; no path-fallback inside a Markov chain). Both
   backends: Vulkan (`WavefrontMltPass`) and native Metal (`MetalWavefrontMltPass`),
-  bit-identical at equal budget (measured relMSE 0.0983, mean 0.251768 on the
-  `int_caustic` suite scene). Per frame: a bootstrap `b`-normalization at
+  recorded bit-identical at the budget measured then (relMSE 0.0983, mean 0.251768
+  on the `int_caustic` suite scene). Superseded by change
+  `mlt-cross-backend-equivalence`: that cross-backend equality does **not**
+  generalize to other budgets — see the entry under Unreleased. Per frame: a bootstrap `b`-normalization at
   accumulation reset (`wfMltBootstrap` → host CDF + weight-proportional chain
   seeding → `wfMltInit`), then `wfMltMutate` × iterations (propose → dual splat
   of proposal and current state by acceptance, uint fixed-point, **never

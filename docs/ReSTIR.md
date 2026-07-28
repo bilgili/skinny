@@ -54,7 +54,7 @@ sample count.
 
 | Property | Value |
 | --- | --- |
-| Backend | **Wavefront only**, on both Vulkan and native Metal (change `metal-wavefront-parity`: `metal_wavefront.MetalRestirDiPass`, bit-identical to the Vulkan pass set on this host). The megakernel on either device falls back to identity (stock NEE) — `reuseMode` folds to 0 in `renderer._pack_uniforms`. |
+| Backend | **Wavefront only**, on both Vulkan and native Metal (change `metal-wavefront-parity`: `metal_wavefront.MetalRestirDiPass`, recorded bit-identical to the Vulkan pass set on the host that test ran on — **not** a standing cross-backend guarantee; ReSTIR DI has not been re-measured since change `mlt-cross-backend-equivalence` found the sibling `path` claim to be false at 6.6e-7, see [Wavefront.md § Metal parity](Wavefront.md)). The megakernel on either device falls back to identity (stock NEE) — `reuseMode` folds to 0 in `renderer._pack_uniforms`. |
 | Vertices | **Primary hit only** (`depth == 0`). Secondary path vertices (`depth ≥ 1`) keep stock NEE. |
 | Materials | **Flat / standard_surface / OpenPBR only.** `restirLoadLane` gates on `MATERIAL_TYPE_FLAT`; skin / MaterialX-graph / python-material lanes pass through to stock NEE. |
 | Light types | Sphere + emissive-triangle + environment in the unified RIS; **directional (delta) lights are plain NEE** outside the RIS. |

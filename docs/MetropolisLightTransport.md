@@ -322,6 +322,54 @@ is not expected to be pixel-identical to path tracing or BDPT. Verification uses
 converged radiance and recorded stochastic tolerances rather than the
 bit-identical execution-mode parity used by independent-sample path tracing.
 
+## Cross-backend equivalence
+
+Vulkan and native Metal are **not** bit-identical to each other under MLT
+(change `mlt-cross-backend-equivalence`). Do not write a cross-backend equality
+assertion.
+
+Each backend IS bit-reproducible with itself. Two processes on the same backend,
+the same scene, and the same budget give a pixel-identical image (`maxdiff 0.0`,
+measured on both). The parity gate rests on this property, and it holds.
+
+Across backends, Slang compiles one source through two back ends — SPIR-V for
+Vulkan, MSL for native Metal. The two back ends contract multiply-add pairs
+differently and implement transcendental functions differently, so the same
+radiance value arrives at the film splat differing in its last bits. Those last
+bits become visible only at the Q24.8 truncation in `mltFilmSplat`
+(`uint(radiance × MLT_SPLAT_SCALE)`, `MLT_SPLAT_SCALE = 256`). A value that
+straddles an integer boundary lands one splat unit apart.
+
+One splat unit is worth `q = b / (256 × mpp_actual × frames)` in the resolved
+image. The measured cross-backend difference is an **integer multiple of `q`**:
+
+| Budget on `int_caustic` | Mode | max abs diff | `q` | multiple | relMSE | PSNR | FLIP |
+|---|---|---|---|---|---|---|---|
+| 128×128, 512 spp, 16384 chains | RGB | 1.3481e-4 | 1.9270e-6 | 70 | 5.302e-10 | 135.67 | 2.949e-6 |
+| 128×128, 512 spp, 16384 chains | spectral | 4.1812e-3 | 1.9348e-6 | 2161 | 5.150e-08 | 114.94 | 1.779e-6 |
+| 64×64, 8 spp, 512 chains | RGB | 7.7280e-4 | 1.2880e-4 | 6 | 1.770e-08 | 119.85 | — |
+
+Per pixel the RGB difference clusters on ±1`q`, ±2`q`, ±3`q`. Spectral leaves
+99.2 % of pixels exactly equal and puts a short tail on the rest: hero-wavelength
+sampling inverts a wavelength pdf, so a last-bit difference can move one sampled
+wavelength instead of only flipping a truncation boundary.
+
+Every one of these numbers is 6–8 orders of magnitude below the scene's own 0.12
+relMSE gate. A difference at the scale of the recorded self-consistency
+tolerance would mean the chains themselves diverged — that would be a defect,
+not this.
+
+Two rules follow.
+
+1. Always record the budget beside a cross-backend measurement. `q` scales with
+   `b / (256 × mpp_actual × frames)`, so a small budget has a coarse quantum and
+   few chances to cross a boundary. An identity measured small does not hold
+   large. The superseded "bit-identical, maxdiff 0" claim was taken at 64×64,
+   8 spp, 512 chains and was then generalized to every budget.
+2. Compare a backend against itself for regression work, and against the parity
+   gates for correctness. Both backends pass the same pbrt-truth and
+   self-consistency gates independently, which is the guarantee that matters.
+
 ## Key files
 
 | File | Role |

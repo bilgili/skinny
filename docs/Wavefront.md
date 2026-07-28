@@ -195,7 +195,9 @@ Kelemen primary-sample-space Metropolis (PSSMLT) whose target function is the
 existing wavefront BDPT path contribution. **Wavefront-only** (no megakernel
 variant, mirrors SPPM), **flat materials only**, **RGB and spectral** (change
 `spectral-mlt`), on both Vulkan (`WavefrontMltPass`) and native Metal
-(`MetalWavefrontMltPass`, bit-identical at equal budget in both). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
+(`MetalWavefrontMltPass`; the two backends are **not** bit-identical to each
+other — they agree within the film-splat quantum, see
+[MetropolisLightTransport.md § Cross-backend equivalence](MetropolisLightTransport.md#cross-backend-equivalence)). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
 `wfMlt*`).
 
 The complete algorithm, one-image step/equation sketch, chain-state layout,
@@ -215,7 +217,11 @@ thread-local `MltRecord[7]`. (2) MIS reads the spectral arrays directly
 next to the inlined spectral estimator overflows the per-thread budget. (3)
 `RNG.reject()` scans only `RNG.maxDim` (the dimensions the iteration touched,
 ~70), never all `MLT_MAX_DIMS` = 192. All three are output-neutral: RGB MLT is
-bit-identical across the change, and spectral Metal ≡ spectral Vulkan.
+bit-identical across the change (a same-backend before/after comparison).
+Spectral Metal was recorded equal to spectral Vulkan at the budget it was
+measured at (64×64, 8 spp, 512 chains); that cross-backend equality does **not**
+generalize — see
+[MetropolisLightTransport.md § Cross-backend equivalence](MetropolisLightTransport.md#cross-backend-equivalence).
 
 **Full-sample chains, not pbrt's per-depth decomposition (design D1).** pbrt's
 `MLTIntegrator` runs one chain per path-length stratum, which requires the
@@ -869,11 +875,22 @@ of truth both backends drive. `vk_wavefront.py` supplies the Vulkan recorder
   equal-count direct dispatch.
 
 **Parity** (guarded A/B tests, `RUN_METAL_WAVEFRONT_COMPILE=1` under
-`scripts/guarded_metal.sh`): path, all three BDPT walk modes, and ReSTIR DI are
-**bit-identical** to the Vulkan wavefront render on this host (both backends
-end on the same Metal GPU); the neural proposal matches at rel-MSE 0.00000 /
-correlation 1.00000 with ~91 % of pixels exactly equal, and stays unbiased
+`scripts/guarded_metal.sh`): path, all three BDPT walk modes, and ReSTIR DI were
+recorded **bit-identical** to the Vulkan wavefront render on the host those tests
+ran on (both backends ending on the same Metal GPU); the neural proposal matches
+at rel-MSE 0.00000 / correlation 1.00000 with ~91 % of pixels exactly equal, and
+stays unbiased
 (`tests/test_metal_{wavefront_path,wavefront_bdpt,restir,neural}_ab.py`).
+
+Do not read that as a standing cross-backend identity. Re-measured under change
+`mlt-cross-backend-equivalence` on `int_caustic` (128×128, 512 spp, `path` +
+wavefront), **native Metal against Vulkan is not bit-identical**: maxdiff
+6.556e-7, 2.3 % of pixels differing, relMSE 5.023e-15, PSNR 184.18. That is
+float-ULP scale — the path integrator accumulates in float, so unlike MLT it has
+no fixed-point splat quantum to snap the difference to. The cause is the same:
+two compilers, SPIR-V and MSL, for one Slang source. The BDPT walk modes and
+ReSTIR DI were **not** re-measured here; treat their recorded identity the same
+way until they are.
 
 **Equal-time** (`scripts/bench_metal_equal_time.py`, three-materials demo @
 256², M5 Pro, steady-state): megakernel path **438.8 fps** (28.8 Mspp/s) vs
