@@ -480,6 +480,64 @@ def test_no_per_method_backend_guard_returns_remain():
         assert gone not in RENDERER_SRC, f"{gone} came back"
 
 
+def test_capacities_have_exactly_one_home():
+    """A capacity is an allocation input, so it lives on `_gpu_set.sizes` and
+    nowhere else.
+
+    A growth site that bumped a renderer attribute AND a `sizes` field would be
+    the same two-copy invariant this module removes for buffers, reintroduced
+    one level up: the second line goes missing, `regrow()` re-derives against a
+    stale capacity, and the packer writes past the end of the buffer it just
+    allocated.
+    """
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:  # libvulkan not on the dylib path
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    rset, _ = build()
+    r = Renderer.__new__(Renderer)
+    r._gpu_set = rset
+
+    for field in ("material_capacity", "instance_capacity",
+                  "emissive_tri_capacity"):
+        # Reading the renderer reads the set.
+        setattr(rset.sizes, field, 123)
+        assert getattr(r, field) == 123
+        # Writing the renderer writes the set — no second copy to forget.
+        setattr(r, field, 456)
+        assert getattr(rset.sizes, field) == 456
+        assert field not in r.__dict__
+
+
+def test_capacities_are_settable_before_the_set_exists():
+    """`__init__` assigns capacities before `_init_gpu` builds the set;
+    construction order must be unchanged."""
+    try:
+        from skinny.renderer import Renderer
+    except OSError as exc:
+        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    r = Renderer.__new__(Renderer)
+    r.material_capacity = 16
+    assert r.material_capacity == 16
+    rset, _ = build(material_capacity=99)
+    r._gpu_set = rset
+    assert r.material_capacity == 99  # the set takes over once it exists
+
+
+def test_mlt_binding_numbers_agree_with_the_wavefront_pass():
+    """Bindings 52-57 are stated here (creation-time dummies) and again in the
+    wavefront MLT pass (the real chain buffers). The source gate only greps
+    `renderer.py`, so nothing else catches the two drifting apart — adding
+    binding 58 to one and not the other would bind a stale dummy forever."""
+    pytest.importorskip("vulkan")
+    from skinny.gpu_resources import MLT_BINDINGS
+    from skinny.vk_wavefront import WavefrontMltPass
+
+    assert MLT_BINDINGS == tuple(b for b, _key in WavefrontMltPass._BINDINGS)
+
+
 def test_pool_sizes_counted_from_declarations():
     """The descriptor-pool tally is derived, not hand-maintained — it must
     still reproduce the pre-change counts (22 storage buffers, 3 storage

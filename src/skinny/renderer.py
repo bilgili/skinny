@@ -5690,7 +5690,6 @@ class Renderer:
         # freed buffer while 18 is rewritten.
         if n > self.emissive_tri_capacity:
             self.emissive_tri_capacity = max(n, self.emissive_tri_capacity * 2)
-            self._gpu_set.sizes.emissive_tri_capacity = self.emissive_tri_capacity
             self._gpu_set.regrow(
                 "emissive_tri_buffer", "_spectral_emitters_buffer",
                 descriptor_sets=self.descriptor_sets,
@@ -5921,7 +5920,6 @@ class Renderer:
             self._per_material_furnace = [False] * new_cap
             # Every per-material-slot buffer is sized from the same capacity, so
             # they regrow and rebind together from their declarations.
-            self._gpu_set.sizes.material_capacity = new_cap
             self._gpu_set.regrow(
                 "flat_material_buffer", "material_types_buffer",
                 "mtlx_skin_buffer", "std_surface_buffer",
@@ -7694,7 +7692,7 @@ class Renderer:
         # catches up.
         if key == "lens_enabled":
             self.accum_frame = 0
-            if hasattr(self, "light_splat_buffer"):
+            if self.light_splat_buffer is not None:
                 try:
                     self.light_splat_buffer.fill_zero_sync()
                 except Exception:
@@ -7954,7 +7952,6 @@ class Renderer:
         if len(transforms) > self.instance_capacity:
             new_cap = max(len(transforms), self.instance_capacity * 2)
             self.instance_capacity = new_cap
-            self._gpu_set.sizes.instance_capacity = new_cap
             self._gpu_set.regrow(
                 "instance_buffer", descriptor_sets=self.descriptor_sets)
 
@@ -9771,7 +9768,7 @@ class Renderer:
             # Zero the BDPT light-tracer splat buffer so the running mean
             # restarts cleanly. Cheap on integrated/dedicated GPUs (single
             # FillBuffer command + queue wait) and only fires on state change.
-            if hasattr(self, 'light_splat_buffer'):
+            if self.light_splat_buffer is not None:
                 self.light_splat_buffer.fill_zero_sync()
         else:
             self.accum_frame += 1
@@ -10757,3 +10754,42 @@ def _resource_property(attr: str) -> property:
 for _decl in _GPU_DECLARATIONS:
     setattr(Renderer, _decl.attr, _resource_property(_decl.attr))
 del _decl
+
+
+# ── Allocation capacities (change renderer-gpu-resource-set) ────────────
+#
+# A capacity IS an allocation input, so it lives on `_gpu_set.sizes` and has
+# exactly one home. A growth site bumps it once and calls `regrow`, which
+# re-derives the byte size from the declaration's own formula. Keeping a second
+# copy on the renderer would reintroduce the "remember the other edit" failure
+# this change exists to remove, one level up from the buffers.
+#
+# `__init__`/`_init_gpu` set these before the resource set exists, so the value
+# is held in a shadow entry until then; construction order is unchanged.
+
+
+def _capacity_property(field: str) -> property:
+    shadow = f"_pre_gpu_{field}"
+
+    def getter(self):
+        gpu_set = self.__dict__.get("_gpu_set")
+        if gpu_set is not None:
+            return getattr(gpu_set.sizes, field)
+        return self.__dict__.get(shadow)
+
+    def setter(self, value):
+        gpu_set = self.__dict__.get("_gpu_set")
+        if gpu_set is not None:
+            setattr(gpu_set.sizes, field, int(value))
+        else:
+            self.__dict__[shadow] = int(value)
+
+    getter.__name__ = field
+    return property(
+        getter, setter,
+        doc=f"Allocation capacity {field!r}, owned by `_gpu_set.sizes`.")
+
+
+for _cap in ("material_capacity", "instance_capacity", "emissive_tri_capacity"):
+    setattr(Renderer, _cap, _capacity_property(_cap))
+del _cap
