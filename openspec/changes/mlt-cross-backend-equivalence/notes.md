@@ -88,3 +88,39 @@ ReSTIR DI were not re-measured** — their recorded identity is flagged, not
 restated. Re-measuring those (and deciding whether the `metal-wavefront-parity`
 spec needs the same equivalence-class treatment MLT just got) is a follow-up,
 deliberately out of this change's scope.
+
+## Review round 2 (codex, `codex review --base 8fd1b61`) — both findings valid, both fixed
+
+The wrapper stalled on round 1; round 2 ran through the CLI against the
+**merge-base**, not `main` (main has advanced past this branch, so `--base main`
+would have diffed in the reverse of `mlt-binding-declaration`).
+
+1. **[P3] A fourth MLT bit-identity claim survived** — the `mlt-integrator`
+   entry in `CHANGELOG.md` still said "bit-identical at equal budget". My own
+   sweep missed it because the filter matched `mlt|metal` **per line** and the
+   word MLT sat on a preceding line. Qualified with its budget and pointed at the
+   superseding entry. Lesson recorded: grep with context for a claim that spans
+   lines, never line-local.
+2. **[P3] Mixed budgets in one sentence** — the new changelog entry printed
+   "integers (69.959 and 6.000)" directly after the manifest-budget RGB **and**
+   spectral numbers. `6.000` is the 64×64/8 spp RGB run; the spectral manifest
+   figure is ~2161·q. As written it understated the spectral bound. Rewritten to
+   name the budget beside each ratio and to state spectral's longer tail
+   explicitly (99.2 % exact, most of the rest ±1–2q, max 2161q).
+
+Both are the change's own subject matter — an unqualified cross-backend claim,
+and a number quoted without its budget — so both were fixed rather than
+dismissed.
+
+Also swept and deliberately left alone, having checked each one is a
+**same-backend** claim: `renderer-module-structure` spec ("bit-identical after
+the extraction ... on either backend before and after"), `CLAUDE.md`'s carve-out
+line, and the `reflection-owned-byte-layouts` / `renderer-module-carveout`
+changelog entries.
+
+`docs/ReSTIR.md` carried the same unqualified cross-backend claim for
+`MetalRestirDiPass`. Qualified by pointer only — ReSTIR DI was **not**
+re-measured here, and the doc now says so rather than asserting either way.
+
+Post-fix gates: `openspec validate --all --strict` 85/85; MLT + envelope hostless
+tests 98 passed, 3 skipped.

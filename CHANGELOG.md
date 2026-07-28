@@ -245,13 +245,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   change then raised that scene 256 ⇒ 512 spp without re-measuring. At the
   manifest budget (128×128, 512 spp, 16384 chains) the backends differ: RGB
   maxdiff 1.348e-4 / relMSE 5.302e-10 / FLIP 2.949e-6, spectral maxdiff 4.181e-3
-  / relMSE 5.150e-08 / FLIP 1.779e-6. **Not a defect** — dividing the maximum
-  difference by the Q24.8 film-splat quantum `q = b / (256 · mpp_actual ·
-  frames)` gives integers (69.959 and 6.000), so the difference is the
-  `uint(radiance × 256.0)` truncation in `mltFilmSplat` flipping one unit when
+  / relMSE 5.150e-08 / FLIP 1.779e-6. **Not a defect** — the difference is a whole
+  number of Q24.8 film-splat quanta, `q = b / (256 · mpp_actual · frames)`. RGB at
+  the manifest budget is 69.959·`q` (`q` = 1.9270e-6), and the separate 64×64,
+  8 spp, 512-chain RGB run is 6.000·`q` (`q` = 1.2880e-4). So the difference is
+  the `uint(radiance × 256.0)` truncation in `mltFilmSplat` flipping one unit when
   the SPIR-V and MSL compilations of the same Slang source differ in their last
   bits (fma contraction, transcendentals). Chain divergence would be
-  Markov-noise-sized, eight orders larger. Controls: each backend renders
+  Markov-noise-sized, eight orders larger. Spectral is the same story with a
+  longer tail: 99.2 % of pixels agree exactly and most of the rest sit at ±1–2·`q`,
+  but a few reach hundreds of quanta and the maximum is 2161·`q` — hero-wavelength
+  sampling inverts a wavelength pdf, so a last-bit difference there can move a
+  sampled wavelength rather than only flip a truncation boundary. Controls: each backend renders
   pixel-identical to itself in a fresh process (`maxdiff 0.0` on both), and the
   host normalization `b` differs by 2.9e-10 relative — enough to prove ULP
   differences exist, far too small to be the image difference. The
@@ -391,8 +396,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spectral / neural / ReSTIR / online-training and non-flat scenes refused at
   startup (recorded parity skips; no path-fallback inside a Markov chain). Both
   backends: Vulkan (`WavefrontMltPass`) and native Metal (`MetalWavefrontMltPass`),
-  bit-identical at equal budget (measured relMSE 0.0983, mean 0.251768 on the
-  `int_caustic` suite scene). Per frame: a bootstrap `b`-normalization at
+  recorded bit-identical at the budget measured then (relMSE 0.0983, mean 0.251768
+  on the `int_caustic` suite scene). Superseded by change
+  `mlt-cross-backend-equivalence`: that cross-backend equality does **not**
+  generalize to other budgets — see the entry under Unreleased. Per frame: a bootstrap `b`-normalization at
   accumulation reset (`wfMltBootstrap` → host CDF + weight-proportional chain
   seeding → `wfMltInit`), then `wfMltMutate` × iterations (propose → dual splat
   of proposal and current state by acceptance, uint fixed-point, **never
