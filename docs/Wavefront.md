@@ -195,7 +195,9 @@ Kelemen primary-sample-space Metropolis (PSSMLT) whose target function is the
 existing wavefront BDPT path contribution. **Wavefront-only** (no megakernel
 variant, mirrors SPPM), **flat materials only**, **RGB and spectral** (change
 `spectral-mlt`), on both Vulkan (`WavefrontMltPass`) and native Metal
-(`MetalWavefrontMltPass`, bit-identical at equal budget in both). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
+(`MetalWavefrontMltPass`; the two backends are **not** bit-identical to each
+other — they agree within the film-splat quantum, see
+[MetropolisLightTransport.md § Cross-backend equivalence](MetropolisLightTransport.md#cross-backend-equivalence)). Kernels compiled from `wavefront/wavefront_mlt.slang` (entries
 `wfMlt*`).
 
 The complete algorithm, one-image step/equation sketch, chain-state layout,

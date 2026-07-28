@@ -89,6 +89,19 @@ struct MltChainMeta
 // (clamping biases exactly the caustics MLT targets). Coarser than
 // BDPT_SPLAT_SCALE (Q22.10) by design: MLT trades 2 precision bits for 4×
 // count headroom, and the resolve averages the quantization across frames.
+//
+// This truncation is ALSO the whole cross-backend difference (change
+// mlt-cross-backend-equivalence). Vulkan and Metal compile this source through
+// SPIR-V and MSL, which contract fma pairs and implement transcendentals
+// differently, so `radiance` can differ in its last bits. The only place that
+// reaches the image is `uint(x * 256.0)` below: a value straddling an integer
+// boundary lands one splat unit apart. So the two backends differ by an INTEGER
+// count of splat quanta (q = b / (256 * mpp_actual * frames)) — measured 70q max
+// on int_caustic at 128^2/512spp, relMSE 5.3e-10 — and are NOT bit-identical to
+// each other. Each backend IS bit-reproducible with itself. A Markov-noise-sized
+// difference would mean the chains diverged; that is a defect, this is not.
+// Do not "fix" it by rounding: rounding moves the boundary, it does not remove
+// it, and it changes every recorded MLT baseline.
 static const float MLT_SPLAT_SCALE = 256.0;
 
 float mltLuminance(float3 c)
