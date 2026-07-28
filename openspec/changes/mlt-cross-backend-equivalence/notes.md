@@ -50,3 +50,41 @@ peaks at +1q (2520 pixels) and −1q (2349 pixels).
 ## Still owed before merge
 
 - codex pre-merge review (the standing gate for anything landing on `main`).
+
+## Review round 1 (codex) — findings folded
+
+The codex wrapper stalled mid-run, but its log had already surfaced two
+leftovers, both confirmed independently:
+
+1. `CHANGELOG.md` — the `spectral-mlt` entry repeats the cross-backend
+   over-claim. Qualified with the budget it was measured at and pointed at the
+   superseding entry. The file's two other `bit-identical` hits
+   (`reflection-owned-byte-layouts`, `renderer-module-carveout`) are
+   **same-backend** pre/post claims: true, left alone.
+2. `docs/Wavefront.md` had a **second** untouched site — the spectral-MLT
+   "spectral Metal ≡ spectral Vulkan" sentence. Qualified the same way.
+
+The same review flagged that `main` has advanced (`1652374`,
+`mlt-binding-declaration`) and overlaps this branch in
+`docs/MetropolisLightTransport.md` and the living MLT spec. Checked:
+`git merge-tree --write-tree main HEAD` reports a **clean** merge — main's
+additions land in different regions of both files.
+
+## The same bug class at a sibling site (probed, not assumed)
+
+`docs/Wavefront.md` also claimed path / all three BDPT walk modes / ReSTIR DI are
+"bit-identical to the Vulkan wavefront render". Re-measured `path` + wavefront on
+`int_caustic` at the manifest budget: **not bit-identical** — maxdiff 6.556e-7,
+2.3 % of pixels differing, relMSE 5.023e-15, PSNR 184.18.
+
+This is the same cause (two compilers for one Slang source) at float-ULP scale
+rather than quantized: the path integrator accumulates in float, so it has no
+fixed-point splat quantum to snap the difference onto. That is *why* MLT's
+difference is 1e-4-sized and quantized while path's is 1e-7-sized and smooth —
+the mechanism is shared, the amplifier is MLT's alone.
+
+The doc now says so, and explicitly records that the **BDPT walk modes and
+ReSTIR DI were not re-measured** — their recorded identity is flagged, not
+restated. Re-measuring those (and deciding whether the `metal-wavefront-parity`
+spec needs the same equivalence-class treatment MLT just got) is a follow-up,
+deliberately out of this change's scope.

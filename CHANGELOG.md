@@ -237,6 +237,31 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **MLT cross-backend equivalence restated — the bit-identity claim was wrong**
+  (change `mlt-cross-backend-equivalence`). The compatibility matrix, README,
+  `docs/Wavefront.md` and `docs/Spectral.md` all said MLT renders bit-identically
+  on Vulkan and native Metal. That was one measurement from change `spectral-mlt`
+  (task 4.3) taken at `int_caustic` 64×64, 8 spp, 512 chains — and the same
+  change then raised that scene 256 ⇒ 512 spp without re-measuring. At the
+  manifest budget (128×128, 512 spp, 16384 chains) the backends differ: RGB
+  maxdiff 1.348e-4 / relMSE 5.302e-10 / FLIP 2.949e-6, spectral maxdiff 4.181e-3
+  / relMSE 5.150e-08 / FLIP 1.779e-6. **Not a defect** — dividing the maximum
+  difference by the Q24.8 film-splat quantum `q = b / (256 · mpp_actual ·
+  frames)` gives integers (69.959 and 6.000), so the difference is the
+  `uint(radiance × 256.0)` truncation in `mltFilmSplat` flipping one unit when
+  the SPIR-V and MSL compilations of the same Slang source differ in their last
+  bits (fma contraction, transcendentals). Chain divergence would be
+  Markov-noise-sized, eight orders larger. Controls: each backend renders
+  pixel-identical to itself in a fresh process (`maxdiff 0.0` on both), and the
+  host normalization `b` differs by 2.9e-10 relative — enough to prove ULP
+  differences exist, far too small to be the image difference. The
+  `metropolis-light-transport` spec now **owns** the equivalence class
+  (per-backend bit-reproducible, cross-backend bounded by the splat quantum, a
+  budget required beside any cross-backend number) and the documents derive from
+  it; previously the spec said only "at parity" and never defined it, which is
+  what let the documents invent one. Docs-and-spec only: no renderer behavior
+  changed, no tolerance or baseline was touched.
+
 - **Reflection-owned byte layouts** (change `reflection-owned-byte-layouts`).
   New `src/skinny/slang_layout.py` owns the byte layouts the host mirrors from
   a Slang struct — the `FrameConstants` uniform block, the material param
@@ -345,8 +370,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `emitterHitMisWeightT0S`, plus a device-side `mltProposalRecords` buffer,
   binding 57) and `RNG.reject()`'s fixed 192-entry restore scan (now bounded by
   `RNG.maxDim` to the dimensions actually touched). Both are output-neutral:
-  pre-change Vulkan, post-change Vulkan and post-change Metal all render
-  bit-identically, and RGB MLT is unchanged.
+  pre-change Vulkan and post-change Vulkan render bit-identically, and RGB MLT is
+  unchanged. Post-change Metal was recorded as bit-identical to that Vulkan image
+  at the budget it was measured at (64×64, 8 spp, 512 chains). Superseded by
+  change `mlt-cross-backend-equivalence`: that cross-backend equality does **not**
+  generalize to other budgets — see the entry above.
 
 - **MLT integrator — PSSMLT over BDPT** (change `mlt-integrator`). A fourth
   integrator, `--integrator mlt` (index 3), joining `path`/`bdpt`/`sppm`:

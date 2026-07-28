@@ -36,7 +36,12 @@
 - [x] 3.5 `docs/Spectral.md` — the spectral-MLT note that lists a Metal render as
       bit-identical to Vulkan. The Vulkan before/after half of that claim is a
       same-backend claim and stays.
-- [x] 3.6 `src/skinny/shaders/wavefront/wavefront_mlt.slang` — note beside
+- [x] 3.6 `CHANGELOG.md` — add the entry for this change, and qualify the
+      `spectral-mlt` entry that repeats the cross-backend over-claim with the
+      budget it was measured at. The two other `bit-identical` hits in the file
+      (`reflection-owned-byte-layouts`, `renderer-module-carveout`) are
+      **same-backend** pre/post claims; they are true and stay.
+- [x] 3.7 `src/skinny/shaders/wavefront/wavefront_mlt.slang` — note beside
       `MLT_SPLAT_SCALE` that the truncation is what makes a last-bit
       cross-backend difference visible, and that it bounds that difference.
 
