@@ -96,6 +96,28 @@ usd), and the mtlx-only `transmittance`, subsurface `reflectance`/`radius`, and
 `interface.eta` on both coated types. Under `usd` those reads do not happen at
 all — no value, no note, no escalation.
 
+The rule covers the stage-emission module too. `media.subsurface_overrides`
+authors the `skinnyOverrides` medium payload, and it once held a **second copy**
+of the subsurface coefficient chain. The copy drifted from the resolver's in
+three ways: it applied the mm-per-unit division, it added the `ior` key, and it
+had no named-spectrum guard on `eta` — so a
+`Material "subsurface" "spectrum eta" "glass-BK7"` crashed the import while the
+resolver's copy resolved the same glass to its d-line index. Change
+`subsurface-eta-single-owner` removed the copy. `media.py` now calls
+`materials.subsurface_medium_overrides` and adds only what the USD stage owns:
+the mm-per-unit division and the `ior` carry. A hostless AST gate in
+`tests/pbrt/test_material_resolve.py` fails the build if a `ParamSet` read
+reappears there.
+
+The resolver reads a `subsurface` material's `eta` **once**, through
+`get_float_texture`, and passes the resolved float to the coefficient builder.
+`material_pack.pack_flat_material` takes the boundary IOR from the `ior` lane and
+never reads `subsurface_eta`, so the two must hold one value; passing it down
+makes that structural rather than a coincidence of both sites spelling the
+default `1.33`. A recognised named glass resolves to its d-line index; an
+unrecognised spectrum, a spectrum file and a texture binding each degrade to the
+pbrt default with exactly one note.
+
 ### Roughness calibration (parity-critical)
 
 - pbrt v4: `alpha = sqrt(roughness)` when `remaproughness` (default), else

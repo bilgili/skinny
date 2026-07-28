@@ -142,23 +142,17 @@ def subsurface_overrides(params) -> dict:
     (the interior random walk). Keys match the renderer's packer
     (``subsurface_sigma_a/_s/_g``); the boundary IOR is carried as ``ior`` —
     ``resolveMedium`` reuses the flat ``ior`` slot for the medium eta.
+
+    This module reads no pbrt param of its own here. The precedence chain, the
+    defaults and the named-spectrum/texture ``eta`` rule belong to the resolver
+    (:func:`skinny.pbrt.materials.subsurface_medium_overrides`); what this adds is
+    what the USD stage owns — the mm-per-scene-unit division below, and the
+    ``ior`` key the renderer reads the boundary IOR from.
     """
     from .emit import PBRT_STAGE_METERS_PER_UNIT
-    from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
+    from .materials import subsurface_medium_overrides
 
-    g_f = params.floats("g", [0.0])
-    eta_f = params.floats("eta", [ETA_DEFAULT])
-    scale_f = params.floats("scale", [SCALE_DEFAULT])
-    coeffs = subsurface_coefficients(
-        name=params.string("name", None),
-        sigma_a=params.rgb("sigma_a", None),
-        sigma_s=params.rgb("sigma_s", None),
-        reflectance=params.rgb("reflectance", None),
-        mfp=params.rgb("mfp", None),
-        g=float(g_f[0]) if g_f else 0.0,
-        eta=float(eta_f[0]) if eta_f else ETA_DEFAULT,
-        scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
-    )
+    coeffs = subsurface_medium_overrides(params)
     # pbrt media coefficients are mm⁻¹ interpreted per *scene unit* (τ = σ·L). The
     # renderer's walk computes τ = σ_packed · L_world · mm_per_unit, and the loader
     # derives mm_per_unit = metersPerUnit · 1000 = 1000 for an imported pbrt stage.
@@ -167,9 +161,8 @@ def subsurface_overrides(params) -> dict:
     # renders opaque gold/brown instead of translucent). g/eta/ior are unitless.
     mm_per_unit = PBRT_STAGE_METERS_PER_UNIT * 1000.0
     return {
-        "subsurface_sigma_a": [c / mm_per_unit for c in coeffs["sigma_a"]],
-        "subsurface_sigma_s": [c / mm_per_unit for c in coeffs["sigma_s"]],
-        "subsurface_g": float(coeffs["g"]),
-        "subsurface_eta": float(coeffs["eta"]),
-        "ior": float(coeffs["eta"]),
+        **coeffs,
+        "subsurface_sigma_a": [c / mm_per_unit for c in coeffs["subsurface_sigma_a"]],
+        "subsurface_sigma_s": [c / mm_per_unit for c in coeffs["subsurface_sigma_s"]],
+        "ior": float(coeffs["subsurface_eta"]),
     }

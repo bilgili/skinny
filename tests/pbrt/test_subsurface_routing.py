@@ -11,7 +11,7 @@ import pytest
 
 from skinny.pbrt.api import import_pbrt
 from skinny.pbrt.emit import PBRT_STAGE_METERS_PER_UNIT
-from skinny.pbrt.subsurface import subsurface_coefficients
+from skinny.pbrt.subsurface import ETA_DEFAULT, subsurface_coefficients
 
 usd_loader = pytest.importorskip("skinny.usd_loader")
 
@@ -68,6 +68,50 @@ def test_mtlx_subsurface_import_carries_same_coeffs(tmp_path):
     exp_s = [c / _MM_PER_UNIT for c in exp["sigma_s"]]
     assert list(cd["subsurface_sigma_a"]) == pytest.approx(exp_a)
     assert list(cd["subsurface_sigma_s"]) == pytest.approx(exp_s)
+
+
+#: `eta` may be authored as a named spectrum. LASF9's d-line (589.3 nm) index.
+NAMED_ETA = (
+    'WorldBegin\n'
+    'Material "subsurface" "spectrum eta" "glass-LASF9"\n'
+    'Shape "sphere" "float radius" 1\n'
+)
+LASF9_D_LINE = 1.85004
+
+
+@pytest.mark.parametrize("mtlx", [False, True], ids=["usd", "mtlx"])
+def test_named_spectrum_eta_imports_and_agrees_with_ior(tmp_path, mtlx):
+    """A named-spectrum `eta` must import, and land one value in both lanes.
+
+    `material_pack.pack_flat_material` reads the boundary IOR from `ior` and
+    never reads `subsurface_eta`, so the two must not diverge — one resolution
+    feeds both (change subsurface-eta-single-owner).
+    """
+    src = tmp_path / "sss.pbrt"
+    src.write_text(NAMED_ETA)
+    out = tmp_path / "sss.usda"
+    stage, _report = import_pbrt(str(src), out=str(out), materialx=mtlx)
+    cd = _skinny_overrides(stage)
+    assert cd["ior"] == pytest.approx(LASF9_D_LINE, abs=1e-5)
+    assert cd["subsurface_eta"] == pytest.approx(cd["ior"])
+
+
+def test_texture_bound_eta_degrades_and_is_reported_once(tmp_path):
+    """A texture-bound `eta` degrades to the pbrt default, noted exactly once."""
+    src = tmp_path / "sss.pbrt"
+    src.write_text(
+        'WorldBegin\n'
+        'Texture "etatex" "float" "constant" "float value" 0.5\n'
+        'Material "subsurface" "texture eta" "etatex"\n'
+        'Shape "sphere" "float radius" 1\n'
+    )
+    stage, report = import_pbrt(str(src))
+    cd = _skinny_overrides(stage)
+    assert cd["ior"] == pytest.approx(ETA_DEFAULT)
+    assert cd["subsurface_eta"] == pytest.approx(cd["ior"])
+    # One read, one note — not one per reader of the same param.
+    detail = " ".join(e.detail for e in report.entries if e.detail)
+    assert detail.count("on eta") == 1
 
 
 def test_renderer_detects_and_tags_subsurface():

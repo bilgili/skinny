@@ -446,6 +446,56 @@ def test_adapters_only_ever_hand_the_material_to_the_resolver(adapter):
         f"call (lines {[n.lineno for n in leaked]})")
 
 
+def test_media_subsurface_emission_holds_no_second_coefficient_chain():
+    """`media.subsurface_overrides` emits; it does not interpret.
+
+    It used to carry its own copy of the coefficient chain, which drifted from
+    the resolver's in three ways — no named-spectrum `eta` guard (a
+    `"spectrum eta" "glass-BK7"` crashed the import), the mm-per-unit division,
+    and the `ior` key. It now adds only the last two on top of the resolver's
+    result (change subsurface-eta-single-owner).
+    """
+    from skinny.pbrt import media
+
+    assert _reads_in(media.subsurface_overrides) == set(), (
+        "media.subsurface_overrides reads pbrt material params directly; "
+        "interpretation belongs in materials.subsurface_medium_overrides")
+
+
+def test_media_subsurface_emission_only_hands_params_to_the_resolver():
+    """Structural half — nothing to alias the ParamSet from."""
+    from skinny.pbrt import media
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(media.subsurface_overrides)))
+    handed_over = {
+        id(a) for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "subsurface_medium_overrides"
+        for a in list(node.args) + [k.value for k in node.keywords]
+    }
+    leaked = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and n.id == "params"
+              and isinstance(n.ctx, ast.Load) and id(n) not in handed_over]
+    assert not leaked, (
+        "media.subsurface_overrides touches params outside the "
+        f"subsurface_medium_overrides call (lines {[n.lineno for n in leaked]})")
+
+
+def test_subsurface_eta_and_ior_are_one_resolution():
+    """`pack_flat_material` reads the boundary IOR from `ior` and never reads
+    `subsurface_eta` (`slang_layout.INTAKE_ONLY_KEYS`), so the two lanes must not
+    diverge for any pbrt param type `eta` can carry."""
+    for src, expected in (
+        ('Material "subsurface" "float eta" 1.42', 1.42),
+        ('Material "subsurface" "spectrum eta" "glass-LASF9"', 1.85004),
+        ('Material "subsurface" "spectrum eta" "not-a-glass"', 1.33),
+        ('Material "subsurface" "texture eta" "sometex"', 1.33),
+    ):
+        res = _res(src)
+        assert res.lobes["ior"] == pytest.approx(expected, abs=1e-5), src
+        assert res.lobes["subsurface_eta"] == pytest.approx(res.lobes["ior"]), src
+
+
 def test_the_read_gate_is_sensitive():
     # negative control: the resolver itself obviously does read params, so the
     # detector is not vacuously passing
