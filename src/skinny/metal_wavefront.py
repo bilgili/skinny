@@ -1134,7 +1134,7 @@ class MetalWavefrontMltPass:
 
     Compiles the four ``wavefront/wavefront_mlt.slang`` entries in-process via
     SlangPy under ``SKINNY_MLT=1`` (which swaps common.slang's RNG for the
-    primary-sample-space sampler) and owns the five chain buffers, bound by
+    primary-sample-space sampler) and owns the six chain buffers, bound by
     Slang global name — the Metal backend has no descriptor sets, so unlike
     Vulkan there are no scene-set slots 52–57 to rebind: the names simply merge
     into the per-dispatch bind map.

@@ -31,6 +31,13 @@ Binding numbers are literal here on purpose (design D2): ``docs/Architecture.md`
 holds the authoritative binding map and ``bindings.slang`` declares the same
 numbers. This module relocates them next to the allocation they belong to; it
 does not derive them.
+
+One exception, and it runs the other way: the **MLT chain bindings (52–57)** are
+DERIVED, from ``wavefront_layout.MLT_CHAIN_BUFFERS`` (change
+mlt-binding-declaration). Those buffers are pass-owned, not renderer-owned, and
+their Vulkan binding travels with a Metal shader-global name and a size key that
+this module never sees — so the pairing is declared once, beside the sizes, and
+gated against the shader. See :data:`MLT_BINDINGS` below.
 """
 
 from __future__ import annotations

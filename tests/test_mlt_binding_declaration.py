@@ -33,6 +33,7 @@ for.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -126,20 +127,16 @@ def test_parse_finds_the_expected_shape():
     assert mlt[-1] == (57, "mltProposalRecords"), mlt
 
 
-def test_parser_ignores_set1_and_bodies():
+def test_parser_ignores_set1_and_bodies(tmp_path):
     """Two-argument (set 1) bindings are out of scope, and the match cannot run
     past a `;` into a following statement or a function body."""
-    text = (
+    probe = tmp_path / "probe.slang"
+    probe.write_text(
         "[[vk::binding(3, 1)]] RWStructuredBuffer<uint> passOwned;\n"
         "[[vk::binding(9)]] RWStructuredBuffer<float> sceneGlobal;\n"
-        "void f() { uint x; }\n"
-    )
-    tmp = Path(__file__).parent / "_parser_probe.slang"
-    tmp.write_text(text, encoding="utf-8")
-    try:
-        assert parse_binding_declarations(tmp) == ((9, "sceneGlobal"),)
-    finally:
-        tmp.unlink()
+        "void f() { uint x; }\n",
+        encoding="utf-8")
+    assert parse_binding_declarations(probe) == ((9, "sceneGlobal"),)
 
 
 def test_shader_declares_exactly_as_many_as_the_table():
@@ -214,24 +211,101 @@ CONSUMERS = (
 )
 
 
+def _docstring_nodes(tree: ast.AST) -> set[int]:
+    """`id()`s of the Constant nodes that are docstrings, so prose describing a
+    binding is never mistaken for code stating one."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef,
+                             ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                out.add(id(body[0].value))
+    return out
+
+
+def consumer_violations(source: str, label: str) -> list[str]:
+    """Executable statements of an MLT binding number or Metal global name in a
+    consumer module.
+
+    **AST, not regex** — the regex this replaced matched only the flat literal
+    sequence `52, 53, 54, 55, 56, 57`, so the exact pre-change table shape
+    `((52, "mlt_primary_samples"), (53, …))` could be restored with every gate
+    still green: it would have gated the change's headline claim against a
+    string the old code never contained. Any integer literal in 52…57 reaching
+    executable code is a violation (the four consumers contain **zero**
+    legitimate ones), as is any of the six Metal globals outside a docstring.
+    """
+    tree = ast.parse(source)
+    docstrings = _docstring_nodes(tree)
+    names = {d.metal_name for d in MLT_CHAIN_BUFFERS}
+    bindings = {d.binding for d in MLT_CHAIN_BUFFERS}
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or id(node) in docstrings:
+            continue
+        v = node.value
+        if isinstance(v, int) and not isinstance(v, bool) and v in bindings:
+            out.append(
+                f"{label}:{node.lineno} states MLT binding number {v} — derive "
+                "it from wavefront_layout.MLT_CHAIN_BUFFERS instead")
+        elif isinstance(v, str) and v in names:
+            out.append(
+                f"{label}:{node.lineno} hardcodes the Metal global '{v}' — it "
+                "belongs to wavefront_layout.MLT_CHAIN_BUFFERS")
+    return out
+
+
 def test_no_consumer_carries_its_own_binding_table():
     """The requirement is structural, so it is gated structurally: a consumer
-    may reference the declaration, never restate it. Catches a re-introduced
-    literal tuple `(52, 53, 54, 55, 56, 57)` and any hardcoded Metal global."""
-    literal = re.compile(r"52\s*,\s*53\s*,\s*54\s*,\s*55\s*,\s*56\s*,\s*57")
-    names = [d.metal_name for d in MLT_CHAIN_BUFFERS]
+    may reference the declaration, never restate it."""
+    bad = []
     for rel in CONSUMERS:
-        src = (PROJECT_ROOT / rel).read_text(encoding="utf-8")
-        code = "\n".join(
-            line for line in src.splitlines()
-            if not line.lstrip().startswith("#"))
-        assert not literal.search(code), (
-            f"{rel} restates the MLT binding numbers — derive them from "
-            "wavefront_layout.MLT_CHAIN_BUFFERS instead")
-        for name in names:
-            assert name not in code, (
-                f"{rel} hardcodes the Metal global '{name}' — it belongs to "
-                "wavefront_layout.MLT_CHAIN_BUFFERS")
+        bad += consumer_violations((PROJECT_ROOT / rel).read_text("utf-8"), rel)
+    assert not bad, "MLT binding identity restated by a consumer:\n" + "\n".join(bad)
+
+
+def test_gate_catches_the_exact_pre_change_table_shapes():
+    """Negative fixture (the gap codex caught pre-merge): the shapes that
+    actually existed before this change must each be rejected. The flat
+    `(52, …, 57)` tuple was the only shape the original regex caught; the two
+    `(binding, key)` / `(name, key)` pass tables — the real second owners —
+    sailed through it."""
+    pre_change_vulkan_pass = (
+        '_BINDINGS = (\n'
+        '    (52, "mlt_primary_samples"),\n'
+        '    (53, "mlt_chain_meta"),\n'
+        ')\n'
+    )
+    pre_change_metal_pass = (
+        '_BINDINGS = (\n'
+        '    ("mltPrimarySamples", "mlt_primary_samples"),\n'
+        '    ("mltChainMeta", "mlt_chain_meta"),\n'
+        ')\n'
+    )
+    pre_change_layout_loop = 'for b in (52, 53, 54, 55, 56, 57):\n    pass\n'
+
+    v = consumer_violations(pre_change_vulkan_pass, "vk_pass")
+    assert len(v) == 2 and all("binding number" in m for m in v), v
+
+    m = consumer_violations(pre_change_metal_pass, "metal_pass")
+    assert len(m) == 2 and all("Metal global" in x for x in m), m
+
+    layout = consumer_violations(pre_change_layout_loop, "layout")
+    assert len(layout) == 6, layout
+
+
+def test_gate_ignores_prose():
+    """A comment or docstring may name a binding — the surrounding docs do —
+    without tripping the gate; only executable statements count."""
+    prose = (
+        '"""Binding 52 is mltPrimarySamples, 53 is mltChainMeta."""\n'
+        '# bindings 52, 53, 54, 55, 56, 57 live in the shared scene set\n'
+        'x = mlt_binding_numbers()\n'
+    )
+    assert consumer_violations(prose, "prose") == []
 
 
 def test_gpu_resources_mlt_bindings_is_derived():

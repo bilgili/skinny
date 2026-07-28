@@ -1093,8 +1093,9 @@ class _VkMltRecorder:
 
 
 class WavefrontMltPass:
-    """Staged wavefront PSSMLT pass (change mlt-integrator). Owns the five
-    MLT chain buffers (sizes from ``wavefront_layout.mlt_buffer_sizes``) and
+    """Staged wavefront PSSMLT pass (change mlt-integrator). Owns the six
+    MLT chain buffers (identity and sizes from
+    ``wavefront_layout.MLT_CHAIN_BUFFERS`` / ``mlt_buffer_sizes``) and
     four compute pipelines compiled from ``wavefront/wavefront_mlt.slang``
     under ``-DSKINNY_MLT=1`` (which swaps common.slang's RNG for the
     primary-sample-space sampler — distinct ``_mlt`` .spv names so the RGB
