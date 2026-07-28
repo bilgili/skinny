@@ -1,0 +1,1589 @@
+{
+ "_comment": "Pre-change GPU resource inventory of Renderer._init_gpu / _create_descriptors / _build_metal_binds / cleanup, captured by instrumenting the live renderer on both backends before the renderer-gpu-resource-set carve-out. Recorded reality, not a transcription: gpu_resources.py is checked AGAINST this, never the other way round. Renderer built at 64x64 with no scene.",
+ "vulkan_rgb": {
+  "resources": [
+   {
+    "order": 0,
+    "attr": "uniform_buffer",
+    "kind": "UniformBuffer",
+    "args": [
+     "768"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 1,
+    "attr": "mtlx_skin_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2880"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 2,
+    "attr": "accum_image",
+    "kind": "StorageImage",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {
+     "transfer_src": "True"
+    }
+   },
+   {
+    "order": 3,
+    "attr": "hud_overlay",
+    "kind": "HudOverlay",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 4,
+    "attr": "env_image",
+    "kind": "SampledImage",
+    "args": [
+     "1024",
+     "512"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 5,
+    "attr": "volume_density_image",
+    "kind": "SampledImage3D",
+    "args": [
+     "1",
+     "1",
+     "1"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 6,
+    "attr": "env_dist_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2101252"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 7,
+    "attr": "neural_weights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "412416"
+    ],
+    "kwargs": {
+     "external": "False",
+     "shared": "False"
+    }
+   },
+   {
+    "order": 8,
+    "attr": "neural_biases_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "6360"
+    ],
+    "kwargs": {
+     "external": "False",
+     "shared": "False"
+    }
+   },
+   {
+    "order": 9,
+    "attr": "neural_layers_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "288"
+    ],
+    "kwargs": {
+     "external": "False"
+    }
+   },
+   {
+    "order": 10,
+    "attr": "record_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 11,
+    "attr": "record_counter",
+    "kind": "StorageBuffer",
+    "args": [
+     "8"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 12,
+    "attr": "tattoo_image",
+    "kind": "SampledImage",
+    "args": [
+     "512",
+     "512"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 13,
+    "attr": "normal_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 14,
+    "attr": "roughness_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 15,
+    "attr": "displacement_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 16,
+    "attr": "vertex_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 17,
+    "attr": "index_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "268"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 18,
+    "attr": "bvh_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "288"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 19,
+    "attr": "instance_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2560"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 20,
+    "attr": "flat_material_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 21,
+    "attr": "material_types_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "80"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 22,
+    "attr": "sphere_lights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 23,
+    "attr": "distant_lights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 24,
+    "attr": "emissive_tri_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "16400"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 25,
+    "attr": "std_surface_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4112"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 26,
+    "attr": "light_splat_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "49152"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 27,
+    "attr": "gizmo_segments_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "8208"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 28,
+    "attr": "lens_elements_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 29,
+    "attr": "lens_pupil_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "1040"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 30,
+    "attr": "_offscreen_output",
+    "kind": "StorageImage",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {
+     "format": "'rgba8_unorm'",
+     "transfer_src": "True"
+    }
+   },
+   {
+    "order": 31,
+    "attr": "_readback",
+    "kind": "ReadbackBuffer",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 32,
+    "attr": "tool_buffer",
+    "kind": "HostStorageBuffer",
+    "args": [
+     "135168"
+    ],
+    "kwargs": {}
+   }
+  ],
+  "destroyed": [
+   "std_surface_buffer",
+   "emissive_tri_buffer",
+   "sphere_lights_buffer",
+   "distant_lights_buffer",
+   "material_types_buffer",
+   "flat_material_buffer",
+   "instance_buffer",
+   "bvh_buffer",
+   "index_buffer",
+   "vertex_buffer",
+   "displacement_image",
+   "roughness_image",
+   "normal_image",
+   "tattoo_image",
+   "env_image",
+   "volume_density_image",
+   "env_dist_buffer",
+   "hud_overlay",
+   "accum_image",
+   "_offscreen_output",
+   "_readback",
+   "uniform_buffer",
+   "mtlx_skin_buffer",
+   "neural_weights_buffer",
+   "neural_biases_buffer",
+   "neural_layers_buffer",
+   "record_buffer",
+   "record_counter",
+   "light_splat_buffer",
+   "gizmo_segments_buffer",
+   "lens_elements_buffer",
+   "lens_pupil_buffer",
+   "tool_buffer"
+  ],
+  "descriptor_writes": [
+   {
+    "binding": 0,
+    "array_elem": 0,
+    "type": 6
+   },
+   {
+    "binding": 2,
+    "array_elem": 0,
+    "type": 3
+   },
+   {
+    "binding": 3,
+    "array_elem": 0,
+    "type": 3
+   },
+   {
+    "binding": 4,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 5,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 6,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 7,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 8,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 9,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 10,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 11,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 26,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 12,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 13,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 15,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 16,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 17,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 18,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 19,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 21,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 22,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 23,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 24,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 20,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 1,
+    "array_elem": 0,
+    "type": 3
+   },
+   {
+    "binding": 30,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 31,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 33,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 34,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 35,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 36,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 37,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 0,
+    "array_elem": 0,
+    "type": 6
+   },
+   {
+    "binding": 2,
+    "array_elem": 0,
+    "type": 3
+   },
+   {
+    "binding": 3,
+    "array_elem": 0,
+    "type": 3
+   },
+   {
+    "binding": 4,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 5,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 6,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 7,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 8,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 9,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 10,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 11,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 26,
+    "array_elem": 0,
+    "type": 1
+   },
+   {
+    "binding": 12,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 13,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 15,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 16,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 17,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 18,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 19,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 21,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 22,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 23,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 24,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 20,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 1,
+    "array_elem": 0,
+    "type": 3
+   },
+   {
+    "binding": 30,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 31,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 33,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 34,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 35,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 36,
+    "array_elem": 0,
+    "type": 7
+   },
+   {
+    "binding": 37,
+    "array_elem": 0,
+    "type": 7
+   }
+  ]
+ },
+ "metal_rgb": {
+  "resources": [
+   {
+    "order": 0,
+    "attr": "uniform_buffer",
+    "kind": "UniformBuffer",
+    "args": [
+     "768"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 1,
+    "attr": "mtlx_skin_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 2,
+    "attr": "accum_image",
+    "kind": "StorageImage",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {
+     "transfer_src": "True"
+    }
+   },
+   {
+    "order": 3,
+    "attr": "hud_overlay",
+    "kind": "HudOverlay",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 4,
+    "attr": "env_image",
+    "kind": "SampledImage",
+    "args": [
+     "1024",
+     "512"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 5,
+    "attr": "volume_density_image",
+    "kind": "SampledImage3D",
+    "args": [
+     "1",
+     "1",
+     "1"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 6,
+    "attr": "env_dist_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2101252"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 7,
+    "attr": "neural_weights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "412416"
+    ],
+    "kwargs": {
+     "external": "False",
+     "shared": "False"
+    }
+   },
+   {
+    "order": 8,
+    "attr": "neural_biases_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "6360"
+    ],
+    "kwargs": {
+     "external": "False",
+     "shared": "False"
+    }
+   },
+   {
+    "order": 9,
+    "attr": "neural_layers_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "288"
+    ],
+    "kwargs": {
+     "external": "False"
+    }
+   },
+   {
+    "order": 10,
+    "attr": "record_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 11,
+    "attr": "record_counter",
+    "kind": "StorageBuffer",
+    "args": [
+     "8"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 12,
+    "attr": "tattoo_image",
+    "kind": "SampledImage",
+    "args": [
+     "512",
+     "512"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 13,
+    "attr": "normal_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 14,
+    "attr": "roughness_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 15,
+    "attr": "displacement_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 16,
+    "attr": "vertex_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 17,
+    "attr": "index_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "268"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 18,
+    "attr": "bvh_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "288"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 19,
+    "attr": "instance_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2560"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 20,
+    "attr": "flat_material_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 21,
+    "attr": "material_types_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "80"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 22,
+    "attr": "sphere_lights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 23,
+    "attr": "distant_lights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 24,
+    "attr": "emissive_tri_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "16400"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 25,
+    "attr": "std_surface_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4112"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 26,
+    "attr": "light_splat_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "49152"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 27,
+    "attr": "gizmo_segments_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "8208"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 28,
+    "attr": "lens_elements_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 29,
+    "attr": "lens_pupil_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "1040"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 30,
+    "attr": "_offscreen_output",
+    "kind": "StorageImage",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {
+     "format": "'rgba8_unorm'",
+     "transfer_src": "True"
+    }
+   },
+   {
+    "order": 31,
+    "attr": "_readback",
+    "kind": "ReadbackBuffer",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 32,
+    "attr": "tool_buffer",
+    "kind": "HostStorageBuffer",
+    "args": [
+     "135168"
+    ],
+    "kwargs": {}
+   }
+  ],
+  "destroyed": [
+   "std_surface_buffer",
+   "emissive_tri_buffer",
+   "sphere_lights_buffer",
+   "distant_lights_buffer",
+   "material_types_buffer",
+   "flat_material_buffer",
+   "instance_buffer",
+   "bvh_buffer",
+   "index_buffer",
+   "vertex_buffer",
+   "displacement_image",
+   "roughness_image",
+   "normal_image",
+   "tattoo_image",
+   "env_image",
+   "volume_density_image",
+   "env_dist_buffer",
+   "hud_overlay",
+   "accum_image",
+   "_offscreen_output",
+   "_readback",
+   "uniform_buffer",
+   "mtlx_skin_buffer",
+   "neural_weights_buffer",
+   "neural_biases_buffer",
+   "neural_layers_buffer",
+   "record_buffer",
+   "record_counter",
+   "light_splat_buffer",
+   "gizmo_segments_buffer",
+   "lens_elements_buffer",
+   "lens_pupil_buffer",
+   "tool_buffer"
+  ],
+  "metal_binds": {
+   "meshVertices": "vertex_buffer.buffer",
+   "meshIndices": "index_buffer.buffer",
+   "bvhNodes": "bvh_buffer.buffer",
+   "instances": "instance_buffer.buffer",
+   "flatMaterials": "flat_material_buffer.buffer",
+   "materialTypes": "material_types_buffer.buffer",
+   "mtlxSkin": "mtlx_skin_buffer.buffer",
+   "sphereLights": "sphere_lights_buffer.buffer",
+   "emissiveTriangles": "emissive_tri_buffer.buffer",
+   "stdSurfaceParams": "std_surface_buffer.buffer",
+   "distantLights": "distant_lights_buffer.buffer",
+   "lightSplatBuffer": "light_splat_buffer.buffer",
+   "gizmoSegments": "gizmo_segments_buffer.buffer",
+   "lensElements": "lens_elements_buffer.buffer",
+   "exitPupilBounds": "lens_pupil_buffer.buffer",
+   "toolBuffer": "tool_buffer.buffer",
+   "envDistCdf": "env_dist_buffer.buffer",
+   "neuralWeights": "neural_weights_buffer.buffer",
+   "neuralBiases": "neural_biases_buffer.buffer",
+   "neuralLayers": "neural_layers_buffer.buffer",
+   "recordBuf": "record_buffer.buffer",
+   "recordCounter": "record_counter.buffer",
+   "outputBuffer": "_offscreen_output.texture",
+   "accumBuffer": "accum_image.texture",
+   "hudMask": "hud_overlay.texture",
+   "commonSampler": "Sampler",
+   "envMap": "env_image.texture",
+   "envMapSampler": "env_image.sampler",
+   "tattooMap": "tattoo_image.texture",
+   "tattooMapSampler": "tattoo_image.sampler",
+   "normalMap": "normal_image.texture",
+   "normalMapSampler": "normal_image.sampler",
+   "roughnessMap": "roughness_image.texture",
+   "roughnessMapSampler": "roughness_image.sampler",
+   "displacementMap": "displacement_image.texture",
+   "displacementMapSampler": "displacement_image.sampler",
+   "volumeDensity": "volume_density_image.texture",
+   "volumeDensitySampler": "volume_density_image.sampler"
+  }
+ },
+ "metal_spectral": {
+  "resources": [
+   {
+    "order": 0,
+    "attr": "uniform_buffer",
+    "kind": "UniformBuffer",
+    "args": [
+     "768"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 1,
+    "attr": "mtlx_skin_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 2,
+    "attr": "accum_image",
+    "kind": "StorageImage",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {
+     "transfer_src": "True"
+    }
+   },
+   {
+    "order": 3,
+    "attr": "hud_overlay",
+    "kind": "HudOverlay",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 4,
+    "attr": "env_image",
+    "kind": "SampledImage",
+    "args": [
+     "1024",
+     "512"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 5,
+    "attr": "volume_density_image",
+    "kind": "SampledImage3D",
+    "args": [
+     "1",
+     "1",
+     "1"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 6,
+    "attr": "env_dist_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2101252"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 7,
+    "attr": "_spectral_scale_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "256"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 8,
+    "attr": "_spectral_data_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "9437184"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 9,
+    "attr": "_spectral_d65_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "380"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 10,
+    "attr": "_spectral_metals_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "5320"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 11,
+    "attr": "neural_weights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "412416"
+    ],
+    "kwargs": {
+     "external": "False",
+     "shared": "False"
+    }
+   },
+   {
+    "order": 12,
+    "attr": "neural_biases_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "6360"
+    ],
+    "kwargs": {
+     "external": "False",
+     "shared": "False"
+    }
+   },
+   {
+    "order": 13,
+    "attr": "neural_layers_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "288"
+    ],
+    "kwargs": {
+     "external": "False"
+    }
+   },
+   {
+    "order": 14,
+    "attr": "record_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 15,
+    "attr": "record_counter",
+    "kind": "StorageBuffer",
+    "args": [
+     "8"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 16,
+    "attr": "tattoo_image",
+    "kind": "SampledImage",
+    "args": [
+     "512",
+     "512"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 17,
+    "attr": "normal_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 18,
+    "attr": "roughness_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 19,
+    "attr": "displacement_image",
+    "kind": "SampledImage",
+    "args": [
+     "2048",
+     "2048"
+    ],
+    "kwargs": {
+     "bytes_per_pixel": "4",
+     "format": "'rgba8_unorm'"
+    }
+   },
+   {
+    "order": 20,
+    "attr": "vertex_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 21,
+    "attr": "index_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "268"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 22,
+    "attr": "bvh_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "288"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 23,
+    "attr": "instance_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2560"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 24,
+    "attr": "flat_material_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4352"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 25,
+    "attr": "_spectral_mat_emission_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "144"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 26,
+    "attr": "material_types_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "80"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 27,
+    "attr": "sphere_lights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 28,
+    "attr": "distant_lights_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 29,
+    "attr": "_spectral_light_spd_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "6096"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 30,
+    "attr": "emissive_tri_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "16400"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 31,
+    "attr": "_spectral_emitters_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "2064"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 32,
+    "attr": "std_surface_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "4112"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 33,
+    "attr": "light_splat_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "49152"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 34,
+    "attr": "gizmo_segments_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "8208"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 35,
+    "attr": "lens_elements_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "528"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 36,
+    "attr": "lens_pupil_buffer",
+    "kind": "StorageBuffer",
+    "args": [
+     "1040"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 37,
+    "attr": "_offscreen_output",
+    "kind": "StorageImage",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {
+     "format": "'rgba8_unorm'",
+     "transfer_src": "True"
+    }
+   },
+   {
+    "order": 38,
+    "attr": "_readback",
+    "kind": "ReadbackBuffer",
+    "args": [
+     "64",
+     "64"
+    ],
+    "kwargs": {}
+   },
+   {
+    "order": 39,
+    "attr": "tool_buffer",
+    "kind": "HostStorageBuffer",
+    "args": [
+     "135168"
+    ],
+    "kwargs": {}
+   }
+  ],
+  "destroyed": [
+   "std_surface_buffer",
+   "emissive_tri_buffer",
+   "sphere_lights_buffer",
+   "distant_lights_buffer",
+   "material_types_buffer",
+   "flat_material_buffer",
+   "instance_buffer",
+   "bvh_buffer",
+   "index_buffer",
+   "vertex_buffer",
+   "displacement_image",
+   "roughness_image",
+   "normal_image",
+   "tattoo_image",
+   "env_image",
+   "volume_density_image",
+   "env_dist_buffer",
+   "_spectral_scale_buffer",
+   "_spectral_data_buffer",
+   "_spectral_d65_buffer",
+   "_spectral_metals_buffer",
+   "_spectral_emitters_buffer",
+   "_spectral_light_spd_buffer",
+   "_spectral_mat_emission_buffer",
+   "hud_overlay",
+   "accum_image",
+   "_offscreen_output",
+   "_readback",
+   "uniform_buffer",
+   "mtlx_skin_buffer",
+   "neural_weights_buffer",
+   "neural_biases_buffer",
+   "neural_layers_buffer",
+   "record_buffer",
+   "record_counter",
+   "light_splat_buffer",
+   "gizmo_segments_buffer",
+   "lens_elements_buffer",
+   "lens_pupil_buffer",
+   "tool_buffer"
+  ],
+  "metal_binds": {
+   "meshVertices": "vertex_buffer.buffer",
+   "meshIndices": "index_buffer.buffer",
+   "bvhNodes": "bvh_buffer.buffer",
+   "instances": "instance_buffer.buffer",
+   "flatMaterials": "flat_material_buffer.buffer",
+   "materialTypes": "material_types_buffer.buffer",
+   "mtlxSkin": "mtlx_skin_buffer.buffer",
+   "sphereLights": "sphere_lights_buffer.buffer",
+   "emissiveTriangles": "emissive_tri_buffer.buffer",
+   "stdSurfaceParams": "std_surface_buffer.buffer",
+   "distantLights": "distant_lights_buffer.buffer",
+   "lightSplatBuffer": "light_splat_buffer.buffer",
+   "gizmoSegments": "gizmo_segments_buffer.buffer",
+   "lensElements": "lens_elements_buffer.buffer",
+   "exitPupilBounds": "lens_pupil_buffer.buffer",
+   "toolBuffer": "tool_buffer.buffer",
+   "envDistCdf": "env_dist_buffer.buffer",
+   "neuralWeights": "neural_weights_buffer.buffer",
+   "neuralBiases": "neural_biases_buffer.buffer",
+   "neuralLayers": "neural_layers_buffer.buffer",
+   "recordBuf": "record_buffer.buffer",
+   "recordCounter": "record_counter.buffer",
+   "outputBuffer": "_offscreen_output.texture",
+   "accumBuffer": "accum_image.texture",
+   "hudMask": "hud_overlay.texture",
+   "commonSampler": "Sampler",
+   "envMap": "env_image.texture",
+   "envMapSampler": "env_image.sampler",
+   "tattooMap": "tattoo_image.texture",
+   "tattooMapSampler": "tattoo_image.sampler",
+   "normalMap": "normal_image.texture",
+   "normalMapSampler": "normal_image.sampler",
+   "roughnessMap": "roughness_image.texture",
+   "roughnessMapSampler": "roughness_image.sampler",
+   "displacementMap": "displacement_image.texture",
+   "displacementMapSampler": "displacement_image.sampler",
+   "volumeDensity": "volume_density_image.texture",
+   "volumeDensitySampler": "volume_density_image.sampler",
+   "spectralScale": "_spectral_scale_buffer.buffer",
+   "spectralData": "_spectral_data_buffer.buffer",
+   "spectralD65": "_spectral_d65_buffer.buffer",
+   "spectralMetals": "_spectral_metals_buffer.buffer",
+   "spectralEmitters": "_spectral_emitters_buffer.buffer",
+   "spectralLightSpd": "_spectral_light_spd_buffer.buffer",
+   "spectralMatEmission": "_spectral_mat_emission_buffer.buffer"
+  }
+ }
+}

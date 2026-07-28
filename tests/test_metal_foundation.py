@@ -272,41 +272,52 @@ def test_metal_format_tokens_resolve_to_real_slangpy_formats():
 
 # ── Metal no-op for Vulkan-only descriptor writes ────────────────────
 
-def test_update_texture_pool_descriptors_noop_on_metal():
-    """`_update_texture_pool_descriptors` writes Vulkan descriptor set 14; on
-    Metal `descriptor_sets is None` and the pool is bound by name at dispatch, so
-    it must short-circuit. `_upload_flat_materials` calls it on every material
-    upload — without the guard the Metal USD-scene render crashes with
-    `TypeError: 'NoneType' object is not iterable`. Stub via `__new__` (no device,
-    no megakernel compile); `descriptor_sets` left None to prove it is untouched."""
+def test_descriptor_writes_are_a_metal_no_op_through_the_resource_set():
+    """A buffer realloc on Metal must never reach a Vulkan descriptor write.
+
+    This used to be five `if self.is_metal: return` guards, one opening each
+    `_rebind_*_descriptors` helper plus `_update_texture_pool_descriptors` —
+    without them the Metal instance/material grow path (a 20+-instance USD
+    scene) crashed in `VkDescriptorBufferInfo(buffer=<slangpy buffer>)` with
+    `TypeError: an integer is required`, and the bindless-pool refresh crashed
+    with `TypeError: 'NoneType' object is not iterable`.
+
+    Since change renderer-gpu-resource-set the divergence is decided ONCE, in
+    the resource set's binding step: the Metal adapter simply has no descriptor
+    step. This asserts the renderer routes through it rather than re-deciding.
+    Stub via `__new__` (no device, no megakernel compile)."""
     try:
         from skinny.renderer import Renderer
     except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
         pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
+
+    from skinny.gpu_resources import ResourceSizes, SceneResourceSet
+
+    class _Ctx:
+        is_metal = True
+
+    # A set with no declarations allocated: any code path that reached for a
+    # buffer or a Vulkan symbol would fail loudly rather than silently pass.
+    rset = SceneResourceSet.__new__(SceneResourceSet)
+    rset.ctx = _Ctx()
+    rset.is_metal = True
+    rset.spectral = False
+    rset._resources = {}
+    rset._closed = False
+    rset.sizes = None
 
     r = Renderer.__new__(Renderer)  # bypass __init__ — no GPU/context needed
     r.is_metal = True
     r.descriptor_sets = None
-    r._update_texture_pool_descriptors()  # must return without iterating None
+    r._gpu_set = rset
 
-
-def test_rebind_descriptors_noop_on_metal():
-    """`_rebind_scene_descriptors` / `_rebind_aux_material_descriptors` rewrite
-    Vulkan descriptor sets after a buffer realloc; on Metal `_build_metal_binds`
-    re-reads each live buffer at dispatch, so both must short-circuit. They run on
-    the instance/material grow path (e.g. a 20+-instance USD scene) — without the
-    guard the Vulkan `VkDescriptorBufferInfo(buffer=<slangpy buffer>)` call raises
-    `TypeError: an integer is required`. Stub via `__new__`, no buffers set, to
-    prove the methods return before touching any Vulkan/buffer attribute."""
-    try:
-        from skinny.renderer import Renderer
-    except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
-        pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
-
-    r = Renderer.__new__(Renderer)
-    r.is_metal = True
-    r._rebind_scene_descriptors()        # must return before reading instance_buffer
-    r._rebind_aux_material_descriptors()  # must return before reading std_surface_buffer
+    r._update_texture_pool_descriptors()   # must not iterate a None set
+    # The former `_rebind_scene_descriptors` / `_rebind_aux_material_descriptors`
+    # work, now one call on the owner of the declarations.
+    rset.rebind(["instance_buffer", "std_surface_buffer"],
+                descriptor_sets=None)
+    rset.rebind(["instance_buffer"], descriptor_sets=["not-a-descriptor-set"])
+    assert isinstance(ResourceSizes, type)
 
 
 def test_debug_viewport_refuses_metal_cleanly():

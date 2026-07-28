@@ -1441,6 +1441,13 @@ incrementally moved over.
 
 ## Descriptor Binding Map
 
+The numbers below are authoritative and `bindings.slang` declares the same ones.
+On the **host** side each is stated once more, next to the allocation it belongs
+to, in `src/skinny/gpu_resources.py` — see
+[GPU resource inventory](#gpu-resource-inventory-gpu_resourcespy-change-renderer-gpu-resource-set).
+That module does not derive these numbers; it relocates them so a resource's
+binding, its size and its destruction sit together.
+
 | Binding | Type | Content | Owner |
 |---------|------|---------|-------|
 | 0 | UBO | FrameConstants + SkinParams + light uniforms | `bindings.slang` |
@@ -1868,8 +1875,10 @@ backend-paired orchestration collapses behind the existing seams. The precedent
 that proves it works is already in-tree: `wavefront_driver.py` holds the staged
 loop once behind a duck-typed recorder, and `mlt_bootstrap.py` holds the pure
 resample. Landed stages: `mlt_chain.py` (MLT host chain state),
-`frame_derive.py` (frame-constant derivation), and the wavefront pass factories
-(`vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass`).
+`frame_derive.py` (frame-constant derivation), the wavefront pass factories
+(`vk_wavefront.ensure_pass` / `metal_wavefront.ensure_pass`), and
+`gpu_resources.py` (the GPU resource inventory — the largest stage so far, 858
+lines out).
 
 **The five steps** — apply in order, one stage per PR:
 
@@ -1914,6 +1923,83 @@ stages: `reflection-owned-byte-layouts` owns the values→bytes serialization
 (`_pack_uniforms` / `_pack_uniforms_msl` offsets + MSL reflection);
 `param-registry-accumulation-reset` owns the accumulation state hash. A
 carve-out stage must route *around* both.
+
+---
+
+## GPU resource inventory (`gpu_resources.py`, change `renderer-gpu-resource-set`)
+
+Every GPU resource the renderer owns is declared **once**. That single
+`ResourceDecl` carries its allocation inputs, its binding identity on *both*
+backends (Vulkan descriptor binding number, Metal shader-global name, either
+optionally absent), and its destruction. `SceneResourceSet` is the list plus the
+code that walks it.
+
+Before this, the same inventory was described four times in `renderer.py`,
+thousands of lines apart — `_init_gpu` allocated by attribute name,
+`_create_descriptors` + five `_rebind_*_descriptors` wrote the Vulkan sets,
+`_build_metal_binds` re-stated the identical mapping as Metal names, and
+`cleanup` destroyed by attribute name again. Adding a resource meant editing all
+four and remembering the last one.
+
+**What it owns:** `_init_gpu`'s allocations, `_create_descriptors`, the five
+`_rebind_*_descriptors` methods, `_rewrite_size_dependent_descriptors`,
+`_ensure_mesh_buffer_capacity`'s realloc, `_build_metal_binds`' resource table,
+and `cleanup`'s destroy list.
+
+**Interface** — small on purpose:
+
+| Call | Does |
+|------|------|
+| `SceneResourceSet(ctx, gpu, sizes, spectral=…)` | allocates every active declaration, in declaration order |
+| `.bind_vulkan(sets, mlt_bindings=…)` | writes every binding, in the recorded write order |
+| `.metal_binds()` | the shader-global → resource dict, from the same declarations |
+| `.regrow(*attrs)` | reallocates at the sizes the declarations now yield, after a capacity on `.sizes` was bumped, and rebinds |
+| `.replace({attr: args})` / `.resize(w, h)` | reallocates at explicit sizes / the viewport-sized set, and rebinds |
+| `.adopt(attr, res)` | transfers an externally built resource into a declared slot |
+| `.write_binding(n, res, sets)` | one write for a resource whose lifetime is *not* the renderer's (the graph-param buffer, the record-drain buffer) |
+| `.close()` | destroys every allocated resource, in the recorded teardown order |
+
+**One backend branch (design D3).** It lives at the binding step: the Vulkan
+adapter emits descriptor writes, the Metal adapter fills the name table. The
+five per-method `is_metal` / `descriptor_sets is None` early-returns that used
+to open each rebind helper are gone — the Metal adapter simply *has no
+descriptor step*, rather than each method opting out.
+
+**Three orders, each recorded once.** They genuinely differ and all three are
+preserved verbatim:
+
+- `DECLARATIONS` — allocation order.
+- `VULKAN_WRITE_SEQUENCE` — descriptor-write order. Neither allocation nor
+  binding order: 26 is written between 11 and 12, 20 after 24, and 1/30/31 last.
+- `DESTROY_SEQUENCE` — teardown order.
+
+**Growth sites state capacities, never byte sizes.** `regrow` re-evaluates the
+declaration's own `cap * STRIDE + slack`, so the arithmetic cannot drift between
+the initial allocation and a later grow, and the rebind is part of the same call.
+This is what closes the bug class where binding 49 (`spectralEmitters`) kept
+pointing at a freed buffer because only 18 was rewritten.
+
+**Renderer access.** Resource attributes are read-only properties forwarding to
+the set, so the ~120 `self.<resource>` reads inside `renderer.py` are unchanged
+(design D4). Assignment is refused: `self.vertex_buffer = X` would reallocate
+without rebinding — exactly the split this module removes. To replace a
+resource, declare the new size through the set. Tests that fake a resource on a
+`__new__`-constructed renderer use `SceneResourceSet.stub(attr=…)`.
+
+**Gates.** `tests/fixtures/gpu_resource_inventory.json` is the pre-change
+inventory *captured from the live renderer* on Vulkan RGB, Metal RGB and Metal
+spectral — recorded reality, never a transcription, the same discipline as
+`shader-variant-key-module`. `tests/test_gpu_resources.py` pins the
+declarations, all three orders, both bind adapters and alloc/destroy pairing to
+it, and fails the build if a `VkWriteDescriptorSet` reappears in `renderer.py`
+or a deleted rebind helper comes back. If a declaration legitimately changes,
+**re-capture** the fixture; do not edit the expectation to match the code.
+
+**Not owned here:** the descriptor *pool* and *sets* themselves (Vulkan objects,
+created in `_create_descriptors`), the seeding uploads (they call renderer
+methods), the combined MaterialX graph-param buffer and the record-drain buffer
+(scene-graph / per-frame lifetimes — they route their writes through
+`write_binding` but the set does not allocate or destroy them).
 
 ---
 
