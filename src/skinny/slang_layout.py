@@ -787,6 +787,60 @@ PREVIEW_SURFACE_FLAT_KEYS: frozenset = frozenset({
     "opacity", "opacityThreshold", "emissiveColor",
 })
 
+#: Every ``UsdPreviewSurface`` shader input. ``_extract_material`` stores each
+#: authored input under its raw name, and ``usd_material_edit`` AUTHORS a subset
+#: on inline preview materials, so all of them can reach a table-owned material.
+#:
+#: Most map onto a flat key; the rest are recognised-but-unread. ``specularColor``
+#: is the one worth naming: the flat packer reads ``specular_color``, so an
+#: authored ``specularColor`` has always been a silent no-op. That is a live
+#: routing gap of exactly the class this table exists to expose — registered here
+#: so it is *recognised*, not silently repaired, since wiring it would change
+#: rendered output and belongs in its own change.
+PREVIEW_SURFACE_INPUT_KEYS: frozenset = frozenset({
+    "diffuseColor", "emissiveColor", "specularColor", "useSpecularWorkflow",
+    "metallic", "roughness", "clearcoat", "clearcoatRoughness", "opacity",
+    "opacityThreshold", "ior", "normal", "displacement", "occlusion",
+})
+
+#: OpenPBR (``open_pbr_surface``) shader-input name → its Autodesk
+#: ``standard_surface`` equivalent. skinny's only uber-closure reads the
+#: standard_surface names, so ``_store_shader_override`` folds each OpenPBR input
+#: onto its equivalent — and keeps the RAW name in ``parameter_overrides`` too.
+#: Both spellings therefore travel, and both must be in the vocabulary.
+#:
+#: Lives here rather than in ``usd_loader`` because it is dialect aliasing, which
+#: is what this table owns; ``usd_loader`` projects from it.
+OPENPBR_TO_STD_SURFACE: dict[str, str] = {
+    "base_weight": "base",
+    "base_metalness": "metalness",
+    "base_diffuse_roughness": "diffuse_roughness",
+    "specular_weight": "specular",
+    "specular_ior": "specular_IOR",
+    "specular_roughness_anisotropy": "specular_anisotropy",
+    "transmission_weight": "transmission",
+    "transmission_dispersion_scale": "transmission_dispersion",
+    "subsurface_weight": "subsurface",
+    "subsurface_scatter_anisotropy": "subsurface_anisotropy",
+    "coat_weight": "coat",
+    "coat_ior": "coat_IOR",
+    "coat_roughness_anisotropy": "coat_anisotropy",
+    "fuzz_weight": "sheen",
+    "fuzz_color": "sheen_color",
+    "fuzz_roughness": "sheen_roughness",
+    "thin_film_ior": "thin_film_IOR",
+    "geometry_thin_walled": "thin_walled",
+}
+
+#: OpenPBR inputs with no standard_surface equivalent, which `_store_shader_override`
+#: still records under their raw name. `geometry_opacity` is the cutout alpha the
+#: transmission bridge checks for.
+OPENPBR_ONLY_KEYS: frozenset = frozenset({
+    "geometry_opacity", "base_color", "specular_color", "transmission_color",
+    "subsurface_color", "subsurface_radius", "coat_color", "emission_color",
+    "emission_luminance", "geometry_normal", "geometry_coat_normal",
+})
+
 #: Keys a real scene carries that no packer reads — recorded so the seam can
 #: tell "recognised bookkeeping" from "misspelled override". Each names its
 #: author and why the packer ignores it.
@@ -826,7 +880,9 @@ RENDERER_OVERRIDE_KEYS: frozenset = frozenset({"emissive_spectral"})
 #: rule that decides when a stray key is an error and when it is only reported.
 MATERIAL_OVERRIDE_KEYS: frozenset = (
     FLAT_OVERRIDE_KEYS | STD_SURFACE_OVERRIDE_KEYS | PREVIEW_SURFACE_FLAT_KEYS
-    | INTAKE_ONLY_KEYS | RENDERER_OVERRIDE_KEYS | frozenset(std_surface_to_flat()))
+    | PREVIEW_SURFACE_INPUT_KEYS | OPENPBR_ONLY_KEYS | INTAKE_ONLY_KEYS
+    | RENDERER_OVERRIDE_KEYS | frozenset(std_surface_to_flat())
+    | frozenset(OPENPBR_TO_STD_SURFACE) | frozenset(OPENPBR_TO_STD_SURFACE.values()))
 
 
 def unknown_override_keys(overrides) -> list[str]:

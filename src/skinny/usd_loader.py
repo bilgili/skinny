@@ -798,26 +798,12 @@ _STD_SURFACE_TO_FLAT: dict[str, str] = slang_layout.std_surface_to_flat()
 # entry. `emission_luminance` is intentionally omitted: OpenPBR authors it in
 # nits, not as standard_surface's 0..1 `emission` weight, so a 1:1 alias would
 # blow out emissive materials.
-_OPENPBR_TO_STD_SURFACE: dict[str, str] = {
-    "base_weight": "base",
-    "base_metalness": "metalness",
-    "base_diffuse_roughness": "diffuse_roughness",
-    "specular_weight": "specular",
-    "specular_ior": "specular_IOR",
-    "specular_roughness_anisotropy": "specular_anisotropy",
-    "transmission_weight": "transmission",
-    "transmission_dispersion_scale": "transmission_dispersion",
-    "subsurface_weight": "subsurface",
-    "subsurface_scatter_anisotropy": "subsurface_anisotropy",
-    "coat_weight": "coat",
-    "coat_ior": "coat_IOR",
-    "coat_roughness_anisotropy": "coat_anisotropy",
-    "fuzz_weight": "sheen",
-    "fuzz_color": "sheen_color",
-    "fuzz_roughness": "sheen_roughness",
-    "thin_film_ior": "thin_film_IOR",
-    "geometry_thin_walled": "thin_walled",
-}
+# A PROJECTION of the one material field table (change
+# flat-material-field-table). `_store_shader_override` keeps the RAW OpenPBR
+# name alongside the folded standard_surface one, so BOTH spellings travel on
+# `parameter_overrides` and both have to be in the vocabulary — which is why
+# the table owns this mapping rather than mirroring it.
+_OPENPBR_TO_STD_SURFACE: dict[str, str] = slang_layout.OPENPBR_TO_STD_SURFACE
 
 
 def _parse_mtlx_value_str(type_name: str, value_str: str) -> object:

@@ -328,6 +328,12 @@ def test_the_vocabulary_matches_the_golden():
     assert sorted(slang_layout.STD_SURFACE_OVERRIDE_KEYS) == v["std_surface"]
     assert sorted(slang_layout.INTAKE_ONLY_KEYS) == v["intake_only"]
     assert sorted(slang_layout.RENDERER_OVERRIDE_KEYS) == v["renderer"]
+    assert sorted(slang_layout.PREVIEW_SURFACE_INPUT_KEYS) == v["preview_surface_inputs"]
+    assert sorted(slang_layout.OPENPBR_ONLY_KEYS) == v["openpbr_only"]
+    assert slang_layout.OPENPBR_TO_STD_SURFACE == v["openpbr_to_std_surface"]
+    # The whole vocabulary, pinned: growing it is a deliberate edit, because
+    # every addition widens what packing will silently accept.
+    assert sorted(slang_layout.MATERIAL_OVERRIDE_KEYS) == v["all"]
 
 
 def test_every_flat_field_key_is_in_the_flat_vocabulary():
@@ -360,6 +366,70 @@ def test_python_materials_are_also_data_driven():
 @pytest.mark.parametrize("key", sorted(slang_layout.MATERIAL_OVERRIDE_KEYS))
 def test_no_vocabulary_key_is_refused(key):
     material_pack.pack_flat_material(_Mat({key: 0.0}))
+
+
+# The gate that closes the hole the corpus survey could not see. Surveying
+# SCENES only reaches the authoring paths some scene happens to exercise; the
+# inline-preview authoring path and the plugin-present OpenPBR intake author
+# names no corpus scene carries, and enforcement turned each of those into a
+# crash. Enumerate the AUTHORING SITES instead — a new key at any of them fails
+# here, hostlessly, instead of at someone's next render.
+
+def test_every_authored_preview_input_is_in_the_vocabulary():
+    from skinny import usd_material_edit
+
+    for name, _type, _default in usd_material_edit._PREVIEW_INPUTS:
+        assert name in slang_layout.MATERIAL_OVERRIDE_KEYS, name
+        # and it must actually pack, not merely be listed
+        material_pack.pack_flat_material(_Mat({name: 0.0}))
+
+
+def test_every_openpbr_spelling_is_in_the_vocabulary():
+    """`_store_shader_override` keeps the raw OpenPBR name AND writes the folded
+    standard_surface one, so both spellings reach a table-owned material."""
+    for raw, std in slang_layout.OPENPBR_TO_STD_SURFACE.items():
+        assert raw in slang_layout.MATERIAL_OVERRIDE_KEYS, raw
+        assert std in slang_layout.MATERIAL_OVERRIDE_KEYS, std
+
+
+def test_every_advertised_editable_is_in_the_vocabulary():
+    from skinny import mtlx_synthesis, scene_graph
+
+    for name in mtlx_synthesis._PREVIEW_AUTHORABLE:
+        assert name in slang_layout.MATERIAL_OVERRIDE_KEYS, name
+    for name in mtlx_synthesis._MATERIAL_FLOAT_RANGES:
+        assert name in slang_layout.MATERIAL_OVERRIDE_KEYS, name
+    for name in scene_graph._MATERIAL_FLOAT_RANGES:
+        assert name in slang_layout.MATERIAL_OVERRIDE_KEYS, name
+
+
+def test_the_openpbr_table_is_a_projection():
+    from skinny import usd_loader
+
+    assert usd_loader._OPENPBR_TO_STD_SURFACE is slang_layout.OPENPBR_TO_STD_SURFACE
+
+
+def test_an_inline_authored_preview_material_packs():
+    """Regression for the codex P1: `author_preview_material` writes
+    `specularColor` on every inline UsdPreviewSurface, and that material is
+    table-owned (no mtlx target), so a missing vocabulary entry crashed the
+    upload rather than rendering."""
+    mat = _Mat({"diffuseColor": (0.8, 0.8, 0.8), "emissiveColor": (0.0, 0.0, 0.0),
+                "specularColor": (0.0, 0.0, 0.0), "roughness": 0.5,
+                "metallic": 0.0, "clearcoat": 0.0, "clearcoatRoughness": 0.01,
+                "opacity": 1.0, "ior": 1.5}, name="Preview")
+    assert len(material_pack.pack_flat_material(mat)) == \
+        slang_layout.scalar_stride("FlatMaterialParams")
+
+
+def test_an_openpbr_material_read_without_the_mtlx_hint_packs():
+    """The plugin-present intake stores every OpenPBR input under its raw name,
+    and such a material has no `mtlx_target_name` — so it is table-owned."""
+    ov = {raw: 0.5 for raw in slang_layout.OPENPBR_TO_STD_SURFACE}
+    ov.update({std: 0.5 for std in slang_layout.OPENPBR_TO_STD_SURFACE.values()})
+    ov["geometry_opacity"] = 1.0
+    assert len(material_pack.pack_flat_material(_Mat(ov, name="openpbr"))) == \
+        slang_layout.scalar_stride("FlatMaterialParams")
 
 
 # ── One derivation step ──────────────────────────────────────────────
