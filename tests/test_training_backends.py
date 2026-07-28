@@ -41,8 +41,10 @@ BOUNDS = (np.zeros(3, np.float32), np.ones(3, np.float32))
 
 
 def _torch_spline_flow():
-    """The torch CPU backend is usable here (torch + spline_flow importable)."""
-    return TorchTrainingBackend(device="cpu").is_available()
+    """The torch CPU backend is usable here (torch + spline_flow importable).
+    Raises rather than skips when torch is present but spline_flow is missing."""
+    from tests.conftest import torch_backend_ready
+    return torch_backend_ready()
 
 
 def _concentrated(n, rng, lobe=(0.3, 0.9, 0.2)):
@@ -264,7 +266,16 @@ def test_fp16_request_still_bakes_fp32_weights():
                     reason="torch + spline_flow unavailable (numpy↔torch parity)")
 def test_numpy_matches_torch_cpu_one_cycle():
     """§7.1: numpy backend ≈ torch CPU backend on the same fixed batch/seed for
-    one cycle — the drift guard between the two implementations."""
+    one cycle — the drift guard between the two implementations.
+
+    "The same batch" is what `_minibatch_rng` now guarantees: the torch backend
+    used to draw its own indices from torch's global RNG, so the two backends
+    trained on independent samples of the same data. That made this assertion
+    unsatisfiable rather than merely tight — at step 1 Adam moves every
+    coordinate by exactly ±lr, so any sign disagreement lands at 2·lr = 2e-3, and
+    ~3% of the 103k coordinates disagreed. On a shared batch the two agree to
+    9.4e-6 (loss to 2.1e-7), well inside the recorded 5e-4.
+    """
     arch = NeuralBuildConfig()
     init = make_dummy_weights(arch)
     rng = np.random.default_rng(123)
@@ -278,13 +289,18 @@ def test_numpy_matches_torch_cpu_one_cycle():
 
     np_be = NumpyTrainingBackend()
     np_be.warm_start(init, cfg)
-    np_be.update(cond, z, w)
+    loss_np = np_be.update(cond, z, w)
     nw_np = np_be.export()
 
     t_be = TorchTrainingBackend(device="cpu")
     t_be.warm_start(init, cfg)
-    t_be.update(cond, z, w)
+    loss_t = t_be.update(cond, z, w)
     nw_t = t_be.export()
+
+    # The forward pass compares directly; the weight check below sees only
+    # sign(grad), because Adam's first step is lr·sign(g) on every coordinate.
+    assert abs(loss_np - loss_t) < 1e-5, \
+        f"numpy/torch loss drift {abs(loss_np - loss_t):.2e} exceeds 1e-5"
 
     # one Adam step from identical weights/grads → agreement to a documented tol.
     diff = np.abs(nw_np.weights - nw_t.weights).max()

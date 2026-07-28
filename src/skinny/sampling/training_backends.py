@@ -216,7 +216,11 @@ def _resolve_spline_flow(explicit: str | None) -> str | None:
     if env:
         cands.append(Path(env))
     here = Path(__file__).resolve()
-    for up in here.parents[2:6]:
+    # A sibling of any ancestor. The fixed 2:6 window this used to scan only
+    # reached the sibling from the primary checkout; a git worktree nests the
+    # source deeper, so the repo silently lost the backend (and every test
+    # gated on it skipped) when run from one.
+    for up in here.parents:
         cands.append(up.parent / "spline_flow")
     for c in cands:
         try:
@@ -225,6 +229,18 @@ def _resolve_spline_flow(explicit: str | None) -> str | None:
         except OSError:
             continue
     return None
+
+
+def _minibatch_rng(t: int) -> np.random.Generator:
+    """The per-cycle minibatch stream, owned here and shared by every backend.
+
+    Which rows a step trains on is a property of the training step index, not of
+    the framework running the step, so all three backends draw from this one
+    generator. Two things rest on that: every backend is reproducible run to run
+    (torch's global RNG is not), and the numpy-vs-torch parity guard compares two
+    implementations on the *same* batch instead of on two independent draws.
+    """
+    return np.random.default_rng(t + 1)
 
 
 def _torch_cuda() -> bool:
@@ -356,6 +372,7 @@ class TorchTrainingBackend(TrainingBackend):
         self._opt = None
         self._scaler = None
         self._cfg = None
+        self._t = 0                         # global step count (minibatch stream)
         self.last_loss: float | None = None
 
     # ── availability / capability ────────────────────────────────────────
@@ -435,6 +452,7 @@ class TorchTrainingBackend(TrainingBackend):
         # keep the flow's default random init so the first update actually moves.
         self._model = model
         self._opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+        self._t = 0
         use_amp = self._use_amp()
         self._scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -458,9 +476,11 @@ class TorchTrainingBackend(TrainingBackend):
         use_amp = self._use_amp()
         model, opt, scaler = self._model, self._opt, self._scaler
         model.train()
+        rng = _minibatch_rng(self._t)
         last = None
         for _ in range(int(cfg.steps_per_cycle)):
-            idx = torch.randint(0, n, (bs,), device=dev)
+            idx = torch.from_numpy(np.ascontiguousarray(rng.integers(0, n, bs),
+                                                        np.int64)).to(dev)
             c, zb, wb = cond_t[idx], z_t[idx], w_t[idx]
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
@@ -471,6 +491,7 @@ class TorchTrainingBackend(TrainingBackend):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             scaler.step(opt)
             scaler.update()
+            self._t += 1
             last = loss
         if last is not None and bool(torch.isfinite(last)):
             self.last_loss = float(last.detach().cpu())
@@ -893,7 +914,7 @@ class NumpyTrainingBackend(TrainingBackend):
         if n == 0:
             return None
         bs = min(int(cfg.batch), n)
-        rng = np.random.default_rng(self._t + 1)
+        rng = _minibatch_rng(self._t)
         last = None
         for _ in range(int(cfg.steps_per_cycle)):
             idx = rng.integers(0, n, bs)
@@ -1186,7 +1207,7 @@ class MlxTrainingBackend(TrainingBackend):
             return -mx.sum(wb * log_q) / mx.maximum(mx.sum(wb), 1e-12)
 
         grad_fn = mx.value_and_grad(loss_fn)
-        rng = np.random.default_rng(self._t + 1)
+        rng = _minibatch_rng(self._t)
         last = None
         for _ in range(int(cfg.steps_per_cycle)):
             idx = rng.integers(0, n, bs)

@@ -10,6 +10,33 @@ MTLX_DIR = PROJECT_ROOT / "src" / "skinny" / "mtlx" / "genslang"
 HARNESS_DIR = Path(__file__).resolve().parent / "harnesses"
 
 
+def torch_backend_ready() -> bool:
+    """True when :class:`TorchTrainingBackend` can really run in this interpreter.
+
+    Skipping is only honest when the host genuinely cannot run the torch loop —
+    the renderer-only venv, which has no torch (torch is not a declared
+    dependency). If torch *is* importable this is a training host, so an
+    unresolved ``spline_flow`` is a misconfiguration, not a reason to skip: it
+    raises instead. The two torch-gated modules used to skip vacuously from any
+    git worktree, which hid a NameError and a real backend defect for weeks.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("torch") is None:
+        return False                                   # renderer-only venv: honest skip
+    from skinny.sampling.training_backends import TorchTrainingBackend, _resolve_spline_flow
+
+    if _resolve_spline_flow(None) is None:
+        raise RuntimeError(
+            "torch is importable but the spline_flow repo was not found, so the "
+            "torch training-backend tests cannot run. Point SKINNY_SPLINE_FLOW at "
+            "the checkout (it needs train.py), or clone it beside the skinny repo. "
+            "This raises rather than skips on purpose — a silent skip here reads as "
+            "a pass."
+        )
+    return TorchTrainingBackend(device="cpu").is_available()
+
+
 @pytest.fixture(scope="session")
 def shader_dir():
     return SHADER_DIR
