@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 from pxr import Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel, UsdVol
 
+from skinny import slang_layout
 from skinny.environment import _load_radiance_hdr, _resize_equirect
 from skinny.mesh import MeshSource, bake_mesh, compute_source_hash
 from skinny.usd_gprims import tessellate_gprim
@@ -628,6 +629,25 @@ def _canonicalize_coat(overrides: dict) -> None:
         overrides["coat_roughness"] = float(ccr)
 
 
+def _apply_override_derivations(overrides: dict) -> None:
+    """The ONE ordered derivation step, run once per material AFTER the
+    ``customData["skinnyOverrides"]`` merge (change flat-material-field-table).
+
+    Order matters and is stated only here: the transmission bridge first (it may
+    author ``opacity``), then the subsurface bridge (which no-ops once an
+    ``opacity`` exists), then the coat canonicalisation.
+
+    Both intakes call this at the same point in their sequence. The mtlx-fallback
+    intake used to derive inside ``_load_mtlx_materials`` — before any prim's
+    customData was available — and then RE-DERIVE in ``_merge_prim_overrides``
+    once the interior medium had arrived. Merging first removes the second run
+    instead of preserving it.
+    """
+    _derive_opacity_from_transmission(overrides)
+    _derive_opacity_from_subsurface(overrides)
+    _canonicalize_coat(overrides)
+
+
 def _extract_material(shade_mat: UsdShade.Material) -> Material:
     """Build a skinny Material from a bound UsdShade.Material.
 
@@ -731,21 +751,13 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
             for k, v in skinny_overrides.items():
                 overrides[str(k)] = v
 
-    # Bridge transmission → opacity so the flat path's delta-dielectric
-    # refraction branch (flat_material.slang: `if (m.opacity < 1.0)`) actually
-    # fires. The renderer's only refraction mechanism is opacity-gated; a
-    # standard_surface/OpenPBR `transmission` weight that never lowers opacity
-    # leaves the surface fully opaque (glass/oil rendered solid white). Mirrors
-    # the .mtlx fallback loader (`_load_mtlx_materials`). Skip when opacity is
-    # already authored (e.g. OpenPBR `geometry_opacity` cutout alpha).
-    _derive_opacity_from_transmission(overrides)
-    # Same gate for a standard_surface `subsurface` weight (the usdMtlx-plugin
-    # intake of a `-mtlx` subsurface material); idempotent when the
-    # UsdPreviewSurface export already authored `opacity = 0`.
-    _derive_opacity_from_subsurface(overrides)
-    # Fold UsdPreviewSurface clearcoat onto the canonical coat slot so a coated
-    # material's coat lobe survives the flat-material pack.
-    _canonicalize_coat(overrides)
+    # The customData merge above is complete, so derive once, in order. Bridging
+    # transmission → opacity is what makes the flat path's delta-dielectric
+    # refraction branch (flat_material.slang: `if (m.opacity < 1.0)`) fire at
+    # all; the subsurface bridge is the same gate for a standard_surface
+    # `subsurface` weight; the coat fold moves UsdPreviewSurface clearcoat onto
+    # the canonical slot the packer reads.
+    _apply_override_derivations(overrides)
 
     return Material(
         name=name,
@@ -760,13 +772,18 @@ def _extract_material(shade_mat: UsdShade.Material) -> Material:
 # ─── Direct MaterialX loading (bypass for missing usdMtlx plugin) ────
 
 
-_STD_SURFACE_TO_FLAT: dict[str, str] = {
-    "base_color": "diffuseColor",
-    "specular_roughness": "roughness",
-    "metalness": "metallic",
-    "specular": "specular",
-    "specular_IOR": "ior",
-}
+# standard_surface input name → the FlatMaterialParams override key it feeds.
+# A PROJECTION of the one material field table (change
+# flat-material-field-table) — never restate a mapping here.
+#
+# This table used to carry 5 entries while `mtlx_synthesis`' copy carried 12,
+# with a "keep in sync" comment on the other side. The 7 it was missing are all
+# IDENTITY mappings (specular_color, transmission_color, diffuse_roughness,
+# coat, coat_roughness, coat_color, coat_IOR), which is why the disagreement was
+# harmless: `_store_shader_override` writes the raw name unconditionally, and
+# the two other readers look the name up with `.get(name, name)`. Harmless by
+# coincidence, not by design — so both sides read the projection now.
+_STD_SURFACE_TO_FLAT: dict[str, str] = slang_layout.std_surface_to_flat()
 
 # OpenPBR surface shader-input names → Autodesk standard_surface names.
 # The materialxusd exporter emits OpenPBR (`open_pbr_surface`) materials whose
@@ -1169,12 +1186,12 @@ def _load_mtlx_materials(
                 if overrides.get("diffuseColor") in (None, (0.0, 0.0, 0.0)):
                     overrides["diffuseColor"] = (1.0, 1.0, 1.0)
 
-            # Subsurface boundary: open the flat refraction gate, mirroring the
-            # UsdPreviewSurface export (and _derive_opacity_from_subsurface on the
-            # plugin-present intake). Guarded so a non-subsurface standard_surface
-            # material is untouched and an explicit opacity is preserved.
-            _derive_opacity_from_subsurface(overrides)
-
+            # NO derivation here. This table entry is per-.mtlx-DOCUMENT: the
+            # prim's `customData["skinnyOverrides"]` — which carries the
+            # subsurface interior medium — has not been merged yet, so a
+            # derivation run at this point would have to be repeated later.
+            # `_merge_prim_overrides` merges first and then derives once
+            # (`_apply_override_derivations`).
             opacity_val = overrides.get("opacity")
             if isinstance(opacity_val, tuple):
                 overrides["opacity"] = float(opacity_val[0])
@@ -1228,29 +1245,26 @@ def _merge_prim_overrides(
     customData merged into its `parameter_overrides`.
 
     Mirrors the `skinnyOverrides` merge `_extract_material` does on the
-    plugin-present intake. ALWAYS returns an independent copy (fresh mutable
-    dicts) so a per-binding entry never aliases the shared `mtlx_materials`
-    table entry (finding D), even when the prim carries no overrides.
+    plugin-present intake, and is the ONLY route from the `mtlx_materials` table
+    to a scene material — so it is where this intake merges and then derives.
+    ALWAYS returns an independent copy (fresh mutable dicts) so a per-binding
+    entry never aliases the shared `mtlx_materials` table entry (finding D),
+    even when the prim carries no overrides, and ALWAYS derives, so a material
+    with no customData is not left underived.
     """
     merged_mat = _independent_material(mtlx_mat)
-    target_prim = stage.GetPrimAtPath(material_path)
-    if not (target_prim and target_prim.IsValid()):
-        return merged_mat
-    cd = target_prim.GetCustomData()
-    skinny_overrides = cd.get("skinnyOverrides") if cd else None
-    if not hasattr(skinny_overrides, "items"):
-        return merged_mat
     merged = merged_mat.parameter_overrides
-    for k, v in skinny_overrides.items():
-        merged[str(k)] = v
-    # The subsurface medium coefficients (subsurface_sigma_*) live in
-    # skinnyOverrides, not the .mtlx shader, so the transmissive-boundary gate
-    # cannot be derived until the customData is merged here — `_load_mtlx_materials`
-    # ran `_derive_opacity_from_subsurface` before the medium was available.
-    # Re-derive now that the interior is present (no-op when already opaque-gated
-    # or when there is no medium). Mirrors `_extract_material`, which merges the
-    # customData first and then derives.
-    _derive_opacity_from_subsurface(merged)
+    target_prim = stage.GetPrimAtPath(material_path)
+    cd = target_prim.GetCustomData() if target_prim and target_prim.IsValid() else None
+    skinny_overrides = cd.get("skinnyOverrides") if cd else None
+    if hasattr(skinny_overrides, "items"):
+        for k, v in skinny_overrides.items():
+            merged[str(k)] = v
+    # Merge complete — now derive, once. The subsurface medium coefficients
+    # (subsurface_sigma_*) live in skinnyOverrides, not the .mtlx shader, so this
+    # is the earliest point at which the transmissive-boundary gate CAN be
+    # derived on this intake. Same call, same order as `_extract_material`.
+    _apply_override_derivations(merged)
     return merged_mat
 
 

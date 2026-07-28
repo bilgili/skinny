@@ -2096,8 +2096,8 @@ and allocators are consumers; no hand-maintained field/offset table remains.
 | Owned struct | Source | Consumer |
 |---|---|---|
 | `FrameConstants` (+ `Camera`) | `common.slang` | `_FC_SCALAR_FIELDS*`, `_TILE_ORIGIN_Y_OFFSET`, `_VK_UNIFORM_BUFFER_BYTES` bound, `_pack_uniforms_msl` |
-| `FlatMaterialParams` | `common.slang` | `FLAT_MATERIAL_STRIDE` |
-| `StdSurfaceParams` | `mtlx_std_surface.slang` | `STD_SURFACE_STRIDE`, `pack_std_surface_params_msl` |
+| `FlatMaterialParams` | `common.slang` | `FLAT_MATERIAL_STRIDE`, `FLAT_MATERIAL_FIELDS` + `pack_material_record` (see Material field table below) |
+| `StdSurfaceParams` | `mtlx_std_surface.slang` | `STD_SURFACE_STRIDE`, `std_surface_fields()`, `pack_std_surface_params_msl` |
 | `WavefrontPathState`, `RecVertex`, `VisiblePoint`, `SppmAccum`, `BDPTVertex`, `WfBdptAux`, MLT chain structs | wavefront/SPPM/BDPT/MLT shaders | `wavefront_layout.py` sizers (public API unchanged) |
 
 **Variants.** Exactly three preprocessor gates are resolvable —
@@ -2136,6 +2136,72 @@ blob 600 B.
    reflection (the `metal-backend` contract) and cross-checks it against the
    derived layout once per program+variant, so drift in either direction raises
    before an upload.
+
+### Material field table (change `flat-material-field-table`)
+
+The two material records are owned one level deeper: **field by field**, not
+only by stride.
+
+`FlatMaterialParams` declares 14 opaque `float4` rows, so the parser derives
+each row's offset but not which lane means `roughness` and which means
+`metallic`. That map used to be a docstring above a 60-argument positional
+`struct.pack`. Transposing two same-typed arguments changed every rendered pixel
+and passed every test, because the only guard was a size-equality assert.
+
+**Derive where possible, pin where not.** `slang_layout.FLAT_MATERIAL_FIELDS`
+declares one `MaterialField` per field: `(name, row, lane, kind, default, key)`.
+The byte offset is DERIVED — the row's parsed offset plus `4 × lane` — so a
+shader-side reorder moves the field with no edit to the table. Only the lane
+assignment is declared. `StdSurfaceParams` declares named scalars, so its half
+of the table is derived outright.
+
+**The table is load-bearing, not documentation.** `material_pack` emits both
+records through `slang_layout.pack_material_record(record, {name: value})`, so
+the bytes are produced BY the table. That is what makes the permanent
+name→offset golden (`tests/fixtures/material_field_offsets.json`) a real
+transposition gate: swap two same-typed fields and both offsets move.
+`tests/test_material_field_table.py` carries the negative control that performs
+the swap and asserts the gate fires — and shows the size-only check still
+passing on the same swap.
+
+**One override-key vocabulary.** The strings that ride
+`Material.parameter_overrides` from the pbrt authors, through the intake merge,
+to the packers have one owner in the same module:
+
+| Set | Contents |
+|---|---|
+| `FLAT_OVERRIDE_KEYS` | the 30 keys `pack_flat_material` reads — the table's own `key` bindings plus `FLAT_DERIVED_KEYS` (medium, dispersion, named conductor) |
+| `STD_SURFACE_OVERRIDE_KEYS` | derived from the `StdSurfaceParams` declaration |
+| `PREVIEW_SURFACE_FLAT_KEYS` | flat keys the loader's own folds author under UsdPreviewSurface names |
+| `INTAKE_ONLY_KEYS` | recognised bookkeeping no packer reads (`clearcoat`, `subsurface_eta`, `pbrt_medium`, …) |
+| `RENDERER_OVERRIDE_KEYS` | read by the renderer, by neither packer (`emissive_spectral`) |
+
+Three tables used to restate parts of this vocabulary behind "keep in sync"
+comments — `usd_loader._STD_SURFACE_TO_FLAT` (5 entries),
+`mtlx_synthesis._STD_SURFACE_TO_FLAT_PACK` (12) and
+`_PREVIEW_SURFACE_FLAT_KEYS`. All three are projections now, and the comments
+are assertions. `std_surface_to_flat()` derives its 12 entries as four genuine
+renames plus every std-surface key the flat packer reads under the same name
+**and the same kind**. The kind guard is load-bearing: std-surface `opacity` is
+a `color3` while the flat record's is a `float`, so aliasing them would
+advertise an edit `_override_float` discards.
+
+**Unknown keys are refused, within scope.** `parameter_overrides` is a shared
+bag: it also carries a MaterialX document's own input names and a Python
+material's slangpile inputs, which are DATA and cannot be enumerated. So
+`material_pack.check_material_vocabulary` refuses an unknown key on a material
+the table owns (plain UsdPreviewSurface / pbrt-imported flat), and only warns on
+a material with an `mtlx_target_name` or a `python_module`. Refusal was enabled
+only after a report-only survey of all 49 corpus/suite scenes — 1093 materials,
+39 distinct keys, zero unknown.
+
+**Merge and derive are ordered once.** `usd_loader._apply_override_derivations`
+states the sequence (transmission bridge → subsurface bridge → coat
+canonicalisation) in one place, called after the `customData["skinnyOverrides"]`
+merge on both intakes. The mtlx-fallback intake used to derive inside
+`_load_mtlx_materials`, before any prim's customData was available, and then
+re-run `_derive_opacity_from_subsurface` in `_merge_prim_overrides` once the
+interior medium had arrived. Merging first removes the second run.
 
 ## Shader variant key (`shader_variants.py`, change `shader-variant-key-module`)
 
