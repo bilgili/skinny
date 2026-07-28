@@ -607,6 +607,29 @@ shortcuts below forwarded to the viewport.
 | `F1` | Toggle HUD |
 | `Esc` | Quit |
 
+### Camera Debug viewport
+
+Its own key map, identical in the GLFW window and the `skinny-gui` dock (the
+recorded set is asserted by `tests/test_qt_debug_viewport_dock.py`). `W A S D
+Q E` move the debug camera in free mode; `D` also toggles the depth-of-field
+planes on press, served from a separate channel so a held strafe does not flip
+it.
+
+| Input | Action |
+|-------|--------|
+| `C` | Toggle orbit / free debug camera |
+| `F` | Reset debug camera |
+| `W A S D Q E` | Move (free mode) |
+| `M` | Toggle mesh wireframes (AABBs invert) |
+| `G` | Toggle ground grid |
+| `P` | Toggle focus plane |
+| `D` | Toggle depth-of-field planes |
+| `I` | Toggle render-area outline |
+| `O` | Toggle orthographic projection |
+| `T` / `B` / `L` | Top / back / left view |
+| `Space` | Toggle HUD |
+| `Esc` | Close (GLFW window only — the Qt dock closes from its title bar) |
+
 ## Assets
 
 ### HDR Environments

@@ -538,8 +538,6 @@ def add_render_flags(parser, *, integrator=True, execution=True,
 ```python
 def load_scene_from_usd(stage_path, *, time=None, use_usd_mtlx_plugin=False) -> Scene    # :1970
 def load_scene_from_stage(stage, *, time=None, use_usd_mtlx_plugin=False) -> Scene       # :1998
-def prepare_usd_streaming(stage_path, *, time=None, use_usd_mtlx_plugin=False
-    ) -> tuple[Scene, list[tuple[MeshSource, np.ndarray, int]]]                          # :2026
 def build_animation_index(stage) -> AnimationIndex                                       # :1542
 def build_playback_clock(stage, index)                                                   # :1591
 def extract_skeletal_bindings(stage) -> SkeletalScene                                    # :1761
@@ -757,7 +755,7 @@ class Preset:                                          # :27
     is_builtin: bool = True
 
 PRESETS: list[Preset]                                  # :67  (Fitzpatrick I–VI × Female/Male)
-def apply_preset(renderer, preset: Preset) -> None     # :72  (writes values via _set_nested)
+def apply_preset(renderer, preset: Preset) -> None     # :72  (writes values via set_param_value)
 ```
 
 ---
@@ -794,7 +792,7 @@ proposal & reuse plug in; see the proposal-mixture discussion in
 | Isolate IBL (no direct lights) | `direct_light=False` / `renderer.direct_light_index = 1` |
 | Linear-HDR pixels (not tonemapped) | read the accumulation buffer / `save_screenshot(..., "exr")` |
 | Apply a skin preset | `presets.apply_preset(renderer, presets.PRESETS[i])` |
-| Set any parameter generically | `params._set_nested(renderer, "mtlx.skin_bsdf_roughness", 0.4)` |
+| Set any parameter generically | `params.set_param_value(renderer, "mtlx.skin_bsdf_roughness", 0.4)` — routes through the target's `set_path` when it has one, so it is correct against a marshalling proxy as well as a live renderer. `_set_nested` resolves intermediate objects itself and reaches *through* a proxy; prefer it only when you hold the renderer on its owning thread. |
 
 See `tests/test_headless.py` (`TestMaterialXGraphDemoRender`) for a complete
 headless USD render example.

@@ -11,11 +11,12 @@ Two entry points:
   :class:`skinny.metal_context.MetalContext`), both of which expose the same
   duck-typed surface the renderer consumes.
 
-The renderer runs the full megakernel on both backends. ``auto`` resolves to
-**Vulkan** everywhere: Metal reaches geometry/structural parity (6.1) but its
-shaded skin color is not yet at parity (6.2), so Metal stays opt-in via an
-explicit ``--backend metal`` (which raises a clear error if a ``DeviceType.metal``
-device cannot construct, rather than degrading).
+Both backends run the full renderer — megakernel and wavefront. ``auto``
+resolves to native **Metal** on a Metal-capable Apple-Silicon host (the native
+backend is at full parity with Vulkan) and falls back to **Vulkan** everywhere
+else; see :func:`select_backend`. An explicit ``--backend metal`` on a host with
+no Metal device raises a clear error naming the missing requirement rather than
+degrading.
 """
 
 from __future__ import annotations

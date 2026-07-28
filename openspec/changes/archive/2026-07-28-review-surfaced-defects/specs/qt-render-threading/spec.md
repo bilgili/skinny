@@ -49,7 +49,15 @@ marshalled action into an unsynchronised one.
 loop that drains commands and advances the renderer SHALL survive an exception
 raised by renderer state mutated concurrently, report it, and continue or
 terminate the session visibly — never leave a session marked running with a
-dead render thread.
+dead render thread. Terminating visibly means the clients attached to the
+session are told, and every command still awaiting a reply is settled; stopping
+the loop silently is indistinguishable from a slow frame.
+
+**A render path SHALL leave no synchronisation primitive in a state that a
+retry cannot recover from.** A guard that catches and retries is worthless if
+the retry blocks: a frame fence reset before the exception-capable work that
+precedes its submit stays unsignaled, so the next iteration waits on it forever.
+Reset such a primitive immediately before the operation that signals it.
 
 #### Scenario: Rendering does not freeze common GUI interactions
 
@@ -106,4 +114,28 @@ dead render thread.
 
 - **WHEN** a resolution control is used on any front-end that offers one
 - **THEN** the render-target resize is applied on the owning thread, and no
-  front-end reaches the renderer's resize path directly from its own thread
+  front-end reaches the renderer's resize path directly from its own thread —
+  serialising it under a lock is not sufficient, since that leaves the
+  destroy-and-recreate of the offscreen image, readback buffer, accumulation
+  image and HUD overlay running on the caller's thread
+
+#### Scenario: A retry after a failed frame is not blocked by the failed frame
+
+- **WHEN** a render iteration raises after the frame fence has been waited on
+  but before the submit that would signal it
+- **THEN** the next iteration proceeds rather than blocking forever on that
+  fence, so the failure counter can reach its limit and the session can give up
+  visibly
+
+#### Scenario: A terminal render failure reaches the client
+
+- **WHEN** a session's render loop stops after repeated failures
+- **THEN** each attached client is told the session failed, and any caller
+  awaiting a command reply is settled rather than left to time out
+
+#### Scenario: An unmarshalled renderer verb is refused, not passed through
+
+- **WHEN** a front-end calls a renderer mutation verb on a marshalling proxy
+  that has no marshalled implementation of it
+- **THEN** the call is refused with an error naming the missing verb, rather
+  than forwarded to the live renderer on the caller's thread

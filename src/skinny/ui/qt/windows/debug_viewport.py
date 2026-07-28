@@ -115,6 +115,33 @@ class _DebugCanvas(QWidget):
             self._on_wheel(notches)
 
 
+# ── Camera Debug key map ──────────────────────────────────────────
+# One table rather than a control-flow chain, so the reconciled binding set is
+# readable and assertable without a Qt application (usd-scene-editing-ui:
+# interaction bindings for a surface present in more than one front-end are
+# reconciled or recorded). The GLFW counterpart is `DebugViewport._on_key`.
+#
+# Two channels, exactly as on the GLFW viewport: `MOVEMENT_KEYS` are *held* for
+# free-camera movement, `PRESS_ACTIONS` fire on *press*. `D` is in both.
+
+MOVEMENT_KEYS = (Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E)
+
+PRESS_ACTIONS: dict = {
+    Qt.Key_C: ("call", "_toggle_cam_mode"),
+    Qt.Key_F: ("call", "_reset_debug_camera"),
+    Qt.Key_M: ("toggle", "show_mesh_wires"),
+    Qt.Key_G: ("toggle", "show_grid"),
+    Qt.Key_P: ("toggle", "show_focus_plane"),
+    Qt.Key_I: ("toggle", "show_render_area"),
+    Qt.Key_O: ("toggle", "ortho_mode"),
+    Qt.Key_D: ("toggle", "show_dof_planes"),
+    Qt.Key_T: ("call", "view_top"),
+    Qt.Key_B: ("call", "view_back"),
+    Qt.Key_L: ("call", "view_left"),
+    Qt.Key_Space: ("toggle", "show_hud"),
+}
+
+
 # ── Worker-side DebugViewport helpers ─────────────────────────────
 # The DebugViewport owns GPU resources against the worker's VulkanContext, so it
 # lives on the render worker as ``renderer.debug_viewport``. These run inside
@@ -341,23 +368,16 @@ class DebugViewportDock(QDockWidget):
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
-        if key in (Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E):
+        if key in MOVEMENT_KEYS:
             self._wasd[key] = True
-            return
-        calls = {
-            Qt.Key_C: ("call", "_toggle_cam_mode"),
-            Qt.Key_F: ("call", "_reset_debug_camera"),
-            Qt.Key_M: ("toggle", "show_mesh_wires"),
-            Qt.Key_G: ("toggle", "show_grid"),
-            Qt.Key_P: ("toggle", "show_focus_plane"),
-            Qt.Key_I: ("toggle", "show_render_area"),
-            Qt.Key_O: ("toggle", "ortho_mode"),
-            Qt.Key_T: ("call", "view_top"),
-            Qt.Key_B: ("call", "view_back"),
-            Qt.Key_L: ("call", "view_left"),
-            Qt.Key_Space: ("toggle", "show_hud"),
-        }
-        action = calls.get(key)
+            # `D` drives both channels, as it does on the GLFW viewport: held
+            # for right-strafe, pressed to toggle the depth-of-field planes.
+            # Returning here for every movement key is what dropped that
+            # binding. Auto-repeat while strafing must not flip the toggle —
+            # GLFW filters `REPEAT` for the same reason.
+            if key not in PRESS_ACTIONS or event.isAutoRepeat():
+                return
+        action = PRESS_ACTIONS.get(key)
         if action is None:
             super().keyPressEvent(event)
             return

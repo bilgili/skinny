@@ -36,6 +36,7 @@ from skinny.cli_common import (
     apply_sppm_glossy_roughness,
 )
 from skinny.params import _set_nested
+from skinny.render_session import MarshalledRenderer, RenderCommandQueue
 from skinny.renderer import Renderer  # noqa: F401 — type annotation only; built by BringupPlan.create
 from skinny.video_encoder import VideoEncoder
 
@@ -63,10 +64,15 @@ _SPPM_GLOSSY_ROUGHNESS: float | None = None  # SPPM glossy-continue threshold (N
 
 # ── Session management ───────────────────────────────────────────────
 
+
 class SkinnySession:
     """Per-user renderer session."""
 
     MAX_SESSIONS: ClassVar[int] = 4
+    #: Consecutive failed render iterations before the session gives up. A
+    #: single raise must not retire the render thread (qt-render-threading), but
+    #: a permanently broken renderer must not spin either.
+    MAX_RENDER_FAILURES: ClassVar[int] = 10
     _active: ClassVar[dict[str, "SkinnySession"]] = {}
 
     def __init__(self, session_id: str) -> None:
@@ -80,9 +86,16 @@ class SkinnySession:
         self.frame_queue: Queue[tuple[int, bytes]] = Queue(maxsize=2)
         self.accum_frame = 0
         self._lock = Lock()
+        # Renderer mutations posted from the Panel/Bokeh and IOLoop threads; the
+        # render thread runs them between frames (qt-render-threading). Writing
+        # the live renderer from another thread is what let an `mtlx.*` slider
+        # raise `dictionary keys changed during iteration` inside the
+        # accumulation-state hash and retire this session's render thread.
+        self._commands = RenderCommandQueue()
         self._handlers: list["VideoStreamHandler"] = []
         self.ready = False
         self._init_error: Exception | None = None
+        self._render_error: Exception | None = None
         self._init_log: list[str] = []
         self.ctx = None  # VulkanContext | MetalContext, built in initialize()
         self.renderer: Renderer | None = None
@@ -148,43 +161,95 @@ class SkinnySession:
 
     def _render_loop(self) -> None:
         prev = time.perf_counter()
+        failures = 0
         while self._running:
             now = time.perf_counter()
             dt = now - prev
             prev = now
-
-            with self._lock:
-                self.renderer.update(dt)
-                raw = self.renderer.render_headless()
-                self.accum_frame = self.renderer.accum_frame
-                width = self.renderer.width
-                height = self.renderer.height
-                is_h264 = self.encoder.is_h264
-                has_desc = bool(self.encoder.avcc_description)
-
-                if is_h264 and has_desc:
-                    results = self.encoder.encode_h264(raw)
+            try:
+                self._render_iteration(dt)
+            except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+                # A posted command or the frame itself can raise. The session
+                # must never stay marked running with a dead render thread
+                # (qt-render-threading), so report and keep going; give up
+                # visibly if it never recovers.
+                failures += 1
+                self._render_error = exc
+                log.error(
+                    "Session %s render iteration failed (%d/%d)",
+                    self.session_id, failures, self.MAX_RENDER_FAILURES,
+                    exc_info=True,
+                )
+                if failures >= self.MAX_RENDER_FAILURES:
+                    log.error(
+                        "Session %s: stopping render thread after %d consecutive"
+                        " failures", self.session_id, failures,
+                    )
+                    self._running = False
+                    self._notify_render_failed(exc)
                 else:
-                    quality = 92 if self.accum_frame > 30 else 75
-                    results = None
-                    jpeg = self.encoder.encode_jpeg(raw, quality=quality)
+                    time.sleep(0.1)
+                continue
+            failures = 0
 
-            if results is not None:
-                for is_key, avcc_data in results:
-                    self._push_frame(0 if is_key else 1, avcc_data)
+    def _notify_render_failed(self, exc: BaseException) -> None:
+        """Tell every attached client the session is dead, and why.
+
+        Also settles any command still waiting on a reply — a caller blocked in
+        `resize` would otherwise wait out its full timeout against a render
+        thread that is never coming back.
+        """
+        reason = f"{type(exc).__name__}: {exc}"
+        for handler in list(self._handlers):
+            try:
+                handler.send_render_failed(reason)
+            except Exception:  # noqa: BLE001 — one bad socket must not stop the rest
+                log.exception("Session %s: failure notice failed", self.session_id)
+        for command in self._commands.drain():
+            if command.reply is not None and command.reply.set_running_or_notify_cancel():
+                command.reply.set_exception(RuntimeError(
+                    f"render thread stopped: {reason}"
+                ))
+
+    def _render_iteration(self, dt: float) -> None:
+        """One posted-commands + render + encode + push cycle."""
+        with self._lock:
+            # Apply everything the GUI/IOLoop threads posted since the last
+            # frame, then advance — commands land between frames, in order.
+            self._commands.run_pending(
+                self.renderer,
+                on_error=lambda msg: log.error(
+                    "Session %s render command failed: %s",
+                    self.session_id, msg,
+                ),
+            )
+            self.renderer.update(dt)
+            raw = self.renderer.render_headless()
+            self.accum_frame = self.renderer.accum_frame
+            is_h264 = self.encoder.is_h264
+            has_desc = bool(self.encoder.avcc_description)
+
+            if is_h264 and has_desc:
+                results = self.encoder.encode_h264(raw)
             else:
-                self._push_frame(2, jpeg)
-            # Suppresses an unused-variable warning when not in JPEG path.
-            del width, height
+                quality = 92 if self.accum_frame > 30 else 75
+                results = None
+                jpeg = self.encoder.encode_jpeg(raw, quality=quality)
 
-            # Adaptive rate: full speed during interaction, throttle when converging
-            af = self.accum_frame
-            if af > 200:
-                time.sleep(0.5)
-            elif af > 50:
-                time.sleep(0.1)
-            elif af > 10:
-                time.sleep(0.03)
+        if results is not None:
+            for is_key, avcc_data in results:
+                self._push_frame(0 if is_key else 1, avcc_data)
+        else:
+            self._push_frame(2, jpeg)
+
+        # Adaptive rate: full speed during interaction, throttle when converging
+        af = self.accum_frame
+        if af > 200:
+            time.sleep(0.5)
+        elif af > 50:
+            time.sleep(0.1)
+        elif af > 10:
+            time.sleep(0.03)
 
     def _push_frame(self, frame_type: int, data: bytes) -> None:
         header = struct.pack("!BI", frame_type, self.accum_frame)
@@ -202,7 +267,18 @@ class SkinnySession:
                 pass
 
     def set_param(self, path: str, value) -> None:
-        _set_nested(self.renderer, path, value)
+        """Post a parameter write to the render thread.
+
+        Never mutates the live renderer from the caller's thread: an `mtlx.*`
+        write inserts keys into a mapping the accumulation-state hash iterates
+        every frame, which raised `dictionary keys changed during iteration` on
+        the render thread. Coalesced per path so a slider drag cannot grow the
+        queue.
+        """
+        self._commands.post(
+            lambda r, path=path, value=value: _set_nested(r, path, value),
+            coalesce_key=f"param:{path}",
+        )
 
     def handle_camera(self, action: str, data: dict) -> None:
         cam = self.renderer.camera
@@ -268,39 +344,57 @@ class SkinnySession:
 
     # ── Resize + screenshot (called from UI / WS threads) ──────────────
 
+    #: How long a caller waits for the render thread to apply a resize.
+    RESIZE_TIMEOUT_S: ClassVar[float] = 15.0
+
     def resize(self, width: int, height: int) -> tuple[int, int]:
-        """Change render + encoder resolution. Returns the actual (W, H)
-        the renderer settled on (clamped + rounded to workgroup multiple).
+        """Change render + encoder resolution on the renderer's owning thread.
+
+        Returns the actual (W, H) the renderer settled on (clamped + rounded to
+        workgroup multiple). Posting rather than locking is the point:
+        `renderer.resize` destroys and recreates the offscreen image, readback
+        buffer, accumulation image and HUD overlay, so it has to run on the
+        thread that renders — holding the lock only serialises it against the
+        render, it does not move it (qt-render-threading).
+        """
+        return self._commands.post_with_reply(
+            lambda r, w=int(width), h=int(height): self._apply_resize(r, w, h)
+        ).result(timeout=self.RESIZE_TIMEOUT_S)
+
+    def _apply_resize(self, renderer, width: int, height: int) -> tuple[int, int]:
+        """The resize compound, run by the render thread between frames.
+
+        Already inside `_lock` (the drain runs there), so it must not re-acquire
+        it — `Lock` is not reentrant.
         """
         from skinny.video_encoder import VideoEncoder
 
-        with self._lock:
-            self.renderer.resize(width, height)
-            actual_w = int(self.renderer.width)
-            actual_h = int(self.renderer.height)
-            if (actual_w, actual_h) != (self.encoder.width, self.encoder.height):
-                self.encoder.close()
-                self.encoder = VideoEncoder(
-                    actual_w, actual_h, gpu_info=self.ctx.gpu_info,
-                )
-            self.encoder.force_keyframe()
-            # Drop any frames queued at the previous resolution so the
-            # browser doesn't try to decode old-dim H264 packets with
-            # the new decoder configuration.
-            while not self.frame_queue.empty():
-                try:
-                    self.frame_queue.get_nowait()
-                except Empty:
-                    break
+        renderer.resize(width, height)
+        actual_w = int(renderer.width)
+        actual_h = int(renderer.height)
+        if (actual_w, actual_h) != (self.encoder.width, self.encoder.height):
+            self.encoder.close()
+            self.encoder = VideoEncoder(
+                actual_w, actual_h, gpu_info=self.ctx.gpu_info,
+            )
+        self.encoder.force_keyframe()
+        # Drop any frames queued at the previous resolution so the browser
+        # doesn't try to decode old-dim H264 packets with the new decoder
+        # configuration.
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except Empty:
+                break
 
-            # Schedule the type=4 (resize) and type=3 (codec config)
-            # WebSocket writes BEFORE the render thread is unblocked so
-            # the IOLoop sees them ahead of any new H264 frames.
-            desc = self.encoder.avcc_description
-            for handler in list(self._handlers):
-                handler.send_resize(actual_w, actual_h)
-                if desc:
-                    handler.send_codec_config(desc)
+        # Schedule the type=4 (resize) and type=3 (codec config) WebSocket
+        # writes before this frame's encode, so the IOLoop sees them ahead of
+        # any new H264 frame at the new size.
+        desc = self.encoder.avcc_description
+        for handler in list(self._handlers):
+            handler.send_resize(actual_w, actual_h)
+            if desc:
+                handler.send_codec_config(desc)
         return actual_w, actual_h
 
     def screenshot(self, fmt: str) -> bytes:
@@ -366,6 +460,22 @@ class VideoStreamHandler(WebSocketHandler):
     def send_codec_config(self, desc: bytes) -> None:
         header = struct.pack("!BI", 3, 0)
         self._write_safely(header + desc)
+
+    def send_render_failed(self, reason: str) -> None:
+        """Push a type=5 render-failure message, then close the socket.
+
+        A session whose render thread has given up must fail *visibly*
+        (qt-render-threading): without this the stream simply stops and the
+        browser cannot tell a dead session from a slow frame.
+        """
+        blob = reason.encode("utf-8", "replace")[:512]
+        self._write_safely(struct.pack("!BIH", 5, 0, len(blob)) + blob)
+        loop = getattr(self, "_ioloop", None)
+        if loop is not None:
+            try:
+                loop.add_callback(lambda: self.close(1011, "render thread failed"))
+            except Exception:  # noqa: BLE001 — socket already gone
+                pass
 
     def _write_safely(self, data: bytes) -> None:
         # write_message must run on the IOLoop thread; resize/screenshot
@@ -543,9 +653,17 @@ def _build_sidebar_widgets(
         capture_screenshot=_capture,
         load_model=_load_model,
         load_hdr=_load_hdr,
+        # Routed to the session's own resize -- not `renderer.resize` -- so the
+        # lock-held ordering of resize → encoder rebuild → frame drain →
+        # WebSocket notify survives.
+        resize_render_target=session.resize,
     )
 
-    tree = build_main_ui(session.renderer, callbacks=callbacks)
+    # The shared tree binds to the marshalling proxy, never the live renderer.
+    tree = build_main_ui(
+        MarshalledRenderer(session._commands, lambda: session.renderer),
+        callbacks=callbacks,
+    )
     builder = PanelTreeBuilder(tree)
     builder.register_periodic()
     session._panel_builder = builder

@@ -104,11 +104,41 @@ Two rules follow:
   reads race too: the scene graph is rebuilt on the streaming load thread and
   swapped into `renderer.scene_graph`, so reading it from another thread can
   observe a swap mid-flight.
+- **A write through a sub-object is still a renderer mutation.**
+  `setattr(renderer.clock, "playing", …)` writes no top-level attribute, so it
+  slipped past the rule while doing nothing at all: the proxy holds its own
+  `PlaybackClock` and absorbed it. Transport writes go through
+  `QtRendererProxy.set_clock_state(verb, value)`, which updates the mirror *and*
+  posts the same verb; `build_app_ui._set_clock_value` routes there whenever the
+  bound object offers it. Any proxy that holds a local instance of a
+  renderer-owned object has this hazard (change `review-surfaced-defects`).
+- **A front-end binds the shared control tree to a marshalling proxy, never to
+  the live renderer.** Binding the same setters to a proxy in one front-end and
+  to the live object in another gives one set of setters two contradictory
+  thread-safety contracts.
+- **A front-end that offers a control served by a host callback supplies it.**
+  `_add_resolution` used to fall back to calling `renderer.resize` directly when
+  `AppCallbacks.resize_render_target` was absent, which silently converted a
+  missing wire into an unsynchronised resize from the caller's thread. It now
+  raises at tree-build time.
+- **A raising command cannot retire the owning thread.** The loop that drains
+  commands and advances the renderer reports the failure and continues, or stops
+  the session visibly — it never leaves a session marked running with a dead
+  render thread.
 
 The GLFW front-end (`app.py`) owns a queue and calls `run_pending` once per
 iteration, immediately after `glfw.poll_events()` and before `renderer.update(dt)`
 — the same position the Qt worker drains at. The call is unconditional, so
 ordering does not depend on optional features being enabled.
+
+The web front-end (`web_app.py`) owns a queue per session. `SkinnySession`
+drains it inside its render lock at the top of every iteration, and the sidebar
+is built against `MarshalledRenderer` — a read-through, write-posting view of
+the session's renderer. Unlike `QtRendererProxy` it mirrors no state (the Panel
+widgets already poll the live renderer for reads), so a sub-object write cannot
+be absorbed locally. Its `resize_render_target` goes to the session's own
+`resize`, not `renderer.resize`, because that method holds the lock across
+resize → encoder rebuild → stale-frame drain → WebSocket notify, in that order.
 
 ### MCP scene control (`mcp_server.py`, `mcp_auth.py`, `mcp_paths.py`)
 
@@ -1414,9 +1444,9 @@ incrementally moved over.
 | Binding | Type | Content | Owner |
 |---------|------|---------|-------|
 | 0 | UBO | FrameConstants + SkinParams + light uniforms | `bindings.slang` |
-| 1 | RWTexture2D | Swapchain / offscreen output (RGBA8) | `bindings.slang` |
+| 1 | RWTexture2D | Offscreen output (RGBA8) — always `_offscreen_output`, on every path; the windowed path blits it to the acquired swapchain image rather than rebinding | `bindings.slang` |
 | 2 | RWTexture2D | HDR accumulation (RGBA32F) | `bindings.slang` |
-| 3 | RWTexture2D | HUD alpha mask (R8) | `bindings.slang` |
+| 3 | RWTexture2D | HUD alpha mask (R8) — filled + copied by `Renderer._sync_hud_overlay`, which every render path calls so no path composites a previous frame's mask | `bindings.slang` |
 | 4 | Sampler2D | HDR environment map (1024×512) | `environment.slang` |
 | 5 | StructuredBuffer | Mesh vertices (32 B each) | `mesh_head.slang` |
 | 6 | StructuredBuffer | Mesh indices (uint32) | `mesh_head.slang` |

@@ -1577,6 +1577,8 @@ class Renderer:
         # HUD overlay
         self.show_hud = True
         self.hud_text_lines: list[str] = []  # set by the input layer each frame
+        # What `_sync_hud_overlay` last rasterised; None forces the first fill.
+        self._hud_upload_key: tuple | None = None
         self._fps_smooth = 0.0
         self._hud_font = self._load_hud_font()
 
@@ -4167,12 +4169,11 @@ class Renderer:
         # resets on a slider drag in the per-material panel.
         self._material_version: int = 0
 
-        # Offscreen output image + readback buffer. Always created — used by
-        # render_headless() (web path) and by save_screenshot() in both
-        # windowed and headless modes. In windowed mode render() rebinds
-        # binding 1 to the swapchain image per frame, so this offscreen
-        # only sees writes during the screenshot path.
-        # Must be created before _create_descriptors which writes binding 1.
+        # Offscreen output image + readback buffer. Always created — this is the
+        # only thing binding 1 ever points at, on every path: render_headless()
+        # (web + screenshot), save_screenshot(), and windowed render(), which
+        # blits it into the acquired swapchain image rather than rebinding.
+        # Must be created before _create_descriptors, which writes binding 1.
         self._offscreen_output = self._gpu.StorageImage(
             self.ctx, self.width, self.height,
             format="rgba8_unorm",
@@ -9873,7 +9874,14 @@ class Renderer:
         """Render one Metal frame into `_offscreen_output` through the active
         execution mode: the staged wavefront tracer when selected (and
         buildable) — MLT / SPPM / BDPT / path — falling back to the megakernel
-        when the selected staged pass is unbuildable (megakernel-mode session)."""
+        when the selected staged pass is unbuildable (megakernel-mode session).
+
+        Both Metal entry points (`_render_windowed_metal`, `_render_headless_metal`)
+        come through here, so this is where the HUD is filled — on Metal the
+        upload writes the texture directly and there is no command-buffer copy
+        seam to hang it off (renderer-output-fidelity).
+        """
+        self._sync_hud_overlay()
         if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
             integrator = {3: "mlt", 2: "sppm", 1: "bdpt"}.get(
                 self.integrator_index, "path")
@@ -10439,6 +10447,29 @@ class Renderer:
 
         return base.tobytes()
 
+    def _sync_hud_overlay(self, cmd=None) -> None:
+        """Fill the HUD staging buffer for *this* frame, then hand it to the GPU.
+
+        Fill and copy live in one place so they cannot diverge again: `render()`
+        filled and copied while `render_headless()` only copied, so a screenshot
+        taken from a windowed session composited whatever the *previous* frame
+        had uploaded — and both Metal paths returned before the fill entirely,
+        so they only ever showed the zero mask written at init. Every render
+        path calls this; none touches `hud_overlay` directly
+        (renderer-output-fidelity).
+
+        `record_copy` is the Vulkan seam — on Metal `upload` writes the texture
+        immediately and `record_copy` is a documented no-op. The rasterise is
+        skipped when nothing it depends on changed, so a headless sweep that
+        never sets HUD text does not pay a full-resolution Pillow pass per frame.
+        """
+        key = (bool(self.show_hud), self.width, self.height,
+               tuple(self.hud_text_lines))
+        if key != self._hud_upload_key:
+            self.hud_overlay.upload(self._build_hud_bytes())
+            self._hud_upload_key = key
+        self.hud_overlay.record_copy(cmd)
+
     def _current_state_hash(self) -> int:
         """Hash camera + material + light state. Changes reset the accumulation.
 
@@ -10580,7 +10611,12 @@ class Renderer:
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
         )
-        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
+        # NB: the fence is reset immediately before the submit that signals
+        # it, never up here. Resetting early leaves it unsignaled across every
+        # exception-capable step below (uniform pack, HUD rasterise, wavefront
+        # record), so a caller that catches and retries would block forever in
+        # the wait above -- the permanent freeze this loop's guard exists to
+        # prevent (codex pre-merge review, finding 1).
 
         # Drain BXDF visualizer pick callback once its frame is fence-
         # visible. Must run BEFORE _pack_uniforms below so disarming on
@@ -10606,7 +10642,6 @@ class Renderer:
         mtlx_bytes = self._pack_mtlx_skin_array()
         if mtlx_bytes:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
-        self.hud_overlay.upload(self._build_hud_bytes())
 
         # Compute writes binding 1 (offscreen) at the user-chosen render
         # resolution; we then blit that into the acquired swapchain image
@@ -10644,8 +10679,8 @@ class Renderer:
             0, 1, [accum_mem_barrier], 0, None, 0, None,
         )
 
-        # Copy this frame's HUD bytes from staging into the device-local image.
-        self.hud_overlay.record_copy(cmd)
+        # Rasterise and copy this frame's HUD bytes into the device-local image.
+        self._sync_hud_overlay(cmd)
 
         # Execution-mode gate (mirrors render_headless): in wavefront mode the
         # staged compute pipeline writes the offscreen image; megakernel binds
@@ -10772,6 +10807,7 @@ class Renderer:
             signalSemaphoreCount=1,
             pSignalSemaphores=[self.render_finished[image_index]],
         )
+        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
         vk.vkQueueSubmit(self.ctx.compute_queue, 1, [submit_info], self.in_flight_fences[f])
 
         # Present
@@ -10796,10 +10832,11 @@ class Renderer:
     def render_headless(self) -> bytes:
         """Render one frame to an offscreen image and return raw RGBA8 pixels.
 
-        Works in both headless and windowed modes — binding 1 (storage
-        image output) is rewritten to ``_offscreen_output`` here so a
-        windowed session that just rebound binding 1 to a swapchain image
-        in render() doesn't corrupt the screenshot.
+        Works in both headless and windowed modes: binding 1 (storage image
+        output) always points at ``_offscreen_output``, written once at init and
+        again on resize. ``render()`` does not rebind it — it blits the offscreen
+        image into the acquired swapchain image — so there is nothing here to
+        restore.
         """
         # Backend not built yet — caller asked for a screenshot before any
         # scene/model was loaded. Return a fully-zeroed RGBA8 frame so the
@@ -10825,25 +10862,12 @@ class Renderer:
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
         )
-        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
-
-        # Point binding 1 at the offscreen image. In headless mode this is
-        # already its initial value; in windowed mode render() points it at
-        # the acquired swapchain image, so we restore it here.
-        offscreen_info = vk.VkDescriptorImageInfo(
-            imageView=self._offscreen_output.view,
-            imageLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-        )
-        vk.vkUpdateDescriptorSets(
-            self.ctx.device, 1,
-            [vk.VkWriteDescriptorSet(
-                dstSet=self.descriptor_sets[f],
-                dstBinding=1, dstArrayElement=0, descriptorCount=1,
-                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                pImageInfo=[offscreen_info],
-            )],
-            0, None,
-        )
+        # NB: the fence is reset immediately before the submit that signals
+        # it, never up here. Resetting early leaves it unsignaled across every
+        # exception-capable step below (uniform pack, HUD rasterise, wavefront
+        # record), so a caller that catches and retries would block forever in
+        # the wait above -- the permanent freeze this loop's guard exists to
+        # prevent (codex pre-merge review, finding 1).
 
         self.uniform_buffer.upload(self._pack_uniforms())
         mtlx_bytes = self._pack_mtlx_skin_array()
@@ -10868,12 +10892,13 @@ class Renderer:
             0, 1, [accum_mem_barrier], 0, None, 0, None,
         )
 
-        # Push (pre-zeroed) HUD staging into the device-local image. Without
-        # this the GPU side of hud_overlay has UNDEFINED contents after a
-        # fresh allocation (driver-dependent garbage) and the shader's
-        # binding 3 sample reads garbage alpha — visible as smeared/banded
-        # artefacts in the rendered frame after a resize.
-        self.hud_overlay.record_copy(cmd)
+        # Rasterise and copy this frame's HUD bytes into the device-local image.
+        # The fill is what a screenshot needs to composite current text rather
+        # than the previous frame's; the copy is also what keeps the GPU-side
+        # image from holding UNDEFINED contents after a fresh allocation
+        # (driver-dependent garbage read as alpha through binding 3 — visible
+        # as smeared/banded artefacts after a resize).
+        self._sync_hud_overlay(cmd)
 
         # Execution-mode gate: in wavefront mode a staged compute pipeline writes
         # the accumulation image; megakernel is the default in-kernel path. A
@@ -10946,6 +10971,7 @@ class Renderer:
             commandBufferCount=1,
             pCommandBuffers=[cmd],
         )
+        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
         vk.vkQueueSubmit(self.ctx.compute_queue, 1, [submit_info], self.in_flight_fences[f])
 
         vk.vkWaitForFences(

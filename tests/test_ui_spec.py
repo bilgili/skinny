@@ -114,13 +114,27 @@ def _collect_bound_paths(node: spec.Node) -> list[str]:
     return out
 
 
+def _callbacks(**kwargs):
+    """`AppCallbacks` with the required resize wire supplied.
+
+    A front-end that offers the resolution control must supply
+    `resize_render_target` (qt-render-threading): `build_main_ui` refuses to
+    build that control against the live renderer, because doing so resizes the
+    render target from whatever thread the widget fired on.
+    """
+    from skinny.ui.build_app_ui import AppCallbacks
+
+    kwargs.setdefault("resize_render_target", lambda w, h: (int(w), int(h)))
+    return AppCallbacks(**kwargs)
+
+
 def test_every_param_bound_exactly_once(stub_renderer):
     """Every entry from ``build_all_params`` either appears as a
     Slider/Combo bound to its path, or is a fallback-light (IBL + Direct
     Light) param — those are dropped from the sidebar entirely, not
     exposed by any widget — exactly once.
     """
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     bound = _collect_bound_paths(tree)
     bound_set = set(bound)
 
@@ -146,7 +160,7 @@ def test_fallback_light_params_not_bound(stub_renderer):
     tree — no Slider/Combo binds them, and no Color/DirectionPicker widget
     is built for them either.
     """
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     bound = set(_collect_bound_paths(tree))
     fallback_paths = {
         p.path for p in build_all_params(stub_renderer)
@@ -162,7 +176,7 @@ def test_fallback_light_params_not_bound(stub_renderer):
 
 def test_top_level_section_order(stub_renderer):
     """Backends rely on stable section ordering. Lock it."""
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     titles = [c.title for c in tree.children
               if isinstance(c, (spec.Section, spec.DynamicSection))]
     assert titles == [
@@ -199,7 +213,7 @@ def test_dedicated_widgets_present(stub_renderer):
     """ResolutionPicker + ScreenshotPicker — sidebar widgets that don't
     map to a single ParamSpec.path.
     """
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     kinds = {type(n).__name__ for n in spec.walk(tree)}
     for required in ("ResolutionPicker", "ScreenshotPicker"):
         assert required in kinds, f"Missing {required} in tree"
@@ -217,7 +231,7 @@ def test_animation_section_hidden_without_animation(stub_renderer):
     from skinny.playback import PlaybackClock
     stub_renderer.clock = PlaybackClock(has_animation=False)
     stub_renderer.has_usd_camera = False
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     dyn = _find_dynamic_section(tree, "Animation")
     assert dyn is not None
     sub = spec.UIBuilder()
@@ -233,7 +247,7 @@ def test_animation_section_controls_present(stub_renderer):
     )
     stub_renderer.has_usd_camera = True
     stub_renderer.camera_mode = "orbit"
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     dyn = _find_dynamic_section(tree, "Animation")
     assert dyn is not None
     sub = spec.UIBuilder()
@@ -247,7 +261,7 @@ def test_animation_section_controls_present(stub_renderer):
 
 def test_scene_controls_hidden_without_declarations(stub_renderer):
     stub_renderer._usd_controls = []
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     dyn = _find_dynamic_section(tree, "Scene Controls")
     assert dyn is not None
     sub = spec.UIBuilder()
@@ -264,7 +278,7 @@ def test_scene_controls_build_widgets(stub_renderer):
         ControlSpec(name="env", label="Env", type="combo",
                     target="renderer:env_index", choices=["a", "b"]),
     ]
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     dyn = _find_dynamic_section(tree, "Scene Controls")
     sub = spec.UIBuilder()
     dyn.build(sub)
@@ -304,10 +318,8 @@ def test_window_openers_in_callbacks(stub_renderer):
     they live on AppCallbacks for the backend to expose (menu in Qt,
     button row in Panel). Confirm the dataclass still carries them.
     """
-    from skinny.ui.build_app_ui import AppCallbacks
-
     fired: list[str] = []
-    cb = AppCallbacks(
+    cb = _callbacks(
         open_scene_graph=lambda: fired.append("sg"),
         open_material_graph=lambda: fired.append("mg"),
         open_bxdf_visualizer=lambda: fired.append("bxdf"),
@@ -350,8 +362,21 @@ def _find_combo(tree, path):
 def test_execution_mode_not_a_runtime_toggle(stub_renderer):
     """The execution mode is a session-fixed CLI selection, so it must NOT be
     bound as a Combo in the data-driven UI tree any front-end renders."""
-    tree = build_main_ui(stub_renderer)
+    tree = build_main_ui(stub_renderer, callbacks=_callbacks())
     assert "execution_mode_index" not in _collect_bound_paths(tree), (
         "execution mode must not be a runtime GUI toggle"
     )
     assert _find_combo(tree, "execution_mode_index") is None
+
+
+def test_resolution_control_requires_the_resize_callback(stub_renderer):
+    """Omitting `resize_render_target` used to fall back to calling
+    `renderer.resize` directly from the caller's thread — a silent
+    unsynchronised resize of the offscreen image, readback buffer,
+    accumulation image and HUD overlay while the render thread may be inside
+    them (review-surfaced-defects defect 2). It is now a build-time error.
+    """
+    from skinny.ui.build_app_ui import AppCallbacks
+
+    with pytest.raises(ValueError, match="resize_render_target"):
+        build_main_ui(stub_renderer, callbacks=AppCallbacks())
