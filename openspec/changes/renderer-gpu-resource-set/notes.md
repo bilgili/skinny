@@ -141,3 +141,41 @@ rebind was a separate call to remember. That duplication is what let binding 49
   to `main`.
 - `ruff` clean. Note that bare `ruff check src/` inspects **0 files** here (the
   root `.gitignore` is `*`), so it was run over an explicit tracked-file list.
+
+## Pre-merge review (codex + an independent architect reviewer)
+
+Both reviewers were given the Principal Software Architect framing and told to
+judge ownership, seams and data flow before line-level correctness. They agreed
+on the architecture — ownership, the one backend branch, the `write_binding`
+boundary, and recording the three orders rather than deriving them — and
+between them found five things worth acting on. All are fixed; none required
+changing the design.
+
+Note: `codex review` refuses a custom prompt alongside `--base`/`--uncommitted`,
+so the architect framing was delivered by running it in a scratch worktree
+where the change is the uncommitted state.
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| 1 | P2 / LOW | `adopt()` closed the *teardown* double free but the Metal record-drain **grow** path reintroduced it: the caller freed `_drain_buffer`, which by then WAS the `record_buffer` slot occupant, and `adopt` then freed it again. | Caller asks `owns()` first; `adopt` is the single destroyer. Gated by `test_metal_record_drain_grow_does_not_double_free`, which drives the real `_ensure_wf_record_drain` and fails with "StorageBuffer destroyed twice" without the guard. |
+| 2 | MEDIUM | Capacities lived on **both** the renderer and `_gpu_set.sizes`; three growth sites wrote two adjacent lines. The same two-copy invariant this change removes for buffers, one level up. | Capacities are allocation inputs and now live on `sizes` only, via forwarding properties. Growth sites bump once. |
+| 3 | MEDIUM | Bindings 52–57 stated in `gpu_resources.MLT_BINDINGS` **and** `WavefrontMltPass._BINDINGS`; the source gate only greps `renderer.py` and cannot see them drift. | Cross-check test pins the two equal. (Restructuring the MLT pass is out of scope.) |
+| 4 | P3 / MEDIUM | `metal_bindless()` had **zero callers** while four dispatch sites hand-built the same comprehension from the private `texture_pool._slots`. An unused method on the owner is worse than none — it reads as covered. | Both megakernel and preview dispatch sites now take it from the set. |
+| 5 | LOW | Two `hasattr(self, "light_splat_buffer")` guards went vacuous once resource attributes became properties: always `True`, so the intended skip-if-absent became `None.fill_zero_sync()`. | Both test for `None`. |
+
+**Accepted, not fixed** (recorded so the next reader does not re-litigate):
+
+- `SceneResourceSet.stub()` returns `None` for unstubbed resources rather than
+  raising, so a test that under-stubs fails deep in renderer code. Acceptable:
+  the alternative is a stricter fake that every future test must fully populate.
+- `replace()` nulls the whole group before allocating, so an allocation failure
+  mid-group leaves `None` slots. Deliberate — it avoids transiently holding two
+  copies of a large mesh — and not a regression (pre-change the same failure
+  left dangling destroyed objects).
+
+The reviewers independently confirmed, line by line against `git show main:`,
+that `VULKAN_WRITE_SEQUENCE` and `DESTROY_SEQUENCE` reproduce the pre-change
+sequences entry for entry, that `pool_sizes()` reproduces the hand-maintained
+tally it replaced, that `metal_binds()` produces the identical name→resource
+dict, that the allocation-before-seeding reordering reads nothing early, and
+that all 67 pre-change resource assignment sites map to a set call.
