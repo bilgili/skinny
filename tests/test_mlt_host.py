@@ -166,14 +166,24 @@ def test_metal_mlt_recorder_flushes_every_sub_batch():
 
 
 def test_metal_mlt_binds_the_chain_buffers_by_name():
-    # Metal has no descriptor sets: the Vulkan bindings 52–56 become Slang
-    # global names merged into the per-dispatch bind map.
-    src = _read("metal_wavefront.py")
-    start = src.index("class MetalWavefrontMltPass")
-    body = src[start:]
+    # Metal has no descriptor sets: the Vulkan bindings become Slang global
+    # names merged into the per-dispatch bind map. Since change
+    # mlt-binding-declaration those names are stated once, in
+    # `wavefront_layout.MLT_CHAIN_BUFFERS`, and the pass projects its bind map
+    # off that — so this asserts the declaration carries them and the pass
+    # derives from it, instead of re-asserting a literal in the pass.
+    from skinny.wavefront_layout import MLT_CHAIN_BUFFERS
+
+    declared = {d.metal_name for d in MLT_CHAIN_BUFFERS}
     for name in ("mltPrimarySamples", "mltChainMeta", "mltCurrentRecords",
-                 "mltBootstrapWeights", "mltChainSeeds"):
-        assert name in body, f"Metal MLT pass must bind {name}"
+                 "mltBootstrapWeights", "mltChainSeeds", "mltProposalRecords"):
+        assert name in declared, f"Metal MLT pass must bind {name}"
+
+    body = _read("metal_wavefront.py")
+    body = body[body.index("class MetalWavefrontMltPass"):]
+    assert "d.metal_name: self.buffers[d.key]" in body and \
+        "MLT_CHAIN_BUFFERS" in body, \
+        "the Metal bind map must be projected off MLT_CHAIN_BUFFERS"
 
 
 def test_bootstrap_round_trip_order_is_shared_by_both_backends():
@@ -382,8 +392,17 @@ def test_vk_wavefront_has_mlt_pass_and_recorder():
 
 
 def test_scene_layout_declares_mlt_bindings_for_wavefront():
+    # The layout must declare every MLT binding the shader references — one
+    # omitted is UB on Vulkan and a hard `SPIR-V to MSL conversion error:
+    # nullptr` on MoltenVK. Since change mlt-binding-declaration the numbers
+    # come off `wavefront_layout` rather than a literal here, so assert the
+    # derivation and the values, not the text of a copy.
+    from skinny.wavefront_layout import mlt_binding_numbers
+
+    assert mlt_binding_numbers() == (52, 53, 54, 55, 56, 57), \
+        "57 = mltProposalRecords, change spectral-mlt"
     src = _read("vk_compute.py")
     assert "mlt_bindings" in src
-    assert "(52, 53, 54, 55, 56, 57)" in src, \
-        "the wavefront scene set-0 layout must declare MLT bindings 52-57 " \
-        "(57 = mltProposalRecords, change spectral-mlt)"
+    assert "for _mlt_binding in mlt_binding_numbers()" in src, \
+        "the wavefront scene set-0 layout must derive its MLT binding " \
+        "entries from wavefront_layout.mlt_binding_numbers()"

@@ -31,12 +31,21 @@ Binding numbers are literal here on purpose (design D2): ``docs/Architecture.md`
 holds the authoritative binding map and ``bindings.slang`` declares the same
 numbers. This module relocates them next to the allocation they belong to; it
 does not derive them.
+
+One exception, and it runs the other way: the **MLT chain bindings (52–57)** are
+DERIVED, from ``wavefront_layout.MLT_CHAIN_BUFFERS`` (change
+mlt-binding-declaration). Those buffers are pass-owned, not renderer-owned, and
+their Vulkan binding travels with a Metal shader-global name and a size key that
+this module never sees — so the pairing is declared once, beside the sizes, and
+gated against the shader. See :data:`MLT_BINDINGS` below.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+from skinny.wavefront_layout import mlt_binding_numbers
 
 # Descriptor classes. `bindless` is binding 14's TexturePool array, written per
 # filled slot rather than as a single descriptor.
@@ -426,11 +435,17 @@ VULKAN_WRITE_SEQUENCE: tuple[str, ...] = (
     "_spectral_mat_emission_buffer",
 )
 
-# MLT chain buffers (52-57): only the wavefront (`scene_bindings_only`) layout
-# declares them, and they are seeded with the record counter as a dummy until
+# MLT chain buffers: only the wavefront (`scene_bindings_only`) layout declares
+# them, and they are seeded with the record counter as a dummy until
 # `_ensure_wavefront_mlt_pass` rebinds the real chain buffers — the 36/37
 # record-dump precedent. Written after 37 and before the spectral tables.
-MLT_BINDINGS: tuple[int, ...] = (52, 53, 54, 55, 56, 57)
+#
+# DERIVED, not stated (change mlt-binding-declaration): the numbers, the Metal
+# global names and the sizes are one declaration in `wavefront_layout`, checked
+# against the shader by `tests/test_mlt_binding_declaration.py`. This module is
+# a consumer — it needs the numbers only, for the dummy writes and the pool
+# count. `MLT_BINDINGS` keeps its name and shape (design D3).
+MLT_BINDINGS: tuple[int, ...] = mlt_binding_numbers()
 MLT_DUMMY_ATTR = "record_counter"
 
 # Teardown order, transcribed from the instrumented pre-change `cleanup`.

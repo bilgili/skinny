@@ -235,6 +235,19 @@ strides match: 16 bytes for a primary sample, 32 bytes for chain metadata, and
 source of truth and sizes persistent state by **chain count**, never by the
 ordinary wavefront stream tile.
 
+The table above is not a fourth copy of these facts: it renders
+`wavefront_layout.MLT_CHAIN_BUFFERS` (change `mlt-binding-declaration`), the
+single host declaration that carries each buffer's size key, Vulkan binding and
+Metal shader-global name **together**. The Vulkan pass, the Metal pass,
+`gpu_resources.MLT_BINDINGS` and `vk_compute`'s set-0 layout all derive from it;
+none states a binding number or a Metal name of its own, and
+`tests/test_mlt_binding_declaration.py` fails the build if one starts to. The
+check that matters is against the **shader**, which states binding and name in
+one declaration — because a *transposed* pairing (binding 54 given
+`mltChainSeeds`) is individually valid at every field, allocates and binds six
+correct buffers, and would surface only as a silent one-backend image
+divergence hidden under MLT's 0.15 self-consistency tolerance.
+
 ## Host and backend orchestration
 
 The backend-neutral ordering lives in `wavefront_driver.py`:

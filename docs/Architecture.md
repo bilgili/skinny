@@ -1562,6 +1562,23 @@ precedent). On Metal they all bind by name so the `vk::binding` index is inert.
 The full state and algorithm reference is
 [MetropolisLightTransport.md](MetropolisLightTransport.md).
 
+**One host declaration owns rows 52–57** (change `mlt-binding-declaration`):
+`wavefront_layout.MLT_CHAIN_BUFFERS` states, per buffer, its `mlt_buffer_sizes`
+key **together with** its Vulkan binding and its Metal shader-global name — the
+same pairing the shader states in one `[[vk::binding(N)]] … <name>` line. Every
+consumer derives from it and none may restate it: `vk_compute`'s set-0 layout
+entries, `gpu_resources.MLT_BINDINGS` (creation-time dummy writes + pool count),
+`WavefrontMltPass`'s descriptor writes, and `MetalWavefrontMltPass`'s
+bind-by-name map. The rule exists because the failure mode here is a
+**transposition**, not an omission: an omission is a `KeyError` or a MoltenVK
+layout error, but a valid binding paired with the wrong buffer allocates, binds
+and dispatches, and silently diverges one backend's image — which MLT's 0.15
+self-consistency tolerance would charge to Markov correlation.
+`tests/test_mlt_binding_declaration.py` gates the declaration against the
+shader's own pairing (count-checked first, so it cannot pass vacuously) and
+fails the build if any consumer re-introduces a binding number or a Metal
+global name of its own.
+
 `commonSampler` is created **repeat/repeat** to match the Vulkan per-slot
 samplers (the `TexturePool` default is `wrap_s = wrap_t = "repeat"`). One shared
 sampler cannot honour per-texture USD `wrapS`/`wrapT`, so repeat/repeat is the

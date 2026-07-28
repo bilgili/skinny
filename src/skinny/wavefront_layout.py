@@ -22,6 +22,8 @@ Two layouts (design B / change metal-wavefront-parity):
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from skinny import slang_layout
 from skinny.slang_layout import (  # noqa: F401  (re-exported for call sites/tests)
     SLANG_MSL_ALIGNS,
@@ -277,6 +279,53 @@ def sppm_grid_buffer_sizes(num_pixels: int) -> dict[str, int]:
 
 MLT_MAX_DIMS = 192          # must match common.slang MLT_MAX_DIMS
 MLT_RECORD_SLOTS = 8        # eye record + up to BDPT_MAX_VERTS-1 light splats
+
+
+class MltChainBuffer(NamedTuple):
+    """One MLT chain buffer's cross-backend identity, stated once.
+
+    ``key`` indexes :func:`mlt_buffer_sizes`; ``binding`` is the Vulkan set-0
+    descriptor binding; ``metal_name`` is the Slang global the Metal pass binds
+    by name. The shader states the same pairing in a single declaration
+    (``[[vk::binding(52)]] … mltPrimarySamples``) — keeping the three here is
+    what lets a hostless gate compare them entry for entry.
+    """
+    key: str
+    binding: int
+    metal_name: str
+
+
+# The declaration (change mlt-binding-declaration). Every consumer derives from
+# this: the Vulkan pass's chain-buffer descriptor writes, the Metal pass's
+# bind-by-name map, `gpu_resources.MLT_BINDINGS` (creation-time dummy writes +
+# pool count), and `vk_compute`'s set-0 layout entries. NOTHING else may state
+# an MLT binding number or Metal global name.
+#
+# Declaration order IS the emission order: the Vulkan descriptor writes and the
+# set-0 layout entries are both emitted by iterating this tuple (52 → 57).
+#
+# `tests/test_mlt_binding_declaration.py` gates this against the shader's own
+# `[[vk::binding(N)]] … <name>` declarations — a transposed pairing (a valid
+# binding paired with the wrong buffer) allocates, binds and runs, and would
+# silently diverge one backend's image, so it is checked rather than trusted.
+MLT_CHAIN_BUFFERS: tuple[MltChainBuffer, ...] = (
+    MltChainBuffer("mlt_primary_samples",   52, "mltPrimarySamples"),
+    MltChainBuffer("mlt_chain_meta",        53, "mltChainMeta"),
+    MltChainBuffer("mlt_current_records",   54, "mltCurrentRecords"),
+    MltChainBuffer("mlt_bootstrap_weights", 55, "mltBootstrapWeights"),
+    MltChainBuffer("mlt_chain_seeds",       56, "mltChainSeeds"),
+    MltChainBuffer("mlt_proposal_records",  57, "mltProposalRecords"),
+)
+
+
+def mlt_binding_numbers() -> tuple[int, ...]:
+    """The Vulkan set-0 bindings the MLT chain buffers occupy, in emission
+    order. Two consumers need exactly this shape: the descriptor-set layout
+    (`vk_compute`) and the creation-time dummy writes (`gpu_resources`). The
+    ``(binding, key)`` and ``(metal_name, key)`` shapes have one consumer each
+    and are projected off :data:`MLT_CHAIN_BUFFERS` at their call site."""
+    return tuple(d.binding for d in MLT_CHAIN_BUFFERS)
+
 
 def mlt_primary_sample_size(*, msl: bool = False) -> int:
     """Byte stride of MltPrimarySample (16 B on both layouts)."""

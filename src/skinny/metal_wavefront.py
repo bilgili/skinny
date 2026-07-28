@@ -1134,7 +1134,7 @@ class MetalWavefrontMltPass:
 
     Compiles the four ``wavefront/wavefront_mlt.slang`` entries in-process via
     SlangPy under ``SKINNY_MLT=1`` (which swaps common.slang's RNG for the
-    primary-sample-space sampler) and owns the five chain buffers, bound by
+    primary-sample-space sampler) and owns the six chain buffers, bound by
     Slang global name — the Metal backend has no descriptor sets, so unlike
     Vulkan there are no scene-set slots 52–57 to rebind: the names simply merge
     into the per-dispatch bind map.
@@ -1151,19 +1151,15 @@ class MetalWavefrontMltPass:
 
     _ENTRIES = ["wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"]
 
-    # Slang global name → mlt_buffer_sizes key (the Vulkan bindings 52–57).
-    _BINDINGS = (
-        ("mltPrimarySamples", "mlt_primary_samples"),
-        ("mltChainMeta", "mlt_chain_meta"),
-        ("mltCurrentRecords", "mlt_current_records"),
-        ("mltBootstrapWeights", "mlt_bootstrap_weights"),
-        ("mltChainSeeds", "mlt_chain_seeds"),
-        ("mltProposalRecords", "mlt_proposal_records"),
-    )
+    # Slang global name → mlt_buffer_sizes key: projected off the one
+    # declaration in `wavefront_layout.MLT_CHAIN_BUFFERS` (change
+    # mlt-binding-declaration). The Metal names and the Vulkan bindings are the
+    # two halves of the same fact, and the shader states them together — so the
+    # host states them together too, instead of once per backend.
 
     def __init__(self, ctx, shader_dir: Path, num_pixels: int, num_chains: int,
                  bootstrap_samples: int, spectral: bool = False) -> None:
-        from skinny.wavefront_layout import mlt_buffer_sizes
+        from skinny.wavefront_layout import MLT_CHAIN_BUFFERS, mlt_buffer_sizes
 
         self.ctx = ctx
         self.shader_dir = Path(shader_dir)
@@ -1208,11 +1204,18 @@ class MetalWavefrontMltPass:
         # result against reflection rather than assuming the two never diverge.
         sizes = mlt_buffer_sizes(self.num_chains, self.bootstrap_samples,
                                  msl=self._variant_key.target is Target.METAL)
-        for name, key, count in (
-            ("mltChainMeta", "mlt_chain_meta", self.num_chains),
-            ("mltBootstrapWeights", "mlt_bootstrap_weights", self.bootstrap_samples),
-            ("mltChainSeeds", "mlt_chain_seeds", self.num_chains),
+        # One element per chain / per bootstrap sample, so `size // count` is
+        # the stride; the three multi-element buffers (MLT_MAX_DIMS dims,
+        # MLT_RECORD_SLOTS records) are not checkable this way. The element
+        # count is a sizing fact and stays here — the Slang global NAME is
+        # identity and comes off the one declaration.
+        _by_key = {d.key: d.metal_name for d in MLT_CHAIN_BUFFERS}
+        for key, count in (
+            ("mlt_chain_meta", self.num_chains),
+            ("mlt_bootstrap_weights", self.bootstrap_samples),
+            ("mlt_chain_seeds", self.num_chains),
         ):
+            name = _by_key[key]
             refl = _reflect_element(mutate, name)
             stride = (refl or (None, 0))[1]
             expect = sizes[key] // max(1, count)
@@ -1222,11 +1225,12 @@ class MetalWavefrontMltPass:
                     f"wavefront_layout.mlt_buffer_sizes {expect}B")
 
         self.buffers: dict[str, StorageBuffer] = {
-            key: StorageBuffer(ctx, sizes[key]) for _, key in self._BINDINGS
+            d.key: StorageBuffer(ctx, sizes[d.key]) for d in MLT_CHAIN_BUFFERS
         }
         for buf in self.buffers.values():
             buf.fill_zero_sync()
-        self._bind_map = {name: self.buffers[key] for name, key in self._BINDINGS}
+        self._bind_map = {d.metal_name: self.buffers[d.key]
+                          for d in MLT_CHAIN_BUFFERS}
 
         spy = ctx._spy
         self.default_tex = ctx.device.create_texture(
