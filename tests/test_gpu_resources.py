@@ -318,6 +318,18 @@ def test_resize_replaces_every_size_dependent_resource():
     assert rset.sizes.width == 128 and rset.sizes.height == 256
 
 
+def test_resize_regrows_the_bdpt_light_splat_buffer():
+    """The BDPT splat is indexed `(pixel.y * fc.width + pixel.x) * 3` with no
+    bounds check against the allocation, so leaving binding 21 at the old
+    extent wrote past the end of the buffer after any viewport grow."""
+    rset, _ = build()
+    old = rset.light_splat_buffer
+    rset.resize(128, 256)
+    assert rset.light_splat_buffer is not old
+    assert old.destroyed
+    assert rset.light_splat_buffer.args == (128 * 256 * 3 * 4,)
+
+
 def test_rebind_is_a_no_op_on_metal():
     """The Metal adapter has no descriptor step at all — the per-method
     `is_metal` early-returns the rebind helpers used to open with are gone."""

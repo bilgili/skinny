@@ -10193,7 +10193,8 @@ class Renderer:
 
     def resize(self, width: int, height: int) -> None:
         """Change *render* resolution at runtime. Recreates the offscreen
-        output, readback buffer, accumulation image, and HUD overlay.
+        output, readback buffer, accumulation image, HUD overlay, and the
+        BDPT light-tracer splat buffer.
 
         The window-side swapchain is intentionally not touched — surface
         capabilities lock its extent to the OS window size. In windowed
@@ -10220,10 +10221,11 @@ class Renderer:
         self.ctx.height = height
 
         # The declarations tagged size-dependent — binding 1 (offscreen output),
-        # binding 2 (accumulation), binding 3 (HUD overlay) and the readback
-        # staging buffer — are recreated and rebound together. Vulkan binds them
-        # through a persistent descriptor set, so the set-0 entries must be
-        # re-pointed at the fresh images; Metal has no persistent descriptor set
+        # binding 2 (accumulation), binding 3 (HUD overlay), binding 21 (the
+        # BDPT light-tracer splat target) and the readback staging buffer — are
+        # recreated and rebound together. Vulkan binds them through a persistent
+        # descriptor set, so the set-0 entries must be re-pointed at the fresh
+        # images; Metal has no persistent descriptor set
         # (the dispatch binds them by reference each frame), and the set's one
         # binding step already knows the difference.
         self._gpu_set.resize(width, height, descriptor_sets=self.descriptor_sets)

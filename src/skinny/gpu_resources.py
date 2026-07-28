@@ -328,9 +328,15 @@ DECLARATIONS: tuple[ResourceDecl, ...] = (
         binding=19, metal="stdSurfaceParams", descriptor=BUFFER,
     ),
     ResourceDecl(
+        # Viewport-sized: the BDPT splat indexes it as
+        # `(pixel.y * fc.width + pixel.x) * 3` with no bounds check against the
+        # allocation (the only clamp is the camera's own frame test against
+        # fc.width/fc.height), so a grow that left this at the old extent wrote
+        # past the end.
         "light_splat_buffer", "StorageBuffer",
         lambda s: (s.width * s.height * 3 * 4,),
         binding=21, metal="lightSplatBuffer", descriptor=BUFFER,
+        size_dependent=True,
     ),
     ResourceDecl(
         "gizmo_segments_buffer", "StorageBuffer",
