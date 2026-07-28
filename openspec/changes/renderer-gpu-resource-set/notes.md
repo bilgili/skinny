@@ -110,7 +110,7 @@ rebind was a separate call to remember. That duplication is what let binding 49
 
 ## Gate evidence
 
-- **Hostless:** `tests/test_gpu_resources.py`, 23 tests — declarations vs the
+- **Hostless:** `tests/test_gpu_resources.py`, 32 tests — declarations vs the
   captured golden on all three configurations (name, kind, size inputs, kwargs,
   allocation order), the Vulkan write sequence, the Metal bind names, the
   teardown order, alloc == destroy, plus the source gate that fails if a
@@ -172,6 +172,14 @@ where the change is the uncommitted state.
   mid-group leaves `None` slots. Deliberate — it avoids transiently holding two
   copies of a large mesh — and not a regression (pre-change the same failure
   left dangling destroyed objects).
+
+**Re-gated after the fixes.** The capacity change touches every growth path, so
+the parity matrix was re-run on a fresh detached worktree pinned to the
+post-review commit: **20 passed, 1 skipped, 1 xfailed, 0 failed** over 112
+renders — identical to the pre-review run, same pre-existing `wfBdptWalk` skip,
+tree verified clean throughout. Metal and Vulkan megakernel renders remain
+bit-identical to `main` (maxdiff 0), hostless 2493 passed with the same 7
+pre-existing failures, ruff clean.
 
 The reviewers independently confirmed, line by line against `git show main:`,
 that `VULKAN_WRITE_SEQUENCE` and `DESTROY_SEQUENCE` reproduce the pre-change

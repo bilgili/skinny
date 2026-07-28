@@ -118,6 +118,9 @@
       It is decided entirely by shader source + build defines, and
       `src/skinny/shaders/`, `shader_variants.py`, `vk_wavefront.py` and
       `metal_wavefront.py` are all untouched here.
+      RE-GATED after the pre-merge review fixes (which touched every growth
+      path): same result, 20 passed / 1 skipped / 1 xfailed / 0 failed, on a
+      fresh worktree pinned to the post-review commit.
       NOTE ON PROVENANCE: a first sweep (also 20 passed / 1 skipped / 1 xfailed)
       was discarded as a gate because an unrelated background task edited the
       worktree mid-run. This result comes from a detached worktree pinned to the
