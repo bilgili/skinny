@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import vulkan as vk
 
-from skinny.renderer import FreeCamera, OrbitCamera, _orbit_distance_cap
+from skinny.camera import FreeCamera, OrbitCamera, _orbit_distance_cap
 from skinny.vk_context import VulkanContext
 
 

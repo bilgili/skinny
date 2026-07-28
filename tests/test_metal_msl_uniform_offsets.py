@@ -39,11 +39,8 @@ _SHADER_DIR = _PROJECT_ROOT / "src" / "skinny" / "shaders"
 # when the Vulkan SDK is not on the dylib path (the host invariants still need the
 # module for the field table + packers).
 try:
-    from skinny.renderer import (
-        _FC_SCALAR_FIELDS,
-        _VK_UNIFORM_BUFFER_BYTES,
-        SkinParameters,
-    )
+    from skinny.renderer import _FC_SCALAR_FIELDS, _VK_UNIFORM_BUFFER_BYTES
+    from skinny.skin_params import SkinParameters
 except OSError as exc:  # pragma: no cover - environment dependent
     pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}",
                 allow_module_level=True)

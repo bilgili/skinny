@@ -410,7 +410,7 @@ linear-HDR read; folded into the display exposure). Retunable via the `film.iso`
 `direct_light_index` and `env_intensity` affect only the synthesized fallback
 pair; authored USD lighting remains controlled by its USD light/material state.
 
-### `SkinParameters` dataclass (`renderer.py:504`)
+### `SkinParameters` dataclass (`skin_params.py`)
 
 The physically-based skin model; `pack()` serialises to the 80-byte std140
 `SkinParams` Slang struct. Fields (defaults): `melanin_fraction=0.15`,
@@ -419,9 +419,16 @@ The physically-based skin model; `pack()` serialises to the 80-byte std140
 `scattering_coefficient=[3.7,4.4,5.05]`, `anisotropy_g=0.8`, `roughness=0.35`,
 `ior=1.4`, `pore_density`, `pore_depth`, `hair_density`, `hair_tilt`.
 
+It lives in `skinny.skin_params`, a module that imports no GPU package (change
+`renderer-pure-core-extraction`). `from skinny.renderer import SkinParameters`
+still works — `renderer` re-exports every moved name — but importing from the
+owning module needs no GPU package.
+
 ### Cameras
 
-`OrbitCamera` (`:708`) and `FreeCamera` (`:804`) are both always live;
+`OrbitCamera` and `FreeCamera` live in `skinny.camera`, which imports no GPU
+package (change `renderer-pure-core-extraction`); `skinny.renderer` re-exports
+both. They are both always live;
 `camera_mode` (`"orbit"` | `"free"` | `"usd"`) selects which feeds the UBO.
 `OrbitCamera`: `orbit(dx,dy)`, `set_distance(v)`, `zoom(d)`, `pan(dx,dy)`,
 `position` (property), `view_matrix()`. `Renderer.toggle_camera_mode()` (`:1324`)

@@ -32,11 +32,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-try:
-    from skinny.renderer import FLAT_MATERIAL_STRIDE, pack_flat_material
-except OSError as exc:  # pragma: no cover - environment dependent
-    pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}",
-                allow_module_level=True)
+from skinny.material_pack import FLAT_MATERIAL_STRIDE, pack_flat_material
 
 pytestmark = pytest.mark.gpu
 

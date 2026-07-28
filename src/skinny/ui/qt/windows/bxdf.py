@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from skinny.bxdf_math import eval_grid, render_lobe_image
-from skinny.renderer import _hashable_value
+from skinny.params import _hashable_value
 
 
 class _LobeCanvas(QLabel):

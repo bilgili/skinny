@@ -141,19 +141,19 @@ def test_pack_uniforms_appends_group_pmf():
 
 
 def test_group_pmf_power_proportional():
-    from skinny.renderer import _sppm_photon_group_pmf
+    from skinny.sppm_budget import _sppm_photon_group_pmf
     pmf = _sppm_photon_group_pmf((1.0, 3.0, 0.0, 4.0), (True, True, False, True))
     assert pmf == (0.125, 0.375, 0.0, 0.5)
 
 
 def test_group_pmf_single_group_is_one():
-    from skinny.renderer import _sppm_photon_group_pmf
+    from skinny.sppm_budget import _sppm_photon_group_pmf
     assert _sppm_photon_group_pmf((0.0, 7.5, 0.0, 0.0), (False, True, False, False)) \
         == (0.0, 1.0, 0.0, 0.0)
 
 
 def test_group_pmf_absent_group_gets_zero_even_with_power():
-    from skinny.renderer import _sppm_photon_group_pmf
+    from skinny.sppm_budget import _sppm_photon_group_pmf
     # A stale power for an absent group (e.g. env with furnaceMode on) must not
     # receive photons: presence gates the pmf, not just the power inputs.
     pmf = _sppm_photon_group_pmf((2.0, 2.0, 0.0, 100.0), (True, True, False, False))
@@ -161,13 +161,13 @@ def test_group_pmf_absent_group_gets_zero_even_with_power():
 
 
 def test_group_pmf_zero_total_falls_back_to_uniform_over_present():
-    from skinny.renderer import _sppm_photon_group_pmf
+    from skinny.sppm_budget import _sppm_photon_group_pmf
     assert _sppm_photon_group_pmf((0.0, 0.0, 0.0, 0.0), (True, False, True, True)) \
         == (1.0 / 3.0, 0.0, 1.0 / 3.0, 1.0 / 3.0)
 
 
 def test_group_pmf_nonfinite_power_treated_as_zero():
-    from skinny.renderer import _sppm_photon_group_pmf
+    from skinny.sppm_budget import _sppm_photon_group_pmf
     pmf = _sppm_photon_group_pmf((float("nan"), 1.0, float("inf"), -5.0),
                                  (True, True, True, True))
     assert pmf == (0.0, 1.0, 0.0, 0.0)
@@ -178,7 +178,7 @@ def test_group_pmf_nonfinite_power_treated_as_zero():
 
 
 def test_group_pmf_no_present_groups_is_all_zero():
-    from skinny.renderer import _sppm_photon_group_pmf
+    from skinny.sppm_budget import _sppm_photon_group_pmf
     assert _sppm_photon_group_pmf((0.0, 0.0, 0.0, 0.0), (False, False, False, False)) \
         == (0.0, 0.0, 0.0, 0.0)
 
@@ -218,14 +218,14 @@ def test_pack_uniforms_honors_pmf_override_hook():
 
 def test_photon_budget_env_free_is_flat_pixels():
     # pmfEnv == 0 must return pixels EXACTLY (env-free renders bit-identical).
-    from skinny.renderer import _sppm_photon_budget
+    from skinny.sppm_budget import _sppm_photon_budget
     assert _sppm_photon_budget(384 * 384, 0.0) == 384 * 384
     assert _sppm_photon_budget(1, 0.0) == 1
 
 
 def test_photon_budget_scales_by_env_pmf_share():
     # N = pixels/(1-pmfEnv): expected NON-env photon count stays exactly pixels.
-    from skinny.renderer import _sppm_photon_budget
+    from skinny.sppm_budget import _sppm_photon_budget
     n = _sppm_photon_budget(100_000, 0.84)
     assert n == round(100_000 / 0.16)  # ×6.25
     # non-env expectation: N·(1−pmfEnv) == pixels (to rounding)
@@ -233,7 +233,7 @@ def test_photon_budget_scales_by_env_pmf_share():
 
 
 def test_photon_budget_caps_at_8x():
-    from skinny.renderer import _sppm_photon_budget
+    from skinny.sppm_budget import _sppm_photon_budget
     assert _sppm_photon_budget(100_000, 1.0) == 800_000
     assert _sppm_photon_budget(100_000, 0.999) == 800_000
 
@@ -241,7 +241,7 @@ def test_photon_budget_caps_at_8x():
 def test_photon_budget_nonfinite_and_out_of_range_pmf_is_flat():
     # The pmf override hook is unvalidated: NaN/inf/negative/>1 must not
     # explode the pack path — clamp to the flat budget (or the cap).
-    from skinny.renderer import _sppm_photon_budget
+    from skinny.sppm_budget import _sppm_photon_budget
     assert _sppm_photon_budget(4096, float("nan")) == 4096
     assert _sppm_photon_budget(4096, float("-inf")) == 4096
     assert _sppm_photon_budget(4096, -0.5) == 4096

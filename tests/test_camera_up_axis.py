@@ -8,9 +8,28 @@ sssdragon) must reconstruct on the authored basis, not a hardcoded world-up of
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from skinny.renderer import _look_at, OrbitCamera, Renderer
+from skinny.camera import _look_at, OrbitCamera
 from skinny.scene import CameraOverride
+
+
+def _have_renderer() -> bool:
+    # The camera math itself is device-free (change renderer-pure-core-extraction),
+    # so most of this file collects and runs anywhere. Two tests below reach
+    # `Renderer._override_to_orbit`, and `skinny.renderer` still imports `vulkan`
+    # at module scope — that raises OSError, not ImportError, without the SDK on
+    # the dynamic-library path, so importorskip does not catch it.
+    try:
+        import skinny.renderer  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+needs_renderer = pytest.mark.skipif(
+    not _have_renderer(), reason="skinny.renderer import unavailable (no Vulkan SDK)"
+)
 
 
 def _norm(v):
@@ -60,6 +79,7 @@ class TestCameraOverrideCarriesUp:
         )
         assert np.allclose(_norm(ov.up), [0.0, 1.0, 0.0], atol=1e-6)
 
+    @needs_renderer
     def test_override_to_orbit_propagates_up_into_view(self):
         # A Z-up authored camera: the resulting OrbitCamera view must honor +Z up.
         up = _norm([0.0, 0.0, 1.0]).astype(np.float32)
@@ -71,6 +91,8 @@ class TestCameraOverrideCarriesUp:
             focal_length_mm=35.0,
             vertical_aperture_mm=24.0,
         )
+        from skinny.renderer import Renderer
+
         cam = OrbitCamera()
         scene = type("S", (), {"world_bounds": staticmethod(lambda: None)})()
         # _override_to_orbit uses no instance state — call unbound with self=None.
@@ -81,6 +103,7 @@ class TestCameraOverrideCarriesUp:
         # The authored +Z up dominates the camera up row, not +Y.
         assert abs(up_row[2]) > abs(up_row[1])
 
+    @needs_renderer
     def test_yup_override_unchanged(self):
         # Back-compat: a Y-up authored camera produces the same view as before
         # (up defaults to +Y; behavior byte-identical).
@@ -91,6 +114,8 @@ class TestCameraOverrideCarriesUp:
             focal_length_mm=50.0,
             vertical_aperture_mm=24.0,
         )
+        from skinny.renderer import Renderer
+
         cam = OrbitCamera()
         scene = type("S", (), {"world_bounds": staticmethod(lambda: None)})()
         Renderer._override_to_orbit(None, cam, ov, scene)

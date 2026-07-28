@@ -72,14 +72,11 @@ def test_mtlx_subsurface_import_carries_same_coeffs(tmp_path):
 
 def test_renderer_detects_and_tags_subsurface():
     from types import SimpleNamespace
-    try:
-        from skinny.renderer import (
-            _material_is_subsurface,
-            MATERIAL_TYPE_SUBSURFACE,
-            MATERIAL_TYPE_FLAT,
-        )
-    except OSError as exc:  # renderer imports vulkan unconditionally
-        pytest.skip(f"renderer import needs the Vulkan SDK on the dylib path: {exc}")
+    from skinny.material_pack import (
+        _material_is_subsurface,
+        MATERIAL_TYPE_SUBSURFACE,
+        MATERIAL_TYPE_FLAT,
+    )
 
     assert MATERIAL_TYPE_SUBSURFACE == 4
     assert MATERIAL_TYPE_SUBSURFACE != MATERIAL_TYPE_FLAT

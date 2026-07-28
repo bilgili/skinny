@@ -15,7 +15,7 @@ class TestPythonPackingSizes:
     """Test Python-side struct packing produces correct byte counts."""
 
     def test_skin_parameters_pack_size(self):
-        from skinny.renderer import SkinParameters
+        from skinny.skin_params import SkinParameters
 
         data = SkinParameters().pack()
         assert len(data) == 80
@@ -25,7 +25,7 @@ class TestPythonPackingSizes:
         # appended at 192/208/224; 240 → 256 (pbrt-cloud-procedural-medium):
         # one float4 (cloud density/wispiness/frequency + pad) appended at 240.
         # The 0..240 prefix layout is unchanged.
-        from skinny.renderer import FLAT_MATERIAL_STRIDE
+        from skinny.material_pack import FLAT_MATERIAL_STRIDE
 
         assert FLAT_MATERIAL_STRIDE == 256
         # Derived from the Slang declaration since change
@@ -41,7 +41,7 @@ class TestPythonPackingSizes:
         assert rows["_transmissionColorDiffuseRough"][0] == 128
 
     def test_flat_material_pack_size(self):
-        from skinny.renderer import pack_flat_material
+        from skinny.material_pack import pack_flat_material
         from types import SimpleNamespace
 
         material = SimpleNamespace(parameter_overrides={})
@@ -57,7 +57,7 @@ class TestPythonPackingSizes:
         opaque glass, base_metalness→0 ⇒ metals render as dielectric).
         """
         from types import SimpleNamespace
-        from skinny.renderer import pack_std_surface_params
+        from skinny.material_pack import pack_std_surface_params
         from skinny.usd_loader import _store_shader_override
 
         overrides: dict[str, object] = {}
@@ -208,7 +208,7 @@ class TestPythonPackingSizes:
         docs/superpowers/specs/2026-05-24-cutout-opacity-fix-design.md).
         """
         from types import SimpleNamespace
-        from skinny.renderer import pack_flat_material, _encode_channel_mask
+        from skinny.material_pack import pack_flat_material, _encode_channel_mask
 
         material = SimpleNamespace(
             parameter_overrides={"opacityThreshold": 0.5},
@@ -236,7 +236,7 @@ class TestPythonPackingSizes:
         diffuseRoughness = 0) when the overrides are absent.
         """
         from types import SimpleNamespace
-        from skinny.renderer import pack_flat_material
+        from skinny.material_pack import pack_flat_material
 
         # Explicit rich inputs land at the documented offsets.
         material = SimpleNamespace(
@@ -265,7 +265,7 @@ class TestPythonPackingSizes:
         σ_s@176, mediumKind@188 (uint, MEDIUM_HOMOGENEOUS=0). Zero for a
         non-subsurface material so the inline pack is inert."""
         from types import SimpleNamespace
-        from skinny.renderer import pack_flat_material
+        from skinny.material_pack import pack_flat_material
 
         mat = SimpleNamespace(parameter_overrides={
             "subsurface_sigma_a": (0.032, 0.17, 0.48),
@@ -310,7 +310,7 @@ class TestSkinParametersFieldPacking:
     """Verify individual field layout of SkinParameters.pack()."""
 
     def test_fields_round_trip(self):
-        from skinny.renderer import SkinParameters
+        from skinny.skin_params import SkinParameters
 
         p = SkinParameters()
         p.melanin_fraction = 0.25

@@ -7,6 +7,33 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The renderer's device-free core is importable without a GPU package**
+  (change `renderer-pure-core-extraction`). `renderer.py` imports `vulkan` at
+  module scope, so the 1 330 lines above the `Renderer` class — the flat-material
+  and standard-surface packers, the camera models and their view/projection math,
+  the film exposure controls and the EXR/Radiance writers, the SPPM photon-budget
+  math, the bindless texture pool, `SkinParameters`, and the small shared helpers
+  — could only be imported where the Vulkan SDK was installed. On a Metal-only
+  host the affected tests skipped, and a skip reads as a pass: the packers that
+  produce the bytes the Metal backend uploads were never actually exercised
+  there. That core now lives in seven modules that import no GPU package —
+  `material_pack.py`, `camera.py`, `film_io.py`, `sppm_budget.py`,
+  `texture_pool.py`, `skin_params.py`, `renderer_helpers.py` — split by subject,
+  each with a consumer that wanted exactly it. `skinny.renderer` re-exports every
+  moved name, so no source call site changed; the tests import from the owning
+  module instead, because a test that reaches through `skinny.renderer` still
+  pulls in `vulkan`. A subprocess gate (`tests/test_pure_core_modules.py`) blocks
+  every GPU package at the meta path and fails if any of the seven stops
+  importing, pulls one in transitively, imports `renderer` back, or gains a name
+  that `renderer` does not re-export. Pure move: every constant value, every
+  packed byte, every camera matrix and both image-writer outputs were captured
+  before and compared after, and the same scene renders to a byte-identical PNG
+  on Metal and on Vulkan. On a host with no Vulkan SDK the affected files go from
+  19 failed / 122 passed / 19 skipped to 0 failed / 188 passed / 14 skipped — the
+  remaining skips genuinely build a `Renderer`.
+
 ### Fixed
 
 - **A parameter edit could freeze a web session's video stream permanently**
