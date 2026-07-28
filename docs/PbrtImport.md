@@ -344,6 +344,40 @@ carried data faithfully (spectral IOR, measured BRDFs) requires the
 matching machinery in skinny's renderer; the loader can grow into the metadata
 incrementally.
 
+## Material override key vocabulary
+
+Beside the carried metadata, the importer authors **override keys** on each
+material's `skinnyOverrides` customData. The loader merges them into
+`Material.parameter_overrides`, and the packers read them there. Those strings
+are a contract across four modules — `pbrt/materials.py` and `pbrt/media.py`
+write them, `usd_loader.py` merges and derives, `material_pack.py` packs,
+`mtlx_synthesis.py` advertises them as editable.
+
+**The vocabulary has one owner: the material field table in `slang_layout.py`**
+(change `flat-material-field-table`; see
+[Architecture.md § Material field table](Architecture.md#material-field-table-change-flat-material-field-table)).
+Do not invent a key at an authoring site — register it in the table first. A key
+the table does not have is **refused** when the material is one the table owns,
+instead of being silently dropped and showing up only as a wrong-looking render.
+
+| Group | Keys |
+|---|---|
+| Flat lobes | `diffuseColor` `roughness` `metallic` `specular` `opacity` `opacityThreshold` `emissiveColor` `ior` `coat` `coat_roughness` `coat_IOR` `coat_color` `transmission_color` `specular_color` `diffuse_roughness` |
+| Spectral identity | `conductor_metal` (named conductor Fresnel) `glass_dispersion` (Cauchy fit) |
+| Subsurface interior | `subsurface_sigma_a` `subsurface_sigma_s` `subsurface_g` |
+| Free-standing medium | `volume_interface` `volume_grid_asset` `volume_cloud` `volume_sigma_a` `volume_sigma_s` `volume_g` `volume_world_to_uvw` |
+| Procedural cloud | `cloud_density` `cloud_wispiness` `cloud_frequency` |
+| standard_surface | the declared fields of `StdSurfaceParams` (`base_color`, `metalness`, `specular_roughness`, `sheen`, `thin_film_IOR`, …) |
+| Recognised, unread | `clearcoat` `clearcoatRoughness` (folded onto `coat`) · `subsurface_eta` (duplicates `ior`) · `pbrt_medium` `volume_grid_field` (import-time bookkeeping) |
+| Renderer-only | `emissive_spectral` (area-light SPD payload) |
+
+A `standard_surface` input reaches the flat packer through
+`slang_layout.std_surface_to_flat()` — four renames (`base_color`→`diffuseColor`,
+`specular_roughness`→`roughness`, `metalness`→`metallic`,
+`specular_IOR`→`ior`) plus eight identity mappings. `opacity` is deliberately
+**not** aliased: it is a `color3` on `standard_surface` and a `float` in the flat
+record.
+
 ## Integrator mapping
 
 The pbrt integrator is carried in `customLayerData["pbrt"]["integrator"]`

@@ -49,6 +49,7 @@ from typing import Any, Optional
 
 import MaterialX as mx
 
+from skinny import slang_layout
 from skinny.materialx_runtime import MaterialLibrary
 
 # ─── Asset / catalog locations ────────────────────────────────────────
@@ -1139,29 +1140,20 @@ _PRESET_INPUT_CACHE: dict[str, tuple[float, bool, dict[str, dict]]] = {}
 # Only inputs `pack_flat_material` reads with a clean 1:1 route are listed. Folded
 # inputs (`base` scales diffuse, `emission`/`emission_color`→emissiveColor,
 # `transmission`→opacity) have no direct packer key, so they are intentionally
-# absent — not advertised (honest, per design D5). Keep in sync with the override
-# keys `pack_flat_material` consumes in renderer.py.
-_STD_SURFACE_TO_FLAT_PACK: dict[str, str] = {
-    "base_color":         "diffuseColor",
-    "specular_roughness": "roughness",
-    "metalness":          "metallic",
-    "specular":           "specular",
-    "specular_color":     "specular_color",
-    "specular_IOR":       "ior",
-    "transmission_color": "transmission_color",
-    "diffuse_roughness":  "diffuse_roughness",
-    "coat":               "coat",
-    "coat_roughness":     "coat_roughness",
-    "coat_color":         "coat_color",
-    "coat_IOR":           "coat_IOR",
-}
+# absent — not advertised (honest, per design D5).
+#
+# A PROJECTION of the one material field table (change
+# flat-material-field-table); the "keep in sync with pack_flat_material" comment
+# that used to sit here is an assertion now (tests/test_material_field_table.py).
+# The table's kind guard is what keeps std_surface `opacity` OUT: it is a
+# `color3` there and a `float` in the flat record, so advertising it would offer
+# an edit `_override_float` discards.
+_STD_SURFACE_TO_FLAT_PACK: dict[str, str] = slang_layout.std_surface_to_flat()
 
-# UsdPreviewSurface override names `pack_flat_material` reads directly
-# (renderer.py) that are NOT reached through a std_surface alias — the loader's
-# emission/opacity folds author these. Keep in sync with pack_flat_material.
-_PREVIEW_SURFACE_FLAT_KEYS: frozenset = frozenset(
-    {"opacity", "opacityThreshold", "emissiveColor"}
-)
+# UsdPreviewSurface override names `pack_flat_material` reads directly that are
+# NOT reached through a std_surface alias — the loader's emission/opacity folds
+# author these. Also a projection of the field table.
+_PREVIEW_SURFACE_FLAT_KEYS: frozenset = slang_layout.PREVIEW_SURFACE_FLAT_KEYS
 
 # The one authoritative set of `parameter_overrides` keys the ACTIVE path-tracing
 # packer (`renderer.pack_flat_material`) actually consumes: the std_surface→flat

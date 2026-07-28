@@ -12,7 +12,7 @@ comment map.
 
 from __future__ import annotations
 
-import struct
+import logging
 
 import numpy as np
 
@@ -172,6 +172,54 @@ _SPECTRAL_METAL_ORDER = tuple(
     k for k, _ in sorted(_CONDUCTOR_METAL_ID.items(), key=lambda kv: kv[1])
 )
 
+class UnknownOverrideKey(ValueError):
+    """A material carried an override key the field table does not have."""
+
+
+def has_data_driven_overrides(material) -> bool:
+    """True when this material's ``parameter_overrides`` serve a vocabulary the
+    field table does not own.
+
+    A MaterialX-targeted material's overrides may carry the referenced
+    document's own input names (the skin library's ``layer_top_melanin``, a
+    material graph's parameters), and a Python material's may carry its
+    slangpile inputs. Those names are DATA, so an unknown key there is not
+    evidence of a typo and must not fail the upload.
+    """
+    return bool(getattr(material, "mtlx_target_name", None)
+                or getattr(material, "python_module", None))
+
+
+def check_material_vocabulary(material) -> list[str]:
+    """Report — and, where the field table is the authority, refuse — override
+    keys outside the vocabulary. Returns the unknown keys.
+
+    A misspelled override used to be silently ignored: the only signal was a
+    wrong-looking render. It is an error now for the materials the table owns
+    (plain UsdPreviewSurface / pbrt-imported flat materials), and a warning for
+    the ones whose vocabulary is data (see :func:`has_data_driven_overrides`) —
+    refusing there would fail a legitimate scene.
+    """
+    overrides = getattr(material, "parameter_overrides", None) or {}
+    unknown = slang_layout.unknown_override_keys(overrides)
+    if not unknown:
+        return unknown
+    name = getattr(material, "name", "<unnamed>")
+    if has_data_driven_overrides(material):
+        # Logger fetched here, not at module scope: a module-level name in a
+        # pure-core module must be re-exported from `renderer` (the
+        # renderer-pure-core-extraction gate), and a logger is not API.
+        logging.getLogger(__name__).warning(
+            "material %r: override key(s) %s are in no packer's vocabulary; "
+            "ignored unless the referenced MaterialX/Python material claims them",
+            name, ", ".join(unknown))
+        return unknown
+    raise UnknownOverrideKey(
+        f"material {name!r}: unknown override key(s) {', '.join(unknown)} — not "
+        f"in the material field table. Fix the spelling at the authoring site, "
+        f"or register the key in slang_layout's override vocabulary.")
+
+
 def pack_flat_material(
     material,
     diffuse_texture_idx: int = 0xFFFFFFFF,
@@ -192,45 +240,17 @@ def pack_flat_material(
     """Pack a Material's overrides into FLAT_MATERIAL_STRIDE bytes
     (FlatMaterialParams).
 
-    Layout (scalar/std430 compatible — `float3` packs at 4-byte alignment):
-       0: diffuseColor.r/g/b      (vec3 → 12 B)
-      12: roughness               (float)
-      16: metallic                (float)
-      20: specular                (float)
-      24: opacity                 (float)
-      28: diffuseTextureIdx       (uint; 0xFFFFFFFF = use constant)
-      32: roughnessTextureIdx     (uint; sentinel = use constant)
-      36: metallicTextureIdx      (uint; sentinel = use constant)
-      40: normalTextureIdx        (uint; sentinel = use mesh normal)
-      44: emissiveTextureIdx      (uint; sentinel = use emissive const)
-      48: emissiveColor.r/g/b     (vec3 → 12 B)
-      60: ior                     (float; index of refraction, default 1.5)
-      64: coat                    (float; clear coat weight 0..1)
-      68: coatRoughness           (float)
-      72: coatIOR                 (float)
-      76: opacityTextureIdx       (uint; sentinel = use constant)
-      80: coatColor.r/g/b         (vec3 → 12 B)
-      92: opacityThreshold        (float; cutout alpha threshold)
-      96: normalScale.x/y/z       (vec3 → 12 B; UsdUVTexture inputs:scale.xyz)
-     108: channelMask             (uint; packed per-input channel selectors)
-     112: normalBias.x/y/z        (vec3 → 12 B; UsdUVTexture inputs:bias.xyz)
-     124: _pad                    (uint; reserved)
-     128: transmissionColor.r/g/b (vec3 → 12 B; Stage-2; fallback diffuseColor)
-     140: diffuseRoughness        (float; Stage-2 Oren-Nayar; 0 ⇒ Lambert)
-     144: specularColor.r/g/b     (vec3 → 12 B; Stage-2; fallback white)
-     156: _pad1                   (uint; reserved)
-     160: medium σ_a.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
-     172: medium g                (float; medium HG anisotropy)
-     176: medium σ_s.r/g/b        (vec3 → 12 B; subsurface/volume; mm⁻¹; else 0)
-     188: mediumKind              (uint; MEDIUM_HOMOGENEOUS=0 / MEDIUM_NANOVDB=1
-                                   / MEDIUM_CLOUD=2; eta reuses ior)
-     192: worldToUvw row 0        (vec4; volume; identity row (1,0,0,0) else)
-     208: worldToUvw row 1        (vec4; volume; identity row (0,1,0,0) else)
-     224: worldToUvw row 2        (vec4; volume; identity row (0,0,1,0) else)
-     240: cloudDensity            (float; MEDIUM_CLOUD only; else 0)
-     244: cloudWispiness          (float; MEDIUM_CLOUD only; else 0)
-     248: cloudFrequency          (float; MEDIUM_CLOUD only; else 0)
-     252: _pad2                   (float; reserved)
+    **The field map is not here.** Every field's name, kind, default and byte
+    offset live in ``slang_layout.FLAT_MATERIAL_FIELDS`` (change
+    flat-material-field-table); this function resolves each field's VALUE and
+    hands a ``{name: value}`` mapping to ``slang_layout.pack_material_record``,
+    which writes it at the derived offset. Read the offsets there:
+
+        slang_layout.material_field_offsets("FlatMaterialParams")
+
+    Packing is keyed by name, never by argument position — that is what lets the
+    permanent name→offset golden catch a transposition of two same-typed fields,
+    which the old size-equality assert could not see.
 
     Stage-2 rich inputs (flat-lobes-rich-inputs) are back-compatible: an absent
     override reproduces the prior behavior — transmissionColor defaults to
@@ -251,6 +271,7 @@ def pack_flat_material(
     by the importer from the medium CTM) rather than the scene grid, and no
     grid `value_max` fold applies (there is no density texture).
     """
+    check_material_vocabulary(material)
     overrides = material.parameter_overrides
     diffuse = _override_color3(overrides, "diffuseColor", _FLAT_DEFAULT_DIFFUSE)
     roughness = _override_float(overrides, "roughness", 0.5)
@@ -355,46 +376,54 @@ def pack_flat_material(
         if rows is not None:
             m = np.asarray([float(v) for v in np.ravel(rows)], np.float32).reshape(3, 4)
             w2u = tuple(tuple(float(v) for v in row) for row in m)
-    return struct.pack(
-        "fff f f f f I I I I I fff f  f f f I  fff f  fff I fff f  fff f  fff I  fff f fff I"
-        " ffff ffff ffff ffff",
-        diffuse[0], diffuse[1], diffuse[2],
-        roughness, metallic, specular, opacity,
-        int(diffuse_texture_idx) & 0xFFFFFFFF,
-        int(roughness_texture_idx) & 0xFFFFFFFF,
-        int(metallic_texture_idx) & 0xFFFFFFFF,
-        int(normal_texture_idx) & 0xFFFFFFFF,
-        int(emissive_texture_idx) & 0xFFFFFFFF,
-        emissive[0], emissive[1], emissive[2],
-        ior,
-        coat, coat_roughness, coat_ior,
-        int(opacity_texture_idx) & 0xFFFFFFFF,
-        coat_color[0], coat_color[1], coat_color[2],
-        opacity_threshold,
-        float(normal_scale[0]), float(normal_scale[1]), float(normal_scale[2]),
-        int(channel_mask) & 0xFFFFFFFF,
-        float(normal_bias[0]), float(normal_bias[1]), float(normal_bias[2]),
-        float(glass_cauchy_b),
-        transmission_color[0], transmission_color[1], transmission_color[2],
-        diffuse_roughness,
-        specular_color[0], specular_color[1], specular_color[2],
-        int(conductor_metal_id) & 0xFFFFFFFF,
-        medium_sigma_a[0], medium_sigma_a[1], medium_sigma_a[2],
-        medium_g,
-        medium_sigma_s[0], medium_sigma_s[1], medium_sigma_s[2],
-        int(medium_kind) & 0xFFFFFFFF,
-        w2u[0][0], w2u[0][1], w2u[0][2], w2u[0][3],
-        w2u[1][0], w2u[1][1], w2u[1][2], w2u[1][3],
-        w2u[2][0], w2u[2][1], w2u[2][2], w2u[2][3],
-        float(cloud_density), float(cloud_wispiness), float(cloud_frequency), 0.0,
-    )
+    return slang_layout.pack_material_record("FlatMaterialParams", {
+        "diffuseColor": diffuse,
+        "roughness": roughness,
+        "metallic": metallic,
+        "specular": specular,
+        "opacity": opacity,
+        "diffuseTextureIdx": diffuse_texture_idx,
+        "roughnessTextureIdx": roughness_texture_idx,
+        "metallicTextureIdx": metallic_texture_idx,
+        "normalTextureIdx": normal_texture_idx,
+        "emissiveTextureIdx": emissive_texture_idx,
+        "emissiveColor": emissive,
+        "ior": ior,
+        "coat": coat,
+        "coatRoughness": coat_roughness,
+        "coatIOR": coat_ior,
+        "opacityTextureIdx": opacity_texture_idx,
+        "coatColor": coat_color,
+        "opacityThreshold": opacity_threshold,
+        "normalScale": normal_scale,
+        "channelMask": channel_mask,
+        "normalBias": normal_bias,
+        "glassCauchyB": glass_cauchy_b,
+        "transmissionColor": transmission_color,
+        "diffuseRoughness": diffuse_roughness,
+        "specularColor": specular_color,
+        "conductorMetalId": conductor_metal_id,
+        "mediumSigmaA": medium_sigma_a,
+        "mediumG": medium_g,
+        "mediumSigmaS": medium_sigma_s,
+        "mediumKind": medium_kind,
+        "worldToUvw0": w2u[0],
+        "worldToUvw1": w2u[1],
+        "worldToUvw2": w2u[2],
+        "cloudDensity": cloud_density,
+        "cloudWispiness": cloud_wispiness,
+        "cloudFrequency": cloud_frequency,
+    })
 
 
 def pack_std_surface_params(material) -> bytes:
     """Pack a Material's overrides into 256 bytes (StdSurfaceParams).
 
-    Layout matches the Slang struct in mtlx_std_surface.slang (scalar layout).
-    UsdPreviewSurface names are mapped to standard_surface equivalents.
+    Every field's offset and default come from
+    ``slang_layout.std_surface_fields()``, derived outright from the Slang
+    struct in mtlx_std_surface.slang (this record declares named scalars, unlike
+    the flat record's opaque ``float4`` rows). UsdPreviewSurface names are mapped
+    to their standard_surface equivalents on the way in.
     """
     o = material.parameter_overrides
 
@@ -476,41 +505,55 @@ def pack_std_surface_params(material) -> bytes:
 
     thin_walled = int(_f("thin_walled", default=0))
 
-    return struct.pack(
-        "ffffffff"      # 0-32:   base_color(3), base, diffuse_roughness, metalness, specular, specular_roughness
-        "ffffffff"      # 32-64:  specular_color(3), specular_IOR, specular_anisotropy, specular_rotation, transmission, transmission_depth
-        "ffffffff"      # 64-96:  transmission_color(3), scatter_aniso, transmission_scatter(3), dispersion
-        "ffffffff"      # 96-128: extra_roughness, subsurface, subsurface_scale, subsurface_aniso, subsurface_color(3), _pad0
-        "ffffffff"      # 128-160: subsurface_radius(3), sheen, sheen_color(3), sheen_roughness
-        "ffffffff"      # 160-192: coat, coat_roughness, coat_aniso, coat_rotation, coat_IOR, coat_affect_color, coat_affect_roughness, _pad1
-        "ffffffff"      # 192-224: coat_color(3), thin_film_thickness, thin_film_IOR, emission, emission_color.r, emission_color.g
-        "fffffIff",     # 224-256: emission_color.b, _pad2, opacity(3), thin_walled, _pad3, _pad4
-        base_color[0], base_color[1], base_color[2], base,
-        diffuse_roughness, metalness, specular, specular_roughness,
-        specular_color[0], specular_color[1], specular_color[2], specular_IOR,
-        specular_anisotropy, specular_rotation, transmission, transmission_depth,
-        transmission_color[0], transmission_color[1], transmission_color[2], transmission_scatter_aniso,
-        transmission_scatter[0], transmission_scatter[1], transmission_scatter[2], transmission_dispersion,
-        transmission_extra_roughness, subsurface, subsurface_scale, subsurface_anisotropy,
-        subsurface_color[0], subsurface_color[1], subsurface_color[2], 0.0,
-        subsurface_radius[0], subsurface_radius[1], subsurface_radius[2], sheen,
-        sheen_color[0], sheen_color[1], sheen_color[2], sheen_roughness,
-        coat, coat_roughness, coat_anisotropy, coat_rotation,
-        coat_IOR, coat_affect_color, coat_affect_roughness, 0.0,
-        coat_color[0], coat_color[1], coat_color[2], thin_film_thickness,
-        thin_film_IOR, emission, emission_color[0], emission_color[1],
-        emission_color[2], 0.0, opacity[0], opacity[1], opacity[2],
-        thin_walled, 0.0, 0.0,
-    )
+    return slang_layout.pack_material_record("StdSurfaceParams", {
+        "base_color": base_color,
+        "base": base,
+        "diffuse_roughness": diffuse_roughness,
+        "metalness": metalness,
+        "specular": specular,
+        "specular_roughness": specular_roughness,
+        "specular_color": specular_color,
+        "specular_IOR": specular_IOR,
+        "specular_anisotropy": specular_anisotropy,
+        "specular_rotation": specular_rotation,
+        "transmission": transmission,
+        "transmission_depth": transmission_depth,
+        "transmission_color": transmission_color,
+        "transmission_scatter_anisotropy": transmission_scatter_aniso,
+        "transmission_scatter": transmission_scatter,
+        "transmission_dispersion": transmission_dispersion,
+        "transmission_extra_roughness": transmission_extra_roughness,
+        "subsurface": subsurface,
+        "subsurface_scale": subsurface_scale,
+        "subsurface_anisotropy": subsurface_anisotropy,
+        "subsurface_color": subsurface_color,
+        "subsurface_radius": subsurface_radius,
+        "sheen": sheen,
+        "sheen_color": sheen_color,
+        "sheen_roughness": sheen_roughness,
+        "coat": coat,
+        "coat_roughness": coat_roughness,
+        "coat_anisotropy": coat_anisotropy,
+        "coat_rotation": coat_rotation,
+        "coat_IOR": coat_IOR,
+        "coat_affect_color": coat_affect_color,
+        "coat_affect_roughness": coat_affect_roughness,
+        "coat_color": coat_color,
+        "thin_film_thickness": thin_film_thickness,
+        "thin_film_IOR": thin_film_IOR,
+        "emission": emission,
+        "emission_color": emission_color,
+        "opacity": opacity,
+        "thin_walled": thin_walled,
+        # _pad0.._pad4 take the table's 0.0 default.
+    })
 
 
-# StdSurfaceParams scalar layout — ordered (field-name, byte-size), DERIVED from
-# the Slang struct in mtlx_std_surface.slang (change
-# reflection-owned-byte-layouts). Matches `pack_std_surface_params`'s scalar
-# (std430) packing: each field's scalar offset is the running byte sum (float3 =
-# 12 B, no 16-B promotion). `pack_std_surface_params_msl` walks it to relocate
-# the scalar record into Metal's MSL layout (where float3 → 16 B), keyed by the
-# reflected field names.
+# StdSurfaceParams scalar layout — ordered (field-name, byte-size), read off the
+# ONE field table (change flat-material-field-table; the derivation itself is
+# reflection-owned-byte-layouts). `pack_std_surface_params` emits at these same
+# offsets, so the relocation below and the packer cannot disagree — there is no
+# second table for the MSL variant to drift against (design D6).
 _STD_SURFACE_SCALAR_ENTRIES: tuple[tuple[str, int], ...] = tuple(
     slang_layout.scalar_layout("StdSurfaceParams").entries)
 
