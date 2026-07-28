@@ -526,16 +526,13 @@ def test_capacities_are_settable_before_the_set_exists():
     assert r.material_capacity == 99  # the set takes over once it exists
 
 
-def test_mlt_binding_numbers_agree_with_the_wavefront_pass():
-    """Bindings 52-57 are stated here (creation-time dummies) and again in the
-    wavefront MLT pass (the real chain buffers). The source gate only greps
-    `renderer.py`, so nothing else catches the two drifting apart — adding
-    binding 58 to one and not the other would bind a stale dummy forever."""
-    pytest.importorskip("vulkan")
-    from skinny.gpu_resources import MLT_BINDINGS
-    from skinny.vk_wavefront import WavefrontMltPass
-
-    assert MLT_BINDINGS == tuple(b for b, _key in WavefrontMltPass._BINDINGS)
+# `test_mlt_binding_numbers_agree_with_the_wavefront_pass` lived here: it
+# compared `MLT_BINDINGS` against `WavefrontMltPass._BINDINGS`. Both now derive
+# from `wavefront_layout.MLT_CHAIN_BUFFERS` (change mlt-binding-declaration), so
+# it would compare a value with itself — a test that cannot fail is worse than
+# no test, because it reads as coverage. Replaced by, and strictly weaker than,
+# `tests/test_mlt_binding_declaration.py`, which checks the declaration against
+# the shader's own `[[vk::binding(N)]] … <name>` pairing.
 
 
 def test_pool_sizes_counted_from_declarations():

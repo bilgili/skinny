@@ -1122,22 +1122,17 @@ class WavefrontMltPass:
         ("wfMltResolve", "wavefront/_wfmlt_resolve"),
     ]
 
-    # Binding → mlt_buffer_sizes key (bindings 52–57 of the scene set-0
-    # layout; 52 lives in common.slang's SKINNY_MLT block, 53–57 in
-    # wavefront_mlt.slang).
-    _BINDINGS = (
-        (52, "mlt_primary_samples"),
-        (53, "mlt_chain_meta"),
-        (54, "mlt_current_records"),
-        (55, "mlt_bootstrap_weights"),
-        (56, "mlt_chain_seeds"),
-        (57, "mlt_proposal_records"),
-    )
+    # Binding → mlt_buffer_sizes key: projected off the one declaration in
+    # `wavefront_layout.MLT_CHAIN_BUFFERS` (change mlt-binding-declaration), in
+    # its order, which IS the descriptor-write order. Not restated here — this
+    # table and the Metal pass's used to state the same pairing independently,
+    # so a transposition in one of them bound the wrong buffer on one backend
+    # and produced a silently divergent image.
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  num_pixels: int, num_chains: int, bootstrap_samples: int,
                  spectral: bool = False) -> None:
-        from skinny.wavefront_layout import mlt_buffer_sizes
+        from skinny.wavefront_layout import MLT_CHAIN_BUFFERS, mlt_buffer_sizes
 
         self.ctx = ctx
         self.num_pixels = int(num_pixels)
@@ -1163,8 +1158,8 @@ class WavefrontMltPass:
         self._modules = modules
 
         sizes = mlt_buffer_sizes(self.num_chains, self.bootstrap_samples)
-        self._buffers = {key: StorageBuffer(ctx, sizes[key])
-                         for _, key in self._BINDINGS}
+        self._buffers = {d.key: StorageBuffer(ctx, sizes[d.key])
+                         for d in MLT_CHAIN_BUFFERS}
 
         # Pipeline layout: [scene set 0 only] + the shared 12-byte tile push
         # constant {streamBase, shadeSlot(unused), streamSize}. The scene
@@ -1187,8 +1182,10 @@ class WavefrontMltPass:
     @property
     def descriptor_bindings(self):
         """``(binding, StorageBuffer)`` pairs the renderer writes into the
-        shared scene descriptor sets (slots 52–57)."""
-        return tuple((b, self._buffers[key]) for b, key in self._BINDINGS)
+        shared scene descriptor sets, in declaration order."""
+        from skinny.wavefront_layout import MLT_CHAIN_BUFFERS
+
+        return tuple((d.binding, self._buffers[d.key]) for d in MLT_CHAIN_BUFFERS)
 
     def _bind(self, cmd, entry, scene_set) -> None:
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self._pipelines[entry])

@@ -18,6 +18,7 @@ from skinny.shader_variants import (
     spv_cache_key,
 )
 from skinny.vk_context import VulkanContext
+from skinny.wavefront_layout import mlt_binding_numbers
 
 
 # Hard cap on the bindless flat-material texture array (binding 14). Each
@@ -677,15 +678,20 @@ class ComputePipeline:
                         stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
                     )
                 )
-        # Bindings 52–57: MLT chain buffers (change mlt-integrator/spectral-mlt) —
-        # the PSS primary-sample vector (52, common.slang under -DSKINNY_MLT),
-        # chain meta (53), current records (54), bootstrap weights (55), chain
-        # seeds (56), and proposal-record scratch (57). Declared only for the wavefront layout (see
-        # `self.mlt_bindings`) so the MLT stage pipelines can bind the shared
-        # scene descriptor set; the renderer writes dummies until
-        # `_ensure_wavefront_mlt_pass` rebinds the real chain buffers.
+        # MLT chain buffers (change mlt-integrator/spectral-mlt) — declared only
+        # for the wavefront layout (see `self.mlt_bindings`) so the MLT stage
+        # pipelines can bind the shared scene descriptor set; the renderer
+        # writes dummies until `_ensure_wavefront_mlt_pass` rebinds the real
+        # chain buffers.
+        #
+        # The numbers come from `wavefront_layout.MLT_CHAIN_BUFFERS` (change
+        # mlt-binding-declaration), never restated here: a layout that omits a
+        # binding the shader references is undefined behaviour on Vulkan and a
+        # hard `SPIR-V to MSL conversion error: nullptr` on MoltenVK — the exact
+        # failure a hand-maintained copy produced for `volumeDensity` (change
+        # fix-vulkan-volume-density-binding).
         if self.mlt_bindings:
-            for _mlt_binding in (52, 53, 54, 55, 56, 57):
+            for _mlt_binding in mlt_binding_numbers():
                 bindings.append(
                     vk.VkDescriptorSetLayoutBinding(
                         binding=_mlt_binding,
