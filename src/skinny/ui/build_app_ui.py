@@ -244,14 +244,15 @@ def _add_scene_controls(ui: UIBuilder, renderer) -> None:
     """Build a widget per USD-declared control (skinny:ui:* prims).
 
     Each control's prefix-typed target resolves to live get/set closures via
-    `usd_loader.resolve_control_binding`; the control's `type` selects the
-    widget. Unresolvable targets yield inert (None) closures — handled here so
-    the widget still renders.
+    `usd_controls.control_accessors` — intake describes the binding, the
+    renderer performs the write. The control's `type` selects the widget.
+    Unresolvable targets yield inert (None) closures — handled here so the
+    widget still renders.
     """
-    from skinny.usd_loader import resolve_control_binding
+    from skinny.usd_controls import control_accessors
 
     for spec in getattr(renderer, "_usd_controls", []):
-        getter, setter = resolve_control_binding(renderer, spec)
+        getter, setter = control_accessors(renderer, spec)
         if spec.type == "slider":
             ui.slider(
                 spec.label,
@@ -373,7 +374,7 @@ def _coerce_color3(value, fallback=(0.72, 0.72, 0.72)) -> tuple[float, float, fl
 
 def build_material_subtree(ui: UIBuilder, renderer) -> None:
     """Populate the Materials dynamic section. Called by both backends
-    when the active scene changes (token = ``id(renderer._usd_scene)``).
+    when the active scene changes (token = ``renderer.scene_version``).
     """
     scene = getattr(renderer, "_usd_scene", None)
     if scene is None or not getattr(scene, "materials", None):
@@ -567,7 +568,7 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
     ui.dynamic_section(
         "Animation",
         rebuild_token=lambda: (
-            id(getattr(renderer, "_usd_scene", None)),
+            getattr(renderer, "scene_version", 0),
             bool(getattr(renderer.clock, "has_animation", False)),
         ),
         build=lambda b: (
@@ -580,7 +581,7 @@ def build_main_ui(renderer, callbacks: AppCallbacks | None = None) -> Section:
     ui.dynamic_section(
         "Scene Controls",
         rebuild_token=lambda: (
-            id(getattr(renderer, "_usd_scene", None)),
+            getattr(renderer, "scene_version", 0),
             len(getattr(renderer, "_usd_controls", [])),
         ),
         build=lambda b: (

@@ -46,7 +46,15 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
-from skinny import frame_derive, mlt_chain, render_envelope, slang_layout
+from skinny import frame_derive, mlt_chain, render_envelope, scene_intake, slang_layout
+# Scene intake is a module-level dependency, not a lazy one (change
+# scene-intake-interface). Every USD read the renderer performs goes through it
+# and comes back as a `SceneUpdate` value applied by `apply_scene_update`; the
+# renderer no longer reaches into loader privates from inside a method body.
+# `compute_joint_matrices` and `prim_has_mtlx_reference` are the two public
+# loader symbols the renderer still calls directly — per-frame skinning and an
+# authoring-time stage query, neither of which is a scene update.
+from skinny.usd_loader import compute_joint_matrices, prim_has_mtlx_reference
 # Device-free core, extracted per subject (change renderer-pure-core-extraction).
 # These modules import no GPU package, so the packers, camera math, film writers
 # and photon-budget math are testable on a host with no Vulkan SDK. The names are
@@ -873,6 +881,10 @@ class Renderer:
         # Bumped whenever the scene graph is (re)built so the UI panels, which
         # poll it, repaint. Always defined so observers can read it pre-edit.
         self._scene_graph_version = 0
+        # Bumped once per adopted SceneUpdate (change scene-intake-interface).
+        # Read through the `scene_version` property; the explicit change token
+        # that replaced `id(renderer._usd_scene)`.
+        self._scene_version = 0
 
         # Load the MaterialX library and generate Slang for the canonical
         # skin material. The CompiledMaterial drives the per-material
@@ -1728,7 +1740,18 @@ class Renderer:
         self.orbit_camera.pitch = pitch
 
     def _clear_model_state(self) -> None:
-        """Reset all model/scene state so a fresh load starts clean."""
+        """Reset all model/scene state so a fresh load starts clean.
+
+        Dropping the stage means dropping everything derived from it. The
+        controls, animation index, clock, up-axis rotation and skeletal handle
+        all describe the stage being released, so they are cleared here — the
+        mirror of `SceneUpdate.replaces_stage_state` on the way in — and
+        `_scene_version` is bumped, because a scene going away is a
+        scene change and every change-token consumer must see it. Before
+        `scene-intake-interface` those consumers keyed on
+        `id(renderer._usd_scene)`, so the clear was noticed by accident:
+        `id(None)` differs from the id of whatever scene was loaded.
+        """
         self.models.clear()
         self._mesh_sources.clear()
         self.model_index = -1
@@ -1738,6 +1761,13 @@ class Renderer:
         self._edit_layer_default_path = None
         self._prim_to_instances = {}
         self._scene_graph = None
+        self._usd_controls = []
+        self._anim_index = None
+        self._skeletal = None
+        self._usd_up_axis_rt = None
+        self._last_eval_time_code = None
+        self.clock = PlaybackClock()
+        self._scene_version += 1
         self._last_projected_default_lights = None
         self._last_aux_light_authority_token = None
         self._usd_model_index = -1
@@ -1895,81 +1925,23 @@ class Renderer:
         self._usd_bake_done = _threading.Event()
 
         def _bg_usd_stream() -> None:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            from skinny.usd_loader import (
-                _read_usd_stage,
-                bake_usd_prim,
-                build_animation_index,
-                build_playback_clock,
-            )
-            scene, prim_data, stage = _read_usd_stage(
+            # One intake call does the whole off-thread read: stage, scene,
+            # scene graph, animation index, clock, up-axis rotation, skeletal
+            # bindings and UI controls. Nothing is written to the renderer
+            # here — the update is applied on the render thread by
+            # `_poll_usd_streaming`, so this thread stays a pure producer
+            # (the graph is still built here, where we have exclusive access
+            # to the stage and no GIL conflict with GLFW poll_events).
+            update = scene_intake.read_stage(
                 path, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
-                keep_stage=True,
             )
-            # Keep the stage around so scene-graph edits (DomeLight HDR
-            # path, etc.) can mutate USD prim attrs as the source of truth.
-            self._usd_stage = stage
-            # Attach the non-destructive session edit layer so the runtime
-            # scene-graph editing API authors there, never the original file.
-            self._attach_edit_layer()
-            # Build the playback clock + animated-prim index from the stage.
-            # Single ref assignments, read on the main thread in update().
-            if stage is not None:
-                try:
-                    from pxr import UsdGeom as _UsdGeom
-                    from skinny.usd_loader import (
-                        _up_axis_rt,
-                        extract_skeletal_bindings,
-                        extract_ui_controls,
-                    )
-                    index = build_animation_index(stage)
-                    self._anim_index = index
-                    self.clock = build_playback_clock(stage, index)
-                    self._usd_up_axis_rt = _up_axis_rt(
-                        str(_UsdGeom.GetStageUpAxis(stage))
-                    )
-                    # SkeletalScene retains the stage + cache so its skinning
-                    # queries stay valid for per-frame ComputeSkinningTransforms.
-                    self._skeletal = extract_skeletal_bindings(stage)
-                    self._usd_controls = extract_ui_controls(stage)
-                    self._last_eval_time_code = None
-                except Exception as exc:  # noqa: BLE001
-                    self._anim_index = None
-                    self._skeletal = None
-                    self._usd_controls = []
-                    self.clock = PlaybackClock()
-                    print(f"[skinny] animation index build failed: {exc}")
-            # Build scene graph here in the background thread while we
-            # have exclusive access to the stage — avoids GIL conflicts
-            # with GLFW poll_events on the main thread.
-            sg = None
-            if stage is not None:
-                from skinny.scene_graph import build_scene_graph
-                try:
-                    sg = build_scene_graph(stage, scene)
-                except Exception as exc:
-                    import traceback
-                    print(f"[skinny] scene graph build failed: {exc}")
-                    traceback.print_exc()
-            self._usd_metadata_queue.put((scene, sg))
+            self._usd_metadata_queue.put(update)
             print(
-                f"[skinny] USD stage read: {len(prim_data)} meshes, "
+                f"[skinny] USD stage read: {len(update.pending_prims)} meshes, "
                 f"baking in background"
             )
-            cache_idx = load_cache_index()
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                futs = {
-                    pool.submit(
-                        bake_usd_prim, src, xform, mat_id, cache_idx,
-                    ): src.name
-                    for src, xform, mat_id in prim_data
-                }
-                for fut in as_completed(futs):
-                    try:
-                        inst = fut.result()
-                        self._usd_instance_queue.put(inst)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[skinny] USD bake failed for {futs[fut]}: {exc}")
+            for inst in scene_intake.bake_pending(update.pending_prims):
+                self._usd_instance_queue.put(inst)
             self._usd_bake_done.set()
 
         _threading.Thread(
@@ -3129,44 +3101,17 @@ class Renderer:
         # Phase 1: metadata (lights, camera, materials, mm_per_unit)
         if self._usd_scene is None:
             try:
-                scene, sg = self._usd_metadata_queue.get_nowait()
+                update = self._usd_metadata_queue.get_nowait()
             except _queue.Empty:
                 return
-            self._usd_scene = scene
-            self._scene_graph = sg
-            self._gen_scene_materials()
-            self._frame_camera_to_scene(scene)
-            # Seed the USD camera follower from the default-time camera so the
-            # user can switch to usd mode before pressing play.
-            if scene.camera_override is not None:
-                self._override_to_orbit(self.usd_camera, scene.camera_override, scene)
-            # Apply authored skinny:ui:default values now that the scene +
-            # materials exist (material/usd targets need them).
-            if self._usd_controls:
-                self._apply_control_defaults()
-            # Inject /Skinny/MainCamera *after* _apply_camera_override so the
-            # node snapshot captures any authored thick lens.
-            self._refresh_camera_node()
-            # Layer synthetic /Skinny/DefaultLight + /Skinny/DefaultDome onto
-            # the loaded graph so the user can still see the renderer-owned
-            # direct light + IBL when the USD asset omits them.
-            self._inject_default_lights_into_scene_graph()
-            if scene.mm_per_unit != 120.0:
-                self.mm_per_unit = scene.mm_per_unit
-            # Film per-sample radiance clamp from the imported pbrt film
-            # (change film-maxcomponent-clamp); 0 = disabled (no-op).
-            self.film_max_component = float(getattr(scene, "film_max_component", 0.0) or 0.0)
-            # Heterogeneous-medium density grid (nanovdb-volume-rendering):
-            # upload once per scene, after mm_per_unit is final and before the
-            # material upload below packs the volume σ folds.
-            self._sync_volume_grid(scene)
-            if scene.instances:
-                self._upload_usd_scene()
-                self._usd_uploaded_count = len(scene.instances)
+            # Built off-thread, applied here on the render thread — the one
+            # application path, same as the synchronous and post-edit triggers.
+            self.apply_scene_update(update)
+            self._usd_uploaded_count = len(update.scene.instances)
             print(
                 f"[skinny] USD metadata applied — "
-                f"{len(scene.materials)} materials, "
-                f"{len(scene.lights_dir)} dir lights"
+                f"{len(update.scene.materials)} materials, "
+                f"{len(update.scene.lights_dir)} dir lights"
             )
 
         # Phase 2: baked mesh instances
@@ -3327,41 +3272,41 @@ class Renderer:
             transforms, material_ids=material_ids, blas_offsets=enabled_offsets,
         )
 
-    def _reextract_animated_lights(self, stage, time, rt) -> None:
-        """Rebuild distant + sphere lights from the stage at `time`.
+    def _apply_time_sample(
+        self, sample, *, upload_transforms: bool, key: str = "name",
+    ) -> None:
+        """Write one `scene_intake.TimeSample` into the scene and the GPU.
 
-        Re-extracts every distant/sphere light (cheap; a handful of prims) so
-        animated intensity/colour/direction track playback. The stage is the
-        source of truth — scene-graph editor edits are written back to it — so
-        a full re-extract stays consistent with manual edits. Dome/env and
-        emissive rect/disk animation are out of scope for this change.
+        The sample is already in stored form (up-axis corrected), so this is a
+        pure write: instance transforms, then the re-extracted light sets.
+        Shared by playback and by the live re-read that follows a raw USD edit.
+
+        `key` names the instance attribute the caller built `xform_paths` from,
+        because the two are not interchangeable: a synthetic area-light
+        instance carries the light prim's *leaf* name in `name` and its full
+        path in `prim_path`. Matching on the wrong one silently moves nothing.
         """
-        from pxr import UsdLux
-        from skinny.usd_loader import _extract_distant_light, _extract_sphere_light
         scene = self._usd_scene
         if scene is None:
             return
-        new_dir = []
-        new_sphere = []
-        for prim in stage.Traverse():
-            if not prim.IsActive() or prim.IsAbstract():
-                continue
-            if prim.IsA(UsdLux.DistantLight):
-                ld = _extract_distant_light(prim, time)
-                if ld is not None:
-                    if rt is not None:
-                        ld.direction = (ld.direction @ rt).astype(np.float32)
-                    new_dir.append(ld)
-            elif prim.IsA(UsdLux.SphereLight):
-                ls = _extract_sphere_light(prim, time)
-                if ls is not None:
-                    if rt is not None:
-                        ls.position = (ls.position @ rt).astype(np.float32)
-                    new_sphere.append(ls)
-        scene.lights_dir = new_dir
-        scene.lights_sphere = new_sphere
-        # Distant SSBO re-uploads every frame in update(); sphere does not.
-        self._upload_sphere_lights(new_sphere)
+        if sample.instance_transforms:
+            moved = False
+            for inst in scene.instances:
+                m = sample.instance_transforms.get(getattr(inst, key))
+                if m is not None:
+                    inst.transform = m
+                    moved = True
+            if moved and upload_transforms:
+                self._reupload_instance_transforms()
+        # The stage is the source of truth — scene-graph editor edits are
+        # written back to it — so a full re-extract stays consistent with
+        # manual edits. Dome/env and emissive rect/disk animation are out of
+        # scope. Distant SSBO re-uploads every frame in update(); sphere does
+        # not, so it is uploaded here.
+        if sample.read_lights:
+            scene.lights_dir = sample.lights_dir
+            scene.lights_sphere = sample.lights_sphere
+            self._upload_sphere_lights(sample.lights_sphere)
 
     def _apply_animation_frame(self) -> None:
         """Re-evaluate animated USD prims at the clock's current time code.
@@ -3382,48 +3327,33 @@ class Renderer:
         if self._last_eval_time_code is not None and tc == self._last_eval_time_code:
             return
 
-        from pxr import Usd
-        from skinny.usd_loader import _extract_camera, _world_transform
-        time = Usd.TimeCode(tc)
-        rt = self._usd_up_axis_rt
-        rt4 = None
-        if rt is not None:
-            rt4 = np.eye(4, dtype=np.float32)
-            rt4[:3, :3] = rt
+        # One intake call covers transforms, lights and camera at this time
+        # code; the animation index selects which of the three are worth
+        # reading, so per-frame cost still scales with the animated set.
+        xset = set(index.xform_paths)
+        sample = scene_intake.read_at_time(
+            stage, tc,
+            up_axis_rt=self._usd_up_axis_rt,
+            xform_paths=(
+                [inst.name for inst in scene.instances if inst.name in xset]
+                if index.xform_paths and scene.instances else []
+            ),
+            want_lights=bool(index.light_paths),
+            want_camera=bool(index.camera_animated),
+        )
+        self._apply_time_sample(sample, upload_transforms=True)
 
-        # 1. Animated transforms → re-upload instance records.
-        if index.xform_paths and scene.instances:
-            xset = set(index.xform_paths)
-            moved = False
-            for inst in scene.instances:
-                if inst.name in xset:
-                    prim = stage.GetPrimAtPath(inst.name)
-                    if prim and prim.IsValid():
-                        m = _world_transform(prim, time)
-                        inst.transform = (
-                            (m @ rt4).astype(np.float32) if rt4 is not None else m
-                        )
-                        moved = True
-            if moved:
-                self._reupload_instance_transforms()
-
-        # 2. Animated lights → re-extract distant + sphere.
-        if index.light_paths:
-            self._reextract_animated_lights(stage, time, rt)
-
-        # 3. USD camera follower. Keep usd_camera tracking the latest evaluated
+        # USD camera follower. Keep usd_camera tracking the latest evaluated
         # time so switching into usd mode is instant; the camera property only
         # returns it when camera_mode == "usd".
-        if index.camera_animated:
-            ov = _extract_camera(stage, time)
-            if ov is not None and rt is not None:
-                ov.position = (ov.position @ rt).astype(np.float32)
-                ov.forward = (ov.forward @ rt).astype(np.float32)
-            self._usd_camera_override = ov
-            if ov is not None:
-                self._override_to_orbit(self.usd_camera, ov, scene)
+        if sample.read_camera:
+            self._usd_camera_override = sample.camera_override
+            if sample.camera_override is not None:
+                self._override_to_orbit(
+                    self.usd_camera, sample.camera_override, scene,
+                )
 
-        # 4. Skeletal (UsdSkel) skinning. Interim CPU path: deform points on the
+        # Skeletal (UsdSkel) skinning. Interim CPU path: deform points on the
         # CPU, rebuild each skinned BLAS, re-upload. GPU skinning + BVH refit
         # replace this in a later step.
         if index.skinned_mesh_paths:
@@ -3443,7 +3373,6 @@ class Renderer:
         scene = self._usd_scene
         if skel is None or not skel.has_skinning or scene is None or not scene.instances:
             return
-        from skinny.usd_loader import compute_joint_matrices
 
         # GPU path: upload per-mesh joint matrices, dispatch skin + BVH refit.
         if self._skinning_passes is not None:
@@ -3454,9 +3383,7 @@ class Renderer:
 
         # CPU fallback (Metal / no GPU passes): deform on the CPU, rebuild each
         # skinned BLAS, re-upload.
-        from dataclasses import replace as _replace
         from skinny.mesh import bake_mesh
-        from skinny.usd_loader import _smooth_normals, lbs_points
 
         by_path = {b.prim_path: b for b in skel.meshes}
         changed = False
@@ -3464,19 +3391,9 @@ class Renderer:
             binding = by_path.get(inst.name)
             if binding is None or inst.source is None:
                 continue
-            mats = compute_joint_matrices(binding, time)
-            deformed = lbs_points(
-                binding.rest_points, binding.joint_indices,
-                binding.joint_weights, mats,
-            )
-            src = inst.source
-            deformed_src = _replace(
-                src,
-                positions=deformed.astype(np.float32),
-                normals=_smooth_normals(deformed, src.tri_idx),
-            )
             inst.mesh = bake_mesh(
-                deformed_src, displacement_bytes=None,
+                scene_intake.deform_skinned_mesh(binding, inst.source, time),
+                displacement_bytes=None,
                 displacement_res=0, displacement_scale_world=0.0,
             )
             changed = True
@@ -3530,12 +3447,12 @@ class Renderer:
 
     def _apply_control_defaults(self) -> None:
         """Apply authored `skinny:ui:default` values to their targets at load."""
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         for spec in self._usd_controls:
             if spec.default is None:
                 continue
             try:
-                _get, setter = resolve_control_binding(self, spec)
+                _get, setter = control_accessors(self, spec)
                 setter(spec.default)
             except Exception as exc:  # noqa: BLE001
                 print(f"[skinny] control default failed for {spec.target}: {exc}")
@@ -3550,36 +3467,22 @@ class Renderer:
         if stage is None or scene is None:
             return
         from pxr import Usd
-        from skinny.usd_loader import _extract_camera, _world_transform
-        # The clock's time code, not `Default()`. This resync re-extracts the
-        # lights, so evaluating at the default time code would reset a
+
+        # Same intake call the playback path uses, over every instance — a live
+        # edit can move any prim, not just an animated one.
+        #
+        # At the clock's time code, not `Default()`: this resync re-extracts
+        # the lights, so evaluating at the default time code would reset a
         # time-sampled light to its schema fallback — mid-playback, on an edit
-        # that had nothing to do with it.
-        t = Usd.TimeCode(float(self.clock.current_time_code))
-        rt = self._usd_up_axis_rt
-        rt4 = None
-        if rt is not None:
-            rt4 = np.eye(4, dtype=np.float32)
-            rt4[:3, :3] = rt
-
-        self._reextract_animated_lights(stage, t, rt)
-
-        if scene.instances:
-            for inst in scene.instances:
-                prim = stage.GetPrimAtPath(inst.name)
-                if prim and prim.IsValid():
-                    m = _world_transform(prim, t)
-                    inst.transform = (
-                        (m @ rt4).astype(np.float32) if rt4 is not None else m
-                    )
-            self._reupload_instance_transforms()
-
-        ov = _extract_camera(stage, t)
-        if ov is not None:
-            if rt is not None:
-                ov.position = (ov.position @ rt).astype(np.float32)
-                ov.forward = (ov.forward @ rt).astype(np.float32)
-            self._usd_camera_override = ov
+        # that had nothing to do with it (change light-emission-time-sampling).
+        sample = scene_intake.read_at_time(
+            stage, Usd.TimeCode(float(self.clock.current_time_code)),
+            up_axis_rt=self._usd_up_axis_rt,
+            xform_paths=[inst.name for inst in scene.instances],
+        )
+        self._apply_time_sample(sample, upload_transforms=True)
+        if sample.camera_override is not None:
+            self._usd_camera_override = sample.camera_override
 
         # Force an accumulation reset (raw USD edits aren't in the state hash).
         self._material_version += 1
@@ -3641,37 +3544,182 @@ class Renderer:
 
         Not part of the live UI path.
         """
+        self.apply_scene_update(scene_intake.adopt_scene(scene, stage=stage))
+
+    # ── The one scene-adoption path (change scene-intake-interface) ──────
+
+    def apply_scene_update(self, update) -> None:
+        """Adopt a `scene_intake.SceneUpdate`. The only path that does.
+
+        Initial load, streamed metadata and post-edit resync all arrive here,
+        so the adoption order is stated once — below, in the order the steps
+        appear. Anything one trigger wants and another does not is a *field of
+        the update*, never a branch on which caller we are.
+
+        Order constraints that are load-bearing:
+
+        - runtime state is captured before the scene is swapped, since it is
+          read off the outgoing scene;
+        - `mm_per_unit` is final before `_sync_volume_grid`, and the grid is
+          uploaded before `_upload_usd_scene` packs the volume σ folds — both
+          read the live scale, so fold and walk agree;
+        - the camera is framed before `_refresh_camera_node`, so the node
+          snapshot captures any authored thick lens;
+        - control defaults run after materials exist (a `material:` target
+          needs them) and before the upload, so a default that writes an
+          override is uploaded with everything else.
+        """
+        scene = update.scene
         first = self._usd_scene is None
 
-        # Enter the USD-active state so update()/render treat this scene as
-        # the subject instead of the default analytic head.
-        if self._usd_model_index < 0:
-            self.models.append("USD: (headless)")
-            self._usd_model_index = len(self.models) - 1
-        self.model_index = self._usd_model_index
+        # 1. Enter the USD-active state so update()/render treat this scene as
+        #    the subject instead of the default analytic head.
+        if update.activate_label is not None:
+            if self._usd_model_index < 0:
+                self.models.append(update.activate_label)
+                self._usd_model_index = len(self.models) - 1
+            self.model_index = self._usd_model_index
 
-        self._usd_scene = scene
-        # Film per-sample radiance clamp from the imported pbrt film (change
-        # film-maxcomponent-clamp); 0 = disabled (no-op). Applied on the
-        # synchronous scene-swap path (headless / parity harness) — the streaming
-        # interactive path sets it in _poll_usd_streaming.
-        self.film_max_component = float(getattr(scene, "film_max_component", 0.0) or 0.0)
-        # When the caller owns a stage (headless editing entry, design D9), take
-        # ownership and attach the non-destructive edit layer so the runtime
-        # scene-graph editing API (add_model/remove_node/set_transform) works.
-        if stage is not None:
-            self._usd_stage = stage
+        # 2. Renderer-side runtime state, read off the outgoing scene.
+        if update.carry_runtime_state:
+            self._carry_runtime_state_into(scene)
+
+        # 3. Take ownership of the stage and its derived state.
+        if update.stage is not None and update.stage is not self._usd_stage:
+            self._usd_stage = update.stage
+            # Attach the non-destructive session edit layer so the runtime
+            # scene-graph editing API authors there, never the original file.
             self._attach_edit_layer()
-        # Density grid before the material upload (the volume σ folds read the
-        # grid state + the live self.mm_per_unit — the same source the walk's
-        # fc.mmPerUnit is packed from, so fold and walk always agree).
+        self._usd_scene = scene
+        if update.scene_graph is not None:
+            self._scene_graph = update.scene_graph
+        if update.replaces_stage_state:
+            # This update speaks for the whole stage, so `None` means "this
+            # stage has none" — assign it. Keeping the old value here is how a
+            # failed index build would leave the *previous* stage's animation
+            # index installed, pointing at a stage that is gone.
+            self._anim_index = update.anim_index
+            self._last_eval_time_code = None
+            self.clock = update.clock or PlaybackClock()
+            self._usd_up_axis_rt = update.up_axis_rt
+            self._skeletal = update.skeletal
+            self._usd_controls = update.controls or []
+        else:
+            # A partial update: `None` means "not read", so keep what we have.
+            if update.anim_index is not None:
+                self._anim_index = update.anim_index
+                self._last_eval_time_code = None
+            if update.clock is not None:
+                self.clock = update.clock
+            if update.up_axis_rt is not None:
+                self._usd_up_axis_rt = update.up_axis_rt
+            if update.skeletal is not None:
+                self._skeletal = update.skeletal
+            if update.controls is not None:
+                self._usd_controls = update.controls
+
+        # 4. Scale and film, both read by the packers below.
+        #    Film per-sample radiance clamp from the imported pbrt film
+        #    (change film-maxcomponent-clamp); 0 = disabled (no-op).
+        self.film_max_component = float(
+            getattr(scene, "film_max_component", 0.0) or 0.0)
+        if update.adopts_mm_per_unit:
+            self.mm_per_unit = float(scene.mm_per_unit)
+
+        # 5. Heterogeneous-medium density grid (nanovdb-volume-rendering),
+        #    then the MaterialX gen pass. Guarded: the latter rebuilds the
+        #    pipeline only on a graph-set change.
         self._sync_volume_grid(scene)
-        self._gen_scene_materials()           # guarded: rebuilds pipeline only on graph-set change
-        if first:
+        self._gen_scene_materials()
+
+        # 6. Camera. `_override_to_orbit` seeds the USD camera follower so the
+        #    user can switch to usd mode before pressing play.
+        if update.frame_camera == "always" or (
+            update.frame_camera == "if_first_or_authored"
+            and (first or scene.camera_override is not None)
+        ):
             self._frame_camera_to_scene(scene)
-        elif scene.camera_override is not None:
-            self._frame_camera_to_scene(scene)  # animated authored camera
-        self._upload_usd_scene()              # every call: geometry + materials + lights
+        if update.frame_camera != "never" and scene.camera_override is not None:
+            self._override_to_orbit(self.usd_camera, scene.camera_override, scene)
+
+        # 7. Authored `skinny:ui:default` values.
+        if update.apply_control_defaults and self._usd_controls:
+            self._apply_control_defaults()
+
+        # 8. Geometry + materials + lights.
+        self._upload_usd_scene()
+
+        # 9. Synthetic graph nodes. Layer /Skinny/DefaultLight +
+        #    /Skinny/DefaultDome onto the loaded graph so the user still sees
+        #    the renderer-owned direct light + IBL when the asset omits them,
+        #    then re-attach /Skinny/MainCamera.
+        self._inject_default_lights_into_scene_graph()
+        self._refresh_camera_node()
+
+        # 10. Change tokens. `_inject_default_lights_into_scene_graph` and
+        #     `_refresh_camera_node` early-return without bumping when there is
+        #     no graph (headless), so bump explicitly.
+        self._material_version += 1
+        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
+        self._scene_version += 1
+
+    def _carry_runtime_state_into(self, new_scene) -> None:
+        """Move renderer-side runtime state onto an incoming scene.
+
+        Instance-enabled flags, light-enabled flags and live material overrides
+        are never authored to USD, so a re-read of the stage would drop them —
+        edit colorA, add a light, the edit vanishes (finding #7). They are
+        carried by the material's stable prim path, falling back to its leaf
+        name, so an override re-applies onto the *same* material and not a
+        same-named one in another scope (`/ScopeA/Foo` vs `/ScopeB/Foo` would
+        cross-apply if keyed by leaf name).
+        """
+        old = self._usd_scene
+        if old is None:
+            return
+
+        inst_enabled = {
+            inst.prim_path: inst.enabled
+            for inst in old.instances if inst.prim_path
+        }
+        light_enabled = {
+            lt.prim_path: lt.enabled
+            for lt in (*old.lights_dir, *old.lights_sphere) if lt.prim_path
+        }
+
+        def _mat_key(m):
+            return getattr(m, "source_prim_path", None) or getattr(m, "name", None)
+
+        overrides = {
+            _mat_key(m): dict(m.parameter_overrides)
+            for m in old.materials
+            if _mat_key(m) and m.parameter_overrides
+        }
+
+        for inst in new_scene.instances:
+            if inst.prim_path in inst_enabled:
+                inst.enabled = inst_enabled[inst.prim_path]
+        for lt in (*new_scene.lights_dir, *new_scene.lights_sphere):
+            if lt.prim_path in light_enabled:
+                lt.enabled = light_enabled[lt.prim_path]
+        # Prior edit wins over the reloaded loader default. `_gen_scene_materials`
+        # reseeds `_material_graph_overrides` from `parameter_overrides`, so the
+        # graph-uniform cache is restored by this same merge — no separate step.
+        for m in new_scene.materials:
+            saved = overrides.get(_mat_key(m))
+            if saved:
+                m.parameter_overrides = {**m.parameter_overrides, **saved}
+
+    @property
+    def scene_version(self) -> int:
+        """Bumped once per adopted `SceneUpdate`.
+
+        The explicit replacement for `id(renderer._usd_scene)`, which several
+        UI panels and two renderer-internal caches used as a change token. An
+        id only changes on a swap, so it went stale the moment a path mutated
+        the scene in place; a counter cannot.
+        """
+        return self._scene_version
 
     def create_empty_scene(self) -> None:
         """Synthesize a bare editable in-memory USD stage and make it active.
@@ -3691,24 +3739,17 @@ class Renderer:
         """
         from pxr import Usd, UsdGeom
 
-        from skinny.usd_loader import load_scene_from_stage
-
         stage = Usd.Stage.CreateInMemory()
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
         UsdGeom.SetStageMetersPerUnit(stage, 1.0)
         world = UsdGeom.Xform.Define(stage, "/World")
         stage.SetDefaultPrim(world.GetPrim())
 
-        # Reset stale per-scene state carried by the load path so force-replacing
-        # a Z-up / animated scene doesn't inherit its rotation or clock. A fresh
-        # Y-up empty stage wants exactly these defaults.
-        self.clock = PlaybackClock()
-        self._anim_index = None
-        self._skeletal = None
-        self._usd_controls = []
-        self._usd_up_axis_rt = None
+        # Stale per-scene state — clock, animation index, up-axis rotation,
+        # skeletal handle, controls, film clamp — is reset by the apply path:
+        # a `replaces=` update speaks for the whole stage, so a force-replace
+        # of a Z-up / animated scene cannot inherit its rotation or clock.
         self._usd_bake_done = None
-        self.film_max_component = 0.0
         # The new stage declares no authored camera; a replaced scene may have
         # left the renderer horizontally mirrored or in USD-camera mode, where
         # input dispatch would call look() on the OrbitCamera and raise. Return
@@ -3719,28 +3760,18 @@ class Renderer:
 
         # An empty stage has no mesh/gprim geometry — allow_empty returns a
         # well-formed empty Scene rather than raising.
-        scene = load_scene_from_stage(
-            stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin, allow_empty=True,
-        )
-        # Adopt the new stage's physical scale (metersPerUnit 1 -> 1000 mm/unit)
-        # so a force-replace doesn't render later skin/volume content at the
-        # previous scene's scale (self.mm_per_unit is a separate renderer field).
-        self.mm_per_unit = float(scene.mm_per_unit)
-
-        # Enter the USD-active state (mirrors set_usd_scene): the label append is
-        # required, not just the index — sites index self.models[_usd_model_index].
-        if self._usd_model_index < 0:
-            self.models.append("USD: (empty)")
-            self._usd_model_index = len(self.models) - 1
-        self.model_index = self._usd_model_index
-
-        self._usd_scene = scene
-        self._usd_stage = stage
+        # `replaces=` marks a force-replace rather than a post-edit resync: no
+        # outgoing runtime state is preserved, the new stage's scale wins
+        # (metersPerUnit 1 → 1000 mm/unit), and the USD-active label is
+        # appended — sites index self.models[_usd_model_index], so the append
+        # is required, not just the index.
         self._usd_edit_layer = None
-        self._attach_edit_layer()
         # Builds scene_graph, re-injects synthetic default light/dome/camera,
         # uploads (empty TLAS via the zero-instance branch), bumps versions.
-        self._resync_geometry_from_stage()
+        self.apply_scene_update(scene_intake.read_open_stage(
+            stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
+            allow_empty=True, replaces="USD: (empty)",
+        ))
 
     # ── Runtime scene-graph editing (usd-scene-editing) ─────────────────
 
@@ -3748,90 +3779,22 @@ class Renderer:
         """Re-read the authoritative stage into the flat scene, GPU buffers, and
         derived scene graph.
 
-        Used after add/remove edits. Re-reads instances + materials + lights +
-        camera via ``load_scene_from_stage``; meshes are cached by content hash,
-        so unchanged prims are not re-baked. Runtime ``enabled`` flags (not
-        authored to the stage) are carried across by prim path for both
-        instances and lights, so an unrelated edit does not lose a user toggle.
-        Authored environment state is replaced or cleared from the re-read
-        stage. Finally rebuilds the derived scene graph (with synthesized
-        default lights re-injected) and bumps the
-        version so the UI panels repaint, and so a deleted light/camera prim
-        drops out of the render.
+        Used after add/remove edits. `scene_intake.read_open_stage` re-reads
+        instances + materials + lights + camera; meshes are cached by content
+        hash, so unchanged prims are not re-baked. The resulting update carries
+        `carry_runtime_state`, so `apply_scene_update` moves the user's
+        instance/light toggles and live material overrides onto the new scene,
+        rebuilds the derived scene graph with the synthesized default lights
+        re-injected, and bumps the change tokens — so the UI panels repaint and
+        a deleted light/camera prim drops out of the render.
         """
         stage = self._usd_stage
-        scene = self._usd_scene
-        if stage is None or scene is None:
+        if stage is None or self._usd_scene is None:
             return
-        from skinny.usd_loader import load_scene_from_stage
-        prev_inst_enabled = {
-            inst.prim_path: inst.enabled
-            for inst in scene.instances if inst.prim_path
-        }
-        prev_light_enabled = {
-            lt.prim_path: lt.enabled
-            for lt in (*scene.lights_dir, *scene.lights_sphere) if lt.prim_path
-        }
-        # Live material overrides (scene_set / slider edits) live only on the
-        # Scene objects + graph cache; a structural resync re-reads materials
-        # from disk and would drop them (finding #7 — edit colorA, add a light,
-        # the edit vanishes). Snapshot the prior overrides by the material's
-        # stable prim path (falling back to its leaf name) so they re-apply onto
-        # the same material, not a same-named one in another scope (/ScopeA/Foo
-        # vs /ScopeB/Foo would cross-apply if keyed by leaf name — finding #7/D).
-        def _mat_key(m):
-            return getattr(m, "source_prim_path", None) or getattr(m, "name", None)
-
-        prev_mat_overrides = {
-            _mat_key(m): dict(m.parameter_overrides)
-            for m in scene.materials
-            if _mat_key(m) and m.parameter_overrides
-        }
-        new_scene = load_scene_from_stage(
+        self.apply_scene_update(scene_intake.read_open_stage(
             stage, use_usd_mtlx_plugin=self._use_usd_mtlx_plugin,
             allow_empty=True,
-        )
-        for inst in new_scene.instances:
-            if inst.prim_path in prev_inst_enabled:
-                inst.enabled = prev_inst_enabled[inst.prim_path]
-        for lt in (*new_scene.lights_dir, *new_scene.lights_sphere):
-            if lt.prim_path in prev_light_enabled:
-                lt.enabled = prev_light_enabled[lt.prim_path]
-        # Re-apply the preserved overrides onto same-named materials (prior edit
-        # wins over the reloaded loader default). `_gen_scene_materials` below
-        # reseeds `_material_graph_overrides` from `parameter_overrides`, so the
-        # graph-uniform cache is restored by this same merge — no separate step.
-        for m in new_scene.materials:
-            saved = prev_mat_overrides.get(_mat_key(m))
-            if saved:
-                m.parameter_overrides = {**m.parameter_overrides, **saved}
-        # Swap instances + materials together so material_ids stay consistent;
-        # take the re-read lights + environment + camera too so deleting one
-        # drops it.
-        scene.instances = new_scene.instances
-        scene.materials = new_scene.materials
-        scene.lights_dir = new_scene.lights_dir
-        scene.lights_sphere = new_scene.lights_sphere
-        scene.environment = new_scene.environment
-        scene.has_authored_lighting = new_scene.has_authored_lighting
-        scene.camera_override = new_scene.camera_override
-        scene.volume_grid = getattr(new_scene, "volume_grid", None)
-        self._sync_volume_grid(scene)
-        self._gen_scene_materials()
-        self._upload_usd_scene()  # also uploads distant + sphere lights
-        self._material_version += 1
-        # Rebuild the derived scene graph so the UI panels (which poll a version
-        # counter / object id) repaint to reflect the edit.
-        try:
-            from skinny.scene_graph import build_scene_graph
-            self._scene_graph = build_scene_graph(stage, scene)
-            self._inject_default_lights_into_scene_graph()
-            self._refresh_camera_node()
-        except Exception as exc:  # noqa: BLE001
-            print(f"[skinny] scene graph rebuild after edit failed: {exc}")
-        # Bump explicitly: _inject_default_lights_into_scene_graph early-returns
-        # (without bumping) when there is no default-light stage, e.g. headless.
-        self._scene_graph_version = getattr(self, "_scene_graph_version", 0) + 1
+        ))
 
     def _instance_indices_under_path(self, prim_path: str) -> list[int]:
         """Indices of every instance at or below ``prim_path`` (subtree match).
@@ -3861,21 +3824,18 @@ class Renderer:
         if not indices:
             return
         from pxr import Usd
-        from skinny.usd_loader import _world_transform
-        rt4 = None
-        rt = self._usd_up_axis_rt
-        if rt is not None:
-            rt4 = np.eye(4, dtype=np.float32)
-            rt4[:3, :3] = rt
-        for i in indices:
-            iprim = stage.GetPrimAtPath(scene.instances[i].prim_path)
-            if not iprim or not iprim.IsValid():
-                continue
-            m = _world_transform(iprim, Usd.TimeCode.Default())
-            scene.instances[i].transform = (
-                (m @ rt4).astype(np.float32) if rt4 is not None else m
-            )
-        self._reupload_instance_transforms()
+
+        # Transforms only: an authored xform never changes the light or camera
+        # set, and re-extracting either here would undo an in-flight edit.
+        sample = scene_intake.read_at_time(
+            stage, Usd.TimeCode.Default(),
+            up_axis_rt=self._usd_up_axis_rt,
+            xform_paths=[scene.instances[i].prim_path for i in indices],
+            want_lights=False, want_camera=False,
+        )
+        self._apply_time_sample(
+            sample, upload_transforms=True, key="prim_path",
+        )
 
     def _author_local_transform(self, xformable, matrix) -> None:
         """Author ``matrix`` as the prim's single ``xformOp:transform`` in the
@@ -4190,14 +4150,13 @@ class Renderer:
                     # authoring failure here raises before the resync and the
                     # except block below removes the just-created prim.
                     from skinny import usd_material_edit as ume
-                    from skinny.usd_loader import _prim_has_mtlx_reference
                     mat_prim = stage.GetPrimAtPath(bind_material_path)
                     if not (mat_prim and mat_prim.IsValid()):
                         raise ValueError(
                             f"add_primitive: material not found: {bind_material_path}"
                         )
                     is_mat = bool(UsdShade.Material(mat_prim))
-                    if not is_mat and not _prim_has_mtlx_reference(
+                    if not is_mat and not prim_has_mtlx_reference(
                         stage, mat_prim.GetPath()
                     ):
                         raise ValueError(
@@ -4320,7 +4279,6 @@ class Renderer:
             raise RuntimeError("bind_material requires a loaded USD stage")
         from pxr import Usd, UsdGeom, UsdShade
         from skinny import usd_material_edit as ume
-        from skinny.usd_loader import _prim_has_mtlx_reference
 
         prim = stage.GetPrimAtPath(prim_path)
         if not (prim and prim.IsValid()):
@@ -4333,7 +4291,7 @@ class Renderer:
         if not (mat_prim and mat_prim.IsValid()):
             raise ValueError(f"bind_material: material not found: {material_path}")
         is_material = bool(UsdShade.Material(mat_prim))
-        if not is_material and not _prim_has_mtlx_reference(stage, mat_prim.GetPath()):
+        if not is_material and not prim_has_mtlx_reference(stage, mat_prim.GetPath()):
             raise ValueError(
                 f"bind_material: {material_path} is neither Material-typed nor "
                 f"carries a .mtlx reference"
@@ -4689,7 +4647,7 @@ class Renderer:
         """
         token = (
             self._is_usd_active(),
-            id(self._usd_scene) if self._usd_scene is not None else 0,
+            self._scene_version,
             self.uses_default_lights,
         )
         if not force and token == self._last_aux_light_authority_token:
@@ -6291,19 +6249,15 @@ class Renderer:
                 prim = self._find_dome_light_prim(env_index)
                 if prim is not None:
                     try:
-                        from pxr import Usd, UsdLux
-                        from skinny.usd_loader import _light_color_radiance
+                        from pxr import Usd
                         # The clock's time code, not the default one: a dome
                         # whose intensity is time-sampled has no value at the
                         # default time code and would resolve to the schema
                         # fallback. The clock reads 0.0 on a static stage, where
                         # any time code gives the same result.
-                        rad = _light_color_radiance(
-                            UsdLux.LightAPI(prim),
-                            Usd.TimeCode(float(self.clock.current_time_code)),
+                        intensity = scene_intake.dome_light_intensity(
+                            prim, Usd.TimeCode(float(self.clock.current_time_code)),
                         )
-                        intensity = float(np.dot(
-                            rad, np.array([0.2126, 0.7152, 0.0722], np.float32)))
                     except Exception as exc:  # noqa: BLE001
                         # Keep the 1.0 fallback, but say so. A silent `pass`
                         # here reports a plausible intensity for a dome whose
@@ -6394,30 +6348,8 @@ class Renderer:
         Returns True on success.
         """
         from pathlib import Path
-        try:
-            from pxr import Usd
-            from skinny.usd_loader import _extract_lens_system
-        except Exception as exc:
-            print(f"[skinny] lens load failed (USD unavailable): {exc}", flush=True)
-            return False
         p = Path(path)
-        if not p.is_file():
-            print(f"[skinny] lens load failed: {p} not found", flush=True)
-            return False
-        try:
-            stage = Usd.Stage.Open(str(p))
-        except Exception as exc:
-            print(f"[skinny] lens load failed to open stage: {exc}", flush=True)
-            return False
-        # Walk every prim and use the first one whose children include
-        # at least one lens-element child.
-        ls = None
-        for prim in stage.Traverse():
-            if not prim.IsActive() or prim.IsAbstract():
-                continue
-            ls = _extract_lens_system(prim, Usd.TimeCode.Default())
-            if ls is not None:
-                break
+        ls = scene_intake.read_lens_file(p)
         if ls is None:
             print(f"[skinny] lens load: no skinny:lens:* prims found in {p}", flush=True)
             return False
@@ -8453,9 +8385,9 @@ class Renderer:
                 id(env_hdr.data) if env_hdr is not None else None,
             )
         elif env_hdr is not None:
-            cache_key = ("authored", id(self._usd_scene), id(env_hdr.data))
+            cache_key = ("authored", self._scene_version, id(env_hdr.data))
         else:
-            cache_key = ("authored-black", id(self._usd_scene))
+            cache_key = ("authored-black", self._scene_version)
         if cache_key == self._last_env_index:
             return
         if env_hdr is None:

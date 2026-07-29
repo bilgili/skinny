@@ -126,52 +126,52 @@ def _spec(target, type="slider"):
 
 class TestResolveBinding:
     def test_renderer_target(self):
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         r = _StubRenderer()
-        get, set_ = resolve_control_binding(r, _spec("renderer:env_intensity"))
+        get, set_ = control_accessors(r, _spec("renderer:env_intensity"))
         assert get() == pytest.approx(1.0)
         set_(2.5)
         assert r.env_intensity == pytest.approx(2.5)
 
     def test_mtlx_target(self):
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         r = _StubRenderer()
-        _get, set_ = resolve_control_binding(r, _spec("mtlx:skin_bsdf_roughness"))
+        _get, set_ = control_accessors(r, _spec("mtlx:skin_bsdf_roughness"))
         set_(0.4)
         assert r.mtlx_overrides["skin_bsdf_roughness"] == pytest.approx(0.4)
 
     def test_material_target(self):
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         r = _StubRenderer()
-        get, set_ = resolve_control_binding(r, _spec("material:Skin:roughness"))
+        get, set_ = control_accessors(r, _spec("material:Skin:roughness"))
         set_(0.7)
         assert r._usd_scene.materials[1].parameter_overrides["roughness"] == pytest.approx(0.7)
         assert get() == pytest.approx(0.7)
 
     def test_material_missing_is_inert(self):
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         r = _StubRenderer()
-        get, set_ = resolve_control_binding(r, _spec("material:Nope:roughness"))
+        get, set_ = control_accessors(r, _spec("material:Nope:roughness"))
         set_(0.5)  # no crash
         assert get() is None
 
     def test_usd_target_writes_and_marks_dirty(self):
         from pxr import Sdf, Usd, UsdLux
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         stage = Usd.Stage.CreateInMemory()
         light = UsdLux.SphereLight.Define(stage, "/Light")
         light.GetIntensityAttr().Set(100.0)
         r = _StubRenderer(stage)
-        get, set_ = resolve_control_binding(r, _spec("usd:/Light.inputs:intensity"))
+        get, set_ = control_accessors(r, _spec("usd:/Light.inputs:intensity"))
         assert get() == pytest.approx(100.0)
         set_(250.0)
         assert light.GetIntensityAttr().Get() == pytest.approx(250.0)
         assert r._usd_live_dirty
 
     def test_unknown_prefix_is_inert(self):
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         r = _StubRenderer()
-        get, set_ = resolve_control_binding(r, _spec("bogus:whatever"))
+        get, set_ = control_accessors(r, _spec("bogus:whatever"))
         set_(1.0)  # no crash
         assert get() is None
 

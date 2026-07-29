@@ -19,7 +19,7 @@ pytest.importorskip("pxr")
 
 from skinny.usd_loader import (  # noqa: E402
     _collect_mtlx_asset_paths,
-    _prim_has_mtlx_reference,
+    prim_has_mtlx_reference,
     _read_mtlx_mapping_sidecar,
     load_scene_from_stage,
 )
@@ -70,7 +70,7 @@ def test_collect_finds_session_layer_reference(tmp_path):
 
     paths = _collect_mtlx_asset_paths(stage)
     assert mtlx in paths
-    assert _prim_has_mtlx_reference(stage, "/Materials/SessMat")
+    assert prim_has_mtlx_reference(stage, "/Materials/SessMat")
 
 
 def test_unbound_session_holder_not_loaded(tmp_path):
@@ -147,6 +147,6 @@ def test_root_layer_collection_unchanged(tmp_path):
     holder.GetPrim().GetReferences().AddReference(mtlx)
 
     assert _collect_mtlx_asset_paths(stage) == {mtlx}
-    assert _prim_has_mtlx_reference(stage, "/Materials/RootMat")
+    assert prim_has_mtlx_reference(stage, "/Materials/RootMat")
     # Session layer is empty → nothing extra discovered.
     assert stage.GetSessionLayer().empty

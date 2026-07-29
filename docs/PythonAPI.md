@@ -543,14 +543,15 @@ def add_render_flags(parser, *, integrator=True, execution=True,
 ## 6. Scene loading (`skinny.usd_loader`)
 
 ```python
-def load_scene_from_usd(stage_path, *, time=None, use_usd_mtlx_plugin=False) -> Scene    # :1970
-def load_scene_from_stage(stage, *, time=None, use_usd_mtlx_plugin=False) -> Scene       # :1998
-def build_animation_index(stage) -> AnimationIndex                                       # :1542
-def build_playback_clock(stage, index)                                                   # :1591
-def extract_skeletal_bindings(stage) -> SkeletalScene                                    # :1761
-def extract_ui_controls(stage) -> list[ControlSpec]                                      # :1822
-def resolve_control_binding(renderer, spec)                                              # :1873
-def summarize(scene) -> str                                                              # :2044
+def load_scene_from_usd(stage_path, *, time=None, use_usd_mtlx_plugin=False) -> Scene
+def load_scene_from_stage(stage, *, time=None, use_usd_mtlx_plugin=False) -> Scene
+def build_animation_index(stage) -> AnimationIndex
+def build_playback_clock(stage, index)
+def extract_skeletal_bindings(stage) -> SkeletalScene
+def extract_ui_controls(stage) -> list[ControlSpec]
+def compute_joint_matrices(binding, time, skel_to_world=None, up_axis_rt4=None)
+def prim_has_mtlx_reference(stage, prim_path) -> bool
+def summarize(scene) -> str
 ```
 
 `load_scene_from_usd` is the blocking path loader; `load_scene_from_stage` takes
@@ -566,6 +567,73 @@ stage = Usd.Stage.Open("scene.usda")
 scene = usd_loader.load_scene_from_stage(stage)
 renderer.set_usd_scene(scene, stage=stage)
 ```
+
+`resolve_control_binding(renderer, spec)` was **removed** from this module by
+change `scene-intake-interface`. It took a renderer and wrote to it; the two
+halves now live in `skinny.scene_intake` and `skinny.usd_controls` below.
+
+---
+
+## 6a. Scene intake (`skinny.scene_intake`, `skinny.usd_controls`)
+
+The one interface from a USD stage to the renderer. Intake returns values and
+holds no renderer reference; `Renderer.apply_scene_update` is the only path
+that adopts one.
+
+```python
+def read_stage(stage_path, *, use_usd_mtlx_plugin=False, build_graph=True) -> SceneUpdate
+def read_open_stage(stage, *, time=None, use_usd_mtlx_plugin=False,
+                    allow_empty=False, build_graph=True, replaces=None) -> SceneUpdate
+def adopt_scene(scene, *, stage=None) -> SceneUpdate
+def bake_pending(pending_prims, *, max_workers=4)          # yields MeshInstance
+def read_at_time(stage, time_code, *, up_axis_rt=None, xform_paths=None,
+                 want_lights=True, want_camera=True) -> TimeSample
+def deform_skinned_mesh(binding, source, time) -> MeshSource
+def dome_light_intensity(prim) -> float
+def read_lens_file(path) -> LensSystem | None
+def resolve_control_binding(spec, *, scene=None, stage=None) -> ControlBinding
+```
+
+`SceneUpdate` has one constructor per trigger — `streamed`, `adopted`,
+`resynced`, `replacing` — and the four readers above build them; do not fill
+its per-trigger fields by hand. `TimeSample.read_lights` / `.read_camera` say
+whether that part of the stage was read at all, which is not the same as the
+lists coming back empty.
+
+`read_at_time` accepts a frame number or a `Usd.TimeCode`. Pass the sentinel,
+not a float, for the default time: `Usd.TimeCode.Default().GetValue()` is NaN.
+
+```python
+from pxr import Usd
+from skinny import scene_intake
+
+stage = Usd.Stage.Open("scene.usda")
+renderer.apply_scene_update(scene_intake.read_open_stage(stage))
+
+sample = scene_intake.read_at_time(stage, 12.0, up_axis_rt=renderer._usd_up_axis_rt)
+print(sample.camera_override, len(sample.lights_dir))
+```
+
+Applying a control binding is the renderer's half:
+
+```python
+def accessors_for(renderer, binding) -> tuple[getter, setter]
+def control_accessors(renderer, spec) -> tuple[getter, setter]
+```
+
+```python
+from skinny.usd_controls import control_accessors
+
+getter, setter = control_accessors(renderer, spec)   # renderer may be a proxy
+setter(0.5)
+```
+
+`skinny.usd_controls` imports no GPU package, so a UI or a test binds controls
+without importing `skinny.renderer`.
+
+`Renderer` gained `apply_scene_update(update)` and a `scene_version` property —
+the explicit change token that replaced `id(renderer._usd_scene)`, bumped once
+per applied update.
 
 ---
 

@@ -658,6 +658,98 @@ Transparency helpers (defined in `materials/flat/flat_shading.slang`):
 - `isMaterialTransparent(materialId)` — opacity < 1 or opacity texture
 - `isShadowTransparent(h)` — cutout or refractive
 
+### Scene intake (`scene_intake.py`, change `scene-intake-interface`)
+
+**`scene_intake.py` is the one interface from a USD stage to the renderer.** It
+reads a stage — in full, as a streamed batch, or at a time code — and returns a
+`SceneUpdate` value. It holds no reference to the renderer, imports nothing
+from it, and never mutates it. `usd_loader.py` stays the extractor underneath;
+intake is what the rest of the codebase talks to.
+
+Before this change the renderer reached into the loader through **15
+function-local imports of 9 private symbols**, so the module-level import graph
+showed no coupling at all. The dependency also ran backwards:
+`usd_loader.resolve_control_binding` took a renderer, read its scene, called
+`apply_material_override` and set `_usd_live_dirty`. Intake and renderer were
+circular at runtime, resolved only by laziness.
+
+**The interface.** Four calls produce an update, one reads a time code, two
+serve per-frame needs:
+
+| Call | Produces |
+|------|----------|
+| `read_stage(path)` | `SceneUpdate` with `pending_prims` unbaked — safe to call off the render thread |
+| `read_open_stage(stage, …)` | `SceneUpdate`, meshes baked inline (post-edit resync; `replaces=` marks a force-replace) |
+| `adopt_scene(scene)` | `SceneUpdate` wrapping an already-loaded `Scene` (headless / parity harness) |
+| `bake_pending(pending_prims)` | Baked instances, yielded in completion order |
+| `read_at_time(stage, tc, …)` | `TimeSample` — instance transforms, lights, camera, all up-axis corrected |
+| `deform_skinned_mesh(binding, source, t)` | LBS-deformed `MeshSource` with re-smoothed normals |
+| `resolve_control_binding(spec, scene=, stage=)` | `ControlBinding` — a *description*, never a write |
+
+`read_at_time` takes a frame number **or** a `Usd.TimeCode`. The sentinel
+matters: `Usd.TimeCode.Default().GetValue()` is NaN, so rounding it through a
+float silently asks for frame NaN.
+
+**One application path.** `Renderer.apply_scene_update(update)` is the only
+place a scene is adopted; it replaced three paths (`set_usd_scene`, the
+streaming poll, `_resync_geometry_from_stage`) that each did a different subset
+of the work in a different order. The order is stated once:
+
+1. enter the USD-active state (if the update carries a label)
+2. carry runtime state off the outgoing scene (resync only)
+3. take the stage + its derived state (graph, animation index, clock, up-axis
+   rotation, skeletal handle, controls)
+4. film clamp, then `mm_per_unit`
+5. `_sync_volume_grid`, then `_gen_scene_materials`
+6. camera framing + the USD camera follower
+7. authored `skinny:ui:default` control values
+8. `_upload_usd_scene`
+9. `_inject_default_lights_into_scene_graph`, `_refresh_camera_node`
+10. bump `_material_version`, `_scene_graph_version`, `_scene_version`
+
+Three of those orderings are load-bearing: runtime state is read *before* the
+swap; `mm_per_unit` is final before the grid sync and the grid before the
+upload that packs the volume σ folds; the camera is framed before the camera
+node snapshots any authored thick lens.
+
+**Per-trigger steps are fields, not branches.** `SceneUpdate` has one
+constructor per trigger — `streamed`, `adopted`, `resynced`, `replacing` —
+and nothing else fills the flags by hand. A resync keeps the user's camera and
+skips control defaults; a full load adopts `mm_per_unit` (unless it is `Scene`'s
+`120.0` sentinel) and does not carry runtime state, because
+`parameter_overrides` mixes authored loader values with live edits and the old
+authored value would beat the newly authored one.
+
+**Runtime-state carry-over is a stated property.** Instance-enabled flags,
+light-enabled flags and live material overrides are never authored to USD, so a
+stage re-read would drop them — edit a colour, add a light, the edit vanishes
+("finding #7"). `Renderer._carry_runtime_state_into` moves them, keyed by the
+material's stable prim path with a fallback to its leaf name, so `/ScopeA/Foo`
+and `/ScopeB/Foo` do not cross-apply.
+
+**`renderer.scene_version` replaced `id(renderer._usd_scene)`.** Six sites used
+object identity as a change token — two `DynamicSection` rebuild tokens, two
+Panel repopulate polls, and two renderer-internal caches. An id only changes on
+a swap, so it went stale the moment a path mutated the scene in place; that is
+precisely why the post-edit path hand-copied eight fields instead of swapping,
+and why it forgot the film clamp among them. The counter is bumped once per
+applied update — **and once by `_clear_model_state`**, because a scene going
+away is a scene change too. With `id()` that transition was noticed by
+accident (`id(None)` differs from the old scene's id); a counter has no such
+accident, so the clear also drops the stage-derived state it orphans (controls,
+animation index, clock, up-axis rotation, skeletal handle), which is the mirror
+of `SceneUpdate.replaces_stage_state` on the way in.
+
+**Threading.** The USD streaming thread is a pure producer: it calls
+`read_stage` then `bake_pending` and writes nothing to the renderer. Every
+renderer write happens in `apply_scene_update` on the render thread.
+
+Gates: `tests/test_scene_intake.py` (intake values, the time-code identity
+fixture, and AST source gates that fail if a function-local loader import or a
+renderer back-reference returns) and `tests/test_scene_update_apply.py` (the
+adoption order and the carry-over, asserted directly rather than as a side
+effect of one path).
+
 ### USD Loading (`usd_loader.py`)
 
 Walks USD stage for `UsdGeom.Mesh`, `UsdLux` lights (DistantLight,
@@ -774,7 +866,7 @@ authority and removes the fallback pair. The decision logic (supported types,
 add-parent resolution, deletability, TRS→matrix) lives in pure helpers
 (`ui/scene_edit_actions.py`) shared by both and unit-tested without a display.
 
-### USD Animation Playback (`playback.py`, `usd_loader.py`, `renderer.py`)
+### USD Animation Playback (`playback.py`, `scene_intake.py`, `renderer.py`)
 
 At load, `build_animation_index(stage)` scans for time-varying prims — transform
 tracks (incl. ancestor-driven), animated lights, an animated camera — and
@@ -784,17 +876,29 @@ time logic: advance, loop, normalized scrub). The renderer keeps the stage alive
 (`_usd_stage`) so prims can be re-evaluated at runtime.
 
 Each frame, `Renderer.update(dt)` advances the clock and `_apply_animation_frame`
-re-evaluates only the indexed prims at `current_time_code`: animated transforms
-recompute the world matrix (`_world_transform`) and re-upload only those TLAS
-`instance_buffer` records (no mesh rebake / BVH rebuild); animated lights are
-re-extracted; an animated USD camera feeds a follower used in `camera_mode ==
-"usd"`. `current_time_code` feeds the `usd_time_code` accumulation-state
+asks intake for one `scene_intake.read_at_time(stage, tc, …)` `TimeSample`
+covering only the indexed prims, then writes it through `_apply_time_sample`:
+animated transforms re-upload only those TLAS `instance_buffer` records (no
+mesh rebake / BVH rebuild); animated lights replace the scene's light sets; an
+animated USD camera feeds a follower used in `camera_mode == "usd"`. The
+animation index selects which of the three the sample carries, so per-frame
+cost still scales with the animated set — and `TimeSample.read_lights` says
+whether lights were read *at all*, which is not the same as their coming back
+empty (a transform-only re-read must not clear the scene's lights). The same
+call serves `_refresh_usd_live_state` at the default time code after a raw USD
+attribute edit, and `_resync_instance_transforms` for a subtree.
+
+`_apply_time_sample` matches instances by the attribute the caller keyed
+`xform_paths` from (`name` for playback, `prim_path` for a subtree resync);
+the two are not interchangeable, because a synthetic area-light instance
+carries the light prim's *leaf* name in `name` and its full path in
+`prim_path`. `current_time_code` feeds the `usd_time_code` accumulation-state
 provider (`params.py:ACCUM_STATE_PROVIDERS` → `_current_state_hash`), so
 playback resets accumulation (1 spp in motion, converges when paused). A built-in
 transport (play/pause, normalized scrubber, fps) lives in the shared spec tree,
 shown only when the stage has animation.
 
-### UsdSkel Skeletal Skinning (`usd_loader.py`, `vk_skinning.py`, `shaders/skin.slang`, `shaders/bvh_refit.slang`)
+### UsdSkel Skeletal Skinning (`scene_intake.py`, `usd_loader.py`, `vk_skinning.py`, `shaders/skin.slang`, `shaders/bvh_refit.slang`)
 
 `extract_skeletal_bindings(stage)` returns a `SkeletalScene` (retaining the cache
 + stage) with one `SkinnedMeshBinding` per skinned mesh: rest points/normals,
@@ -814,17 +918,29 @@ submit (skin → barrier → refit) before the frame render — no edit to the s
 render recording, no GPU→CPU readback. Non-Vulkan backends fall back to CPU
 skinning + BLAS rebuild.
 
-### USD-Driven Scene Controls (`usd_loader.py`, `ui/build_app_ui.py`)
+### USD-Driven Scene Controls (`scene_intake.py`, `usd_controls.py`, `ui/build_app_ui.py`)
 
 `extract_ui_controls(stage)` parses any prim with an authored `skinny:ui:type`
 into a `ControlSpec` (type, prefix-typed `target`, label, range, choices,
-default, order). `resolve_control_binding(renderer, spec)` maps the target prefix
-to live get/set closures: `renderer:`/`mtlx:` → `_get_nested`/`_set_nested`;
-`material:<name>:<input>` → `apply_material_override`; `usd:<prim>.<attr>` →
-attribute `Get`/`Set` + a live-state refresh (lights/transforms/camera). A
-data-driven "Scene Controls" `DynamicSection` in `build_main_ui` renders one
-widget per control across all front-ends, shown only when the stage declares
-controls. Authored `skinny:ui:default` values apply at load.
+default, order). Resolution and application are **two owners**, split by change
+`scene-intake-interface`: `scene_intake.resolve_control_binding(spec, scene=,
+stage=)` looks the target up against a scene and a stage and returns a
+`ControlBinding` *description* — which material index, which live
+`Usd.Attribute` — and `usd_controls.control_accessors(renderer, spec)` turns
+that into the get/set closures the UI uses. `renderer:`/`mtlx:` →
+`_get_nested`/`params.set_param_value`; `material:<name>:<input>` →
+`apply_material_override`; `usd:<prim>.<attr>` → attribute `Get`/`Set` + a
+live-state refresh (lights/transforms/camera). Unresolvable targets return an
+inert binding plus a warning, so a bad declaration leaves the widget
+present-but-dead instead of breaking the panel.
+
+`usd_controls.py` carries no GPU dependency, so the UI and its tests bind
+controls without importing `skinny.renderer`; and the writes go through
+`params.set_param_value`, never `_set_nested`, because the Qt and web
+front-ends pass a marshalling proxy that `_set_nested` would resolve straight
+through. A data-driven "Scene Controls" `DynamicSection` in `build_main_ui`
+renders one widget per control across all front-ends, shown only when the stage
+declares controls. Authored `skinny:ui:default` values apply at load.
 
 The shared UI tree (`build_app_ui.py`) has no `IBL` or `Direct Light`
 sections — those fallback-light params (`env_index`, `env_intensity`,
@@ -919,8 +1035,8 @@ Edits flow back through `MaterialLibrary` and trigger a graph rebuild
 > architectural overview.
 
 `skinny.headless` is the public offscreen-render interface, driving
-`Renderer.set_usd_scene()` + `usd_loader.load_scene_from_stage()` directly
-with no window or event loop. Key symbols:
+`Renderer.set_usd_scene()` — a three-line caller of `apply_scene_update` with a
+`scene_intake.adopt_scene` update — with no window or event loop. Key symbols:
 
 - `HeadlessRenderer(w, h)` — context-manager that owns `VulkanContext` +
   `Renderer` (built through the shared
@@ -1885,6 +2001,8 @@ a build-time requirement (generated `.slang` files are checked into git).
 | `settings.py` | — | Persistent storage at `~/.skinny/` (JSON) |
 | `tattoos.py` | `Tattoo` | Procedural + image-based tattoo loading |
 | `head_textures.py` | `TextureStats` | Detail map loading (normal, roughness, displacement) at 2048² |
+| `scene_intake.py` | — | USD stage → `SceneUpdate` value; the one interface the renderer consumes |
+| `usd_controls.py` | — | `ControlBinding` → renderer get/set closures (the applying half of the control seam) |
 | `usd_loader.py` | — | USD stage → Scene (meshes, lights, cameras, materials, MaterialX fallback) |
 | `fetch_hdrs.py` | — | Downloads CC0 HDRIs from Poly Haven |
 

@@ -1254,7 +1254,7 @@ def _merge_prim_overrides(
     return merged_mat
 
 
-def _prim_has_mtlx_reference(stage: Usd.Stage, prim_path: "Sdf.Path") -> bool:
+def prim_has_mtlx_reference(stage: Usd.Stage, prim_path: "Sdf.Path") -> bool:
     """True when the root OR session layer spec at *prim_path* carries a `.mtlx`
     reference.
 
@@ -1293,7 +1293,7 @@ def _resolve_binding_from_mtlx_table(
     Walks the prim and its ancestors for a `material:binding` relationship and
     matches each target's leaf name against *mtlx_materials* (the sidecar
     table). A leaf-name hit is accepted ONLY when the bound target prim actually
-    carries a `.mtlx` reference (`_prim_has_mtlx_reference`) — so a plain-USD
+    carries a `.mtlx` reference (`prim_has_mtlx_reference`) — so a plain-USD
     material that coincidentally shares a leaf name with a sidecar entry is left
     to `ComputeBoundMaterial` instead of being shadowed. On an accepted hit,
     merges the bound Material prim's `skinnyOverrides` customData (the
@@ -1313,7 +1313,7 @@ def _resolve_binding_from_mtlx_table(
                 if cached is not None:
                     return cached
                 mtlx_mat = mtlx_materials.get(target_path.name)
-                if mtlx_mat is not None and _prim_has_mtlx_reference(
+                if mtlx_mat is not None and prim_has_mtlx_reference(
                     stage, target_path
                 ):
                     mtlx_mat = _merge_prim_overrides(stage, target_path, mtlx_mat)
@@ -2710,84 +2710,6 @@ def extract_ui_controls(stage: "Usd.Stage") -> list[ControlSpec]:
         ))
     out.sort(key=lambda c: (c.order, c.name))
     return out
-
-
-def _inert_binding(reason: str):
-    log.warning("skinny:ui control inert: %s", reason)
-    return (lambda: None, lambda _v: None)
-
-
-def resolve_control_binding(renderer, spec: "ControlSpec"):
-    """Resolve a ControlSpec.target into (getter, setter) closures.
-
-    Reuses the renderer's existing live-edit machinery. Unresolvable targets
-    return inert closures + a warning rather than raising, so a bad declaration
-    leaves the widget present-but-dead instead of breaking the panel.
-    """
-    # `set_param_value`, not `_set_nested`: the renderer these bind to may be a
-    # marshalling proxy, and `_set_nested` resolves through it to the live object
-    # behind — an `mtlx.*` write would insert into the renderer's own mapping
-    # from the GUI thread (the web freeze) or into a proxy mirror that posts
-    # nothing (the Qt drop). See `params.set_param_value`.
-    from skinny.params import _get_nested, set_param_value
-
-    kind, _, rest = spec.target.partition(":")
-
-    if kind == "renderer":
-        return (lambda: _get_nested(renderer, rest),
-                lambda v: set_param_value(renderer, rest, v))
-
-    if kind == "mtlx":
-        path = "mtlx." + rest
-        return (lambda: _get_nested(renderer, path),
-                lambda v: set_param_value(renderer, path, v))
-
-    if kind == "material":
-        mat_name, _, inp = rest.partition(":")
-        if not inp:
-            return _inert_binding(f"material target {rest!r} missing input")
-        scene = getattr(renderer, "_usd_scene", None)
-        mats = getattr(scene, "materials", None) or []
-        mat_id = next(
-            (i for i, m in enumerate(mats)
-             if getattr(m, "name", None) == mat_name
-             or getattr(m, "mtlx_target_name", None) == mat_name),
-            None,
-        )
-        if mat_id is None:
-            return _inert_binding(f"material {mat_name!r} not found")
-
-        def _get(mid=mat_id, k=inp):
-            m = renderer._usd_scene.materials[mid]
-            return m.parameter_overrides.get(k)
-
-        def _set(v, mid=mat_id, k=inp):
-            renderer.apply_material_override(mid, k, v)
-
-        return (_get, _set)
-
-    if kind == "usd":
-        prim_path, _, attr_name = rest.rpartition(".")
-        stage = getattr(renderer, "_usd_stage", None)
-        if stage is None or not prim_path or not attr_name:
-            return _inert_binding(f"usd target {rest!r} unresolvable")
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            return _inert_binding(f"usd prim {prim_path!r} not found")
-        attr = prim.GetAttribute(attr_name)
-        if not attr or not attr.IsValid():
-            return _inert_binding(f"usd attr {attr_name!r} not found on {prim_path}")
-
-        def _get(a=attr):
-            return a.Get()
-
-        def _set(v, a=attr):
-            a.Set(v)
-            renderer._usd_live_dirty = True
-
-        return (_get, _set)
-
-    return _inert_binding(f"unknown target prefix in {spec.target!r}")
 
 
 def bake_usd_prim(
