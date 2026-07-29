@@ -43,7 +43,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuild tokens, two Panel repopulate polls, and two renderer-internal caches.
   An id only changes on a swap, so it went stale the moment a path mutated the
   scene in place; that is exactly why the post-edit path hand-copied fields
-  instead of swapping. The counter is bumped once per applied update. The
+  instead of swapping. The counter is bumped once per applied update, and once
+  by `_clear_model_state` — dropping the scene is a scene change, and it now
+  also clears the controls, animation index, clock, up-axis rotation and
+  skeletal handle that described the stage it just released, instead of leaving
+  them pointed at a stage that is gone. The
   renderer-side runtime state that only the post-edit path used to preserve —
   instance-enabled flags, light-enabled flags, and live material overrides keyed
   by source prim path — is now a stated property of applying an update, asserted

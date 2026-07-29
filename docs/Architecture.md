@@ -733,7 +733,12 @@ Panel repopulate polls, and two renderer-internal caches. An id only changes on
 a swap, so it went stale the moment a path mutated the scene in place; that is
 precisely why the post-edit path hand-copied eight fields instead of swapping,
 and why it forgot the film clamp among them. The counter is bumped once per
-applied update.
+applied update — **and once by `_clear_model_state`**, because a scene going
+away is a scene change too. With `id()` that transition was noticed by
+accident (`id(None)` differs from the old scene's id); a counter has no such
+accident, so the clear also drops the stage-derived state it orphans (controls,
+animation index, clock, up-axis rotation, skeletal handle), which is the mirror
+of `SceneUpdate.replaces_stage_state` on the way in.
 
 **Threading.** The USD streaming thread is a pure producer: it calls
 `read_stage` then `bake_pending` and writes nothing to the renderer. Every

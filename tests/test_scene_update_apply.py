@@ -1,12 +1,17 @@
 """One application path: `Renderer.apply_scene_update` (scene-intake-interface).
 
-Hostless. `apply_scene_update` orchestrates GPU work, so these tests drive it
-against a stub whose GPU steps are recorded instead of run — which is exactly
-what makes the *order* and the *runtime-state carry-over* assertable at all.
-Before this change the carry-over existed only inside one of three adoption
-paths and could only be observed as a side effect of taking that path.
+Device-free, but **not** import-free: the subject is `Renderer`'s own method,
+so `skinny.renderer` — and therefore `vulkan`, which it imports at module
+scope — must be importable. What these tests never do is construct a GPU
+context. They bind the unbound adoption methods to a stub whose GPU steps
+record their name instead of running, which is what makes the *order* and the
+*runtime-state carry-over* assertable at all: before this change the carry-over
+lived inside one of three adoption paths and could only be observed as a side
+effect of taking that path.
 
-The end-to-end GPU behaviour is gate 6.2/6.3; this is the property gate.
+Do not read this as a hostless gate for the intake seam — that is
+`tests/test_scene_intake.py`, which imports no renderer at all. The end-to-end
+GPU behaviour is gate 6.2/6.3; this is the property gate in between.
 """
 
 from __future__ import annotations
@@ -374,6 +379,42 @@ class TestSceneVersion:
         r = _renderer_stub()
         r.apply(scene_intake.SceneUpdate.adopted(_scene(), stage=None))
         assert r._material_version == 1
+
+    def test_clearing_the_model_state_is_itself_a_scene_change(self):
+        """Regression: with `id(_usd_scene)` as the token, dropping the scene
+        was noticed by accident — `id(None)` differs from the old scene's id.
+        A counter has no such accident, so the clear must bump it, or every
+        consumer keeps showing state from a stage that is gone."""
+        from skinny.playback import PlaybackClock
+        from skinny.renderer import Renderer
+
+        r = _renderer_stub()
+        r._mesh_sources = []
+        r._displacement_cache = {}
+        r._normal_cache = {}
+        r._material_graph_ids = {}
+        r._material_graph_overrides = {}
+        r._mtlx_scene_materials = {}
+        r._dummy_mesh = object()
+        r.material_capacity = 4
+        r._upload_mesh = lambda _m: None
+        r._upload_detail_maps = lambda _d: None
+        r._usd_scene = _scene()
+        r._usd_controls = ["a control from the old stage"]
+        r._anim_index = "old index"
+        r._skeletal = "old skeleton"
+        r._usd_up_axis_rt = "old rotation"
+        r.clock = "old clock"
+        before = r._scene_version
+
+        types.MethodType(Renderer._clear_model_state, r)()
+
+        assert r._scene_version == before + 1, "the clear must be observable"
+        assert r._usd_controls == []
+        assert r._anim_index is None
+        assert r._skeletal is None
+        assert r._usd_up_axis_rt is None
+        assert isinstance(r.clock, PlaybackClock)
 
     def test_ui_sites_read_the_counter_not_the_object_id(self):
         import ast

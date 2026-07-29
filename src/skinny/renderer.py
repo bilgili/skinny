@@ -1740,7 +1740,18 @@ class Renderer:
         self.orbit_camera.pitch = pitch
 
     def _clear_model_state(self) -> None:
-        """Reset all model/scene state so a fresh load starts clean."""
+        """Reset all model/scene state so a fresh load starts clean.
+
+        Dropping the stage means dropping everything derived from it. The
+        controls, animation index, clock, up-axis rotation and skeletal handle
+        all describe the stage being released, so they are cleared here — the
+        mirror of `SceneUpdate.replaces_stage_state` on the way in — and
+        `_scene_version` is bumped, because a scene going away is a
+        scene change and every change-token consumer must see it. Before
+        `scene-intake-interface` those consumers keyed on
+        `id(renderer._usd_scene)`, so the clear was noticed by accident:
+        `id(None)` differs from the id of whatever scene was loaded.
+        """
         self.models.clear()
         self._mesh_sources.clear()
         self.model_index = -1
@@ -1750,6 +1761,13 @@ class Renderer:
         self._edit_layer_default_path = None
         self._prim_to_instances = {}
         self._scene_graph = None
+        self._usd_controls = []
+        self._anim_index = None
+        self._skeletal = None
+        self._usd_up_axis_rt = None
+        self._last_eval_time_code = None
+        self.clock = PlaybackClock()
+        self._scene_version += 1
         self._last_projected_default_lights = None
         self._last_aux_light_authority_token = None
         self._usd_model_index = -1
