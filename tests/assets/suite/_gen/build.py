@@ -244,6 +244,28 @@ SCENES: dict[str, str] = {
     "mat_plastic": _scene(
         "mat_plastic",
         'Material "coateddiffuse" "rgb reflectance" [0.2 0.3 0.7] "float roughness" 0.1'),
+    # A coated metal that discriminates WHICH roughness spelling each lobe reads
+    # (change coatedconductor-roughness-spelling):
+    #   conductor.roughness 0.45 -> the base metal, visibly blurred
+    #   interface.roughness 0.02 -> the coat, a sharp clearcoat
+    # The rough metal is the discriminator, and it points this way round on
+    # purpose. `CoatedConductorMaterial::Create` defines NO top-level
+    # `roughness`, and pbrt does not merely ignore one — it REFUSES the scene
+    # ("roughness": unused parameter), so a trap value cannot be authored here
+    # and the defect has to show through the parameter's ABSENCE. skinny's
+    # UsdPreviewSurface path used to read that absent top-level spelling, which
+    # defaults to 0: a perfect mirror where pbrt renders a blurred metal. The
+    # pbrt-truth gate sees that, and so does the plain-vs-MaterialX equivalence
+    # gate, because the mtlx path already read `conductor.roughness`.
+    # The environment is constant, so the ceiling area light is what carries the
+    # sharpness — a mirror of a uniform env looks identical at any roughness and
+    # would not discriminate.
+    "mat_coated_metal": _scene(
+        "mat_coated_metal",
+        'Material "coatedconductor" "spectrum conductor.eta" "metal-Au-eta" '
+        '"spectrum conductor.k" "metal-Au-k" '
+        '"float conductor.roughness" 0.45 "float interface.roughness" 0.02',
+        env="0.4 0.4 0.4"),
     "mat_emissive": _scene(
         "mat_emissive", 'Material "diffuse" "rgb reflectance" [0.5 0.5 0.5]',
         emissive_sphere="6 5 4"),

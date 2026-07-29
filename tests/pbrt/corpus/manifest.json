@@ -445,6 +445,43 @@
    "notes": "MaterialX authoring of mat_plastic; equivalence vs plain sibling"
   },
   {
+   "name": "mat_coated_metal",
+   "suite": true,
+   "file": "suite/mat_coated_metal/mat_coated_metal.pbrt",
+   "usd": "tests/assets/suite/mat_coated_metal/mat_coated_metal.usda",
+   "ref": "refs/suite_mat_coated_metal.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "notes": "suite discriminator (mat_coated_metal): a coatedconductor whose metal (conductor.roughness 0.45) and coat (interface.roughness 0.02) are far apart, so reading the wrong spelling into the metal changes the image; pbrt-gated + self-consistency. Measured path|wavefront pbrt-truth relMSE 0.03792 (0.02452 on the _mtlx sibling) — the residual is the base metal's RGB `metallic` response vs pbrt's spectral Au eta/k, NOT the coat: a probe with the clearcoat weight zeroed is BRIGHTER (0.930x) and still 1.73x pbrt's sphere luminance. Reading the top-level `roughness` instead measured 0.4287"
+  },
+  {
+   "name": "mat_coated_metal_mtlx",
+   "suite": true,
+   "file": "suite/mat_coated_metal/mat_coated_metal.pbrt",
+   "usd": "tests/assets/suite/mat_coated_metal/mat_coated_metal_mtlx.usda",
+   "ref": "refs/suite_mat_coated_metal.exr",
+   "width": 128,
+   "height": 128,
+   "spp": 256,
+   "relmse_tol": 0.06,
+   "flip_tol": 0.08,
+   "material_class": "flat",
+   "megakernel_ok": true,
+   "materialx": true,
+   "equivalence": {
+    "pair": "mat_coated_metal",
+    "relmse": 0.0095,
+    "flip": 0.0145,
+    "note": "measured 0.009194/0.01407 (a little headroom over the measurement, which carries render noise); the two authorings only agree because both flavours read conductor.roughness for the metal — before that fix this pair measured relMSE 0.08661 / FLIP 0.06609, so the gate is still ~9x tighter than it was"
+   },
+   "notes": "MaterialX authoring of mat_coated_metal; equivalence vs plain sibling — meaningful only because both flavours now read conductor.roughness for the metal"
+  },
+  {
    "name": "mat_emissive",
    "suite": true,
    "file": "suite/mat_emissive/mat_emissive.pbrt",

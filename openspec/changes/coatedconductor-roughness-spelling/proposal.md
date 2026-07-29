@@ -15,10 +15,18 @@ The item states the defect but gets its premise wrong. It says the top-level
 | coat | `interface.roughness`, `interface.uroughness`, `interface.vroughness` |
 | metal | `conductor.roughness`, `conductor.uroughness`, `conductor.vroughness` |
 
-A top-level `roughness` on a `coatedconductor` is a parameter pbrt ignores. So
-the UsdPreviewSurface path is not reading the *coat's* roughness into the metal —
-it is reading a parameter that has no meaning for this material type, exactly the
-class of phantom read that `subsurface-promoting-accessors` deleted for `radius`.
+A top-level `roughness` on a `coatedconductor` is a parameter pbrt does not
+merely ignore — it **refuses the scene**. Measured against the pinned pbrt v4:
+
+```
+Error: mat_coated_metal.pbrt:16:173: "roughness": unused parameter.
+```
+
+So the UsdPreviewSurface path is not reading the *coat's* roughness into the
+metal. It is reading a parameter that no valid pbrt scene carries, which is a
+stronger form of the phantom read that `subsurface-promoting-accessors` deleted
+for `radius`: `radius` at least appeared on pbrt shapes, whereas this one makes
+the scene unrenderable.
 
 The two coated types are **asymmetric in pbrt**, which is why this is easy to get
 wrong: `CoatedDiffuseMaterial::Create` *does* read top-level `roughness` for its
