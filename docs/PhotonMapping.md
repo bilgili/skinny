@@ -27,9 +27,9 @@ spec (see [Deferred phases](#deferred-phases)).
 SPPM rides the **wavefront execution backend** documented in
 [Wavefront.md](Wavefront.md) (the SPPM stage list lives there beside the
 path/BDPT tables); its set-1 descriptor bindings are in
-[Architecture.md](Architecture.md) (descriptor binding map); the generic
-path/BDPT integrators are in [README.md](../README.md); the pbrt `sppm` importer
-mapping is in [PbrtImport.md](PbrtImport.md).
+[GpuResources.md](GpuResources.md) (descriptor binding map); the generic
+path/BDPT integrators are in [RenderingModes.md](RenderingModes.md); the pbrt
+`sppm` importer mapping is in [PbrtImport.md](PbrtImport.md).
 
 ## What SPPM is
 

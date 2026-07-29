@@ -22,7 +22,7 @@ shader/numpy symbols that realize them.
 > the GPU measurement. Still pending: the wavefront **white-furnace** spectral
 > closure gate, the `SPPM_FLUX_FIXED_SCALE` numpy re-measure, and the full-corpus
 > (non-suite) spectral sweep. See the
-> [README compatibility matrix](../README.md) and
+> [compatibility matrix](RenderingModes.md#compatibility-matrix) and
 > [CLAUDE.md](../CLAUDE.md) for the current state and scope guards.
 
 > Equations are shipped as **SVG images** (the repo's GitLab does not render

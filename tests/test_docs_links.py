@@ -33,7 +33,7 @@ ROOT_DOCS = (
 # Directories under docs/ that are historical records, not live documentation.
 DOCS_EXCLUDED_DIRS = ("superpowers",)
 
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 # Inline code spans hold link-shaped *examples* (CLAUDE.md documents the
 # `![alt](diagrams/foo.svg)` form), so they are not links.
 _CODE_SPAN = re.compile(r"`[^`]*`")
@@ -64,15 +64,29 @@ def _live_docs() -> list[str]:
 
 
 def _strip_fences(text: str) -> list[str]:
-    """Blank out fenced code blocks so a code sample cannot look like a link."""
-    lines = text.splitlines()
-    out, in_fence = [], False
-    for line in lines:
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            out.append("")
-            continue
-        out.append("" if in_fence else line)
+    """Blank out fenced code blocks so a code sample cannot look like a link.
+
+    CommonMark closes a fence only with the SAME delimiter character, repeated
+    at least as many times as the opener. A four-backtick fence showing a
+    three-backtick Markdown example must therefore stay open across the inner
+    ``` line — toggling on every fence-looking line would treat the sample text
+    as real links.
+    """
+    out = []
+    opener = None  # (char, length) while inside a fence
+    for line in text.splitlines():
+        match = _FENCE.match(line)
+        if match:
+            char, run = match.group(1)[0], len(match.group(1))
+            if opener is None:
+                opener = (char, run)
+                out.append("")
+                continue
+            if char == opener[0] and run >= opener[1]:
+                opener = None
+                out.append("")
+                continue
+        out.append("" if opener else line)
     return out
 
 
@@ -150,14 +164,19 @@ def test_index_lists_every_reference_document():
     reports, `docs/superpowers/` records history — and neither is a reference
     document the index should enumerate. Their links are still checked above.
     """
-    index = os.path.join(REPO, "docs", "README.md")
-    linked = {
-        os.path.basename(t.split("#", 1)[0])
-        for t in _links(os.path.join("docs", "README.md"))
-        if _is_relative(t)
-    }
+    docs_dir = os.path.join(REPO, "docs")
+    index = os.path.join(docs_dir, "README.md")
+    # Resolve each target to a real path, so a link to a nested report that
+    # happens to share a filename cannot stand in for the top-level document.
+    linked = set()
+    for target in _links(os.path.join("docs", "README.md")):
+        if not _is_relative(target):
+            continue
+        resolved = os.path.normpath(os.path.join(docs_dir, target.split("#", 1)[0]))
+        if os.path.dirname(resolved) == docs_dir:
+            linked.add(os.path.basename(resolved))
     on_disk = {
-        n for n in os.listdir(os.path.join(REPO, "docs"))
+        n for n in os.listdir(docs_dir)
         if n.endswith(".md") and n != "README.md"
     }
     assert on_disk, "no reference documents found — the check would be vacuous"
@@ -218,6 +237,26 @@ def test_negative_control(tmp_path):
         for line in _strip_fences(target.read_text(encoding="utf-8"))
         for m in _LINK.finditer(line)
     ]
+
+    # A four-backtick fence stays open across an inner ``` line (CommonMark
+    # closes only on the same character, at the opener's length or longer), so
+    # the sample link inside it is not a link.
+    nested = tmp_path / "nested.md"
+    nested.write_text(
+        "````markdown\n"
+        "```\n"
+        "[sample](inner/not-a-link.md)\n"
+        "```\n"
+        "````\n"
+        "[real](target.md)\n",
+        encoding="utf-8",
+    )
+    kept = [
+        m.group(1)
+        for line in _strip_fences(nested.read_text(encoding="utf-8"))
+        for m in _LINK.finditer(line)
+    ]
+    assert kept == ["target.md"], kept
 
 
 @pytest.mark.parametrize("doc", LIVE_DOCS)

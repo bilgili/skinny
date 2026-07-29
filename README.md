@@ -516,7 +516,7 @@ path)` for each frame — the pipeline is compiled only once.
 See `examples/` for minimal demo scripts. Full Python API reference (headless
 interface, `Renderer`, parameters, scene loading, presets) is in
 [PythonAPI.md](docs/PythonAPI.md); `skinny.headless` internals are in
-[Architecture.md](docs/Architecture.md).
+[FrontEnds.md](docs/FrontEnds.md).
 
 ### Importing pbrt v4 scenes (`skinny-import-pbrt`)
 
