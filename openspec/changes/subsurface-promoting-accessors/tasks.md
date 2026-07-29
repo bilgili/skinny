@@ -124,3 +124,24 @@ change fixes six and removes one.
   `all_mtypes.pbrt`, which has no test consumers.
 - `subsurface_radius` is derived from the resolved `mfp` — the same physical
   quantity — rather than dropped, so the mtlx lobe still exists.
+
+## 9. Pre-merge self-review fold
+
+- [x] 9.1 The AST gate covered `resolve_material` and
+      `subsurface_medium_overrides` only. `_resolve_medium_colour` — the function
+      that actually resolves every medium coefficient — was NOT checked, so a raw
+      read reintroduced there would have passed. The gate now covers it and both
+      promoting accessors.
+- [x] 9.2 Added a sensitivity control: the detector is run over a reconstructed
+      pre-change read and must flag it. A gate that cannot fail is decoration.
+- [x] 9.3 The widened `used default` escalation reaches EVERY material type, not
+      just subsurface — `_named_spectrum_scalar` serves `eta` everywhere, so an
+      unrecognised named eta on a `dielectric` now reports APPROX. Intended, but
+      it was stated only obliquely; now pinned by a test and recorded in
+      `docs/PbrtImport.md`.
+- [x] 9.4 Verified no other consumer of `subsurface_radius` breaks: it is packed
+      by `material_pack.py:473` and consumed by `mtlx_std_surface.slang` as the
+      per-channel scattering radius — the same physical quantity as `mfp`, and
+      the default is unchanged ([1,1,1], since MFP_DEFAULT is 1.0). No corpus or
+      suite scene authors `mfp` on a subsurface material either
+      (`subsurface_infinite.pbrt` authors only sigma_a/sigma_s), so nothing moves.

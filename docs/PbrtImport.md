@@ -92,9 +92,16 @@ EXACT→APPROX, and notes/statuses are import *output* — so the few reads that
 one-sided or divergent between the two pipelines today are **frozen** behind that
 flag rather than unified, each with a named follow-up: `coatedconductor` base
 roughness spelling (`conductor.roughness` under mtlx, top-level `roughness` under
-usd), and the mtlx-only `transmittance`, subsurface `reflectance`/`radius`, and
-`interface.eta` on both coated types. Under `usd` those reads do not happen at
-all — no value, no note, no escalation.
+usd), and the mtlx-only `transmittance` and `interface.eta` on both coated types.
+Under `usd` those reads do not happen at all — no value, no note, no escalation.
+
+Subsurface `reflectance` and `radius` left that list in change
+`subsurface-promoting-accessors`. `reflectance` is resolved once, outside the
+gate: the `usd` path already read it for the medium coefficient chain, so the
+gate suppressed its note rather than its read. The `radius` read is gone
+entirely — pbrt defines no such parameter on a material — and the
+`subsurface_radius` lobe derives from `mfp`, the same physical quantity. Only the
+mtlx-only *lobes* remain gated.
 
 The rule covers the stage-emission module too. `media.subsurface_overrides`
 authors the `skinnyOverrides` medium payload, and it once held a **second copy**
@@ -146,6 +153,14 @@ The promoting layer follows two rules.
    carries the marker `used default`, which is what escalates the material's
    status from `EXACT` to `APPROX`. A substituted value that leaves the import
    `EXACT` is a wrong answer wearing a clean report.
+
+   This escalation is **not subsurface-only**. The marker also appears on
+   `_named_spectrum_scalar`'s notes, which serve `eta` on every material type, so
+   an unrecognised named eta on a `dielectric` now reports `APPROX` where it
+   previously reported `EXACT` with a note. That is the intended reading — the
+   value *was* substituted. A *recognised* name stays an exact substitution and
+   does not escalate. No corpus or suite scene carries an unrecognised name, so
+   no committed report moves.
 2. **A named spectrum substitutes only where the substitution means something.**
    `_IOR_PARAM_NAMES` restricts the float side, so a named glass yields its d-line
    index on an IOR lane and degrades on a roughness lane.

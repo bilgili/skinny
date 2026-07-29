@@ -593,11 +593,28 @@ def test_resolver_reads_no_parameter_value_through_a_raising_accessor():
     accessor passes it. This fails the build instead, whichever branch and
     whichever name.
     """
-    leaked = _raising_reads_in(M.resolve_material) + _raising_reads_in(
-        M.subsurface_medium_overrides)
+    leaked = []
+    for fn in (M.resolve_material, M.subsurface_medium_overrides,
+               M._resolve_medium_colour, M.get_float_texture, M.get_spectrum_texture):
+        leaked += _raising_reads_in(fn)
     assert not leaked, (
         "pbrt parameter values read through a float()-on-token accessor: "
         f"{leaked}. Use get_float_texture / get_spectrum_texture.")
+
+
+def test_the_raising_read_detector_can_actually_fail():
+    """Sensitivity control: a gate that cannot fail is decoration.
+
+    Reconstructs the pre-change read and asserts the detector flags it, so the
+    green above means "no raw read", not "detector matched nothing".
+    """
+    def _reintroduced(p):
+        sigma_a = p.rgb("sigma_a", None)      # noqa: F841 - the read being detected
+        g_f = p.floats("g", [0.0])            # noqa: F841
+        return sigma_a, g_f
+
+    found = _raising_reads_in(_reintroduced)
+    assert [f.split("@")[0] for f in found] == ["sigma_a:rgb", "g:floats"], found
 
 
 def test_named_spectrum_on_a_spectrum_lane_is_not_silently_dropped():
@@ -731,3 +748,23 @@ def test_subsurface_does_not_read_a_parameter_pbrt_never_defines():
     """pbrt's SubsurfaceMaterial::Create has no `radius`; only shapes do."""
     src = textwrap.dedent(inspect.getsource(M.resolve_material))
     assert '"radius"' not in src, "resolver reads a `radius` pbrt would ignore"
+
+
+def test_a_degrading_named_spectrum_escalates_on_every_material_type():
+    """The status escalation is NOT subsurface-only, by design.
+
+    It keys off the `used default` marker that every degradation note carries,
+    including `_named_spectrum_scalar`'s on the float side — which serves `eta`
+    on every material type. So an unrecognised named eta on a `dielectric` now
+    reports APPROX where it reported EXACT with a note, which was a substituted
+    value wearing a clean status. Only `all_mtypes.pbrt` carries such a name, so
+    no corpus scene's report moves.
+    """
+    res = _res('Material "dielectric" "spectrum eta" "glass-ZZ9"')
+    assert res.lobes["ior"] == pytest.approx(1.5)
+    assert res.notes == ["named spectrum 'glass-ZZ9' on eta unrecognised; used default 1.5"]
+    assert res.status == APPROX
+
+    # a RECOGNISED name is an exact substitution and must NOT escalate
+    exact = _res('Material "dielectric" "spectrum eta" "glass-BK7"')
+    assert exact.notes == [] and exact.status == EXACT
