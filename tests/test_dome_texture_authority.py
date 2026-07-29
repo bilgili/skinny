@@ -21,6 +21,7 @@ import pytest
 from pxr import Gf, Usd, UsdGeom, UsdLux
 
 from skinny.gpu_resources import SceneResourceSet
+from skinny.playback import PlaybackClock
 from skinny.renderer import Renderer
 from skinny.scene import LightEnvHDR, Scene, environment_contribution_intensity
 from skinny.scene_graph import build_scene_graph, inject_default_lights
@@ -49,6 +50,10 @@ def _editor() -> tuple[Renderer, Usd.Stage]:
     UsdGeom.Cube.Define(stage, "/World/Geometry")
 
     r = Renderer.__new__(Renderer)
+    # `apply_dome_light_texture` folds the dome's colour×intensity×exposure at
+    # the clock's time code (a time-code-free read returns the schema fallback
+    # for a time-sampled attribute). A real Renderer builds this in __init__.
+    r.clock = PlaybackClock()
     r._usd_stage = stage
     r._usd_edit_layer = None
     r._usd_scene = Scene()
