@@ -354,9 +354,11 @@ def test_usd_flavor_does_not_escalate_on_an_mtlx_only_unresolvable_texture():
 
 
 def test_coatedconductor_base_roughness_param_spelling_is_frozen_per_flavor():
-    # DRIFT (frozen, follow-up): pbrt-v4 spells it `conductor.roughness`; only
-    # the mtlx pipeline reads that spelling, the USD one reads top-level
-    # `roughness`. Preserved deliberately — fixing it changes committed fixtures.
+    # DRIFT (frozen, follow-up `coatedconductor-roughness-spelling`): pbrt-v4
+    # spells it `conductor.roughness` and reads NO top-level `roughness` for this
+    # material type. Only the mtlx pipeline reads the correct spelling; the USD
+    # one reads top-level `roughness`, which pbrt ignores here. Preserved
+    # deliberately — fixing it changes committed fixtures.
     src = 'Material "coatedconductor" "float conductor.roughness" 0.04 "float roughness" 0.64'
     usd = _res(src, M.USD).lobes["roughness"].pv.const
     mtlx = _res(src, M.MTLX).lobes["roughness"].pv.const

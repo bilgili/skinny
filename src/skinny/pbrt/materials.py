@@ -695,11 +695,15 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
         lobes["base_color"] = reflectance(base)
         lobes["specular_color"] = list(base)
         if mtlx:
-            # FLAVOUR GATE (drift 1; follow-up: make the UsdPreviewSurface path
-            # read `conductor.roughness` too, with fixture regen). pbrt-v4 spells
-            # the base metal's roughness `conductor.roughness`; only the mtlx
-            # pipeline reads that spelling today, the USD one reads the
-            # top-level `roughness` (which drives the coat) instead.
+            # FLAVOUR GATE (drift 1; follow-up: change
+            # `coatedconductor-roughness-spelling`, KnownBugs.md #3.1). pbrt-v4
+            # spells the base metal's roughness `conductor.roughness` and the
+            # coat's `interface.roughness`; `CoatedConductorMaterial::Create`
+            # reads NO top-level `roughness` for this material type. Only the
+            # mtlx pipeline reads the correct spelling today — the USD one reads
+            # the top-level `roughness`, a param pbrt ignores here. (The two
+            # coated types are asymmetric: `coateddiffuse` DOES take its coat
+            # roughness from top-level `roughness`, so that branch is correct.)
             rv = get_float_texture(p, "conductor.roughness", 0.0,
                                    textures=textures, base_dir=base_dir, notes=notes)
             if rv.is_tex:

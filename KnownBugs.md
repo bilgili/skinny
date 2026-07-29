@@ -85,23 +85,41 @@ tiles where Vulkan clamps.
 
 ---
 
-## 3. pbrt material mapping: four frozen divergences between the two export flavours
+## 3. pbrt material mapping: frozen divergences between the two export flavours
 
 **Observed:** 2026-07-25, while extracting the shared resolver (change
-`pbrt-material-shared-resolver`). All four **predate** that change and were
-preserved deliberately — the change's gate is byte-identical importer output, so
-fixing any of them there would have silently changed committed `.usda` fixtures.
-Each is flavour-gated in `resolve_material` with a comment pointing here.
+`pbrt-material-shared-resolver`). Four were recorded; two are now fixed (see the
+closing note) and two remain. All **predate** that change and were preserved
+deliberately — the change's gate is byte-identical importer output, so fixing any
+of them there would have silently changed committed `.usda` fixtures. Each
+remaining one is flavour-gated in `resolve_material` with a comment pointing here.
 
 **1. `coatedconductor` base-metal roughness reads a different param per flavour.**
-pbrt-v4 spells the metal's roughness `conductor.roughness` (the top-level
-`roughness` drives the *coat*). The `-mtlx` path reads `conductor.roughness`
-(correct); the UsdPreviewSurface path reads top-level `roughness`, so on a
-`coatedconductor` that sets both, the two exports render a differently-rough
-metal. **Fix:** read `conductor.roughness` on both, regenerate the affected
-`.usda` fixtures, and diff the parity baselines (no suite or corpus scene uses
-`coatedconductor` today, so add one — `tests/pbrt/fixtures/all_mtypes.pbrt`
-covers the import-level behaviour but renders nothing).
+pbrt-v4 spells the metal's roughness `conductor.roughness` and the coat's
+`interface.roughness`; `CoatedConductorMaterial::Create` reads **no top-level
+`roughness` at all**. The `-mtlx` path reads `conductor.roughness` (correct); the
+UsdPreviewSurface path reads top-level `roughness`, so on a `coatedconductor`
+that sets both, the two exports render a differently-rough metal — and the USD
+path is not reading the *coat's* roughness into the metal, it is reading a
+parameter pbrt ignores for this material type.
+
+> An earlier revision of this entry claimed the top-level `roughness` "drives the
+> coat". It does not, for `coatedconductor`. The two coated types are asymmetric
+> in pbrt, which is what makes this easy to get wrong: `CoatedDiffuseMaterial::
+> Create` *does* read top-level `roughness` for its coat, so skinny's
+> `coateddiffuse` handling is correct and must not change.
+
+There are in fact **three** defects on this branch, not one: the metal roughness
+spelling above, plus `conductor.uroughness`/`conductor.vroughness` dropped
+silently on **both** flavours (an anisotropic coated metal imports isotropic with
+no note), and the phantom top-level read itself. Nothing gates any of it —
+`coatedconductor` appears only in `tests/pbrt/fixtures/all_mtypes.pbrt`, which no
+test consumes, and no corpus or confirming-suite scene uses the material.
+
+**Fix:** proposed as change `coatedconductor-roughness-spelling` (both flavours
+read `conductor.roughness`, the top-level read is deleted, the anisotropic
+spellings flow through the same unreduced `ResolvedRoughness` path). Not yet
+implemented.
 
 **2. Two pbrt params are read only on the `-mtlx` path** —
 `diffusetransmission` `transmittance` and `interface.eta` on
@@ -112,7 +130,7 @@ escalation) on the `-mtlx` import and nothing at all on the plain one. **Fix:**
 decide per param whether the note is worth the divergence, then read
 unconditionally and re-baseline the reports.
 
-`subsurface` `reflectance` and `radius` used to be on this list. Change
+**Fixed since:** `subsurface` `reflectance` and `radius` used to be on this list. Change
 `subsurface-promoting-accessors` removed both: `reflectance` is now resolved once
 outside the gate (the usd path already read it for the coefficient chain, so the
 gate suppressed its note rather than its read), and the `radius` read is gone —
