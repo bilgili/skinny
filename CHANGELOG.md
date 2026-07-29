@@ -9,6 +9,52 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Scene intake is one interface that returns a value** (change
+  `scene-intake-interface`). `usd_loader.py` had four public loaders that the
+  renderer largely bypassed: it reached into nine private loader symbols through
+  **15 function-local imports**, so the module-level import graph showed no
+  coupling at all. The dependency also ran backwards —
+  `usd_loader.resolve_control_binding` took a renderer, read its scene, called
+  `apply_material_override`, set `_usd_live_dirty`, and imported `skinny.params`
+  to string-path into renderer attributes — so intake and renderer were circular
+  at runtime, resolved only by laziness. A new `scene_intake.py` reads a stage
+  (in full, as a streamed batch, or at a time code) and returns a `SceneUpdate`
+  value; it holds no renderer reference and imports nothing from one. The
+  control binding inverted: intake returns a `ControlBinding` description and
+  the new `usd_controls.py` turns it into the renderer's get/set closures.
+  Neither module imports a GPU package, so a UI or a test binds controls and
+  asserts intake results without importing `skinny.renderer`.
+- **One path adopts every scene** (same change). `Renderer.apply_scene_update`
+  replaced three adoption paths — `set_usd_scene`, the streaming poll, and the
+  post-edit geometry resync — that each did a different subset of the work in a
+  different order. The order is now stated once, and anything one trigger wants
+  and another does not is a *field of the update* rather than a branch. Two
+  latent bugs fell out of the merge: the post-edit path re-read the stage but
+  never adopted the re-read film clamp (it hand-copied eight fields and this was
+  not one of them), and neither the synchronous nor the streaming path bumped
+  `_material_version`, so a scene swap relied on some unrelated hash input to
+  reset accumulation. Both are fixed by the unified path. Per-frame re-extraction
+  of animated lights, camera and skeletal state is now one
+  `scene_intake.read_at_time` call instead of a re-derivation from loader
+  internals, verified bit-for-bit against a fixture captured from the pre-change
+  renderer.
+- **`renderer.scene_version` replaced `id(renderer._usd_scene)`** (same change).
+  Six sites used object identity as a scene-change token — two `DynamicSection`
+  rebuild tokens, two Panel repopulate polls, and two renderer-internal caches.
+  An id only changes on a swap, so it went stale the moment a path mutated the
+  scene in place; that is exactly why the post-edit path hand-copied fields
+  instead of swapping. The counter is bumped once per applied update. The
+  renderer-side runtime state that only the post-edit path used to preserve —
+  instance-enabled flags, light-enabled flags, and live material overrides keyed
+  by source prim path — is now a stated property of applying an update, asserted
+  directly rather than as a side effect of taking one particular path. Rendered
+  output is unchanged: nine A/B renders across all four adoption paths are
+  bit-identical to pre-change (maxdiff 0.0). One behaviour deliberately changed:
+  `create_empty_scene` used to finish through the post-edit path and so
+  inherited its carry-over, merging the *previous* scene's material overrides
+  onto the new empty stage; a force-replace now carries nothing, matching what
+  the method already documented.
+
 - **The renderer's device-free core is importable without a GPU package**
   (change `renderer-pure-core-extraction`). `renderer.py` imports `vulkan` at
   module scope, so the 1 330 lines above the `Renderer` class — the flat-material

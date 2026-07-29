@@ -87,6 +87,35 @@ first derivation ran before customData was merged
 `flat-material-field-table`, which owns the override key vocabulary. Noted
 here, fixed there.
 
+### D7 — `SceneUpdate` carries the `SkeletalScene`, not a separate handle
+
+The open question below leaned toward a separate handle, because a live pxr
+object inside a value type is uncomfortable. Implementation showed the premise
+is already false: the update must carry the live `Usd.Stage` the renderer takes
+ownership of, so it is a transfer object, not a pure value. A separate skeletal
+handle would force every call site to thread two returns and buy no purity that
+the stage has not already spent. `SceneUpdate` carries both, and its docstring
+says so.
+
+### D8 — Streaming keeps its instance queue
+
+The second open question asked whether the streaming drain becomes a sequence
+of `SceneUpdate`s. It does not. The metadata phase produces one `SceneUpdate`
+(`SceneUpdate.streamed`), which carries the unbaked `pending_prims`; the baked
+instances that follow are the tail of that same update, not new ones. Modelling
+each batch as an update would mean an update that describes no structural
+change, only "more of what the last one promised". The queue stays; what moved
+is that the *read* is now one intake call the streaming thread makes, with no
+renderer writes on that thread.
+
+### D9 — `_prim_has_mtlx_reference` is promoted, not folded
+
+D5 assumed this private folds into the update. It does not: it is an
+authoring-time stage query (`add_primitive`, `bind_material` — "is this prim a
+material or an `.mtlx` reference?"), with no load-time result to fold. It is
+also called from inside `usd_loader` itself, so it cannot move out. It becomes
+public `prim_has_mtlx_reference` and the renderer imports it at module scope.
+
 ## Risks / Trade-offs
 
 - **Risk: ordering differences between the three paths are load-bearing.**
@@ -106,10 +135,15 @@ here, fixed there.
 
 ## Open Questions
 
-- Should `SceneUpdate` carry the `SkeletalScene` (which holds a live
-  `UsdSkel.Cache` and the stage, and must be kept alive)? A live pxr object
-  inside a value type is uncomfortable; the alternative is a separate handle
-  returned alongside. Leaning: separate handle.
-- Does the streaming path keep its own queue, or become a sequence of
-  `SceneUpdate`s? Leaning: a sequence, which makes it testable — but that
-  changes the drain loop shape in `_poll_usd_streaming`.
+Both are resolved above — the `SkeletalScene` handle by D7, the streaming drain
+shape by D8.
+
+## Follow-ups found while baselining
+
+- `_light_color_radiance` reads `inputs:intensity` / `inputs:color` /
+  `inputs:exposure` with **no time code**, so animated light intensity never
+  animates: `Get()` on an attribute that has only time samples returns the
+  schema fallback (50000 for a `DistantLight`), not the sampled value. Only the
+  light's *transform* animates today. `read_at_time` preserves this on purpose —
+  the spec requires per-frame values identical to the pre-change extraction, so
+  fixing it here would break its own gate. Separate change.

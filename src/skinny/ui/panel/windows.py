@@ -479,7 +479,7 @@ def build_bxdf_pane(
     _last_id = [-1]
 
     def poll() -> None:
-        cur = id(getattr(renderer, "_usd_scene", None))
+        cur = getattr(renderer, "scene_version", 0)
         if cur != _last_id[0]:
             _last_id[0] = cur
             _repopulate()
@@ -661,7 +661,7 @@ def build_material_graph_pane(
     _last_id = [-1]
 
     def poll() -> None:
-        cur = id(getattr(renderer, "_usd_scene", None))
+        cur = getattr(renderer, "scene_version", 0)
         if cur != _last_id[0]:
             _last_id[0] = cur
             _repopulate_materials()

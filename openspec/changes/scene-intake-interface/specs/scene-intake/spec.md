@@ -5,9 +5,13 @@
 ### Requirement: Scene intake returns a value and holds no renderer reference
 
 Scene intake SHALL expose one interface that reads a USD stage — in full, as a
-streamed batch, or at a given time code — and returns a `SceneUpdate` value
-describing instances, materials, lights, camera, volume, controls, skeletal
-bindings and film clamp. Intake MUST NOT hold, mutate, or import from the
+streamed batch, or at a given time code — and returns a value. A whole-stage
+read SHALL return a `SceneUpdate` describing instances, materials, lights,
+camera, volume, controls, skeletal bindings and film clamp; a time-code read
+SHALL return the animated subset (instance transforms, lights, camera) as its
+own value, because a per-frame delta describes no material, volume or control
+change and a type that claimed otherwise would be mostly empty by
+construction. Intake MUST NOT hold, mutate, or import from the
 renderer: the current back-reference in `resolve_control_binding` (reading
 `renderer._usd_scene`, calling `renderer.apply_material_override`, setting
 `renderer._usd_live_dirty`, and importing `skinny.params` to string-path into

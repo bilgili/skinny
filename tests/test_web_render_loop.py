@@ -153,7 +153,7 @@ def test_usd_declared_controls_write_through_the_marshalling_seam() -> None:
     through a proxy to the live mapping behind it — the same unmarshalled
     `mtlx.*` insert, reached through a USD-declared control instead of a slider.
     """
-    from skinny.usd_loader import resolve_control_binding
+    from skinny.usd_controls import control_accessors
 
     posted: list[tuple[str, object]] = []
     proxy = type("Proxy", (), {
@@ -163,7 +163,7 @@ def test_usd_declared_controls_write_through_the_marshalling_seam() -> None:
 
     for target in ("mtlx:layer_top_melanin", "renderer:env_intensity"):
         spec = type("Spec", (), {"target": target})()
-        _getter, setter = resolve_control_binding(proxy, spec)
+        _getter, setter = control_accessors(proxy, spec)
         setter(0.5)
 
     assert posted == [("mtlx.layer_top_melanin", 0.5), ("env_intensity", 0.5)]

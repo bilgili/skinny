@@ -1,0 +1,542 @@
+{
+  "stage": "#usda 1.0\n(\n    startTimeCode = 0\n    endTimeCode = 24\n    timeCodesPerSecond = 24\n    upAxis = \"Z\"\n    metersPerUnit = 1\n)\n\ndef Sphere \"Ball\"\n{\n    double3 xformOp:translate.timeSamples = {\n        0: (-4, 0, 1),\n        24: (4, 0, 3),\n    }\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    double radius = 1.5\n}\n\ndef Sphere \"Static\"\n{\n    double3 xformOp:translate = (0, 6, 0)\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    double radius = 0.75\n}\n\ndef Camera \"Cam\"\n{\n    float focalLength = 35\n    float verticalAperture = 24\n    double3 xformOp:translate.timeSamples = {\n        0: (0, -14, 2),\n        24: (3, -12, 5),\n    }\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n\ndef DistantLight \"Sun\"\n{\n    float inputs:intensity.timeSamples = {\n        0: 3,\n        24: 7,\n    }\n    color3f inputs:color = (1, 0.9, 0.8)\n    double3 xformOp:rotateXYZ.timeSamples = {\n        0: (-45, 20, 0),\n        24: (-70, 60, 10),\n    }\n    uniform token[] xformOpOrder = [\"xformOp:rotateXYZ\"]\n}\n\ndef SphereLight \"Bulb\"\n{\n    float inputs:intensity.timeSamples = {\n        0: 400,\n        24: 900,\n    }\n    float inputs:radius = 0.4\n    color3f inputs:color = (0.6, 0.8, 1)\n    double3 xformOp:translate.timeSamples = {\n        0: (2, 2, 3),\n        24: (-2, 3, 6),\n    }\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n",
+  "time_codes": [
+    0.0,
+    6.0,
+    12.0,
+    18.0,
+    24.0
+  ],
+  "frames": {
+    "0": {
+      "instances": {
+        "/Static": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -6.0,
+            1.0
+          ]
+        ],
+        "/Ball": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            -4.0,
+            1.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "lights_dir": [
+        {
+          "prim_path": "/Sun",
+          "direction": [
+            0.241845,
+            0.664463,
+            -0.707107
+          ],
+          "radiance": [
+            50000.0,
+            45000.0,
+            40000.0
+          ]
+        }
+      ],
+      "lights_sphere": [
+        {
+          "prim_path": "/Bulb",
+          "position": [
+            2.0,
+            3.0,
+            -2.0
+          ],
+          "radiance": [
+            0.6,
+            0.8,
+            1.0
+          ],
+          "radius": 0.4
+        }
+      ],
+      "camera": {
+        "position": [
+          0.0,
+          2.0,
+          14.0
+        ],
+        "forward": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "focal_length_mm": 35.0,
+        "vertical_aperture_mm": 24.0
+      }
+    },
+    "6": {
+      "instances": {
+        "/Static": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -6.0,
+            1.0
+          ]
+        ],
+        "/Ball": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            -2.0,
+            1.5,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "lights_dir": [
+        {
+          "prim_path": "/Sun",
+          "direction": [
+            0.278646,
+            0.542066,
+            -0.792793
+          ],
+          "radiance": [
+            50000.0,
+            45000.0,
+            40000.0
+          ]
+        }
+      ],
+      "lights_sphere": [
+        {
+          "prim_path": "/Bulb",
+          "position": [
+            1.0,
+            3.75,
+            -2.25
+          ],
+          "radiance": [
+            0.6,
+            0.8,
+            1.0
+          ],
+          "radius": 0.4
+        }
+      ],
+      "camera": {
+        "position": [
+          0.75,
+          2.75,
+          13.5
+        ],
+        "forward": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "focal_length_mm": 35.0,
+        "vertical_aperture_mm": 24.0
+      }
+    },
+    "12": {
+      "instances": {
+        "/Static": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -6.0,
+            1.0
+          ]
+        ],
+        "/Ball": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            2.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "lights_dir": [
+        {
+          "prim_path": "/Sun",
+          "direction": [
+            0.270549,
+            0.411595,
+            -0.870283
+          ],
+          "radiance": [
+            50000.0,
+            45000.0,
+            40000.0
+          ]
+        }
+      ],
+      "lights_sphere": [
+        {
+          "prim_path": "/Bulb",
+          "position": [
+            0.0,
+            4.5,
+            -2.5
+          ],
+          "radiance": [
+            0.6,
+            0.8,
+            1.0
+          ],
+          "radius": 0.4
+        }
+      ],
+      "camera": {
+        "position": [
+          1.5,
+          3.5,
+          13.0
+        ],
+        "forward": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "focal_length_mm": 35.0,
+        "vertical_aperture_mm": 24.0
+      }
+    },
+    "18": {
+      "instances": {
+        "/Static": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -6.0,
+            1.0
+          ]
+        ],
+        "/Ball": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            2.0,
+            2.5,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "lights_dir": [
+        {
+          "prim_path": "/Sun",
+          "direction": [
+            0.218849,
+            0.284298,
+            -0.933424
+          ],
+          "radiance": [
+            50000.0,
+            45000.0,
+            40000.0
+          ]
+        }
+      ],
+      "lights_sphere": [
+        {
+          "prim_path": "/Bulb",
+          "position": [
+            -1.0,
+            5.25,
+            -2.75
+          ],
+          "radiance": [
+            0.6,
+            0.8,
+            1.0
+          ],
+          "radius": 0.4
+        }
+      ],
+      "camera": {
+        "position": [
+          2.25,
+          4.25,
+          12.5
+        ],
+        "forward": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "focal_length_mm": 35.0,
+        "vertical_aperture_mm": 24.0
+      }
+    },
+    "24": {
+      "instances": {
+        "/Static": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -6.0,
+            1.0
+          ]
+        ],
+        "/Ball": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            4.0,
+            3.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "lights_dir": [
+        {
+          "prim_path": "/Sun",
+          "direction": [
+            0.128522,
+            0.17101,
+            -0.976851
+          ],
+          "radiance": [
+            50000.0,
+            45000.0,
+            40000.0
+          ]
+        }
+      ],
+      "lights_sphere": [
+        {
+          "prim_path": "/Bulb",
+          "position": [
+            -2.0,
+            6.0,
+            -3.0
+          ],
+          "radiance": [
+            0.6,
+            0.8,
+            1.0
+          ],
+          "radius": 0.4
+        }
+      ],
+      "camera": {
+        "position": [
+          3.0,
+          5.0,
+          12.0
+        ],
+        "forward": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "focal_length_mm": 35.0,
+        "vertical_aperture_mm": 24.0
+      }
+    }
+  }
+}

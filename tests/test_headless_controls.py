@@ -98,9 +98,9 @@ class TestHeadlessControls:
         return np.frombuffer(last, np.uint8).reshape(H, W, 4)[:, :, :3].astype(np.float32)
 
     def _binding(self, r, target):
-        from skinny.usd_loader import resolve_control_binding
+        from skinny.usd_controls import control_accessors
         spec = next(c for c in r._usd_controls if c.target == target)
-        return resolve_control_binding(r, spec)
+        return control_accessors(r, spec)
 
     def test_controls_discovered(self, renderer):
         targets = {c.target for c in renderer._usd_controls}

@@ -992,6 +992,8 @@ per-material furnace probes.
 |------|---------|
 | `renderer.py` | Backend-neutral render orchestration, uniforms, environment/mesh/texture upload, frame loop |
 | `scene.py` | Scene graph data classes (`MeshInstance`, `Material`, `Light*`, `Scene`) |
+| `scene_intake.py` | USD stage to a `SceneUpdate` value — the one interface the renderer consumes |
+| `usd_controls.py` | Applies a resolved USD control binding to a renderer (no GPU dependency) |
 | `usd_loader.py` | USD stage to `Scene` conversion (with MaterialX API fallback) |
 | `materialx_runtime.py` | MaterialX document loading, Slang code generation, uniform packing |
 | `mesh.py` | OBJ loading, normalization, subdivision, displacement, BVH construction |
