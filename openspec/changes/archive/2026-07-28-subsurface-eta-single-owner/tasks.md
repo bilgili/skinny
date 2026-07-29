@@ -60,11 +60,11 @@
       still crashes.
 - [x] 5.2 `docs/PbrtImport.md` records the resolver/emission split and the single
       `eta` resolution.
-- [ ] 5.3 `slang_layout.INTAKE_ONLY_KEYS` comment for `subsurface_eta` — NOT
-      APPLICABLE on this branch. `INTAKE_ONLY_KEYS` does not exist in `src/` yet;
-      it arrives with the unmerged `flat-material-field-table` change. That
-      change must state the `ior`/`subsurface_eta` agreement is structural, not
-      empirical.
+- [x] 5.3 `slang_layout.INTAKE_ONLY_KEYS` comment for `subsurface_eta` updated:
+      the `ior` agreement is STRUCTURAL, not empirical-across-the-corpus. Was
+      not applicable while this branch was cut from `2ac8aba` — `INTAKE_ONLY_KEYS`
+      arrived with `flat-material-field-table` (`main` at `a652bee`), which was
+      merged in before this branch landed.
 - [x] 5.4 `openspec validate --strict`; pre-merge review (group 6).
 
 ## 6. Pre-merge review fold
