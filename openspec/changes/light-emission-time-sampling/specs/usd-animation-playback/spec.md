@@ -14,7 +14,11 @@ value there, so USD returns the schema fallback — 50000 for a
 of its authored value.
 
 A stage read that receives no explicit time code SHALL evaluate at the stage's
-start time code, not at the default time code. The playback clock also starts at
+start time code, not at the default time code. A caller that forwards an absent
+time code SHALL forward its absence, and SHALL NOT substitute
+`Usd.TimeCode.Default()` for it. `Usd.TimeCode.Default()` is a specific time code
+at which a time-sampled attribute has no value, so substituting it discards the
+information the stage read needs to choose the start time code. The playback clock also starts at
 the stage's start time code, so the loaded values agree with the first rendered
 frame. This matters most for the light types that are never re-extracted: for
 them the value read at load is the value that renders for the whole session.
@@ -26,6 +30,16 @@ re-extracted; the per-frame requirement below states that.
 
 - **WHEN** a stage is read without an explicit time code and a light authors its emission attributes as time samples only
 - **THEN** the load evaluates that light at the stage's start time code, so the loaded radiance is the authored sample there and not the schema fallback
+
+#### Scenario: A headless render requests no particular time
+
+- **WHEN** a headless render runs with its time option unset
+- **THEN** the absent time code reaches the stage read as absent, and the render uses the stage's start time code
+
+#### Scenario: A live-state resync follows a control edit
+
+- **WHEN** a `usd:` control edits an attribute and the renderer re-reads live scene state while a time-sampled light is loaded
+- **THEN** the resync re-extracts that light at the playback clock's current time code, and does not reset it to the value at another time code
 
 #### Scenario: Intensity has time samples and no default value
 

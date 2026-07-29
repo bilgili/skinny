@@ -98,6 +98,32 @@ while the rest of the load stays at `Default()`. That puts a second evaluation
 time inside one read, so a light and the geometry it illuminates could resolve at
 different times.
 
+### The "unspecified" sentinel must survive to the loader
+
+`headless._to_timecode(None)` returned `Usd.TimeCode.Default()`. That resolved
+"the caller did not specify a time" into an explicit time code at the boundary,
+so the loader's `time is None` branch never ran and every headless render read
+time-sampled lights at their schema fallback. `_to_timecode` now returns `None`
+and lets the loader decide.
+
+This is the rule the defect keeps re-teaching: `Usd.TimeCode.Default()` is not a
+neutral placeholder for "no particular time". It is a specific time code at which
+a time-sampled attribute has no value. A boundary that substitutes it for an
+absent argument destroys information the loader needs.
+
+`Renderer._refresh_usd_live_state` had the same shape. It re-extracts the lights
+after a `usd:` control edit and evaluated at `Default()`, which would reset a
+time-sampled light to its fallback mid-playback on an edit unrelated to it. It
+now uses the clock's time code, matching `_apply_animation_frame` and the dome
+site.
+
+Three sites outside the render path still pass `Default()` and are left alone:
+`renderer._world_transform` for the instance-layout read, `_extract_lens_system`,
+and the two `scene_graph` reads that populate the UI. None of them feeds a light
+radiance into a rendered frame. The scene-graph pair would display an animated
+light's fallback intensity in the property panel; that is a display defect, and
+it belongs to a change that owns the scene-graph read.
+
 ## D5: No behaviour change without time samples
 
 `Attribute.Get(time)` equals `Attribute.Get()` when the attribute holds an

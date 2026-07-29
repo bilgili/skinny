@@ -100,7 +100,11 @@ def _frame_times(rng: tuple[float, float, float]) -> list[float]:
 def _to_timecode(time: object):
     from pxr import Usd
     if time is None:
-        return Usd.TimeCode.Default()
+        # Preserve "unspecified" rather than resolving it here. The loader turns
+        # None into the stage's START time code; collapsing it to `Default()`
+        # here would hand the loader an explicit time code, skip that branch,
+        # and read every time-sampled-only light at its schema fallback.
+        return None
     if isinstance(time, Usd.TimeCode):
         return time
     return Usd.TimeCode(float(time))

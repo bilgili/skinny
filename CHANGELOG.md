@@ -41,7 +41,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   avoid), so for those three the fallback was permanent and the fix was
   unreachable. The load now evaluates at the stage's **start time code**, which
   is where `build_playback_clock` starts the clock, so the loaded scene agrees
-  with the first rendered frame.
+  with the first rendered frame. Two callers were substituting `Default()` for an
+  absent time and had to stop: `headless._to_timecode(None)` resolved "no time
+  requested" into an explicit `Default()` at the boundary, which skipped the
+  loader's start-time branch and put the fallback back into *every* headless
+  render; and `Renderer._refresh_usd_live_state` re-extracted the lights at
+  `Default()` after a `usd:` control edit, which would reset a time-sampled light
+  to its fallback mid-playback on an edit unrelated to it. The rule the defect
+  keeps re-teaching: `Usd.TimeCode.Default()` is not a neutral placeholder for
+  "no particular time" — it is a specific time code at which a time-sampled
+  attribute has no value.
   Scenes without time-sampled light attributes are unchanged, because
   `Get(time)` and `Get()` agree on an attribute with a default value or only a
   fallback. The adjacent bare `except Exception: pass` around the dome fold now

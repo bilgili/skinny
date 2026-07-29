@@ -3551,7 +3551,11 @@ class Renderer:
             return
         from pxr import Usd
         from skinny.usd_loader import _extract_camera, _world_transform
-        t = Usd.TimeCode.Default()
+        # The clock's time code, not `Default()`. This resync re-extracts the
+        # lights, so evaluating at the default time code would reset a
+        # time-sampled light to its schema fallback — mid-playback, on an edit
+        # that had nothing to do with it.
+        t = Usd.TimeCode(float(self.clock.current_time_code))
         rt = self._usd_up_axis_rt
         rt4 = None
         if rt is not None:

@@ -130,6 +130,36 @@ class TestLightEmissionTimeSamples:
         # schema fallback (1.0).
         assert emissive["Rect"] == pytest.approx((4.0, 4.0, 4.0))
 
+    def test_headless_default_time_reaches_the_stage_start_time_code(self):
+        """`RenderOptions.time=None` must stay unspecified through the boundary.
+
+        `_to_timecode` used to resolve None to `Usd.TimeCode.Default()`, which
+        is an explicit time code — that skipped the loader's start-time branch
+        and put the schema fallback back into every headless render.
+        """
+        from pxr import Sdf, Usd, UsdGeom, UsdLux
+        from skinny.headless import _load_scene
+        stage = Usd.Stage.CreateInMemory()
+        stage.SetStartTimeCode(0)
+        stage.SetEndTimeCode(24)
+        UsdGeom.Xform.Define(stage, "/World")
+        UsdGeom.Cube.Define(stage, "/World/Geo")
+        rect = UsdLux.RectLight.Define(stage, Sdf.Path("/World/Rect"))
+        api = UsdLux.LightAPI(rect.GetPrim())
+        api.GetIntensityAttr().Set(4.0, 0.0)
+        api.GetIntensityAttr().Set(9.0, 24.0)
+
+        def emissive(scene):
+            return {
+                m.name: m.parameter_overrides.get("emissiveColor")
+                for m in scene.materials
+            }["Rect"]
+
+        # Unspecified → the stage start sample, not the 1.0 fallback.
+        assert emissive(_load_scene(stage, None)) == pytest.approx((4.0,) * 3)
+        # An explicit time code is still honoured.
+        assert emissive(_load_scene(stage, 24.0)) == pytest.approx((9.0,) * 3)
+
     def test_load_of_a_static_stage_is_unaffected_by_the_start_time_code(self):
         """A stage with no time samples resolves the same either way."""
         from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
