@@ -38,10 +38,17 @@ _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 # `![alt](diagrams/foo.svg)` form), so they are not links.
 _CODE_SPAN = re.compile(r"`[^`]*`")
 # Markdown inline links and images: ](target) — the target may carry a title.
-_LINK = re.compile(r"!?\]\(\s*<?([^)>\s]+)>?(?:\s+[\"'][^\"']*[\"'])?\s*\)")
+# CommonMark allows an angle-bracket destination, which is the only form that
+# may contain spaces: `[x](<My Guide.md>)`. Match it first, or the bare-word
+# alternative silently yields nothing and the link goes unchecked.
+_LINK = re.compile(
+    r"!?\]\(\s*(?:<([^<>\n]*)>|([^)<>\s]+))(?:\s+[\"'][^\"']*[\"'])?\s*\)"
+)
 # Link reference definitions: `[label]: target "title"`. A reference-style link
 # resolves through one of these, so the definition's target is the real link.
-_LINK_DEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?([^>\s]+)>?(?:\s+[\"'(][^\"')]*[\"')])?\s*$")
+_LINK_DEF = re.compile(
+    r"^ {0,3}\[[^\]]+\]:\s*(?:<([^<>\n]*)>|([^<>\s]+))(?:\s+[\"'(][^\"')]*[\"')])?\s*$"
+)
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 # An explicit HTML anchor pins a slug against a heading rewrite; docs/ReSTIR.md
 # already uses this form.
@@ -132,11 +139,38 @@ def _links(rel_doc: str) -> list[str]:
     out = []
     for line in lines:
         stripped = _CODE_SPAN.sub("", line)
-        out.extend(m.group(1) for m in _LINK.finditer(stripped))
+        # Each pattern has two destination groups: <angle-bracket> or bare.
+        out.extend(m.group(1) or m.group(2) for m in _LINK.finditer(stripped))
         definition = _LINK_DEF.match(stripped)
         if definition:
-            out.append(definition.group(1))
-    return out
+            out.append(definition.group(1) or definition.group(2))
+    return [t for t in out if t]
+
+
+def _exists_case_exact(path: str) -> bool:
+    """os.path.exists, but honouring case even on a case-insensitive volume.
+
+    This macOS checkout resolves `docs/architecture.md` to `docs/Architecture.md`,
+    so a mis-cased link passes here and 404s on GitHub and on Linux. Walk the
+    path from the repo root and require each component to appear in its parent's
+    listing exactly as written.
+    """
+    if not os.path.exists(path):
+        return False
+    current = os.path.abspath(REPO)
+    rest = os.path.relpath(os.path.abspath(path), current)
+    if rest.startswith(os.pardir):
+        return True  # outside the repo — existence is all we can claim
+    for part in rest.split(os.sep):
+        if part in (os.curdir, ""):
+            continue
+        try:
+            if part not in os.listdir(current):
+                return False
+        except OSError:
+            return False
+        current = os.path.join(current, part)
+    return True
 
 
 def _is_relative(target: str) -> bool:
@@ -219,10 +253,10 @@ def test_negative_control(tmp_path):
     links = []
     for line in _strip_fences(source.read_text(encoding="utf-8")):
         stripped = _CODE_SPAN.sub("", line)
-        links.extend(m.group(1) for m in _LINK.finditer(stripped))
+        links.extend(m.group(1) or m.group(2) for m in _LINK.finditer(stripped))
         d = _LINK_DEF.match(stripped)
         if d:
-            links.append(d.group(1))
+            links.append(d.group(1) or d.group(2))
     assert links == [
         "target.md#pinned",
         "nope.md",
@@ -233,7 +267,7 @@ def test_negative_control(tmp_path):
     assert "missing-heading" not in anchors
     # A fenced code block never contributes a link.
     assert "fenced/not-a-link.md" not in [
-        m.group(1)
+        m.group(1) or m.group(2)
         for line in _strip_fences(target.read_text(encoding="utf-8"))
         for m in _LINK.finditer(line)
     ]
@@ -252,11 +286,36 @@ def test_negative_control(tmp_path):
         encoding="utf-8",
     )
     kept = [
-        m.group(1)
+        m.group(1) or m.group(2)
         for line in _strip_fences(nested.read_text(encoding="utf-8"))
         for m in _LINK.finditer(line)
     ]
     assert kept == ["target.md"], kept
+
+    # An angle-bracket destination is the only inline form that may hold a
+    # space. A pattern that rejects it yields NO target, so the link goes
+    # unchecked and a missing file passes.
+    angled = tmp_path / "angled.md"
+    angled.write_text(
+        "[guide](<My Guide.md>) and [plain](<tight.md>)\n\n[r]: <Ref Doc.md>\n",
+        encoding="utf-8",
+    )
+    got = []
+    for line in _strip_fences(angled.read_text(encoding="utf-8")):
+        got.extend(m.group(1) or m.group(2) for m in _LINK.finditer(line))
+        d = _LINK_DEF.match(line)
+        if d:
+            got.append(d.group(1) or d.group(2))
+    assert got == ["My Guide.md", "tight.md", "Ref Doc.md"], got
+
+    # Case matters on GitHub and on Linux even when this volume forgives it.
+    # Checked inside the repo, where the walk applies — tmp_path is outside it.
+    right = os.path.join(REPO, "docs", "Architecture.md")
+    wrong = os.path.join(REPO, "docs", "architecture.md")
+    assert _exists_case_exact(right)
+    assert not _exists_case_exact(wrong)
+    if not os.path.exists(wrong):
+        pytest.skip("case-sensitive filesystem: os.path.exists already rejects it")
 
 
 @pytest.mark.parametrize("doc", LIVE_DOCS)
@@ -270,7 +329,7 @@ def test_relative_links_resolve(doc):
         path = target.split("#", 1)[0]
         if not path:  # a bare #anchor points at this document
             continue
-        if not os.path.exists(os.path.normpath(os.path.join(base, path))):
+        if not _exists_case_exact(os.path.normpath(os.path.join(base, path))):
             broken.append(target)
     assert not broken, f"{doc}: link target does not exist: {broken}"
 
@@ -287,7 +346,7 @@ def test_link_anchors_resolve(doc):
         if not anchor:
             continue
         full = os.path.normpath(os.path.join(base, path)) if path else os.path.join(REPO, doc)
-        if not full.endswith(".md") or not os.path.exists(full):
+        if not full.endswith(".md") or not _exists_case_exact(full):
             continue  # a missing file is the other test's failure
         if anchor not in _anchors(full):
             broken.append(target)

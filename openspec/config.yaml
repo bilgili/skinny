@@ -36,6 +36,15 @@ context: |
   env, persisted) via backend_select.select_backend; `auto` resolves to Metal on
   Apple-Silicon macOS (when the device constructs), else Vulkan.
 
-  Authoritative reference docs: Architecture.md (module map + descriptor binding
-  map), SkinRendering.md (skin estimator chain sections 1-6), CLAUDE.md and
-  AGENTS.md (contributor/agent guidance), CHANGELOG.md, README.md.
+  Authoritative reference docs: docs/README.md is the index — it lists every
+  reference document and says what each one owns; read it to find the right
+  file. Each document owns one subject and stays at or below 700 lines.
+  Architecture.md is the hub (high-level pipeline, GPU execution flow, key
+  invariants); GpuResources.md owns the descriptor binding map, the byte
+  layouts, and the shader variant key; ImplementationMap.md owns the per-file
+  module map; RenderingModes.md owns the compatibility matrix and the sampling
+  modes; SceneSystem.md, ShaderPipeline.md, Backends.md, HostModules.md,
+  FrontEnds.md, OnlineTraining.md, and ParityHarness.md own the remaining
+  renderer subjects. SkinRendering.md (skin estimator chain sections 1-6),
+  CLAUDE.md and AGENTS.md (contributor/agent guidance), CHANGELOG.md,
+  README.md.
