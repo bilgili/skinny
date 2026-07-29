@@ -92,7 +92,9 @@ Move each section at its current heading level. Do not reword any line.
 
 ## 6. Review and land
 
-- [ ] 6.1 Run the codex pre-merge review over the branch. Fix or consciously
-      dismiss each finding.
-- [ ] 6.2 `openspec validate docs-split-large-docs --strict`.
+- [x] 6.1 Run the codex pre-merge review over the branch. Fix or consciously
+      dismiss each finding. Seven passes: 15 findings, all fixed; the seventh
+      returned clean. None were in the moved text — every one was in the link
+      gate or in a pointer into it.
+- [x] 6.2 `openspec validate docs-split-large-docs --strict`.
 - [ ] 6.3 Merge to `main`, archive the change, and remove the worktree.
