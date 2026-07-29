@@ -849,14 +849,13 @@ INTAKE_ONLY_KEYS: frozenset = frozenset({
     # `coat`/`coat_roughness` and leaves the originals in place.
     "clearcoat", "clearcoatRoughness",
     # pbrt `Material "subsurface"` boundary IOR (pbrt/materials.py). No packer
-    # reads it: the flat record's boundary eta is the `ior` lane, which the same
-    # author writes from the same pbrt `eta` parameter. Across the corpus the two
-    # agree exactly. The two readers are not the same code, though: `ior` comes
-    # from `scalar("eta", …)` while this key comes from `subsurface_coefficients`,
-    # which alone resolves a NAMED-spectrum eta (`glass-LASF9`) to its d-line
-    # index — the unguarded reader raises on one today. That is a pbrt-import
-    # defect, not a packing one; recorded here so the key reads as known-unread
-    # rather than as a typo.
+    # reads it: the flat record's boundary eta is the `ior` lane. The two agree
+    # STRUCTURALLY, not just across the corpus (change subsurface-eta-single-owner):
+    # `resolve_material` reads the pbrt `eta` exactly ONCE, through
+    # `get_float_texture`, and that one float feeds `lobes["ior"]` and
+    # `subsurface_coefficients` alike — including a NAMED-spectrum eta
+    # (`glass-LASF9` → its d-line index), which used to raise in the second of two
+    # readers. Recorded here so the key reads as known-unread rather than a typo.
     "subsurface_eta",
     # pbrt bookkeeping: the medium's pbrt name (pbrt/media.py) and the density
     # field inside the .nvdb (consumed by pbrt/api.py at import, not at pack).

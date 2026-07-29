@@ -112,15 +112,13 @@ the report signal — a texture-bound or unrecognised one of these produces a no
 all on the plain one. **Fix:** decide per param whether the note is worth the
 divergence, then read unconditionally and re-baseline the reports.
 
-**3. `_subsurface_overrides` crashes on a texture-bound `reflectance`.**
-`materials._subsurface_overrides` reads it with `ParamSet.rgb`, which raises
-`ValueError` on a texture-typed param (both flavours; the promoting accessors
-exist precisely to avoid this). **Repro:** `Material "subsurface" "texture
-reflectance" "sometex"` → `could not convert string to float: 'sometex'`.
-
-**4. `media.subsurface_overrides` crashes on a named-spectrum `eta`.**
-`api._author_material` calls it in addition to the `materials.py` twin, but only
-the latter has the named-glass guard; the `media.py` one reads `ParamSet.floats`
-straight. **Repro:** `Material "subsurface" "spectrum eta" "glass-BK7"` →
-`could not convert string to float: 'glass-BK7'`. The two `subsurface_overrides`
-implementations should be one.
+**3. Three `subsurface` params still crash on a non-numeric binding.**
+`materials.subsurface_medium_overrides` reads `reflectance`, `sigma_a`, `sigma_s`
+and `mfp` with `ParamSet.rgb`, and `g` and `scale` with `ParamSet.floats`. Both
+raise `ValueError` on a texture-typed or named-spectrum param (both flavours; the
+promoting accessors `get_spectrum_texture` / `get_float_texture` exist precisely
+to avoid this). **Repro:** `Material "subsurface" "texture reflectance"
+"sometex"` → `could not convert string to float: 'sometex'`. **Fix:** route each
+through its promoting accessor, as `eta` now is. The `eta` case was item 4 and is
+fixed (change `subsurface-eta-single-owner`); it removed the second copy of the
+coefficient chain in `media.py`, so one fix now covers both call paths.

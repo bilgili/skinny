@@ -130,35 +130,32 @@ def heterogeneous_overrides(medium, scene_dir: str | None = None) -> dict:
     }
 
 
-def subsurface_overrides(params) -> dict:
-    """Volumetric medium coefficients for a pbrt ``subsurface`` material.
+def subsurface_overrides(resolved) -> dict:
+    """Stage-emission form of a pbrt ``subsurface`` material's medium coefficients.
 
-    Resolved via the pbrt-v4 precedence (:mod:`skinny.pbrt.subsurface`): explicit
-    ``sigma_a``/``sigma_s`` (× ``scale``); else a named preset (``Skin1`` …); else
-    ``reflectance`` + ``mfp`` diffuse-albedo inversion. Emitted onto
-    ``skinnyOverrides`` so the loader merges them into
-    ``Material.parameter_overrides``, where the renderer reads them to pack the
+    *resolved* is the resolver's output — the mapper's ``inputs`` dict, which
+    carries the neutral ``subsurface_sigma_a/_s/_g/_eta`` lobes verbatim on both
+    flavours. This function takes **no pbrt params and resolves nothing**: the
+    precedence chain (:mod:`skinny.pbrt.subsurface`), the defaults and the
+    named-spectrum/texture ``eta`` rule are the resolver's
+    (:func:`skinny.pbrt.materials.subsurface_medium_overrides`). Handing the
+    resolved values over rather than the `ParamSet` is what makes the boundary
+    IOR ONE resolution: `eta` is read once, in `resolve_material`, and both the
+    shader's `ior` input and the `ior` below descend from that single read.
+
+    The result is emitted onto ``skinnyOverrides`` so the loader merges it into
+    ``Material.parameter_overrides``, where the renderer reads it to pack the
     inline homogeneous medium and route the material to MATERIAL_TYPE_SUBSURFACE
     (the interior random walk). Keys match the renderer's packer
     (``subsurface_sigma_a/_s/_g``); the boundary IOR is carried as ``ior`` —
     ``resolveMedium`` reuses the flat ``ior`` slot for the medium eta.
+
+    The emitted key set is spelled out, not spread from *resolved*: this is the
+    stage's contract, so a key added to the resolver must be routed here on
+    purpose instead of silently landing in ``parameter_overrides``.
     """
     from .emit import PBRT_STAGE_METERS_PER_UNIT
-    from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
 
-    g_f = params.floats("g", [0.0])
-    eta_f = params.floats("eta", [ETA_DEFAULT])
-    scale_f = params.floats("scale", [SCALE_DEFAULT])
-    coeffs = subsurface_coefficients(
-        name=params.string("name", None),
-        sigma_a=params.rgb("sigma_a", None),
-        sigma_s=params.rgb("sigma_s", None),
-        reflectance=params.rgb("reflectance", None),
-        mfp=params.rgb("mfp", None),
-        g=float(g_f[0]) if g_f else 0.0,
-        eta=float(eta_f[0]) if eta_f else ETA_DEFAULT,
-        scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
-    )
     # pbrt media coefficients are mm⁻¹ interpreted per *scene unit* (τ = σ·L). The
     # renderer's walk computes τ = σ_packed · L_world · mm_per_unit, and the loader
     # derives mm_per_unit = metersPerUnit · 1000 = 1000 for an imported pbrt stage.
@@ -166,10 +163,11 @@ def subsurface_overrides(params) -> dict:
     # pbrt coefficients — otherwise the interior is ~1000× too dense (the sssdragon
     # renders opaque gold/brown instead of translucent). g/eta/ior are unitless.
     mm_per_unit = PBRT_STAGE_METERS_PER_UNIT * 1000.0
+    eta = float(resolved["subsurface_eta"])
     return {
-        "subsurface_sigma_a": [c / mm_per_unit for c in coeffs["sigma_a"]],
-        "subsurface_sigma_s": [c / mm_per_unit for c in coeffs["sigma_s"]],
-        "subsurface_g": float(coeffs["g"]),
-        "subsurface_eta": float(coeffs["eta"]),
-        "ior": float(coeffs["eta"]),
+        "subsurface_sigma_a": [c / mm_per_unit for c in resolved["subsurface_sigma_a"]],
+        "subsurface_sigma_s": [c / mm_per_unit for c in resolved["subsurface_sigma_s"]],
+        "subsurface_g": float(resolved["subsurface_g"]),
+        "subsurface_eta": eta,
+        "ior": eta,
     }

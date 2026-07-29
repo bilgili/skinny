@@ -1,8 +1,7 @@
 # pbrt-material-resolution Specification
 
-## Purpose
-TBD - created by archiving change pbrt-material-shared-resolver. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Single shared resolver for pbrt material parameters
 
 pbrt-param interpretation SHALL live in exactly one resolver: which params are
@@ -59,45 +58,7 @@ added to the resolver cannot reach `Material.parameter_overrides` unrouted.
   and the named-spectrum rule cannot drift between the two modules, and no
   renamed local can smuggle a `ParamSet` past the syntactic check
 
-### Requirement: Refactor preserves importer output byte-identically
-
-The extraction MUST NOT change importer output: for every scene in the
-confirming suite and the parity corpus, the `.usda` (plain and `-mtlx`
-flavors) and `.mtlx` documents produced after the refactor SHALL be
-byte-identical to those produced before it, including report notes and
-statuses. Recorded copy drifts between the two pipelines (e.g. the
-`coatedconductor` base-metal roughness param spelling) SHALL be preserved
-as-is and parameterized explicitly, not silently fixed.
-
-#### Scenario: Byte-identical import diff gate
-
-- **WHEN** the importer is run over the suite and corpus scenes before and
-  after the refactor and the outputs are diffed
-- **THEN** the diff is empty and no committed `.usda` fixture under `tests/`
-  requires regeneration
-
-#### Scenario: Authoring-equivalence gate stays green
-
-- **WHEN** the confirming-suite authoring-equivalence gate
-  (`tests/pbrt/test_suite.py`, plain-USD ≡ MaterialX) runs on the refactored
-  importer
-- **THEN** every equivalence pair passes within its recorded tolerances with
-  no baseline or tolerance change
-
-### Requirement: Resolver is hostless-testable
-
-The resolver SHALL be exercisable without a GPU, USD stage, or MaterialX
-runtime: unit tests MUST assert the resolved intermediate directly from pbrt
-`ParamSet` inputs for every supported material type, including named-spectrum
-substitution (7 metals / 7 glasses d-line IOR), texture-bound params,
-anisotropic roughness, and subsurface coefficient precedence.
-
-#### Scenario: Hostless resolver unit tests
-
-- **WHEN** the resolver unit tests run under plain `pytest` with no GPU
-  markers
-- **THEN** they pass, covering each material-type branch and each shared
-  accessor path at the resolved-form level
+## ADDED Requirements
 
 ### Requirement: One eta resolution per subsurface material
 
@@ -150,4 +111,3 @@ to the pbrt default with a note. No `eta` value SHALL raise.
   imported after the change
 - **THEN** the `.usda` (plain and `-mtlx`) and `.mtlx` documents are
   byte-identical to those produced before it, including report notes and status
-

@@ -377,7 +377,10 @@ def _author_material(stage, mat_path, pbrt_material, mesh_prim, report,
     )
     overrides = dict(extra_overrides or {})
     if pbrt_material is not None and pbrt_material.type == "subsurface":
-        overrides.update(media_mod.subsurface_overrides(pbrt_material.params))
+        # The RESOLVED lobes, not the raw ParamSet: `eta` is read once, by
+        # resolve_material, and both the shader `ior` input and the medium's
+        # `ior` override descend from that one read.
+        overrides.update(media_mod.subsurface_overrides(inputs))
     # Named-conductor / dispersive-glass identity for spectral mode (additive,
     # RGB reduction unchanged; empty for RGB-only materials).
     overrides.update(materials_mod.material_spectral_overrides(pbrt_material))
@@ -429,7 +432,10 @@ def _author_material_mtlx(stage, mat_path, pbrt_material, mesh_prim, report,
     )
     overrides = dict(extra_overrides or {})
     if pbrt_material is not None and pbrt_material.type == "subsurface":
-        overrides.update(media_mod.subsurface_overrides(pbrt_material.params))
+        # The RESOLVED lobes, not the raw ParamSet: `eta` is read once, by
+        # resolve_material, and both the shader `ior` input and the medium's
+        # `ior` override descend from that one read.
+        overrides.update(media_mod.subsurface_overrides(inputs))
     # Named-conductor / dispersive-glass identity for spectral mode (additive,
     # RGB reduction unchanged; empty for RGB-only materials).
     overrides.update(materials_mod.material_spectral_overrides(pbrt_material))

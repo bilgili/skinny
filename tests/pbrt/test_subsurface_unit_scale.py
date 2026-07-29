@@ -12,15 +12,25 @@ from __future__ import annotations
 
 import pytest
 
+from skinny.pbrt import materials as Mmaterials
 from skinny.pbrt import media as Mmedia
 from skinny.pbrt import emit as Memit
 from skinny.pbrt.parser import parse_directives
+from skinny.pbrt.state import PbrtMaterial
 from skinny.pbrt.tokenizer import tokenize
 
 
 def _params(text):
+    """The RESOLVED lobes for a pbrt material — what `media` now consumes.
+
+    `media.subsurface_overrides` takes the resolver's output, not a `ParamSet`
+    (change subsurface-eta-single-owner), so these unit-scale assertions run over
+    the same values the authoring pass hands it.
+    """
     (d,) = parse_directives(tokenize(text))
-    return d.params
+    inputs, _tex, _status, _notes = Mmaterials.map_material(
+        PbrtMaterial(d.type_arg() or "", d.params))
+    return inputs
 
 
 # The loader derives mm_per_unit = metersPerUnit * 1000 (usd_loader._read_*).

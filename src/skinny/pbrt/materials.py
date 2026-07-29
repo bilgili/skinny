@@ -381,15 +381,21 @@ def material_spectral_overrides(pbrt_material) -> dict:
 # its own change (see `pbrt-named-spectra` design, Non-Goals).
 
 
-def _subsurface_overrides(p) -> dict:
+def subsurface_medium_overrides(p, eta) -> dict:
     """Resolve pbrt `subsurface` inputs → medium-coefficient override keys
     (`subsurface_sigma_a/_s` mm⁻¹, `subsurface_g`, `subsurface_eta`) via the
     pbrt-v4 precedence (skinny.pbrt.subsurface). These ride on parameter_overrides
-    for the renderer to pack into the volumetric medium; the boundary IOR is
-    `subsurface_eta`. Emitted by both the flat and mtlx mappers so the two import
-    paths produce identical coefficients.
+    for the renderer to pack into the volumetric medium.
+
+    This is the ONE reader of a `subsurface` material's medium params, called
+    from exactly one place — :func:`resolve_material`, which passes the `eta` it
+    already resolved for the `ior` lobe. `eta` is a required argument, not an
+    optional one: an `eta=None` fallback would be a second contract, and the
+    caller that wanted it (`media.subsurface_overrides`) now takes the resolved
+    lobes instead of a `ParamSet`, so `eta` is resolved once per material rather
+    than once per consumer.
     """
-    from .subsurface import subsurface_coefficients, ETA_DEFAULT, SCALE_DEFAULT
+    from .subsurface import subsurface_coefficients, SCALE_DEFAULT
 
     name = p.string("name", None)
     sigma_a = p.rgb("sigma_a", None)
@@ -397,21 +403,12 @@ def _subsurface_overrides(p) -> dict:
     reflectance = p.rgb("reflectance", None)
     mfp = p.rgb("mfp", None)
     g_f = p.floats("g", [0.0])
-    # `eta` may be a named spectrum (e.g. "glass-BK7"), which `floats` would raise
-    # on — it is the one eta reader not routed through get_float_texture. Resolve a
-    # recognised glass to its d-line index, anything else to the pbrt default.
-    eta_p = p.get("eta")
-    if eta_p is not None and eta_p.type == "spectrum" and eta_p.values \
-            and isinstance(eta_p.values[0], str):
-        eta_f = [_named_spectrum_scalar(eta_p.string, "eta", ETA_DEFAULT, None)]
-    else:
-        eta_f = p.floats("eta", [ETA_DEFAULT])
     scale_f = p.floats("scale", [SCALE_DEFAULT])
     coeffs = subsurface_coefficients(
         name=name, sigma_a=sigma_a, sigma_s=sigma_s,
         reflectance=reflectance, mfp=mfp,
         g=float(g_f[0]) if g_f else 0.0,
-        eta=float(eta_f[0]) if eta_f else ETA_DEFAULT,
+        eta=float(eta),
         scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
     )
     return {
@@ -591,9 +588,15 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
             else "diffusetransmission approximated as diffuse + partial opacity"
         )
     elif mtype == "subsurface":
+        from .subsurface import ETA_DEFAULT
+
         lobes["base_color"] = ParamValue([1.0, 1.0, 1.0])
         lobes["subsurface"] = 1.0
-        lobes["ior"] = scalar("eta", 1.33)
+        # ONE `eta` read for the whole branch. `pack_flat_material` takes the
+        # boundary IOR from the `ior` lane and never reads `subsurface_eta`, so
+        # the two must hold one value — passing it down makes that structural
+        # rather than a coincidence of both sites spelling the default 1.33.
+        lobes["ior"] = scalar("eta", ETA_DEFAULT)
         if mtlx:
             # FLAVOUR GATE (one-sided reads; follow-up: UsdPreviewSurface has no
             # subsurface colour/radius inputs and reads neither today).
@@ -608,7 +611,7 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
         # above stay for the preview closure + back-compat; on the
         # UsdPreviewSurface side the opacity=0 boundary remains the transitional
         # fallback. Emitted identically by both adapters.
-        lobes.update(_subsurface_overrides(p))
+        lobes.update(subsurface_medium_overrides(p, eta=lobes["ior"]))
         status = APPROX
         notes.append(
             "subsurface -> standard_surface subsurface + volumetric medium coeffs (σ_a/σ_s/g)"

@@ -391,7 +391,8 @@ _ACCESSORS = frozenset({"get_float_texture", "get_spectrum_texture", "resolve_te
 #: ``ParamSet`` reader methods, flagged only on a ParamSet-shaped receiver
 #: (``p``/``params``/``<x>.params``) so a plain ``dict.get`` on a lobe map is not
 #: mistaken for a param read.
-_PARAMSET_METHODS = frozenset({"get", "string", "rgb", "floats", "bool", "float", "spectrum"})
+_PARAMSET_METHODS = frozenset(
+    {"get", "string", "rgb", "floats", "bool", "float", "int", "ints"})
 _PARAMSET_NAMES = frozenset({"p", "params"})
 
 
@@ -444,6 +445,100 @@ def test_adapters_only_ever_hand_the_material_to_the_resolver(adapter):
     assert not leaked, (
         f"{adapter.__name__} touches pbrt_material outside the resolve_material "
         f"call (lines {[n.lineno for n in leaked]})")
+
+
+def test_media_subsurface_emission_holds_no_second_coefficient_chain():
+    """`media.subsurface_overrides` emits; it does not interpret.
+
+    It used to carry its own copy of the coefficient chain, which drifted from
+    the resolver's in three ways — no named-spectrum `eta` guard (a
+    `"spectrum eta" "glass-BK7"` crashed the import), the mm-per-unit division,
+    and the `ior` key. It now takes the RESOLVED lobes and adds only the last two
+    (change subsurface-eta-single-owner).
+    """
+    from skinny.pbrt import media
+
+    assert _reads_in(media.subsurface_overrides) == set(), (
+        "media.subsurface_overrides reads pbrt material params directly; "
+        "interpretation belongs in materials.subsurface_medium_overrides")
+
+
+def test_media_subsurface_emission_never_sees_a_paramset():
+    """Structural half — there is no ParamSet in scope to read or alias.
+
+    Stronger than the syntactic gate above, which a rename (`q = params`) or a
+    reader method missing from `_PARAMSET_METHODS` would slip past. `resolved` is
+    a plain dict of already-interpreted values, so the only way back to a pbrt
+    param would be a new argument — which this fails on.
+    """
+    from skinny.pbrt import media
+
+    sig = inspect.signature(media.subsurface_overrides)
+    assert list(sig.parameters) == ["resolved"], (
+        "media.subsurface_overrides grew a parameter; if it is a ParamSet the "
+        "second coefficient chain is back")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(media.subsurface_overrides)))
+    assert not [n for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and n.id in _PARAMSET_NAMES], (
+        "media.subsurface_overrides names a ParamSet-shaped local")
+
+
+def test_subsurface_eta_is_resolved_exactly_once_per_material(tmp_path):
+    """The whole point of the change: ONE `eta` read reaches BOTH lanes.
+
+    `pack_flat_material` takes the boundary IOR from the `ior` lane and never
+    reads `subsurface_eta` (see `material_pack.pack_flat_material`), so the two
+    must agree. Asserting the two resolved lobes is not enough — `media.py`
+    assigns one from the other, so that pair cannot diverge by construction. The
+    lanes that CAN diverge are the shader input and the `skinnyOverrides`, which
+    used to come from two independent reads of the same param. This counts the
+    reads.
+    """
+    from skinny.pbrt import materials as MM
+    from skinny.pbrt.api import import_pbrt
+
+    src = tmp_path / "s.pbrt"
+    src.write_text('WorldBegin\nMaterial "subsurface" "spectrum eta" "glass-LASF9"\n'
+                   'Shape "sphere" "float radius" 1\n')
+    calls = []
+    real = MM.get_float_texture
+
+    def counting(params, name, default, **kw):
+        if name == "eta":
+            calls.append(name)
+        return real(params, name, default, **kw)
+
+    MM.get_float_texture = counting
+    try:
+        stage, _ = import_pbrt(str(src))
+    finally:
+        MM.get_float_texture = real
+    assert len(calls) == 1, f"`eta` resolved {len(calls)} times, expected once"
+
+    from pxr import UsdShade
+
+    shader_ior = next(
+        s.GetInput("ior").Get() for s in
+        (UsdShade.Shader(p) for p in stage.TraverseAll())
+        if s and s.GetInput("ior"))
+    ovr = next(dict(p.GetCustomDataByKey("skinnyOverrides")) for p in stage.TraverseAll()
+               if p.GetCustomDataByKey("skinnyOverrides")
+               and "subsurface_eta" in p.GetCustomDataByKey("skinnyOverrides"))
+    assert shader_ior == pytest.approx(1.85004, abs=1e-5)
+    assert ovr["ior"] == pytest.approx(shader_ior)
+    assert ovr["subsurface_eta"] == pytest.approx(shader_ior)
+
+
+def test_subsurface_eta_and_ior_lobes_agree_for_every_param_type():
+    for src, expected in (
+        ('Material "subsurface" "float eta" 1.42', 1.42),
+        ('Material "subsurface" "spectrum eta" "glass-LASF9"', 1.85004),
+        ('Material "subsurface" "spectrum eta" "not-a-glass"', 1.33),
+        ('Material "subsurface" "texture eta" "sometex"', 1.33),
+    ):
+        res = _res(src)
+        assert res.lobes["ior"] == pytest.approx(expected, abs=1e-5), src
+        assert res.lobes["subsurface_eta"] == pytest.approx(res.lobes["ior"]), src
 
 
 def test_the_read_gate_is_sensitive():
