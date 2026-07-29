@@ -193,6 +193,17 @@ is a follow-up, not this change.
   current level. A `##` section stays `##` in the new file. Do not promote a
   section to a document title. The new document gets a fresh `#` title above
   the moved `##` sections.
+- **A prose cross-reference outlives its section** → The link test only sees
+  Markdown links, so `See **X** below` keeps reading as valid after X moves to
+  another document. One such reference existed in `docs/Architecture.md` and is
+  now a deep link. This class is not mechanically decidable, so the mitigation
+  is the rule: when a split moves a section, convert every prose reference to it
+  into a link, which the test then owns.
+- **A link resolves but names the wrong owner** → The test fails only on a
+  missing target, so a pointer at `docs/Architecture.md` survives after its
+  subject leaves. Eleven such links existed and were repointed. Mitigation is
+  the same rule: judge every inbound reference by subject, not by whether it
+  still resolves.
 - **An inbound link outside the checked set breaks** → The link test covers the
   live tree. Archived OpenSpec changes and `docs/superpowers/` keep stale
   links by design; the test excludes them, so it does not force a rewrite of

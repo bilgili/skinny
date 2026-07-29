@@ -304,8 +304,8 @@ walk + (s,t) connections + s=1 splat, the path tracer's per-bounce
 
 `evalSceneGraph(materialId, hit, ...)` is generated per material into
 `shaders/generated/` by `MaterialXGenSlang` and dispatched via tag-switch
-in `flat_material.slang`. See **MaterialX Nodegraph Compute Pipeline**
-below.
+in `flat_material.slang`. See
+[ShaderPipeline.md § MaterialX Nodegraph Compute Pipeline](ShaderPipeline.md#materialx-nodegraph-compute-pipeline).
 
 ---
 
