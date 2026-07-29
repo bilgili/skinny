@@ -9,7 +9,7 @@ and the related assets, shaders, and references.
 
 The generic pipeline (arbitrary MaterialX nodegraphs, flat/standard_surface
 materials, path/BDPT integrators, cameras, backends, web mode) is documented in
-[README.md](../README.md) and [Architecture.md](Architecture.md).
+[RenderingModes.md](RenderingModes.md) and [Architecture.md](Architecture.md).
 
 ## Features
 
@@ -128,7 +128,7 @@ The IBL estimators (§2/§3) draw environment directions from the shared
 environment importance-sampling distribution (sin θ-weighted equirect CDFs,
 bindings 31/32) with MIS, so bright sky/sun directions are found directly
 rather than via chance BSDF bounces — see *Environment Importance Sampling* in
-[Architecture.md](Architecture.md).
+[ShaderPipeline.md](ShaderPipeline.md).
 
 ## Volume Rendering (`volume_render.slang`)
 

@@ -16,10 +16,10 @@ GUI controls, and the source papers.
 
 ReSTIR plugs into the **scene-sampling reuse seam** (the `ReusePlugin` socket
 reserved by the sampling change). The seam and the wavefront execution backend it
-rides on are documented in [Architecture.md](Architecture.md) (descriptor
+rides on are documented in [GpuResources.md](GpuResources.md) (descriptor
 binding map) and [Wavefront.md](Wavefront.md) (the bounce-0 reuse hook); the
-generic path/BDPT integrators live in [README.md](../README.md). The
-pre-implementation brainstorm and its decision history are archived at
+generic path/BDPT integrators live in [RenderingModes.md](RenderingModes.md).
+The pre-implementation brainstorm and its decision history are archived at
 `docs/superpowers/specs/2026-06-02-restir-di-design.md` — **this document
 describes the shipped code**, which deviates from that brainstorm in a few places
 (noted below).

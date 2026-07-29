@@ -22,7 +22,7 @@ shader/numpy symbols that realize them.
 > the GPU measurement. Still pending: the wavefront **white-furnace** spectral
 > closure gate, the `SPPM_FLUX_FIXED_SCALE` numpy re-measure, and the full-corpus
 > (non-suite) spectral sweep. See the
-> [README compatibility matrix](../README.md) and
+> [compatibility matrix](RenderingModes.md#compatibility-matrix) and
 > [CLAUDE.md](../CLAUDE.md) for the current state and scope guards.
 
 > Equations are shipped as **SVG images** (the repo's GitLab does not render
@@ -45,8 +45,8 @@ validated GPU≡numpy in `tests/kernels/test_spectrum_kernels.py`:
 
 The descriptor bindings (45–47 `spectralScale`/`spectralData`/`spectralD65`, plus
 48 `spectralMetals`), the spectral compile variant, and the shader module map are
-documented in [Architecture.md § Descriptor Binding Map](Architecture.md#descriptor-binding-map)
-and [Architecture.md § Modules](Architecture.md#modules) — this document does not
+documented in [GpuResources.md § Descriptor Binding Map](GpuResources.md#descriptor-binding-map)
+and [ShaderPipeline.md § Modules](ShaderPipeline.md#modules) — this document does not
 duplicate them.
 
 ## What hero-wavelength spectral is
