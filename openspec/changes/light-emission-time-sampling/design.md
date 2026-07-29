@@ -47,7 +47,31 @@ The clock reads 0.0 for a stage with no animation. `Get(0.0)` and `Get()` agree
 on an attribute that holds a default value, so a static scene keeps its current
 result.
 
-## D3: No behaviour change without time samples
+## D3: The read is fixed, the re-extraction cadence is not
+
+Two different things could each make an animated light wrong: a read that
+ignores the time code, and a light the renderer never re-reads during playback.
+This change fixes the first only.
+
+`Renderer._reextract_animated_lights` re-extracts DistantLight and SphereLight
+each frame. It does not re-extract DomeLight, RectLight or DiskLight. That
+exclusion is deliberate and predates this change: the per-frame path promises no
+mesh rebake and no BVH rebuild, but a RectLight is carried as emissive geometry,
+so refreshing its radiance means rebaking that geometry and re-uploading its
+BLAS. A DomeLight would re-decode its HDR texture. Both break the promise the
+per-frame path is built on.
+
+So all five light types now read at the correct time code, and three of them
+still read it only once, at stage extraction. The specification states both
+facts rather than implying a per-frame refresh the renderer does not perform.
+
+Discarded alternative: extend `_reextract_animated_lights` to all five types.
+That is a much larger change — it needs a rebake-and-reupload path for animated
+emissive geometry and a texture-decode cache for the dome — and it belongs to
+whichever change adds animated area-light support, not to a fix for a
+time-blind read.
+
+## D4: No behaviour change without time samples
 
 `Attribute.Get(time)` equals `Attribute.Get()` when the attribute holds an
 authored default value or only a schema fallback. USD resolves a time code
@@ -58,7 +82,7 @@ Every existing scene without animated light attributes therefore renders
 identically. The parity matrix and the confirming-scene suite need no baseline
 change.
 
-## D4: The test asserts variation, not a fixed value
+## D5: The test asserts variation, not a fixed value
 
 The hostless test authors an intensity with two time samples. It extracts the
 light at both time codes and asserts that the two radiance values differ, and

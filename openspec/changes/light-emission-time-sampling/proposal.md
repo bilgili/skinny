@@ -45,6 +45,21 @@ Behaviour on a stage with no time samples does not change. `Get(time)` and
 `Get()` return the same value when the attribute holds a default value or only a
 schema fallback.
 
+## Out of scope
+
+This change corrects the **read**. It does not change **how often** a light is
+re-extracted.
+
+`Renderer._reextract_animated_lights` re-extracts DistantLight and SphereLight
+per frame. It does not re-extract DomeLight, RectLight or DiskLight. A dome would
+re-decode its HDR texture each frame. A rect or disk light is carried as emissive
+geometry, so refreshing it needs the mesh rebake and BVH rebuild that the
+per-frame path exists to avoid. Those three types keep the values read at stage
+extraction, which is the behaviour before this change as well.
+
+Those three types still gain the correct read at extraction time, which is what
+this change fixes. Animating them per frame is a separate change.
+
 ## Capabilities
 
 ### New Capabilities
@@ -53,9 +68,12 @@ None.
 
 ### Modified Capabilities
 
-- `usd-animation-playback`: name the light emission attributes that per-frame
-  re-evaluation must read at the current time code, and require the read to use
-  that time code.
+- `usd-animation-playback`:
+  - ADD a requirement that light extraction reads every emission attribute at
+    the time code it evaluates the light at, for all five supported light types.
+  - MODIFY the per-frame re-evaluation requirement to state which light types it
+    refreshes — DistantLight and SphereLight — and to record that DomeLight,
+    RectLight and DiskLight are not refreshed per frame.
 
 ## Impact
 
