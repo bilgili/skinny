@@ -41,8 +41,14 @@ _CODE_SPAN = re.compile(r"`[^`]*`")
 # CommonMark allows an angle-bracket destination, which is the only form that
 # may contain spaces: `[x](<My Guide.md>)`. Match it first, or the bare-word
 # alternative silently yields nothing and the link goes unchecked.
+#
+# A bare destination may also carry BALANCED parentheses — `[x](plan_(draft).md)`
+# is valid — so the third alternative allows one level of nesting. Stopping at
+# the first `)` would extract `plan_(draft` and report a missing file for a
+# document that exists.
 _LINK = re.compile(
-    r"!?\]\(\s*(?:<([^<>\n]*)>|([^)<>\s]+))(?:\s+[\"'][^\"']*[\"'])?\s*\)"
+    r"!?\]\(\s*(?:<([^<>\n]*)>|((?:[^()<>\s]|\([^()<>\s]*\))+))"
+    r"(?:\s+[\"'][^\"']*[\"'])?\s*\)"
 )
 # Link reference definitions: `[label]: target "title"`. A reference-style link
 # resolves through one of these, so the definition's target is the real link.
@@ -307,6 +313,17 @@ def test_negative_control(tmp_path):
         if d:
             got.append(d.group(1) or d.group(2))
     assert got == ["My Guide.md", "tight.md", "Ref Doc.md"], got
+
+    # A bare destination may carry balanced parentheses. Stopping at the first
+    # `)` would extract `plan_(draft` and fail on valid Markdown.
+    parens = tmp_path / "parens.md"
+    parens.write_text("[design](plan_(draft).md) then [plain](x.md)\n", encoding="utf-8")
+    got = [
+        m.group(1) or m.group(2)
+        for line in _strip_fences(parens.read_text(encoding="utf-8"))
+        for m in _LINK.finditer(line)
+    ]
+    assert got == ["plan_(draft).md", "x.md"], got
 
     # Case matters on GitHub and on Linux even when this volume forgives it.
     # Checked inside the repo, where the walk applies — tmp_path is outside it.
