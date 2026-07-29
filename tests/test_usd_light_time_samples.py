@@ -100,6 +100,55 @@ class TestLightEmissionTimeSamples:
         assert at_start.radiance[0] == pytest.approx(1.0)   # 1 * 2^0
         assert at_end.radiance[0] == pytest.approx(4.0)     # 1 * 2^2
 
+    def test_load_evaluates_lights_at_the_stage_start_time_code(self):
+        """A normal load must not evaluate at the default time code.
+
+        Dome/Rect/Disk lights are never re-extracted during playback, so a
+        load that reads at `Usd.TimeCode.Default()` leaves them pinned to the
+        schema fallback forever — the per-frame path cannot rescue them the way
+        it rescues distant/sphere.
+        """
+        from pxr import Sdf, Usd, UsdGeom, UsdLux
+        from skinny.usd_loader import load_scene_from_stage
+        stage = Usd.Stage.CreateInMemory()
+        stage.SetStartTimeCode(0)
+        stage.SetEndTimeCode(24)
+        UsdGeom.Xform.Define(stage, "/World")
+        UsdGeom.Cube.Define(stage, "/World/Geo")
+
+        rect = UsdLux.RectLight.Define(stage, Sdf.Path("/World/Rect"))
+        api = UsdLux.LightAPI(rect.GetPrim())
+        api.GetIntensityAttr().Set(4.0, 0.0)     # time samples only
+        api.GetIntensityAttr().Set(9.0, 24.0)
+
+        scene = load_scene_from_stage(stage)
+        emissive = {
+            m.name: m.parameter_overrides.get("emissiveColor")
+            for m in scene.materials
+        }
+        # The sample at the stage start time code (4.0), not the RectLight
+        # schema fallback (1.0).
+        assert emissive["Rect"] == pytest.approx((4.0, 4.0, 4.0))
+
+    def test_load_of_a_static_stage_is_unaffected_by_the_start_time_code(self):
+        """A stage with no time samples resolves the same either way."""
+        from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
+        from skinny.usd_loader import load_scene_from_stage
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.Xform.Define(stage, "/World")
+        UsdGeom.Cube.Define(stage, "/World/Geo")
+        rect = UsdLux.RectLight.Define(stage, Sdf.Path("/World/Rect"))
+        api = UsdLux.LightAPI(rect.GetPrim())
+        api.GetIntensityAttr().Set(3.0)
+        api.GetColorAttr().Set(Gf.Vec3f(1.0, 0.0, 0.5))
+
+        scene = load_scene_from_stage(stage)
+        emissive = {
+            m.name: m.parameter_overrides.get("emissiveColor")
+            for m in scene.materials
+        }
+        assert emissive["Rect"] == pytest.approx((3.0, 0.0, 1.5))
+
     def test_static_light_is_unchanged_by_the_time_code(self):
         """No time samples ⇒ the time code must not alter the result."""
         from pxr import Gf, Sdf, Usd, UsdLux

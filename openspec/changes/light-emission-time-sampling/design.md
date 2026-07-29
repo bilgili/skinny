@@ -71,7 +71,34 @@ emissive geometry and a texture-decode cache for the dome — and it belongs to
 whichever change adds animated area-light support, not to a fix for a
 time-blind read.
 
-## D4: No behaviour change without time samples
+## D4: The load evaluates at the stage start time code
+
+A time code threaded correctly is still wrong if its value is wrong.
+`_read_open_stage` defaulted `eval_time` to `Usd.TimeCode.Default()`, so a normal
+load read every light at the default time code and got the schema fallback for a
+time-samples-only attribute — the exact defect, one level up.
+
+Distant and sphere lights recovered on the first playback frame. Dome, rect and
+disk lights never re-extract, so for them the fallback was permanent: the fix was
+unreachable through the normal load path.
+
+`eval_time` now defaults to `Usd.TimeCode(stage.GetStartTimeCode())`.
+`build_playback_clock` sets `current_time_code=start`, so the load now agrees
+with the first rendered frame instead of disagreeing with it.
+
+This changes the evaluation time for every attribute the load reads, not only
+lights. That is the point: one evaluation time for the whole read is what makes
+the loaded scene self-consistent. A stage with no time samples resolves
+identically either way, so every static scene — the whole parity corpus and the
+confirming suite — is unaffected. The full hostless suite shows the same failure
+set before and after.
+
+Discarded alternative: special-case the light reads to use the start time code
+while the rest of the load stays at `Default()`. That puts a second evaluation
+time inside one read, so a light and the geometry it illuminates could resolve at
+different times.
+
+## D5: No behaviour change without time samples
 
 `Attribute.Get(time)` equals `Attribute.Get()` when the attribute holds an
 authored default value or only a schema fallback. USD resolves a time code
@@ -82,7 +109,7 @@ Every existing scene without animated light attributes therefore renders
 identically. The parity matrix and the confirming-scene suite need no baseline
 change.
 
-## D5: The test asserts variation, not a fixed value
+## D6: The test asserts variation, not a fixed value
 
 The hostless test authors an intensity with two time samples. It extracts the
 light at both time codes and asserts that the two radiance values differ, and

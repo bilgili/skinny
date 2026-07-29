@@ -13,8 +13,19 @@ value there, so USD returns the schema fallback — 50000 for a
 `UsdLuxDistantLight` intensity. The light then renders at the fallback instead
 of its authored value.
 
+A stage read that receives no explicit time code SHALL evaluate at the stage's
+start time code, not at the default time code. The playback clock also starts at
+the stage's start time code, so the loaded values agree with the first rendered
+frame. This matters most for the light types that are never re-extracted: for
+them the value read at load is the value that renders for the whole session.
+
 This requirement governs the read itself. It does not state how often a light is
 re-extracted; the per-frame requirement below states that.
+
+#### Scenario: A stage loads with no explicit time code
+
+- **WHEN** a stage is read without an explicit time code and a light authors its emission attributes as time samples only
+- **THEN** the load evaluates that light at the stage's start time code, so the loaded radiance is the authored sample there and not the schema fallback
 
 #### Scenario: Intensity has time samples and no default value
 

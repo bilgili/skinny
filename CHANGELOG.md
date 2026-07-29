@@ -31,6 +31,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same defect a second time in the separate colour/intensity/exposure reads
   behind its stashed `color`/`intensity` fields; those now use the same time
   code, so the scene-graph editor no longer writes a fallback back to the stage.
+  Threading the time code was not sufficient on its own: `_read_open_stage`
+  defaulted its evaluation time to `Usd.TimeCode.Default()`, so a normal load
+  read every light *at* the default time code and still got the fallback — the
+  same defect one level up. Distant and sphere lights recovered on the first
+  playback frame via `_reextract_animated_lights`, but dome, rect and disk lights
+  are never re-extracted (a dome would re-decode its HDR each frame; a rect/disk
+  light is emissive geometry needing the mesh rebake the per-frame path exists to
+  avoid), so for those three the fallback was permanent and the fix was
+  unreachable. The load now evaluates at the stage's **start time code**, which
+  is where `build_playback_clock` starts the clock, so the loaded scene agrees
+  with the first rendered frame.
   Scenes without time-sampled light attributes are unchanged, because
   `Get(time)` and `Get()` agree on an attribute with a default value or only a
   fallback. The adjacent bare `except Exception: pass` around the dome fold now

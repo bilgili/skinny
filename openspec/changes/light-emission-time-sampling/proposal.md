@@ -35,8 +35,15 @@ does not name the emission attributes, so the defect stayed invisible.
 - Read the stashed colour, intensity and exposure in `_extract_sphere_light` at
   the same time code.
 - Pass the renderer's current time code at the `renderer.py` dome call site.
-- Add a hostless test. The test authors a time-sampled light intensity and
-  asserts that the extracted radiance differs between two time codes.
+- Default the stage read's evaluation time to the stage's **start time code**
+  instead of `Usd.TimeCode.Default()`. Threading the time code correctly is not
+  enough while the value threaded is the default time code: a normal load read
+  every light there and still got the schema fallback. Distant and sphere lights
+  recovered on the first playback frame; dome, rect and disk lights never
+  re-extract, so for them the fallback was permanent and the fix was unreachable.
+- Add hostless tests. They author a time-sampled light intensity and assert that
+  the extracted radiance differs between two time codes, and that a normal load
+  returns the sample at the stage start time code rather than the fallback.
 
 The parameter is required, not optional. An optional parameter keeps the defect
 reachable at every site that forgets to pass it.

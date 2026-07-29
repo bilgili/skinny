@@ -2212,7 +2212,18 @@ def _read_open_stage(
     (a freshly created scene, or one whose last instance was just removed).
     """
     label = source_label or (stage.GetRootLayer().identifier or "<anonymous stage>")
-    eval_time = time if time is not None else Usd.TimeCode.Default()
+    # The stage's START time code, not `Default()`. An attribute carrying only
+    # time samples has no value at the default time code, so USD returns the
+    # schema fallback — a RectLight authored purely as time samples loaded at
+    # intensity 1.0, a DistantLight at 50000. Distant/sphere lights recover on
+    # the first playback frame (`_reextract_animated_lights`), but dome, rect
+    # and disk lights are never re-extracted, so the fallback was permanent for
+    # them. `build_playback_clock` starts the clock at `GetStartTimeCode()`, so
+    # evaluating the load there makes it agree with the first rendered frame.
+    # A stage with no time samples resolves identically either way.
+    eval_time = (
+        time if time is not None else Usd.TimeCode(float(stage.GetStartTimeCode()))
+    )
 
     mtlx_materials: dict[str, Material] = {}
     if not use_usd_mtlx_plugin:
