@@ -182,6 +182,12 @@ def get_spectrum_texture(params, name, default_rgb, *, textures=None, base_dir=N
 
     Constant spectrum -> ``ParamValue(rgb)``; named texture -> ``ParamValue(
     default_rgb, tex)``; absent -> ``ParamValue(default_rgb)``. Texture-safe.
+
+    Every degradation is reported, as :func:`get_float_texture` already reports
+    its own — an unrecognised name, a spectrum file, and a name whose
+    substitution is meaningless on this lane each fall back to *default_rgb* with
+    a note. A silent substitution is a defect, not a degradation: it renders a
+    plausible wrong value and leaves the import EXACT.
     """
     p = params.get(name)
     if p is None:
@@ -193,8 +199,55 @@ def get_spectrum_texture(params, name, default_rgb, *, textures=None, base_dir=N
         if notes is not None:
             notes.append(f"texture '{p.string}' on {name} unresolved/unsupported; used default")
         return ParamValue(list(default_rgb))
+    if p.type == "spectrum" and p.values and isinstance(p.values[0], str):
+        return ParamValue(_named_spectrum_rgb(
+            p.string, name, default_rgb, notes, illuminant=illuminant))
     rgb = spectra.param_to_rgb(p, illuminant=illuminant)
     return ParamValue(list(rgb) if rgb is not None else list(default_rgb))
+
+
+#: Spectrum-valued params on which a *named metal*'s reflectance RGB is a
+#: meaningful substitution — they carry a reflectance. This is the spectrum-side
+#: mirror of `_IOR_PARAM_NAMES`: writing gold's reflectance into an absorption or
+#: scattering coefficient (`sigma_a`, `mfp`, …) is the same defect class as
+#: writing a glass IOR into a roughness, and it used to happen silently.
+_REFLECTANCE_PARAM_NAMES = frozenset({
+    "reflectance", "transmittance", "conductor.reflectance",
+})
+
+
+def _named_spectrum_rgb(spectrum_name, param_name, default_rgb, notes, *,
+                        illuminant=False) -> list:
+    """RGB for a named-spectrum-valued colour param, reporting any substitution.
+
+    A recognised name on a lane where it means something is an exact
+    substitution and stays unnoted. Everything else degrades to *default_rgb*
+    with a note that names what was unusable — a spectrum **file** reference is
+    called out as such (pbrt reads the file; skinny has no reader), and a name
+    that is recognised but wrong for this lane says so rather than being
+    silently substituted.
+    """
+    if illuminant:
+        illum = spectra.named_illuminant_rgb(spectrum_name)
+        if illum is not None:
+            return list(illum)
+    known_metal = spectra.named_metal_reflectance_rgb(spectrum_name)
+    if known_metal is not None and param_name in _REFLECTANCE_PARAM_NAMES:
+        return list(known_metal)
+    if notes is not None:
+        if spectra.looks_like_spectrum_file(spectrum_name):
+            notes.append(
+                f"spectrum file '{spectrum_name}' on {param_name} not read "
+                f"(unsupported); used default")
+        elif known_metal is not None:
+            notes.append(
+                f"named spectrum '{spectrum_name}' on {param_name} is a "
+                f"reflectance, not usable here; used default")
+        else:
+            notes.append(
+                f"named spectrum '{spectrum_name}' on {param_name} unrecognised; "
+                f"used default")
+    return list(default_rgb)
 
 
 def references_texture(pbrt_material, textures, base_dir=None) -> bool:
@@ -381,7 +434,67 @@ def material_spectral_overrides(pbrt_material) -> dict:
 # its own change (see `pbrt-named-spectra` design, Non-Goals).
 
 
-def subsurface_medium_overrides(p, eta) -> dict:
+#: Degrade value for a `reflectance` that was authored but is unusable. The two
+#: consumers of the resolved value disagree on their own defaults — the mtlx
+#: `subsurface_color` lobe uses white, the Jensen inversion uses mid-grey — and
+#: one resolution can hold only one. Mid-grey wins: it is the inversion's own
+#: meaningful albedo, and it is the lane the value actually feeds. White stays
+#: the default for an ABSENT `reflectance`, which is a different question.
+_REFLECTANCE_DEGRADED = (0.5, 0.5, 0.5)
+
+
+#: Marker carried by the note a texture-bound MEDIUM coefficient produces. pbrt
+#: evaluates these per intersection; skinny's imported interior medium is
+#: homogeneous, so the authored data has nowhere to go. That is unrepresentable,
+#: not approximate, and `resolve_material` turns it into a SKIPPED status.
+_MEDIUM_TEXTURE_NOTE = "cannot vary over a homogeneous medium"
+
+
+def _resolve_medium_colour(p, key, fallback, *, textures=None, base_dir=None,
+                           notes=None):
+    """One resolution and exactly one note for a medium coefficient.
+
+    Returns None when the param is ABSENT — presence is what the pbrt precedence
+    branches on, and the promoting accessor never returns None, so the two
+    questions cannot share an answer.
+
+    A texture binding is reported here rather than by the accessor, because the
+    accessor only notes a texture it could not *resolve* while for a homogeneous
+    medium a perfectly resolvable one is equally unusable. Suppressing the
+    accessor's note keeps it at one note per binding.
+    """
+    prm = p.get(key)
+    if prm is None:
+        return None
+    is_tex = prm.type == "texture"
+    val = get_spectrum_texture(
+        p, key, fallback, textures=textures, base_dir=base_dir,
+        notes=None if is_tex else notes).const
+    if is_tex and notes is not None:
+        notes.append(f"texture '{prm.string}' on {key} {_MEDIUM_TEXTURE_NOTE}; used default")
+    return list(val)
+
+
+def _binding_degrades(param, param_name) -> bool:
+    """Was the param authored with a binding whose value cannot be carried?
+
+    A texture always degrades here: pbrt evaluates it per intersection and the
+    imported interior medium is homogeneous, so there is nowhere to put it. A
+    named spectrum degrades unless it is a recognised name on a lane where that
+    substitution means something.
+    """
+    if param is None:
+        return False
+    if param.type == "texture":
+        return True
+    if param.type == "spectrum" and param.values and isinstance(param.values[0], str):
+        return not (param_name in _REFLECTANCE_PARAM_NAMES
+                    and spectra.named_metal_reflectance_rgb(param.string) is not None)
+    return False
+
+
+def subsurface_medium_overrides(p, eta, reflectance, mfp, *, textures=None,
+                                base_dir=None, notes=None) -> dict:
     """Resolve pbrt `subsurface` inputs → medium-coefficient override keys
     (`subsurface_sigma_a/_s` mm⁻¹, `subsurface_g`, `subsurface_eta`) via the
     pbrt-v4 precedence (skinny.pbrt.subsurface). These ride on parameter_overrides
@@ -395,21 +508,57 @@ def subsurface_medium_overrides(p, eta) -> dict:
     lobes instead of a `ParamSet`, so `eta` is resolved once per material rather
     than once per consumer.
     """
-    from .subsurface import subsurface_coefficients, SCALE_DEFAULT
+    from .subsurface import (
+        subsurface_coefficients, SCALE_DEFAULT,
+        _DEFAULT_SIGMA_A, _DEFAULT_SIGMA_S,
+    )
+
+    def present(key):
+        """Was the param authored? A syntactic fact, independent of readability.
+
+        The precedence below branches on presence, exactly as pbrt does with
+        `GetSpectrumTextureOrNull` (non-null for a texture binding too). The
+        promoting accessors never return None, so presence cannot be read from
+        their result — that would make every material take the explicit-sigma
+        branch and leave the other three unreachable.
+        """
+        return p.get(key) is not None
+
+    def colour(key, fallback):
+        return _resolve_medium_colour(
+            p, key, fallback, textures=textures, base_dir=base_dir, notes=notes)
+
+    def number(key, fallback):
+        return get_float_texture(
+            p, key, fallback, textures=textures, base_dir=base_dir, notes=notes).const
 
     name = p.string("name", None)
-    sigma_a = p.rgb("sigma_a", None)
-    sigma_s = p.rgb("sigma_s", None)
-    reflectance = p.rgb("reflectance", None)
-    mfp = p.rgb("mfp", None)
-    g_f = p.floats("g", [0.0])
-    scale_f = p.floats("scale", [SCALE_DEFAULT])
+    # The sigma pair degrades as a UNIT. pbrt refuses a half-authored pair
+    # outright ("Provided \"sigma_a\" parameter without \"sigma_s\""), so pairing
+    # a substituted sigma_a with the author's sigma_s would combine two different
+    # materials — with a dense authored sigma_s the albedo approaches 1, the mean
+    # free path collapses, and the interior walk saturates on a dark blob.
+    sigma_a = sigma_s = None
+    if present("sigma_a") and present("sigma_s"):
+        sigma_a = colour("sigma_a", _DEFAULT_SIGMA_A)
+        sigma_s = colour("sigma_s", _DEFAULT_SIGMA_S)
+        if (_binding_degrades(p.get("sigma_a"), "sigma_a")
+                or _binding_degrades(p.get("sigma_s"), "sigma_s")):
+            sigma_a, sigma_s = list(_DEFAULT_SIGMA_A), list(_DEFAULT_SIGMA_S)
+    elif present("sigma_a") or present("sigma_s"):
+        # Half-authored: pbrt errors, skinny drops the pair and says so.
+        sigma_a = sigma_s = None
+        if notes is not None:
+            authored = "sigma_a" if present("sigma_a") else "sigma_s"
+            notes.append(
+                f"'{authored}' given without its partner; the sigma pair is "
+                "incomplete and was dropped")
     coeffs = subsurface_coefficients(
         name=name, sigma_a=sigma_a, sigma_s=sigma_s,
         reflectance=reflectance, mfp=mfp,
-        g=float(g_f[0]) if g_f else 0.0,
+        g=number("g", 0.0),
         eta=float(eta),
-        scale=float(scale_f[0]) if scale_f else SCALE_DEFAULT,
+        scale=number("scale", SCALE_DEFAULT),
     )
     return {
         "subsurface_sigma_a": list(coeffs["sigma_a"]),
@@ -459,7 +608,7 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
     never reads today would change its report output. Each gate is commented
     with the follow-up that removes it.
     """
-    from .report import APPROX, EXACT
+    from .report import APPROX, EXACT, SKIPPED
 
     notes: list[str] = []
     lobes: dict = {}
@@ -588,7 +737,7 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
             else "diffusetransmission approximated as diffuse + partial opacity"
         )
     elif mtype == "subsurface":
-        from .subsurface import ETA_DEFAULT
+        from .subsurface import ETA_DEFAULT, MFP_DEFAULT
 
         lobes["base_color"] = ParamValue([1.0, 1.0, 1.0])
         lobes["subsurface"] = 1.0
@@ -597,21 +746,38 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
         # the two must hold one value — passing it down makes that structural
         # rather than a coincidence of both sites spelling the default 1.33.
         lobes["ior"] = scalar("eta", ETA_DEFAULT)
+        # ONE resolution each for `reflectance` and `mfp`, shared by the mtlx
+        # preview lobes below and the coefficient chain. Presence is a separate,
+        # syntactic question (`p.get(...) is not None`): the promoting accessors
+        # never return None, so reading presence off their result would make
+        # every material look like it authored the param.
+        sss_refl = _resolve_medium_colour(
+            p, "reflectance", _REFLECTANCE_DEGRADED,
+            textures=textures, base_dir=base_dir, notes=notes)
+        sss_mfp = _resolve_medium_colour(
+            p, "mfp", [MFP_DEFAULT] * 3,
+            textures=textures, base_dir=base_dir, notes=notes)
         if mtlx:
-            # FLAVOUR GATE (one-sided reads; follow-up: UsdPreviewSurface has no
-            # subsurface colour/radius inputs and reads neither today).
-            lobes["subsurface_color"] = get_spectrum_texture(
-                p, "reflectance", [1.0, 1.0, 1.0],
-                textures=textures, base_dir=base_dir, notes=notes,
-            ).const
-            lobes["subsurface_radius"] = list(p.rgb("radius", [1.0, 1.0, 1.0]))
+            # FLAVOUR GATE (one-sided read; follow-up: UsdPreviewSurface has no
+            # subsurface colour input and does not read one today). The VALUE is
+            # not gated — it is the shared resolution above, so the usd path
+            # reports a degrading `reflectance` the same way this one does.
+            lobes["subsurface_color"] = (
+                list(sss_refl) if sss_refl is not None else [1.0, 1.0, 1.0])
+            # pbrt has no `subsurface` `radius` param (only shapes have one), so
+            # reading one would be skinny inventing behaviour. `subsurface_radius`
+            # IS the mean free path, which `mfp` already carries.
+            lobes["subsurface_radius"] = (
+                list(sss_mfp) if sss_mfp is not None else [1.0, 1.0, 1.0])
         # Stage-2 (pbrt-subsurface-volumetric): carry the volumetric medium
         # coefficients (σ_a, σ_s, g, eta) via the pbrt precedence, so the renderer
         # can shade a real interior random walk. The std_surface weight/color/radius
         # above stay for the preview closure + back-compat; on the
         # UsdPreviewSurface side the opacity=0 boundary remains the transitional
         # fallback. Emitted identically by both adapters.
-        lobes.update(subsurface_medium_overrides(p, eta=lobes["ior"]))
+        lobes.update(subsurface_medium_overrides(
+            p, eta=lobes["ior"], reflectance=sss_refl, mfp=sss_mfp,
+            textures=textures, base_dir=base_dir, notes=notes))
         status = APPROX
         notes.append(
             "subsurface -> standard_surface subsurface + volumetric medium coeffs (σ_a/σ_s/g)"
@@ -625,10 +791,20 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
     if emissive_rgb is not None:
         lobes["emission_rgb"] = list(emissive_rgb)
 
-    # an unresolved/unsupported texture binding degrades to its scalar/rgb default
-    # (handled in the accessors) -> surface as APPROX.
-    if status == EXACT and any("unresolved/unsupported" in n for n in notes):
+    # Any binding that degraded to its scalar/rgb default (handled in the
+    # accessors) -> surface as APPROX. "used default" is the marker every such
+    # note carries: an unresolvable texture, an unrecognised named spectrum, a
+    # spectrum file, and a name that is recognised but meaningless on its lane.
+    # A substituted value that leaves the import EXACT is a silent wrong answer.
+    if status == EXACT and any("used default" in n for n in notes):
         status = APPROX
+    # A texture-bound MEDIUM coefficient is not an approximation. pbrt evaluates
+    # it per intersection; skinny's imported interior medium is homogeneous, so
+    # the authored data has nowhere to go and the substituted default bears no
+    # relation to it. SKIPPED is the vocabulary for an unrepresentable construct,
+    # and it is what makes the CLI exit non-zero (report.has_unsupported).
+    if any(_MEDIUM_TEXTURE_NOTE in n for n in notes):
+        status = SKIPPED
 
     return ResolvedMaterial(lobes, status, notes)
 

@@ -103,22 +103,18 @@ metal. **Fix:** read `conductor.roughness` on both, regenerate the affected
 `coatedconductor` today, so add one — `tests/pbrt/fixtures/all_mtypes.pbrt`
 covers the import-level behaviour but renders nothing).
 
-**2. Three pbrt params are read only on the `-mtlx` path** —
-`diffusetransmission` `transmittance`, `subsurface` `reflectance`/`radius`, and
-`interface.eta` on `coateddiffuse`/`coatedconductor`. UsdPreviewSurface has no
-input for any of them, so the value would be dropped anyway; what is *lost* is
-the report signal — a texture-bound or unrecognised one of these produces a note
-(and possibly an EXACT→APPROX escalation) on the `-mtlx` import and nothing at
-all on the plain one. **Fix:** decide per param whether the note is worth the
-divergence, then read unconditionally and re-baseline the reports.
+**2. Two pbrt params are read only on the `-mtlx` path** —
+`diffusetransmission` `transmittance` and `interface.eta` on
+`coateddiffuse`/`coatedconductor`. UsdPreviewSurface has no input for either, so
+the value would be dropped anyway; what is *lost* is the report signal — a
+texture-bound or unrecognised one produces a note (and possibly an EXACT→APPROX
+escalation) on the `-mtlx` import and nothing at all on the plain one. **Fix:**
+decide per param whether the note is worth the divergence, then read
+unconditionally and re-baseline the reports.
 
-**3. Three `subsurface` params still crash on a non-numeric binding.**
-`materials.subsurface_medium_overrides` reads `reflectance`, `sigma_a`, `sigma_s`
-and `mfp` with `ParamSet.rgb`, and `g` and `scale` with `ParamSet.floats`. Both
-raise `ValueError` on a texture-typed or named-spectrum param (both flavours; the
-promoting accessors `get_spectrum_texture` / `get_float_texture` exist precisely
-to avoid this). **Repro:** `Material "subsurface" "texture reflectance"
-"sometex"` → `could not convert string to float: 'sometex'`. **Fix:** route each
-through its promoting accessor, as `eta` now is. The `eta` case was item 4 and is
-fixed (change `subsurface-eta-single-owner`); it removed the second copy of the
-coefficient chain in `media.py`, so one fix now covers both call paths.
+`subsurface` `reflectance` and `radius` used to be on this list. Change
+`subsurface-promoting-accessors` removed both: `reflectance` is now resolved once
+outside the gate (the usd path already read it for the coefficient chain, so the
+gate suppressed its note rather than its read), and the `radius` read is gone —
+pbrt's `SubsurfaceMaterial::Create` defines no such param, so reading one was
+skinny inventing behaviour. Only the LOBES stay mtlx-only.

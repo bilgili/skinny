@@ -328,10 +328,17 @@ def test_mtlx_only_reads_are_absent_under_the_usd_flavor(src, lobe, param):
 
 
 def test_subsurface_colour_and_radius_are_mtlx_only():
-    usd = _res('Material "subsurface" "rgb reflectance" [0.7 0.4 0.3] "rgb radius" [0.9 0.6 0.4]',
-               M.USD)
-    mtlx = _res('Material "subsurface" "rgb reflectance" [0.7 0.4 0.3] "rgb radius" [0.9 0.6 0.4]',
-                M.MTLX)
+    """The LOBES stay mtlx-only; `subsurface_radius` now comes from `mfp`.
+
+    pbrt's `SubsurfaceMaterial::Create` has no `radius` parameter — only shapes
+    have one — so reading it was skinny inventing behaviour (change
+    subsurface-promoting-accessors). `subsurface_radius` IS the mean free path,
+    which `mfp` already carries, so the lobe is derived from it and the phantom
+    read is gone.
+    """
+    src = ('Material "subsurface" "rgb reflectance" [0.7 0.4 0.3] '
+           '"rgb mfp" [0.9 0.6 0.4] "rgb radius" [9 9 9]')
+    usd, mtlx = _res(src, M.USD), _res(src, M.MTLX)
     assert "subsurface_color" not in usd.lobes and "subsurface_radius" not in usd.lobes
     assert mtlx.lobes["subsurface_color"] == pytest.approx([0.7, 0.4, 0.3])
     assert mtlx.lobes["subsurface_radius"] == pytest.approx([0.9, 0.6, 0.4])
@@ -547,3 +554,180 @@ def test_the_read_gate_is_sensitive():
     reads = _reads_in(M.resolve_material)
     assert "get_float_texture" in reads and "get_spectrum_texture" in reads
     assert any(r.startswith("params.") for r in reads)
+
+
+# --------------------------------------------------------------------------- #
+# promoting-accessor coverage (change subsurface-promoting-accessors)
+#
+# The promoting accessors exist so an unusable pbrt binding DEGRADES with a note
+# instead of raising. Two things must hold for that to be true, and a test for
+# each: no reader may call `float()` on a raw token (it raises, or worse parses
+# garbage), and no degradation may be silent.
+# --------------------------------------------------------------------------- #
+
+#: `ParamSet` readers that call `float()` on the raw token values. On a texture
+#: or a named spectrum they raise; on a `blackbody` or an inline sampled spectrum
+#: they silently return the tokens themselves. Neither is a legal way to read a
+#: material parameter value — that is what the promoting accessors are for.
+_RAISING_PARAMSET_METHODS = frozenset({"rgb", "floats", "float", "int", "ints"})
+
+
+def _raising_reads_in(func):
+    """`params.<m>` calls on a ParamSet-shaped receiver, for the raising `m`."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    found = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _RAISING_PARAMSET_METHODS
+                and _is_paramset(node.func.value)):
+            arg = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else "?"
+            found.append(f"{arg}:{node.func.attr}@{node.lineno}")
+    return found
+
+
+def test_resolver_reads_no_parameter_value_through_a_raising_accessor():
+    """The structural gate. It names no parameter, so it cannot rot.
+
+    A behavioural sweep over "every param a type reads" has no machine-readable
+    source — it is a hand-written list, so the NEXT param added with a raw
+    accessor passes it. This fails the build instead, whichever branch and
+    whichever name.
+    """
+    leaked = _raising_reads_in(M.resolve_material) + _raising_reads_in(
+        M.subsurface_medium_overrides)
+    assert not leaked, (
+        "pbrt parameter values read through a float()-on-token accessor: "
+        f"{leaked}. Use get_float_texture / get_spectrum_texture.")
+
+
+def test_named_spectrum_on_a_spectrum_lane_is_not_silently_dropped():
+    """An unrecognised name must degrade WITH a note, as the float side does."""
+    res = _res('Material "diffuse" "spectrum reflectance" "glass-BK7"')
+    assert res.lobes["base_color"].const == [0.5, 0.5, 0.5]
+    assert len(res.notes) == 1, res.notes
+    assert "glass-BK7" in res.notes[0] and "reflectance" in res.notes[0]
+    assert res.status == APPROX
+
+
+def test_spectrum_file_on_a_spectrum_lane_is_reported():
+    res = _res('Material "diffuse" "spectrum reflectance" "spd/foo.spd"')
+    assert len(res.notes) == 1, res.notes
+    assert "spd/foo.spd" in res.notes[0]
+    assert res.status == APPROX
+
+
+def test_named_metal_substitutes_on_a_reflectance_lane_without_a_note():
+    """A recognised name on a lane where it means something is EXACT."""
+    res = _res('Material "diffuse" "spectrum reflectance" "metal-Au-eta"')
+    assert res.lobes["base_color"].const != [0.5, 0.5, 0.5]
+    assert res.notes == []
+    assert res.status == EXACT
+
+
+def test_named_metal_does_not_substitute_into_a_coefficient_lane():
+    """The spectrum-side mirror of `_IOR_PARAM_NAMES`.
+
+    A metal's reflectance RGB is a reflectance. Writing it into an absorption
+    coefficient is the same defect class as writing a glass IOR into a roughness.
+    """
+    res = _res('Material "subsurface" "spectrum sigma_a" "metal-Au-eta" '
+               '"rgb sigma_s" [1 1 1]')
+    gold = M.get_spectrum_texture(
+        _mat('Material "diffuse" "spectrum reflectance" "metal-Au-eta"').params,
+        "reflectance", [0.5, 0.5, 0.5]).const
+    assert res.lobes["subsurface_sigma_a"] != pytest.approx(list(gold))
+    assert any("sigma_a" in n for n in res.notes), res.notes
+
+
+@pytest.mark.parametrize("binding,expected", [
+    ('"blackbody sigma_a" [6500]', [1.042, 0.984, 1.035]),
+    ('"spectrum sigma_a" [400 .1 700 .9]', [0.869, 0.461, 0.181]),
+])
+def test_legal_non_numeric_bindings_reduce_instead_of_yielding_tokens(binding, expected):
+    """These parse through `ParamSet.rgb` without raising — into garbage.
+
+    `"spectrum sigma_a" [400 .1 700 .9]` yields [400.0, 0.1, 700.0]: the raw
+    wavelength/value tokens read as an RGB triple, no crash and no note. The
+    corpus contains neither form, so its hash gate cannot see this.
+    """
+    res = _res(f'Material "subsurface" {binding} "rgb sigma_s" [1 1 1]')
+    assert res.lobes["subsurface_sigma_a"] == pytest.approx(expected, abs=1e-3)
+
+
+@pytest.mark.parametrize("prm", ["sigma_a", "sigma_s", "reflectance", "mfp", "g", "scale"])
+@pytest.mark.parametrize("binding", ["texture", "spectrum"])
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_no_subsurface_binding_raises(prm, binding, flavor):
+    val = '"sometex"' if binding == "texture" else '"glass-BK7"'
+    res = _res(f'Material "subsurface" "{binding} {prm}" {val}', flavor)
+    assert any(prm in n for n in res.notes), res.notes
+
+
+def test_unusable_sigma_pair_keeps_the_explicit_sigma_branch():
+    """Presence selects the branch; readability only affects the value.
+
+    pbrt branches on `GetSpectrumTextureOrNull`, which is non-null for a texture
+    binding too, so an unreadable sigma must not fall through to the reflectance
+    inversion or the Wholemilk defaults — either would swap the physical model.
+    """
+    from skinny.pbrt.subsurface import subsurface_coefficients
+
+    res = _res('Material "subsurface" "texture sigma_a" "t" "rgb sigma_s" [4 5 6] '
+               '"rgb reflectance" [0.9 0.9 0.9]')
+    # NOT the reflectance-inversion branch, which reflectance would have selected
+    inversion = subsurface_coefficients(reflectance=[0.9, 0.9, 0.9])
+    assert res.lobes["subsurface_sigma_s"] != pytest.approx(inversion["sigma_s"])
+
+
+def test_half_unusable_sigma_pair_degrades_as_a_unit():
+    """pbrt ErrorExits on a half-authored pair; skinny must not mix two materials.
+
+    Substituting a default for sigma_a only would pair Wholemilk's absorption
+    with the author's scattering — with a dense authored sigma_s the albedo
+    approaches 1, the mean free path collapses, and the interior walk saturates.
+    """
+    from skinny.pbrt.subsurface import subsurface_coefficients
+
+    res = _res('Material "subsurface" "texture sigma_a" "t" "rgb sigma_s" [100 100 100]')
+    both = subsurface_coefficients()          # the default pair, degraded together
+    assert res.lobes["subsurface_sigma_a"] == pytest.approx(both["sigma_a"])
+    assert res.lobes["subsurface_sigma_s"] == pytest.approx(both["sigma_s"])
+    assert any("sigma_a" in n for n in res.notes), res.notes
+
+
+def test_absent_sigma_pair_still_falls_through():
+    """The mirror: a promoting default must not make an absent param look present."""
+    from skinny.pbrt.subsurface import subsurface_coefficients
+
+    res = _res('Material "subsurface" "rgb reflectance" [0.9 0.9 0.9]')
+    inversion = subsurface_coefficients(reflectance=[0.9, 0.9, 0.9])
+    assert res.lobes["subsurface_sigma_a"] == pytest.approx(inversion["sigma_a"])
+
+    plain = _res('Material "subsurface"')
+    wholemilk = subsurface_coefficients()
+    assert plain.lobes["subsurface_sigma_a"] == pytest.approx(wholemilk["sigma_a"])
+
+
+def test_reflectance_is_resolved_once_for_both_consumers():
+    """One read feeds the subsurface_color lobe and the coefficient chain."""
+    calls = []
+    real = M.get_spectrum_texture
+
+    def counting(params, name, default, **kw):
+        if name == "reflectance":
+            calls.append(name)
+        return real(params, name, default, **kw)
+
+    M.get_spectrum_texture = counting
+    try:
+        res = _res('Material "subsurface" "rgb reflectance" [0.7 0.4 0.3]', M.MTLX)
+    finally:
+        M.get_spectrum_texture = real
+    assert len(calls) == 1, f"reflectance resolved {len(calls)} times"
+    assert res.lobes["subsurface_color"] == pytest.approx([0.7, 0.4, 0.3])
+
+
+def test_subsurface_does_not_read_a_parameter_pbrt_never_defines():
+    """pbrt's SubsurfaceMaterial::Create has no `radius`; only shapes do."""
+    src = textwrap.dedent(inspect.getsource(M.resolve_material))
+    assert '"radius"' not in src, "resolver reads a `radius` pbrt would ignore"

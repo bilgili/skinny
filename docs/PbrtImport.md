@@ -128,6 +128,63 @@ line: two AST gates fail the build if a `ParamSet` read or a ParamSet-shaped
 argument reappears in `media.py`, and a third counts the `eta` resolutions in a
 full import and fails at two.
 
+### The promoting accessor layer
+
+Every material parameter value is read through `get_float_texture` or
+`get_spectrum_texture`, never through a raw `ParamSet` accessor. The raw
+accessors (`rgb`, `floats`, `float`) call `float()` on the token, which **raises**
+on a texture or a named spectrum, and — worse — silently returns the tokens
+themselves for a `blackbody` or an inline sampled spectrum. Before change
+`subsurface-promoting-accessors`, `"spectrum sigma_a" [400 .1 700 .9]` imported as
+`[400.0, 0.1, 700.0]`: the raw wavelength/value pairs read as an RGB triple, with
+no crash, no note and an `EXACT` status.
+
+The promoting layer follows two rules.
+
+1. **No degradation is silent.** A binding whose value the resolver cannot carry
+   falls back to the parameter's default and appends one note. Every such note
+   carries the marker `used default`, which is what escalates the material's
+   status from `EXACT` to `APPROX`. A substituted value that leaves the import
+   `EXACT` is a wrong answer wearing a clean report.
+2. **A named spectrum substitutes only where the substitution means something.**
+   `_IOR_PARAM_NAMES` restricts the float side, so a named glass yields its d-line
+   index on an IOR lane and degrades on a roughness lane.
+   `_REFLECTANCE_PARAM_NAMES` is the mirror on the spectrum side: a named metal's
+   reflectance RGB is exact on a reflectance lane and degrades, with a note, on an
+   absorption or scattering coefficient. Writing gold's reflectance into `sigma_a`
+   is the same defect class as writing a glass IOR into a roughness.
+
+A hostless AST gate in `tests/pbrt/test_material_resolve.py` fails the build if a
+`float()`-on-token accessor is used for a parameter value anywhere in the
+resolver. It names no parameter, so it cannot rot as a hand-written list would —
+the *next* parameter added through a raw accessor fails it too.
+
+**Presence and readability are separate reads.** The subsurface coefficient
+precedence branches on which parameters were authored:
+
+```
+name → (sigma_a AND sigma_s) → reflectance (+mfp) → Wholemilk defaults
+```
+
+A promoting accessor never returns `None`, so presence cannot be read off its
+result — every material would take the explicit-σ branch and the other three
+would become unreachable. Presence therefore comes from `p.get(name) is not None`,
+a syntactic fact, and the value from the accessor. This matches pbrt, which
+branches on `GetSpectrumTextureOrNull` — non-null for a texture binding too. An
+unusable parameter keeps the branch pbrt would have taken and loses only its
+value.
+
+The σ pair degrades **as a unit**: pbrt `ErrorExit`s on a half-authored pair, so
+substituting a default for one member would pair one material's absorption with
+another's scattering.
+
+**Skipped versus approximate.** A spectral reduction to RGB is a bounded fidelity
+loss and reports `APPROX`. A texture-bound *medium coefficient* is not an
+approximation at all — pbrt evaluates it per intersection and skinny's imported
+interior medium is homogeneous, so the authored data has nowhere to go. That
+reports `SKIPPED`, which makes `report.has_unsupported` return true and the CLI
+exit non-zero.
+
 ### Roughness calibration (parity-critical)
 
 - pbrt v4: `alpha = sqrt(roughness)` when `remaproughness` (default), else
