@@ -237,15 +237,26 @@ AttributeBegin
   Shape "trianglemesh" "point3 P" [ 0.5 2.1 0  0.7 2.1 0  0.6 2.3 0 ] "integer indices" [ 0 1 2 ]
 AttributeEnd
 
-# One subsurface param shape is still deliberately ABSENT here because it
-# crashes the importer, in shared code no change has touched yet (recorded as
-# KnownBugs.md item 3): a TEXTURE-bound `reflectance`, which
-# materials.subsurface_medium_overrides reads with `ParamSet.rgb` — that raises
-# on a texture-typed param. A NAMED-SPECTRUM `eta` used to crash the same way and
-# no longer does (change subsurface-eta-single-owner); it is covered below.
+# Every subsurface param binding is now representable. A NAMED-SPECTRUM `eta`
+# used to crash (fixed by subsurface-eta-single-owner); a TEXTURE- or
+# named-spectrum-bound coefficient used to crash too, and a `blackbody` or inline
+# sampled spectrum silently parsed into its raw tokens (both fixed by
+# subsurface-promoting-accessors). A texture-bound COEFFICIENT reports SKIPPED —
+# the imported interior medium is homogeneous, so a per-intersection texture is
+# unrepresentable, not approximate.
 AttributeBegin
   Material "subsurface" "spectrum eta" "glass-LASF9"
   Shape "trianglemesh" "point3 P" [ 1.1 2.1 0  1.3 2.1 0  1.2 2.3 0 ] "integer indices" [ 0 1 2 ]
+AttributeEnd
+
+AttributeBegin
+  Material "subsurface" "blackbody sigma_a" [6500] "rgb sigma_s" [1 1 1]
+  Shape "trianglemesh" "point3 P" [ 1.4 2.1 0  1.6 2.1 0  1.5 2.3 0 ] "integer indices" [ 0 1 2 ]
+AttributeEnd
+
+AttributeBegin
+  Material "subsurface" "spectrum mfp" [400 .1 700 .9] "rgb reflectance" [0.6 0.5 0.4]
+  Shape "trianglemesh" "point3 P" [ 1.7 2.1 0  1.9 2.1 0  1.8 2.3 0 ] "integer indices" [ 0 1 2 ]
 AttributeEnd
 
 AttributeBegin

@@ -200,11 +200,18 @@ def test_subsurface_sets_rich_slots():
     assert status == "approx"
 
 
-def test_subsurface_radius_from_pbrt_radius():
+def test_subsurface_radius_comes_from_mfp_not_a_phantom_radius():
+    """pbrt's `SubsurfaceMaterial::Create` defines no `radius` — only shapes do.
+
+    Reading one was skinny inventing behaviour (change
+    subsurface-promoting-accessors). `subsurface_radius` IS the mean free path,
+    so it is derived from `mfp`; an authored `radius` is ignored, as pbrt ignores
+    it.
+    """
     inputs, _tex, _, _ = M.map_material_mtlx(
-        _mat('Material "subsurface" "rgb radius" [1.0 0.5 0.3]')
+        _mat('Material "subsurface" "rgb mfp" [1.0 0.5 0.3] "rgb radius" [9 9 9]')
     )
-    assert inputs["subsurface_radius"] == [1.0, 0.5, 0.3]
+    assert inputs["subsurface_radius"] == pytest.approx([1.0, 0.5, 0.3])
 
 
 # --------------------------------------------------------------------------- #
