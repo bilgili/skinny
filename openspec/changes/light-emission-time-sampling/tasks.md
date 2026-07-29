@@ -40,7 +40,26 @@
 - [x] 5.4 Run `ruff check src/skinny/usd_loader.py src/skinny/renderer.py`.
 - [x] 5.5 Run `openspec validate light-emission-time-sampling --strict`.
 
-## 6. Documentation
+## 6. Codex pre-merge review findings
+
+- [x] 6.1 P2 — the spec delta required per-frame re-evaluation for all five
+      light types, but the renderer refreshes only DistantLight and SphereLight.
+      Corrected the specification: ADD the read-at-time-code requirement for all
+      five types, MODIFY the per-frame one to name the types it refreshes and
+      record the three exclusions.
+- [x] 6.2 P2 — `_read_open_stage` defaulted its evaluation time to
+      `Usd.TimeCode.Default()`, so a normal load still read every light at the
+      fallback. Dome/rect/disk never re-extract, so the fix was unreachable for
+      them. Default to the stage's start time code.
+- [x] 6.3 P2 — `headless._to_timecode(None)` substituted `Default()` for an
+      absent time, skipping the start-time branch in every headless render.
+      Return `None` and let the loader decide.
+- [x] 6.4 Same shape found while checking 6.3:
+      `Renderer._refresh_usd_live_state` re-extracted lights at `Default()`.
+      Use the clock's time code.
+- [x] 6.5 Re-run the review until clean.
+
+## 7. Documentation
 
 - [x] 6.1 Update `CHANGELOG.md`.
 - [x] 6.2 Record the `tests/fixtures/anim_reread.json` re-capture as a follow-up
