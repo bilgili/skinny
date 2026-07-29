@@ -457,7 +457,7 @@
    "flip_tol": 0.08,
    "material_class": "flat",
    "megakernel_ok": true,
-   "notes": "suite discriminator (mat_coated_metal): a coatedconductor whose metal (conductor.roughness 0.45) and coat (interface.roughness 0.02) are far apart, so reading the wrong spelling into the metal changes the image; pbrt-gated + self-consistency. Measured path|wavefront pbrt-truth relMSE 0.03792 (0.02452 on the _mtlx sibling) — the residual is the base metal's RGB `metallic` response vs pbrt's spectral Au eta/k, NOT the coat: a probe with the clearcoat weight zeroed is BRIGHTER (0.930x) and still 1.73x pbrt's sphere luminance. Reading the top-level `roughness` instead measured 0.4287"
+   "notes": "suite discriminator (mat_coated_metal): a coatedconductor whose metal (conductor.roughness 0.45) and coat (interface.roughness 0.02) are far apart, so reading the wrong spelling into the metal changes the image; pbrt-gated + self-consistency. Measured path|wavefront pbrt-truth relMSE 0.03792 (0.02452 on the _mtlx sibling); reading the top-level `roughness` instead measured 0.4287. The residual is the COAT energy model, not the metal (KnownBugs item 4): the sphere is 1.604x pbrt's luminance here, while the uncoated gold spheres of mat_conductor measure 0.923x and 0.978x under the same lighting, and the environment background matches to 0.999x"
   },
   {
    "name": "mat_coated_metal_mtlx",

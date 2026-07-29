@@ -147,12 +147,21 @@ per-combo `baselines` were needed; `path|megakernel` vs the anchor is exactly 0
 (mega ≡ wave). The `_mtlx` sibling sits closer to pbrt than the plain one
 (0.02452 vs 0.03792).
 
-**Residual, out of scope and recorded as `KnownBugs.md` item 4:** the imported
-metal renders 1.60× brighter and less saturated than pbrt's. Measured, not
-assumed — a probe with the clearcoat weight zeroed is *brighter* (0.930×) and
-still 1.73× pbrt, so the excess is the base metal's RGB `metallic` response vs
-pbrt's spectral `eta`/`k`, not the coat. `--spectral` does not close it
-(0.04112 vs RGB 0.03792). Independent of the roughness spelling.
+**Residual, out of scope and recorded as `KnownBugs.md` item 4:** the coated
+metal renders 1.60× brighter and less saturated than pbrt's. Localized by
+measurement to the COAT: the uncoated gold spheres of `mat_conductor` measure
+0.923× and 0.978× under the same lighting and the environment background matches
+to 0.999×, so neither the metal response nor the lighting is at fault. skinny
+adds a Fresnel coat lobe over an unattenuated base (`coatAttenuation` is the
+identity, because the importer sets `coat_color = [1,1,1]`), where pbrt's
+`CoatedConductorBxDF` layers — and layering makes a coated metal DARKER.
+
+Two hypotheses died on the way and are recorded so they are not re-run: the
+"zero the clearcoat" probe (it removes skinny's coat while pbrt keeps its own,
+so it measures the wrong difference), and the metal's RGB response (the
+named-metal F0 table reproduces the spectrally-integrated normal-incidence
+reflectance to within 0.3% luminance for Au/Ag/Al/Cu). `--spectral` does not
+close it either (0.04112 vs RGB 0.03792). Independent of the roughness spelling.
 
 ## Notes
 

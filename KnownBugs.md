@@ -131,7 +131,7 @@ skinny inventing behaviour. Only the LOBES stay mtlx-only.
 
 ---
 
-## 4. An imported metal renders brighter and less saturated than pbrt
+## 4. A COATED metal renders ~1.6x too bright: the coat adds energy instead of layering
 
 **Observed:** 2026-07-29, on the new `tests/assets/suite/mat_coated_metal/` scene
 (a gold `coatedconductor`, `--backend metal`, path|wavefront, 128², 256 spp),
@@ -142,26 +142,63 @@ bright region is broader — pbrt's highlight is more concentrated. Over the sph
 disc: mean luminance **0.2917 vs pbrt 0.1818 (1.60×)**, p99 0.9713 vs 0.8124,
 mean RGB (0.350, 0.292, 0.121) vs (0.238, 0.176, 0.078).
 
-**Cause (measured, not assumed):** it is **not** the coat. A probe render with the
-clearcoat weight zeroed comes out *brighter*, not darker (coat = 0.930×), and is
-still **1.73×** pbrt's sphere luminance with no coat at all. The excess is in the
-base metal: skinny imports a pbrt `conductor` as a UsdPreviewSurface `metallic`
-surface tinted by an RGB reflectance derived from the named metal, where pbrt
-evaluates the conductor Fresnel from spectral `eta`/`k` per wavelength. The
-MaterialX sibling, whose `standard_surface` models the layered metal more
-directly, sits closer: pbrt-truth relMSE **0.02436 vs 0.03797**.
+**Cause — the COAT, localized by measurement.** Same renderer, same lighting,
+sphere-region luminance ratios skinny/pbrt:
 
-**Scope / impact:** appearance-level, both backends, independent of execution
-mode and of the roughness spelling. Every combo still passes the scene's
-pbrt-truth gate (0.06 relMSE / 0.08 FLIP) and mega ≡ wave is exact, so this is a
-fidelity gap, not a regression. Same class as the recorded `mat_conductor`
-divergence.
+| scene | coat | ratio |
+|-------|------|-------|
+| `mat_conductor`, gold, roughness 0 | none | 0.923 |
+| `mat_conductor`, gold, roughness 0.3 | none | 0.978 |
+| `mat_coated_metal`, gold, roughness 0.45 | yes | **1.604** |
 
-**Likely fix:** carry the conductor's spectral `eta`/`k` into the flat BSDF's
-Fresnel instead of collapsing them to an RGB reflectance at import — a resolver +
-shader change, not an import-spelling one. `--spectral` does not close it today
-(spectral relMSE 0.04112 vs RGB 0.03797 on this scene), so the gap is in the
-material model rather than the transport.
+The BARE conductor matches pbrt (and is slightly *dark*, which is the expected
+single-scatter GGX energy loss). Only the coated one blows up, so the metal
+response is not the defect. The environment background matches to **0.999**, so
+it is not lighting either.
+
+**It is under-attenuation, not addition.** Both renderers darken a metal when it
+is coated; skinny just does not darken it enough. Coated sphere ÷ bare sphere,
+each within its own renderer (so the roughness difference between the two scenes
+cancels), backgrounds matching at 0.406 / 0.401:
+
+| | coat's effect on the metal |
+|---|---|
+| pbrt | **0.298×** |
+| skinny | **0.489×** |
+
+0.489 / 0.298 = **1.64**, which is the 1.604 disc ratio. skinny's coat removes
+energy from the base only through the `pCoat` selection probability — one
+Fresnel reflection's worth. pbrt's `CoatedConductorBxDF` is a stochastic
+**layered** BxDF that loses energy at every interface crossing and re-hits the
+metal (×R_metal < 1) on each internal bounce. `flat_material.slang:80,171` shows
+skinny has no second channel for that loss: when the coat lobe is not chosen the
+base weight is multiplied by `coatAttenuation = m.coatColor`, and the importer
+sets `coat_color = [1,1,1]` for every pbrt coated material, so that factor is the
+identity. The repeated ×R_metal also explains the desaturation, since pbrt
+multiplies the gold reflectance several times where skinny multiplies it once.
+
+**The exact accounting is not yet resolved** — how much of pbrt's extra 1.64×
+is interface transmission, TIR re-hits, or its layered walk's depth truncation.
+That is the first task of the follow-up change, not a settled fact here.
+
+**Do not trust the "zero the clearcoat" probe.** Zeroing skinny's coat makes it
+*brighter* (0.930×) and still 1.73× pbrt — which looks like an acquittal of the
+coat but is not: the probe removes skinny's coat while pbrt's reference keeps its
+layered one, so it measures the wrong difference. Two earlier hypotheses died on
+the real measurements: the metal's RGB `metallic` response is fine (the named-metal
+F0 table reproduces the spectrally-integrated normal-incidence reflectance to
+within 0.3% luminance for Au/Ag/Al/Cu), and `--spectral` does not close the gap
+(0.04112 vs RGB 0.03792).
+
+**Scope / impact:** both coated types, both backends, independent of execution
+mode and of the roughness spelling. `coateddiffuse` is affected by the same
+additive model, less visibly, because a Lambert base has far less energy to
+double up. Every combo still passes the scene's pbrt-truth gate (0.06 relMSE /
+0.08 FLIP), so this is a fidelity gap, not a regression.
+
+**Likely fix:** attenuate the base lobe by the coat's transmission — at minimum
+`(1 - F)` entering and exiting rather than an identity `coatColor` — or model the
+interface as a real layer. Tracked as its own OpenSpec change.
 
 **Repro:**
 ```bash
