@@ -1423,15 +1423,25 @@ def _resolve_material_binding(
     return material_index[mat_path]
 
 
-def _light_color_radiance(light_api: UsdLux.LightAPI) -> np.ndarray:
+def _light_color_radiance(
+    light_api: UsdLux.LightAPI, time: Usd.TimeCode
+) -> np.ndarray:
     """Combine `inputs:color * inputs:intensity * 2^inputs:exposure` into a
-    linear-HDR radiance vec3 used by skinny's renderer."""
+    linear-HDR radiance vec3 used by skinny's renderer.
+
+    `time` is required, not defaulted. A time-code-free `Get()` resolves at the
+    default time code, where an attribute carrying only time samples has no
+    value — USD then returns the *schema fallback* (50000 for a DistantLight
+    intensity), so an animated light silently renders at the fallback at every
+    frame. A required parameter turns a missed call site into a TypeError
+    instead of a plausible-looking wrong number.
+    """
     color_attr = light_api.GetColorAttr()
     intensity_attr = light_api.GetIntensityAttr()
     exposure_attr = light_api.GetExposureAttr()
-    color = color_attr.Get() if color_attr else (1.0, 1.0, 1.0)
-    intensity = float(intensity_attr.Get()) if intensity_attr else 1.0
-    exposure = float(exposure_attr.Get()) if exposure_attr else 0.0
+    color = color_attr.Get(time) if color_attr else (1.0, 1.0, 1.0)
+    intensity = float(intensity_attr.Get(time)) if intensity_attr else 1.0
+    exposure = float(exposure_attr.Get(time)) if exposure_attr else 0.0
     scaled = float(intensity) * (2.0 ** exposure)
     color_arr = np.asarray(color, dtype=np.float32).reshape(3)
     return (color_arr * scaled).astype(np.float32)
@@ -1461,7 +1471,7 @@ def _extract_distant_light(
         return None
     light_dir /= norm
 
-    radiance = _light_color_radiance(UsdLux.LightAPI(prim))
+    radiance = _light_color_radiance(UsdLux.LightAPI(prim), time)
     return LightDir(direction=light_dir, radiance=radiance,
                     prim_path=str(prim.GetPath()),
                     spectral_spd=_extract_light_spd(prim))
@@ -1548,7 +1558,7 @@ def _extract_dome_light(
     except (OSError, ValueError):
         return None
 
-    radiance = _light_color_radiance(UsdLux.LightAPI(prim))
+    radiance = _light_color_radiance(UsdLux.LightAPI(prim), time)
     # DomeLight intensity scales the env radiance multiplicatively. We
     # collapse color×intensity×2^exposure into one scalar by taking the
     # luminance — the texture itself carries the chromatic detail.
@@ -1574,25 +1584,28 @@ def _extract_sphere_light(
     radius_attr = sphere.GetRadiusAttr().Get(time)
     radius = float(radius_attr) if radius_attr is not None else 0.5
     light_api = UsdLux.LightAPI(prim)
-    radiance = _light_color_radiance(light_api)
+    radiance = _light_color_radiance(light_api, time)
     # Stash the authored colour + intensity so the scene-graph editor
     # can mutate either dimension without losing the other (radiance is
-    # the combined product, irreversible from a single edit).
+    # the combined product, irreversible from a single edit). These read the
+    # same three attributes a second time, so they take the same time code —
+    # otherwise an animated bulb stashes a fallback beside a time-correct
+    # radiance and the editor writes the fallback back to the stage.
     color_attr = light_api.GetColorAttr()
     color = (
-        np.asarray(color_attr.Get(), np.float32).reshape(3)
+        np.asarray(color_attr.Get(time), np.float32).reshape(3)
         if color_attr and color_attr.HasAuthoredValue()
         else np.ones(3, np.float32)
     )
     intensity_attr = light_api.GetIntensityAttr()
     intensity = (
-        float(intensity_attr.Get())
+        float(intensity_attr.Get(time))
         if intensity_attr and intensity_attr.HasAuthoredValue()
         else 1.0
     )
     exposure_attr = light_api.GetExposureAttr()
     exposure = (
-        float(exposure_attr.Get())
+        float(exposure_attr.Get(time))
         if exposure_attr and exposure_attr.HasAuthoredValue()
         else 0.0
     )
@@ -1666,7 +1679,7 @@ def _rect_light_to_instance(
         [-w,  h, 0.0],
     ], dtype=np.float32)
     tri_idx = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
-    radiance = _light_color_radiance(UsdLux.LightAPI(prim))
+    radiance = _light_color_radiance(UsdLux.LightAPI(prim), time)
     inst = _area_light_to_instance(
         prim, time, positions, tri_idx, material_id, radiance,
     )
@@ -1702,7 +1715,7 @@ def _disk_light_to_instance(
     tri_idx = np.array(
         [[0, i + 1, ((i + 1) % n) + 1] for i in range(n)], dtype=np.int32
     )
-    radiance = _light_color_radiance(UsdLux.LightAPI(prim))
+    radiance = _light_color_radiance(UsdLux.LightAPI(prim), time)
     inst = _area_light_to_instance(
         prim, time, positions, tri_idx, material_id, radiance,
     )

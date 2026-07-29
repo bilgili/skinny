@@ -6287,13 +6287,28 @@ class Renderer:
                 prim = self._find_dome_light_prim(env_index)
                 if prim is not None:
                     try:
-                        from pxr import UsdLux
+                        from pxr import Usd, UsdLux
                         from skinny.usd_loader import _light_color_radiance
-                        rad = _light_color_radiance(UsdLux.LightAPI(prim))
+                        # The clock's time code, not the default one: a dome
+                        # whose intensity is time-sampled has no value at the
+                        # default time code and would resolve to the schema
+                        # fallback. The clock reads 0.0 on a static stage, where
+                        # any time code gives the same result.
+                        rad = _light_color_radiance(
+                            UsdLux.LightAPI(prim),
+                            Usd.TimeCode(float(self.clock.current_time_code)),
+                        )
                         intensity = float(np.dot(
                             rad, np.array([0.2126, 0.7152, 0.0722], np.float32)))
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        # Keep the 1.0 fallback, but say so. A silent `pass`
+                        # here reports a plausible intensity for a dome whose
+                        # fold actually failed, which reads as a lighting bug
+                        # rather than an error.
+                        print(
+                            f"[skinny] dome {prim.GetPath()}: intensity fold "
+                            f"failed ({exc}); using 1.0", flush=True,
+                        )
                 self._usd_scene.environment = LightEnvHDR(
                     name=env.name, data=env.data, intensity=intensity)
             else:
