@@ -39,6 +39,9 @@ _FENCE = re.compile(r"^\s*(```|~~~)")
 _CODE_SPAN = re.compile(r"`[^`]*`")
 # Markdown inline links and images: ](target) — the target may carry a title.
 _LINK = re.compile(r"!?\]\(\s*<?([^)>\s]+)>?(?:\s+[\"'][^\"']*[\"'])?\s*\)")
+# Link reference definitions: `[label]: target "title"`. A reference-style link
+# resolves through one of these, so the definition's target is the real link.
+_LINK_DEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?([^>\s]+)>?(?:\s+[\"'(][^\"')]*[\"')])?\s*$")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 # An explicit HTML anchor pins a slug against a heading rewrite; docs/ReSTIR.md
 # already uses this form.
@@ -104,11 +107,14 @@ def _anchors(path: str) -> set[str]:
 def _links(rel_doc: str) -> list[str]:
     with open(os.path.join(REPO, rel_doc), encoding="utf-8") as fh:
         lines = _strip_fences(fh.read())
-    return [
-        m.group(1)
-        for line in lines
-        for m in _LINK.finditer(_CODE_SPAN.sub("", line))
-    ]
+    out = []
+    for line in lines:
+        stripped = _CODE_SPAN.sub("", line)
+        out.extend(m.group(1) for m in _LINK.finditer(stripped))
+        definition = _LINK_DEF.match(stripped)
+        if definition:
+            out.append(definition.group(1))
+    return out
 
 
 def _is_relative(target: str) -> bool:
@@ -126,6 +132,29 @@ def test_live_doc_set_is_not_empty():
     assert len(LIVE_DOCS) >= 15, LIVE_DOCS
     assert "README.md" in LIVE_DOCS
     assert os.path.join("docs", "Architecture.md") in LIVE_DOCS
+
+
+def test_index_lists_every_reference_document():
+    """docs/README.md must link every reference document in docs/.
+
+    Scope is the top level of `docs/`. Nested directories hold generated
+    artifacts — `docs/diagrams/` carries the SVG generators and their result
+    reports, `docs/superpowers/` records history — and neither is a reference
+    document the index should enumerate. Their links are still checked above.
+    """
+    index = os.path.join(REPO, "docs", "README.md")
+    linked = {
+        os.path.basename(t.split("#", 1)[0])
+        for t in _links(os.path.join("docs", "README.md"))
+        if _is_relative(t)
+    }
+    on_disk = {
+        n for n in os.listdir(os.path.join(REPO, "docs"))
+        if n.endswith(".md") and n != "README.md"
+    }
+    assert on_disk, "no reference documents found — the check would be vacuous"
+    missing = sorted(on_disk - linked)
+    assert not missing, f"{index} does not link: {missing}"
 
 
 def test_negative_control(tmp_path):
@@ -147,15 +176,25 @@ def test_negative_control(tmp_path):
     source = tmp_path / "source.md"
     source.write_text(
         "[ok](target.md#pinned) [gone](nope.md) "
-        "[stale](target.md#missing-heading) `[example](docs/foo.svg)`\n",
+        "[stale](target.md#missing-heading) `[example](docs/foo.svg)`\n"
+        "A reference-style link to [the guide][g].\n"
+        "\n"
+        "[g]: also-nope.md\n",
         encoding="utf-8",
     )
-    links = [
-        m.group(1)
-        for line in _strip_fences(source.read_text(encoding="utf-8"))
-        for m in _LINK.finditer(_CODE_SPAN.sub("", line))
+    links = []
+    for line in _strip_fences(source.read_text(encoding="utf-8")):
+        stripped = _CODE_SPAN.sub("", line)
+        links.extend(m.group(1) for m in _LINK.finditer(stripped))
+        d = _LINK_DEF.match(stripped)
+        if d:
+            links.append(d.group(1))
+    assert links == [
+        "target.md#pinned",
+        "nope.md",
+        "target.md#missing-heading",
+        "also-nope.md",  # a reference definition IS a link
     ]
-    assert links == ["target.md#pinned", "nope.md", "target.md#missing-heading"]
     assert not (tmp_path / "nope.md").exists()
     assert "missing-heading" not in anchors
     # A fenced code block never contributes a link.

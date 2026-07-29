@@ -22,25 +22,37 @@ to a named child document.
 - **THEN** the author splits it at a subject boundary and registers each new
   document in the `docs/README.md` index
 
-### Requirement: The docs index lists every document
-`docs/README.md` SHALL index every Markdown document in `docs/` with a
-one-line hook that says what the document owns. `README.md` SHALL link
-`docs/README.md`.
+### Requirement: The docs index lists every reference document
+`docs/README.md` SHALL index every reference document with a one-line hook that
+says what the document owns. `README.md` SHALL link `docs/README.md`.
 
-A new document in `docs/` SHALL be added to the index in the same change that
-creates it.
+The indexed set is the top level of `docs/`. Nested directories hold generated
+artifacts rather than reference documents — `docs/diagrams/` carries the SVG and
+equation generators with their result reports, `docs/superpowers/` records
+history — and the index SHALL NOT be required to enumerate them. Their links
+are still checked by the link-integrity test.
+
+A new reference document SHALL be added to the index in the same change that
+creates it. A hostless test SHALL assert that `docs/README.md` links every
+`docs/*.md` file, so an unindexed document fails the build rather than becoming
+unreachable.
 
 #### Scenario: a new document is added without an index entry
-- **WHEN** a change adds a Markdown document under `docs/` and does not list it
-  in `docs/README.md`
-- **THEN** the change is incomplete, because the document is not reachable from
-  `README.md`
+- **WHEN** a change adds a Markdown document at the top level of `docs/` and
+  does not list it in `docs/README.md`
+- **THEN** the index test fails, naming the unindexed document
+
+#### Scenario: a generated report is added under docs/diagrams/
+- **WHEN** a generator writes a result report under `docs/diagrams/`
+- **THEN** the index test passes without an entry for it, and the
+  link-integrity test still resolves every link the report contains
 
 ### Requirement: Every relative Markdown link resolves
 A hostless test SHALL resolve every relative Markdown link in the live
 documentation set — `README.md`, `CLAUDE.md`, `AGENTS.md`, `CHANGELOG.md`,
-`examples/README.md`, and `docs/**/*.md`. The test SHALL fail when a link names
-a file that does not exist. When a link carries a `#anchor`, the test SHALL
+`examples/README.md`, and `docs/**/*.md`. Both link forms count: an inline
+`[text](target)` link and the target of a `[label]: target` reference
+definition. The test SHALL fail when a link names a file that does not exist. When a link carries a `#anchor`, the test SHALL
 slugify every ATX heading in the target file with the GitHub rule and SHALL
 fail when the anchor is absent.
 
@@ -58,6 +70,11 @@ network.
 #### Scenario: a heading is reworded
 - **WHEN** an author rewords a heading that an inbound anchor targets
 - **THEN** the link test fails on the stale anchor
+
+#### Scenario: a reference-style link names a missing file
+- **WHEN** a document writes `[text][label]` with a `[label]: gone.md`
+  definition and `gone.md` does not exist
+- **THEN** the link test fails, naming the missing target
 
 #### Scenario: an archived change keeps a stale link
 - **WHEN** an archived OpenSpec change links a document path that no longer
