@@ -417,10 +417,10 @@ def read_at_time(
     sentinel whose `GetValue()` is NaN, so rounding it through a float would
     silently ask for frame NaN instead.
 
-    Light intensity is read at the stage's *default* time, not at
-    `time_code` — `_light_color_radiance` takes no time code. That is
-    pre-change behaviour, preserved here on purpose; see the follow-up noted
-    in `openspec/changes/scene-intake-interface/baseline.md`.
+    Every extraction below resolves at `time_code`, emission included — see
+    `_light_color_radiance`, which requires a time code precisely so a missed
+    call site is a TypeError rather than a plausible-looking schema fallback
+    (change `light-emission-time-sampling`).
     """
     time = (
         time_code if isinstance(time_code, Usd.TimeCode)
@@ -499,10 +499,15 @@ def deform_skinned_mesh(
     )
 
 
-def dome_light_intensity(prim) -> float:
-    """Scalar intensity of a DomeLight prim: its colour × intensity ×
-    2^exposure folded to luminance, matching `_extract_dome_light`."""
-    rad = _light_color_radiance(UsdLux.LightAPI(prim))
+def dome_light_intensity(prim, time) -> float:
+    """Scalar intensity of a DomeLight prim at `time`: its colour × intensity
+    × 2^exposure folded to luminance, matching `_extract_dome_light`.
+
+    `time` is required for the same reason `_light_color_radiance` requires it:
+    a dome whose intensity is time-sampled has no value at the default time
+    code and would silently resolve to the schema fallback.
+    """
+    rad = _light_color_radiance(UsdLux.LightAPI(prim), time)
     return float(np.dot(rad, _LUMINANCE))
 
 

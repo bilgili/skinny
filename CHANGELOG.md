@@ -7,6 +7,55 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A time-sampled light intensity no longer renders at the schema fallback**
+  (change `light-emission-time-sampling`). `_light_color_radiance` in
+  `usd_loader.py` read `inputs:color`, `inputs:intensity` and `inputs:exposure`
+  with `attr.Get()` and no time code. USD resolves such a call at the default
+  time code, where an attribute holding only time samples has no value, so USD
+  returned the *schema fallback* — 50000 for a `UsdLuxDistantLight` intensity,
+  1.0 for a `UsdLuxSphereLight`. A stage authoring
+  `float inputs:intensity.timeSamples = {0: 3, 24: 7}` therefore rendered at
+  50000 at every time code and its animation was invisible. Every caller already
+  computed the right time code and passed it to `_extract_distant_light`,
+  `_extract_sphere_light`, `_extract_dome_light`, `_rect_light_to_instance` and
+  `_disk_light_to_instance`, and each one then dropped it at this one call — so
+  the per-frame playback path `_reextract_animated_lights` re-extracted animated
+  lights every frame and still got the fallback. `_light_color_radiance` now
+  takes a **required** `time: Usd.TimeCode` (an optional one would keep the
+  defect reachable at any site that forgot it, and the failure is silent — a
+  plausible number, not an error), and all six call sites pass it: the five in
+  `usd_loader.py` forward their own `time`, and the dome path in `renderer.py`
+  passes the playback clock's current time code. `_extract_sphere_light` carried
+  the same defect a second time in the separate colour/intensity/exposure reads
+  behind its stashed `color`/`intensity` fields; those now use the same time
+  code, so the scene-graph editor no longer writes a fallback back to the stage.
+  Threading the time code was not sufficient on its own: `_read_open_stage`
+  defaulted its evaluation time to `Usd.TimeCode.Default()`, so a normal load
+  read every light *at* the default time code and still got the fallback — the
+  same defect one level up. Distant and sphere lights recovered on the first
+  playback frame via `_reextract_animated_lights`, but dome, rect and disk lights
+  are never re-extracted (a dome would re-decode its HDR each frame; a rect/disk
+  light is emissive geometry needing the mesh rebake the per-frame path exists to
+  avoid), so for those three the fallback was permanent and the fix was
+  unreachable. The load now evaluates at the stage's **start time code**, which
+  is where `build_playback_clock` starts the clock, so the loaded scene agrees
+  with the first rendered frame. Two callers were substituting `Default()` for an
+  absent time and had to stop: `headless._to_timecode(None)` resolved "no time
+  requested" into an explicit `Default()` at the boundary, which skipped the
+  loader's start-time branch and put the fallback back into *every* headless
+  render; and `Renderer._refresh_usd_live_state` re-extracted the lights at
+  `Default()` after a `usd:` control edit, which would reset a time-sampled light
+  to its fallback mid-playback on an edit unrelated to it. The rule the defect
+  keeps re-teaching: `Usd.TimeCode.Default()` is not a neutral placeholder for
+  "no particular time" — it is a specific time code at which a time-sampled
+  attribute has no value.
+  Scenes without time-sampled light attributes are unchanged, because
+  `Get(time)` and `Get()` agree on an attribute with a default value or only a
+  fallback. The adjacent bare `except Exception: pass` around the dome fold now
+  reports the failure instead of silently reporting an intensity of 1.0.
+
 ### Changed
 
 - **Scene intake is one interface that returns a value** (change
@@ -36,8 +85,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reset accumulation. Both are fixed by the unified path. Per-frame re-extraction
   of animated lights, camera and skeletal state is now one
   `scene_intake.read_at_time` call instead of a re-derivation from loader
-  internals, verified bit-for-bit against a fixture captured from the pre-change
-  renderer.
+  internals, verified bit-for-bit against a fixture captured from a real
+  headless renderer over a Z-up animated stage.
 - **`renderer.scene_version` replaced `id(renderer._usd_scene)`** (same change).
   Six sites used object identity as a scene-change token — two `DynamicSection`
   rebuild tokens, two Panel repopulate polls, and two renderer-internal caches.

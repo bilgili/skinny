@@ -1,9 +1,9 @@
 """Capture the per-frame animated re-read as a fixture (task 1.3).
 
 Drives a real headless renderer over a time-code sweep and records what the
-pre-change per-frame extraction produced: instance world transforms, distant
-and sphere lights, and the camera override. The recorded values are the
-identity target for `scene_intake.read_at_time`.
+per-frame extraction produces: instance world transforms, distant and sphere
+lights, and the camera override. The recorded values are the identity target
+for `scene_intake.read_at_time`.
 
 Run from the repo root with the guarded Metal runner:
 

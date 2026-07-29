@@ -3468,11 +3468,15 @@ class Renderer:
             return
         from pxr import Usd
 
-        # Same intake call the playback path uses, at the default time code and
-        # over every instance — a live edit can move any prim, not just an
-        # animated one.
+        # Same intake call the playback path uses, over every instance — a live
+        # edit can move any prim, not just an animated one.
+        #
+        # At the clock's time code, not `Default()`: this resync re-extracts
+        # the lights, so evaluating at the default time code would reset a
+        # time-sampled light to its schema fallback — mid-playback, on an edit
+        # that had nothing to do with it (change light-emission-time-sampling).
         sample = scene_intake.read_at_time(
-            stage, Usd.TimeCode.Default(),
+            stage, Usd.TimeCode(float(self.clock.current_time_code)),
             up_axis_rt=self._usd_up_axis_rt,
             xform_paths=[inst.name for inst in scene.instances],
         )
@@ -6245,9 +6249,24 @@ class Renderer:
                 prim = self._find_dome_light_prim(env_index)
                 if prim is not None:
                     try:
-                        intensity = scene_intake.dome_light_intensity(prim)
-                    except Exception:
-                        pass
+                        from pxr import Usd
+                        # The clock's time code, not the default one: a dome
+                        # whose intensity is time-sampled has no value at the
+                        # default time code and would resolve to the schema
+                        # fallback. The clock reads 0.0 on a static stage, where
+                        # any time code gives the same result.
+                        intensity = scene_intake.dome_light_intensity(
+                            prim, Usd.TimeCode(float(self.clock.current_time_code)),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Keep the 1.0 fallback, but say so. A silent `pass`
+                        # here reports a plausible intensity for a dome whose
+                        # fold actually failed, which reads as a lighting bug
+                        # rather than an error.
+                        print(
+                            f"[skinny] dome {prim.GetPath()}: intensity fold "
+                            f"failed ({exc}); using 1.0", flush=True,
+                        )
                 self._usd_scene.environment = LightEnvHDR(
                     name=env.name, data=env.data, intensity=intensity)
             else:

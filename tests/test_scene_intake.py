@@ -217,12 +217,21 @@ class TestReadAtTime:
 
 
 @needs_usd
-class TestReadAtTimeMatchesPreChangeExtraction:
+class TestReadAtTimeMatchesRecordedExtraction:
     """The recorded identity target (task 1.3).
 
     `tests/fixtures/anim_reread.json` was captured from a real headless
-    renderer *before* this change, over a Z-up animated stage. `read_at_time`
-    must reproduce it exactly.
+    renderer over a Z-up animated stage — Y-up would leave the up-axis
+    rotation `None` and test none of the composition math. `read_at_time` must
+    reproduce it exactly.
+
+    Re-capture with `tests/fixtures/_capture_anim_reread.py` whenever the
+    extraction it pins legitimately changes; never hand-edit the JSON to match
+    the code. It was re-captured once already, when
+    `light-emission-time-sampling` made light emission resolve at the requested
+    time code — before that the recorded radiance was a constant schema
+    fallback, and the sweep now covers animated intensity as well as animated
+    transforms.
     """
 
     @pytest.fixture(scope="class")
