@@ -45,8 +45,8 @@ validated GPU≡numpy in `tests/kernels/test_spectrum_kernels.py`:
 
 The descriptor bindings (45–47 `spectralScale`/`spectralData`/`spectralD65`, plus
 48 `spectralMetals`), the spectral compile variant, and the shader module map are
-documented in [Architecture.md § Descriptor Binding Map](Architecture.md#descriptor-binding-map)
-and [Architecture.md § Modules](Architecture.md#modules) — this document does not
+documented in [GpuResources.md § Descriptor Binding Map](GpuResources.md#descriptor-binding-map)
+and [ShaderPipeline.md § Modules](ShaderPipeline.md#modules) — this document does not
 duplicate them.
 
 ## What hero-wavelength spectral is

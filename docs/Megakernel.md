@@ -310,7 +310,7 @@ modules, then dispatches by **binding resources by name** — the renderer's
 binding map drives the same logical slots, with no Vulkan descriptor sets. The
 resource layer is resolved once by `resource_module(ctx)` (`vk_compute` vs
 `metal_compute`), so the renderer's construction sites are backend-agnostic; see
-[Architecture.md § Backend selection](Architecture.md#backend-selection).
+[Backends.md § Backend selection](Backends.md#backend-selection).
 
 **MSL uniform layout (`FrameConstants fc`, binding 0).** Slang pads `float3` and
 `uint3` to 16 B on the Metal target, so the reflected MSL block is **656 B /
@@ -318,7 +318,7 @@ resource layer is resolved once by `resource_module(ctx)` (`vk_compute` vs
 4-align** (**600 B** with the tail; the embedded `Camera` is 288 B vs 272 B).
 Both sides are derived from the declaration by `slang_layout` and the reflected
 layout is cross-checked against it — see
-[Architecture.md § Byte-layout ownership](Architecture.md#byte-layout-ownership-slang_layoutpy-change-reflection-owned-byte-layouts).
+[GpuResources.md § Byte-layout ownership](GpuResources.md#byte-layout-ownership-slang_layoutpy-change-reflection-owned-byte-layouts).
 `_pack_uniforms_msl` reuses the Vulkan scalar blob from `_pack_uniforms` verbatim
 and relocates each field to its **reflected** MSL offset (`pipeline.uniform_layout`
 — never hardcoded; e.g. `camera.position`@256, `focusPlaneOrigin`@416,
@@ -331,7 +331,7 @@ path is byte-unchanged.
 Skin/std-surface params and the lights arrive as SSBOs (not part of `fc`). For
 the Metal-target texture/sampler split (`commonSampler`, the discrete-map
 samplers, `NRI`) see
-[Architecture.md § MetalContext](Architecture.md#metalcontext-metal_contextpy-metal_computepy).
+[Backends.md § MetalContext](Backends.md#metalcontext-metal_contextpy-metal_computepy).
 
 **Metal watchdog tiling (change `metal-megakernel-watchdog-tiling`).** macOS
 cannot cancel another process's GPU work, so a single full-frame megakernel

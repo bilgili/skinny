@@ -55,7 +55,8 @@ export DYLD_LIBRARY_PATH=$VULKAN_SDK/lib
 | `render_turntable.py` | Orbits the existing scene camera 360° by mutating its stage transform per frame |
 
 Both scripts are thin demos of the public API — see `skinny.headless` for the
-full interface and `Architecture.md` for renderer internals.
+full interface, [docs/FrontEnds.md](../docs/FrontEnds.md) for the headless
+render API, and [docs/README.md](../docs/README.md) for the documentation index.
 
 ## Output formats
 
