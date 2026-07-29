@@ -1,7 +1,11 @@
 # Skinny — Documentation Index
 
-Every document in `docs/` is listed here. Each one owns a subject: a change
-updates the document that owns what it touched. Start at
+Every reference document at the top level of `docs/` is listed here. Each one
+owns a subject: a change updates the document that owns what it touched. The
+nested directories are generated artifacts rather than reference documents —
+`docs/diagrams/` holds the SVG and equation generators with their result
+reports, `docs/superpowers/` records history — so they are not enumerated
+below. Start at
 [Architecture.md](Architecture.md) for the renderer overview, or at
 [../README.md](../README.md) for installation and the command lines.
 

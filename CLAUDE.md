@@ -19,16 +19,17 @@ environment.
 
 At the end of every implementation, review **all** Markdown documentation and
 update whatever the change touched, scoped to each document's subject.
-**[docs/README.md](docs/README.md) indexes every technical document** and says
-what each one owns — read the index to find the right file, and register a new
+**[docs/README.md](docs/README.md) indexes every top-level reference document
+in `docs/`** and says what each one owns — read the index to find the right file, and register a new
 document there in the same change that creates it. `README.md`, `CHANGELOG.md`,
 `CLAUDE.md`, and `AGENTS.md` stay at the repo root.
 
 Each document owns one subject, and a reference document stays **at or below
 700 lines** (change `docs-split-large-docs`). When one grows past the ceiling,
 split it at a subject boundary — never at an arbitrary line — and register the
-new document in the index. `docs/Wavefront.md`, `docs/NeuralGuiding.md`, and
-`docs/PythonAPI.md` are still over the ceiling; splitting them is a follow-up.
+new document in the index. Four documents are still over the ceiling —
+`docs/Wavefront.md` (1033), `docs/NeuralGuiding.md` (961), `docs/PythonAPI.md`
+(873), and `docs/ReSTIR.md` (727) — and splitting them is a follow-up.
 
 Route a change to its owner: the wavefront pipeline updates
 `docs/Wavefront.md`; ReSTIR DI (reservoir/RIS/GRIS shaders, the reuse pass set,

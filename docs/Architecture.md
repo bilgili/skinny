@@ -47,7 +47,7 @@ the document that owns the subject, not this file.
 | [ParityHarness.md](ParityHarness.md) | The parity matrix, the dual gate, the confirming-scene suite |
 | [ImplementationMap.md](ImplementationMap.md) | The per-file listing of the Python package and the shader tree |
 
-[README.md](README.md) indexes every document in `docs/`.
+[README.md](README.md) indexes every reference document in `docs/`.
 
 ---
 

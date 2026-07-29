@@ -11,8 +11,8 @@ pipeline handles arbitrary MaterialX materials, OpenUSD scenes, ray-traced
 geometry, image-based lighting, microfacet specular, and energy-conservation
 checks.
 
-**[docs/README.md](docs/README.md) indexes every document**, one line each. The
-entry points: renderer internals in [Architecture.md](docs/Architecture.md);
+**[docs/README.md](docs/README.md) indexes every reference document**, one line
+each. The entry points: renderer internals in [Architecture.md](docs/Architecture.md);
 what the renderer can be told to do — backend, compatibility matrix, sampling
 modes — in [RenderingModes.md](docs/RenderingModes.md); skin-specific rendering
 (three-layer optics, scattering modes, MaterialX skin nodedefs, head geometry,

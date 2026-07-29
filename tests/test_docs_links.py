@@ -88,7 +88,12 @@ def _anchors(path: str) -> set[str]:
     """Every anchor a Markdown file exposes, including GitHub's -1/-2 suffixes."""
     with open(path, encoding="utf-8") as fh:
         lines = _strip_fences(fh.read())
-    seen: Counter[str] = Counter()
+    # github-slugger's disambiguation: on a collision, append `-N` where N is
+    # the occurrence count of the ORIGINAL slug, then retry against every slug
+    # already emitted. Headings `Foo`, `Foo`, `Foo-1` give foo, foo-1, foo-1-1
+    # — a per-base counter would wrongly give foo-1 twice.
+    occurrences: Counter[str] = Counter()
+    emitted: set[str] = set()
     anchors: set[str] = set()
     for line in lines:
         anchors.update(_HTML_ANCHOR.findall(line))
@@ -98,9 +103,12 @@ def _anchors(path: str) -> set[str]:
         base = _slug(match.group(2))
         if not base:
             continue
-        count = seen[base]
-        seen[base] += 1
-        anchors.add(base if count == 0 else f"{base}-{count}")
+        result = base
+        while result in emitted:
+            occurrences[base] += 1
+            result = f"{base}-{occurrences[base]}"
+        emitted.add(result)
+        anchors.add(result)
     return anchors
 
 
@@ -172,6 +180,13 @@ def test_negative_control(tmp_path):
     assert "real-heading-modpy-1" in anchors  # duplicate gets GitHub's suffix
     assert "pinned" in anchors  # explicit HTML anchor honoured
     assert "missing-heading" not in anchors
+
+    # A heading whose own slug collides with a generated suffix: github-slugger
+    # retries against every emitted slug, so this is foo, foo-1, foo-1-1 — NOT
+    # foo-1 twice, which is what a naive per-base counter produces.
+    collide = tmp_path / "collide.md"
+    collide.write_text("# Foo\n# Foo\n# Foo-1\n", encoding="utf-8")
+    assert _anchors(str(collide)) == {"foo", "foo-1", "foo-1-1"}
 
     source = tmp_path / "source.md"
     source.write_text(

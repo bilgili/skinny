@@ -8,7 +8,9 @@ most, one line of purpose each. *File Listing* names the rest of the tree, where
 the file name is the answer. The two lists were separate documents until change
 `docs-split-large-docs` merged them; the duplicate bare listings of
 `src/skinny/` and `src/skinny/ui/` were dropped, because the annotated tables
-above cover every file they named.
+above cover every file they named. `__init__.py` was the one file those
+listings named that had no annotated row, so it gained one rather than being
+lost.
 
 For the renderer overview see [Architecture.md](Architecture.md). For the host
 module ownership seams see [HostModules.md](HostModules.md).
@@ -21,6 +23,7 @@ module ownership seams see [HostModules.md](HostModules.md).
 
 | File | Purpose |
 |------|---------|
+| `__init__.py` | Package root — declares `__version__` |
 | `app.py` | GLFW shader-debug entry — keyboard + window only |
 | `ui/qt/app.py` | `skinny-gui` Qt entry — `MainWindow`, viewport + docks |
 | `web_app.py` | Panel web app, per-session renderer, Tornado video WebSocket |
