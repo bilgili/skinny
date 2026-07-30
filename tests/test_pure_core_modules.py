@@ -24,9 +24,9 @@ import textwrap
 
 import pytest
 
-# Every module the pure-core extraction produced. Adding a module to the
-# device-free side means adding it here — that is the whole gate.
-PURE_MODULES = (
+# Modules whose names `renderer.py` re-exports, so pre-split call sites still
+# resolve them through `skinny.renderer`. The re-export gate below covers these.
+RE_EXPORTED_MODULES = (
     "skinny.camera",
     "skinny.film_io",
     "skinny.material_pack",
@@ -35,6 +35,19 @@ PURE_MODULES = (
     "skinny.sppm_budget",
     "skinny.texture_pool",
 )
+
+# Device-free modules `renderer.py` consumes as MODULES (`frame_plan.derive`,
+# `mlt_chain.run_bootstrap`, …) rather than by re-exported name. They carry the
+# same device-free obligation and none of the re-export one.
+MODULE_IMPORTED_MODULES = (
+    "skinny.frame_derive",
+    "skinny.frame_plan",
+    "skinny.mlt_chain",
+)
+
+# Every module the pure-core extraction produced. Adding a module to the
+# device-free side means adding it here — that is the whole gate.
+PURE_MODULES = RE_EXPORTED_MODULES + MODULE_IMPORTED_MODULES
 
 # Packages that mean "this module reached a GPU". `vulkan` is the one
 # `renderer.py` imports at module scope; `slangpy` is the Metal backend's
@@ -139,7 +152,7 @@ def test_renderer_re_exports_every_moved_name() -> None:
         for alias in node.names
     }
 
-    for module in PURE_MODULES:
+    for module in RE_EXPORTED_MODULES:
         mod_tree = ast.parse((pkg / f"{module.split('.')[1]}.py").read_text())
         declared: set[str] = set()
         for node in mod_tree.body:  # top level only — an import is not a declaration

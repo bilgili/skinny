@@ -32,7 +32,7 @@ section in [Wavefront.md](Wavefront.md).
 | Shader entry | `mainImage` | `main_pass.slang:377-437` |
 | Workgroup | `[numthreads(8,8,1)]` = 64 threads, **one thread per pixel** | `main_pass.slang`, `WORKGROUP_SIZE=8` `renderer.py:65` |
 | Dispatch grid | `ceil(W/8) × ceil(H/8) × 1` | `renderer.py:7159-7173` |
-| Frequency | one `vkCmdDispatch` per frame | `render()` `renderer.py:7065` |
+| Frequency | one `vkCmdDispatch` per frame | `_execute_vulkan_frame()` → `_record_frame_dispatch()` |
 | Parameters | single UBO (FrameConstants + SkinParams + lights), **no push constants** | `_pack_uniforms()` `renderer.py:6693+`, upload `7094` |
 
 The pipeline is built only in megakernel mode — gated by
@@ -44,8 +44,12 @@ entry_point="mainImage" ...)` compiles `main_pass.slang` → SPIR-V
 
 Per-frame: `vkCmdBindPipeline` → `vkCmdBindDescriptorSets(descriptor_sets[f])`
 → `vkCmdDispatch(groups_x, groups_y, 1)` → blit storage image to swapchain
-(windowed) or copy to readback (headless, `render_headless` mirrors this at
-`renderer.py:7367`). The same pipeline is reused synchronously for the
+(windowed) or copy to readback (headless). Windowed and headless run **one**
+recorded body — `Renderer._execute_vulkan_frame`, with the megakernel gate in
+`_record_frame_dispatch` — and differ only in their target (change
+`frame-plan-split`, see [HostModules.md](HostModules.md) → *Per-frame path*).
+The headless path used to hold a near-verbatim copy. The same pipeline is reused
+synchronously for the
 BXDF/BSSRDF visualiser, keyed by `toolBuffer[0]` (`renderer.py:5609-5619`,
 `main_pass.slang:386-396`).
 
@@ -244,7 +248,10 @@ else branches at runtime inside the one kernel.
 - **CPU:** `update()` computes `_current_state_hash()` (`renderer.py:6947-6983`)
   over camera/lights/env/model/integrator/proposal-seam/playback-time/MaterialX
   overrides. Hash changed → `accum_frame = 0` + zero the light-splat buffer; else
-  `accum_frame += 1` (`renderer.py:7047-7057`). `execution_mode_index` is
+  `accum_frame += 1`. The decision is made in `update()`, after `_sync_scene(dt)`
+  returns, so it observes every mutation of the frame's scene state; the frame
+  plan **consumes** it as `plan.first_frame` and never re-derives it (change
+  `frame-plan-split`). `execution_mode_index` is
   excluded (fixed for the session, `renderer.py:6965`). `frameIndex` (RNG seed,
   `createRNG(pixel, fc.frameIndex)` `main_pass.slang:401`) advances every frame
   so each accumulated sample draws fresh noise.
@@ -349,13 +356,18 @@ loops the bands; `mainImage`/`mainImageRecord` add `fc.tileOriginY`, a Metal-onl
 `FrameConstants` field, to the dispatch thread's `y`). Each buffer is bounded to
 `width × bandHeight` pixels. The accumulation image persists across the bands of
 a frame and each pixel is written once, so N-band output is **bit-identical** to
-one dispatch. The band count comes from `renderer._metal_megakernel_bands()` — an
-integrator-aware per-pixel budget (`_METAL_MEGAKERNEL_BAND_PIXELS`: BDPT gets a
-far smaller budget than Path/SPPM) scaled by resolution, overridable via
-`SKINNY_METAL_MEGAKERNEL_BANDS`. Ordinary scenes at ≤256² stay a single band, so
-the parity corpus is unaffected. Vulkan always dispatches the full frame in one
-buffer; the `tileOriginY` field and its read are `#if defined(SKINNY_METAL)`
-gated, so the Vulkan `FrameConstants` struct and SPIR-V are byte-unchanged.
+one dispatch. The band count is a **frame decision**: `plan.megakernel_bands`,
+derived by `frame_plan.megakernel_bands` (change `frame-plan-split`) from an
+integrator-aware per-pixel budget (`frame_plan.MEGAKERNEL_BAND_PIXELS`: BDPT gets
+a far smaller budget than Path/SPPM) scaled by resolution, overridable via
+`SKINNY_METAL_MEGAKERNEL_BANDS`. The rule keys on the **capability**
+`needs_watchdog_tiling`, not on the backend — a backend without watchdog-policed
+command buffers gets one band, which is one full-frame dispatch.
+`Renderer._needs_watchdog_tiling` is the single place that capability binds to
+Metal. Ordinary scenes at ≤256² stay a single band, so the parity corpus is
+unaffected. Vulkan always dispatches the full frame in one buffer; the
+`tileOriginY` field and its read are `#if defined(SKINNY_METAL)` gated, so the
+Vulkan `FrameConstants` struct and SPIR-V are byte-unchanged.
 
 ---
 

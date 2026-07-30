@@ -144,6 +144,72 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   What this does **not** buy: the Vulkan SDK library path is still required to
   *import* the renderer on either backend, because `renderer.py` imports
   `vulkan` at module load. Choosing Metal picks the device, not the import graph.
+- **The per-frame path is scene sync, a pure frame plan, and execution**
+  (change `frame-plan-split`). One `update()` + `render()` pair carried roughly
+  34 distinct responsibilities, and `render_headless()` held a near-verbatim
+  copy of the middle of it — the cross-frame accumulation barrier, the
+  execution-mode gate and the dispatch block, duplicated. A change to the gate
+  had to be made twice, "which passes will this frame run" was not a value
+  anything could inspect, and the ordering constraints were facts about line
+  numbers. The path is now three stages with one owner each.
+  `Renderer._sync_scene(dt)` advances the scene state, in the transcribed
+  pre-split order (the dependencies are recorded, not rearranged — the light
+  upload still follows the snapshot rebuild that decides the authority, and the
+  mesh rebake still keys on wall-clock time so a slider drag debounces
+  independently of frame rate). `frame_plan.derive(...)` then produces a
+  **value**: execution mode, integrator, step order, dispatch banding, MLT
+  budget, and which optional per-frame work runs. It holds no buffers, no
+  command buffers and no pipelines, so `tests/test_frame_plan.py` derives a plan
+  and asserts its pass sequence on a host with no GPU — 119 hostless tests over
+  every integrator × execution mode × backend capability × target the render
+  envelope admits, where the golden test for `_pack_uniforms` is GPU-marked
+  precisely because it must construct a renderer to get there. Windowed and
+  headless now share **one** recorded body, `_execute_vulkan_frame`, and differ
+  only in their target: `_SwapchainTarget` acquires an image, contributes the
+  `UNDEFINED → TRANSFER_DST` barrier to the *same* barrier call (so the recorded
+  command stream is unchanged, not merely equivalent), blits, transitions to
+  `PRESENT_SRC` and presents; `_OffscreenTarget` copies into the readback
+  buffer, waits the fence and returns the bytes. The Metal entry points consume
+  the plan instead of re-deriving the execution mode, the integrator name, the
+  MLT reseed condition and the SPPM first-frame flag a second time.
+  Three consequences worth naming. **Ordering constraints are asserted rather
+  than implied**: `frame_plan.ORDERING_INVARIANTS` states each with its reason
+  and `check_invariants` runs on every derivation, so "the pick-result drain
+  precedes the uniform pack" — a satisfied pick that disarms after the pack
+  disarms one frame late and fires twice — is now a test, with a negative
+  control proving the check is not vacuous. **Banding is capability-driven**:
+  `frame_plan.megakernel_bands` takes `needs_watchdog_tiling`, not `is_metal`,
+  because the reason a dispatch splits into row bands is that the backend's
+  command buffers are watchdog-policed; `Renderer._needs_watchdog_tiling` is the
+  single place that binds, and `gpu-backend-adapter` will move it into its
+  capability record without touching a consumer. **The accumulation reset keeps
+  its owner**: `update()` decides it from the `params.py` registry and publishes
+  `accum_frame`; the plan consumes `accum_frame == 0` and never re-derives it.
+  The pick drain moved to after the fence wait on the headless path, which is
+  identical there (its previous call already waited the same fence at its tail,
+  so the drain read the same bytes) and is the only safe order windowed-side.
+  The per-call binding-1 rewrite the proposal flagged for investigation turned
+  out to have been removed already by change `review-surfaced-defects`: it was
+  dead compensation for a rebind `render()` had stopped doing, neither a target
+  difference nor a live bug. Pure refactor — same dispatches, same order, same
+  images; gated by the full parity matrix before and after — Vulkan 73/73
+  metric lines identical, which is the gate that counts, because on a Metal host
+  every render takes the `is_metal` arm and never enters the rewritten body.
+  A codex pre-merge review found six defects, all fixed: the plan was derived
+  **before** the pick drain (a pick callback sets `accum_frame = 0`, so
+  `plan.first_frame` disagreed with the packed `fc.accumFrame` and SPPM could skip
+  its accumulator clear); `target.submit_info()` was evaluated inside the
+  fence-reset/submit critical region, where a raise leaves the fence unsignalled
+  and a retrying caller blocks forever; `plan.steps` was descriptive with nothing
+  reconciling it against the executor; the weight swap became a start-of-frame
+  snapshot and so deferred an OFF→ON transition by a frame; `plan.target` and the
+  concrete target object were unchecked against each other; and the Metal MLT
+  bootstrap re-derived a chain batch the mutation dispatch took from the plan. The
+  common cause of the two serious ones was one design error — a snapshot taken
+  before the state it describes stops changing — and the fix is uniform: drain,
+  then derive. `online_swap` left the plan entirely, because arming online
+  training is a frame-END decision and a field that cannot be authoritative does
+  not belong in a plan.
 
 - **Scene intake is one interface that returns a value** (change
   `scene-intake-interface`). `usd_loader.py` had four public loaders that the
