@@ -43,11 +43,22 @@ cannot stand in for a missing top-level document.
 - **THEN** the index test passes without an entry for it, and the
   link-integrity test still resolves every link the report contains
 
-### Requirement: A document passes the size ceiling
-Each reference document in `docs/` SHALL cover one subject and SHALL stay at or
-below 700 lines. When a document passes the ceiling, the author SHALL split it
-along a subject boundary, not at an arbitrary line, and SHALL register each new
-document in the `README.md` index.
+### Requirement: One subject per reference document
+Each reference document in `docs/` SHALL cover one subject. A document SHALL
+stay at or below 700 lines. When a document passes the ceiling, the author
+SHALL split it along a subject boundary, not at an arbitrary line.
+
+`docs/Architecture.md` SHALL be a hub. It SHALL hold the high-level pipeline,
+the GPU execution flow, the shader module dependency graph, the key invariants,
+and a map of its child documents. It SHALL NOT hold the descriptor binding map,
+the scene system, the backend selection logic, the byte layouts, the parity
+harness, the web front end, or the module file listing — each of those belongs
+to a named child document.
+
+#### Scenario: a new descriptor binding is added
+- **WHEN** a change adds a descriptor binding
+- **THEN** the author updates the binding map in `docs/GpuResources.md`, and
+  `docs/Architecture.md` needs no edit
 
 #### Scenario: a document passes the size ceiling
 - **WHEN** a reference document in `docs/` grows past 700 lines

@@ -64,4 +64,4 @@ Move each section at its current heading level. Do not reword any line.
       (2 P1), all fixed; the seventh returned clean. Every one was in text I
       authored or in the gate — none in moved text.
 - [x] 6.2 `openspec validate readme-as-docs-index --strict`.
-- [ ] 6.3 Merge to `main`, archive, remove the worktree, and push.
+- [x] 6.3 Merge to `main`, archive, remove the worktree, and push.
