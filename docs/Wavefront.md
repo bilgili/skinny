@@ -64,7 +64,7 @@ dispatch:
   **same scene descriptor set 0**, so the UBO, materials, lights, textures, and
   env CDFs are shared verbatim.
 
-> Vulkan-only: gated on `hasattr(ctx, "compute_queue")` (`renderer.py:1090`,
+> Vulkan-only: gated on `capabilities(ctx).has_descriptor_sets` (`renderer.py:1090`,
 > `1399`). There is no CPU fallback for the wavefront path.
 
 ### Path stages (`WavefrontPathPass`, `vk_wavefront.py:464-679`)

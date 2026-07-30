@@ -117,7 +117,8 @@ creation).
 **Metal-target shader adaptations** (gated `#if defined(SKINNY_METAL)`, Vulkan
 SPIR-V byte-unchanged): the combined `Sampler2D` pool exceeds Apple's compute
 argument limits and slang-rhi cannot bind a combined `Sampler2D` at all, so the
-bindless `flatMaterialTextures` pool becomes `Texture2D[120]` sampled through a
+bindless `flatMaterialTextures` pool becomes `Texture2D[119]`
+(`capabilities(ctx).bindless_texture_capacity`) sampled through a
 shared `commonSampler` (binding 38), the five discrete maps (env/tattoo/normal/
 roughness/displacement) split into `Texture2D` + a per-map `SamplerState`
 (bindings 39–43), and `NonUniformResourceIndex` (unavailable in the compute stage
@@ -199,7 +200,7 @@ unaffected). See [Megakernel.md → Backends](Megakernel.md#backends-vulkan-and-
 
 **Tool-dock render paths** (change `metal-tool-dock-render`): the two View-menu
 tool docks whose render paths were Vulkan-only now run on Metal via compute.
-- **Material Graph preview** — `PreviewPipelineMetal` compiles `preview_pass.slang`
+- **Material Graph preview** — the adapter's `PreviewPipeline` compiles `preview_pass.slang`
   (`previewMain`) in-process (same session config as the megakernel
   `ComputePipeline`, linking the emit-time `generated_materials` so it shades
   identically) and dispatches by binding the scene material resources + the output

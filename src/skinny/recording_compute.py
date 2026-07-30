@@ -132,6 +132,8 @@ class RecordingContext:
     compute_queue = None
     supports_shared_memory = False
     supports_indirect_dispatch = True
+    supports_external_memory = False
+    supports_external_semaphore = False
 
     def __init__(self, width: int = 64, height: int = 64) -> None:
         self.width = int(width)
@@ -212,7 +214,7 @@ class UniformBuffer(_Resource):
 
 
 class StorageImage(_Resource):
-    def __init__(self, ctx, width: int, height: int, format="rgba32_float",
+    def __init__(self, ctx, width: int, height: int, format=None,
                  transfer_src: bool = False) -> None:
         self.width, self.height = int(width), int(height)
         self.format = format
@@ -227,7 +229,7 @@ class StorageImage(_Resource):
 
 
 class SampledImage(_Resource):
-    def __init__(self, ctx, width: int, height: int, format="rgba32_float",
+    def __init__(self, ctx, width: int, height: int, format=None,
                  bytes_per_pixel: int = 16, address_mode_u="repeat",
                  address_mode_v="clamp") -> None:
         self.width, self.height = int(width), int(height)
@@ -303,11 +305,38 @@ class _RecordingPipeline(_Resource):
         """
         self._reflected = set(names)
 
-    def _record_dispatch(self, groups, binds) -> None:
+    def _record_dispatch(self, groups, binds, *, uniform_blob=None,
+                         push_bytes=None, bindless=None, output_image=None,
+                         vars=None) -> None:
+        """Record one dispatch and what it actually binds.
+
+        "Bound" mirrors the real adapters rather than the shape of the ``binds``
+        dict (codex pre-merge review, MEDIUM 2). Two rules, both taken from
+        `metal_compute`:
+
+        - a key whose value is ``None`` is **skipped**, not bound — so recording
+          a key with no resource must not mask a genuinely missing binding;
+        - a resource does not have to arrive through ``binds``. The uniform blob
+          binds ``fc``, a push block binds ``pc``, the preview output binds
+          ``previewOutput``, and ``bindless`` binds the global it names. Ignoring
+          those channels reported legitimate bindings as absent.
+        """
+        bound = {name for name, res in (binds or {}).items() if res is not None}
+        if uniform_blob is not None:
+            bound.add("fc")
+        if push_bytes is not None:
+            bound.add("pc")
+        if output_image is not None:
+            bound.add("previewOutput")
+        if bindless is not None:
+            # (global_name, textures) — the pool binds under its own global.
+            bound.add(bindless[0] if isinstance(bindless, (tuple, list))
+                      else str(bindless))
+        bound.update(name for name, v in (vars or {}).items() if v is not None)
         self._rec.record(
             "dispatch", type(self).__name__,
             entry=self.entry_point, groups=tuple(int(g) for g in groups),
-            bound=sorted((binds or {}).keys()),
+            bound=sorted(bound),
             reflected=sorted(self._reflected),
         )
 
@@ -330,8 +359,9 @@ class ComputePipeline(_RecordingPipeline):
                    graph_fragments, compile_pipeline=False, spectral=spectral)
 
     def dispatch(self, width: int, height: int, uniform_blob=None, binds=None,
-                 bindless=None, bands: int = 0, tile_origin_offset: int = 0):
-        self._record_dispatch((width, height, 1), binds)
+                 bindless=None, bands: int = 0, tile_origin_offset=None):
+        self._record_dispatch((width, height, 1), binds,
+                              uniform_blob=uniform_blob, bindless=bindless)
 
     def dispatch_indirect(self, args_buffer, offset: int = 0, bindings=None):
         self._record_dispatch((0, 0, 0), bindings)
@@ -339,7 +369,7 @@ class ComputePipeline(_RecordingPipeline):
     def dispatch_kernel(self, thread_count, buffers=None, vars=None):
         groups = thread_count if isinstance(thread_count, (tuple, list)) \
             else (thread_count, 1, 1)
-        self._record_dispatch(groups, buffers)
+        self._record_dispatch(groups, buffers, vars=vars)
 
 
 class PreviewPipeline(_RecordingPipeline):
@@ -362,4 +392,6 @@ class PreviewPipeline(_RecordingPipeline):
 
     def dispatch(self, size: int, push_bytes: bytes, uniform_blob=None,
                  binds=None, output_image=None, bindless=None):
-        self._record_dispatch((size, size, 1), binds)
+        self._record_dispatch((size, size, 1), binds,
+                              uniform_blob=uniform_blob, push_bytes=push_bytes,
+                              bindless=bindless, output_image=output_image)

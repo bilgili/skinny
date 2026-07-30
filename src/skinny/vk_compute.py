@@ -27,11 +27,31 @@ from skinny.wavefront_layout import mlt_binding_numbers
 BINDLESS_TEXTURE_CAPACITY = 128
 
 
+#: The one image-format vocabulary both adapters speak. Declared here and in
+#: `metal_compute._FORMAT_TOKENS`; the conformance test compares the two.
+_FORMAT_TOKENS = ("rgba32f", "rgba32_float", "rgba8_unorm", "rgba8_srgb",
+                  "r8_unorm")
+_ADDRESS_TOKENS = ("repeat", "clamp", "mirror", "black", "useMetadata")
+
+
 def _vk_format_token(fmt):
-    """Resolve a backend-neutral image-format token to a ``VkFormat``. Ints (an
-    existing ``VkFormat``) pass through unchanged, so all current call sites and
-    their SPIR-V/resources are byte-identical; the renderer passes string tokens
-    so a construction site is the same on the Metal backend (see metal_compute)."""
+    """Resolve a backend-neutral image-format token to a ``VkFormat``.
+
+    ``None`` means the default RGBA32F, exactly as on Metal. A raw ``VkFormat``
+    int is **refused**: accepting one is what let the two adapters take different
+    argument domains under one parameter name, so a call site that worked on
+    Vulkan raised on Metal (codex pre-merge review, MEDIUM 3). Internal raw
+    Vulkan structs (``VkImageCreateInfo`` and friends) still use ``VkFormat``
+    ints — they are Vulkan API inputs, not adapter arguments.
+    """
+    if fmt is None:
+        return vk.VK_FORMAT_R32G32B32A32_SFLOAT
+    if not isinstance(fmt, str):
+        raise TypeError(
+            f"image format must be one of {_FORMAT_TOKENS} or None, not "
+            f"{fmt!r}. The adapters share one vocabulary; pass the token, not a "
+            "VkFormat int."
+        )
     if isinstance(fmt, str):
         return {
             "rgba32f": vk.VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -40,12 +60,20 @@ def _vk_format_token(fmt):
             "rgba8_srgb": vk.VK_FORMAT_R8G8B8A8_SRGB,
             "r8_unorm": vk.VK_FORMAT_R8_UNORM,
         }.get(fmt, vk.VK_FORMAT_R32G32B32A32_SFLOAT)
-    return fmt
 
 
 def _vk_address_token(mode):
-    """Resolve a backend-neutral address-mode token to a ``VkSamplerAddressMode``;
-    ints pass through unchanged (byte-identical)."""
+    """Resolve a backend-neutral address-mode token to a ``VkSamplerAddressMode``.
+
+    Refuses a raw ``VkSamplerAddressMode`` int for the same reason
+    :func:`_vk_format_token` does.
+    """
+    if not isinstance(mode, str):
+        raise TypeError(
+            f"address mode must be one of {_ADDRESS_TOKENS}, not {mode!r}. "
+            "The adapters share one vocabulary; pass the token, not a "
+            "VkSamplerAddressMode int."
+        )
     if isinstance(mode, str):
         return {
             "repeat": vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -54,7 +82,6 @@ def _vk_address_token(mode):
             "black": vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
             "useMetadata": vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
         }.get(mode, vk.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-    return mode
 
 # The backend-agnostic megakernel-source emission (the `generated_materials` /
 # per-graph / python-dispatcher Slang that `main_pass.slang` imports) lives in
@@ -842,10 +869,10 @@ class StorageImage:
         ctx: VulkanContext,
         width: int,
         height: int,
-        format: int = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+        format=None,
         transfer_src: bool = False,
     ) -> None:
-        format = _vk_format_token(format)  # accept backend-neutral tokens (int passes through)
+        format = _vk_format_token(format)  # one shared vocabulary; see the helper
         self.ctx = ctx
         self.width = width
         self.height = height
@@ -1468,10 +1495,10 @@ class SampledImage:
         ctx: VulkanContext,
         width: int,
         height: int,
-        format: int = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+        format=None,
         bytes_per_pixel: int = 16,
-        address_mode_u: int = vk.VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        address_mode_v: int = vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        address_mode_u="repeat",
+        address_mode_v="clamp",
     ) -> None:
         # Accept backend-neutral string tokens (the renderer passes these so a
         # SampledImage construction site is identical on Metal); existing int

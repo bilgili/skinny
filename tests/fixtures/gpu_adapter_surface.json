@@ -231,6 +231,88 @@
       "COMMON_SAMPLER_NAME",
       "DISCRETE_MAP_SAMPLERS"
     ],
+    "domains": {
+      "ComputePipeline.__init__": {
+        "compile_pipeline": "bool",
+        "entry_module": "str",
+        "entry_point": "str",
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "ComputePipeline.dispatch": {
+        "bands": "int",
+        "bindless": "none",
+        "tile_origin_offset": "none"
+      },
+      "ComputePipeline.dispatch_indirect": {
+        "bindings": "none",
+        "offset": "int"
+      },
+      "ComputePipeline.dispatch_kernel": {
+        "buffers": "none",
+        "vars": "none"
+      },
+      "ComputePipeline.scene_bindings_only": {
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "DebugRasterMetal.render": {
+        "max_steps": "expr"
+      },
+      "HostStorageBuffer.read": {
+        "offset": "int"
+      },
+      "HostStorageBuffer.write": {
+        "offset": "int"
+      },
+      "HudOverlay.record_copy": {
+        "cmd": "none"
+      },
+      "MetalFrameEncoder.dispatch": {
+        "bindings": "none",
+        "bindless": "none",
+        "uniform_blob": "none",
+        "uniforms": "none"
+      },
+      "MetalFrameEncoder.dispatch_indirect": {
+        "bindings": "none",
+        "bindless": "none",
+        "offset": "int",
+        "uniform_blob": "none",
+        "uniforms": "none"
+      },
+      "PreviewPipeline.__init__": {
+        "graph_fragments": "none"
+      },
+      "PreviewPipeline.dispatch": {
+        "bindless": "none"
+      },
+      "ReadbackBuffer.__init__": {
+        "bytes_per_pixel": "int"
+      },
+      "SampledImage.__init__": {
+        "address_mode_u": "str",
+        "address_mode_v": "str",
+        "bytes_per_pixel": "int",
+        "format": "none"
+      },
+      "StorageBuffer.__init__": {
+        "external": "bool",
+        "indirect": "bool",
+        "shared": "bool"
+      },
+      "StorageBuffer.write_in_place": {
+        "offset": "int"
+      },
+      "StorageImage.__init__": {
+        "format": "none",
+        "transfer_src": "bool"
+      },
+      "make_sampler": {
+        "address_u": "str",
+        "address_v": "str"
+      }
+    },
     "functions": {
       "make_sampler": [
         "ctx",
@@ -412,6 +494,47 @@
     "constants": [
       "BINDLESS_TEXTURE_CAPACITY"
     ],
+    "domains": {
+      "ComputePipeline.__init__": {
+        "compile_pipeline": "bool",
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "ComputePipeline.scene_bindings_only": {
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "ExternalTimelineSemaphore.__init__": {
+        "initial_value": "int"
+      },
+      "ExternalTimelineSemaphore.wait": {
+        "timeout_ns": "int"
+      },
+      "HostStorageBuffer.read": {
+        "offset": "int"
+      },
+      "HostStorageBuffer.write": {
+        "offset": "int"
+      },
+      "ReadbackBuffer.__init__": {
+        "bytes_per_pixel": "int"
+      },
+      "SampledImage.__init__": {
+        "address_mode_u": "str",
+        "address_mode_v": "str",
+        "bytes_per_pixel": "int",
+        "format": "none"
+      },
+      "StorageBuffer.__init__": {
+        "external": "bool",
+        "indirect": "bool",
+        "shared": "bool"
+      },
+      "StorageImage.__init__": {
+        "format": "none",
+        "transfer_src": "bool"
+      }
+    },
     "functions": {
       "emit_wavefront_material_modules": [
         "graph_fragments"

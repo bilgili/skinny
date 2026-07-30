@@ -1392,18 +1392,25 @@ class Renderer:
         one pipeline per material.
 
         Bindings: the traceScene set (0/2/5/6/7/12/13/16), this graph's param
-        SSBO at GRAPH_BINDING_BASE, and the 128-slot bindless texture pool at 14
+        SSBO at GRAPH_BINDING_BASE, and the bindless texture pool at 14, sized
+        by the active target's `bindless_texture_capacity` capability
         (over-provided — graphs that sample no textures reflect no 14, which the
         superset layout tolerates). Returns a `ShadePassGroup`; plug it into the
         `_wavefront_debug_pass` seam. Rebuild after a scene/geometry reload.
         """
         from skinny.materialx_runtime import assign_graph_ids
         from skinny.vk_compute import (
-            BINDLESS_TEXTURE_CAPACITY,
             GRAPH_BINDING_BASE,
             emit_wavefront_shade_module,
             graph_param_combined_stride,
         )
+
+        # The pool capacity differs per target (128 Vulkan / 119 Metal), so it
+        # is a capability, not a constant imported from one adapter by name.
+        # Importing the Vulkan 128 here would over-declare the descriptor array
+        # against a 119-slot Metal shader — the extent mismatch this capability
+        # exists to prevent (codex pre-merge review, HIGH 2).
+        BINDLESS_TEXTURE_CAPACITY = self.caps.bindless_texture_capacity
         from skinny.vk_wavefront import (
             BoundComputePass,
             ShadePassGroup,
@@ -9231,8 +9238,11 @@ class Renderer:
         ``.nrec`` dump and the live drain). Backend-independent — it reuses the
         scene descriptor set, so it runs in either execution mode."""
         if self._record_pipeline is None:
-            from skinny.vk_compute import ComputePipeline
-            self._record_pipeline = ComputePipeline(
+            # Through the selected adapter, not by importing one by name: the
+            # caller has already refused any backend without
+            # `has_megakernel_record_source`, so this resolves to vk_compute —
+            # but the seam reach is what the conformance gate forbids.
+            self._record_pipeline = self._gpu.ComputePipeline(
                 self.ctx, self.shader_dir,
                 entry_module="main_pass", entry_point="mainImageRecord",
                 graph_fragments=list(self._scene_graph_fragments),

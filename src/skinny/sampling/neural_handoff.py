@@ -72,13 +72,38 @@ def make_publisher(kind: str, **kwargs) -> NeuralWeightPublisher:
     if kind == "interop":
         from skinny.gpu_backend import capabilities
         ctx = getattr(kwargs.get("weights_buffer"), "ctx", None)
-        # Two implementations, selected by the capability each needs: an
-        # exported-memory handoff where the backend has external memory, an
-        # in-place UMA write where it does not (change gpu-backend-adapter).
-        if ctx is not None and not capabilities(ctx).has_external_memory:
-            from .neural_handoff_interop_metal import MetalSharedWeightPublisher
-            kwargs.pop("timeline_semaphore", None)  # no exported semaphores here
-            return MetalSharedWeightPublisher(**kwargs)
+        # A three-way decision, each arm selected by the capability it needs
+        # (change gpu-backend-adapter; codex pre-merge review HIGH 1):
+        #   - in-place UMA write, where the device shares memory with the host;
+        #   - exported-memory handoff, which needs external memory AND an
+        #     external timeline semaphore — `vk_context`'s graded device build
+        #     probes them independently and can enable memory without the
+        #     semaphore, so neither implies the other;
+        #   - otherwise refuse HERE, naming the missing capability, instead of
+        #     allocating silently-non-exportable buffers and deferring the
+        #     failure to the first publish.
+        if ctx is not None:
+            caps = capabilities(ctx)
+            if caps.has_shared_in_place_write:
+                from .neural_handoff_interop_metal import (
+                    MetalSharedWeightPublisher,
+                )
+                kwargs.pop("timeline_semaphore", None)  # no exported semaphores
+                return MetalSharedWeightPublisher(**kwargs)
+            missing = [
+                cap for cap, ok in (
+                    ("external memory", caps.has_external_memory),
+                    ("an external timeline semaphore",
+                     caps.has_external_semaphore),
+                ) if not ok
+            ]
+            if missing:
+                raise NotImplementedError(
+                    "interop weight handoff unavailable on the "
+                    f"{caps.name} backend: it has no "
+                    f"{' and no '.join(missing)}. Use --neural-handoff shared "
+                    "(in-process RAM) or file (disk) on this device."
+                )
         from .neural_handoff_interop import InteropWeightPublisher
         try:
             return InteropWeightPublisher(**kwargs)

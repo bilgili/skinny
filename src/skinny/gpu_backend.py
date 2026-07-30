@@ -8,9 +8,11 @@ executing them. This module declares what those three have to agree on:
 - :class:`BackendCapabilities` — the facts consumers used to rediscover with a
   vendor branch. **Every field replaces at least one pre-existing live branch**
   (design D1); no speculative capabilities. :func:`capabilities` derives the
-  record from a context, folding the two runtime device probes
-  (``supports_shared_memory``, ``supports_indirect_dispatch``) in, so a consumer
-  reads one named fact instead of a backend test plus a probe.
+  record from a context, folding the four runtime device probes
+  (``supports_external_memory``, ``supports_external_semaphore``,
+  ``supports_shared_memory``, ``supports_indirect_dispatch``) in **for every
+  backend**, so a consumer reads one named fact instead of a backend test plus a
+  probe — and so no device-dependent fact is asserted as a family constant.
 - :data:`ONE_SIDED_MEMBERS` — the members that genuinely exist on one adapter
   only (design D5). Declared, never discovered: adding one is a deliberate edit,
   exactly like ``METAL_ONLY_DEFINES`` in :mod:`skinny.shader_variants`.
@@ -75,8 +77,19 @@ class BackendCapabilities:
     #: megakernel dispatch is submit-and-wait, so it builds none.
     has_frame_sync_objects: bool
 
-    #: ``VK_KHR_external_memory`` for the CUDA neural-weight handoff.
+    #: ``VK_KHR_external_memory`` for the CUDA neural-weight handoff. A **device
+    #: probe**, not a backend-family fact: a Vulkan device without the extension
+    #: (MoltenVK, or any driver that fails the graded device build in
+    #: `vk_context`) reports False. Static records state the pessimistic
+    #: default; `capabilities()` promotes it from the context.
     has_external_memory: bool
+
+    #: ``VK_KHR_external_semaphore`` + a timeline semaphore, for the
+    #: CUDA-write↔Vulkan-read ordering the same handoff needs. Probed
+    #: **independently** of the memory extension — `vk_context`'s graded
+    #: fallback can enable memory without it — so the CUDA protocol requires
+    #: BOTH, and neither implies the other (codex pre-merge review, HIGH 1).
+    has_external_semaphore: bool
 
     #: Unified memory the interop publisher can overwrite in place at the frame
     #: boundary (Metal, and only when the device probe agrees).
@@ -115,7 +128,11 @@ VULKAN_CAPABILITIES = BackendCapabilities(
     name="vulkan",
     has_descriptor_sets=True,
     has_frame_sync_objects=True,
-    has_external_memory=True,
+    # Device probes, NOT backend-family facts — `vk_context` builds the device
+    # with a graded fallback and can end up with neither, memory only, or both.
+    # The pessimistic default here is what `capabilities()` promotes.
+    has_external_memory=False,
+    has_external_semaphore=False,
     has_shared_in_place_write=False,
     has_indirect_dispatch=True,
     has_gpu_skinning=True,
@@ -130,6 +147,7 @@ METAL_CAPABILITIES = BackendCapabilities(
     has_descriptor_sets=False,
     has_frame_sync_objects=False,
     has_external_memory=False,
+    has_external_semaphore=False,
     # Both of these are device probes on a real MetalContext; the static record
     # states the pessimistic default and `capabilities()` promotes them.
     has_shared_in_place_write=False,
@@ -149,6 +167,7 @@ RECORDING_CAPABILITIES = BackendCapabilities(
     has_descriptor_sets=False,
     has_frame_sync_objects=False,
     has_external_memory=False,
+    has_external_semaphore=False,
     has_shared_in_place_write=False,
     has_indirect_dispatch=True,
     has_gpu_skinning=False,
@@ -169,22 +188,37 @@ def capabilities(ctx) -> BackendCapabilities:
     """Return the capability record for ``ctx``'s backend.
 
     Reads ``ctx.backend_name`` (falling back to ``is_metal`` for a stub context
-    that predates it) and folds in the two runtime device probes, so a consumer
+    that predates it) and folds in the runtime device probes, so a consumer
     never has to ask "is this Metal *and* does the device support X".
+
+    The probe fold is **symmetric across backends**. Every device-dependent
+    field is promoted from the context for whichever backend is active, because
+    a capability that is device-dependent on one target is not a family constant
+    on the other: a Vulkan device may fail to enable external memory (MoltenVK,
+    a missing extension, the graded device build in `vk_context`), and asserting
+    it statically hands the CUDA publisher a buffer that was silently allocated
+    non-exportable, deferring the failure to first publication (codex pre-merge
+    review, HIGH 1). Each `getattr` default is the pessimistic one, so a stub
+    context that declares no probe keeps the static record's value.
     """
     name = getattr(ctx, "backend_name", None)
     if name not in _BY_NAME:
         name = "metal" if getattr(ctx, "is_metal", False) else "vulkan"
     caps = _BY_NAME[name]
-    if name == "metal":
-        caps = replace(
-            caps,
-            has_shared_in_place_write=bool(
-                getattr(ctx, "supports_shared_memory", False)),
-            has_indirect_dispatch=bool(
-                getattr(ctx, "supports_indirect_dispatch", False)),
-        )
-    return caps
+    return replace(
+        caps,
+        has_external_memory=bool(
+            getattr(ctx, "supports_external_memory", caps.has_external_memory)),
+        has_external_semaphore=bool(
+            getattr(ctx, "supports_external_semaphore",
+                    caps.has_external_semaphore)),
+        has_shared_in_place_write=bool(
+            getattr(ctx, "supports_shared_memory",
+                    caps.has_shared_in_place_write)),
+        has_indirect_dispatch=bool(
+            getattr(ctx, "supports_indirect_dispatch",
+                    caps.has_indirect_dispatch)),
+    )
 
 
 #: The three sibling adapter modules, by backend name.
@@ -317,6 +351,49 @@ def _param_names(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     return [n for n in names if n != "self"]
 
 
+def _default_domain(node: ast.expr) -> str:
+    """Classify a default expression into an *argument domain*.
+
+    Parameter names alone cannot catch the divergence this change exists to
+    remove: ``format`` took a ``VkFormat`` int on one adapter and a neutral
+    string on the other, under the same name (codex pre-merge review, MEDIUM 3).
+    The domain is what has to agree, so the conformance test compares this.
+
+    Deliberately coarse — ``"str"`` / ``"int"`` / ``"none"`` / ``"bool"`` /
+    ``"expr"`` — because the two adapters legitimately differ in the *value* of
+    a default (``"clamp"`` vs ``"clamp_to_edge"`` would be a real difference,
+    but ``16`` vs ``16`` is not interesting); what must never differ is the
+    KIND, which is what a VkEnum int versus a token string is.
+    """
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if v is None:
+            return "none"
+        if isinstance(v, bool):
+            return "bool"
+        if isinstance(v, str):
+            return "str"
+        if isinstance(v, int):
+            return "int"
+        if isinstance(v, float):
+            return "float"
+    return "expr"
+
+
+def _param_domains(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
+    """``{param: domain}`` for every parameter that declares a default."""
+    a = fn.args
+    out: dict[str, str] = {}
+    positional = a.posonlyargs + a.args
+    # defaults align to the TAIL of the positional list
+    for p, d in zip(positional[len(positional) - len(a.defaults):], a.defaults):
+        out[p.arg] = _default_domain(d)
+    for p, d in zip(a.kwonlyargs, a.kw_defaults):
+        if d is not None:
+            out[p.arg] = _default_domain(d)
+    return out
+
+
 #: ``__init__`` is part of the surface — a constructor whose parameter names
 #: drift is exactly the break the conformance test exists to catch.
 _DUNDER_SURFACE = frozenset({"__init__"})
@@ -330,8 +407,13 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
     """Return the public surface of an adapter module, read from its source.
 
     ``{"classes": {Cls: {method: [param, ...]}}, "functions": {...},
-    "constants": [...]}``, private members excluded. Parsed with :mod:`ast` so
-    the conformance test needs neither the ``vulkan`` extension nor a device.
+    "constants": [...], "domains": {"Cls.method"|"func": {param: domain}}}``,
+    private members excluded. Parsed with :mod:`ast` so the conformance test
+    needs neither the ``vulkan`` extension nor a device.
+
+    ``domains`` carries the *argument domain* of every defaulted parameter (see
+    :func:`_default_domain`), which is what makes the promised "one address-mode
+    and format vocabulary" testable rather than aspirational.
     """
     root = src_root or Path(__file__).resolve().parent.parent
     path = root / (module.replace(".", "/") + ".py")
@@ -339,6 +421,7 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
     classes: dict[str, dict[str, list[str]]] = {}
     functions: dict[str, list[str]] = {}
     constants: list[str] = []
+    domains: dict[str, dict[str, str]] = {}
     declared: dict[str, dict[str, list[str]]] = {}
     bases: dict[str, list[str]] = {}
     for node in tree.body:
@@ -350,6 +433,12 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
                 and _public(m.name)
             }
             declared[node.name] = members
+            for m in node.body:
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                        and _public(m.name):
+                    d = _param_domains(m)
+                    if d:
+                        domains[f"{node.name}.{m.name}"] = d
             bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
             if not _public(node.name):
                 continue
@@ -357,6 +446,9 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if _public(node.name):
                 functions[node.name] = _param_names(node)
+                d = _param_domains(node)
+                if d:
+                    domains[node.name] = d
         elif isinstance(node, ast.Assign):
             constants += [
                 t.id for t in node.targets
@@ -380,6 +472,7 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
         classes[name] = {**_inherited(name, frozenset()), **members}
 
     return {
+        "domains": domains,
         "classes": classes,
         "functions": functions,
         "constants": sorted(set(constants)),

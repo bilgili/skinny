@@ -284,7 +284,7 @@ first, then update both tables — a hostless doc-sync check
 | MLT integrator — PSSMLT over BDPT (wavefront, flat, RGB **+ spectral**) | ✅ (`WavefrontMltPass`) | ✅ (`MetalWavefrontMltPass`, `mlt-integrator` / `spectral-mlt`; **not** bit-identical to Vulkan — splat-quantum equivalent, see the MLT Backends row) |
 | Heterogeneous volumes (NanoVDB) — path only, mega+wave | ✅ | ✅ (`nanovdb-volume-rendering`) |
 | Procedural `cloud` medium (pbrt analytic fBm) — path only, mega+wave | ✅ | ✅ (`pbrt-cloud-procedural-medium`) |
-| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal` bind-by-name, `metal-tool-dock-render`) |
+| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipeline` bind-by-name, `metal-tool-dock-render`) |
 | Camera Debug viewport | ✅ (graphics rasteriser) | ✅ (`DebugRasterMetal` compute rasteriser, `metal-tool-dock-render`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |

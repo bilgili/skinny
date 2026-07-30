@@ -450,7 +450,10 @@ class VulkanContext:                                  # :27
 `window=None` → headless: no surface/swapchain, `present_queue = None`,
 compute queue only. Exposes `.width`, `.height`, `.device`, `.physical_device`,
 `.gpu_info`, `.compute_queue`, `.command_pool`. `destroy()` waits idle and tears
-everything down. (The wavefront path keys off `hasattr(ctx, "compute_queue")`.)
+everything down. (The wavefront path reads the declared capability
+`gpu_backend.capabilities(ctx).has_descriptor_sets` — **never**
+`hasattr(ctx, "compute_queue")`, which is unconditionally true because
+`MetalContext.compute_queue` is `None` rather than absent.)
 
 `wait_idle()` is the backend-neutral device drain (`vkDeviceWaitIdle` on Vulkan,
 `Device.wait_for_idle` on the Metal twin `MetalContext`); the renderer calls

@@ -283,9 +283,10 @@ def test_capabilities_resolve_from_a_context():
         supports_shared_memory = True
         supports_indirect_dispatch = False
 
-    assert gb.capabilities(_Vk()) is gb.VULKAN_CAPABILITIES
+    # A context that declares no probe keeps the static record's values.
+    assert gb.capabilities(_Vk()) == gb.VULKAN_CAPABILITIES
     mt = gb.capabilities(_Mt())
-    # The two device probes are folded in, so a consumer reads one named fact.
+    # The device probes are folded in, so a consumer reads one named fact.
     assert mt.has_shared_in_place_write is True
     assert mt.has_indirect_dispatch is False
     assert mt.has_descriptor_sets is False
@@ -300,18 +301,32 @@ def test_capabilities_fall_back_to_is_metal_for_a_stub_context():
 
 def test_the_two_backends_differ_on_every_declared_capability():
     """A capability earns its place by replacing a real branch (design D1), so
-    a field the backends agree on is either dead or misnamed."""
+    a field the backends agree on is either dead or misnamed.
+
+    Compared **after** the probe fold, on a fully-capable device of each kind:
+    the static records are deliberately pessimistic about every device-probed
+    field (codex pre-merge review, HIGH 1), so comparing the static records
+    would now report the probed fields as agreeing when the devices differ.
+    """
     class _FullMetal:
         backend_name, is_metal = "metal", True
         supports_shared_memory = True
         supports_indirect_dispatch = True
+        supports_external_memory = False    # no CUDA interop on Metal
+        supports_external_semaphore = False
 
-    # Compare against a fully-capable Metal device: the static record is
-    # deliberately pessimistic on the two probed fields.
+    class _FullVulkan:
+        backend_name, is_metal = "vulkan", False
+        supports_shared_memory = False      # exported memory, not in-place UMA
+        supports_indirect_dispatch = True
+        supports_external_memory = True
+        supports_external_semaphore = True
+
     metal = gb.capabilities(_FullMetal())
-    same = [f for f in gb.VULKAN_CAPABILITIES.__dataclass_fields__
+    vulkan = gb.capabilities(_FullVulkan())
+    same = [f for f in vulkan.__dataclass_fields__
             if f != "has_indirect_dispatch"
-            and getattr(gb.VULKAN_CAPABILITIES, f) == getattr(metal, f)]
+            and getattr(vulkan, f) == getattr(metal, f)]
     assert not same, f"capabilities the two backends agree on: {same}"
 
 
@@ -349,10 +364,45 @@ def test_recording_adapter_reports_a_missing_binding():
     ctx = rec.RecordingContext()
     pipe = rec.ComputePipeline(ctx, "shaders", "main_pass", "mainImage")
     pipe.reflect_globals({"outputBuffer", "sceneBuffer", "envMap"})
-    pipe.dispatch(8, 8, binds={"outputBuffer": None})
+    pipe.dispatch(8, 8, binds={"outputBuffer": rec.StorageBuffer(ctx, 16)})
 
     assert ctx.recorder.missing_bindings() == [
         ("mainImage", "envMap"), ("mainImage", "sceneBuffer")]
+
+
+def test_recording_adapter_treats_a_none_resource_as_unbound():
+    """A key with no resource is NOT a binding — `metal_compute.dispatch` skips
+    `None` rather than binding it, so recording it as bound would mask exactly
+    the gap this adapter exists to find (codex pre-merge review, MEDIUM 2)."""
+    from skinny import recording_compute as rec
+
+    ctx = rec.RecordingContext()
+    pipe = rec.ComputePipeline(ctx, "shaders", "main_pass", "mainImage")
+    pipe.reflect_globals({"outputBuffer"})
+    pipe.dispatch(8, 8, binds={"outputBuffer": None})
+
+    assert ctx.recorder.missing_bindings() == [("mainImage", "outputBuffer")]
+
+
+def test_recording_adapter_counts_the_non_binds_channels():
+    """A resource does not have to arrive through `binds`: the uniform blob
+    binds `fc`, a push block `pc`, the preview output `previewOutput`, and
+    `bindless` the global it names. Ignoring those reported real bindings as
+    absent (codex pre-merge review, MEDIUM 2)."""
+    from skinny import recording_compute as rec
+
+    ctx = rec.RecordingContext()
+    pipe = rec.ComputePipeline(ctx, "shaders", "main_pass", "mainImage")
+    pipe.reflect_globals({"fc", "matTextures"})
+    pipe.dispatch(8, 8, uniform_blob=b"\x00" * 64,
+                  bindless=("matTextures", []))
+    assert ctx.recorder.missing_bindings() == []
+
+    prev = rec.PreviewPipeline(ctx, "shaders")
+    prev.reflect_globals({"fc", "pc", "previewOutput"})
+    prev.dispatch(64, push_bytes=b"\x00" * 32, uniform_blob=b"\x00" * 64,
+                  output_image=rec.StorageImage(ctx, 64, 64))
+    assert ctx.recorder.missing_bindings() == []
 
 
 def test_recording_adapter_reports_nothing_for_an_undeclared_pipeline():
@@ -390,6 +440,183 @@ def test_recording_context_needs_no_device():
                          text=True, env={"PYTHONPATH": env_src, "PATH": ""})
     assert out.returncode == 0, out.stderr
     assert "ok" in out.stdout
+
+
+# ── 6. codex pre-merge review fixes ─────────────────────────────────────
+
+
+def test_no_device_dependent_capability_is_asserted_statically():
+    """HIGH 1: a capability the device probes must not be a backend-family
+    constant. Every static record states the pessimistic default, and
+    `capabilities()` promotes it from the context — for BOTH backends, not just
+    Metal. Asserting Vulkan external memory statically handed the CUDA publisher
+    buffers that `vk_compute` had silently allocated non-exportable, deferring
+    the failure to first publish."""
+    from skinny.gpu_backend import (
+        METAL_CAPABILITIES,
+        VULKAN_CAPABILITIES,
+        capabilities,
+    )
+
+    for rec in (VULKAN_CAPABILITIES, METAL_CAPABILITIES):
+        assert rec.has_external_memory is False
+        assert rec.has_external_semaphore is False
+        assert rec.has_shared_in_place_write is False
+
+    class _Ctx:
+        backend_name = "vulkan"
+        supports_external_memory = True
+        supports_external_semaphore = True
+
+    caps = capabilities(_Ctx())
+    assert caps.has_external_memory and caps.has_external_semaphore
+
+    # the graded device build can enable memory WITHOUT the semaphore
+    class _MemOnly(_Ctx):
+        supports_external_semaphore = False
+
+    half = capabilities(_MemOnly())
+    assert half.has_external_memory and not half.has_external_semaphore
+
+
+def test_interop_handoff_refuses_by_naming_the_missing_capability():
+    """HIGH 1: the CUDA protocol needs external memory AND an external timeline
+    semaphore. A device with one but not the other must refuse here, naming what
+    is missing, not allocate silently-unexportable buffers."""
+    import pytest
+
+    from skinny.sampling.neural_handoff import make_publisher
+
+    class _Buf:
+        class ctx:
+            backend_name = "vulkan"
+            supports_external_memory = True
+            supports_external_semaphore = False
+
+    with pytest.raises(NotImplementedError) as exc:
+        make_publisher("interop", weights_buffer=_Buf())
+    msg = str(exc.value)
+    assert "external timeline semaphore" in msg
+    assert "vulkan" in msg
+
+
+def test_bindless_capacity_never_read_from_one_adapter_by_name():
+    """HIGH 2: `build_wavefront_shade_passes` imported the Vulkan 128 while the
+    Metal shader compiles 119 — the descriptor/shader extent mismatch the
+    capability exists to prevent. No renderer path may import the constant."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "src/skinny/renderer.py"
+    tree = ast.parse(src.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in {
+                "skinny.vk_compute", "skinny.metal_compute"}:
+            names = [a.name for a in node.names]
+            assert "BINDLESS_TEXTURE_CAPACITY" not in names, (
+                f"renderer.py:{node.lineno} imports the capacity from "
+                f"{node.module}; read self.caps.bindless_texture_capacity")
+
+
+def test_resource_module_knows_every_declared_adapter():
+    """MEDIUM 1: `gpu_backend.ADAPTER_MODULES` declared three adapters while the
+    selection seam knew two vendors, so a RecordingContext silently selected
+    vk_compute and the recording adapter was unreachable through a Renderer."""
+    from skinny.backend_select import _RESOURCE_MODULES, resource_module
+    from skinny.gpu_backend import ADAPTER_MODULES
+    from skinny.recording_compute import RecordingContext
+
+    assert set(_RESOURCE_MODULES) == set(ADAPTER_MODULES)
+
+    mod = resource_module(RecordingContext())
+    assert mod.__name__ == "skinny.recording_compute"
+
+
+def test_adapters_share_one_argument_domain():
+    """MEDIUM 3: parameter NAMES agreeing is not the promise — the argument
+    domain is. `format` took a VkFormat int on one adapter and a neutral string
+    on the other under the same name, so the old name-only surface could not
+    catch it."""
+    from skinny.gpu_backend import ADAPTER_MODULES, adapter_surface
+
+    domains = {n: adapter_surface(m)["domains"] for n, m in ADAPTER_MODULES.items()}
+    conflicts = []
+    for member in set().union(*[set(d) for d in domains.values()]):
+        present = {n: d[member] for n, d in domains.items() if member in d}
+        for param in set().union(*[set(v) for v in present.values()]):
+            kinds = {n: v[param] for n, v in present.items() if param in v}
+            if len(set(kinds.values())) > 1:
+                conflicts.append((member, param, kinds))
+    assert not conflicts, f"argument-domain drift across adapters: {conflicts}"
+
+
+def test_vulkan_refuses_a_raw_vkenum_across_the_seam():
+    """MEDIUM 3: accepting an int is what allowed the domains to diverge. A call
+    site that passes one must fail loudly on Vulkan rather than working there
+    and raising on Metal."""
+    import pytest
+
+    vk_compute = pytest.importorskip("skinny.vk_compute")
+
+    with pytest.raises(TypeError, match="VkFormat int"):
+        vk_compute._vk_format_token(37)
+    with pytest.raises(TypeError, match="VkSamplerAddressMode int"):
+        vk_compute._vk_address_token(0)
+    assert vk_compute._vk_format_token(None) is not None
+
+
+def test_docs_do_not_teach_the_removed_probe_or_the_removed_name():
+    """LOW 1: live documentation that still teaches `hasattr(ctx,
+    "compute_queue")` or `PreviewPipelineMetal` invites the exact bug this
+    change removed, and the repo's no-drift rule (CLAUDE.md) forbids it.
+
+    Naming the probe is allowed **only** where the surrounding prose says it was
+    wrong — that is the cautionary passage this change deliberately added. The
+    disclaimer wraps across lines, so the check reads a small window rather than
+    the single matching line.
+    """
+    root = Path(__file__).resolve().parent.parent
+    probe = re.compile(r'hasattr\(\s*[\w.]*ctx[\w.]*\s*,\s*["\']compute_queue["\']')
+    disclaimer = re.compile(
+        r"never|removed|must not|unconditionally true|cautionary|was wrong",
+        re.I)
+    offenders = []
+    for doc in sorted(root.glob("docs/*.md")) + [root / "CLAUDE.md",
+                                                 root / "README.md"]:
+        if not doc.exists():
+            continue
+        lines = doc.read_text().splitlines()
+        for i, line in enumerate(lines, 1):
+            if "PreviewPipelineMetal" in line:
+                offenders.append(f"{doc.name}:{i} PreviewPipelineMetal")
+            if probe.search(line):
+                window = "\n".join(lines[max(0, i - 4):i + 3])
+                if not disclaimer.search(window):
+                    offenders.append(f"{doc.name}:{i} compute_queue probe")
+    assert not offenders, (
+        f"documentation still teaches a removed probe/name: {offenders}")
+
+
+def test_docs_state_the_implemented_bindless_capacity():
+    """LOW 1: `Backends.md` documented 120 Metal slots while the implementation
+    compiles 119 — a doc number that disagrees with the capability is how the
+    'MUST equal' comment failed in the first place."""
+    root = Path(__file__).resolve().parent.parent
+    backends = (root / "docs" / "Backends.md").read_text()
+    cap = gb.METAL_CAPABILITIES.bindless_texture_capacity
+    assert f"Texture2D[{cap}]" in backends, (
+        f"docs/Backends.md does not state the implemented Metal pool size "
+        f"Texture2D[{cap}]")
+    assert "Texture2D[120]" not in backends
+
+
+def test_implementation_map_lists_the_new_owner_modules():
+    """LOW 1: a new owner module missing from the per-file map is drift the
+    repo's documentation-upkeep rule explicitly forbids."""
+    root = Path(__file__).resolve().parent.parent
+    imap = (root / "docs" / "ImplementationMap.md").read_text()
+    for mod in ("gpu_backend.py", "recording_compute.py"):
+        assert mod in imap, f"docs/ImplementationMap.md does not list {mod}"
 
 
 if __name__ == "__main__":  # regenerate the pinned surface fixture

@@ -122,19 +122,56 @@ def resource_module(ctx):
 
     The renderer builds its GPU resources (``StorageBuffer``, ``StorageImage``,
     ``SampledImage``, ``UniformBuffer``, ``ComputePipeline``, …) through one of
-    two sibling modules that expose the **same public API**:
-    :mod:`skinny.vk_compute` for a :class:`~skinny.vk_context.VulkanContext` and
-    :mod:`skinny.metal_compute` for a :class:`~skinny.metal_context.MetalContext`.
-    Resolving the module once from ``ctx.is_metal`` keeps the construction sites
-    backend-agnostic (no per-site ``if ctx.is_metal`` branch). Imports are
+    **three** sibling modules that expose the same public API:
+    :mod:`skinny.vk_compute` for a :class:`~skinny.vk_context.VulkanContext`,
+    :mod:`skinny.metal_compute` for a :class:`~skinny.metal_context.MetalContext`,
+    and :mod:`skinny.recording_compute` for a
+    :class:`~skinny.recording_compute.RecordingContext`, which records calls
+    instead of executing them. Resolving the module once here keeps the
+    construction sites backend-agnostic (no per-site branch). Imports are
     deferred so a host without one backend's runtime never imports it (notably
     ``vk_compute`` pulls in the ``vulkan`` extension, which the Metal path must
     not require).
-    """
-    if getattr(ctx, "is_metal", False):
-        from skinny import metal_compute
 
-        return metal_compute
+    Selection reads ``ctx.backend_name`` — the same key
+    :func:`skinny.gpu_backend.capabilities` uses — so the set of adapters the
+    selection seam knows equals ``gpu_backend.ADAPTER_MODULES``. A two-way
+    ``is_metal`` test cannot express three adapters: it routed every non-Metal
+    context, recording included, to Vulkan, which made the recording adapter
+    unreachable through a ``Renderer`` (codex pre-merge review, MEDIUM 1).
+    ``is_metal`` remains the fallback for a stub context that predates
+    ``backend_name``.
+    """
+    name = getattr(ctx, "backend_name", None)
+    if name not in _RESOURCE_MODULES:
+        name = "metal" if getattr(ctx, "is_metal", False) else "vulkan"
+    return _RESOURCE_MODULES[name]()
+
+
+def _vk_compute_module():
     from skinny import vk_compute
 
     return vk_compute
+
+
+def _metal_compute_module():
+    from skinny import metal_compute
+
+    return metal_compute
+
+
+def _recording_compute_module():
+    from skinny import recording_compute
+
+    return recording_compute
+
+
+#: Adapter-module loaders by backend name. Mirrors
+#: :data:`skinny.gpu_backend.ADAPTER_MODULES`; a hostless test asserts the two
+#: key sets are equal, so declaring an adapter there and forgetting it here
+#: cannot happen silently.
+_RESOURCE_MODULES = {
+    "vulkan": _vk_compute_module,
+    "metal": _metal_compute_module,
+    "recording": _recording_compute_module,
+}

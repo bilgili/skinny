@@ -63,7 +63,9 @@ module ownership seams see [HostModules.md](HostModules.md).
 | `gfx/presenter.py` | Surface / swapchain abstraction (None for headless) |
 | `gfx/vulkan/` | Vulkan implementation of `Backend` / `Device` / `Presenter` |
 | `gfx/metal/` | Legacy `Backend` abstraction stub; the production Metal path uses `metal_*.py` |
-| `backend_select.py` | Shared `auto` / Vulkan / Metal backend selection |
+| `gpu_backend.py` | **Owns the seam**: `BackendCapabilities`, the one-sided/divergent tables, the adapter surface reader |
+| `recording_compute.py` | Third adapter — records allocations/bindings/dispatches, executes nothing (hostless tests) |
+| `backend_select.py` | Shared `auto` / Vulkan / Metal backend selection; resolves the adapter module by `backend_name` |
 | `vk_context.py` | Vulkan instance, device, queue setup (windowed + headless) |
 | `vk_compute.py` | Compute pipeline, descriptor layout, GPU buffer/image helpers |
 | `vk_wavefront.py` | Vulkan wavefront execution passes |
