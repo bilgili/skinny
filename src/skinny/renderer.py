@@ -8092,7 +8092,8 @@ class Renderer:
             # Pack the frame blob AFTER the bootstrap so the resolve reads the
             # freshly measured `fc.mltB` (the bootstrap re-packs internally).
             if plan.first_frame or not staged.seeded:
-                self._run_wavefront_mlt_bootstrap_metal(staged)
+                self._run_wavefront_mlt_bootstrap_metal(
+                    staged, plan.mlt_chain_batch)
             staged.dispatch_frame(
                 binds=self._build_metal_binds(),
                 uniform_blob=self._pack_uniforms_msl(),
@@ -8117,7 +8118,7 @@ class Renderer:
             staged.dispatch_frame(
                 binds=binds, uniform_blob=blob, bindless_textures=textures)
 
-    def _run_wavefront_mlt_bootstrap_metal(self, mlt) -> None:
+    def _run_wavefront_mlt_bootstrap_metal(self, mlt, chain_batch: int) -> None:
         """Synchronous MLT (re)seed at an accumulation reset on Metal (design
         D3) — the Metal sibling of `_run_wavefront_mlt_bootstrap`. Identical
         host round-trip; the two submits are the pass's own
@@ -8128,7 +8129,10 @@ class Renderer:
         binds = self._build_metal_binds()
         textures = [(s.texture if s is not None else None)
                     for s in self.texture_pool._slots]
-        batch = self._mlt_metal_chain_batch()
+        # The plan owns the batch for ALL THREE phases. Re-deriving it here let
+        # bootstrap/init disagree with the mutation dispatch if the env changed
+        # mid-frame (codex pre-merge review, finding 6).
+        batch = chain_batch
         dispatch = {"bootstrap": mlt.dispatch_bootstrap, "init": mlt.dispatch_init}
 
         # The blob is packed AFTER _mlt_seed is set and inside the phase (a
@@ -8156,7 +8160,7 @@ class Renderer:
         from skinny.metal_compute import _rgba_f32_to_rgba8
         return _rgba_f32_to_rgba8(arr).tobytes()
 
-    def _render_windowed_metal(self, plan) -> None:
+    def _render_windowed_metal(self) -> None:
         """Windowed Metal frame: dispatch the megakernel into `_offscreen_output`
         (rgba8) and blit it onto the acquired slang-rhi surface image, then
         present. The blit converts the surface's native format (typically
@@ -8167,7 +8171,10 @@ class Renderer:
         surface = getattr(self.ctx, "surface", None)
         if surface is None:
             return
+        # Drain, then derive — a pick callback mutates what the plan describes
+        # (codex pre-merge review, finding 1).
         self.poll_pick_result()
+        plan = self._derive_frame_plan(frame_plan.TARGET_WINDOWED)
         self._render_scene_metal(plan)
         image = surface.acquire_next_image()
         if image is None:
@@ -8690,8 +8697,14 @@ class Renderer:
     def _derive_frame_plan(self, target: str) -> frame_plan.FramePlan:
         """Derive this frame's plan — the execution mode, the integrator, the
         step order, the dispatch banding and the optional per-frame work — as a
-        value holding no device handles. Derived once per frame, before the
-        first step it describes."""
+        value holding no device handles.
+
+        Derived once per frame, **after the pick drain** and before the first
+        step it describes. The drain runs pick callbacks, and a callback mutates
+        the state the plan reads (`_on_autofocus_hit` sets `accum_frame = 0`), so
+        deriving earlier would give the dispatch a `first_frame` that disagrees
+        with the `fc.accumFrame` the uniform pack writes.
+        """
         return frame_plan.derive(
             target=target,
             execution_mode_index=self.effective_execution_mode_index,
@@ -8702,7 +8715,6 @@ class Renderer:
             records_command_buffers=self._records_command_buffers,
             mlt_num_chains=self.mlt_num_chains,
             has_heavy_nonflat=self._has_heavy_nonflat(),
-            online_training=bool(self._online_training),
         )
 
     def update(self, dt: float) -> None:
@@ -8843,21 +8855,23 @@ class Renderer:
         # window has nothing to draw — skip the whole frame.
         if not self._backend_render_ready:
             return
-        plan = self._derive_frame_plan(frame_plan.TARGET_WINDOWED)
         if self.is_metal:
             # Metal has no Vulkan swapchain/fence machinery — dispatch the
             # megakernel and blit the offscreen frame to the slang-rhi surface.
-            self._render_windowed_metal(plan)
+            self._render_windowed_metal()
             # Frame-end double-buffer swap for online neural training (change
             # metal-neural-interop, design D1): _render_windowed_metal drains
             # the device before returning, so no in-flight command buffer reads
             # bindings 33/34 while the interop publisher's swap writes the
             # shared weight buffers in place (and the file publisher's
-            # upload_sync path is equally safe).
-            if plan.online_swap:
+            # upload_sync path is equally safe). Read live, not off the plan:
+            # arming online training is a frame-END decision, and a plan derived
+            # at the top of the frame would defer an OFF→ON transition by one
+            # frame (codex pre-merge review, finding 4).
+            if self._online_training:
                 self._online_frame_end_swap()
             return
-        self._execute_vulkan_frame(plan, _SwapchainTarget(self))
+        self._execute_vulkan_frame(_SwapchainTarget(self))
 
     def render_headless(self) -> bytes:
         """Render one frame to an offscreen image and return raw RGBA8 pixels.
@@ -8873,19 +8887,23 @@ class Renderer:
         # web/screenshot path stays well-defined.
         if not self._backend_render_ready:
             return b"\x00" * (self.width * self.height * 4)
-        plan = self._derive_frame_plan(frame_plan.TARGET_HEADLESS)
         if self.is_metal:
+            # Drain BEFORE deriving: a pick callback can reset the accumulation
+            # (`_on_autofocus_hit` sets `accum_frame = 0`), and a plan derived
+            # first would carry a stale `first_frame` while `_pack_uniforms`
+            # reads the mutated live value (codex pre-merge review, finding 1).
             self.poll_pick_result()
+            plan = self._derive_frame_plan(frame_plan.TARGET_HEADLESS)
             frame = self._render_headless_metal(plan)
             # Frame-end swap (metal-neural-interop): the frame's readback has
             # drained the device, so promoting pending weights now only affects
             # the NEXT frame — render weights stayed frozen this frame.
-            if plan.online_swap:
+            if self._online_training:
                 self._online_frame_end_swap()
             return frame
-        return self._execute_vulkan_frame(plan, _OffscreenTarget(self))
+        return self._execute_vulkan_frame(_OffscreenTarget(self))
 
-    def _execute_vulkan_frame(self, plan: frame_plan.FramePlan, target):
+    def _execute_vulkan_frame(self, target):
         """Execute *plan* against *target* — the one Vulkan frame body (change
         frame-plan-split, task 4.1).
 
@@ -8915,6 +8933,18 @@ class Renderer:
         # BSSRDF eval uses a synchronous out-of-band dispatch, so it needs no
         # per-frame poll.
         self.poll_pick_result()
+
+        # Derived AFTER the drain, because a pick callback can mutate the state
+        # the plan describes — `_on_autofocus_hit` sets `accum_frame = 0`, so a
+        # plan derived earlier would report `first_frame=False` to the SPPM/MLT
+        # dispatch while `_pack_uniforms` packs `fc.accumFrame = 0`. Two readings
+        # of one value, which is what the pre-split code avoided by having no
+        # snapshot at all (codex pre-merge review, finding 1).
+        plan = self._derive_frame_plan(target.name)
+        assert plan.target == target.name, (
+            f"plan targets {plan.target!r} but the target object is "
+            f"{target.name!r} — the plan and the executor must not disagree "
+            f"about which target this frame has")
 
         target.acquire(f)
 
@@ -8997,10 +9027,14 @@ class Renderer:
 
         vk.vkEndCommandBuffer(cmd)
 
+        # Built BEFORE the reset: everything that can raise must happen while the
+        # fence is still signalled, or a caller that catches and retries blocks
+        # forever in the wait above. The reset and its submit stay contiguous
+        # (codex pre-merge review, finding 2).
+        submit = target.submit_info(cmd, f)
         vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
         vk.vkQueueSubmit(
-            self.ctx.compute_queue, 1, [target.submit_info(cmd, f)],
-            self.in_flight_fences[f])
+            self.ctx.compute_queue, 1, [submit], self.in_flight_fences[f])
 
         target.finish(f)
 
@@ -9008,8 +9042,8 @@ class Renderer:
         # the windowed path's `_apply_render_weights` upload_sync waits the
         # device idle and the headless target has already waited its fence, so
         # in either case the in-flight frame's reads of bindings 33/34/35
-        # complete before the swap overwrites them.
-        if plan.online_swap:
+        # complete before the swap overwrites them. Read live — see `render`.
+        if self._online_training:
             self._online_frame_end_swap()
 
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT

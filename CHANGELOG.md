@@ -106,7 +106,24 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out to have been removed already by change `review-surfaced-defects`: it was
   dead compensation for a rebind `render()` had stopped doing, neither a target
   difference nor a live bug. Pure refactor — same dispatches, same order, same
-  images; gated by the full parity matrix before and after.
+  images; gated by the full parity matrix before and after — Vulkan 73/73
+  metric lines identical, which is the gate that counts, because on a Metal host
+  every render takes the `is_metal` arm and never enters the rewritten body.
+  A codex pre-merge review found six defects, all fixed: the plan was derived
+  **before** the pick drain (a pick callback sets `accum_frame = 0`, so
+  `plan.first_frame` disagreed with the packed `fc.accumFrame` and SPPM could skip
+  its accumulator clear); `target.submit_info()` was evaluated inside the
+  fence-reset/submit critical region, where a raise leaves the fence unsignalled
+  and a retrying caller blocks forever; `plan.steps` was descriptive with nothing
+  reconciling it against the executor; the weight swap became a start-of-frame
+  snapshot and so deferred an OFF→ON transition by a frame; `plan.target` and the
+  concrete target object were unchecked against each other; and the Metal MLT
+  bootstrap re-derived a chain batch the mutation dispatch took from the plan. The
+  common cause of the two serious ones was one design error — a snapshot taken
+  before the state it describes stops changing — and the fix is uniform: drain,
+  then derive. `online_swap` left the plan entirely, because arming online
+  training is a frame-END decision and a field that cannot be authoritative does
+  not belong in a plan.
 
 - **Scene intake is one interface that returns a value** (change
   `scene-intake-interface`). `usd_loader.py` had four public loaders that the

@@ -133,3 +133,79 @@ def test_fence_is_reset_only_immediately_before_its_submit() -> None:
                 f"{name}: fence reset is not immediately followed by its submit, "
                 f"found {nxt!r}"
             )
+
+
+# ── plan.steps vs the executor's real order (codex review, finding 3) ─────
+
+# Each Vulkan step, and the source marker in `_execute_vulkan_frame` that
+# performs it. `plan.steps` used to be a symbolic tuple nothing replayed, so the
+# plan and the executor were two independent, unreconciled authorities on order.
+# Until `gpu-backend-adapter`'s recording adapter can replay the plan for real
+# (task 4.3), this pins them to each other by source order.
+_VULKAN_STEP_MARKERS = {
+    "fence_wait": "vk.vkWaitForFences(",
+    "pick_drain": "self.poll_pick_result()",
+    "pack_uniforms": "self.uniform_buffer.upload(",
+    "upload_mtlx": "self.mtlx_skin_buffer.upload_sync(",
+    "begin_cmd": "vk.vkBeginCommandBuffer(",
+    "hud": "self._sync_hud_overlay(cmd)",
+    "dispatch": "self._record_frame_dispatch(",
+    "output": "target.record_output(cmd)",
+    "end_cmd": "vk.vkEndCommandBuffer(",
+    "fence_reset": "vk.vkResetFences(",
+    "submit": "vk.vkQueueSubmit(",
+    "rotate_frame": "self.current_frame = (f + 1)",
+}
+
+
+def test_plan_step_order_matches_the_executor_source_order() -> None:
+    """Every step the plan names, that the shared body performs, appears in the
+    body in the plan's order. A plan whose order drifted from the code it claims
+    to describe would assert an invariant about nothing."""
+    from skinny import frame_plan
+
+    body = inspect.getsource(Renderer._execute_vulkan_frame)
+    lines = body.splitlines()
+    positions = {}
+    for step, marker in _VULKAN_STEP_MARKERS.items():
+        hits = [i for i, line in enumerate(lines) if marker in line]
+        assert hits, f"no source marker for planned step {step!r}: {marker!r}"
+        positions[step] = hits[0]
+
+    for target in (frame_plan.TARGET_WINDOWED, frame_plan.TARGET_HEADLESS):
+        plan = frame_plan.derive(
+            target=target, execution_mode_index=frame_plan.EXECUTION_WAVEFRONT,
+            integrator_index=0, accum_frame=0, width=64, height=64,
+            needs_watchdog_tiling=False, records_command_buffers=True,
+            mlt_num_chains=16384, has_heavy_nonflat=False)
+        planned = [s for s in plan.steps if s in positions]
+        actual = sorted(planned, key=positions.__getitem__)
+        assert planned == actual, (
+            f"{target}: plan order {planned} disagrees with the executor's "
+            f"source order {actual}")
+
+
+def test_the_plan_is_derived_after_the_pick_drain() -> None:
+    """A pick callback mutates what the plan reads — `_on_autofocus_hit` sets
+    `accum_frame = 0`. Deriving before the drain hands the dispatch a
+    `first_frame` that disagrees with the packed `fc.accumFrame`
+    (codex pre-merge review, finding 1)."""
+    for name in ("_execute_vulkan_frame", "_render_windowed_metal", "render_headless"):
+        lines = inspect.getsource(getattr(Renderer, name)).splitlines()
+        drain = next(i for i, l in enumerate(lines)
+                     if "self.poll_pick_result()" in l)
+        derive = next(i for i, l in enumerate(lines)
+                      if "self._derive_frame_plan(" in l)
+        assert drain < derive, f"{name} derives the plan before draining picks"
+
+
+def test_the_weight_swap_reads_online_training_live() -> None:
+    """Arming online training is a frame-END decision; a start-of-frame snapshot
+    defers an OFF->ON transition by a frame (codex pre-merge review, finding 4)."""
+    for name in ("_execute_vulkan_frame", "render", "render_headless"):
+        body = inspect.getsource(getattr(Renderer, name))
+        if "_online_frame_end_swap" not in body:
+            continue
+        assert "if self._online_training:" in body, (
+            f"{name} must gate the swap on live state, not a planned flag")
+        assert "plan.online_swap" not in body

@@ -30,7 +30,7 @@ def _derive(integrator="path", execution_mode="wavefront",
             target=frame_plan.TARGET_WINDOWED, *, accum_frame=0,
             needs_watchdog_tiling=False, records_command_buffers=True,
             width=256, height=256, mlt_num_chains=16384,
-            has_heavy_nonflat=False, online_training=False):
+            has_heavy_nonflat=False):
     return frame_plan.derive(
         target=target,
         execution_mode_index=EXECUTION_INDICES[execution_mode],
@@ -40,7 +40,6 @@ def _derive(integrator="path", execution_mode="wavefront",
         records_command_buffers=records_command_buffers,
         mlt_num_chains=mlt_num_chains,
         has_heavy_nonflat=has_heavy_nonflat,
-        online_training=online_training,
     )
 
 
@@ -190,7 +189,7 @@ def test_every_stated_invariant_holds_on_every_derived_plan():
     for integrator, mode, tiling, records, target in _MATRIX:
         plan = _derive(integrator=integrator, execution_mode=mode,
                        target=target, needs_watchdog_tiling=tiling,
-                       records_command_buffers=records, online_training=True)
+                       records_command_buffers=records)
         frame_plan.check_invariants(plan)  # raises PlanOrderError on violation
 
 
@@ -239,17 +238,33 @@ def test_windowed_and_headless_share_every_step_that_is_not_target_work(records)
     assert shared == [s for s in headless.steps if s not in target_work]
 
 
+def test_fence_reset_is_immediately_before_its_submit():
+    """The reset/submit pair must be adjacent — anything between them that can
+    raise leaves the fence unsignalled and a retrying caller blocks forever
+    (codex pre-merge review, finding 2)."""
+    for target in TARGETS:
+        plan = _derive(target=target, records_command_buffers=True)
+        i = plan.index(frame_plan.FENCE_RESET)
+        assert i >= 0
+        assert plan.steps[i + 1] == frame_plan.SUBMIT
+        assert plan.steps[i - 1] == frame_plan.END_CMD
+
+
 def test_headless_reads_back_only_after_the_drain():
     plan = _derive(target=frame_plan.TARGET_HEADLESS)
     assert plan.index(frame_plan.DRAIN) < plan.index(frame_plan.READBACK)
 
 
-def test_the_neural_swap_runs_only_when_online_training_is_on():
-    assert not _derive(online_training=False).runs(frame_plan.ONLINE_SWAP)
-    on = _derive(online_training=True)
-    assert on.runs(frame_plan.ONLINE_SWAP)
-    # Weights stay frozen for the frame that read them.
-    assert on.index(frame_plan.DISPATCH) < on.index(frame_plan.ONLINE_SWAP)
+def test_the_plan_does_not_decide_the_neural_weight_swap():
+    """Arming online training is a frame-END decision. A plan derived at the top
+    of the frame would defer an OFF->ON transition by a frame, so the swap sites
+    read `_online_training` live and the plan must not name the step at all
+    (codex pre-merge review, finding 4)."""
+    plan = _derive()
+    assert not hasattr(plan, "online_swap")
+    assert not any("online" in step for step in plan.steps)
+    assert not any(step in {"online_swap"} for pair in frame_plan.ORDERING_INVARIANTS
+                   for step in pair[:2])
 
 
 # ── D4: the plan consumes the accumulation decision, never re-derives it ──

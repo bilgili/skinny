@@ -20,6 +20,12 @@ Three properties make the plan worth having:
   split into row bands. The caller passes `needs_watchdog_tiling`, not
   `is_metal`, so the reason travels with the decision.
 
+The plan does NOT own the frame-end neural weight swap either. Arming online
+training is a frame-END decision: a plan derived at the top of the frame would
+defer an OFF-to-ON transition by one frame, so the swap sites read
+`_online_training` live, exactly as the pre-split code did (codex pre-merge
+review, finding 4).
+
 The plan does NOT own the accumulation reset. `Renderer.update` decides it from
 the `params.py` registry (change `param-registry-accumulation-reset`) and
 publishes it as `accum_frame`; the plan consumes `accum_frame == 0` as
@@ -77,11 +83,11 @@ OUTPUT = "output"
 RESTORE_BARRIER = "restore_barrier"
 PRESENT_BARRIER = "present_barrier"
 END_CMD = "end_cmd"
+FENCE_RESET = "fence_reset"
 SUBMIT = "submit"
 PRESENT = "present"
 DRAIN = "drain"
 READBACK = "readback"
-ONLINE_SWAP = "online_swap"
 ROTATE_FRAME = "rotate_frame"
 
 TARGET_WINDOWED = "windowed"
@@ -115,9 +121,12 @@ ORDERING_INVARIANTS = (
     (SUBMIT, PRESENT, "present waits on the submit's signal semaphore"),
     (SUBMIT, DRAIN, "the drain waits the fence the submit signals"),
     (DRAIN, READBACK, "the readback reads host-visible memory the drain flushes"),
-    (DISPATCH, ONLINE_SWAP,
-     "weights stay frozen for the frame that reads them; the swap promotes "
-     "pending weights for the NEXT frame only"),
+    (END_CMD, FENCE_RESET,
+     "nothing that can raise may sit between the reset and its submit, or the "
+     "fence stays unsignalled and a retrying caller blocks forever"),
+    (FENCE_RESET, SUBMIT,
+     "the fence is reset immediately before the submit that signals it, never "
+     "earlier (codex review of review-surfaced-defects, finding 1)"),
 )
 
 
@@ -163,9 +172,6 @@ class FramePlan:
     bound_heavy_eye: bool
     """Bound the wavefront eye submit per tile — set when the scene has a
     non-terminal non-flat material (change wavefront-nonflat-tiled-fallback)."""
-
-    online_swap: bool
-    """Perform the neural double-buffer swap at frame end."""
 
     def index(self, step: str) -> int:
         """Position of *step*, or -1 when this frame does not perform it."""
@@ -216,8 +222,7 @@ def integrator_name(integrator_index: int) -> str:
     return INTEGRATOR_NAMES.get(int(integrator_index), "path")
 
 
-def _vulkan_steps(target: str, wavefront: bool, mlt: bool,
-                  online_swap: bool) -> tuple[str, ...]:
+def _vulkan_steps(target: str, wavefront: bool, mlt: bool) -> tuple[str, ...]:
     """The Vulkan step order, shared between the two targets.
 
     The windowed and headless paths differ only where marked. Note the pick
@@ -235,9 +240,8 @@ def _vulkan_steps(target: str, wavefront: bool, mlt: bool,
     steps += [DISPATCH, OUTPUT_BARRIER, OUTPUT, RESTORE_BARRIER]
     if target == TARGET_WINDOWED:
         steps.append(PRESENT_BARRIER)
-    steps += [END_CMD, SUBMIT, PRESENT if target == TARGET_WINDOWED else DRAIN]
-    if online_swap:
-        steps.append(ONLINE_SWAP)
+    steps += [END_CMD, FENCE_RESET, SUBMIT,
+              PRESENT if target == TARGET_WINDOWED else DRAIN]
     steps.append(ROTATE_FRAME)
     if target == TARGET_HEADLESS:
         # The readback reads host-visible memory the drain already flushed, so
@@ -247,8 +251,7 @@ def _vulkan_steps(target: str, wavefront: bool, mlt: bool,
     return tuple(steps)
 
 
-def _metal_steps(target: str, wavefront: bool, mlt: bool,
-                 online_swap: bool) -> tuple[str, ...]:
+def _metal_steps(target: str, wavefront: bool, mlt: bool) -> tuple[str, ...]:
     """The Metal step order. No fences, no command buffers, no descriptor sets
     — resources bind at dispatch and each submit drains. The uniform blob is
     packed per dispatch rather than uploaded to a persistent buffer, so
@@ -261,8 +264,6 @@ def _metal_steps(target: str, wavefront: bool, mlt: bool,
         steps += [ACQUIRE, OUTPUT, PRESENT, DRAIN]
     else:
         steps += [DRAIN, READBACK]
-    if online_swap:
-        steps.append(ONLINE_SWAP)
     return tuple(steps)
 
 
@@ -282,8 +283,7 @@ def check_invariants(plan: FramePlan) -> None:
 def derive(*, target: str, execution_mode_index: int, integrator_index: int,
            accum_frame: int, width: int, height: int,
            needs_watchdog_tiling: bool, records_command_buffers: bool,
-           mlt_num_chains: int, has_heavy_nonflat: bool,
-           online_training: bool) -> FramePlan:
+           mlt_num_chains: int, has_heavy_nonflat: bool) -> FramePlan:
     """Derive this frame's plan from renderer state.
 
     Every argument is a scalar or a bool. Nothing here touches a device, so a
@@ -301,7 +301,7 @@ def derive(*, target: str, execution_mode_index: int, integrator_index: int,
     build_steps = _vulkan_steps if records_command_buffers else _metal_steps
     plan = FramePlan(
         target=target,
-        steps=build_steps(target, wavefront, mlt, bool(online_training)),
+        steps=build_steps(target, wavefront, mlt),
         execution_mode=int(execution_mode_index),
         integrator=integrator,
         accum_frame=int(accum_frame),
@@ -312,7 +312,6 @@ def derive(*, target: str, execution_mode_index: int, integrator_index: int,
             _mlt_iterations(width, height, mlt_num_chains) if mlt else 0),
         mlt_chain_batch=mlt_chain_batch(needs_watchdog_tiling) if mlt else 0,
         bound_heavy_eye=bool(has_heavy_nonflat),
-        online_swap=bool(online_training),
     )
     check_invariants(plan)
     return plan

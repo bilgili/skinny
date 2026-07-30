@@ -171,6 +171,57 @@ Two controls worth keeping:
   parity matrix means anything** — the same scene-data hole recorded in change
   `parity-scene-asset-integrity`.
 
+## Codex pre-merge review — six findings, all fixed
+
+The review returned "not fully behaviour-preserving", and it was right. The
+common cause of the two HIGH findings is one design error: **a snapshot taken
+before the state it describes stops changing.**
+
+1. **HIGH — the plan was derived before the pick drain.** `poll_pick_result`
+   runs pick callbacks, and `_on_autofocus_hit` sets `accum_frame = 0`. A plan
+   derived first carried a stale `first_frame` while `_pack_uniforms` packed the
+   mutated live `fc.accumFrame` — two readings of one value, on a frame where
+   SPPM would then skip its photon-accumulator clear. The pre-split code had no
+   snapshot, so it could not disagree with itself. Fixed: every path drains, then
+   derives. Gated by `test_the_plan_is_derived_after_the_pick_drain`.
+2. **HIGH — `target.submit_info()` was evaluated after `vkResetFences`.** The
+   hook sits inside the reset/submit critical region, so a raise there leaves the
+   fence unsignalled and a retrying caller blocks forever — the exact freeze
+   `review-surfaced-defects` finding 1 exists to prevent, and my code satisfied
+   its test textually while violating its intent. Fixed: build the submit
+   descriptor first. `FENCE_RESET` is now a plan step with two invariants
+   (`END_CMD → FENCE_RESET → SUBMIT`).
+3. **HIGH — `plan.steps` was descriptive, not enforced.** Nothing replayed it, so
+   the plan and the executor were two unreconciled authorities on order, and
+   `check_invariants` silently skips a rule when a step is absent. Replaying it
+   for real is task 4.3's recording adapter, which has not landed; until then
+   `test_plan_step_order_matches_the_executor_source_order` pins the plan's order
+   to the executor's actual source order, and the missing `FENCE_RESET` step is
+   added.
+4. **MEDIUM — the weight swap became a start-of-frame snapshot**, deferring an
+   OFF→ON transition by a frame. Arming online training is a frame-END decision,
+   so `online_swap` is **removed from the plan** and the swap sites read
+   `_online_training` live, as before. A field that cannot be authoritative does
+   not belong in the plan.
+5. **MEDIUM — `plan.target` and the concrete target object were unchecked
+   against each other.** `_execute_vulkan_frame` now asserts they agree.
+6. **MEDIUM — the Metal MLT bootstrap re-derived `_mlt_metal_chain_batch()`**
+   while the mutation dispatch used `plan.mlt_chain_batch`, so the phases could
+   disagree if the environment changed mid-frame. The plan now owns the batch for
+   all three phases.
+
+The review also noted (LOW) that the headless pick-drain move is a **correctness
+fix, not a preservation**: `render_headless` is documented to work in a windowed
+session, where the previous call may have been `render()`, which does not wait the
+fence at its tail — so the old pre-wait drain could read the tool buffer while a
+frame was in flight. §1.2 above claims equivalence on the assumption that the
+previous call was also headless; that assumption holds only in a headless
+session. Waiting first is strictly safer in both.
+
+After the fixes: Vulkan parity is **still 73/73 identical** to `main`, hostless
+is 2877 passed with the same 7 pre-existing failures, and the Metal kill harness
+plus the Metal frame-path smoke are green.
+
 ## 1.3 — The per-call binding rewrite in `render_headless`
 
 **Verdict: already removed. It was dead compensation, not a target difference
