@@ -38,7 +38,12 @@ def _have_vulkan() -> bool:
         return False
 
 
-needs_vulkan = pytest.mark.skipif(not _have_vulkan(), reason="No Vulkan runtime")
+# Not a backend guard: these renders resolve their backend through
+# select_backend and run on native Metal here (change headless-backend-auto).
+# The `vulkan` module is still an *import* requirement on every backend because
+# renderer.py imports it at module load.
+needs_vulkan = pytest.mark.skipif(
+    not _have_vulkan(), reason="the vulkan module does not import")
 
 
 @needs_usd

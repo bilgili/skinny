@@ -22,12 +22,12 @@
   <rect class="c" x="20" y="150" width="240" height="92" rx="8"/>
   <text class="t mono" x="140" y="172" text-anchor="middle" font-weight="600">HeadlessRenderer(w, h)</text>
   <text class="f" x="140" y="192" text-anchor="middle">context manager</text>
-  <text class="f" x="140" y="210" text-anchor="middle">owns VulkanContext + Renderer</text>
+  <text class="f" x="140" y="210" text-anchor="middle">owns GPU context + Renderer</text>
   <text class="f" x="140" y="228" text-anchor="middle">pipeline compiles once</text>
 
   <rect class="b" x="330" y="150" width="200" height="44" rx="8"/>
-  <text class="t mono" x="430" y="172" text-anchor="middle">VulkanContext(window=None)</text>
-  <text class="f" x="430" y="188" text-anchor="middle">compute queue only</text>
+  <text class="t mono" x="430" y="172" text-anchor="middle">Metal | Vulkan (window=None)</text>
+  <text class="f" x="430" y="188" text-anchor="middle">select_backend · compute only</text>
 
   <rect class="b" x="330" y="210" width="200" height="44" rx="8"/>
   <text class="t mono" x="430" y="232" text-anchor="middle">Renderer(...)</text>
