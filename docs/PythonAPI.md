@@ -11,14 +11,16 @@ modes see [Megakernel.md](Megakernel.md) / [Wavefront.md](Wavefront.md).
   image file with no window. Everything else is the live-app surface.
 
 > **Build prerequisite.** The Slang generator `PyMaterialXGenSlang` is **not** in
-> the PyPI MaterialX wheel — build MaterialX from source with
-> `-DMATERIALX_BUILD_PYTHON=ON -DMATERIALX_BUILD_GEN_SLANG=ON`. See `README.md`.
-> Vulkan also needs the SDK on `DYLD_LIBRARY_PATH` (`VULKAN_SDK/lib`) — and that
-> holds **even for a Metal-backend render**: `renderer.py` imports `vulkan` at
-> module load, and `import vulkan` itself raises
-> `Cannot find Vulkan SDK version` without the library path. Choosing Metal
-> picks the *device*, not the import graph; lifting that module-load import is a
-> separate follow-up.
+> the PyPI MaterialX wheel. On a supported platform the prebuilt wheels carry it;
+> otherwise build MaterialX from source with `-DMATERIALX_BUILD_PYTHON=ON
+> -DMATERIALX_BUILD_GEN_SLANG=ON` — see [Install.md](Install.md).
+> A **Vulkan loader library** is also required — and that holds **even for a
+> Metal-backend render**: `renderer.py` imports `vulkan` at module load, and the
+> binding `dlopen`s `libvulkan.so.1` / `vulkan-1.dll` / `libvulkan.dylib`,
+> raising `Cannot find Vulkan SDK version` without one. Choosing Metal picks the
+> *device*, not the import graph; lifting that module-load import is a separate
+> follow-up. On macOS that means the LunarG SDK (MoltenVK) with
+> `$VULKAN_SDK/lib` on `DYLD_LIBRARY_PATH`; see [Install.md](Install.md).
 
 ---
 

@@ -36,9 +36,14 @@ context: |
   env, persisted) via backend_select.select_backend; `auto` resolves to Metal on
   Apple-Silicon macOS (when the device constructs), else Vulkan.
 
-  Authoritative reference docs: docs/README.md is the index — it lists every
-  reference document and says what each one owns; read it to find the right
-  file. Each document owns one subject and stays at or below 700 lines.
+  Authoritative reference docs: README.md § Documentation is the index — it lists
+  every reference document in docs/ and says what each one owns; read it to find
+  the right file. There is no docs/README.md. Each document owns one subject and
+  stays at or below 700 lines. README.md itself is a front door (gallery,
+  features, quick start, index, licence): install lives in docs/Install.md, the
+  run-and-CLI reference in docs/Usage.md, bindings in docs/Controls.md, assets in
+  docs/Assets.md, contributor notes in docs/Contributing.md, papers in
+  docs/References.md.
   Architecture.md is the hub (high-level pipeline, GPU execution flow, key
   invariants); GpuResources.md owns the descriptor binding map, the byte
   layouts, and the shader variant key; ImplementationMap.md owns the per-file

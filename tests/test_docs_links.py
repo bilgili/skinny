@@ -196,8 +196,36 @@ def test_live_doc_set_is_not_empty():
     assert os.path.join("docs", "Architecture.md") in LIVE_DOCS
 
 
+INDEX_HEADING = "## Documentation"
+
+
+def _readme_split() -> tuple[list[str], list[str]]:
+    """README.md's `## Documentation` lines, and every line outside it.
+
+    Returns two line lists rather than joined strings on purpose: `_strip_fences`
+    drops line terminators, so re-joining and then string-replacing one part out
+    of the other silently matches nothing.
+    """
+    lines = _strip_fences(open(os.path.join(REPO, "README.md"), encoding="utf-8").read())
+    starts = [i for i, ln in enumerate(lines) if ln.startswith(INDEX_HEADING)]
+    assert len(starts) == 1, f"README.md must have exactly one {INDEX_HEADING!r}"
+    start = starts[0]
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    return lines[start:end], lines[:start] + lines[end:]
+
+
+def _index_section() -> list[str]:
+    return _readme_split()[0]
+
+
 def test_index_lists_every_reference_document():
-    """docs/README.md must link every reference document in docs/.
+    """README.md must link every reference document in docs/.
+
+    `README.md` IS the index (change `readme-as-docs-index`): a reader arrives
+    there, so it must say where everything lives without a redirect.
 
     Scope is the top level of `docs/`. Nested directories hold generated
     artifacts — `docs/diagrams/` carries the SVG generators and their result
@@ -205,23 +233,88 @@ def test_index_lists_every_reference_document():
     document the index should enumerate. Their links are still checked above.
     """
     docs_dir = os.path.join(REPO, "docs")
-    index = os.path.join(docs_dir, "README.md")
-    # Resolve each target to a real path, so a link to a nested report that
-    # happens to share a filename cannot stand in for the top-level document.
+    # Only the Documentation section counts. README also links documents from its
+    # intro, features, and quick start, and those must not stand in for an index
+    # row — otherwise deleting a row still passes and the check is decorative.
+    section = _index_section()
+    # Targets are relative to the repo root, since the index is README.md.
+    # Resolve each one, so a link to a nested report that happens to share a
+    # filename cannot stand in for the top-level document.
     linked = set()
-    for target in _links(os.path.join("docs", "README.md")):
-        if not _is_relative(target):
-            continue
-        resolved = os.path.normpath(os.path.join(docs_dir, target.split("#", 1)[0]))
-        if os.path.dirname(resolved) == docs_dir:
-            linked.add(os.path.basename(resolved))
-    on_disk = {
-        n for n in os.listdir(docs_dir)
-        if n.endswith(".md") and n != "README.md"
-    }
+    for line in section:
+        for m in _LINK.finditer(_CODE_SPAN.sub("", line)):
+            target = m.group(1) or m.group(2)
+            if not target or not _is_relative(target):
+                continue
+            resolved = os.path.normpath(os.path.join(REPO, target.split("#", 1)[0]))
+            if os.path.dirname(resolved) == docs_dir:
+                linked.add(os.path.basename(resolved))
+    on_disk = {n for n in os.listdir(docs_dir) if n.endswith(".md")}
     assert on_disk, "no reference documents found — the check would be vacuous"
     missing = sorted(on_disk - linked)
-    assert not missing, f"{index} does not link: {missing}"
+    assert not missing, f"README.md § Documentation does not link: {missing}"
+
+
+def test_index_check_ignores_links_outside_the_index_section():
+    """A link in the intro or quick start must not count as an index row.
+
+    README links some documents twice — once in prose, once in the index. If the
+    completeness check scanned the whole file, deleting an index row would still
+    pass because the prose link covers it, and the check would be decorative.
+    """
+    section, outside = _readme_split()
+    assert section and outside, "README.md split produced an empty half"
+
+    docs_dir = os.path.join(REPO, "docs")
+
+    def linked(lines):
+        """Top-level docs/*.md names linked from these lines.
+
+        Restricted to resolved `docs/*.md` targets on purpose: counting every
+        relative link would drag in examples, the changelog, and gallery images,
+        so a valid README edit that added a few of those could fail the size
+        comparison below for reasons that have nothing to do with the index.
+        """
+        found = set()
+        for line in lines:
+            for m in _LINK.finditer(_CODE_SPAN.sub("", line)):
+                target = m.group(1) or m.group(2)
+                if not target or not _is_relative(target):
+                    continue
+                resolved = os.path.normpath(os.path.join(REPO, target.split("#", 1)[0]))
+                if os.path.dirname(resolved) == docs_dir and resolved.endswith(".md"):
+                    found.add(os.path.basename(resolved))
+        return found
+
+    inside_names, outside_names = linked(section), linked(outside)
+    # The scoping only matters if some document IS linked twice. Assert that,
+    # or this guard would quietly stop testing anything.
+    both = sorted(inside_names & outside_names)
+    assert both, (
+        "no document is linked both inside and outside the index — "
+        "the section scoping in test_index_lists_every_reference_document "
+        "is no longer load-bearing, so either it or this guard is wrong"
+    )
+    # The halves must be real, disjoint slices — not the whole file twice, which
+    # is what silently happened when this guard joined the lines and used
+    # str.replace (fences drop line terminators, so nothing matched).
+    assert any(ln.startswith(INDEX_HEADING) for ln in section)
+    assert not any(ln.startswith(INDEX_HEADING) for ln in outside)
+    # Every index row names a doc; the outside half must not carry them all.
+    assert len(inside_names) > len(outside_names)
+
+
+def test_there_is_exactly_one_index():
+    """docs/README.md must not come back — the index has one home.
+
+    Two files claiming to be the index is the shape this change removed; the
+    second one is a redirect the reader has to follow.
+    """
+    stray = os.path.join(REPO, "docs", "README.md")
+    assert not os.path.exists(stray), (
+        "docs/README.md exists again — README.md is the index; "
+        "add new documents to its Documentation section instead"
+    )
 
 
 def test_negative_control(tmp_path):
