@@ -270,9 +270,11 @@ class TestDistanceCap:
     def test_restore_honors_large_distance(self):
         import types
         from skinny.camera import OrbitCamera
-        from skinny.app import _apply_saved_camera
+        # One camera restore rule for both front-ends, owned by
+        # session_snapshot (change session-settings-owner).
+        from skinny.session_snapshot import restore_camera
         stub = types.SimpleNamespace(orbit_camera=OrbitCamera(), free_camera=None)
-        _apply_saved_camera(stub, {"orbit": {"distance": 250.0}})
+        restore_camera(stub, {"orbit": {"distance": 250.0}})
         assert stub.orbit_camera.distance == 250.0
         assert stub.orbit_camera.max_distance >= 250.0
 
