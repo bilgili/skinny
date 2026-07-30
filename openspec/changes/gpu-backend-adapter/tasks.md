@@ -91,9 +91,9 @@ protocol docstring now says so.
 
 - [x] 6.1 `ruff check src/`; full hostless `pytest`.
 - [x] 6.2 `.spv` bytes and `spv_cache` keys unchanged vs 1.3.
-- [ ] 6.3 Metal: megakernel + wavefront + preview dock + debug viewport smoke.
+- [x] 6.3 Metal: megakernel + wavefront + preview dock + debug viewport smoke.
 - [x] 6.4 Vulkan: megakernel + wavefront smoke.
-- [ ] 6.5 Parity matrix dual gate unchanged; both structural and shaded
+- [x] 6.5 Parity matrix dual gate unchanged; both structural and shaded
       Metal↔Vulkan parity tests pass on a dual-device host.
 - [x] 6.6 `tests/test_metal_cleanup.py` incl. the gpu-marked kill harness.
 - [x] 6.7 Docs: `docs/Architecture.md` backend seam section; CLAUDE.md
@@ -145,17 +145,27 @@ protocol docstring now says so.
   recorded pbrt-truth baseline and the `(Path, wavefront)` self-consistency
   anchor, so passing IS "dual gate unchanged".
 
-**STILL NOT run — host memory, not a result:**
+**Run and green (third pass, quiet machine — all gates now closed):**
 
-- **6.3 (preview dock, debug viewport)** and **6.5 (structural + shaded
-  Metal↔Vulkan parity)**. All four cold-compile Slang for the Metal target and
-  are skipped unless `RUN_METAL_PREVIEW_COMPILE` / `RUN_METAL_DEBUG_RASTER` /
-  `RUN_METAL_MEGAKERNEL_COMPILE` is set **and** the command runs under
-  `scripts/guarded_metal.sh`. The guard aborted at `avail=7.87GB (need>=10)`.
+- **6.3 (preview dock)** `tests/test_metal_material_preview.py` with
+  `RUN_METAL_PREVIEW_COMPILE=1` under the guard: **1 passed in 15.93s**, peak
+  `MTLCompilerService` 1.09 GB, swap 0.
+- **6.3 (debug viewport) + 6.5 (cross-backend)**
+  `tests/test_metal_debug_viewport.py` +
+  `tests/test_metal_vulkan_structural_parity.py` +
+  `tests/test_metal_vulkan_shaded_parity.py`, with `RUN_METAL_DEBUG_RASTER=1`
+  and `RUN_METAL_MEGAKERNEL_COMPILE=1` under the guard: **3 passed in 37.70s**.
+  Both cross-backend parity tests render the megakernel on Metal AND Vulkan on
+  this dual-device host, which is the "dual-device host" the task asks for.
 
-It was **not** bypassed and `MIN_FREE_GB` was **not** lowered: this box runs at
-zero swap headroom, and an `MTLCompilerService` spike with nowhere to page locks
-or reboots it — which is the exact failure the threshold was chosen to prevent.
-Freeing ~3 GB (the guard's metric counts only free + speculative + purgeable
-pages, so ordinary app RSS is what stands in the way) and re-running the three
-commands is all that remains.
+**Correction — an earlier attempt at 6.3 was misread as a code regression.**
+On a loaded machine (6 GB free, 1825 MB swap in use, another session rendering)
+the preview test ran past 2000 s while `MTLCompilerService` climbed toward 1 GB
+with nowhere to page. That was recorded here as an A/B failure against a 5.17 s
+merge-base run. It was not: the merge-base arm had a warm Slang cache and this
+tree's was cold, so the compiler-RAM delta measured cache warmth, not code. On a
+quiet machine this tree compiles cold in 15.93 s and passes. The lesson is the
+one the guard already encodes — a Metal timing result taken while the box is
+starved measures the box, so re-run on a quiet machine before calling a
+slow-down a defect. Stack sampling used
+`faulthandler.dump_traceback_later(exit=False)`; nothing was killed.
