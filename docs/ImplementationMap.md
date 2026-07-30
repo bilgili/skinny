@@ -42,10 +42,11 @@ module ownership seams see [HostModules.md](HostModules.md).
 | `mesh_cache.py` | On-disk BVH cache (zstd-compressed vertex/index/BVH blobs) |
 | `environment.py` | Built-in and HDR environment loading |
 | `head_textures.py` | Detail map loading (normal, roughness, displacement) at 2048² |
-| `presets.py` | Fitzpatrick I--VI presets and user preset save/load |
+| `presets.py` | Fitzpatrick I--VI presets; user presets are read-only |
 | `tattoos.py` | Tattoo image loading |
 | `params.py` | Shared parameter definitions (`ParamSpec`), get/set helpers |
-| `settings.py` | User settings persistence |
+| `settings.py` | User settings persistence (merge-on-write) |
+| `session_snapshot.py` | The persisted session schema: shared + contributed keys, capture/restore |
 | `fetch_hdrs.py` | Poly Haven HDRI download helper |
 | `lens_optics.py` | PBRT-v3 thick-lens helpers (CPU exit-pupil bounding) |
 | `bxdf_math.py` | CPU BSDF eval + lobe rasterisation for the BXDF visualiser |

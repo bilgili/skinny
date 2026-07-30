@@ -19,10 +19,18 @@ environment.
 
 At the end of every implementation, review **all** Markdown documentation and
 update whatever the change touched, scoped to each document's subject.
-**[docs/README.md](docs/README.md) indexes every top-level reference document
-in `docs/`** and says what each one owns — read the index to find the right file, and register a new
-document there in the same change that creates it. `README.md`, `CHANGELOG.md`,
-`CLAUDE.md`, and `AGENTS.md` stay at the repo root.
+**[README.md](README.md) § Documentation is the index** — it lists every
+top-level reference document in `docs/` and says what each one owns. Read it to
+find the right file, and register a new document there in the same change that
+creates it. There is no `docs/README.md`; the index has one home (change
+`readme-as-docs-index`), and a hostless test fails if a second one appears.
+`README.md`, `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` stay at the repo root.
+
+`README.md` itself is a **front door**, not a mixed document: title, gallery,
+features, a quick start, the index, licence. The install procedure lives in
+`docs/Install.md`, the run-and-CLI reference in `docs/Usage.md`, the bindings in
+`docs/Controls.md`, the asset layout in `docs/Assets.md`, the contributor notes
+in `docs/Contributing.md`, and the paper references in `docs/References.md`.
 
 Each document owns one subject, and a reference document stays **at or below
 700 lines** (change `docs-split-large-docs`). When one grows past the ceiling,
@@ -44,10 +52,14 @@ codegen change updates `docs/ShaderPipeline.md`; a backend-selection or Metal
 change updates `docs/Backends.md`; a host-module ownership change updates
 `docs/HostModules.md`; an envelope change (which integrator × mode × axis
 combinations run) updates `docs/RenderingModes.md`; a new CLI flag updates
-`README.md` when it changes installation or invocation, and
-`docs/RenderingModes.md` when it changes what the renderer can be told to do; a
-new public Python symbol updates `docs/PythonAPI.md`; and so on. Do not let docs
-drift from the code.
+`docs/Usage.md`, or `docs/RenderingModes.md` when it changes what the renderer
+can be told to do; a dependency or build-step change updates
+`docs/Install.md`; a new keyboard or mouse binding updates `docs/Controls.md`; a
+new asset directory or discovery rule updates `docs/Assets.md`; a test or
+development-convention change updates `docs/Contributing.md`; a new public
+Python symbol updates `docs/PythonAPI.md`; and so on. `README.md` changes only
+when the project summary, the gallery, the feature list, or the quick-start
+sequence itself changes. Do not let docs drift from the code.
 
 Every relative Markdown link and `#anchor` in the live tree is checked by
 `tests/test_docs_links.py`. Move a section and the inbound links must move with
@@ -148,9 +160,17 @@ export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS
 export DYLD_LIBRARY_PATH=$VULKAN_SDK/lib
 ```
 
-Render offscreen with no window via `VulkanContext(window=None, ...)` +
-`Renderer(...)` + `update(dt)` + `render_headless()` (returns raw RGBA8 bytes,
-`width*height*4`). Drive a USD scene by passing `usd_scene_path=` to `Renderer`;
+The `SKINNY_BACKEND` / `VULKAN_SDK` exports are independent: `HeadlessRenderer`
+now resolves its backend through `select_backend` like every other runner
+(`backend=` > `SKINNY_BACKEND` > `auto` → **Metal** here, change
+`headless-backend-auto`), but the SDK library path is still needed to *import*
+the renderer on either backend, because `renderer.py` imports `vulkan` at module
+load.
+
+Render offscreen with no window via `HeadlessRenderer(w, h)` (resolved context)
+or, for a hand-rolled loop, `VulkanContext(window=None, ...)` /
+`MetalContext(window=None, ...)` + `Renderer(...)` + `update(dt)` +
+`render_headless()` (returns raw RGBA8 bytes, `width*height*4`). Drive a USD scene by passing `usd_scene_path=` to `Renderer`;
 USD load is async, so pump `update()` until `renderer._usd_scene` has the expected
 instances before sampling frames. Accumulation resets automatically when any field
 in `_current_state_hash()` changes (includes `integrator_index`, `env_intensity`,

@@ -201,6 +201,20 @@ def test_renderer_is_metal_branches_are_only_two_implementation_splits():
         "_render_windowed_metal",          # swapchain frame vs surface blit
         "_render_headless_metal",
     }
+    # Map each `if`/ternary that tests `is_metal` to its FULL body span. A fixed
+    # line window silently mis-judges a branch whose dispatching call sits
+    # further down (main's `render_headless` drains and derives a plan first),
+    # which reads as a violation the moment unrelated code lands above the call.
+    spans: dict[int, tuple[int, int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.IfExp)):
+            for sub in ast.walk(node.test):
+                if isinstance(sub, ast.Attribute) and sub.attr == "is_metal":
+                    end = getattr(node, "end_lineno", sub.lineno + 6)
+                    prev = spans.get(sub.lineno)
+                    lo, hi = (sub.lineno, end)
+                    spans[sub.lineno] = (lo, max(hi, prev[1])) if prev else (lo, hi)
+
     live = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or node.attr != "is_metal":
@@ -208,7 +222,8 @@ def test_renderer_is_metal_branches_are_only_two_implementation_splits():
         text = lines[node.lineno - 1]
         if "self.is_metal = " in text:
             continue  # the adapter selection itself
-        body = "\n".join(lines[node.lineno - 1:node.lineno + 6])
+        lo, hi = spans.get(node.lineno, (node.lineno, node.lineno + 6))
+        body = "\n".join(lines[lo - 1:hi])
         if any(name in body for name in allowed_calls):
             continue
         live.append(f"renderer.py:{node.lineno}: {text.strip()}")

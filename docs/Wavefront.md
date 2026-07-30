@@ -37,9 +37,16 @@ staged dispatch loop into the frame command buffer (modelled on
 `vk_skinning.SkinningPasses`). The render gate replaces the megakernel's single
 dispatch:
 
-- **Gate** (`renderer.py:7147-7158`, headless `7367-7377`): when
-  `effective_execution_mode_index == EXECUTION_WAVEFRONT`, call
+- **Gate** (`Renderer._record_frame_dispatch`): when
+  `plan.execution_mode == EXECUTION_WAVEFRONT`, call
   `staged.record_dispatch(cmd, descriptor_sets[f])` instead of `vkCmdDispatch`.
+  The gate is written **once**. Windowed and headless share one recorded body
+  (`_execute_vulkan_frame`) and differ only in their target; the execution mode
+  and the integrator come from the frame plan rather than being re-derived at
+  each dispatch site (change `frame-plan-split`, see
+  [HostModules.md](HostModules.md) → *Per-frame path*). `_record_wavefront_dispatch`
+  reads `plan.integrator`, `plan.first_frame` (the SPPM first-frame flag and the
+  MLT reseed) and `plan.mlt_iterations`.
 - **Selection:** one dispatcher `renderer._ensure_wavefront_pass(integrator)`
   routes `"path" / "bdpt" / "sppm" / "mlt"`; if no scene yet →
   `WavefrontEnvPass` (env-only fallback). `WAVEFRONT_BDPT_SUPPORTED = True`, so
@@ -656,9 +663,11 @@ both read bindings 33/34/35 and the active `neuralNetworkVersion`, which stay
 fixed while the command buffer for a frame executes. The single point where new
 weights are promoted is the **frame boundary**:
 
-- `Renderer._online_frame_end_swap()` runs **after the fence wait** in
-  `render_headless` (and **after present** in `render`) — once the GPU is done
-  reading the current weights. It `publisher.swap()`s the trainer's pending
+- `Renderer._online_frame_end_swap()` runs at the tail of
+  `_execute_vulkan_frame`, once the target has finished — **after the fence
+  wait** for the offscreen target, **after present** for the swapchain target —
+  so the GPU is done reading the current weights. The frame plan names it
+  (`plan.online_swap`) and states the constraint that it follows the dispatch. It `publisher.swap()`s the trainer's pending
   weights into the render slot and increments the network version **in both places
   the per-sample density key is read**: `FrameConstants.neuralNetworkVersion` (the
   inline inverse) **and** the `WavefrontNeuralProposalPass` push-constant stamp

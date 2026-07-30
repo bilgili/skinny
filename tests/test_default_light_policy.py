@@ -320,11 +320,26 @@ def test_update_polls_usd_before_building_authority_snapshot():
         for node in tree.body
         if isinstance(node, ast.ClassDef) and node.name == "Renderer"
     )
+    # The scene-advancing steps live in `_sync_scene`, which `update` calls
+    # (change frame-plan-split). The ordering rule is unchanged — it is one of
+    # the load-bearing dependencies that split records — so it is asserted where
+    # the calls now are. A future move breaks this loudly with a KeyError below
+    # rather than passing vacuously.
     update = next(
+        node
+        for node in renderer_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_sync_scene"
+    )
+    frame_entry = next(
         node
         for node in renderer_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "update"
     )
+    assert any(
+        isinstance(call.func, ast.Attribute) and call.func.attr == "_sync_scene"
+        for call in ast.walk(frame_entry)
+        if isinstance(call, ast.Call)
+    ), "update must drive the scene sync it delegates to"
     call_lines = {
         call.func.attr: call.lineno
         for call in ast.walk(update)
