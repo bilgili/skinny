@@ -47,7 +47,7 @@ Per-frame: `vkCmdBindPipeline` → `vkCmdBindDescriptorSets(descriptor_sets[f])`
 (windowed) or copy to readback (headless). Windowed and headless run **one**
 recorded body — `Renderer._execute_vulkan_frame`, with the megakernel gate in
 `_record_frame_dispatch` — and differ only in their target (change
-`frame-plan-split`, see [Architecture.md](Architecture.md) → *Per-frame path*).
+`frame-plan-split`, see [HostModules.md](HostModules.md) → *Per-frame path*).
 The headless path used to hold a near-verbatim copy. The same pipeline is reused
 synchronously for the
 BXDF/BSSRDF visualiser, keyed by `toolBuffer[0]` (`renderer.py:5609-5619`,
@@ -317,7 +317,7 @@ modules, then dispatches by **binding resources by name** — the renderer's
 binding map drives the same logical slots, with no Vulkan descriptor sets. The
 resource layer is resolved once by `resource_module(ctx)` (`vk_compute` vs
 `metal_compute`), so the renderer's construction sites are backend-agnostic; see
-[Architecture.md § Backend selection](Architecture.md#backend-selection).
+[Backends.md § Backend selection](Backends.md#backend-selection).
 
 **MSL uniform layout (`FrameConstants fc`, binding 0).** Slang pads `float3` and
 `uint3` to 16 B on the Metal target, so the reflected MSL block is **656 B /
@@ -325,7 +325,7 @@ resource layer is resolved once by `resource_module(ctx)` (`vk_compute` vs
 4-align** (**600 B** with the tail; the embedded `Camera` is 288 B vs 272 B).
 Both sides are derived from the declaration by `slang_layout` and the reflected
 layout is cross-checked against it — see
-[Architecture.md § Byte-layout ownership](Architecture.md#byte-layout-ownership-slang_layoutpy-change-reflection-owned-byte-layouts).
+[GpuResources.md § Byte-layout ownership](GpuResources.md#byte-layout-ownership-slang_layoutpy-change-reflection-owned-byte-layouts).
 `_pack_uniforms_msl` reuses the Vulkan scalar blob from `_pack_uniforms` verbatim
 and relocates each field to its **reflected** MSL offset (`pipeline.uniform_layout`
 — never hardcoded; e.g. `camera.position`@256, `focusPlaneOrigin`@416,
@@ -338,7 +338,7 @@ path is byte-unchanged.
 Skin/std-surface params and the lights arrive as SSBOs (not part of `fc`). For
 the Metal-target texture/sampler split (`commonSampler`, the discrete-map
 samplers, `NRI`) see
-[Architecture.md § MetalContext](Architecture.md#metalcontext-metal_contextpy-metal_computepy).
+[Backends.md § MetalContext](Backends.md#metalcontext-metal_contextpy-metal_computepy).
 
 **Metal watchdog tiling (change `metal-megakernel-watchdog-tiling`).** macOS
 cannot cancel another process's GPU work, so a single full-frame megakernel

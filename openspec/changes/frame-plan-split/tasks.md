@@ -84,8 +84,12 @@
       exactly identical.
 - [x] 5.5 `tests/test_metal_cleanup.py` incl. the gpu-marked kill harness
       (dispatch shape changed). → 13 hostless + 3 gpu-marked passed.
-- [x] 5.6 Docs: `docs/Architecture.md` per-frame section, `docs/Megakernel.md`,
-      `docs/Wavefront.md`.
+- [x] 5.6 Docs: the per-frame section, `docs/Megakernel.md`, `docs/Wavefront.md`.
+      → `docs-split-large-docs` landed on `main` mid-change and split
+      `Architecture.md` 2639→364 lines into subject docs, so the per-frame
+      section is owned by **`docs/HostModules.md`** (which already owns
+      `bringup.py`, the carve-out pattern and the device-free pure core), not the
+      hub. `Megakernel.md` / `Wavefront.md` cross-references point there.
 - [x] 5.7 `openspec validate frame-plan-split --strict`. → valid.
 
 ## Note

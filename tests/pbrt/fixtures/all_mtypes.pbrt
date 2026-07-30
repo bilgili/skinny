@@ -6,9 +6,14 @@
 # branch of skinny.pbrt.materials (and every param read inside those branches)
 # under the byte-identity import diff, including the branches no suite or
 # corpus scene reaches: `coatedconductor`, `diffusetransmission`, `interface`,
-# `thindielectric`, the unknown-material fallback, and the one-sided /
-# flavour-divergent reads (`transmittance`, subsurface `reflectance`/`radius`,
-# `interface.eta`, `conductor.roughness` vs top-level `roughness`).
+# `thindielectric`, the unknown-material fallback, and the one-sided reads
+# (`transmittance`, subsurface `reflectance`/`radius`, `interface.eta`).
+#
+# The `coatedconductor` blocks below deliberately author a top-level `roughness`
+# NEXT TO `conductor.roughness`. pbrt-v4 would refuse such a scene outright
+# ("roughness": unused parameter) — which is exactly why the import must ignore
+# the top-level value: the diff moves if skinny ever reads it again (change
+# coatedconductor-roughness-spelling).
 #
 # Textured, named-spectrum, spectrum-file and unresolved-texture variants are
 # included because the promoting accessors emit notes (and escalate
@@ -183,7 +188,7 @@ AttributeBegin
     "point2 uv" [ 0 0  1 0  1 1  0 1 ]
 AttributeEnd
 
-# --- coatedconductor (drift 1: conductor.roughness vs top-level roughness) - #
+# --- coatedconductor (metal from conductor.roughness; top-level is ignored) - #
 AttributeBegin
   Material "coatedconductor" "spectrum conductor.eta" "metal-Ag-eta"
     "spectrum conductor.k" "metal-Ag-k"
@@ -192,7 +197,7 @@ AttributeBegin
   Shape "trianglemesh" "point3 P" [ -0.1 1.5 0  0.1 1.5 0  0 1.7 0 ] "integer indices" [ 0 1 2 ]
 AttributeEnd
 
-# coatedconductor with a texture-bound conductor.roughness (mtlx-only read)
+# coatedconductor with a texture-bound conductor.roughness (read on BOTH flavours)
 AttributeBegin
   Material "coatedconductor" "texture conductor.roughness" "rtex" "float roughness" 0.3
   Shape "trianglemesh"
@@ -201,9 +206,12 @@ AttributeBegin
     "point2 uv" [ 0 0  1 0  1 1  0 1 ]
 AttributeEnd
 
-# coatedconductor with anisotropic top-level roughness (USD-only read path)
+# coatedconductor anisotropy: the metal pair is `conductor.uroughness`/
+# `conductor.vroughness`. The top-level pair beside it is NOT read — pbrt does
+# not define it for this material type.
 AttributeBegin
-  Material "coatedconductor" "float uroughness" 0.05 "float vroughness" 0.3
+  Material "coatedconductor" "float conductor.uroughness" 0.05 "float conductor.vroughness" 0.3
+    "float uroughness" 0.7 "float vroughness" 0.9
   Shape "trianglemesh" "point3 P" [ 0.5 1.5 0  0.7 1.5 0  0.6 1.7 0 ] "integer indices" [ 0 1 2 ]
 AttributeEnd
 

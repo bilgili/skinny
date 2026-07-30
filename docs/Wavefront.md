@@ -44,7 +44,7 @@ dispatch:
   (`_execute_vulkan_frame`) and differ only in their target; the execution mode
   and the integrator come from the frame plan rather than being re-derived at
   each dispatch site (change `frame-plan-split`, see
-  [Architecture.md](Architecture.md) → *Per-frame path*). `_record_wavefront_dispatch`
+  [HostModules.md](HostModules.md) → *Per-frame path*). `_record_wavefront_dispatch`
   reads `plan.integrator`, `plan.first_frame` (the SPPM first-frame flag and the
   MLT reseed) and `plan.mlt_iterations`.
 - **Selection:** one dispatcher `renderer._ensure_wavefront_pass(integrator)`
@@ -190,7 +190,7 @@ phase 4    all wfSppmUpdate tiles                                        → bar
 
 SPPM binds the scene set as set 0 and its own **set 1** (four typed buffers:
 `sppmVisiblePoints` / `sppmAccum` / `sppmGrid` / `sppmScanScratch`, sized by
-num_pixels — see [Architecture.md § SPPM set 1](Architecture.md#wavefront-pass-local-descriptor-sets-set-1)).
+num_pixels — see [GpuResources.md § SPPM set 1](GpuResources.md#wavefront-pass-local-descriptor-sets-set-1)).
 The full SPPM reference — pipeline diagram, the estimator equations + the
 equation→shader map, the buffer/state layout, the pbrt mapping, and the deferred
 PM-2/PM-3 phases — is in **[PhotonMapping.md](PhotonMapping.md)**.
@@ -258,7 +258,7 @@ iterations, so the per-frame mutation budget is proportional to pixel count
 sized by `nChains` (not `stream_size`) and MSL-stride-aware via `mlt_buffer_sizes`
 in `wavefront_layout.py` (SPPM `sppm_buffer_sizes` precedent); the chain-state
 buffers live at descriptor bindings 52–57 (see
-[Architecture.md § Descriptor Binding Map](Architecture.md#descriptor-binding-map)).
+[GpuResources.md § Descriptor Binding Map](GpuResources.md#descriptor-binding-map)).
 
 The per-frame staged sequence:
 
@@ -654,7 +654,7 @@ animates, so the net adapts instead of staying frozen on a per-scene offline
 bake. An async trainer publishes fresh weights at any time; the renderer
 **never** touches the inference buffers mid-frame. The whole drain→train→
 publish→swap loop is documented in
-[Architecture.md § Online neural training](Architecture.md#online-neural-training);
+[OnlineTraining.md § Online neural training](OnlineTraining.md#online-neural-training);
 this section covers only the wavefront-side commitment point.
 
 **Render weights are frozen for the duration of a frame.** The

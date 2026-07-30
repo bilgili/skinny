@@ -89,11 +89,17 @@ two exports silently — which had already happened.
 The resolver takes a `flavor` (`usd`/`mtlx`), a deliberate wart. Reading a param
 has side effects — an unresolved texture appends a note and escalates
 EXACT→APPROX, and notes/statuses are import *output* — so the few reads that are
-one-sided or divergent between the two pipelines today are **frozen** behind that
-flag rather than unified, each with a named follow-up: `coatedconductor` base
-roughness spelling (`conductor.roughness` under mtlx, top-level `roughness` under
-usd), and the mtlx-only `transmittance` and `interface.eta` on both coated types.
-Under `usd` those reads do not happen at all — no value, no note, no escalation.
+one-sided between the two pipelines today are **frozen** behind that flag rather
+than unified, each with a named follow-up: the mtlx-only `transmittance` and
+`interface.eta` on both coated types. Under `usd` those reads do not happen at
+all — no value, no note, no escalation.
+
+A flavour gate is for a read that is one-sided **because a target has no input
+for the value**. It is never a way to freeze a disagreement about *which* pbrt
+parameter a lobe comes from: two flavours resolving one lobe from two different
+parameters is a defect, and one of the two spellings is simply wrong. The
+`coatedconductor` base-metal roughness used to be gated that way and no longer
+is — see the spelling table below.
 
 Subsurface `reflectance` and `radius` left that list in change
 `subsurface-promoting-accessors`. `reflectance` is resolved once, outside the
@@ -213,6 +219,58 @@ neither target round-trips through a `sqrt`): UsdPreviewSurface then collapses
 them to the isotropic geometric mean and flags it, `standard_surface` keeps a
 mean `specular_roughness` + `specular_anisotropy`.
 
+The arithmetic has **one owner**, `_calibrate_roughness`, and every roughness a
+material resolves passes through it — whatever its spelling and whichever lobe it
+feeds. `_resolve_roughness` is the chain built on top: it takes a `prefix` so a
+prefixed spelling gets the identical treatment (same texture promotion, same
+note wording, same anisotropic pair). A material branch must never hand-roll
+either; a hostless AST gate
+(`test_the_roughness_calibration_has_no_second_implementation`) fails the build
+if the arithmetic appears outside the owner, the chain, and the two target
+reduction policies.
+
+`remaproughness` is read **unprefixed** whatever the prefix, because pbrt reads
+one per material (`GetOneBool`) and it governs every roughness on it — the
+interface (coat) roughness included, which pbrt remaps exactly like the
+conductor pair (`materials.cpp:351`). A coated material's `interface.roughness`
+therefore reaches the owner as a **scalar** (neither target has a texture input
+for that lobe, so a binding degrades with a target-worded note instead of
+connecting) but is calibrated like everything else. It used to pass through raw,
+which emitted a far too sharp coat — a pbrt `interface.roughness` of 0.02 landed
+as 0.02 where pbrt renders GGX alpha 0.1414.
+
+#### Per-material roughness spelling
+
+pbrt names a layered material's roughnesses per *lobe*, and the two coated types
+are **asymmetric**. skinny mirrors that asymmetry rather than unifying it:
+
+| pbrt material | coat lobe reads | base lobe reads |
+|---------------|-----------------|-----------------|
+| `coateddiffuse` | top-level `roughness` (+`uroughness`/`vroughness`) | — (base is Lambert) |
+| `coatedconductor` | `interface.roughness` | `conductor.roughness` (+`conductor.uroughness`/`conductor.vroughness`) |
+
+`CoatedConductorMaterial::Create` defines **no top-level `roughness`**, and pbrt
+does not merely ignore one — it refuses the scene (`"roughness": unused
+parameter`). So skinny reads none either: there is no correct value to import
+from a parameter no valid pbrt scene carries, and a "forgiving" fallback would
+import an image pbrt will not render. `CoatedDiffuseMaterial::Create` *does* read
+the top-level spelling, which is why `coateddiffuse` keeps it (change
+`coatedconductor-roughness-spelling`).
+
+Three known gaps, recorded rather than papered over:
+
+- The coat lobe is scalar on both targets, so
+  `interface.uroughness`/`interface.vroughness` stay unread — there is nowhere
+  to put the anisotropy, and inventing a reduction would be worse than the gap.
+- pbrt's layered-BxDF controls (`thickness`, `albedo`, `g`, `maxdepth`,
+  `nsamples`) are read on neither coated type.
+- A roughness bound to **two different textures** on its two axes collapses to
+  the first: `_resolve_roughness` connects one texture and returns an isotropic
+  value with the "perceptual remap not applied" note, so `specular_anisotropy`
+  is not emitted for that case. This predates the prefixed spellings and is
+  identical for the top-level pair; only constant anisotropic pairs resolve
+  unreduced.
+
 ### Spectrum → RGB
 
 skinny is an RGB renderer, so every spectrum is reduced to linear RGB: `rgb`
@@ -315,8 +373,8 @@ directly (the export's richer slots feed the existing `{coat, spec, diffuse,
 delta-transmission}` lobe set — still **without** the preview-only
 `evalStdSurfaceBSDF`), so **colored glass** (tinted transmission) and **tinted
 speculars** now actually render through the flat path, and `diffuse_roughness`
-drives an Oren-Nayar diffuse. See [Architecture.md → Flat Material
-BSDF](Architecture.md#flat-material-bsdf-materialsflatflat_materialslang--flat_lobesslang).
+drives an Oren-Nayar diffuse. See [ShaderPipeline.md → Flat Material
+BSDF](ShaderPipeline.md#flat-material-bsdf-materialsflatflat_materialslang--flat_lobesslang).
 **Stage-2 Ch5 (change `pbrt-subsurface-volumetric`) imports `subsurface` as a
 volumetric interior medium** rather than the old `opacity = 0` clear-glass
 lowering. A `subsurface` material becomes a smooth dielectric boundary (`eta`)
@@ -459,7 +517,7 @@ write them, `usd_loader.py` merges and derives, `material_pack.py` packs,
 
 **The vocabulary has one owner: the material field table in `slang_layout.py`**
 (change `flat-material-field-table`; see
-[Architecture.md § Material field table](Architecture.md#material-field-table-change-flat-material-field-table)).
+[GpuResources.md § Material field table](GpuResources.md#material-field-table-change-flat-material-field-table)).
 Do not invent a key at an authoring site — register it in the table first. A key
 the table does not have is **refused** when the material is one the table owns,
 instead of being silently dropped and showing up only as a wrong-looking render.

@@ -139,7 +139,7 @@ guards (`skinny.bringup.plan_bringup`) and hands the resulting `BringupPlan`
 in, so the context and `Renderer` are built by `plan.create(...)`. Direct
 Python callers leave it `None` and pass the individual kwargs — those become a
 plan internally, so there is one construction path either way (see
-[Architecture.md § Front-end bring-up](Architecture.md#front-end-bring-up-bringuppy-change-frontend-bringup-builder)).
+[HostModules.md § Front-end bring-up](HostModules.md#front-end-bring-up-bringuppy-change-frontend-bringup-builder)).
 
 ```python
 with sk.HeadlessRenderer(1024, 1024, execution_mode="wavefront") as r:

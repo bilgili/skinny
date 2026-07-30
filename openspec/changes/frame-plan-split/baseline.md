@@ -117,6 +117,23 @@ The plan removes those re-derivations. The pick drain sits in
 `_render_windowed_metal` for the windowed path and in `render_headless` for the
 headless path — the same asymmetry the Vulkan side has.
 
+## Merge-time collision — `docs-split-large-docs`
+
+`docs-split-large-docs` merged to `main` while this change was in development and
+split `docs/Architecture.md` from 2639 lines into 364 plus 23 subject documents.
+This change had added its per-frame section to the monolithic file, so the merge
+conflicted over almost the whole document. Resolution: take `main`'s hub verbatim
+and re-home the section in **`docs/HostModules.md`**, whose stated subject —
+host module map and ownership, already holding `bringup.py`, the renderer
+carve-out pattern and the device-free pure core — is exactly where a carve-out
+stage that produces a device-free module belongs. `openspec/config.yaml` is the
+authoritative ownership map; read it rather than guessing.
+
+Lesson, and it is the same one `scene-intake-interface` recorded: run
+`git log <branch-point>..main` **before** merging, not after. A doc reorganisation
+on `main` invalidates a doc edit the same way a spun-off code fix invalidates a
+fixture.
+
 ## 1.4 — The identity target, and what "identical" can mean here
 
 The full matrix ran before and after on the same host (Metal, 128²-256²). Every

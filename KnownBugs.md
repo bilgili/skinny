@@ -85,23 +85,34 @@ tiles where Vulkan clamps.
 
 ---
 
-## 3. pbrt material mapping: four frozen divergences between the two export flavours
+## 3. pbrt material mapping: frozen divergences between the two export flavours
 
 **Observed:** 2026-07-25, while extracting the shared resolver (change
-`pbrt-material-shared-resolver`). All four **predate** that change and were
-preserved deliberately — the change's gate is byte-identical importer output, so
-fixing any of them there would have silently changed committed `.usda` fixtures.
-Each is flavour-gated in `resolve_material` with a comment pointing here.
+`pbrt-material-shared-resolver`). Four were recorded; three are now fixed (this
+entry's #1, plus the two in the closing note) and one remains. All **predate**
+that change and were preserved deliberately — the change's gate is byte-identical importer output, so fixing any
+of them there would have silently changed committed `.usda` fixtures. Each
+remaining one is flavour-gated in `resolve_material` with a comment pointing here.
 
-**1. `coatedconductor` base-metal roughness reads a different param per flavour.**
-pbrt-v4 spells the metal's roughness `conductor.roughness` (the top-level
-`roughness` drives the *coat*). The `-mtlx` path reads `conductor.roughness`
-(correct); the UsdPreviewSurface path reads top-level `roughness`, so on a
-`coatedconductor` that sets both, the two exports render a differently-rough
-metal. **Fix:** read `conductor.roughness` on both, regenerate the affected
-`.usda` fixtures, and diff the parity baselines (no suite or corpus scene uses
-`coatedconductor` today, so add one — `tests/pbrt/fixtures/all_mtypes.pbrt`
-covers the import-level behaviour but renders nothing).
+**1. FIXED** (2026-07-29, change `coatedconductor-roughness-spelling`) — the
+`coatedconductor` base-metal roughness read a different param per flavour. Both
+flavours now read `conductor.roughness` (with `conductor.uroughness` /
+`conductor.vroughness`, which **neither** read before), through the one shared
+calibration chain.
+
+The entry's premise was wrong and is corrected here for the record: it said the
+top-level `roughness` "drives the *coat*". It does not.
+`CoatedConductorMaterial::Create` reads `interface.roughness` for the coat,
+`conductor.roughness` for the metal, and **no top-level `roughness` at all** —
+pbrt does not even ignore one, it **refuses the scene** (`"roughness": unused
+parameter`, measured against the pinned pbrt v4). So the UsdPreviewSurface path
+was not reading the coat's roughness into the metal; it was reading a parameter
+no valid pbrt scene carries. `coateddiffuse` is the asymmetric case where the
+top-level spelling IS correct, and it is unchanged.
+
+Gated by the new `tests/assets/suite/mat_coated_metal/` scene: path|wavefront
+pbrt-truth relMSE **0.4287 → 0.03797**, and the plain-vs-MaterialX equivalence
+pair **0.08661 → 0.009122**.
 
 **2. Two pbrt params are read only on the `-mtlx` path** —
 `diffusetransmission` `transmittance` and `interface.eta` on
@@ -112,9 +123,87 @@ escalation) on the `-mtlx` import and nothing at all on the plain one. **Fix:**
 decide per param whether the note is worth the divergence, then read
 unconditionally and re-baseline the reports.
 
-`subsurface` `reflectance` and `radius` used to be on this list. Change
+**Fixed since:** `subsurface` `reflectance` and `radius` used to be on this list. Change
 `subsurface-promoting-accessors` removed both: `reflectance` is now resolved once
 outside the gate (the usd path already read it for the coefficient chain, so the
 gate suppressed its note rather than its read), and the `radius` read is gone —
 pbrt's `SubsurfaceMaterial::Create` defines no such param, so reading one was
 skinny inventing behaviour. Only the LOBES stay mtlx-only.
+
+---
+
+## 4. A COATED metal renders ~1.6x too bright
+
+**Observed:** 2026-07-29, on the new `tests/assets/suite/mat_coated_metal/` scene
+(a gold `coatedconductor`, `--backend metal`, path|wavefront, 128², 256 spp),
+while confirming change `coatedconductor-roughness-spelling`.
+
+**Symptom:** the sphere is visibly lighter and less saturated than pbrt's, and its
+bright region is broader — pbrt's highlight is more concentrated. Over the sphere
+disc: mean luminance **0.2917 vs pbrt 0.1818 (1.60×)**, p99 0.9713 vs 0.8124,
+mean RGB (0.350, 0.292, 0.121) vs (0.238, 0.176, 0.078).
+
+**Cause — the COAT, localized by measurement.** Same renderer, same lighting,
+sphere-region luminance ratios skinny/pbrt:
+
+| scene | coat | ratio |
+|-------|------|-------|
+| `mat_conductor`, gold, roughness 0 | none | 0.923 |
+| `mat_conductor`, gold, roughness 0.3 | none | 0.978 |
+| `mat_coated_metal`, gold, roughness 0.45 | yes | **1.604** |
+
+The BARE conductor matches pbrt (and is slightly *dark*, which is the expected
+single-scatter GGX energy loss). Only the coated one blows up, so the metal
+response is not the defect. The environment background matches to **0.999**, so
+it is not lighting either.
+
+**Probably under-attenuation rather than addition** — both renderers darken a
+metal when it is coated, skinny just less. Coated sphere ÷ bare sphere within
+each renderer: pbrt **0.298×**, skinny **0.489×**, a ratio of 1.64 that is
+suspiciously close to the 1.604 disc ratio.
+
+**That last comparison is UNCONTROLLED and is not load-bearing.** The two scenes
+differ in base roughness (0.3 vs 0.45) and geometry, so the nuisance variables
+cancel only if both renderers respond to roughness identically — assumed, not
+shown. A matching background rules out *miss* rays, not sphere illumination or
+area-light visibility, and the floor's 0.868× shows those paths already disagree.
+Establishing the mechanism needs an exact counterfactual: one scene, one sphere,
+one base roughness, the coat the only difference, rendered in both systems.
+
+What is worth carrying forward: skinny removes energy from the base only through
+the `pCoat` selection probability — one Fresnel reflection's worth —
+and `flat_material.slang:80,171` shows there is no second channel for any further
+loss, because `coatAttenuation = m.coatColor` and the importer sets
+`coat_color = [1,1,1]` for every pbrt coated material. pbrt's
+`CoatedConductorBxDF` is a stochastic layered BxDF with a medium
+(`thickness`/`albedo`) that absorbs at every crossing. Note that interface
+transmission and TIR are **redistribution, not net loss**, and that pbrt's
+`maxdepth`/`nsamples` truncation is an estimator property, not physics to
+reproduce.
+
+**Do not trust the "zero the clearcoat" probe.** Zeroing skinny's coat makes it
+*brighter* (0.930×) and still 1.73× pbrt — which looks like an acquittal of the
+coat but is not: the probe removes skinny's coat while pbrt's reference keeps its
+layered one, so it measures the wrong difference. Two earlier hypotheses died on
+the real measurements: the metal's RGB `metallic` response is fine (the named-metal
+F0 table reproduces the spectrally-integrated normal-incidence reflectance to
+within 0.3% luminance for Au/Ag/Al/Cu), and `--spectral` does not close the gap
+(0.04112 vs RGB 0.03792).
+
+**Scope / impact:** both coated types, both backends, independent of execution
+mode and of the roughness spelling. `coateddiffuse` is affected by the same
+under-attenuation, less visibly, because a Lambert base reflects far less back
+into the coat. Every combo still passes the scene's pbrt-truth gate (0.06 relMSE /
+0.08 FLIP), so this is a fidelity gap, not a regression.
+
+**Likely fix:** attenuate the base lobe by the coat's transmission, through ONE
+shared transfer function that `sample()`, `evaluate()` and
+`flatBsdfResponseSpectral` all consume. Note `(1-F)` entering and exiting is only
+~0.92 near normal incidence at IOR 1.5, so it cannot account for 1.6× alone.
+Tracked as change `coat-layer-energy`.
+
+**Repro:**
+```bash
+PYTHONPATH=src SKINNY_BACKEND=metal ./bin/python3.13 -m pytest \
+  tests/pbrt/test_suite.py -k coated -m gpu -q -s
+```

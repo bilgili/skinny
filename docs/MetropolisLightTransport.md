@@ -13,8 +13,9 @@ one of those paths, small mutations explore its neighbourhood while occasional
 large steps keep the estimator ergodic.
 
 The generic staged execution machinery is documented in
-[Wavefront.md](Wavefront.md), the BDPT target estimator and descriptor layout in
-[Architecture.md](Architecture.md), and the hero-wavelength target variant in
+[Wavefront.md](Wavefront.md), the BDPT target estimator in
+[ShaderPipeline.md](ShaderPipeline.md) and the descriptor layout in
+[GpuResources.md](GpuResources.md), and the hero-wavelength target variant in
 [Spectral.md](Spectral.md#spectral-mlt). This page owns the full MLT algorithm,
 state, host orchestration, controls, limitations, and verification map.
 

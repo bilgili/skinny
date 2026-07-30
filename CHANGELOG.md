@@ -9,6 +9,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An imported `coatedconductor` renders its metal at the roughness pbrt gives
+  it** (change `coatedconductor-roughness-spelling`). pbrt-v4 spells the base
+  metal's roughness `conductor.roughness` and the coat's `interface.roughness`.
+  The `-mtlx` import read the first; the UsdPreviewSurface import read a
+  top-level `roughness` instead, so the two exports of one scene rendered a
+  differently-rough metal. Both now read `conductor.roughness`, with
+  `conductor.uroughness` / `conductor.vroughness`, which **neither** read before
+  — an anisotropic coated metal used to import isotropic with no note. The
+  top-level read is deleted rather than kept as a fallback:
+  `CoatedConductorMaterial::Create` defines no such parameter and pbrt refuses a
+  scene that carries one, so no valid scene has a value to import.
+  `coateddiffuse` is the asymmetric case where the top-level spelling IS what
+  pbrt reads, and it is unchanged.
+
+  The coat's `interface.roughness` is now calibrated like every other roughness
+  as well. It passed through raw, so a pbrt coat roughness of 0.02 landed as
+  0.02 where pbrt renders GGX alpha 0.1414 — a far too sharp clearcoat.
+
+  On the new `tests/assets/suite/mat_coated_metal/` gate scene: pbrt-truth
+  relMSE **0.4287 → 0.03792**, and the plain-vs-MaterialX authoring-equivalence
+  pair **0.08661 → 0.009194**.
+
 - **A time-sampled light intensity no longer renders at the schema fallback**
   (change `light-emission-time-sampling`). `_light_color_radiance` in
   `usd_loader.py` read `inputs:color`, `inputs:intensity` and `inputs:exposure`
@@ -512,7 +534,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backends, ReSTIR-DI and neural render combos, and BDPT spectral were left to
   the key-equality tests + toggle smoke rather than full pbrt-truth renders.
   The reusable extraction pattern + follow-on order (detail maps → gizmo → USD
-  live-edit) is documented in Architecture.md.
+  live-edit) is documented in
+  [docs/HostModules.md](docs/HostModules.md#renderer-carve-out-pattern-change-renderer-module-carveout).
 
 - **`RenderCommandQueue` and `QtRendererProxy` moved** from
   `skinny/ui/qt/render_session.py` to `skinny/render_session.py`; the old path
@@ -1518,7 +1541,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/pbrt/test_emissive_nee.py` (correctness/energy, equal-spp variance,
   unbiasedness, `diffuse_arealight` no-regression). See
   [docs/Megakernel.md](docs/Megakernel.md) § 3.1 and the
-  [docs/Architecture.md](docs/Architecture.md) binding map (18).
+  [docs/GpuResources.md](docs/GpuResources.md) binding map (18).
 - **Neural-flow Lambert directional chart** (change
   `directional-flow-parameterization`) — the neural directional proposal's
   square↔direction map (`neural_flow.slang` `nf_square_to_hemi` /
