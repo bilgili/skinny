@@ -9,8 +9,6 @@ Qt event loop would get in the way.
 
 from __future__ import annotations
 
-import os
-import sys
 import time
 from pathlib import Path
 
@@ -19,7 +17,7 @@ import glfw
 
 from skinny.params import (
     ParamSpec, build_visible_params,
-    _get_nested, _set_nested, _snapshot_params, _apply_saved_params,
+    _get_nested, _set_nested,
 )
 from skinny.bringup import plan_bringup
 from skinny.cli_common import (
@@ -30,87 +28,17 @@ from skinny.cli_common import (
 )
 from skinny.render_session import RenderCommandQueue
 from skinny.renderer import Renderer  # noqa: F401 — re-exported; built by BringupPlan.create
+from skinny.session_snapshot import (
+    GLFW_KEYS,
+    capture_shared,
+    contribute,
+    resolve_persisted_flag,
+    restore_shared,
+)
 from skinny.settings import ensure_dirs, load_settings, save_settings
 
 # Render-area size comes from the shared --width/--height flags (default
 # 640x480, SKINNY_WIDTH/SKINNY_HEIGHT env fallbacks); see cli_common.
-
-
-def _snapshot_camera(renderer) -> dict:
-    orbit = renderer.orbit_camera
-    free = renderer.free_camera
-    return {
-        "mode": renderer.camera_mode,
-        "orbit": {
-            "yaw": float(orbit.yaw),
-            "pitch": float(orbit.pitch),
-            "distance": float(orbit.distance),
-            "fov": float(orbit.fov),
-            "target": [float(orbit.target[0]), float(orbit.target[1]), float(orbit.target[2])],
-        },
-        "free": {
-            "position": [float(free.position[0]), float(free.position[1]), float(free.position[2])],
-            "yaw": float(free.yaw),
-            "pitch": float(free.pitch),
-            "fov": float(free.fov),
-            "move_speed": float(free.move_speed),
-        },
-    }
-
-
-def _apply_saved_camera(renderer, saved_cam) -> None:
-    if not isinstance(saved_cam, dict):
-        return
-
-    def _vec3(raw, fallback):
-        if isinstance(raw, (list, tuple)) and len(raw) == 3:
-            try:
-                return np.array([float(raw[0]), float(raw[1]), float(raw[2])], dtype=np.float32)
-            except (TypeError, ValueError):
-                pass
-        return fallback
-
-    def _flt(raw, fallback):
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return fallback
-
-    orbit_raw = saved_cam.get("orbit")
-    if isinstance(orbit_raw, dict):
-        o = renderer.orbit_camera
-        o.yaw = _flt(orbit_raw.get("yaw"), o.yaw)
-        o.pitch = float(np.clip(
-            _flt(orbit_raw.get("pitch"), o.pitch), -np.pi / 2 + 0.01, np.pi / 2 - 0.01
-        ))
-        o.distance = max(0.5, _flt(orbit_raw.get("distance"), o.distance))
-        o.max_distance = max(o.max_distance, o.distance)
-        o.fov = float(np.clip(_flt(orbit_raw.get("fov"), o.fov), 1.0, 170.0))
-        o.target = _vec3(orbit_raw.get("target"), o.target)
-
-    free_raw = saved_cam.get("free")
-    if isinstance(free_raw, dict):
-        f = renderer.free_camera
-        f.position = _vec3(free_raw.get("position"), f.position)
-        f.yaw = _flt(free_raw.get("yaw"), f.yaw)
-        f.pitch = float(np.clip(
-            _flt(free_raw.get("pitch"), f.pitch), -np.pi / 2 + 0.01, np.pi / 2 - 0.01
-        ))
-        f.fov = float(np.clip(_flt(free_raw.get("fov"), f.fov), 1.0, 170.0))
-        f.move_speed = float(np.clip(_flt(free_raw.get("move_speed"), f.move_speed), 0.05, 50.0))
-
-    mode = saved_cam.get("mode")
-    if mode in ("orbit", "free"):
-        renderer.camera_mode = mode
-
-
-def _apply_saved_gizmo_mode(renderer, saved_mode) -> None:
-    """Restore the persisted transform-gizmo mode (an int 0..3)."""
-    from skinny.gizmo import GizmoMode
-    try:
-        renderer.gizmo.mode = GizmoMode(int(saved_mode))
-    except (TypeError, ValueError):
-        return
 
 
 class InputHandler:
@@ -556,35 +484,24 @@ def main() -> None:
     )
     try:
         # CLI/env --neural-handoff wins; otherwise restore the persisted backend.
-        if "--neural-handoff" not in sys.argv and not os.environ.get("SKINNY_NEURAL_HANDOFF"):
-            saved_handoff = saved.get("neural_handoff")
-            if saved_handoff in ("file", "interop", "shared"):
-                renderer._neural_handoff_kind = saved_handoff
-        # Same precedence for --neural-trainer / --train-precision (change
-        # neural-trainer-backends): CLI/env wins, else restore the persisted value.
-        if "--neural-trainer" not in sys.argv and not os.environ.get("SKINNY_NEURAL_TRAINER"):
-            saved_trainer = saved.get("neural_trainer")
-            if saved_trainer in ("cpu", "cuda", "mlx", "auto"):
-                renderer._neural_trainer_kind = saved_trainer
-        if "--train-precision" not in sys.argv and not os.environ.get("SKINNY_TRAIN_PRECISION"):
-            saved_prec = saved.get("train_precision")
-            if saved_prec in ("fp32", "fp16"):
-                renderer._train_precision = saved_prec
-        # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
-        # otherwise restore the persisted override. The sys.argv/env guard keeps an
-        # explicit CLI value (applied below, after the other CLI overrides) from
-        # being clobbered — when set there, this restore is skipped.
-        if ("--sppm-glossy-roughness" not in sys.argv
-                and not os.environ.get("SKINNY_SPPM_GLOSSY_ROUGHNESS")):
-            _sgr = saved.get("sppm_glossy_roughness")
-            if _sgr is not None:
-                renderer._sppm_glossy_roughness_override = float(_sgr)
-        # --online-training (change online-training-trigger): CLI/env wins, else
-        # restore the persisted flag. Enabling waits until the scene is ready (below).
-        online_training_requested = bool(args.online_training)
-        if ("--online-training" not in sys.argv
-                and not os.environ.get("SKINNY_ONLINE_TRAINING")):
-            online_training_requested = bool(saved.get("online_training", False))
+        # One precedence rule per persisted flag, owned by the snapshot module
+        # (change session-settings-owner): an explicit CLI flag or env var wins,
+        # else the persisted value, else the argparse default the renderer was
+        # already constructed with. `--sppm-glossy-roughness` is re-applied below
+        # via apply_sppm_glossy_roughness, which is idempotent for the CLI case.
+        renderer._neural_handoff_kind = resolve_persisted_flag(
+            "neural_handoff", args.neural_handoff, saved)
+        renderer._neural_trainer_kind = resolve_persisted_flag(
+            "neural_trainer", args.neural_trainer, saved)
+        renderer._train_precision = resolve_persisted_flag(
+            "train_precision", args.train_precision, saved)
+        _sgr = resolve_persisted_flag(
+            "sppm_glossy_roughness", args.sppm_glossy_roughness, saved)
+        if _sgr is not None:
+            renderer._sppm_glossy_roughness_override = float(_sgr)
+        # Enabling online training waits until the scene is ready (below).
+        online_training_requested = bool(resolve_persisted_flag(
+            "online_training", args.online_training, saved))
         # Display-only state for the startup configuration matrix (change
         # online-training-observability): the resolved backend and the user's
         # online-training intent (kept even if the gate below refuses, so the matrix
@@ -592,9 +509,9 @@ def main() -> None:
         renderer._requested_backend = args.backend
         renderer._online_training_requested = online_training_requested
 
-        _apply_saved_params(renderer, saved.get("params", {}))
-        _apply_saved_camera(renderer, saved.get("camera"))
-        _apply_saved_gizmo_mode(renderer, saved.get("gizmo_mode"))
+        # Params + camera + gizmo mode, restored by the snapshot owner (change
+        # session-settings-owner) — one rule, shared with `skinny-gui`.
+        restore_shared(renderer, saved)
         # CLI --integrator (when given) wins over the persisted value for this launch.
         if args.integrator is not None:
             renderer.integrator_index = INTEGRATOR_INDEX[args.integrator]
@@ -679,22 +596,15 @@ def main() -> None:
             debug_viewport.update(dt)
             debug_viewport.render(renderer)
 
+        # The snapshot owner captures every renderer-owned key; this front-end
+        # contributes only what no renderer can produce — the window position.
+        # `save_settings` merges, so `skinny-gui`'s dock layout survives.
         try:
-            out: dict = {
-                "backend": plan.backend,
-                "vulkan_window": _window_pos_dict(window),
-                "params": _snapshot_params(renderer, input_handler.params),
-                "camera": _snapshot_camera(renderer),
-                "gizmo_mode": int(renderer.gizmo.mode),
-                "neural_handoff": renderer._neural_handoff_kind,
-                "neural_trainer": renderer._neural_trainer_kind,
-                "train_precision": renderer._train_precision,
-                "online_training": bool(online_training_requested),
-                "encoding": renderer._neural_config.encoding.value,
-                "sppm_glossy_roughness": getattr(
-                    renderer, "_sppm_glossy_roughness_override", None),
-            }
-            save_settings(out)
+            save_settings(contribute(
+                capture_shared(renderer, backend=plan.backend),
+                _contributed_session_state(window),
+                owned=GLFW_KEYS,
+            ))
         except OSError:
             pass
 
@@ -713,6 +623,13 @@ def main() -> None:
 def _window_pos_dict(window) -> dict[str, int]:
     pos = glfw.get_window_pos(window)
     return {"x": int(pos[0]), "y": int(pos[1])}
+
+
+def _contributed_session_state(window) -> dict:
+    """This front-end's own settings keys — must equal
+    `session_snapshot.GLFW_KEYS`, which `contribute` enforces.
+    """
+    return {"vulkan_window": _window_pos_dict(window)}
 
 
 if __name__ == "__main__":

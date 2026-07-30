@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import TimeoutError
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -26,11 +25,16 @@ from PySide6.QtWidgets import (
     QLineEdit, QMainWindow, QPlainTextEdit, QScrollArea, QTextEdit, QWidget,
 )
 
-import numpy as np
-
 from skinny.bringup import BringupPlan, plan_bringup
 from skinny.cli_common import add_render_flags, resolve_mcp_roots
-from skinny.params import _apply_saved_params, _snapshot_params, build_all_params
+from skinny.session_snapshot import (
+    QT_KEYS,
+    capture_shared,
+    contribute,
+    resolve_persisted_flag,
+    restore_params,
+    restore_shared,
+)
 from skinny.settings import (
     ensure_dirs,
     get_last_dir,
@@ -447,35 +451,18 @@ class MainWindow(QMainWindow):
         data = self._saved_settings or {}
 
         try:
-            _apply_saved_params(
-                self.renderer, data.get("params", {}),
-                build_all_params(self.renderer),
-            )
+            restore_params(self.renderer, data)
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to apply saved params: %s", exc)
 
         def restore_renderer(renderer, data=data) -> None:
+            # Params + camera + gizmo mode through the snapshot owner (change
+            # session-settings-owner) — the same rule `skinny` restores by.
             try:
-                _apply_saved_params(
-                    renderer, data.get("params", {}),
-                    build_all_params(renderer),
-                )
+                restore_shared(renderer, data)
+                renderer._update_light()
             except Exception as exc:  # noqa: BLE001
-                log.warning("Failed to apply saved params on render thread: %s", exc)
-            cam = data.get("camera")
-            if isinstance(cam, dict):
-                try:
-                    _apply_camera_snapshot(renderer, cam)
-                    renderer._update_light()
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Failed to apply saved camera on render thread: %s", exc)
-            gm = data.get("gizmo_mode")
-            if gm is not None:
-                try:
-                    from skinny.gizmo import GizmoMode
-                    renderer.gizmo.mode = GizmoMode(int(gm))
-                except (TypeError, ValueError):
-                    pass
+                log.warning("Failed to restore session state on render thread: %s", exc)
 
         self.viewport.post_render_command(restore_renderer)
 
@@ -515,23 +502,33 @@ class MainWindow(QMainWindow):
                 pass
 
     def _snapshot_session_state(self) -> dict:
-        """Capture params, camera, open docks, and Qt dock geometry."""
-        out: dict = {}
+        """The full snapshot: the shared renderer-owned section + this
+        front-end's own keys.
+
+        The shared section is captured ON the render thread, which owns the live
+        renderer. A timeout falls back to the keys this thread knows on its own —
+        `backend`, which the window was handed at construction. The rest is left
+        out rather than guessed off the proxy: `save_settings` merges, so the
+        previous values stay on disk.
+        """
+        backend = self._backend_name
+        shared: dict = {"backend": backend}
         try:
-            future = self.renderer.request(lambda renderer: {
-                "params": _snapshot_params(renderer, build_all_params(renderer)),
-                "camera": _snapshot_camera(renderer),
-                "gizmo_mode": int(renderer.gizmo.mode),
-                "encoding": renderer._neural_config.encoding.value,
-                "sppm_glossy_roughness": getattr(
-                    renderer, "_sppm_glossy_roughness_override", None),
-            })
-            render_state = future.result(timeout=2.0)
-            out.update(render_state)
+            future = self.renderer.request(
+                lambda renderer: capture_shared(renderer, backend=backend),
+            )
+            shared = future.result(timeout=2.0)
         except TimeoutError:
             log.warning("Timed out waiting for renderer settings snapshot")
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to snapshot renderer-owned state: %s", exc)
+        return contribute(shared, self._contributed_session_state(), owned=QT_KEYS)
+
+    def _contributed_session_state(self) -> dict:
+        """This front-end's own settings keys — must equal
+        `session_snapshot.QT_KEYS`, which `contribute` enforces.
+        """
+        out: dict = {}
         open_docks: list[str] = []
         for name, dock in (
             ("scene_graph", self._scene_graph_dock),
@@ -544,12 +541,6 @@ class MainWindow(QMainWindow):
                 open_docks.append(name)
         out["open_docks"] = open_docks
         out["last_dirs"] = last_dirs_snapshot()
-        out["backend"] = self._backend_name
-        out.setdefault("encoding", getattr(self.renderer, "_encoding", "E0"))
-        out.setdefault(
-            "sppm_glossy_roughness",
-            getattr(self.renderer, "_sppm_glossy_roughness", None),
-        )
         try:
             out["section_states"] = self._tree_builder.section_states()
         except Exception as exc:  # noqa: BLE001
@@ -580,76 +571,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         super().closeEvent(event)
-
-
-def _snapshot_camera(renderer) -> dict:
-    orbit = renderer.orbit_camera
-    free = renderer.free_camera
-    return {
-        "mode": renderer.camera_mode,
-        "orbit": {
-            "yaw": float(orbit.yaw),
-            "pitch": float(orbit.pitch),
-            "distance": float(orbit.distance),
-            "fov": float(orbit.fov),
-            "target": [float(orbit.target[0]), float(orbit.target[1]), float(orbit.target[2])],
-        },
-        "free": {
-            "position": [float(free.position[0]), float(free.position[1]), float(free.position[2])],
-            "yaw": float(free.yaw),
-            "pitch": float(free.pitch),
-            "fov": float(free.fov),
-            "move_speed": float(free.move_speed),
-        },
-    }
-
-
-def _apply_camera_snapshot(renderer, saved_cam) -> None:
-    """Restore ``orbit_camera`` + ``free_camera`` from a snapshot dict.
-    Out-of-range / missing values fall back to the renderer's defaults.
-    """
-    if not isinstance(saved_cam, dict):
-        return
-
-    def _vec3(raw, fallback):
-        if isinstance(raw, (list, tuple)) and len(raw) == 3:
-            try:
-                return np.array([float(raw[0]), float(raw[1]), float(raw[2])], dtype=np.float32)
-            except (TypeError, ValueError):
-                pass
-        return fallback
-
-    def _flt(raw, fallback):
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return fallback
-
-    orbit_raw = saved_cam.get("orbit")
-    if isinstance(orbit_raw, dict):
-        o = renderer.orbit_camera
-        o.yaw = _flt(orbit_raw.get("yaw"), o.yaw)
-        o.pitch = float(np.clip(
-            _flt(orbit_raw.get("pitch"), o.pitch), -np.pi / 2 + 0.01, np.pi / 2 - 0.01
-        ))
-        o.distance = float(np.clip(_flt(orbit_raw.get("distance"), o.distance), 0.5, 50.0))
-        o.fov = float(np.clip(_flt(orbit_raw.get("fov"), o.fov), 1.0, 170.0))
-        o.target = _vec3(orbit_raw.get("target"), o.target)
-
-    free_raw = saved_cam.get("free")
-    if isinstance(free_raw, dict):
-        f = renderer.free_camera
-        f.position = _vec3(free_raw.get("position"), f.position)
-        f.yaw = _flt(free_raw.get("yaw"), f.yaw)
-        f.pitch = float(np.clip(
-            _flt(free_raw.get("pitch"), f.pitch), -np.pi / 2 + 0.01, np.pi / 2 - 0.01
-        ))
-        f.fov = float(np.clip(_flt(free_raw.get("fov"), f.fov), 1.0, 170.0))
-        f.move_speed = float(np.clip(_flt(free_raw.get("move_speed"), f.move_speed), 0.05, 50.0))
-
-    mode = saved_cam.get("mode")
-    if mode in ("orbit", "free"):
-        renderer.camera_mode = mode
 
 
 def main() -> None:
@@ -685,23 +606,29 @@ def main() -> None:
     # on the Qt render thread, from this plan.
     plan = plan_bringup(args, prog="skinny-gui", persisted=saved_settings)
 
-    # --sppm-glossy-roughness (SPPM glossy-continue threshold): CLI/env wins;
-    # else restore the persisted override. None leaves the renderer's built-in.
-    sppm_glossy_roughness_value = args.sppm_glossy_roughness
-    if ("--sppm-glossy-roughness" not in sys.argv
-            and not os.environ.get("SKINNY_SPPM_GLOSSY_ROUGHNESS")):
-        saved_sgr = saved_settings.get("sppm_glossy_roughness")
-        if saved_sgr is not None:
-            sppm_glossy_roughness_value = float(saved_sgr)
+    # Persisted flags (change session-settings-owner): an explicit CLI flag or
+    # env var wins, else the persisted value, else the argparse default. These
+    # are the flags `cli_common` documents as persisted on the interactive
+    # front-ends; `skinny-gui` used to restore only the SPPM threshold and erase
+    # the rest, so the documented behaviour held on `skinny` alone.
+    def _persisted(key, cli_value):
+        return resolve_persisted_flag(key, cli_value, saved_settings)
+
+    sppm_glossy_roughness_value = _persisted(
+        "sppm_glossy_roughness", args.sppm_glossy_roughness)
+    neural_handoff_value = _persisted("neural_handoff", args.neural_handoff)
+    neural_trainer_value = _persisted("neural_trainer", args.neural_trainer)
+    train_precision_value = _persisted("train_precision", args.train_precision)
+    online_training_value = bool(_persisted("online_training", args.online_training))
 
     app = QApplication(sys.argv)
     win = MainWindow(args.scene, args.gpu, args.usdMtlx, plan.execution_mode,
                      plan.bdpt_walk, args.integrator,
                      plan=plan,
-                     neural_handoff=args.neural_handoff,
-                     neural_trainer=args.neural_trainer,
-                     train_precision=args.train_precision,
-                     online_training=args.online_training,
+                     neural_handoff=neural_handoff_value,
+                     neural_trainer=neural_trainer_value,
+                     train_precision=train_precision_value,
+                     online_training=online_training_value,
                      reuse=args.reuse,
                      lobe_samplers=args.lobe_samplers,
                      backend=plan.backend,

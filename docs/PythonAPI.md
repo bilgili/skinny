@@ -826,17 +826,72 @@ This mirrors the graphical editor's own save action.
 ```python
 def ensure_dirs() -> None                             # :41
 def load_settings() -> dict[str, Any]                 # :49
-def save_settings(data: dict[str, Any]) -> None       # :60   (atomic tmp + os.replace)
-def get_last_dir(category) -> str                     # :86
-def record_last_dir(category, directory) -> None      # :99
-def load_user_presets() -> list[Preset]               # :129
-def save_user_preset(name, values) -> Path            # :153
-def delete_user_preset(name) -> bool                  # :168
+def save_settings(data: dict[str, Any]) -> None       # :60   (merge, then atomic tmp + os.replace)
+def get_last_dir(category) -> str                     # :102
+def record_last_dir(category, directory) -> None      # :115
+def last_dirs_snapshot() -> dict[str, str]            # :130
+def load_user_presets() -> list[Preset]               # :145
 ```
 
 Constants: `SETTINGS_DIR` (`~/.skinny`), `PRESETS_DIR`, `MESH_CACHE_DIR`,
 `SETTINGS_FILE`. `settings.json` holds window geometry + parameter snapshot +
 camera; user presets are one JSON per file.
+
+`save_settings` **merges** the supplied keys into the file on disk (change
+`session-settings-owner`). A writer can only add or update its own keys, so a
+front-end can no longer delete another front-end's state by exiting. A missing or
+corrupt file loads as `{}`, so the write replaces it rather than propagating it.
+`skinny.session_snapshot` owns which keys exist.
+
+Presets are read-only: no front-end writes or deletes a preset file, so
+`save_user_preset` and `delete_user_preset` are deleted (change
+`session-settings-owner`). Drop a JSON file in `~/.skinny/presets/` and
+`load_user_presets` reads it.
+
+### `skinny.session_snapshot` — the persisted session schema
+
+```python
+SHARED_KEYS: frozenset[str]        # renderer-owned: params, camera, gizmo_mode, backend,
+                                   # encoding, sppm_glossy_roughness, neural_handoff,
+                                   # neural_trainer, train_precision, online_training
+GLFW_KEYS: frozenset[str]          # `skinny`-owned: vulkan_window
+QT_KEYS: frozenset[str]            # `skinny-gui`-owned: open_docks, last_dirs,
+                                   # section_states, qt_geometry, qt_dock_state
+CONTRIBUTED_KEYS = GLFW_KEYS | QT_KEYS
+DECLARED_KEYS = SHARED_KEYS | CONTRIBUTED_KEYS
+PERSISTED_FLAGS: dict[str, tuple[str, str, Any]]      # key → (flag, env var, validator)
+
+def capture_shared(renderer, *, backend: str) -> dict  # every renderer-owned key
+def restore_shared(renderer, data) -> None             # params + camera + gizmo mode
+def restore_params(renderer, data) -> None             # parameters alone
+def capture_camera(renderer) -> dict
+def restore_camera(renderer, saved_cam) -> None
+def restore_gizmo_mode(renderer, saved_mode) -> None
+def contribute(shared, contributed, *, owned) -> dict  # refuses a key `owned` does not declare
+def resolve_persisted_flag(key, cli_value, saved, *, argv=None, environ=None)
+```
+
+Both interactive front-ends consume this module; neither authors the dict. Call
+`capture_shared` with a live renderer, on the thread that owns it —
+`skinny-gui` calls it inside a render-thread request. Rules the module enforces:
+
+- **Parameters are captured unfiltered** (`build_all_params`). Visibility governs
+  what a front-end displays, never what the snapshot stores.
+- **One camera restore rule.** A persisted orbit distance beyond the cap raises
+  `max_distance` to fit it. No front-end clamps the distance.
+- **Restore steps are fault-isolated.** Parameters, camera and gizmo mode restore
+  independently, so a settings file that breaks one still returns the others.
+- **`contribute` refuses any key its `owned` section does not declare** —
+  per-front-end, not against the union, because the owning front-end would erase a
+  foreign key on its next exit. Declare a new key in `GLFW_KEYS` or `QT_KEYS`
+  first.
+- **`backend` and `encoding` are declared here but restored by
+  `plan_bringup(persisted=…)`**: they are session-fixed bring-up inputs, read
+  before a renderer exists. This module owns the key; `bringup.py` owns what a
+  startup value does.
+- **`resolve_persisted_flag` is the one precedence rule** for the flags
+  `cli_common` documents as persisted: an explicit CLI flag or environment
+  variable wins, else the persisted value, else the argparse default.
 
 ### `skinny.presets`
 

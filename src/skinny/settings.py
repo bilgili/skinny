@@ -7,10 +7,11 @@ Layout::
         presets/
             <name>.json        # one user-saved preset per file
 
-`settings.json` is rewritten atomically on exit via tmp-file + replace. Every
-field is optional — a missing file, missing key, or out-of-range value falls
-back to the in-code default so a corrupted/partial settings file can never
-brick startup.
+`settings.json` is merged with the on-disk file and rewritten atomically on exit
+via tmp-file + replace, so a front-end can only add or update its own keys.
+Every field is optional — a missing file, missing key, or out-of-range value
+falls back to the in-code default so a corrupted/partial settings file can never
+brick startup. `skinny.session_snapshot` owns which keys exist.
 """
 
 from __future__ import annotations
@@ -58,10 +59,25 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(data: dict[str, Any]) -> None:
+    """Merge ``data`` into the settings already on disk, then rewrite atomically.
+
+    Merge, never replace (change session-settings-owner): the two interactive
+    front-ends own overlapping-but-different key sets, so a wholesale write let
+    each erase the other's keys on exit — closing `skinny-gui` dropped
+    `vulkan_window` and the neural keys, closing `skinny` dropped the Qt dock
+    layout. A writer that does not know the full schema can now only add or
+    update its own keys.
+
+    Nested values are replaced whole, not deep-merged: the writer of a key owns
+    that key's entire value. `load_settings` yields {} for a missing or corrupt
+    file, so a corrupt file is replaced rather than propagated.
+    """
     ensure_dirs()
+    merged = load_settings()
+    merged.update(data)
     tmp = SETTINGS_FILE.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
+        json.dump(merged, fh, indent=2, sort_keys=True)
     os.replace(tmp, SETTINGS_FILE)
 
 
@@ -150,28 +166,8 @@ def load_user_presets() -> list[Preset]:
     return presets
 
 
-def save_user_preset(name: str, values: dict[str, float]) -> Path:
-    ensure_dirs()
-    safe = _sanitize_filename(name)
-    path = PRESETS_DIR / f"{safe}.json"
-    payload = {
-        "name": name,
-        "values": {k: float(v) for k, v in values.items()},
-    }
-    tmp = path.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
-    os.replace(tmp, path)
-    return path
-
-
-def delete_user_preset(name: str) -> bool:
-    safe = _sanitize_filename(name)
-    path = PRESETS_DIR / f"{safe}.json"
-    if path.exists():
-        try:
-            path.unlink()
-            return True
-        except OSError:
-            return False
-    return False
+# `save_user_preset` / `delete_user_preset` lived here with zero callers in
+# `src/` or `tests/` — write surface for a Tk Delete button that no longer
+# exists (change session-settings-owner). Deleted; each is eight lines if the
+# button returns. Presets are still read: drop a JSON file in ~/.skinny/presets/
+# and `load_user_presets` picks it up.
