@@ -22,7 +22,7 @@
       this is a behaviour fix (the probe was always true) and measure: run the
       Metal wavefront suite before and after and diff images.
 - [x] 2.3 Replace the 12 `descriptor_sets is None` gates.
-- [ ] 2.4 Hostless test: no attribute-presence backend probe remains.
+- [x] 2.4 Hostless test: no attribute-presence backend probe remains.
 
 ## 3. Stage 2 — naming and argument domains
 
