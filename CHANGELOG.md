@@ -9,6 +9,37 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Closing one interactive front-end no longer erases the other's settings**
+  (change `session-settings-owner`). `save_settings` wrote the supplied dict
+  wholesale, and `skinny` and `skinny-gui` each authored their own 11-key
+  snapshot with only 6 keys in common. So closing `skinny-gui` deleted
+  `vulkan_window`, `neural_handoff`, `neural_trainer`, `train_precision` and
+  `online_training`; closing `skinny` deleted `open_docks`, `last_dirs`,
+  `section_states`, `qt_geometry` and `qt_dock_state`. Settings are now
+  **merged** into the file on disk, so a writer can only add or update its own
+  keys. An existing `~/.skinny/settings.json` keeps working.
+
+  `skinny.session_snapshot` now owns the schema: the front-ends contribute their
+  own keys and no longer author the dict. Three divergences went with the
+  duplication:
+
+  - **A wide orbit distance survives on `skinny-gui`.** It clamped a restored
+    orbit distance to 50 and ignored `max_distance`; `skinny` raised the cap to
+    fit. There is one rule now — the `skinny` one — so a persisted distance past
+    the cap moves the cap, not the view. Qt users with a persisted distance above
+    50 will see their restored camera further out than before, which is the view
+    they left.
+  - **A scene with authored lighting no longer discards the fallback-light
+    parameters.** `skinny` snapshotted the visibility-filtered parameter set, so
+    `env_index`, `env_intensity`, `direct_light_index` and `light_*` were dropped
+    at capture time whenever the scene had its own lights. Capture is unfiltered;
+    visibility governs only what is displayed.
+  - **`--neural-handoff`, `--neural-trainer`, `--train-precision` and
+    `--online-training` are persisted and restored on `skinny-gui` too**, which
+    is what the CLI help has claimed all along. `online_training` records the
+    intent, so a session that refused the loop for a missing prerequisite no
+    longer turns the preference off.
+
 - **An imported `coatedconductor` renders its metal at the roughness pbrt gives
   it** (change `coatedconductor-roughness-spelling`). pbrt-v4 spells the base
   metal's roughness `conductor.roughness` and the coat's `interface.roughness`.
@@ -78,8 +109,41 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fallback. The adjacent bare `except Exception: pass` around the dome fold now
   reports the failure instead of silently reporting an intensity of 1.0.
 
+### Removed
+
+- `settings.save_user_preset` / `settings.delete_user_preset` (change
+  `session-settings-owner`) — write surface for a Tk Delete button that no longer
+  exists, with zero callers. Presets are still read from `~/.skinny/presets/`.
+
 ### Changed
 
+- **The headless Python API resolves its GPU backend instead of assuming Vulkan**
+  (change `headless-backend-auto`). `HeadlessRenderer` hard-coded
+  `backend="vulkan"` on its direct-Python path — the one path that does not go
+  through `bringup.plan_bringup` — so it never reached `select_backend`. Three
+  things followed: `SKINNY_BACKEND` was ignored, `backend="auto"` was not even a
+  legal argument (the unresolved string reached `make_context`, which raises
+  `unknown backend 'auto'`), and every Apple-Silicon caller silently rendered
+  through MoltenVK. The argument now goes through the same selector every other
+  runner uses, so the precedence is `backend=` > `SKINNY_BACKEND` > `auto`, and
+  `auto` picks native Metal on an Apple-Silicon host.
+
+  **This changes the default backend.** A caller that relied on the implicit
+  Vulkan default — the three module-level wrappers `render_to_array` /
+  `render_scene` / `render_animation` included — now renders on Metal on this
+  class of host. Pass `backend="vulkan"` to keep the MoltenVK path. Every other
+  in-tree call site, the parity harness included, already passed an explicit
+  backend and is unaffected.
+
+  The signature default is `None`, not the string `"auto"`, and the distinction
+  is load-bearing: `select_backend` reads `prefer or env or persisted or "auto"`,
+  so a literal `"auto"` would outrank `SKINNY_BACKEND` rather than defer to it.
+  `None` is what argparse hands the four front-ends. No persisted setting
+  participates — the direct API is non-interactive, like `skinny-render`.
+
+  What this does **not** buy: the Vulkan SDK library path is still required to
+  *import* the renderer on either backend, because `renderer.py` imports
+  `vulkan` at module load. Choosing Metal picks the device, not the import graph.
 - **The per-frame path is scene sync, a pure frame plan, and execution**
   (change `frame-plan-split`). One `update()` + `render()` pair carried roughly
   34 distinct responsibilities, and `render_headless()` held a near-verbatim

@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 class Preset:
     name: str
     values: dict[str, float] = field(default_factory=dict)
-    # False for user-saved presets loaded from ~/.skinny/presets/. The Tk
-    # Delete button only operates on non-builtin entries.
+    # False for user-saved presets loaded from ~/.skinny/presets/. Read-only
+    # today: no front-end writes or deletes a preset file.
     is_builtin: bool = True
 
 

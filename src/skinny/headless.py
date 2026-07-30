@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 
+from skinny.backend_select import select_backend
 from skinny.bringup import BringupPlan, plan_bringup
 from skinny.cli_common import add_render_flags, neural_config_from_args, resolve_walk
 
@@ -132,17 +133,26 @@ def _repo_root() -> Path:
 class HeadlessRenderer:
     """Windowless renderer that persists across calls.
 
-    Use as a context manager so the Vulkan context is always torn down:
+    Use as a context manager so the GPU context is always torn down:
 
         with HeadlessRenderer(1920, 1080) as r:
             for i in range(120):
                 mutate(stage)
                 r.render_scene(stage, f"out/{i:04d}.png", samples=64)
+
+    ``backend`` takes the same tokens as the ``--backend`` flag (``auto`` /
+    ``metal`` / ``vulkan``) and is resolved through the shared
+    :func:`skinny.backend_select.select_backend`, so the precedence is
+    ``backend=`` > ``SKINNY_BACKEND`` > ``auto`` — the chain every other
+    front-end uses. Leaving it unset therefore renders on native Metal on an
+    Apple-Silicon host and on Vulkan everywhere else. No persisted setting
+    participates: the direct Python API is non-interactive, like
+    ``skinny-render``.
     """
 
     def __init__(self, width: int, height: int, *, gpu: Optional[str] = None,
                  plan: Optional[BringupPlan] = None,
-                 backend: str = "vulkan",
+                 backend: Optional[str] = None,
                  execution_mode: str = "megakernel", bdpt_walk: str = "fused",
                  proposals: Optional[str] = None, reuse: Optional[str] = None,
                  lobe_samplers: Optional[str] = None,
@@ -157,8 +167,19 @@ class HeadlessRenderer:
             # guarded plan from plan_bringup instead. Conditioner encoding
             # (axis 2) is a build dim: E0/None keeps neural_config=None → the
             # renderer's default → byte-identical SPIR-V.
+            #
+            # `backend` is resolved here — the one step plan_bringup owns that
+            # this path would otherwise skip. Precedence is the shared chain
+            # `backend=` > SKINNY_BACKEND > 'auto', which is why the default is
+            # None and not the string "auto": select_backend reads `prefer or
+            # env or …`, so a literal "auto" would win over SKINNY_BACKEND
+            # instead of deferring to it. None mirrors argparse's
+            # `--backend default=None` on the four front-ends exactly.
+            # `persisted=None` (the parameter's own default) because the direct
+            # API, like `skinny-render`, reads no ~/.skinny/settings.json.
+            # A resolved plan (the `plan is not None` branch) already ran this.
             plan = BringupPlan(
-                prog="skinny-render", backend=backend,
+                prog="skinny-render", backend=select_backend(backend),
                 execution_mode=execution_mode, startup_integrator="path",
                 spectral=spectral, bdpt_walk=resolve_walk(bdpt_walk),
                 encoding=encoding,

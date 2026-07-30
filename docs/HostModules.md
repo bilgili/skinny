@@ -1,8 +1,8 @@
 # Skinny — Host Module Map and Ownership
 
 This document covers the Python host side: the module map, the front-end
-bring-up builder, the renderer carve-out pattern, and the device-free pure
-core.
+bring-up builder, the session snapshot owner, the renderer carve-out pattern, and
+the device-free pure core.
 
 For the per-file listing see [ImplementationMap.md](ImplementationMap.md).
 For the renderer overview see [Architecture.md](Architecture.md).
@@ -104,6 +104,70 @@ the pieces.
 
 ---
 
+## Session snapshot (`session_snapshot.py`, change `session-settings-owner`)
+
+The persisted session — what `~/.skinny/settings.json` holds — has **one
+owner**. `settings.py` owns the file; `session_snapshot.py` owns the schema.
+
+`skinny` and `skinny-gui` each used to author their own 11-key dict, and
+`save_settings` wrote it wholesale. The two key sets intersected in 6, so each
+front-end **deleted five of the other's keys** on exit. Two fixes, at two
+different boundaries:
+
+1. **`save_settings` merges.** It loads the file, updates the supplied keys, and
+   writes. One change protects every writer, including a future one that does not
+   know the whole schema.
+2. **One declared schema.** The front-ends contribute their own keys; they never
+   author the dict.
+
+| Section | Keys | Owner |
+|---|---|---|
+| shared | `params`, `camera`, `gizmo_mode`, `backend`, `encoding`, `sppm_glossy_roughness`, `neural_handoff`, `neural_trainer`, `train_precision`, `online_training` | the renderer — `capture_shared` / `restore_shared` |
+| `GLFW_KEYS` | `vulkan_window` | `skinny` (`app.py::_contributed_session_state`) |
+| `QT_KEYS` | `open_docks`, `last_dirs`, `section_states`, `qt_geometry`, `qt_dock_state` | `skinny-gui` (`ui/qt/app.py::MainWindow._contributed_session_state`) |
+
+A contributed section is **opaque**: the module preserves a Qt geometry blob
+without interpreting it. `contribute(shared, contributed, owned=…)` **refuses**
+any key the caller's own section does not declare — per-front-end, not against
+the union, so `skinny` cannot write a Qt-owned key that `skinny-gui` would erase
+on its next exit. Declare a new key in `GLFW_KEYS` or `QT_KEYS` first.
+
+`restore_shared` restores parameters, camera and gizmo mode with **independent
+fault isolation**: a settings file that breaks one step still returns the others.
+`backend` and `encoding` are declared here but restored by
+`plan_bringup(persisted=…)` — they are session-fixed bring-up inputs, read before
+a renderer exists. This module owns the key; the bring-up builder owns what a
+startup value does.
+
+`skinny-web` and `skinny-render` still do not persist. That asymmetry is the
+bring-up decision above (`persisted=None`), and it stays.
+
+Three divergences the duplication had grown, each now decided once:
+
+- **Camera restore.** `skinny` raised `max_distance` to fit a restored orbit
+  distance; `skinny-gui` clamped the distance to 50 and ignored the cap. The
+  module keeps the `skinny` rule, because `max_distance` is the cap authority and
+  the clamp destroyed a legitimately persisted wide view.
+- **Captured parameter set.** `skinny` captured `build_visible_params`, which
+  drops the fallback-light parameters under a scene with authored lighting —
+  losing them permanently. Capture uses `build_all_params`; visibility governs
+  display and restore, not storage.
+- **Persisted flags.** `resolve_persisted_flag` + the `PERSISTED_FLAGS` table are
+  the one precedence rule for the flags `cli_common` documents as persisted
+  (`--neural-handoff`, `--neural-trainer`, `--train-precision`,
+  `--online-training`, `--sppm-glossy-roughness`): an explicit CLI flag or
+  environment variable wins, else the persisted value, else the argparse default.
+  `skinny-gui` restored only the SPPM threshold before, so the documented
+  persistence held on one front-end of two.
+
+`tests/test_session_settings.py` is the gate: both erasure directions, the
+corrupt-file case, a capture/restore round trip, the refusal, and each
+front-end's contributed key set. The key-set check reads the front-end **source**
+(AST), because neither front-end module imports without `vulkan` — an
+import-based check would skip on a Metal-only host, and a skip reads as a pass.
+
+---
+
 ## Python Modules
 
 | Module | Key Classes | Purpose |
@@ -148,7 +212,8 @@ the pieces.
 | `lens_optics.py` | — | PBRT-v3 thick-lens helpers |
 | `debug_viewport.py` | `DebugViewport` | Camera/lens/wireframe debug renderer |
 | `presets.py` | `Preset` | 12 built-in skin presets (Fitzpatrick I–VI × Female/Male) |
-| `settings.py` | — | Persistent storage at `~/.skinny/` (JSON) |
+| `settings.py` | — | Persistent storage at `~/.skinny/` (JSON); `save_settings` merges into the file on disk |
+| `session_snapshot.py` | — | The persisted session schema: shared (renderer-owned) + front-end-contributed keys, capture/restore, one camera rule, persisted-flag precedence |
 | `tattoos.py` | `Tattoo` | Procedural + image-based tattoo loading |
 | `head_textures.py` | `TextureStats` | Detail map loading (normal, roughness, displacement) at 2048² |
 | `scene_intake.py` | — | USD stage → `SceneUpdate` value; the one interface the renderer consumes |
