@@ -13,7 +13,12 @@ modes see [Megakernel.md](Megakernel.md) / [Wavefront.md](Wavefront.md).
 > **Build prerequisite.** The Slang generator `PyMaterialXGenSlang` is **not** in
 > the PyPI MaterialX wheel — build MaterialX from source with
 > `-DMATERIALX_BUILD_PYTHON=ON -DMATERIALX_BUILD_GEN_SLANG=ON`. See `README.md`.
-> Vulkan also needs the SDK on `DYLD_LIBRARY_PATH` (`VULKAN_SDK/lib`).
+> Vulkan also needs the SDK on `DYLD_LIBRARY_PATH` (`VULKAN_SDK/lib`) — and that
+> holds **even for a Metal-backend render**: `renderer.py` imports `vulkan` at
+> module load, and `import vulkan` itself raises
+> `Cannot find Vulkan SDK version` without the library path. Choosing Metal
+> picks the *device*, not the import graph; lifting that module-load import is a
+> separate follow-up.
 
 ---
 
@@ -76,7 +81,17 @@ to unit radiance (its reflectance sibling is `upsample_reflectance(rgb, lam)`).
 The public offscreen interface. Accepts a USD file path **or** an already-open
 `Usd.Stage`, holds the GPU context across calls, and returns RGBA8 pixels.
 
-![Headless API flow: a module wrapper or HeadlessRenderer context manager owns a windowless VulkanContext + Renderer; render_headless returns RGBA8 bytes that become a NumPy array or an image file.](diagrams/headless_api.svg)
+The backend is **resolved, not assumed** (change `headless-backend-auto`): the
+`backend=` argument goes through the same
+[`select_backend`](Backends.md) every other front-end uses, so precedence is
+`backend=` > `SKINNY_BACKEND` > `auto`, and `auto` picks native Metal on an
+Apple-Silicon host. Leaving the argument unset therefore renders on Metal here
+and on Vulkan elsewhere. Pass `backend="vulkan"` to pin the MoltenVK path. No
+persisted setting participates — the direct API is non-interactive, like
+`skinny-render`. The Vulkan SDK library path is still required to *import* the
+renderer on either backend (see the build-prerequisite note above).
+
+![Headless API flow: a module wrapper or HeadlessRenderer context manager owns a windowless GPU context — Metal or Vulkan, resolved by select_backend — plus a Renderer; render_headless returns RGBA8 bytes that become a NumPy array or an image file.](diagrams/headless_api.svg)
 
 ```python
 Source = Union[str, Path, "Usd.Stage", object]   # headless.py:24
@@ -114,7 +129,7 @@ context manager.
 class HeadlessRenderer:                                                  # :128
     def __init__(self, width, height, *, gpu=None,
                  plan=None,                    # a skinny.bringup.BringupPlan
-                 backend="vulkan",
+                 backend=None,                  # None → SKINNY_BACKEND → auto
                  execution_mode="megakernel", bdpt_walk="fused",
                  proposals=None, reuse=None, lobe_samplers=None,
                  encoding=None, spectral=False): ...                     # :139
@@ -140,6 +155,9 @@ in, so the context and `Renderer` are built by `plan.create(...)`. Direct
 Python callers leave it `None` and pass the individual kwargs — those become a
 plan internally, so there is one construction path either way (see
 [HostModules.md § Front-end bring-up](HostModules.md#front-end-bring-up-bringuppy-change-frontend-bringup-builder)).
+On that direct path `HeadlessRenderer` runs the one bring-up step the kwargs
+would otherwise skip, `select_backend` — so the backend is resolved exactly once
+either way, and `backend="auto"` is legal here as on the CLI.
 
 ```python
 with sk.HeadlessRenderer(1024, 1024, execution_mode="wavefront") as r:

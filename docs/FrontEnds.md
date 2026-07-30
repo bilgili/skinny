@@ -19,7 +19,9 @@ renderer overview see [Architecture.md](Architecture.md).
 `Renderer.set_usd_scene()` — a three-line caller of `apply_scene_update` with a
 `scene_intake.adopt_scene` update — with no window or event loop. Key symbols:
 
-- `HeadlessRenderer(w, h)` — context-manager that owns `VulkanContext` +
+- `HeadlessRenderer(w, h)` — context-manager that owns the resolved GPU context
+  (`MetalContext` or `VulkanContext` — `backend=` > `SKINNY_BACKEND` > `auto`
+  through the shared `select_backend`, change `headless-backend-auto`) +
   `Renderer` (built through the shared
   [bring-up builder](HostModules.md#front-end-bring-up-bringuppy-change-frontend-bringup-builder)'s
   `create` stage, so destroy-on-failure and the plan-carried build dims are the
