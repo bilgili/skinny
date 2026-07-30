@@ -522,15 +522,34 @@ def test_bindless_capacity_never_read_from_one_adapter_by_name():
     import ast
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parent.parent / "src/skinny/renderer.py"
-    tree = ast.parse(src.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in {
-                "skinny.vk_compute", "skinny.metal_compute"}:
-            names = [a.name for a in node.names]
-            assert "BINDLESS_TEXTURE_CAPACITY" not in names, (
-                f"renderer.py:{node.lineno} imports the capacity from "
-                f"{node.module}; read self.caps.bindless_texture_capacity")
+    root = pathlib.Path(__file__).resolve().parent.parent / "src" / "skinny"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        # The adapters each legitimately declare their own constant; every
+        # other module must go through the capability record.
+        if path.name in {"vk_compute.py", "metal_compute.py",
+                         "recording_compute.py", "gpu_backend.py"}:
+            continue
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            # `from skinny.vk_compute import BINDLESS_TEXTURE_CAPACITY`
+            if isinstance(node, ast.ImportFrom) and node.module in {
+                    "skinny.vk_compute", "skinny.metal_compute",
+                    "skinny.recording_compute"}:
+                if any(a.name == "BINDLESS_TEXTURE_CAPACITY" for a in node.names):
+                    offenders.append(f"{path.name}:{node.lineno} (import)")
+            # `gpu.BINDLESS_TEXTURE_CAPACITY` / `self._gpu.BINDLESS_...` — an
+            # attribute read off the adapter MODULE. This is the form the
+            # import-only check missed: it yields the right number today only
+            # because `gpu` happens to be the resolved adapter, which gives the
+            # capacity a second owner (codex re-review).
+            if isinstance(node, ast.Attribute) and \
+                    node.attr == "BINDLESS_TEXTURE_CAPACITY":
+                offenders.append(f"{path.name}:{node.lineno} (attribute)")
+    assert not offenders, (
+        f"the bindless capacity is read from an adapter instead of the "
+        f"capability record at {offenders}; use "
+        f"capabilities(ctx).bindless_texture_capacity")
 
 
 def test_resource_module_knows_every_declared_adapter():
