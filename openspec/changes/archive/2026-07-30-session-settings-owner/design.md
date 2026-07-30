@@ -64,6 +64,16 @@ Dropping on *capture* loses data permanently. Capture everything; let
 visibility affect what is shown and restored, not what is stored. This also
 makes the two front-ends' files interchangeable, which is the point.
 
+### D4b — `online_training` persists the intent, not the outcome
+
+`skinny` persisted the flag *after* its prerequisite gate, so a session refused
+for a missing prerequisite (megakernel, or no neural proposal) wrote
+`online_training: false` and silently discarded what the user asked for. The
+snapshot reads `renderer._online_training_requested`, which both front-ends set
+to the pre-gate request. A refusal is a per-session condition, not a preference
+change. The runtime gate still refuses the same way on the next launch, so
+nothing runs that could not run before.
+
 ### D5 — Make the help text true
 
 `cli_common` claims `--neural-trainer`, `--train-precision` and
@@ -91,6 +101,26 @@ returns, the functions are eight lines.
   inherits that, so a corrupt file is replaced rather than propagated.
 - **Trade-off: front-end sections are opaque blobs.** That is deliberate — the
   module's job is preservation, not interpretation.
+- **Accepted: the merge is an unlocked read-modify-write.** Two front-ends that
+  exit in the same instant can still lose one update, and both write the same
+  `settings.json.tmp` path, so one `os.replace` can fail (each caller already
+  catches that). This is strictly better than the wholesale write it replaces —
+  the loss window shrinks from "every key the other front-end owns" to
+  "overlapping keys written in the same instant". A lock file is not worth the
+  complexity for a two-process desktop app whose worst case is one session's
+  window layout.
+- **Accepted: a persisted flag does not reach the bring-up guards.** Each
+  front-end resolves the persisted flags *after* `plan_bringup`, so a persisted
+  `online_training: true` skips `validate_render_flags` (which refuses
+  `--online-training` under `--integrator bdpt`/`mlt`) and is refused by the
+  runtime gate instead. `skinny` behaved exactly this way before the change; the
+  change makes `skinny-gui` match it. Feeding a persisted flag into the guard
+  sequence belongs to `bringup.py`, which already takes `persisted=` for the
+  integrator, backend and encoding — a follow-up, in that module.
+- **Accepted: `settings.record_last_dir` still authors the `last_dirs` key.**
+  It is the pre-existing write-through path, declared in `QT_KEYS` and merged
+  like any other key. Moving its key semantics into the snapshot module would
+  make every file dialog depend on the snapshot owner for no behaviour change.
 
 ## Open Questions
 

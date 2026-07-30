@@ -9,6 +9,37 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Closing one interactive front-end no longer erases the other's settings**
+  (change `session-settings-owner`). `save_settings` wrote the supplied dict
+  wholesale, and `skinny` and `skinny-gui` each authored their own 11-key
+  snapshot with only 6 keys in common. So closing `skinny-gui` deleted
+  `vulkan_window`, `neural_handoff`, `neural_trainer`, `train_precision` and
+  `online_training`; closing `skinny` deleted `open_docks`, `last_dirs`,
+  `section_states`, `qt_geometry` and `qt_dock_state`. Settings are now
+  **merged** into the file on disk, so a writer can only add or update its own
+  keys. An existing `~/.skinny/settings.json` keeps working.
+
+  `skinny.session_snapshot` now owns the schema: the front-ends contribute their
+  own keys and no longer author the dict. Three divergences went with the
+  duplication:
+
+  - **A wide orbit distance survives on `skinny-gui`.** It clamped a restored
+    orbit distance to 50 and ignored `max_distance`; `skinny` raised the cap to
+    fit. There is one rule now — the `skinny` one — so a persisted distance past
+    the cap moves the cap, not the view. Qt users with a persisted distance above
+    50 will see their restored camera further out than before, which is the view
+    they left.
+  - **A scene with authored lighting no longer discards the fallback-light
+    parameters.** `skinny` snapshotted the visibility-filtered parameter set, so
+    `env_index`, `env_intensity`, `direct_light_index` and `light_*` were dropped
+    at capture time whenever the scene had its own lights. Capture is unfiltered;
+    visibility governs only what is displayed.
+  - **`--neural-handoff`, `--neural-trainer`, `--train-precision` and
+    `--online-training` are persisted and restored on `skinny-gui` too**, which
+    is what the CLI help has claimed all along. `online_training` records the
+    intent, so a session that refused the loop for a missing prerequisite no
+    longer turns the preference off.
+
 - **An imported `coatedconductor` renders its metal at the roughness pbrt gives
   it** (change `coatedconductor-roughness-spelling`). pbrt-v4 spells the base
   metal's roughness `conductor.roughness` and the coat's `interface.roughness`.
@@ -78,7 +109,107 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fallback. The adjacent bare `except Exception: pass` around the dome fold now
   reports the failure instead of silently reporting an intensity of 1.0.
 
+### Removed
+
+- `settings.save_user_preset` / `settings.delete_user_preset` (change
+  `session-settings-owner`) — write surface for a Tk Delete button that no longer
+  exists, with zero callers. Presets are still read from `~/.skinny/presets/`.
+
 ### Changed
+
+- **The headless Python API resolves its GPU backend instead of assuming Vulkan**
+  (change `headless-backend-auto`). `HeadlessRenderer` hard-coded
+  `backend="vulkan"` on its direct-Python path — the one path that does not go
+  through `bringup.plan_bringup` — so it never reached `select_backend`. Three
+  things followed: `SKINNY_BACKEND` was ignored, `backend="auto"` was not even a
+  legal argument (the unresolved string reached `make_context`, which raises
+  `unknown backend 'auto'`), and every Apple-Silicon caller silently rendered
+  through MoltenVK. The argument now goes through the same selector every other
+  runner uses, so the precedence is `backend=` > `SKINNY_BACKEND` > `auto`, and
+  `auto` picks native Metal on an Apple-Silicon host.
+
+  **This changes the default backend.** A caller that relied on the implicit
+  Vulkan default — the three module-level wrappers `render_to_array` /
+  `render_scene` / `render_animation` included — now renders on Metal on this
+  class of host. Pass `backend="vulkan"` to keep the MoltenVK path. Every other
+  in-tree call site, the parity harness included, already passed an explicit
+  backend and is unaffected.
+
+  The signature default is `None`, not the string `"auto"`, and the distinction
+  is load-bearing: `select_backend` reads `prefer or env or persisted or "auto"`,
+  so a literal `"auto"` would outrank `SKINNY_BACKEND` rather than defer to it.
+  `None` is what argparse hands the four front-ends. No persisted setting
+  participates — the direct API is non-interactive, like `skinny-render`.
+
+  What this does **not** buy: the Vulkan SDK library path is still required to
+  *import* the renderer on either backend, because `renderer.py` imports
+  `vulkan` at module load. Choosing Metal picks the device, not the import graph.
+- **The per-frame path is scene sync, a pure frame plan, and execution**
+  (change `frame-plan-split`). One `update()` + `render()` pair carried roughly
+  34 distinct responsibilities, and `render_headless()` held a near-verbatim
+  copy of the middle of it — the cross-frame accumulation barrier, the
+  execution-mode gate and the dispatch block, duplicated. A change to the gate
+  had to be made twice, "which passes will this frame run" was not a value
+  anything could inspect, and the ordering constraints were facts about line
+  numbers. The path is now three stages with one owner each.
+  `Renderer._sync_scene(dt)` advances the scene state, in the transcribed
+  pre-split order (the dependencies are recorded, not rearranged — the light
+  upload still follows the snapshot rebuild that decides the authority, and the
+  mesh rebake still keys on wall-clock time so a slider drag debounces
+  independently of frame rate). `frame_plan.derive(...)` then produces a
+  **value**: execution mode, integrator, step order, dispatch banding, MLT
+  budget, and which optional per-frame work runs. It holds no buffers, no
+  command buffers and no pipelines, so `tests/test_frame_plan.py` derives a plan
+  and asserts its pass sequence on a host with no GPU — 119 hostless tests over
+  every integrator × execution mode × backend capability × target the render
+  envelope admits, where the golden test for `_pack_uniforms` is GPU-marked
+  precisely because it must construct a renderer to get there. Windowed and
+  headless now share **one** recorded body, `_execute_vulkan_frame`, and differ
+  only in their target: `_SwapchainTarget` acquires an image, contributes the
+  `UNDEFINED → TRANSFER_DST` barrier to the *same* barrier call (so the recorded
+  command stream is unchanged, not merely equivalent), blits, transitions to
+  `PRESENT_SRC` and presents; `_OffscreenTarget` copies into the readback
+  buffer, waits the fence and returns the bytes. The Metal entry points consume
+  the plan instead of re-deriving the execution mode, the integrator name, the
+  MLT reseed condition and the SPPM first-frame flag a second time.
+  Three consequences worth naming. **Ordering constraints are asserted rather
+  than implied**: `frame_plan.ORDERING_INVARIANTS` states each with its reason
+  and `check_invariants` runs on every derivation, so "the pick-result drain
+  precedes the uniform pack" — a satisfied pick that disarms after the pack
+  disarms one frame late and fires twice — is now a test, with a negative
+  control proving the check is not vacuous. **Banding is capability-driven**:
+  `frame_plan.megakernel_bands` takes `needs_watchdog_tiling`, not `is_metal`,
+  because the reason a dispatch splits into row bands is that the backend's
+  command buffers are watchdog-policed; `Renderer._needs_watchdog_tiling` is the
+  single place that binds, and `gpu-backend-adapter` will move it into its
+  capability record without touching a consumer. **The accumulation reset keeps
+  its owner**: `update()` decides it from the `params.py` registry and publishes
+  `accum_frame`; the plan consumes `accum_frame == 0` and never re-derives it.
+  The pick drain moved to after the fence wait on the headless path, which is
+  identical there (its previous call already waited the same fence at its tail,
+  so the drain read the same bytes) and is the only safe order windowed-side.
+  The per-call binding-1 rewrite the proposal flagged for investigation turned
+  out to have been removed already by change `review-surfaced-defects`: it was
+  dead compensation for a rebind `render()` had stopped doing, neither a target
+  difference nor a live bug. Pure refactor — same dispatches, same order, same
+  images; gated by the full parity matrix before and after — Vulkan 73/73
+  metric lines identical, which is the gate that counts, because on a Metal host
+  every render takes the `is_metal` arm and never enters the rewritten body.
+  A codex pre-merge review found six defects, all fixed: the plan was derived
+  **before** the pick drain (a pick callback sets `accum_frame = 0`, so
+  `plan.first_frame` disagreed with the packed `fc.accumFrame` and SPPM could skip
+  its accumulator clear); `target.submit_info()` was evaluated inside the
+  fence-reset/submit critical region, where a raise leaves the fence unsignalled
+  and a retrying caller blocks forever; `plan.steps` was descriptive with nothing
+  reconciling it against the executor; the weight swap became a start-of-frame
+  snapshot and so deferred an OFF→ON transition by a frame; `plan.target` and the
+  concrete target object were unchecked against each other; and the Metal MLT
+  bootstrap re-derived a chain batch the mutation dispatch took from the plan. The
+  common cause of the two serious ones was one design error — a snapshot taken
+  before the state it describes stops changing — and the fix is uniform: drain,
+  then derive. `online_swap` left the plan entirely, because arming online
+  training is a frame-END decision and a field that cannot be authoritative does
+  not belong in a plan.
 
 - **Scene intake is one interface that returns a value** (change
   `scene-intake-interface`). `usd_loader.py` had four public loaders that the

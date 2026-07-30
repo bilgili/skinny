@@ -1,8 +1,8 @@
 # Skinny — Host Module Map and Ownership
 
 This document covers the Python host side: the module map, the front-end
-bring-up builder, the renderer carve-out pattern, and the device-free pure
-core.
+bring-up builder, the session snapshot owner, the renderer carve-out pattern, and
+the device-free pure core.
 
 For the per-file listing see [ImplementationMap.md](ImplementationMap.md).
 For the renderer overview see [Architecture.md](Architecture.md).
@@ -104,6 +104,70 @@ the pieces.
 
 ---
 
+## Session snapshot (`session_snapshot.py`, change `session-settings-owner`)
+
+The persisted session — what `~/.skinny/settings.json` holds — has **one
+owner**. `settings.py` owns the file; `session_snapshot.py` owns the schema.
+
+`skinny` and `skinny-gui` each used to author their own 11-key dict, and
+`save_settings` wrote it wholesale. The two key sets intersected in 6, so each
+front-end **deleted five of the other's keys** on exit. Two fixes, at two
+different boundaries:
+
+1. **`save_settings` merges.** It loads the file, updates the supplied keys, and
+   writes. One change protects every writer, including a future one that does not
+   know the whole schema.
+2. **One declared schema.** The front-ends contribute their own keys; they never
+   author the dict.
+
+| Section | Keys | Owner |
+|---|---|---|
+| shared | `params`, `camera`, `gizmo_mode`, `backend`, `encoding`, `sppm_glossy_roughness`, `neural_handoff`, `neural_trainer`, `train_precision`, `online_training` | the renderer — `capture_shared` / `restore_shared` |
+| `GLFW_KEYS` | `vulkan_window` | `skinny` (`app.py::_contributed_session_state`) |
+| `QT_KEYS` | `open_docks`, `last_dirs`, `section_states`, `qt_geometry`, `qt_dock_state` | `skinny-gui` (`ui/qt/app.py::MainWindow._contributed_session_state`) |
+
+A contributed section is **opaque**: the module preserves a Qt geometry blob
+without interpreting it. `contribute(shared, contributed, owned=…)` **refuses**
+any key the caller's own section does not declare — per-front-end, not against
+the union, so `skinny` cannot write a Qt-owned key that `skinny-gui` would erase
+on its next exit. Declare a new key in `GLFW_KEYS` or `QT_KEYS` first.
+
+`restore_shared` restores parameters, camera and gizmo mode with **independent
+fault isolation**: a settings file that breaks one step still returns the others.
+`backend` and `encoding` are declared here but restored by
+`plan_bringup(persisted=…)` — they are session-fixed bring-up inputs, read before
+a renderer exists. This module owns the key; the bring-up builder owns what a
+startup value does.
+
+`skinny-web` and `skinny-render` still do not persist. That asymmetry is the
+bring-up decision above (`persisted=None`), and it stays.
+
+Three divergences the duplication had grown, each now decided once:
+
+- **Camera restore.** `skinny` raised `max_distance` to fit a restored orbit
+  distance; `skinny-gui` clamped the distance to 50 and ignored the cap. The
+  module keeps the `skinny` rule, because `max_distance` is the cap authority and
+  the clamp destroyed a legitimately persisted wide view.
+- **Captured parameter set.** `skinny` captured `build_visible_params`, which
+  drops the fallback-light parameters under a scene with authored lighting —
+  losing them permanently. Capture uses `build_all_params`; visibility governs
+  display and restore, not storage.
+- **Persisted flags.** `resolve_persisted_flag` + the `PERSISTED_FLAGS` table are
+  the one precedence rule for the flags `cli_common` documents as persisted
+  (`--neural-handoff`, `--neural-trainer`, `--train-precision`,
+  `--online-training`, `--sppm-glossy-roughness`): an explicit CLI flag or
+  environment variable wins, else the persisted value, else the argparse default.
+  `skinny-gui` restored only the SPPM threshold before, so the documented
+  persistence held on one front-end of two.
+
+`tests/test_session_settings.py` is the gate: both erasure directions, the
+corrupt-file case, a capture/restore round trip, the refusal, and each
+front-end's contributed key set. The key-set check reads the front-end **source**
+(AST), because neither front-end module imports without `vulkan` — an
+import-based check would skip on a Metal-only host, and a skip reads as a pass.
+
+---
+
 ## Python Modules
 
 | Module | Key Classes | Purpose |
@@ -148,7 +212,8 @@ the pieces.
 | `lens_optics.py` | — | PBRT-v3 thick-lens helpers |
 | `debug_viewport.py` | `DebugViewport` | Camera/lens/wireframe debug renderer |
 | `presets.py` | `Preset` | 12 built-in skin presets (Fitzpatrick I–VI × Female/Male) |
-| `settings.py` | — | Persistent storage at `~/.skinny/` (JSON) |
+| `settings.py` | — | Persistent storage at `~/.skinny/` (JSON); `save_settings` merges into the file on disk |
+| `session_snapshot.py` | — | The persisted session schema: shared (renderer-owned) + front-end-contributed keys, capture/restore, one camera rule, persisted-flag precedence |
 | `tattoos.py` | `Tattoo` | Procedural + image-based tattoo loading |
 | `head_textures.py` | `TextureStats` | Detail map loading (normal, roughness, displacement) at 2048² |
 | `scene_intake.py` | — | USD stage → `SceneUpdate` value; the one interface the renderer consumes |
@@ -253,6 +318,13 @@ asserts — from the AST, so the check itself stays hostless — that `renderer`
 re-exports every name the seven modules declare. Adding a module to the
 device-free side means adding it to `PURE_MODULES` there.
 
+`PURE_MODULES` has two halves (change `frame-plan-split`). `RE_EXPORTED_MODULES`
+are the seven above, whose names `renderer` re-exports so pre-split call sites
+still resolve. `MODULE_IMPORTED_MODULES` — `frame_derive`, `frame_plan`,
+`mlt_chain` — `renderer` consumes as modules (`frame_plan.derive(...)`), so they
+carry the same device-free obligation and none of the re-export one. Only the
+first half is checked for re-exports.
+
 The move is textual and changed nothing observable: every constant value, every
 packed byte for a spread of materials, every camera matrix, both image-writer
 outputs and the pool's slot behaviour were captured before and compared after.
@@ -265,3 +337,72 @@ behind is anything the `Renderer` class body owns, plus the scene-record strides
 outside `renderer.py` and so would gain a module without gaining a test.
 
 ---
+
+---
+
+## Per-frame path (`frame_plan.py`, change `frame-plan-split`)
+
+Each frame runs three stages. Each stage has one owner.
+
+| Stage | Owner | What it does |
+|---|---|---|
+| scene sync | `Renderer._sync_scene(dt)` | Advances every piece of scene state the frame reads: USD streaming, playback and animation, live-edit re-read, light recompute, the scene snapshot, the light and environment uploads, the mesh rebake, the tattoo upload. |
+| frame plan | `frame_plan.derive(...)` | Derives the frame's decisions as a **value**: execution mode, integrator, step order, dispatch banding, MLT budget, and the optional per-frame work. |
+| execute | `Renderer._execute_vulkan_frame(plan, target)` or `Renderer._render_scene_metal(plan)` | Records and submits the plan against a target. |
+
+Before the split, one `update()` + `render()` pair carried roughly 34
+responsibilities and `render_headless()` held a near-verbatim copy of the middle
+of it. A change to the execution-mode gate had to be made twice.
+
+**The plan holds no device handles.** It names passes, counts, flags and
+decisions — never a buffer, a command buffer or a pipeline. `tests/test_frame_plan.py`
+derives a plan and asserts its pass sequence with no GPU present, over every
+integrator × execution mode × backend capability × target the render envelope
+admits. `frame_plan.py` is in the device-free set above.
+
+**Windowed and headless differ only in their target.** Both derive a plan and
+call the same execution body. A target supplies exactly three things: where the
+output goes, whether a swapchain image is acquired and presented, and whether a
+readback follows. `_SwapchainTarget` acquires an image, contributes the
+`UNDEFINED → TRANSFER_DST` barrier **to the same barrier call** so the recorded
+command stream is unchanged rather than merely equivalent, blits, adds the
+`PRESENT_SRC` transition, and presents. `_OffscreenTarget` contributes no extra
+barrier, copies into the readback buffer, waits the fence, and returns the bytes.
+
+**Ordering constraints are asserted, not implied.** `plan.steps` lists the
+frame's steps in execution order and `frame_plan.ORDERING_INVARIANTS` states each
+constraint with its reason; `check_invariants` runs on every derivation. Two
+constraints earned their place by being violated during review:
+
+- The pick-result drain precedes the uniform pack, because a satisfied pick that
+  disarms after the pack disarms one frame late and fires twice.
+- The fence reset sits immediately between `END_CMD` and `SUBMIT`. Anything that
+  can raise in between leaves the fence unsignalled, and a caller that catches
+  and retries blocks forever in the wait.
+
+`plan.steps` is not yet replayed by the executor — that is
+`gpu-backend-adapter`'s recording adapter. Until it lands,
+`test_plan_step_order_matches_the_executor_source_order` pins the plan's order to
+the shared body's source order, so the plan and the code cannot drift into two
+unreconciled authorities.
+
+**The plan is derived after the pick drain, and owns only what it can be
+authoritative about.** `poll_pick_result` runs pick callbacks, and
+`_on_autofocus_hit` sets `accum_frame = 0` — so a plan derived earlier would hand
+the dispatch a `first_frame` that disagrees with the packed `fc.accumFrame`. For
+the same reason the frame-end neural weight swap is **not** a plan field: arming
+online training is a frame-end decision, and a start-of-frame snapshot would
+defer an off-to-on transition by a frame. Those sites read `_online_training`
+live.
+
+**Banding is capability-driven.** A dispatch splits into row bands because the
+backend's command buffers are watchdog-policed, not because the backend is Metal.
+`frame_plan.megakernel_bands` takes `needs_watchdog_tiling`;
+`Renderer._needs_watchdog_tiling` is the single place that capability binds to a
+backend, and `gpu-backend-adapter` moves that binding into its capability record
+without changing anything that consumes it.
+
+**The accumulation reset keeps its owner.** `Renderer.update` decides it from the
+`params.py` registry (change `param-registry-accumulation-reset`) and publishes
+`accum_frame`; the plan consumes `accum_frame == 0` as `first_frame`, which drives
+the SPPM first-frame flag and the MLT reseed.

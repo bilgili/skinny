@@ -160,9 +160,17 @@ export VULKAN_SDK=/Users/ahmetbilgili/VulkanSDK/1.4.341.1/macOS
 export DYLD_LIBRARY_PATH=$VULKAN_SDK/lib
 ```
 
-Render offscreen with no window via `VulkanContext(window=None, ...)` +
-`Renderer(...)` + `update(dt)` + `render_headless()` (returns raw RGBA8 bytes,
-`width*height*4`). Drive a USD scene by passing `usd_scene_path=` to `Renderer`;
+The `SKINNY_BACKEND` / `VULKAN_SDK` exports are independent: `HeadlessRenderer`
+now resolves its backend through `select_backend` like every other runner
+(`backend=` > `SKINNY_BACKEND` > `auto` → **Metal** here, change
+`headless-backend-auto`), but the SDK library path is still needed to *import*
+the renderer on either backend, because `renderer.py` imports `vulkan` at module
+load.
+
+Render offscreen with no window via `HeadlessRenderer(w, h)` (resolved context)
+or, for a hand-rolled loop, `VulkanContext(window=None, ...)` /
+`MetalContext(window=None, ...)` + `Renderer(...)` + `update(dt)` +
+`render_headless()` (returns raw RGBA8 bytes, `width*height*4`). Drive a USD scene by passing `usd_scene_path=` to `Renderer`;
 USD load is async, so pump `update()` until `renderer._usd_scene` has the expected
 instances before sampling frames. Accumulation resets automatically when any field
 in `_current_state_hash()` changes (includes `integrator_index`, `env_intensity`,

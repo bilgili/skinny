@@ -100,8 +100,10 @@ def test_renderer_dispatch_branch_selects_mlt():
     src = _read("renderer.py")
     start = src.index("def _record_wavefront_dispatch")
     body = src[start:start + 4000]
-    assert "integrator_index == 3" in body, \
-        "_record_wavefront_dispatch must branch on the MLT integrator index"
+    # The integrator is named by the frame plan (change frame-plan-split), not
+    # re-derived from the index at each dispatch site.
+    assert 'plan.integrator == "mlt"' in body, \
+        "_record_wavefront_dispatch must branch on the plan's MLT integrator"
     assert '_ensure_wavefront_pass("mlt")' in body
     assert "record_frame" in body
 
@@ -129,16 +131,21 @@ def test_renderer_packs_mlt_uniform_tail_in_shader_order():
 
 def test_metal_dispatch_selects_mlt_pass():
     # After Stage C the Metal frame path routes every integrator through the one
-    # `_ensure_wavefront_pass` dispatcher; the integrator→token map picks MLT
-    # (index 3) so the Metal MLT factory is selected, and an unbuildable pass
+    # `_ensure_wavefront_pass` dispatcher. The integrator→token map moved to
+    # `frame_plan` (change frame-plan-split), so the Metal path consumes
+    # `plan.integrator` instead of re-deriving it; an unbuildable pass still
     # falls back to the megakernel.
+    from skinny import frame_plan
+
+    assert frame_plan.integrator_name(3) == "mlt"
+    assert frame_plan.INTEGRATOR_NAMES == {
+        0: "path", 1: "bdpt", 2: "sppm", 3: "mlt"}
     src = _read("renderer.py")
     start = src.index("def _render_scene_metal")
     body = src[start:start + 3000]
-    assert '{3: "mlt", 2: "sppm", 1: "bdpt"}' in body
-    assert "_ensure_wavefront_pass(integrator)" in body
-    assert "_render_wavefront_metal(staged, integrator)" in body
-    assert "_render_megakernel_metal()" in body, \
+    assert "_ensure_wavefront_pass(plan.integrator)" in body
+    assert "_render_wavefront_metal(staged, plan)" in body
+    assert "_render_megakernel_metal(plan)" in body, \
         "an unbuildable staged pass must fall back to the megakernel"
 
 
@@ -352,7 +359,9 @@ def test_mlt_metal_chain_batch_defaults_to_one_batch_at_default_chains():
     R = _renderer_module()
     assert R._MLT_METAL_CHAIN_BATCH_DEFAULT == 16384
     src = _read("renderer.py")
-    assert "chain_batch=self._mlt_metal_chain_batch()" in src
+    # The batch is a frame decision now (change frame-plan-split): the mutation
+    # dispatch takes it off the plan, the reseed path off its own local.
+    assert "chain_batch=plan.mlt_chain_batch" in src
     assert "chain_batch=batch" in src  # bootstrap + init in the reseed path
     ms = _read("metal_wavefront.py")
     # All three Metal dispatch entries thread chain_batch into the driver.
