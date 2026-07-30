@@ -265,13 +265,25 @@ def test_index_check_ignores_links_outside_the_index_section():
     section, outside = _readme_split()
     assert section and outside, "README.md split produced an empty half"
 
+    docs_dir = os.path.join(REPO, "docs")
+
     def linked(lines):
+        """Top-level docs/*.md names linked from these lines.
+
+        Restricted to resolved `docs/*.md` targets on purpose: counting every
+        relative link would drag in examples, the changelog, and gallery images,
+        so a valid README edit that added a few of those could fail the size
+        comparison below for reasons that have nothing to do with the index.
+        """
         found = set()
         for line in lines:
             for m in _LINK.finditer(_CODE_SPAN.sub("", line)):
                 target = m.group(1) or m.group(2)
-                if target and _is_relative(target):
-                    found.add(os.path.basename(target.split("#", 1)[0]))
+                if not target or not _is_relative(target):
+                    continue
+                resolved = os.path.normpath(os.path.join(REPO, target.split("#", 1)[0]))
+                if os.path.dirname(resolved) == docs_dir and resolved.endswith(".md"):
+                    found.add(os.path.basename(resolved))
         return found
 
     inside_names, outside_names = linked(section), linked(outside)

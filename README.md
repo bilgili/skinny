@@ -224,7 +224,7 @@ here.
 | [docs/PbrtImport.md](docs/PbrtImport.md) | The pbrt v4 scene importer and its feature parity |
 | [docs/ParityHarness.md](docs/ParityHarness.md) | The parity matrix, the dual gate, the confirming-scene suite |
 | [docs/Contributing.md](docs/Contributing.md) | Running the tests, development conventions |
-| [docs/References.md](docs/References.md) | The paper behind each implemented technique |
+| [docs/References.md](docs/References.md) | Core transport and shading references; each subject document carries its own |
 
 ## License
 

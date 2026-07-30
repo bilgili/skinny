@@ -3,7 +3,10 @@
 This document covers what skinny needs and how to install it: the platform and
 dependency requirements, the virtual environment, and — only for a platform
 outside the prebuilt-wheel matrix — the MaterialX from-source build. On a
-supported platform `pip install -e ".[dev]"` installs every Python package.
+supported platform `pip install -e ".[dev]"` installs the default and
+development dependencies. Optional features declare their own extras in
+`pyproject.toml` — `usd`, `web`, `mcp`, `interop`, `mlx` — and are not installed
+by `[dev]`; add the ones you need, e.g. `pip install -e ".[dev,mcp]"`.
 
 Two prerequisites are external to pip, and this document is the one place that
 states them:
@@ -32,8 +35,9 @@ For the shortest path to a rendered frame see the quick start in
 - A GPU supported by one of the compute backends: Vulkan 1.2 with a current
   graphics driver, or native Metal on Apple Silicon
 - Slang compiler (`slangc`) on `PATH`
-- MaterialX **built from source** with the Slang code generator enabled — the
-  PyPI wheel does not ship `PyMaterialXGenSlang`. See
+- MaterialX with the Slang code generator (`PyMaterialXGenSlang`), which the PyPI
+  wheel does not ship. On a supported platform `pyproject.toml` installs a
+  prebuilt wheel that has it; otherwise build it from source — see
   [MaterialX from source (required for the Slang backend)](#materialx-from-source-required-for-the-slang-backend).
 - GLFW-compatible desktop environment (only required for the `skinny`
   shader-debug entry; `skinny-gui` runs on Qt and `skinny-web` is headless)

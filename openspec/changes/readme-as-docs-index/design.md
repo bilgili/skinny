@@ -123,9 +123,19 @@ itself authored:
   `ModuleNotFoundError: pxr`. This change's own text calls that fallback the
   answer for an unsupported platform, so the gap had to be stated.
 
-Both are registered in the verbatim checker as named corrections: it reverses
-each one before comparing, so the rest of the section is still checked
+A third followed on the next pass: Requirements called MaterialX "**built from
+source**" mandatory, while the same document says a supported platform needs no
+CMake and this change's quick start says the same. Same test — it contradicted
+prose authored here — so same treatment.
+
+All three are registered in the verbatim checker as named corrections: it
+reverses each one before comparing, so the rest of the section is still checked
 byte-for-byte and a *second*, unrecorded edit still fails.
+
+The pattern is worth naming: `docs/Install.md` had accumulated three statements
+that contradicted its own body. They were invisible while the file was a section
+of a 750-line README and became obvious the moment it was a document with one
+subject. That is an argument for the split, not against it.
 
 ### D7: README does not assert per-platform install completeness
 

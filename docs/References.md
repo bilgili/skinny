@@ -1,9 +1,14 @@
 # Skinny — Papers and References
 
-This document maps each implemented technique to the paper it comes from.
+This document collects the core transport and shading references: MIS, BDPT,
+SPPM, GGX, Fresnel, and the realistic camera.
 
-For the skin-specific estimator chain and its sources see
-[SkinRendering.md](SkinRendering.md).
+It is not a complete bibliography. Each subject document carries its own
+references for the technique it owns — [ReSTIR.md](ReSTIR.md),
+[MetropolisLightTransport.md](MetropolisLightTransport.md),
+[Spectral.md](Spectral.md), [NeuralGuiding.md](NeuralGuiding.md),
+[SplineFlows.md](SplineFlows.md), and
+[SkinRendering.md](SkinRendering.md) for the skin estimator chain.
 
 ---
 
