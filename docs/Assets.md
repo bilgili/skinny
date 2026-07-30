@@ -1,11 +1,12 @@
 # Skinny — Assets
 
 This document covers the asset directories the renderer discovers on disk:
-`hdrs/` environments, `heads/` models with their texture maps, and
-`tattoos/` images.
+`hdrs/` environments, `heads/` models with their texture maps, and USD scene
+assets.
 
-For the skin model these assets feed see
-[SkinRendering.md](SkinRendering.md).
+Tattoo images (`tattoos/`) are documented with the model that consumes them, in
+[SkinRendering.md § Tattoos (asset)](SkinRendering.md#tattoos-asset), along with
+the rest of the skin model these assets feed.
 
 ---
 

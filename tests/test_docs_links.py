@@ -199,8 +199,13 @@ def test_live_doc_set_is_not_empty():
 INDEX_HEADING = "## Documentation"
 
 
-def _index_section() -> list[str]:
-    """The lines of README.md's `## Documentation` section, fences stripped."""
+def _readme_split() -> tuple[list[str], list[str]]:
+    """README.md's `## Documentation` lines, and every line outside it.
+
+    Returns two line lists rather than joined strings on purpose: `_strip_fences`
+    drops line terminators, so re-joining and then string-replacing one part out
+    of the other silently matches nothing.
+    """
     lines = _strip_fences(open(os.path.join(REPO, "README.md"), encoding="utf-8").read())
     starts = [i for i, ln in enumerate(lines) if ln.startswith(INDEX_HEADING)]
     assert len(starts) == 1, f"README.md must have exactly one {INDEX_HEADING!r}"
@@ -209,7 +214,11 @@ def _index_section() -> list[str]:
         (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
         len(lines),
     )
-    return lines[start:end]
+    return lines[start:end], lines[:start] + lines[end:]
+
+
+def _index_section() -> list[str]:
+    return _readme_split()[0]
 
 
 def test_index_lists_every_reference_document():
@@ -253,16 +262,34 @@ def test_index_check_ignores_links_outside_the_index_section():
     completeness check scanned the whole file, deleting an index row would still
     pass because the prose link covers it, and the check would be decorative.
     """
-    section = "".join(_index_section())
-    whole = open(os.path.join(REPO, "README.md"), encoding="utf-8").read()
-    outside = whole.replace(section, "")
-    # At least one document is linked from prose as well as from the index —
-    # otherwise this test proves nothing about the scoping.
-    both = [
-        n for n in os.listdir(os.path.join(REPO, "docs"))
-        if n.endswith(".md") and f"docs/{n}" in outside and f"docs/{n}" in section
-    ]
-    assert both, "no document is linked both inside and outside the index"
+    section, outside = _readme_split()
+    assert section and outside, "README.md split produced an empty half"
+
+    def linked(lines):
+        found = set()
+        for line in lines:
+            for m in _LINK.finditer(_CODE_SPAN.sub("", line)):
+                target = m.group(1) or m.group(2)
+                if target and _is_relative(target):
+                    found.add(os.path.basename(target.split("#", 1)[0]))
+        return found
+
+    inside_names, outside_names = linked(section), linked(outside)
+    # The scoping only matters if some document IS linked twice. Assert that,
+    # or this guard would quietly stop testing anything.
+    both = sorted(inside_names & outside_names)
+    assert both, (
+        "no document is linked both inside and outside the index — "
+        "the section scoping in test_index_lists_every_reference_document "
+        "is no longer load-bearing, so either it or this guard is wrong"
+    )
+    # The halves must be real, disjoint slices — not the whole file twice, which
+    # is what silently happened when this guard joined the lines and used
+    # str.replace (fences drop line terminators, so nothing matched).
+    assert any(ln.startswith(INDEX_HEADING) for ln in section)
+    assert not any(ln.startswith(INDEX_HEADING) for ln in outside)
+    # Every index row names a doc; the outside half must not carry them all.
+    assert len(inside_names) > len(outside_names)
 
 
 def test_there_is_exactly_one_index():

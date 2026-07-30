@@ -136,8 +136,8 @@ checks.
 git clone https://gitlab.kephrenz.nl/root/skinny.git
 cd skinny
 python -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/skinny
+.venv/bin/pip install -e ".[dev]"     # Windows: .venv\Scripts\pip
+.venv/bin/skinny                       # Windows: .venv\Scripts\skinny
 ```
 
 That is the whole install on a supported platform — Python 3.12/3.13/3.14 on
@@ -165,7 +165,7 @@ here.
 
 | Document | Owns |
 |---|---|
-| [docs/Install.md](docs/Install.md) | Requirements, virtual environment, MaterialX from source, Vulkan SDK |
+| [docs/Install.md](docs/Install.md) | Requirements, virtual environment, the from-source MaterialX fallback |
 | [docs/Usage.md](docs/Usage.md) | The front ends, invocation, headless rendering, pbrt v4 import |
 | [docs/RenderingModes.md](docs/RenderingModes.md) | Backend, resolution, the compatibility matrix, the sampling modes, furnace mode |
 | [docs/Controls.md](docs/Controls.md) | Keyboard and mouse bindings, the camera debug viewport |
@@ -200,7 +200,7 @@ here.
 |---|---|
 | [docs/SkinRendering.md](docs/SkinRendering.md) | The three-layer skin model and the §1–§6 estimator chain |
 | [docs/Subsurface.md](docs/Subsurface.md) | Subsurface transport and the interior random walk |
-| [docs/Assets.md](docs/Assets.md) | The `hdrs/`, `heads/`, and `tattoos/` asset directories |
+| [docs/Assets.md](docs/Assets.md) | The `hdrs/` and `heads/` asset directories, and USD scene assets |
 
 **Neural guiding**
 

@@ -1,8 +1,9 @@
 # Skinny — Installation
 
-This document covers what skinny needs and how to install it: the platform
-and dependency requirements, the virtual environment, and the MaterialX
-from-source build that the Slang backend requires.
+This document covers what skinny needs and how to install it: the platform and
+dependency requirements, the virtual environment, and — only for a platform
+outside the prebuilt-wheel matrix — the MaterialX from-source build. On a
+supported platform `pip install -e ".[dev]"` is the whole install.
 
 For the shortest path to a rendered frame see the quick start in
 [README.md](../README.md). For how to run the renderer once installed see
