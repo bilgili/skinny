@@ -2,6 +2,15 @@
   "metal": {
     "classes": {
       "ComputePipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "entry_module",
+          "entry_point",
+          "graph_fragments",
+          "compile_pipeline",
+          "spectral"
+        ],
         "destroy": [],
         "dispatch": [
           "width",
@@ -31,6 +40,10 @@
         ]
       },
       "DebugRasterMetal": {
+        "__init__": [
+          "ctx",
+          "shader_dir"
+        ],
         "destroy": [],
         "render": [
           "line_floats",
@@ -42,6 +55,10 @@
         ]
       },
       "HostStorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
         "destroy": [],
         "read": [
           "length",
@@ -53,6 +70,11 @@
         ]
       },
       "HudOverlay": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height"
+        ],
         "destroy": [],
         "record_copy": [
           "cmd"
@@ -62,6 +84,9 @@
         ]
       },
       "MetalFrameEncoder": {
+        "__init__": [
+          "ctx"
+        ],
         "barrier": [],
         "clear": [
           "buffer"
@@ -86,7 +111,12 @@
         "flush": [],
         "submit": []
       },
-      "PreviewPipelineMetal": {
+      "PreviewPipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "graph_fragments"
+        ],
         "destroy": [],
         "dispatch": [
           "size",
@@ -95,9 +125,25 @@
           "binds",
           "output_image",
           "bindless"
+        ],
+        "pack_push": [
+          "matId",
+          "graphId",
+          "primKind",
+          "size",
+          "yaw",
+          "pitch",
+          "distance",
+          "fovTan"
         ]
       },
       "ReadbackBuffer": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "bytes_per_pixel"
+        ],
         "destroy": [],
         "read": [],
         "record_copy_from": [
@@ -106,18 +152,40 @@
         ]
       },
       "SampledImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "bytes_per_pixel",
+          "address_mode_u",
+          "address_mode_v"
+        ],
         "destroy": [],
         "upload_sync": [
           "data"
         ]
       },
       "SampledImage3D": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "depth"
+        ],
         "destroy": [],
         "upload_sync": [
           "voxels"
         ]
       },
       "StorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes",
+          "indirect",
+          "external",
+          "shared"
+        ],
         "destroy": [],
         "download_sync": [
           "byte_count"
@@ -137,10 +205,21 @@
         ]
       },
       "StorageImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "transfer_src"
+        ],
         "destroy": [],
         "read_rgba": []
       },
       "UniformBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
         "destroy": [],
         "upload": [
           "data"
@@ -152,11 +231,26 @@
       "COMMON_SAMPLER_NAME",
       "DISCRETE_MAP_SAMPLERS"
     ],
-    "functions": {}
+    "functions": {
+      "make_sampler": [
+        "ctx",
+        "address_u",
+        "address_v"
+      ]
+    }
   },
   "vulkan": {
     "classes": {
       "ComputePipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "entry_module",
+          "entry_point",
+          "graph_fragments",
+          "compile_pipeline",
+          "spectral"
+        ],
         "destroy": [],
         "scene_bindings_only": [
           "cls",
@@ -167,6 +261,10 @@
         ]
       },
       "ExternalTimelineSemaphore": {
+        "__init__": [
+          "ctx",
+          "initial_value"
+        ],
         "destroy": [],
         "export_handle": [],
         "signal": [
@@ -179,6 +277,10 @@
         ]
       },
       "HostStorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
         "destroy": [],
         "read": [
           "length",
@@ -190,6 +292,11 @@
         ]
       },
       "HudOverlay": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height"
+        ],
         "destroy": [],
         "record_copy": [
           "cmd"
@@ -199,6 +306,12 @@
         ]
       },
       "PreviewPipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "main_descriptor_set_layout",
+          "output_image_view"
+        ],
         "destroy": [],
         "pack_push": [
           "matId",
@@ -212,6 +325,12 @@
         ]
       },
       "ReadbackBuffer": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "bytes_per_pixel"
+        ],
         "destroy": [],
         "read": [],
         "record_copy_from": [
@@ -220,18 +339,40 @@
         ]
       },
       "SampledImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "bytes_per_pixel",
+          "address_mode_u",
+          "address_mode_v"
+        ],
         "destroy": [],
         "upload_sync": [
-          "rgba_f32"
+          "data"
         ]
       },
       "SampledImage3D": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "depth"
+        ],
         "destroy": [],
         "upload_sync": [
           "voxels"
         ]
       },
       "StorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes",
+          "indirect",
+          "external",
+          "shared"
+        ],
         "destroy": [],
         "download_sync": [
           "byte_count"
@@ -247,9 +388,21 @@
         ]
       },
       "StorageImage": {
-        "destroy": []
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "transfer_src"
+        ],
+        "destroy": [],
+        "read_rgba": []
       },
       "UniformBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
         "destroy": [],
         "upload": [
           "data"

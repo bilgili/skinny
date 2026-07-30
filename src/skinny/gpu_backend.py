@@ -46,6 +46,7 @@ __all__ = [
     "RECORDING_CAPABILITIES",
     "ADAPTER_MODULES",
     "ONE_SIDED_MEMBERS",
+    "DIVERGENT_SIGNATURES",
     "capabilities",
     "adapter_surface",
 ]
@@ -243,10 +244,65 @@ ONE_SIDED_MEMBERS: dict[str, dict[str, str]] = {
                "has_shared_in_place_write); Vulkan uploads through a staging "
                "copy",
     },
-    "HostStorageBuffer.write_in_place": {
+    "PreviewPipeline.dispatch": {
         "only": "metal",
-        "why": "see StorageBuffer.write_in_place",
+        "why": "see ComputePipeline.dispatch — the descriptor-set backend "
+               "records the preview dispatch into a command buffer it owns",
     },
+    "make_sampler": {
+        "only": "metal",
+        "why": "one shared sampler for the bindless pool, because the Metal "
+               "argument table splits combined Sampler2D into texture + "
+               "sampler (design D8). Vulkan's pool holds combined samplers, "
+               "so a standalone sampler has no meaning there",
+    },
+    "ComputePipeline.reflect_globals": {
+        "only": "recording",
+        "why": "declares the shader globals a recorded dispatch must cover "
+               "(task 4.3). A device adapter reflects them from the compiled "
+               "pipeline instead of being told",
+    },
+    "PreviewPipeline.reflect_globals": {
+        "only": "recording",
+        "why": "see ComputePipeline.reflect_globals",
+    },
+    "Call": {
+        "only": "recording",
+        "why": "the recording adapter's own log entry — scaffolding for "
+               "assertions, not a GPU resource the device adapters could have",
+    },
+    "Recorder": {
+        "only": "recording",
+        "why": "see Call — holds the ordered call log",
+    },
+    "RecordingContext": {
+        "only": "recording",
+        "why": "a device-free stand-in for VulkanContext / MetalContext; the "
+               "device adapters get their context from backend_select",
+    },
+    "COMMON_SAMPLER_NAME": {
+        "only": "metal",
+        "why": "the shader-global name the shared bindless sampler binds to; "
+               "a bind-by-name concept with no descriptor-set counterpart",
+    },
+    "DISCRETE_MAP_SAMPLERS": {
+        "only": "metal",
+        "why": "see COMMON_SAMPLER_NAME — the discrete map sampler globals",
+    },
+}
+
+
+#: Members present on every adapter whose *signature* genuinely differs, with
+#: the reason. Same rule as :data:`ONE_SIDED_MEMBERS`: declared, never
+#: discovered. Keep this table as short as the truth allows — a signature listed
+#: here is one a caller cannot write backend-agnostically.
+DIVERGENT_SIGNATURES: dict[str, str] = {
+    "PreviewPipeline.__init__":
+        "the binding models genuinely differ: a descriptor-set backend takes "
+        "the scene set-0 layout and an output image view, a bind-by-name "
+        "backend takes the scene's MaterialX graph fragments and resolves both "
+        "at dispatch. The one call site branches on has_descriptor_sets; every "
+        "other use of the class (pack_push, dispatch, destroy) is uniform.",
 }
 
 
@@ -261,8 +317,13 @@ def _param_names(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     return [n for n in names if n != "self"]
 
 
+#: ``__init__`` is part of the surface — a constructor whose parameter names
+#: drift is exactly the break the conformance test exists to catch.
+_DUNDER_SURFACE = frozenset({"__init__"})
+
+
 def _public(name: str) -> bool:
-    return not name.startswith("_")
+    return name in _DUNDER_SURFACE or not name.startswith("_")
 
 
 def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
@@ -278,16 +339,21 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
     classes: dict[str, dict[str, list[str]]] = {}
     functions: dict[str, list[str]] = {}
     constants: list[str] = []
+    declared: dict[str, dict[str, list[str]]] = {}
+    bases: dict[str, list[str]] = {}
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
-            if not _public(node.name):
-                continue
-            classes[node.name] = {
+            members = {
                 m.name: _param_names(m)
                 for m in node.body
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and _public(m.name)
             }
+            declared[node.name] = members
+            bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+            if not _public(node.name):
+                continue
+            classes[node.name] = members
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if _public(node.name):
                 functions[node.name] = _param_names(node)
@@ -299,6 +365,20 @@ def adapter_surface(module: str, *, src_root: Path | None = None) -> dict:
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             if node.target.id.isupper() and _public(node.target.id):
                 constants.append(node.target.id)
+    # An inherited member is part of the surface: a shared base in the same
+    # module (the recording adapter's `_Resource`) must not read as a gap.
+    def _inherited(name: str, seen: frozenset[str]) -> dict[str, list[str]]:
+        merged: dict[str, list[str]] = {}
+        for base in bases.get(name, ()):
+            if base in seen or base not in declared:
+                continue
+            merged.update(_inherited(base, seen | {name}))
+            merged.update(declared[base])
+        return merged
+
+    for name, members in classes.items():
+        classes[name] = {**_inherited(name, frozenset()), **members}
+
     return {
         "classes": classes,
         "functions": functions,

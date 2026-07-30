@@ -16,6 +16,7 @@ import numpy as np
 
 from skinny import config_report as cr
 from skinny.params import EXECUTION_MEGAKERNEL, EXECUTION_WAVEFRONT
+from skinny.gpu_backend import METAL_CAPABILITIES, VULKAN_CAPABILITIES
 from skinny.renderer import Renderer
 from skinny.sampling.neural_replay import ReplayBuffer
 from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
@@ -47,7 +48,7 @@ def _matrix_fake(**overrides):
     approved; overrides flip individual axes."""
     fake = types.SimpleNamespace(
         _requested_backend="auto",
-        is_metal=True,
+        caps=METAL_CAPABILITIES,
         _requested_execution_mode="wavefront",
         effective_execution_mode_index=EXECUTION_WAVEFRONT,
         execution_mode_fallback_active=False,
@@ -314,7 +315,7 @@ def test_metal_wavefront_ready_without_descriptor_sets():
     # must come from the scene bindings, or online training never enables (the
     # bug: the old gate tested descriptor_sets, permanently None on Metal).
     fake = types.SimpleNamespace(
-        is_metal=True, effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        caps=METAL_CAPABILITIES, effective_execution_mode_index=EXECUTION_WAVEFRONT,
         descriptor_sets=None, _scene_bindings=object(), pipeline=None)
     assert _ready(fake) is True
     fake._scene_bindings = None
@@ -323,7 +324,7 @@ def test_metal_wavefront_ready_without_descriptor_sets():
 
 def test_vulkan_wavefront_still_requires_descriptor_sets():
     fake = types.SimpleNamespace(
-        is_metal=False, effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        caps=VULKAN_CAPABILITIES, effective_execution_mode_index=EXECUTION_WAVEFRONT,
         descriptor_sets=None, _scene_bindings=object(), pipeline=None)
     assert _ready(fake) is False
     fake.descriptor_sets = object()

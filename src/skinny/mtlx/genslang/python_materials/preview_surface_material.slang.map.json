@@ -1,0 +1,20 @@
+{
+  "generated": "python_materials/preview_surface_material.slang",
+  "sources": [
+    "python_materials/preview_surface_material.py"
+  ],
+  "mappings": [
+    {
+      "generated_line": 1,
+      "source": "python_materials/preview_surface_material.py",
+      "source_line": 2,
+      "symbol": "checker_pattern"
+    },
+    {
+      "generated_line": 1,
+      "source": "python_materials/preview_surface_material.py",
+      "source_line": 2,
+      "symbol": "perturb_normal"
+    }
+  ]
+}

@@ -369,14 +369,6 @@ class Renderer:
         from skinny.backend_select import resource_module
         self._gpu = resource_module(self.ctx)
         self.is_metal = bool(getattr(self.ctx, "is_metal", False))
-        # What the selected backend can do, by name rather than by vendor
-        # (change gpu-backend-adapter, design D1). Every question the renderer
-        # used to answer with an `is_metal` branch — descriptor sets, frame
-        # sync objects, external memory, GPU skinning, watchdog tiling,
-        # bindless capacity — is a field on this record. `is_metal` survives
-        # only where there are genuinely two implementations.
-        from skinny.gpu_backend import capabilities
-        self.caps = capabilities(self.ctx)
         # Shared sampler for the Metal bindless texture pool (binding 38, design
         # D8). One sampler instead of the 128 a combined Sampler2D[] would emit.
         # MUST be repeat/repeat to match the Vulkan per-slot samplers, whose
@@ -1075,6 +1067,26 @@ class Renderer:
         """True when the capability gate is overriding the selected execution
         mode (front-ends surface this to the user)."""
         return self.effective_execution_mode_index != self.execution_mode_index
+
+    @property
+    def caps(self):
+        """What the selected backend can do, by name rather than by vendor
+        (change gpu-backend-adapter, design D1).
+
+        Every question this renderer used to answer with an `is_metal` branch —
+        descriptor sets, frame sync objects, external memory, GPU skinning,
+        watchdog tiling, bindless capacity — is a field on this record;
+        `is_metal` survives only where there are genuinely two implementations.
+
+        Derived from `self.ctx` and memoised, rather than set in `__init__`, so
+        a renderer built through `__new__` (the hostless test pattern) answers
+        it from whatever context it was given.
+        """
+        caps = self.__dict__.get("_caps")
+        if caps is None:
+            from skinny.gpu_backend import capabilities
+            caps = self.__dict__["_caps"] = capabilities(self.ctx)
+        return caps
 
     @property
     def _backend_render_ready(self) -> bool:

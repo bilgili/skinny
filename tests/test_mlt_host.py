@@ -314,12 +314,17 @@ def test_mlt_uniform_tail_gated_on_active_consumer():
     from skinny import mlt_chain
     tail = inspect.getsource(mlt_chain.uniform_tail_active)
     assert "integrator_index != 3" in tail
-    assert "EXECUTION_WAVEFRONT" in tail and "is_metal" in tail
+    # The predicate takes the CAPABILITY that makes the tail unsafe — a backend
+    # that packs the blob per dispatch against a reflected layout — not the
+    # vendor name (change gpu-backend-adapter).
+    assert "EXECUTION_WAVEFRONT" in tail and "reflected_uniform_layout" in tail
+    assert "is_metal" not in tail
     # …and the renderer feeds it the live pass-built / mode state.
     call = _read("renderer.py")
     call = call[call.index("def _mlt_uniform_tail_active"):][:600]
     assert "mlt_chain.uniform_tail_active(" in call
-    assert "self.is_metal" in call and "self.effective_execution_mode_index" in call
+    assert "self.caps.has_reflected_record_layouts" in call
+    assert "self.effective_execution_mode_index" in call
     assert "self._wavefront_mlt_pass is not None" in call
 
     # The layout source routes through the predicate; the scalar packer's tail
@@ -334,7 +339,7 @@ def test_mlt_uniform_tail_gated_on_active_consumer():
 
 def test_mlt_msl_pack_matches_target_layout_not_session():
     # codex pre-merge review: an explicit non-MLT layout_source (the material
-    # preview's PreviewPipelineMetal) must pack the base 568 B blob even while
+    # preview's Metal PreviewPipeline) must pack the base 568 B blob even while
     # MLT is the active integrator — _pack_uniforms_msl keys the tail off
     # `"mltSigma" in layout` and passes that to _pack_uniforms(mlt_tail=…), so
     # the blob and the field table always agree with the target layout.
