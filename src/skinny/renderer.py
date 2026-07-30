@@ -46,7 +46,9 @@ from skinny.params import (
     clamp_mode_index,
     effective_execution_mode,
 )
-from skinny import frame_derive, mlt_chain, render_envelope, scene_intake, slang_layout
+from skinny import (
+    frame_derive, frame_plan, mlt_chain, render_envelope, scene_intake, slang_layout,
+)
 # Scene intake is a module-level dependency, not a lazy one (change
 # scene-intake-interface). Every USD read the renderer performs goes through it
 # and comes back as a `SceneUpdate` value applied by `apply_scene_update`; the
@@ -170,7 +172,9 @@ _SPPM_METAL_PHOTON_BATCH_DEFAULT = 65536
 # `nChains` (16384) this is exactly one batch — the GPU-validated path is
 # unchanged — and only a larger chain count subdivides. Env override
 # SKINNY_MLT_METAL_CHAIN_BATCH; 0 disables tiling (single full dispatch).
-_MLT_METAL_CHAIN_BATCH_DEFAULT = 16384
+# Owned by `frame_plan` (change frame-plan-split) — the watchdog-tiling decision
+# is a frame decision; re-exported here for the call sites that pinned it.
+_MLT_METAL_CHAIN_BATCH_DEFAULT = frame_plan.MLT_CHAIN_BATCH_DEFAULT
 
 
 # Ordered (field-name, scalar-byte-size) of the `FrameConstants fc` uniform block,
@@ -199,19 +203,11 @@ _FC_MLT_FIELDS: tuple[tuple[str, int], ...] = _FC_SCALAR_FIELDS_MLT[-9:-1]
 # wavefront-only) — under an MLT pack the word moves by the tail's 32 B.
 _TILE_ORIGIN_Y_OFFSET = slang_layout.fc_tile_origin_y_offset()
 
-# Target pixels per Metal megakernel command buffer, per integrator, before the
-# frame is split into more row bands (change metal-megakernel-watchdog-tiling).
-# BDPT does the widest per-pixel work (eye × light subpaths + full s×t connection
-# matrix, each connection a BSDF eval at both ends), so it needs a far smaller
-# budget than the path tracer to stay under the macOS GPU watchdog on heavy
-# (graph-material) scenes. Path/SPPM are cheap enough to keep the single
-# full-frame dispatch on ordinary scenes. `_metal_megakernel_bands` reads these.
-_METAL_MEGAKERNEL_BAND_PIXELS_DEFAULT = 8_000_000
-_METAL_MEGAKERNEL_BAND_PIXELS = {
-    0: 8_000_000,   # Path — effectively one band until very large frames
-    1: 200_000,     # BDPT — the wedging case; ~1280×720 → ~5 bands
-    2: 8_000_000,   # SPPM eye pass — cheap per pixel
-}
+# Row-band budgets for the watchdog-tiled megakernel dispatch. Owned by
+# `frame_plan` (change frame-plan-split) together with the banding rule itself;
+# re-exported here for the call sites that pinned them.
+_METAL_MEGAKERNEL_BAND_PIXELS_DEFAULT = frame_plan.MEGAKERNEL_BAND_PIXELS_DEFAULT
+_METAL_MEGAKERNEL_BAND_PIXELS = frame_plan.MEGAKERNEL_BAND_PIXELS
 
 # Per-tile lane cap for the wavefront BDPT/SPPM eye stage when the scene has a
 # non-terminal non-flat material (VOLUME / PYTHON): the non-flat first-hit path
@@ -331,6 +327,167 @@ SPECTRAL_EMITTER_STRIDE = 8
 # the modes are mutually exclusive (only one is armed at a time).
 TOOL_MODE_STRUCTURAL = 4
 TOOL_STRUCT_AOV_BASE = 16  # float4 slots; past the 16-slot header/pick region
+
+
+_SUB_COLOR = vk.VkImageSubresourceRange(
+    aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+    baseMipLevel=0, levelCount=1,
+    baseArrayLayer=0, layerCount=1,
+)
+
+
+def _barrier_list(barriers):
+    """The `(count, pBarriers)` argument pair `vkCmdPipelineBarrier` takes. The
+    shared and target-supplied image barriers go in ONE call, so the recorded
+    command stream is the same as before the windowed/headless split (change
+    frame-plan-split)."""
+    return len(barriers), barriers
+
+
+class _SwapchainTarget:
+    """Where a windowed frame goes (change frame-plan-split).
+
+    Acquires a swapchain image, blits the finished offscreen image onto it and
+    presents. The compute dispatch always writes `_offscreen_output` at the
+    render resolution; the blit is what decouples render resolution from the
+    window's surface extent (and scales between them with a linear filter).
+    """
+
+    name = frame_plan.TARGET_WINDOWED
+
+    def __init__(self, renderer: "Renderer") -> None:
+        self._r = renderer
+        self._image_index = 0
+        self._image = None
+
+    def acquire(self, frame: int) -> None:
+        r = self._r
+        self._image_index = r.ctx.vkAcquireNextImageKHR(
+            r.ctx.device, r.ctx.swapchain_info.swapchain, 2**64 - 1,
+            r.image_available[frame], vk.VK_NULL_HANDLE,
+        )
+        self._image = r.ctx.swapchain_info.images[self._image_index]
+
+    def output_barriers(self) -> list:
+        """Extra image barriers merged into the shared compute→transfer
+        barrier: the acquired image goes UNDEFINED → TRANSFER_DST."""
+        return [vk.VkImageMemoryBarrier(
+            srcAccessMask=0,
+            dstAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+            oldLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            image=self._image,
+            subresourceRange=_SUB_COLOR,
+        )]
+
+    def record_output(self, cmd) -> None:
+        r = self._r
+        extent = r.ctx.swapchain_info.extent
+        layers = vk.VkImageSubresourceLayers(
+            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            mipLevel=0, baseArrayLayer=0, layerCount=1,
+        )
+        blit = vk.VkImageBlit(
+            srcSubresource=layers,
+            srcOffsets=[
+                vk.VkOffset3D(x=0, y=0, z=0),
+                vk.VkOffset3D(x=int(r.width), y=int(r.height), z=1),
+            ],
+            dstSubresource=layers,
+            dstOffsets=[
+                vk.VkOffset3D(x=0, y=0, z=0),
+                vk.VkOffset3D(x=int(extent.width), y=int(extent.height), z=1),
+            ],
+        )
+        vk.vkCmdBlitImage(
+            cmd,
+            r._offscreen_output.image, vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            self._image, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, [blit], vk.VK_FILTER_LINEAR,
+        )
+
+    def record_post_output(self, cmd) -> None:
+        """Swapchain TRANSFER_DST → PRESENT_SRC. A separate barrier from the
+        shared restore because its destination stage is BOTTOM_OF_PIPE, not the
+        next frame's compute."""
+        vk.vkCmdPipelineBarrier(
+            cmd,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, None, 0, None,
+            1, [vk.VkImageMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                dstAccessMask=0,
+                oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                newLayout=vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                image=self._image,
+                subresourceRange=_SUB_COLOR,
+            )],
+        )
+
+    def submit_info(self, cmd, frame: int):
+        return vk.VkSubmitInfo(
+            waitSemaphoreCount=1,
+            pWaitSemaphores=[self._r.image_available[frame]],
+            pWaitDstStageMask=[vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT],
+            commandBufferCount=1,
+            pCommandBuffers=[cmd],
+            signalSemaphoreCount=1,
+            pSignalSemaphores=[self._r.render_finished[self._image_index]],
+        )
+
+    def finish(self, frame: int) -> None:
+        """Present. No host wait — the next frame's fence wait is the throttle."""
+        r = self._r
+        r.ctx.vkQueuePresentKHR(r.ctx.present_queue, vk.VkPresentInfoKHR(
+            waitSemaphoreCount=1,
+            pWaitSemaphores=[r.render_finished[self._image_index]],
+            swapchainCount=1,
+            pSwapchains=[r.ctx.swapchain_info.swapchain],
+            pImageIndices=[self._image_index],
+        ))
+
+    def result(self) -> None:
+        return None
+
+
+class _OffscreenTarget:
+    """Where a headless frame goes (change frame-plan-split).
+
+    No swapchain and no semaphores: the finished offscreen image is copied into
+    the readback staging buffer, the submit is waited on the host, and the
+    frame's bytes are returned. Binding 1 points at `_offscreen_output` for the
+    whole session, so there is nothing to rebind here (see baseline.md §1.3).
+    """
+
+    name = frame_plan.TARGET_HEADLESS
+
+    def __init__(self, renderer: "Renderer") -> None:
+        self._r = renderer
+
+    def acquire(self, frame: int) -> None:
+        return None
+
+    def output_barriers(self) -> list:
+        return []
+
+    def record_output(self, cmd) -> None:
+        self._r._readback.record_copy_from(cmd, self._r._offscreen_output.image)
+
+    def record_post_output(self, cmd) -> None:
+        return None
+
+    def submit_info(self, cmd, frame: int):
+        return vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])
+
+    def finish(self, frame: int) -> None:
+        """Wait the submit out — a readback must see completed GPU work."""
+        r = self._r
+        vk.vkWaitForFences(
+            r.ctx.device, 1, [r.in_flight_fences[frame]], vk.VK_TRUE, 2**64 - 1)
+
+    def result(self) -> bytes:
+        return self._r._readback.read()
 
 
 class Renderer:
@@ -1214,33 +1371,34 @@ class Renderer:
             upload_uniforms=lambda: self.uniform_buffer.upload(
                 self._pack_uniforms()))
 
-    def _record_wavefront_dispatch(self, cmd, scene_set):
+    def _record_wavefront_dispatch(self, cmd, scene_set, plan):
         """Record the active wavefront integrator's dispatch into ``cmd`` —
-        shared by the windowed + headless Vulkan seams. SPPM (integrator 2) needs
-        the per-frame photon count + first-frame flag; MLT (integrator 3) runs
-        the synchronous bootstrap round-trip at an accumulation reset before
-        recording its frame; path/bdpt take the scene set alone. SPPM and MLT
-        fall back to the path tracer when their pass is unbuildable (e.g. a
-        megakernel-mode session's layout, not yet wired)."""
-        if self.integrator_index == 3:  # INTEGRATOR_MLT
+        shared by the windowed + headless Vulkan seams. SPPM needs the per-frame
+        photon count + first-frame flag; MLT runs the synchronous bootstrap
+        round-trip at an accumulation reset before recording its frame;
+        path/bdpt take the scene set alone. SPPM and MLT fall back to the path
+        tracer when their pass is unbuildable (e.g. a megakernel-mode session's
+        layout, not yet wired).
+
+        The integrator, the mutation budget and the first-frame flag come from
+        *plan* rather than being re-derived here (change frame-plan-split)."""
+        if plan.integrator == "mlt":
             mlt = self._ensure_wavefront_pass("mlt")
             if mlt is not None:
-                if self.accum_frame == 0 or not mlt.seeded:
+                if plan.first_frame or not mlt.seeded:
                     self._run_wavefront_mlt_bootstrap(mlt, scene_set)
                 mlt.record_frame(
-                    cmd, scene_set, iterations=self._mlt_iterations_per_frame())
+                    cmd, scene_set, iterations=plan.mlt_iterations)
                 return
-        if self.integrator_index == 2:  # INTEGRATOR_SPPM
+        if plan.integrator == "sppm":
             sppm = self._ensure_wavefront_pass("sppm")
             if sppm is not None:
                 sppm.record_dispatch(
                     cmd, scene_set, photons=self._sppm_photons_emitted,
-                    first_frame=(self.accum_frame == 0))
+                    first_frame=plan.first_frame)
                 return
-        if self.integrator_index == 1:
-            staged = self._ensure_wavefront_pass("bdpt")
-        else:
-            staged = self._ensure_wavefront_pass("path")
+        staged = self._ensure_wavefront_pass(
+            "bdpt" if plan.integrator == "bdpt" else "path")
         if staged is not None:
             staged.record_dispatch(cmd, scene_set)
         else:
@@ -7852,7 +8010,7 @@ class Renderer:
             b["graphParamsCombined"] = combined.buffer
         return b
 
-    def _render_megakernel_metal(self) -> None:
+    def _render_megakernel_metal(self, plan) -> None:
         """Bind every megakernel resource and dispatch one frame on the Metal
         pipeline (design D2/D4). Writes the display image into `_offscreen_output`."""
         mtlx_bytes = self._pack_mtlx_skin_array_msl()
@@ -7861,34 +8019,26 @@ class Renderer:
         binds = self._build_metal_binds()
         bindless = self._gpu_set.metal_bindless()
         # Row-band tiling bounds each committed command buffer under the macOS GPU
-        # watchdog (change metal-megakernel-watchdog-tiling). The tileOriginY u32 is
-        # patched at its reflected MSL offset per band.
+        # watchdog (change metal-megakernel-watchdog-tiling). The band count is the
+        # plan's; the tileOriginY u32 is patched at its reflected MSL offset per band.
         tile_off, _ = self._msl_layout_source.uniform_layout["tileOriginY"]
         self.pipeline.dispatch(
             self.width, self.height,
             uniform_blob=self._pack_uniforms_msl(),
             binds=binds, bindless=bindless,
-            bands=self._metal_megakernel_bands(),
+            bands=plan.megakernel_bands,
             tile_origin_offset=tile_off,
         )
 
     def _metal_megakernel_bands(self) -> int:
         """Row-band count for the Metal megakernel dispatch so no single command
-        buffer exceeds the GPU watchdog budget. Integrator-aware and resolution-
-        scaled; `SKINNY_METAL_MEGAKERNEL_BANDS` overrides for tuning. Vulkan never
-        calls this (it dispatches the full frame in one buffer)."""
-        import os
-        override = os.environ.get("SKINNY_METAL_MEGAKERNEL_BANDS")
-        if override:
-            try:
-                return max(1, int(override))
-            except ValueError:
-                pass
-        budget = _METAL_MEGAKERNEL_BAND_PIXELS.get(
-            int(self.integrator_index), _METAL_MEGAKERNEL_BAND_PIXELS_DEFAULT)
-        pixels = int(self.width) * int(self.height)
-        bands = (pixels + budget - 1) // budget
-        return max(1, min(int(self.height), bands))
+        buffer exceeds the GPU watchdog budget. The rule lives in
+        `frame_plan.megakernel_bands`, keyed on the watchdog *capability* rather
+        than on the backend; this binds the capability to `is_metal`, which is
+        where the two are the same thing today."""
+        return frame_plan.megakernel_bands(
+            self._needs_watchdog_tiling, self.integrator_index,
+            self.width, self.height)
 
     def _has_heavy_nonflat(self) -> bool:
         """True when the scene has a non-terminal non-flat material (VOLUME /
@@ -7901,7 +8051,7 @@ class Renderer:
         return any(
             int(t) in (MATERIAL_TYPE_PYTHON, MATERIAL_TYPE_VOLUME) for t in types)
 
-    def _render_scene_metal(self) -> None:
+    def _render_scene_metal(self, plan) -> None:
         """Render one Metal frame into `_offscreen_output` through the active
         execution mode: the staged wavefront tracer when selected (and
         buildable) — MLT / SPPM / BDPT / path — falling back to the megakernel
@@ -7911,19 +8061,20 @@ class Renderer:
         come through here, so this is where the HUD is filled — on Metal the
         upload writes the texture directly and there is no command-buffer copy
         seam to hang it off (renderer-output-fidelity).
+
+        The execution mode and the integrator come from *plan* (change
+        frame-plan-split); this is no longer a second place they are derived.
         """
         self._sync_hud_overlay()
-        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            integrator = {3: "mlt", 2: "sppm", 1: "bdpt"}.get(
-                self.integrator_index, "path")
-            staged = self._ensure_wavefront_pass(integrator)
+        if plan.execution_mode == EXECUTION_WAVEFRONT:
+            staged = self._ensure_wavefront_pass(plan.integrator)
             if staged is not None:
-                self._render_wavefront_metal(staged, integrator)
+                self._render_wavefront_metal(staged, plan)
                 return
             # unbuildable → fall back to the megakernel below
-        self._render_megakernel_metal()
+        self._render_megakernel_metal(plan)
 
-    def _render_wavefront_metal(self, staged, integrator: str) -> None:
+    def _render_wavefront_metal(self, staged, plan) -> None:
         """Dispatch one staged wavefront frame on the Metal backend (change
         metal-wavefront-parity + renderer-module-carveout): the shared
         `record_*_loop` stage order over one frame command encoder. path/BDPT
@@ -7937,29 +8088,29 @@ class Renderer:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
         textures = [(s.texture if s is not None else None)
                     for s in self.texture_pool._slots]
-        if integrator == "mlt":
+        if plan.integrator == "mlt":
             # Pack the frame blob AFTER the bootstrap so the resolve reads the
             # freshly measured `fc.mltB` (the bootstrap re-packs internally).
-            if self.accum_frame == 0 or not staged.seeded:
+            if plan.first_frame or not staged.seeded:
                 self._run_wavefront_mlt_bootstrap_metal(staged)
             staged.dispatch_frame(
                 binds=self._build_metal_binds(),
                 uniform_blob=self._pack_uniforms_msl(),
                 bindless_textures=textures,
-                iterations=self._mlt_iterations_per_frame(),
-                chain_batch=self._mlt_metal_chain_batch(),
+                iterations=plan.mlt_iterations,
+                chain_batch=plan.mlt_chain_batch,
             )
             return
         # Bound the heavy per-tile eye submit when the scene has a non-terminal
         # non-flat material (change wavefront-nonflat-tiled-fallback).
-        staged.bound_heavy_eye = self._has_heavy_nonflat()
+        staged.bound_heavy_eye = plan.bound_heavy_eye
         binds = self._build_metal_binds()
         blob = self._pack_uniforms_msl()
-        if integrator == "sppm":
+        if plan.integrator == "sppm":
             staged.dispatch_frame(
                 binds=binds, uniform_blob=blob, bindless_textures=textures,
                 photons=self._sppm_photons_emitted,
-                first_frame=(self.accum_frame == 0),
+                first_frame=plan.first_frame,
                 photon_batch=self._sppm_metal_photon_batch,
             )
         else:  # path / bdpt
@@ -7991,25 +8142,21 @@ class Renderer:
 
     def _mlt_metal_chain_batch(self) -> int:
         """Per-dispatch chain breadth for the Metal MLT phases (design D7,
-        codex pre-merge review). 0 on Vulkan (no watchdog) and off by env; on
-        Metal, `SKINNY_MLT_METAL_CHAIN_BATCH` overrides the default so a large
-        `--chains` stays under the macOS GPU watchdog."""
-        if not self.is_metal:
-            return 0
-        import os
-        return int(os.environ.get("SKINNY_MLT_METAL_CHAIN_BATCH",
-                                  str(_MLT_METAL_CHAIN_BATCH_DEFAULT)))
+        codex pre-merge review). Rule in `frame_plan.mlt_chain_batch`: 0 without
+        the watchdog-tiling capability, else `SKINNY_MLT_METAL_CHAIN_BATCH` over
+        the default, so a large `--chains` stays under the macOS GPU watchdog."""
+        return frame_plan.mlt_chain_batch(self._needs_watchdog_tiling)
 
-    def _render_headless_metal(self) -> bytes:
+    def _render_headless_metal(self, plan) -> bytes:
         """Metal headless render → raw RGBA8 bytes (the structural-parity test
         path). Mirrors the Vulkan `render_headless` minus the Vulkan
         command-buffer/descriptor machinery — resources bind at dispatch."""
-        self._render_scene_metal()
+        self._render_scene_metal(plan)
         arr = self._offscreen_output.read_rgba()  # (H, W, 4)
         from skinny.metal_compute import _rgba_f32_to_rgba8
         return _rgba_f32_to_rgba8(arr).tobytes()
 
-    def _render_windowed_metal(self) -> None:
+    def _render_windowed_metal(self, plan) -> None:
         """Windowed Metal frame: dispatch the megakernel into `_offscreen_output`
         (rgba8) and blit it onto the acquired slang-rhi surface image, then
         present. The blit converts the surface's native format (typically
@@ -8021,7 +8168,7 @@ class Renderer:
         if surface is None:
             return
         self.poll_pick_result()
-        self._render_scene_metal()
+        self._render_scene_metal(plan)
         image = surface.acquire_next_image()
         if image is None:
             return
@@ -8520,6 +8667,44 @@ class Renderer:
         ) + tuple(p.extractor(self) for p in ACCUM_STATE_PROVIDERS)
         return hash(parts)
 
+    # ── Frame plan (change frame-plan-split) ────────────────────────────
+
+    @property
+    def _needs_watchdog_tiling(self) -> bool:
+        """The backend's command buffers are policed by a GPU watchdog, so a
+        long dispatch must be split into flushed sub-batches. True on Metal
+        (macOS kills an over-long command buffer and cannot reclaim another
+        process's GPU work); false on Vulkan, which dispatches a full frame in
+        one buffer. This property is the single place the capability is bound
+        to a backend — `gpu-backend-adapter` moves the binding into its
+        capability record, and nothing that consumes it changes."""
+        return self.is_metal
+
+    @property
+    def _records_command_buffers(self) -> bool:
+        """The backend records a frame into a command buffer and submits it
+        against a fence (Vulkan), as opposed to binding resources at dispatch
+        and draining per submit (Metal). Selects the frame's step order."""
+        return not self.is_metal
+
+    def _derive_frame_plan(self, target: str) -> frame_plan.FramePlan:
+        """Derive this frame's plan — the execution mode, the integrator, the
+        step order, the dispatch banding and the optional per-frame work — as a
+        value holding no device handles. Derived once per frame, before the
+        first step it describes."""
+        return frame_plan.derive(
+            target=target,
+            execution_mode_index=self.effective_execution_mode_index,
+            integrator_index=self.integrator_index,
+            accum_frame=self.accum_frame,
+            width=self.width, height=self.height,
+            needs_watchdog_tiling=self._needs_watchdog_tiling,
+            records_command_buffers=self._records_command_buffers,
+            mlt_num_chains=self.mlt_num_chains,
+            has_heavy_nonflat=self._has_heavy_nonflat(),
+            online_training=bool(self._online_training),
+        )
+
     def update(self, dt: float) -> None:
         self.time_elapsed += dt
         self.frame_index += 1
@@ -8536,6 +8721,51 @@ class Renderer:
                 inst_fps if self._fps_smooth == 0 else self._fps_smooth * 0.9 + inst_fps * 0.1
             )
 
+        self._sync_scene(dt)
+
+        state = self._current_state_hash()
+        if state != self._last_state_hash:
+            self.accum_frame = 0
+            self._last_state_hash = state
+            # Zero the BDPT light-tracer splat buffer so the running mean
+            # restarts cleanly. Cheap on integrated/dedicated GPUs (single
+            # FillBuffer command + queue wait) and only fires on state change.
+            if self.light_splat_buffer is not None:
+                self.light_splat_buffer.fill_zero_sync()
+        else:
+            self.accum_frame += 1
+
+        # Refresh the gizmo overlay each frame (cheap CPU-side rebuild +
+        # one storage-buffer upload). Camera moves and instance edits
+        # both shift the on-screen ring, so building per-frame keeps it
+        # synced without an explicit dirty signal.
+        self._refresh_gizmo_segments()
+
+    def _sync_scene(self, dt: float) -> None:
+        """Advance every piece of scene state the frame reads, in the one order
+        that works (change frame-plan-split, task 2.1).
+
+        This is the state-advancing half of `update`. The order is not
+        cosmetic — it is transcribed unchanged from the pre-split `update` and
+        the dependencies are stated in
+        `openspec/changes/frame-plan-split/baseline.md` §1.1. In short:
+
+        1. Newly-arrived USD metadata lands first, so an authority transition
+           is atomic within one frame.
+        2. The playback clock advances before animated prims are evaluated, and
+           both precede every read of `_usd_scene`.
+        3. A `usd:` live edit is re-read before the snapshot is built.
+        4. Light state is recomputed before the snapshot consumes it.
+        5. The snapshot is rebuilt before the scene-graph and light-upload
+           steps read the active authority from it.
+        6. The mesh rebake is keyed on wall-clock time, not frame time — that
+           is what debounces a slider drag independently of frame rate.
+
+        The accumulation decision deliberately stays in `update`, after this
+        returns, so it observes every mutation made here. Its hash is owned by
+        the `params.py` registry (change param-registry-accumulation-reset);
+        the frame plan consumes the result and never re-derives it.
+        """
         # Apply newly-arrived USD metadata before building the per-frame scene
         # snapshot. This makes the authority transition atomic: authored lights
         # and environment state become visible in the same frame.
@@ -8600,265 +8830,34 @@ class Renderer:
         if cur_scatter != self._last_scatter_index:
             self._upload_material_types()
 
-        state = self._current_state_hash()
-        if state != self._last_state_hash:
-            self.accum_frame = 0
-            self._last_state_hash = state
-            # Zero the BDPT light-tracer splat buffer so the running mean
-            # restarts cleanly. Cheap on integrated/dedicated GPUs (single
-            # FillBuffer command + queue wait) and only fires on state change.
-            if self.light_splat_buffer is not None:
-                self.light_splat_buffer.fill_zero_sync()
-        else:
-            self.accum_frame += 1
-
-        # Refresh the gizmo overlay each frame (cheap CPU-side rebuild +
-        # one storage-buffer upload). Camera moves and instance edits
-        # both shift the on-screen ring, so building per-frame keeps it
-        # synced without an explicit dirty signal.
-        self._refresh_gizmo_segments()
-
     def render(self) -> None:
+        """Render one frame to the window.
+
+        Windowed and headless differ only in their target (change
+        frame-plan-split): both derive a plan and hand it to the same execution
+        body. Everything between the accumulation barrier and the submit is
+        written once, in `_execute_vulkan_frame`.
+        """
         # The selected backend is built lazily once a scene's MaterialX
         # fragments are gen'd (USD metadata arrival, OBJ load). Until then the
         # window has nothing to draw — skip the whole frame.
         if not self._backend_render_ready:
             return
+        plan = self._derive_frame_plan(frame_plan.TARGET_WINDOWED)
         if self.is_metal:
             # Metal has no Vulkan swapchain/fence machinery — dispatch the
             # megakernel and blit the offscreen frame to the slang-rhi surface.
-            self._render_windowed_metal()
+            self._render_windowed_metal(plan)
             # Frame-end double-buffer swap for online neural training (change
             # metal-neural-interop, design D1): _render_windowed_metal drains
             # the device before returning, so no in-flight command buffer reads
             # bindings 33/34 while the interop publisher's swap writes the
             # shared weight buffers in place (and the file publisher's
             # upload_sync path is equally safe).
-            if self._online_training:
+            if plan.online_swap:
                 self._online_frame_end_swap()
             return
-        f = self.current_frame
-
-        vk.vkWaitForFences(
-            self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
-        )
-        # NB: the fence is reset immediately before the submit that signals
-        # it, never up here. Resetting early leaves it unsignaled across every
-        # exception-capable step below (uniform pack, HUD rasterise, wavefront
-        # record), so a caller that catches and retries would block forever in
-        # the wait above -- the permanent freeze this loop's guard exists to
-        # prevent (codex pre-merge review, finding 1).
-
-        # Drain BXDF visualizer pick callback once its frame is fence-
-        # visible. Must run BEFORE _pack_uniforms below so disarming on
-        # a satisfied pick lands in this frame's UBO. BXDF / BSSRDF eval
-        # uses a synchronous out-of-band dispatch — no per-frame poll
-        # needed there.
-        self.poll_pick_result()
-
-        image_index = self.ctx.vkAcquireNextImageKHR(
-            self.ctx.device,
-            self.ctx.swapchain_info.swapchain,
-            2**64 - 1,
-            self.image_available[f],
-            vk.VK_NULL_HANDLE,
-        )
-
-        # Upload uniforms and HUD staging
-        self.uniform_buffer.upload(self._pack_uniforms())
-        # Re-pack the per-material skin UBO array so SkinParameters slider
-        # changes (and any per-material override mutations) are visible
-        # to the shader on the next frame. Skipped when the runtime
-        # didn't load.
-        mtlx_bytes = self._pack_mtlx_skin_array()
-        if mtlx_bytes:
-            self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
-
-        # Compute writes binding 1 (offscreen) at the user-chosen render
-        # resolution; we then blit that into the acquired swapchain image
-        # (which is locked to the window's surface extent). The descriptor
-        # for binding 1 was already written to ``_offscreen_output`` at
-        # init / resize, so no per-frame rewrite is needed here.
-        swap_extent = self.ctx.swapchain_info.extent
-        swap_w = int(swap_extent.width)
-        swap_h = int(swap_extent.height)
-        swap_image = self.ctx.swapchain_info.images[image_index]
-        sub_color = vk.VkImageSubresourceRange(
-            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-            baseMipLevel=0, levelCount=1,
-            baseArrayLayer=0, layerCount=1,
-        )
-
-        # Record command buffer
-        cmd = self.command_buffers[f]
-        vk.vkResetCommandBuffer(cmd, 0)
-        begin_info = vk.VkCommandBufferBeginInfo(
-            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        )
-        vk.vkBeginCommandBuffer(cmd, begin_info)
-
-        # Cross-frame memory dependency on the accumulation image: previous
-        # frame's writes must be visible to this frame's reads.
-        accum_mem_barrier = vk.VkMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, [accum_mem_barrier], 0, None, 0, None,
-        )
-
-        # Rasterise and copy this frame's HUD bytes into the device-local image.
-        self._sync_hud_overlay(cmd)
-
-        # Execution-mode gate (mirrors render_headless): in wavefront mode the
-        # staged compute pipeline writes the offscreen image; megakernel binds
-        # main_pass directly. The offscreen image is then blitted to the
-        # swapchain below, identically for both backends.
-        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            if self._wavefront_debug_pass is not None:
-                self._wavefront_debug_pass.record_dispatch(cmd)
-            else:
-                self._record_wavefront_dispatch(cmd, self.descriptor_sets[f])
-        else:
-            # Bind pipeline and descriptors
-            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
-            vk.vkCmdBindDescriptorSets(
-                cmd,
-                vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-                self.pipeline.pipeline_layout,
-                0, 1, [self.descriptor_sets[f]],
-                0, None,
-            )
-
-            # Dispatch into the offscreen image at render resolution.
-            groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-            groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-            vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
-
-        # Offscreen GENERAL → TRANSFER_SRC for the blit source.
-        offscreen_to_src = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            image=self._offscreen_output.image,
-            subresourceRange=sub_color,
-        )
-        # Swapchain UNDEFINED → TRANSFER_DST for the blit destination.
-        swap_to_dst = vk.VkImageMemoryBarrier(
-            srcAccessMask=0,
-            dstAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
-            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            image=swap_image,
-            subresourceRange=sub_color,
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, None, 0, None,
-            2, [offscreen_to_src, swap_to_dst],
-        )
-
-        # Blit offscreen → swapchain image (linear filter scales when sizes differ).
-        blit = vk.VkImageBlit(
-            srcSubresource=vk.VkImageSubresourceLayers(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                mipLevel=0, baseArrayLayer=0, layerCount=1,
-            ),
-            srcOffsets=[
-                vk.VkOffset3D(x=0, y=0, z=0),
-                vk.VkOffset3D(x=int(self.width), y=int(self.height), z=1),
-            ],
-            dstSubresource=vk.VkImageSubresourceLayers(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                mipLevel=0, baseArrayLayer=0, layerCount=1,
-            ),
-            dstOffsets=[
-                vk.VkOffset3D(x=0, y=0, z=0),
-                vk.VkOffset3D(x=swap_w, y=swap_h, z=1),
-            ],
-        )
-        vk.vkCmdBlitImage(
-            cmd,
-            self._offscreen_output.image,
-            vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            swap_image,
-            vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1, [blit],
-            vk.VK_FILTER_LINEAR,
-        )
-
-        # Offscreen TRANSFER_SRC → GENERAL for the next compute dispatch.
-        offscreen_to_general = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            image=self._offscreen_output.image,
-            subresourceRange=sub_color,
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, None, 0, None,
-            1, [offscreen_to_general],
-        )
-        # Swapchain TRANSFER_DST → PRESENT_SRC for present.
-        swap_to_present = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
-            dstAccessMask=0,
-            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            image=swap_image,
-            subresourceRange=sub_color,
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            0, 0, None, 0, None,
-            1, [swap_to_present],
-        )
-
-        vk.vkEndCommandBuffer(cmd)
-
-        # Submit
-        submit_info = vk.VkSubmitInfo(
-            waitSemaphoreCount=1,
-            pWaitSemaphores=[self.image_available[f]],
-            pWaitDstStageMask=[vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT],
-            commandBufferCount=1,
-            pCommandBuffers=[cmd],
-            signalSemaphoreCount=1,
-            pSignalSemaphores=[self.render_finished[image_index]],
-        )
-        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
-        vk.vkQueueSubmit(self.ctx.compute_queue, 1, [submit_info], self.in_flight_fences[f])
-
-        # Present
-        present_info = vk.VkPresentInfoKHR(
-            waitSemaphoreCount=1,
-            pWaitSemaphores=[self.render_finished[image_index]],
-            swapchainCount=1,
-            pSwapchains=[self.ctx.swapchain_info.swapchain],
-            pImageIndices=[image_index],
-        )
-        self.ctx.vkQueuePresentKHR(self.ctx.present_queue, present_info)
-
-        # Frame-end double-buffer swap for online neural training (task 4.2):
-        # _apply_render_weights' upload_sync waits the device idle, so the
-        # in-flight frame's reads of bindings 33/34/35 complete before the swap
-        # overwrites them.
-        if self._online_training:
-            self._online_frame_end_swap()
-
-        self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
+        self._execute_vulkan_frame(plan, _SwapchainTarget(self))
 
     def render_headless(self) -> bytes:
         """Render one frame to an offscreen image and return raw RGBA8 pixels.
@@ -8874,21 +8873,30 @@ class Renderer:
         # web/screenshot path stays well-defined.
         if not self._backend_render_ready:
             return b"\x00" * (self.width * self.height * 4)
+        plan = self._derive_frame_plan(frame_plan.TARGET_HEADLESS)
         if self.is_metal:
             self.poll_pick_result()
-            frame = self._render_headless_metal()
+            frame = self._render_headless_metal(plan)
             # Frame-end swap (metal-neural-interop): the frame's readback has
             # drained the device, so promoting pending weights now only affects
             # the NEXT frame — render weights stayed frozen this frame.
-            if self._online_training:
+            if plan.online_swap:
                 self._online_frame_end_swap()
             return frame
-        f = self.current_frame
+        return self._execute_vulkan_frame(plan, _OffscreenTarget(self))
 
-        # Drain BXDF visualiser scene-pick callbacks once their frame has
-        # retired. Matches render() so the Qt + web entry points get the
-        # same pick behaviour as the legacy GLFW path.
-        self.poll_pick_result()
+    def _execute_vulkan_frame(self, plan: frame_plan.FramePlan, target):
+        """Execute *plan* against *target* — the one Vulkan frame body (change
+        frame-plan-split, task 4.1).
+
+        The windowed and headless paths used to hold near-verbatim copies of
+        everything from the cross-frame accumulation barrier through the
+        submit. They now share it, and `target` supplies the only things that
+        genuinely differ: whether a swapchain image is acquired, what extra
+        image barriers the output needs, where the finished offscreen image is
+        copied, what the submit synchronises on, and what the frame returns.
+        """
+        f = self.current_frame
 
         vk.vkWaitForFences(
             self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
@@ -8900,27 +8908,44 @@ class Renderer:
         # the wait above -- the permanent freeze this loop's guard exists to
         # prevent (codex pre-merge review, finding 1).
 
+        # Drain BXDF visualizer pick callbacks once their frame is fence-
+        # visible. Must run BEFORE _pack_uniforms below so disarming on a
+        # satisfied pick lands in this frame's UBO — `plan.steps` states that
+        # constraint and `frame_plan.check_invariants` asserts it. BXDF /
+        # BSSRDF eval uses a synchronous out-of-band dispatch, so it needs no
+        # per-frame poll.
+        self.poll_pick_result()
+
+        target.acquire(f)
+
+        # Upload uniforms and HUD staging
         self.uniform_buffer.upload(self._pack_uniforms())
+        # Re-pack the per-material skin UBO array so SkinParameters slider
+        # changes (and any per-material override mutations) are visible
+        # to the shader on the next frame. Skipped when the runtime
+        # didn't load.
         mtlx_bytes = self._pack_mtlx_skin_array()
         if mtlx_bytes:
             self.mtlx_skin_buffer.upload_sync(mtlx_bytes)
 
+        # Record command buffer
         cmd = self.command_buffers[f]
         vk.vkResetCommandBuffer(cmd, 0)
-        begin_info = vk.VkCommandBufferBeginInfo(
+        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
             flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        )
-        vk.vkBeginCommandBuffer(cmd, begin_info)
+        ))
 
-        accum_mem_barrier = vk.VkMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
-        )
+        # Cross-frame memory dependency on the accumulation image: previous
+        # frame's writes must be visible to this frame's reads.
         vk.vkCmdPipelineBarrier(
             cmd,
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, [accum_mem_barrier], 0, None, 0, None,
+            0, 1, [vk.VkMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=(vk.VK_ACCESS_SHADER_READ_BIT
+                               | vk.VK_ACCESS_SHADER_WRITE_BIT),
+            )], 0, None, 0, None,
         )
 
         # Rasterise and copy this frame's HUD bytes into the device-local image.
@@ -8931,92 +8956,91 @@ class Renderer:
         # as smeared/banded artefacts after a resize).
         self._sync_hud_overlay(cmd)
 
-        # Execution-mode gate: in wavefront mode a staged compute pipeline writes
-        # the accumulation image; megakernel is the default in-kernel path. A
-        # test/debug pass overrides the staged path tracer when set; otherwise
-        # the real staged generate→bounce→resolve loop runs (reusing the
-        # megakernel scene descriptor set as set 0).
-        if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
-            if self._wavefront_debug_pass is not None:
-                self._wavefront_debug_pass.record_dispatch(cmd)
-            else:
-                self._record_wavefront_dispatch(cmd, self.descriptor_sets[f])
-        else:
-            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
-            vk.vkCmdBindDescriptorSets(
-                cmd,
-                vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-                self.pipeline.pipeline_layout,
-                0, 1, [self.descriptor_sets[f]],
-                0, None,
-            )
-            groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-            groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
-            vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+        self._record_frame_dispatch(cmd, plan, self.descriptor_sets[f])
 
-        # Transition offscreen output: GENERAL → TRANSFER_SRC for readback
-        barrier_to_src = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            image=self._offscreen_output.image,
-            subresourceRange=vk.VkImageSubresourceRange(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                baseMipLevel=0, levelCount=1,
-                baseArrayLayer=0, layerCount=1,
-            ),
-        )
+        # Offscreen GENERAL → TRANSFER_SRC so the output copy can read it, plus
+        # whatever the target's destination needs (the swapchain image goes
+        # UNDEFINED → TRANSFER_DST here; the readback buffer needs nothing).
         vk.vkCmdPipelineBarrier(
             cmd,
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, None, 0, None, 1, [barrier_to_src],
+            0, 0, None, 0, None,
+            *_barrier_list([vk.VkImageMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+                oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+                newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                image=self._offscreen_output.image,
+                subresourceRange=_SUB_COLOR,
+            )] + target.output_barriers()),
         )
 
-        self._readback.record_copy_from(cmd, self._offscreen_output.image)
+        target.record_output(cmd)
 
-        # Transition back: TRANSFER_SRC → GENERAL for next frame's compute write
-        barrier_to_general = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            image=self._offscreen_output.image,
-            subresourceRange=vk.VkImageSubresourceRange(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                baseMipLevel=0, levelCount=1,
-                baseArrayLayer=0, layerCount=1,
-            ),
-        )
+        # Offscreen TRANSFER_SRC → GENERAL for the next frame's compute write.
         vk.vkCmdPipelineBarrier(
             cmd,
             vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
             vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, None, 0, None, 1, [barrier_to_general],
+            0, 0, None, 0, None,
+            1, [vk.VkImageMemoryBarrier(
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
+                image=self._offscreen_output.image,
+                subresourceRange=_SUB_COLOR,
+            )],
         )
+        target.record_post_output(cmd)
 
         vk.vkEndCommandBuffer(cmd)
 
-        submit_info = vk.VkSubmitInfo(
-            commandBufferCount=1,
-            pCommandBuffers=[cmd],
-        )
         vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
-        vk.vkQueueSubmit(self.ctx.compute_queue, 1, [submit_info], self.in_flight_fences[f])
+        vk.vkQueueSubmit(
+            self.ctx.compute_queue, 1, [target.submit_info(cmd, f)],
+            self.in_flight_fences[f])
 
-        vk.vkWaitForFences(
-            self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1
-        )
+        target.finish(f)
 
         # Frame-end double-buffer swap for online neural training (task 4.2):
-        # the frame's GPU work is complete, so promoting pending weights now only
-        # affects the NEXT frame — render weights stayed frozen this frame.
-        if self._online_training:
+        # the windowed path's `_apply_render_weights` upload_sync waits the
+        # device idle and the headless target has already waited its fence, so
+        # in either case the in-flight frame's reads of bindings 33/34/35
+        # complete before the swap overwrites them.
+        if plan.online_swap:
             self._online_frame_end_swap()
 
         self.current_frame = (f + 1) % MAX_FRAMES_IN_FLIGHT
-        return self._readback.read()
+        return target.result()
+
+    def _record_frame_dispatch(self, cmd, plan: frame_plan.FramePlan, scene_set):
+        """Record the frame's compute work into ``cmd``.
+
+        The execution-mode gate that used to sit inline in both `render` and
+        `render_headless`: in wavefront mode the staged pipeline writes the
+        offscreen image; the megakernel binds `main_pass` and dispatches over
+        the render extent. A test/debug pass overrides the staged path tracer
+        when set.
+        """
+        if plan.execution_mode == EXECUTION_WAVEFRONT:
+            if self._wavefront_debug_pass is not None:
+                self._wavefront_debug_pass.record_dispatch(cmd)
+            else:
+                self._record_wavefront_dispatch(cmd, scene_set, plan)
+            return
+        vk.vkCmdBindPipeline(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline.pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            self.pipeline.pipeline_layout, 0, 1, [scene_set], 0, None,
+        )
+        # Dispatch into the offscreen image at render resolution.
+        groups_x = (self.width + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        groups_y = (self.height + WORKGROUP_SIZE - 1) // WORKGROUP_SIZE
+        vk.vkCmdDispatch(cmd, groups_x, groups_y, 1)
+
 
     # ── Resolution + screenshot ─────────────────────────────────────
 

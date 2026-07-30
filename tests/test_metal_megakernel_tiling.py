@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from skinny import frame_plan
 from skinny import renderer as R
 
 
@@ -30,20 +31,38 @@ def test_tile_origin_y_is_last_field_and_offset_matches():
     assert total <= R._VK_UNIFORM_BUFFER_BYTES
 
 
-def _bands(integrator, w, h, env=None):
-    stub = SimpleNamespace(integrator_index=integrator, width=w, height=h)
+def _bands(integrator, w, h, env=None, tiling=True):
+    # The band rule moved to `frame_plan` (change frame-plan-split) and is keyed
+    # on the watchdog-tiling CAPABILITY, not on the backend. Called there
+    # directly: it is device-free, so this needs no renderer and no SDK env.
     if env is not None:
         import os
         prev = os.environ.get("SKINNY_METAL_MEGAKERNEL_BANDS")
         os.environ["SKINNY_METAL_MEGAKERNEL_BANDS"] = str(env)
         try:
-            return R.Renderer._metal_megakernel_bands(stub)
+            return frame_plan.megakernel_bands(tiling, integrator, w, h)
         finally:
             if prev is None:
                 del os.environ["SKINNY_METAL_MEGAKERNEL_BANDS"]
             else:
                 os.environ["SKINNY_METAL_MEGAKERNEL_BANDS"] = prev
-    return R.Renderer._metal_megakernel_bands(stub)
+    return frame_plan.megakernel_bands(tiling, integrator, w, h)
+
+
+def test_renderer_binds_the_capability_to_the_metal_backend():
+    """`_metal_megakernel_bands` is now a binding of the capability to a
+    backend, and nothing more. Vulkan renders one full-frame band."""
+    metal = SimpleNamespace(_needs_watchdog_tiling=True, integrator_index=1,
+                            width=1280, height=720)
+    vulkan = SimpleNamespace(_needs_watchdog_tiling=False, integrator_index=1,
+                             width=1280, height=720)
+    assert R.Renderer._metal_megakernel_bands(metal) == _bands(1, 1280, 720)
+    assert R.Renderer._metal_megakernel_bands(vulkan) == 1
+
+
+def test_without_the_watchdog_capability_the_frame_is_one_band():
+    for integrator in (0, 1, 2, 3):
+        assert _bands(integrator, 2560, 1440, tiling=False) == 1
 
 
 def test_bdpt_gets_more_bands_than_path_at_same_resolution():

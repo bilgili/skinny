@@ -1248,13 +1248,70 @@ Key methods:
 - Compute queue only (no present queue)
 - No surface extensions in instance creation
 
-`Renderer.render_headless()`:
-- Dispatches to persistent offscreen `StorageImage` (not swapchain image)
-- Barrier → `ReadbackBuffer.record_copy_from()` → fence wait → `read()`
-- Returns raw RGBA bytes
+`Renderer.render_headless()` derives a plan and executes it against an
+**offscreen target** (see *Per-frame path* below). The target supplies the
+three things that differ from a windowed frame:
+- The dispatch writes the persistent offscreen `StorageImage`. No swapchain
+  image is acquired.
+- `ReadbackBuffer.record_copy_from()` replaces the blit, and the submit is
+  waited on the host.
+- The frame returns raw RGBA bytes.
 
 The Qt entry (`skinny-gui`) runs in the same headless mode and blits the
 readback into a `QImage` via `RenderViewport`.
+
+---
+
+## Per-frame path (`frame_plan.py`, change `frame-plan-split`)
+
+Each frame runs three stages. Each stage has one owner.
+
+| Stage | Owner | What it does |
+|---|---|---|
+| scene sync | `Renderer._sync_scene(dt)` | Advances every piece of scene state the frame reads: USD streaming, playback and animation, live-edit re-read, light recompute, the scene snapshot, the light and environment uploads, the mesh rebake, the tattoo upload. |
+| frame plan | `frame_plan.derive(...)` | Derives the frame's decisions as a **value**: execution mode, integrator, step order, dispatch banding, MLT budget, and the optional per-frame work. |
+| execute | `Renderer._execute_vulkan_frame(plan, target)` or `Renderer._render_scene_metal(plan)` | Records and submits the plan against a target. |
+
+**The plan holds no device handles.** It names passes, counts, flags and
+decisions — never a buffer, a command buffer or a pipeline. A test derives a
+plan and asserts its pass sequence with no GPU present
+(`tests/test_frame_plan.py`). `frame_plan.py` is in the device-free set that
+`tests/test_pure_core_modules.py` gates.
+
+**The windowed and headless paths differ only in their target.** Both derive a
+plan and call the same execution body. A target supplies exactly three things:
+where the output goes, whether a swapchain image is acquired and presented, and
+whether a readback follows. `_SwapchainTarget` acquires an image, contributes
+the `UNDEFINED → TRANSFER_DST` barrier to the shared barrier call, blits, adds
+the `PRESENT_SRC` transition, and presents. `_OffscreenTarget` contributes no
+extra barrier, copies into the readback buffer, waits the fence, and returns the
+bytes. Everything between the accumulation barrier and the submit is written
+once. Before this change the headless path held a near-verbatim copy of it.
+
+**Ordering constraints are asserted, not implied.** `plan.steps` lists the
+frame's steps in execution order, and `frame_plan.ORDERING_INVARIANTS` states
+each constraint with its reason. `frame_plan.check_invariants` runs on every
+derivation. The constraint that motivated this: the pick-result drain must
+precede the uniform pack, because a satisfied pick that disarms after the pack
+disarms one frame late and fires a second time. That used to be a fact about
+two line numbers in two functions.
+
+**Banding is capability-driven.** A dispatch is split into row bands because the
+backend's command buffers are watchdog-policed, not because the backend is
+Metal. `frame_plan.megakernel_bands` takes `needs_watchdog_tiling`;
+`Renderer._needs_watchdog_tiling` is the single place that capability binds to a
+backend, and `gpu-backend-adapter` moves that binding into its capability
+record without changing anything that consumes it.
+
+**The plan consumes the accumulation reset; it never re-derives it.**
+`Renderer.update` decides it from the `params.py` registry (change
+`param-registry-accumulation-reset`) and publishes `accum_frame`. The plan reads
+`accum_frame == 0` as `first_frame`, which drives the SPPM first-frame flag and
+the MLT reseed. Two owners for one decision is what that capability prevents.
+
+The transcribed pre-split step lists, the region-by-region diff of the two
+paths, and the verdict on the headless binding rewrite are recorded in
+`openspec/changes/archive/*-frame-plan-split/baseline.md`.
 
 ---
 

@@ -58,6 +58,56 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The per-frame path is scene sync, a pure frame plan, and execution**
+  (change `frame-plan-split`). One `update()` + `render()` pair carried roughly
+  34 distinct responsibilities, and `render_headless()` held a near-verbatim
+  copy of the middle of it — the cross-frame accumulation barrier, the
+  execution-mode gate and the dispatch block, duplicated. A change to the gate
+  had to be made twice, "which passes will this frame run" was not a value
+  anything could inspect, and the ordering constraints were facts about line
+  numbers. The path is now three stages with one owner each.
+  `Renderer._sync_scene(dt)` advances the scene state, in the transcribed
+  pre-split order (the dependencies are recorded, not rearranged — the light
+  upload still follows the snapshot rebuild that decides the authority, and the
+  mesh rebake still keys on wall-clock time so a slider drag debounces
+  independently of frame rate). `frame_plan.derive(...)` then produces a
+  **value**: execution mode, integrator, step order, dispatch banding, MLT
+  budget, and which optional per-frame work runs. It holds no buffers, no
+  command buffers and no pipelines, so `tests/test_frame_plan.py` derives a plan
+  and asserts its pass sequence on a host with no GPU — 119 hostless tests over
+  every integrator × execution mode × backend capability × target the render
+  envelope admits, where the golden test for `_pack_uniforms` is GPU-marked
+  precisely because it must construct a renderer to get there. Windowed and
+  headless now share **one** recorded body, `_execute_vulkan_frame`, and differ
+  only in their target: `_SwapchainTarget` acquires an image, contributes the
+  `UNDEFINED → TRANSFER_DST` barrier to the *same* barrier call (so the recorded
+  command stream is unchanged, not merely equivalent), blits, transitions to
+  `PRESENT_SRC` and presents; `_OffscreenTarget` copies into the readback
+  buffer, waits the fence and returns the bytes. The Metal entry points consume
+  the plan instead of re-deriving the execution mode, the integrator name, the
+  MLT reseed condition and the SPPM first-frame flag a second time.
+  Three consequences worth naming. **Ordering constraints are asserted rather
+  than implied**: `frame_plan.ORDERING_INVARIANTS` states each with its reason
+  and `check_invariants` runs on every derivation, so "the pick-result drain
+  precedes the uniform pack" — a satisfied pick that disarms after the pack
+  disarms one frame late and fires twice — is now a test, with a negative
+  control proving the check is not vacuous. **Banding is capability-driven**:
+  `frame_plan.megakernel_bands` takes `needs_watchdog_tiling`, not `is_metal`,
+  because the reason a dispatch splits into row bands is that the backend's
+  command buffers are watchdog-policed; `Renderer._needs_watchdog_tiling` is the
+  single place that binds, and `gpu-backend-adapter` will move it into its
+  capability record without touching a consumer. **The accumulation reset keeps
+  its owner**: `update()` decides it from the `params.py` registry and publishes
+  `accum_frame`; the plan consumes `accum_frame == 0` and never re-derives it.
+  The pick drain moved to after the fence wait on the headless path, which is
+  identical there (its previous call already waited the same fence at its tail,
+  so the drain read the same bytes) and is the only safe order windowed-side.
+  The per-call binding-1 rewrite the proposal flagged for investigation turned
+  out to have been removed already by change `review-surfaced-defects`: it was
+  dead compensation for a rebind `render()` had stopped doing, neither a target
+  difference nor a live bug. Pure refactor — same dispatches, same order, same
+  images; gated by the full parity matrix before and after.
+
 - **Scene intake is one interface that returns a value** (change
   `scene-intake-interface`). `usd_loader.py` had four public loaders that the
   renderer largely bypassed: it reached into nine private loader symbols through

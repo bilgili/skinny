@@ -11,7 +11,10 @@ import inspect
 
 from skinny.renderer import Renderer
 
-RENDER_PATHS = ("render", "render_headless", "_render_scene_metal")
+# One Vulkan body for both targets since change frame-plan-split — `render` and
+# `render_headless` are the two entry points into `_execute_vulkan_frame`, which
+# is where the frame is recorded. Metal keeps its own `_render_scene_metal`.
+RENDER_PATHS = ("_execute_vulkan_frame", "_render_scene_metal")
 
 
 class _HudOverlay:
@@ -118,7 +121,9 @@ def test_fence_is_reset_only_immediately_before_its_submit() -> None:
     wait — the permanent freeze the web render-loop guard exists to prevent
     (codex pre-merge review, finding 1).
     """
-    for name in ("render", "render_headless"):
+    # Both targets go through the one body now (change frame-plan-split), so
+    # there is one reset to check instead of two copies of the same rule.
+    for name in ("_execute_vulkan_frame",):
         lines = [l.strip() for l in inspect.getsource(getattr(Renderer, name)).splitlines()]
         resets = [i for i, l in enumerate(lines) if l.startswith("vk.vkResetFences(")]
         assert resets, f"{name} has no fence reset"
