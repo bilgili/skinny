@@ -25,6 +25,11 @@ formats.
 Head geometry (analytic SDF head + discovered `heads/*.obj` mesh heads with
 detail maps) is documented in [SkinRendering.md](SkinRendering.md).
 
+### Mesh heads (legacy)
+
+Place `.obj` files (with optional normal/roughness/displacement maps) in
+`heads/<name>/` directories. They are discovered automatically at startup.
+
 ### USD Scenes
 
 Example scenes ship in `assets/`:

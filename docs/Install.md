@@ -3,7 +3,11 @@
 This document covers what skinny needs and how to install it: the platform and
 dependency requirements, the virtual environment, and — only for a platform
 outside the prebuilt-wheel matrix — the MaterialX from-source build. On a
-supported platform `pip install -e ".[dev]"` is the whole install.
+supported platform `pip install -e ".[dev]"` installs every Python package.
+Two prerequisites are external to pip: the Vulkan SDK must be on the
+dynamic-library path on every platform (the renderer imports `vulkan` at module
+scope, Metal included), and Vulkan rendering additionally needs `slangc` on
+`PATH`. Both are listed under Requirements below.
 
 For the shortest path to a rendered frame see the quick start in
 [README.md](../README.md). For how to run the renderer once installed see

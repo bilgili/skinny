@@ -145,11 +145,16 @@ OpenUSD (with `usdMtlx`) wheels for Python 3.12/3.13/3.14 on **macOS 26+ Apple
 Silicon**, **Linux x86-64**, and **Windows AMD64** — no CMake, no MaterialX
 source build. Two caveats before that snippet produces a frame:
 
-- On macOS the native Metal backend compiles the Slang sources in-process, so
-  the commands above are the whole install.
-- On Linux and Windows the renderer runs on Vulkan, which needs the **Slang
-  compiler `slangc` on `PATH`** and the Vulkan SDK — no SPIR-V is checked in, so
-  the shaders are compiled on first run and startup aborts without `slangc`.
+- **Every platform** needs the **Vulkan SDK on the dynamic-library path**, even
+  when rendering on Metal: `skinny.renderer` imports the `vulkan` module at
+  module scope, so `import skinny.app` raises
+  `OSError: Cannot find Vulkan SDK version` without it. Export `VULKAN_SDK` and
+  add `$VULKAN_SDK/lib` to `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH`
+  (Linux).
+- **Linux and Windows** render on Vulkan, which also needs the **Slang compiler
+  `slangc` on `PATH`**: no SPIR-V is checked in, so the shaders compile on first
+  run and startup aborts without it. On macOS the native Metal backend compiles
+  the Slang sources in-process, so `slangc` is not required.
 
 [docs/Install.md](docs/Install.md) has the full requirement list, the wheel
 matrix, and the from-source MaterialX build you need only on a platform outside

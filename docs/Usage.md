@@ -274,7 +274,3 @@ bit-parity. Limitation: the walk lights from a single distant light + the
 environment; area/emissive lights inside the medium, heterogeneous / NanoVDB
 grids, and free-standing `MediumInterface` media are deliberate follow-ups.
 
-### Mesh heads (legacy)
-
-Place `.obj` files (with optional normal/roughness/displacement maps) in
-`heads/<name>/` directories. They are discovered automatically at startup.
