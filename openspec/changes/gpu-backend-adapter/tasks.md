@@ -169,3 +169,48 @@ one the guard already encodes — a Metal timing result taken while the box is
 starved measures the box, so re-run on a quiet machine before calling a
 slow-down a defect. Stack sampling used
 `faulthandler.dump_traceback_later(exit=False)`; nothing was killed.
+
+### Codex pre-merge review (required gate)
+
+Run at `xhigh` from the worktree — verified not mis-rooted, since the companion
+pins `workspaceRoot` to the PRIMARY checkout and a review of the wrong tree is
+indistinguishable from a real one. Verdict: **REQUEST CHANGES**, 2 HIGH, 3
+MEDIUM, 1 LOW, no CRITICAL. All six groups fixed in `8d42908`.
+
+Of the six focus areas put to it adversarially, four came back **non-issues**
+with evidence (`caps` lifecycle, the seven `compute_queue` sites, surviving
+VkEnum callers, the compound descriptor-set truth tables, and the regrow/rebind
+paths). The two that were real:
+
+- **HIGH 1** — `has_external_memory` was `True` in the static Vulkan record
+  while `vk_context` probes it at runtime and can enable memory *without* the
+  external semaphore the CUDA protocol also needs. A device lacking either got
+  silently non-exportable buffers and failed at first publish. Fixed by making
+  every device-probed field pessimistic in the static records and folding the
+  probes in for **both** backends, adding `has_external_semaphore`, and giving
+  `make_publisher` a three-way decision that refuses by naming what is missing.
+- **HIGH 2** — `build_wavefront_shade_passes` still imported the Vulkan 128-slot
+  capacity and used it as the descriptor `array_count` against a 119-slot Metal
+  shader: the exact extent mismatch the capability exists to prevent. The
+  branch's own task-1.2 inventory had it recorded as an unfixed seam reach while
+  the summary claimed it fixed — the inventory was right.
+
+The three MEDIUMs were all "the seam claims something it does not enforce": the
+third adapter was declared but unreachable through selection, the recorder
+counted dictionary keys rather than modelling real binding semantics, and the
+argument domain was still divergent because the surface reader compared only
+parameter *names*. Teaching the reader argument **domains** immediately caught
+two further live drifts in the recording adapter that no human had spotted.
+
+**Re-gated after the fixes, machine quiet:**
+
+- `ruff check src/` clean; hostless **17 failed / 2858 passed**, the same
+  failure set as the merge-base with 16 more passing.
+- Metal preview + debug viewport + structural + shaded cross-backend parity +
+  cleanup kill harness: **20 passed**.
+- Parity matrix: **12 passed / 0 failed**.
+- Vulkan smoke: 2 failed / 34 passed — **identical to a merge-base arm run in
+  its own worktree** (`test_render_headless_nonzero`,
+  `test_pack_uniforms_direct_flag`), so pre-existing, not from this change. The
+  baseline arm was run rather than assumed, because an earlier hang on this
+  branch was written up as a regression on a confounded comparison.
