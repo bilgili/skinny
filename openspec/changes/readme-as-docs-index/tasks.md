@@ -59,7 +59,9 @@ Move each section at its current heading level. Do not reword any line.
 
 ## 6. Review and land
 
-- [ ] 6.1 Run the codex pre-merge review. Fix or consciously dismiss each
-      finding, and re-run until a pass returns clean.
-- [ ] 6.2 `openspec validate readme-as-docs-index --strict`.
+- [x] 6.1 Run the codex pre-merge review. Fix or consciously dismiss each
+      finding, and re-run until a pass returns clean. Seven passes: 18 findings
+      (2 P1), all fixed; the seventh returned clean. Every one was in text I
+      authored or in the gate — none in moved text.
+- [x] 6.2 `openspec validate readme-as-docs-index --strict`.
 - [ ] 6.3 Merge to `main`, archive, remove the worktree, and push.

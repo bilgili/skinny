@@ -273,4 +273,3 @@ uses a dipole here, so the random walk is *milky*-matching rather than
 bit-parity. Limitation: the walk lights from a single distant light + the
 environment; area/emissive lights inside the medium, heterogeneous / NanoVDB
 grids, and free-standing `MediumInterface` media are deliberate follow-ups.
-
