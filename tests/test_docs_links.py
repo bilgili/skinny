@@ -196,6 +196,22 @@ def test_live_doc_set_is_not_empty():
     assert os.path.join("docs", "Architecture.md") in LIVE_DOCS
 
 
+INDEX_HEADING = "## Documentation"
+
+
+def _index_section() -> list[str]:
+    """The lines of README.md's `## Documentation` section, fences stripped."""
+    lines = _strip_fences(open(os.path.join(REPO, "README.md"), encoding="utf-8").read())
+    starts = [i for i, ln in enumerate(lines) if ln.startswith(INDEX_HEADING)]
+    assert len(starts) == 1, f"README.md must have exactly one {INDEX_HEADING!r}"
+    start = starts[0]
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    return lines[start:end]
+
+
 def test_index_lists_every_reference_document():
     """README.md must link every reference document in docs/.
 
@@ -208,20 +224,45 @@ def test_index_lists_every_reference_document():
     document the index should enumerate. Their links are still checked above.
     """
     docs_dir = os.path.join(REPO, "docs")
+    # Only the Documentation section counts. README also links documents from its
+    # intro, features, and quick start, and those must not stand in for an index
+    # row — otherwise deleting a row still passes and the check is decorative.
+    section = _index_section()
     # Targets are relative to the repo root, since the index is README.md.
     # Resolve each one, so a link to a nested report that happens to share a
     # filename cannot stand in for the top-level document.
     linked = set()
-    for target in _links("README.md"):
-        if not _is_relative(target):
-            continue
-        resolved = os.path.normpath(os.path.join(REPO, target.split("#", 1)[0]))
-        if os.path.dirname(resolved) == docs_dir:
-            linked.add(os.path.basename(resolved))
+    for line in section:
+        for m in _LINK.finditer(_CODE_SPAN.sub("", line)):
+            target = m.group(1) or m.group(2)
+            if not target or not _is_relative(target):
+                continue
+            resolved = os.path.normpath(os.path.join(REPO, target.split("#", 1)[0]))
+            if os.path.dirname(resolved) == docs_dir:
+                linked.add(os.path.basename(resolved))
     on_disk = {n for n in os.listdir(docs_dir) if n.endswith(".md")}
     assert on_disk, "no reference documents found — the check would be vacuous"
     missing = sorted(on_disk - linked)
-    assert not missing, f"README.md does not link: {missing}"
+    assert not missing, f"README.md § Documentation does not link: {missing}"
+
+
+def test_index_check_ignores_links_outside_the_index_section():
+    """A link in the intro or quick start must not count as an index row.
+
+    README links some documents twice — once in prose, once in the index. If the
+    completeness check scanned the whole file, deleting an index row would still
+    pass because the prose link covers it, and the check would be decorative.
+    """
+    section = "".join(_index_section())
+    whole = open(os.path.join(REPO, "README.md"), encoding="utf-8").read()
+    outside = whole.replace(section, "")
+    # At least one document is linked from prose as well as from the index —
+    # otherwise this test proves nothing about the scoping.
+    both = [
+        n for n in os.listdir(os.path.join(REPO, "docs"))
+        if n.endswith(".md") and f"docs/{n}" in outside and f"docs/{n}" in section
+    ]
+    assert both, "no document is linked both inside and outside the index"
 
 
 def test_there_is_exactly_one_index():

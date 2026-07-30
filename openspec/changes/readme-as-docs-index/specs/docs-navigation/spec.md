@@ -14,15 +14,24 @@ history — and the index SHALL NOT be required to enumerate them. Their links
 are still checked by the link-integrity test.
 
 A new reference document SHALL be added to the index in the same change that
-creates it. A hostless test SHALL assert that `README.md` links every
-`docs/*.md` file, so an unindexed document fails the build rather than becoming
-unreachable. The test SHALL resolve each target and count it only when it lands
-directly in `docs/`, so a link to a nested report cannot stand in for a missing
-top-level document.
+creates it. A hostless test SHALL assert that the index links every `docs/*.md`
+file, so an unindexed document fails the build rather than becoming unreachable.
+
+The test SHALL collect links from the index section **only**. `README.md` links
+some documents from its intro and quick start as well, and a prose link SHALL
+NOT satisfy the index requirement — otherwise deleting an index row still
+passes and the check is decorative. The test SHALL also resolve each target and
+count it only when it lands directly in `docs/`, so a link to a nested report
+cannot stand in for a missing top-level document.
 
 #### Scenario: a new document is added without an index entry
 - **WHEN** a change adds a Markdown document at the top level of `docs/` and
   does not list it in `README.md`
+- **THEN** the index test fails, naming the unindexed document
+
+#### Scenario: a document is linked from prose but not from the index
+- **WHEN** `README.md` links a document from its intro or quick start and the
+  index section has no row for it
 - **THEN** the index test fails, naming the unindexed document
 
 #### Scenario: a second index is introduced
@@ -56,7 +65,11 @@ the contributor notes, or the paper references — each of those belongs to the
 document in `docs/` that owns it.
 
 A quick start in `README.md` SHALL be the shortest sequence that produces a
-frame, and SHALL link the installation document for the full procedure.
+frame, and SHALL link the installation document for the full procedure. It SHALL
+describe the supported-platform path as the normal case, and a from-source build
+only as the fallback for a platform outside the wheel matrix. Every navigation
+claim it makes SHALL be true of the document it names: it SHALL NOT promise
+content the target does not carry.
 
 #### Scenario: a new CLI flag is documented
 - **WHEN** a change adds a CLI flag

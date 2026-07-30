@@ -140,14 +140,19 @@ python -m venv .venv
 .venv/bin/skinny
 ```
 
-The Slang backend also needs MaterialX built from source with
-`PyMaterialXGenSlang` — the PyPI wheel does not carry it, and the renderer fails
-at import without it. [docs/Install.md](docs/Install.md) has that procedure, the
-platform requirements, and the Vulkan SDK setup.
+That is the whole install on a supported platform — Python 3.12/3.13/3.14 on
+Apple Silicon macOS, Linux x86-64, or Windows AMD64. `pyproject.toml` pulls
+prebuilt MaterialX (with `PyMaterialXGenSlang`) and OpenUSD (with `usdMtlx`)
+wheels, so there is no compiler and no CMake step.
+[docs/Install.md](docs/Install.md) has the platform matrix and the from-source
+build you need only if your platform is outside it.
 
 Force a backend with `--backend metal` or `--backend vulkan`; pick an integrator
 with `--integrator path|bdpt|sppm|mlt`. [docs/Usage.md](docs/Usage.md) covers the
-front ends, every flag, headless rendering, and pbrt v4 import.
+front ends, headless rendering, and pbrt v4 import;
+[docs/RenderingModes.md](docs/RenderingModes.md) covers the shared renderer
+options — `--execution-mode`, `--proposals`, `--reuse`, `--spectral` — and which
+combinations of them actually run.
 
 ## Documentation
 
@@ -161,7 +166,7 @@ here.
 | Document | Owns |
 |---|---|
 | [docs/Install.md](docs/Install.md) | Requirements, virtual environment, MaterialX from source, Vulkan SDK |
-| [docs/Usage.md](docs/Usage.md) | The front ends, every CLI flag, headless rendering, pbrt v4 import |
+| [docs/Usage.md](docs/Usage.md) | The front ends, invocation, headless rendering, pbrt v4 import |
 | [docs/RenderingModes.md](docs/RenderingModes.md) | Backend, resolution, the compatibility matrix, the sampling modes, furnace mode |
 | [docs/Controls.md](docs/Controls.md) | Keyboard and mouse bindings, the camera debug viewport |
 
