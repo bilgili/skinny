@@ -197,7 +197,10 @@ def test_live_doc_set_is_not_empty():
 
 
 def test_index_lists_every_reference_document():
-    """docs/README.md must link every reference document in docs/.
+    """README.md must link every reference document in docs/.
+
+    `README.md` IS the index (change `readme-as-docs-index`): a reader arrives
+    there, so it must say where everything lives without a redirect.
 
     Scope is the top level of `docs/`. Nested directories hold generated
     artifacts — `docs/diagrams/` carries the SVG generators and their result
@@ -205,23 +208,33 @@ def test_index_lists_every_reference_document():
     document the index should enumerate. Their links are still checked above.
     """
     docs_dir = os.path.join(REPO, "docs")
-    index = os.path.join(docs_dir, "README.md")
-    # Resolve each target to a real path, so a link to a nested report that
-    # happens to share a filename cannot stand in for the top-level document.
+    # Targets are relative to the repo root, since the index is README.md.
+    # Resolve each one, so a link to a nested report that happens to share a
+    # filename cannot stand in for the top-level document.
     linked = set()
-    for target in _links(os.path.join("docs", "README.md")):
+    for target in _links("README.md"):
         if not _is_relative(target):
             continue
-        resolved = os.path.normpath(os.path.join(docs_dir, target.split("#", 1)[0]))
+        resolved = os.path.normpath(os.path.join(REPO, target.split("#", 1)[0]))
         if os.path.dirname(resolved) == docs_dir:
             linked.add(os.path.basename(resolved))
-    on_disk = {
-        n for n in os.listdir(docs_dir)
-        if n.endswith(".md") and n != "README.md"
-    }
+    on_disk = {n for n in os.listdir(docs_dir) if n.endswith(".md")}
     assert on_disk, "no reference documents found — the check would be vacuous"
     missing = sorted(on_disk - linked)
-    assert not missing, f"{index} does not link: {missing}"
+    assert not missing, f"README.md does not link: {missing}"
+
+
+def test_there_is_exactly_one_index():
+    """docs/README.md must not come back — the index has one home.
+
+    Two files claiming to be the index is the shape this change removed; the
+    second one is a redirect the reader has to follow.
+    """
+    stray = os.path.join(REPO, "docs", "README.md")
+    assert not os.path.exists(stray), (
+        "docs/README.md exists again — README.md is the index; "
+        "add new documents to its Documentation section instead"
+    )
 
 
 def test_negative_control(tmp_path):
