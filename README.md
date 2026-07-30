@@ -140,12 +140,20 @@ python -m venv .venv
 .venv/bin/skinny                       # Windows: .venv\Scripts\skinny
 ```
 
-That is the whole install on a supported platform — Python 3.12/3.13/3.14 on
-Apple Silicon macOS, Linux x86-64, or Windows AMD64. `pyproject.toml` pulls
-prebuilt MaterialX (with `PyMaterialXGenSlang`) and OpenUSD (with `usdMtlx`)
-wheels, so there is no compiler and no CMake step.
-[docs/Install.md](docs/Install.md) has the platform matrix and the from-source
-build you need only if your platform is outside it.
+`pyproject.toml` pulls prebuilt MaterialX (with `PyMaterialXGenSlang`) and
+OpenUSD (with `usdMtlx`) wheels for Python 3.12/3.13/3.14 on **macOS 26+ Apple
+Silicon**, **Linux x86-64**, and **Windows AMD64** — no CMake, no MaterialX
+source build. Two caveats before that snippet produces a frame:
+
+- On macOS the native Metal backend compiles the Slang sources in-process, so
+  the commands above are the whole install.
+- On Linux and Windows the renderer runs on Vulkan, which needs the **Slang
+  compiler `slangc` on `PATH`** and the Vulkan SDK — no SPIR-V is checked in, so
+  the shaders are compiled on first run and startup aborts without `slangc`.
+
+[docs/Install.md](docs/Install.md) has the full requirement list, the wheel
+matrix, and the from-source MaterialX build you need only on a platform outside
+it.
 
 Force a backend with `--backend metal` or `--backend vulkan`; pick an integrator
 with `--integrator path|bdpt|sppm|mlt`. [docs/Usage.md](docs/Usage.md) covers the

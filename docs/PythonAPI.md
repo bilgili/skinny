@@ -11,8 +11,9 @@ modes see [Megakernel.md](Megakernel.md) / [Wavefront.md](Wavefront.md).
   image file with no window. Everything else is the live-app surface.
 
 > **Build prerequisite.** The Slang generator `PyMaterialXGenSlang` is **not** in
-> the PyPI MaterialX wheel — build MaterialX from source with
-> `-DMATERIALX_BUILD_PYTHON=ON -DMATERIALX_BUILD_GEN_SLANG=ON`. See `README.md`.
+> the PyPI MaterialX wheel. On a supported platform the prebuilt wheels carry it;
+> otherwise build MaterialX from source with `-DMATERIALX_BUILD_PYTHON=ON
+> -DMATERIALX_BUILD_GEN_SLANG=ON` — see [Install.md](Install.md).
 > Vulkan also needs the SDK on `DYLD_LIBRARY_PATH` (`VULKAN_SDK/lib`).
 
 ---

@@ -71,11 +71,23 @@ only as the fallback for a platform outside the wheel matrix. Every navigation
 claim it makes SHALL be true of the document it names: it SHALL NOT promise
 content the target does not carry.
 
+A platform the quick start names as supported SHALL actually reach a rendered
+frame by the sequence shown, including its interpreter-path conventions and every
+external prerequisite the backend on that platform needs. The quick start SHALL
+NOT be described as complete for a platform that needs a step it omits.
+
 #### Scenario: a new CLI flag is documented
 - **WHEN** a change adds a CLI flag
 - **THEN** the author documents it in `docs/Usage.md`, or in
   `docs/RenderingModes.md` when it changes what the renderer can be told to do,
   and `README.md` needs no edit
+
+#### Scenario: the quick start omits a platform prerequisite
+- **WHEN** the quick start names a platform as supported but the sequence shown
+  cannot produce a frame there — a different venv executable path, a missing
+  external compiler, an OS version below the wheel target
+- **THEN** the quick start is wrong: it either carries the extra step or stops
+  calling that platform's install complete
 
 #### Scenario: the install procedure changes
 - **WHEN** a dependency or build step changes
