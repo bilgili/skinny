@@ -45,10 +45,54 @@ the context, resolved once by `resource_module(ctx)` (keyed on `ctx.is_metal`):
 expose the **same public API** (`StorageBuffer`, `StorageImage`, `SampledImage`,
 `UniformBuffer`, `HostStorageBuffer`, `ComputePipeline`, …), so the construction
 sites stay backend-agnostic (`self._gpu = resource_module(self.ctx)`); imports are
-deferred so the Metal path never imports `vulkan`. The few genuinely
-backend-specific spots are gated on `is_metal`: the MSL uniform pack
-(`_pack_uniforms_msl`), the bind-by-name megakernel dispatch (no Vulkan descriptor
-sets), and the teardown drain (the backend-neutral `ctx.wait_idle()` seam).
+deferred so the Metal path never imports `vulkan`.
+
+## The declared seam (`gpu_backend.py`, change `gpu-backend-adapter`)
+
+"The same public API" is a **tested** claim now, not a comment. `gpu_backend.py`
+declares what the adapters must agree on and what they may not:
+
+- **`BackendCapabilities`** — one frozen record naming each reason a consumer
+  used to branch on the vendor: `has_descriptor_sets`, `has_frame_sync_objects`,
+  `has_external_memory`, `has_shared_in_place_write`, `has_indirect_dispatch`,
+  `has_gpu_skinning`, `has_megakernel_record_source`,
+  `has_reflected_record_layouts`, `needs_watchdog_tiling`, and
+  `bindless_texture_capacity`. **Read it through `capabilities(ctx)`**, which
+  folds the two runtime device probes (`supports_shared_memory`,
+  `supports_indirect_dispatch`) in, so a consumer asks one named question rather
+  than a backend test plus a probe. Every field replaces at least one
+  pre-existing live branch — a capability with no branch behind it does not
+  belong in the record, and a field the two backends agree on is caught by test.
+  On the renderer it is the memoised `self.caps` property, derived from
+  `self.ctx`.
+- **`ONE_SIDED_MEMBERS` / `DIVERGENT_SIGNATURES`** — members that genuinely
+  exist on one adapter (`ExternalTimelineSemaphore`, `MetalFrameEncoder`,
+  `DebugRasterMetal`, `make_sampler`, …) or whose signature genuinely differs
+  (`PreviewPipeline.__init__`). Declared, never discovered: adding one is a
+  deliberate edit, exactly like `METAL_ONLY_DEFINES` in `shader_variants`.
+- **`recording_compute`** — a third adapter that records allocations, bindings
+  and dispatches instead of executing them, and returns zero-filled data. It
+  makes dispatch ordering and binding coverage assertable with **no device**
+  (`Recorder.dispatch_entries()`, `Recorder.missing_bindings()`). It records, it
+  does not simulate: image correctness stays the parity matrix's job.
+
+Two probes were removed and must not come back. `hasattr(ctx, "compute_queue")`
+was used as "is this Vulkan?" at 7 sites, but `MetalContext.compute_queue` is
+`None` rather than absent, so it was **unconditionally true**; and
+`descriptor_sets is None` was an "is Metal" sentinel at 13 gates, 5 of them
+compounded with `is_metal` in the same expression. `tests/test_gpu_backend.py`
+fails if either returns, if the adapter surfaces drift from the pinned fixture
+undeclared, if the bindless capacity disagrees with the array size compiled into
+`shaders/bindings.slang` for that target, or if a new `is_metal` branch appears
+in `renderer.py` that is neither the adapter selection nor a genuine second
+implementation.
+
+Four `is_metal` branches remain in the renderer, and all four are genuine
+two-implementation splits, not questions the capability record can answer: the
+wavefront pass factory (`vk_wavefront` vs `metal_wavefront`), and the windowed,
+headless and material-preview dispatch paths. The rule that fell out of the
+migration: **resource construction, binding, readback and dispatch belong on the
+adapter; assembling a frame does not.**
 
 ### MetalContext (`metal_context.py`, `metal_compute.py`)
 

@@ -20,8 +20,8 @@ is split at a subject boundary and the new document is registered here.
 | [ShaderPipeline.md](ShaderPipeline.md) | Pluggable Slang interfaces, the material and integrator pipeline, MaterialX nodegraph codegen, environment importance sampling, SlangPile |
 | [SceneSystem.md](SceneSystem.md) | USD intake, scene graph, instancing, lights, textures, skinning, camera / lens / debug viewport |
 | [GpuResources.md](GpuResources.md) | Descriptor binding map, GPU resource inventory, host-mirrored byte layouts, shader variant key, `FrameConstants` layout |
-| [HostModules.md](HostModules.md) | Python module map, front-end bring-up, the renderer carve-out pattern, the device-free pure core |
-| [Backends.md](Backends.md) | Backend selection, `MetalContext`, the Vulkan path, the `gfx/` abstraction |
+| [HostModules.md](HostModules.md) | Python module map, front-end bring-up, the renderer carve-out pattern, the device-free pure core, the backend seam |
+| [Backends.md](Backends.md) | Backend selection, the declared seam (`gpu_backend.py`, capabilities, the recording adapter), `MetalContext`, the Vulkan path, the `gfx/` abstraction |
 | [FrontEnds.md](FrontEnds.md) | Headless render API, web application, display tail (exposure, tone map, tool readback) |
 | [ImplementationMap.md](ImplementationMap.md) | The per-file map of the Python package, the shader tree, and the tests |
 
