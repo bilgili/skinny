@@ -451,12 +451,17 @@ def test_renderer_material_type_mapping_refuses_every_non_flat_code():
 
 # ─── doc-sync (D8) ─────────────────────────────────────────────────────────
 #
-# The CLAUDE.md / README compatibility tables document the predicate rather than
-# being mirrored into it. This check is deliberately shallow — it catches
-# "someone changed the envelope and forgot the docs", not prose equivalence.
+# The CLAUDE.md / RenderingModes.md compatibility tables document the predicate
+# rather than being mirrored into it. This check is deliberately shallow — it
+# catches "someone changed the envelope and forgot the docs", not prose
+# equivalence.
+#
+# The tuple names the documents that HOLD the tables. The README table moved to
+# docs/RenderingModes.md in change `docs-split-large-docs`; moving a table again
+# means updating this tuple in the same change.
 
 _REPO = os.path.join(os.path.dirname(__file__), "..")
-DOC_TABLES = ("README.md", "CLAUDE.md")
+DOC_TABLES = (os.path.join("docs", "RenderingModes.md"), "CLAUDE.md")
 
 
 def _doc_text(name: str) -> str:

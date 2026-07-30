@@ -28,10 +28,10 @@ source papers.
 SplineFlow plugs into the **scene-sampling proposal seam** (the `ProposalPlugin`
 socket reserved by the sampling change), the sibling of the `ReusePlugin` socket
 ReSTIR rides. The seam and the wavefront execution backend it runs on are
-documented in [Architecture.md](Architecture.md) (descriptor binding map) and
+documented in [GpuResources.md](GpuResources.md) (descriptor binding map) and
 [Wavefront.md](Wavefront.md) (the bounce-stage proposal hook); the generic
-path/BDPT integrators live in [README.md](../README.md). The pre-implementation
-brainstorm and decision history are archived under
+path/BDPT integrators live in [RenderingModes.md](RenderingModes.md). The
+pre-implementation brainstorm and decision history are archived under
 `openspec/changes/archive/2026-06-06-neural-directional-proposal/` (Stage 1) and
 `openspec/changes/archive/2026-06-07-neural-precision-size-study/` (Stage 2) —
 **this document describes the shipped code**.

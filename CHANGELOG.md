@@ -467,7 +467,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backends, ReSTIR-DI and neural render combos, and BDPT spectral were left to
   the key-equality tests + toggle smoke rather than full pbrt-truth renders.
   The reusable extraction pattern + follow-on order (detail maps → gizmo → USD
-  live-edit) is documented in Architecture.md.
+  live-edit) is documented in
+  [docs/HostModules.md](docs/HostModules.md#renderer-carve-out-pattern-change-renderer-module-carveout).
 
 - **`RenderCommandQueue` and `QtRendererProxy` moved** from
   `skinny/ui/qt/render_session.py` to `skinny/render_session.py`; the old path
@@ -1473,7 +1474,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/pbrt/test_emissive_nee.py` (correctness/energy, equal-spp variance,
   unbiasedness, `diffuse_arealight` no-regression). See
   [docs/Megakernel.md](docs/Megakernel.md) § 3.1 and the
-  [docs/Architecture.md](docs/Architecture.md) binding map (18).
+  [docs/GpuResources.md](docs/GpuResources.md) binding map (18).
 - **Neural-flow Lambert directional chart** (change
   `directional-flow-parameterization`) — the neural directional proposal's
   square↔direction map (`neural_flow.slang` `nf_square_to_hemi` /

@@ -373,8 +373,8 @@ directly (the export's richer slots feed the existing `{coat, spec, diffuse,
 delta-transmission}` lobe set — still **without** the preview-only
 `evalStdSurfaceBSDF`), so **colored glass** (tinted transmission) and **tinted
 speculars** now actually render through the flat path, and `diffuse_roughness`
-drives an Oren-Nayar diffuse. See [Architecture.md → Flat Material
-BSDF](Architecture.md#flat-material-bsdf-materialsflatflat_materialslang--flat_lobesslang).
+drives an Oren-Nayar diffuse. See [ShaderPipeline.md → Flat Material
+BSDF](ShaderPipeline.md#flat-material-bsdf-materialsflatflat_materialslang--flat_lobesslang).
 **Stage-2 Ch5 (change `pbrt-subsurface-volumetric`) imports `subsurface` as a
 volumetric interior medium** rather than the old `opacity = 0` clear-glass
 lowering. A `subsurface` material becomes a smooth dielectric boundary (`eta`)
@@ -517,7 +517,7 @@ write them, `usd_loader.py` merges and derives, `material_pack.py` packs,
 
 **The vocabulary has one owner: the material field table in `slang_layout.py`**
 (change `flat-material-field-table`; see
-[Architecture.md § Material field table](Architecture.md#material-field-table-change-flat-material-field-table)).
+[GpuResources.md § Material field table](GpuResources.md#material-field-table-change-flat-material-field-table)).
 Do not invent a key at an authoring site — register it in the table first. A key
 the table does not have is **refused** when the material is one the table owns,
 instead of being silently dropped and showing up only as a wrong-looking render.
