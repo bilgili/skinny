@@ -56,8 +56,8 @@
       `plan.megakernel_bands` instead of re-deriving each.
 - [ ] 4.3 If `gpu-backend-adapter` stage 3 has landed: execute the plan against
       the recording adapter and assert the dispatch sequence hostlessly.
-      **NOT APPLICABLE — `gpu-backend-adapter` is 0/26; stage 3 has not
-      landed.** The plan is shaped for it: `plan.steps` is the sequence that
+      **NOT APPLICABLE — `gpu-backend-adapter` is not merged to `main`, so
+      stage 3's recording adapter does not exist to replay against.** The plan is shaped for it: `plan.steps` is the sequence that
       adapter will replay, and `check_invariants` already gates its order.
 
 ## 5. Gates
@@ -68,7 +68,10 @@
       Hostless: 2873 passed, 7 failed — the identical 7 that fail on `main`
       (6 × `test_corpus_scene_imports_cleanly_mtlx`, 1 × `test_mcp_tool_schemas`).
 - [x] 5.2 Parity matrix both gates identical to 1.4 — identical, not close.
-      → **Vulkan 73/73 identical** (the path this change rewrote); Metal
+      → **Vulkan identical modulo one measured-nondeterministic combo**
+      (the path this change rewrote): 73/73 on three comparisons, 70/73 on a
+      fourth whose 3 deltas a `main`-vs-itself control reproduces exactly.
+      Metal
       1207/1250 + all 20 heavy-scene lines identical, with 43 confined to three
       combo families measured to be nondeterministic run-to-run on an unchanged
       tree at a higher rate than the before/after delta. Full accounting and the

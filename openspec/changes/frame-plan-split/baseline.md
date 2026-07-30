@@ -142,10 +142,22 @@ negative control (one mutated digit in 400 lines) is checked.
 
 | Comparison | Shared metric lines | Digit-identical | Differ |
 |---|---|---|---|
-| Vulkan, before vs after | 73 | **73** | **0** |
+| Vulkan, before vs after (×3 runs) | 73 | **73** | **0** |
+| Vulkan, final branch vs main | 73 | 70 | 3 |
+| Vulkan, **main vs itself** (control) | 73 | 70 | **the same 3** |
 | Metal, before vs after | 1250 | 1207 | 43 |
 | Metal, heavy scenes before vs after | 20 | **20** | **0** |
 | Metal, after vs after — **same tree, run twice** | 256 | 242 | 14 |
+
+**Vulkan `bdpt|wavefront|spectral` is nondeterministic too — measured, not
+assumed.** Three of 73 lines differed on the final branch-vs-main comparison, so
+`main` was rendered **twice against itself** as a control: the same three keys
+differed, in the same combo family, at the same one-digit magnitude
+(`noiseσ 0.006049→0.00605`, `FLIP 0.008708→0.008709`, `PSNR 32.87→32.86`, with
+relMSE / MSE / MAE / var identical). Three earlier Vulkan comparisons had come
+back 73/73, so the family is *rarely* divergent under Vulkan and *reliably*
+divergent under Metal — the reason the control matters is that "identical three
+times running" is not the same as "deterministic".
 
 **The Vulkan result is the one that gates this change.** `_execute_vulkan_frame`
 is what the split rewrote, and on this Metal host every Metal render takes the
