@@ -35,6 +35,7 @@ License 2.
 **Non-Goals:**
 
 - No prose rewrite of the moved sections. They move verbatim.
+  **Deviated from, twice, deliberately** — see § D6.
 - No second index. `docs/README.md` is deleted, not left as a redirect.
 - No change to the eight documents `docs-split-large-docs` created, beyond
   repointing links.
@@ -105,6 +106,39 @@ The previous change learned this the hard way: that file carries the
 doc-ownership context OpenSpec seeds into every future change, and it named
 `docs/README.md` as the index. It is updated in the same commit as the index
 move, not left to a later sweep.
+
+### D6: Two content corrections, recorded rather than deferred
+
+The verbatim rule says a content error found during a split becomes a separate
+change. Two were fixed here instead, because both contradicted prose this change
+itself authored:
+
+- `docs/Install.md` § Requirements said "Python 3.11 or newer" while
+  `pyproject.toml` sets `requires-python = ">=3.12"` and every prebuilt wheel is
+  `cp312`+. The quick start this change writes names 3.12/3.13/3.14, so leaving
+  the requirement list contradicting it two clicks away was worse than fixing it.
+- `docs/Install.md`'s from-source fallback builds MaterialX only, but off the
+  wheel matrix the environment markers skip `openusd-materialx` too, and
+  `skinny.usd_loader` imports `pxr` unconditionally — so the "fallback" ended in
+  `ModuleNotFoundError: pxr`. This change's own text calls that fallback the
+  answer for an unsupported platform, so the gap had to be stated.
+
+Both are registered in the verbatim checker as named corrections: it reverses
+each one before comparing, so the rest of the section is still checked
+byte-for-byte and a *second*, unrecorded edit still fails.
+
+### D7: README does not assert per-platform install completeness
+
+Five review passes found wrong platform claims in the quick start — a Windows
+venv path, a macOS-only wheel tag, a missing `slangc`, a Vulkan loader needed
+even on Metal, an unpinned interpreter. Each fix was correct and the next pass
+found another, because README was re-deriving facts that `docs/Install.md` owns.
+
+So README no longer claims a platform is completely installed. It gives the
+minimal sequence, names the two prerequisites that are external to pip as
+*varying by platform*, and sends the reader to `docs/Install.md` for both. One
+home for a platform fact, the same rule this change applies to the index and the
+previous change applied to the compatibility matrix.
 
 ## Risks / Trade-offs
 

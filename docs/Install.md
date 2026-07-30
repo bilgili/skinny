@@ -4,10 +4,21 @@ This document covers what skinny needs and how to install it: the platform and
 dependency requirements, the virtual environment, and — only for a platform
 outside the prebuilt-wheel matrix — the MaterialX from-source build. On a
 supported platform `pip install -e ".[dev]"` installs every Python package.
-Two prerequisites are external to pip: the Vulkan SDK must be on the
-dynamic-library path on every platform (the renderer imports `vulkan` at module
-scope, Metal included), and Vulkan rendering additionally needs `slangc` on
-`PATH`. Both are listed under Requirements below.
+
+Two prerequisites are external to pip, and this document is the one place that
+states them:
+
+- **A Vulkan loader library**, on every platform. `skinny.renderer` imports the
+  `vulkan` binding at module scope, and that binding `dlopen`s
+  `libvulkan.so.1` / `vulkan-1.dll` / `libvulkan.dylib`, so `import skinny.app`
+  fails without one — including when you intend to render on Metal. Its error
+  says `Cannot find Vulkan SDK version`, but what it could not find is the
+  loader. On Linux and Windows a current Vulkan driver package provides it
+  system-wide. macOS has no system Vulkan, so install the LunarG SDK
+  (MoltenVK) and put `$VULKAN_SDK/lib` on `DYLD_LIBRARY_PATH`.
+- **The Slang compiler `slangc` on `PATH`**, for Vulkan rendering only. No
+  SPIR-V is checked in, so the shaders compile on first run. The native Metal
+  backend compiles in-process via SlangPy and does not need it.
 
 For the shortest path to a rendered frame see the quick start in
 [README.md](../README.md). For how to run the renderer once installed see
@@ -17,7 +28,7 @@ For the shortest path to a rendered frame see the quick start in
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.12, 3.13, or 3.14 (`pyproject.toml` sets `requires-python = ">=3.12"`, and the prebuilt wheels start at `cp312`)
 - A GPU supported by one of the compute backends: Vulkan 1.2 with a current
   graphics driver, or native Metal on Apple Silicon
 - Slang compiler (`slangc`) on `PATH`
@@ -136,6 +147,16 @@ no compiler, no CMake.
 The manual from-source build below is only needed if your platform isn't in that
 matrix (e.g. Linux aarch64, Intel macOS) or you need a newer MaterialX than the
 pinned `v1.0.11` release provides.
+
+> **The recipe below covers MaterialX only.** Off the wheel matrix the
+> environment markers skip *both* direct dependencies, so `openusd-materialx`
+> is not installed either — and `skinny.usd_loader` imports `pxr`
+> unconditionally, so the renderer still fails with `ModuleNotFoundError: pxr`
+> after a MaterialX-only build. Such a platform also needs OpenUSD built with
+> the `usdMtlx` plugin (`PXR_BUILD_USD_IMAGING`/`usdMtlx` enabled); see
+> [`bilgili/openusd-materialx`](https://github.com/bilgili/openusd-materialx)
+> for the build this project's wheels are produced from. That build is not
+> scripted here.
 
 Build and install MaterialX with Python bindings + Slang generator enabled:
 
