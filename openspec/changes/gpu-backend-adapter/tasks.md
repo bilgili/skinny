@@ -2,16 +2,16 @@
 
 ## 1. Baseline capture
 
-- [ ] 1.1 Enumerate the public surface of `vk_compute` and `metal_compute`
+- [x] 1.1 Enumerate the public surface of `vk_compute` and `metal_compute`
       (classes, methods, parameter names, module functions, constants) and
       record the diff as a permanent fixture. This is the drift the
       conformance test will pin.
-- [ ] 1.2 Enumerate every backend branch outside the adapter modules: the 40
+- [x] 1.2 Enumerate every backend branch outside the adapter modules: the 40
       `is_metal` sites in `renderer.py`, 5 in `debug_viewport.py`, 4
       `compute_queue` probes in `vk_wavefront.py`, 12 `descriptor_sets is
       None` gates, and the `is_metal` parameter of `mlt_chain`. For each,
       record the *reason* it branches. Group into capabilities.
-- [ ] 1.3 Capture Vulkan `.spv` bytes and `build/spv_cache` keys for all
+- [x] 1.3 Capture Vulkan `.spv` bytes and `build/spv_cache` keys for all
       kernels — the byte-identity baseline for any define touched by 3.3.
 
 ## 2. Stage 1 — capability record, broken probes replaced

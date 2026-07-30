@@ -1,0 +1,274 @@
+{
+  "metal": {
+    "classes": {
+      "ComputePipeline": {
+        "destroy": [],
+        "dispatch": [
+          "width",
+          "height",
+          "uniform_blob",
+          "binds",
+          "bindless",
+          "bands",
+          "tile_origin_offset"
+        ],
+        "dispatch_indirect": [
+          "args_buffer",
+          "offset",
+          "bindings"
+        ],
+        "dispatch_kernel": [
+          "thread_count",
+          "buffers",
+          "vars"
+        ],
+        "scene_bindings_only": [
+          "cls",
+          "ctx",
+          "shader_dir",
+          "graph_fragments",
+          "spectral"
+        ]
+      },
+      "DebugRasterMetal": {
+        "destroy": [],
+        "render": [
+          "line_floats",
+          "tri_floats",
+          "view_proj",
+          "width",
+          "height",
+          "max_steps"
+        ]
+      },
+      "HostStorageBuffer": {
+        "destroy": [],
+        "read": [
+          "length",
+          "offset"
+        ],
+        "write": [
+          "data",
+          "offset"
+        ]
+      },
+      "HudOverlay": {
+        "destroy": [],
+        "record_copy": [
+          "cmd"
+        ],
+        "upload": [
+          "data"
+        ]
+      },
+      "MetalFrameEncoder": {
+        "barrier": [],
+        "clear": [
+          "buffer"
+        ],
+        "dispatch": [
+          "pipe",
+          "groups",
+          "bindings",
+          "uniform_blob",
+          "uniforms",
+          "bindless"
+        ],
+        "dispatch_indirect": [
+          "pipe",
+          "args_buffer",
+          "offset",
+          "bindings",
+          "uniform_blob",
+          "uniforms",
+          "bindless"
+        ],
+        "flush": [],
+        "submit": []
+      },
+      "PreviewPipelineMetal": {
+        "destroy": [],
+        "dispatch": [
+          "size",
+          "push_bytes",
+          "uniform_blob",
+          "binds",
+          "output_image",
+          "bindless"
+        ]
+      },
+      "ReadbackBuffer": {
+        "destroy": [],
+        "read": [],
+        "record_copy_from": [
+          "cmd",
+          "src_image"
+        ]
+      },
+      "SampledImage": {
+        "destroy": [],
+        "upload_sync": [
+          "data"
+        ]
+      },
+      "SampledImage3D": {
+        "destroy": [],
+        "upload_sync": [
+          "voxels"
+        ]
+      },
+      "StorageBuffer": {
+        "destroy": [],
+        "download_sync": [
+          "byte_count"
+        ],
+        "export_handle": [],
+        "fill_zero_sync": [],
+        "upload_range": [
+          "data",
+          "dst_offset"
+        ],
+        "upload_sync": [
+          "data"
+        ],
+        "write_in_place": [
+          "data",
+          "offset"
+        ]
+      },
+      "StorageImage": {
+        "destroy": [],
+        "read_rgba": []
+      },
+      "UniformBuffer": {
+        "destroy": [],
+        "upload": [
+          "data"
+        ]
+      }
+    },
+    "constants": [
+      "BINDLESS_TEXTURE_CAPACITY",
+      "COMMON_SAMPLER_NAME",
+      "DISCRETE_MAP_SAMPLERS"
+    ],
+    "functions": {}
+  },
+  "vulkan": {
+    "classes": {
+      "ComputePipeline": {
+        "destroy": [],
+        "scene_bindings_only": [
+          "cls",
+          "ctx",
+          "shader_dir",
+          "graph_fragments",
+          "spectral"
+        ]
+      },
+      "ExternalTimelineSemaphore": {
+        "destroy": [],
+        "export_handle": [],
+        "signal": [
+          "value"
+        ],
+        "value": [],
+        "wait": [
+          "value",
+          "timeout_ns"
+        ]
+      },
+      "HostStorageBuffer": {
+        "destroy": [],
+        "read": [
+          "length",
+          "offset"
+        ],
+        "write": [
+          "data",
+          "offset"
+        ]
+      },
+      "HudOverlay": {
+        "destroy": [],
+        "record_copy": [
+          "cmd"
+        ],
+        "upload": [
+          "data"
+        ]
+      },
+      "PreviewPipeline": {
+        "destroy": [],
+        "pack_push": [
+          "matId",
+          "graphId",
+          "primKind",
+          "size",
+          "yaw",
+          "pitch",
+          "distance",
+          "fovTan"
+        ]
+      },
+      "ReadbackBuffer": {
+        "destroy": [],
+        "read": [],
+        "record_copy_from": [
+          "cmd",
+          "src_image"
+        ]
+      },
+      "SampledImage": {
+        "destroy": [],
+        "upload_sync": [
+          "rgba_f32"
+        ]
+      },
+      "SampledImage3D": {
+        "destroy": [],
+        "upload_sync": [
+          "voxels"
+        ]
+      },
+      "StorageBuffer": {
+        "destroy": [],
+        "download_sync": [
+          "byte_count"
+        ],
+        "export_handle": [],
+        "fill_zero_sync": [],
+        "upload_range": [
+          "data",
+          "dst_offset"
+        ],
+        "upload_sync": [
+          "data"
+        ]
+      },
+      "StorageImage": {
+        "destroy": []
+      },
+      "UniformBuffer": {
+        "destroy": [],
+        "upload": [
+          "data"
+        ]
+      }
+    },
+    "constants": [
+      "BINDLESS_TEXTURE_CAPACITY"
+    ],
+    "functions": {
+      "emit_wavefront_material_modules": [
+        "graph_fragments"
+      ],
+      "emit_wavefront_shade_module": [
+        "graph_fragment",
+        "graph_id",
+        "binding",
+        "combined_stride"
+      ]
+    }
+  }
+}

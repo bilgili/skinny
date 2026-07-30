@@ -70,10 +70,14 @@ def make_publisher(kind: str, **kwargs) -> NeuralWeightPublisher:
         from .neural_handoff_shared import SharedWeightPublisher
         return SharedWeightPublisher(**kwargs)
     if kind == "interop":
+        from skinny.gpu_backend import capabilities
         ctx = getattr(kwargs.get("weights_buffer"), "ctx", None)
-        if getattr(ctx, "is_metal", False):
+        # Two implementations, selected by the capability each needs: an
+        # exported-memory handoff where the backend has external memory, an
+        # in-place UMA write where it does not (change gpu-backend-adapter).
+        if ctx is not None and not capabilities(ctx).has_external_memory:
             from .neural_handoff_interop_metal import MetalSharedWeightPublisher
-            kwargs.pop("timeline_semaphore", None)  # no exported semaphores on Metal
+            kwargs.pop("timeline_semaphore", None)  # no exported semaphores here
             return MetalSharedWeightPublisher(**kwargs)
         from .neural_handoff_interop import InteropWeightPublisher
         try:
