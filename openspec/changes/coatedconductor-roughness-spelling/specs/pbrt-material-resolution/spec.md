@@ -10,7 +10,9 @@ lobe on that material type, identically on both export flavours.
 `coatedconductor` SHALL read `conductor.roughness` (with
 `conductor.uroughness` / `conductor.vroughness`) for the base metal and
 `interface.roughness` for the coat. It SHALL NOT read a top-level `roughness`,
-which `CoatedConductorMaterial::Create` does not define.
+which `CoatedConductorMaterial::Create` does not define — pbrt refuses such a
+scene outright (`"roughness": unused parameter`), so no valid pbrt scene carries
+the value and no fallback to it can be correct.
 
 `coateddiffuse` SHALL keep reading the top-level `roughness` for its coat, which
 is what `CoatedDiffuseMaterial::Create` reads. The two coated types are
@@ -77,6 +79,10 @@ the defect: the image changes if the wrong parameter is read.
   resolving one in place of the other changes the rendered image, and a hostless
   assertion pins that the two resolved values are not equal — so the scene cannot
   silently decay into passing whichever parameter is read
+- **AND** the scene SHALL NOT author the top-level `roughness` to stage the
+  defect: pbrt refuses such a scene, so it would have no reference image. The
+  discrimination SHALL come from the parameter's ABSENCE — the wrong read falls
+  to its default of 0, so a metal authored ROUGH renders as a mirror
 
 #### Scenario: The material reaches both gate classes
 

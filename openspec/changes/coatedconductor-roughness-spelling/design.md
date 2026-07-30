@@ -60,10 +60,17 @@ carries: *the resolver SHALL NOT read a parameter pbrt itself does not define fo
 that material type.*
 
 **Discarded alternative:** keep reading the top-level `roughness` as a fallback
-when `conductor.roughness` is absent. It looks forgiving and is not: pbrt renders
-such a scene with the metal at `conductor.roughness`'s default of 0, so a
-fallback would import a *different image* than pbrt renders, silently, for a
-scene pbrt itself accepts.
+when `conductor.roughness` is absent. It looks forgiving and is not — and the
+measurement makes it worse than the proposal first argued. pbrt does not accept
+such a scene at all:
+
+```
+Error: mat_coated_metal.pbrt:16:173: "roughness": unused parameter.
+```
+
+A fallback would therefore import a value from a scene **pbrt refuses to
+render**, silently, and produce an image that has no reference to be right or
+wrong against.
 
 ### D2 — `_resolve_roughness` takes a prefix, and the branch stops hand-rolling
 
@@ -86,13 +93,31 @@ layer (`GetOneBool("remaproughness", true)`), and it governs both roughnesses.
 That is the arrangement that produced this bug — the copy was written without the
 anisotropic pair and drifted immediately.
 
-### D3 — The coat keeps `interface.roughness`, unprefixed by this change
+### D3 — The coat keeps `interface.roughness` as a scalar read, but IS calibrated
 
 Both flavours already read `interface.roughness` for `coat_roughness`, which
-matches pbrt. It stays a scalar read here: routing it through the prefixed chain
+matches pbrt. It stays a **scalar** read: routing it through the prefixed chain
 would also pick up `interface.uroughness`/`vroughness`, and `coat_roughness` is a
 scalar lobe with nowhere to put anisotropy. Recording that as a known gap is
-honest; inventing a reduction for it is not.
+honest; inventing a reduction for it is not. A texture bound to it must also
+degrade with the target-worded note rather than connect, which is what the
+scalar accessor does and the chain does not.
+
+**Corrected during implementation (codex pre-merge review, HIGH).** The first
+draft of D3 read "stays a scalar read" as "stays *outside the calibration*", and
+that was wrong. pbrt applies `RoughnessToAlpha` to the interface roughness under
+`remaproughness` exactly as it does to the conductor pair
+(`pbrt-v4 src/pbrt/materials.cpp:351`), so passing the raw value through emitted
+a far too sharp coat — 0.02 landed as 0.02 where pbrt renders alpha 0.1414.
+`coateddiffuse` was already correct here, because its coat goes through the full
+chain, so the two coated types disagreed for no reason.
+
+Scalar-ness and calibration are separate properties, so the seam separates them:
+`_calibrate_roughness(params, value)` owns the arithmetic and the
+`remaproughness` read, `_resolve_roughness` is the *chain* built on it, and the
+coat calls the owner directly with its scalar value. The AST gate's owner set
+grows by that one function, and the arithmetic is now genuinely single-owner —
+which the gate proved, by refusing the obvious "just call it in the branch" fix.
 
 ### D4 — The material gets a gate before it gets a fix
 
@@ -102,9 +127,27 @@ dropped anisotropy are invisible.
 
 A confirming-suite scene must **discriminate** the defect, not merely exercise
 the material: coat and metal roughness have to differ enough that reading the
-wrong one changes the image. A near-mirror metal (`conductor.roughness` 0.02)
-under a satin coat (`interface.roughness` 0.3) does that — reading 0.3 into the
-metal blurs the reflection visibly.
+wrong one changes the image.
+
+The scene points the opposite way from the first sketch, and pbrt's refusal is
+why. The sketch was a near-mirror metal under a satin coat, on the assumption
+that the buggy path read the coat's value into the metal. It does not — it reads
+the *top-level* spelling, which such a scene cannot carry, because pbrt would
+refuse to produce the reference. With the parameter absent the old path fell to
+its default of **0**, so the defect has to show through that default. Hence a
+**rough** metal (`conductor.roughness` 0.45) under a **sharp** coat
+(`interface.roughness` 0.02): the old path renders a mirror where pbrt renders a
+blurred metal.
+
+Measured, path|wavefront, 128²/256 spp, Metal:
+
+| | pbrt-truth relMSE | FLIP |
+|---|---|---|
+| old read (metal roughness 0) | 0.4287 | 0.2392 |
+| `conductor.roughness` | 0.03797 | 0.03652 |
+
+The plain-vs-MaterialX equivalence pair moves with it, 0.08661 → 0.009122 — that
+gate only became meaningful once both flavours read one spelling.
 
 The scene needs a pbrt-truth EXR from the pinned pbrt v4 build, plus the plain
 and `-mtlx` authoring-equivalence pair the suite's gate classes expect. Both

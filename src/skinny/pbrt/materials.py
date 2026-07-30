@@ -54,6 +54,14 @@ from .parser import ParamSet
 _TEXTURABLE = {
     "reflectance": ("diffuseColor", "color3f"),
     "roughness": ("roughness", "float"),
+    # `coatedconductor` spells its base metal's roughness `conductor.roughness`
+    # and BOTH flavours resolve a texture bound to it into a connection, so the
+    # UV-synthesis scan has to know that spelling too — otherwise a texture-bound
+    # conductor roughness connects on a UV-less shape that never gets default UVs
+    # (change coatedconductor-roughness-spelling). It lands on the same
+    # UsdPreviewSurface input as the top-level spelling; the two never co-occur,
+    # because pbrt refuses a `coatedconductor` carrying a top-level `roughness`.
+    "conductor.roughness": ("roughness", "float"),
 }
 # UsdPreviewSurface input -> connection value_type, derived from _TEXTURABLE so
 # the map stays the one source of truth (consumed by api._author_texture).
@@ -304,8 +312,26 @@ class ResolvedRoughness:
         return self.pv is None
 
 
-def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None,
-                       flavor: str) -> ResolvedRoughness:
+def _calibrate_roughness(params, value: float) -> float:
+    """pbrt roughness -> GGX alpha -> the perceptual roughness both targets take.
+
+    The ONE owner of the calibration arithmetic. Every roughness a material
+    resolves goes through here, whatever its spelling and whichever lobe it
+    feeds — including a coated material's scalar `interface.roughness`, which
+    reaches it outside :func:`_resolve_roughness` because neither target has a
+    texture input for that lobe.
+
+    ``remaproughness`` is read here, unprefixed: pbrt reads one per material
+    (``GetOneBool``) and it governs EVERY roughness on it, the interface one
+    included (pbrt-v4 `materials.cpp:351` remaps `interface.uroughness` /
+    `interface.vroughness` exactly like the conductor pair).
+    """
+    return alpha_to_usd_roughness(
+        pbrt_roughness_to_alpha(value, params.bool("remaproughness", True)))
+
+
+def _resolve_roughness(params, notes: list[str], *, prefix: str = "", textures=None,
+                       base_dir=None, flavor: str) -> ResolvedRoughness:
     """Resolve ``roughness``/``uroughness``/``vroughness`` for either target.
 
     A texture-bound axis connects the texture and uses a mid scalar fallback
@@ -313,31 +339,40 @@ def _resolve_roughness(params, notes: list[str], *, textures=None, base_dir=None
     an extra node — flagged approx). The all-constant path yields either the
     isotropic calibrated roughness or the unreduced alpha pair.
 
+    ``prefix`` selects the *spelling*, not a second policy: pbrt gives a layered
+    material's lobes prefixed names (``coatedconductor``'s base metal is
+    ``conductor.roughness``/``conductor.uroughness``/``conductor.vroughness``),
+    and every spelling gets this one chain. A material branch that hand-rolled
+    its own prefixed read is what dropped the anisotropic pair for that lobe
+    (change coatedconductor-roughness-spelling).
+
+    ``remaproughness`` is read UNPREFIXED whatever ``prefix`` is: pbrt reads one
+    per material (``GetOneBool``), and it governs every roughness on it.
+
     ``flavor`` only gates the anisotropy *note*: the UsdPreviewSurface target
     loses the two axes in its collapse and says so, standard_surface represents
     them faithfully and has nothing to report.
     """
     remap = params.bool("remaproughness", True)
+    r_name, u_name, v_name = f"{prefix}roughness", f"{prefix}uroughness", f"{prefix}vroughness"
     # resolve all three via the texture-safe accessor (never float() a texture name)
-    rough = get_float_texture(params, "roughness", 0.0, textures=textures, base_dir=base_dir, notes=notes)
-    urough = get_float_texture(params, "uroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
-    vrough = get_float_texture(params, "vroughness", rough.const, textures=textures, base_dir=base_dir, notes=notes)
+    rough = get_float_texture(params, r_name, 0.0, textures=textures, base_dir=base_dir, notes=notes)
+    urough = get_float_texture(params, u_name, rough.const, textures=textures, base_dir=base_dir, notes=notes)
+    vrough = get_float_texture(params, v_name, rough.const, textures=textures, base_dir=base_dir, notes=notes)
     tex = rough.tex or urough.tex or vrough.tex
     if tex is not None:
         notes.append(
             "roughness texture connected; perceptual remap not applied to texture (approx)"
         )
         return ResolvedRoughness(ParamValue(0.5, tex))
-    if "uroughness" in params or "vroughness" in params:
+    if u_name in params or v_name in params:
         if flavor == USD:
             notes.append("anisotropic roughness reduced to isotropic (geometric mean)")
         return ResolvedRoughness(
             alpha_u=pbrt_roughness_to_alpha(urough.const, remap),
             alpha_v=pbrt_roughness_to_alpha(vrough.const, remap),
         )
-    return ResolvedRoughness(
-        ParamValue(alpha_to_usd_roughness(pbrt_roughness_to_alpha(rough.const, remap)))
-    )
+    return ResolvedRoughness(ParamValue(_calibrate_roughness(params, rough.const)))
 
 
 def _usd_roughness(rr: ResolvedRoughness) -> ParamValue:
@@ -623,8 +658,9 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
             p, "reflectance", default, textures=textures, base_dir=base_dir, notes=notes
         )
 
-    def roughness():
-        return _resolve_roughness(p, notes, textures=textures, base_dir=base_dir, flavor=flavor)
+    def roughness(prefix=""):
+        return _resolve_roughness(p, notes, prefix=prefix, textures=textures,
+                                  base_dir=base_dir, flavor=flavor)
 
     def scalar(name, default):
         # Neither target has a texture input for these (ior / coat IOR / coat
@@ -694,36 +730,33 @@ def resolve_material(pbrt_material, *, emissive_rgb=None, textures=None, base_di
         base = _conductor_basecolor(p, notes)
         lobes["base_color"] = reflectance(base)
         lobes["specular_color"] = list(base)
-        if mtlx:
-            # FLAVOUR GATE (drift 1; follow-up: change
-            # `coatedconductor-roughness-spelling`, KnownBugs.md #3.1). pbrt-v4
-            # spells the base metal's roughness `conductor.roughness` and the
-            # coat's `interface.roughness`; `CoatedConductorMaterial::Create`
-            # reads NO top-level `roughness` for this material type. Only the
-            # mtlx pipeline reads the correct spelling today — the USD one reads
-            # the top-level `roughness`, a param pbrt ignores here. (The two
-            # coated types are asymmetric: `coateddiffuse` DOES take its coat
-            # roughness from top-level `roughness`, so that branch is correct.)
-            rv = get_float_texture(p, "conductor.roughness", 0.0,
-                                   textures=textures, base_dir=base_dir, notes=notes)
-            if rv.is_tex:
-                lobes["roughness"] = ResolvedRoughness(ParamValue(0.5, rv.tex))
-                notes.append(
-                    "roughness texture connected; perceptual remap not applied to texture (approx)"
-                )
-            else:
-                remap = p.bool("remaproughness", True)
-                lobes["roughness"] = ResolvedRoughness(
-                    ParamValue(alpha_to_usd_roughness(pbrt_roughness_to_alpha(rv.const, remap)))
-                )
-        else:
-            lobes["roughness"] = roughness()
+        # pbrt-v4 spells the base metal's roughness `conductor.roughness` (with
+        # `conductor.uroughness`/`conductor.vroughness`), on BOTH flavours — the
+        # spelling is pbrt's, not a target's, so no flavour gate belongs here.
+        # `CoatedConductorMaterial::Create` defines no top-level `roughness` at
+        # all, and pbrt does not merely ignore one: it REFUSES the scene
+        # ("roughness": unused parameter). Reading that spelling here — as the
+        # UsdPreviewSurface path used to — could therefore only import a value
+        # from a scene pbrt itself will not render. It is not a fallback worth
+        # keeping (change coatedconductor-roughness-spelling).
+        lobes["roughness"] = roughness("conductor.")
         lobes["coat"] = 1.0
         lobes["coat_color"] = [1.0, 1.0, 1.0]
         if mtlx:
             # FLAVOUR GATE (one-sided read; same follow-up as coateddiffuse).
             lobes["coat_ior"] = scalar("interface.eta", 1.5)
-        lobes["coat_roughness"] = scalar("interface.roughness", 0.0)
+        # The coat takes the SAME calibration as every other roughness — pbrt
+        # remaps `interface.*` exactly like the conductor pair
+        # (`materials.cpp:351`), so passing the raw pbrt value through emitted a
+        # far too sharp coat (0.02 landed as 0.02 where pbrt renders alpha
+        # 0.1414). It stays a SCALAR read: neither target has a texture input for
+        # this lobe, so a binding must degrade with the target-worded note rather
+        # than connect.
+        # KNOWN GAP: `interface.uroughness`/`interface.vroughness` stay unread —
+        # a scalar lobe has nowhere to put anisotropy, and inventing a reduction
+        # for it would be worse than recording the gap.
+        lobes["coat_roughness"] = _calibrate_roughness(
+            p, scalar("interface.roughness", 0.0))
     elif mtype == "diffusetransmission":
         lobes["base_color"] = reflectance([0.25, 0.25, 0.25])
         lobes["transmission"] = 0.5

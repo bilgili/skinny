@@ -135,7 +135,100 @@ def test_coateddiffuse_coat_roughness_comes_from_top_level_roughness(flavor):
 def test_coatedconductor_coat_roughness_reads_interface_roughness(flavor):
     res = _res('Material "coatedconductor" "float interface.roughness" 0.4', flavor)
     assert res.lobes["coat"] == 1.0
-    assert res.lobes["coat_roughness"] == pytest.approx(0.4)
+    # calibrated like every other roughness: pbrt remaps `interface.*` too
+    # (pbrt-v4 materials.cpp:351), so 0.4 -> alpha sqrt(0.4) -> sqrt of that
+    assert res.lobes["coat_roughness"] == pytest.approx((0.4 ** 0.5) ** 0.5)
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_coatedconductor_metal_roughness_reads_conductor_roughness(flavor):
+    """Both flavours take the base metal from `conductor.roughness` alone.
+
+    The top-level `roughness` below is a value pbrt itself never reads:
+    `CoatedConductorMaterial::Create` does not define one, and pbrt does not
+    merely ignore it — it REFUSES the scene ("roughness": unused parameter). A
+    read of it could therefore only come from a scene pbrt would not render.
+    """
+    src = ('Material "coatedconductor" "float conductor.roughness" 0.04 '
+           '"float interface.roughness" 0.36 "float roughness" 0.64')
+    res = _res(src, flavor)
+    assert res.lobes["roughness"].pv.const == pytest.approx(0.2 ** 0.5)  # sqrt(sqrt(0.04))
+    assert res.lobes["coat_roughness"] == pytest.approx((0.36 ** 0.5) ** 0.5)
+    # the two lobes must not collapse onto one value — that is what makes the
+    # confirming-suite scene a discriminator rather than a passenger
+    assert res.lobes["roughness"].pv.const != pytest.approx(res.lobes["coat_roughness"])
+
+
+@pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
+def test_coatedconductor_metal_anisotropy_survives_as_an_unreduced_pair(flavor):
+    """`conductor.uroughness`/`conductor.vroughness` reach the adapters unreduced.
+
+    Both flavours dropped them silently before this change, so an anisotropic
+    coated metal imported isotropic with no note.
+    """
+    res = _res('Material "coatedconductor" "float conductor.uroughness" 0.04 '
+               '"float conductor.vroughness" 0.25', flavor)
+    rr = res.lobes["roughness"]
+    assert rr.is_aniso
+    assert rr.alpha_u == pytest.approx(0.2)   # remap: alpha = sqrt(roughness)
+    assert rr.alpha_v == pytest.approx(0.5)
+    # only the UsdPreviewSurface target loses the axes in its collapse, so only
+    # it reports the reduction
+    note = "anisotropic roughness reduced to isotropic (geometric mean)"
+    assert (note in res.notes) == (flavor == M.USD)
+
+
+def test_the_committed_coated_metal_scene_still_discriminates():
+    """The confirming-suite scene ON DISK, not an inline stand-in.
+
+    The scene is the load-bearing artifact: if it is ever regenerated with the
+    two roughnesses equal, every render gate passes whichever parameter is read
+    and the fix ships unprotected. An inline assertion cannot catch that, so this
+    one imports the committed `.pbrt` and pins the two properties the scene has
+    to have — no top-level `roughness` (pbrt refuses such a scene), and a metal
+    that resolves distinctly from the coat.
+    """
+    import os
+
+    from skinny.pbrt.parser import parse_directives
+    from skinny.pbrt.state import PbrtMaterial
+
+    scene = os.path.join(os.path.dirname(__file__), "..", "assets", "suite",
+                         "mat_coated_metal", "mat_coated_metal.pbrt")
+    directives = parse_directives(tokenize(open(scene).read()))
+    coated = [d for d in directives
+              if d.name == "Material" and d.type_arg() == "coatedconductor"]
+    assert len(coated) == 1, "the scene must author exactly one coatedconductor"
+    params = coated[0].params
+
+    assert "conductor.roughness" in params
+    assert "interface.roughness" in params
+    assert "roughness" not in params, (
+        "the scene must NOT author a top-level `roughness` — pbrt refuses such a "
+        "scene, so it could carry no reference EXR")
+
+    for flavor in (M.USD, M.MTLX):
+        res = M.resolve_material(PbrtMaterial("coatedconductor", params), flavor=flavor)
+        metal = res.lobes["roughness"].pv.const
+        coat = res.lobes["coat_roughness"]
+        assert metal != pytest.approx(coat, abs=0.05), (
+            f"{flavor}: the scene's metal ({metal:.4f}) and coat ({coat:.4f}) "
+            "roughnesses are too close to discriminate which spelling is read")
+
+
+def test_the_two_coated_types_read_asymmetric_spellings_like_pbrt():
+    """pbrt is asymmetric here and the resolver mirrors it rather than unifying.
+
+    `CoatedDiffuseMaterial::Create` reads the top-level `roughness` for its coat;
+    `CoatedConductorMaterial::Create` reads none at all. A later "consistency"
+    cleanup that unified the two would break one of them.
+    """
+    diffuse = _res('Material "coateddiffuse" "float roughness" 0.04 '
+                   '"float conductor.roughness" 0.64')
+    assert diffuse.lobes["coat_roughness"].pv.const == pytest.approx(0.2 ** 0.5)
+
+    conductor = _res('Material "coatedconductor" "float conductor.roughness" 0.04')
+    assert conductor.lobes["roughness"].pv.const == pytest.approx(0.2 ** 0.5)
 
 
 @pytest.mark.parametrize("flavor", [M.USD, M.MTLX])
@@ -353,20 +446,6 @@ def test_usd_flavor_does_not_escalate_on_an_mtlx_only_unresolvable_texture():
     assert any("unresolved/unsupported" in n for n in _res(src, M.MTLX, textures=textures).notes)
 
 
-def test_coatedconductor_base_roughness_param_spelling_is_frozen_per_flavor():
-    # DRIFT (frozen, follow-up `coatedconductor-roughness-spelling`): pbrt-v4
-    # spells it `conductor.roughness` and reads NO top-level `roughness` for this
-    # material type. Only the mtlx pipeline reads the correct spelling; the USD
-    # one reads top-level `roughness`, which pbrt ignores here. Preserved
-    # deliberately — fixing it changes committed fixtures.
-    src = 'Material "coatedconductor" "float conductor.roughness" 0.04 "float roughness" 0.64'
-    usd = _res(src, M.USD).lobes["roughness"].pv.const
-    mtlx = _res(src, M.MTLX).lobes["roughness"].pv.const
-    assert mtlx == pytest.approx(0.2 ** 0.5)   # sqrt(sqrt(0.04))
-    assert usd == pytest.approx(0.8 ** 0.5)    # sqrt(sqrt(0.64))
-    assert usd != mtlx
-
-
 # --------------------------------------------------------------------------- #
 # note ORDER (accessor notes interleave with branch notes in read order)
 # --------------------------------------------------------------------------- #
@@ -550,12 +629,86 @@ def test_subsurface_eta_and_ior_lobes_agree_for_every_param_type():
         assert res.lobes["subsurface_eta"] == pytest.approx(res.lobes["ior"]), src
 
 
+# --------------------------------------------------------------------------- #
+# the roughness calibration chain has ONE implementation
+# (change coatedconductor-roughness-spelling)
+# --------------------------------------------------------------------------- #
+
+#: the calibration arithmetic: pbrt roughness -> alpha -> perceptual roughness.
+_CALIBRATION = frozenset({"pbrt_roughness_to_alpha", "alpha_to_usd_roughness"})
+#: the only functions allowed to call it — `_calibrate_roughness` (the single
+#: owner of the arithmetic), the chain that uses it, and the two target reduction
+#: policies, which convert an already-calibrated alpha pair. A material branch
+#: appearing here means a second copy exists, which is the arrangement that
+#: silently dropped `conductor.uroughness`/`vroughness`.
+_CALIBRATION_OWNERS = frozenset({"_calibrate_roughness", "_resolve_roughness",
+                                 "_usd_roughness", "_mtlx_roughness"})
+
+
+def _calibration_callers(source: str) -> dict[str, set[str]]:
+    """Map calibration function -> names of the functions that call it.
+
+    Structural (AST), not a text scan: a grep for the identifier would also match
+    a docstring or a comment naming it, and would miss a call made through a
+    renamed import.
+    """
+    out: dict[str, set[str]] = {}
+
+    def walk(node, enclosing):
+        for child in ast.iter_child_nodes(node):
+            name = (child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    else enclosing)
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                    and child.func.id in _CALIBRATION):
+                out.setdefault(child.func.id, set()).add(name)
+            walk(child, name)
+
+    walk(ast.parse(source), "<module>")
+    return out
+
+
+def _calibration_offenders(source: str) -> set[str]:
+    callers = _calibration_callers(source)
+    # never report "clean" because nothing was found at all
+    assert set(callers) == set(_CALIBRATION), f"calibration call sites missing: {callers}"
+    return {n for names in callers.values() for n in names} - _CALIBRATION_OWNERS
+
+
+def test_the_roughness_calibration_has_no_second_implementation():
+    offenders = _calibration_offenders(inspect.getsource(M))
+    assert not offenders, (
+        f"the roughness calibration is re-implemented in {sorted(offenders)}; "
+        "a material branch must reach it through _resolve_roughness(prefix=...)")
+
+
+def test_the_calibration_gate_is_sensitive():
+    # negative control: the exact source shape this change deleted from the
+    # `coatedconductor` branch must still be caught.
+    hand_rolled = textwrap.dedent("""
+        def _resolve_roughness(params, notes, *, prefix=""):
+            return alpha_to_usd_roughness(pbrt_roughness_to_alpha(r, remap))
+
+        def resolve_material(p):
+            if mtype == "coatedconductor":
+                lobes["roughness"] = alpha_to_usd_roughness(
+                    pbrt_roughness_to_alpha(rv.const, remap))
+    """)
+    assert _calibration_offenders(hand_rolled) == {"resolve_material"}
+
+
 def test_the_read_gate_is_sensitive():
-    # negative control: the resolver itself obviously does read params, so the
-    # detector is not vacuously passing
+    # negative control: the resolver obviously does read params, so the detector
+    # is not vacuously passing.
     reads = _reads_in(M.resolve_material)
     assert "get_float_texture" in reads and "get_spectrum_texture" in reads
-    assert any(r.startswith("params.") for r in reads)
+    # `resolve_material`'s own body no longer holds a bare ParamSet method call —
+    # deleting the hand-rolled `conductor.roughness` block took the last one
+    # (change coatedconductor-roughness-spelling), so every read there now goes
+    # through a promoting accessor or a helper. The bare-call half of the control
+    # therefore points at the helpers that still make one, which is what proves
+    # the AST detector can see that shape at all.
+    assert any(r.startswith("params.") for r in _reads_in(M._resolve_roughness))
+    assert any(r.startswith("params.") for r in _reads_in(M._conductor_basecolor))
 
 
 # --------------------------------------------------------------------------- #
