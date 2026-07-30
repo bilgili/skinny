@@ -65,5 +65,15 @@
       the env-precedence proof on real hardware. Both images agree in mean
       (144.77412 vs 144.77411).
 - [x] 4.5 `openspec validate headless-backend-auto --strict`.
-- [ ] 4.6 Pre-merge review gate: run the codex review over the diff and fold in
-      or consciously dismiss each finding.
+- [x] 4.6 Pre-merge review gate. The codex runtime hit its session limit, so
+      the review ran as a review subagent instead (the recorded fallback), over
+      the diff at absolute worktree paths. One finding, folded in: a
+      self-declared BREAKING change with no `CHANGELOG.md` entry, against a repo
+      convention where the preceding change added 37 lines in the same commit.
+      A `### Changed` entry now records the default flip, the `backend="vulkan"`
+      migration, the `None`-vs-`"auto"` reason, and the fact that Metal does not
+      remove the Vulkan-SDK import requirement. The reviewer independently
+      re-measured the 8-of-12 negative control by swapping the pre-change module
+      in and out. Questions 1-5 and the front-end / parity-harness / docs scope
+      came back clean.
+- [x] 4.7 `CHANGELOG.md`: the entry above (review finding 1).

@@ -117,6 +117,34 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The headless Python API resolves its GPU backend instead of assuming Vulkan**
+  (change `headless-backend-auto`). `HeadlessRenderer` hard-coded
+  `backend="vulkan"` on its direct-Python path — the one path that does not go
+  through `bringup.plan_bringup` — so it never reached `select_backend`. Three
+  things followed: `SKINNY_BACKEND` was ignored, `backend="auto"` was not even a
+  legal argument (the unresolved string reached `make_context`, which raises
+  `unknown backend 'auto'`), and every Apple-Silicon caller silently rendered
+  through MoltenVK. The argument now goes through the same selector every other
+  runner uses, so the precedence is `backend=` > `SKINNY_BACKEND` > `auto`, and
+  `auto` picks native Metal on an Apple-Silicon host.
+
+  **This changes the default backend.** A caller that relied on the implicit
+  Vulkan default — the three module-level wrappers `render_to_array` /
+  `render_scene` / `render_animation` included — now renders on Metal on this
+  class of host. Pass `backend="vulkan"` to keep the MoltenVK path. Every other
+  in-tree call site, the parity harness included, already passed an explicit
+  backend and is unaffected.
+
+  The signature default is `None`, not the string `"auto"`, and the distinction
+  is load-bearing: `select_backend` reads `prefer or env or persisted or "auto"`,
+  so a literal `"auto"` would outrank `SKINNY_BACKEND` rather than defer to it.
+  `None` is what argparse hands the four front-ends. No persisted setting
+  participates — the direct API is non-interactive, like `skinny-render`.
+
+  What this does **not** buy: the Vulkan SDK library path is still required to
+  *import* the renderer on either backend, because `renderer.py` imports
+  `vulkan` at module load. Choosing Metal picks the device, not the import graph.
+
 - **Scene intake is one interface that returns a value** (change
   `scene-intake-interface`). `usd_loader.py` had four public loaders that the
   renderer largely bypassed: it reached into nine private loader symbols through
