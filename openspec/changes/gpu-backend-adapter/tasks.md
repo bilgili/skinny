@@ -95,7 +95,7 @@ protocol docstring now says so.
 - [x] 6.4 Vulkan: megakernel + wavefront smoke.
 - [ ] 6.5 Parity matrix dual gate unchanged; both structural and shaded
       Metal↔Vulkan parity tests pass on a dual-device host.
-- [ ] 6.6 `tests/test_metal_cleanup.py` incl. the gpu-marked kill harness.
+- [x] 6.6 `tests/test_metal_cleanup.py` incl. the gpu-marked kill harness.
 - [x] 6.7 Docs: `docs/Architecture.md` backend seam section; CLAUDE.md
       compatibility matrix if any capability changes user-visible behaviour.
 - [x] 6.8 `openspec validate gpu-backend-adapter --strict`.
@@ -131,17 +131,31 @@ protocol docstring now says so.
   compatibility-matrix change: no capability alters user-visible behaviour (no
   CLI flag, no envelope combo, no refusal changes).
 
-**NOT run — machine contention, not a result:**
+**Also run and green (second pass, quiet-machine retry):**
 
-- **6.3 (preview dock, debug viewport)** Both cold-compile Slang for the Metal
-  target. `scripts/guarded_metal.sh` refused to start: `only 5.63GB free
-  (< 10GB)`. The guard was **not** bypassed — a Metal compile with nowhere to
-  swap locks the box.
-- **6.5** Parity matrix dual gate + the structural / shaded Metal↔Vulkan parity
-  tests.
-- **6.6 (gpu-marked kill harness)**
+- **6.6** `tests/test_metal_cleanup.py -m gpu`: **3 passed** (clean-exit probe,
+  SIGKILL-mid-render → GPU-usable probe, atexit teardown), on top of the 13
+  hostless. The kill harness is required because this change touches context
+  lifecycle and dispatch gating.
+- **6.5 (matrix half)** `tests/pbrt/test_parity.py -k matrix` on Metal:
+  **12 passed, 0 failed**, 96 renders in 7m49s. The five scenes whose assets
+  live only in the primary checkout (`bathroom`, `dragon`, `disney_cloud`,
+  `bunny_cloud`, `clouds`) were deselected — they fail at the merge-base too,
+  for want of the asset, not the code. The gate asserts each combo against its
+  recorded pbrt-truth baseline and the `(Path, wavefront)` self-consistency
+  anchor, so passing IS "dual gate unchanged".
 
-The blocker is that two other sessions held live GPU pytest runs (a Metal
-`furnace_gate` and a Vulkan parity sweep) while these gates were due, and the
-standing rule is one guarded GPU process at a time. Re-run 6.3/6.5/6.6 on a
-quiet machine before merge.
+**STILL NOT run — host memory, not a result:**
+
+- **6.3 (preview dock, debug viewport)** and **6.5 (structural + shaded
+  Metal↔Vulkan parity)**. All four cold-compile Slang for the Metal target and
+  are skipped unless `RUN_METAL_PREVIEW_COMPILE` / `RUN_METAL_DEBUG_RASTER` /
+  `RUN_METAL_MEGAKERNEL_COMPILE` is set **and** the command runs under
+  `scripts/guarded_metal.sh`. The guard aborted at `avail=7.87GB (need>=10)`.
+
+It was **not** bypassed and `MIN_FREE_GB` was **not** lowered: this box runs at
+zero swap headroom, and an `MTLCompilerService` spike with nowhere to page locks
+or reboots it — which is the exact failure the threshold was chosen to prevent.
+Freeing ~3 GB (the guard's metric counts only free + speculative + purgeable
+pages, so ordinary app RSS is what stands in the way) and re-running the three
+commands is all that remains.
