@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 import math
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 import panel as pn
@@ -115,12 +115,15 @@ def build_scene_graph_pane(
             _set_status("Load a USD scene before adding a model.", "warning")
             return
         parent = add_parent_for_node(state["node"])
-        with session._lock:
-            try:
-                new_path = renderer.add_model(str(path), parent_prim_path=parent)
-            except (ValueError, RuntimeError) as exc:
-                _set_status(f"Add failed: {exc}", "danger")
-                return
+        try:
+            new_path = session.run_on_render_thread(
+                lambda r, p=str(path), parent=parent: r.add_model(
+                    p, parent_prim_path=parent,
+                )
+            )
+        except (ValueError, RuntimeError) as exc:
+            _set_status(f"Add failed: {exc}", "danger")
+            return
         record_last_dir("model", path.parent)
         _set_status(f"Added {new_path}", "success")
 
@@ -129,12 +132,13 @@ def build_scene_graph_pane(
         if not is_deletable(node):
             _set_status("This node cannot be deleted.", "warning")
             return
-        with session._lock:
-            try:
-                renderer.remove_node(node.path)
-            except (ValueError, RuntimeError) as exc:
-                _set_status(f"Delete failed: {exc}", "danger")
-                return
+        try:
+            session.run_on_render_thread(
+                lambda r, p=node.path: r.remove_node(p)
+            )
+        except (ValueError, RuntimeError) as exc:
+            _set_status(f"Delete failed: {exc}", "danger")
+            return
         _set_status(f"Deleted {node.path}", "success")
 
     def _on_add_light(event) -> None:
@@ -148,26 +152,26 @@ def build_scene_graph_pane(
             )
             return
         parent = add_parent_for_node(state["node"])
-        with session._lock:
-            try:
-                new_path = renderer.add_light(
-                    light_type, parent_prim_path=parent,
+        try:
+            new_path = session.run_on_render_thread(
+                lambda r, t=light_type, parent=parent: r.add_light(
+                    t, parent_prim_path=parent,
                 )
-            except Exception as exc:  # noqa: BLE001 — non-fatal UI boundary
-                _set_status(f"Add {light_type} failed: {exc}", "danger")
-                return
+            )
+        except Exception as exc:  # noqa: BLE001 — non-fatal UI boundary
+            _set_status(f"Add {light_type} failed: {exc}", "danger")
+            return
         _set_status(f"Added {new_path}", "success")
 
     def _on_save(_event) -> None:
         if getattr(renderer, "_usd_edit_layer", None) is None:
             _set_status("No edits to save (no USD scene loaded).", "warning")
             return
-        with session._lock:
-            try:
-                written = renderer.save_edits()
-            except (ValueError, RuntimeError) as exc:
-                _set_status(f"Save failed: {exc}", "danger")
-                return
+        try:
+            written = session.run_on_render_thread(lambda r: r.save_edits())
+        except (ValueError, RuntimeError) as exc:
+            _set_status(f"Save failed: {exc}", "danger")
+            return
         _set_status(f"Saved edits to {written}", "success")
 
     add_btn.on_click(_on_add)
@@ -253,11 +257,10 @@ def _build_scene_prop_widget(
     where the shared function returns a reason string, the failure was not even
     reportable. ``report(msg, kind)`` surfaces that reason in the status line.
     """
-    renderer = session.renderer
-
     def _apply(p, value) -> None:
-        with session._lock:
-            reason = apply_scene_property(renderer, node, p, value)
+        reason = session.run_on_render_thread(
+            lambda r, p=p, value=value: apply_scene_property(r, node, p, value)
+        )
         if reason and report is not None:
             report(f"{p.display_name}: {reason}", "warning")
 
@@ -681,8 +684,13 @@ def build_material_graph_pane(
 def _build_graph_input_widget(
     session, view: NodeGraphView, node: NodeView, port,
 ) -> pn.viewable.Viewable | None:
-    renderer = session.renderer
     label = pn.pane.Markdown(f"**{port.name}** ({port.type_name})")
+
+    def _edit(value) -> None:
+        """One posted graph-port edit, whatever the port's type."""
+        session.run_on_render_thread(
+            lambda r, v=value: _apply_graph_edit(r, view, node, port, v)
+        )
 
     if port.connected_from:
         up, op = port.connected_from
@@ -700,8 +708,7 @@ def _build_graph_input_widget(
         )
 
         def on_change(event):
-            with session._lock:
-                _apply_graph_edit(renderer, view, node, port, float(event.new))
+            _edit(float(event.new))
 
         w.param.watch(on_change, "value")
         return pn.Row(label, w)
@@ -717,11 +724,7 @@ def _build_graph_input_widget(
         ]
 
         def push(_e, ws=sliders):
-            with session._lock:
-                _apply_graph_edit(
-                    renderer, view, node, port,
-                    tuple(float(w.value) for w in ws),
-                )
+            _edit(tuple(float(w.value) for w in ws))
 
         for s in sliders:
             s.param.watch(push, "value")
@@ -731,8 +734,7 @@ def _build_graph_input_widget(
         w = pn.widgets.Checkbox(name=port.name, value=bool(port.value))
 
         def on_change(event):
-            with session._lock:
-                _apply_graph_edit(renderer, view, node, port, bool(event.new))
+            _edit(bool(event.new))
 
         w.param.watch(on_change, "value")
         return pn.Row(label, w)
@@ -745,8 +747,7 @@ def _build_graph_input_widget(
         w = pn.widgets.IntSlider(name=port.name, start=0, end=32, value=v)
 
         def on_change(event):
-            with session._lock:
-                _apply_graph_edit(renderer, view, node, port, int(event.new))
+            _edit(int(event.new))
 
         w.param.watch(on_change, "value")
         return pn.Row(label, w)
@@ -838,7 +839,6 @@ def build_debug_viewport_pane(
 
     from skinny.debug_viewport import DebugViewport
 
-    renderer = session.renderer
     ctx = session.ctx
     shader_dir = _Path(__file__).resolve().parents[2] / "shaders"
 
@@ -846,7 +846,13 @@ def build_debug_viewport_pane(
     status = pn.pane.Markdown("Initialising debug viewport…")
     dv_holder: dict = {"dv": None}
 
-    def _ensure_dv() -> Optional[DebugViewport]:
+    #: Everything below that takes a ``renderer`` argument runs on the render
+    #: thread, posted through the session. The viewport owns GPU resources and
+    #: writes ``renderer.debug_viewport``; the Bokeh thread only reads the
+    #: returned pixels and writes Panel widgets, which is the only place a
+    #: Panel widget may be written from.
+
+    def _ensure_dv(renderer) -> DebugViewport:
         if dv_holder["dv"] is not None:
             return dv_holder["dv"]
         try:
@@ -857,23 +863,40 @@ def build_debug_viewport_pane(
             dv.attach_renderer(renderer)
             renderer.debug_viewport = dv
             dv.open()
-            dv_holder["dv"] = dv
-            return dv
-        except Exception as exc:  # noqa: BLE001
-            status.object = f"Debug viewport unavailable: {exc}"
+        except Exception as exc:
+            raise RuntimeError(f"Debug viewport unavailable: {exc}") from exc
+        dv_holder["dv"] = dv
+        return dv
+
+    def _render_frame(renderer):
+        dv = _ensure_dv(renderer)
+        if not dv.is_open:
             return None
+        return dv.render_embedded(renderer)
+
+    def _apply_view(renderer, which: str) -> None:
+        dv = _ensure_dv(renderer)
+        if which == "top":
+            dv.view_top()
+        elif which == "left":
+            dv.view_left()
+        elif which == "back":
+            dv.view_back()
+        elif which == "reset":
+            dv._reset_debug_camera()
+
+    # Publish the action so the sidebar shortcut can post it without knowing
+    # anything about this pane's widgets.
+    session._debug_view_action = _apply_view
 
     def _tick() -> None:
-        dv = _ensure_dv()
-        if dv is None or not dv.is_open:
+        try:
+            pixels = session.run_on_render_thread(_render_frame)
+        except Exception as exc:  # noqa: BLE001
+            status.object = f"render failed: {exc}"
             return
-        with session._lock:
-            try:
-                pixels = dv.render_embedded(renderer)
-            except Exception as exc:  # noqa: BLE001
-                status.object = f"render failed: {exc}"
-                return
-        if pixels is None or Image is None:
+        dv = dv_holder["dv"]
+        if dv is None or pixels is None or Image is None:
             return
         img = Image.frombytes("RGBA", (dv._width, dv._height), bytes(pixels))
         buf = io.BytesIO()
@@ -884,45 +907,40 @@ def build_debug_viewport_pane(
     pn.state.add_periodic_callback(_tick, period=200)
 
     def view(which: str):
-        def _go(_e):
-            dv = _ensure_dv()
-            if dv is None:
-                return
-            with session._lock:
-                if which == "top":
-                    dv.view_top()
-                elif which == "left":
-                    dv.view_left()
-                elif which == "back":
-                    dv.view_back()
+        def _go(_e) -> None:
+            try:
+                session.debug_view(which)
+            except Exception as exc:  # noqa: BLE001
+                status.object = f"{which} view failed: {exc}"
         return _go
 
     btn_top = pn.widgets.Button(name="Top", width=60)
     btn_left = pn.widgets.Button(name="Left", width=60)
     btn_back = pn.widgets.Button(name="Back", width=60)
+    btn_reset = pn.widgets.Button(name="Reset", width=60)
     btn_top.on_click(view("top"))
     btn_left.on_click(view("left"))
     btn_back.on_click(view("back"))
-
-    def reset(_e):
-        dv = _ensure_dv()
-        if dv is None:
-            return
-        with session._lock:
-            dv._reset_debug_camera()
-
-    btn_reset = pn.widgets.Button(name="Reset", width=60)
-    btn_reset.on_click(reset)
+    btn_reset.on_click(view("reset"))
 
     def _real_close() -> None:
-        dv = dv_holder["dv"]
-        if dv is not None:
+        session._debug_view_action = None
+        if dv_holder["dv"] is not None:
+            def teardown(renderer) -> None:
+                dv = dv_holder["dv"]
+                if dv is None:
+                    return
+                try:
+                    dv.destroy()
+                except Exception:
+                    pass
+                dv_holder["dv"] = None
+                renderer.debug_viewport = None
+
             try:
-                dv.destroy()
-            except Exception:
-                pass
-            dv_holder["dv"] = None
-            renderer.debug_viewport = None
+                session.run_on_render_thread(teardown)
+            except Exception:  # noqa: BLE001 — a dead render thread must not
+                pass          # block closing the pane
         on_close()
 
     return _card(

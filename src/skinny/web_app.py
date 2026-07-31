@@ -19,10 +19,11 @@ import logging
 import struct
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Lock, Thread
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import panel as pn
 from tornado.ioloop import IOLoop
@@ -92,6 +93,9 @@ class SkinnySession:
         # raise `dictionary keys changed during iteration` inside the
         # accumulation-state hash and retire this session's render thread.
         self._commands = RenderCommandQueue()
+        # Published by the Camera-Debug pane when it is built; the pane owns the
+        # DebugViewport, the session only routes actions onto the render thread.
+        self._debug_view_action: Callable[[Any, str], None] | None = None
         self._handlers: list["VideoStreamHandler"] = []
         self.ready = False
         self._init_error: Exception | None = None
@@ -281,49 +285,70 @@ class SkinnySession:
         )
 
     def handle_camera(self, action: str, data: dict) -> None:
-        cam = self.renderer.camera
-        mode = getattr(self.renderer, "camera_mode", "orbit")
+        """Post one browser camera gesture to the render thread.
+
+        Deliberately **not** coalesced: a drag is a stream of deltas that the
+        camera integrates, so last-write-wins would drop motion and rotate less
+        than the mouse did. The render loop drains every iteration, so the
+        pending count is bounded by one frame's worth of events.
+        """
         dx = float(data.get("dx", 0))
         dy = float(data.get("dy", 0))
-        if action == "orbit":
-            # In free-look mode the active camera is FreeCamera; left-drag
-            # maps to look() instead of orbit().
-            if mode == "orbit" and hasattr(cam, "orbit"):
-                cam.orbit(dx, dy)
-            elif hasattr(cam, "look"):
-                cam.look(dx, dy)
-        elif action == "pan":
-            if hasattr(cam, "pan"):
-                cam.pan(dx, dy)
-        elif action == "zoom":
-            if hasattr(cam, "zoom"):
-                cam.zoom(float(data.get("delta", 0)))
-        elif action == "move" and hasattr(cam, "move"):
-            cam.move(
-                float(data.get("forward", 0)),
-                float(data.get("right", 0)),
-                float(data.get("up", 0)),
-                float(data.get("dt", 0.016)),
-            )
-        if self.encoder.is_h264:
+        delta = float(data.get("delta", 0))
+        move = (
+            float(data.get("forward", 0)), float(data.get("right", 0)),
+            float(data.get("up", 0)), float(data.get("dt", 0.016)),
+        )
+
+        def apply(r, action=action, dx=dx, dy=dy, delta=delta, move=move) -> None:
+            cam = r.camera
+            mode = getattr(r, "camera_mode", "orbit")
+            if action == "orbit":
+                # In free-look mode the active camera is FreeCamera; left-drag
+                # maps to look() instead of orbit().
+                if mode == "orbit" and hasattr(cam, "orbit"):
+                    cam.orbit(dx, dy)
+                elif hasattr(cam, "look"):
+                    cam.look(dx, dy)
+            elif action == "pan":
+                if hasattr(cam, "pan"):
+                    cam.pan(dx, dy)
+            elif action == "zoom":
+                if hasattr(cam, "zoom"):
+                    cam.zoom(delta)
+            elif action == "move" and hasattr(cam, "move"):
+                cam.move(*move)
+            self._force_keyframe()
+
+        self._commands.post(apply)
+
+    def _force_keyframe(self) -> None:
+        """Ask the encoder for an I-frame on the next encode.
+
+        Called from inside posted commands, so it is ordered with the mutation
+        that made the frame worth re-keying rather than racing it.
+        """
+        if self.encoder is not None and self.encoder.is_h264:
             self.encoder.force_keyframe()
 
     def handle_autofocus(self, x: float, y: float) -> None:
         """Browser-side Shift+Left-click autofocus. Render-space pixel
-        coords already mapped by the client. Routes through the same
-        lock the render path uses so the pick arms cleanly."""
-        r = self.renderer
-        with self._lock:
+        coords already mapped by the client. Posted, because arming the pick
+        writes renderer state the next frame reads."""
+        def apply(r, x=float(x), y=float(y)) -> None:
             if hasattr(r, "autofocus_at_pixel"):
                 r.autofocus_at_pixel(x, y)
-        if self.encoder.is_h264:
-            self.encoder.force_keyframe()
+            self._force_keyframe()
+
+        self._commands.post(apply)
 
     def handle_control(self, action: str) -> None:
-        """Browser-side keyboard shortcuts (C / F / Space / F1 / L / V / X)
-        routed through the same lock the camera / render path uses."""
-        r = self.renderer
-        with self._lock:
+        """Browser-side keyboard shortcuts (C / F / Space / F1 / L / V / X).
+
+        Posted rather than locked. Not coalesced: every one of these is a
+        toggle, and collapsing two presses into one inverts the result.
+        """
+        def apply(r, action=action) -> None:
             if action == "toggle_camera" and hasattr(r, "toggle_camera_mode"):
                 r.toggle_camera_mode()
             elif action == "reset_camera" and hasattr(r, "reset_camera"):
@@ -339,13 +364,17 @@ class SkinnySession:
                 r.reset_zoom_rect()
                 if hasattr(r, "set_zoom_drag_overlay"):
                     r.set_zoom_drag_overlay(None)
-        if self.encoder.is_h264:
-            self.encoder.force_keyframe()
+            self._force_keyframe()
+
+        self._commands.post(apply)
 
     # ── Resize + screenshot (called from UI / WS threads) ──────────────
 
     #: How long a caller waits for the render thread to apply a resize.
     RESIZE_TIMEOUT_S: ClassVar[float] = 15.0
+    #: How long a caller waits for any other awaited command (screenshot,
+    #: scene/HDR load, debug-viewport action).
+    COMMAND_TIMEOUT_S: ClassVar[float] = 30.0
 
     def resize(self, width: int, height: int) -> tuple[int, int]:
         """Change render + encoder resolution on the renderer's owning thread.
@@ -398,11 +427,50 @@ class SkinnySession:
         return actual_w, actual_h
 
     def screenshot(self, fmt: str) -> bytes:
-        """Render a screenshot in the requested format and return its bytes."""
-        buf = io.BytesIO()
-        with self._lock:
-            self.renderer.save_screenshot(buf, fmt)
-        return buf.getvalue()
+        """Render a screenshot in the requested format and return its bytes.
+
+        GPU work, so it runs on the owning thread and the caller waits on the
+        reply — the same shape the Qt proxy uses for its GPU-producing docks.
+        """
+        def capture(r, fmt=fmt) -> bytes:
+            buf = io.BytesIO()
+            r.save_screenshot(buf, fmt)
+            return buf.getvalue()
+
+        return self.run_on_render_thread(capture)
+
+    def run_on_render_thread(self, callback):
+        """Run ``callback(renderer)`` on the render thread and return its result.
+
+        The session's post-with-reply front door, for the sidebar callbacks that
+        need an outcome (screenshot bytes, a load that may raise). An exception
+        raised by the command propagates here, which is what gives the web
+        front-end the reply contract the tool surface already has.
+        """
+        return self._commands.post_with_reply(callback).result(
+            timeout=self.COMMAND_TIMEOUT_S,
+        )
+
+    def load_model(self, path) -> None:
+        self.run_on_render_thread(lambda r, p=path: r.load_model_from_path(p))
+
+    def load_hdr(self, path) -> None:
+        self.run_on_render_thread(
+            lambda r, p=path: r.load_environment_from_path(p)
+        )
+
+    def debug_view(self, which: str) -> None:
+        """Apply a Camera-Debug viewport action on the render thread.
+
+        The action itself belongs to the debug pane, which owns the
+        ``DebugViewport``; the pane publishes it here when it is built. A
+        sidebar shortcut is a caller, not an owner, so it posts through this
+        rather than reaching into the pane's widget tree.
+        """
+        action = self._debug_view_action
+        if action is None:
+            return
+        self.run_on_render_thread(lambda r, which=which: action(r, which))
 
     def register_handler(self, handler: "VideoStreamHandler") -> None:
         self._handlers.append(handler)
@@ -582,8 +650,8 @@ def _build_sidebar_widgets(
     """Build the Panel sidebar from the shared widget-tree spec.
 
     All layout decisions live in :func:`skinny.ui.build_app_ui.build_main_ui`;
-    this function only injects session-scoped callbacks (screenshot/load
-    under the session lock, child-window openers that push cards into
+    this function only injects session-scoped callbacks (screenshot and loads
+    posted to the render thread, child-window openers that push cards into
     ``child_windows_col``).
     """
     from skinny.ui.build_app_ui import AppCallbacks, build_main_ui
@@ -592,17 +660,6 @@ def _build_sidebar_widgets(
         build_bxdf_pane, build_debug_viewport_pane,
         build_material_graph_pane, build_scene_graph_pane,
     )
-
-    def _capture(fmt: str) -> bytes:
-        return session.screenshot(fmt)
-
-    def _load_model(path):
-        with session._lock:
-            session.renderer.load_model_from_path(path)
-
-    def _load_hdr(path):
-        with session._lock:
-            session.renderer.load_environment_from_path(path)
 
     # Track open panes by name so a second sidebar click brings the
     # existing pane into view rather than spawning a duplicate.
@@ -625,21 +682,12 @@ def _build_sidebar_widgets(
 
     def _debug_view(which: str):
         def _go():
-            # Ensure the debug pane is open, then call its view button.
+            # Opening the pane is what publishes the action on the session; the
+            # shortcut then posts it like any other command. It used to reach
+            # into the pane's widget tree by index and increment a Button's
+            # `clicks`, which was a workaround for having no command path.
             _toggle("debug", build_debug_viewport_pane)()
-            card = open_panes.get("debug")
-            if card is None:
-                return
-            # Card layout: [close_button, Column(button_row, image, status)].
-            # First child of inner Column is the button Row containing the
-            # view buttons in fixed order: Top, Left, Back, Reset.
-            try:
-                btn_row = card.objects[1].objects[0]
-                idx = {"top": 0, "left": 1, "back": 2}.get(which)
-                if idx is not None:
-                    btn_row.objects[idx].clicks += 1
-            except (IndexError, AttributeError):
-                pass
+            session.debug_view(which)
         return _go
 
     callbacks = AppCallbacks(
@@ -650,9 +698,11 @@ def _build_sidebar_widgets(
         debug_view_top=_debug_view("top"),
         debug_view_left=_debug_view("left"),
         debug_view_back=_debug_view("back"),
-        capture_screenshot=_capture,
-        load_model=_load_model,
-        load_hdr=_load_hdr,
+        # Every host callback posts and waits; none of them touches the live
+        # renderer on this (Bokeh) thread.
+        capture_screenshot=session.screenshot,
+        load_model=session.load_model,
+        load_hdr=session.load_hdr,
         # Routed to the session's own resize -- not `renderer.resize` -- so the
         # lock-held ordering of resize → encoder rebuild → frame drain →
         # WebSocket notify survives.

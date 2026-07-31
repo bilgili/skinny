@@ -19,6 +19,7 @@ import numpy as np
 from skinny.backend_select import select_backend
 from skinny.bringup import BringupPlan, plan_bringup
 from skinny.cli_common import add_render_flags, neural_config_from_args, resolve_walk
+from skinny.render_session import RenderCommandQueue
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -192,23 +193,45 @@ class HeadlessRenderer:
             hdr_dir=_repo_root() / "hdrs",
             tattoo_dir=_repo_root() / "tattoos",
         )
+        # Renderer mutations go through the same command queue every other
+        # front-end uses (change renderer-command-interface, design D2). This
+        # caller has no second thread, so it drains immediately after posting —
+        # the degenerate case of the interface, not a separate path. Nothing is
+        # coalesced and the queue is FIFO, so the renderer sees exactly the
+        # sequence of calls it saw when these were direct writes.
+        self._commands = RenderCommandQueue()
         try:
             # Scene-sampling seam selection (mirrors the interactive front-ends).
             if proposals is not None:
-                self.renderer.proposal_preset_index = \
-                    self.renderer.proposal_preset_from_token(proposals)
+                self._run(lambda r, t=proposals: setattr(
+                    r, "proposal_preset_index", r.proposal_preset_from_token(t),
+                ))
             if reuse is not None:
-                self.renderer.reuse_index = self.renderer._REUSE_TOKENS.index(reuse)
+                self._run(lambda r, t=reuse: setattr(
+                    r, "reuse_index", r._REUSE_TOKENS.index(t),
+                ))
             if lobe_samplers is not None:
                 from skinny.sampling import parse_lobe_samplers
 
                 c, s, d = parse_lobe_samplers(lobe_samplers)
-                self.renderer.coat_sampler_index = c
-                self.renderer.spec_sampler_index = s
-                self.renderer.diff_sampler_index = d
+                self._run(lambda r, c=c: setattr(r, "coat_sampler_index", c))
+                self._run(lambda r, s=s: setattr(r, "spec_sampler_index", s))
+                self._run(lambda r, d=d: setattr(r, "diff_sampler_index", d))
         except Exception:
             self.ctx.destroy()
             raise
+
+    def _run(self, callback):
+        """Post one renderer mutation and drain it on this thread.
+
+        ``post_with_reply`` rather than ``post`` so a mutation that raises
+        raises *here*, at the call site, exactly as the direct write it replaced
+        did. The reply is already settled by the time ``result()`` is called —
+        the drain ran synchronously above it.
+        """
+        reply = self._commands.post_with_reply(callback)
+        self._commands.run_pending(self.renderer)
+        return reply.result()
 
     def __enter__(self) -> "HeadlessRenderer":
         return self
@@ -225,24 +248,30 @@ class HeadlessRenderer:
             self.ctx.destroy()
 
     def _prepare(self, source: Source, opts: RenderOptions) -> None:
+        # The stage is built off the queue, then swapped in by a command — the
+        # off-thread-build / owning-thread-apply split the scene-intake
+        # interface uses.
         scene = _load_scene(source, opts.time)
-        self.renderer.set_usd_scene(scene)
+        self._run(lambda r, s=scene: r.set_usd_scene(s))
         # Apply options AFTER the scene swap so they win over anything
         # _apply_usd_lights seeded on the first scene.
-        self.renderer.integrator_index = opts.integrator_index
-        self.renderer.tonemap_index = opts.tonemap_index
-        self.renderer.exposure = float(opts.exposure)
+        self._run(lambda r, v=opts.integrator_index: setattr(
+            r, "integrator_index", v))
+        self._run(lambda r, v=opts.tonemap_index: setattr(r, "tonemap_index", v))
+        self._run(lambda r, v=float(opts.exposure): setattr(r, "exposure", v))
         # These options belong to Skinny's fallback pair. Retain them even
         # while authored USD lighting owns the current scene; the renderer's
         # authority gates keep them from affecting authored contributions.
-        self.renderer.direct_light_index = 0 if opts.direct_light else 1
+        self._run(lambda r, v=0 if opts.direct_light else 1: setattr(
+            r, "direct_light_index", v))
         if opts.env_intensity is not None:
-            self.renderer.env_intensity = float(opts.env_intensity)
+            self._run(lambda r, v=float(opts.env_intensity): setattr(
+                r, "env_intensity", v))
         # SPPM glossy-continue threshold override (only read under SPPM). None
         # leaves the renderer's built-in default in place.
         if opts.sppm_glossy_roughness is not None:
-            self.renderer._sppm_glossy_roughness_override = \
-                float(opts.sppm_glossy_roughness)
+            self._run(lambda r, v=float(opts.sppm_glossy_roughness): setattr(
+                r, "_sppm_glossy_roughness_override", v))
 
     def _accumulate(self, samples: int) -> bytes:
         raw = b""

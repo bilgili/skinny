@@ -146,20 +146,63 @@ Two rules follow:
   commands and advances the renderer reports the failure and continues, or stops
   the session visibly — it never leaves a session marked running with a dead
   render thread.
+- **A lock is not a substitute for the queue** (change
+  `renderer-command-interface`). Holding a render lock around a renderer call
+  serialises that call against the render; it does **not** move the call onto
+  the thread that owns the renderer. The web session used to do exactly this at
+  sixteen sites, and its own docstrings described the lock as if it made the
+  mutation safe. The lock still exists and still protects the render+encode
+  span — it is no longer the mutation mechanism.
+- **A mutation verb is named, never inferred from its spelling.**
+  `MarshalledRenderer` refused `apply_*` and passed everything else through to
+  the live renderer. `toggle_material_furnace` is a renderer mutation the shared
+  control tree calls, and it is not spelled `apply_*`, so it ran on the caller's
+  thread. `_MUTATION_VERBS` names the ones the prefix rule misses; a prefix is a
+  naming convention, not a boundary.
 
-The GLFW front-end (`app.py`) owns a queue and calls `run_pending` once per
-iteration, immediately after `glfw.poll_events()` and before `renderer.update(dt)`
-— the same position the Qt worker drains at. The call is unconditional, so
-ordering does not depend on optional features being enabled.
+**Every front-end that owns a renderer owns a queue and drains it before
+advancing that renderer.** There is one interface — `post`, `post_with_reply`,
+coalesce-by-key, `run_pending` on the owning thread — and four callers of it:
 
-The web front-end (`web_app.py`) owns a queue per session. `SkinnySession`
-drains it inside its render lock at the top of every iteration, and the sidebar
-is built against `MarshalledRenderer` — a read-through, write-posting view of
-the session's renderer. Unlike `QtRendererProxy` it mirrors no state (the Panel
-widgets already poll the live renderer for reads), so a sub-object write cannot
-be absorbed locally. Its `resize_render_target` goes to the session's own
-`resize`, not `renderer.resize`, because that method holds the lock across
-resize → encoder rebuild → stale-frame drain → WebSocket notify, in that order.
+| Front-end | Owning thread | Drains at |
+|---|---|---|
+| `skinny` (GLFW) | main loop | after `glfw.poll_events()`, before `renderer.update(dt)` |
+| `skinny-gui` (Qt) | `_RenderWorker` | top of each worker iteration |
+| `skinny-web` | per-session render thread | top of `_render_iteration`, inside the render lock |
+| `skinny-render` / `HeadlessRenderer` | the caller's own thread | immediately after each post |
+
+The GLFW drain is unconditional, so ordering does not depend on optional
+features being enabled.
+
+The web front-end (`web_app.py`) owns a queue per session. Every browser-driven
+mutation posts: `set_param`, `handle_camera`, `handle_control`,
+`handle_autofocus`, `resize`, `screenshot`, the scene and HDR loads, and the
+Camera-Debug actions. Awaited ones go through `SkinnySession.run_on_render_thread`,
+which posts, waits with a timeout, and re-raises whatever the command raised —
+the reply contract the MCP tool surface already had. Camera gestures and control
+toggles are deliberately **not** coalesced: a drag is a stream of deltas the
+camera integrates, and a toggle pressed twice is not a toggle pressed once.
+
+The sidebar is built against `MarshalledRenderer` — a read-through,
+write-posting view of the session's renderer. Unlike `QtRendererProxy` it
+mirrors no state (the Panel widgets already poll the live renderer for reads),
+so a sub-object write cannot be absorbed locally. Its `resize_render_target`
+goes to the session's own `resize`, not `renderer.resize`, because that method
+holds the lock across resize → encoder rebuild → stale-frame drain → WebSocket
+notify, in that order.
+
+The Camera-Debug pane owns its `DebugViewport`; the sidebar shortcut is a
+caller, not an owner. The pane publishes its action on the session when it is
+built and clears it on close, and both the pane's buttons and the sidebar
+shortcut post that one action. The shortcut used to reach into the pane's Panel
+widget tree by index and increment a `Button.clicks`, which was a workaround for
+having no command path.
+
+`HeadlessRenderer` posts and drains under the same call, which is the degenerate
+case of the interface rather than a separate path: no second thread means the
+drain can happen immediately. It uses `post_with_reply` so a mutation that
+raises raises at the call site, exactly as the direct write it replaced did. Its
+public method surface is unchanged.
 
 ### MCP scene control (`mcp_server.py`, `mcp_auth.py`, `mcp_paths.py`)
 
