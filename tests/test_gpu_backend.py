@@ -680,13 +680,11 @@ def test_no_renderer_init_path_reaches_a_member_the_adapter_lacks():
             present = (member in surface["functions"]
                        or member in surface["classes"]
                        or member in surface["constants"])
-            assert getattr(caps, gate) is present or not getattr(caps, gate), (
-                f"{name}: capability {gate} is True but {member} is absent — "
-                f"a consumer gated on it would reach a member this adapter "
-                f"does not have")
             if getattr(caps, gate):
                 assert present, (
-                    f"{name}: {gate} is True but the adapter has no {member}")
+                    f"{name}: capability {gate} is True but {member} is absent "
+                    f"— a consumer gated on it would reach a member this "
+                    f"adapter does not have")
 
 
 #: One-sided module members a consumer reaches through a capability, and the
@@ -701,11 +699,39 @@ def test_capability_names_the_reason_not_the_binding_model():
     """`has_descriptor_sets` must not stand in for the argument-table or the
     shader-build facts it was overloaded with. Both now have their own field,
     and the three consumers read those."""
-    src = (SRC / "renderer.py").read_text()
-    assert "self.caps.needs_shared_bindless_sampler" in src
-    assert src.count("self.caps.has_merged_record_header") == 2
-    # the sampler reach must no longer be gated on the binding model
-    assert "make_sampler(self.ctx, address_v=\"repeat\")\n            if not self.caps.has_descriptor_sets" not in src
+    tree = ast.parse((SRC / "renderer.py").read_text())
+
+    def _caps_fields(node) -> set[str]:
+        """Capability fields named anywhere inside an expression."""
+        return {n.attr for n in ast.walk(node)
+                if isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Attribute)
+                and n.value.attr == "caps"}
+
+    # Find the guard around each `_gpu.make_sampler(...)` reach by AST, not by
+    # matching source text: a whitespace-exact `not in` assert passes the moment
+    # the expression is reindented, which is a gate that goes vacuous silently.
+    reaches = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.If, ast.IfExp)):
+            continue
+        body = node.body if isinstance(node.body, list) else [node.body]
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Attribute) and sub.attr == "make_sampler"):
+                reaches.append(_caps_fields(node.test))
+                break
+    assert reaches, "no guarded make_sampler reach found in renderer.py"
+    for fields in reaches:
+        assert "needs_shared_bindless_sampler" in fields, (
+            f"a make_sampler reach is guarded by {fields or '{}'} — it must be "
+            f"gated on needs_shared_bindless_sampler, the fact that names why "
+            f"the member exists")
+        assert "has_descriptor_sets" not in fields, (
+            "a make_sampler reach is gated on the binding model again")
+
+    # both record-drain sites read the shader-build fact
+    assert (SRC / "renderer.py").read_text().count(
+        "self.caps.has_merged_record_header") == 2
 
 
 if __name__ == "__main__":  # regenerate the pinned surface fixture

@@ -423,11 +423,23 @@ what belongs here is the ownership rule it establishes.
 
 **Branch on the reason, never on the vendor.** Each capability field names why a
 consumer used to diverge — descriptor sets, frame sync objects, external memory,
-in-place shared writes, indirect dispatch, GPU skinning, the megakernel record
+external semaphore, in-place shared writes, the shared bindless sampler, the
+merged record header, indirect dispatch, GPU skinning, the megakernel record
 source, reflected record layouts, watchdog tiling, bindless capacity. A field
 earns its place only by removing at least one existing branch, so the record
-cannot grow into a config blob; a field the two backends agree on is a test
-failure, because it is either dead or misnamed. On the renderer the record is
+cannot grow into a config blob; a field the two device backends agree on is a
+test failure, because it is either dead or misnamed — excluding
+`has_indirect_dispatch`, a device probe either backend may report either way.
+`has_external_semaphore` is the one field with no *pre-existing* branch behind
+it: it encodes the branch that should have existed, since the CUDA handoff
+needed both extensions and assumed one implied the other.
+
+**Name the reason, not the binding model.** `has_descriptor_sets` was briefly
+made to stand in for "is bind-by-name". That is the same answer on two backends
+and the wrong one on a third, and it put a `make_sampler` reach in front of the
+recording adapter, which has no such member. Two facts it was hiding — the
+argument table splitting a combined `Sampler2D`, and the records compiling under
+`SKINNY_METAL_RECORDS` — now own fields. On the renderer the record is
 the memoised `self.caps` property, derived from `self.ctx` rather than assigned
 in `__init__`, so a renderer built through `__new__` — the hostless test pattern
 — still answers it.

@@ -54,16 +54,30 @@ declares what the adapters must agree on and what they may not:
 
 - **`BackendCapabilities`** — one frozen record naming each reason a consumer
   used to branch on the vendor: `has_descriptor_sets`, `has_frame_sync_objects`,
-  `has_external_memory`, `has_shared_in_place_write`, `has_indirect_dispatch`,
-  `has_gpu_skinning`, `has_megakernel_record_source`,
-  `has_reflected_record_layouts`, `needs_watchdog_tiling`, and
-  `bindless_texture_capacity`. **Read it through `capabilities(ctx)`**, which
+  `has_external_memory`, `has_external_semaphore`,
+  `has_shared_in_place_write`, `needs_shared_bindless_sampler`,
+  `has_merged_record_header`, `has_indirect_dispatch`, `has_gpu_skinning`,
+  `has_megakernel_record_source`, `has_reflected_record_layouts`,
+  `needs_watchdog_tiling`, and `bindless_texture_capacity`. **Read it through `capabilities(ctx)`**, which
   folds the four runtime device probes (`supports_external_memory`,
   `supports_external_semaphore`, `supports_shared_memory`,
   `supports_indirect_dispatch`) in, so a consumer asks one named question rather
-  than a backend test plus a probe. Every field replaces at least one
-  pre-existing live branch — a capability with no branch behind it does not
-  belong in the record, and a field the two backends agree on is caught by test.
+  than a backend test plus a probe. Every field replaces at least one live
+  branch — a capability with no branch behind it does not belong in the record,
+  and a field the two device backends agree on is caught by test, **excluding**
+  `has_indirect_dispatch`, which is a device probe either backend may report
+  either way. One field replaces no *pre-existing* branch:
+  `has_external_semaphore` encodes the branch that should have existed, because
+  the CUDA handoff needed both extensions all along and silently assumed one
+  implied the other.
+
+  **Name the reason, not the binding model.** `has_descriptor_sets` was briefly
+  overloaded into "is bind-by-name", which is the same answer on the two device
+  backends and the wrong one on the recording adapter — it binds by name, splits
+  no samplers, and compiles no records. The shared bindless sampler (an
+  argument-table fact) and the merged record header (a shader-build fact) each
+  own a field, so a capability-gated reach at a one-sided member is true only
+  where that member exists.
   On the renderer it is the memoised `self.caps` property, derived from
   `self.ctx`.
 - **`ONE_SIDED_MEMBERS` / `DIVERGENT_SIGNATURES`** — members that genuinely
