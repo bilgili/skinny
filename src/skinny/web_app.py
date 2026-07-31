@@ -20,10 +20,11 @@ import struct
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Lock, Thread
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import panel as pn
 from tornado.ioloop import IOLoop
@@ -38,8 +39,15 @@ from skinny.cli_common import (
 )
 from skinny.params import _set_nested
 from skinny.render_session import MarshalledRenderer, RenderCommandQueue
-from skinny.renderer import Renderer  # noqa: F401 — type annotation only; built by BringupPlan.create
 from skinny.video_encoder import VideoEncoder
+
+if TYPE_CHECKING:
+    # `skinny.renderer` imports `vulkan` at module scope, so importing it here
+    # made this module — and every hostless test of the session's command paths
+    # — unimportable without the Vulkan SDK on the library path, on a
+    # Metal-only host. It is only ever used as an annotation, and
+    # `from __future__ import annotations` is in effect.
+    from skinny.renderer import Renderer
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +101,11 @@ class SkinnySession:
         # raise `dictionary keys changed during iteration` inside the
         # accumulation-state hash and retire this session's render thread.
         self._commands = RenderCommandQueue()
+        # Set once the render thread is known to be gone (gave up, or cleaned
+        # up). A stopped session drains nothing, so a command posted afterwards
+        # would sit in the queue for the life of the process — and a browser
+        # that keeps dragging posts one every few milliseconds.
+        self._stopped = False
         # Published by the Camera-Debug pane when it is built; the pane owns the
         # DebugViewport, the session only routes actions onto the render thread.
         self._debug_view_action: Callable[[Any, str], None] | None = None
@@ -204,6 +217,9 @@ class SkinnySession:
         thread that is never coming back.
         """
         reason = f"{type(exc).__name__}: {exc}"
+        # Refuse new commands BEFORE draining, so a post racing this drain is
+        # rejected rather than landing in a queue nothing will read again.
+        self._stopped = True
         for handler in list(self._handlers):
             try:
                 handler.send_render_failed(reason)
@@ -279,7 +295,7 @@ class SkinnySession:
         the render thread. Coalesced per path so a slider drag cannot grow the
         queue.
         """
-        self._commands.post(
+        self.post(
             lambda r, path=path, value=value: _set_nested(r, path, value),
             coalesce_key=f"param:{path}",
         )
@@ -320,7 +336,7 @@ class SkinnySession:
                 cam.move(*move)
             self._force_keyframe()
 
-        self._commands.post(apply)
+        self.post(apply)
 
     def _force_keyframe(self) -> None:
         """Ask the encoder for an I-frame on the next encode.
@@ -331,6 +347,27 @@ class SkinnySession:
         if self.encoder is not None and self.encoder.is_h264:
             self.encoder.force_keyframe()
 
+    def prime_stream(self) -> Future:
+        """Re-key the stream for a newly attached client and report the state it
+        needs to configure its decoder.
+
+        Returns the **unsettled** future. The only caller is a Tornado
+        coroutine, which awaits it; blocking there would stall every other
+        session's frame writes for the whole timeout.
+
+        The encoder belongs to the render thread: `_apply_resize` closes it and
+        builds a replacement there. A client attaching mid-resize used to read
+        `encoder.avcc_description` and `renderer.width` from the IOLoop thread,
+        so it could describe a codec that had just been closed, or pair one
+        resolution's dimensions with another's AVCC record. Reading all three in
+        one command makes them one consistent answer.
+        """
+        def prime(r) -> tuple[int, int, bytes | None]:
+            self._force_keyframe()
+            return int(r.width), int(r.height), self.encoder.avcc_description
+
+        return self.request(prime)
+
     def handle_autofocus(self, x: float, y: float) -> None:
         """Browser-side Shift+Left-click autofocus. Render-space pixel
         coords already mapped by the client. Posted, because arming the pick
@@ -340,7 +377,7 @@ class SkinnySession:
                 r.autofocus_at_pixel(x, y)
             self._force_keyframe()
 
-        self._commands.post(apply)
+        self.post(apply)
 
     def handle_control(self, action: str) -> None:
         """Browser-side keyboard shortcuts (C / F / Space / F1 / L / V / X).
@@ -366,7 +403,7 @@ class SkinnySession:
                     r.set_zoom_drag_overlay(None)
             self._force_keyframe()
 
-        self._commands.post(apply)
+        self.post(apply)
 
     # ── Resize + screenshot (called from UI / WS threads) ──────────────
 
@@ -439,17 +476,60 @@ class SkinnySession:
 
         return self.run_on_render_thread(capture)
 
-    def run_on_render_thread(self, callback):
+    def post(self, callback, *, coalesce_key: str | None = None) -> None:
+        """Post a fire-and-forget command, unless the render thread has stopped.
+
+        Nothing settles a plain post, so a stopped session cannot report the
+        refusal — dropping is the honest outcome, and it is what keeps the queue
+        from growing without bound while a disconnected browser keeps dragging.
+        """
+        if self._stopped:
+            return
+        self._commands.post(callback, coalesce_key=coalesce_key)
+
+    def request(self, callback) -> Future:
+        """Post ``callback(renderer)`` and return its unsettled reply future.
+
+        For a caller that must not block. The Tornado IOLoop is single-threaded
+        and runs every session's socket writes, so a coroutine there awaits this
+        future — it never waits on it synchronously.
+
+        A stopped session fails the future immediately rather than letting the
+        caller wait out a timeout against a thread that is never coming back.
+        """
+        if self._stopped:
+            future: Future = Future()
+            future.set_exception(RuntimeError("render thread stopped"))
+            return future
+        return self._commands.post_with_reply(callback)
+
+    def run_on_render_thread(self, callback, *, timeout: float | None = None):
         """Run ``callback(renderer)`` on the render thread and return its result.
 
         The session's post-with-reply front door, for the sidebar callbacks that
         need an outcome (screenshot bytes, a load that may raise). An exception
         raised by the command propagates here, which is what gives the web
         front-end the reply contract the tool surface already has.
+
+        **Blocks the calling thread**, so it is for the Bokeh worker threads
+        only. An IOLoop coroutine must use :meth:`request` and await instead.
+
+        On timeout the command is **cancelled**, not abandoned. `run_pending`
+        skips a cancelled command, so a resize or scene load the caller was told
+        had failed cannot land minutes later — which is how the MCP tool surface
+        has always treated its own timeouts.
         """
-        return self._commands.post_with_reply(callback).result(
-            timeout=self.COMMAND_TIMEOUT_S,
-        )
+        future = self.request(callback)
+        try:
+            return future.result(timeout=self.COMMAND_TIMEOUT_S
+                                 if timeout is None else timeout)
+        except TimeoutError:
+            # `cancel()` fails if the render thread already started the command;
+            # then it will finish and the result is simply discarded. Either way
+            # the caller is told it timed out, and nothing lands afterwards that
+            # the caller was told had not happened.
+            future.cancel()
+            raise
 
     def load_model(self, path) -> None:
         self.run_on_render_thread(lambda r, p=path: r.load_model_from_path(p))
@@ -484,8 +564,17 @@ class SkinnySession:
     def cleanup(self) -> None:
         log.info("Cleaning up session %s", self.session_id)
         self._running = False
+        self._stopped = True
         if hasattr(self, "_render_thread"):
             self._render_thread.join(timeout=5)
+        # The thread has gone; settle whatever it never got to, so a Bokeh
+        # callback blocked in `run_on_render_thread` returns now instead of
+        # waiting out its full timeout against a dead session.
+        for command in self._commands.drain():
+            if command.reply is not None and command.reply.set_running_or_notify_cancel():
+                command.reply.set_exception(
+                    RuntimeError("session was cleaned up")
+                )
         if self.encoder is not None:
             self.encoder.close()
         if self.renderer is not None:
@@ -577,9 +666,16 @@ class VideoStreamHandler(WebSocketHandler):
                 self.session.frame_queue.get_nowait()
             except Empty:
                 break
-        self.session.encoder.force_keyframe()
-        self.send_resize(self.session.renderer.width, self.session.renderer.height)
-        desc = self.session.encoder.avcc_description
+        try:
+            width, height, desc = await asyncio.wait_for(
+                asyncio.wrap_future(self.session.prime_stream()),
+                timeout=SkinnySession.COMMAND_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 — a dead render thread closes the socket
+            log.exception("Video WS: could not prime session %s",
+                          self.session.session_id)
+            return
+        self.send_resize(width, height)
         if desc:
             self.send_codec_config(desc)
             log.info("Video WS: sent AVCC description (%d bytes)", len(desc))

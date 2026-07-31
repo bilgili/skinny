@@ -9,6 +9,7 @@ focuses the existing pane rather than spawning a duplicate.
 from __future__ import annotations
 
 import io
+import logging
 import math
 from typing import Callable
 
@@ -25,6 +26,8 @@ from skinny.mtlx_graph_view import (
     NodeGraphView, NodeView, build_view,
 )
 from skinny.ui.scene_edit_actions import apply_scene_property
+
+log = logging.getLogger(__name__)
 
 
 # ── Shared helpers ────────────────────────────────────────────────
@@ -845,12 +848,17 @@ def build_debug_viewport_pane(
     image_pane = pn.pane.PNG(None, width=640)
     status = pn.pane.Markdown("Initialising debug viewport…")
     dv_holder: dict = {"dv": None}
+    #: Latest frame the render thread produced, plus the closed flag. The render
+    #: thread writes; the Bokeh timer reads. One slot, last-write-wins — a
+    #: dropped debug frame costs nothing, and it is what lets the timer stay
+    #: non-blocking.
+    latest: dict = {"frame": None, "error": None, "closed": False}
 
     #: Everything below that takes a ``renderer`` argument runs on the render
     #: thread, posted through the session. The viewport owns GPU resources and
     #: writes ``renderer.debug_viewport``; the Bokeh thread only reads the
-    #: returned pixels and writes Panel widgets, which is the only place a
-    #: Panel widget may be written from.
+    #: latest slot and writes Panel widgets, which is the only place a Panel
+    #: widget may be written from.
 
     def _ensure_dv(renderer) -> DebugViewport:
         if dv_holder["dv"] is not None:
@@ -868,11 +876,27 @@ def build_debug_viewport_pane(
         dv_holder["dv"] = dv
         return dv
 
-    def _render_frame(renderer):
-        dv = _ensure_dv(renderer)
-        if not dv.is_open:
-            return None
-        return dv.render_embedded(renderer)
+    def _render_frame(renderer) -> None:
+        """Produce one debug frame into `latest`. Runs on the render thread.
+
+        Returns nothing: this is a plain `post`, not an awaited request. The
+        Bokeh timer used to wait on the reply, which blocked the single Tornado
+        IOLoop for a whole render-loop iteration — up to 0.5 s once the frame
+        converges and the loop starts sleeping — five times a second, starving
+        every other session's video for as long as the pane stayed open.
+        """
+        if latest["closed"]:
+            return
+        try:
+            dv = _ensure_dv(renderer)
+            latest["frame"] = (
+                dv.render_embedded(renderer) if dv.is_open else None,
+                dv.camera_mode, dv._width, dv._height,
+            )
+            latest["error"] = None
+        except Exception as exc:  # noqa: BLE001 — surfaced in the status line
+            latest["frame"] = None
+            latest["error"] = str(exc)
 
     def _apply_view(renderer, which: str) -> None:
         dv = _ensure_dv(renderer)
@@ -890,21 +914,29 @@ def build_debug_viewport_pane(
     session._debug_view_action = _apply_view
 
     def _tick() -> None:
-        try:
-            pixels = session.run_on_render_thread(_render_frame)
-        except Exception as exc:  # noqa: BLE001
-            status.object = f"render failed: {exc}"
+        """Ask for the next debug frame and show the last one. Never blocks."""
+        if latest["closed"]:
             return
-        dv = dv_holder["dv"]
-        if dv is None or pixels is None or Image is None:
+        session.post(_render_frame, coalesce_key="debug_viewport_frame")
+        if latest["error"] is not None:
+            status.object = f"render failed: {latest['error']}"
             return
-        img = Image.frombytes("RGBA", (dv._width, dv._height), bytes(pixels))
+        frame = latest["frame"]
+        if frame is None or Image is None:
+            return
+        pixels, mode, width, height = frame
+        if pixels is None:
+            return
+        img = Image.frombytes("RGBA", (width, height), bytes(pixels))
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="PNG")
         image_pane.object = buf.getvalue()
-        status.object = f"Mode: {dv.camera_mode}   Size: {dv._width}×{dv._height}"
+        status.object = f"Mode: {mode}   Size: {width}×{height}"
 
-    pn.state.add_periodic_callback(_tick, period=200)
+    # Keep the handle: an un-stopped callback keeps firing after the pane is
+    # closed, and `_render_frame` would rebuild the DebugViewport it had just
+    # destroyed, forever, 5 times a second.
+    tick_handle = pn.state.add_periodic_callback(_tick, period=200)
 
     def view(which: str):
         def _go(_e) -> None:
@@ -924,23 +956,34 @@ def build_debug_viewport_pane(
     btn_reset.on_click(view("reset"))
 
     def _real_close() -> None:
+        # Order matters: stop producing before destroying. `closed` also stops
+        # any `_render_frame` already queued from rebuilding the viewport.
+        latest["closed"] = True
+        if tick_handle is not None:
+            try:
+                tick_handle.stop()
+            except Exception:  # noqa: BLE001 — already stopped
+                pass
         session._debug_view_action = None
         if dv_holder["dv"] is not None:
             def teardown(renderer) -> None:
                 dv = dv_holder["dv"]
                 if dv is None:
                     return
-                try:
-                    dv.destroy()
-                except Exception:
-                    pass
                 dv_holder["dv"] = None
                 renderer.debug_viewport = None
+                dv.destroy()
 
             try:
                 session.run_on_render_thread(teardown)
-            except Exception:  # noqa: BLE001 — a dead render thread must not
-                pass          # block closing the pane
+            except Exception:
+                # A dead or wedged render thread must not block closing the
+                # pane, but a skipped GPU teardown is exactly what the Metal
+                # dispatch-hygiene rules say must never be silent.
+                log.exception(
+                    "Debug viewport teardown did not run; its GPU resources "
+                    "are leaked until the session is destroyed",
+                )
         on_close()
 
     return _card(

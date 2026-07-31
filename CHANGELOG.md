@@ -26,9 +26,29 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outcome the way the MCP tool surface already did. The lock still protects the
   render+encode span; it is no longer the mutation mechanism. Camera gestures
   and control toggles are not coalesced — a drag is a stream of deltas the camera
-  integrates, and a toggle pressed twice is not a toggle pressed once.
+  integrates, and a toggle pressed twice is not a toggle pressed once. A command
+  that times out is cancelled, so a resize the caller was told had failed cannot
+  land afterwards, and a session whose render thread has died refuses commands
+  instead of queueing them forever.
 
-  Two related defects went with it:
+  Several related defects went with it:
+
+  - **A USD scene-control edit wrote the live stage from the browser's thread.**
+    The `usd`-kind control setter called `attr.Set(v)` directly, and pxr gives
+    no guarantee for a concurrent read/write on a stage the render thread is
+    traversing. The write and its `_usd_live_dirty` flag are one command now.
+    Splitting them is also why these edits did nothing at all on `skinny-gui`:
+    `QtRendererProxy` stores `_`-prefixed attributes on the proxy and posts
+    nothing, so the stage changed and the renderer was never told.
+  - **The Camera-Debug pane starved the web server while it was open.** Its 5 Hz
+    frame timer waited on a GPU render from the Tornado IOLoop — the single
+    thread that writes every session's video. It posts and reads a latest-frame
+    slot now. Closing the pane also stops the timer, which previously kept
+    firing and rebuilding the `DebugViewport` it had just destroyed.
+  - **The scene-loader and screenshot controls kept a direct-renderer
+    fallback.** `_add_resolution` already refused to build without an
+    owning-thread callback; the other two silently called the live renderer.
+    All three refuse now.
 
   - **The Furnace checkbox ran on the caller's thread, and did nothing at all on
     `skinny-gui`.** `MarshalledRenderer` refused unmarshalled `apply_*` verbs and
@@ -42,6 +62,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Rendered output is unchanged: `skinny-render` produces byte-identical images
   (SHA-256 over three suite scenes, each rendered twice, all six hashes equal).
+  That gate covers `_prepare`; the `--proposals` / `--reuse` / `--lobe-samplers`
+  writes in `HeadlessRenderer.__init__` are posted the same way but are not
+  exercised by it.
 
 - **Closing one interactive front-end no longer erases the other's settings**
   (change `session-settings-owner`). `save_settings` wrote the supplied dict

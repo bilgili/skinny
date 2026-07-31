@@ -59,6 +59,8 @@ class _StubRenderer:
     def __init__(self) -> None:
         self.camera = _StubCamera()
         self.camera_mode = "orbit"
+        self.width = 1280
+        self.height = 720
         self.mtlx_overrides: dict[str, float] = {}
         self.show_hud = True
         self.show_focus_overlay = False
@@ -91,6 +93,7 @@ class _StubRenderer:
 
 class _StubEncoder:
     is_h264 = True
+    avcc_description = b"AVCC"
 
     def __init__(self) -> None:
         self.keyframes = 0
@@ -165,10 +168,30 @@ def test_autofocus_is_posted_not_applied_inline(session):
 
 
 def test_set_param_is_posted_not_applied_inline(session):
+    """`SkinnySession.set_param` posts.
+
+    Note it is NOT the browser's slider path — nothing in the UI routes to it.
+    A slider goes through the sidebar's `MarshalledRenderer.set_path`, which
+    the next test covers. This one keeps the session method honest for whenever
+    a parameter WebSocket message is added.
+    """
     session.set_param("mtlx.base", 0.25)
     assert session.renderer.mtlx_overrides == {}
     _drain(session)
     assert session.renderer.mtlx_overrides["base"] == 0.25
+
+
+def test_the_browsers_actual_slider_path_is_posted(session):
+    """The sidebar binds the shared tree to `MarshalledRenderer`, and
+    `set_param_value` resolves through its `set_path`. This is the path a
+    browser slider drag really takes."""
+    from skinny.params import set_param_value
+
+    sidebar = MarshalledRenderer(session._commands, lambda: session.renderer)
+    set_param_value(sidebar, "mtlx.base", 0.5)
+    assert session.renderer.mtlx_overrides == {}, "slider wrote the live renderer"
+    _drain(session)
+    assert session.renderer.mtlx_overrides["base"] == 0.5
 
 
 def test_camera_gestures_are_not_coalesced(session):
@@ -303,24 +326,165 @@ def test_qt_proxy_marshals_the_furnace_toggle_too():
     assert live.log == [("furnace", 3, False)]
 
 
-def test_shared_tree_reaches_only_marshalled_mutation_verbs():
+#: Renderer members the shared control tree may call on a proxy without a
+#: marshalled verb: reads, and the two verbs every front-end overrides with a
+#: host callback. Anything else the tree reaches has to be classified — as a
+#: read (add it here, with a reason) or as a mutation (give it a marshalled
+#: verb). The point is that a NEW name fails until someone decides which it is.
+_TREE_MAY_REACH_UNMARSHALLED = {
+    # Reads.
+    "iter_graph_uniforms", "proposal_preset_from_token",
+    # Host-callback verbs: `AppCallbacks.load_model` / `capture_screenshot`
+    # replace these on every front-end that mounts the tree, so the direct call
+    # is a fallback branch, not the live path. See `_add_scene_loader` /
+    # `_add_capture`, which refuse to build the control without the callback.
+    "load_model_from_path", "save_screenshot",
+}
+
+
+def test_shared_tree_reaches_only_classified_renderer_members():
     """Whatever `build_main_ui` binds to is a marshalling proxy on the web, so
     every renderer mutation the shared tree calls must have a marshalled verb.
-    Fails loudly instead of silently running one on the caller's thread."""
+
+    This deliberately does NOT filter the scan through
+    `MarshalledRenderer._is_mutation` first. Doing that made the gate circular:
+    an unmarshalled verb is by definition not yet in `_MUTATION_VERBS`, so the
+    filter dropped exactly the names the gate exists to catch, and the
+    assertion could only ever fire for a verb someone had already remembered to
+    register. Scan every member, then require each one to be classified.
+    """
     import re
 
     from skinny.ui import build_app_ui
 
     src = inspect.getsource(build_app_ui)
-    reached = {
-        v for v in re.findall(r"renderer\.([a-z_]+)\(", src)
-        if MarshalledRenderer._is_mutation(v)
-    }
-    assert reached, "expected the tree to reach at least one mutation verb"
-    assert reached <= set(MarshalledRenderer._MARSHALLED_VERBS), (
-        f"shared tree reaches unmarshalled verbs: "
-        f"{sorted(reached - set(MarshalledRenderer._MARSHALLED_VERBS))}"
+    # `[a-z_]+` missed names with digits or capitals; `\w+` does not.
+    reached = set(re.findall(r"renderer\.(\w+)\s*\(", src))
+    assert reached, "expected the tree to reach at least one renderer member"
+    unclassified = (
+        reached
+        - set(MarshalledRenderer._MARSHALLED_VERBS)
+        - _TREE_MAY_REACH_UNMARSHALLED
     )
+    assert not unclassified, (
+        f"the shared control tree reaches renderer members that are neither "
+        f"marshalled nor declared reads: {sorted(unclassified)}. Give each a "
+        f"marshalled verb on MarshalledRenderer (and QtRendererProxy), or add "
+        f"it to _TREE_MAY_REACH_UNMARSHALLED with the reason it is safe."
+    )
+
+
+def test_the_verb_gate_can_actually_fail():
+    """Negative control for the gate above.
+
+    The version this replaced passed unchanged when a new unmarshalled verb was
+    added to the scanned source, because it filtered by `_is_mutation` first.
+    """
+    import re
+
+    source = "renderer.reset_zoom_rect()\nrenderer.apply_material_override(1)\n"
+    reached = set(re.findall(r"renderer\.(\w+)\s*\(", source))
+    unclassified = (
+        reached
+        - set(MarshalledRenderer._MARSHALLED_VERBS)
+        - _TREE_MAY_REACH_UNMARSHALLED
+    )
+    assert unclassified == {"reset_zoom_rect"}, (
+        "the gate no longer notices an unregistered verb"
+    )
+
+
+# ── A stopped session refuses, it does not accumulate ────────────────────
+
+
+def test_a_stopped_session_drops_posts_instead_of_queueing_them(session):
+    """After the render thread gives up, nothing drains. A browser that keeps
+    dragging would otherwise grow the queue for the life of the process."""
+    session._notify_render_failed(RuntimeError("gpu lost"))
+    for _ in range(50):
+        session.handle_camera("orbit", {"dx": 1, "dy": 0})
+    assert len(session._commands) == 0
+
+
+def test_a_stopped_session_fails_an_awaited_command_at_once(session):
+    """Rather than making the caller wait out a 30 s timeout against a thread
+    that is never coming back."""
+    session._notify_render_failed(RuntimeError("gpu lost"))
+    with pytest.raises(RuntimeError, match="render thread stopped"):
+        session.run_on_render_thread(lambda r: None)
+
+
+def test_a_timed_out_command_is_cancelled_not_left_to_land(session):
+    """`run_pending` skips cancelled commands, but only if someone cancels.
+    An uncancelled resize lands minutes after the caller was told it failed."""
+    with pytest.raises(TimeoutError):
+        session.run_on_render_thread(lambda r: r.log.append(("late",)),
+                                     timeout=0.01)
+    _drain(session)
+    assert session.renderer.log == [], "the timed-out command ran anyway"
+
+
+def test_prime_stream_returns_an_unsettled_future(session):
+    """The only caller is a Tornado coroutine. Blocking there stalls every
+    other session's frame writes for the whole timeout."""
+    future = session.prime_stream()
+    assert isinstance(future, Future)
+    assert not future.done(), "prime_stream blocked the caller"
+    _drain(session)
+    assert future.result(timeout=0) == (1280, 720, b"AVCC")
+
+
+# ── The USD control setter posts its stage write ─────────────────────────
+
+
+def test_usd_control_setter_posts_the_stage_write_and_the_dirty_flag():
+    """`attr.Set` mutates the live stage the render thread reads, and pxr gives
+    no guarantee for a concurrent read/write. The flag rides the same command,
+    because splitting them let the Qt proxy swallow the flag half."""
+    from skinny.usd_controls import accessors_for
+
+    applied: list = []
+
+    class _Attr:
+        def Get(self):
+            return 1.0
+
+        def Set(self, v):
+            applied.append(("set", v))
+
+        def GetPath(self):
+            return "/World/light.intensity"
+
+    live = _StubRenderer()
+    queue = RenderCommandQueue()
+    proxy = MarshalledRenderer(queue, lambda: live)
+    binding = type("B", (), {"kind": "usd", "attribute": _Attr()})()
+
+    _get, _set = accessors_for(proxy, binding)
+    _set(2.5)
+    assert applied == [], "the stage was written on the caller's thread"
+    queue.run_pending(live)
+    assert applied == [("set", 2.5)]
+    assert live._usd_live_dirty is True, "the dirty flag was swallowed"
+
+
+def test_usd_control_setter_applies_inline_without_a_proxy():
+    """The single-threaded front-end binds the live renderer and already runs
+    on the owning thread."""
+    from skinny.usd_controls import accessors_for
+
+    applied: list = []
+    attr = type("A", (), {
+        "Get": lambda self: 1.0,
+        "Set": lambda self, v: applied.append(v),
+        "GetPath": lambda self: "/W/l.i",
+    })()
+    live = _StubRenderer()
+    binding = type("B", (), {"kind": "usd", "attribute": attr})()
+
+    accessors_for(live, binding)[1](3.0)
+    assert applied == [3.0]
+    assert live._usd_live_dirty is True
 
 
 # ── skinny-render: post and drain synchronously ──────────────────────────
@@ -398,26 +562,165 @@ def test_headless_prepare_applies_the_scene_before_the_options(monkeypatch):
 # ── 4.4 source gate ──────────────────────────────────────────────────────
 
 
-#: Front-end modules whose code runs on a thread that does not own the
-#: renderer. A `with session._lock:` here used to serialise a mutation against
-#: the render without moving it onto the owning thread — the distinction the
-#: whole change rests on (design D1).
-_OFF_THREAD_MODULES = (
-    "web_app.py",
-    "ui/panel/windows.py",
-    "ui/panel/backend.py",
+def _off_thread_modules() -> list[Path]:
+    """Every module whose code runs on a thread that does not own the renderer.
+
+    **Derived, not hand-listed.** A hand-list silently exempts the next pane
+    someone adds under `ui/panel/`, which is exactly the module most likely to
+    reach for the lock by copying its neighbour.
+    """
+    return sorted(SRC.glob("ui/panel/*.py")) + [SRC / "web_app.py"]
+
+
+def test_the_off_thread_module_list_is_not_empty():
+    """A derived list that silently derives nothing is a gate that always
+    passes."""
+    mods = _off_thread_modules()
+    assert len(mods) >= 3, f"expected the panel front-end modules, got {mods}"
+    assert (SRC / "ui/panel/windows.py") in mods
+
+
+@pytest.mark.parametrize(
+    "path", _off_thread_modules(), ids=lambda p: p.name,
 )
-
-
-@pytest.mark.parametrize("rel", _OFF_THREAD_MODULES)
-def test_no_front_end_mutates_the_renderer_under_the_session_lock(rel):
+def test_no_front_end_takes_the_session_lock(path):
     """`session._lock` is the render+encode lock. Taking it around a renderer
-    call is the pattern this change removes; the render loop's own drain is the
-    one legitimate holder, and it lives on the session, not here."""
-    source = (SRC / rel).read_text()
-    assert "session._lock" not in source, (
-        f"{rel} still mutates the renderer under the session lock; post it"
+    call serialises that call against the render but does not move it onto the
+    owning thread — the distinction the whole change rests on (design D1). The
+    render loop's own drain is the one legitimate holder, and it lives on the
+    session itself, not in these modules.
+
+    AST, not a substring: `sess = session` then `with sess._lock:` defeated the
+    string check, and so did `getattr(session, "_lock")`. This walks every
+    attribute access named `_lock` instead.
+    """
+    tree = ast.parse(path.read_text())
+    hits = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "_lock"
+        # `web_app.py` owns the lock; `self._lock` in the render loop is the
+        # legitimate holder. Any OTHER base is a front-end reaching for it.
+        and not (isinstance(node.value, ast.Name) and node.value.id == "self")
+    ]
+    hits += [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "_lock"
+    ]
+    assert not hits, (
+        f"{path.name} reaches for the render lock at line(s) {hits}; post the "
+        f"mutation through the session instead"
     )
+
+
+@pytest.mark.parametrize(
+    "path", _off_thread_modules(), ids=lambda p: p.name,
+)
+def test_no_front_end_writes_a_renderer_attribute_off_thread(path):
+    """The thing task 4.4 actually claims: no direct renderer attribute write
+    from a non-owning thread.
+
+    The lock gate above cannot see `renderer.foo = x` with no lock at all,
+    which is a *worse* version of the banned pattern. This one looks for
+    attribute stores whose base is a name the front-end uses for a live
+    renderer. A write inside a posted command binds the renderer to the
+    callback's own parameter (`r`, or a shadowing `renderer`), so it is not a
+    module-level name and does not trip this.
+    """
+    LIVE = {"renderer"}
+    hits: list[tuple[str, str, int]] = []
+
+    class Scan(ast.NodeVisitor):
+        """Skips whole function bodies whose first parameter is the renderer.
+
+        `ast.walk` cannot express that — it flattens the tree, so a `continue`
+        on a FunctionDef still visits every node inside it. A visitor that
+        simply does not recurse is the only way to model the scope.
+        """
+
+        def _is_command_body(self, node) -> bool:
+            args = node.args.args
+            return bool(args) and args[0].arg in LIVE | {"r"}
+
+        def visit_FunctionDef(self, node) -> None:
+            if not self._is_command_body(node):
+                self.generic_visit(node)
+
+        def visit_Lambda(self, node) -> None:
+            if not self._is_command_body(node):
+                self.generic_visit(node)
+
+        def _record(self, target, lineno) -> None:
+            if (isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in LIVE):
+                hits.append((target.value.id, target.attr, lineno))
+
+        def visit_Assign(self, node) -> None:
+            for t in node.targets:
+                self._record(t, node.lineno)
+            self.generic_visit(node)
+
+        def visit_AugAssign(self, node) -> None:
+            self._record(node.target, node.lineno)
+            self.generic_visit(node)
+
+    Scan().visit(ast.parse(path.read_text()))
+    assert not hits, (
+        f"{path.name} writes renderer state directly off-thread: {hits}. "
+        f"Post the write through the session's command queue."
+    )
+
+
+def test_the_renderer_write_gate_can_actually_fail(tmp_path):
+    """Negative control: a bare off-thread write, and a legitimate one inside a
+    posted command, must be told apart."""
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "def bad(session):\n"
+        "    renderer = session.renderer\n"
+        "    renderer.exposure = 2.0\n"
+        "def ok(renderer):\n"
+        "    renderer.exposure = 2.0\n"
+    )
+    LIVE = {"renderer"}
+    hits: list[int] = []
+
+    class Scan(ast.NodeVisitor):
+        def visit_FunctionDef(self, node) -> None:
+            args = node.args.args
+            if not (args and args[0].arg in LIVE | {"r"}):
+                self.generic_visit(node)
+
+        def visit_Assign(self, node) -> None:
+            for t in node.targets:
+                if (isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id in LIVE):
+                    hits.append(node.lineno)
+            self.generic_visit(node)
+
+    Scan().visit(ast.parse(probe.read_text()))
+    assert hits == [3], (
+        "the gate must flag the off-thread write and spare the posted one"
+    )
+
+
+def test_the_lock_gate_can_actually_fail(tmp_path):
+    """Negative control. The string version this replaced passed for
+    `sess = session; with sess._lock:` — the AST version must not."""
+    probe = tmp_path / "probe.py"
+    probe.write_text("def f(session):\n    sess = session\n    with sess._lock:\n        pass\n")
+    tree = ast.parse(probe.read_text())
+    hits = [
+        n.lineno for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute) and n.attr == "_lock"
+        and not (isinstance(n.value, ast.Name) and n.value.id == "self")
+    ]
+    assert hits, "the aliased lock grab slipped through"
 
 
 def test_the_debug_shortcut_does_not_poke_a_widget_tree():

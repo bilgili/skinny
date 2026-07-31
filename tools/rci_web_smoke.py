@@ -52,12 +52,21 @@ def main() -> int:
         stop = threading.Event()
         posted = {"param": 0, "camera": 0, "control": 0}
 
+        # The path a browser slider actually takes: the sidebar's shared control
+        # tree is bound to a MarshalledRenderer, and `set_param_value` resolves
+        # through its `set_path`. `SkinnySession.set_param` is NOT that path —
+        # nothing in the UI routes to it — so driving it here would prove
+        # nothing about a slider drag.
+        from skinny.render_session import MarshalledRenderer
+
+        sidebar = MarshalledRenderer(session._commands, lambda: session.renderer)
+
         def slider_drag() -> None:
-            """What a browser slider drag looks like on the IOLoop thread."""
+            """What a browser slider drag looks like on the Bokeh worker."""
             i = 0
             while not stop.is_set():
                 i += 1
-                session.set_param("exposure", 1.0 + (i % 20) * 0.05)
+                sidebar.set_path("exposure", 1.0 + (i % 20) * 0.05)
                 posted["param"] += 1
                 time.sleep(0.002)
 
@@ -133,7 +142,7 @@ def main() -> int:
 
         # The last posted slider value must be the one the renderer holds — a
         # dropped or torn write shows up here.
-        session.set_param("exposure", 1.75)
+        sidebar.set_path("exposure", 1.75)
         time.sleep(0.5)
         if abs(float(session.renderer.exposure) - 1.75) > 1e-6:
             errors.append(

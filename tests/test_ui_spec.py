@@ -125,6 +125,10 @@ def _callbacks(**kwargs):
     from skinny.ui.build_app_ui import AppCallbacks
 
     kwargs.setdefault("resize_render_target", lambda w, h: (int(w), int(h)))
+    # Same rule, same reason, for the other two controls that reach the
+    # renderer directly (change renderer-command-interface).
+    kwargs.setdefault("load_model", lambda path: None)
+    kwargs.setdefault("capture_screenshot", lambda fmt: b"")
     return AppCallbacks(**kwargs)
 
 
@@ -369,14 +373,31 @@ def test_execution_mode_not_a_runtime_toggle(stub_renderer):
     assert _find_combo(tree, "execution_mode_index") is None
 
 
-def test_resolution_control_requires_the_resize_callback(stub_renderer):
-    """Omitting `resize_render_target` used to fall back to calling
+@pytest.mark.parametrize(
+    "missing",
+    ["resize_render_target", "load_model", "capture_screenshot"],
+)
+def test_owning_thread_controls_require_their_callback(stub_renderer, missing):
+    """The three controls that would otherwise reach the live renderer.
+
+    Omitting `resize_render_target` used to fall back to calling
     `renderer.resize` directly from the caller's thread — a silent
     unsynchronised resize of the offscreen image, readback buffer,
     accumulation image and HUD overlay while the render thread may be inside
-    them (review-surfaced-defects defect 2). It is now a build-time error.
+    them (review-surfaced-defects defect 2). `load_model` and
+    `capture_screenshot` had the same fallback and kept it until change
+    `renderer-command-interface`; one decision now covers all three.
     """
     from skinny.ui.build_app_ui import AppCallbacks
 
-    with pytest.raises(ValueError, match="resize_render_target"):
-        build_main_ui(stub_renderer, callbacks=AppCallbacks())
+    kwargs = {
+        "resize_render_target": lambda w, h: (int(w), int(h)),
+        "load_model": lambda path: None,
+        "capture_screenshot": lambda fmt: b"",
+    }
+    del kwargs[missing]
+
+    # `AppCallbacks` directly, not `_callbacks()` — that helper fills every one
+    # of these in by default, which is exactly what this test removes.
+    with pytest.raises(ValueError, match=missing):
+        build_main_ui(stub_renderer, callbacks=AppCallbacks(**kwargs))

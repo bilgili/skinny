@@ -11,7 +11,7 @@ and `render_headless()`. A mutation is safe only if it runs on that thread.
 | `skinny` (GLFW) | in-process MCP server | MCP worker | `RenderCommandQueue` | safe |
 | `skinny-gui` (Qt) | shared control tree → `QtRendererProxy` | GUI thread | queue | safe |
 | MCP tools | `post` / `post_with_reply` only | any | queue | safe |
-| `skinny-web` | `SkinnySession.set_param` | IOLoop | queue | safe (9e6322d) |
+| `skinny-web` | `SkinnySession.set_param` | — | queue | safe, but **no caller** |
 | `skinny-web` | `SkinnySession.resize` | IOLoop/Bokeh | queue (reply) | safe (9e6322d) |
 | `skinny-web` | shared control tree → `MarshalledRenderer` | Bokeh | queue for writes | **partly** — see 1.3 |
 | `skinny-web` | `SkinnySession.handle_camera` | IOLoop | **none** | **RACY** |
@@ -26,6 +26,15 @@ and `render_headless()`. A mutation is safe only if it runs on that thread.
 
 `handle_camera` is the sharpest case: it takes no lock at all, and it mutates
 the camera object the render thread reads in the same instant.
+
+**The proposal's headline example is wrong.** It opens with `set_param`
+(`web_app.py:204`) and says "every parameter change from a browser races the
+render thread". No browser reaches that method. `VideoStreamHandler.on_message`
+routes only `camera`, `control` and `autofocus`; a sidebar slider goes through
+`set_param_value` → `MarshalledRenderer.set_path`, which posts, and has posted
+since 9e6322d. `set_param` is correct and unused — the natural home if a
+parameter WebSocket message is ever added, but not a defect this change fixed.
+The real off-thread mutations are the rest of this table.
 
 `_lock` is the render+encode lock. Holding it serialises a mutation against the
 render, but it does not move the mutation onto the owning thread — that

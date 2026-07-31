@@ -43,11 +43,13 @@
       `tools/rci_identity_gate.py`: all six SHA-256 hashes unchanged.
 - [x] 4.3 Manual web smoke: drag a slider during an active render; no torn
       state, no stall. Scripted as `tools/rci_web_smoke.py` — a real session,
-      real GPU, real render thread, 955 parameter writes + 639 camera gestures
-      + 12 control toggles from two other threads. Frames kept flowing, the
-      awaited screenshot settled in 0.06 s, accumulation resumed to 43 in the
-      quiet phase, and the last slider value landed. The browser client itself
-      was not driven.
+      real GPU, real render thread, 921 slider writes + 618 camera gestures +
+      12 control toggles from two other threads. Frames kept flowing, the
+      awaited screenshot settled in 0.06 s, accumulation resumed to 46 in the
+      quiet phase, and the last slider value landed. The slider writes go
+      through `MarshalledRenderer.set_path`, which is the path a browser
+      slider really takes — **not** `SkinnySession.set_param`, which the UI
+      never calls. The browser client itself was not driven.
 - [x] 4.4 Source gate: no direct renderer attribute write from a non-owning
       thread.
 - [x] 4.5 `ruff check src/`; full hostless `pytest`.

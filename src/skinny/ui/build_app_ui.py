@@ -308,13 +308,19 @@ def _add_resolution(ui: UIBuilder, renderer, resize_fn=None) -> None:
 
 
 def _add_scene_loader(ui: UIBuilder, renderer, load_model_fn=None) -> None:
-    """Scene file picker. ``load_model_fn(path)`` lets the host wrap the
-    call (e.g. acquire the per-session render lock in the web path).
-    Defaults to a direct ``Renderer.load_model_from_path``.
+    """Scene file picker. ``load_model_fn(path)`` runs the load on the
+    renderer's owning thread — posted on the web, marshalled on Qt.
+
+    No direct-renderer fallback, for the reason `_add_resolution` gives: a
+    missing wire became an unsynchronised `renderer.load_model_from_path` from
+    the caller's thread, which swaps the whole scene while the render thread is
+    reading it. A front-end that offers the control supplies the callback.
     """
     if load_model_fn is None:
-        def load_model_fn(path: Path) -> None:
-            renderer.load_model_from_path(path)
+        raise ValueError(
+            "AppCallbacks.load_model is required: the scene loader must load "
+            "on the renderer's owning thread"
+        )
 
     ui.file_picker(
         "Load scene…",
@@ -325,16 +331,18 @@ def _add_scene_loader(ui: UIBuilder, renderer, load_model_fn=None) -> None:
 
 
 def _add_capture(ui: UIBuilder, renderer, capture_fn=None) -> None:
-    """Screenshot picker. ``capture_fn(fmt) -> bytes`` lets the host wrap
-    the call (e.g. acquire the per-session render lock in the web path).
-    Defaults to a direct ``Renderer.save_screenshot`` into a ``BytesIO``.
+    """Screenshot picker. ``capture_fn(fmt) -> bytes`` renders the capture on
+    the renderer's owning thread and returns the encoded bytes.
+
+    No direct-renderer fallback: `save_screenshot` is GPU work, and running it
+    from the caller's thread races the frame in flight. Same rule as
+    `_add_resolution` and `_add_scene_loader`.
     """
     if capture_fn is None:
-        import io as _io
-        def capture_fn(fmt: str) -> bytes:
-            buf = _io.BytesIO()
-            renderer.save_screenshot(buf, fmt)
-            return buf.getvalue()
+        raise ValueError(
+            "AppCallbacks.capture_screenshot is required: a capture must "
+            "render on the renderer's owning thread"
+        )
 
     ui.screenshot_picker(formats=CAPTURE_FORMATS, capture=capture_fn)
 
