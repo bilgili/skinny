@@ -539,7 +539,7 @@ class Renderer:
         # correct default and matches the pool default.
         self._metal_common_sampler = (
             self._gpu.make_sampler(self.ctx, address_v="repeat")
-            if not self.caps.has_descriptor_sets else None)
+            if self.caps.needs_shared_bindless_sampler else None)
         # Neural size/precision build config (study change
         # neural-precision-size-study). Fixed for the renderer's lifetime — the
         # study harness builds a fresh headless renderer per grid cell. Falls
@@ -7708,8 +7708,15 @@ class Renderer:
 
         res_handoff = self._neural_handoff_kind
         if res_handoff == "interop":
-            res_handoff = ("interop(CUDA)" if self.caps.has_external_memory
-                           else "interop(UMA)")
+            # Each arm names the capability it actually needs. Keying UMA off
+            # `not has_external_memory` mislabelled a Vulkan device whose graded
+            # build failed the extension as UMA (fallback review, LOW).
+            if self.caps.has_shared_in_place_write:
+                res_handoff = "interop(UMA)"
+            elif self.caps.has_external_memory and self.caps.has_external_semaphore:
+                res_handoff = "interop(CUDA)"
+            else:
+                res_handoff = "interop(unavailable)"
         rows.append(cr.ConfigRow("neural-handoff", self._neural_handoff_kind,
                                  res_handoff, train_status))
 
@@ -9357,7 +9364,7 @@ class Renderer:
         capacity = int(self.width) * int(self.height) * rec_max_bounces
         cap_limit = (1 << 20) if max_records_per_frame is None else int(max_records_per_frame)
         capacity = max(1, min(capacity, cap_limit))
-        if not self.caps.has_descriptor_sets:
+        if self.caps.has_merged_record_header:
             size = 64 + capacity * RECORD_STRIDE   # header + records
             if self._drain_buffer is None or self._drain_buffer.size < size:
                 # Do NOT free the outgoing drain buffer here once it has been
@@ -9400,7 +9407,7 @@ class Renderer:
         from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
 
         cap = self._ensure_wf_record_drain(max_records_per_frame)
-        if not self.caps.has_descriptor_sets:
+        if self.caps.has_merged_record_header:
             header = self._drain_buffer.download_sync(64)
             count = min(_struct.unpack("<I", header[60:64])[0], cap)
             if count:

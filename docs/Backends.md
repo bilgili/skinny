@@ -58,7 +58,8 @@ declares what the adapters must agree on and what they may not:
   `has_gpu_skinning`, `has_megakernel_record_source`,
   `has_reflected_record_layouts`, `needs_watchdog_tiling`, and
   `bindless_texture_capacity`. **Read it through `capabilities(ctx)`**, which
-  folds the two runtime device probes (`supports_shared_memory`,
+  folds the four runtime device probes (`supports_external_memory`,
+  `supports_external_semaphore`, `supports_shared_memory`,
   `supports_indirect_dispatch`) in, so a consumer asks one named question rather
   than a backend test plus a probe. Every field replaces at least one
   pre-existing live branch — a capability with no branch behind it does not

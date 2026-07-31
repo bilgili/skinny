@@ -653,6 +653,61 @@ def test_implementation_map_lists_the_new_owner_modules():
         assert mod in imap, f"docs/ImplementationMap.md does not list {mod}"
 
 
+def test_no_renderer_init_path_reaches_a_member_the_adapter_lacks():
+    """The reachability claim, tested — not just module routing.
+
+    `test_resource_module_knows_every_declared_adapter` proves `resource_module`
+    returns the right module; it does NOT prove a `Renderer` can be built over
+    it. It could not: `Renderer.__init__` picked the shared bindless sampler
+    with `not has_descriptor_sets`, so the recording adapter (bind-by-name, but
+    it splits no samplers) took the Metal arm and died on a missing
+    `make_sampler`. `has_descriptor_sets` had been overloaded into "is
+    bind-by-name", which is the same answer on two backends and the wrong one on
+    a third (fallback pre-merge review, MEDIUM 1).
+
+    So: for every capability-gated reach at a one-sided member, the capability
+    must be true only where the member exists.
+    """
+    for name, module in gb.ADAPTER_MODULES.items():
+        surface = gb.adapter_surface(module)
+        caps = gb._BY_NAME[name]
+        for member, entry in gb.ONE_SIDED_MEMBERS.items():
+            if "." in member:
+                continue  # methods are reached through an instance, not module
+            gate = _ONE_SIDED_GATES.get(member)
+            if gate is None:
+                continue
+            present = (member in surface["functions"]
+                       or member in surface["classes"]
+                       or member in surface["constants"])
+            assert getattr(caps, gate) is present or not getattr(caps, gate), (
+                f"{name}: capability {gate} is True but {member} is absent — "
+                f"a consumer gated on it would reach a member this adapter "
+                f"does not have")
+            if getattr(caps, gate):
+                assert present, (
+                    f"{name}: {gate} is True but the adapter has no {member}")
+
+
+#: One-sided module members a consumer reaches through a capability, and the
+#: capability that gates the reach. The gate above asserts the capability is
+#: true ONLY where the member exists, so the pair cannot drift apart.
+_ONE_SIDED_GATES = {
+    "make_sampler": "needs_shared_bindless_sampler",
+}
+
+
+def test_capability_names_the_reason_not_the_binding_model():
+    """`has_descriptor_sets` must not stand in for the argument-table or the
+    shader-build facts it was overloaded with. Both now have their own field,
+    and the three consumers read those."""
+    src = (SRC / "renderer.py").read_text()
+    assert "self.caps.needs_shared_bindless_sampler" in src
+    assert src.count("self.caps.has_merged_record_header") == 2
+    # the sampler reach must no longer be gated on the binding model
+    assert "make_sampler(self.ctx, address_v=\"repeat\")\n            if not self.caps.has_descriptor_sets" not in src
+
+
 if __name__ == "__main__":  # regenerate the pinned surface fixture
     FIXTURE.write_text(json.dumps(
         {n: gb.adapter_surface(m) for n, m in gb.ADAPTER_MODULES.items()

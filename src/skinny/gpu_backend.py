@@ -6,8 +6,11 @@ sibling adapter modules — :mod:`skinny.vk_compute` or :mod:`skinny.metal_compu
 executing them. This module declares what those three have to agree on:
 
 - :class:`BackendCapabilities` — the facts consumers used to rediscover with a
-  vendor branch. **Every field replaces at least one pre-existing live branch**
-  (design D1); no speculative capabilities. :func:`capabilities` derives the
+  vendor branch. **Every field replaces at least one live branch** (design D1); no
+  speculative capabilities. `has_external_semaphore` is the one field that
+  replaces no *pre-existing* branch: the CUDA handoff needed both extensions
+  all along and silently assumed one implied the other, so the branch it
+  encodes is the one that should have existed. :func:`capabilities` derives the
   record from a context, folding the four runtime device probes
   (``supports_external_memory``, ``supports_external_semaphore``,
   ``supports_shared_memory``, ``supports_indirect_dispatch``) in **for every
@@ -95,6 +98,22 @@ class BackendCapabilities:
     #: boundary (Metal, and only when the device probe agrees).
     has_shared_in_place_write: bool
 
+    #: The bindless pool needs ONE separately-created sampler because the
+    #: target's argument table splits a combined ``Sampler2D`` into a texture
+    #: plus a discrete ``SamplerState`` (design D8). This is an argument-table
+    #: fact, NOT the binding model: it was expressed as ``not
+    #: has_descriptor_sets``, which is the same answer on the two device
+    #: backends and the WRONG answer on any third adapter that binds by name
+    #: without splitting samplers — the recording adapter (codex re-review /
+    #: fallback review, MEDIUM 1). Pairs 1:1 with the one-sided
+    #: ``make_sampler``: true exactly where that member exists.
+    needs_shared_bindless_sampler: bool
+
+    #: The record drain reads a merged 64-byte header + records buffer, because
+    #: the target compiles the records under ``SKINNY_METAL_RECORDS``. A shader
+    #: **build** fact, not the binding model — same overloading as above.
+    has_merged_record_header: bool
+
     #: ``vkCmdDispatchIndirect`` / a Metal encoder that honours indirect args.
     #: False falls the wavefront slot counts back to a CPU readback.
     has_indirect_dispatch: bool
@@ -134,6 +153,8 @@ VULKAN_CAPABILITIES = BackendCapabilities(
     has_external_memory=False,
     has_external_semaphore=False,
     has_shared_in_place_write=False,
+    needs_shared_bindless_sampler=False,   # combined Sampler2D descriptors
+    has_merged_record_header=False,        # separate header buffer
     has_indirect_dispatch=True,
     has_gpu_skinning=True,
     has_megakernel_record_source=True,
@@ -151,6 +172,8 @@ METAL_CAPABILITIES = BackendCapabilities(
     # Both of these are device probes on a real MetalContext; the static record
     # states the pessimistic default and `capabilities()` promotes them.
     has_shared_in_place_write=False,
+    needs_shared_bindless_sampler=True,    # argument table splits Sampler2D
+    has_merged_record_header=True,         # SKINNY_METAL_RECORDS build
     has_indirect_dispatch=False,
     has_gpu_skinning=False,
     has_megakernel_record_source=False,
@@ -169,6 +192,11 @@ RECORDING_CAPABILITIES = BackendCapabilities(
     has_external_memory=False,
     has_external_semaphore=False,
     has_shared_in_place_write=False,
+    # Binds by name like Metal, but splits no samplers and compiles no
+    # records — which is exactly the pair `has_descriptor_sets` could not
+    # express, and why a Renderer over this adapter used to die in __init__.
+    needs_shared_bindless_sampler=False,
+    has_merged_record_header=False,
     has_indirect_dispatch=True,
     has_gpu_skinning=False,
     has_megakernel_record_source=False,

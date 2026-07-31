@@ -137,8 +137,13 @@ def resource_module(ctx):
     :func:`skinny.gpu_backend.capabilities` uses — so the set of adapters the
     selection seam knows equals ``gpu_backend.ADAPTER_MODULES``. A two-way
     ``is_metal`` test cannot express three adapters: it routed every non-Metal
-    context, recording included, to Vulkan, which made the recording adapter
-    unreachable through a ``Renderer`` (codex pre-merge review, MEDIUM 1).
+    context, recording included, to Vulkan (codex pre-merge review, MEDIUM 1).
+
+    This resolves *selection*. Being selectable is necessary but not sufficient
+    for a ``Renderer`` to build over an adapter — that additionally requires
+    every capability-gated reach to be true only where the member exists, which
+    `tests/test_gpu_backend.py` asserts separately. Saying "reachable through a
+    Renderer" here would be a claim this function cannot keep.
     ``is_metal`` remains the fallback for a stub context that predates
     ``backend_name``.
     """
