@@ -425,6 +425,15 @@ class QtRendererProxy:
             coalesce_key=f"mat_override:{index}:{name}",
         )
 
+    def toggle_material_furnace(self, index: int, enabled: bool) -> None:
+        # The shared tree's per-material Furnace checkbox. Without this the
+        # proxy's `__getattr__` raises AttributeError, because it only serves
+        # mirrored values — the verb is not a value.
+        self.post(
+            lambda r, i=int(index), v=bool(enabled): r.toggle_material_furnace(i, v),
+            coalesce_key=f"furnace:{index}",
+        )
+
     def apply_material_overrides(self, index: int, values: "dict[str, Any]") -> None:
         """Fan-out material edit: post ONE render-thread callback (mcp-material-
         authoring, design D5). The Qt Scene Graph dock routes a promoted logical
@@ -600,11 +609,19 @@ class MarshalledRenderer:
     captured, because a session builds its renderer asynchronously.
     """
 
-    #: Renderer verbs this proxy marshals. Anything else matching ``apply_*`` is
-    #: REFUSED rather than passed through to the live object: passing it through
-    #: would run a renderer mutation on the caller's thread while reading as
-    #: "every write is a command". A new verb is one line here.
-    _MARSHALLED_VERBS = ("apply_material_override",)
+    #: Renderer verbs this proxy marshals. Anything else the refusal rule below
+    #: classes as a mutation is REFUSED rather than passed through to the live
+    #: object: passing it through would run a renderer mutation on the caller's
+    #: thread while reading as "every write is a command". A new verb is one
+    #: line here plus its method.
+    _MARSHALLED_VERBS = ("apply_material_override", "toggle_material_furnace")
+
+    #: Mutation verbs whose names the ``apply_*`` rule does not catch. The
+    #: prefix is a naming convention, not a boundary — `toggle_material_furnace`
+    #: is a renderer mutation the shared control tree calls, and it passed
+    #: straight through to the live renderer on the caller's thread because it
+    #: happens not to be spelled `apply_*`. Name them, do not infer them.
+    _MUTATION_VERBS = ("toggle_material_furnace",)
 
     def __init__(self, command_queue: "RenderCommandQueue", renderer_getter) -> None:
         object.__setattr__(self, "_commands", command_queue)
@@ -634,8 +651,18 @@ class MarshalledRenderer:
             coalesce_key=f"material:{index}:{name}",
         )
 
+    def toggle_material_furnace(self, index: int, enabled: bool) -> None:
+        self.post(
+            lambda r, i=int(index), v=bool(enabled): r.toggle_material_furnace(i, v),
+            coalesce_key=f"furnace:{index}",
+        )
+
+    @classmethod
+    def _is_mutation(cls, name: str) -> bool:
+        return name.startswith("apply_") or name in cls._MUTATION_VERBS
+
     def __getattr__(self, name: str) -> Any:
-        if name.startswith("apply_") and name not in self._MARSHALLED_VERBS:
+        if self._is_mutation(name) and name not in self._MARSHALLED_VERBS:
             raise AttributeError(
                 f"{name!r} is a renderer mutation with no marshalled verb on "
                 f"{type(self).__name__}; add it to _MARSHALLED_VERBS rather than "

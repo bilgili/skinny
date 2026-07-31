@@ -132,6 +132,10 @@ class TestHeadlessFallbackLightOptions:
 
         wrapper = object.__new__(headless.HeadlessRenderer)
         wrapper.renderer = _Renderer()
+        # `_prepare` posts its mutations and drains them on this thread
+        # (change renderer-command-interface), so the queue `__init__` builds
+        # has to exist on a hand-constructed wrapper too.
+        wrapper._commands = headless.RenderCommandQueue()
         monkeypatch.setattr(
             headless,
             "_load_scene",

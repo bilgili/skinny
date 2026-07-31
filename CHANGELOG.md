@@ -9,6 +9,63 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Browser parameter changes no longer race the render thread** (change
+  `renderer-command-interface`). "Drive the renderer" had three answers
+  depending on the entry point. `skinny-gui`, `skinny` and the MCP tools posted
+  to a command queue; `skinny-render` called directly; `skinny-web` did some of
+  each. `SkinnySession.handle_camera` mutated the live camera from the Tornado
+  IOLoop thread with **no** synchronisation at all, while the render thread read
+  it. Sixteen further sites — `handle_control`, `handle_autofocus`, `screenshot`,
+  the two sidebar load callbacks, and nine scene-graph / material-graph edits in
+  `ui/panel/windows.py` — held the session's render lock around a renderer call,
+  which serialises it against the render but does not move it onto the thread
+  that owns the renderer.
+
+  Every front-end now drives the renderer through the one command interface, and
+  every awaited command carries a reply, so the web front-end can report an edit
+  outcome the way the MCP tool surface already did. The lock still protects the
+  render+encode span; it is no longer the mutation mechanism. Camera gestures
+  and control toggles are not coalesced — a drag is a stream of deltas the camera
+  integrates, and a toggle pressed twice is not a toggle pressed once. A command
+  that times out is cancelled, so a resize the caller was told had failed cannot
+  land afterwards, and a session whose render thread has died refuses commands
+  instead of queueing them forever.
+
+  Several related defects went with it:
+
+  - **A USD scene-control edit wrote the live stage from the browser's thread.**
+    The `usd`-kind control setter called `attr.Set(v)` directly, and pxr gives
+    no guarantee for a concurrent read/write on a stage the render thread is
+    traversing. The write and its `_usd_live_dirty` flag are one command now.
+    Splitting them is also why these edits did nothing at all on `skinny-gui`:
+    `QtRendererProxy` stores `_`-prefixed attributes on the proxy and posts
+    nothing, so the stage changed and the renderer was never told.
+  - **The Camera-Debug pane starved the web server while it was open.** Its 5 Hz
+    frame timer waited on a GPU render from the Tornado IOLoop — the single
+    thread that writes every session's video. It posts and reads a latest-frame
+    slot now. Closing the pane also stops the timer, which previously kept
+    firing and rebuilding the `DebugViewport` it had just destroyed.
+  - **The scene-loader and screenshot controls kept a direct-renderer
+    fallback.** `_add_resolution` already refused to build without an
+    owning-thread callback; the other two silently called the live renderer.
+    All three refuse now.
+
+  - **The Furnace checkbox ran on the caller's thread, and did nothing at all on
+    `skinny-gui`.** `MarshalledRenderer` refused unmarshalled `apply_*` verbs and
+    passed everything else straight through, but `toggle_material_furnace` is a
+    renderer mutation that is not spelled `apply_*`. On the Qt proxy the verb was
+    missing outright, so the checkbox raised `AttributeError`. Both proxies now
+    marshal it, and the refusal rule names the mutation verbs the prefix misses.
+  - **The web Camera-Debug shortcut reached into a Panel widget tree by index**
+    and incremented a `Button.clicks` to fire the action. The pane now publishes
+    its action on the session and both callers post it.
+
+  Rendered output is unchanged: `skinny-render` produces byte-identical images
+  (SHA-256 over three suite scenes, each rendered twice, all six hashes equal).
+  That gate covers `_prepare`; the `--proposals` / `--reuse` / `--lobe-samplers`
+  writes in `HeadlessRenderer.__init__` are posted the same way but are not
+  exercised by it.
+
 - **Closing one interactive front-end no longer erases the other's settings**
   (change `session-settings-owner`). `save_settings` wrote the supplied dict
   wholesale, and `skinny` and `skinny-gui` each authored their own 11-key

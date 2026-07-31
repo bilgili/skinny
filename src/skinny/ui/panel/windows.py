@@ -9,8 +9,9 @@ focuses the existing pane rather than spawning a duplicate.
 from __future__ import annotations
 
 import io
+import logging
 import math
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 import panel as pn
@@ -25,6 +26,8 @@ from skinny.mtlx_graph_view import (
     NodeGraphView, NodeView, build_view,
 )
 from skinny.ui.scene_edit_actions import apply_scene_property
+
+log = logging.getLogger(__name__)
 
 
 # ── Shared helpers ────────────────────────────────────────────────
@@ -115,12 +118,15 @@ def build_scene_graph_pane(
             _set_status("Load a USD scene before adding a model.", "warning")
             return
         parent = add_parent_for_node(state["node"])
-        with session._lock:
-            try:
-                new_path = renderer.add_model(str(path), parent_prim_path=parent)
-            except (ValueError, RuntimeError) as exc:
-                _set_status(f"Add failed: {exc}", "danger")
-                return
+        try:
+            new_path = session.run_on_render_thread(
+                lambda r, p=str(path), parent=parent: r.add_model(
+                    p, parent_prim_path=parent,
+                )
+            )
+        except (ValueError, RuntimeError) as exc:
+            _set_status(f"Add failed: {exc}", "danger")
+            return
         record_last_dir("model", path.parent)
         _set_status(f"Added {new_path}", "success")
 
@@ -129,12 +135,13 @@ def build_scene_graph_pane(
         if not is_deletable(node):
             _set_status("This node cannot be deleted.", "warning")
             return
-        with session._lock:
-            try:
-                renderer.remove_node(node.path)
-            except (ValueError, RuntimeError) as exc:
-                _set_status(f"Delete failed: {exc}", "danger")
-                return
+        try:
+            session.run_on_render_thread(
+                lambda r, p=node.path: r.remove_node(p)
+            )
+        except (ValueError, RuntimeError) as exc:
+            _set_status(f"Delete failed: {exc}", "danger")
+            return
         _set_status(f"Deleted {node.path}", "success")
 
     def _on_add_light(event) -> None:
@@ -148,26 +155,26 @@ def build_scene_graph_pane(
             )
             return
         parent = add_parent_for_node(state["node"])
-        with session._lock:
-            try:
-                new_path = renderer.add_light(
-                    light_type, parent_prim_path=parent,
+        try:
+            new_path = session.run_on_render_thread(
+                lambda r, t=light_type, parent=parent: r.add_light(
+                    t, parent_prim_path=parent,
                 )
-            except Exception as exc:  # noqa: BLE001 — non-fatal UI boundary
-                _set_status(f"Add {light_type} failed: {exc}", "danger")
-                return
+            )
+        except Exception as exc:  # noqa: BLE001 — non-fatal UI boundary
+            _set_status(f"Add {light_type} failed: {exc}", "danger")
+            return
         _set_status(f"Added {new_path}", "success")
 
     def _on_save(_event) -> None:
         if getattr(renderer, "_usd_edit_layer", None) is None:
             _set_status("No edits to save (no USD scene loaded).", "warning")
             return
-        with session._lock:
-            try:
-                written = renderer.save_edits()
-            except (ValueError, RuntimeError) as exc:
-                _set_status(f"Save failed: {exc}", "danger")
-                return
+        try:
+            written = session.run_on_render_thread(lambda r: r.save_edits())
+        except (ValueError, RuntimeError) as exc:
+            _set_status(f"Save failed: {exc}", "danger")
+            return
         _set_status(f"Saved edits to {written}", "success")
 
     add_btn.on_click(_on_add)
@@ -253,11 +260,10 @@ def _build_scene_prop_widget(
     where the shared function returns a reason string, the failure was not even
     reportable. ``report(msg, kind)`` surfaces that reason in the status line.
     """
-    renderer = session.renderer
-
     def _apply(p, value) -> None:
-        with session._lock:
-            reason = apply_scene_property(renderer, node, p, value)
+        reason = session.run_on_render_thread(
+            lambda r, p=p, value=value: apply_scene_property(r, node, p, value)
+        )
         if reason and report is not None:
             report(f"{p.display_name}: {reason}", "warning")
 
@@ -681,8 +687,13 @@ def build_material_graph_pane(
 def _build_graph_input_widget(
     session, view: NodeGraphView, node: NodeView, port,
 ) -> pn.viewable.Viewable | None:
-    renderer = session.renderer
     label = pn.pane.Markdown(f"**{port.name}** ({port.type_name})")
+
+    def _edit(value) -> None:
+        """One posted graph-port edit, whatever the port's type."""
+        session.run_on_render_thread(
+            lambda r, v=value: _apply_graph_edit(r, view, node, port, v)
+        )
 
     if port.connected_from:
         up, op = port.connected_from
@@ -700,8 +711,7 @@ def _build_graph_input_widget(
         )
 
         def on_change(event):
-            with session._lock:
-                _apply_graph_edit(renderer, view, node, port, float(event.new))
+            _edit(float(event.new))
 
         w.param.watch(on_change, "value")
         return pn.Row(label, w)
@@ -717,11 +727,7 @@ def _build_graph_input_widget(
         ]
 
         def push(_e, ws=sliders):
-            with session._lock:
-                _apply_graph_edit(
-                    renderer, view, node, port,
-                    tuple(float(w.value) for w in ws),
-                )
+            _edit(tuple(float(w.value) for w in ws))
 
         for s in sliders:
             s.param.watch(push, "value")
@@ -731,8 +737,7 @@ def _build_graph_input_widget(
         w = pn.widgets.Checkbox(name=port.name, value=bool(port.value))
 
         def on_change(event):
-            with session._lock:
-                _apply_graph_edit(renderer, view, node, port, bool(event.new))
+            _edit(bool(event.new))
 
         w.param.watch(on_change, "value")
         return pn.Row(label, w)
@@ -745,8 +750,7 @@ def _build_graph_input_widget(
         w = pn.widgets.IntSlider(name=port.name, start=0, end=32, value=v)
 
         def on_change(event):
-            with session._lock:
-                _apply_graph_edit(renderer, view, node, port, int(event.new))
+            _edit(int(event.new))
 
         w.param.watch(on_change, "value")
         return pn.Row(label, w)
@@ -838,15 +842,25 @@ def build_debug_viewport_pane(
 
     from skinny.debug_viewport import DebugViewport
 
-    renderer = session.renderer
     ctx = session.ctx
     shader_dir = _Path(__file__).resolve().parents[2] / "shaders"
 
     image_pane = pn.pane.PNG(None, width=640)
     status = pn.pane.Markdown("Initialising debug viewport…")
     dv_holder: dict = {"dv": None}
+    #: Latest frame the render thread produced, plus the closed flag. The render
+    #: thread writes; the Bokeh timer reads. One slot, last-write-wins — a
+    #: dropped debug frame costs nothing, and it is what lets the timer stay
+    #: non-blocking.
+    latest: dict = {"frame": None, "error": None, "closed": False}
 
-    def _ensure_dv() -> Optional[DebugViewport]:
+    #: Everything below that takes a ``renderer`` argument runs on the render
+    #: thread, posted through the session. The viewport owns GPU resources and
+    #: writes ``renderer.debug_viewport``; the Bokeh thread only reads the
+    #: latest slot and writes Panel widgets, which is the only place a Panel
+    #: widget may be written from.
+
+    def _ensure_dv(renderer) -> DebugViewport:
         if dv_holder["dv"] is not None:
             return dv_holder["dv"]
         try:
@@ -857,72 +871,119 @@ def build_debug_viewport_pane(
             dv.attach_renderer(renderer)
             renderer.debug_viewport = dv
             dv.open()
-            dv_holder["dv"] = dv
-            return dv
-        except Exception as exc:  # noqa: BLE001
-            status.object = f"Debug viewport unavailable: {exc}"
-            return None
+        except Exception as exc:
+            raise RuntimeError(f"Debug viewport unavailable: {exc}") from exc
+        dv_holder["dv"] = dv
+        return dv
+
+    def _render_frame(renderer) -> None:
+        """Produce one debug frame into `latest`. Runs on the render thread.
+
+        Returns nothing: this is a plain `post`, not an awaited request. The
+        Bokeh timer used to wait on the reply, which blocked the single Tornado
+        IOLoop for a whole render-loop iteration — up to 0.5 s once the frame
+        converges and the loop starts sleeping — five times a second, starving
+        every other session's video for as long as the pane stayed open.
+        """
+        if latest["closed"]:
+            return
+        try:
+            dv = _ensure_dv(renderer)
+            latest["frame"] = (
+                dv.render_embedded(renderer) if dv.is_open else None,
+                dv.camera_mode, dv._width, dv._height,
+            )
+            latest["error"] = None
+        except Exception as exc:  # noqa: BLE001 — surfaced in the status line
+            latest["frame"] = None
+            latest["error"] = str(exc)
+
+    def _apply_view(renderer, which: str) -> None:
+        dv = _ensure_dv(renderer)
+        if which == "top":
+            dv.view_top()
+        elif which == "left":
+            dv.view_left()
+        elif which == "back":
+            dv.view_back()
+        elif which == "reset":
+            dv._reset_debug_camera()
+
+    # Publish the action so the sidebar shortcut can post it without knowing
+    # anything about this pane's widgets.
+    session._debug_view_action = _apply_view
 
     def _tick() -> None:
-        dv = _ensure_dv()
-        if dv is None or not dv.is_open:
+        """Ask for the next debug frame and show the last one. Never blocks."""
+        if latest["closed"]:
             return
-        with session._lock:
-            try:
-                pixels = dv.render_embedded(renderer)
-            except Exception as exc:  # noqa: BLE001
-                status.object = f"render failed: {exc}"
-                return
-        if pixels is None or Image is None:
+        session.post(_render_frame, coalesce_key="debug_viewport_frame")
+        if latest["error"] is not None:
+            status.object = f"render failed: {latest['error']}"
             return
-        img = Image.frombytes("RGBA", (dv._width, dv._height), bytes(pixels))
+        frame = latest["frame"]
+        if frame is None or Image is None:
+            return
+        pixels, mode, width, height = frame
+        if pixels is None:
+            return
+        img = Image.frombytes("RGBA", (width, height), bytes(pixels))
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="PNG")
         image_pane.object = buf.getvalue()
-        status.object = f"Mode: {dv.camera_mode}   Size: {dv._width}×{dv._height}"
+        status.object = f"Mode: {mode}   Size: {width}×{height}"
 
-    pn.state.add_periodic_callback(_tick, period=200)
+    # Keep the handle: an un-stopped callback keeps firing after the pane is
+    # closed, and `_render_frame` would rebuild the DebugViewport it had just
+    # destroyed, forever, 5 times a second.
+    tick_handle = pn.state.add_periodic_callback(_tick, period=200)
 
     def view(which: str):
-        def _go(_e):
-            dv = _ensure_dv()
-            if dv is None:
-                return
-            with session._lock:
-                if which == "top":
-                    dv.view_top()
-                elif which == "left":
-                    dv.view_left()
-                elif which == "back":
-                    dv.view_back()
+        def _go(_e) -> None:
+            try:
+                session.debug_view(which)
+            except Exception as exc:  # noqa: BLE001
+                status.object = f"{which} view failed: {exc}"
         return _go
 
     btn_top = pn.widgets.Button(name="Top", width=60)
     btn_left = pn.widgets.Button(name="Left", width=60)
     btn_back = pn.widgets.Button(name="Back", width=60)
+    btn_reset = pn.widgets.Button(name="Reset", width=60)
     btn_top.on_click(view("top"))
     btn_left.on_click(view("left"))
     btn_back.on_click(view("back"))
-
-    def reset(_e):
-        dv = _ensure_dv()
-        if dv is None:
-            return
-        with session._lock:
-            dv._reset_debug_camera()
-
-    btn_reset = pn.widgets.Button(name="Reset", width=60)
-    btn_reset.on_click(reset)
+    btn_reset.on_click(view("reset"))
 
     def _real_close() -> None:
-        dv = dv_holder["dv"]
-        if dv is not None:
+        # Order matters: stop producing before destroying. `closed` also stops
+        # any `_render_frame` already queued from rebuilding the viewport.
+        latest["closed"] = True
+        if tick_handle is not None:
             try:
-                dv.destroy()
-            except Exception:
+                tick_handle.stop()
+            except Exception:  # noqa: BLE001 — already stopped
                 pass
-            dv_holder["dv"] = None
-            renderer.debug_viewport = None
+        session._debug_view_action = None
+        if dv_holder["dv"] is not None:
+            def teardown(renderer) -> None:
+                dv = dv_holder["dv"]
+                if dv is None:
+                    return
+                dv_holder["dv"] = None
+                renderer.debug_viewport = None
+                dv.destroy()
+
+            try:
+                session.run_on_render_thread(teardown)
+            except Exception:
+                # A dead or wedged render thread must not block closing the
+                # pane, but a skipped GPU teardown is exactly what the Metal
+                # dispatch-hygiene rules say must never be silent.
+                log.exception(
+                    "Debug viewport teardown did not run; its GPU resources "
+                    "are leaked until the session is destroyed",
+                )
         on_close()
 
     return _card(

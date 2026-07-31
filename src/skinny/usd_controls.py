@@ -59,8 +59,28 @@ def accessors_for(
             return attr.Get()
 
         def _set(v):
-            attr.Set(v)
-            renderer._usd_live_dirty = True
+            # `attr.Set` mutates the live `Usd.Stage` the render thread reads,
+            # and pxr gives no guarantee for a concurrent read/write — the
+            # consequence is undefined behaviour in native code, not a torn
+            # Python value. The attribute is not reached *through* the renderer,
+            # so neither the proxy's mutation rule nor a `renderer.<verb>` scan
+            # can see it; it has to be posted here, at the setter.
+            #
+            # The stage write and the dirty flag are one write, so they go in
+            # one command. Splitting them is what let `QtRendererProxy` swallow
+            # the flag (it stores `_`-prefixed names on the proxy and posts
+            # nothing), leaving the stage mutated and the renderer never told.
+            def apply(r, v=v) -> None:
+                attr.Set(v)
+                r._usd_live_dirty = True
+
+            post = getattr(renderer, "post", None)
+            if callable(post):
+                post(apply, coalesce_key=f"usd:{attr.GetPath()}")
+            else:
+                # The single-threaded front-end binds the live renderer and is
+                # already on the owning thread.
+                apply(renderer)
 
         return (_get, _set)
 

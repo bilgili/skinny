@@ -1,0 +1,8 @@
+{
+  "tests/assets/suite/int_caustic/int_caustic.usda": "3e8f9d9ee87c3df8a52c5b24920dc9cd05edeb8bb7bc7b905e26170d9a7b2afb",
+  "tests/assets/suite/int_caustic/int_caustic.usda#exposure1.5": "2ddc68496f1cd66a64f6140c7ae8a853eec226b8dbd56a8b62e1b5fa7a339e06",
+  "tests/assets/suite/mat_conductor/mat_conductor.usda": "c46f05078e38a6ba447381e30506411600c78cc5c1bcef0f41b6b2e4e0994822",
+  "tests/assets/suite/mat_conductor/mat_conductor.usda#exposure1.5": "862d61e0f751b17e4fd99f79d4795051a4a0958d7d539ac6429ae63273bd71db",
+  "tests/assets/suite/mat_diffuse/mat_diffuse.usda": "35bebc276a3c5dadf7a18d64b7575a2bf43a19573cea48bb25e06bd09e80f8ff",
+  "tests/assets/suite/mat_diffuse/mat_diffuse.usda#exposure1.5": "c4f8f0ef58079b3fff1bce4d7b4645a94b5fca8aec8c9cdb028ded4cedda7bd5"
+}

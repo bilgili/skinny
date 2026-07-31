@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +10,19 @@ pn = pytest.importorskip("panel")
 
 from skinny.ui.panel import windows  # noqa: E402
 from skinny.ui.scene_edit_actions import SUPPORTED_LIGHT_TYPES  # noqa: E402
+
+
+def _stub_session(renderer):
+    """A session whose command front door runs the command right here.
+
+    The real one posts to the render thread and waits on the reply; the
+    observable contract this stands in for is 'the command runs against the
+    renderer, and its result -- or its exception -- comes back to the caller'.
+    """
+    return SimpleNamespace(
+        renderer=renderer,
+        run_on_render_thread=lambda callback: callback(renderer),
+    )
 
 
 class _Renderer:
@@ -36,7 +48,7 @@ def _pane(monkeypatch, renderer):
     monkeypatch.setattr(
         pn.state, "add_periodic_callback", lambda *args, **kwargs: None,
     )
-    session = SimpleNamespace(renderer=renderer, _lock=Lock())
+    session = _stub_session(renderer)
     return windows.build_scene_graph_pane(session, lambda: None)
 
 
@@ -126,7 +138,7 @@ def test_panel_material_bool_routes_to_override_not_enable():
     from skinny.scene_graph import SceneGraphProperty
 
     rend = _MatRenderer()
-    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    session = _stub_session(rend)
     node = _mat_node()
     prop = SceneGraphProperty(
         name="flag", display_name="flag", type_name="bool", value=False,
@@ -144,7 +156,7 @@ def test_panel_material_vec3_routes_to_override_not_transform():
     from skinny.scene_graph import SceneGraphProperty
 
     rend = _MatRenderer()
-    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    session = _stub_session(rend)
     node = _mat_node()
     prop = SceneGraphProperty(
         name="dir", display_name="dir", type_name="vec3f", value=(0.0, 0.0, 0.0),
@@ -164,7 +176,7 @@ def test_panel_material_int_editable_routes_to_override(monkeypatch):
     from skinny.scene_graph import SceneGraphProperty
 
     rend = _MatRenderer()
-    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    session = _stub_session(rend)
     node = _mat_node()
     prop = SceneGraphProperty(
         name="octaves", display_name="octaves", type_name="int", value=3,
@@ -182,7 +194,7 @@ def test_panel_material_vec2_editable_routes_to_override(monkeypatch):
     from skinny.scene_graph import SceneGraphProperty
 
     rend = _MatRenderer()
-    session = SimpleNamespace(renderer=rend, _lock=Lock())
+    session = _stub_session(rend)
     node = _mat_node()
     prop = SceneGraphProperty(
         name="uv_scale", display_name="uv_scale", type_name="vec2f",
@@ -241,7 +253,7 @@ def test_dome_light_property_edit_reaches_the_env_override():
     renderer = _DispatchRenderer()
     prop = _prop("intensity", "float", 1.0, min=0.0, max=10.0)
     node = _node("/World/Dome", "DomeLight", [prop], RendererRef("light_env", 0))
-    session = SimpleNamespace(renderer=renderer, _lock=Lock())
+    session = _stub_session(renderer)
 
     widget = windows._build_scene_prop_widget(session, node, prop)
     widget.value = 4.0
@@ -254,7 +266,7 @@ def test_unroutable_property_edit_reports_a_reason():
     renderer = _DispatchRenderer()
     prop = _prop("mystery", "float", 1.0)
     node = _node("/World/Orphan", "Xform", [prop], None)
-    session = SimpleNamespace(renderer=renderer, _lock=Lock())
+    session = _stub_session(renderer)
     reported = []
 
     widget = windows._build_scene_prop_widget(

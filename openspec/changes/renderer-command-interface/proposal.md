@@ -65,9 +65,14 @@ this is covered.
 ## Impact
 
 - Modified: `src/skinny/web_app.py` (session mutation path, sidebar binding,
-  control dispatch, button synthesis), `src/skinny/ui/panel/backend.py`
-  (setters post rather than call), `src/skinny/headless.py` (drives through the
-  queue), `src/skinny/render_session.py` (proxy verbs the web needs).
+  control dispatch, button synthesis), `src/skinny/ui/panel/windows.py` (the
+  scene-graph, material-graph and Camera-Debug edits post instead of taking the
+  session lock), `src/skinny/usd_controls.py` (the `usd` setter posts its stage
+  write), `src/skinny/ui/build_app_ui.py` (the scene-loader and capture controls
+  refuse a missing owning-thread callback), `src/skinny/headless.py` (drives
+  through the queue), `src/skinny/render_session.py` (proxy verbs the web
+  needs). **Not** `src/skinny/ui/panel/backend.py` — binding the tree to a proxy
+  fixes its six setters without editing it, which is what D3 predicted.
 - Unchanged: the queue's semantics, MCP tools, Qt behaviour, rendered output.
 - **User-visible**: web parameter changes stop racing the render thread. Under
   load the current behaviour is a torn read at best; there is no evidence it
