@@ -200,7 +200,9 @@ def test_texture_pool_dedupes_and_destroys_without_a_device(tmp_path) -> None:
     png = tmp_path / "t.png"
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(png)
 
-    pool = TexturePool(object(), _FakeGpu())
+    # Capacity is injected explicitly — the pool reads it from the capability
+    # record otherwise (one owner), not off the resource module.
+    pool = TexturePool(object(), _FakeGpu(), capacity=2)
 
     assert pool.add_or_get(tmp_path / "missing.png") == TexturePool.SENTINEL
     first = pool.add_or_get(png)

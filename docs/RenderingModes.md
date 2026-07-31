@@ -72,7 +72,7 @@ fails a test.
 | Spectral rendering (`--spectral`, hero-wavelength) | ✅ (path + bdpt + sppm + mlt, megakernel + wavefront, flat) | ✅ (`spectral-rendering`, `spectral-bdpt-megakernel`, `spectral-wavefront`) |
 | MaterialX `standard_surface` / `OpenPBR` / skin | ✅ | ✅ |
 | Per-lobe BSDF sampler registry | ✅ | ✅ |
-| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal`, bind-by-name; `metal-tool-dock-render`) |
+| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipeline`, bind-by-name; `metal-tool-dock-render`) |
 | Camera Debug viewport | ✅ (graphics rasteriser) | ✅ (`DebugRasterMetal` compute rasteriser; `metal-tool-dock-render`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ | CPU fallback (deformation only) |
 | H264 encoder pool (web mode) | NVENC / QSV / AMF | VideoToolbox |

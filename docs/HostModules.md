@@ -338,7 +338,6 @@ outside `renderer.py` and so would gain a module without gaining a test.
 
 ---
 
----
 
 ## Per-frame path (`frame_plan.py`, change `frame-plan-split`)
 
@@ -406,3 +405,62 @@ without changing anything that consumes it.
 `params.py` registry (change `param-registry-accumulation-reset`) and publishes
 `accum_frame`; the plan consumes `accum_frame == 0` as `first_frame`, which drives
 the SPPM first-frame flag and the MLT reseed.
+
+---
+
+## The backend seam (`gpu_backend.py`, change `gpu-backend-adapter`)
+
+`backend_select.resource_module` documented that `vk_compute` and
+`metal_compute` "expose the same public API". They did not, and the renderer
+paid for the gap with 34 live `is_metal` branches plus two probes used as if
+they were the seam.
+
+`gpu_backend.py` owns what the seam is: the `BackendCapabilities` record read
+through `capabilities(ctx)`, the `ONE_SIDED_MEMBERS` / `DIVERGENT_SIGNATURES`
+tables, and the AST surface reader the conformance test runs on. The full map is
+in [Backends.md § The declared seam](Backends.md#the-declared-seam-gpu_backendpy-change-gpu-backend-adapter);
+what belongs here is the ownership rule it establishes.
+
+**Branch on the reason, never on the vendor.** Each capability field names why a
+consumer used to diverge — descriptor sets, frame sync objects, external memory,
+external semaphore, in-place shared writes, the shared bindless sampler, the
+merged record header, indirect dispatch, GPU skinning, the megakernel record
+source, reflected record layouts, watchdog tiling, bindless capacity. A field
+earns its place only by removing at least one existing branch, so the record
+cannot grow into a config blob; a field the two device backends agree on is a
+test failure, because it is either dead or misnamed — excluding
+`has_indirect_dispatch`, a device probe either backend may report either way.
+`has_external_semaphore` is the one field with no *pre-existing* branch behind
+it: it encodes the branch that should have existed, since the CUDA handoff
+needed both extensions and assumed one implied the other.
+
+**Name the reason, not the binding model.** `has_descriptor_sets` was briefly
+made to stand in for "is bind-by-name". That is the same answer on two backends
+and the wrong one on a third, and it put a `make_sampler` reach in front of the
+recording adapter, which has no such member. Two facts it was hiding — the
+argument table splitting a combined `Sampler2D`, and the records compiling under
+`SKINNY_METAL_RECORDS` — now own fields. On the renderer the record is
+the memoised `self.caps` property, derived from `self.ctx` rather than assigned
+in `__init__`, so a renderer built through `__new__` — the hostless test pattern
+— still answers it.
+
+**Never probe for a backend by attribute presence.** The removed
+`hasattr(ctx, "compute_queue")` is the cautionary case: `MetalContext` sets that
+attribute to `None` rather than omitting it, so the probe was *unconditionally
+true* at all 7 sites and three wavefront pass factories were protected only by
+the descriptor-set check on the next line. The failure was invisible because the
+probe never returned `False` anywhere. A named capability read cannot fail that
+way, and `tests/test_gpu_backend.py` fails if either probe returns.
+
+**A divergence that survives is declared, not discovered.** One-sided members
+and the one divergent signature live in tables beside the interface, each with
+its reason, and the conformance test asserts the adapters agree *modulo those
+tables* — including that no declaration is stale. This is the same discipline as
+`shader_variants.METAL_ONLY_DEFINES` and `gpu_resources`' recorded orders: the
+exception is a deliberate edit with a written reason, never a silent gap.
+
+**The third adapter is where testability comes from.** `recording_compute`
+records allocations, bindings and dispatches without a device, so dispatch
+ordering and binding coverage become plain hostless assertions instead of
+questions only a dual-device host could answer. It records, it does not
+simulate — radiometry stays the parity matrix's job.

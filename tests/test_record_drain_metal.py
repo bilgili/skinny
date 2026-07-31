@@ -15,6 +15,7 @@ import struct
 import numpy as np
 import pytest
 
+from skinny.gpu_backend import METAL_CAPABILITIES
 from skinny.renderer import EXECUTION_WAVEFRONT, Renderer
 from skinny.sampling.path_records import RECORD_DTYPE, RECORD_STRIDE
 
@@ -54,9 +55,10 @@ def _records(n: int, tag: float) -> np.ndarray:
 
 
 class FakeMetalRenderer:
-    """Just the attrs `_drain_wavefront_records` touches on the Metal branch."""
+    """Just the attrs `_drain_wavefront_records` touches on the bind-by-name
+    branch — which it selects by capability now, not by vendor."""
 
-    is_metal = True
+    caps = METAL_CAPABILITIES
 
     def __init__(self, capacity: int, records: np.ndarray, count: int | None = None):
         self._drain_buffer = FakeDrainBuffer(capacity, records, count)
@@ -126,7 +128,7 @@ def test_bdpt_and_megakernel_fall_back_to_megakernel_source():
 
 def test_megakernel_record_source_raises_on_metal():
     class FakeMetal:
-        is_metal = True
+        caps = METAL_CAPABILITIES
         _scene_bindings = object()
         descriptor_sets = None
 

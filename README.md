@@ -184,8 +184,8 @@ here.
 | [docs/ShaderPipeline.md](docs/ShaderPipeline.md) | Pluggable Slang interfaces, the material and integrator pipeline, MaterialX nodegraph codegen, environment importance sampling, SlangPile |
 | [docs/SceneSystem.md](docs/SceneSystem.md) | USD intake, scene graph, instancing, lights, textures, skinning, camera / lens / debug viewport |
 | [docs/GpuResources.md](docs/GpuResources.md) | Descriptor binding map, GPU resource inventory, host-mirrored byte layouts, shader variant key, `FrameConstants` layout |
-| [docs/HostModules.md](docs/HostModules.md) | Python module map, front-end bring-up, the session snapshot owner, the renderer carve-out pattern, the device-free pure core |
-| [docs/Backends.md](docs/Backends.md) | Backend selection, `MetalContext`, the Vulkan path, the `gfx/` abstraction |
+| [docs/HostModules.md](docs/HostModules.md) | Python module map, front-end bring-up, the session snapshot owner, the renderer carve-out pattern, the device-free pure core, the per-frame path, the backend seam |
+| [docs/Backends.md](docs/Backends.md) | Backend selection, the declared seam (`gpu_backend.py`, capabilities, the recording adapter), `MetalContext`, the Vulkan path, the `gfx/` abstraction |
 | [docs/FrontEnds.md](docs/FrontEnds.md) | Headless render API, web application, display tail (exposure, tone map, tool readback) |
 | [docs/ImplementationMap.md](docs/ImplementationMap.md) | The per-file map of the Python package, the shader tree, and the tests |
 

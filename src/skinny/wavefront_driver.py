@@ -84,16 +84,28 @@ class WavefrontRecorder(Protocol):
         ...
 
     def flush_heavy_eye(self) -> None:
-        """Bound the heavy per-tile eye submit (change
-        wavefront-nonflat-tiled-fallback). When the scene has a non-terminal
-        non-flat material (VOLUME / PYTHON), whose non-flat first-hit path
-        fallback runs the full multi-bounce ``PathTracer.estimateRadiance`` in the
-        eye kernel, the Metal backend submits + drains the accumulated command
-        buffer here so no single command buffer runs the fallback over more than
-        one ``stream_size`` tile (the macOS GPU watchdog bound, metal
-        row-band discipline). A no-op on Vulkan (no watchdog) and whenever the
-        scene has no non-terminal non-flat material (byte-identical single
-        submit)."""
+        """Mark a tile boundary after a potentially heavy eye dispatch (change
+        wavefront-nonflat-tiled-fallback).
+
+        The driver states *where* the boundary is; the recorder decides what to
+        do there. A backend whose
+        :attr:`~skinny.gpu_backend.BackendCapabilities.needs_watchdog_tiling`
+        is set submits + drains the accumulated command buffer, so no single
+        command buffer runs the non-flat first-hit fallback — the full
+        multi-bounce ``PathTracer.estimateRadiance`` that VOLUME / PYTHON
+        materials take in the eye kernel — over more than one ``stream_size``
+        tile. Every other backend records a no-op and the frame stays one
+        byte-identical submit, as does any scene with no non-terminal non-flat
+        material.
+
+        Reassessed under change gpu-backend-adapter (task 5.3) and deliberately
+        **kept in this protocol**: the capability record already owns *whether*
+        the boundary costs anything, and hoisting the decision into the driver
+        (``if caps.needs_watchdog_tiling: rec.flush()``) would both put a
+        watchdog test in the backend-neutral loop and drop the per-scene
+        ``bound_heavy_eye`` condition the recorder folds in. Like
+        :meth:`barrier`, this is a point in the recording that each backend
+        interprets."""
         ...
 
 

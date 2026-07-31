@@ -520,15 +520,16 @@ class Renderer:
         # renderer builds every megakernel resource through `self._gpu.*`, which is
         # `vk_compute` on a VulkanContext (byte-identical to before) and
         # `metal_compute` on a MetalContext — no per-construction-site backend
-        # branch. `is_metal` gates the few genuinely different paths (uniform pack,
-        # frame dispatch).
+        # branch. `is_metal` survives only where there are genuinely two
+        # implementations (uniform pack, frame dispatch); every other question
+        # is a named field on `self.caps` below.
         from skinny.backend_select import resource_module
         self._gpu = resource_module(self.ctx)
         self.is_metal = bool(getattr(self.ctx, "is_metal", False))
         # Shared sampler for the Metal bindless texture pool (binding 38, design
         # D8). One sampler instead of the 128 a combined Sampler2D[] would emit.
         # MUST be repeat/repeat to match the Vulkan per-slot samplers, whose
-        # TexturePool default is wrap_s=wrap_t="repeat": `_make_sampler` defaults
+        # TexturePool default is wrap_s=wrap_t="repeat": `make_sampler` defaults
         # address_v="clamp" (right for the equirect env map, wrong for tiling
         # material textures). With clamp-V a texture sampled past v=1 — e.g. a
         # MaterialX `tiledimage` at uvtiling=4 like the wood material — clamps to
@@ -537,8 +538,8 @@ class Renderer:
         # honoured per-slot under one shared sampler (D8); repeat/repeat is the
         # correct default and matches the pool default.
         self._metal_common_sampler = (
-            self._gpu._make_sampler(self.ctx, address_v="repeat")
-            if self.is_metal else None)
+            self._gpu.make_sampler(self.ctx, address_v="repeat")
+            if self.caps.needs_shared_bindless_sampler else None)
         # Neural size/precision build config (study change
         # neural-precision-size-study). Fixed for the renderer's lifetime — the
         # study harness builds a fresh headless renderer per grid cell. Falls
@@ -832,10 +833,11 @@ class Renderer:
         # wavefront BDPT still pins Metal to the megakernel until phase 4).
         # The renderer compiles ONLY the selected backend
         # (see `_build_pipeline_for_current_graphs`).
-        _wavefront_capable = hasattr(self.ctx, "compute_queue") or self.is_metal
-        self.execution_modes: list[str] = (
-            ["Megakernel", "Wavefront"] if _wavefront_capable else ["Megakernel"]
-        )
+        # Both backends run wavefront. This used to read
+        # `hasattr(self.ctx, "compute_queue") or self.is_metal`, which was
+        # unconditionally True on both sides — `MetalContext.compute_queue` is
+        # `None`, not absent (change gpu-backend-adapter, design D3).
+        self.execution_modes: list[str] = ["Megakernel", "Wavefront"]
         _mode_aliases = {"megakernel": EXECUTION_MEGAKERNEL, "wavefront": EXECUTION_WAVEFRONT}
         _requested = _mode_aliases.get(
             self._requested_execution_mode.strip().lower(), EXECUTION_MEGAKERNEL
@@ -1224,16 +1226,36 @@ class Renderer:
         return self.effective_execution_mode_index != self.execution_mode_index
 
     @property
+    def caps(self):
+        """What the selected backend can do, by name rather than by vendor
+        (change gpu-backend-adapter, design D1).
+
+        Every question this renderer used to answer with an `is_metal` branch —
+        descriptor sets, frame sync objects, external memory, GPU skinning,
+        watchdog tiling, bindless capacity — is a field on this record;
+        `is_metal` survives only where there are genuinely two implementations.
+
+        Derived from `self.ctx` and memoised, rather than set in `__init__`, so
+        a renderer built through `__new__` (the hostless test pattern) answers
+        it from whatever context it was given.
+        """
+        caps = self.__dict__.get("_caps")
+        if caps is None:
+            from skinny.gpu_backend import capabilities
+            caps = self.__dict__["_caps"] = capabilities(self.ctx)
+        return caps
+
+    @property
     def _backend_render_ready(self) -> bool:
         """True once the selected backend can dispatch a frame: the per-frame
         scene descriptor sets exist and the compiled backend is present. In
         megakernel mode that means the megakernel pipeline; in wavefront mode
         the scene bindings (the staged stage pipelines build lazily)."""
-        if self.is_metal:
-            # The Metal megakernel binds resources at dispatch (no Vulkan
-            # descriptor sets); readiness is the compiled pipeline. In wavefront
-            # mode no megakernel is compiled (`scene_bindings_only`) — readiness
-            # is the scene bindings; the stage pipelines build lazily.
+        if not self.caps.has_descriptor_sets:
+            # A bind-by-name backend re-reads every resource reference at
+            # dispatch, so readiness is the compiled pipeline. In wavefront mode
+            # no megakernel is compiled (`scene_bindings_only`) — readiness is
+            # the scene bindings; the stage pipelines build lazily.
             if self.effective_execution_mode_index == EXECUTION_WAVEFRONT:
                 return self._scene_bindings is not None
             return self.pipeline is not None
@@ -1245,9 +1267,9 @@ class Renderer:
 
     def _ensure_wavefront_env_pass(self):
         """Build (once) the env-only wavefront pass. Returns it, or None on a
-        non-Vulkan backend. Phase-1 integration milestone — superseded by the
-        staged pipeline."""
-        if not hasattr(self.ctx, "compute_queue"):
+        backend without descriptor sets. Phase-1 integration milestone —
+        superseded by the staged pipeline."""
+        if not self.caps.has_descriptor_sets:
             return None
         if self._wavefront_env_pass is None:
             from skinny.vk_wavefront import WavefrontEnvPass
@@ -1321,7 +1343,7 @@ class Renderer:
         FrameConstants tail. Predicate + rationale live in
         `mlt_chain.uniform_tail_active` (change renderer-module-carveout)."""
         return mlt_chain.uniform_tail_active(
-            self.integrator_index, self.is_metal,
+            self.integrator_index, self.caps.has_reflected_record_layouts,
             self.effective_execution_mode_index,
             self._wavefront_mlt_pass is not None)
 
@@ -1480,8 +1502,11 @@ class Renderer:
         (single slot GRAPH_BINDING_BASE) + the bindless texture array (14, from
         the texture pool). Over-providing bindings the kernel may not reference
         is fine — the SPIR-V uses a subset of the layout."""
-        from skinny.vk_compute import BINDLESS_TEXTURE_CAPACITY, GRAPH_BINDING_BASE
+        from skinny.vk_compute import GRAPH_BINDING_BASE
         from skinny.vk_wavefront import BoundComputePass
+        # The pool capacity differs per target (128 Vulkan / 119 Metal), so it
+        # is a capability, not a constant imported from one adapter by name.
+        BINDLESS_TEXTURE_CAPACITY = self.caps.bindless_texture_capacity
         sb = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         specs = [
             {"binding": 0, "type": vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -1525,18 +1550,25 @@ class Renderer:
         one pipeline per material.
 
         Bindings: the traceScene set (0/2/5/6/7/12/13/16), this graph's param
-        SSBO at GRAPH_BINDING_BASE, and the 128-slot bindless texture pool at 14
+        SSBO at GRAPH_BINDING_BASE, and the bindless texture pool at 14, sized
+        by the active target's `bindless_texture_capacity` capability
         (over-provided — graphs that sample no textures reflect no 14, which the
         superset layout tolerates). Returns a `ShadePassGroup`; plug it into the
         `_wavefront_debug_pass` seam. Rebuild after a scene/geometry reload.
         """
         from skinny.materialx_runtime import assign_graph_ids
         from skinny.vk_compute import (
-            BINDLESS_TEXTURE_CAPACITY,
             GRAPH_BINDING_BASE,
             emit_wavefront_shade_module,
             graph_param_combined_stride,
         )
+
+        # The pool capacity differs per target (128 Vulkan / 119 Metal), so it
+        # is a capability, not a constant imported from one adapter by name.
+        # Importing the Vulkan 128 here would over-declare the descriptor array
+        # against a 119-slot Metal shader — the extent mismatch this capability
+        # exists to prevent (codex pre-merge review, HIGH 2).
+        BINDLESS_TEXTURE_CAPACITY = self.caps.bindless_texture_capacity
         from skinny.vk_wavefront import (
             BoundComputePass,
             ShadePassGroup,
@@ -1609,52 +1641,16 @@ class Renderer:
     def read_accumulation(self) -> "np.ndarray":
         """Copy the linear-HDR accumulation image to host as an (H, W, 4)
         float32 array. For A/B comparison that must not depend on tonemapping
-        (see CLAUDE.md headless notes)."""
+        (see CLAUDE.md headless notes).
+
+        Readback is a declared interface method on both adapters (change
+        gpu-backend-adapter), so this is one call, not a backend branch.
+        """
         import numpy as np
 
-        if self.is_metal:
-            # Metal storage images read back directly (drains the device);
-            # no Vulkan command-buffer / layout-transition machinery.
-            return np.asarray(
-                self.accum_image.read_rgba(), dtype=np.float32)
-
-        w, h = self.width, self.height
-        readback = self._gpu.ReadbackBuffer(self.ctx, w, h, bytes_per_pixel=16)  # RGBA32F
-        f = self.current_frame
-        vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
-        cmd = self.command_buffers[f]
-        vk.vkResetCommandBuffer(cmd, 0)
-        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(
-            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
-        rng = vk.VkImageSubresourceRange(
-            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-            baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)
-        to_src = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            image=self.accum_image.image, subresourceRange=rng)
-        vk.vkCmdPipelineBarrier(cmd, vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, None, 0, None, 1, [to_src])
-        readback.record_copy_from(cmd, self.accum_image.image)
-        to_gen = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            image=self.accum_image.image, subresourceRange=rng)
-        vk.vkCmdPipelineBarrier(cmd, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, None, 0, None, 1, [to_gen])
-        vk.vkEndCommandBuffer(cmd)
-        vk.vkResetFences(self.ctx.device, 1, [self.in_flight_fences[f]])
-        vk.vkQueueSubmit(self.ctx.compute_queue, 1,
-                         [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
-                         self.in_flight_fences[f])
-        vk.vkWaitForFences(self.ctx.device, 1, [self.in_flight_fences[f]], vk.VK_TRUE, 2**64 - 1)
-        data = readback.read()
-        readback.destroy()
-        return np.frombuffer(data, dtype=np.float32).reshape(h, w, 4)
+        return np.asarray(
+            self.accum_image.read_rgba(), dtype=np.float32,
+        ).reshape(self.height, self.width, 4)
 
     def refresh_user_presets(self) -> None:
         """Re-scan ~/.skinny/presets/ and rebuild the preset list.
@@ -2665,8 +2661,8 @@ class Renderer:
         # state — keeps the rebuild gate idempotent.
         built_sig = attempted_sig
 
-        if self.is_metal:
-            # Metal binds resources at dispatch (no Vulkan descriptor pool/sets);
+        if not self.caps.has_descriptor_sets:
+            # A bind-by-name backend re-reads resources at dispatch;
             # only the per-graph SSBO data + material-type codes need uploading.
             # The texture-pool textures are bound directly from the pool at
             # dispatch, so `_update_texture_pool_descriptors` (a Vulkan
@@ -2780,9 +2776,8 @@ class Renderer:
         # storage the interop publisher writes in place at the frame-boundary
         # swap. The file handoff uses plain device-local buffers everywhere.
         interop = (self._neural_handoff_kind == "interop")
-        external = interop and not self.is_metal
-        shared = (interop and self.is_metal
-                  and getattr(self.ctx, "supports_shared_memory", False))
+        external = interop and self.caps.has_external_memory
+        shared = interop and self.caps.has_shared_in_place_write
 
         return ResourceSizes(
             width=self.width, height=self.height,
@@ -2795,7 +2790,8 @@ class Renderer:
             # records at the reflected stride; the buffer only needs to be large
             # enough.
             mtlx_skin_slot_bytes=(
-                256 if self.is_metal else self.mtlx_skin_record_size),
+                256 if self.caps.has_reflected_record_layouts
+                else self.mtlx_skin_record_size),
             instance_capacity=self.instance_capacity,
             emissive_tri_capacity=self.emissive_tri_capacity,
             gizmo_capacity=self.gizmo_segment_capacity,
@@ -3129,10 +3125,10 @@ class Renderer:
         # Command buffers
         self.command_buffers = self.ctx.allocate_command_buffers(MAX_FRAMES_IN_FLIGHT)
 
-        # Synchronisation. The Metal megakernel dispatch is synchronous
-        # (submit + wait_for_idle each frame), so it needs no Vulkan
-        # fences/semaphores — the present-smoke fence is owned by the surface.
-        if self.is_metal:
+        # Synchronisation. A backend whose megakernel dispatch is synchronous
+        # (submit + wait_for_idle each frame) needs no per-frame semaphores or
+        # fences — its present-smoke fence is owned by the surface.
+        if not self.caps.has_frame_sync_objects:
             self.image_available = []
             self.render_finished = []
             self.in_flight_fences = []
@@ -3154,7 +3150,7 @@ class Renderer:
             self.image_available = []
             self.render_finished = []
 
-        if not self.is_metal:
+        if self.caps.has_frame_sync_objects:
             self.in_flight_fences = [
                 vk.vkCreateFence(
                     self.ctx.device,
@@ -3561,13 +3557,14 @@ class Renderer:
     def _build_skinning_passes(self) -> None:
         """Build GPU skinning + refit passes for the loaded skinned scene.
 
-        Vulkan only (uses the compute queue directly); on other backends this
-        is a no-op and the CPU skinning fallback runs instead. Captures each
-        skinned instance's rest-pose BLAS bytes + its offsets in the shared
-        concatenated buffers (from `_usd_instance_layout`).
+        Needs GPU skinning (`vk_skinning.py` has no MSL counterpart); where the
+        capability is missing this is a no-op and the CPU skinning fallback
+        runs instead. Captures each skinned instance's rest-pose BLAS bytes +
+        its offsets in the shared concatenated buffers (from
+        `_usd_instance_layout`).
         """
-        if not hasattr(self.ctx, "compute_queue"):
-            return  # non-Vulkan backend → CPU fallback
+        if not self.caps.has_gpu_skinning:
+            return  # no GPU skinning on this backend → CPU fallback
         skel = self._skeletal
         scene = self._usd_scene
         layout = self._usd_instance_layout
@@ -5116,7 +5113,7 @@ class Renderer:
         # forthcoming Metal preview/raster port. Vulkan always reads scalar
         # (stride 256, no relocation).
         ss_layout = (getattr(self._msl_layout_source, "std_surface_layout", None)
-                     if self.is_metal else None) or None
+                     if self.caps.has_reflected_record_layouts else None) or None
         ss_stride = (getattr(self._msl_layout_source, "std_surface_stride", 0)
                      if ss_layout else 0) or STD_SURFACE_STRIDE
         ss_data = bytearray()
@@ -5234,9 +5231,9 @@ class Renderer:
             data[mat_idx * stride:mat_idx * stride + len(packed)] = packed
         self._graph_params_combined.upload_sync(bytes(data))
 
-        # Metal binds the combined buffer at dispatch by name (no Vulkan
-        # descriptor set); the upload above is all that's needed there.
-        if self.is_metal:
+        # A bind-by-name backend picks the combined buffer up at dispatch; the
+        # upload above is all that's needed there.
+        if not self.caps.has_descriptor_sets:
             return
 
         # Defensive: a slangc empty-graph fallback may leave the binding absent.
@@ -5416,21 +5413,20 @@ class Renderer:
             )
         if self._preview_pipeline is None:
             try:
-                if self.is_metal:
-                    # Native-Metal preview: compile preview_pass.slang to MSL,
-                    # dispatch by binding resources by name (no descriptor sets,
-                    # no output image view). Change metal-tool-dock-render P1.
-                    from skinny.metal_compute import PreviewPipelineMetal
-                    self._preview_pipeline = PreviewPipelineMetal(
-                        self.ctx, self.shader_dir,
-                        graph_fragments=list(self._scene_graph_fragments),
-                    )
-                else:
-                    from skinny.vk_compute import PreviewPipeline
-                    self._preview_pipeline = PreviewPipeline(
+                # One name, resolved through the adapter handle (change
+                # gpu-backend-adapter). The constructors still differ: a
+                # bind-by-name backend takes the scene's graph fragments and
+                # needs no descriptor-set layout or output image view.
+                if self.caps.has_descriptor_sets:
+                    self._preview_pipeline = self._gpu.PreviewPipeline(
                         self.ctx, self.shader_dir,
                         self._scene_set0_layout,
                         self._preview_image.view,
+                    )
+                else:
+                    self._preview_pipeline = self._gpu.PreviewPipeline(
+                        self.ctx, self.shader_dir,
+                        graph_fragments=list(self._scene_graph_fragments),
                     )
             except RuntimeError as e:
                 print(f"[skinny] preview pipeline build failed: {e}")
@@ -5458,9 +5454,9 @@ class Renderer:
         Returns None when the renderer is not ready (no scene loaded, or
         slangc failed on preview_pass.slang).
         """
-        if self.is_metal:
-            # Bound the single-command-buffer Metal preview dispatch under the
-            # GPU watchdog (codex #2) — clamp before allocating the output image
+        if self.caps.needs_watchdog_tiling:
+            # Bound the single-command-buffer preview dispatch under the GPU
+            # watchdog (codex #2) — clamp before allocating the output image
             # so image size, push `size`, and the returned size stay consistent.
             size = min(int(size), _METAL_PREVIEW_MAX_SIZE)
         if not self._ensure_preview_resources(size):
@@ -5478,8 +5474,6 @@ class Renderer:
                 material_id, graph_id, prim_kind, size,
                 yaw, pitch, distance, fov_tan,
             )
-
-        from skinny.vk_compute import PreviewPipeline
 
         if self.descriptor_sets is None or not self.descriptor_sets:
             return None
@@ -5521,7 +5515,7 @@ class Renderer:
             1, 1, [pp.descriptor_set],
             0, None,
         )
-        push_bytes = PreviewPipeline.pack_push(
+        push_bytes = self._gpu.PreviewPipeline.pack_push(
             material_id, graph_id, prim_kind, size,
             yaw, pitch, distance, fov_tan,
         )
@@ -5594,12 +5588,10 @@ class Renderer:
         """Metal path of `render_material_preview` (change metal-tool-dock-render
         P1). Mirrors `_render_megakernel_metal`: build the set-0 material bind
         dict (`_build_metal_binds`) + the bindless texture pool, pack the same
-        32-byte push block, dispatch `PreviewPipelineMetal` over `size×size`,
-        and read back the RGBA32F output image (float32, matching the Vulkan
-        `(pixels, size)` contract the Material Graph dock reshapes)."""
-        from skinny.vk_compute import PreviewPipeline
-
-        push_bytes = PreviewPipeline.pack_push(
+        32-byte push block, dispatch the adapter's `PreviewPipeline` over
+        `size×size`, and read back the RGBA32F output image (float32, matching
+        the Vulkan `(pixels, size)` contract the Material Graph dock reshapes)."""
+        push_bytes = self._gpu.PreviewPipeline.pack_push(
             material_id, graph_id, prim_kind, size,
             yaw, pitch, distance, fov_tan,
         )
@@ -6078,7 +6070,7 @@ class Renderer:
         # and `self.pipeline` is non-None there, so the None check alone wouldn't
         # catch it). Degrade gracefully to a zeroed grid in both cases instead of
         # crashing. (A native Metal tool-dispatch sibling is a later phase.)
-        if self.pipeline is None or self.is_metal:
+        if self.pipeline is None or not self.caps.has_descriptor_sets:
             try:
                 callback(np.zeros((n_theta, n_phi, 3), dtype=np.float32))
             except Exception as exc:
@@ -7555,7 +7547,8 @@ class Renderer:
         # records build flavor lands via the pass rebuild key (wf_record), and
         # the accumulation restarts cleanly under the new pipeline.
         if self._wf_record_active and (
-                self.descriptor_sets is not None or self.is_metal):
+                self.descriptor_sets is not None
+                or not self.caps.has_descriptor_sets):
             self._ensure_wf_record_drain()
         self._last_state_hash = None
         self._start_trainer_thread()
@@ -7652,7 +7645,7 @@ class Renderer:
         rows: list = []
         # backend: requested (front-end-set, default "auto") vs resolved device.
         req_b = self._requested_backend or "auto"
-        res_b = "metal" if self.is_metal else "vulkan"
+        res_b = self.caps.name
         rows.append(cr.ConfigRow("backend", req_b, res_b, cr.ON))
 
         # execution mode: the Metal/bdpt capability gate can pin the resolved
@@ -7715,7 +7708,15 @@ class Renderer:
 
         res_handoff = self._neural_handoff_kind
         if res_handoff == "interop":
-            res_handoff = "interop(UMA)" if self.is_metal else "interop(CUDA)"
+            # Each arm names the capability it actually needs. Keying UMA off
+            # `not has_external_memory` mislabelled a Vulkan device whose graded
+            # build failed the extension as UMA (fallback review, LOW).
+            if self.caps.has_shared_in_place_write:
+                res_handoff = "interop(UMA)"
+            elif self.caps.has_external_memory and self.caps.has_external_semaphore:
+                res_handoff = "interop(CUDA)"
+            else:
+                res_handoff = "interop(unavailable)"
         rows.append(cr.ConfigRow("neural-handoff", self._neural_handoff_kind,
                                  res_handoff, train_status))
 
@@ -7796,10 +7797,10 @@ class Renderer:
             return 0
         # The drain reads GPU records, so the scene must be built; skip the frame
         # while it isn't (USD streams in async, a rebake transiently nulls these).
-        # descriptor_sets is Vulkan-only; the Metal drain binds by name
-        # (change metal-record-drain).
+        # descriptor_sets exist only where the backend declares them; a
+        # bind-by-name drain has nothing to check (change metal-record-drain).
         if self._scene_bindings is None or (
-                self.descriptor_sets is None and not self.is_metal):
+                self.caps.has_descriptor_sets and self.descriptor_sets is None):
             return 0
         return self.online_drain()
 
@@ -7951,7 +7952,7 @@ class Renderer:
         `set_data` byte blobs only (design D4).
 
         `layout_source` overrides the default `_msl_layout_source` — the material
-        preview passes its own `PreviewPipelineMetal` so it packs against that
+        preview passes its own Metal `PreviewPipeline` so it packs against that
         program's reflected `fc` layout, independent of whether the megakernel /
         wavefront layout source exists yet (wavefront-mode preview, codex #1)."""
         src = layout_source if layout_source is not None else self._msl_layout_source
@@ -7960,7 +7961,7 @@ class Renderer:
         # The scalar tail must match the TARGET layout, not the session state:
         # only a `SKINNY_MLT` program's reflected `fc` has the MLT fields, so an
         # explicit non-MLT `layout_source` (e.g. the material preview's
-        # `PreviewPipelineMetal`) needs the base 568 B blob even while MLT is the
+        # Metal `PreviewPipeline`) needs the base 568 B blob even while MLT is the
         # active integrator — otherwise the tail bytes have no destination and
         # the drift guard fires (codex pre-merge review). Drive `_pack_uniforms`
         # off `"mltSigma" in layout` so the blob and the field table always agree.
@@ -8034,8 +8035,9 @@ class Renderer:
         """Row-band count for the Metal megakernel dispatch so no single command
         buffer exceeds the GPU watchdog budget. The rule lives in
         `frame_plan.megakernel_bands`, keyed on the watchdog *capability* rather
-        than on the backend; this binds the capability to `is_metal`, which is
-        where the two are the same thing today."""
+        than on the backend; `_needs_watchdog_tiling` now reads that capability
+        off the record (change gpu-backend-adapter), so no backend name is
+        involved here at all."""
         return frame_plan.megakernel_bands(
             self._needs_watchdog_tiling, self.integrator_index,
             self.width, self.height)
@@ -8156,9 +8158,12 @@ class Renderer:
         path). Mirrors the Vulkan `render_headless` minus the Vulkan
         command-buffer/descriptor machinery — resources bind at dispatch."""
         self._render_scene_metal(plan)
-        arr = self._offscreen_output.read_rgba()  # (H, W, 4)
-        from skinny.metal_compute import _rgba_f32_to_rgba8
-        return _rgba_f32_to_rgba8(arr).tobytes()
+        arr = np.asarray(self._offscreen_output.read_rgba())  # (H, W, 4)
+        # Display pixels are already in [0,1]; clamp to RGBA8 here rather than
+        # importing one adapter's private helper (change gpu-backend-adapter).
+        if arr.dtype != np.uint8:
+            arr = (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        return arr.tobytes()
 
     def _render_windowed_metal(self) -> None:
         """Windowed Metal frame: dispatch the megakernel into `_offscreen_output`
@@ -8442,7 +8447,7 @@ class Renderer:
             # OPTIONAL per-pass ceiling (default 0 = unlimited) for pathological
             # scenes; prefer lowering the batch over capping photons.
             self._sppm_metal_photon_batch = 0
-            if self.is_metal:
+            if self.caps.needs_watchdog_tiling:
                 import os
                 _cap = int(os.environ.get("SKINNY_SPPM_METAL_PHOTON_CAP", "0"))
                 if _cap > 0:
@@ -8683,16 +8688,22 @@ class Renderer:
         (macOS kills an over-long command buffer and cannot reclaim another
         process's GPU work); false on Vulkan, which dispatches a full frame in
         one buffer. This property is the single place the capability is bound
-        to a backend — `gpu-backend-adapter` moves the binding into its
-        capability record, and nothing that consumes it changes."""
-        return self.is_metal
+        to a backend — `gpu-backend-adapter` has now moved that binding into the
+        capability record, exactly as this docstring anticipated, and nothing
+        that consumes the property changed."""
+        return self.caps.needs_watchdog_tiling
 
     @property
     def _records_command_buffers(self) -> bool:
         """The backend records a frame into a command buffer and submits it
         against a fence (Vulkan), as opposed to binding resources at dispatch
-        and draining per submit (Metal). Selects the frame's step order."""
-        return not self.is_metal
+        and draining per submit (Metal). Selects the frame's step order.
+
+        This is the same fact as `has_frame_sync_objects` — a backend that
+        records into a command buffer is exactly the one that needs the
+        per-frame semaphores and in-flight fences — so it reads the capability
+        rather than naming a vendor (change gpu-backend-adapter)."""
+        return self.caps.has_frame_sync_objects
 
     def _derive_frame_plan(self, target: str) -> frame_plan.FramePlan:
         """Derive this frame's plan — the execution mode, the integrator, the
@@ -9125,96 +9136,14 @@ class Renderer:
         """Copy the float32 RGBA accumulation image to the host. Returns
         ``(array, sample_count)`` where ``array`` is shape (H, W, 4) and
         the caller divides by ``sample_count`` to get linear mean radiance.
+
+        Readback is a declared interface method on both adapters (change
+        gpu-backend-adapter): each drains the device and stages the copy
+        itself, so this is one call rather than a backend branch.
         """
-
-        if self.is_metal:
-            # Metal `StorageImage` is rgba32_float; `read_rgba()` drains the
-            # texture straight to an (H, W, 4) float32 host array — no transfer
-            # command buffer, barriers, or fence needed. Match the Vulkan path's
-            # shape/dtype and sample-count exactly.
-            self.ctx.wait_idle()
-            arr = np.asarray(
-                self.accum_image.read_rgba(), dtype=np.float32,
-            ).reshape(self.height, self.width, 4).copy()
-            samples = max(1, int(self.accum_frame) + 1)
-            return arr, samples
-
-        vk.vkDeviceWaitIdle(self.ctx.device)
-
-        rb = self._gpu.ReadbackBuffer(
-            self.ctx, self.width, self.height, bytes_per_pixel=16,
-        )
-
-        alloc = vk.VkCommandBufferAllocateInfo(
-            commandPool=self.ctx.command_pool,
-            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            commandBufferCount=1,
-        )
-        cmd = vk.vkAllocateCommandBuffers(self.ctx.device, alloc)[0]
-        vk.vkBeginCommandBuffer(
-            cmd,
-            vk.VkCommandBufferBeginInfo(
-                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            ),
-        )
-
-        sub = vk.VkImageSubresourceRange(
-            aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-            baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1,
-        )
-        to_src = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            image=self.accum_image.image,
-            subresourceRange=sub,
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, None, 0, None, 1, [to_src],
-        )
-        rb.record_copy_from(cmd, self.accum_image.image)
-        to_general = vk.VkImageMemoryBarrier(
-            srcAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
-            dstAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
-            oldLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            newLayout=vk.VK_IMAGE_LAYOUT_GENERAL,
-            image=self.accum_image.image,
-            subresourceRange=sub,
-        )
-        vk.vkCmdPipelineBarrier(
-            cmd,
-            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, None, 0, None, 1, [to_general],
-        )
-        vk.vkEndCommandBuffer(cmd)
-
-        fence = vk.vkCreateFence(
-            self.ctx.device, vk.VkFenceCreateInfo(), None,
-        )
-        vk.vkQueueSubmit(
-            self.ctx.compute_queue, 1,
-            [vk.VkSubmitInfo(commandBufferCount=1, pCommandBuffers=[cmd])],
-            fence,
-        )
-        vk.vkWaitForFences(
-            self.ctx.device, 1, [fence], vk.VK_TRUE, 2**64 - 1,
-        )
-        vk.vkDestroyFence(self.ctx.device, fence, None)
-        vk.vkFreeCommandBuffers(
-            self.ctx.device, self.ctx.command_pool, 1, [cmd],
-        )
-
-        raw = rb.read()
-        rb.destroy()
-
-        arr = np.frombuffer(raw, dtype=np.float32).reshape(
-            self.height, self.width, 4,
-        ).copy()
+        arr = np.asarray(
+            self.accum_image.read_rgba(), dtype=np.float32,
+        ).reshape(self.height, self.width, 4).copy()
         samples = max(1, int(self.accum_frame) + 1)
         return arr, samples
 
@@ -9336,6 +9265,11 @@ class Renderer:
 
         from skinny.sampling.path_records import RECORD_STRIDE, pack_header
 
+        if not self.caps.has_megakernel_record_source:
+            raise RuntimeError(
+                "dump_path_records: the megakernel record source is unavailable "
+                f"on the {self.caps.name} backend — use the wavefront path "
+                "integrator (record source 'wavefront') there")
         if self._scene_bindings is None or self.descriptor_sets is None:
             raise RuntimeError("dump_path_records: scene not built yet (pump update())")
 
@@ -9376,8 +9310,11 @@ class Renderer:
         ``.nrec`` dump and the live drain). Backend-independent — it reuses the
         scene descriptor set, so it runs in either execution mode."""
         if self._record_pipeline is None:
-            from skinny.vk_compute import ComputePipeline
-            self._record_pipeline = ComputePipeline(
+            # Through the selected adapter, not by importing one by name: the
+            # caller has already refused any backend without
+            # `has_megakernel_record_source`, so this resolves to vk_compute —
+            # but the seam reach is what the conformance gate forbids.
+            self._record_pipeline = self._gpu.ComputePipeline(
                 self.ctx, self.shader_dir,
                 entry_module="main_pass", entry_point="mainImageRecord",
                 graph_fragments=list(self._scene_graph_fragments),
@@ -9427,7 +9364,7 @@ class Renderer:
         capacity = int(self.width) * int(self.height) * rec_max_bounces
         cap_limit = (1 << 20) if max_records_per_frame is None else int(max_records_per_frame)
         capacity = max(1, min(capacity, cap_limit))
-        if self.is_metal:
+        if self.caps.has_merged_record_header:
             size = 64 + capacity * RECORD_STRIDE   # header + records
             if self._drain_buffer is None or self._drain_buffer.size < size:
                 # Do NOT free the outgoing drain buffer here once it has been
@@ -9470,7 +9407,7 @@ class Renderer:
         from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
 
         cap = self._ensure_wf_record_drain(max_records_per_frame)
-        if self.is_metal:
+        if self.caps.has_merged_record_header:
             header = self._drain_buffer.download_sync(64)
             count = min(_struct.unpack("<I", header[60:64])[0], cap)
             if count:
@@ -9516,7 +9453,7 @@ class Renderer:
         from skinny.sampling.path_records import RECORD_STRIDE, records_from_buffer
 
         if self._scene_bindings is None or (
-                self.descriptor_sets is None and not self.is_metal):
+                self.caps.has_descriptor_sets and self.descriptor_sets is None):
             raise RuntimeError(
                 "drain_path_records_to_replay: scene not built yet (pump update())")
 
@@ -9528,11 +9465,11 @@ class Renderer:
         if self._resolve_record_source() == "wavefront":
             return self._drain_wavefront_records(replay, max_records_per_frame)
 
-        if self.is_metal:
+        if not self.caps.has_megakernel_record_source:
             raise RuntimeError(
-                "the megakernel record source is unavailable on the Metal "
-                "backend — use the wavefront path integrator (record source "
-                "'wavefront') for online training there")
+                "the megakernel record source is unavailable on the "
+                f"{self.caps.name} backend — use the wavefront path integrator "
+                "(record source 'wavefront') for online training there")
 
         rec_max_bounces = 6  # lockstep with path_record.slang REC_MAX_BOUNCES
         capacity = int(self.width) * int(self.height) * rec_max_bounces
