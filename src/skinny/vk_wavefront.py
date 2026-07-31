@@ -21,6 +21,7 @@ from pathlib import Path
 
 import vulkan as vk
 
+from skinny.gpu_backend import capabilities
 from skinny.shader_variants import (
     Family,
     ShaderVariantKey,
@@ -1969,7 +1970,7 @@ def _ensure_path(r):
     """Staged wavefront path tracer (Vulkan). None on a non-Vulkan backend or
     before the scene bindings exist."""
     from skinny.renderer import MATERIAL_TYPE_FLAT
-    if not hasattr(r.ctx, "compute_queue"):
+    if not capabilities(r.ctx).has_descriptor_sets:
         return None
     if r._scene_bindings is None or r.descriptor_sets is None:
         return None
@@ -2036,7 +2037,7 @@ def _ensure_path(r):
 
 def _ensure_bdpt(r):
     """Staged wavefront BDPT pass (Vulkan)."""
-    if not hasattr(r.ctx, "compute_queue"):
+    if not capabilities(r.ctx).has_descriptor_sets:
         return None
     if r._scene_bindings is None or r.descriptor_sets is None:
         return None
@@ -2076,7 +2077,7 @@ def _ensure_bdpt(r):
 def _ensure_sppm(r):
     """Staged wavefront SPPM pass (Vulkan). None before scene bindings exist;
     the caller falls back to the path tracer."""
-    if not hasattr(r.ctx, "compute_queue"):
+    if not capabilities(r.ctx).has_descriptor_sets:
         return None
     if r._scene_bindings is None or r.descriptor_sets is None:
         return None
@@ -2100,11 +2101,11 @@ def _ensure_mlt(r):
     the path tracer like SPPM does."""
     # `_ensure_wavefront_pass` is the routing authority (Metal → metal_wavefront),
     # so this is unreachable on Metal via the dispatcher — but the pre-carve-out
-    # `_ensure_wavefront_mlt_pass` returned None on `is_metal`, so preserve the
-    # guard verbatim to keep a direct Vulkan-factory call safe on a Metal host.
-    if r.is_metal:
-        return None
-    if not hasattr(r.ctx, "compute_queue"):
+    # `_ensure_wavefront_mlt_pass` returned None on `is_metal`, so keep a guard
+    # so a direct Vulkan-factory call stays safe on a Metal host. It is the same
+    # question as the other three factories now: this pass writes descriptor
+    # sets, which is what makes it Vulkan-only.
+    if not capabilities(r.ctx).has_descriptor_sets:
         return None
     if r._scene_bindings is None or r.descriptor_sets is None:
         return None

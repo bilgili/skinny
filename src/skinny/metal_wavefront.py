@@ -35,6 +35,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+from skinny.gpu_backend import capabilities
 from skinny.metal_compute import MetalFrameEncoder, StorageBuffer
 from skinny.shader_variants import Family, ShaderVariantKey, Target
 from skinny.wavefront_driver import record_bdpt_loop, record_path_loop
@@ -231,7 +232,7 @@ class _MetalWavefrontRecorder:
 
     def shade(self, slot: int, entry: str) -> None:
         self._tile = (self._tile[0], int(slot), self._tile[2])
-        if self._p.ctx.supports_indirect_dispatch:
+        if capabilities(self._p.ctx).has_indirect_dispatch:
             self._enc.dispatch_indirect(
                 self._p._entries[entry], self._p.buffers["indirect"],
                 int(slot) * 12, bindings=self._binds, uniform_blob=self._fc,

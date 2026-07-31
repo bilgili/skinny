@@ -14,7 +14,7 @@ declaration carries its allocation inputs, its binding identity on *both*
 backends, and its destruction. Backend divergence is confined to one binding
 step — :meth:`SceneResourceSet.bind_vulkan` versus
 :meth:`SceneResourceSet.metal_binds` — consuming the same declaration list, so
-the per-method ``is_metal`` early-returns that used to open every rebind helper
+the per-method backend early-returns that used to open every rebind helper
 are gone.
 
 Three distinct orders exist in the pre-change renderer and all three are
@@ -514,7 +514,8 @@ class SceneResourceSet:
         self._gpu = gpu
         self.sizes = sizes
         self.spectral = bool(spectral)
-        self.is_metal = bool(getattr(ctx, "is_metal", False))
+        from skinny.gpu_backend import capabilities
+        self.caps = capabilities(ctx)
         self._resources: dict[str, object] = {}
         self._closed = False
         # The pool needs the resource module itself, not a constructor on it.
@@ -539,7 +540,8 @@ class SceneResourceSet:
         rset._gpu = None
         rset.sizes = None
         rset.spectral = False
-        rset.is_metal = False
+        from skinny.gpu_backend import VULKAN_CAPABILITIES
+        rset.caps = VULKAN_CAPABILITIES
         rset._resources = dict(resources)
         rset._closed = False
         rset._texture_pool_factory = None
@@ -650,9 +652,9 @@ class SceneResourceSet:
         resource reference fresh at each dispatch through :meth:`metal_binds`,
         so a reallocation is picked up automatically and there is nothing to
         rewrite — the Metal adapter simply has no descriptor step, rather than
-        each rebind helper opting out with its own ``is_metal`` early return.
+        each rebind helper opting out with its own backend early return.
         """
-        if self.is_metal or descriptor_sets is None:
+        if not self.caps.has_descriptor_sets or descriptor_sets is None:
             return
         import vulkan as vk
 
@@ -721,7 +723,7 @@ class SceneResourceSet:
         hand-rolls a ``VkWriteDescriptorSet`` — the mechanics stay in one place
         even where the lifetime does not.
         """
-        if self.is_metal or descriptor_sets is None:
+        if not self.caps.has_descriptor_sets or descriptor_sets is None:
             return
         import vulkan as vk
 
@@ -773,7 +775,7 @@ class SceneResourceSet:
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 descriptorCount=frames_in_flight
-                * (samplers + self._gpu.BINDLESS_TEXTURE_CAPACITY),
+                * (samplers + self.caps.bindless_texture_capacity),
             ),
             vk.VkDescriptorPoolSize(
                 type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -783,7 +785,7 @@ class SceneResourceSet:
 
     def bind_vulkan(self, descriptor_sets, *, mlt_bindings: bool = False) -> None:
         """Write every declared binding, in the recorded write order."""
-        if self.is_metal or descriptor_sets is None:
+        if not self.caps.has_descriptor_sets or descriptor_sets is None:
             return
         import vulkan as vk
 

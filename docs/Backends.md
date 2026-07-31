@@ -45,10 +45,69 @@ the context, resolved once by `resource_module(ctx)` (keyed on `ctx.is_metal`):
 expose the **same public API** (`StorageBuffer`, `StorageImage`, `SampledImage`,
 `UniformBuffer`, `HostStorageBuffer`, `ComputePipeline`, …), so the construction
 sites stay backend-agnostic (`self._gpu = resource_module(self.ctx)`); imports are
-deferred so the Metal path never imports `vulkan`. The few genuinely
-backend-specific spots are gated on `is_metal`: the MSL uniform pack
-(`_pack_uniforms_msl`), the bind-by-name megakernel dispatch (no Vulkan descriptor
-sets), and the teardown drain (the backend-neutral `ctx.wait_idle()` seam).
+deferred so the Metal path never imports `vulkan`.
+
+## The declared seam (`gpu_backend.py`, change `gpu-backend-adapter`)
+
+"The same public API" is a **tested** claim now, not a comment. `gpu_backend.py`
+declares what the adapters must agree on and what they may not:
+
+- **`BackendCapabilities`** — one frozen record naming each reason a consumer
+  used to branch on the vendor: `has_descriptor_sets`, `has_frame_sync_objects`,
+  `has_external_memory`, `has_external_semaphore`,
+  `has_shared_in_place_write`, `needs_shared_bindless_sampler`,
+  `has_merged_record_header`, `has_indirect_dispatch`, `has_gpu_skinning`,
+  `has_megakernel_record_source`, `has_reflected_record_layouts`,
+  `needs_watchdog_tiling`, and `bindless_texture_capacity`. **Read it through `capabilities(ctx)`**, which
+  folds the four runtime device probes (`supports_external_memory`,
+  `supports_external_semaphore`, `supports_shared_memory`,
+  `supports_indirect_dispatch`) in, so a consumer asks one named question rather
+  than a backend test plus a probe. Every field replaces at least one live
+  branch — a capability with no branch behind it does not belong in the record,
+  and a field the two device backends agree on is caught by test, **excluding**
+  `has_indirect_dispatch`, which is a device probe either backend may report
+  either way. One field replaces no *pre-existing* branch:
+  `has_external_semaphore` encodes the branch that should have existed, because
+  the CUDA handoff needed both extensions all along and silently assumed one
+  implied the other.
+
+  **Name the reason, not the binding model.** `has_descriptor_sets` was briefly
+  overloaded into "is bind-by-name", which is the same answer on the two device
+  backends and the wrong one on the recording adapter — it binds by name, splits
+  no samplers, and compiles no records. The shared bindless sampler (an
+  argument-table fact) and the merged record header (a shader-build fact) each
+  own a field, so a capability-gated reach at a one-sided member is true only
+  where that member exists.
+  On the renderer it is the memoised `self.caps` property, derived from
+  `self.ctx`.
+- **`ONE_SIDED_MEMBERS` / `DIVERGENT_SIGNATURES`** — members that genuinely
+  exist on one adapter (`ExternalTimelineSemaphore`, `MetalFrameEncoder`,
+  `DebugRasterMetal`, `make_sampler`, …) or whose signature genuinely differs
+  (`PreviewPipeline.__init__`). Declared, never discovered: adding one is a
+  deliberate edit, exactly like `METAL_ONLY_DEFINES` in `shader_variants`.
+- **`recording_compute`** — a third adapter that records allocations, bindings
+  and dispatches instead of executing them, and returns zero-filled data. It
+  makes dispatch ordering and binding coverage assertable with **no device**
+  (`Recorder.dispatch_entries()`, `Recorder.missing_bindings()`). It records, it
+  does not simulate: image correctness stays the parity matrix's job.
+
+Two probes were removed and must not come back. `hasattr(ctx, "compute_queue")`
+was used as "is this Vulkan?" at 7 sites, but `MetalContext.compute_queue` is
+`None` rather than absent, so it was **unconditionally true**; and
+`descriptor_sets is None` was an "is Metal" sentinel at 13 gates, 5 of them
+compounded with `is_metal` in the same expression. `tests/test_gpu_backend.py`
+fails if either returns, if the adapter surfaces drift from the pinned fixture
+undeclared, if the bindless capacity disagrees with the array size compiled into
+`shaders/bindings.slang` for that target, or if a new `is_metal` branch appears
+in `renderer.py` that is neither the adapter selection nor a genuine second
+implementation.
+
+Four `is_metal` branches remain in the renderer, and all four are genuine
+two-implementation splits, not questions the capability record can answer: the
+wavefront pass factory (`vk_wavefront` vs `metal_wavefront`), and the windowed,
+headless and material-preview dispatch paths. The rule that fell out of the
+migration: **resource construction, binding, readback and dispatch belong on the
+adapter; assembling a frame does not.**
 
 ### MetalContext (`metal_context.py`, `metal_compute.py`)
 
@@ -73,7 +132,8 @@ creation).
 **Metal-target shader adaptations** (gated `#if defined(SKINNY_METAL)`, Vulkan
 SPIR-V byte-unchanged): the combined `Sampler2D` pool exceeds Apple's compute
 argument limits and slang-rhi cannot bind a combined `Sampler2D` at all, so the
-bindless `flatMaterialTextures` pool becomes `Texture2D[120]` sampled through a
+bindless `flatMaterialTextures` pool becomes `Texture2D[119]`
+(`capabilities(ctx).bindless_texture_capacity`) sampled through a
 shared `commonSampler` (binding 38), the five discrete maps (env/tattoo/normal/
 roughness/displacement) split into `Texture2D` + a per-map `SamplerState`
 (bindings 39–43), and `NonUniformResourceIndex` (unavailable in the compute stage
@@ -155,7 +215,7 @@ unaffected). See [Megakernel.md → Backends](Megakernel.md#backends-vulkan-and-
 
 **Tool-dock render paths** (change `metal-tool-dock-render`): the two View-menu
 tool docks whose render paths were Vulkan-only now run on Metal via compute.
-- **Material Graph preview** — `PreviewPipelineMetal` compiles `preview_pass.slang`
+- **Material Graph preview** — the adapter's `PreviewPipeline` compiles `preview_pass.slang`
   (`previewMain`) in-process (same session config as the megakernel
   `ComputePipeline`, linking the emit-time `generated_materials` so it shades
   identically) and dispatches by binding the scene material resources + the output

@@ -34,7 +34,8 @@ uniform FrameConstants fc;
 // argument table caps at 128 textures, and 120 (pool) + 5 discrete maps +
 // output/accum/hudMask filled it EXACTLY — adding the `volumeDensity` 3D
 // grid at 129 made every Metal pipeline fail silently (all-black frames).
-// MUST equal metal_compute.BINDLESS_TEXTURE_CAPACITY.
+// MUST equal gpu_backend.METAL_CAPABILITIES.bindless_texture_capacity —
+// enforced by tests/test_gpu_backend.py, not by this comment.
 [[vk::binding(14)]] Texture2D<float4> flatMaterialTextures[119];
 [[vk::binding(38)]] SamplerState commonSampler;
 #endif

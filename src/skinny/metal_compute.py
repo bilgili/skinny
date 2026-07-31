@@ -92,8 +92,11 @@ def _buffer_usage(spy, *, indirect: bool = False):
 
 # Backend-neutral image-format tokens the renderer passes so a construction site
 # is the same on either backend (vk_compute resolves the same tokens to VkFormat).
-# Legacy Vulkan `VkFormat` int values are also accepted defensively (no `vulkan`
-# import) so a stray int doesn't crash the Metal path.
+# One format/address vocabulary across the adapters (change gpu-backend-adapter):
+# callers pass the neutral token, never a `VkFormat` / `VkSamplerAddressMode`
+# int. The int-translation tables this module used to carry to absorb callers
+# that passed the wrong domain are gone; an unknown token still falls back
+# rather than raising, exactly as before.
 _FORMAT_TOKENS = {
     "rgba32f": "rgba32_float",
     "rgba32_float": "rgba32_float",
@@ -106,34 +109,26 @@ _FORMAT_TOKENS = {
     "r32_float": "r32_float",
     "r16_float": "r16_float",
 }
-_VKFORMAT_INTS = {  # VkFormat enum values → slangpy.Format name
-    9: "r8_unorm", 37: "rgba8_unorm", 43: "rgba8_unorm_srgb", 109: "rgba32_float",
-}
 _ADDRESS_TOKENS = {"repeat", "clamp", "mirror", "black", "useMetadata"}
-_VK_ADDRESS_INTS = {0: "repeat", 1: "mirror", 2: "clamp", 3: "black"}
 
 
 def _resolve_format(spy, fmt):
-    """Map a backend-neutral format token (or ``None``/``slangpy.Format``/legacy
-    VkFormat int) to a ``slangpy.Format``."""
+    """Map a backend-neutral format token (or ``None``/``slangpy.Format``) to a
+    ``slangpy.Format``."""
     if fmt is None:
         return spy.Format.rgba32_float
     if isinstance(fmt, str):
         return getattr(spy.Format, _FORMAT_TOKENS.get(fmt, "rgba32_float"))
-    if isinstance(fmt, int):  # legacy VkFormat int
-        return getattr(spy.Format, _VKFORMAT_INTS.get(fmt, "rgba32_float"))
     return fmt  # already a slangpy.Format
 
 
 def _resolve_address_mode(mode, default: str) -> str:
     if isinstance(mode, str):
         return mode if mode in _ADDRESS_TOKENS else default
-    if isinstance(mode, int):  # legacy VkSamplerAddressMode int
-        return _VK_ADDRESS_INTS.get(mode, default)
     return default
 
 
-def _make_sampler(ctx, *, address_u: str = "repeat", address_v: str = "clamp"):
+def make_sampler(ctx, *, address_u: str = "repeat", address_v: str = "clamp"):
     """Create a linear sampler, mapping the Vulkan default address modes
     (repeat U, clamp-to-edge V) onto slang-rhi's sampler desc. Falls back to a
     bare default sampler if the keyword surface differs across slangpy builds."""
@@ -443,7 +438,7 @@ class SampledImage:
             memory_type=spy.MemoryType.device_local,
             label="skinny.sampled_image",
         )
-        self.sampler = _make_sampler(
+        self.sampler = make_sampler(
             ctx, address_u=address_mode_u, address_v=address_mode_v
         )
 
@@ -492,7 +487,7 @@ class SampledImage3D:
             memory_type=spy.MemoryType.device_local,
             label="skinny.sampled_image_3d",
         )
-        self.sampler = _make_sampler(ctx, address_u="clamp", address_v="clamp")
+        self.sampler = make_sampler(ctx, address_u="clamp", address_v="clamp")
 
     def upload_sync(self, voxels: np.ndarray) -> None:
         """Copy a ``(depth, height, width)`` float16/float32 array into the
@@ -950,9 +945,14 @@ class ComputePipeline:
         self._kernel = None
 
 
-class PreviewPipelineMetal:
+class PreviewPipeline:
     """Metal material-preview pipeline (change metal-tool-dock-render P1, design
-    D1) — the native-Metal sibling of ``vk_compute.PreviewPipeline``.
+    D1) — the Metal adapter's preview pipeline.
+
+    One concept, one name across the adapters (change gpu-backend-adapter). It
+    carried a target-suffixed name until then, which made
+    ``self._gpu.PreviewPipeline`` impossible and forced the renderer to import
+    each adapter's class by name.
 
     Compiles ``preview_pass.slang`` (``previewMain``) to MSL through a SlangPy
     slang session configured **exactly** like the megakernel
@@ -1100,6 +1100,20 @@ class PreviewPipelineMetal:
         cpass.end()
         dev.submit_command_buffer(enc.finish())
         dev.wait_for_idle()
+
+    _PUSH_FMT = "<IIIIffff"  # matches vk_compute.PreviewPipeline._PUSH_FMT
+
+    @staticmethod
+    def pack_push(matId: int, graphId: int, primKind: int, size: int,
+                  yaw: float, pitch: float, distance: float, fovTan: float) -> bytes:
+        """Pack ``preview_pass.slang::PreviewPushConsts`` — the same bytes on
+        both targets, so both adapters declare it and no caller reaches across
+        the seam for it."""
+        return struct.pack(
+            PreviewPipeline._PUSH_FMT,
+            int(matId), int(graphId), int(primKind), int(size),
+            float(yaw), float(pitch), float(distance), float(fovTan),
+        )
 
     def destroy(self) -> None:
         self.pipeline = None

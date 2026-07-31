@@ -16,10 +16,14 @@ from PIL import Image
 if TYPE_CHECKING:
     from skinny.vk_compute import SampledImage
 
+from skinny.gpu_backend import capabilities
+
+
 class TexturePool:
     """Bindless flat-material texture pool (binding 14 in main_pass.slang).
 
-    Owns up to BINDLESS_TEXTURE_CAPACITY SampledImage slots. Materials
+    Owns up to `capabilities(ctx).bindless_texture_capacity` SampledImage
+    slots (128 Vulkan / 119 Metal). Materials
     point at slots by index; unused slots stay None and are gated off by
     PARTIALLY_BOUND on the descriptor binding plus a sentinel index in
     the material record.
@@ -31,13 +35,24 @@ class TexturePool:
 
     SENTINEL = 0xFFFFFFFF
 
-    def __init__(self, ctx, gpu) -> None:
+    def __init__(self, ctx, gpu, *, capacity: int | None = None) -> None:
         self.ctx = ctx
         # GPU-resource module (vk_compute / metal_compute) — the pool's bindless
         # capacity follows the active backend's cap (Metal trims to fit its
         # 128-texture / 16-sampler argument limit, design D8).
         self._gpu = gpu
-        self._capacity = int(gpu.BINDLESS_TEXTURE_CAPACITY)
+        # The capacity comes from the capability record, not from the adapter
+        # module. Reading `gpu.BINDLESS_TEXTURE_CAPACITY` gives the right number
+        # today only because `gpu` is the resolved adapter — it gives the number
+        # a second owner, which is what let the 128/119 mismatch exist at all
+        # (codex re-review). One owner: `gpu_backend.capabilities`.
+        # `capacity` is an explicit test seam for the exhaustion path; production
+        # callers omit it and get the one owner. Injecting it through a fake
+        # module attribute (the old `gpu.BINDLESS_TEXTURE_CAPACITY`) is what gave
+        # the number a second owner in the first place.
+        self._capacity = int(
+            capacity if capacity is not None
+            else capabilities(ctx).bindless_texture_capacity)
         self._slots = [None] * self._capacity
         self._by_path: dict[str, int] = {}
         self._next_slot = 0

@@ -11,11 +11,13 @@ summary uses the always-available numpy reference backend.
 from __future__ import annotations
 
 import types
+from dataclasses import replace
 
 import numpy as np
 
 from skinny import config_report as cr
 from skinny.params import EXECUTION_MEGAKERNEL, EXECUTION_WAVEFRONT
+from skinny.gpu_backend import METAL_CAPABILITIES, VULKAN_CAPABILITIES
 from skinny.renderer import Renderer
 from skinny.sampling.neural_replay import ReplayBuffer
 from skinny.sampling.neural_trainer import NeuralTrainer, TrainerConfig
@@ -47,7 +49,12 @@ def _matrix_fake(**overrides):
     approved; overrides flip individual axes."""
     fake = types.SimpleNamespace(
         _requested_backend="auto",
-        is_metal=True,
+        # A real Metal host, i.e. the documented Mac combo: the static record
+        # is deliberately pessimistic about every device-probed field, and
+        # `capabilities()` promotes them off the context. Using the static
+        # record here described a Metal device with NO unified memory, which is
+        # not the combo this fixture claims to describe.
+        caps=replace(METAL_CAPABILITIES, has_shared_in_place_write=True),
         _requested_execution_mode="wavefront",
         effective_execution_mode_index=EXECUTION_WAVEFRONT,
         execution_mode_fallback_active=False,
@@ -101,6 +108,29 @@ def test_signature_dedups_and_flips():
 
 
 # ── renderer-side row assembly: the online-training status payoff ────
+
+def test_handoff_row_names_the_mechanism_each_capability_supports():
+    """The interop row must name the mechanism the capabilities actually allow.
+
+    It used to read `interop(CUDA) if has_external_memory else interop(UMA)`,
+    so a Vulkan device whose graded build failed the extension was reported as
+    UMA — a mechanism it does not have (fallback pre-merge review, LOW). Only
+    METAL_CAPABILITIES was ever exercised here, which is why it went unseen.
+    """
+    metal_uma = replace(METAL_CAPABILITIES, has_shared_in_place_write=True)
+    cuda = replace(VULKAN_CAPABILITIES, has_external_memory=True,
+                   has_external_semaphore=True)
+    half = replace(VULKAN_CAPABILITIES, has_external_memory=True,
+                   has_external_semaphore=False)
+
+    assert _rows(_matrix_fake(caps=metal_uma))["neural-handoff"].resolved \
+        == "interop(UMA)"
+    assert _rows(_matrix_fake(caps=cuda))["neural-handoff"].resolved \
+        == "interop(CUDA)"
+    # memory without the semaphore is NOT the CUDA protocol, and is not UMA
+    assert _rows(_matrix_fake(caps=half))["neural-handoff"].resolved \
+        == "interop(unavailable)"
+
 
 def test_rows_approved_when_prereqs_met():
     rows = _rows(_matrix_fake())
@@ -314,7 +344,7 @@ def test_metal_wavefront_ready_without_descriptor_sets():
     # must come from the scene bindings, or online training never enables (the
     # bug: the old gate tested descriptor_sets, permanently None on Metal).
     fake = types.SimpleNamespace(
-        is_metal=True, effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        caps=METAL_CAPABILITIES, effective_execution_mode_index=EXECUTION_WAVEFRONT,
         descriptor_sets=None, _scene_bindings=object(), pipeline=None)
     assert _ready(fake) is True
     fake._scene_bindings = None
@@ -323,7 +353,7 @@ def test_metal_wavefront_ready_without_descriptor_sets():
 
 def test_vulkan_wavefront_still_requires_descriptor_sets():
     fake = types.SimpleNamespace(
-        is_metal=False, effective_execution_mode_index=EXECUTION_WAVEFRONT,
+        caps=VULKAN_CAPABILITIES, effective_execution_mode_index=EXECUTION_WAVEFRONT,
         descriptor_sets=None, _scene_bindings=object(), pipeline=None)
     assert _ready(fake) is False
     fake.descriptor_sets = object()

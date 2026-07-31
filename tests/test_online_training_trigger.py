@@ -15,6 +15,7 @@ import types
 
 import numpy as np
 
+from skinny.gpu_backend import VULKAN_CAPABILITIES
 from skinny.params import EXECUTION_MEGAKERNEL, EXECUTION_WAVEFRONT
 from skinny.renderer import Renderer
 from skinny.sampling.neural_handoff import make_publisher
@@ -61,6 +62,7 @@ def test_tick_drains_into_replay_and_returns_promptly():
 
     fake = types.SimpleNamespace(
         _online_training=True,
+        caps=VULKAN_CAPABILITIES,
         _scene_bindings=object(),
         descriptor_sets=[object()],
         _neural_replay=replay,

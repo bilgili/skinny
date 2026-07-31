@@ -304,7 +304,7 @@ first, then update both tables — a hostless doc-sync check
 | MLT integrator — PSSMLT over BDPT (wavefront, flat, RGB **+ spectral**) | ✅ (`WavefrontMltPass`) | ✅ (`MetalWavefrontMltPass`, `mlt-integrator` / `spectral-mlt`; **not** bit-identical to Vulkan — splat-quantum equivalent, see the MLT Backends row) |
 | Heterogeneous volumes (NanoVDB) — path only, mega+wave | ✅ | ✅ (`nanovdb-volume-rendering`) |
 | Procedural `cloud` medium (pbrt analytic fBm) — path only, mega+wave | ✅ | ✅ (`pbrt-cloud-procedural-medium`) |
-| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipelineMetal` bind-by-name, `metal-tool-dock-render`) |
+| Material Graph dock preview (`preview_pass.slang`) | ✅ (descriptor sets) | ✅ (`PreviewPipeline` bind-by-name, `metal-tool-dock-render`) |
 | Camera Debug viewport | ✅ (graphics rasteriser) | ✅ (`DebugRasterMetal` compute rasteriser, `metal-tool-dock-render`) |
 | UsdSkel GPU skinning + GPU BVH refit | ✅ (`vk_skinning.py`) | CPU fallback (no MSL skinning kernel) |
 | Wavefront indirect dispatch (slot counts) | ✅ | CPU readback fallback while slang-rhi Metal indirect dispatch is no-op |
@@ -486,6 +486,8 @@ never raise it.
 
 **GPU resource inventory (`gpu_resources.py`, change `renderer-gpu-resource-set`)** — the largest carve-out stage so far (858 lines out of `renderer.py`). Every GPU resource is declared **once**: one `ResourceDecl` carries its allocation inputs, its binding on BOTH backends (Vulkan binding number + Metal shader-global name), and its destruction. `SceneResourceSet` absorbed `_init_gpu`'s allocations, `_create_descriptors`, the five `_rebind_*_descriptors`, `_rewrite_size_dependent_descriptors`, `_ensure_mesh_buffer_capacity`'s realloc, `_build_metal_binds`' resource table and `cleanup`'s destroy list. **Backend divergence is decided ONCE, at the binding step** — the Vulkan adapter writes descriptors, the Metal adapter fills the name table, from the same list; the five per-method `is_metal` / `descriptor_sets is None` early-returns are gone (the Metal adapter has no descriptor step, rather than each helper opting out). **Growth sites state the new capacity, never the new byte size**: `regrow()` re-evaluates the declaration's own `cap * STRIDE + slack` and rebinds in the same call, so the arithmetic can't drift and a rebind can't be forgotten (the bug class where binding 49 kept pointing at a freed buffer while 18 was rewritten). Three orders genuinely differ and are each recorded once — `DECLARATIONS` (allocation), `VULKAN_WRITE_SEQUENCE` (descriptor writes: 26 between 11 and 12, 20 after 24, 1/30/31 last), `DESTROY_SEQUENCE` (teardown). Renderer resource attributes are **read-only properties** forwarding to the set, so the ~120 `self.<resource>` reads are unchanged while assignment — which would reallocate without rebinding — is refused; tests fake resources via `SceneResourceSet.stub(...)`. Gated by `tests/fixtures/gpu_resource_inventory.json`, **captured from the live pre-change renderer** on Vulkan RGB / Metal RGB / Metal spectral (recorded reality, not a transcription — re-capture it, never edit it to match the code), plus a source gate that fails if a `VkWriteDescriptorSet` reappears in `renderer.py`. Full map in [GpuResources.md § GPU resource inventory](docs/GpuResources.md#gpu-resource-inventory-gpu_resourcespy-change-renderer-gpu-resource-set).
 
+**Backend seam ownership (`gpu_backend.py`, change `gpu-backend-adapter`)** — `backend_select.resource_module` documented that `vk_compute` and `metal_compute` "expose the same public API"; they did not, and the renderer paid with 34 live `is_metal` branches plus two probes used as if they were the seam. **Branch on the reason, never on the vendor**: `BackendCapabilities`, read through `capabilities(ctx)`, names each one — `has_descriptor_sets`, `has_frame_sync_objects`, `has_external_memory`, `has_external_semaphore`, `has_shared_in_place_write`, `needs_shared_bindless_sampler`, `has_merged_record_header`, `has_indirect_dispatch`, `has_gpu_skinning`, `has_megakernel_record_source`, `has_reflected_record_layouts`, `needs_watchdog_tiling`, `bindless_texture_capacity` — and folds the four runtime device probes (`supports_external_memory`, `supports_external_semaphore`, `supports_shared_memory`, `supports_indirect_dispatch`) in **for every backend**, so a consumer asks one named question instead of a backend test plus a probe. A field earns its place only by removing at least one existing branch (no speculative capabilities), and a field the two device backends agree on fails the build (dead or misnamed) — excluding `has_indirect_dispatch`, which is a device probe both may report either way. **Name the reason, not the binding model**: `has_descriptor_sets` was overloaded into "is bind-by-name", which is the same answer on two backends and the wrong one on the third — the shared bindless sampler (an argument-table fact) and the merged record header (a shader-build fact) each own a field now. On the renderer it is the memoised `self.caps` **property** derived from `self.ctx`, not an `__init__` attribute, so a `__new__` test stub still answers it. **Never probe a backend by attribute presence**: `hasattr(ctx, "compute_queue")` was "is this Vulkan?" at 7 sites but `MetalContext.compute_queue` is `None` rather than absent, so it was *unconditionally true* and three wavefront pass factories were protected only by the descriptor check on the next line; `descriptor_sets is None` was an "is Metal" sentinel at 13 gates, 5 compounded with `is_metal` in one expression (the same fact twice). Both are gone and `tests/test_gpu_backend.py` fails if either returns. Divergence that survives is **declared, never discovered** — `ONE_SIDED_MEMBERS` / `DIVERGENT_SIGNATURES` beside the interface, each with its reason, asserted modulo a pinned surface fixture (stale declarations caught too). A **third adapter**, `recording_compute.py`, records allocations/bindings/dispatches without a device, so dispatch ordering and binding coverage (`Recorder.missing_bindings()`) are hostless assertions — it records, it does not simulate; radiometry stays the parity matrix's. The bindless capacity (128 Vulkan / 119 Metal) is one number across record, adapter and `bindings.slang`, enforced by test rather than the old "MUST equal" shader comment. Four `is_metal` branches remain in `renderer.py`, all genuine two-implementation splits (wavefront pass factory, windowed / headless / preview dispatch): **resource construction, binding, readback and dispatch belong on the adapter; assembling a frame does not.** Full map in [Backends.md § The declared seam](docs/Backends.md#the-declared-seam-gpu_backendpy-change-gpu-backend-adapter) and [HostModules.md § The backend seam](docs/HostModules.md#the-backend-seam-gpu_backendpy-change-gpu-backend-adapter).
+
 **Metal plumbing (`metal_context.py`, `metal_compute.py`)** — `MetalContext` stands up a **native** Metal device via SlangPy/RHI (`DeviceType.metal`, no MoltenVK, no PyObjC) with a surface bridged from the GLFW Cocoa `NSWindow` (`WindowHandle(nswindow=…)` → slang-rhi `Surface`, no manual `CAMetalLayer`). `metal_compute.py` exposes the **same public API** as `vk_compute` (`StorageBuffer`, `StorageImage`, `SampledImage`, `UniformBuffer`, `HostStorageBuffer`, `ComputePipeline`), so the renderer construction sites stay backend-agnostic (`self._gpu = resource_module(self.ctx)`). **Full-parity now**: the megakernel (`main_pass.slang` → `mainImage`) compiles in-process to Metal and dispatches by binding resources by name; the wavefront execution mode runs the staged path / BDPT integrators, ReSTIR DI, and the neural directional proposal (changes `metal-wavefront-parity`, `metal-neural-interop`, `metal-record-drain`). Pipeline parameters are bound as whole resources or via `set_data` byte blobs, **never per-field `ShaderCursor` writes** (a scalar cursor write around an open Metal encoder leaves the fence un-signalled). Trivial / foundation kernels name their entry `computeMain`, never `main` (Slang's Metal target reserves `main`). Metal-target shader adaptations are gated `#if defined(SKINNY_METAL)` so the Vulkan SPIR-V is byte-unchanged — see [Backends.md § MetalContext](docs/Backends.md#metalcontext-metal_contextpy-metal_computepy) for the bindless-pool split, 31-slot argument-table fold tricks, and the `SKINNY_METAL_NEURAL` / `SKINNY_METAL_RECORDS` build modes. Online training is fully single-device on Apple Silicon: `--neural-handoff interop` writes UMA shared-storage weight buffers in place at the frame boundary (no CUDA, no extra deps).
 
 **Vulkan plumbing (`vk_context.py`, `vk_compute.py`)** — `VulkanContext` owns instance, device, queues, swapchain, and command pool. `ComputePipeline` loads the pre-compiled SPIR-V and reflects the descriptor set layout. `StorageBuffer`, `StorageImage`, `SampledImage`, and `UniformBuffer` wrap GPU memory with synchronous upload helpers.
@@ -536,3 +538,48 @@ A pre-compiled `main_pass.spv` is checked in. Any shader change requires a recom
 ### Presets and settings
 
 User settings live in `~/.skinny/`. `settings.json` stores window geometry + parameter values + camera state. User-saved presets are individual JSON files under `~/.skinny/presets/`. The `preset_index` parameter is intentionally excluded from the snapshot because the user's preset list can change between sessions.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **skinny** (23 symbols, 20 relationships, 0 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/skinny/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/skinny/clusters` | All functional areas |
+| `gitnexus://repo/skinny/processes` | All execution flows |
+| `gitnexus://repo/skinny/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

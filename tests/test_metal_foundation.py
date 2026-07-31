@@ -252,22 +252,25 @@ def test_metal_frame_encoder_multipass_barrier(shader_dir):
 # ── image-format token resolution ────────────────────────────────────
 
 def test_metal_format_tokens_resolve_to_real_slangpy_formats():
-    """Every value in `_FORMAT_TOKENS` / `_VKFORMAT_INTS` must name a real
-    `slangpy.Format` member, else `_resolve_format`'s `getattr(spy.Format, …)`
-    raises `AttributeError: type object 'Format' has no attribute '…'` at texture-
-    load / render time (slang-rhi spells 8-bit sRGB `rgba8_unorm_srgb`, not the
-    `rgba8_srgb` neutral token). Pure enum-name check — no device, no compile."""
-    spy = pytest.importorskip("slangpy")
-    from skinny.metal_compute import _FORMAT_TOKENS, _VKFORMAT_INTS, _resolve_format
+    """Every value in `_FORMAT_TOKENS` must name a real `slangpy.Format` member,
+    else `_resolve_format`'s `getattr(spy.Format, …)` raises `AttributeError:
+    type object 'Format' has no attribute '…'` at texture-load / render time
+    (slang-rhi spells 8-bit sRGB `rgba8_unorm_srgb`, not the `rgba8_srgb`
+    neutral token). Pure enum-name check — no device, no compile.
 
-    for name in (*_FORMAT_TOKENS.values(), *_VKFORMAT_INTS.values()):
+    The `VkFormat`-int half of this test went with `_VKFORMAT_INTS` (change
+    gpu-backend-adapter): the adapters share one format vocabulary now, so no
+    caller passes a Vulkan enum int across the seam and the Metal adapter no
+    longer carries a table to absorb one."""
+    spy = pytest.importorskip("slangpy")
+    from skinny.metal_compute import _FORMAT_TOKENS, _resolve_format
+
+    for name in _FORMAT_TOKENS.values():
         assert hasattr(spy.Format, name), f"slangpy.Format has no member {name!r}"
 
-    # The sRGB neutral token and VkFormat R8G8B8A8_SRGB (43) both land on the
-    # slang-rhi sRGB format — this is the exact regression that crashed the
-    # three-materials USD scene render on Metal.
+    # The sRGB neutral token lands on the slang-rhi sRGB format — this is the
+    # exact regression that crashed the three-materials USD scene render.
     assert _resolve_format(spy, "rgba8_srgb") == spy.Format.rgba8_unorm_srgb
-    assert _resolve_format(spy, 43) == spy.Format.rgba8_unorm_srgb
 
 
 # ── Metal no-op for Vulkan-only descriptor writes ────────────────────
@@ -298,16 +301,18 @@ def test_descriptor_writes_are_a_metal_no_op_through_the_resource_set():
 
     # A set with no declarations allocated: any code path that reached for a
     # buffer or a Vulkan symbol would fail loudly rather than silently pass.
+    from skinny.gpu_backend import capabilities
+
     rset = SceneResourceSet.__new__(SceneResourceSet)
     rset.ctx = _Ctx()
-    rset.is_metal = True
+    rset.caps = capabilities(rset.ctx)
     rset.spectral = False
     rset._resources = {}
     rset._closed = False
     rset.sizes = None
 
     r = Renderer.__new__(Renderer)  # bypass __init__ — no GPU/context needed
-    r.is_metal = True
+    r.ctx = rset.ctx                 # `Renderer.caps` derives from the context
     r.descriptor_sets = None
     r._gpu_set = rset
 
@@ -354,16 +359,21 @@ def test_bxdf_eval_degrades_on_metal():
     readback (`command_pool` / `vkDeviceWaitIdle` / `descriptor_sets`). On Metal
     `self.pipeline` is non-None, so the old `pipeline is None` guard wouldn't catch
     it and it crashed on `self.ctx.command_pool`. It must instead degrade to a
-    zeroed grid via the callback. Stub via `__new__`, pipeline non-None, is_metal
-    True — proves it never reaches the Vulkan path (no ctx needed)."""
+    zeroed grid via the callback. Stub via `__new__`, pipeline non-None, and a
+    context whose backend declares no descriptor sets — proves it never reaches
+    the Vulkan path."""
     try:
         from skinny.renderer import Renderer
     except OSError as exc:  # libvulkan not on the dylib path (renderer imports it)
         pytest.skip(f"needs the Vulkan SDK on the dylib path: {exc}")
 
+    class _Ctx:
+        backend_name = "metal"
+        is_metal = True
+
     r = Renderer.__new__(Renderer)
-    r.is_metal = True
-    r.pipeline = object()  # non-None: only the is_metal arm may divert control
+    r.ctx = _Ctx()
+    r.pipeline = object()  # non-None: only the capability arm may divert control
     got = []
     r.request_bxdf_eval({"n_theta": 4, "n_phi": 3}, got.append)
     assert len(got) == 1

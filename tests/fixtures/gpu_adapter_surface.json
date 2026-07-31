@@ -1,0 +1,550 @@
+{
+  "metal": {
+    "classes": {
+      "ComputePipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "entry_module",
+          "entry_point",
+          "graph_fragments",
+          "compile_pipeline",
+          "spectral"
+        ],
+        "destroy": [],
+        "dispatch": [
+          "width",
+          "height",
+          "uniform_blob",
+          "binds",
+          "bindless",
+          "bands",
+          "tile_origin_offset"
+        ],
+        "dispatch_indirect": [
+          "args_buffer",
+          "offset",
+          "bindings"
+        ],
+        "dispatch_kernel": [
+          "thread_count",
+          "buffers",
+          "vars"
+        ],
+        "scene_bindings_only": [
+          "cls",
+          "ctx",
+          "shader_dir",
+          "graph_fragments",
+          "spectral"
+        ]
+      },
+      "DebugRasterMetal": {
+        "__init__": [
+          "ctx",
+          "shader_dir"
+        ],
+        "destroy": [],
+        "render": [
+          "line_floats",
+          "tri_floats",
+          "view_proj",
+          "width",
+          "height",
+          "max_steps"
+        ]
+      },
+      "HostStorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
+        "destroy": [],
+        "read": [
+          "length",
+          "offset"
+        ],
+        "write": [
+          "data",
+          "offset"
+        ]
+      },
+      "HudOverlay": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height"
+        ],
+        "destroy": [],
+        "record_copy": [
+          "cmd"
+        ],
+        "upload": [
+          "data"
+        ]
+      },
+      "MetalFrameEncoder": {
+        "__init__": [
+          "ctx"
+        ],
+        "barrier": [],
+        "clear": [
+          "buffer"
+        ],
+        "dispatch": [
+          "pipe",
+          "groups",
+          "bindings",
+          "uniform_blob",
+          "uniforms",
+          "bindless"
+        ],
+        "dispatch_indirect": [
+          "pipe",
+          "args_buffer",
+          "offset",
+          "bindings",
+          "uniform_blob",
+          "uniforms",
+          "bindless"
+        ],
+        "flush": [],
+        "submit": []
+      },
+      "PreviewPipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "graph_fragments"
+        ],
+        "destroy": [],
+        "dispatch": [
+          "size",
+          "push_bytes",
+          "uniform_blob",
+          "binds",
+          "output_image",
+          "bindless"
+        ],
+        "pack_push": [
+          "matId",
+          "graphId",
+          "primKind",
+          "size",
+          "yaw",
+          "pitch",
+          "distance",
+          "fovTan"
+        ]
+      },
+      "ReadbackBuffer": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "bytes_per_pixel"
+        ],
+        "destroy": [],
+        "read": [],
+        "record_copy_from": [
+          "cmd",
+          "src_image"
+        ]
+      },
+      "SampledImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "bytes_per_pixel",
+          "address_mode_u",
+          "address_mode_v"
+        ],
+        "destroy": [],
+        "upload_sync": [
+          "data"
+        ]
+      },
+      "SampledImage3D": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "depth"
+        ],
+        "destroy": [],
+        "upload_sync": [
+          "voxels"
+        ]
+      },
+      "StorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes",
+          "indirect",
+          "external",
+          "shared"
+        ],
+        "destroy": [],
+        "download_sync": [
+          "byte_count"
+        ],
+        "export_handle": [],
+        "fill_zero_sync": [],
+        "upload_range": [
+          "data",
+          "dst_offset"
+        ],
+        "upload_sync": [
+          "data"
+        ],
+        "write_in_place": [
+          "data",
+          "offset"
+        ]
+      },
+      "StorageImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "transfer_src"
+        ],
+        "destroy": [],
+        "read_rgba": []
+      },
+      "UniformBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
+        "destroy": [],
+        "upload": [
+          "data"
+        ]
+      }
+    },
+    "constants": [
+      "BINDLESS_TEXTURE_CAPACITY",
+      "COMMON_SAMPLER_NAME",
+      "DISCRETE_MAP_SAMPLERS"
+    ],
+    "domains": {
+      "ComputePipeline.__init__": {
+        "compile_pipeline": "bool",
+        "entry_module": "str",
+        "entry_point": "str",
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "ComputePipeline.dispatch": {
+        "bands": "int",
+        "bindless": "none",
+        "tile_origin_offset": "none"
+      },
+      "ComputePipeline.dispatch_indirect": {
+        "bindings": "none",
+        "offset": "int"
+      },
+      "ComputePipeline.dispatch_kernel": {
+        "buffers": "none",
+        "vars": "none"
+      },
+      "ComputePipeline.scene_bindings_only": {
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "DebugRasterMetal.render": {
+        "max_steps": "expr"
+      },
+      "HostStorageBuffer.read": {
+        "offset": "int"
+      },
+      "HostStorageBuffer.write": {
+        "offset": "int"
+      },
+      "HudOverlay.record_copy": {
+        "cmd": "none"
+      },
+      "MetalFrameEncoder.dispatch": {
+        "bindings": "none",
+        "bindless": "none",
+        "uniform_blob": "none",
+        "uniforms": "none"
+      },
+      "MetalFrameEncoder.dispatch_indirect": {
+        "bindings": "none",
+        "bindless": "none",
+        "offset": "int",
+        "uniform_blob": "none",
+        "uniforms": "none"
+      },
+      "PreviewPipeline.__init__": {
+        "graph_fragments": "none"
+      },
+      "PreviewPipeline.dispatch": {
+        "bindless": "none"
+      },
+      "ReadbackBuffer.__init__": {
+        "bytes_per_pixel": "int"
+      },
+      "SampledImage.__init__": {
+        "address_mode_u": "str",
+        "address_mode_v": "str",
+        "bytes_per_pixel": "int",
+        "format": "none"
+      },
+      "StorageBuffer.__init__": {
+        "external": "bool",
+        "indirect": "bool",
+        "shared": "bool"
+      },
+      "StorageBuffer.write_in_place": {
+        "offset": "int"
+      },
+      "StorageImage.__init__": {
+        "format": "none",
+        "transfer_src": "bool"
+      },
+      "make_sampler": {
+        "address_u": "str",
+        "address_v": "str"
+      }
+    },
+    "functions": {
+      "make_sampler": [
+        "ctx",
+        "address_u",
+        "address_v"
+      ]
+    }
+  },
+  "vulkan": {
+    "classes": {
+      "ComputePipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "entry_module",
+          "entry_point",
+          "graph_fragments",
+          "compile_pipeline",
+          "spectral"
+        ],
+        "destroy": [],
+        "scene_bindings_only": [
+          "cls",
+          "ctx",
+          "shader_dir",
+          "graph_fragments",
+          "spectral"
+        ]
+      },
+      "ExternalTimelineSemaphore": {
+        "__init__": [
+          "ctx",
+          "initial_value"
+        ],
+        "destroy": [],
+        "export_handle": [],
+        "signal": [
+          "value"
+        ],
+        "value": [],
+        "wait": [
+          "value",
+          "timeout_ns"
+        ]
+      },
+      "HostStorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
+        "destroy": [],
+        "read": [
+          "length",
+          "offset"
+        ],
+        "write": [
+          "data",
+          "offset"
+        ]
+      },
+      "HudOverlay": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height"
+        ],
+        "destroy": [],
+        "record_copy": [
+          "cmd"
+        ],
+        "upload": [
+          "data"
+        ]
+      },
+      "PreviewPipeline": {
+        "__init__": [
+          "ctx",
+          "shader_dir",
+          "main_descriptor_set_layout",
+          "output_image_view"
+        ],
+        "destroy": [],
+        "pack_push": [
+          "matId",
+          "graphId",
+          "primKind",
+          "size",
+          "yaw",
+          "pitch",
+          "distance",
+          "fovTan"
+        ]
+      },
+      "ReadbackBuffer": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "bytes_per_pixel"
+        ],
+        "destroy": [],
+        "read": [],
+        "record_copy_from": [
+          "cmd",
+          "src_image"
+        ]
+      },
+      "SampledImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "bytes_per_pixel",
+          "address_mode_u",
+          "address_mode_v"
+        ],
+        "destroy": [],
+        "upload_sync": [
+          "data"
+        ]
+      },
+      "SampledImage3D": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "depth"
+        ],
+        "destroy": [],
+        "upload_sync": [
+          "voxels"
+        ]
+      },
+      "StorageBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes",
+          "indirect",
+          "external",
+          "shared"
+        ],
+        "destroy": [],
+        "download_sync": [
+          "byte_count"
+        ],
+        "export_handle": [],
+        "fill_zero_sync": [],
+        "upload_range": [
+          "data",
+          "dst_offset"
+        ],
+        "upload_sync": [
+          "data"
+        ]
+      },
+      "StorageImage": {
+        "__init__": [
+          "ctx",
+          "width",
+          "height",
+          "format",
+          "transfer_src"
+        ],
+        "destroy": [],
+        "read_rgba": []
+      },
+      "UniformBuffer": {
+        "__init__": [
+          "ctx",
+          "size_bytes"
+        ],
+        "destroy": [],
+        "upload": [
+          "data"
+        ]
+      }
+    },
+    "constants": [
+      "BINDLESS_TEXTURE_CAPACITY"
+    ],
+    "domains": {
+      "ComputePipeline.__init__": {
+        "compile_pipeline": "bool",
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "ComputePipeline.scene_bindings_only": {
+        "graph_fragments": "none",
+        "spectral": "bool"
+      },
+      "ExternalTimelineSemaphore.__init__": {
+        "initial_value": "int"
+      },
+      "ExternalTimelineSemaphore.wait": {
+        "timeout_ns": "int"
+      },
+      "HostStorageBuffer.read": {
+        "offset": "int"
+      },
+      "HostStorageBuffer.write": {
+        "offset": "int"
+      },
+      "ReadbackBuffer.__init__": {
+        "bytes_per_pixel": "int"
+      },
+      "SampledImage.__init__": {
+        "address_mode_u": "str",
+        "address_mode_v": "str",
+        "bytes_per_pixel": "int",
+        "format": "none"
+      },
+      "StorageBuffer.__init__": {
+        "external": "bool",
+        "indirect": "bool",
+        "shared": "bool"
+      },
+      "StorageImage.__init__": {
+        "format": "none",
+        "transfer_src": "bool"
+      }
+    },
+    "functions": {
+      "emit_wavefront_material_modules": [
+        "graph_fragments"
+      ],
+      "emit_wavefront_shade_module": [
+        "graph_fragment",
+        "graph_id",
+        "binding",
+        "combined_stride"
+      ]
+    }
+  }
+}

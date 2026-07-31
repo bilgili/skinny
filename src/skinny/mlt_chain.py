@@ -52,23 +52,28 @@ def iterations_per_frame(width: int, height: int, num_chains: int) -> int:
     return max(1, round(pixels / max(1, int(num_chains))))
 
 
-def uniform_tail_active(integrator_index: int, is_metal: bool,
+def uniform_tail_active(integrator_index: int, reflected_uniform_layout: bool,
                         execution_mode_index: int, pass_built: bool) -> bool:
     """Whether `_pack_uniforms` must emit the ``#if defined(SKINNY_MLT)``
     FrameConstants tail — i.e. the dispatched shader's ``fc`` actually has
     those fields (codex pre-merge review).
 
-    Vulkan uses one oversized shared UBO, so appending the tail whenever MLT is
-    the integrator is harmless — only the MLT ``.spv`` reads the offsets. Metal
-    packs the blob per-dispatch and the drift guard asserts the blob length
-    equals the reflected ``fc`` size, so the tail is packed ONLY when the Metal
-    MLT wavefront pass is the real consumer: integrator 3, wavefront mode, and
-    the pass built. A megakernel-fallback MLT selection (execution mode !=
-    wavefront) or any non-MLT integrator gets the base layout, no tail —
-    otherwise runtime integrator cycling crashes uniform packing."""
+    ``reflected_uniform_layout`` is
+    :attr:`~skinny.gpu_backend.BackendCapabilities.has_reflected_record_layouts`
+    — pass the capability, never a vendor flag.
+
+    A backend without it (Vulkan) uses one oversized shared UBO, so appending
+    the tail whenever MLT is the integrator is harmless — only the MLT ``.spv``
+    reads the offsets. A backend with it (Metal) packs the blob per-dispatch and
+    the drift guard asserts the blob length equals the reflected ``fc`` size, so
+    the tail is packed ONLY when the MLT wavefront pass is the real consumer:
+    integrator 3, wavefront mode, and the pass built. A megakernel-fallback MLT
+    selection (execution mode != wavefront) or any non-MLT integrator gets the
+    base layout, no tail — otherwise runtime integrator cycling crashes uniform
+    packing."""
     if integrator_index != 3:
         return False
-    if not is_metal:
+    if not reflected_uniform_layout:
         return True
     return execution_mode_index == EXECUTION_WAVEFRONT and pass_built
 

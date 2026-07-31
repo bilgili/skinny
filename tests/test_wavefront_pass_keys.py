@@ -13,6 +13,8 @@ assert the stored `_wf_*_pass_dims` equals the hand-computed pre-carve-out key.
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 vk = pytest.importorskip("skinny.vk_wavefront")
@@ -34,6 +36,11 @@ class _StubRenderer:
                  graph_sig="g0", heavy=False, mlt_chains=16384,
                  mlt_bootstrap=8192):
         self.is_metal = is_metal
+        # The factories read `gpu_backend.capabilities(r.ctx)`, so the stub
+        # needs a context that names its backend (change gpu-backend-adapter).
+        self.ctx = types.SimpleNamespace(
+            backend_name="metal" if is_metal else "vulkan", is_metal=is_metal,
+            supports_shared_memory=False, supports_indirect_dispatch=False)
         self.width, self.height = width, height
         self._reuse_mode = reuse_mode
         self._neural = neural
