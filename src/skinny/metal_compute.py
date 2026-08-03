@@ -45,11 +45,14 @@ from skinny.shader_variants import Family, ShaderVariantKey, Target
 
 # Metal trims the bindless flat-material texture pool to fit Apple Metal's
 # 128-texture compute-argument limit alongside the discrete maps (design D8).
-# MUST equal the array dimension in `shaders/bindings.slang`'s `#if SKINNY_METAL`
-# branch (`Texture2D<float4> flatMaterialTextures[119]`). 119, not 120: the
-# 128-texture argument table is otherwise exactly full, and the volumeDensity
-# 3D grid (binding 26, nanovdb-volume-rendering) needs the last slot.
-BINDLESS_TEXTURE_CAPACITY = 119
+# The capacity has ONE home — `argument_budget`, which `test_argument_budget`
+# ties to the slangc-derived value (128 minus the discrete texture globals). This
+# adapter reads it through its backend capability, like the recording adapter,
+# rather than restating a literal. MUST still equal the array dimension in
+# `shaders/bindings.slang`'s `#if SKINNY_METAL` branch.
+from skinny.gpu_backend import METAL_CAPABILITIES  # noqa: E402
+
+BINDLESS_TEXTURE_CAPACITY = METAL_CAPABILITIES.bindless_texture_capacity
 
 # Slang globals for the shared sampler + the per-map samplers added on the Metal
 # target (design D8). Used by the renderer to bind them by name.

@@ -278,12 +278,16 @@ def test_bindless_capacity_matches_the_adapter_constant(backend):
                 for t in node.targets):
             value = node.value
     assert value is not None, f"{mod} lost BINDLESS_TEXTURE_CAPACITY"
+    caps_name = f"{backend.upper()}_CAPABILITIES"
     if isinstance(value, ast.Constant):
-        assert value.value == getattr(
-            gb, f"{backend.upper()}_CAPABILITIES").bindless_texture_capacity
+        assert value.value == getattr(gb, caps_name).bindless_texture_capacity
     else:
-        # `recording_compute` derives it from the record, which is the point.
-        assert "RECORDING_CAPABILITIES" in ast.unparse(value)
+        # Every adapter now DERIVES the capacity from its backend capability
+        # (whose one home is `argument_budget`) rather than restating a literal —
+        # change spectral-table-fold, task 1.3. `recording_compute` already did.
+        assert caps_name in ast.unparse(value), (
+            f"{mod} must derive BINDLESS_TEXTURE_CAPACITY from {caps_name}, "
+            f"got {ast.unparse(value)!r}")
 
 
 # ── 4. capability record ────────────────────────────────────────────────

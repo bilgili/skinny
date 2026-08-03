@@ -1,0 +1,76 @@
+{
+  "_comment": "slangc module-union census per registered Metal variant. Regenerate: python -c 'from skinny import argument_budget as a; a.write_baseline()'. Wavefront counts are a union upper bound (see argument_budget.hard_limit_enforced); the per-kernel <=31 truth is the gpu cross-check.",
+  "bindless_texture_capacity_metal": 119,
+  "variants": {
+    "megakernel": {
+      "buffer": 21,
+      "sampler": 7,
+      "texture": 128
+    },
+    "megakernel.spectral": {
+      "buffer": 28,
+      "sampler": 7,
+      "texture": 128
+    },
+    "preview": {
+      "buffer": 13,
+      "sampler": 3,
+      "texture": 125
+    },
+    "wf_bdpt": {
+      "buffer": 25,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_bdpt.spectral": {
+      "buffer": 31,
+      "sampler": 3,
+      "texture": 124
+    },
+    "wf_mlt": {
+      "buffer": 21,
+      "sampler": 3,
+      "texture": 124
+    },
+    "wf_mlt.spectral": {
+      "buffer": 28,
+      "sampler": 3,
+      "texture": 124
+    },
+    "wf_path": {
+      "buffer": 27,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_path.neural": {
+      "buffer": 28,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_path.records": {
+      "buffer": 25,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_path.spectral": {
+      "buffer": 34,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_path.spectral.records": {
+      "buffer": 32,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_sppm": {
+      "buffer": 20,
+      "sampler": 7,
+      "texture": 128
+    },
+    "wf_sppm.spectral": {
+      "buffer": 27,
+      "sampler": 7,
+      "texture": 128
+    }
+  }
+}

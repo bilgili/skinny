@@ -188,19 +188,21 @@ class _EntryPipeline:
         try:
             self.pipeline = ctx.device.create_compute_pipeline(program=self.program)
         except Exception as exc:
-            # Metal caps a kernel's buffer argument table at 31 slots; an
-            # overflow surfaces here as an opaque SLANG_FAIL from pipeline
-            # creation. Name the kernel and the program's global count so the
-            # failure is actionable (change metal-record-drain, design D2):
-            # the fix is compiling wavefront-dead globals out of this build
-            # flavor (see bindings.slang / path_record_common.slang gates).
+            # Metal caps a kernel's buffer argument table (the limit is owned by
+            # argument_budget, never restated here); an overflow surfaces as an
+            # opaque SLANG_FAIL from pipeline creation. Name the kernel and the
+            # program's global count so the failure is actionable (change
+            # metal-record-drain, design D2): the fix is compiling wavefront-dead
+            # globals out of this flavor (see bindings.slang gates). This is the
+            # runtime BACKSTOP for the hostless argument_budget census.
+            from skinny.argument_budget import METAL_BUFFER_LIMIT
             n_globals = len(list(self.program.layout.parameters))
             raise RuntimeError(
                 f"Metal compute pipeline for wavefront kernel {entry!r} failed "
                 f"to build ({exc}). The program declares {n_globals} globals — "
-                f"if this flavor exceeds Metal's 31-buffer-slot argument table, "
-                f"compile out wavefront-dead buffer globals for it "
-                f"(see the SKINNY_METAL_RECORDS gates, change metal-record-drain)."
+                f"if this flavor exceeds Metal's {METAL_BUFFER_LIMIT}-buffer-slot "
+                f"argument table, compile out wavefront-dead buffer globals for "
+                f"it (see the SKINNY_METAL_RECORDS gates, change metal-record-drain)."
             ) from exc
         self.global_names = {p.name for p in self.program.layout.parameters}
 

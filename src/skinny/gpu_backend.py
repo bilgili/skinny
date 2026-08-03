@@ -44,6 +44,11 @@ import ast
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from skinny.argument_budget import (
+    BINDLESS_TEXTURE_CAPACITY_METAL,
+    BINDLESS_TEXTURE_CAPACITY_VULKAN,
+)
+
 __all__ = [
     "BackendCapabilities",
     "VULKAN_CAPABILITIES",
@@ -160,7 +165,7 @@ VULKAN_CAPABILITIES = BackendCapabilities(
     has_megakernel_record_source=True,
     has_reflected_record_layouts=False,
     needs_watchdog_tiling=False,
-    bindless_texture_capacity=128,
+    bindless_texture_capacity=BINDLESS_TEXTURE_CAPACITY_VULKAN,
 )
 
 METAL_CAPABILITIES = BackendCapabilities(
@@ -179,7 +184,7 @@ METAL_CAPABILITIES = BackendCapabilities(
     has_megakernel_record_source=False,
     has_reflected_record_layouts=True,
     needs_watchdog_tiling=True,
-    bindless_texture_capacity=119,
+    bindless_texture_capacity=BINDLESS_TEXTURE_CAPACITY_METAL,
 )
 
 #: The recording adapter executes nothing, so it claims no device capability it
@@ -202,7 +207,7 @@ RECORDING_CAPABILITIES = BackendCapabilities(
     has_megakernel_record_source=False,
     has_reflected_record_layouts=False,
     needs_watchdog_tiling=False,
-    bindless_texture_capacity=119,
+    bindless_texture_capacity=BINDLESS_TEXTURE_CAPACITY_METAL,
 )
 
 _BY_NAME = {

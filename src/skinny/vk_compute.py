@@ -21,10 +21,13 @@ from skinny.vk_context import VulkanContext
 from skinny.wavefront_layout import mlt_binding_numbers
 
 
-# Hard cap on the bindless flat-material texture array (binding 14). Each
-# slot is one combined-image-sampler descriptor. Bumping this requires no
-# shader change but consumes more descriptor slots.
-BINDLESS_TEXTURE_CAPACITY = 128
+# Hard cap on the bindless flat-material texture array (binding 14). Each slot is
+# one combined-image-sampler descriptor. The capacity has ONE home —
+# `argument_budget`, via the backend capability, like the other adapters — not a
+# literal restated here.
+from skinny.gpu_backend import VULKAN_CAPABILITIES
+
+BINDLESS_TEXTURE_CAPACITY = VULKAN_CAPABILITIES.bindless_texture_capacity
 
 
 #: The one image-format vocabulary both adapters speak. Declared here and in
