@@ -331,7 +331,6 @@ EMISSIVE_TRI_CAPACITY = 256
 # (temperature_K, scale) per emissive triangle, parallel-indexed to binding 18.
 # 8 B / record. A blackbody emitter carries (T, blackbody_scale(T, emission));
 # a plain-RGB emitter carries (0, 0) so the shader falls back to the RGB upsample.
-SPECTRAL_EMITTER_STRIDE = 8
 
 
 # Tool-buffer (binding 30) dispatch modes. Slot 0.x of the tool buffer selects
@@ -2749,6 +2748,20 @@ class Renderer:
                 np.concatenate(metal_blocks), dtype=np.float32),
         }
 
+    def _emissive_tri_stride(self) -> int:
+        """Bytes per EmissiveTriangle record: 80 in the spectral build (the
+        inline blackbody row, change spectral-table-fold) else 64. All fields are
+        `float4`, so scalar and MSL strides agree on both backends."""
+        return slang_layout.scalar_stride("EmissiveTriangle",
+                                          spectral=self._spectral)
+
+    def _flat_material_stride(self) -> int:
+        """Bytes per FlatMaterialParams record: 272 in the spectral build (the
+        inline blackbody row, change spectral-table-fold) else 256. All added
+        rows are `float4`, so scalar and MSL strides agree on both backends."""
+        return slang_layout.scalar_stride("FlatMaterialParams",
+                                          spectral=self._spectral)
+
     def _spectral_tables_layout(self, arrays: dict) -> tuple[dict, int]:
         """Region byte offsets + total size of the combined `spectralTables`
         buffer (change spectral-table-fold). Five regions, each 16-byte aligned,
@@ -2850,15 +2863,14 @@ class Renderer:
             neural_header_bytes=len(self._neural_dummy_header_bytes),
             neural_external=external, neural_shared=shared,
             record_stride=RECORD_STRIDE,
-            flat_material_stride=FLAT_MATERIAL_STRIDE,
+            flat_material_stride=self._flat_material_stride(),
             std_surface_stride=STD_SURFACE_STRIDE,
             sphere_light_capacity=SPHERE_LIGHT_CAPACITY,
             sphere_light_stride=SPHERE_LIGHT_STRIDE,
             distant_light_capacity=DISTANT_LIGHT_CAPACITY,
             distant_light_stride=DISTANT_LIGHT_STRIDE,
-            emissive_tri_stride=EMISSIVE_TRI_STRIDE,
+            emissive_tri_stride=self._emissive_tri_stride(),
             instance_stride=INSTANCE_STRIDE,
-            spectral_emitter_stride=SPECTRAL_EMITTER_STRIDE,
             spectral_light_spd_stride=SPECTRAL_LIGHT_SPD_STRIDE,
             spectral_tables_bytes=self._spectral_tables_total_bytes(
                 spectral_arrays),
@@ -3029,17 +3041,12 @@ class Renderer:
         self._num_instances = 1
         # Flat-material parameters — one zeroed record so the buffer is valid
         # even before any USD scene is loaded.
-        self.flat_material_buffer.upload_sync(b"\x00" * FLAT_MATERIAL_STRIDE)
+        self.flat_material_buffer.upload_sync(
+            b"\x00" * self._flat_material_stride())
         self._num_flat_materials = 0
-        # Per-material blackbody emission (binding 51, Group 6.1 follow-up),
-        # spectral variant only: float2 (temperature_K, scale) per flat material,
-        # indexed by materialId. Lets a camera-visible / BSDF-hit blackbody emitter
-        # use the exact Planck SPD (matching NEE) instead of the RGB upsample.
-        # Sized/grown parallel to flat_material_buffer; zeros ⇒ RGB upsample.
-        if self._spectral:
-            self._spectral_mat_emission_buffer.upload_sync(
-                b"\x00" * (self.material_capacity * SPECTRAL_EMITTER_STRIDE)
-            )
+        # (The per-material blackbody (temperature, scale) rides inline in
+        # FlatMaterialParams' fifteenth row now — change spectral-table-fold, D2;
+        # no separate buffer to zero here. _upload_flat_materials packs it.)
         # Per-material type codes (binding 16), one uint per slot, rewritten each
         # time _upload_flat_materials runs. Seeded with MATERIAL_TYPE_FLAT so no
         # slot defaults to skin.
@@ -3088,16 +3095,12 @@ class Renderer:
         # material has non-zero emissiveColor. The shader samples one triangle
         # per pixel per frame for next-event estimation.
         self.emissive_tri_buffer.upload_sync(
-            b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
+            b"\x00" * (self.emissive_tri_capacity * self._emissive_tri_stride())
         )
         self._num_emissive_tris: int = 0
-        # Spectral emitter metadata (binding 49): float2 (T, scale) per triangle,
-        # sized/grown parallel to emissive_tri_buffer. Spectral variant only, so
-        # the RGB descriptor layout stays byte-identical.
-        if self._spectral:
-            self._spectral_emitters_buffer.upload_sync(
-                b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
-            )
+        # (The per-emitter blackbody (temperature, scale) rides in the
+        # EmissiveTriangle record's fifteenth row now — change spectral-table-fold,
+        # D2; the zero-fill above covers it via the 80 B spectral stride.)
         # Σ(area·Rec709-lum) over emissive triangles → FrameConstants.emissiveTotalPower
         # (the path tracer's BSDF-hit MIS weight). Set in _upload_emissive_triangles.
         self._emissive_total_power: float = 0.0
@@ -4730,12 +4733,9 @@ class Renderer:
             # the inline CDF is never read.
             self._num_emissive_tris = 0
             self._emissive_total_power = 0.0
-            zeros = b"\x00" * (self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE)
+            zeros = b"\x00" * (self.emissive_tri_capacity
+                               * self._emissive_tri_stride())
             self.emissive_tri_buffer.upload_sync(zeros)
-            if self._spectral and self._spectral_emitters_buffer is not None:
-                self._spectral_emitters_buffer.upload_sync(
-                    b"\x00" * (self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE)
-                )
             return
 
         # Grow the buffer to hold every emissive triangle, doubling capacity like
@@ -4746,18 +4746,18 @@ class Renderer:
         if n > self.emissive_tri_capacity:
             self.emissive_tri_capacity = max(n, self.emissive_tri_capacity * 2)
             self._gpu_set.regrow(
-                "emissive_tri_buffer", "_spectral_emitters_buffer",
-                descriptor_sets=self.descriptor_sets,
-            )
+                "emissive_tri_buffer", descriptor_sets=self.descriptor_sets)
 
+        # The record is 80 B in the spectral build (the fifteenth `float4`
+        # _spectralTempScale row carries (temperature, scale)) and 64 B in RGB —
+        # change spectral-table-fold moved the former spectralEmitters buffer
+        # (binding 49) inline here.
+        tri_stride = self._emissive_tri_stride()
         uniform = bool(getattr(self, "_emissive_uniform_selection", False))
         data = bytearray()
-        spectral_data = bytearray()   # binding 49: (T, scale) parallel to `data`
         cum = 0.0
         for i in range(n):
             p0, p1, p2, em, area, bb_temp, bb_scale = records[i]
-            if self._spectral:
-                spectral_data += struct.pack("ff", float(bb_temp), float(bb_scale))
             if uniform:
                 # Test A/B: uniform-by-index — the same shader path then
                 # reproduces exact 1/N selection.
@@ -4774,19 +4774,17 @@ class Renderer:
                 float(p2[0]), float(p2[1]), float(p2[2]), 0.0,
                 float(em[0]), float(em[1]), float(em[2]), float(area),
             )
+            if self._spectral:  # _spectralTempScale row (xy=temp,scale; zw pad)
+                data += struct.pack("ffff", float(bb_temp), float(bb_scale),
+                                    0.0, 0.0)
         # Pin the final CDF entry to exactly 1.0 (guards float round-off so the
         # binary search always resolves a valid index for u → 1⁻).
         if not uniform and n > 0:
-            struct.pack_into("f", data, (n - 1) * EMISSIVE_TRI_STRIDE + 12, 1.0)
-        cap_bytes = self.emissive_tri_capacity * EMISSIVE_TRI_STRIDE
+            struct.pack_into("f", data, (n - 1) * tri_stride + 12, 1.0)
+        cap_bytes = self.emissive_tri_capacity * tri_stride
         while len(data) < cap_bytes:
-            data += b"\x00" * EMISSIVE_TRI_STRIDE
+            data += b"\x00" * tri_stride
         self.emissive_tri_buffer.upload_sync(bytes(data[:cap_bytes]))
-        if self._spectral and self._spectral_emitters_buffer is not None:
-            sp_cap = self.emissive_tri_capacity * SPECTRAL_EMITTER_STRIDE
-            while len(spectral_data) < sp_cap:
-                spectral_data += b"\x00" * SPECTRAL_EMITTER_STRIDE
-            self._spectral_emitters_buffer.upload_sync(bytes(spectral_data[:sp_cap]))
         self._num_emissive_tris = n
         print(f"[skinny] emissive triangles: {n}"
               + (" (uniform selection)" if uniform else " (power-weighted NEE)"))
@@ -4982,7 +4980,6 @@ class Renderer:
             self._gpu_set.regrow(
                 "flat_material_buffer", "material_types_buffer",
                 "mtlx_skin_buffer", "std_surface_buffer",
-                "_spectral_mat_emission_buffer",
                 descriptor_sets=self.descriptor_sets,
             )
         # Python-material slots route through MATERIAL_TYPE_PYTHON, but
@@ -4995,26 +4992,13 @@ class Renderer:
 
         data = bytearray()
         types: list[int] = []
-        spectral_emis = bytearray()   # binding 51: (T, scale) parallel to `data`
+        # The per-material blackbody (temperature, scale) now rides inline in each
+        # FlatMaterialParams record — pack_flat_material computes it from
+        # `emissive_spectral` (change spectral-table-fold, D2). No parallel buffer.
         for i, mat in enumerate(materials):
-            # Spectral (Group 6.1 follow-up): per-material blackbody (T, scale) for
-            # the exact-Planck visible/BSDF-hit emission path. Appended for EVERY
-            # material (before any `continue`) to stay parallel-indexed to materialId.
-            if self._spectral:
-                bb_t, bb_s = 0.0, 0.0
-                _bp = mat.parameter_overrides.get("emissive_spectral")
-                if (_bp is not None and hasattr(_bp, "get")
-                        and _bp.get("kind") == "blackbody"):
-                    bb_t = float(_bp.get("temperature", 0.0) or 0.0)
-                    if bb_t > 0.0:
-                        from skinny.pbrt import spectral as _sp
-                        _em = _override_color3(
-                            mat.parameter_overrides, "emissiveColor", (0.0, 0.0, 0.0))
-                        bb_s = float(_sp.blackbody_scale(bb_t, _em))
-                spectral_emis += struct.pack("ff", bb_t, bb_s)
             if mat.mtlx_target_name == "M_skinny_skin_default":
                 types.append(MATERIAL_TYPE_SKIN)
-                data += b"\x00" * FLAT_MATERIAL_STRIDE
+                data += b"\x00" * self._flat_material_stride()
                 continue
             mod = getattr(mat, "python_module", None)
             if mod and mod in py_ids:
@@ -5120,16 +5104,12 @@ class Renderer:
                 spectral=self._spectral,
             )
         if not data:
-            data += b"\x00" * FLAT_MATERIAL_STRIDE
+            data += b"\x00" * self._flat_material_stride()
             types.append(MATERIAL_TYPE_FLAT)
         self.flat_material_buffer.upload_sync(bytes(data))
-        if self._spectral and self._spectral_mat_emission_buffer is not None:
-            sp_cap = self.material_capacity * SPECTRAL_EMITTER_STRIDE
-            if not spectral_emis:
-                spectral_emis += struct.pack("ff", 0.0, 0.0)
-            while len(spectral_emis) < sp_cap:
-                spectral_emis += b"\x00" * SPECTRAL_EMITTER_STRIDE
-            self._spectral_mat_emission_buffer.upload_sync(bytes(spectral_emis[:sp_cap]))
+        # (The per-material blackbody now rides in each FlatMaterialParams record
+        # — packed by pack_flat_material above — so there is no separate
+        # spectralMatEmission buffer to upload; change spectral-table-fold, D2.)
         self._num_flat_materials = len(materials)
         self._material_types = types
         # Spectral v1 is FLAT-only: the megakernel spectral integrator

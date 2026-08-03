@@ -9,6 +9,19 @@ import common;
 [[vk::binding(17)]] StructuredBuffer<SphereLight>      sphereLights;
 [[vk::binding(18)]] StructuredBuffer<EmissiveTriangle>  emissiveTriangles;
 
+#if defined(SKINNY_SPECTRAL)
+// Per-emissive-triangle blackbody (temperature_K, scale). Rides inline in the
+// EmissiveTriangle record's fifteenth float4 row (change spectral-table-fold,
+// D2) — no separate buffer. A blackbody area light carries (T>0,
+// blackbody_scale(T, emission)); a plain-RGB emitter carries (0, 0) so the
+// transport falls back to the RGB illuminant upsample. Lives here, beside the
+// emissiveTriangles buffer it reads, rather than in bindings.slang.
+float2 emitterBlackbody(uint idx)
+{
+    return emissiveTriangles[idx].blackbody;
+}
+#endif
+
 // Power-weighted emissive-triangle selection (change emissive-mesh-nee). Binary
 // search over the inclusive cumulative-power CDF packed in each record's `cw`
 // lane: returns the smallest i with cw[i] > u (same upper-bound shape as the env

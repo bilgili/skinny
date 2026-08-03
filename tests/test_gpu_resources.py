@@ -60,7 +60,7 @@ CAPTURED_SIZES = dict(
     sphere_light_capacity=16, sphere_light_stride=32,
     distant_light_capacity=16, distant_light_stride=32,
     emissive_tri_stride=64, instance_stride=144,
-    spectral_emitter_stride=8, spectral_light_spd_stride=380,
+    spectral_light_spd_stride=380,
     # Combined spectral-table buffer (change spectral-table-fold): the five
     # 16-byte-aligned regions summed — scale 256 + sigmoid grid 9437184 + D65 384
     # + metals 5328 + lightSpd (16·380=)6080.

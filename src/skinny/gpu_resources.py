@@ -148,7 +148,6 @@ class ResourceSizes:
     distant_light_stride: int
     emissive_tri_stride: int
     instance_stride: int
-    spectral_emitter_stride: int
     spectral_light_spd_stride: int
     # Total byte size of the combined `_spectral_tables_buffer` (change
     # spectral-table-fold): the five 16-byte-aligned regions summed. The renderer
@@ -283,15 +282,14 @@ DECLARATIONS: tuple[ResourceDecl, ...] = (
         binding=12, metal="instances", descriptor=BUFFER,
     ),
     ResourceDecl(
+        # The per-material blackbody (temperature, scale), formerly the separate
+        # spectralMatEmission buffer (binding 51), is now the fifteenth float4 row
+        # of FlatMaterialParams in the spectral build (change spectral-table-fold,
+        # D2). So this buffer's stride is 272 B under SKINNY_SPECTRAL, 256 B in
+        # RGB — the renderer's `flat_material_stride` carries that.
         "flat_material_buffer", "StorageBuffer",
         lambda s: (s.material_capacity * s.flat_material_stride + 256,),
         binding=13, metal="flatMaterials", descriptor=BUFFER,
-    ),
-    ResourceDecl(
-        "_spectral_mat_emission_buffer", "StorageBuffer",
-        lambda s: (s.material_capacity * s.spectral_emitter_stride + 16,),
-        binding=51, metal="spectralMatEmission", descriptor=BUFFER,
-        spectral=True,
     ),
     ResourceDecl(
         "material_types_buffer", "StorageBuffer",
@@ -313,14 +311,14 @@ DECLARATIONS: tuple[ResourceDecl, ...] = (
     # fixed distant-light capacity means it never regrows, so it merges safely;
     # the renderer re-uploads only its region in place when the lights change.)
     ResourceDecl(
+        # The per-emitter blackbody (temperature, scale), formerly the separate
+        # spectralEmitters buffer (binding 49), is now the fifth float4 row of the
+        # EmissiveTriangle record in the spectral build (change
+        # spectral-table-fold, D2). So `emissive_tri_stride` is 80 B under
+        # SKINNY_SPECTRAL, 64 B in RGB.
         "emissive_tri_buffer", "StorageBuffer",
         lambda s: (s.emissive_tri_capacity * s.emissive_tri_stride + 16,),
         binding=18, metal="emissiveTriangles", descriptor=BUFFER,
-    ),
-    ResourceDecl(
-        "_spectral_emitters_buffer", "StorageBuffer",
-        lambda s: (s.emissive_tri_capacity * s.spectral_emitter_stride + 16,),
-        binding=49, metal="spectralEmitters", descriptor=BUFFER, spectral=True,
     ),
     ResourceDecl(
         "std_surface_buffer", "StorageBuffer",
@@ -421,8 +419,6 @@ VULKAN_WRITE_SEQUENCE: tuple[str, ...] = (
     # two per-record emission arrays (49, 51) remain until group 4 folds them
     # into their parent records.
     "_spectral_tables_buffer",
-    "_spectral_emitters_buffer",
-    "_spectral_mat_emission_buffer",
 )
 
 # MLT chain buffers: only the wavefront (`scene_bindings_only`) layout declares
@@ -458,8 +454,6 @@ DESTROY_SEQUENCE: tuple[str, ...] = (
     "volume_density_image",
     "env_dist_buffer",
     "_spectral_tables_buffer",
-    "_spectral_emitters_buffer",
-    "_spectral_mat_emission_buffer",
     "hud_overlay",
     "accum_image",
     "_offscreen_output",

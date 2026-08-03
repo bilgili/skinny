@@ -8,7 +8,7 @@
       "texture": 128
     },
     "megakernel.spectral": {
-      "buffer": 24,
+      "buffer": 22,
       "sampler": 7,
       "texture": 128
     },
@@ -23,7 +23,7 @@
       "texture": 128
     },
     "wf_bdpt.spectral": {
-      "buffer": 27,
+      "buffer": 25,
       "sampler": 3,
       "texture": 124
     },
@@ -33,7 +33,7 @@
       "texture": 124
     },
     "wf_mlt.spectral": {
-      "buffer": 24,
+      "buffer": 22,
       "sampler": 3,
       "texture": 124
     },
@@ -53,12 +53,12 @@
       "texture": 128
     },
     "wf_path.spectral": {
-      "buffer": 30,
+      "buffer": 28,
       "sampler": 7,
       "texture": 128
     },
     "wf_path.spectral.records": {
-      "buffer": 28,
+      "buffer": 26,
       "sampler": 7,
       "texture": 128
     },
@@ -68,7 +68,7 @@
       "texture": 128
     },
     "wf_sppm.spectral": {
-      "buffer": 23,
+      "buffer": 21,
       "sampler": 7,
       "texture": 128
     }

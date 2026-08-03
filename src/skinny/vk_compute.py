@@ -686,28 +686,23 @@ class ComputePipeline:
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             ),
         ]
-        # bindings 45/46/47: spectral hero-wavelength upsample data — the pbrt
-        # sRGB→spectrum sigmoid-coefficient table scale grid / data cube and the
-        # CIE D65 illuminant SPD (spectralScale / spectralData / spectralD65).
-        # binding 48: named-conductor eta/k curves (spectralMetals, Group 6.2).
-        # binding 49: per-emissive-triangle blackbody (T, scale) (spectralEmitters,
-        # Group 6.1), parallel-indexed to the emissive-triangle buffer (binding 18).
-        # binding 50: per-distant-light authored illuminant SPD (spectralLightSpd,
-        # Group 6.3), 95 floats/light indexed by the DistantLight `_direction.w` slot.
-        # binding 51: per-material blackbody (T, scale) (spectralMatEmission, Group
-        # 6.1 follow-up), indexed by materialId for exact-Planck visible/BSDF-hit
-        # emission. Declared only for the `-DSKINNY_SPECTRAL` megakernel variant so
-        # the RGB layout is byte-identical; consumed by spectrum.slang.
+        # binding 45: the ONE combined spectral-table buffer (change
+        # spectral-table-fold) — `spectralTables`, a ByteAddressBuffer holding the
+        # five formerly-separate read-only tables (scale / sigmoid grid / D65 /
+        # named-conductor eta+k / per-light SPDs) end to end. Bindings 46-51 are
+        # freed: 46-48 and 50 merged into 45; the two per-record blackbody
+        # (T, scale) values (formerly 49/51) moved inline into the EmissiveTriangle
+        # and FlatMaterialParams records. Declared only for the `-DSKINNY_SPECTRAL`
+        # megakernel variant so the RGB layout is byte-identical.
         if self.spectral:
-            for _spectral_binding in (45, 46, 47, 48, 49, 50, 51):
-                bindings.append(
-                    vk.VkDescriptorSetLayoutBinding(
-                        binding=_spectral_binding,
-                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        descriptorCount=1,
-                        stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
-                    )
+            bindings.append(
+                vk.VkDescriptorSetLayoutBinding(
+                    binding=45,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    descriptorCount=1,
+                    stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
                 )
+            )
         # MLT chain buffers (change mlt-integrator/spectral-mlt) — declared only
         # for the wavefront layout (see `self.mlt_bindings`) so the MLT stage
         # pipelines can bind the shared scene descriptor set; the renderer

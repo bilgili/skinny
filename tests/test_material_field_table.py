@@ -50,20 +50,24 @@ class _Mat:
 # ── Transposition gate ───────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("spectral", [False, True])
 @pytest.mark.parametrize("record", RECORDS)
 @pytest.mark.parametrize("dialect", ("scalar", "msl"))
-def test_field_offsets_match_the_permanent_golden(record, dialect):
-    want = GOLDEN[f"{record}.{dialect}"]
-    got = slang_layout.material_field_offsets(record, msl=dialect == "msl")
+def test_field_offsets_match_the_permanent_golden(record, dialect, spectral):
+    key = f"{record}.{dialect}" + (".spectral" if spectral else "")
+    want = GOLDEN[key]
+    got = slang_layout.material_field_offsets(record, msl=dialect == "msl",
+                                              spectral=spectral)
     assert got == want["offsets"]
     stride = (slang_layout.msl_stride if dialect == "msl"
-              else slang_layout.scalar_stride)(record)
+              else slang_layout.scalar_stride)(record, spectral=spectral)
     assert stride == want["stride"]
 
 
+@pytest.mark.parametrize("spectral", [False, True])
 @pytest.mark.parametrize("record", RECORDS)
-def test_fields_tile_the_stride_with_no_gap_or_overlap(record):
-    slang_layout.check_material_record(record)
+def test_fields_tile_the_stride_with_no_gap_or_overlap(record, spectral):
+    slang_layout.check_material_record(record, spectral=spectral)
 
 
 def test_transposing_two_same_typed_fields_fails_the_gate(monkeypatch):
@@ -87,6 +91,29 @@ def test_transposing_two_same_typed_fields_fails_the_gate(monkeypatch):
     got = slang_layout.material_field_offsets("FlatMaterialParams")
     assert got != GOLDEN["FlatMaterialParams.scalar"]["offsets"]
     assert got["roughness"] == 16 and got["metallic"] == 12
+
+
+def test_transposing_the_spectral_field_fails_the_gate(monkeypatch):
+    """Negative control for the spectral-only fifteenth row (change
+    spectral-table-fold, task 4.5). `materialTemperature` (lane 0) and
+    `_spectralMatPad2` (lane 2) are both floats in `_spectralTempScale`; swapping
+    their lanes moves both offsets, and the spectral golden catches it — while the
+    RGB layout, which has neither field, stays byte-identical."""
+    fields = list(slang_layout.FLAT_MATERIAL_FIELDS)
+    i = next(n for n, f in enumerate(fields) if f.name == "materialTemperature")
+    j = next(n for n, f in enumerate(fields) if f.name == "_spectralMatPad2")
+    a, b = fields[i], fields[j]
+    fields[i] = slang_layout.MaterialField(a.name, a.row, b.lane, a.kind,
+                                           a.default, spectral=True)
+    fields[j] = slang_layout.MaterialField(b.name, b.row, a.lane, b.kind,
+                                           b.default, spectral=True)
+    monkeypatch.setattr(slang_layout, "FLAT_MATERIAL_FIELDS", tuple(fields))
+    # RGB is untouched (neither field is in it); spectral offsets have moved.
+    assert (slang_layout.material_field_offsets("FlatMaterialParams")
+            == GOLDEN["FlatMaterialParams.scalar"]["offsets"])
+    got = slang_layout.material_field_offsets("FlatMaterialParams", spectral=True)
+    assert got != GOLDEN["FlatMaterialParams.scalar.spectral"]["offsets"]
+    assert got["materialTemperature"] == 264 and got["_spectralMatPad2"] == 256
 
 
 def test_a_field_naming_a_row_the_shader_lacks_is_refused(monkeypatch):
@@ -114,11 +141,14 @@ def test_packing_an_unknown_field_name_raises():
         slang_layout.pack_material_record("FlatMaterialParams", {"rooughness": 1.0})
 
 
+@pytest.mark.parametrize("spectral", [False, True])
 @pytest.mark.parametrize("record", RECORDS)
-def test_omitted_fields_take_the_table_default(record):
-    rec = slang_layout.pack_material_record(record, {})
-    offsets = slang_layout.material_field_offsets(record)
+def test_omitted_fields_take_the_table_default(record, spectral):
+    rec = slang_layout.pack_material_record(record, {}, spectral=spectral)
+    offsets = slang_layout.material_field_offsets(record, spectral=spectral)
     for f in slang_layout.material_fields(record):
+        if f.spectral and not spectral:
+            continue
         off = offsets[f.name]
         if f.kind == "uint":
             got = struct.unpack_from("<I", rec, off)[0]
@@ -132,11 +162,16 @@ def test_omitted_fields_take_the_table_default(record):
             assert got == pytest.approx(tuple(float(c) for c in f.default)), f.name
 
 
-def test_every_field_lands_where_the_table_says():
+@pytest.mark.parametrize("spectral", [False, True])
+def test_every_field_lands_where_the_table_says(spectral):
     """Write one distinguishable value per field, then read each back at its
-    golden offset. Catches a packer that agrees with the table by accident."""
+    golden offset. Catches a packer that agrees with the table by accident. Run
+    for both builds so the spectral-only fifteenth row (change
+    spectral-table-fold) is covered too."""
+    active = [f for f in slang_layout.FLAT_MATERIAL_FIELDS
+              if spectral or not f.spectral]
     values, expect = {}, {}
-    for n, f in enumerate(slang_layout.FLAT_MATERIAL_FIELDS):
+    for n, f in enumerate(active):
         if f.kind == "uint":
             v = 0x1000 + n
         elif f.kind == "float":
@@ -145,10 +180,13 @@ def test_every_field_lands_where_the_table_says():
             v = tuple(100.0 + n + 0.25 * k for k in range(f.lanes))
         values[f.name] = v
         expect[f.name] = v
-    rec = slang_layout.pack_material_record("FlatMaterialParams", values)
-    assert len(rec) == slang_layout.scalar_stride("FlatMaterialParams")
-    offsets = GOLDEN["FlatMaterialParams.scalar"]["offsets"]
-    for f in slang_layout.FLAT_MATERIAL_FIELDS:
+    rec = slang_layout.pack_material_record("FlatMaterialParams", values,
+                                            spectral=spectral)
+    assert len(rec) == slang_layout.scalar_stride("FlatMaterialParams",
+                                                  spectral=spectral)
+    key = "FlatMaterialParams.scalar" + (".spectral" if spectral else "")
+    offsets = GOLDEN[key]["offsets"]
+    for f in active:
         off = offsets[f.name]
         if f.kind == "uint":
             assert struct.unpack_from("<I", rec, off)[0] == expect[f.name], f.name

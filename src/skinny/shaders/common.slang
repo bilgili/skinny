@@ -106,6 +106,14 @@ struct FlatMaterialParams
     // For the cloud the worldToUvw rows map world → medium-local [0,1]³
     // (identical semantics to the grid's texel space; no texture involved).
     float4 _cloudDensityWispinessFrequency; // 240..256 x=density y=wispiness z=frequency w=pad
+#if defined(SKINNY_SPECTRAL)
+    // Per-material blackbody (temperature_K, scale), moved inline from the former
+    // `spectralMatEmission` buffer (binding 51) into this record (change
+    // spectral-table-fold, D2). temperature == 0 ⇒ not a blackbody. A fifteenth
+    // float4 row present ONLY in the SKINNY_SPECTRAL build; the RGB record stays
+    // 256 B and byte-identical (bytes appended, never shifted).
+    float4 _spectralTempScale;              // 256..272 xy = (temperature, scale)
+#endif
 
     property float3 diffuseColor      { get { return _diffuseColorRoughness.xyz; } }
     property float  roughness         { get { return _diffuseColorRoughness.w; } }
@@ -211,6 +219,13 @@ struct EmissiveTriangle
     float4 _v1;              // xyz = v1,  w = pSel (per-triangle selection prob p_i)
     float4 _v2;              // xyz = v2
     float4 _emissionArea;    // xyz = emission, w = area
+#if defined(SKINNY_SPECTRAL)
+    // Per-emitter blackbody (temperature_K, scale), moved inline from the former
+    // `spectralEmitters` buffer (binding 49) into this record (change
+    // spectral-table-fold, D2). temperature == 0 ⇒ not a blackbody. Only in the
+    // SKINNY_SPECTRAL build; the RGB record stays 64 B and byte-identical.
+    float4 _spectralTempScale;   // xy = (temperature, scale); zw unused
+#endif
 
     property float3 v0       { get { return _v0.xyz; } }
     property float3 v1       { get { return _v1.xyz; } }
@@ -225,6 +240,9 @@ struct EmissiveTriangle
     // selection probability consumed as the light's selectionPdf.
     property float  cw       { get { return _v0.w; } }
     property float  pSel     { get { return _v1.w; } }
+#if defined(SKINNY_SPECTRAL)
+    property float2 blackbody { get { return _spectralTempScale.xy; } }
+#endif
 };
 
 // Distant (directional) light record. `direction` points TOWARD the light

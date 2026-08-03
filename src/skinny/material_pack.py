@@ -376,6 +376,22 @@ def pack_flat_material(
         if rows is not None:
             m = np.asarray([float(v) for v in np.ravel(rows)], np.float32).reshape(3, 4)
             w2u = tuple(tuple(float(v) for v in row) for row in m)
+    # Per-material blackbody (temperature, scale), moved inline from the former
+    # spectralMatEmission buffer into FlatMaterialParams' fifteenth row (change
+    # spectral-table-fold, D2). Spectral build only; (0, 0) ⇒ not a blackbody, so
+    # the transport keeps the RGB illuminant upsample. The value fields are
+    # supplied only when spectral (they do not exist in the RGB record).
+    spectral_fields: dict = {}
+    if spectral:
+        bb_t = bb_s = 0.0
+        _bp = overrides.get("emissive_spectral")
+        if _bp is not None and hasattr(_bp, "get") and _bp.get("kind") == "blackbody":
+            bb_t = float(_bp.get("temperature", 0.0) or 0.0)
+            if bb_t > 0.0:
+                from skinny.pbrt import spectral as _sp
+                bb_s = float(_sp.blackbody_scale(bb_t, emissive))
+        spectral_fields = {"materialTemperature": bb_t,
+                           "materialBlackbodyScale": bb_s}
     return slang_layout.pack_material_record("FlatMaterialParams", {
         "diffuseColor": diffuse,
         "roughness": roughness,
@@ -413,7 +429,8 @@ def pack_flat_material(
         "cloudDensity": cloud_density,
         "cloudWispiness": cloud_wispiness,
         "cloudFrequency": cloud_frequency,
-    })
+        **spectral_fields,
+    }, spectral=spectral)
 
 
 def pack_std_surface_params(material) -> bytes:

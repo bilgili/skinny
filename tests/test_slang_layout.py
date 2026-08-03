@@ -34,7 +34,11 @@ _SCALAR_GOLDENS = [
     ("MltChainMeta", {}, 32),
     ("MltRecord", {}, 16),
     ("FlatMaterialParams", {}, 256),
+    # +16 B fifteenth float4 row (inline blackbody, change spectral-table-fold).
+    ("FlatMaterialParams", {"spectral": True}, 272),
     ("StdSurfaceParams", {}, 256),
+    ("EmissiveTriangle", {}, 64),                          # RGB
+    ("EmissiveTriangle", {"spectral": True}, 80),          # +16 B blackbody row
 ]
 
 # (struct, kwargs, golden MSL stride) — scalar/MSL axis.
@@ -48,6 +52,9 @@ _MSL_GOLDENS = [
     ("MltPrimarySample", {}, 16),
     ("MltChainMeta", {}, 32),
     ("MltRecord", {}, 16),
+    ("EmissiveTriangle", {}, 64),
+    ("EmissiveTriangle", {"spectral": True}, 80),
+    ("FlatMaterialParams", {"spectral": True}, 272),
 ]
 
 
@@ -78,6 +85,10 @@ _DECLARED_FIELD_GOLDENS = {
     ("MltRecord", ()): [('uint', 'pixel'), ('float', 'r'), ('float', 'g'), ('float', 'b')],
     ("Camera", ()): [('float4x4', 'viewInverse'), ('float4x4', 'projInverse'), ('float4x4', 'view'), ('float4x4', 'proj'), ('float3', 'position'), ('float', 'fov')],
     ("SampledWavelengths", ()): [('float4', 'lambda'), ('float4', 'pdf')],
+    ("EmissiveTriangle", ()): [('float4', '_v0'), ('float4', '_v1'), ('float4', '_v2'), ('float4', '_emissionArea')],
+    # +_spectralTempScale (xy = temperature, scale) under SKINNY_SPECTRAL —
+    # change spectral-table-fold, D2. The RGB record above is byte-unchanged.
+    ("EmissiveTriangle", ('spectral',)): [('float4', '_v0'), ('float4', '_v1'), ('float4', '_v2'), ('float4', '_emissionArea'), ('float4', '_spectralTempScale')],
 }
 
 

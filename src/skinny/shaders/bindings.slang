@@ -162,20 +162,8 @@ void namedMetalEtaK(uint metalId, SampledWavelengths sw, out float4 eta, out flo
     }
 }
 
-// Per-emissive-triangle blackbody metadata (change spectral-rendering, Group 6.1).
-// vk binding 49; uploaded only when spectral, parallel-indexed to the emissive-
-// triangle buffer (binding 18). Two floats/record: (temperature_K, scale). A
-// blackbody area light carries (T>0, blackbody_scale(T, emission)); a plain-RGB
-// emitter carries (0, 0) so the transport falls back to the RGB illuminant
-// upsample. Absent from the RGB build.
-[[vk::binding(49)]] StructuredBuffer<float> spectralEmitters;
-
-// (temperature, scale) for emissive triangle `idx`. temperature == 0 ⇒ not a
-// blackbody (caller upsamples the RGB radiance instead).
-float2 emitterBlackbody(uint idx)
-{
-    return float2(spectralEmitters[idx * 2u], spectralEmitters[idx * 2u + 1u]);
-}
+// (emitterBlackbody moved to scene_lights.slang, beside the emissiveTriangles
+// buffer it reads — change spectral-table-fold. Binding 49 freed.)
 
 // Per-distant-light authored illuminant SPD (change spectral-rendering, Group 6.3).
 // vk binding 50; uploaded only when spectral. 95 floats/light on the 360-830/5 nm
@@ -203,16 +191,14 @@ Spectrum distantLightSpd(int slot, SampledWavelengths sw)
     return s;
 }
 
-// Per-material blackbody (temperature, scale) (change spectral-rendering, Group
-// 6.1 follow-up). vk binding 51; uploaded only when spectral, indexed by
-// materialId. temperature == 0 ⇒ not a blackbody (caller keeps the RGB upsample).
-// Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD,
-// matching the NEE path (spectralEmitters). Absent from the RGB build.
-[[vk::binding(51)]] StructuredBuffer<float> spectralMatEmission;
-
+// Per-material blackbody (temperature, scale). Moved inline into the fifteenth
+// float4 row of FlatMaterialParams (change spectral-table-fold, D2) — no separate
+// buffer (binding 51 freed). temperature == 0 ⇒ not a blackbody (caller keeps the
+// RGB upsample). Lets a camera-visible / BSDF-hit blackbody emitter use the exact
+// Planck SPD, matching the NEE path (emitterBlackbody). Absent from the RGB build.
 float2 materialBlackbody(uint matId)
 {
-    return float2(spectralMatEmission[matId * 2u], spectralMatEmission[matId * 2u + 1u]);
+    return flatMaterials[matId]._spectralTempScale.xy;
 }
 #endif
 // BXDF visualizer output. Host-visible RWStructuredBuffer<float4>. Layout:

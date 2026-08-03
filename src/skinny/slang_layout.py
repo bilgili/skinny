@@ -83,6 +83,7 @@ STRUCT_SOURCES: dict[str, str] = {
     "FrameConstants": "common.slang",
     "Camera": "common.slang",
     "FlatMaterialParams": "common.slang",
+    "EmissiveTriangle": "common.slang",
     "MltPrimarySample": "common.slang",
     "StdSurfaceParams": "mtlx_std_surface.slang",
     "SampledWavelengths": "spectrum.slang",
@@ -487,10 +488,11 @@ class MaterialField:
     registered separately, in ``FLAT_DERIVED_KEYS``.
     """
 
-    __slots__ = ("name", "row", "lane", "kind", "default", "key")
+    __slots__ = ("name", "row", "lane", "kind", "default", "key", "spectral")
 
     def __init__(self, name: str, row: str, lane: int, kind: str,
-                 default, key: str | None = None) -> None:
+                 default, key: str | None = None, *,
+                 spectral: bool = False) -> None:
         if kind not in MATERIAL_KIND_LANES:
             raise SlangLayoutError(f"{name}: unknown material field kind {kind!r}")
         self.name = name
@@ -499,6 +501,10 @@ class MaterialField:
         self.kind = kind
         self.default = default
         self.key = key
+        # A field whose `row` exists ONLY in the SKINNY_SPECTRAL build (change
+        # spectral-table-fold). It is absent from the RGB record's fields, offset
+        # map and packing, and present only when a spectral layout is derived.
+        self.spectral = spectral
 
     @property
     def lanes(self) -> int:
@@ -566,6 +572,19 @@ FLAT_MATERIAL_FIELDS: tuple[MaterialField, ...] = (
     MaterialField("cloudWispiness", "_cloudDensityWispinessFrequency", 1, "float", 0.0),
     MaterialField("cloudFrequency", "_cloudDensityWispinessFrequency", 2, "float", 0.0),
     MaterialField("_cloudPad", "_cloudDensityWispinessFrequency", 3, "float", 0.0),
+    # Per-material blackbody (temperature_K, scale) — the fifteenth float4 row,
+    # present ONLY in the SKINNY_SPECTRAL build (change spectral-table-fold, D2).
+    # Moved inline from the former spectralMatEmission buffer (binding 51). The
+    # two pad lanes keep the row fully tiled. Value comes from the
+    # `material_blackbody` derivation, so key=None.
+    MaterialField("materialTemperature", "_spectralTempScale", 0, "float", 0.0,
+                  spectral=True),
+    MaterialField("materialBlackbodyScale", "_spectralTempScale", 1, "float", 0.0,
+                  spectral=True),
+    MaterialField("_spectralMatPad2", "_spectralTempScale", 2, "float", 0.0,
+                  spectral=True),
+    MaterialField("_spectralMatPad3", "_spectralTempScale", 3, "float", 0.0,
+                  spectral=True),
 )
 
 #: ``StdSurfaceParams`` (binding 19) — declared as named scalars, so the whole
@@ -615,16 +634,23 @@ def material_fields(record: str) -> tuple[MaterialField, ...]:
     raise SlangLayoutError(f"{record!r} is not a registered material record")
 
 
-def material_field_offsets(record: str, *, msl: bool = False) -> dict[str, int]:
+def material_field_offsets(record: str, *, msl: bool = False,
+                           spectral: bool = False) -> dict[str, int]:
     """``{field name: byte offset}`` for a material record.
 
     Row offsets are derived from the Slang declaration; the lane adds
     ``4 * lane``. This is the transposition gate's subject: swapping two
     same-typed fields in the table moves both offsets.
+
+    ``spectral`` selects the build: a spectral-only field (its row exists only
+    under ``SKINNY_SPECTRAL``) is present iff ``spectral`` is true, and the row
+    offsets come from the spectral layout.
     """
-    layout = (msl_layout if msl else scalar_layout)(record)
+    layout = (msl_layout if msl else scalar_layout)(record, spectral=spectral)
     out: dict[str, int] = {}
     for f in material_fields(record):
+        if f.spectral and not spectral:
+            continue
         try:
             row_off, row_size = layout.offsets[f.row]
         except KeyError:
@@ -641,17 +667,22 @@ def material_field_offsets(record: str, *, msl: bool = False) -> dict[str, int]:
     return out
 
 
-def check_material_record(record: str) -> None:
+def check_material_record(record: str, *, spectral: bool = False) -> None:
     """Raise unless the record's fields tile its SCALAR stride exactly, with no
     overlap and no gap. A lane left unclaimed is a byte the host never writes.
+    Checked for both builds: ``spectral=False`` tiles the RGB stride with the
+    non-spectral fields, ``spectral=True`` tiles the (larger) spectral stride
+    with the spectral fields included.
 
     Scalar only, deliberately: the MSL dialect pads ``float3`` to 16 B, so its
     gaps are the layout working as intended and a tiling check there would be
     guaranteed to fail. The MSL offsets are gated by the golden instead."""
-    stride = scalar_stride(record)
+    stride = scalar_stride(record, spectral=spectral)
     claimed = bytearray(stride)
-    offsets = material_field_offsets(record)
+    offsets = material_field_offsets(record, spectral=spectral)
     for f in material_fields(record):
+        if f.spectral and not spectral:
+            continue
         off = offsets[f.name]
         for b in range(off, off + 4 * f.lanes):
             if claimed[b]:
@@ -673,20 +704,23 @@ _PACK_FMT = {"float": "<f", "uint": "<I", "color3": "<3f", "vec4": "<4f"}
 
 
 def pack_material_record(record: str, values: dict, *,
-                         msl: bool = False) -> bytes:
+                         msl: bool = False, spectral: bool = False) -> bytes:
     """Emit one material record from ``{field name: value}``.
 
     Every field lands at the offset :func:`material_field_offsets` derives, and
     a field the caller omits gets the table's declared default. A name the table
     does not have raises — a packer cannot silently drop a value.
 
+    ``spectral`` selects the build: the record grows by the spectral-only fields
+    and the stride is the spectral stride; a non-spectral pack omits them.
+
     This is what makes the name→offset golden a real transposition gate: the
     bytes are produced BY the table, so swapping two same-typed fields in it
     moves both offsets and the golden fails.
     """
-    fields = material_fields(record)
-    stride = (msl_stride if msl else scalar_stride)(record)
-    offsets = material_field_offsets(record, msl=msl)
+    fields = [f for f in material_fields(record) if spectral or not f.spectral]
+    stride = (msl_stride if msl else scalar_stride)(record, spectral=spectral)
+    offsets = material_field_offsets(record, msl=msl, spectral=spectral)
     unknown = sorted(set(values) - {f.name for f in fields})
     if unknown:
         raise SlangLayoutError(
