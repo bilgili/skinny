@@ -108,21 +108,26 @@ uniform FrameConstants fc;
 import spectrum;
 static const int SPECTRAL_TABLE_RES = 64;   // rgb2spec_srgb.npz `res`
 static const int SPECTRAL_D65_COUNT = 95;   // spectral_curves.npz d65 grid length
-[[vk::binding(45)]] StructuredBuffer<float> spectralScale;
-[[vk::binding(46)]] StructuredBuffer<float> spectralData;
-[[vk::binding(47)]] StructuredBuffer<float> spectralD65;
+// The five read-only spectral tables (scale, sigmoid grid, D65, named-conductor
+// eta/k, per-light illuminant SPDs) share ONE ByteAddressBuffer at binding 45
+// (change spectral-table-fold). Each accessor reads its region at the byte
+// offset the host wrote into FrameConstants; the shader never computes one from
+// a table size. Bindings 46-48 and 50 are freed.
+[[vk::binding(45)]] ByteAddressBuffer spectralTables;
 
 // Bound-buffer wrappers around spectrum.slang's parameter-driven upsamplers, so
 // call sites in the transport stay short. Reflectance: sigmoid only. Illuminant:
 // sigmoid × D65 (pbrt RGBIlluminantSpectrum).
 Spectrum upsampleReflectanceBound(float3 rgb, SampledWavelengths sw)
 {
-    return upsampleReflectance(rgb, sw, SPECTRAL_TABLE_RES, spectralScale, spectralData);
+    return upsampleReflectance(rgb, sw, SPECTRAL_TABLE_RES, spectralTables,
+                               fc.spectralScaleOffset, fc.spectralDataOffset);
 }
 Spectrum upsampleIlluminantBound(float3 rgb, SampledWavelengths sw)
 {
-    return upsampleIlluminant(rgb, sw, SPECTRAL_TABLE_RES, spectralScale,
-                              spectralData, spectralD65, SPECTRAL_D65_COUNT);
+    return upsampleIlluminant(rgb, sw, SPECTRAL_TABLE_RES, spectralTables,
+                              fc.spectralScaleOffset, fc.spectralDataOffset,
+                              fc.spectralD65Offset, SPECTRAL_D65_COUNT);
 }
 
 // Named-conductor eta/k curves (change spectral-rendering, Group 6.2). vk binding
@@ -130,7 +135,6 @@ Spectrum upsampleIlluminantBound(float3 rgb, SampledWavelengths sw)
 // al, cu, cuzn, mgo, tio2 — ids 1..7) each [eta(95) | k(95)] on the 360–830/5 nm
 // grid (95 = SPECTRAL_D65_COUNT), so stride 190 floats/metal. Absent from the RGB
 // build.
-[[vk::binding(48)]] StructuredBuffer<float> spectralMetals;
 static const int SPECTRAL_METAL_STRIDE = 2 * SPECTRAL_D65_COUNT;  // eta+k per metal
 
 //: Number of metals uploaded to `spectralMetals`. MUST equal
@@ -152,8 +156,9 @@ void namedMetalEtaK(uint metalId, SampledWavelengths sw, out float4 eta, out flo
         float t = (sw.lambda[i] - SPECTRUM_LAMBDA_MIN) / 5.0;
         int   j = clamp(int(t), 0, SPECTRAL_D65_COUNT - 2);
         float f = clamp(t - float(j), 0.0, 1.0);
-        eta[i] = lerp(spectralMetals[base + j],  spectralMetals[base + j + 1],  f);
-        k[i]   = lerp(spectralMetals[kbase + j], spectralMetals[kbase + j + 1], f);
+        uint mo = fc.spectralMetalsOffset;
+        eta[i] = lerp(_tblF(spectralTables, mo, base + j),  _tblF(spectralTables, mo, base + j + 1),  f);
+        k[i]   = lerp(_tblF(spectralTables, mo, kbase + j), _tblF(spectralTables, mo, kbase + j + 1), f);
     }
 }
 
@@ -176,7 +181,8 @@ float2 emitterBlackbody(uint idx)
 // vk binding 50; uploaded only when spectral. 95 floats/light on the 360-830/5 nm
 // grid (host-scaled to the light's RGB luminance), indexed by the DistantLight
 // `_direction.w` slot. Absent from the RGB build.
-[[vk::binding(50)]] StructuredBuffer<float> spectralLightSpd;
+// (spectralLightSpd is the last region of `spectralTables`, binding 45 —
+// change spectral-table-fold. Binding 50 is freed.)
 
 // Evaluate distant-light slot `slot`'s SPD at the 4 hero wavelengths (linear
 // interp on the 5 nm grid, endpoint-clamped — mirrors sampleCurve5nm with a base
@@ -191,7 +197,8 @@ Spectrum distantLightSpd(int slot, SampledWavelengths sw)
         float t = (sw.lambda[i] - SPECTRUM_LAMBDA_MIN) / 5.0;
         int   j = clamp(int(t), 0, SPECTRAL_D65_COUNT - 2);
         float f = clamp(t - float(j), 0.0, 1.0);
-        s[i] = lerp(spectralLightSpd[base + j], spectralLightSpd[base + j + 1], f);
+        uint lo = fc.spectralLightSpdOffset;
+        s[i] = lerp(_tblF(spectralTables, lo, base + j), _tblF(spectralTables, lo, base + j + 1), f);
     }
     return s;
 }

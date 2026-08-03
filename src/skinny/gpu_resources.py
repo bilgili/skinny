@@ -150,10 +150,10 @@ class ResourceSizes:
     instance_stride: int
     spectral_emitter_stride: int
     spectral_light_spd_stride: int
-    spectral_scale_floats: int = 0
-    spectral_data_floats: int = 0
-    spectral_d65_floats: int = 0
-    spectral_metals_floats: int = 0
+    # Total byte size of the combined `_spectral_tables_buffer` (change
+    # spectral-table-fold): the five 16-byte-aligned regions summed. The renderer
+    # computes it from the loaded table arrays + the distant-light capacity.
+    spectral_tables_bytes: int = 0
 
 
 # ── Declarations ────────────────────────────────────────────────────────
@@ -197,25 +197,19 @@ DECLARATIONS: tuple[ResourceDecl, ...] = (
                     + s.env_height * (s.env_width + 1)) * 4,),
         binding=31, metal="envDistCdf", descriptor=BUFFER,
     ),
+    # Combined spectral read-only tables (change spectral-table-fold): the five
+    # non-growing tables — scale, sigmoid grid, D65, named-conductor eta/k, and
+    # the per-distant-light illuminant SPDs — packed end to end in ONE
+    # ByteAddressBuffer at binding 45, each region 16-byte aligned. Five buffer
+    # argument entries become one. The host owns the region layout and writes the
+    # start offsets into FrameConstants; the total byte size is
+    # `spectral_tables_bytes`. Never regrows (the two GROWING spectral arrays —
+    # per-emitter and per-material emission — moved into their parent records
+    # instead, group 4).
     ResourceDecl(
-        "_spectral_scale_buffer", "StorageBuffer",
-        lambda s: (s.spectral_scale_floats * 4,),
-        binding=45, metal="spectralScale", descriptor=BUFFER, spectral=True,
-    ),
-    ResourceDecl(
-        "_spectral_data_buffer", "StorageBuffer",
-        lambda s: (s.spectral_data_floats * 4,),
-        binding=46, metal="spectralData", descriptor=BUFFER, spectral=True,
-    ),
-    ResourceDecl(
-        "_spectral_d65_buffer", "StorageBuffer",
-        lambda s: (s.spectral_d65_floats * 4,),
-        binding=47, metal="spectralD65", descriptor=BUFFER, spectral=True,
-    ),
-    ResourceDecl(
-        "_spectral_metals_buffer", "StorageBuffer",
-        lambda s: (s.spectral_metals_floats * 4,),
-        binding=48, metal="spectralMetals", descriptor=BUFFER, spectral=True,
+        "_spectral_tables_buffer", "StorageBuffer",
+        lambda s: (s.spectral_tables_bytes,),
+        binding=45, metal="spectralTables", descriptor=BUFFER, spectral=True,
     ),
     ResourceDecl(
         "neural_weights_buffer", "StorageBuffer",
@@ -314,13 +308,10 @@ DECLARATIONS: tuple[ResourceDecl, ...] = (
         lambda s: (s.distant_light_capacity * s.distant_light_stride + 16,),
         binding=20, metal="distantLights", descriptor=BUFFER,
     ),
-    ResourceDecl(
-        # Fixed capacity — distant lights never grow past the cap, so no
-        # rebind path.
-        "_spectral_light_spd_buffer", "StorageBuffer",
-        lambda s: (s.distant_light_capacity * s.spectral_light_spd_stride + 16,),
-        binding=50, metal="spectralLightSpd", descriptor=BUFFER, spectral=True,
-    ),
+    # (spectralLightSpd, formerly binding 50, is now the last region of the
+    # combined `_spectral_tables_buffer` above — change spectral-table-fold. Its
+    # fixed distant-light capacity means it never regrows, so it merges safely;
+    # the renderer re-uploads only its region in place when the lights change.)
     ResourceDecl(
         "emissive_tri_buffer", "StorageBuffer",
         lambda s: (s.emissive_tri_capacity * s.emissive_tri_stride + 16,),
@@ -425,13 +416,12 @@ VULKAN_WRITE_SEQUENCE: tuple[str, ...] = (
     "neural_layers_buffer",    # 35
     "record_buffer",           # 36
     "record_counter",          # 37
-    # Spectral tables last (45-51), only in the spectral layout.
-    "_spectral_scale_buffer",
-    "_spectral_data_buffer",
-    "_spectral_d65_buffer",
-    "_spectral_metals_buffer",
+    # Spectral tables last (only in the spectral layout). The five read-only
+    # tables are one combined buffer at 45 now (change spectral-table-fold); the
+    # two per-record emission arrays (49, 51) remain until group 4 folds them
+    # into their parent records.
+    "_spectral_tables_buffer",
     "_spectral_emitters_buffer",
-    "_spectral_light_spd_buffer",
     "_spectral_mat_emission_buffer",
 )
 
@@ -467,12 +457,8 @@ DESTROY_SEQUENCE: tuple[str, ...] = (
     "env_image",
     "volume_density_image",
     "env_dist_buffer",
-    "_spectral_scale_buffer",
-    "_spectral_data_buffer",
-    "_spectral_d65_buffer",
-    "_spectral_metals_buffer",
+    "_spectral_tables_buffer",
     "_spectral_emitters_buffer",
-    "_spectral_light_spd_buffer",
     "_spectral_mat_emission_buffer",
     "hud_overlay",
     "accum_image",

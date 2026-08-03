@@ -167,12 +167,20 @@ float sigmoidPoly(float3 coeffs, float lam)
 
 float sigmoidLerp(float t, float a, float b) { return a + t * (b - a); }
 
+// Read float element `i` of a table region that starts at byte offset `base`
+// inside the combined `spectralTables` ByteAddressBuffer (change
+// spectral-table-fold). The five formerly-separate `StructuredBuffer<float>`
+// tables are now regions of one buffer; only these load expressions change.
+float _tblF(ByteAddressBuffer t, uint base, int i)
+{
+    return t.Load<float>(base + uint(i) * 4u);
+}
+
 // pbrt RGBToSpectrumTable::operator() trilinear lookup. `scale` is the RES node
 // array; `data` is the flat [3][res][res][res][3] coefficient grid (row-major).
 // Bound as StructuredBuffers by the renderer (descriptor plumbing, Group 3.2).
 float3 rgbSigmoidCoeffs(float3 rgb, int res,
-                        StructuredBuffer<float> scale,
-                        StructuredBuffer<float> data)
+                        ByteAddressBuffer tables, uint scaleOff, uint dataOff)
 {
     rgb = clamp(rgb, float3(0.0), float3(1.0));
     if (rgb.x == rgb.y && rgb.y == rgb.z)
@@ -200,11 +208,12 @@ float3 rgbSigmoidCoeffs(float3 rgb, int res,
     // FindInterval: largest zi in [0, res-2] with scale[zi] < z.
     int zi = 0;
     for (int i = 1; i < res - 1; ++i)
-        if (scale[i] < z)
+        if (_tblF(tables, scaleOff, i) < z)
             zi = i;
     float dx = x - float(xi);
     float dy = y - float(yi);
-    float dz = (z - scale[zi]) / (scale[zi + 1] - scale[zi]);
+    float dz = (z - _tblF(tables, scaleOff, zi))
+             / (_tblF(tables, scaleOff, zi + 1) - _tblF(tables, scaleOff, zi));
 
     float3 c;
     [ForceUnroll]
@@ -212,14 +221,14 @@ float3 rgbSigmoidCoeffs(float3 rgb, int res,
     {
         // co(dxo,dyo,dzo) = data[maxc][zi+dzo][yi+dyo][xi+dxo][comp]
         // flat index = (((maxc*res + z)*res + y)*res + x)*3 + comp
-        float c000 = data[(((maxc * res + (zi + 0)) * res + (yi + 0)) * res + (xi + 0)) * 3 + comp];
-        float c100 = data[(((maxc * res + (zi + 0)) * res + (yi + 0)) * res + (xi + 1)) * 3 + comp];
-        float c010 = data[(((maxc * res + (zi + 0)) * res + (yi + 1)) * res + (xi + 0)) * 3 + comp];
-        float c110 = data[(((maxc * res + (zi + 0)) * res + (yi + 1)) * res + (xi + 1)) * 3 + comp];
-        float c001 = data[(((maxc * res + (zi + 1)) * res + (yi + 0)) * res + (xi + 0)) * 3 + comp];
-        float c101 = data[(((maxc * res + (zi + 1)) * res + (yi + 0)) * res + (xi + 1)) * 3 + comp];
-        float c011 = data[(((maxc * res + (zi + 1)) * res + (yi + 1)) * res + (xi + 0)) * 3 + comp];
-        float c111 = data[(((maxc * res + (zi + 1)) * res + (yi + 1)) * res + (xi + 1)) * 3 + comp];
+        float c000 = _tblF(tables, dataOff, (((maxc * res + (zi + 0)) * res + (yi + 0)) * res + (xi + 0)) * 3 + comp);
+        float c100 = _tblF(tables, dataOff, (((maxc * res + (zi + 0)) * res + (yi + 0)) * res + (xi + 1)) * 3 + comp);
+        float c010 = _tblF(tables, dataOff, (((maxc * res + (zi + 0)) * res + (yi + 1)) * res + (xi + 0)) * 3 + comp);
+        float c110 = _tblF(tables, dataOff, (((maxc * res + (zi + 0)) * res + (yi + 1)) * res + (xi + 1)) * 3 + comp);
+        float c001 = _tblF(tables, dataOff, (((maxc * res + (zi + 1)) * res + (yi + 0)) * res + (xi + 0)) * 3 + comp);
+        float c101 = _tblF(tables, dataOff, (((maxc * res + (zi + 1)) * res + (yi + 0)) * res + (xi + 1)) * 3 + comp);
+        float c011 = _tblF(tables, dataOff, (((maxc * res + (zi + 1)) * res + (yi + 1)) * res + (xi + 0)) * 3 + comp);
+        float c111 = _tblF(tables, dataOff, (((maxc * res + (zi + 1)) * res + (yi + 1)) * res + (xi + 1)) * 3 + comp);
         c[comp] = sigmoidLerp(dz,
             sigmoidLerp(dy, sigmoidLerp(dx, c000, c100), sigmoidLerp(dx, c010, c110)),
             sigmoidLerp(dy, sigmoidLerp(dx, c001, c101), sigmoidLerp(dx, c011, c111)));
@@ -229,10 +238,9 @@ float3 rgbSigmoidCoeffs(float3 rgb, int res,
 
 // Evaluate an sRGB reflectance as a spectrum at the sampled wavelengths.
 float4 upsampleReflectance(float3 rgb, SampledWavelengths sw, int res,
-                           StructuredBuffer<float> scale,
-                           StructuredBuffer<float> data)
+                           ByteAddressBuffer tables, uint scaleOff, uint dataOff)
 {
-    float3 co = rgbSigmoidCoeffs(rgb, res, scale, data);
+    float3 co = rgbSigmoidCoeffs(rgb, res, tables, scaleOff, dataOff);
     float4 s;
     [ForceUnroll]
     for (int i = 0; i < 4; ++i)
@@ -242,12 +250,12 @@ float4 upsampleReflectance(float3 rgb, SampledWavelengths sw, int res,
 
 // Linear interp of a curve sampled on the 360–830/5 nm grid (mirrors np.interp
 // with endpoint clamp). `count` = grid length (95 for the vendored curves).
-float sampleCurve5nm(float lam, StructuredBuffer<float> curve, int count)
+float sampleCurve5nm(float lam, ByteAddressBuffer tables, uint curveOff, int count)
 {
     float t = (lam - SPECTRUM_LAMBDA_MIN) / 5.0;
     int i = clamp(int(t), 0, count - 2);
     float f = clamp(t - float(i), 0.0, 1.0);
-    return lerp(curve[i], curve[i + 1], f);
+    return lerp(_tblF(tables, curveOff, i), _tblF(tables, curveOff, i + 1), f);
 }
 
 // Evaluate an sRGB emitter as a spectrum (pbrt RGBIlluminantSpectrum):
@@ -258,17 +266,16 @@ float sampleCurve5nm(float lam, StructuredBuffer<float> curve, int count)
 // `spectral.d65_normalized()`), so a unit RGB illuminant resolves to unit
 // radiance and this mirrors `spectral.upsample_illuminant` bit-for-bit.
 float4 upsampleIlluminant(float3 rgb, SampledWavelengths sw, int res,
-                          StructuredBuffer<float> scale,
-                          StructuredBuffer<float> data,
-                          StructuredBuffer<float> d65, int d65Count)
+                          ByteAddressBuffer tables, uint scaleOff, uint dataOff,
+                          uint d65Off, int d65Count)
 {
     float m  = max(rgb.x, max(rgb.y, rgb.z));
     float sc = 2.0 * m;
     float3 rgbN = (sc > 0.0) ? rgb / sc : float3(0.0);
-    float3 co = rgbSigmoidCoeffs(rgbN, res, scale, data);
+    float3 co = rgbSigmoidCoeffs(rgbN, res, tables, scaleOff, dataOff);
     float4 s;
     [ForceUnroll]
     for (int i = 0; i < 4; ++i)
-        s[i] = sc * sigmoidPoly(co, sw.lambda[i]) * sampleCurve5nm(sw.lambda[i], d65, d65Count);
+        s[i] = sc * sigmoidPoly(co, sw.lambda[i]) * sampleCurve5nm(sw.lambda[i], tables, d65Off, d65Count);
     return s;
 }

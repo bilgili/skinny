@@ -2749,6 +2749,30 @@ class Renderer:
                 np.concatenate(metal_blocks), dtype=np.float32),
         }
 
+    def _spectral_tables_layout(self, arrays: dict) -> tuple[dict, int]:
+        """Region byte offsets + total size of the combined `spectralTables`
+        buffer (change spectral-table-fold). Five regions, each 16-byte aligned,
+        in a fixed order: the four static tables then the per-distant-light SPDs.
+        The light SPD region is sized from the fixed `DISTANT_LIGHT_CAPACITY`, so
+        it never grows — the renderer re-uploads only its bytes when lights
+        change. Offsets are byte offsets into the buffer, written into
+        FrameConstants."""
+        def align16(n: int) -> int:
+            return (n + 15) & ~15
+        sizes = [
+            ("scale", arrays["scale"].nbytes),
+            ("data", arrays["data"].nbytes),
+            ("d65", arrays["d65"].nbytes),
+            ("metals", arrays["metals"].nbytes),
+            ("lightSpd", DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE),
+        ]
+        offsets: dict[str, int] = {}
+        cur = 0
+        for name, sz in sizes:
+            offsets[name] = cur
+            cur += align16(sz)
+        return offsets, cur
+
     def _resource_sizes(self, spectral_arrays: dict) -> ResourceSizes:
         """Gather the allocation inputs the declarations in `gpu_resources`
         consume. The formulas live with the declarations; these are the scene-
@@ -2836,12 +2860,20 @@ class Renderer:
             instance_stride=INSTANCE_STRIDE,
             spectral_emitter_stride=SPECTRAL_EMITTER_STRIDE,
             spectral_light_spd_stride=SPECTRAL_LIGHT_SPD_STRIDE,
-            spectral_scale_floats=spectral_arrays.get("scale", _EMPTY_F32).size,
-            spectral_data_floats=spectral_arrays.get("data", _EMPTY_F32).size,
-            spectral_d65_floats=spectral_arrays.get("d65", _EMPTY_F32).size,
-            spectral_metals_floats=spectral_arrays.get(
-                "metals", _EMPTY_F32).size,
+            spectral_tables_bytes=self._spectral_tables_total_bytes(
+                spectral_arrays),
         )
+
+    def _spectral_tables_total_bytes(self, spectral_arrays: dict) -> int:
+        """Total size of the combined spectral-table buffer, and — as a side
+        effect — the record of its region offsets on the renderer so
+        `_pack_uniforms` can write them into FrameConstants. Zero (and no
+        offsets) for a non-spectral render, whose declaration is compiled out."""
+        if not spectral_arrays:
+            return 0
+        offsets, total = self._spectral_tables_layout(spectral_arrays)
+        self._spectral_region_offsets = offsets
+        return total
 
     def _init_gpu(self) -> None:
         # Pipeline + descriptor pool/sets are built lazily by
@@ -2947,14 +2979,14 @@ class Renderer:
         self._env_lum_integral: float = 0.0
         self._ensure_env_uploaded()
         if self._spectral:
-            self._spectral_scale_buffer.upload_sync(
-                spectral_arrays["scale"].tobytes())
-            self._spectral_data_buffer.upload_sync(
-                spectral_arrays["data"].tobytes())
-            self._spectral_d65_buffer.upload_sync(
-                spectral_arrays["d65"].tobytes())
-            self._spectral_metals_buffer.upload_sync(
-                spectral_arrays["metals"].tobytes())
+            # Write the four static tables into their regions of the combined
+            # `spectralTables` buffer (change spectral-table-fold). The fifth
+            # region (per-light SPDs) is written by `_upload_distant_lights` when
+            # a scene's lights load, so it is left zero here.
+            off = self._spectral_region_offsets
+            for name in ("scale", "data", "d65", "metals"):
+                self._spectral_tables_buffer.upload_range(
+                    spectral_arrays[name].tobytes(), off[name])
         self.neural_weights_buffer.upload_sync(self._neural_dummy_weight_bytes)
         self.neural_biases_buffer.upload_sync(self._neural_dummy_bias_bytes)
         self.neural_layers_buffer.upload_sync(self._neural_dummy_header_bytes)
@@ -3048,8 +3080,9 @@ class Renderer:
         # DISTANT_LIGHT_CAPACITY), so no rebind path. Filled in
         # _upload_distant_lights; zeros when no light carries an SPD.
         if self._spectral:
-            self._spectral_light_spd_buffer.upload_sync(
-                b"\x00" * (DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE)
+            self._spectral_tables_buffer.upload_range(
+                b"\x00" * (DISTANT_LIGHT_CAPACITY * SPECTRAL_LIGHT_SPD_STRIDE),
+                self._spectral_region_offsets["lightSpd"],
             )
         # Emissive triangles (binding 18), built from scene instances whose
         # material has non-zero emissiveColor. The shader samples one triangle
@@ -4891,8 +4924,12 @@ class Renderer:
                 data += b"\x00" * DISTANT_LIGHT_STRIDE
                 spd_data += b"\x00" * SPECTRAL_LIGHT_SPD_STRIDE
         self.distant_lights_buffer.upload_sync(bytes(data))
-        if self._spectral and self._spectral_light_spd_buffer is not None:
-            self._spectral_light_spd_buffer.upload_sync(bytes(spd_data))
+        if self._spectral and self._spectral_region_offsets is not None:
+            # Re-upload only the light-SPD region of the combined spectral-table
+            # buffer in place (change spectral-table-fold); the static regions
+            # are untouched.
+            self._spectral_tables_buffer.upload_range(
+                bytes(spd_data), self._spectral_region_offsets["lightSpd"])
         self._num_distant_lights = n
         # Σlum over the packed set → SPPM photon-group power Φ_D = πR²·Σlum
         self._distant_lum_sum = float(sum(

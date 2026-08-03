@@ -61,8 +61,10 @@ CAPTURED_SIZES = dict(
     distant_light_capacity=16, distant_light_stride=32,
     emissive_tri_stride=64, instance_stride=144,
     spectral_emitter_stride=8, spectral_light_spd_stride=380,
-    spectral_scale_floats=64, spectral_data_floats=2359296,
-    spectral_d65_floats=95, spectral_metals_floats=1330,
+    # Combined spectral-table buffer (change spectral-table-fold): the five
+    # 16-byte-aligned regions summed — scale 256 + sigmoid grid 9437184 + D65 384
+    # + metals 5328 + lightSpd (16·380=)6080.
+    spectral_tables_bytes=256 + 9437184 + 384 + 5328 + 6080,
 )
 
 
@@ -163,11 +165,23 @@ def golden_resources(key):
 # ── inventory matches the pre-change renderer ───────────────────────────
 
 
+# The spectral table fold (change spectral-table-fold) merged the five read-only
+# spectral buffers into one at binding 45, changing the metal_spectral resource
+# set. The inventory fixture is live-captured reality (CLAUDE.md: never hand-edit
+# it to match code), so its metal_spectral entry is recaptured from the live
+# renderer in group 5 (task 3.7). Until then these three comparisons xfail; the
+# vulkan_rgb / metal_rgb entries are unaffected (RGB declares no spectral buffer).
+_FOLD_RECAPTURE = pytest.mark.xfail(
+    reason="task 3.7: gpu_resource_inventory metal_spectral entry pending "
+           "live-renderer recapture after the spectral table fold",
+    strict=True)
+
+
 @pytest.mark.parametrize(
     "key,spectral,is_metal",
     [("vulkan_rgb", False, False),
      ("metal_rgb", False, True),
-     ("metal_spectral", True, True)],
+     pytest.param("metal_spectral", True, True, marks=_FOLD_RECAPTURE)],
 )
 def test_inventory_matches_golden(key, spectral, is_metal):
     """Scenario: inventory matches the pre-change renderer — name, kind, size
@@ -224,8 +238,9 @@ def test_both_targets_cover_the_same_declarations():
     assert {d.attr for d in DECLARATIONS} - vulkan - metal == {"_readback"}
 
 
-@pytest.mark.parametrize("key,spectral", [("metal_rgb", False),
-                                          ("metal_spectral", True)])
+@pytest.mark.parametrize("key,spectral", [
+    ("metal_rgb", False),
+    pytest.param("metal_spectral", True, marks=_FOLD_RECAPTURE)])
 def test_metal_binds_match_golden(key, spectral):
     rset, _ = build(spectral=spectral, is_metal=True)
     want = GOLDEN[key]["metal_binds"]
@@ -282,8 +297,9 @@ def test_close_is_idempotent():
     assert len(gpu.destroy_log) == n
 
 
-@pytest.mark.parametrize("key,spectral", [("vulkan_rgb", False),
-                                          ("metal_spectral", True)])
+@pytest.mark.parametrize("key,spectral", [
+    ("vulkan_rgb", False),
+    pytest.param("metal_spectral", True, marks=_FOLD_RECAPTURE)])
 def test_destroy_order_matches_golden(key, spectral):
     rset, gpu = build(spectral=spectral, is_metal=key.startswith("metal"))
     decls = [d for d in rset.declarations if d.kind != "TexturePool"]
