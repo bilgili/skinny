@@ -193,6 +193,21 @@ _MLT_METAL_CHAIN_BATCH_DEFAULT = frame_plan.MLT_CHAIN_BATCH_DEFAULT
 _FC_SCALAR_FIELDS: tuple[tuple[str, int], ...] = slang_layout.fc_scalar_blob()
 _FC_SCALAR_FIELDS_MLT: tuple[tuple[str, int], ...] = slang_layout.fc_scalar_blob(
     mlt=True)
+# Spectral variants (change spectral-table-fold): the same blob with the five
+# `#if defined(SKINNY_SPECTRAL)` region-offset u32s, which pack before the MLT
+# tail and the relocated tileOriginY word.
+_FC_SCALAR_FIELDS_SPECTRAL: tuple[tuple[str, int], ...] = slang_layout.fc_scalar_blob(
+    spectral=True)
+_FC_SCALAR_FIELDS_SPECTRAL_MLT: tuple[tuple[str, int], ...] = slang_layout.fc_scalar_blob(
+    spectral=True, mlt=True)
+
+
+def _fc_scalar_fields(*, spectral: bool, mlt: bool) -> tuple[tuple[str, int], ...]:
+    """The scalar `fc` field table for a build, so `_pack_uniforms_msl` relocates
+    exactly the fields `_pack_uniforms` packed (the drift guard rests on this)."""
+    if spectral:
+        return _FC_SCALAR_FIELDS_SPECTRAL_MLT if mlt else _FC_SCALAR_FIELDS_SPECTRAL
+    return _FC_SCALAR_FIELDS_MLT if mlt else _FC_SCALAR_FIELDS
 
 # The `#if defined(SKINNY_MLT)` FrameConstants tail alone (change mlt-integrator)
 # — the fields the MLT blob adds, between `sppmGroupPmfEnv` and `tileOriginY`.
@@ -555,6 +570,11 @@ class Renderer:
         # (bindings 45/46/47) are uploaded + bound. Every spectral resource is
         # guarded on this flag so a non-spectral run is byte-identical to before.
         self._spectral = bool(spectral)
+        # Byte offset of each region inside the combined `spectralTables` buffer
+        # (binding 45, change spectral-table-fold). Set by `_build_spectral_tables`
+        # before the first spectral frame; the FrameConstants packer refuses to
+        # pack an unset offset (task 3.6).
+        self._spectral_region_offsets: dict | None = None
         # BDPT subpath-build strategy for wavefront+bdpt (CLI-fixed per session):
         #   fused      — one walk kernel (the S1 connect-compaction win, default)
         #   eye        — staged eye walk + fused light tail
@@ -7901,7 +7921,7 @@ class Renderer:
 
     @staticmethod
     def _check_msl_uniform_layout(src, layout: dict, size: int, *,
-                                  mlt: bool) -> None:
+                                  mlt: bool, spectral: bool = False) -> None:
         """Cross-check the compiled program's LIVE `fc` reflection against the
         layout `slang_layout` derives from the Slang declaration (change
         reflection-owned-byte-layouts, task 2.5).
@@ -7919,22 +7939,24 @@ class Renderer:
                 src._skinny_fc_layout_checked = seen
             except AttributeError:  # pragma: no cover - exotic layout source
                 pass
-        if mlt in seen:
+        key = (spectral, mlt)
+        if key in seen:
             return
-        derived = slang_layout.msl_layout("FrameConstants", mlt=mlt)
+        derived = slang_layout.msl_layout("FrameConstants", mlt=mlt,
+                                          spectral=spectral)
         if derived.stride != size:
             raise RuntimeError(
                 f"reflected MSL `fc` size {size} B but slang_layout derives "
-                f"{derived.stride} B (mlt={mlt}) — FrameConstants and its host "
-                "mirror have drifted")
+                f"{derived.stride} B (spectral={spectral}, mlt={mlt}) — "
+                "FrameConstants and its host mirror have drifted")
         bad = {name: (off_size, derived.offsets.get(name))
                for name, off_size in layout.items()
                if derived.offsets.get(name) != off_size}
         if bad:
             raise RuntimeError(
                 f"reflected MSL `fc` layout disagrees with slang_layout "
-                f"(mlt={mlt}); reflected vs derived: {bad}")
-        seen.add(mlt)
+                f"(spectral={spectral}, mlt={mlt}); reflected vs derived: {bad}")
+        seen.add(key)
 
     def _pack_uniforms_msl(self, layout_source=None) -> bytes:
         """Pack the `fc` uniform block to the Metal Shading Language struct layout
@@ -7963,9 +7985,11 @@ class Renderer:
         # the drift guard fires (codex pre-merge review). Drive `_pack_uniforms`
         # off `"mltSigma" in layout` so the blob and the field table always agree.
         has_tail = "mltSigma" in layout
-        self._check_msl_uniform_layout(src, layout, size, mlt=has_tail)
-        scalar = self._pack_uniforms(mlt_tail=has_tail)
-        fields = _FC_SCALAR_FIELDS_MLT if has_tail else _FC_SCALAR_FIELDS
+        has_spectral = "spectralScaleOffset" in layout
+        self._check_msl_uniform_layout(src, layout, size, mlt=has_tail,
+                                       spectral=has_spectral)
+        scalar = self._pack_uniforms(mlt_tail=has_tail, spectral=has_spectral)
+        fields = _fc_scalar_fields(spectral=has_spectral, mlt=has_tail)
         out = bytearray(size)
         off = 0
         for name, sz in fields:
@@ -8176,12 +8200,15 @@ class Renderer:
         surface.present()
         self.ctx.device.wait_for_idle()
 
-    def _pack_uniforms(self, *, mlt_tail: bool | None = None) -> bytes:
+    def _pack_uniforms(self, *, mlt_tail: bool | None = None,
+                       spectral: bool | None = None) -> bytes:
         """Assemble the `fc` scalar blob. ``mlt_tail`` overrides whether the
         `#if defined(SKINNY_MLT)` tail is appended; ``None`` (the Vulkan direct
         path, which has no reflected layout to key off) defers to
-        ``_mlt_uniform_tail_active()``. ``_pack_uniforms_msl`` passes an explicit
-        bool derived from the target layout so the blob matches it exactly."""
+        ``_mlt_uniform_tail_active()``. ``spectral`` overrides whether the
+        `#if defined(SKINNY_SPECTRAL)` region-offset block is appended; ``None``
+        defers to ``self._spectral``. ``_pack_uniforms_msl`` passes both explicit,
+        derived from the target layout, so the blob matches it exactly."""
         self._sync_lens_buffer()
         aspect = self.width / self.height
         view_fwd = self.camera.view_matrix()
@@ -8456,6 +8483,24 @@ class Renderer:
         data += struct.pack("f", sppm_glossy)                        # sppmGlossyContinueRoughness
         data += struct.pack("f", float(self.film_max_component))      # filmMaxComponent
         data += struct.pack("4f", *(float(p) for p in sppm_pmf))     # sppmGroupPmfE/S/D/Env
+        # Spectral table region offsets (change spectral-table-fold): the
+        # `#if defined(SKINNY_SPECTRAL)` FrameConstants block, appended ONLY when
+        # the spectral tables are bound. Declared BEFORE the SKINNY_METAL tail, so
+        # the blob rule keeps them at their reflected offset and leaves the MLT
+        # tail (and mltSigma@564 for RGB+MLT) after them. The host owns these byte
+        # offsets into the combined `spectralTables` buffer; the shader never
+        # computes one from a size.
+        emit_spectral = (self._spectral if spectral is None else bool(spectral))
+        if emit_spectral:
+            off = self._spectral_region_offsets
+            if off is None:
+                raise RuntimeError(
+                    "spectral render: the combined spectral-table region offsets "
+                    "are unset — _build_spectral_tables() must run before packing "
+                    "FrameConstants (change spectral-table-fold, task 3.6)")
+            data += struct.pack(
+                "IIIII", off["scale"], off["data"], off["d65"],
+                off["metals"], off["lightSpd"])
         # MLT chain constants (change mlt-integrator): the SKINNY_MLT
         # FrameConstants tail (`_FC_MLT_FIELDS`), appended ONLY when the MLT
         # wavefront pass is the consumer — every other pipeline's struct ends

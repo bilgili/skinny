@@ -128,12 +128,40 @@ _FC_DECLARED_MLT = [
 ]
 
 
+# The five `#if defined(SKINNY_SPECTRAL)` region offsets (change
+# spectral-table-fold), declared BEFORE the SKINNY_METAL `tileOriginY` tail.
+_FC_SPECTRAL_OFFSETS = [
+    ("uint", "spectralScaleOffset"), ("uint", "spectralDataOffset"),
+    ("uint", "spectralD65Offset"), ("uint", "spectralMetalsOffset"),
+    ("uint", "spectralLightSpdOffset"),
+]
+
+
+def _insert_spectral(fields):
+    """`fields` with the spectral offset block spliced in before tileOriginY —
+    or, when tileOriginY is absent (non-Metal), before the MLT tail / at the end."""
+    out = list(fields)
+    for i, f in enumerate(out):
+        if f == ("uint", "tileOriginY") or f[1].startswith("mlt"):
+            return out[:i] + _FC_SPECTRAL_OFFSETS + out[i:]
+    return out + _FC_SPECTRAL_OFFSETS
+
+
 def test_frame_constants_declared_fields_are_typed_locked():
     """Full typed lock — every FrameConstants field, not just head and tail."""
     assert sl.struct_fields("FrameConstants", metal=True, mlt=True) == \
         _FC_DECLARED_MLT
     assert sl.struct_fields("FrameConstants", metal=True) == [
         f for f in _FC_DECLARED_MLT if not f[1].startswith("mlt")]
+    # Spectral: the offset block appears before tileOriginY, in every build.
+    assert sl.struct_fields("FrameConstants", metal=True, mlt=True,
+                            spectral=True) == _insert_spectral(_FC_DECLARED_MLT)
+    base = [f for f in _FC_DECLARED_MLT if not f[1].startswith("mlt")]
+    assert sl.struct_fields("FrameConstants", metal=True, spectral=True) == \
+        _insert_spectral(base)
+    vk_base = [f for f in base if f != ("uint", "tileOriginY")]
+    assert sl.struct_fields("FrameConstants", spectral=True) == \
+        vk_base + _FC_SPECTRAL_OFFSETS
     # The embedded Camera is locked by _DECLARED_FIELD_GOLDENS above.
     assert ("Camera", "camera") in _FC_DECLARED_MLT
 

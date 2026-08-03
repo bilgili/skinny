@@ -415,7 +415,8 @@ def msl_stride(struct: str, *, spectral: bool = False, mlt: bool = False,
 # ── FrameConstants host scalar blob (the D1 blob rule) ───────────────
 
 
-def fc_scalar_blob(*, mlt: bool = False) -> tuple[tuple[str, int], ...]:
+def fc_scalar_blob(*, mlt: bool = False,
+                   spectral: bool = False) -> tuple[tuple[str, int], ...]:
     """Ordered ``(field-name, scalar-byte-size)`` of the host ``fc`` scalar blob
     that ``_pack_uniforms`` appends, flattened (the embedded ``Camera`` is
     ``camera.<field>``, matching Slang's reflected names).
@@ -428,7 +429,8 @@ def fc_scalar_blob(*, mlt: bool = False) -> tuple[tuple[str, int], ...]:
     oversized UBO, which is precisely what lets ``mltSigma`` sit at 564 where
     the Vulkan MLT SPIR-V expects it.
     """
-    entries = scalar_layout("FrameConstants", mlt=mlt, metal=True).entries
+    entries = scalar_layout("FrameConstants", mlt=mlt, spectral=spectral,
+                            metal=True).entries
     tail = [e for e in entries if e[0] == "tileOriginY"]
     if not tail:
         raise SlangLayoutError(
