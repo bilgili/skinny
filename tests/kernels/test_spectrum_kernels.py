@@ -50,13 +50,14 @@ def spectrum_harness(load_shader):
 
 @pytest.fixture(scope="session")
 def upsample_buffers(device):
-    """(res, scaleBuf, dataBuf, d65Buf, d65_count) — the three tables uploaded
-    exactly as the renderer feeds them, wrapped as slangpy GPU buffers.
+    """(res, tablesBuf, scaleOff, dataOff, d65Off, d65_count) — scale | data | D65
+    packed into ONE ByteAddressBuffer with each region's byte offset, matching the
+    renderer's combined `spectralTables` after change spectral-table-fold. The
+    wrappers read `tables.Load<float>(off + i*4)`, so `off` is a byte offset into
+    the contiguous (4-byte-aligned) float regions.
 
-    The wrappers' ``StructuredBuffer<float>`` parameters take a *resource*, not a
-    vectorized value: a raw numpy array is broadcast per-thread by slangpy and
-    trips a shape mismatch, so bind ``NDBuffer.from_numpy(...).storage`` (a whole
-    ``Buffer``) instead.
+    Bind ``NDBuffer.from_numpy(...).storage`` (a whole ``Buffer``) so slangpy
+    passes a resource, not a per-thread-broadcast value.
     """
     import slangpy as spy
 
@@ -64,10 +65,12 @@ def upsample_buffers(device):
     scale_f32 = np.ascontiguousarray(scale, dtype=np.float32)
     data_f32 = np.ascontiguousarray(data.ravel("C"), dtype=np.float32)
     d65_f32 = np.ascontiguousarray(spectral.d65_normalized(), dtype=np.float32)
-    scale_buf = spy.NDBuffer.from_numpy(device, scale_f32).storage
-    data_buf = spy.NDBuffer.from_numpy(device, data_f32).storage
-    d65_buf = spy.NDBuffer.from_numpy(device, d65_f32).storage
-    return int(res), scale_buf, data_buf, d65_buf, int(d65_f32.size)
+    scale_off = 0
+    data_off = scale_f32.size * 4
+    d65_off = (scale_f32.size + data_f32.size) * 4
+    combined = np.concatenate([scale_f32, data_f32, d65_f32])
+    tables_buf = spy.NDBuffer.from_numpy(device, combined).storage
+    return (int(res), tables_buf, scale_off, data_off, d65_off, int(d65_f32.size))
 
 
 # A spread of sample coordinates in [0, 1).
@@ -142,14 +145,14 @@ class TestSampleWavelengths:
 
 class TestUpsampleReflectance:
     def test_matches_mirror(self, spectrum_harness, upsample_buffers):
-        res, scale, data, _d65, _n = upsample_buffers
+        res, tables, scale_off, data_off, _d65_off, _n = upsample_buffers
         errs: list[float] = []
         for rgb in _REFLECTANCES:
             for u in _US:
                 sw = spectral.sample_wavelengths(u)
                 ref = spectral.upsample_reflectance(rgb, sw.lambda_)
                 gpu = spectrum_harness.test_upsampleReflectance(
-                    rgb, float(u), res, scale, data
+                    rgb, float(u), res, tables, scale_off, data_off
                 )
                 _assert_close(gpu, ref, f"refl(rgb={rgb}, u={u})", errs)
         print(f"\nupsampleReflectance max rel err: {max(errs):.3e}")
@@ -157,14 +160,14 @@ class TestUpsampleReflectance:
 
 class TestUpsampleIlluminant:
     def test_matches_mirror(self, spectrum_harness, upsample_buffers):
-        res, scale, data, d65, n = upsample_buffers
+        res, tables, scale_off, data_off, d65_off, n = upsample_buffers
         errs: list[float] = []
         for rgb in _ILLUMINANTS:
             for u in _US:
                 sw = spectral.sample_wavelengths(u)
                 ref = spectral.upsample_illuminant(rgb, sw.lambda_)
                 gpu = spectrum_harness.test_upsampleIlluminant(
-                    rgb, float(u), res, scale, data, d65, n
+                    rgb, float(u), res, tables, scale_off, data_off, d65_off, n
                 )
                 _assert_close(gpu, ref, f"illum(rgb={rgb}, u={u})", errs)
         print(f"\nupsampleIlluminant max rel err: {max(errs):.3e}")
