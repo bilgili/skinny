@@ -55,13 +55,8 @@ binding, its size and its destruction sit together.
 | 35 | StructuredBuffer | Neural-proposal per-Linear-layer headers (`NfLayerHeader`: weightOffset, biasOffset, inDim, outDim — precision/size-agnostic) | `sampling/neural_proposal.slang` |
 | 36 | RWStructuredBuffer | Neural training-record append buffer (`PathRecord`, 64 B) — written by the `mainImageRecord` dump entry **and** the wavefront path integrator (when `fc.recordMode` is set). *Metal slot-cap gate:* compiled out of the neural-active wavefront build (with 30/37, see binding 30) | `integrators/path_record_common.slang` |
 | 37 | RWStructuredBuffer | Record append counter (`uint[2]` = `[count, capacity]`) — same Metal slot-cap gate as 36 | `integrators/path_record_common.slang` |
-| 45 | StructuredBuffer&lt;float&gt; | **Spectral upsampling — scale grid `spectralScale`** — the Jakob-Hanika RGB→spectrum sigmoid-coefficient table's RES node array (`SPECTRAL_TABLE_RES` = 64 floats). **Spectral-build-only** (`#if defined(SKINNY_SPECTRAL)`); absent from the RGB SPIR-V. Uploaded by `renderer.py` only when `--spectral` is active; on Metal binds by name (`spectralScale`), so the `vk::binding` index is inert there (change `spectral-rendering`) | `bindings.slang` |
-| 46 | StructuredBuffer&lt;float&gt; | **Spectral upsampling — coefficient grid `spectralData`** — flat `[3][res][res][res][3]` sigmoid-coefficient table (2,359,296 floats at res 64). Spectral-build-only, see binding 45 | `bindings.slang` |
-| 47 | StructuredBuffer&lt;float&gt; | **CIE D65 SPD `spectralD65`** — the reference illuminant SPD normalized to unit luminance (`SPECTRAL_D65_COUNT` = 95 floats), consumed by `upsampleIlluminant`. Spectral-build-only, see binding 45 | `bindings.slang` |
-| 48 | StructuredBuffer&lt;float&gt; | **Named-conductor eta/k `spectralMetals`** (Group 6.2) — au/ag/al/cu (ids 1..4), each `[eta(95) \| k(95)]` on the 360–830/5 nm grid (stride 190 floats). Sampled at the 4 hero λ by `namedMetalEtaK` for exact complex-index Fresnel. Spectral-build-only, see binding 45 | `bindings.slang` |
-| 49 | StructuredBuffer&lt;float&gt; | **Per-emissive-triangle blackbody `spectralEmitters`** (Group 6.1) — `(temperature_K, scale)` per emissive triangle (2 floats), **parallel-indexed to the emissive-triangle buffer (binding 18)**; a blackbody area light carries `(T>0, blackbody_scale(T, emission))`, a plain-RGB emitter `(0,0)`. NEE substitutes `planckSpectrum(sw,T)·scale` for the RGB illuminant upsample. Spectral-build-only, see binding 45 | `bindings.slang` |
-| 50 | StructuredBuffer&lt;float&gt; | **Per-distant-light illuminant SPD `spectralLightSpd`** (Group 6.3) — 95 floats/light on the 360–830/5 nm grid (host-scaled to the light's RGB luminance), indexed by the `DistantLight._direction.w` slot (−1 = none → RGB upsample). Fixed `DISTANT_LIGHT_CAPACITY` (16) slots. Spectral-build-only, see binding 45 | `bindings.slang` |
-| 51 | StructuredBuffer&lt;float&gt; | **Per-material blackbody `spectralMatEmission`** (Group 6.1 follow-up) — `(temperature_K, scale)` per flat material, **indexed by materialId**. Lets a camera-visible / BSDF-hit blackbody emitter use the exact Planck SPD (matching the NEE path's binding-49 lookup) instead of the RGB upsample. Grown/rebound with the flat-material buffer. Spectral-build-only, see binding 45 | `bindings.slang` |
+| 45 | ByteAddressBuffer | **Combined spectral tables `spectralTables`** (change `spectral-table-fold`) — the five read-only spectral tables end to end in ONE buffer, each region 16-byte aligned: the scale grid (`SPECTRAL_TABLE_RES` = 64 floats), the sigmoid-coefficient grid (`[3][res][res][res][3]` = 2,359,296 floats), the CIE D65 SPD (`SPECTRAL_D65_COUNT` = 95 floats), the named-conductor eta/k curves (`[eta(95) \| k(95)]` per metal, stride 190), and the per-distant-light illuminant SPDs (95 floats/light × `DISTANT_LIGHT_CAPACITY`). `FrameConstants` carries the start byte offset of each region; the accessors (`upsampleReflectanceBound` / `upsampleIlluminantBound` / `namedMetalEtaK` / `distantLightSpd`) read at those offsets. **Spectral-build-only** (`#if defined(SKINNY_SPECTRAL)`); absent from the RGB SPIR-V. On Metal binds by name (`spectralTables`) | `bindings.slang` |
+| 46–51 | *(free)* | Freed by the spectral table fold. 46–48 and 50 merged into the binding-45 buffer; the two per-record blackbody `(temperature, scale)` values (formerly 49 `spectralEmitters` and 51 `spectralMatEmission`) moved inline into the `EmissiveTriangle` and `FlatMaterialParams` records — see the byte-layout section | — |
 | 52 | RWStructuredBuffer | **MLT primary-sample vectors `mltPrimarySamples`** — the per-chain PSS state `X` (`MltPrimarySample` = value/backup + lastMod/modBackup, 16 B), `nChains × dims_per_chain`. The PSS `RNG` override in `common.slang` reads/mutates it. **MLT-build-only** (`#if defined(SKINNY_MLT)`, change `mlt-integrator`); absent from the default RGB/megakernel SPIR-V. On Metal binds by name (`vk::binding` index inert) | `common.slang` |
 | 53 | RWStructuredBuffer | **MLT chain metadata `mltChainMeta`** (`MltChainMeta`, `nChains`) — per-chain `{depth, cCurrent, pCurrent, LCurrent (rgb), rngState, iteration counters}`; the accept/reject bookkeeping. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
 | 54 | RWStructuredBuffer | **MLT current-state records `mltCurrentRecords`** (`MltRecord`, `nChains × MLT_RECORD_SLOTS`, `MLT_RECORD_SLOTS = BDPT_MAX_VERTS + 1`) — the accepted chain's captured contributions (eye value + ≤ `BDPT_MAX_VERTS` light-tracer splats) restored on reject and re-splatted per mutation. MLT-build-only, see binding 52 | `wavefront/wavefront_mlt.slang` |
@@ -100,22 +95,24 @@ layout is shared by the megakernel and every wavefront stage pipeline (via
 in `bindings.slang` has a matching layout entry, so a new shared scene binding
 cannot ship without its declaration (change `fix-vulkan-volume-density-binding`).
 
-**Spectral bindings 45–51** are compiled in **only** the spectral megakernel
-variant (`#if defined(SKINNY_SPECTRAL)`, change `spectral-rendering`) and are
-absent from the default RGB SPIR-V, so they never enter an RGB build's set-0
-layout. `renderer.py` uploads them only when `--spectral` is active: the three
-upsampling `StructuredBuffer<float>`s (45/46/47 — the Jakob-Hanika scale grid,
-the sigmoid-coefficient grid, and the unit-luminance CIE D65 SPD), plus four
-exact-source buffers — named-conductor eta/k (48, `spectralMetals`, Group 6.2),
-per-emissive-triangle blackbody `(T, scale)` (49, `spectralEmitters`, Group 6.1,
-parallel-indexed to binding 18), per-distant-light illuminant SPD (50,
-`spectralLightSpd`, Group 6.3, indexed by `DistantLight._direction.w`), and
-per-material blackbody `(T, scale)` (51, `spectralMatEmission`, indexed by
-materialId — the exact-Planck visible/BSDF-hit emission companion to 49). On
-Metal they all bind by name so the `vk::binding` index is inert. The table resolution
-(`SPECTRAL_TABLE_RES` = 64) and D65/grid length (`SPECTRAL_D65_COUNT` = 95) ride
-as **compile-time constants**, not `FrameConstants` fields, so the RGB UBO
-packing is unchanged.
+**Spectral binding 45** is compiled in **only** the spectral variant
+(`#if defined(SKINNY_SPECTRAL)`, change `spectral-rendering`) and is absent from
+the RGB SPIR-V, so it never enters an RGB build's set-0 layout. The spectral
+table fold (change `spectral-table-fold`) collapsed the seven former spectral
+globals (45–51) to this one buffer plus two record fields. `renderer.py` uploads
+the combined `spectralTables` (binding 45) only when `--spectral` is active: it
+holds the five read-only tables — the Jakob-Hanika scale grid, the
+sigmoid-coefficient grid, the unit-luminance CIE D65 SPD, the named-conductor
+eta/k curves, and the per-distant-light illuminant SPDs — end to end, each region
+16-byte aligned, with the start byte offset of each region written into
+`FrameConstants`. The two per-record blackbody `(temperature, scale)` values —
+formerly the parallel buffers 49 (`spectralEmitters`, per emissive triangle) and
+51 (`spectralMatEmission`, per material) — now ride inline in the
+`EmissiveTriangle` and `FlatMaterialParams` records, so they grow with their
+parent and cost no argument entry. On Metal binding 45 binds by name so the
+`vk::binding` index is inert. The table resolution (`SPECTRAL_TABLE_RES` = 64) and
+D65/grid length (`SPECTRAL_D65_COUNT` = 95) ride as **compile-time constants**,
+not `FrameConstants` fields, so the RGB UBO packing is unchanged.
 
 **MLT bindings 52–57** are compiled in **only** the MLT wavefront variant
 (`#if defined(SKINNY_MLT)`, change `mlt-integrator`) and are absent from the
@@ -348,8 +345,11 @@ preserved verbatim:
 **Growth sites state capacities, never byte sizes.** `regrow` re-evaluates the
 declaration's own `cap * STRIDE + slack`, so the arithmetic cannot drift between
 the initial allocation and a later grow, and the rebind is part of the same call.
-This is what closes the bug class where binding 49 (`spectralEmitters`) kept
-pointing at a freed buffer because only 18 was rewritten.
+This is what closed the bug class where binding 49 (`spectralEmitters`) kept
+pointing at a freed buffer because only 18 was rewritten — and the spectral table
+fold (change `spectral-table-fold`) then removed that pairing entirely: the
+per-emitter blackbody now rides inline in the `EmissiveTriangle` record, so it
+grows with binding 18 and there is no second buffer to rebind.
 
 **Renderer access.** Resource attributes are read-only properties forwarding to
 the set, so the ~120 `self.<resource>` reads inside `renderer.py` are unchanged
@@ -580,6 +580,49 @@ and a one-character shader edit falls through to `slangc`. The host sizers in
 `wavefront_layout.py` keep their `spectral=` / `msl=` signatures, but the
 wavefront passes read those booleans off the same `ShaderVariantKey` their
 kernels compiled with, so shader defines and host sizing cannot disagree.
+
+## Argument-table budget (`argument_budget.py`, change `spectral-table-fold`)
+
+Metal gives each compute kernel three fixed-size argument tables: **31** buffer
+entries, **128** texture entries, **16** sampler entries. The buffer limit is the
+Metal Shading Language ABI; no GPU family raises it. slang-rhi assigns a
+program's globals program-wide in declaration order, so a declared-but-dead
+global still costs an entry — a global must be *compiled out*, not merely unused,
+to give its slot back.
+
+`argument_budget` is the **one home** for those three limits; every other module
+that needs one reads it from there (`test_argument_budget` fails on a second
+declaration). It produces a per-`ShaderVariantKey` **census** — the buffer,
+texture and sampler count a variant compiles — from the compiler itself:
+`slangc -reflection-json` on the variant's module under its build gates. That
+needs no GPU device (slangc is a CPU compiler and the generated-material modules
+are emitted by CPU codegen), only `slangc` on `PATH`.
+
+The census reports a module's global-scope **union**, not the per-entry
+dead-stripped set that slang-rhi links at runtime — so it is exact for a
+single-scope module (the megakernel, the preview) and an upper bound for the
+multi-kernel wavefront modules. The hostless test therefore enforces a hard
+`≤ limit` only where the union equals the per-kernel set (`hard_limit_enforced`:
+megakernel / preview) and, for every variant, checks the count against the
+checked-in baseline `tests/fixtures/argument_budget_baseline.json`. A count that
+moves without a baseline update fails. The exact per-kernel `≤31` for the
+wavefront kernels is the gpu-marked cross-check against
+`program.layout.parameters` (task 1.7). The runtime pipeline-creation error in
+`metal_wavefront.py` stays as the backstop, now reading the cap from the owner.
+
+The bindless flat-material texture pool capacity is **derived** here too —
+`bindless_texture_capacity(target)` = the texture limit minus the other texture
+globals the megakernel declares (128 − 9 = 119 on Metal; 128 on Vulkan, which
+pays no reservation for the `PARTIALLY_BOUND` tail). The owner holds it as the
+checked-in `BINDLESS_TEXTURE_CAPACITY_METAL` / `_VULKAN` constants (a live slangc
+call must not run at `metal_compute` import); the test ties each to the derived
+value. `metal_compute` and `gpu_backend` read the constant — neither restates the
+literal.
+
+The **spectral table fold** is what the baseline records: it dropped every Metal
+spectral variant by exactly six buffer entries (megakernel-spectral 28 → 22),
+visible as the baseline diff, and freed the headroom the argument-buffer changes
+that follow will spend.
 
 ## FrameConstants Layout
 

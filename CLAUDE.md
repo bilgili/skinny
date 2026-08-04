@@ -341,7 +341,7 @@ first, then update both tables — a hostless doc-sync check
 | Import (procedural cloud) | pbrt `MakeNamedMedium "cloud"` (default `[0,1]³` bounds) → density/wispiness/frequency + σ + world→medium-local rows on the interface material's `skinnyOverrides` — no grid file, no `UsdVol.Volume` prim. `Material ""` on a `MediumInterface` shape = null boundary like `Material "interface"`. Non-default `p0`/`p1` bounds stay recorded skips. |
 | Transport | Majorant/null-collision (Woodcock) delta-tracking through the `MEDIUM_NANOVDB` / `MEDIUM_CLOUD` density seam (`materials/subsurface/medium.slang` + `volume_walk.slang`); density = one R16F `Texture3D` (binding 26); index-matched pass-through boundary; HG phase; distant+env NEE; escape-ray continuation shades geometry behind the volume. Metal watchdog caps: `VOLUME_MAX_SCATTERS`=64, `VOLUME_MAX_STEPS`=4096 under `SKINNY_METAL`. |
 | Transport (procedural cloud) | `MEDIUM_CLOUD` = an analytic `densityAt` case: pbrt's exact `CloudMedium::Density` (256-entry `NoisePerm` classic Perlin, 5-octave fBm, 2-iteration wispiness warp, altitude falloff — `materials/subsurface/cloud_noise.slang`, numpy-mirror-verified) evaluated in medium-local `[0,1]³`; zero outside the cube (pbrt's bounds clip). No texture, no new binding; packed σ_t is the exact global majorant (density clamps to [0,1]). `FlatMaterialParams` grew 240→256 B (one float4: density/wispiness/frequency). |
-| Metal argument table | The bindless flat-material texture pool is trimmed **120→119** (`BINDLESS_TEXTURE_CAPACITY`) so the `volumeDensity` 3D texture fits under Apple's 128-texture compute-argument limit (120 pool + 5 discrete maps + output/accum/hud filled it exactly). |
+| Metal argument table | The bindless flat-material texture pool is trimmed to **119** so the `volumeDensity` 3D texture fits under Apple's 128-texture compute-argument limit (119 pool + 9 discrete filled it exactly). The capacity is **derived, not a literal** (change `spectral-table-fold`): `argument_budget.bindless_texture_capacity(target)` = the texture limit minus the other texture globals the megakernel declares (`slangc` reflection); the owner holds the checked-in `BINDLESS_TEXTURE_CAPACITY_METAL`/`_VULKAN` constant tied to that derivation by test, and `metal_compute`/`gpu_backend` read it — neither restates the number. |
 
 **Neural directional proposal constraints** (independent of backend):
 
@@ -424,6 +424,13 @@ ship it untested across combos:**
   every existing combo; run the gate (below) and, if a combo legitimately shifts,
   re-measure and update the manifest `measured`/`baseline`, never loosen a
   self-consistency tolerance to hide a real divergence.
+- **New buffer / texture / sampler shader global** → state which variants carry
+  it with a `#if` gate (never leave a global unconditionally declared that only
+  one build needs — it costs a Metal argument-table entry in every kernel). The
+  `argument_budget` census counts it per variant; regenerate the baseline
+  (`argument_budget.write_baseline()`) and confirm no Metal variant passes its
+  table limit (31 buffers / 128 textures / 16 samplers). The limits live only in
+  `argument_budget` — never restate one.
 - **New reference scene** → add it to `tests/pbrt/corpus/manifest.json` (pbrt
   `file` or a `.usda` `usd` asset) and generate its EXR with
   `python tests/pbrt/regen_refs.py --scene <name> --res 256 --spp <n>` (uses the

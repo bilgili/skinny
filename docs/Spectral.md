@@ -43,9 +43,15 @@ validated GPU≡numpy in `tests/kernels/test_spectrum_kernels.py`:
 | vendored pbrt tables + upsampling | `src/skinny/pbrt/data/spectral_tables.py` |
 | CMF / Planck / sRGB primitives | `src/skinny/pbrt/spectra.py` |
 
-The descriptor bindings (45–47 `spectralScale`/`spectralData`/`spectralD65`, plus
-48 `spectralMetals`), the spectral compile variant, and the shader module map are
-documented in [GpuResources.md § Descriptor Binding Map](GpuResources.md#descriptor-binding-map)
+The five read-only spectral tables (upsampling scale grid, sigmoid-coefficient
+grid, CIE D65 SPD, named-conductor eta/k, per-distant-light illuminant SPDs) live
+in ONE `ByteAddressBuffer spectralTables` at binding 45, each region 16-byte
+aligned, with its start offset in `FrameConstants` (change `spectral-table-fold`).
+The two per-record blackbody `(temperature, scale)` values ride inline in the
+`EmissiveTriangle` and `FlatMaterialParams` records, not in a buffer of their own.
+The descriptor binding, the spectral compile variant, and the shader module map
+are documented in
+[GpuResources.md § Descriptor Binding Map](GpuResources.md#descriptor-binding-map)
 and [ShaderPipeline.md § Modules](ShaderPipeline.md#modules) — this document does not
 duplicate them.
 
@@ -422,7 +428,7 @@ emissive triangles, task 6.1.)*
 
 A named metal (`au`/`ag`/`al`/`cu`/`cuzn`/`mgo`/`tio2`) preserves its identity on
 `skinnyOverrides["conductor_metal"]`; its complex index η̃ = η + iκ is looked up per
-hero wavelength from the vendored eta/k curves (`spectralMetals`, binding 48, 5 nm
+hero wavelength from the vendored eta/k curves (`spectralMetals` region of the combined `spectralTables` buffer, 5 nm
 grid) and the specular lobe uses pbrt's exact unpolarized `FrComplex` instead of a
 scalar Schlick approximation:
 
@@ -475,9 +481,9 @@ Three limits worth knowing:
   reader) is reported as such rather than mistaken for an unknown glass.
 * **SPD binding is distant-light-only.** A named illuminant yields the correct
   chromaticity on *every* light type, but only distant lights bind an SPD
-  (binding 50). Point/spot/infinite/area lights spectrally upsample from that RGB
+  (the per-light SPD region of `spectralTables`). Point/spot/infinite/area lights spectrally upsample from that RGB
   — the same treatment an inline `spectrum L` gets on those lights. Area lights
-  carry only a blackbody `(temperature, scale)` pair (binding 49), so there is
+  carry only a blackbody `(temperature, scale)` pair (inline in the EmissiveTriangle record), so there is
   nowhere to put an SPD without a record-layout change.
 
 ### Glass dispersion (Cauchy)

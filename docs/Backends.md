@@ -231,8 +231,17 @@ pipelines, queue buffers sized from the **reflected MSL strides**, one
 `MetalFrameEncoder` per frame with global barriers, and the CPU
 slot-count-readback fallback while slang-rhi's Metal indirect dispatch is a
 no-op — selected by the logged `supports_indirect_dispatch` probe). Metal caps
-a kernel's argument table at **31 buffer slots**, assigned program-wide in
-declaration order: the default wavefront build stubs the record emitters
+a kernel's argument table at **31 buffer slots** (also 128 textures, 16
+samplers), assigned program-wide in declaration order. That limit has one owner,
+`argument_budget.py`, and a **hostless per-variant census** is the primary gate:
+it derives each variant's buffer/texture/sampler count from the compiler
+(`slangc -reflection-json`, no GPU device) and fails before a device is built if
+a count passes the limit or drifts from the checked-in baseline. The runtime
+pipeline-creation error here stays as the backstop; the exact per-kernel count is
+the gpu-marked cross-check against `program.layout.parameters`. See
+[GpuResources.md § Argument-table budget](GpuResources.md#argument-table-budget-argument_budgetpy-change-spectral-table-fold).
+Several builds compile globals out to fit the cap: the default wavefront build
+stubs the record emitters
 (`wf_records.slang`), and the neural-active build (`SKINNY_METAL_NEURAL=1`)
 additionally compiles out `toolBuffer`/`recordBuf`/`recordCounter` (dead in
 every wavefront kernel) to fit the un-stubbed `neuralWeights/Biases/Layers`.
