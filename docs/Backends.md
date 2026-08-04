@@ -89,7 +89,8 @@ declares what the adapters must agree on and what they may not:
   and dispatches instead of executing them, and returns zero-filled data. It
   makes dispatch ordering and binding coverage assertable with **no device**
   (`Recorder.dispatch_entries()`, `Recorder.missing_bindings()`). It records, it
-  does not simulate: image correctness stays the parity matrix's job.
+  does not simulate: image correctness stays the parity matrix's job. Its
+  live-binding coverage path is the section below.
 
 Two probes were removed and must not come back. `hasattr(ctx, "compute_queue")`
 was used as "is this Vulkan?" at 7 sites, but `MetalContext.compute_queue` is
@@ -108,6 +109,67 @@ wavefront pass factory (`vk_wavefront` vs `metal_wavefront`), and the windowed,
 headless and material-preview dispatch paths. The rule that fell out of the
 migration: **resource construction, binding, readback and dispatch belong on the
 adapter; assembling a frame does not.**
+
+### Live bindings on the recording adapter (change `recording-adapter-live-bindings`)
+
+`Recorder.missing_bindings()` names every shader global a recorded dispatch left
+unbound. On Metal an unbound global reads as **zero rather than raising**, so
+catching one before the GPU is worth a lot — but only if neither side of the
+comparison is written by the test. Originally both were: a caller handed
+`reflect_globals()` a literal set and `dispatch()` a literal bind dict, so the
+assertion was that two literals disagreed where their author expected. Three
+pieces make it real.
+
+**The declared side comes from the compiler.** A hand parser was tried first and
+abandoned: a line/regex parser cannot tell a file-scope resource global from a
+function parameter of resource type without full scope tracking, and pre-merge
+review kept finding valid Slang spellings it under-reported — the exact fail-open
+the gate exists to prevent. So the declared globals come from `slangc`'s own
+reflection. `tests/fixtures/gen_recording_pass_globals.py` emits the generated
+MaterialX Slang the megakernel imports, compiles each registered pass **to the
+Metal target** under its `ShaderVariantKey` defines with `-reflection-json`,
+takes the top-level `parameters` (uniform block included) and refuses on any
+bindable entry-point parameter (a `uniform` that would lower to a push constant,
+absent from `parameters`), and writes `tests/fixtures/recording_pass_globals.json`.
+The hostless gate reads that golden — a checked-in generated artifact trusted the
+way the parity harness trusts its reference EXRs; a `gpu`-marked freshness test
+re-runs the compiler and diffs. Regenerate after any shader edit that changes a
+registered pass's globals::
+
+    PYTHONPATH=src .venv/bin/python -m tests.fixtures.gen_recording_pass_globals
+
+**The bound side comes from the host.** `SceneResourceSet.metal_binds()` is the
+single builder — the renderer's `_build_metal_binds` delegates to it, passing the
+two globals the renderer owns rather than the set (`commonSampler`,
+`graphParamsCombined`) as keyword arguments instead of adding them afterwards.
+`recording_compute.scene_binds(ctx)` allocates a `SceneResourceSet` **against the
+recording adapter** and calls that same method, so the gate compares the
+compiler's truth against production code with no device and no `Renderer`.
+
+**Registration is enforced.** `RECORDABLE_PASSES` lists each covered pass — today
+the Metal megakernel; the denoise auxiliary and display passes join when
+`denoise-pipeline` lands (coverage is scoped per registered
+`(pass, ShaderVariantKey)`). `RECORDABLE_EXCLUSIONS` lists every other compute
+entry with a reason. `tests/test_recording_pass_coverage.py` asserts each
+registered pass leaves nothing unbound, that the golden names exactly the
+registered passes, that every entry `compute_entry_points()` finds is registered
+or excluded, and that no exclusion is stale. Entry keys are `(module,
+entry_point)`, never the name alone: several modules declare `computeMain`.
+`compute_entry_points` is the one scan that stays source-side — a far simpler
+grammar than declarations, with a single-pass comment lexer (a `/*` inside a
+`//` line, or either delimiter inside a string, is text) and a platform-neutral
+module key.
+
+Two independent legs guard the golden. It is **cross-checked** against
+`gpu_resources.DECLARATIONS`: the megakernel golden must name exactly the
+default-layout inventory resources it reaches (all but the neural buffers it
+strips at build), so a drift on either side fails. And a **negative control**: a
+fixture pass whose bind map omits one reflected global, asserted reported through
+the same call the real gate uses — weakening the comparison fails it.
+
+The hand-driven scenarios in `tests/test_gpu_backend.py` stay, relabelled: they
+test the **recorder** (a `None` value is unbound, the uniform blob binds `fc`, an
+undeclared pipeline reports nothing), which is what a literal set is right for.
 
 ### MetalContext (`metal_context.py`, `metal_compute.py`)
 

@@ -346,9 +346,17 @@ def test_the_two_backends_differ_on_every_declared_capability():
 
 
 # ── 5. the recording adapter ────────────────────────────────────────────
+#
+# These scenarios test the RECORDER, not any pass: both the declared set and the
+# bind map are written here by hand, which is right for pinning the recorder's
+# own rules and proves nothing about whether a real pass binds what its shader
+# declares. Coverage for real passes lives in
+# `tests/test_recording_pass_coverage.py` (change `recording-adapter-live-bindings`),
+# where the declared side is the compiler's reflection golden and the bound side
+# is the host's real bind map.
 
 
-def test_recording_adapter_records_allocation_and_dispatch_order():
+def test_recorder_records_allocation_and_dispatch_order():
     from skinny import recording_compute as rec
 
     ctx = rec.RecordingContext(32, 32)
@@ -364,7 +372,7 @@ def test_recording_adapter_records_allocation_and_dispatch_order():
     assert ctx.recorder.ops("dispatch")[0].detail["groups"] == (32, 32, 1)
 
 
-def test_recording_adapter_returns_zero_filled_data_and_never_pixels():
+def test_recorder_returns_zero_filled_data_and_never_pixels():
     from skinny import recording_compute as rec
 
     ctx = rec.RecordingContext(4, 4)
@@ -372,7 +380,7 @@ def test_recording_adapter_returns_zero_filled_data_and_never_pixels():
     assert not rec.StorageImage(ctx, 4, 4).read_rgba().any()
 
 
-def test_recording_adapter_reports_a_missing_binding():
+def test_recorder_reports_a_missing_binding():
     """Spec scenario: the gap is caught before the GPU, not as a black image."""
     from skinny import recording_compute as rec
 
@@ -385,7 +393,7 @@ def test_recording_adapter_reports_a_missing_binding():
         ("mainImage", "envMap"), ("mainImage", "sceneBuffer")]
 
 
-def test_recording_adapter_treats_a_none_resource_as_unbound():
+def test_recorder_treats_a_none_resource_as_unbound():
     """A key with no resource is NOT a binding — `metal_compute.dispatch` skips
     `None` rather than binding it, so recording it as bound would mask exactly
     the gap this adapter exists to find (codex pre-merge review, MEDIUM 2)."""
@@ -399,7 +407,7 @@ def test_recording_adapter_treats_a_none_resource_as_unbound():
     assert ctx.recorder.missing_bindings() == [("mainImage", "outputBuffer")]
 
 
-def test_recording_adapter_counts_the_non_binds_channels():
+def test_recorder_counts_the_non_binds_channels():
     """A resource does not have to arrive through `binds`: the uniform blob
     binds `fc`, a push block `pc`, the preview output `previewOutput`, and
     `bindless` the global it names. Ignoring those reported real bindings as
@@ -420,7 +428,7 @@ def test_recording_adapter_counts_the_non_binds_channels():
     assert ctx.recorder.missing_bindings() == []
 
 
-def test_recording_adapter_reports_nothing_for_an_undeclared_pipeline():
+def test_recorder_reports_nothing_for_an_undeclared_pipeline():
     """No reflection declared ⇒ report nothing, rather than report everything."""
     from skinny import recording_compute as rec
 

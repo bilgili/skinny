@@ -7988,28 +7988,17 @@ class Renderer:
         module actually references, so binding an unused name is harmless and a
         dead-stripped one is simply skipped.
 
-        Every declared resource — buffers, storage images, and the discrete
-        `Texture2D`/`Texture3D` + `SamplerState` pairs Metal needs because a
-        combined `Sampler2D`/`Sampler3D` is unsupported there — comes from the
-        same declaration list the Vulkan descriptor writes come from. Only the
-        two globals that are not declared resources are added here.
+        same declaration list the Vulkan descriptor writes come from. The two
+        globals that are not declared resources — the shared bindless-pool
+        sampler (binding 38, design D8) and the combined MaterialX graph-param
+        buffer (`graphParamsCombined`, change combine-graph-param-buffers,
+        whose lifetime follows the scene graph) — are passed in rather than
+        added afterwards, so `metal_binds` stays the single builder and the
+        hostless binding-coverage gate sees the same map this frame binds.
         """
-        b = self._gpu_set.metal_binds()
-        # Shared bindless-pool sampler (binding 38, design D8) — owned by the
-        # renderer, not the resource set: it is one sampler standing in for the
-        # 128 a combined `Sampler2D[]` would emit.
-        b["commonSampler"] = self._metal_common_sampler
-        # Per-graph MaterialX param SSBOs (globals `graphParams_<sanitized>`,
-        # binding GRAPH_BINDING_BASE). One combined buffer shared by every graph
-        # (the Slang global is `graphParamsCombined`, change
-        # combine-graph-param-buffers). Contents are scalar-packed in
-        # `_upload_graph_param_buffers` — `Load<T>` reads the same scalar layout
-        # on Metal and SPIR-V, so no MSL relocation. Its lifetime follows the
-        # scene graph rather than the resource set.
-        combined = getattr(self, "_graph_params_combined", None)
-        if combined is not None:
-            b["graphParamsCombined"] = combined.buffer
-        return b
+        return self._gpu_set.metal_binds(
+            common_sampler=self._metal_common_sampler,
+            graph_params=getattr(self, "_graph_params_combined", None))
 
     def _render_megakernel_metal(self, plan) -> None:
         """Bind every megakernel resource and dispatch one frame on the Metal

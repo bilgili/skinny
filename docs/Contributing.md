@@ -26,6 +26,34 @@ GPU-dependent tests are marked `@pytest.mark.gpu`; statistical Monte Carlo
 tests are marked `@pytest.mark.slow`; SlangPile-specific tests are marked
 `@pytest.mark.slangpile`.
 
+### Adding a compute pass
+
+A new compute entry point in the shader tree must be **registered or excluded**,
+or the build fails (change `recording-adapter-live-bindings`).
+
+- Register it in `recording_compute.RECORDABLE_PASSES` when the host builds its
+  bind map through `SceneResourceSet.metal_binds()`. Give the entry module, the
+  entry point, its `ShaderVariantKey`, and a bind-map provider — usually
+  `lambda ctx: scene_binds(ctx)`. Then regenerate the declared-globals golden so
+  the gate knows what the pass declares:
+
+  ```bash
+  PYTHONPATH=src .venv/bin/python -m tests.fixtures.gen_recording_pass_globals
+  ```
+
+  The gate then asserts the pass binds every global `slangc` reflects for it.
+- Otherwise add it to `recording_compute.RECORDABLE_EXCLUSIONS` **with a
+  reason**. An exclusion for a pass that no longer exists also fails, because a
+  stale one silently re-admits the gap it was meant to bound.
+
+Regenerate the golden too after any shader edit that changes a registered pass's
+declared globals — the `gpu`-marked freshness test re-runs the compiler and
+diffs, so a stale golden is caught. `tests/test_recording_pass_coverage.py` is
+the gate; the design is in
+[Backends.md § Live bindings on the recording adapter](Backends.md#live-bindings-on-the-recording-adapter-change-recording-adapter-live-bindings).
+Never hand a registered pass a literal set of globals — the compiler and the
+host, not the test, supply the two sides.
+
 ## Development
 
 Compile Python:

@@ -342,6 +342,44 @@ ONE_SIDED_MEMBERS: dict[str, dict[str, str]] = {
         "why": "a device-free stand-in for VulkanContext / MetalContext; the "
                "device adapters get their context from backend_select",
     },
+    # Coverage registry (change recording-adapter-live-bindings). The declared
+    # globals of a pass come from the compiler's reflection (checked in as a
+    # golden), so the recording adapter owns only the registry the coverage gate
+    # iterates and the device-free scene bind map it compares against.
+    "RecordablePass": {
+        "only": "recording",
+        "why": "a pass registered for hostless binding coverage: entry module, "
+               "entry point, variant key, bind-map provider. A device adapter "
+               "dispatches passes rather than enumerating them",
+    },
+    "RecordableExclusion": {
+        "only": "recording",
+        "why": "see RecordablePass — a compute entry deliberately outside the "
+               "coverage gate, with its reason",
+    },
+    "RECORDABLE_PASSES": {
+        "only": "recording",
+        "why": "see RecordablePass — the registry itself",
+    },
+    "RECORDABLE_EXCLUSIONS": {
+        "only": "recording",
+        "why": "see RecordableExclusion — the exclusion table itself",
+    },
+    "compute_entry_points": {
+        "only": "recording",
+        "why": "enumerates every compute entry in the shader tree so the "
+               "registry meta-test can fail on an unregistered pass",
+    },
+    "scene_binds": {
+        "only": "recording",
+        "why": "builds the host's real scene bind map with no device, by "
+               "allocating a SceneResourceSet against this adapter",
+    },
+    "shader_dir": {
+        "only": "recording",
+        "why": "the shader tree the coverage gate reads; the device adapters "
+               "receive it from their construction site",
+    },
     "COMMON_SAMPLER_NAME": {
         "only": "metal",
         "why": "the shader-global name the shared bindless sampler binds to; "
