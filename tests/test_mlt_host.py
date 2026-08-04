@@ -355,8 +355,10 @@ def test_mlt_msl_pack_matches_target_layout_not_session():
     src = _read("renderer.py")
     msl = src[src.index("def _pack_uniforms_msl"):src.index("def _build_metal_binds")]
     assert 'has_tail = "mltSigma" in layout' in msl
-    assert "self._pack_uniforms(mlt_tail=has_tail)" in msl
-    assert "_FC_SCALAR_FIELDS_MLT if has_tail else _FC_SCALAR_FIELDS" in msl
+    # spectral-table-fold added a parallel spectral axis: the tail AND the
+    # spectral-offset block are both keyed off the target layout.
+    assert "self._pack_uniforms(mlt_tail=has_tail, spectral=has_spectral)" in msl
+    assert "_fc_scalar_fields(spectral=has_spectral, mlt=has_tail)" in msl
 
 
 def test_mlt_metal_chain_batch_defaults_to_one_batch_at_default_chains():

@@ -4,9 +4,14 @@
 import spectrum;
 import common;  // Spectrum / SPECTRUM_N (spectrum.slang imports it non-exported)
 
-StructuredBuffer<float> gScale;
-StructuredBuffer<float> gData;
-StructuredBuffer<float> gD65;
+// One combined ByteAddressBuffer holding scale | data | D65 end to end, matching
+// the renderer's `spectralTables` after change spectral-table-fold. The Python
+// GPU≡numpy test packs the three arrays contiguously and passes each region's
+// byte offset.
+ByteAddressBuffer gTables;
+uniform uint gScaleOff;
+uniform uint gDataOff;
+uniform uint gD65Off;
 RWStructuredBuffer<float> gOut;
 uniform int gRes;
 uniform int gD65Count;
@@ -67,33 +72,30 @@ float test_spectrumWidth()
     return float(SPECTRUM_N);
 }
 
-// The upsample wrappers take the sRGB table (res/scale/data) and D65 curve as
-// explicit function PARAMETERS rather than reading the module globals: slangpy
-// binds a numpy array straight to a `StructuredBuffer<float>` parameter, so the
-// Python GPU≡numpy test (tests/kernels/test_spectrum_kernels.py) can feed
-// gScale=scale, gData=data.ravel('C'), gD65=d65_normalized() per call. The
-// module-scope globals below stay so `computeMain` (the slangc compile gate)
-// still links, and the wrapped spectrum.slang functions are unchanged.
+// The upsample wrappers take the combined `ByteAddressBuffer` + each region's
+// byte offset as explicit PARAMETERS (matching the refactored spectrum.slang
+// signatures, change spectral-table-fold): the Python GPU≡numpy test
+// (tests/kernels/test_spectrum_kernels.py) packs scale|data|d65 into one buffer
+// and feeds `tables`, `scaleOff`, `dataOff`, `d65Off` per call. The module-scope
+// globals below stay so `computeMain` (the slangc compile gate) still links.
 float3 test_rgbSigmoidCoeffs(float3 rgb, int res,
-                             StructuredBuffer<float> scale,
-                             StructuredBuffer<float> data)
+                             ByteAddressBuffer tables, uint scaleOff, uint dataOff)
 {
-    return rgbSigmoidCoeffs(rgb, res, scale, data);
+    return rgbSigmoidCoeffs(rgb, res, tables, scaleOff, dataOff);
 }
 
 float4 test_upsampleReflectance(float3 rgb, float u, int res,
-                                StructuredBuffer<float> scale,
-                                StructuredBuffer<float> data)
+                                ByteAddressBuffer tables, uint scaleOff, uint dataOff)
 {
-    return upsampleReflectance(rgb, sampleWavelengths(u), res, scale, data);
+    return upsampleReflectance(rgb, sampleWavelengths(u), res, tables, scaleOff, dataOff);
 }
 
 float4 test_upsampleIlluminant(float3 rgb, float u, int res,
-                               StructuredBuffer<float> scale,
-                               StructuredBuffer<float> data,
-                               StructuredBuffer<float> d65, int d65Count)
+                               ByteAddressBuffer tables, uint scaleOff, uint dataOff,
+                               uint d65Off, int d65Count)
 {
-    return upsampleIlluminant(rgb, sampleWavelengths(u), res, scale, data, d65, d65Count);
+    return upsampleIlluminant(rgb, sampleWavelengths(u), res, tables, scaleOff,
+                              dataOff, d65Off, d65Count);
 }
 
 [shader("compute")]
@@ -103,11 +105,11 @@ void computeMain(uint3 tid: SV_DispatchThreadID)
     // Touch every entry so nothing is dead-stripped before the compile gate.
     float4 a = test_sampleWavelengths(0.3) + test_wavelengthPdfs(0.3)
              + test_terminateSecondary(0.3)
-             + test_upsampleReflectance(float3(0.5), 0.3, gRes, gScale, gData)
-             + test_upsampleIlluminant(float3(0.5), 0.3, gRes, gScale, gData, gD65, gD65Count)
+             + test_upsampleReflectance(float3(0.5), 0.3, gRes, gTables, gScaleOff, gDataOff)
+             + test_upsampleIlluminant(float3(0.5), 0.3, gRes, gTables, gScaleOff, gDataOff, gD65Off, gD65Count)
              + test_planck(0.3, 5000.0);
     float3 b = test_cieXYZBar(550.0) + test_resolve(0.3, a)
-             + test_rgbSigmoidCoeffs(float3(0.5, 0.2, 0.7), gRes, gScale, gData);
+             + test_rgbSigmoidCoeffs(float3(0.5, 0.2, 0.7), gRes, gTables, gScaleOff, gDataOff);
     float c = test_sigmoidPoly(b, 550.0);
     gOut[tid.x] = a.x + b.x + c;  // sink: defeats dead-code elimination
 }
