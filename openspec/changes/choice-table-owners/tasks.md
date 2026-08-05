@@ -34,20 +34,32 @@
 - [x] 2.6 Source gate: no axis list literal outside the table
       (`tests/test_choice_tables.py`, with a negative control on `9ffd5b0`).
 
-## 3. Wavefront names and constants
+## 3. Wavefront names and constants — DEFERRED to `choice-table-wavefront-owners`
 
-- [ ] 3.1 Kernel entry-name table in `wavefront_driver.py`; both backends and
-      the driver import it.
-- [ ] 3.2 Shared constants get one home; per-backend ones get a test pinning
-      the pair with the stated reason.
-- [ ] 3.3 Negative control: rename a kernel in the table and confirm the build
-      fails rather than a render.
+The kernel-name table + shared/pinned pass constants are large mechanical churn
+across the two GPU pass modules and are gated by a dual-backend wavefront GPU
+smoke, so per D5 they land as a separate follow-up change (baseline recorded in
+task 1.3). They are NOT part of this change's delivered scope.
+
+- [~] 3.1 Kernel entry-name table in `wavefront_driver.py`; both backends and
+      the driver import it. (follow-up)
+- [~] 3.2 Shared constants get one home; per-backend ones get a test pinning
+      the pair with the stated reason. (follow-up)
+- [~] 3.3 Negative control: rename a kernel in the table and confirm the build
+      fails rather than a render. (follow-up)
 
 ## 4. Gates
 
-- [ ] 4.1 `ruff check src/`; full hostless `pytest`.
-- [ ] 4.2 CLI surface unchanged: every previously accepted flag value still
-      accepted, argparse help text checked.
-- [ ] 4.3 GPU smoke: one wavefront render per backend (kernel names moved).
-- [ ] 4.4 Docs: `README.md` flag choices, `docs/Wavefront.md` kernel table.
-- [ ] 4.5 `openspec validate choice-table-owners --strict`.
+- [x] 4.1 `ruff check src/` clean on the touched files; full hostless `pytest`
+      passes (18 remaining failures are all pre-existing-on-`9ffd5b0` — MCP
+      schema, pbrt mtlx logic — or worktree-only asset absence — gitignored
+      `main_pass.spv` / pbrt corpus scenes — none from this change).
+- [x] 4.2 CLI surface unchanged: `--integrator {path,bdpt,sppm,mlt}`,
+      `--execution-mode {auto,megakernel,wavefront}`, headless `--tonemap`
+      choices all still parse; a bad value still exits 2. Help text untouched
+      (only the `choices=` source changed).
+- [~] 4.3 GPU smoke: one wavefront render per backend. Moot for this change —
+      no wavefront code changed; belongs to the follow-up.
+- [x] 4.4 Docs: `README.md` flag choices are unchanged (stable CLI vocabulary),
+      so no edit. `docs/Wavefront.md` kernel table moves to the follow-up.
+- [x] 4.5 `openspec validate choice-table-owners --strict` — valid.

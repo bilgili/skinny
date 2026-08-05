@@ -29,7 +29,11 @@ names are written in three files** (`wavefront_driver.py`, `vk_wavefront.py`,
 `BDPT_MAX_VERTS`, `VERTEX_STRIDE`, `AUX_STRIDE`, `EYE_BOUNCES`,
 `LIGHT_BOUNCES`, `WALK_MODES`, `RESERVOIR_STRIDE`, the ReSTIR `DEFAULT_CONFIG`
 — are duplicated verbatim between the Vulkan and Metal pass classes with **no
-test pinning them equal**.
+test pinning them equal**. That wavefront half is **deferred to a separate
+follow-up change** (`choice-table-wavefront-owners`): it is large mechanical
+churn across the two GPU pass modules and is gated by a dual-backend wavefront
+GPU smoke, so per D5 it lands on its own schedule rather than blocking the
+host-side axis owners here.
 
 By the deletion test these mirrors are shallow: removing them concentrates the
 lists rather than moving complexity anywhere. What they currently buy is a
@@ -45,12 +49,11 @@ that are already wrong in shipped UI.
 - `render_session._default_choice_names` and `_default_values` read the owner
   instead of restating it; the placeholder need is met by importing a
   toolkit-free table, not by retyping the lists.
-- Kernel entry-point names get one table, imported by the driver and both
-  backends, so a rename breaks the build rather than a render.
-- The 14 duplicated wavefront constants get one home, or a test that pins the
-  two copies equal where they must legitimately differ.
 - Fix the drifted values found along the way: the missing MLT label, the
   disagreeing tonemap list, and the six divergent placeholder lists.
+
+Deferred to the follow-up change `choice-table-wavefront-owners`: the kernel
+entry-point name table and the shared/pinned wavefront pass constants.
 
 ## Capabilities
 
@@ -58,21 +61,21 @@ that are already wrong in shipped UI.
 
 - `choice-table-ownership`: one owner per enumerated axis for its values,
   labels and indices — consumed by the CLI's `choices`, the headless tables,
-  the renderer's display lists and the GUI-thread proxy defaults — plus one
-  owner for the wavefront kernel entry-point names and shared pass constants.
-  `render-cli` and `wavefront-execution` behaviour is unchanged except where a
-  currently-drifted label or list is corrected.
+  the renderer's display lists and the GUI-thread proxy defaults. `render-cli`
+  behaviour is unchanged except where a currently-drifted label or list is
+  corrected. (The wavefront kernel-name and pass-constant owner moves to the
+  follow-up change `choice-table-wavefront-owners`.)
 
 ## Impact
 
+- Added: `src/skinny/choice_tables.py` (the axis owner),
+  `tests/test_choice_tables.py` (golden + source gate).
 - Modified: `src/skinny/cli_common.py`, `src/skinny/headless.py`,
-  `src/skinny/render_envelope.py`, `src/skinny/renderer.py` (display lists),
-  `src/skinny/render_session.py` (placeholders and defaults),
-  `src/skinny/wavefront_driver.py`, `src/skinny/vk_wavefront.py`,
-  `src/skinny/metal_wavefront.py`.
+  `src/skinny/render_envelope.py`, `src/skinny/frame_plan.py`,
+  `src/skinny/renderer.py` (display lists), `src/skinny/render_session.py`
+  (placeholders and defaults), `src/skinny/params.py` (`ParamSpec.default`).
 - **User-visible**: the MLT integrator label and the tonemap list become
   correct in surfaces that currently show the wrong ones.
-- Hostless, no GPU work, no shader change, no risk to the parity matrix. Lands
-  piecemeal — one axis at a time.
-- Docs: `README.md` where flag choices are listed; `docs/Wavefront.md` for the
-  kernel-name table.
+- Hostless, no GPU work, no shader change, no risk to the parity matrix.
+- Docs: `README.md` flag choices are unchanged (the CLI vocabulary is stable).
+  The `docs/Wavefront.md` kernel-name table moves to the follow-up change.
