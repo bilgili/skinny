@@ -62,9 +62,12 @@ detail-maps, ReSTIR combination, proposal preset) has one owner:
 consumer — the CLI `choices`, the headless `str→index` dicts, the renderer's
 display lists, and the GUI-thread proxy placeholders are all projections
 (`labels`, `tokens`, `index_by_token`, `index_to_token`). An AST source gate in
-`tests/test_choice_tables.py` fails the build if a list/tuple/dict literal whose
-string set equals an owned axis's membership appears outside the owner, so a
-re-mirrored axis is caught rather than left to drift. See
+`tests/test_choice_tables.py` scans every module under `src/skinny` and fails the
+build if a list/tuple/dict literal whose string set equals an owned axis's
+membership appears in any of them (two documented carve-outs: the `On`/`Off`
+detail-maps pair, whose set is shared by sibling axes, and `renderer.py`'s
+record-source `megakernel`/`wavefront` literal). A re-mirrored axis is caught
+rather than left to drift. See
 [HostModules.md § The enumerated-axis owner](HostModules.md#the-enumerated-axis-owner-choice_tablespy-change-choice-table-owners).
 
 ## Development

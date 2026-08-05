@@ -97,14 +97,14 @@ def test_cli_proposals_choices_project_the_owner():
     assert tuple(action.choices) == ct.tokens(ct.PROPOSAL_PRESET)
 
 
-def test_execution_index_constants_are_pinned_to_the_owner():
-    """The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices are kept as
-    separate int constants in four leaf modules (to avoid a GPU import cycle);
-    pin every copy to the owner's index so they cannot drift from it."""
+def test_execution_index_constants_project_the_owner():
+    """The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices are derived
+    from the owner in every module that declares them (device-free leaf modules
+    keeping the index without a GPU import cycle), so they cannot drift from it."""
     idx = ct.index_by_token(ct.EXECUTION_MODE)
     assert (idx["megakernel"], idx["wavefront"]) == (0, 1)
     from skinny import frame_derive, frame_plan, mlt_chain, params
-    # params/frame_plan define both; frame_derive/mlt_chain only need WAVEFRONT.
+    # params/frame_plan declare both; frame_derive/mlt_chain only need WAVEFRONT.
     for mod in (params, frame_plan, frame_derive, mlt_chain):
         if hasattr(mod, "EXECUTION_MEGAKERNEL"):
             assert mod.EXECUTION_MEGAKERNEL == idx["megakernel"], mod.__name__
@@ -114,34 +114,37 @@ def test_execution_index_constants_are_pinned_to_the_owner():
 
 # ── source gate: no axis membership restated outside the owner ────────────────
 #
-# AST-based, so a multiline literal cannot evade it, and it matches an axis's
-# *full membership set* (not a substring) so a generic literal elsewhere is not a
-# false positive. `detail-maps` is deliberately NOT gated: its set {"On","Off"}
-# is not unique — `direct_light_modes` and `furnace_modes` carry the same pair,
-# so a membership-set gate cannot tell an owned mirror from a legitimate sibling.
-# `execution tokens` is scoped to the two files that owned it, because
-# renderer.py's `("megakernel","wavefront")` legitimately names the record-source
-# axis (a different axis) with the same token set.
+# Scans EVERY module under src/skinny (not a hand-picked list). AST-based, so a
+# multiline literal cannot evade it, and it matches an axis's *full membership
+# set*, so a generic literal elsewhere is not a false positive. Two documented
+# carve-outs:
+#   * `detail-maps` is NOT gated — its set {"On","Off"} is shared by
+#     `direct_light_modes` and `furnace_modes` (legitimate sibling axes), so a
+#     membership-set gate cannot tell an owned mirror from a sibling.
+#   * `execution tokens` skips renderer.py, whose `("megakernel","wavefront")`
+#     legitimately names the record-source axis (a different axis) with the same
+#     token set.
+# Known limit: exact-set matching catches a *complete* reintroduced mirror, not a
+# partial one (a 3-of-4 integrator list). Subset matching is rejected because an
+# axis's proper subset collides with real sibling literals (e.g. {"sppm","mlt"} is
+# render_envelope.WAVEFRONT_ONLY_INTEGRATORS).
 
-_CONSUMERS = [
-    "cli_common.py", "headless.py", "render_envelope.py", "frame_plan.py",
-    "renderer.py", "render_session.py",
-]
+_CONSUMERS = sorted(
+    str(p.relative_to(SRC)) for p in SRC.rglob("*.py") if p.name != "choice_tables.py")
 
-# (name, membership frozenset, only_files | None)
+# (name, membership frozenset, files to SKIP)
 _GATED_AXES = [
-    ("integrator tokens", frozenset(ct.tokens(ct.INTEGRATOR)), None),
-    ("integrator labels", frozenset(ct.labels(ct.INTEGRATOR)), None),
-    ("tonemap tokens", frozenset(ct.tokens(ct.TONEMAP)), None),
-    ("tonemap labels", frozenset(ct.labels(ct.TONEMAP)), None),
-    ("execution labels", frozenset(ct.labels(ct.EXECUTION_MODE)), None),
-    ("execution tokens", frozenset(ct.tokens(ct.EXECUTION_MODE)),
-     {"render_envelope.py", "cli_common.py"}),
-    ("reuse labels", frozenset(ct.labels(ct.REUSE)), None),
-    ("reuse tokens", frozenset(ct.tokens(ct.REUSE)), None),
-    ("restir combination labels", frozenset(ct.labels(ct.RESTIR_COMBINATION)), None),
-    ("proposal tokens", frozenset(ct.tokens(ct.PROPOSAL_PRESET)), None),
-    ("proposal labels", frozenset(ct.labels(ct.PROPOSAL_PRESET)), None),
+    ("integrator tokens", frozenset(ct.tokens(ct.INTEGRATOR)), frozenset()),
+    ("integrator labels", frozenset(ct.labels(ct.INTEGRATOR)), frozenset()),
+    ("tonemap tokens", frozenset(ct.tokens(ct.TONEMAP)), frozenset()),
+    ("tonemap labels", frozenset(ct.labels(ct.TONEMAP)), frozenset()),
+    ("execution labels", frozenset(ct.labels(ct.EXECUTION_MODE)), frozenset()),
+    ("execution tokens", frozenset(ct.tokens(ct.EXECUTION_MODE)), frozenset({"renderer.py"})),
+    ("reuse labels", frozenset(ct.labels(ct.REUSE)), frozenset()),
+    ("reuse tokens", frozenset(ct.tokens(ct.REUSE)), frozenset()),
+    ("restir combination labels", frozenset(ct.labels(ct.RESTIR_COMBINATION)), frozenset()),
+    ("proposal tokens", frozenset(ct.tokens(ct.PROPOSAL_PRESET)), frozenset()),
+    ("proposal labels", frozenset(ct.labels(ct.PROPOSAL_PRESET)), frozenset()),
 ]
 
 
@@ -168,11 +171,11 @@ def _literal_string_sets(text: str) -> list[frozenset[str]]:
     return out
 
 
-@pytest.mark.parametrize("name,members,only_files", _GATED_AXES)
-def test_no_axis_mirror_outside_the_owner(name, members, only_files):
+@pytest.mark.parametrize("name,members,skip_files", _GATED_AXES)
+def test_no_axis_mirror_outside_the_owner(name, members, skip_files):
     offenders = []
     for fname in _CONSUMERS:
-        if only_files is not None and fname not in only_files:
+        if fname in skip_files:
             continue
         if members in _literal_string_sets((SRC / fname).read_text(encoding="utf-8")):
             offenders.append(fname)
@@ -181,8 +184,8 @@ def test_no_axis_mirror_outside_the_owner(name, members, only_files):
         f"{offenders} — project choice_tables instead")
 
 
-@pytest.mark.parametrize("name,members,only_files", _GATED_AXES)
-def test_gate_detects_a_synthetic_mirror(name, members, only_files):
+@pytest.mark.parametrize("name,members,skip_files", _GATED_AXES)
+def test_gate_detects_a_synthetic_mirror(name, members, skip_files):
     """Negative control (git-free): the AST gate must flag a literal of each
     axis's membership, so a green gate means 'no mirror', not 'gate is vacuous'."""
     snippet = "x = [" + ", ".join(repr(m) for m in sorted(members)) + "]\n"

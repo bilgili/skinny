@@ -12,6 +12,8 @@ from typing import Callable
 
 import numpy as np
 
+from skinny import choice_tables
+
 
 # Common render resolutions surfaced in the desktop and web "Resolution"
 # sections. First entry "Custom" is the sentinel selected when the live
@@ -57,13 +59,14 @@ class ParamSpec:
     # `int` here to preserve the legacy int() cast in the state hash (a
     # fractional saved value changing within the same integer must not reset).
     hash_coercion: Callable[[object], object] | None = None
-    # The placeholder the GUI-thread proxy shows for this param before the first
-    # render-thread snapshot arrives (render_session._default_values). None → the
-    # proxy falls back to `lo`. This is NOT the renderer's real init value —
-    # `Renderer.__init__` remains the initialization authority and the snapshot
-    # overwrites this within a frame. It lives here only so the proxy reads one
-    # registry field instead of hardcoding its own placeholder list; the values
-    # are exactly the ones the proxy hardcoded before (env_intensity 1.0 etc.).
+    # An arbitrary but stable placeholder the GUI-thread proxy shows for this
+    # param before the first render-thread snapshot arrives
+    # (render_session._default_values). None → the proxy falls back to `lo`.
+    # It is deliberately NOT the renderer's real init value: `Renderer.__init__`
+    # owns initialization (env_intensity 0.5, mm_per_unit 1000, the tuned key
+    # light, …), and its snapshot overwrites this within a frame. It lives here
+    # so the proxy reads one registry field instead of keeping its own hardcoded
+    # placeholder list; the values are exactly the ones the proxy showed before.
     proxy_default: float | None = None
 
 
@@ -95,8 +98,10 @@ def _disc(
 # Index 0 = megakernel: the single main_pass.slang compute dispatch. This is
 # the current behaviour, the default, and the only mode on non-Vulkan backends.
 # Index 1 = wavefront: staged per-material compute dispatches (Vulkan only).
-EXECUTION_MEGAKERNEL = 0
-EXECUTION_WAVEFRONT = 1
+# Named indices projected from the choice_tables owner (dependency-free, no cycle).
+_EXEC_INDEX = choice_tables.index_by_token(choice_tables.EXECUTION_MODE)
+EXECUTION_MEGAKERNEL = _EXEC_INDEX["megakernel"]
+EXECUTION_WAVEFRONT = _EXEC_INDEX["wavefront"]
 
 
 def clamp_mode_index(index: int, n_modes: int) -> int:
@@ -200,12 +205,12 @@ STATIC_PARAMS: list[ParamSpec] = [
     _cont("Vellus hair density", "mtlx.skin_bsdf_hair_density",      0.05, 0.0,  1.0),
     _cont("Vellus hair tilt",   "mtlx.skin_bsdf_hair_tilt",          0.05, 0.0,  1.0),
 
-    _cont("Light elevation",    "light_elevation",             5.0, -90.0, 90.0),
-    _cont("Light azimuth",      "light_azimuth",               5.0, -180.0, 180.0),
+    _cont("Light elevation",    "light_elevation",             5.0, -90.0, 90.0, proxy_default=0.0),
+    _cont("Light azimuth",      "light_azimuth",               5.0, -180.0, 180.0, proxy_default=0.0),
     _cont("Light intensity",    "light_intensity",             0.2,  0.0,  20.0, proxy_default=1.0),
-    _cont("Light color R",      "light_color_r",               0.05, 0.0,  1.0),
-    _cont("Light color G",      "light_color_g",               0.05, 0.0,  1.0),
-    _cont("Light color B",      "light_color_b",               0.05, 0.0,  1.0),
+    _cont("Light color R",      "light_color_r",               0.05, 0.0,  1.0, proxy_default=1.0),
+    _cont("Light color G",      "light_color_g",               0.05, 0.0,  1.0, proxy_default=1.0),
+    _cont("Light color B",      "light_color_b",               0.05, 0.0,  1.0, proxy_default=1.0),
 
     # pbrt film exposure controls (change pbrt-radiometric-parity). Retuning ISO
     # or exposure time rescales output radiance live (imaging ratio

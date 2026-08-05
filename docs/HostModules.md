@@ -244,12 +244,15 @@ Seven axes are owned: integrator, tonemap, execution mode, reuse, detail-maps,
 ReSTIR combination, proposal preset. `DEFAULT_EXECUTION_FOR_INTEGRATOR` is a
 projection too — its integrator keys come from the table and its
 megakernel/wavefront values from `render_envelope.WAVEFRONT_ONLY_INTEGRATORS`.
-The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices stay as separate
-int constants in the four device-free leaf modules (to avoid a GPU import cycle)
-but are pinned to the owner's indices by `tests/test_choice_tables.py`.
-`tests/test_choice_tables.py` also carries the AST source gate: a list/tuple/dict
-literal whose string set equals an owned axis's membership fails the build unless
-it lives in the owner. Adding an axis value edits one tuple.
+The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices in the four
+device-free leaf modules (`params`, `frame_plan`, `frame_derive`, `mlt_chain`)
+are each derived from the owner's index — they keep the readable name without a
+GPU import cycle, and `tests/test_choice_tables.py` confirms every copy agrees.
+`tests/test_choice_tables.py` also carries the AST source gate: scanning every
+module under `src/skinny`, a list/tuple/dict literal whose string set equals an
+owned axis's membership fails the build (two documented carve-outs — the ambiguous
+`On`/`Off` detail-maps pair and `renderer.py`'s record-source token literal).
+Adding an axis value edits one tuple.
 
 The wavefront kernel-name and pass-constant owner is a separate follow-up change,
 `choice-table-wavefront-owners`.

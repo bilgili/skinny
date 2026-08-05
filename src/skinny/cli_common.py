@@ -554,11 +554,13 @@ def add_render_flags(
                  "reconstruct sharp reflections. Default (unset) uses the tuned built-in "
                  "(~0.5); 0 = PM-1 delta-only. SPPM + wavefront only.")
     if proposals:
+        _proposal_tokens = choice_tables.tokens(choice_tables.PROPOSAL_PRESET)
         parser.add_argument(
             "--proposals",
-            choices=choice_tables.tokens(choice_tables.PROPOSAL_PRESET),
+            choices=_proposal_tokens,
             default=os.environ.get("SKINNY_PROPOSALS"),
-            metavar="{bsdf,bsdf+env,env,bsdf+neural,neural}",
+            # `+` reads better than `,` inside the braces; still the owner's tokens.
+            metavar="{" + ",".join(t.replace(",", "+") for t in _proposal_tokens) + "}",
             help="Directional-proposal mixture at the BSDF bounce (+ "
                  "SKINNY_PROPOSALS env). 'bsdf' (default) is the material's own "
                  "importance sampler — bit-identical to the classic renderer; "
@@ -584,15 +586,21 @@ def add_render_flags(
                  "front-ends.",
         )
     if reuse:
-        # Deliberately a strict subset of choice_tables.REUSE: `restir-di` is a
-        # runtime-only mode (GUI-cycleable, capability-gated), never a CLI flag
-        # value — so this is not a mirror of the reuse axis, it is the CLI-exposed
-        # subset. `none` is the only shipped CLI value.
+        # The CLI advertises only `none`; `restir-di` (choice_tables.REUSE's other
+        # entry) stays a runtime GUI selection. NOTE the surface is asymmetric and
+        # this is a pre-existing gap, not a clean subset: argparse validates only
+        # explicit args, not defaults, so `SKINNY_REUSE=restir-di` bypasses this
+        # `choices` and reaches `renderer.reuse_index` (enabling ReSTIR DI on
+        # wavefront, identity elsewhere) while `--reuse restir-di` is rejected.
+        # Closing it (validate the env value, or expose `restir-di` on the flag)
+        # is a product decision left to a separate change; this one only stopped
+        # falsely claiming the value is unreachable from the CLI.
         parser.add_argument(
             "--reuse", choices=("none",), default=os.environ.get("SKINNY_REUSE"),
             help="Reuse/resampling mode around direct + indirect lighting (+ "
-                 "SKINNY_REUSE env). Only 'none' (stock NEE) ships today; "
-                 "ReSTIR-style reservoir reuse is a future mode.",
+                 "SKINNY_REUSE env). The flag exposes only 'none' (stock NEE); "
+                 "ReSTIR DI reuse is selected at runtime on the interactive "
+                 "front-ends.",
         )
     if spectral:
         parser.add_argument(

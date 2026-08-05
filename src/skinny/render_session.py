@@ -311,23 +311,21 @@ class QtRendererProxy:
         self._values["uses_default_lights"] = True
 
     def _default_values(self, width: int, height: int) -> dict[str, Any]:
+        # Only the three inputs with no registry entry are seeded by hand: the two
+        # constructor sizes and `camera_mode` (a string, not a numeric param).
+        # Every registry param — including the light colour/angle placeholders that
+        # used to be hardcoded here — comes from the registry below.
         values: dict[str, Any] = {
             "width": int(width),
             "height": int(height),
             "camera_mode": "orbit",
-            "light_color_r": 1.0,
-            "light_color_g": 1.0,
-            "light_color_b": 1.0,
-            "light_elevation": 0.0,
-            "light_azimuth": 0.0,
         }
-        # Placeholder values come from the params registry — each param's
-        # `proxy_default` (falling back to `lo`) — instead of a hardcoded list
-        # here. These are pre-snapshot placeholders, not the renderer's real init
-        # values (the snapshot overwrites them within a frame); the four params
-        # that carry an explicit `proxy_default` reproduce exactly the values the
-        # proxy hardcoded before. The five light pseudo-params above have no
-        # registry entry, so they stay seeded in `values`.
+        # Pre-snapshot placeholders projected from the params registry: each
+        # param's `proxy_default`, or `lo` when it declares none. These are the
+        # exact values the proxy showed before this change; they are NOT the
+        # renderer's real init values (the render-thread snapshot overwrites them
+        # within a frame). The registry is the single owner of these placeholders,
+        # so the proxy is no longer a second defaults authority.
         for param in STATIC_PARAMS:
             if param.path in values:
                 continue

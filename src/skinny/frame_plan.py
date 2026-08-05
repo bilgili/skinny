@@ -42,8 +42,9 @@ from skinny import choice_tables
 
 # Execution-mode indices, mirrored from `renderer` so this module imports no
 # GPU-touching code (renderer.py imports `vulkan` at module load).
-EXECUTION_MEGAKERNEL = 0
-EXECUTION_WAVEFRONT = 1
+_EXEC_INDEX = choice_tables.index_by_token(choice_tables.EXECUTION_MODE)
+EXECUTION_MEGAKERNEL = _EXEC_INDEX["megakernel"]
+EXECUTION_WAVEFRONT = _EXEC_INDEX["wavefront"]
 
 # Integrator index → the staged pass name `_ensure_wavefront_pass` takes;
 # a projection of the integrator axis owner.
