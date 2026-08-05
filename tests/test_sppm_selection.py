@@ -20,13 +20,12 @@ def _read(rel: str) -> str:
 
 
 def test_renderer_registers_sppm_mode():
-    src = _read("renderer.py")
-    # The GUI / runtime cycler reads integrator_modes; SPPM must be the 3rd entry
+    # The GUI / runtime cycler reads integrator_modes, a projection of the
+    # choice_tables owner (change choice-table-owners); SPPM must be the 3rd entry
     # (index 2) so it lines up with INTEGRATOR_INDEX["sppm"] and INTEGRATOR_SPPM.
-    m = re.search(r"integrator_modes:\s*list\[str\]\s*=\s*\[([^\]]*)\]", src)
-    assert m, "integrator_modes list not found in renderer.py"
-    modes = [s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()]
-    assert modes[:3] == ["Path", "BDPT", "SPPM"], modes
+    from skinny import choice_tables
+    assert choice_tables.labels(choice_tables.INTEGRATOR)[:3] == ["Path", "BDPT", "SPPM"]
+    assert choice_tables.index_by_token(choice_tables.INTEGRATOR)["sppm"] == 2
 
 
 def test_shader_defines_sppm_constant():

@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from skinny import render_envelope
+from skinny import choice_tables, render_envelope
 
 
 def _envelope_mode(execution_mode: str | None) -> str:
@@ -32,8 +32,8 @@ def _envelope_mode(execution_mode: str | None) -> str:
     """
     return "megakernel" if (execution_mode or "megakernel") == "megakernel" else "wavefront"
 
-# path → integrator_index, mirroring the renderer's integrator ordering.
-INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
+# path → integrator_index, a projection of the integrator axis owner.
+INTEGRATOR_INDEX = choice_tables.index_by_token(choice_tables.INTEGRATOR)
 
 # Execution mode `auto` derives from the integrator: `path`/`bdpt` run under the
 # megakernel; `sppm` and `mlt` have no megakernel path and run under the
@@ -533,7 +533,8 @@ def add_render_flags(
         )
     if integrator:
         parser.add_argument(
-            "--integrator", choices=("path", "bdpt", "sppm", "mlt"), default=None,
+            "--integrator", choices=choice_tables.tokens(choice_tables.INTEGRATOR),
+            default=None,
             help="Light-transport integrator (default: 'path', or the persisted "
                  "value on the interactive front-ends). 'path' is the "
                  "unidirectional path tracer; 'bdpt' is the bidirectional path "
@@ -698,7 +699,8 @@ def add_render_flags(
         )
     if execution:
         parser.add_argument(
-            "--execution-mode", choices=("auto", "megakernel", "wavefront"),
+            "--execution-mode",
+            choices=("auto", *choice_tables.tokens(choice_tables.EXECUTION_MODE)),
             default=os.environ.get("SKINNY_EXECUTION_MODE", "auto"),
             help="GPU execution backend, fixed for the session (+ "
                  "SKINNY_EXECUTION_MODE env). 'auto' (default) derives the mode "

@@ -57,16 +57,24 @@ class ParamSpec:
     # `int` here to preserve the legacy int() cast in the state hash (a
     # fractional saved value changing within the same integer must not reset).
     hash_coercion: Callable[[object], object] | None = None
+    # Placeholder value the GUI-thread proxy shows before a renderer exists
+    # (render_session._default_values). None → the proxy falls back to `lo`.
+    # Set only where the renderer's real default differs from the low bound, so
+    # the proxy is no longer a third defaults authority beside this registry and
+    # Renderer.__init__.
+    default: float | None = None
 
 
 def _cont(
     name: str, path: str, step: float, lo: float, hi: float,
     resets_accumulation: bool = True,
     hash_coercion: Callable[[object], object] | None = None,
+    default: float | None = None,
 ) -> ParamSpec:
     return ParamSpec(
         name, path, "continuous", step, lo, hi,
         resets_accumulation=resets_accumulation, hash_coercion=hash_coercion,
+        default=default,
     )
 
 
@@ -125,8 +133,8 @@ def effective_execution_mode(
 STATIC_PARAMS: list[ParamSpec] = [
     _disc("Preset",            "preset_index",                "presets"),
     _disc("Environment",       "env_index",                   "environments"),
-    _cont("IBL intensity",     "env_intensity",               0.05, 0.0,  3.0),
-    _cont("mm per unit",       "mm_per_unit",                 5.0,  1.0,  1000.0),
+    _cont("IBL intensity",     "env_intensity",               0.05, 0.0,  3.0, default=1.0),
+    _cont("mm per unit",       "mm_per_unit",                 5.0,  1.0,  1000.0, default=5.0),
     _disc("Direct light",      "direct_light_index",          "direct_light_modes"),
     _disc("Scattering",        "scatter_index",               "scatter_modes"),
     _disc("Integrator",        "integrator_index",            "integrator_modes"),
@@ -170,7 +178,7 @@ STATIC_PARAMS: list[ParamSpec] = [
     _disc("Furnace mode",      "furnace_index",               "furnace_modes"),
     _disc("Model",             "model_index",                 "models"),
     _disc("Detail maps",       "detail_maps_index",           "detail_maps_modes"),
-    _cont("Normal map strength", "normal_map_strength",       0.05, 0.0,  2.0),
+    _cont("Normal map strength", "normal_map_strength",       0.05, 0.0,  2.0, default=1.0),
     _cont("Displacement (mm)", "displacement_scale_mm",       0.05, 0.0,  2.0),
     _disc("Tattoo",            "tattoo_index",                "tattoos"),
     _cont("Tattoo density",    "tattoo_density",              0.05, 0.0,  1.0),
@@ -192,7 +200,7 @@ STATIC_PARAMS: list[ParamSpec] = [
 
     _cont("Light elevation",    "light_elevation",             5.0, -90.0, 90.0),
     _cont("Light azimuth",      "light_azimuth",               5.0, -180.0, 180.0),
-    _cont("Light intensity",    "light_intensity",             0.2,  0.0,  20.0),
+    _cont("Light intensity",    "light_intensity",             0.2,  0.0,  20.0, default=1.0),
     _cont("Light color R",      "light_color_r",               0.05, 0.0,  1.0),
     _cont("Light color G",      "light_color_g",               0.05, 0.0,  1.0),
     _cont("Light color B",      "light_color_b",               0.05, 0.0,  1.0),
