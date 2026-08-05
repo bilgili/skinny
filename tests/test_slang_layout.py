@@ -224,6 +224,15 @@ def test_fc_blob_lengths_are_pinned():
     assert sl.fc_blob_size(mlt=True) == 600
     # The MLT tail is exactly 8 uint/float fields.
     assert sl.fc_blob_size(mlt=True) - sl.fc_blob_size() == 32
+    # Spectral adds exactly the 5 region-offset u32s (20 B) in every build
+    # (change spectral-table-fold). These are the sizes the renderer's
+    # `_fc_scalar_fields` selector and the `_pack_uniforms` coverage guard must
+    # agree on for each (spectral, mlt) — a spectral pack asserting against the
+    # non-spectral table (the bug the pre-merge review caught) fails here.
+    assert sl.fc_blob_size(spectral=True) == 588
+    assert sl.fc_blob_size(spectral=True, mlt=True) == 620
+    assert sl.fc_blob_size(spectral=True) - sl.fc_blob_size() == 20
+    assert sl.fc_blob_size(spectral=True, mlt=True) - sl.fc_blob_size(mlt=True) == 20
 
 
 def test_fc_blob_puts_tile_origin_y_last_and_mlt_sigma_at_564():

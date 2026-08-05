@@ -245,12 +245,15 @@ def _table_sizes(params: list[dict]) -> dict[str, int]:
         kind = b.get("kind")
         count = b.get("count", 1) or 1
         index = b.get("index", 0)
+        # `count` honoured on every table: the tree has no buffer/sampler arrays
+        # today (so `count` is 1 there), but a future `StructuredBuffer<T> foo[N]`
+        # must count N entries, not 1 — otherwise the census under-reports.
         if kind in _BUFFER_KINDS:
-            sizes[BUFFER] += 1
+            sizes[BUFFER] += count
         elif kind in _TEXTURE_KINDS:
             sizes[TEXTURE] = max(sizes[TEXTURE], index + count)
         elif kind in _SAMPLER_KINDS:
-            sizes[SAMPLER] += 1
+            sizes[SAMPLER] += count
         else:
             raise ArgumentBudgetError(
                 f"unclassified reflection kind {kind!r} on global "

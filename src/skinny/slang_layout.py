@@ -440,9 +440,9 @@ def fc_scalar_blob(*, mlt: bool = False,
     return tuple([e for e in entries if e[0] != "tileOriginY"] + tail)
 
 
-def fc_blob_size(*, mlt: bool = False) -> int:
+def fc_blob_size(*, mlt: bool = False, spectral: bool = False) -> int:
     """Byte length of the host ``fc`` scalar blob for the variant."""
-    return sum(sz for _, sz in fc_scalar_blob(mlt=mlt))
+    return sum(sz for _, sz in fc_scalar_blob(mlt=mlt, spectral=spectral))
 
 
 def fc_tile_origin_y_offset() -> int:

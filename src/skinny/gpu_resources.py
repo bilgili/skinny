@@ -148,7 +148,6 @@ class ResourceSizes:
     distant_light_stride: int
     emissive_tri_stride: int
     instance_stride: int
-    spectral_light_spd_stride: int
     # Total byte size of the combined `_spectral_tables_buffer` (change
     # spectral-table-fold): the five 16-byte-aligned regions summed. The renderer
     # computes it from the loaded table arrays + the distant-light capacity.
@@ -414,10 +413,11 @@ VULKAN_WRITE_SEQUENCE: tuple[str, ...] = (
     "neural_layers_buffer",    # 35
     "record_buffer",           # 36
     "record_counter",          # 37
-    # Spectral tables last (only in the spectral layout). The five read-only
-    # tables are one combined buffer at 45 now (change spectral-table-fold); the
-    # two per-record emission arrays (49, 51) remain until group 4 folds them
-    # into their parent records.
+    # Spectral tables last (only in the spectral layout): the five read-only
+    # tables are ONE combined buffer at binding 45 now (change
+    # spectral-table-fold). The two former per-record emission arrays (49, 51)
+    # were folded inline into their parent records (EmissiveTriangle,
+    # FlatMaterialParams), so there is nothing else to write.
     "_spectral_tables_buffer",
 )
 

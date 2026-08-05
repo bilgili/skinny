@@ -323,8 +323,9 @@ SPECTRAL_LIGHT_SPD_SAMPLES = 95
 SPECTRAL_LIGHT_SPD_STRIDE = SPECTRAL_LIGHT_SPD_SAMPLES * 4  # bytes / light
 
 # Emissive-triangle record (binding 18): vec3 v0 + pad, vec3 v1 + pad,
-# vec3 v2 + pad, vec3 emission + float area. 64 B / record.
-EMISSIVE_TRI_STRIDE = 64
+# vec3 v2 + pad, vec3 emission + float area — 64 B RGB, 80 B spectral (the inline
+# blackbody row, change spectral-table-fold). The stride is derived per build by
+# `_emissive_tri_stride()`; there is no module-constant stride any more.
 EMISSIVE_TRI_CAPACITY = 256
 
 # Spectral emitter record (binding 49, spectral variant only): float2
@@ -2871,7 +2872,6 @@ class Renderer:
             distant_light_stride=DISTANT_LIGHT_STRIDE,
             emissive_tri_stride=self._emissive_tri_stride(),
             instance_stride=INSTANCE_STRIDE,
-            spectral_light_spd_stride=SPECTRAL_LIGHT_SPD_STRIDE,
             spectral_tables_bytes=self._spectral_tables_total_bytes(
                 spectral_arrays),
         )
@@ -8564,13 +8564,13 @@ class Renderer:
         # the pack site instead of silently mis-relocating on Metal / running off
         # the end of the UBO on Vulkan.
         blob = bytes(data)
-        fields = _FC_SCALAR_FIELDS_MLT if emit_tail else _FC_SCALAR_FIELDS
+        fields = _fc_scalar_fields(spectral=emit_spectral, mlt=emit_tail)
         table_bytes = sum(sz for _, sz in fields)
         assert table_bytes == len(blob), (
             f"FrameConstants field table covers {table_bytes} B but "
             f"_pack_uniforms produced {len(blob)} B "
-            f"(mlt_tail={emit_tail}) — the Slang struct and the packer body "
-            "have drifted")
+            f"(spectral={emit_spectral}, mlt_tail={emit_tail}) — the Slang "
+            "struct and the packer body have drifted")
         return blob
 
     def _ensure_env_uploaded(self) -> None:
