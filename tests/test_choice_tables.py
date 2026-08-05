@@ -10,18 +10,14 @@
 
 from __future__ import annotations
 
-import re
-import subprocess
+import ast
+from pathlib import Path
 
 import pytest
 
 from skinny import choice_tables as ct
 
-SRC = __import__("pathlib").Path(__file__).resolve().parents[1] / "src" / "skinny"
-
-# The commit this change branched from — its sources still carry the mirrors, so
-# it is the negative control the source gate must fire on.
-BASE_COMMIT = "9ffd5b0"
+SRC = Path(__file__).resolve().parents[1] / "src" / "skinny"
 
 
 # ── golden content (repointing changed nothing) ──────────────────────────────
@@ -89,61 +85,105 @@ def test_proxy_placeholders_match_the_renderer_lists():
     assert d["proposal_preset_modes"] == ct.labels(ct.PROPOSAL_PRESET)
 
 
-# ── source gate: no axis membership restated outside the owner ────────────────
+# ── the CLI / execution-mode projections that are hostless-checkable ─────────
 
-# Each pattern matches a *code* list/tuple/dict literal of an axis's membership —
-# anchored on the opening `[` / `(` / `{` so a docstring that merely names the
-# tokens in prose ("`integrator` is one of "path", "bdpt", …") does not match.
-# Keyed to the file(s) the mirror lived in — the execution-mode pair is not swept
-# in renderer.py, where `("megakernel", "wavefront")` legitimately names the
-# record-source axis, a different axis this change does not own.
-_AXIS_MIRRORS = {
-    "integrator tokens": (r'[\[({]\s*"path"\s*[,:].*"bdpt"\s*[,:].*"sppm"', None),
-    "integrator index→token": (r'\{\s*0\s*:\s*"path".*1\s*:\s*"bdpt"', None),
-    "integrator labels": (r'[\[(]\s*"Path"\s*,\s*"BDPT"', None),
-    "tonemap tokens": (r'[\[({]\s*"aces"\s*[,:].*"reinhard"\s*[,:].*"hable"', None),
-    "tonemap labels": (r'[\[(]\s*"ACES"\s*,\s*"Reinhard"', None),
-    "execution modes": (r'[\[(]\s*"megakernel"\s*,\s*"wavefront"',
-                        {"render_envelope.py", "cli_common.py"}),
-}
+def test_cli_proposals_choices_project_the_owner():
+    import argparse
+
+    from skinny import cli_common
+    p = argparse.ArgumentParser()
+    cli_common.add_render_flags(p, proposals=True)
+    action = next(a for a in p._actions if a.dest == "proposals")
+    assert tuple(action.choices) == ct.tokens(ct.PROPOSAL_PRESET)
+
+
+def test_execution_index_constants_are_pinned_to_the_owner():
+    """The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices are kept as
+    separate int constants in four leaf modules (to avoid a GPU import cycle);
+    pin every copy to the owner's index so they cannot drift from it."""
+    idx = ct.index_by_token(ct.EXECUTION_MODE)
+    assert (idx["megakernel"], idx["wavefront"]) == (0, 1)
+    from skinny import frame_derive, frame_plan, mlt_chain, params
+    # params/frame_plan define both; frame_derive/mlt_chain only need WAVEFRONT.
+    for mod in (params, frame_plan, frame_derive, mlt_chain):
+        if hasattr(mod, "EXECUTION_MEGAKERNEL"):
+            assert mod.EXECUTION_MEGAKERNEL == idx["megakernel"], mod.__name__
+        if hasattr(mod, "EXECUTION_WAVEFRONT"):
+            assert mod.EXECUTION_WAVEFRONT == idx["wavefront"], mod.__name__
+
+
+# ── source gate: no axis membership restated outside the owner ────────────────
+#
+# AST-based, so a multiline literal cannot evade it, and it matches an axis's
+# *full membership set* (not a substring) so a generic literal elsewhere is not a
+# false positive. `detail-maps` is deliberately NOT gated: its set {"On","Off"}
+# is not unique — `direct_light_modes` and `furnace_modes` carry the same pair,
+# so a membership-set gate cannot tell an owned mirror from a legitimate sibling.
+# `execution tokens` is scoped to the two files that owned it, because
+# renderer.py's `("megakernel","wavefront")` legitimately names the record-source
+# axis (a different axis) with the same token set.
 
 _CONSUMERS = [
     "cli_common.py", "headless.py", "render_envelope.py", "frame_plan.py",
     "renderer.py", "render_session.py",
 ]
 
+# (name, membership frozenset, only_files | None)
+_GATED_AXES = [
+    ("integrator tokens", frozenset(ct.tokens(ct.INTEGRATOR)), None),
+    ("integrator labels", frozenset(ct.labels(ct.INTEGRATOR)), None),
+    ("tonemap tokens", frozenset(ct.tokens(ct.TONEMAP)), None),
+    ("tonemap labels", frozenset(ct.labels(ct.TONEMAP)), None),
+    ("execution labels", frozenset(ct.labels(ct.EXECUTION_MODE)), None),
+    ("execution tokens", frozenset(ct.tokens(ct.EXECUTION_MODE)),
+     {"render_envelope.py", "cli_common.py"}),
+    ("reuse labels", frozenset(ct.labels(ct.REUSE)), None),
+    ("reuse tokens", frozenset(ct.tokens(ct.REUSE)), None),
+    ("restir combination labels", frozenset(ct.labels(ct.RESTIR_COMBINATION)), None),
+    ("proposal tokens", frozenset(ct.tokens(ct.PROPOSAL_PRESET)), None),
+    ("proposal labels", frozenset(ct.labels(ct.PROPOSAL_PRESET)), None),
+]
 
-def _code_lines(text: str) -> list[str]:
-    return [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+
+def _literal_string_sets(text: str) -> list[frozenset[str]]:
+    """Every list/tuple/dict literal's set of string constants (its elements, or
+    a dict's keys, or a dict's values) — the shapes an axis mirror can take."""
+    out: list[frozenset[str]] = []
+
+    def _strs(nodes) -> frozenset[str]:
+        return frozenset(
+            n.value for n in nodes
+            if isinstance(n, ast.Constant) and isinstance(n.value, str))
+
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            s = _strs(node.elts)
+            if s:
+                out.append(s)
+        elif isinstance(node, ast.Dict):
+            for group in (node.keys, node.values):
+                s = _strs(group)
+                if s:
+                    out.append(s)
+    return out
 
 
-@pytest.mark.parametrize("name,spec", list(_AXIS_MIRRORS.items()))
-def test_no_axis_mirror_outside_the_owner(name, spec):
-    pattern, only_files = spec
-    rx = re.compile(pattern)
+@pytest.mark.parametrize("name,members,only_files", _GATED_AXES)
+def test_no_axis_mirror_outside_the_owner(name, members, only_files):
     offenders = []
     for fname in _CONSUMERS:
         if only_files is not None and fname not in only_files:
             continue
-        for ln in _code_lines((SRC / fname).read_text(encoding="utf-8")):
-            if rx.search(ln):
-                offenders.append(f"{fname}: {ln.strip()}")
-    assert offenders == [], f"axis mirror '{name}' reappeared:\n" + "\n".join(offenders)
+        if members in _literal_string_sets((SRC / fname).read_text(encoding="utf-8")):
+            offenders.append(fname)
+    assert offenders == [], (
+        f"axis '{name}' membership {sorted(members)} restated as a literal in: "
+        f"{offenders} — project choice_tables instead")
 
 
-@pytest.mark.parametrize("name,spec", list(_AXIS_MIRRORS.items()))
-def test_gate_fires_on_pre_change_sources(name, spec):
-    """Negative control: every pattern must have matched the pre-change tree."""
-    pattern, only_files = spec
-    rx = re.compile(pattern)
-    files = only_files if only_files is not None else set(_CONSUMERS)
-    matched = False
-    for fname in files:
-        got = subprocess.run(
-            ["git", "-C", str(SRC.parents[1]), "show", f"{BASE_COMMIT}:src/skinny/{fname}"],
-            capture_output=True, text=True)
-        if got.returncode != 0:
-            pytest.skip(f"base commit {BASE_COMMIT} unavailable")
-        if any(rx.search(ln) for ln in _code_lines(got.stdout)):
-            matched = True
-    assert matched, f"pattern for '{name}' never matched the pre-change tree"
+@pytest.mark.parametrize("name,members,only_files", _GATED_AXES)
+def test_gate_detects_a_synthetic_mirror(name, members, only_files):
+    """Negative control (git-free): the AST gate must flag a literal of each
+    axis's membership, so a green gate means 'no mirror', not 'gate is vacuous'."""
+    snippet = "x = [" + ", ".join(repr(m) for m in sorted(members)) + "]\n"
+    assert members in _literal_string_sets(snippet)

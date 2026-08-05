@@ -834,8 +834,8 @@ class Renderer:
         # `hasattr(self.ctx, "compute_queue") or self.is_metal`, which was
         # unconditionally True on both sides — `MetalContext.compute_queue` is
         # `None`, not absent (change gpu-backend-adapter, design D3).
-        self.execution_modes: list[str] = ["Megakernel", "Wavefront"]
-        _mode_aliases = {"megakernel": EXECUTION_MEGAKERNEL, "wavefront": EXECUTION_WAVEFRONT}
+        self.execution_modes: list[str] = choice_tables.labels(choice_tables.EXECUTION_MODE)
+        _mode_aliases = choice_tables.index_by_token(choice_tables.EXECUTION_MODE)
         _requested = _mode_aliases.get(
             self._requested_execution_mode.strip().lower(), EXECUTION_MEGAKERNEL
         )

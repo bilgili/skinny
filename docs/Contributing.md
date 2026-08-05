@@ -54,6 +54,19 @@ the gate; the design is in
 Never hand a registered pass a literal set of globals — the compiler and the
 host, not the test, supply the two sides.
 
+### Adding or changing an enumerated render axis
+
+Each enumerated render axis (integrator, tonemap, execution mode, reuse,
+detail-maps, ReSTIR combination, proposal preset) has one owner:
+`choice_tables.py`. Add or reorder a value in the owning tuple there, never in a
+consumer — the CLI `choices`, the headless `str→index` dicts, the renderer's
+display lists, and the GUI-thread proxy placeholders are all projections
+(`labels`, `tokens`, `index_by_token`, `index_to_token`). An AST source gate in
+`tests/test_choice_tables.py` fails the build if a list/tuple/dict literal whose
+string set equals an owned axis's membership appears outside the owner, so a
+re-mirrored axis is caught rather than left to drift. See
+[HostModules.md § The enumerated-axis owner](HostModules.md#the-enumerated-axis-owner-choice_tablespy-change-choice-table-owners).
+
 ## Development
 
 Compile Python:

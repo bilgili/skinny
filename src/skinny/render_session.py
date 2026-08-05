@@ -321,15 +321,18 @@ class QtRendererProxy:
             "light_elevation": 0.0,
             "light_azimuth": 0.0,
         }
-        # Placeholder values come from the params registry — its `default`
-        # (falling back to `lo`) — not a third hardcoded authority here. The four
-        # params whose real default differs from `lo` (env_intensity, mm_per_unit,
-        # normal_map_strength, light_intensity) carry that default in params.py.
+        # Placeholder values come from the params registry — each param's
+        # `proxy_default` (falling back to `lo`) — instead of a hardcoded list
+        # here. These are pre-snapshot placeholders, not the renderer's real init
+        # values (the snapshot overwrites them within a frame); the four params
+        # that carry an explicit `proxy_default` reproduce exactly the values the
+        # proxy hardcoded before. The five light pseudo-params above have no
+        # registry entry, so they stay seeded in `values`.
         for param in STATIC_PARAMS:
             if param.path in values:
                 continue
             if param.kind == "continuous":
-                seed = param.default if param.default is not None else param.lo
+                seed = param.proxy_default if param.proxy_default is not None else param.lo
                 values[param.path] = float(seed)
             else:
                 values[param.path] = 0

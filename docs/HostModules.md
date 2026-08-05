@@ -202,7 +202,8 @@ import-based check would skip on a Metal-only host, and a skip reads as a pass.
 | `mesh.py` | `Mesh`, `MeshSource` | OBJ loading, subdivision, displacement, BVH construction |
 | `mesh_cache.py` | — | On-disk BVH cache (zstd-compressed vertex/index/BVH blobs, `~/.skinny/mesh_cache/`) |
 | `environment.py` | `Environment` | HDR env map loading (.hdr decoder), built-in presets |
-| `params.py` | `ParamSpec`, `AccumStateProvider` | Shared parameter definitions, get/set helpers, persistence; accumulation-reset registry (`ParamSpec.resets_accumulation` + `ACCUM_STATE_PROVIDERS`) |
+| `params.py` | `ParamSpec`, `AccumStateProvider` | Shared parameter definitions, get/set helpers, persistence; accumulation-reset registry (`ParamSpec.resets_accumulation` + `ACCUM_STATE_PROVIDERS`); `ParamSpec.proxy_default` is the GUI-thread proxy's pre-snapshot placeholder (not the renderer's init value) |
+| `choice_tables.py` | `Axis`, `labels`, `tokens`, `index_by_token`, `index_to_token` | Single owner of each enumerated render axis's values/labels/indices — integrator, tonemap, execution mode, reuse, detail-maps, ReSTIR combination, proposal preset; device-free (change `choice-table-owners`, see [The enumerated-axis owner](#the-enumerated-axis-owner-choice_tablespy-change-choice-table-owners)) |
 | `hardware.py` | `GpuInfo`, `GpuVendor` | GPU enumeration, vendor detection, encoder selection |
 | `video_encoder.py` | `VideoEncoder` | H264/JPEG encoding with hw-aware fallback, Annex B→AVCC |
 | `scene_graph.py` | `SceneGraphNode`, `SceneGraphProperty`, `RendererRef` | USD prim hierarchy tree model with typed editable properties |
@@ -220,6 +221,38 @@ import-based check would skip on a Metal-only host, and a skip reads as a pass.
 | `usd_controls.py` | — | `ControlBinding` → renderer get/set closures (the applying half of the control seam) |
 | `usd_loader.py` | — | USD stage → Scene (meshes, lights, cameras, materials, MaterialX fallback) |
 | `fetch_hdrs.py` | — | Downloads CC0 HDRIs from Poly Haven |
+
+---
+
+## The enumerated-axis owner (`choice_tables.py`, change `choice-table-owners`)
+
+`render_envelope.py` owns whether a combo is *valid*; `choice_tables.py` owns
+what each axis is *called*. Each enumerated render axis is one ordered tuple of
+`Axis(label, token)` records — the display label, the CLI/headless/persisted
+string token where the axis has one, and the entry's index (its tuple position).
+Every other view is a projection: the CLI's `choices` are `tokens(...)`, the
+headless `str→index` dicts are `index_by_token(...)`, `render_envelope.INTEGRATORS`
+/ `EXECUTION_MODES` and `frame_plan.INTEGRATOR_NAMES` are `tokens(...)` /
+`index_to_token(...)`, the renderer's display lists (`integrator_modes`,
+`tonemap_modes`, `reuse_modes`, `restir_combination_modes`, `detail_maps_modes`,
+`execution_modes`, `_PROPOSAL_PRESETS`) are `labels(...)`, and the GUI-thread
+proxy's placeholder names are `labels(...)`. The module is device-free and
+imports nothing from `skinny`, so any layer imports it without a cycle. It owns
+vocabulary, never validity.
+
+Seven axes are owned: integrator, tonemap, execution mode, reuse, detail-maps,
+ReSTIR combination, proposal preset. `DEFAULT_EXECUTION_FOR_INTEGRATOR` is a
+projection too — its integrator keys come from the table and its
+megakernel/wavefront values from `render_envelope.WAVEFRONT_ONLY_INTEGRATORS`.
+The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices stay as separate
+int constants in the four device-free leaf modules (to avoid a GPU import cycle)
+but are pinned to the owner's indices by `tests/test_choice_tables.py`.
+`tests/test_choice_tables.py` also carries the AST source gate: a list/tuple/dict
+literal whose string set equals an owned axis's membership fails the build unless
+it lives in the owner. Adding an axis value edits one tuple.
+
+The wavefront kernel-name and pass-constant owner is a separate follow-up change,
+`choice-table-wavefront-owners`.
 
 ---
 

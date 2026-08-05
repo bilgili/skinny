@@ -41,10 +41,9 @@ INTEGRATOR_INDEX = choice_tables.index_by_token(choice_tables.INTEGRATOR)
 # An explicit `--execution-mode` (flag or env) overrides this (see
 # :func:`resolve_execution_mode`).
 DEFAULT_EXECUTION_FOR_INTEGRATOR = {
-    "path": "megakernel",
-    "bdpt": "megakernel",
-    "sppm": "wavefront",
-    "mlt": "wavefront",
+    integ: ("wavefront" if integ in render_envelope.WAVEFRONT_ONLY_INTEGRATORS
+            else "megakernel")
+    for integ in choice_tables.tokens(choice_tables.INTEGRATOR)
 }
 
 # Advertised walk choices. `megakernel` is accepted as a deprecated alias but is
@@ -557,7 +556,7 @@ def add_render_flags(
     if proposals:
         parser.add_argument(
             "--proposals",
-            choices=("bsdf", "bsdf,env", "env", "bsdf,neural", "neural"),
+            choices=choice_tables.tokens(choice_tables.PROPOSAL_PRESET),
             default=os.environ.get("SKINNY_PROPOSALS"),
             metavar="{bsdf,bsdf+env,env,bsdf+neural,neural}",
             help="Directional-proposal mixture at the BSDF bounce (+ "
@@ -585,6 +584,10 @@ def add_render_flags(
                  "front-ends.",
         )
     if reuse:
+        # Deliberately a strict subset of choice_tables.REUSE: `restir-di` is a
+        # runtime-only mode (GUI-cycleable, capability-gated), never a CLI flag
+        # value — so this is not a mirror of the reuse axis, it is the CLI-exposed
+        # subset. `none` is the only shipped CLI value.
         parser.add_argument(
             "--reuse", choices=("none",), default=os.environ.get("SKINNY_REUSE"),
             help="Reuse/resampling mode around direct + indirect lighting (+ "

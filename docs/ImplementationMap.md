@@ -45,6 +45,7 @@ module ownership seams see [HostModules.md](HostModules.md).
 | `presets.py` | Fitzpatrick I--VI presets; user presets are read-only |
 | `tattoos.py` | Tattoo image loading |
 | `params.py` | Shared parameter definitions (`ParamSpec`), get/set helpers |
+| `choice_tables.py` | Single owner of each enumerated render axis's values/labels/indices (integrator, tonemap, execution mode, reuse, detail-maps, ReSTIR combination, proposal preset); device-free |
 | `settings.py` | User settings persistence (merge-on-write) |
 | `session_snapshot.py` | The persisted session schema: shared + contributed keys, capture/restore |
 | `fetch_hdrs.py` | Poly Haven HDRI download helper |
