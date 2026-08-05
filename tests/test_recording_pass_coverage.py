@@ -263,6 +263,39 @@ def test_an_entry_point_with_a_brace_in_a_comment_is_still_found(tmp_path):
     assert ("m", "kern") in rec.compute_entry_points(tmp_path)
 
 
+def test_entry_scan_excludes_generated_untracked_shaders(tmp_path):
+    """The scan counts only SOURCE (git-tracked) shaders, not the renderer's
+    per-scene generated output.
+
+    The renderer emits `generated_materials.slang` and per-material
+    `wavefront/shade_<Material>.slang` modules — each with a `[shader("compute")]`
+    entry — into the tree at run time. They are never `git add`ed, so on any
+    checkout that has rendered, a plain rglob would surface them and fail the
+    registry meta-test with entries that must not be registered. A git fixture
+    proves the tracked source entry is found and the untracked generated one is
+    not."""
+    import subprocess
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args],
+                       check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "wavefront").mkdir()
+    (tmp_path / "src_pass.slang").write_text(
+        '[shader("compute")] [numthreads(1,1,1)]\n'
+        "void sourceKern(uint3 t : SV_DispatchThreadID) {}\n")
+    git("add", "src_pass.slang")
+    # Emitted at run time, never committed — a real compute entry.
+    (tmp_path / "wavefront" / "shade_Marble.slang").write_text(
+        '[shader("compute")] [numthreads(1,1,1)]\n'
+        "void shadeSurface_Marble(uint3 t : SV_DispatchThreadID) {}\n")
+
+    found = rec.compute_entry_points(tmp_path)
+    assert ("src_pass", "sourceKern") in found
+    assert ("wavefront.shade_Marble", "shadeSurface_Marble") not in found
+
+
 def test_entry_scan_survives_block_comments_and_whitespace(tmp_path):
     """Codex review, finding 4: the entry scan strips BOTH comment forms and
     tolerates Slang's whitespace, so it neither misses a real entry nor invents

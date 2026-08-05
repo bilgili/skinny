@@ -29,6 +29,7 @@ The public surface mirrors the two device adapters, modulo
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -497,9 +498,40 @@ def _strip_comments(text: str) -> str:
     return "".join(out)
 
 
+def _source_slang(base: Path) -> list[Path]:
+    """The SOURCE ``.slang`` files under ``base`` — the ones a human wrote and
+    committed, never the renderer's per-scene generated output.
+
+    The renderer emits generated shaders INTO the tree at run time:
+    ``generated_materials.slang`` and, per scene material, a
+    ``wavefront/shade_<Material>.slang`` module — each carrying a
+    ``[shader("compute")]`` entry. A plain ``rglob("*.slang")`` picks those up,
+    so on any checkout that has ever rendered, the registry meta-test sees
+    entries that are not (and must not be) registered and fails. Those files are
+    never ``git add``ed, so the source set is exactly the **git-tracked**
+    ``.slang`` — tracked-ness does not depend on ``.gitignore``, so this reads
+    the same on the primary checkout and in a worktree whose ``.gitignore`` is
+    ``*``. A directory that is not a git work tree (a tmp test root) falls back
+    to a full rglob.
+    """
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(base), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True)
+        if inside.returncode == 0 and inside.stdout.strip() == "true":
+            listed = subprocess.run(
+                ["git", "-C", str(base), "ls-files", "-z", "--", "*.slang"],
+                capture_output=True, text=True, check=True)
+            return [base / rel for rel in listed.stdout.split("\0") if rel]
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return sorted(base.rglob("*.slang"))
+
+
 def compute_entry_points(root=None) -> frozenset[tuple[str, str]]:
-    """``(module, entry_point)`` for every compute entry the shader tree
-    declares, gates ignored.
+    """``(module, entry_point)`` for every SOURCE compute entry the shader tree
+    declares, gates ignored (generated per-scene shaders excluded — see
+    :func:`_source_slang`).
 
     Keyed by module AND name, never by name alone: four modules declare an
     entry called ``computeMain``, so a name-keyed map silently collapses three
@@ -512,7 +544,7 @@ def compute_entry_points(root=None) -> frozenset[tuple[str, str]]:
     """
     base = Path(root) if root is not None else shader_dir()
     found: set[tuple[str, str]] = set()
-    for path in sorted(base.rglob("*.slang")):
+    for path in sorted(_source_slang(base)):
         # `".".join(parts)`, not `.replace("/", ".")`: the latter is POSIX-only
         # and leaves a `\` separator on Windows, so a nested module's key would
         # not match its dotted registry/exclusion entry (codex review).
