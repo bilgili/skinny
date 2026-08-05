@@ -51,9 +51,9 @@ task 1.3). They are NOT part of this change's delivered scope.
 ## 4. Gates
 
 - [x] 4.1 `ruff check src/` clean on the touched files; full hostless `pytest`
-      passes (18 remaining failures are all pre-existing-on-`9ffd5b0` — MCP
-      schema, pbrt mtlx logic — or worktree-only asset absence — gitignored
-      `main_pass.spv` / pbrt corpus scenes — none from this change).
+      passes (3142 passed; the 17 remaining failures are all pre-existing-on-
+      `9ffd5b0` — MCP schema, pbrt mtlx logic — or worktree-only asset absence —
+      gitignored pbrt corpus scenes — none from this change).
 - [x] 4.2 CLI surface unchanged: `--integrator {path,bdpt,sppm,mlt}`,
       `--execution-mode {auto,megakernel,wavefront}`, headless `--tonemap`
       choices all still parse; a bad value still exits 2. Help text untouched
