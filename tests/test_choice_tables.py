@@ -97,14 +97,38 @@ def test_cli_proposals_choices_project_the_owner():
     assert tuple(action.choices) == ct.tokens(ct.PROPOSAL_PRESET)
 
 
-def test_execution_index_constants_project_the_owner():
-    """The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices are derived
-    from the owner in every module that declares them (device-free leaf modules
-    keeping the index without a GPU import cycle), so they cannot drift from it."""
+_EXEC_INDEX_MODULES = ("params.py", "frame_plan.py", "frame_derive.py", "mlt_chain.py")
+
+
+def _assigned_values(text: str, names: set[str]) -> list[ast.expr]:
+    """The RHS expression of every module-level assignment to one of `names`."""
+    out = []
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id in names:
+                    out.append(node.value)
+    return out
+
+
+@pytest.mark.parametrize("module", _EXEC_INDEX_MODULES)
+def test_execution_index_constants_are_derived_not_literal(module):
+    """The `EXECUTION_MEGAKERNEL`/`EXECUTION_WAVEFRONT` named indices must be
+    *derived* from the owner, not restated as a literal `0`/`1` — reverting to a
+    literal (even the currently-correct value) fails here, not just a wrong one."""
+    values = _assigned_values(
+        (SRC / module).read_text(encoding="utf-8"),
+        {"EXECUTION_MEGAKERNEL", "EXECUTION_WAVEFRONT"})
+    assert values, f"{module} declares no execution-index constant"
+    for v in values:
+        assert not isinstance(v, ast.Constant), \
+            f"{module} restates an execution index as a literal; derive it from choice_tables"
+
+
+def test_execution_index_values_match_the_owner():
     idx = ct.index_by_token(ct.EXECUTION_MODE)
     assert (idx["megakernel"], idx["wavefront"]) == (0, 1)
     from skinny import frame_derive, frame_plan, mlt_chain, params
-    # params/frame_plan declare both; frame_derive/mlt_chain only need WAVEFRONT.
     for mod in (params, frame_plan, frame_derive, mlt_chain):
         if hasattr(mod, "EXECUTION_MEGAKERNEL"):
             assert mod.EXECUTION_MEGAKERNEL == idx["megakernel"], mod.__name__
@@ -115,36 +139,38 @@ def test_execution_index_constants_project_the_owner():
 # ── source gate: no axis membership restated outside the owner ────────────────
 #
 # Scans EVERY module under src/skinny (not a hand-picked list). AST-based, so a
-# multiline literal cannot evade it, and it matches an axis's *full membership
-# set*, so a generic literal elsewhere is not a false positive. Two documented
-# carve-outs:
-#   * `detail-maps` is NOT gated — its set {"On","Off"} is shared by
-#     `direct_light_modes` and `furnace_modes` (legitimate sibling axes), so a
-#     membership-set gate cannot tell an owned mirror from a sibling.
-#   * `execution tokens` skips renderer.py, whose `("megakernel","wavefront")`
-#     legitimately names the record-source axis (a different axis) with the same
-#     token set.
-# Known limit: exact-set matching catches a *complete* reintroduced mirror, not a
-# partial one (a 3-of-4 integrator list). Subset matching is rejected because an
-# axis's proper subset collides with real sibling literals (e.g. {"sppm","mlt"} is
-# render_envelope.WAVEFRONT_ONLY_INTEGRATORS).
+# multiline literal cannot evade it. A literal's string set *hits* an axis when it
+# equals the membership, is a superset of it (axis + an extra sentinel), or — for
+# an axis of four or more members — is the membership missing exactly one element
+# (the historic "integrator list dropped MLT" failure). Smaller subsets are not
+# hits: an axis's proper 1/2-element subset collides with legitimate sibling
+# literals (e.g. {"sppm","mlt"} = render_envelope.WAVEFRONT_ONLY_INTEGRATORS,
+# {"Off"} everywhere), so only the near-complete band is unambiguous.
+#
+# Per (axis, file) an allowance records the legitimate hits that are NOT mirrors:
+# `renderer.py` carries exactly one execution-token literal — the record-source
+# axis `("megakernel","wavefront")`, a different axis — so its allowance is 1 and a
+# *second* execution-token literal there is still caught. `detail-maps` is not
+# gated at all: its {"On","Off"} set is shared by `direct_light_modes` /
+# `furnace_modes`, so even exact matching cannot tell an owned mirror from a
+# sibling.
 
 _CONSUMERS = sorted(
     str(p.relative_to(SRC)) for p in SRC.rglob("*.py") if p.name != "choice_tables.py")
 
-# (name, membership frozenset, files to SKIP)
+# (name, membership frozenset, {file: allowed legitimate hit count})
 _GATED_AXES = [
-    ("integrator tokens", frozenset(ct.tokens(ct.INTEGRATOR)), frozenset()),
-    ("integrator labels", frozenset(ct.labels(ct.INTEGRATOR)), frozenset()),
-    ("tonemap tokens", frozenset(ct.tokens(ct.TONEMAP)), frozenset()),
-    ("tonemap labels", frozenset(ct.labels(ct.TONEMAP)), frozenset()),
-    ("execution labels", frozenset(ct.labels(ct.EXECUTION_MODE)), frozenset()),
-    ("execution tokens", frozenset(ct.tokens(ct.EXECUTION_MODE)), frozenset({"renderer.py"})),
-    ("reuse labels", frozenset(ct.labels(ct.REUSE)), frozenset()),
-    ("reuse tokens", frozenset(ct.tokens(ct.REUSE)), frozenset()),
-    ("restir combination labels", frozenset(ct.labels(ct.RESTIR_COMBINATION)), frozenset()),
-    ("proposal tokens", frozenset(ct.tokens(ct.PROPOSAL_PRESET)), frozenset()),
-    ("proposal labels", frozenset(ct.labels(ct.PROPOSAL_PRESET)), frozenset()),
+    ("integrator tokens", frozenset(ct.tokens(ct.INTEGRATOR)), {}),
+    ("integrator labels", frozenset(ct.labels(ct.INTEGRATOR)), {}),
+    ("tonemap tokens", frozenset(ct.tokens(ct.TONEMAP)), {}),
+    ("tonemap labels", frozenset(ct.labels(ct.TONEMAP)), {}),
+    ("execution labels", frozenset(ct.labels(ct.EXECUTION_MODE)), {}),
+    ("execution tokens", frozenset(ct.tokens(ct.EXECUTION_MODE)), {"renderer.py": 1}),
+    ("reuse labels", frozenset(ct.labels(ct.REUSE)), {}),
+    ("reuse tokens", frozenset(ct.tokens(ct.REUSE)), {}),
+    ("restir combination labels", frozenset(ct.labels(ct.RESTIR_COMBINATION)), {}),
+    ("proposal tokens", frozenset(ct.tokens(ct.PROPOSAL_PRESET)), {}),
+    ("proposal labels", frozenset(ct.labels(ct.PROPOSAL_PRESET)), {}),
 ]
 
 
@@ -171,22 +197,40 @@ def _literal_string_sets(text: str) -> list[frozenset[str]]:
     return out
 
 
-@pytest.mark.parametrize("name,members,skip_files", _GATED_AXES)
-def test_no_axis_mirror_outside_the_owner(name, members, skip_files):
+def _axis_hits(members: frozenset[str], sets: list[frozenset[str]]) -> int:
+    """How many literals mirror `members`: exact, superset, or (for a 4+-member
+    axis) missing exactly one member. Narrower subsets are not counted."""
+    big = len(members) >= 4
+    n = 0
+    for s in sets:
+        if s == members or members < s:
+            n += 1
+        elif big and s < members and len(s) == len(members) - 1:
+            n += 1
+    return n
+
+
+@pytest.mark.parametrize("name,members,allow", _GATED_AXES)
+def test_no_axis_mirror_outside_the_owner(name, members, allow):
     offenders = []
     for fname in _CONSUMERS:
-        if fname in skip_files:
-            continue
-        if members in _literal_string_sets((SRC / fname).read_text(encoding="utf-8")):
-            offenders.append(fname)
+        hits = _axis_hits(members, _literal_string_sets((SRC / fname).read_text(encoding="utf-8")))
+        if hits > allow.get(fname, 0):
+            offenders.append(f"{fname} ({hits} hit(s), {allow.get(fname, 0)} allowed)")
     assert offenders == [], (
         f"axis '{name}' membership {sorted(members)} restated as a literal in: "
         f"{offenders} — project choice_tables instead")
 
 
-@pytest.mark.parametrize("name,members,skip_files", _GATED_AXES)
-def test_gate_detects_a_synthetic_mirror(name, members, skip_files):
-    """Negative control (git-free): the AST gate must flag a literal of each
-    axis's membership, so a green gate means 'no mirror', not 'gate is vacuous'."""
-    snippet = "x = [" + ", ".join(repr(m) for m in sorted(members)) + "]\n"
-    assert members in _literal_string_sets(snippet)
+@pytest.mark.parametrize("name,members,allow", _GATED_AXES)
+def test_gate_detects_synthetic_mirrors(name, members, allow):
+    """Negative control (git-free): the gate must flag an exact mirror, a superset
+    (extra sentinel), and — for a 4+-member axis — a missing-one partial. A green
+    gate then means 'no mirror', not 'gate is vacuous'."""
+    exact = "x = [" + ", ".join(repr(m) for m in sorted(members)) + "]\n"
+    superset = "x = [" + ", ".join(repr(m) for m in sorted(members | {"__extra__"})) + "]\n"
+    assert _axis_hits(members, _literal_string_sets(exact)) == 1
+    assert _axis_hits(members, _literal_string_sets(superset)) == 1
+    if len(members) >= 4:
+        partial = "x = [" + ", ".join(repr(m) for m in sorted(members)[:-1]) + "]\n"
+        assert _axis_hits(members, _literal_string_sets(partial)) == 1

@@ -586,21 +586,21 @@ def add_render_flags(
                  "front-ends.",
         )
     if reuse:
-        # The CLI advertises only `none`; `restir-di` (choice_tables.REUSE's other
-        # entry) stays a runtime GUI selection. NOTE the surface is asymmetric and
-        # this is a pre-existing gap, not a clean subset: argparse validates only
-        # explicit args, not defaults, so `SKINNY_REUSE=restir-di` bypasses this
-        # `choices` and reaches `renderer.reuse_index` (enabling ReSTIR DI on
-        # wavefront, identity elsewhere) while `--reuse restir-di` is rejected.
-        # Closing it (validate the env value, or expose `restir-di` on the flag)
-        # is a product decision left to a separate change; this one only stopped
-        # falsely claiming the value is unreachable from the CLI.
+        # The flag advertises only the first reuse token; `restir-di` is not a
+        # flag value today. Derived from the owner (a projection of the CLI-exposed
+        # prefix), so it cannot drift from choice_tables.REUSE — it is not a
+        # hand-authored literal. NOTE a pre-existing asymmetry survives: argparse
+        # validates only explicit args, not defaults, so `SKINNY_REUSE=restir-di`
+        # bypasses these `choices` and reaches `renderer.reuse_index` (ReSTIR DI on
+        # wavefront, identity elsewhere) while `--reuse restir-di` exits 2. Closing
+        # it — validate the env value, or widen the flag to the full owner — is a
+        # product decision left to a separate change.
+        _reuse_cli = choice_tables.tokens(choice_tables.REUSE)[:1]
         parser.add_argument(
-            "--reuse", choices=("none",), default=os.environ.get("SKINNY_REUSE"),
+            "--reuse", choices=_reuse_cli, default=os.environ.get("SKINNY_REUSE"),
             help="Reuse/resampling mode around direct + indirect lighting (+ "
-                 "SKINNY_REUSE env). The flag exposes only 'none' (stock NEE); "
-                 "ReSTIR DI reuse is selected at runtime on the interactive "
-                 "front-ends.",
+                 "SKINNY_REUSE env). The flag accepts only 'none' (stock NEE); "
+                 "ReSTIR DI reuse is not a flag value in this release.",
         )
     if spectral:
         parser.add_argument(
