@@ -65,6 +65,28 @@ DISCRETE_MAP_SAMPLERS = {
 
 _shared_fallback_warned = False
 
+# Fixed shader-global name of the gated kernel-beacon buffer (change
+# metal-kernel-beacon). Bound by name on every Metal dispatch under the trace
+# gate; absent from a production kernel's reflected globals, so binding it is a
+# no-op there.
+_BEACON_GLOBAL_NAME = "gKernelBeacon"
+
+
+def _bind_beacon(ctx, cur, global_names) -> None:
+    """Bind the beacon buffer on a ShaderCursor when tracing and the kernel
+    reflected it. No-op on the production path (name dead-stripped)."""
+    if not getattr(ctx, "trace", False) or _BEACON_GLOBAL_NAME not in global_names:
+        return
+    native = ctx.beacon_native
+    if native is not None:
+        cur[_BEACON_GLOBAL_NAME] = native
+
+
+def _pipe_entry(pipe) -> str:
+    """The compiled entry-point name of a pipeline — ``ComputePipeline`` names
+    it ``entry_point``; the wavefront ``_EntryPipeline`` names it ``entry``."""
+    return getattr(pipe, "entry_point", None) or getattr(pipe, "entry", "")
+
 
 def _warn_shared_fallback(reason) -> None:
     """One-shot notice that shared-storage mode degraded to staged uploads
@@ -671,7 +693,8 @@ class ComputePipeline:
         # reached the compile → the megakernel ran the RGB variant).
         opts.defines = ShaderVariantKey(
             Target.METAL, Family.MEGAKERNEL,
-            spectral=self.spectral).session_defines()
+            spectral=self.spectral,
+            metal_trace=getattr(self.ctx, "trace", False)).session_defines()
         # Match the Vulkan `slangc` path's matrix layout. slangc defaults to
         # column-major (HLSL/Slang default — the Vulkan flags never override it)
         # and both the `_pack_uniforms` camera matrices and the `Instance`
@@ -835,6 +858,7 @@ class ComputePipeline:
             if native is None or name not in self.global_names:
                 continue
             cur[name] = native
+        _bind_beacon(self.ctx, cur, self.global_names)
 
         if bindless is not None:
             name, textures = bindless
@@ -845,6 +869,9 @@ class ComputePipeline:
                         else self._default_tex
                     slot_cur[i] = tex
 
+        # Stamp the mmap cell with this megakernel entry before it dispatches;
+        # the id survives a wedge (change metal-kernel-beacon).
+        self.ctx.beacon_stamp(self.entry_point)
         n_bands = max(1, int(bands))
         band_h = (int(height) + n_bands - 1) // n_bands
         for y0 in range(0, int(height), band_h):
@@ -875,6 +902,11 @@ class ComputePipeline:
         bound = dict(vars or {})
         for name, res in (buffers or {}).items():
             bound[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        if getattr(self.ctx, "trace", False) and _BEACON_GLOBAL_NAME in self.global_names:
+            native = self.ctx.beacon_native
+            if native is not None:
+                bound[_BEACON_GLOBAL_NAME] = native
+        self.ctx.beacon_stamp(self.entry_point)
         self._kernel.dispatch(thread_count=list(thread_count), vars=bound)
         dev.wait_for_idle()
 
@@ -918,6 +950,8 @@ class ComputePipeline:
             if res is None or name not in self.global_names:
                 continue
             cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        _bind_beacon(self.ctx, cur, self.global_names)
+        self.ctx.beacon_stamp(self.entry_point)
 
         groups = None
         if not self.ctx.supports_indirect_dispatch:
@@ -992,7 +1026,9 @@ class PreviewPipeline:
         mtlx_genslang = self.shader_dir.parent / "mtlx" / "genslang"
         opts = spy.SlangCompilerOptions()
         opts.include_paths = [self.shader_dir, mtlx_genslang]
-        opts.defines = ShaderVariantKey(Target.METAL, Family.PREVIEW).session_defines()
+        opts.defines = ShaderVariantKey(
+            Target.METAL, Family.PREVIEW,
+            metal_trace=getattr(self.ctx, "trace", False)).session_defines()
         # Column-major matches the megakernel path so the shared `fc` camera
         # matrices read identically (see ComputePipeline._build).
         opts.matrix_layout = spy.SlangMatrixLayout.column_major
@@ -1081,6 +1117,7 @@ class PreviewPipeline:
                     or name not in self.global_names:
                 continue
             cur[name] = native
+        _bind_beacon(self.ctx, cur, self.global_names)
 
         if bindless is not None:
             name, textures = bindless
@@ -1091,6 +1128,7 @@ class PreviewPipeline:
                         else self._default_tex
                     slot_cur[i] = tex
 
+        self.ctx.beacon_stamp(self.entry_point)
         enc = dev.create_command_encoder()
         cpass = enc.begin_compute_pass()
         cpass.bind_pipeline(self.pipeline, ro)
@@ -1151,7 +1189,8 @@ class DebugRasterMetal:
         opts = spy.SlangCompilerOptions()
         opts.include_paths = [self.shader_dir]
         opts.defines = ShaderVariantKey(
-            Target.METAL, Family.DEBUG_RASTER).session_defines()
+            Target.METAL, Family.DEBUG_RASTER,
+            metal_trace=getattr(self.ctx, "trace", False)).session_defines()
         session = dev.create_slang_session(compiler_options=opts)
         src = self.shader_dir / "debug_raster.slang"
         module = session.load_module_from_source(
@@ -1202,15 +1241,22 @@ class DebugRasterMetal:
         vp = np.ascontiguousarray(view_proj, dtype=np.float32).reshape(4, 4)
         vp_vars = {"gVP0": vp[0].tolist(), "gVP1": vp[1].tolist(),
                    "gVP2": vp[2].tolist(), "gVP3": vp[3].tolist()}
+        # Under trace every debug kernel reflects gKernelBeacon (its beaconStore
+        # first line uses it), so it MUST be bound; stamp each before dispatch
+        # (change metal-kernel-beacon).
+        _bv = ({_BEACON_GLOBAL_NAME: self.ctx.beacon_native}
+               if getattr(self.ctx, "trace", False) else {})
 
         # Clear colour + depth.
+        self.ctx.beacon_stamp("clearImage")
         self._clear_color.dispatch(
             thread_count=[w, h, 1],
             vars={"colorOut": self._color.buffer, "gWidth": w, "gHeight": h,
-                  "gClearPacked": [clear_packed, 0, 0, 0]})
+                  "gClearPacked": [clear_packed, 0, 0, 0], **_bv})
+        self.ctx.beacon_stamp("clearDepth")
         self._clear_depth.dispatch(
             thread_count=[w, h, 1],
-            vars={"depthOut": self._depth.buffer, "gWidth": w, "gHeight": h})
+            vars={"depthOut": self._depth.buffer, "gWidth": w, "gHeight": h, **_bv})
         dev.wait_for_idle()
 
         lverts = np.ascontiguousarray(line_floats, dtype=np.float32).ravel()
@@ -1221,11 +1267,13 @@ class DebugRasterMetal:
             common = {"lineVerts": self._lverts.buffer,
                       "colorOut": self._color.buffer, "depthOut": self._depth.buffer,
                       "gWidth": w, "gHeight": h, "gCount": n_lines,
-                      "gMaxSteps": int(max_steps), **vp_vars}
+                      "gMaxSteps": int(max_steps), **vp_vars, **_bv}
             # Pass 1 (depth) then pass 2 (colour) — depth must be complete before
             # the colour pass re-reads the winning depth.
+            self.ctx.beacon_stamp("depthLines")
             self._depth_lines.dispatch(thread_count=[n_lines, 1, 1], vars=common)
             dev.wait_for_idle()
+            self.ctx.beacon_stamp("colorLines")
             self._color_lines.dispatch(thread_count=[n_lines, 1, 1], vars=common)
             dev.wait_for_idle()
 
@@ -1235,11 +1283,12 @@ class DebugRasterMetal:
             self._tverts = self._grow(self._tverts, tverts.nbytes, self.ctx)
             self._tverts.upload_sync(tverts.tobytes())
             # One thread per (triangle, screen-row): each walks <= width pixels.
+            self.ctx.beacon_stamp("blendTris")
             self._blend_tris.dispatch(
                 thread_count=[n_tris, h, 1],
                 vars={"triVerts": self._tverts.buffer,
                       "colorOut": self._color.buffer, "depthOut": self._depth.buffer,
-                      "gWidth": w, "gHeight": h, "gCount": n_tris, **vp_vars})
+                      "gWidth": w, "gHeight": h, "gCount": n_tris, **vp_vars, **_bv})
             dev.wait_for_idle()
 
         return self._color.download_sync(px * 4)
@@ -1306,6 +1355,7 @@ class MetalFrameEncoder:
             if res is None or name not in pipe.global_names:
                 continue
             cur[name] = getattr(res, "buffer", getattr(res, "texture", res))
+        _bind_beacon(self.ctx, cur, pipe.global_names)
         # Bindless texture array: (global_name, [native_texture | None, …],
         # default_texture) — every slot must be bound on Metal, so None slots get
         # the default 1×1 texture (mirrors ComputePipeline.dispatch).
@@ -1324,6 +1374,10 @@ class MetalFrameEncoder:
         """Encode a direct dispatch of ``pipe`` over the ``(x, y, z)`` thread-group
         count ``groups`` into the shared encoder (no submit)."""
         ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
+        # Batched loop: stamp per encoded dispatch so the mmap tracks the last
+        # kernel encoded before a submit/flush; the GPU beacon buffer records
+        # the true running kernel within the batch (change metal-kernel-beacon).
+        self.ctx.beacon_stamp(_pipe_entry(pipe))
         cpass = self._enc.begin_compute_pass()
         cpass.bind_pipeline(pipe.pipeline, ro)
         cpass.dispatch_compute(self._spy.math.uint3(*(int(g) for g in groups)))
@@ -1339,6 +1393,7 @@ class MetalFrameEncoder:
         the count via :meth:`flush` and falls back to :meth:`dispatch` itself when
         ``ctx.supports_indirect_dispatch`` is false (task 1.3)."""
         ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
+        self.ctx.beacon_stamp(_pipe_entry(pipe))
         native_args = getattr(args_buffer, "buffer", args_buffer)
         cpass = self._enc.begin_compute_pass()
         cpass.bind_pipeline(pipe.pipeline, ro)

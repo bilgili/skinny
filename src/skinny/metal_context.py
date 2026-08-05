@@ -230,6 +230,20 @@ class MetalContext:
         self.device = None
         self.surface = None
         self.swapchain_info = None
+        # Kernel beacon (change metal-kernel-beacon). Opt-in via the
+        # SKINNY_METAL_TRACE env var, whose VALUE is the mmap cell path. When
+        # set, every Metal dispatch stamps the running kernel id into the mmap
+        # (the load-bearing record a parent reads after a wedge) and binds the
+        # gated `gKernelBeacon` UMA buffer so the traced shader confirms which
+        # kernel started on the device. Set before _finish_init so a half-failed
+        # construction still tears the writer down cleanly.
+        _trace_path = os.environ.get("SKINNY_METAL_TRACE") or None
+        self.trace = _trace_path is not None
+        self._beacon_buffer = None
+        self._beacon_writer = None
+        if self.trace:
+            from skinny.metal_beacon import BeaconWriter
+            self._beacon_writer = BeaconWriter(_trace_path)
         # gpu_preference / enable_validation are accepted for surface parity with
         # VulkanContext; slang-rhi picks the system default Metal device and owns
         # its own validation, so they are no-ops here in P1.
@@ -501,6 +515,35 @@ class MetalContext:
         self.destroy()
         return False
 
+    # ── Kernel beacon (change metal-kernel-beacon) ───────────────────
+    @property
+    def beacon_native(self):
+        """Native handle of the 256-byte UMA beacon buffer, lazily created on
+        first use. Returns ``None`` when tracing is off, so a dispatch wrapper
+        binds nothing on the production path (no argument-table slot spent)."""
+        if not self.trace:
+            return None
+        if self._beacon_buffer is None:
+            from skinny.metal_beacon import BEACON_BYTES
+            from skinny.metal_compute import StorageBuffer
+            self._beacon_buffer = StorageBuffer(self, BEACON_BYTES, shared=True)
+        return self._beacon_buffer.buffer
+
+    def beacon_stamp(self, entry: str) -> None:
+        """Stamp the mmap cell with the kernel id of ``entry`` right before its
+        dispatch. No-op when tracing is off. An entry outside the frozen table
+        stamps ``KERNEL_ID_NONE``, so a hang in an untabled kernel is reported
+        as no kernel rather than mis-attributed to the previous stamp."""
+        writer = self._beacon_writer
+        if writer is None:
+            return
+        from skinny.metal_beacon import KERNEL_ID_NONE, kernel_id_for
+        try:
+            kid = kernel_id_for(entry)
+        except KeyError:
+            kid = KERNEL_ID_NONE
+        writer.stamp(kid)
+
     def destroy(self) -> None:
         """Drain the queue and close the device. Idempotent: repeated calls
         (explicit, context-manager, atexit, signal — in any order) are safe
@@ -508,6 +551,13 @@ class MetalContext:
         if getattr(self, "_destroyed", False):
             return
         self._destroyed = True
+        writer = getattr(self, "_beacon_writer", None)
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:  # noqa: BLE001 — best-effort mmap close
+                pass
+            self._beacon_writer = None
         device = getattr(self, "device", None)
         if device is not None:
             try:

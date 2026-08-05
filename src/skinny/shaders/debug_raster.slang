@@ -1,3 +1,6 @@
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 // Camera Debug software rasteriser (change metal-tool-dock-render P2).
 //
 // The native Metal backend has no graphics pipeline, so the debug viewport's
@@ -108,6 +111,9 @@ bool inBounds(int x, int y)
 [numthreads(8, 8, 1)]
 void clearImage(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_clearImage);
+#endif
     if (tid.x >= gWidth || tid.y >= gHeight) return;
     colorOut[tid.y * gWidth + tid.x] = gClearPacked.x;
 }
@@ -116,6 +122,9 @@ void clearImage(uint3 tid : SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void clearDepth(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_clearDepth);
+#endif
     if (tid.x >= gWidth || tid.y >= gHeight) return;
     depthOut[tid.y * gWidth + tid.x] = 0xFFFFFFFFu;
 }
@@ -125,6 +134,9 @@ void clearDepth(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void depthLines(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_depthLines);
+#endif
     uint li = tid.x;
     if (li >= gCount) return;
     float2 pa, pb; float da, db;
@@ -154,6 +166,9 @@ void depthLines(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void colorLines(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_colorLines);
+#endif
     uint li = tid.x;
     if (li >= gCount) return;
     float2 pa, pb; float da, db;
@@ -185,6 +200,9 @@ void colorLines(uint3 tid : SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void blendTris(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_blendTris);
+#endif
     uint ti = tid.x;
     int row = int(tid.y);
     if (ti >= gCount || row >= int(gHeight)) return;

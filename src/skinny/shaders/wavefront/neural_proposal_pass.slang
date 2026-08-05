@@ -1,3 +1,6 @@
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 // Wavefront neural-proposal pre-pass.
 //
 // Scheduled between scatter and the flat shade each bounce (mirrors how the
@@ -36,6 +39,9 @@ struct NeuralPC { uint streamSize; uint networkVersion; uint _pad0; uint _pad1; 
 [numthreads(64, 1, 1)]
 void wfNeuralProposal(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfNeuralProposal);
+#endif
     uint i = tid.x;
     if (i >= npc.streamSize)
         return;

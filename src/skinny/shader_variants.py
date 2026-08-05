@@ -79,6 +79,7 @@ VALID_TARGET_FAMILIES: frozenset[tuple[Target, Family]] = frozenset({
 #: counterpart — the cross-backend agreement test subtracts exactly this set.
 METAL_ONLY_DEFINES: frozenset[str] = frozenset({
     "SKINNY_METAL", "SKINNY_METAL_NEURAL", "SKINNY_METAL_RECORDS",
+    "SKINNY_METAL_TRACE",
 })
 
 # Base define names per family (target-independent part).
@@ -140,6 +141,7 @@ class ShaderVariantKey:
     mlt: bool = False
     metal_neural: bool = False    # SKINNY_METAL_NEURAL (METAL only)
     metal_records: bool = False   # SKINNY_METAL_RECORDS (METAL only)
+    metal_trace: bool = False     # SKINNY_METAL_TRACE (METAL only, all families)
     neural: NeuralBuildConfig | None = None
 
     def __post_init__(self) -> None:
@@ -152,6 +154,12 @@ class ShaderVariantKey:
             raise ValueError(
                 f"metal_neural/metal_records are METAL-only, got target="
                 f"{self.target.name}")
+        # metal_trace is METAL-only like the other two, but — unlike them — is
+        # valid on ALL Metal families (the beacon binds to every compute
+        # kernel), so it is NOT family-gated below.
+        if self.metal_trace and self.target is not Target.METAL:
+            raise ValueError(
+                f"metal_trace is METAL-only, got target={self.target.name}")
         # Family-gate them too, like every other axis: both defines are live in
         # bindings.slang / path_record_common.slang, which the megakernel also
         # includes, so an accepted-but-meaningless gate on a MEGAKERNEL key
@@ -195,6 +203,8 @@ class ShaderVariantKey:
                 base.append("SKINNY_METAL_NEURAL=1")
             if self.metal_records:
                 base.append("SKINNY_METAL_RECORDS=1")
+            if self.metal_trace:
+                base.append("SKINNY_METAL_TRACE=1")
         spectral = ["SKINNY_SPECTRAL=1"] if self.spectral else []
         neural = [tok for tok in self._neural_tokens() if tok != "-D"]
         mlt = ["SKINNY_MLT=1"] if self.mlt else []

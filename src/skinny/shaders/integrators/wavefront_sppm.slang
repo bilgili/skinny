@@ -25,6 +25,9 @@ import nee;                        // allLightsNEE
 import lights.sphere_light;
 import lights.emissive_triangle_light;
 import lights.directional_light;
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 import cameras.pinhole;            // PinholeCamera
 import wavefront.wf_display;       // wfWriteDisplay (exposure + tonemap + present)
 import integrators.sppm_state;     // VisiblePoint, SppmAccum, VP_ACTIVE, grid helpers
@@ -132,6 +135,9 @@ void sppmStoreVisiblePoint(uint idx, float3 pos, float3 ns, float3 wo,
 [numthreads(64, 1, 1)]
 void wfSppmEye(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmEye);
+#endif
     let i = tid.x;
     if (i >= sppmTile.streamSize)
         return;
@@ -398,6 +404,9 @@ void wfSppmEye(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfSppmGridCount(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmGridCount);
+#endif
     let i = tid.x;
     let np = sppmNumPixels();
     if (i >= np)
@@ -420,6 +429,9 @@ groupshared uint gScan[SPPM_SCAN_BLOCK];
 [numthreads(SPPM_SCAN_BLOCK, 1, 1)]
 void wfSppmGridScanBlock(uint3 gtid: SV_GroupThreadID, uint3 gid: SV_GroupID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmGridScanBlock);
+#endif
     let np = sppmNumPixels();
     let nc = sppmGridCellCount(np);
     let li = gtid.x;
@@ -452,6 +464,9 @@ void wfSppmGridScanBlock(uint3 gtid: SV_GroupThreadID, uint3 gid: SV_GroupID)
 [numthreads(1, 1, 1)]
 void wfSppmGridScanBlockSums(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmGridScanBlockSums);
+#endif
     let nc = sppmGridCellCount(sppmNumPixels());
     let numBlocks = (nc + SPPM_SCAN_BLOCK - 1u) / SPPM_SCAN_BLOCK;
     uint acc = 0u;
@@ -469,6 +484,9 @@ void wfSppmGridScanBlockSums(uint3 tid: SV_DispatchThreadID)
 [numthreads(SPPM_SCAN_BLOCK, 1, 1)]
 void wfSppmGridScanAdd(uint3 tid: SV_DispatchThreadID, uint3 gid: SV_GroupID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmGridScanAdd);
+#endif
     let nc = sppmGridCellCount(sppmNumPixels());
     let gi = tid.x;
     if (gi >= nc)
@@ -481,6 +499,9 @@ void wfSppmGridScanAdd(uint3 tid: SV_DispatchThreadID, uint3 gid: SV_GroupID)
 [numthreads(64, 1, 1)]
 void wfSppmGridScatter(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmGridScatter);
+#endif
     let i = tid.x;
     let np = sppmNumPixels();
     if (i >= np)
@@ -782,6 +803,9 @@ void sppmDepositPhoton(Spectrum beta, float3 photonPos, float3 photonInDir
 [numthreads(64, 1, 1)]
 void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmPhotonTrace);
+#endif
     // Photon-dispatch tiling (change sppm-photon-dispatch-tiling): the phase-3
     // pass is committed as flushed photon sub-batches under Metal so no single
     // command buffer spans photons × VPs-in-cell (caustic clusters wedge the
@@ -905,6 +929,9 @@ void wfSppmPhotonTrace(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfSppmUpdate(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfSppmUpdate);
+#endif
     let i = tid.x;
     if (i >= sppmTile.streamSize)
         return;

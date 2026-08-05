@@ -16,6 +16,9 @@ import mtlx_std_surface;
 import mtlx_closures;
 import environment;
 import generated_materials;
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 
 [[vk::binding(0, 1)]] RWTexture2D<float4> previewOutput;
 
@@ -136,6 +139,9 @@ bool intersectPlane(float3 O, float3 D,
 [numthreads(8, 8, 1)]
 void previewMain(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_previewMain);
+#endif
     uint S = pc.size;
     if (tid.x >= S || tid.y >= S) return;
 

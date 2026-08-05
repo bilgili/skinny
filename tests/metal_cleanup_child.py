@@ -18,6 +18,15 @@ one guarded Metal device of its process. Modes (``sys.argv[1]``):
                  the atexit hook MetalContext registered must drain + close and
                  (with ``SKINNY_METAL_TEARDOWN_MARKER`` set by the parent)
                  print ``SKINNY_METAL_TEARDOWN_RAN``.
+- ``beacon``   — mmap kernel-beacon wiring (change metal-kernel-beacon):
+                 ``argv[2]`` = beacon-cell path, ``argv[3]`` = frame-1 sentinel,
+                 ``argv[4]`` = kernel entry name (default ``mainImage``). Opens
+                 the cell, initializes it to ``KERNEL_ID_NONE``, then per
+                 iteration stamps that entry's kernel id through
+                 ``BeaconWriter.stamp`` BEFORE a bounded dispatch. The parent
+                 SIGTERMs mid-loop and reads the cell: the last stamp names the
+                 kernel the child was on. Never hangs the GPU (bounded buffers);
+                 the "wedge" is simulated by the SIGTERM interrupt.
 """
 
 from __future__ import annotations
@@ -95,6 +104,38 @@ def _mode_render(sentinel: str, budget_s: float = 120.0) -> int:
     return 0
 
 
+def _mode_beacon(beacon_path: str, sentinel: str, entry: str = "mainImage",
+                 budget_s: float = 120.0) -> int:
+    """Stamp a known kernel id before each bounded dispatch; the parent SIGTERMs
+    mid-loop and reads the cell to report the kernel by name."""
+    import numpy as np  # noqa: F401 — keep import cost out of the timed loop
+
+    from skinny.metal_beacon import KERNEL_ID_NONE, BeaconWriter, kernel_id_for
+    from skinny.metal_compute import ComputePipeline, StorageBuffer
+
+    kid = kernel_id_for(entry)  # KeyError here = a bad test entry, fail loud
+    ctx = _make_ctx()
+    buf = StorageBuffer(ctx, _N * 4)
+    pipe = ComputePipeline(ctx, _SHADER_DIR, _MODULE, _ENTRY)
+    writer = BeaconWriter(beacon_path)
+    writer.stamp(KERNEL_ID_NONE)  # initialize the cell before the first dispatch
+    deadline = time.monotonic() + budget_s
+    frame = 0
+    while time.monotonic() < deadline:
+        writer.stamp(kid)  # stamp the kernel id BEFORE the dispatch that may hang
+        pipe.dispatch_kernel([_N, 1, 1], buffers={"result": buf})
+        buf.download_sync(_N * 4)
+        frame += 1
+        if frame == 1:
+            Path(sentinel).write_text("frame1", encoding="utf-8")
+    # Not killed within the budget (parent bug / manual run): exit cleanly.
+    writer.close()
+    pipe.destroy()
+    buf.destroy()
+    ctx.destroy()
+    return 0
+
+
 def _mode_atexit() -> int:
     # Module-level ref: the requirement's scenario is a context still ALIVE at
     # interpreter exit (the lifecycle registry holds only weakrefs by design, so
@@ -116,6 +157,9 @@ def main(argv: list[str]) -> int:
         return _mode_render(argv[2])
     if mode == "atexit":
         return _mode_atexit()
+    if mode == "beacon":
+        entry = argv[4] if len(argv) > 4 else "mainImage"
+        return _mode_beacon(argv[2], argv[3], entry)
     print(f"unknown mode {mode!r}", file=sys.stderr)
     return 2
 

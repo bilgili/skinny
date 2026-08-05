@@ -32,6 +32,7 @@ by name on each stage's root object, filtered to the entry's reflected globals
 
 from __future__ import annotations
 
+import dataclasses
 import struct
 from pathlib import Path
 
@@ -114,8 +115,15 @@ def _metal_slang_session(ctx, shader_dir: Path, key: ShaderVariantKey | None = N
     mtlx_genslang = shader_dir.parent / "mtlx" / "genslang"
     opts = spy.SlangCompilerOptions()
     opts.include_paths = [shader_dir, mtlx_genslang]
+    key = key if key is not None else _wavefront_key()
+    # Add the beacon trace define here — the ONE site every wavefront Metal
+    # compile passes through — so no `_wavefront_key()` call site has to carry
+    # it. `replace` only affects the defines; the pass keeps its own key for
+    # host sizing, where metal_trace is irrelevant (change metal-kernel-beacon).
+    if getattr(ctx, "trace", False) and not key.metal_trace:
+        key = dataclasses.replace(key, metal_trace=True)
     # One complete dict, assigned ONCE — `opts.defines` is copy-on-read.
-    opts.defines = (key if key is not None else _wavefront_key()).session_defines()
+    opts.defines = key.session_defines()
     opts.matrix_layout = spy.SlangMatrixLayout.column_major
     return ctx.device.create_slang_session(compiler_options=opts)
 
