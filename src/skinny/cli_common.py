@@ -586,16 +586,16 @@ def add_render_flags(
                  "front-ends.",
         )
     if reuse:
-        # The flag advertises only the first reuse token; `restir-di` is not a
-        # flag value today. Derived from the owner (a projection of the CLI-exposed
-        # prefix), so it cannot drift from choice_tables.REUSE — it is not a
-        # hand-authored literal. NOTE a pre-existing asymmetry survives: argparse
-        # validates only explicit args, not defaults, so `SKINNY_REUSE=restir-di`
-        # bypasses these `choices` and reaches `renderer.reuse_index` (ReSTIR DI on
-        # wavefront, identity elsewhere) while `--reuse restir-di` exits 2. Closing
-        # it — validate the env value, or widen the flag to the full owner — is a
-        # product decision left to a separate change.
-        _reuse_cli = choice_tables.tokens(choice_tables.REUSE)[:1]
+        # The flag accepts only the owner's CLI-exposed reuse tokens; `restir-di`
+        # is marked cli_exposed=False in choice_tables.REUSE, so the "which values
+        # are CLI-settable" decision lives in the owner, not as a slice here. NOTE
+        # a pre-existing asymmetry survives: argparse validates only explicit args,
+        # not defaults, so `SKINNY_REUSE=restir-di` bypasses these `choices` and
+        # reaches `renderer.reuse_index` (ReSTIR DI on wavefront, identity
+        # elsewhere) while `--reuse restir-di` exits 2. Closing it — validate the
+        # env value, or mark restir-di cli_exposed — is a product decision left to
+        # a separate change.
+        _reuse_cli = choice_tables.cli_tokens(choice_tables.REUSE)
         parser.add_argument(
             "--reuse", choices=_reuse_cli, default=os.environ.get("SKINNY_REUSE"),
             help="Reuse/resampling mode around direct + indirect lighting (+ "

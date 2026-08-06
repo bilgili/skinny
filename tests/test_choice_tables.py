@@ -41,7 +41,18 @@ def test_execution_mode_golden():
 
 def test_reuse_golden():
     assert ct.labels(ct.REUSE) == ["None", "ReSTIR DI"]
+    # `tokens` is the full set (the renderer needs both); `cli_tokens` is the
+    # owner-declared CLI-exposed subset (restir-di is runtime-only).
     assert list(ct.tokens(ct.REUSE)) == ["none", "restir-di"]
+    assert ct.cli_tokens(ct.REUSE) == ("none",)
+    assert [e.cli_exposed for e in ct.REUSE] == [True, False]
+
+
+def test_cli_exposed_defaults_true_for_every_flag_axis():
+    # Only reuse hides a token; every other CLI axis exposes all of its tokens,
+    # so cli_tokens == tokens there (no accidental hiding).
+    for axis in (ct.INTEGRATOR, ct.TONEMAP, ct.EXECUTION_MODE, ct.PROPOSAL_PRESET):
+        assert ct.cli_tokens(axis) == ct.tokens(axis)
 
 
 def test_runtime_only_axes_golden():
@@ -95,6 +106,18 @@ def test_cli_proposals_choices_project_the_owner():
     cli_common.add_render_flags(p, proposals=True)
     action = next(a for a in p._actions if a.dest == "proposals")
     assert tuple(action.choices) == ct.tokens(ct.PROPOSAL_PRESET)
+
+
+def test_cli_reuse_choices_project_the_owner():
+    import argparse
+
+    from skinny import cli_common
+    p = argparse.ArgumentParser()
+    cli_common.add_render_flags(p, reuse=True)
+    action = next(a for a in p._actions if a.dest == "reuse")
+    # The flag exposes exactly the owner's CLI-exposed reuse tokens — the subset
+    # decision is the owner's (cli_exposed), not a slice at the flag.
+    assert tuple(action.choices) == ct.cli_tokens(ct.REUSE) == ("none",)
 
 
 _EXEC_INDEX_MODULES = ("params.py", "frame_plan.py", "frame_derive.py", "mlt_chain.py")

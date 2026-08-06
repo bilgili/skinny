@@ -31,10 +31,17 @@ class Axis:
     (reuse and detail-map and ReSTIR-combination modes are selected by index in
     the GUI, not by a flag value). The entry's *index* is its position in the
     axis tuple — the integer the renderer and the headless driver use.
+
+    ``cli_exposed`` is ``False`` for an entry whose ``token`` exists but is not a
+    CLI flag value — a runtime-only value the owner still names (e.g. the reuse
+    axis's ``restir-di``, selectable in the GUI but not by ``--reuse``). The CLI
+    projects :func:`cli_tokens`, so *which* tokens a flag accepts is the owner's
+    decision, not an arbitrary slice at the flag.
     """
 
     label: str
     token: str | None = None
+    cli_exposed: bool = True
 
 
 # ── the axes ────────────────────────────────────────────────────────────────
@@ -64,10 +71,11 @@ EXECUTION_MODE: tuple[Axis, ...] = (
     Axis("Wavefront", "wavefront"),
 )
 
-#: Scene-sampling reuse mode. Token = the persisted reuse key.
+#: Scene-sampling reuse mode. Token = the persisted reuse key. ``restir-di`` is
+#: runtime-only (GUI-selectable), so it is not a ``--reuse`` flag value.
 REUSE: tuple[Axis, ...] = (
     Axis("None", "none"),
-    Axis("ReSTIR DI", "restir-di"),
+    Axis("ReSTIR DI", "restir-di", cli_exposed=False),
 )
 
 #: Detail-map (secondary normal/displacement) toggle. Runtime-only, no token.
@@ -101,12 +109,20 @@ def labels(axis: tuple[Axis, ...]) -> list[str]:
 
 
 def tokens(axis: tuple[Axis, ...]) -> tuple[str, ...]:
-    """The axis's string tokens, in index order (an argparse ``choices`` tuple).
+    """The axis's string tokens, in index order — every token, including any that
+    is runtime-only (the renderer's ``_REUSE_TOKENS`` needs the full set).
 
-    Only for axes whose every entry has a token — integrator, tonemap, execution
-    mode, reuse, proposal preset.
+    For axes whose every entry has a token — integrator, tonemap, execution mode,
+    reuse, proposal preset.
     """
     return tuple(e.token for e in axis if e.token is not None)
+
+
+def cli_tokens(axis: tuple[Axis, ...]) -> tuple[str, ...]:
+    """The tokens a CLI flag exposes — :func:`tokens` minus the entries marked
+    ``cli_exposed=False``. The owner, not the flag, decides which values a flag
+    accepts (e.g. ``--reuse`` gets ``("none",)``, not the arbitrary ``tokens()[:1]``)."""
+    return tuple(e.token for e in axis if e.token is not None and e.cli_exposed)
 
 
 def index_by_token(axis: tuple[Axis, ...]) -> dict[str, int]:

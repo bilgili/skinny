@@ -55,9 +55,11 @@ task 1.3). They are NOT part of this change's delivered scope.
       `9ffd5b0` — MCP schema, pbrt mtlx logic — or worktree-only asset absence —
       gitignored pbrt corpus scenes — none from this change).
 - [x] 4.2 CLI surface unchanged: `--integrator {path,bdpt,sppm,mlt}`,
-      `--execution-mode {auto,megakernel,wavefront}`, headless `--tonemap`
-      choices all still parse; a bad value still exits 2. Help text untouched
-      (only the `choices=` source changed).
+      `--execution-mode {auto,megakernel,wavefront}`, `--proposals`, `--reuse`,
+      headless `--tonemap` — every previously accepted value still parses and a
+      bad value still exits 2 (verified in `test_choice_tables.py`). The accepted
+      values are unchanged; only the `--proposals` / `--reuse` help-text wording
+      was corrected (the metavar/choices now project the owner).
 - [~] 4.3 GPU smoke: one wavefront render per backend. Moot for this change —
       no wavefront code changed; belongs to the follow-up.
 - [x] 4.4 Docs: `README.md` flag choices are unchanged (stable CLI vocabulary),
