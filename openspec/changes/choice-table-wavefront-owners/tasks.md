@@ -33,9 +33,10 @@
 ## 4. Gates
 
 - [x] 4.1 `ruff check src/` clean on the touched files; full hostless `pytest`
-      passes (3183 passed after rebasing onto the merged beacon work; the 17
-      remaining failures are all pre-existing on `main` — MCP schema, pbrt mtlx
-      logic — or worktree-only asset absence — none from this change). Four
+      passes (3185 passed after rebasing onto the merged beacon + spectral-mlt
+      work; the 17 remaining failures are all pre-existing on `main` — MCP schema,
+      pbrt mtlx logic — or worktree-only asset absence — none from this change).
+      Four
       source-inspection tests that assumed the kernel-name string literals were
       repointed to the owner: `test_mlt_host` ×2, the `test_shader_variants`
       kernel-golden regex, and the beacon's `_wavefront_entries_in_source`
