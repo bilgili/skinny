@@ -45,6 +45,7 @@ from skinny.wavefront_driver import (
     WALK_MODES as _WF_WALK_MODES,
     WF_EYE_BOUNCES,
     WF_LIGHT_BOUNCES,
+    WF_BDPT_NUM_SLOTS,
     WF_MAX_BOUNCES,
     WF_NUM_SLOTS,
     WF_STREAM_CAP_BDPT,
@@ -960,7 +961,7 @@ class MetalWavefrontBdptPass:
     BDPT_MAX_VERTS = _WF_BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # reflection fallback only — MSL stride is authoritative
     AUX_STRIDE = 128      # reflection fallback only
-    NUM_SLOTS = WF_NUM_SLOTS  # lockstep with WF_BDPT_NUM_SLOTS in the shader
+    NUM_SLOTS = WF_BDPT_NUM_SLOTS  # lockstep with WF_BDPT_NUM_SLOTS in the shader
     SLOT_NEE = 0
     SLOT_FULL = 1
     # gen-eye seeds eye[0..1], the loop extends eye[2..]; gen-light seeds light[0].

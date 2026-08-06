@@ -833,11 +833,15 @@ runtime dispatch failure on one backend. The Metal *resource* names (`wfEye`,
 `wfSlotCount`, …) are a different namespace and are **not** owned here.
 
 The pass constants every backend must agree on also live here: `WF_MAX_BOUNCES`,
-`BDPT_MAX_VERTS`, `WF_EYE_BOUNCES` / `WF_LIGHT_BOUNCES`, `WF_NUM_SLOTS`,
-`WF_STREAM_CAP_PATH` (1<<20) / `WF_STREAM_CAP_BDPT` (1<<18), `WALK_MODES` (the
-same tuple the CLI advertises as `cli_common.WALK_CHOICES`), and
-`RESTIR_DEFAULT_CONFIG`. Each backend pass class derives its class attribute from
-these. The vertex / aux / reservoir **strides** stay per-backend — a real buffer
+`BDPT_MAX_VERTS`, `WF_EYE_BOUNCES` / `WF_LIGHT_BOUNCES`, `WF_STREAM_CAP_PATH`
+(1<<20) / `WF_STREAM_CAP_BDPT` (1<<18), `WALK_MODES` (the same tuple the CLI
+advertises as `cli_common.WALK_CHOICES`), and `RESTIR_DEFAULT_CONFIG`. Each
+backend pass class derives its class attribute from these. The path and BDPT
+counting-sort slot counts are **separate** owners — `WF_NUM_SLOTS` (path:
+flat/other, mirrors `wf_shade_common.slang`) and `WF_BDPT_NUM_SLOTS` (BDPT:
+nee/full, mirrors `wavefront_bdpt.slang`) — independently `2` today; they are
+**not** collapsed into one constant, since they mirror two distinct shader slot
+domains. The vertex / aux / reservoir **strides** stay per-backend — a real buffer
 stride on Vulkan, a reflection *fallback* on Metal (the MSL stride is
 authoritative) — and are pinned equal, with the reason, by
 `tests/test_wavefront_kernel_names.py`; the record-stack sizing formula is

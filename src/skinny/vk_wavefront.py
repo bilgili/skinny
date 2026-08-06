@@ -35,6 +35,7 @@ from skinny.wavefront_driver import (
     WALK_MODES as _WF_WALK_MODES,
     WF_EYE_BOUNCES,
     WF_LIGHT_BOUNCES,
+    WF_BDPT_NUM_SLOTS,
     WF_MAX_BOUNCES,
     WF_NUM_SLOTS,
     WF_STREAM_CAP_BDPT,
@@ -1763,7 +1764,7 @@ class WavefrontBdptPass:
     BDPT_MAX_VERTS = _WF_BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # ≥ sizeof(BDPTVertex) (≈120 B scalar) — headroom
     AUX_STRIDE = 128      # ≥ sizeof(WfBdptAux) (≈92 B scalar w/ eye-walk state)
-    NUM_SLOTS = WF_NUM_SLOTS  # lockstep with WF_BDPT_SLOT_* in the shader
+    NUM_SLOTS = WF_BDPT_NUM_SLOTS  # lockstep with WF_BDPT_NUM_SLOTS in the shader
     SLOT_NEE = 0
     SLOT_FULL = 1
     # gen-eye seeds eye[0..1], the loop extends eye[2..]; gen-light seeds light[0].

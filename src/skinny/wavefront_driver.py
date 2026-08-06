@@ -107,7 +107,13 @@ KERNEL_ENTRY_NAMES: frozenset[str] = frozenset({
 # real stride on Vulkan but a reflection fallback on Metal (the MSL stride is
 # authoritative) — and the record-stack sizing formula, which differs by design.
 WF_MAX_BOUNCES = 6              # lockstep with WF_MAX_BOUNCES in the shader
-WF_NUM_SLOTS = 2               # 0 = flat, 1 = non-flat catch-all
+# The path and BDPT counting-sort slot domains are DISTINCT — path routes
+# flat(0)/non-flat(1) (wf_shade_common.slang WF_NUM_SLOTS), BDPT routes
+# nee(0)/full(1) (wavefront_bdpt.slang WF_BDPT_NUM_SLOTS). Each host constant
+# mirrors ONE shader constant; they are independently 2 today, so they get two
+# owners, not one (forcing them equal would couple two unrelated shader facts).
+WF_NUM_SLOTS = 2               # path: 0 = flat, 1 = non-flat catch-all
+WF_BDPT_NUM_SLOTS = 2          # bdpt: 0 = nee, 1 = full
 WF_STREAM_CAP_PATH = 1 << 20    # path/sppm max lanes per stream (~68 MB path-state)
 WF_STREAM_CAP_BDPT = 1 << 18    # smaller: each lane owns 2×BDPT_MAX_VERTS vertices
 BDPT_MAX_VERTS = 7             # lockstep with bdpt.slang BDPT_MAX_VERTS

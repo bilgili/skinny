@@ -144,8 +144,13 @@ def test_shared_constants_have_one_owner(backends):
     vk, mt = backends
     assert vk.WavefrontPathPass.MAX_BOUNCES == mt.MetalWavefrontPathPass.MAX_BOUNCES == wd.WF_MAX_BOUNCES == 6
     assert vk.WavefrontPathPass.STREAM_CAP == mt.MetalWavefrontPathPass.STREAM_CAP == wd.WF_STREAM_CAP_PATH == (1 << 20)
+    # Path and BDPT slot counts are SEPARATE owners — each mirrors its own shader
+    # constant (wf_shade_common.slang WF_NUM_SLOTS vs wavefront_bdpt.slang
+    # WF_BDPT_NUM_SLOTS). They are independently 2 today; the test does NOT assert
+    # path == bdpt, only that each backend matches its integrator's owner.
     assert vk.WavefrontPathPass.NUM_SLOTS == mt.MetalWavefrontPathPass.NUM_SLOTS == wd.WF_NUM_SLOTS == 2
     for cls_v, cls_m in [(vk.WavefrontBdptPass, mt.MetalWavefrontBdptPass)]:
+        assert cls_v.NUM_SLOTS == cls_m.NUM_SLOTS == wd.WF_BDPT_NUM_SLOTS == 2
         assert cls_v.BDPT_MAX_VERTS == cls_m.BDPT_MAX_VERTS == wd.BDPT_MAX_VERTS == 7
         assert cls_v.EYE_BOUNCES == cls_m.EYE_BOUNCES == wd.WF_EYE_BOUNCES == 5
         assert cls_v.LIGHT_BOUNCES == cls_m.LIGHT_BOUNCES == wd.WF_LIGHT_BOUNCES == 6
