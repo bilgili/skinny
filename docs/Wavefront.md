@@ -819,7 +819,29 @@ Since change `metal-wavefront-parity`, the wavefront execution mode runs on the
 **native Metal backend** at parity with Vulkan. The loop *stage orders* live in
 the backend-neutral **`wavefront_driver.py`** (`record_path_loop` /
 `record_bdpt_loop` over the `WavefrontRecorder` protocol) — the single source
-of truth both backends drive. `vk_wavefront.py` supplies the Vulkan recorder
+of truth both backends drive.
+
+### Kernel-name & shared-constant owner (`wavefront_driver.py`, change `choice-table-wavefront-owners`)
+
+`wavefront_driver.py` also owns the two things the driver and both backends used
+to restate. Every wavefront compute kernel's Slang entry-point name is declared
+once as a `WF_…` constant (35 in total — path, BDPT, SPPM, MLT, plus
+`WF_NEURAL_PROPOSAL` and Vulkan-only `WF_INDIRECT_PAINT`); the driver dispatches
+through them and both backend `entries` lists import them, so renaming a kernel
+edits one line and is an **import-time** failure in every consumer, never a
+runtime dispatch failure on one backend. The Metal *resource* names (`wfEye`,
+`wfSlotCount`, …) are a different namespace and are **not** owned here.
+
+The pass constants every backend must agree on also live here: `WF_MAX_BOUNCES`,
+`BDPT_MAX_VERTS`, `WF_EYE_BOUNCES` / `WF_LIGHT_BOUNCES`, `WF_NUM_SLOTS`,
+`WF_STREAM_CAP_PATH` (1<<20) / `WF_STREAM_CAP_BDPT` (1<<18), `WALK_MODES` (the
+same tuple the CLI advertises as `cli_common.WALK_CHOICES`), and
+`RESTIR_DEFAULT_CONFIG`. Each backend pass class derives its class attribute from
+these. The vertex / aux / reservoir **strides** stay per-backend — a real buffer
+stride on Vulkan, a reflection *fallback* on Metal (the MSL stride is
+authoritative) — and are pinned equal, with the reason, by
+`tests/test_wavefront_kernel_names.py`; the record-stack sizing formula is
+per-backend by design and left separate. `vk_wavefront.py` supplies the Vulkan recorder
 (byte-identical to the historical inline command recording);
 **`metal_wavefront.py`** supplies the Metal primitives:
 

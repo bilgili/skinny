@@ -156,7 +156,9 @@ def test_metal_mlt_pass_and_recorder_exist():
     # The define itself is owned by shader_variants.py (change
     # shader-variant-key-module); this pass must ask for the MLT axis.
     assert "_wavefront_key(mlt=True" in src, "MLT kernels must compile under SKINNY_MLT"
-    for entry in ("wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"):
+    # Kernel entry names are the wavefront_driver owner's constants now
+    # (change choice-table-wavefront-owners), not string literals here.
+    for entry in ("WF_MLT_BOOTSTRAP", "WF_MLT_INIT", "WF_MLT_MUTATE", "WF_MLT_RESOLVE"):
         assert entry in src
 
 
@@ -401,7 +403,9 @@ def test_vk_wavefront_has_mlt_pass_and_recorder():
     # -DSKINNY_MLT=1 and a `_mlt` cache_token, both golden-pinned in
     # tests/test_shader_variants.py. This pass must ask for the MLT axis.
     assert "_wavefront_key(mlt=True" in src, "MLT kernels must compile under -DSKINNY_MLT=1"
-    for entry in ("wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"):
+    # Kernel entry names are the wavefront_driver owner's constants now
+    # (change choice-table-wavefront-owners), not string literals here.
+    for entry in ("WF_MLT_BOOTSTRAP", "WF_MLT_INIT", "WF_MLT_MUTATE", "WF_MLT_RESOLVE"):
         assert entry in src
 
 

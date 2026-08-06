@@ -22,6 +22,106 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+# ── kernel entry-point names — the single owner (change choice-table-wavefront-owners) ──
+#
+# Every wavefront compute kernel's Slang entry-point name is declared ONCE here.
+# The driver dispatches through these constants; both backend pass modules import
+# them for their pipeline `entries` lists (`from skinny.wavefront_driver import
+# WF_…`). A rename edits one line and is an import-time failure in every consumer,
+# never a runtime dispatch failure on one backend. `tests/test_wavefront_kernel_names.py`
+# pins each constant to its historical string and fails if any kernel-name literal
+# reappears in the driver or either backend. These are ENTRY-POINT names only — the
+# Metal bind-by-name resource names (`wfEye`, `wfSlotCount`, …) are a different
+# namespace and are not owned here.
+
+# Path tracer (wavefront/wavefront_path.slang)
+WF_PATH_GENERATE = "wfPathGenerate"
+WF_PATH_INTERSECT = "wfPathIntersect"
+WF_BUILD_ARGS = "wfBuildArgs"
+WF_SCATTER = "wfScatter"
+WF_PATH_SHADE_FLAT = "wfPathShadeFlat"
+WF_PATH_SHADE = "wfPathShade"
+WF_PATH_RESOLVE = "wfPathResolve"
+
+# BDPT (wavefront/wavefront_bdpt.slang)
+WF_BDPT_BUILD_ARGS = "wfBdptBuildArgs"
+WF_BDPT_SCATTER = "wfBdptScatter"
+WF_BDPT_WALK = "wfBdptWalk"
+WF_BDPT_GEN_EYE = "wfBdptGenEye"
+WF_BDPT_WALK_CLASSIFY = "wfBdptWalkClassify"
+WF_BDPT_BOUNCE_EYE = "wfBdptBounceEye"
+WF_BDPT_LIGHT_TAIL = "wfBdptLightTail"
+WF_BDPT_GEN_LIGHT = "wfBdptGenLight"
+WF_BDPT_BOUNCE_LIGHT = "wfBdptBounceLight"
+WF_BDPT_SPLAT = "wfBdptSplat"
+WF_BDPT_CLASSIFY = "wfBdptClassify"
+WF_BDPT_CONNECT_NEE = "wfBdptConnectNee"
+WF_BDPT_CONNECT_FULL = "wfBdptConnectFull"
+WF_BDPT_RESOLVE = "wfBdptResolve"
+
+# SPPM (wavefront/wavefront_sppm.slang)
+WF_SPPM_EYE = "wfSppmEye"
+WF_SPPM_GRID_COUNT = "wfSppmGridCount"
+WF_SPPM_GRID_SCAN_BLOCK = "wfSppmGridScanBlock"
+WF_SPPM_GRID_SCAN_BLOCK_SUMS = "wfSppmGridScanBlockSums"
+WF_SPPM_GRID_SCAN_ADD = "wfSppmGridScanAdd"
+WF_SPPM_GRID_SCATTER = "wfSppmGridScatter"
+WF_SPPM_PHOTON_TRACE = "wfSppmPhotonTrace"
+WF_SPPM_UPDATE = "wfSppmUpdate"
+
+# MLT (wavefront/wavefront_mlt.slang)
+WF_MLT_BOOTSTRAP = "wfMltBootstrap"
+WF_MLT_INIT = "wfMltInit"
+WF_MLT_MUTATE = "wfMltMutate"
+WF_MLT_RESOLVE = "wfMltResolve"
+
+# Neural directional-proposal pre-pass (both backends).
+WF_NEURAL_PROPOSAL = "wfNeuralProposal"
+# Indirect-args paint (Vulkan only; Metal uses the CPU readback fallback).
+WF_INDIRECT_PAINT = "wfIndirectPaint"
+
+#: Every owned kernel entry-point name — the set the source gate forbids as a
+#: literal outside this owner.
+KERNEL_ENTRY_NAMES: frozenset[str] = frozenset({
+    WF_PATH_GENERATE, WF_PATH_INTERSECT, WF_BUILD_ARGS, WF_SCATTER,
+    WF_PATH_SHADE_FLAT, WF_PATH_SHADE, WF_PATH_RESOLVE,
+    WF_BDPT_BUILD_ARGS, WF_BDPT_SCATTER, WF_BDPT_WALK, WF_BDPT_GEN_EYE,
+    WF_BDPT_WALK_CLASSIFY, WF_BDPT_BOUNCE_EYE, WF_BDPT_LIGHT_TAIL,
+    WF_BDPT_GEN_LIGHT, WF_BDPT_BOUNCE_LIGHT, WF_BDPT_SPLAT, WF_BDPT_CLASSIFY,
+    WF_BDPT_CONNECT_NEE, WF_BDPT_CONNECT_FULL, WF_BDPT_RESOLVE,
+    WF_SPPM_EYE, WF_SPPM_GRID_COUNT, WF_SPPM_GRID_SCAN_BLOCK,
+    WF_SPPM_GRID_SCAN_BLOCK_SUMS, WF_SPPM_GRID_SCAN_ADD, WF_SPPM_GRID_SCATTER,
+    WF_SPPM_PHOTON_TRACE, WF_SPPM_UPDATE,
+    WF_MLT_BOOTSTRAP, WF_MLT_INIT, WF_MLT_MUTATE, WF_MLT_RESOLVE,
+    WF_NEURAL_PROPOSAL, WF_INDIRECT_PAINT,
+})
+
+
+# ── shared wavefront pass constants (must be equal across backends) ──
+#
+# The values every backend must agree on: bounce counts, per-stream lane caps,
+# the slot count, the walk modes, and the ReSTIR default config. Both backend
+# pass modules derive their class attributes from these, so a change lands on
+# both at once. NOT here (legitimately per-backend, pinned with a reason in
+# tests/test_wavefront_kernel_names.py): the vertex/aux/reservoir strides — a
+# real stride on Vulkan but a reflection fallback on Metal (the MSL stride is
+# authoritative) — and the record-stack sizing formula, which differs by design.
+WF_MAX_BOUNCES = 6              # lockstep with WF_MAX_BOUNCES in the shader
+WF_NUM_SLOTS = 2               # 0 = flat, 1 = non-flat catch-all
+WF_STREAM_CAP_PATH = 1 << 20    # path/sppm max lanes per stream (~68 MB path-state)
+WF_STREAM_CAP_BDPT = 1 << 18    # smaller: each lane owns 2×BDPT_MAX_VERTS vertices
+BDPT_MAX_VERTS = 7             # lockstep with bdpt.slang BDPT_MAX_VERTS
+WF_EYE_BOUNCES = BDPT_MAX_VERTS - 2
+WF_LIGHT_BOUNCES = BDPT_MAX_VERTS - 1
+#: BDPT subpath-build walk modes — the same tuple the CLI advertises as
+#: ``cli_common.WALK_CHOICES`` (pinned equal by the test; kept here so the
+#: low-level driver does not import the high-level CLI module).
+WALK_MODES = ("fused", "eye", "eye_light")
+#: Default ReSTIR DI config (mirrors restir_primary.slang RestirPC). flags bit0
+#: spatial, bit1 temporal. Renderer overrides via RestirDiReuse.
+RESTIR_DEFAULT_CONFIG = dict(flags=0x3, mLight=8, spatialK=5, spatialRadius=16.0,
+                             normalThresh=0.9, depthThresh=0.1, mCap=20, mBsdf=1)
+
 
 @runtime_checkable
 class WavefrontRecorder(Protocol):
@@ -137,15 +237,15 @@ def record_path_loop(
             rec.barrier()  # prior tile's resolve before reusing the buffers
         first = False
         rec.push_tile(stream_base)
-        rec.dispatch_full("wfPathGenerate")
+        rec.dispatch_full(WF_PATH_GENERATE)
         for bounce in range(max_bounces):
             rec.clear_counts()
             rec.barrier()
-            rec.dispatch_full("wfPathIntersect")  # trace + classify + count
+            rec.dispatch_full(WF_PATH_INTERSECT)  # trace + classify + count
             rec.barrier()
-            rec.dispatch_one("wfBuildArgs")        # counts → offsets + args
+            rec.dispatch_one(WF_BUILD_ARGS)        # counts → offsets + args
             rec.barrier()
-            rec.dispatch_full("wfScatter")         # lanes → per-slot queues
+            rec.dispatch_full(WF_SCATTER)         # lanes → per-slot queues
             rec.barrier()
             # Neural-proposal pre-pass: forward-sample every live lane into the
             # neural buffer the flat shade reads. Binds its own pipeline layout,
@@ -162,12 +262,12 @@ def record_path_loop(
                 rec.restir_primary_direct()
                 rec.barrier()
                 rec.push_tile(stream_base)
-            rec.shade(0, "wfPathShadeFlat")        # slot 0 (flat)
+            rec.shade(0, WF_PATH_SHADE_FLAT)        # slot 0 (flat)
             if build_catchall:
                 rec.barrier()
-                rec.shade(1, "wfPathShade")        # slot 1 (non-flat catch-all)
+                rec.shade(1, WF_PATH_SHADE)        # slot 1 (non-flat catch-all)
         rec.barrier()
-        rec.dispatch_full("wfPathResolve")
+        rec.dispatch_full(WF_PATH_RESOLVE)
         stream_base += stream_size
 
 
@@ -209,9 +309,9 @@ def record_bdpt_loop(
         rec.clear_counts()
         rec.dispatch_full(classify_entry)
         rec.barrier()
-        rec.dispatch_one("wfBdptBuildArgs")
+        rec.dispatch_one(WF_BDPT_BUILD_ARGS)
         rec.barrier()
-        rec.dispatch_full("wfBdptScatter")
+        rec.dispatch_full(WF_BDPT_SCATTER)
         rec.barrier()
 
     def build_subpaths() -> None:
@@ -219,28 +319,28 @@ def record_bdpt_loop(
         leaving each lane's aux (eyeLen/lightLen/escaped/rngState) ready for
         the shared connect+resolve tail."""
         if walk_mode == "fused":
-            rec.dispatch_full("wfBdptWalk")       # eye+light+splat in one kernel
+            rec.dispatch_full(WF_BDPT_WALK)       # eye+light+splat in one kernel
             rec.barrier()
             return
         # staged eye walk (eye + eye_light modes)
-        rec.dispatch_full("wfBdptGenEye")         # eye[0..1] + first ray
+        rec.dispatch_full(WF_BDPT_GEN_EYE)         # eye[0..1] + first ray
         rec.barrier()
         for _ in range(eye_bounces):
-            compact("wfBdptWalkClassify")         # gather live eye lanes → slot 0
-            rec.shade(slot_nee, "wfBdptBounceEye")   # extend one eye vertex
+            compact(WF_BDPT_WALK_CLASSIFY)         # gather live eye lanes → slot 0
+            rec.shade(slot_nee, WF_BDPT_BOUNCE_EYE)   # extend one eye vertex
             rec.barrier()
         if walk_mode == "eye":
-            rec.dispatch_full("wfBdptLightTail")  # fused light walk + splat
+            rec.dispatch_full(WF_BDPT_LIGHT_TAIL)  # fused light walk + splat
             rec.barrier()
             return
         # eye_light: staged light walk + standalone splat
-        rec.dispatch_full("wfBdptGenLight")       # light[0] + first light ray
+        rec.dispatch_full(WF_BDPT_GEN_LIGHT)       # light[0] + first light ray
         rec.barrier()
         for _ in range(light_bounces):
-            compact("wfBdptWalkClassify")         # gather live light lanes → slot 0
-            rec.shade(slot_nee, "wfBdptBounceLight")  # extend one light vertex
+            compact(WF_BDPT_WALK_CLASSIFY)         # gather live light lanes → slot 0
+            rec.shade(slot_nee, WF_BDPT_BOUNCE_LIGHT)  # extend one light vertex
             rec.barrier()
-        rec.dispatch_full("wfBdptSplat")          # s=1 light-tracer splat
+        rec.dispatch_full(WF_BDPT_SPLAT)          # s=1 light-tracer splat
         rec.barrier()
 
     stream_base = 0
@@ -251,12 +351,12 @@ def record_bdpt_loop(
         first = False
         rec.push_tile(stream_base)
         build_subpaths()
-        compact("wfBdptClassify")                 # route lanes NEE / FULL / dead
-        rec.shade(slot_nee, "wfBdptConnectNee")
+        compact(WF_BDPT_CLASSIFY)                 # route lanes NEE / FULL / dead
+        rec.shade(slot_nee, WF_BDPT_CONNECT_NEE)
         rec.barrier()
-        rec.shade(slot_full, "wfBdptConnectFull")
+        rec.shade(slot_full, WF_BDPT_CONNECT_FULL)
         rec.barrier()
-        rec.dispatch_full("wfBdptResolve")
+        rec.dispatch_full(WF_BDPT_RESOLVE)
         stream_base += stream_size
         # Bound the heavy per-tile eye submit: the non-flat first-hit path
         # fallback in wfBdptWalk / wfBdptGenEye runs a full multi-bounce path for
@@ -309,7 +409,7 @@ def record_sppm_loop(
             rec.barrier()
         first = False
         rec.push_tile(stream_base)
-        rec.dispatch_full("wfSppmEye")
+        rec.dispatch_full(WF_SPPM_EYE)
         stream_base += stream_size
         # Bound the heavy per-tile eye submit (see record_bdpt_loop): wfSppmEye's
         # non-flat first-hit path fallback runs a full multi-bounce path for
@@ -329,15 +429,15 @@ def record_sppm_loop(
     # phase 2 — single global grid build (counting sort).
     rec.clear_grid()
     rec.barrier()
-    rec.dispatch_count("wfSppmGridCount", num_pixels, 64)
+    rec.dispatch_count(WF_SPPM_GRID_COUNT, num_pixels, 64)
     rec.barrier()
-    rec.dispatch_count("wfSppmGridScanBlock", num_cells, 256)
+    rec.dispatch_count(WF_SPPM_GRID_SCAN_BLOCK, num_cells, 256)
     rec.barrier()
-    rec.dispatch_one("wfSppmGridScanBlockSums")
+    rec.dispatch_one(WF_SPPM_GRID_SCAN_BLOCK_SUMS)
     rec.barrier()
-    rec.dispatch_count("wfSppmGridScanAdd", num_cells, 256)
+    rec.dispatch_count(WF_SPPM_GRID_SCAN_ADD, num_cells, 256)
     rec.barrier()
-    rec.dispatch_count("wfSppmGridScatter", num_pixels, 64)
+    rec.dispatch_count(WF_SPPM_GRID_SCATTER, num_pixels, 64)
     rec.barrier()
     rec.flush()
 
@@ -380,7 +480,7 @@ def record_sppm_loop(
     while base < photons:
         n = min(batch, photons - base)
         rec.push_tile(base)
-        rec.dispatch_count("wfSppmPhotonTrace", n, 64)
+        rec.dispatch_count(WF_SPPM_PHOTON_TRACE, n, 64)
         rec.barrier()
         rec.flush()
         base += n
@@ -393,7 +493,7 @@ def record_sppm_loop(
             rec.barrier()
         first = False
         rec.push_tile(stream_base)
-        rec.dispatch_full("wfSppmUpdate")
+        rec.dispatch_full(WF_SPPM_UPDATE)
         stream_base += stream_size
     rec.barrier()
 
@@ -426,7 +526,7 @@ def record_mlt_bootstrap(rec, *, bootstrap_samples: int, num_chains: int,
     while base < bootstrap_samples:
         n = min(batch, bootstrap_samples - base)
         rec.push_window(base, n)
-        rec.dispatch_count("wfMltBootstrap", n, 64)
+        rec.dispatch_count(WF_MLT_BOOTSTRAP, n, 64)
         rec.barrier()
         rec.flush()
         base += n
@@ -441,7 +541,7 @@ def record_mlt_init(rec, *, num_chains: int, chain_batch: int = 0) -> None:
     while base < num_chains:
         n = min(batch, num_chains - base)
         rec.push_window(base, n)
-        rec.dispatch_count("wfMltInit", n, 64)
+        rec.dispatch_count(WF_MLT_INIT, n, 64)
         rec.barrier()
         rec.flush()
         base += n
@@ -466,10 +566,10 @@ def record_mlt_frame(rec, *, num_pixels: int, num_chains: int, iterations: int,
         while base < num_chains:
             n = min(batch, num_chains - base)
             rec.push_window(base, n)
-            rec.dispatch_count("wfMltMutate", n, 64)
+            rec.dispatch_count(WF_MLT_MUTATE, n, 64)
             rec.barrier()
             rec.flush()
             base += n
     rec.push_window(0, num_pixels)
-    rec.dispatch_count("wfMltResolve", num_pixels, 64)
+    rec.dispatch_count(WF_MLT_RESOLVE, num_pixels, 64)
     rec.barrier()

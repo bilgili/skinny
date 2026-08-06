@@ -39,7 +39,53 @@ from pathlib import Path
 from skinny.gpu_backend import capabilities
 from skinny.metal_compute import MetalFrameEncoder, StorageBuffer
 from skinny.shader_variants import Family, ShaderVariantKey, Target
-from skinny.wavefront_driver import record_bdpt_loop, record_path_loop
+from skinny.wavefront_driver import (
+    BDPT_MAX_VERTS as _WF_BDPT_MAX_VERTS,
+    RESTIR_DEFAULT_CONFIG,
+    WALK_MODES as _WF_WALK_MODES,
+    WF_EYE_BOUNCES,
+    WF_LIGHT_BOUNCES,
+    WF_MAX_BOUNCES,
+    WF_NUM_SLOTS,
+    WF_STREAM_CAP_BDPT,
+    WF_STREAM_CAP_PATH,
+    WF_BDPT_BOUNCE_EYE,
+    WF_BDPT_BOUNCE_LIGHT,
+    WF_BDPT_BUILD_ARGS,
+    WF_BDPT_CLASSIFY,
+    WF_BDPT_CONNECT_FULL,
+    WF_BDPT_CONNECT_NEE,
+    WF_BDPT_GEN_EYE,
+    WF_BDPT_GEN_LIGHT,
+    WF_BDPT_LIGHT_TAIL,
+    WF_BDPT_RESOLVE,
+    WF_BDPT_SCATTER,
+    WF_BDPT_SPLAT,
+    WF_BDPT_WALK,
+    WF_BDPT_WALK_CLASSIFY,
+    WF_BUILD_ARGS,
+    WF_MLT_BOOTSTRAP,
+    WF_MLT_INIT,
+    WF_MLT_MUTATE,
+    WF_MLT_RESOLVE,
+    WF_NEURAL_PROPOSAL,
+    WF_PATH_GENERATE,
+    WF_PATH_INTERSECT,
+    WF_PATH_RESOLVE,
+    WF_PATH_SHADE,
+    WF_PATH_SHADE_FLAT,
+    WF_SCATTER,
+    WF_SPPM_EYE,
+    WF_SPPM_GRID_COUNT,
+    WF_SPPM_GRID_SCAN_ADD,
+    WF_SPPM_GRID_SCAN_BLOCK,
+    WF_SPPM_GRID_SCAN_BLOCK_SUMS,
+    WF_SPPM_GRID_SCATTER,
+    WF_SPPM_PHOTON_TRACE,
+    WF_SPPM_UPDATE,
+    record_bdpt_loop,
+    record_path_loop,
+)
 from skinny.wavefront_layout import path_state_size, rec_vertex_size
 
 
@@ -266,7 +312,7 @@ class _MetalWavefrontRecorder:
         np_ = self._p._neural
         groups = ((np_.stream_size + np_._GROUP - 1) // np_._GROUP, 1, 1)
         self._enc.dispatch(
-            np_._entries["wfNeuralProposal"], groups, bindings=self._binds,
+            np_._entries[WF_NEURAL_PROPOSAL], groups, bindings=self._binds,
             uniform_blob=self._fc, uniforms={"npc": np_.npc_blob()},
             bindless=self._bindless)
 
@@ -315,11 +361,9 @@ class MetalRestirDiPass:
     _GROUP = 64  # matches [numthreads(64,1,1)] in restir_primary.slang
     RESERVOIR_STRIDE = 32  # reflection fallback only — MSL stride is authoritative
     GBUF_STRIDE = 32       # reflection fallback only
-    # Default ReSTIR config (mirrors restir_primary.slang RestirPC and the
-    # Vulkan pass's DEFAULT_CONFIG — lockstep). flags bit0 spatial, bit1
-    # temporal. Renderer overrides via RestirDiReuse.
-    DEFAULT_CONFIG = dict(flags=0x3, mLight=8, spatialK=5, spatialRadius=16.0,
-                          normalThresh=0.9, depthThresh=0.1, mCap=20, mBsdf=1)
+    # Shared with Vulkan — owned by wavefront_driver.RESTIR_DEFAULT_CONFIG (copied
+    # so per-instance `{**DEFAULT_CONFIG, **config}` never mutates the shared dict).
+    DEFAULT_CONFIG = dict(RESTIR_DEFAULT_CONFIG)
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int,
                  config: dict | None = None) -> None:
@@ -418,8 +462,8 @@ class MetalNeuralProposalPass:
         module = session.load_module_from_source(
             "neural_proposal_pass", src_path.read_text(encoding="utf-8"),
             str(src_path))
-        self._entries = {"wfNeuralProposal": _EntryPipeline(
-            ctx, session, module, "wfNeuralProposal")}
+        self._entries = {WF_NEURAL_PROPOSAL: _EntryPipeline(
+            ctx, session, module, WF_NEURAL_PROPOSAL)}
 
         # Slang global name → buffer, merged into the scene binds per dispatch
         # (the Vulkan pass's set-1 contents: state 0, hit 1, neural-out 2).
@@ -457,9 +501,10 @@ class MetalWavefrontPathPass:
     """
 
     _GROUP = 64  # matches [numthreads(64, 1, 1)] in wavefront_path.slang
-    MAX_BOUNCES = 6  # lockstep with WF_MAX_BOUNCES in the shader
-    STREAM_CAP = 1 << 20  # max lanes per stream — bounds path-state VRAM
-    NUM_SLOTS = 2  # lockstep with WF_NUM_SLOTS (0 = flat, 1 = catch-all)
+    # Shared across backends — owned by wavefront_driver (change choice-table-wavefront-owners).
+    MAX_BOUNCES = WF_MAX_BOUNCES
+    STREAM_CAP = WF_STREAM_CAP_PATH
+    NUM_SLOTS = WF_NUM_SLOTS
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  build_catchall: bool = True, record_capacity: int = 0,
@@ -508,10 +553,10 @@ class MetalWavefrontPathPass:
         module = session.load_module_from_source(
             "wavefront_path", src_path.read_text(encoding="utf-8"), str(src_path))
 
-        entries = ["wfPathGenerate", "wfPathIntersect", "wfBuildArgs",
-                   "wfScatter", "wfPathShadeFlat", "wfPathResolve"]
+        entries = [WF_PATH_GENERATE, WF_PATH_INTERSECT, WF_BUILD_ARGS,
+                   WF_SCATTER, WF_PATH_SHADE_FLAT, WF_PATH_RESOLVE]
         if self.build_catchall:
-            entries.append("wfPathShade")
+            entries.append(WF_PATH_SHADE)
         self._entries = {e: _EntryPipeline(ctx, session, module, e)
                          for e in entries}
 
@@ -520,9 +565,9 @@ class MetalWavefrontPathPass:
         # needs just the stride to size the buffers (design B, task 1.5). The
         # wfState stride is locked to the GPU-free mirror; the others come
         # straight from reflection (HitInfo has no GPU-free mirror).
-        gen = self._entries["wfPathGenerate"].program
-        isect = self._entries["wfPathIntersect"].program
-        flat = self._entries["wfPathShadeFlat"].program
+        gen = self._entries[WF_PATH_GENERATE].program
+        isect = self._entries[WF_PATH_INTERSECT].program
+        flat = self._entries[WF_PATH_SHADE_FLAT].program
         # Sizer axes come off the key the kernels above compiled with (D6).
         msl = self._variant_key.target is Target.METAL
         spectral = self._variant_key.spectral
@@ -589,7 +634,7 @@ class MetalWavefrontPathPass:
         # `_msl_layout_source`.) fc comes from the generate program; the
         # material-param layouts from the shade program(s) that reference them.
         self.uniform_layout, self.uniform_size = _reflect_uniform_layout(gen)
-        catch = self._entries.get("wfPathShade")
+        catch = self._entries.get(WF_PATH_SHADE)
         self.mtlx_skin_layout: dict = {}
         self.mtlx_skin_stride = 0
         if catch is not None:
@@ -766,11 +811,11 @@ class MetalWavefrontSppmPass:
     kernels sit well under Metal's 31-buffer-slot cap)."""
 
     _GROUP = 64
-    STREAM_CAP = 1 << 20
+    STREAM_CAP = WF_STREAM_CAP_PATH  # shared (wavefront_driver)
 
-    _ENTRIES = ["wfSppmEye", "wfSppmGridCount", "wfSppmGridScanBlock",
-                "wfSppmGridScanBlockSums", "wfSppmGridScanAdd", "wfSppmGridScatter",
-                "wfSppmPhotonTrace", "wfSppmUpdate"]
+    _ENTRIES = [WF_SPPM_EYE, WF_SPPM_GRID_COUNT, WF_SPPM_GRID_SCAN_BLOCK,
+                WF_SPPM_GRID_SCAN_BLOCK_SUMS, WF_SPPM_GRID_SCAN_ADD, WF_SPPM_GRID_SCATTER,
+                WF_SPPM_PHOTON_TRACE, WF_SPPM_UPDATE]
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  graph_fragments=None, neural_config=None,
@@ -806,7 +851,7 @@ class MetalWavefrontSppmPass:
 
         # Reflected VisiblePoint stride must match the host MSL mirror. Spectral
         # widens it (Spectrum beta/ld + conductorMetalId); RGB stays identical.
-        eye = self._entries["wfSppmEye"].program
+        eye = self._entries[WF_SPPM_EYE].program
         # Sizer axes come off the key these kernels compiled with (design D6).
         msl = self._variant_key.target is Target.METAL
         spectral = self._variant_key.spectral
@@ -910,20 +955,21 @@ class MetalWavefrontBdptPass:
     """
 
     _GROUP = 64           # matches [numthreads(64, 1, 1)] in wavefront_bdpt.slang
-    BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
+    # Shared across backends — owned by wavefront_driver. VERTEX_STRIDE/AUX_STRIDE
+    # stay local: a reflection fallback here (Metal), a real stride on Vulkan.
+    BDPT_MAX_VERTS = _WF_BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # reflection fallback only — MSL stride is authoritative
     AUX_STRIDE = 128      # reflection fallback only
-    NUM_SLOTS = 2         # lockstep with WF_BDPT_NUM_SLOTS in the shader
+    NUM_SLOTS = WF_NUM_SLOTS  # lockstep with WF_BDPT_NUM_SLOTS in the shader
     SLOT_NEE = 0
     SLOT_FULL = 1
-    # Eye-walk extend bounces: gen-eye seeds eye[0..1], the loop extends eye[2..].
-    EYE_BOUNCES = BDPT_MAX_VERTS - 2
-    # Light-walk extend bounces: gen-light seeds light[0], the loop extends light[1..].
-    LIGHT_BOUNCES = BDPT_MAX_VERTS - 1
+    # gen-eye seeds eye[0..1], the loop extends eye[2..]; gen-light seeds light[0].
+    EYE_BOUNCES = WF_EYE_BOUNCES
+    LIGHT_BOUNCES = WF_LIGHT_BOUNCES
     # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices.
-    STREAM_CAP = 1 << 18
+    STREAM_CAP = WF_STREAM_CAP_BDPT
 
-    WALK_MODES = ("fused", "eye", "eye_light")
+    WALK_MODES = _WF_WALK_MODES
 
     def __init__(self, ctx, shader_dir: Path, stream_size: int, num_pixels: int,
                  walk_mode: str = "fused", graph_fragments=None,
@@ -957,16 +1003,16 @@ class MetalWavefrontBdptPass:
         # counting sort + split connect + resolve are shared by all modes; only
         # the subpath-build kernels differ. Only the active mode's kernels are
         # compiled (no wasted Metal pipeline builds).
-        shared = ["wfBdptClassify", "wfBdptBuildArgs", "wfBdptScatter",
-                  "wfBdptConnectNee", "wfBdptConnectFull", "wfBdptResolve"]
-        staged_eye = ["wfBdptGenEye", "wfBdptWalkClassify", "wfBdptBounceEye"]
+        shared = [WF_BDPT_CLASSIFY, WF_BDPT_BUILD_ARGS, WF_BDPT_SCATTER,
+                  WF_BDPT_CONNECT_NEE, WF_BDPT_CONNECT_FULL, WF_BDPT_RESOLVE]
+        staged_eye = [WF_BDPT_GEN_EYE, WF_BDPT_WALK_CLASSIFY, WF_BDPT_BOUNCE_EYE]
         if walk_mode == "fused":
-            entries = ["wfBdptWalk"] + shared
+            entries = [WF_BDPT_WALK] + shared
         elif walk_mode == "eye":
-            entries = staged_eye + ["wfBdptLightTail"] + shared
+            entries = staged_eye + [WF_BDPT_LIGHT_TAIL] + shared
         else:  # eye_light
-            entries = staged_eye + ["wfBdptGenLight", "wfBdptBounceLight",
-                                    "wfBdptSplat"] + shared
+            entries = staged_eye + [WF_BDPT_GEN_LIGHT, WF_BDPT_BOUNCE_LIGHT,
+                                    WF_BDPT_SPLAT] + shared
         self._entries = {e: _EntryPipeline(ctx, session, module, e)
                          for e in entries}
 
@@ -1158,7 +1204,7 @@ class MetalWavefrontMltPass:
 
     _GROUP = 64  # matches [numthreads(64,1,1)] on all four MLT kernels
 
-    _ENTRIES = ["wfMltBootstrap", "wfMltInit", "wfMltMutate", "wfMltResolve"]
+    _ENTRIES = [WF_MLT_BOOTSTRAP, WF_MLT_INIT, WF_MLT_MUTATE, WF_MLT_RESOLVE]
 
     # Slang global name → mlt_buffer_sizes key: projected off the one
     # declaration in `wavefront_layout.MLT_CHAIN_BUFFERS` (change
@@ -1196,7 +1242,7 @@ class MetalWavefrontMltPass:
         # session this pass is the `_msl_layout_source`, and it is the ONLY
         # program whose `fc` carries the SKINNY_MLT tail — `_pack_uniforms_msl`
         # relocates mltSigma…mltSeed against this layout.
-        mutate = self._entries["wfMltMutate"].program
+        mutate = self._entries[WF_MLT_MUTATE].program
         self.uniform_layout, self.uniform_size = _reflect_uniform_layout(mutate)
         self.mtlx_skin_layout: dict = {}
         self.mtlx_skin_stride = 0

@@ -29,6 +29,52 @@ from skinny.shader_variants import (
     slangc_flags,
 )
 from skinny.vk_compute import StorageBuffer
+from skinny.wavefront_driver import (
+    BDPT_MAX_VERTS as _WF_BDPT_MAX_VERTS,
+    RESTIR_DEFAULT_CONFIG,
+    WALK_MODES as _WF_WALK_MODES,
+    WF_EYE_BOUNCES,
+    WF_LIGHT_BOUNCES,
+    WF_MAX_BOUNCES,
+    WF_NUM_SLOTS,
+    WF_STREAM_CAP_BDPT,
+    WF_STREAM_CAP_PATH,
+    WF_BDPT_BOUNCE_EYE,
+    WF_BDPT_BOUNCE_LIGHT,
+    WF_BDPT_BUILD_ARGS,
+    WF_BDPT_CLASSIFY,
+    WF_BDPT_CONNECT_FULL,
+    WF_BDPT_CONNECT_NEE,
+    WF_BDPT_GEN_EYE,
+    WF_BDPT_GEN_LIGHT,
+    WF_BDPT_LIGHT_TAIL,
+    WF_BDPT_RESOLVE,
+    WF_BDPT_SCATTER,
+    WF_BDPT_SPLAT,
+    WF_BDPT_WALK,
+    WF_BDPT_WALK_CLASSIFY,
+    WF_BUILD_ARGS,
+    WF_INDIRECT_PAINT,
+    WF_MLT_BOOTSTRAP,
+    WF_MLT_INIT,
+    WF_MLT_MUTATE,
+    WF_MLT_RESOLVE,
+    WF_NEURAL_PROPOSAL,
+    WF_PATH_GENERATE,
+    WF_PATH_INTERSECT,
+    WF_PATH_RESOLVE,
+    WF_PATH_SHADE,
+    WF_PATH_SHADE_FLAT,
+    WF_SCATTER,
+    WF_SPPM_EYE,
+    WF_SPPM_GRID_COUNT,
+    WF_SPPM_GRID_SCAN_ADD,
+    WF_SPPM_GRID_SCAN_BLOCK,
+    WF_SPPM_GRID_SCAN_BLOCK_SUMS,
+    WF_SPPM_GRID_SCATTER,
+    WF_SPPM_PHOTON_TRACE,
+    WF_SPPM_UPDATE,
+)
 from skinny.wavefront_layout import (
     REC_VERTEX_STRIDE as _REC_VERTEX_STRIDE,
     queue_buffer_sizes,
@@ -592,9 +638,10 @@ class WavefrontPathPass:
     """
 
     _GROUP = 64  # matches [numthreads(64, 1, 1)] in wavefront_path.slang
-    MAX_BOUNCES = 6  # lockstep with WF_MAX_BOUNCES in the shader
-    STREAM_CAP = 1 << 20  # max lanes per stream — bounds path-state VRAM (~68 MB)
-    NUM_SLOTS = 2  # lockstep with WF_NUM_SLOTS (0 = flat, 1 = non-flat catch-all)
+    # Shared across backends — owned by wavefront_driver (change choice-table-wavefront-owners).
+    MAX_BOUNCES = WF_MAX_BOUNCES
+    STREAM_CAP = WF_STREAM_CAP_PATH
+    NUM_SLOTS = WF_NUM_SLOTS
 
     HIT_STRIDE = 96  # ≥ sizeof(HitInfo) (≈92 B scalar) — headroom
     NEURAL_STRIDE = 32  # = sizeof(WfNeuralSample) (interfaces.slang): wi,pdf,version,valid,2×pad
@@ -653,15 +700,15 @@ class WavefrontPathPass:
         # compiled only when the scene actually has a non-flat material — so a
         # common flat scene never compiles the ~2.8 MB kernel.
         entries = [
-            ("wfPathGenerate", "wavefront/_wfpath_generate"),
-            ("wfPathIntersect", "wavefront/_wfpath_intersect"),
-            ("wfBuildArgs", "wavefront/_wfpath_buildargs"),
-            ("wfScatter", "wavefront/_wfpath_scatter"),
-            ("wfPathShadeFlat", "wavefront/_wfpath_shade_flat"),
-            ("wfPathResolve", "wavefront/_wfpath_resolve"),
+            (WF_PATH_GENERATE, "wavefront/_wfpath_generate"),
+            (WF_PATH_INTERSECT, "wavefront/_wfpath_intersect"),
+            (WF_BUILD_ARGS, "wavefront/_wfpath_buildargs"),
+            (WF_SCATTER, "wavefront/_wfpath_scatter"),
+            (WF_PATH_SHADE_FLAT, "wavefront/_wfpath_shade_flat"),
+            (WF_PATH_RESOLVE, "wavefront/_wfpath_resolve"),
         ]
         if self.build_catchall:
-            entries.append(("wfPathShade", "wavefront/_wfpath_shade"))
+            entries.append((WF_PATH_SHADE, "wavefront/_wfpath_shade"))
         modules = {}
         for entry, out_name in entries:
             spv = _compile_full_spv(shader_dir, "wavefront/wavefront_path", entry, out_name,
@@ -914,17 +961,17 @@ class WavefrontSppmPass:
     """
 
     _GROUP = 64  # matches [numthreads(64,1,1)] on the tiled eye/update kernels
-    STREAM_CAP = 1 << 20
+    STREAM_CAP = WF_STREAM_CAP_PATH  # shared (wavefront_driver)
 
     _ENTRIES = [
-        ("wfSppmEye", "integrators/_wfsppm_eye"),
-        ("wfSppmGridCount", "integrators/_wfsppm_grid_count"),
-        ("wfSppmGridScanBlock", "integrators/_wfsppm_scan_block"),
-        ("wfSppmGridScanBlockSums", "integrators/_wfsppm_scan_sums"),
-        ("wfSppmGridScanAdd", "integrators/_wfsppm_scan_add"),
-        ("wfSppmGridScatter", "integrators/_wfsppm_scatter"),
-        ("wfSppmPhotonTrace", "integrators/_wfsppm_photon"),
-        ("wfSppmUpdate", "integrators/_wfsppm_update"),
+        (WF_SPPM_EYE, "integrators/_wfsppm_eye"),
+        (WF_SPPM_GRID_COUNT, "integrators/_wfsppm_grid_count"),
+        (WF_SPPM_GRID_SCAN_BLOCK, "integrators/_wfsppm_scan_block"),
+        (WF_SPPM_GRID_SCAN_BLOCK_SUMS, "integrators/_wfsppm_scan_sums"),
+        (WF_SPPM_GRID_SCAN_ADD, "integrators/_wfsppm_scan_add"),
+        (WF_SPPM_GRID_SCATTER, "integrators/_wfsppm_scatter"),
+        (WF_SPPM_PHOTON_TRACE, "integrators/_wfsppm_photon"),
+        (WF_SPPM_UPDATE, "integrators/_wfsppm_update"),
     ]
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
@@ -1118,10 +1165,10 @@ class WavefrontMltPass:
     _GROUP = 64  # matches [numthreads(64,1,1)] on all four MLT kernels
 
     _ENTRIES = [
-        ("wfMltBootstrap", "wavefront/_wfmlt_bootstrap"),
-        ("wfMltInit", "wavefront/_wfmlt_init"),
-        ("wfMltMutate", "wavefront/_wfmlt_mutate"),
-        ("wfMltResolve", "wavefront/_wfmlt_resolve"),
+        (WF_MLT_BOOTSTRAP, "wavefront/_wfmlt_bootstrap"),
+        (WF_MLT_INIT, "wavefront/_wfmlt_init"),
+        (WF_MLT_MUTATE, "wavefront/_wfmlt_mutate"),
+        (WF_MLT_RESOLVE, "wavefront/_wfmlt_resolve"),
     ]
 
     # Binding → mlt_buffer_sizes key: projected off the one declaration in
@@ -1292,7 +1339,7 @@ class WavefrontNeuralProposalPass:
             from skinny.sampling.neural_weights import NeuralBuildConfig
             neural_config = NeuralBuildConfig()
         spv = _compile_full_spv(shader_dir, "wavefront/neural_proposal_pass",
-                                "wfNeuralProposal", "wavefront/_wfneural",
+                                WF_NEURAL_PROPOSAL, "wavefront/_wfneural",
                                 _wavefront_key(neural_config=neural_config))
         code = spv.read_bytes()
         self._module = vk.vkCreateShaderModule(
@@ -1384,10 +1431,9 @@ class RestirDiPass:
 
     _GROUP = 64  # matches [numthreads(64,1,1)] in restir_primary.slang
     RESERVOIR_STRIDE = 32  # ≥ sizeof(Reservoir) (28 B scalar) — headroom
-    # Default ReSTIR config (mirrors restir_primary.slang RestirPC). flags bit0
-    # spatial, bit1 temporal. Renderer overrides via RestirDiReuse.
-    DEFAULT_CONFIG = dict(flags=0x3, mLight=8, spatialK=5, spatialRadius=16.0,
-                          normalThresh=0.9, depthThresh=0.1, mCap=20, mBsdf=1)
+    # Shared with Metal — owned by wavefront_driver.RESTIR_DEFAULT_CONFIG (copied
+    # so per-instance `{**DEFAULT_CONFIG, **config}` never mutates the shared dict).
+    DEFAULT_CONFIG = dict(RESTIR_DEFAULT_CONFIG)
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  state_buffer, state_range: int, hit_buffer, hit_range: int,
@@ -1525,7 +1571,7 @@ class IndirectPaintPass:
     def __init__(self, ctx, shader_dir: Path, queue_buf, queue_range: int,
                  out_buf, out_range: int) -> None:
         self.ctx = ctx
-        spv = _compile_spv(shader_dir, "wavefront/indirect_paint", "wfIndirectPaint")
+        spv = _compile_spv(shader_dir, "wavefront/indirect_paint", WF_INDIRECT_PAINT)
         code = spv.read_bytes()
         self._module = vk.vkCreateShaderModule(
             ctx.device, vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code), None)
@@ -1712,22 +1758,22 @@ class WavefrontBdptPass:
     subpath. Matches the megakernel scope: flat first-hit, pinhole camera."""
 
     _GROUP = 64           # matches [numthreads(64, 1, 1)] in wavefront_bdpt.slang
-    BDPT_MAX_VERTS = 7    # lockstep with bdpt.slang BDPT_MAX_VERTS
+    # Shared across backends — owned by wavefront_driver. VERTEX_STRIDE/AUX_STRIDE
+    # stay local: a real stride here (Vulkan), a reflection fallback on Metal.
+    BDPT_MAX_VERTS = _WF_BDPT_MAX_VERTS
     VERTEX_STRIDE = 128   # ≥ sizeof(BDPTVertex) (≈120 B scalar) — headroom
     AUX_STRIDE = 128      # ≥ sizeof(WfBdptAux) (≈92 B scalar w/ eye-walk state)
-    # Connect counting-sort slots — lockstep with WF_BDPT_SLOT_* in the shader.
-    NUM_SLOTS = 2
+    NUM_SLOTS = WF_NUM_SLOTS  # lockstep with WF_BDPT_SLOT_* in the shader
     SLOT_NEE = 0
     SLOT_FULL = 1
-    # Eye-walk extend bounces: gen-eye seeds eye[0..1], the loop extends eye[2..].
-    EYE_BOUNCES = BDPT_MAX_VERTS - 2
-    # Light-walk extend bounces: gen-light seeds light[0], the loop extends light[1..].
-    LIGHT_BOUNCES = BDPT_MAX_VERTS - 1
+    # gen-eye seeds eye[0..1], the loop extends eye[2..]; gen-light seeds light[0].
+    EYE_BOUNCES = WF_EYE_BOUNCES
+    LIGHT_BOUNCES = WF_LIGHT_BOUNCES
     # Smaller cap than the path tracer: each lane owns 2×BDPT_MAX_VERTS vertices
     # (eye+light), so vertex VRAM = stream × 7 × 128 × 2. 1<<18 ≈ 470 MB.
-    STREAM_CAP = 1 << 18
+    STREAM_CAP = WF_STREAM_CAP_BDPT
 
-    WALK_MODES = ("fused", "eye", "eye_light")
+    WALK_MODES = _WF_WALK_MODES
 
     def __init__(self, ctx, shader_dir: Path, scene_set_layout,
                  eye_buf, light_buf, aux_buf, vert_range: int, aux_range: int,
@@ -1753,27 +1799,27 @@ class WavefrontBdptPass:
         #   eye_light  — fully staged eye + light walks + standalone splat.
         # Only the active mode's kernels are compiled/built (no wasted slangc).
         shared = [
-            ("wfBdptClassify", "wavefront/_wfbdpt_classify"),
-            ("wfBdptBuildArgs", "wavefront/_wfbdpt_buildargs"),
-            ("wfBdptScatter", "wavefront/_wfbdpt_scatter"),
-            ("wfBdptConnectNee", "wavefront/_wfbdpt_connect_nee"),
-            ("wfBdptConnectFull", "wavefront/_wfbdpt_connect_full"),
-            ("wfBdptResolve", "wavefront/_wfbdpt_resolve"),
+            (WF_BDPT_CLASSIFY, "wavefront/_wfbdpt_classify"),
+            (WF_BDPT_BUILD_ARGS, "wavefront/_wfbdpt_buildargs"),
+            (WF_BDPT_SCATTER, "wavefront/_wfbdpt_scatter"),
+            (WF_BDPT_CONNECT_NEE, "wavefront/_wfbdpt_connect_nee"),
+            (WF_BDPT_CONNECT_FULL, "wavefront/_wfbdpt_connect_full"),
+            (WF_BDPT_RESOLVE, "wavefront/_wfbdpt_resolve"),
         ]
         staged_eye = [
-            ("wfBdptGenEye", "wavefront/_wfbdpt_gen_eye"),
-            ("wfBdptWalkClassify", "wavefront/_wfbdpt_walk_classify"),
-            ("wfBdptBounceEye", "wavefront/_wfbdpt_bounce_eye"),
+            (WF_BDPT_GEN_EYE, "wavefront/_wfbdpt_gen_eye"),
+            (WF_BDPT_WALK_CLASSIFY, "wavefront/_wfbdpt_walk_classify"),
+            (WF_BDPT_BOUNCE_EYE, "wavefront/_wfbdpt_bounce_eye"),
         ]
         if walk_mode == "fused":
-            entries = [("wfBdptWalk", "wavefront/_wfbdpt_walk")] + shared
+            entries = [(WF_BDPT_WALK, "wavefront/_wfbdpt_walk")] + shared
         elif walk_mode == "eye":
-            entries = staged_eye + [("wfBdptLightTail", "wavefront/_wfbdpt_light_tail")] + shared
+            entries = staged_eye + [(WF_BDPT_LIGHT_TAIL, "wavefront/_wfbdpt_light_tail")] + shared
         else:  # eye_light
             entries = staged_eye + [
-                ("wfBdptGenLight", "wavefront/_wfbdpt_gen_light"),
-                ("wfBdptBounceLight", "wavefront/_wfbdpt_bounce_light"),
-                ("wfBdptSplat", "wavefront/_wfbdpt_splat"),
+                (WF_BDPT_GEN_LIGHT, "wavefront/_wfbdpt_gen_light"),
+                (WF_BDPT_BOUNCE_LIGHT, "wavefront/_wfbdpt_bounce_light"),
+                (WF_BDPT_SPLAT, "wavefront/_wfbdpt_splat"),
             ] + shared
         # One key for the compile AND any host sizing keyed off this pass
         # (design D6), like the path and SPPM passes.

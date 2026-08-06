@@ -340,8 +340,16 @@ def test_sppm_sizes_from_the_key_it_compiled_with():
 def test_kernel_goldens_cover_every_compile_site():
     """A kernel added to a `_compile_full_spv` loop must join the golden list —
     otherwise a wrong key/token at the new site would go unchecked."""
+    from skinny import wavefront_driver as wd
     src = (SRC / "vk_wavefront.py").read_text(encoding="utf-8")
-    declared = set(re.findall(r'\(\s*"(wf\w+|restir\w+)"\s*,\s*"([\w/]+)"\s*\)', src))
+    # The wf* entry names are the wavefront_driver owner's constants now
+    # (change choice-table-wavefront-owners): match `(WF_CONST, "slug")` and
+    # resolve the constant to its string; restir* names are still literals.
+    declared = set()
+    for tok, slug in re.findall(
+            r'\(\s*(WF_[A-Z0-9_]+|"wf\w+"|"restir\w+")\s*,\s*"([\w/]+)"\s*\)', src):
+        name = getattr(wd, tok) if tok.startswith("WF_") else tok.strip('"')
+        declared.add((name, slug))
     # One-directional on its own, so it would pass vacuously if the pattern
     # ever stopped matching (a reformat splitting a tuple across lines, an
     # entry-point prefix rename). Pin the count too.
