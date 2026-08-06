@@ -43,13 +43,15 @@
       (now reads `wavefront_driver.KERNEL_ENTRY_NAMES` instead of grepping
       `vk_wavefront.py`, which the rebase against `beacon-wavefront-attribution`
       surfaced).
-- [ ] 4.2 GPU smoke: one wavefront render per backend (Vulkan + native Metal),
-      serialised under ZERO-SWAP, confirming every kernel still dispatches.
-      **DEFERRED** — a concurrent session has Metal wavefront work in flight
-      (`beacon-wavefront-attribution`), so ZERO-SWAP forbids a second guarded
-      Metal process. Run when the GPU is free. The change is byte-identical
-      (kernel strings + constant values unchanged), proven hostlessly by the
-      golden/pin tests, so the smoke is confirmation, not a correctness gate.
+- [x] 4.2 GPU smoke: wavefront render per backend, serialised under ZERO-SWAP,
+      confirming every kernel still dispatches. **PASS on both backends** (Metal
+      M5 Pro + Vulkan/MoltenVK), post-merge on `main`, on `diffuse_arealight`
+      64×64 spp16: path/bdpt/sppm/mlt(RGB) all render with finite energy, and the
+      per-integrator means are bit-identical across backends (path 0.1763, bdpt
+      0.1750, sppm 0.1755, mlt 0.1858). `wfNeuralProposal` exercised via
+      `--proposals bsdf,neural` (Metal, 0.1758); `wfIndirectPaint` via the Vulkan
+      indirect path (Metal takes the CPU slot-count-readback fallback). 35/35
+      kernel families dispatch under the repointed `WF_*` constants.
 - [x] 4.3 Docs: added the kernel-name & shared-constant owner section to
       `docs/Wavefront.md`.
 - [x] 4.4 `openspec validate choice-table-wavefront-owners --strict`.
