@@ -252,14 +252,14 @@ def test_id_to_name_is_a_bijection():
 
 
 def _wavefront_entries_in_source() -> set[str]:
-    """The dispatched ``wf*`` entry names, read from ``vk_wavefront.py`` — the
-    spec's source of truth ("every wavefront stage kernel named in
-    vk_wavefront.py"). The seven undispatched shader-only wf* entries never
-    appear as string literals there, so this yields exactly the dispatched set."""
-    import re
+    """The dispatched ``wf*`` entry names, read from their single owner
+    ``wavefront_driver.KERNEL_ENTRY_NAMES`` (change choice-table-wavefront-owners).
+    The names used to be string literals grepped from ``vk_wavefront.py``; they are
+    now ``WF_*`` constants owned by the driver and imported by both backends, so the
+    beacon table's coverage is checked against the owner, not a source scrape."""
+    from skinny import wavefront_driver
 
-    text = (_REPO_ROOT / "src" / "skinny" / "vk_wavefront.py").read_text()
-    return set(re.findall(r'"(wf[A-Za-z]+)"', text))
+    return set(wavefront_driver.KERNEL_ENTRY_NAMES)
 
 
 def test_table_covers_every_dispatchable_kernel():
