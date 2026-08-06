@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import math
 
-# Execution-mode index for wavefront, mirrored so this module imports no
-# GPU-touching code (renderer.py imports `vulkan` at module load).
-EXECUTION_WAVEFRONT = 1
+from skinny import choice_tables
+
+# Execution-mode index for wavefront, projected from the choice_tables owner
+# (dependency-free, so this module still imports no GPU-touching code).
+EXECUTION_WAVEFRONT = choice_tables.index_by_token(choice_tables.EXECUTION_MODE)["wavefront"]
 
 
 def detail_flags(master_on: bool, nrm_ok: bool, rgh_ok: bool, dsp_ok: bool,

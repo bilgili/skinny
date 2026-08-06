@@ -30,8 +30,11 @@ recorded skips and the matrix tests' substring assertions keep their wording. Th
 CLI's longer, flag-naming prose stays in ``cli_common`` keyed by code: prose is
 presentation, not a rule.
 
-Imports nothing above the two capability-flag leaf modules, so parity, the CLI
-layer, and the renderer can all import it without a cycle. Both flags are read at
+Imports nothing above the two capability-flag leaf modules and the
+dependency-free ``choice_tables`` (which owns the integrator/execution-mode
+*vocabulary* this module projects into :data:`INTEGRATORS` / :data:`EXECUTION_MODES`,
+never validity), so parity, the CLI layer, and the renderer can all import it
+without a cycle. Both flags are read at
 **evaluation** time (never captured at import), so a test monkeypatch takes
 effect.
 """
@@ -40,13 +43,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from skinny import mlt_capability, spectral_capability
+from skinny import choice_tables, mlt_capability, spectral_capability
 
 #: Integrators the renderer knows. An integrator outside this set is refused as
 #: unknown — the parity coverage meta-test fails the build when the app exposes
 #: an integrator with no entry here.
-INTEGRATORS = ("path", "bdpt", "sppm", "mlt")
-EXECUTION_MODES = ("megakernel", "wavefront")
+INTEGRATORS = choice_tables.tokens(choice_tables.INTEGRATOR)
+EXECUTION_MODES = choice_tables.tokens(choice_tables.EXECUTION_MODE)
 
 #: Integrators with no megakernel path: SPPM shares a global visible-point /
 #: photon grid across pixels, MLT shares bootstrap/normalization state — both are

@@ -38,13 +38,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from skinny import choice_tables
+
 # Execution-mode indices, mirrored from `renderer` so this module imports no
 # GPU-touching code (renderer.py imports `vulkan` at module load).
-EXECUTION_MEGAKERNEL = 0
-EXECUTION_WAVEFRONT = 1
+_EXEC_INDEX = choice_tables.index_by_token(choice_tables.EXECUTION_MODE)
+EXECUTION_MEGAKERNEL = _EXEC_INDEX["megakernel"]
+EXECUTION_WAVEFRONT = _EXEC_INDEX["wavefront"]
 
-# Integrator index → the staged pass name `_ensure_wavefront_pass` takes.
-INTEGRATOR_NAMES = {0: "path", 1: "bdpt", 2: "sppm", 3: "mlt"}
+# Integrator index → the staged pass name `_ensure_wavefront_pass` takes;
+# a projection of the integrator axis owner.
+INTEGRATOR_NAMES = choice_tables.index_to_token(choice_tables.INTEGRATOR)
 
 # Target pixels per Metal megakernel command buffer, per integrator, before the
 # frame is split into more row bands (change metal-megakernel-watchdog-tiling).

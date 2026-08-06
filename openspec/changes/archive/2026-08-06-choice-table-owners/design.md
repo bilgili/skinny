@@ -49,15 +49,17 @@ the missing MLT integrator label, the `["Filmic"]` tonemap placeholder against
 the real four-entry list, and the six divergent placeholder lists. Some of
 these may have been deliberate stubs; check each before "fixing" it.
 
-### D4 — Kernel names get a table; constants get a table or a pin
+### D4 — Kernel names get a table; constants get a table or a pin (DEFERRED)
 
-Entry-point names are pure strings shared by three modules — a table, and a
-rename becomes an import error. The 14 pass constants are subtler: some
-genuinely differ (the record-stack sizing formula differs by design between
-backends, and the Metal rebuild keys carry extra elements). So: shared where
-they must be equal, and a test pinning the pair where they are separately
-maintained for a stated reason. Do not force equality on constants that are
-legitimately per-backend.
+**Deferred to the follow-up change `choice-table-wavefront-owners`.** Entry-point
+names are pure strings shared by three modules — a table, and a rename becomes an
+import error. The 14 pass constants are subtler: some genuinely differ (the
+record-stack sizing formula differs by design between backends, and the Metal
+rebuild keys carry extra elements). So: shared where they must be equal, and a
+test pinning the pair where they are separately maintained for a stated reason.
+Do not force equality on constants that are legitimately per-backend. This half
+is large mechanical churn across the two GPU pass modules and is gated by a
+dual-backend wavefront GPU smoke, so per D5 it lands on its own schedule.
 
 ### D5 — One axis at a time
 

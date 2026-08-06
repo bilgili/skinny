@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 
+from skinny import choice_tables
 from skinny.backend_select import select_backend
 from skinny.bringup import BringupPlan, plan_bringup
 from skinny.cli_common import add_render_flags, neural_config_from_args, resolve_walk
@@ -26,8 +27,8 @@ if TYPE_CHECKING:
 
 Source = Union[str, Path, "Usd.Stage", object]
 
-_INTEGRATORS = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
-_TONEMAPS = {"aces": 0, "reinhard": 1, "hable": 2, "linear": 3}
+_INTEGRATORS = choice_tables.index_by_token(choice_tables.INTEGRATOR)
+_TONEMAPS = choice_tables.index_by_token(choice_tables.TONEMAP)
 _LDR_FORMATS = {"png", "jpeg", "bmp"}
 _HDR_FORMATS = {"exr", "hdr"}
 
@@ -410,7 +411,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # default), so it opts out of the shared render-area flags to avoid an
     # argparse conflict.
     add_render_flags(p, resolution=False, mcp=False)
-    p.add_argument("--tonemap", choices=["aces", "reinhard", "hable", "linear"],
+    p.add_argument("--tonemap", choices=list(choice_tables.tokens(choice_tables.TONEMAP)),
                    default="aces")
     p.add_argument("--exposure", type=float, default=0.0)
     p.add_argument("--env-intensity", type=float, default=None, dest="env_intensity")

@@ -18,6 +18,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from skinny import choice_tables
 from skinny.params import STATIC_PARAMS, _set_nested
 from skinny.playback import PlaybackClock, apply_clock_verb
 from skinny.scene_graph import copy_scene_graph
@@ -210,23 +211,32 @@ class _AttrBag:
 
 
 def _default_choice_names() -> dict[str, list[str]]:
+    # Enumerated axes are projections of the choice_tables owner, so the GUI-thread
+    # placeholders cannot drift from the renderer's real display lists (they used
+    # to: missing MLT, `["Filmic"]`, `["Off"]` reuse, etc.). The remaining entries
+    # are genuine pre-renderer stubs: scene/asset-driven lists with no fixed
+    # vocabulary (presets/environments/models/tattoos), the per-lobe sampler modes
+    # (owned by the sampling registry), and the not-yet-owned static axes
+    # (scatter/direct-light/restir-regime/furnace). All are overwritten by the
+    # first `apply_snapshot`.
+    ct = choice_tables
     return {
         "presets": ["Default"],
         "environments": ["studio.hdr"],
         "direct_light_modes": ["On", "Off"],
         "scatter_modes": ["BSSRDF", "Volume"],
-        "integrator_modes": ["Path", "BDPT", "SPPM"],
-        "proposal_preset_modes": ["bsdf"],
-        "reuse_modes": ["Off"],
+        "integrator_modes": ct.labels(ct.INTEGRATOR),
+        "proposal_preset_modes": ct.labels(ct.PROPOSAL_PRESET),
+        "reuse_modes": ct.labels(ct.REUSE),
         "coat_sampler_modes": ["Default"],
         "spec_sampler_modes": ["Default"],
         "diff_sampler_modes": ["Default"],
         "restir_regime_modes": ["Initial"],
-        "restir_combination_modes": ["Unbiased", "Biased"],
-        "tonemap_modes": ["Filmic"],
+        "restir_combination_modes": ct.labels(ct.RESTIR_COMBINATION),
+        "tonemap_modes": ct.labels(ct.TONEMAP),
         "furnace_modes": ["Off", "On"],
         "models": ["(none)"],
-        "detail_maps_modes": ["Off"],
+        "detail_maps_modes": ct.labels(ct.DETAIL_MAPS),
         "tattoos": ["(none)"],
     }
 
@@ -301,26 +311,29 @@ class QtRendererProxy:
         self._values["uses_default_lights"] = True
 
     def _default_values(self, width: int, height: int) -> dict[str, Any]:
+        # Only the three inputs with no registry entry are seeded by hand: the two
+        # constructor sizes and `camera_mode` (a string, not a numeric param).
+        # Every registry param — including the light colour/angle placeholders that
+        # used to be hardcoded here — comes from the registry below.
         values: dict[str, Any] = {
             "width": int(width),
             "height": int(height),
             "camera_mode": "orbit",
-            "light_color_r": 1.0,
-            "light_color_g": 1.0,
-            "light_color_b": 1.0,
-            "light_elevation": 0.0,
-            "light_azimuth": 0.0,
         }
+        # Pre-snapshot placeholders projected from the params registry: each
+        # param's `proxy_default`, or `lo` when it declares none. These are the
+        # exact values the proxy showed before this change; they are NOT the
+        # renderer's real init values (the render-thread snapshot overwrites them
+        # within a frame). The registry is the single owner of these placeholders,
+        # so the proxy is no longer a second defaults authority.
         for param in STATIC_PARAMS:
             if param.path in values:
                 continue
-            values[param.path] = float(param.lo) if param.kind == "continuous" else 0
-        values.update({
-            "env_intensity": 1.0,
-            "mm_per_unit": 5.0,
-            "normal_map_strength": 1.0,
-            "light_intensity": 1.0,
-        })
+            if param.kind == "continuous":
+                seed = param.proxy_default if param.proxy_default is not None else param.lo
+                values[param.path] = float(seed)
+            else:
+                values[param.path] = 0
         return values
 
     def apply_snapshot(self, snapshot: RendererStateSnapshot) -> None:

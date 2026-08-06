@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from skinny import render_envelope
+from skinny import choice_tables, render_envelope
 
 
 def _envelope_mode(execution_mode: str | None) -> str:
@@ -32,8 +32,8 @@ def _envelope_mode(execution_mode: str | None) -> str:
     """
     return "megakernel" if (execution_mode or "megakernel") == "megakernel" else "wavefront"
 
-# path → integrator_index, mirroring the renderer's integrator ordering.
-INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
+# path → integrator_index, a projection of the integrator axis owner.
+INTEGRATOR_INDEX = choice_tables.index_by_token(choice_tables.INTEGRATOR)
 
 # Execution mode `auto` derives from the integrator: `path`/`bdpt` run under the
 # megakernel; `sppm` and `mlt` have no megakernel path and run under the
@@ -41,10 +41,9 @@ INTEGRATOR_INDEX = {"path": 0, "bdpt": 1, "sppm": 2, "mlt": 3}
 # An explicit `--execution-mode` (flag or env) overrides this (see
 # :func:`resolve_execution_mode`).
 DEFAULT_EXECUTION_FOR_INTEGRATOR = {
-    "path": "megakernel",
-    "bdpt": "megakernel",
-    "sppm": "wavefront",
-    "mlt": "wavefront",
+    integ: ("wavefront" if integ in render_envelope.WAVEFRONT_ONLY_INTEGRATORS
+            else "megakernel")
+    for integ in choice_tables.tokens(choice_tables.INTEGRATOR)
 }
 
 # Advertised walk choices. `megakernel` is accepted as a deprecated alias but is
@@ -533,7 +532,8 @@ def add_render_flags(
         )
     if integrator:
         parser.add_argument(
-            "--integrator", choices=("path", "bdpt", "sppm", "mlt"), default=None,
+            "--integrator", choices=choice_tables.tokens(choice_tables.INTEGRATOR),
+            default=None,
             help="Light-transport integrator (default: 'path', or the persisted "
                  "value on the interactive front-ends). 'path' is the "
                  "unidirectional path tracer; 'bdpt' is the bidirectional path "
@@ -554,11 +554,13 @@ def add_render_flags(
                  "reconstruct sharp reflections. Default (unset) uses the tuned built-in "
                  "(~0.5); 0 = PM-1 delta-only. SPPM + wavefront only.")
     if proposals:
+        _proposal_tokens = choice_tables.tokens(choice_tables.PROPOSAL_PRESET)
         parser.add_argument(
             "--proposals",
-            choices=("bsdf", "bsdf,env", "env", "bsdf,neural", "neural"),
+            choices=_proposal_tokens,
             default=os.environ.get("SKINNY_PROPOSALS"),
-            metavar="{bsdf,bsdf+env,env,bsdf+neural,neural}",
+            # `+` reads better than `,` inside the braces; still the owner's tokens.
+            metavar="{" + ",".join(t.replace(",", "+") for t in _proposal_tokens) + "}",
             help="Directional-proposal mixture at the BSDF bounce (+ "
                  "SKINNY_PROPOSALS env). 'bsdf' (default) is the material's own "
                  "importance sampler — bit-identical to the classic renderer; "
@@ -584,11 +586,21 @@ def add_render_flags(
                  "front-ends.",
         )
     if reuse:
+        # The flag accepts only the owner's CLI-exposed reuse tokens; `restir-di`
+        # is marked cli_exposed=False in choice_tables.REUSE, so the "which values
+        # are CLI-settable" decision lives in the owner, not as a slice here. NOTE
+        # a pre-existing asymmetry survives: argparse validates only explicit args,
+        # not defaults, so `SKINNY_REUSE=restir-di` bypasses these `choices` and
+        # reaches `renderer.reuse_index` (ReSTIR DI on wavefront, identity
+        # elsewhere) while `--reuse restir-di` exits 2. Closing it — validate the
+        # env value, or mark restir-di cli_exposed — is a product decision left to
+        # a separate change.
+        _reuse_cli = choice_tables.cli_tokens(choice_tables.REUSE)
         parser.add_argument(
-            "--reuse", choices=("none",), default=os.environ.get("SKINNY_REUSE"),
+            "--reuse", choices=_reuse_cli, default=os.environ.get("SKINNY_REUSE"),
             help="Reuse/resampling mode around direct + indirect lighting (+ "
-                 "SKINNY_REUSE env). Only 'none' (stock NEE) ships today; "
-                 "ReSTIR-style reservoir reuse is a future mode.",
+                 "SKINNY_REUSE env). The flag accepts only 'none' (stock NEE); "
+                 "ReSTIR DI reuse is not a flag value in this release.",
         )
     if spectral:
         parser.add_argument(
@@ -698,7 +710,8 @@ def add_render_flags(
         )
     if execution:
         parser.add_argument(
-            "--execution-mode", choices=("auto", "megakernel", "wavefront"),
+            "--execution-mode",
+            choices=("auto", *choice_tables.tokens(choice_tables.EXECUTION_MODE)),
             default=os.environ.get("SKINNY_EXECUTION_MODE", "auto"),
             help="GPU execution backend, fixed for the session (+ "
                  "SKINNY_EXECUTION_MODE env). 'auto' (default) derives the mode "

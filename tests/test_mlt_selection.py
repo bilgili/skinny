@@ -8,7 +8,6 @@ envelope. Nothing here constructs a Renderer or touches a GPU.
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 
 import pytest
@@ -37,11 +36,11 @@ def _ns(**kw) -> argparse.Namespace:
 # ── Registration ─────────────────────────────────────────────────────────────
 
 def test_renderer_registers_mlt_mode():
-    src = _read("renderer.py")
-    m = re.search(r"integrator_modes:\s*list\[str\]\s*=\s*\[([^\]]*)\]", src)
-    assert m, "integrator_modes list not found in renderer.py"
-    modes = [s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()]
-    assert modes[:4] == ["Path", "BDPT", "SPPM", "MLT"], modes
+    # The renderer's integrator_modes is a projection of the choice_tables owner
+    # (change choice-table-owners); assert the owner registers MLT at index 3.
+    from skinny import choice_tables
+    assert choice_tables.labels(choice_tables.INTEGRATOR)[:4] == [
+        "Path", "BDPT", "SPPM", "MLT"]
 
 
 def test_integrator_index_registers_mlt():
@@ -51,9 +50,9 @@ def test_integrator_index_registers_mlt():
 
 
 def test_headless_integrator_map_includes_mlt():
-    src = _read("headless.py")
-    m = re.search(r"_INTEGRATORS\s*=\s*\{([^}]*)\}", src)
-    assert m and '"mlt": 3' in m.group(1), "headless _INTEGRATORS must map mlt to 3"
+    # headless._INTEGRATORS is derived from the owner (change choice-table-owners).
+    from skinny import headless
+    assert headless._INTEGRATORS["mlt"] == 3
 
 
 def test_cli_choices_include_mlt():

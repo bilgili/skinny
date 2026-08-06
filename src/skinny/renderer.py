@@ -47,7 +47,8 @@ from skinny.params import (
     effective_execution_mode,
 )
 from skinny import (
-    frame_derive, frame_plan, mlt_chain, render_envelope, scene_intake, slang_layout,
+    choice_tables, frame_derive, frame_plan, mlt_chain, render_envelope,
+    scene_intake, slang_layout,
 )
 # Scene intake is a module-level dependency, not a lazy one (change
 # scene-intake-interface). Every USD read the renderer performs goes through it
@@ -689,7 +690,7 @@ class Renderer:
         # fall through to the path tracer in main_pass.slang. Index 2 = SPPM
         # (Stochastic Progressive Photon Mapping), wavefront-only and flat-material
         # only; under the megakernel it falls through to the path tracer.
-        self.integrator_modes: list[str] = ["Path", "BDPT", "SPPM", "MLT"]
+        self.integrator_modes: list[str] = choice_tables.labels(choice_tables.INTEGRATOR)
         self.integrator_index = 0
 
         # Pluggable scene-sampling seam (sampling/proposal.slang). The active
@@ -701,20 +702,15 @@ class Renderer:
         # indices to plugin instances, folded into FrameConstants by
         # _pack_uniforms. Default index 0 ({bsdf}/none) is bit-identical to the
         # pre-seam renderer. Reuse has only the identity mode until ReSTIR lands.
-        self._PROPOSAL_PRESETS: list[tuple[str, str]] = [
-            ("BSDF",          "bsdf"),
-            ("BSDF + Env",    "bsdf,env"),
-            ("Env",           "env"),
-            # Learned neural spline-flow proposal (bit2). Wavefront-only — the
-            # megakernel capability-gate (in _pack_uniforms) strips the bit and
-            # falls back to its analytic subset, like ReSTIR DI → identity.
-            ("BSDF + Neural", "bsdf,neural"),
-            # Neural-only guiding (no BSDF MIS partner). Wavefront-only; on the
-            # megakernel the stripped mask is empty, so it folds back to {bsdf}
-            # (see the empty-mask guard in _pack_uniforms).
-            ("Neural",        "neural"),
-        ]
-        self.proposal_preset_modes: list[str] = [n for n, _ in self._PROPOSAL_PRESETS]
+        # Labels + proposal-token strings owned by choice_tables.PROPOSAL_PRESET.
+        # bit2 presets ("BSDF + Neural", "Neural") are wavefront-only — the
+        # megakernel capability-gate (in _pack_uniforms) strips the bit and falls
+        # back to its analytic subset, like ReSTIR DI → identity; a "Neural"-only
+        # mask folds back to {bsdf} (the empty-mask guard in _pack_uniforms).
+        self._PROPOSAL_PRESETS: list[tuple[str, str]] = choice_tables.label_token_pairs(
+            choice_tables.PROPOSAL_PRESET)
+        self.proposal_preset_modes: list[str] = choice_tables.labels(
+            choice_tables.PROPOSAL_PRESET)
         self.proposal_preset_index = 0
         # Neural proposal (bit2) host state. `neural_network_version` is stamped
         # into FrameConstants (baseline 0 — the per-sample version hook for online
@@ -773,8 +769,8 @@ class Renderer:
         self._neural_weights_path = None
         # Reuse modes: identity (stock NEE) + ReSTIR DI (wavefront-only;
         # falls back to identity on megakernel/Metal via the capability gate).
-        self._REUSE_TOKENS: list[str] = ["none", "restir-di"]
-        self.reuse_modes: list[str] = ["None", "ReSTIR DI"]
+        self._REUSE_TOKENS: list[str] = list(choice_tables.tokens(choice_tables.REUSE))
+        self.reuse_modes: list[str] = choice_tables.labels(choice_tables.REUSE)
         self.reuse_index = 0
         # Per-lobe sampler selection for the flat/std_surface BSDF — runtime +
         # GUI + persisted, folded into FrameConstants.flatLobeSamplers by
@@ -812,7 +808,8 @@ class Renderer:
         # Biased ΣM combination: faster (skips the GRIS per-domain re-eval) but
         # biased; bounded on spatial-only, over-brightens with temporal on glossy.
         # Stored as an index (0/1) so the data-driven _disc selector drives it.
-        self.restir_combination_modes: list[str] = ["Unbiased (GRIS)", "Biased (ΣM)"]
+        self.restir_combination_modes: list[str] = choice_tables.labels(
+            choice_tables.RESTIR_COMBINATION)
         self.restir_biased = 0
         # ReSTIR tuning (push-constant only — refreshed per frame, no pass
         # rebuild). Gated visible in the UI when ReSTIR DI is active; reset
@@ -837,8 +834,8 @@ class Renderer:
         # `hasattr(self.ctx, "compute_queue") or self.is_metal`, which was
         # unconditionally True on both sides — `MetalContext.compute_queue` is
         # `None`, not absent (change gpu-backend-adapter, design D3).
-        self.execution_modes: list[str] = ["Megakernel", "Wavefront"]
-        _mode_aliases = {"megakernel": EXECUTION_MEGAKERNEL, "wavefront": EXECUTION_WAVEFRONT}
+        self.execution_modes: list[str] = choice_tables.labels(choice_tables.EXECUTION_MODE)
+        _mode_aliases = choice_tables.index_by_token(choice_tables.EXECUTION_MODE)
         _requested = _mode_aliases.get(
             self._requested_execution_mode.strip().lower(), EXECUTION_MEGAKERNEL
         )
@@ -898,7 +895,7 @@ class Renderer:
         # end of main_pass.slang after progressive accumulation. These are
         # post-process knobs so they do not invalidate the accumulation
         # buffer — the sole resets_accumulation=False opt-outs in params.py.
-        self.tonemap_modes: list[str] = ["ACES", "Reinhard", "Hable", "Linear"]
+        self.tonemap_modes: list[str] = choice_tables.labels(choice_tables.TONEMAP)
         self.tonemap_index = 0
         self.exposure = 0.0
 
@@ -1011,7 +1008,7 @@ class Renderer:
         # availability flags feed the UBO so the shader only reads a map
         # when it's actually meaningful — and the enable toggle below lets
         # the user fall back to the slider values at will.
-        self.detail_maps_modes: list[str] = ["On", "Off"]
+        self.detail_maps_modes: list[str] = choice_tables.labels(choice_tables.DETAIL_MAPS)
         self.detail_maps_index = 0          # 0 = maps on, 1 = use sliders
         self.normal_map_strength = 1.0      # multiplies tangent-space XY offset
         # Default displacement ≈ 1 mm peak so a model shipping with a disp map
@@ -7988,28 +7985,17 @@ class Renderer:
         module actually references, so binding an unused name is harmless and a
         dead-stripped one is simply skipped.
 
-        Every declared resource — buffers, storage images, and the discrete
-        `Texture2D`/`Texture3D` + `SamplerState` pairs Metal needs because a
-        combined `Sampler2D`/`Sampler3D` is unsupported there — comes from the
-        same declaration list the Vulkan descriptor writes come from. Only the
-        two globals that are not declared resources are added here.
+        same declaration list the Vulkan descriptor writes come from. The two
+        globals that are not declared resources — the shared bindless-pool
+        sampler (binding 38, design D8) and the combined MaterialX graph-param
+        buffer (`graphParamsCombined`, change combine-graph-param-buffers,
+        whose lifetime follows the scene graph) — are passed in rather than
+        added afterwards, so `metal_binds` stays the single builder and the
+        hostless binding-coverage gate sees the same map this frame binds.
         """
-        b = self._gpu_set.metal_binds()
-        # Shared bindless-pool sampler (binding 38, design D8) — owned by the
-        # renderer, not the resource set: it is one sampler standing in for the
-        # 128 a combined `Sampler2D[]` would emit.
-        b["commonSampler"] = self._metal_common_sampler
-        # Per-graph MaterialX param SSBOs (globals `graphParams_<sanitized>`,
-        # binding GRAPH_BINDING_BASE). One combined buffer shared by every graph
-        # (the Slang global is `graphParamsCombined`, change
-        # combine-graph-param-buffers). Contents are scalar-packed in
-        # `_upload_graph_param_buffers` — `Load<T>` reads the same scalar layout
-        # on Metal and SPIR-V, so no MSL relocation. Its lifetime follows the
-        # scene graph rather than the resource set.
-        combined = getattr(self, "_graph_params_combined", None)
-        if combined is not None:
-            b["graphParamsCombined"] = combined.buffer
-        return b
+        return self._gpu_set.metal_binds(
+            common_sampler=self._metal_common_sampler,
+            graph_params=getattr(self, "_graph_params_combined", None))
 
     def _render_megakernel_metal(self, plan) -> None:
         """Bind every megakernel resource and dispatch one frame on the Metal

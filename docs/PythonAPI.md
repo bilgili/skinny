@@ -499,6 +499,7 @@ class ParamSpec:                                      # :41
     choice_source: str | None = None  # discrete: renderer attribute holding the choice list
     resets_accumulation: bool = True
     hash_coercion: Callable[[object], object] | None = None
+    proxy_default: float | None = None  # GUI-proxy pre-snapshot placeholder (None → lo); not the renderer's init value
 ```
 
 `Renderer._current_state_hash()` derives its parameter-backed contributors from

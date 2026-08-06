@@ -9,6 +9,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **GUI-thread placeholder choice lists no longer show stale or wrong names**
+  (change `choice-table-owners`). Each enumerated render axis now has one owner
+  for its values, labels and indices — `choice_tables.py` — and the CLI's
+  `choices`, the headless lookup dicts, the renderer's display lists and the
+  GUI-thread proxy's placeholders are all projections of it. Six proxy
+  placeholder lists had drifted from the renderer's real lists and are corrected:
+  - the integrator selector was missing **MLT** (showed `Path / BDPT / SPPM`);
+  - the tonemap selector showed a single **`Filmic`** entry instead of
+    `ACES / Reinhard / Hable / Linear`;
+  - the reuse selector showed **`Off`** instead of `None / ReSTIR DI`;
+  - the detail-maps selector showed **`Off`** instead of `On / Off`;
+  - the ReSTIR-combination selector showed **`Unbiased / Biased`** instead of
+    `Unbiased (GRIS) / Biased (ΣM)`;
+  - the proposal-preset selector showed a single **`bsdf`** entry instead of
+    `BSDF / BSDF + Env / Env / BSDF + Neural / Neural`.
+
+  These are the labels shown for the brief window before the first render-thread
+  snapshot arrives. The proxy also no longer hardcodes four placeholder default
+  values (`env_intensity`, `mm_per_unit`, `normal_map_strength`,
+  `light_intensity`); it reads them from the params registry, which now carries
+  those defaults.
+
 - **Browser parameter changes no longer race the render thread** (change
   `renderer-command-interface`). "Drive the renderer" had three answers
   depending on the entry point. `skinny-gui`, `skinny` and the MCP tools posted

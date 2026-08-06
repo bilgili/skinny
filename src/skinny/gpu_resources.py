@@ -817,12 +817,26 @@ class SceneResourceSet:
 
     # ── binding: Metal ──────────────────────────────────────────────────
 
-    def metal_binds(self) -> dict:
+    def metal_binds(self, *, common_sampler=None, graph_params=None) -> dict:
         """Map each Metal shader-global name to its native SlangPy resource,
         from the same declarations. The pipeline filters to the names the
         compiled module references, so binding an unused name is harmless and a
-        dead-stripped one is simply skipped."""
+        dead-stripped one is simply skipped.
+
+        The two keyword arguments are the globals the RENDERER owns rather than
+        this set — the shared bindless-pool sampler (binding 38, one sampler
+        standing in for the 128 a combined ``Sampler2D[]`` would emit) and the
+        combined MaterialX graph-param buffer, whose lifetime follows the scene
+        graph. They arrive here rather than being added by the caller so the
+        Metal bind map has ONE builder: the hostless binding-coverage gate
+        (change ``recording-adapter-live-bindings``) drives this method, and a
+        name a caller bolted on afterwards would be invisible to it.
+        """
         binds: dict = {}
+        if common_sampler is not None:
+            binds["commonSampler"] = common_sampler
+        if graph_params is not None:
+            binds["graphParamsCombined"] = graph_params.buffer
         for decl in DECLARATIONS:
             if decl.metal is None or not decl.active(self.spectral):
                 continue
