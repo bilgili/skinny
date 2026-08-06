@@ -133,3 +133,51 @@ unchanged.
   262144 cap), and the mean radiance of a lit diffuse region converges toward the
   `path` anchor as samples accumulate rather than plateauing dark
 
+### Requirement: The timeout path reports the hung kernel identity
+
+The parent SHALL read the beacon cell and report the hung kernel's identity by
+name when its wall-clock timeout expires and it SIGTERMs the child. The report
+SHALL name the kernel whose id the child stamped last, resolved
+through the kernel-identity table. The SIGTERM path SHALL keep its current
+contract: the chained handler runs `MetalContext.destroy()`, the parent waits the
+grace period, and it escalates to SIGKILL only after it confirms the child holds
+no in-flight dispatch. The beacon report SHALL be additive; it SHALL NOT change
+the SIGTERM-first, never-SIGKILL-first order.
+
+#### Scenario: a wedged dispatch is reported by kernel name, not a guess
+- **WHEN** a child dispatch hangs and the parent times out
+- **THEN** the parent SIGTERMs the child (running `destroy()`), then reports the
+  hung kernel by its entry-point name instead of "a Metal dispatch did not
+  return"
+
+#### Scenario: the beacon report does not weaken the kill order
+- **WHEN** the parent adds the beacon report to the timeout path
+- **THEN** the parent still sends SIGTERM first, still waits the grace period, and
+  still escalates to SIGKILL only after it confirms no in-flight dispatch
+
+### Requirement: Traced wavefront dispatch submits one kernel per command buffer
+
+Under the `SKINNY_METAL_TRACE` gate, the wavefront `MetalFrameEncoder` SHALL
+submit and drain each dispatch as its own bounded command buffer, so a wedge
+isolates the one kernel that hung. Each traced dispatch SHALL stamp the beacon
+cell, submit that one kernel, and drain (`wait_for_idle`) before the next kernel
+is encoded. This aligns with the watchdog-bounded rule: each dispatch finishes or
+hangs alone, so the operator reads the exact in-flight kernel from the beacon.
+
+With the gate off (the production default), the wavefront encoder SHALL keep its
+batched single-submit behavior unchanged. The per-kernel submit SHALL apply only
+under trace, so production performance and the committed command-buffer shape are
+unchanged. The SIGTERM-first, never-SIGKILL-first timeout order SHALL be
+unchanged.
+
+#### Scenario: a traced wavefront wedge isolates one kernel
+- **WHEN** a wavefront frame runs under `SKINNY_METAL_TRACE` and one stage kernel
+  hangs
+- **THEN** only that kernel's command buffer is in flight, the beacon cell names
+  that kernel, and the parent SIGTERMs and reports it by name
+
+#### Scenario: production wavefront dispatch is unchanged
+- **WHEN** a wavefront frame runs with `SKINNY_METAL_TRACE` off
+- **THEN** the encoder batches the frame's stages into one command buffer and
+  submits once, exactly as before this change
+

@@ -22,6 +22,9 @@ import bindings;
 import scene_trace;
 import cameras.pinhole;
 import integrators.bdpt;
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 #if defined(SKINNY_SPECTRAL)
 // Spectral MLT (change spectral-mlt): the target function becomes the megakernel
 // spectral BDPT estimator (change spectral-bdpt-megakernel). Its estimateRadiance
@@ -197,6 +200,9 @@ MltSample mltEvaluate(inout RNG rng, uint recordBase)
 [numthreads(64, 1, 1)]
 void wfMltBootstrap(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfMltBootstrap);
+#endif
     uint slot = tid.x;
     if (slot >= wfTile.streamSize) return;
     uint index = wfTile.streamBase + slot;
@@ -218,6 +224,9 @@ void wfMltBootstrap(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfMltInit(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfMltInit);
+#endif
     uint chain = wfTile.streamBase + tid.x;
     if (tid.x >= wfTile.streamSize || chain >= fc.mltNumChains) return;
 
@@ -247,6 +256,9 @@ void wfMltInit(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfMltMutate(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfMltMutate);
+#endif
     uint chain = wfTile.streamBase + tid.x;
     if (tid.x >= wfTile.streamSize || chain >= fc.mltNumChains) return;
 
@@ -328,6 +340,9 @@ void wfMltMutate(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfMltResolve(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfMltResolve);
+#endif
     uint lane = tid.x;
     if (lane >= fc.width * fc.height) return;
     uint base = lane * 3u;

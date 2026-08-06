@@ -1,3 +1,6 @@
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 // Wavefront bidirectional path tracer (P1 §8 / design §P1-G). The megakernel
 // BDPTIntegrator.estimateRadiance, decomposed into compute dispatches that store
 // the camera + light subpath vertices in VRAM between stages. Three subpath-build
@@ -861,6 +864,9 @@ void wfSplatLightWalkS<TC : ICamera>(BDPTVertex lightPath[BDPT_MAX_VERTS],
 [numthreads(64, 1, 1)]
 void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptWalk);
+#endif
     uint slot = tid.x;                          // stream slot
     if (slot >= wfTile.streamSize) return;
     uint base = slot * BDPT_MAX_VERTS;
@@ -1218,6 +1224,9 @@ void wfBdptWalk(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptLightTail(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptLightTail);
+#endif
     uint slot = tid.x;
     if (slot >= wfTile.streamSize)
         return;
@@ -1314,6 +1323,9 @@ void wfBdptLightTail(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptGenEye(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptGenEye);
+#endif
     uint slot = tid.x;
     if (slot >= wfTile.streamSize)
         return;
@@ -1603,6 +1615,9 @@ void wfBdptGenEye(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptWalkClassify(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptWalkClassify);
+#endif
     uint i = tid.x;
     if (i >= wfTile.streamSize)
         return;
@@ -1625,6 +1640,9 @@ void wfBdptWalkClassify(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptBounceEye(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptBounceEye);
+#endif
     uint slotLane = wfBdptQueueLane(0u, tid.x);
     if (slotLane == 0xFFFFFFFFu)
         return;
@@ -2002,6 +2020,9 @@ void wfBdptBounceEye(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptGenLight(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptGenLight);
+#endif
     uint slot = tid.x;
     if (slot >= wfTile.streamSize)
         return;
@@ -2063,6 +2084,9 @@ void wfBdptGenLight(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptBounceLight(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptBounceLight);
+#endif
     uint slotLane = wfBdptQueueLane(0u, tid.x);
     if (slotLane == 0xFFFFFFFFu)
         return;
@@ -2361,6 +2385,9 @@ void wfBdptBounceLight(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptSplat(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptSplat);
+#endif
     uint slot = tid.x;
     if (slot >= wfTile.streamSize)
         return;
@@ -2393,6 +2420,9 @@ void wfBdptSplat(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptClassify(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptClassify);
+#endif
     uint i = tid.x;
     if (i >= wfTile.streamSize)
         return;
@@ -2421,6 +2451,9 @@ void wfBdptClassify(uint3 tid: SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void wfBdptBuildArgs(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptBuildArgs);
+#endif
     uint running = 0u;
     for (uint slot = 0u; slot < WF_BDPT_NUM_SLOTS; ++slot)
     {
@@ -2439,6 +2472,9 @@ void wfBdptBuildArgs(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptScatter(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptScatter);
+#endif
     uint i = tid.x;
     if (i >= wfTile.streamSize)
         return;
@@ -2547,6 +2583,9 @@ void wfBdptConnectLane(uint i, bool includeGeneric)
 [numthreads(64, 1, 1)]
 void wfBdptConnectNee(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptConnectNee);
+#endif
     uint i = wfBdptQueueLane(wfTile.shadeSlot, tid.x);
     if (i == 0xFFFFFFFFu)
         return;
@@ -2560,6 +2599,9 @@ void wfBdptConnectNee(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptConnectFull(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptConnectFull);
+#endif
     uint i = wfBdptQueueLane(wfTile.shadeSlot, tid.x);
     if (i == 0xFFFFFFFFu)
         return;
@@ -2570,6 +2612,9 @@ void wfBdptConnectFull(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfBdptResolve(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBdptResolve);
+#endif
     uint slot = tid.x;
     if (slot >= wfTile.streamSize)              // dispatch rounds up to 64 — skip tail
         return;

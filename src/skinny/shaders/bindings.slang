@@ -240,6 +240,16 @@ float2 materialBlackbody(uint matId)
 [[vk::binding(30)]] RWStructuredBuffer<float4>     toolBuffer;
 #endif
 
+// Kernel-beacon UMA buffer (change metal-kernel-beacon). Metal-only, bound by
+// name `gKernelBeacon`; the [[vk::binding]] is inert (SKINNY_METAL_TRACE
+// implies SKINNY_METAL, so the Vulkan target never compiles it). The
+// DECLARATION itself is gated, not just its uses: an unused Metal global still
+// consumes an argument-table slot, so with the gate off the 128-slot budget is
+// unchanged. 256-byte cell mirroring host metal_beacon.py (see beacon.slang).
+#if defined(SKINNY_METAL_TRACE)
+[[vk::binding(60)]] RWByteAddressBuffer gKernelBeacon;
+#endif
+
 static const uint TOOL_MODE_OFF        = 0u;
 static const uint TOOL_MODE_PICK       = 1u;  // pick path uses fc.pickArmed, not toolMode
 static const uint TOOL_MODE_BXDF       = 2u;

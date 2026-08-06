@@ -1,3 +1,6 @@
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 // Per-material-queue paint kernel — the minimal carrier for verifying the
 // wavefront indirect-dispatch path (P1 §P1-C / tasks 3.2 / 3.3 / 9.3).
 //
@@ -30,6 +33,9 @@ struct PaintPC
 [numthreads(64, 1, 1)]
 void wfIndirectPaint(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfIndirectPaint);
+#endif
     // Early-out makes the conservative direct dispatch (worst-case groups)
     // identical to the exactly-sized indirect dispatch.
     if (tid.x >= pc.sliceCount)

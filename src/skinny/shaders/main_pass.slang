@@ -36,6 +36,9 @@ import materials.skin.skin_bssrdf;
 // / applyTonemap / linearToSRGB) — shared with the wavefront resolve display
 // tail so both backends composite identically.
 import tonemap;
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 
 // ── Per-pixel frame body, monomorphized on the camera model ─────
 
@@ -479,6 +482,9 @@ void mainImageRecord(uint3 dispatchThreadID: SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void mainImage(uint3 dispatchThreadID: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_mainImage);
+#endif
     uint2 pixel = dispatchThreadID.xy;
 #if defined(SKINNY_METAL)
     // Metal megakernel watchdog tiling: this command buffer covers one row band

@@ -41,6 +41,9 @@ import wavefront.wf_records;
 // Flat-material bounce eval — imports only the flat material + NEE, so the flat
 // shade kernel stays small (no skin/python). The catch-all uses evaluateBounce.
 import wavefront.flat_bounce;
+#if defined(SKINNY_METAL_TRACE)
+import beacon;
+#endif
 #if defined(SKINNY_SPECTRAL)
 // Hero-wavelength draw (generate) + env-miss upsample + film resolve. Imports
 // are not transitive, so name it here even though bindings pulls it under the
@@ -70,6 +73,9 @@ void wfTerminate(uint i, inout WavefrontPathState s, Spectrum radiance, RNG rng)
 [numthreads(64, 1, 1)]
 void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfPathGenerate);
+#endif
     uint i = tid.x;                            // slot in the fixed-size stream
     if (i >= wfTile.streamSize)                 // dispatch rounds up to 64 — skip tail
         return;
@@ -125,6 +131,9 @@ void wfPathGenerate(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfPathIntersect);
+#endif
     uint i = tid.x;                            // stream slot
     if (i >= wfTile.streamSize)
         return;
@@ -208,6 +217,9 @@ void wfPathIntersect(uint3 tid: SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void wfBuildArgs(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfBuildArgs);
+#endif
     uint running = 0u;
     for (uint slot = 0u; slot < WF_NUM_SLOTS; ++slot)
     {
@@ -227,6 +239,9 @@ void wfBuildArgs(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfScatter(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfScatter);
+#endif
     uint i = tid.x;
     if (i >= wfTile.streamSize)
         return;
@@ -246,6 +261,9 @@ void wfScatter(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfPathShadeFlat);
+#endif
     // Queue-indexed: indirect-dispatched over slot WF_SLOT_FLAT's lanes only.
     uint i = wfQueueLane(wfTile.shadeSlot, tid.x);
     if (i == 0xFFFFFFFFu)
@@ -276,6 +294,9 @@ void wfPathShadeFlat(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathShade(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfPathShade);
+#endif
     // Queue-indexed: indirect-dispatched over slot WF_SLOT_OTHER's lanes only.
     uint i = wfQueueLane(wfTile.shadeSlot, tid.x);
     if (i == 0xFFFFFFFFu)
@@ -296,6 +317,9 @@ void wfPathShade(uint3 tid: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void wfPathResolve(uint3 tid: SV_DispatchThreadID)
 {
+#if defined(SKINNY_METAL_TRACE)
+    beaconStore(KID_wfPathResolve);
+#endif
     uint i = tid.x;                            // stream slot
     if (i >= wfTile.streamSize)
         return;
