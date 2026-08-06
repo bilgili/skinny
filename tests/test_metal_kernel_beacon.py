@@ -12,6 +12,7 @@ under the guarded Metal runner (one process at a time, SIGTERM never SIGKILL).
 
 from __future__ import annotations
 
+import inspect
 import os
 import platform
 import shutil
@@ -440,3 +441,250 @@ def test_sigterm_then_report_names_the_stamped_kernel(tmp_path):
     text = (f"kernel_id={report.kernel_id} ({report.kernel_name})"
             if report is not None else "no valid beacon")
     assert text == "kernel_id=8 (wfPathShade)"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# change beacon-wavefront-attribution — verifier (task group 5)
+# ══════════════════════════════════════════════════════════════════════
+
+# ── 10. Trace-gated per-kernel submit in MetalFrameEncoder (hostless) ─
+# design.md frozen contract "MetalFrameEncoder.dispatch / .dispatch_indirect —
+# trace-gated submit granularity":
+#   - trace False → returns after cpass.end() WITHOUT submitting (batched).
+#   - trace True  → runs the flush() body (submit + drain + reopen), and SHALL
+#     NOT set _submitted, so a same-frame later dispatch still encodes and the
+#     frame-end submit() stays valid.
+# Scenarios "trace on submits one wavefront kernel at a time" / "trace off keeps
+# the batched single submit" (metal-kernel-beacon + metal-dispatch-hygiene).
+# Driven with a device-free fake ctx/encoder so the FROZEN behavioral contract is
+# asserted without a GPU — the crux GPU proof is test 12 below.
+
+from types import SimpleNamespace  # noqa: E402
+
+
+class _FakeCpass:
+    def bind_pipeline(self, *a):
+        pass
+
+    def dispatch_compute(self, *a):
+        pass
+
+    def dispatch_compute_indirect(self, *a):
+        pass
+
+    def end(self):
+        pass
+
+
+class _FakeEncoder:
+    def begin_compute_pass(self):
+        return _FakeCpass()
+
+
+def _make_fake_frame_encoder(trace: bool):
+    """A ``MetalFrameEncoder`` with every device call stubbed, so only the
+    trace-gated submit-granularity branch is exercised."""
+    from skinny.metal_compute import MetalFrameEncoder
+
+    enc = MetalFrameEncoder.__new__(MetalFrameEncoder)
+    enc.ctx = SimpleNamespace(trace=trace, beacon_stamp=lambda entry: None)
+    enc._spy = SimpleNamespace(
+        math=SimpleNamespace(uint3=lambda *a: None),
+        BufferOffsetPair=lambda *a: None,
+    )
+    enc._enc = _FakeEncoder()
+    enc._submitted = False
+    enc._root = lambda *a, **k: object()  # bypass create_root_shader_object
+    calls: list[str] = []
+    # The trace branch MUST reuse flush() (submit + drain + reopen), NOT submit()
+    # (design "Reuse the flush() mechanism, not submit()"); record which fires.
+    enc.flush = lambda: calls.append("flush")
+    enc.submit = lambda: calls.append("submit")
+    return enc, calls
+
+
+def _drive_dispatch(enc, method: str) -> None:
+    pipe = SimpleNamespace(entry_point="wfPathShade", entry="wfPathShade",
+                           pipeline=object())
+    if method == "dispatch":
+        enc.dispatch(pipe, [1, 1, 1], bindings=None)
+    else:
+        enc.dispatch_indirect(pipe, object(), 0, bindings=None)
+
+
+@pytest.mark.parametrize("method", ["dispatch", "dispatch_indirect"])
+def test_trace_on_submits_one_kernel_per_command_buffer(method):
+    # Scenario "trace on submits one wavefront kernel at a time": each encoded
+    # kernel is submitted + drained via flush() before the next is encoded.
+    enc, calls = _make_fake_frame_encoder(trace=True)
+    _drive_dispatch(enc, method)
+    assert calls == ["flush"], "trace-on dispatch must per-kernel submit via flush()"
+    # Reuse flush(), not submit(): _submitted stays clear so the frame-end
+    # submit() is not skipped and a later same-frame dispatch still encodes.
+    assert enc._submitted is False
+
+
+@pytest.mark.parametrize("method", ["dispatch", "dispatch_indirect"])
+def test_trace_off_keeps_batched_single_submit(method):
+    # Scenario "trace off keeps the batched single submit": the dispatch encodes
+    # only — no submit, no drain — so the frame accumulates into one command
+    # buffer that submit() drains once at frame end.
+    enc, calls = _make_fake_frame_encoder(trace=False)
+    _drive_dispatch(enc, method)
+    assert calls == [], "trace-off dispatch must not submit or drain per kernel"
+    assert enc._submitted is False
+
+
+# ── 11. destroy() releases the beacon buffer, idempotently (hostless) ─
+# design.md "MetalContext.destroy — beacon-buffer release contract" +
+# scenario "destroy clears the beacon buffer": release _beacon_buffer beside
+# _beacon_writer, set the handle None, safe when None, safe on a second call.
+
+
+class _FakeBeaconBuffer:
+    def __init__(self):
+        self.destroyed = 0
+
+    def destroy(self):
+        self.destroyed += 1
+
+
+def _make_stub_context(*, beacon_buffer):
+    """A ``MetalContext`` shell with only the fields ``destroy()`` touches —
+    no GPU device (``device=None`` skips the drain/close branch)."""
+    from skinny.metal_context import MetalContext
+
+    ctx = MetalContext.__new__(MetalContext)
+    ctx._destroyed = False
+    ctx._beacon_writer = None
+    ctx._beacon_buffer = beacon_buffer
+    ctx.device = None
+    ctx.surface = None
+    ctx.swapchain_info = None
+    return ctx
+
+
+def test_destroy_releases_and_clears_the_beacon_buffer():
+    buf = _FakeBeaconBuffer()
+    ctx = _make_stub_context(beacon_buffer=buf)
+    ctx.destroy()
+    assert buf.destroyed == 1, "destroy() must release the beacon buffer"
+    assert ctx._beacon_buffer is None, "destroy() must clear the beacon handle"
+    # A second destroy() is a safe no-op — it does not re-release the buffer.
+    ctx.destroy()
+    assert buf.destroyed == 1
+    assert ctx._beacon_buffer is None
+
+
+def test_destroy_is_none_safe_when_no_beacon_buffer():
+    # Trace off, or trace on but no dispatch ran, so beacon_native was never
+    # touched: the handle is None and destroy() must not raise.
+    ctx = _make_stub_context(beacon_buffer=None)
+    ctx.destroy()  # must not raise
+    assert ctx._beacon_buffer is None
+    ctx.destroy()  # idempotent no-op
+    assert ctx._beacon_buffer is None
+
+
+# ── 12. Seqlock quiescence comment (hostless) ────────────────────────
+# design.md "BeaconWriter seqlock comment — documentation contract" + scenario
+# "the seqlock comment records the straddle limit": the comment states the guard
+# catches gross tearing (not a payload straddle) and rests on writer quiescence
+# at read time.
+
+
+def test_seqlock_comment_records_straddle_limit_and_quiescence():
+    src = inspect.getsource(BeaconWriter.stamp).lower()
+    # Gross-tearing-only, not a payload straddle.
+    assert "straddle" in src, "seqlock comment must name the payload straddle limit"
+    assert "gross" in src or "tearing" in src, (
+        "seqlock comment must state it catches gross tearing only"
+    )
+    # Correctness rests on writer quiescence at read time.
+    assert "quiescen" in src, "seqlock comment must state the quiescence assumption"
+    # The quiescence mechanism: the parent reads only after it SIGTERMs the child.
+    assert "sigterm" in src or "wait_for_idle" in src, (
+        "seqlock comment must tie quiescence to the post-SIGTERM read"
+    )
+
+
+# ── 13. Seqlock primitive rejects a straddled/uninitialized cell ─────
+# The documented reader invariant at the primitive level: accept only when
+# magic is valid AND seq == seq_check; a straddled or uninitialized cell → None.
+# (Re-uses the shipped primitive to assert the invariant the comment states.)
+
+
+def test_seqlock_reader_accepts_only_committed_cell(tmp_path):
+    path = str(tmp_path / "cell")
+    # A committed cell (seq == seq_check, valid magic) reads back the kernel.
+    _write_raw(path, BEACON_MAGIC, 5, kernel_id_for("wfPathShade"), 5)
+    report = BeaconReader(path).read()
+    assert report is not None and report.kernel_id == kernel_id_for("wfPathShade")
+    # A straddled cell (seq advanced past seq_check, mid-write) → None.
+    _write_raw(path, BEACON_MAGIC, 6, kernel_id_for("wfPathShade"), 5)
+    assert BeaconReader(path).read() is None
+    # An uninitialized cell (magic 0) → None.
+    _write_raw(path, 0, 0, 0, 0)
+    assert BeaconReader(path).read() is None
+
+
+# ── 14. Traced wavefront wedge names the in-flight stage (gpu-marked) ─
+# The crux (metal-kernel-beacon "a wedged wavefront kernel is named under trace";
+# metal-dispatch-hygiene "a traced wavefront wedge isolates one kernel"). Drives
+# the ACTUAL trace-gated MetalFrameEncoder per-kernel-submit path (NOT the sync
+# harness of test 9). A LATER-encoded stage (wfPathShade) hangs bounded; under
+# per-kernel submit the child blocks in its drain and never encodes the still-
+# later stage (wfPathResolve). The parent SIGTERMs and reads the in-flight stage.
+# This FAILS against the old batched behavior, which would stamp wfPathResolve
+# (the last-encoded kernel of the in-flight batch) over the hung wfPathShade.
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not _ON_APPLE_SILICON, reason="beacon report needs Apple-Silicon Metal")
+def test_traced_wavefront_wedge_names_the_inflight_stage(tmp_path):
+    cell = tmp_path / "beacon.cell"
+    sentinel = tmp_path / "stageA.flag"
+    env = os.environ.copy()  # inherits VULKAN_SDK / DYLD_LIBRARY_PATH
+    env["PYTHONPATH"] = str(_REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    # Turning trace on = pointing SKINNY_METAL_TRACE at the cell. This is what
+    # flips ctx.trace and makes MetalFrameEncoder per-kernel-submit.
+    env["SKINNY_METAL_TRACE"] = str(cell)
+    child = subprocess.Popen(
+        [sys.executable, str(_CHILD), "beacon_wavefront", str(sentinel)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=str(_REPO_ROOT),
+    )
+    try:
+        deadline = time.monotonic() + 120.0
+        while not sentinel.exists():
+            assert child.poll() is None, (
+                "wavefront-beacon child died before stage A drained: "
+                f"{child.stderr.read().decode(errors='replace') if child.stderr else ''}"
+            )
+            assert time.monotonic() < deadline, "child never wrote the stage-A sentinel"
+            time.sleep(0.1)
+        # Stage A drained; stage B (wfPathShade) is now the in-flight kernel and
+        # the child is blocked in its bounded drain. SIGTERM while B is in flight —
+        # SIGTERM first, never SIGKILL-first (the bounded loop self-terminates and
+        # the chained handler runs destroy()).
+        child.send_signal(signal.SIGTERM)
+        child.wait(timeout=90.0)
+    finally:
+        if child.poll() is None:  # safety net only — never the tested path
+            child.send_signal(signal.SIGTERM)
+            child.wait(timeout=60.0)
+
+    report = BeaconReader(str(cell)).read()
+    assert report is not None, (
+        "no valid beacon after SIGTERM: "
+        f"{child.stderr.read().decode(errors='replace') if child.stderr else ''}"
+    )
+    # The in-flight, hung stage — NOT the still-later stage encoded after it.
+    assert report.kernel_name == "wfPathShade", (
+        f"expected the in-flight stage wfPathShade, got {report.kernel_name!r} "
+        f"(id {report.kernel_id}); wfPathResolve here = the old batched "
+        f"last-encoded misattribution the fix removes"
+    )
+    assert report.kernel_id == kernel_id_for("wfPathShade")
+    assert report.kernel_name != "wfPathResolve", (
+        "reported a later-encoded stage — the batched misattribution bug"
+    )

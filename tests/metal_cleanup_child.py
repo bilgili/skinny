@@ -27,6 +27,21 @@ one guarded Metal device of its process. Modes (``sys.argv[1]``):
                  SIGTERMs mid-loop and reads the cell: the last stamp names the
                  kernel the child was on. Never hangs the GPU (bounded buffers);
                  the "wedge" is simulated by the SIGTERM interrupt.
+- ``beacon_wavefront`` — drives the ACTUAL trace-gated wavefront per-kernel-submit
+                 path (change beacon-wavefront-attribution): ``argv[2]`` = frame-1
+                 sentinel. The parent sets ``SKINNY_METAL_TRACE=<cell>`` in the
+                 env, so ``MetalContext`` turns ``ctx.trace`` on and creates the
+                 beacon writer to that cell, and ``MetalFrameEncoder.dispatch``
+                 submits + drains one command buffer per kernel. The child encodes
+                 a three-stage frame through ONE ``MetalFrameEncoder``: stage A
+                 (``wfPathGenerate``) drains, a barrier, then the LATER-encoded
+                 stage B (``wfPathShade``) that runs a bounded-but-long loop. Under
+                 the per-kernel-submit rule the child blocks in B's drain and never
+                 reaches the stage C (``wfPathResolve``) dispatch, so the cell names
+                 B — the in-flight kernel — not the later-encoded C. The parent
+                 SIGTERMs while B is in flight (sentinel is written right before B).
+                 The loop has a hard trip count so it self-terminates and never
+                 truly wedges the GPU (metal-dispatch-hygiene).
 """
 
 from __future__ import annotations
@@ -136,6 +151,95 @@ def _mode_beacon(beacon_path: str, sentinel: str, entry: str = "mainImage",
     return 0
 
 
+# Self-contained wavefront stub: three compute entry points whose names resolve
+# to real kernel ids in the frozen beacon table (wfPathGenerate=2, wfPathShade=8,
+# wfPathResolve=7). No includes, no gated code — the beacon stamp is driven purely
+# by the host from each pipeline's entry-point name. Stage B (wfPathShade) runs a
+# HARD-BOUNDED long loop (never infinite → never wedges the GPU); the LCG carry
+# keeps the compiler from hoisting it, and the result store keeps it live.
+# ponytail: the trip count is a physical GPU calibration knob — big enough that
+# the parent's SIGTERM lands while B is in flight (> ~1 s on any Apple GPU), small
+# enough that the OS watchdog reclaims it if the SIGTERM path somehow stalls.
+_WF_STUB_TRIP = 400_000_000
+_WF_STUB_SRC = f"""
+RWStructuredBuffer<uint> result;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfPathGenerate(uint3 tid : SV_DispatchThreadID)
+{{
+    result[tid.x] = tid.x;
+}}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfPathShade(uint3 tid : SV_DispatchThreadID)
+{{
+    uint acc = tid.x + 1u;
+    [loop]
+    for (uint i = 0u; i < {_WF_STUB_TRIP}u; ++i) {{
+        acc = acc * 1664525u + 1013904223u;
+    }}
+    result[tid.x] = acc;
+}}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void wfPathResolve(uint3 tid : SV_DispatchThreadID)
+{{
+    result[tid.x] = tid.x + 7u;
+}}
+"""
+
+
+def _mode_beacon_wavefront(sentinel: str) -> int:
+    """Drive the trace-gated ``MetalFrameEncoder`` per-kernel-submit path.
+
+    ``ctx.trace`` is on (parent set ``SKINNY_METAL_TRACE=<cell>``), so each
+    ``enc.dispatch`` submits + drains its own command buffer and stamps the mmap
+    cell from the pipeline's entry name. Encodes A → barrier → B(hang) → barrier →
+    C; under the fix the child blocks in B's drain and never encodes C.
+    """
+    from skinny.metal_compute import MetalFrameEncoder, StorageBuffer
+    from skinny.metal_wavefront import _EntryPipeline
+
+    ctx = _make_ctx()
+    # The whole point of this mode: the encoder must be per-kernel-submitting.
+    assert getattr(ctx, "trace", False), (
+        "SKINNY_METAL_TRACE must be set so MetalFrameEncoder per-kernel-submits"
+    )
+    spy = ctx._spy
+    opts = spy.SlangCompilerOptions()
+    opts.matrix_layout = spy.SlangMatrixLayout.column_major
+    session = ctx.device.create_slang_session(compiler_options=opts)
+    module = session.load_module_from_source(
+        "beacon_wf_stub", _WF_STUB_SRC, "beacon_wf_stub.slang"
+    )
+    pipes = {e: _EntryPipeline(ctx, session, module, e)
+             for e in ("wfPathGenerate", "wfPathShade", "wfPathResolve")}
+    buf = StorageBuffer(ctx, _N * 4)
+    groups = [(_N + 63) // 64, 1, 1]
+
+    enc = MetalFrameEncoder(ctx)
+    # Stage A — completes under trace (submit + drain).
+    enc.dispatch(pipes["wfPathGenerate"], groups, bindings={"result": buf})
+    enc.barrier()  # runs on the fresh empty encoder A already submitted
+    # Tell the parent stage A drained and B is the next (in-flight) kernel, so it
+    # SIGTERMs while B — the LATER-encoded stage — is the one in flight.
+    Path(sentinel).write_text("stageA-done", encoding="utf-8")
+    # Stage B — the LATER-encoded, bounded-long hang. Under the per-kernel-submit
+    # rule this submits + drains, so the child BLOCKS here and never encodes C.
+    enc.dispatch(pipes["wfPathShade"], groups, bindings={"result": buf})
+    enc.barrier()
+    # Stage C — reached ONLY if the fix is absent (batched encode would stamp this
+    # last-encoded kernel over B). Under the fix this line is never reached.
+    enc.dispatch(pipes["wfPathResolve"], groups, bindings={"result": buf})
+    enc.submit()  # frame-end submit on a possibly-empty encoder — safe by design
+    buf.destroy()
+    ctx.destroy()
+    return 0
+
+
 def _mode_atexit() -> int:
     # Module-level ref: the requirement's scenario is a context still ALIVE at
     # interpreter exit (the lifecycle registry holds only weakrefs by design, so
@@ -160,6 +264,8 @@ def main(argv: list[str]) -> int:
     if mode == "beacon":
         entry = argv[4] if len(argv) > 4 else "mainImage"
         return _mode_beacon(argv[2], argv[3], entry)
+    if mode == "beacon_wavefront":
+        return _mode_beacon_wavefront(argv[2])
     print(f"unknown mode {mode!r}", file=sys.stderr)
     return 2
 

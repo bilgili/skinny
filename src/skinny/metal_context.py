@@ -558,6 +558,13 @@ class MetalContext:
             except Exception:  # noqa: BLE001 — best-effort mmap close
                 pass
             self._beacon_writer = None
+        beacon_buffer = getattr(self, "_beacon_buffer", None)
+        if beacon_buffer is not None:
+            try:
+                beacon_buffer.destroy()
+            except Exception:  # noqa: BLE001 — best-effort; SlangPy owns lifetime
+                pass
+            self._beacon_buffer = None
         device = getattr(self, "device", None)
         if device is not None:
             try:

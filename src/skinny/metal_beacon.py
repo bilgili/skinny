@@ -8,6 +8,16 @@ beacon reports it anyway: the child process stamps the kernel id into a
 memory-mapped cell right before each dispatch, and a parent process reads the
 cell after a wall-clock timeout.
 
+Accuracy is per dispatch path (change beacon-wavefront-attribution). The
+megakernel and the synchronous single-shot wrappers run exactly one kernel per
+committed command buffer, so the cell names the true in-flight kernel. The
+wavefront path batches many kernels into one command buffer and submits once, so
+the cell names the LAST-ENCODED kernel of the in-flight batch, which need not be
+the kernel that hung. Under ``SKINNY_METAL_TRACE`` the wavefront encoder submits
+and drains after every dispatch (``MetalFrameEncoder.dispatch``), so at most one
+kernel is in flight per command buffer and the cell again names the true
+in-flight kernel.
+
 This module is device-free — it imports no GPU package. It owns:
 
 * the 256-byte little-endian cell layout (frozen in ``design.md``);
@@ -171,6 +181,11 @@ class BeaconWriter:
         # Seqlock order: magic + seq first, then the payload, then seq_check.
         # A reader accepts the snapshot only when seq == seq_check, so a read
         # that races the payload write is observably torn (rejected).
+        # The sequence-mirror guard catches gross tearing (seq != seq_check), not
+        # a partial payload straddle within one stamp. Correctness rests on writer
+        # quiescence at read time: the parent reads only after it SIGTERMs the
+        # wedged child, so the writer is blocked in wait_for_idle or terminated —
+        # no stamp is mid-flight, so no partial payload can straddle the read.
         struct.pack_into("<II", mm, _OFF_MAGIC, BEACON_MAGIC, self._seq)
         struct.pack_into("<III", mm, _OFF_KERNEL_ID, kernel_id, PHASE_ENTRY, 0)
         struct.pack_into("<I", mm, _OFF_SEQ_CHECK, self._seq)

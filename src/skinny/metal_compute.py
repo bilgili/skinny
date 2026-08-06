@@ -1374,14 +1374,22 @@ class MetalFrameEncoder:
         """Encode a direct dispatch of ``pipe`` over the ``(x, y, z)`` thread-group
         count ``groups`` into the shared encoder (no submit)."""
         ro = self._root(pipe, bindings, uniform_blob, uniforms, bindless)
-        # Batched loop: stamp per encoded dispatch so the mmap tracks the last
-        # kernel encoded before a submit/flush; the GPU beacon buffer records
-        # the true running kernel within the batch (change metal-kernel-beacon).
+        # Stamp per encoded dispatch, before the compute pass, on both paths.
+        # Trace off (production): batched loop — accumulate into one encoder and
+        # let submit() drain once at frame end; the mmap tracks the last kernel
+        # encoded before that submit, so it names the last-encoded kernel of the
+        # in-flight batch, not necessarily the one that hung. Trace on: submit +
+        # drain + reopen after every dispatch (via flush(), not submit(), so
+        # _submitted stays clear and later same-frame dispatches still encode),
+        # keeping exactly one kernel in flight per command buffer so the mmap
+        # names the true running kernel (change beacon-wavefront-attribution).
         self.ctx.beacon_stamp(_pipe_entry(pipe))
         cpass = self._enc.begin_compute_pass()
         cpass.bind_pipeline(pipe.pipeline, ro)
         cpass.dispatch_compute(self._spy.math.uint3(*(int(g) for g in groups)))
         cpass.end()
+        if self.ctx.trace:
+            self.flush()
 
     def dispatch_indirect(self, pipe: ComputePipeline, args_buffer, offset: int = 0,
                           *, bindings=None, uniform_blob=None, uniforms=None,
@@ -1400,6 +1408,11 @@ class MetalFrameEncoder:
         cpass.dispatch_compute_indirect(
             self._spy.BufferOffsetPair(native_args, int(offset)))
         cpass.end()
+        # Same trace-gated rule as dispatch(): trace off encodes only; trace on
+        # submits + drains + reopens via flush() so this one indirect dispatch is
+        # the only kernel in flight (change beacon-wavefront-attribution).
+        if self.ctx.trace:
+            self.flush()
 
     def clear(self, buffer) -> None:
         """Encode a full-buffer zero-fill (the Metal analogue of
