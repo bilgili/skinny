@@ -515,20 +515,38 @@ uint pcgHash(uint input)
 // rejected proposal restores exactly (pbrt Accept/Reject).
 //
 // pbrt's X resizes dynamically (EnsureReady LOG_FATALs on GPU); here the
-// budget is FIXED at MLT_MAX_DIMS. The flat-material envelope bounds the
-// worst-case index (~72 at maxDepth 5, design D2) well below it — the
-// overflow branch is memory-safety only (a fresh hash value every evaluation
-// is not restored on reject and would break detailed balance). Spectral MLT
-// (change spectral-mlt) consumes exactly ONE extra camera-stream dimension —
-// the SpectralBDPTIntegrator's `sampleWavelengths(rng.next())` at the top of
-// estimateRadiance — so the worst case rises to ~73, still far under 192.
+// budget is FIXED at MLT_MAX_DIMS. The PSS buffer index is
+// `streamIndex + MLT_NUM_STREAMS·sampleIndex`, so the peak index depends on
+// how many streams the transport actually uses (change spectral-mlt-dense-pack):
+//
+//   - RGB BDPT (bdpt.slang) calls startStream(1u)/(2u): draws split across 3
+//     streams (~24/stream), so the peak index stays ~72 at maxDepth 5 (design
+//     D2). MLT_NUM_STREAMS = 3.
+//   - Spectral BDPT (bdpt_spectral.slang) makes NO startStream(1/2) call:
+//     every draw lands on stream 0. With a stride of 3 the peak index would be
+//     3·sampleIndex — measured 234 on the diffuse_arealight corpus scene
+//     (sampleIndex 78) — which overflows 192, hits the overflow branch (broken
+//     detailed balance), and drives the reject() scan to ~192 device-memory
+//     trips (the Metal GPU wedge). Spectral therefore DENSE-PACKS one stream:
+//     MLT_NUM_STREAMS = 1, so index = sampleIndex and the peak drops to ~78,
+//     well under 192. This is a pure storage remap (dim k moves from slot 3k
+//     to slot k, no slot collides because streams 1/2 are unused), so the
+//     Markov chain, the target distribution and the rendered result are
+//     value-identical to the strided layout.
+//
+// The overflow branch below is memory-safety only (a fresh hash value every
+// evaluation is not restored on reject and would break detailed balance).
 //
 // This block only exists in the MLT wavefront compile; the #else branch is
 // byte-identical to the shipped RNG, so every RGB kernel .spv is unchanged.
 // numpy mirror: src/skinny/sampling/mlt_sampler.py (keep in lockstep;
 // tests/test_mlt_sampler.py pins the semantics hostlessly).
 
-static const uint MLT_NUM_STREAMS = 3u;
+#if defined(SKINNY_SPECTRAL)
+static const uint MLT_NUM_STREAMS = 1u;   // dense-pack: spectral uses one stream
+#else
+static const uint MLT_NUM_STREAMS = 3u;   // RGB splits camera/light/connection
+#endif
 static const uint MLT_MAX_DIMS = 192u;   // matches sampling/mlt_sampler.py
 
 // One primary-sample dimension — 16 B, matches the host stride
