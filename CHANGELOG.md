@@ -9,6 +9,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Spectral MLT no longer overflows its primary-sample budget and wedges the
+  Metal GPU** (change `spectral-mlt-dense-pack`). The primary-sample buffer index
+  is `streamIndex + MLT_NUM_STREAMS·sampleIndex`. RGB BDPT splits its draws across
+  three streams, but spectral BDPT draws from one stream only, so with the shared
+  stride of three its single stream reached slot 234 on diffuse area-light scenes
+  (measured on `diffuse_arealight`) — over the 192-slot budget. The overflow broke
+  detailed balance and drove the `reject()` scan to ~192 device-memory trips, which
+  hung (and once kernel-panicked) the native Metal dispatch. Spectral now
+  dense-packs one stream (`MLT_NUM_STREAMS = 1` under `SKINNY_SPECTRAL`), so the
+  peak index drops to ~78. The change is a pure storage remap, so the Markov chain
+  and the rendered result are value-identical; the RGB compile keeps three streams
+  and its SPIR-V is unchanged.
+
 - **Browser parameter changes no longer race the render thread** (change
   `renderer-command-interface`). "Drive the renderer" had three answers
   depending on the entry point. `skinny-gui`, `skinny` and the MCP tools posted

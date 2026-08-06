@@ -158,9 +158,17 @@ One GPU lane maps to one persistent Markov chain. The default is 16,384 chains.
 Each chain owns up to 192 primary dimensions. A dimension stores its current and
 backup values plus the iteration numbers needed for lazy mutation and rollback.
 
-The sampler divides dimensions into interleaved streams while preserving the
-ordinary `RNG` surface used by the renderer. `startIteration` chooses a large or
-small step:
+The sampler places dimension `k` at buffer slot `streamIndex +
+MLT_NUM_STREAMS·sampleIndex`. RGB BDPT uses three interleaved streams (camera,
+light, connection), so its draws divide across the streams and the peak slot
+stays near 72. Spectral BDPT draws from one stream only, so it **dense-packs**
+with `MLT_NUM_STREAMS = 1` (change `spectral-mlt-dense-pack`): slot `k` equals
+`sampleIndex`. A stride of three would put its single stream's draws at slot
+`3·sampleIndex`, which reaches 234 on a diffuse area-light scene, overflows the
+192-slot budget, and drives the `reject()` scan to about 192 device-memory trips
+— the fault that wedged the Metal GPU. Dense-packing keeps the peak near 78. The
+remap changes only the slot number, so the Markov chain and the rendered result
+are unchanged. `startIteration` chooses a large or small step:
 
 - A **large step** replaces touched dimensions with fresh independent values.
   Its probability defaults to `0.3`.

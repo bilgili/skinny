@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import numpy as np
 
+# PSS index = streamIndex + num_streams·sampleIndex. RGB BDPT uses 3 streams
+# (camera/light/connection) so its peak index is ~72 at maxDepth 5 (design D2).
+# Spectral BDPT uses one stream, so it DENSE-PACKS with num_streams=1 (change
+# spectral-mlt-dense-pack); with a stride of 3 its single stream would peak at
+# 3·sampleIndex ≈ 234 and overflow. This default mirrors the RGB compile; pass
+# ``num_streams=1`` to mirror the spectral compile.
 MLT_NUM_STREAMS = 3
-# Must match common.slang MLT_MAX_DIMS. Worst-case usage ~72 at maxDepth 5
-# (design D2); spectral MLT (change spectral-mlt) adds exactly one camera-stream
-# dimension (the hero-wavelength draw) → ~73, still far under this budget.
+# Must match common.slang MLT_MAX_DIMS. Dense-packed worst case ~78 (measured on
+# diffuse_arealight), well under this budget.
 MLT_MAX_DIMS = 192
 
 _F32 = np.float32
@@ -74,7 +79,11 @@ class MltSampler:
     """
 
     def __init__(self, seed_index: int, seed: int, sigma: float,
-                 large_step_probability: float):
+                 large_step_probability: float,
+                 num_streams: int = MLT_NUM_STREAMS):
+        # num_streams mirrors the shader compile: 3 (RGB) or 1 (spectral,
+        # dense-packed — change spectral-mlt-dense-pack).
+        self.num_streams = int(num_streams)
         self.rng = Rng(pcg_hash((seed_index + seed * 16777259) & 0xFFFFFFFF))
         self.sigma = _F32(sigma)
         self.large_step_probability = _F32(large_step_probability)
@@ -94,12 +103,12 @@ class MltSampler:
         self.large_step = bool(self.rng.next() < self.large_step_probability)
 
     def start_stream(self, index: int) -> None:
-        assert index < MLT_NUM_STREAMS
+        assert index < self.num_streams
         self.stream_index = index
         self.sample_index = 0
 
     def _next_index(self) -> int:
-        idx = self.stream_index + MLT_NUM_STREAMS * self.sample_index
+        idx = self.stream_index + self.num_streams * self.sample_index
         self.sample_index += 1
         return idx
 

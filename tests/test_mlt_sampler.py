@@ -147,6 +147,21 @@ def test_budget_overflow_asserts():
         s._ensure_ready(MLT_MAX_DIMS)
 
 
+def test_spectral_dense_pack_indices():
+    # Spectral compile: one stream, dense-packed (change spectral-mlt-dense-pack).
+    # index == sample_index (no ×3 inflation), so 78 draws (the measured
+    # diffuse_arealight peak) fit; the old strided layout would hit 3·78 = 234.
+    s = MltSampler(7, seed=1, sigma=0.01, large_step_probability=0.3,
+                   num_streams=1)
+    s.start_stream(0)
+    assert [s._next_index() for _ in range(4)] == [0, 1, 2, 3]
+    assert 78 < MLT_MAX_DIMS          # dense-pack fits
+    assert 3 * 78 >= MLT_MAX_DIMS     # strided layout overflowed (the bug)
+    # streams 1/2 are unused in spectral — asking for one is out of range.
+    with pytest.raises(AssertionError):
+        s.start_stream(1)
+
+
 # ── shader lockstep (source-level) ───────────────────────────────────────────
 
 def test_shader_constants_match_mirror():
@@ -158,8 +173,12 @@ def test_shader_constants_match_mirror():
     assert "#if defined(SKINNY_MLT)" in src
     m = re.search(r"MLT_MAX_DIMS\s*=\s*(\d+)u", src)
     assert m and int(m.group(1)) == MLT_MAX_DIMS
-    m = re.search(r"MLT_NUM_STREAMS\s*=\s*(\d+)u", src)
-    assert m and int(m.group(1)) == MLT_NUM_STREAMS
+    # Two declarations under #if defined(SKINNY_SPECTRAL): 1 (spectral,
+    # dense-packed) and 3 (RGB) — change spectral-mlt-dense-pack. The mirror's
+    # module default mirrors the RGB compile.
+    nums = [int(x) for x in re.findall(r"MLT_NUM_STREAMS\s*=\s*(\d+)u", src)]
+    assert set(nums) == {1, 3}, nums
+    assert MLT_NUM_STREAMS == 3
     # Reject-restore / lazy-reset / stream machinery markers exist.
     for token in ("void reject()", "void accept()", "void startIteration(",
                   "void startStream(", "lastLargeStepIteration", "mltErfInv",
