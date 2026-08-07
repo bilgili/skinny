@@ -91,20 +91,6 @@ _FAMILY_BASE: dict[Family, tuple[str, ...]] = {
     Family.DEBUG_RASTER: (),
 }
 
-#: Every ``SKINNY_*`` build gate this module can emit — the family bases, the
-#: Metal-only gates, and the two per-axis ones. This module owns which gates
-#: exist, so a consumer that must *evaluate* a shader conditional (the argument
-#: table census in ``argument_budget``) reads the vocabulary from here rather
-#: than inventing a second list. ``NF_*`` tokens are excluded on purpose: they
-#: are composed by ``sampling.neural_weights.NeuralBuildConfig``, which owns
-#: them, and reach a shader only through a key that carries a config.
-ALL_DEFINE_NAMES: frozenset[str] = frozenset(
-    {"SKINNY_SPECTRAL", "SKINNY_MLT"}
-    | METAL_ONLY_DEFINES
-    | {name for base in _FAMILY_BASE.values() for name in base}
-)
-
-
 @dataclass(frozen=True)
 class RecordedAsymmetry:
     """A define divergence between the two backends that exists **today** and
