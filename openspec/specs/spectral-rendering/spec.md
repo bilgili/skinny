@@ -369,3 +369,108 @@ path-state record layout appears only when the spectral define is set.
 - **THEN** each produced non-spectral `.spv` is byte-identical to its checked-in pre-change
   binary (verified by a hostless guard test)
 
+### Requirement: Spectral GPU tables occupy one buffer argument entry
+
+The spectral build SHALL declare exactly **one** buffer global for its read-only
+spectral tables. That buffer SHALL be a `ByteAddressBuffer` at binding 45 holding
+the upsampling scale nodes, the sigmoid coefficient grid, the CIE D65 spectral
+power distribution, the named conductor eta and k curves, and the authored
+illuminant spectral power distributions, one region after another.
+
+The host SHALL own the region layout and SHALL write the start offset of each
+region into `FrameConstants`. The shader SHALL read an offset; it SHALL NOT
+compute one from a table size.
+
+Bindings 46, 47, 48, and 50 SHALL be free in the spectral build.
+
+#### Scenario: The spectral build declares one table buffer
+
+- **WHEN** the argument table census is taken for a spectral variant
+- **THEN** exactly one buffer global carries the read-only spectral tables, and
+  the variant's buffer count is six lower than before this change
+
+#### Scenario: Region offsets come from the host
+
+- **WHEN** the renderer builds the combined spectral table buffer
+- **THEN** it writes each region's start offset into `FrameConstants`, and each
+  region begins on a 16-byte boundary
+
+#### Scenario: An unset region offset is refused
+
+- **WHEN** a spectral render starts and any region offset in `FrameConstants` is
+  unset
+- **THEN** the renderer raises an error naming the region, rather than reading at
+  offset zero
+
+### Requirement: Spectral emission rides in its parent record
+
+The per-emissive-triangle spectral emission value SHALL live in the emissive
+triangle record, and the per-material spectral emission value SHALL live in
+`FlatMaterialParams`. Neither SHALL have its own buffer global.
+
+Both fields SHALL exist only in the `SKINNY_SPECTRAL` build. The RGB records
+SHALL be byte-identical to the records before this change.
+
+Bindings 49 and 51 SHALL be free.
+
+#### Scenario: The emission fields grow with their parent
+
+- **WHEN** the loader raises the emissive triangle capacity or the material
+  capacity
+- **THEN** the spectral emission values grow with the parent record buffer, and
+  no separate spectral buffer is reallocated or rebound
+
+#### Scenario: The RGB record layout is unchanged
+
+- **WHEN** the byte layout of `FlatMaterialParams` and of the emissive triangle
+  record is derived for the RGB build
+- **THEN** every field offset and the total stride equal their values before this
+  change
+
+#### Scenario: The spectral record carries the field
+
+- **WHEN** the byte layout of `FlatMaterialParams` is derived for the
+  `SKINNY_SPECTRAL` build
+- **THEN** the spectral emission field is present at a derived offset, and the
+  name-to-offset golden records it
+
+### Requirement: Spectral reads keep one shader seam
+
+Every shader read of a spectral table SHALL pass through an accessor function
+declared in `bindings.slang`. No integrator, no material, and no sampler SHALL
+read a spectral buffer global directly.
+
+The accessor names SHALL be unchanged by this change.
+
+#### Scenario: No integrator reads a spectral buffer
+
+- **WHEN** the shader tree outside `bindings.slang` and `spectrum.slang` is
+  searched for the spectral table buffer identifier
+- **THEN** no match is found
+
+#### Scenario: Accessor names survive the fold
+
+- **WHEN** the accessor functions for reflectance upsampling, illuminant
+  upsampling, named conductor eta and k, illuminant spectral power distributions,
+  and emitter emission are listed before and after this change
+- **THEN** the names are the same
+
+### Requirement: The fold moves bytes and not pixels
+
+This change SHALL NOT alter any rendered spectral image. Every spectral parity
+matrix combination SHALL keep its recorded pbrt-truth baseline and its recorded
+spectral self-consistency value.
+
+#### Scenario: Spectral images are unchanged
+
+- **WHEN** every spectral parity matrix combination renders after the fold and is
+  compared against the same combination rendered before it, on the same backend
+  and the same budget
+- **THEN** the images match bit for bit
+
+#### Scenario: No baseline is widened
+
+- **WHEN** the change's diff is inspected
+- **THEN** no spectral pbrt-truth baseline and no spectral self-consistency
+  tolerance is raised
+

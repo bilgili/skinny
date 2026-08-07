@@ -367,9 +367,19 @@ independently of how many distinct MaterialX graph materials the scene carries:
 graph params SHALL occupy exactly one buffer slot for any graph count. The
 neural directional proposal with online training (record emission) active SHALL
 build on the Metal backend for scenes with multiple graph materials, where it
-previously overflowed the argument table. A build that still exceeds 31 buffers
-SHALL fail with a clear error naming the kernel and slot count rather than a raw
-`SLANG_FAIL`.
+previously overflowed the argument table.
+
+The renderer SHALL detect an over-budget variant **before it builds a device**.
+The hostless per-variant census owned by `metal-argument-table-budget` SHALL be
+the primary gate, and SHALL fail on any host, with no GPU present, naming the
+variant, the table, the count, and the limit.
+
+A build that still exceeds 31 buffers at pipeline creation SHALL fail with a
+clear error naming the kernel and slot count rather than a raw `SLANG_FAIL`. That
+runtime error SHALL remain as a backstop for a census that misread a build gate.
+
+The cap SHALL be read from the budget owner. No other module and no source
+comment SHALL restate it.
 
 #### Scenario: Neural online training builds on a multi-graph scene
 
@@ -384,6 +394,19 @@ SHALL fail with a clear error naming the kernel and slot count rather than a raw
 - **WHEN** a Metal wavefront build would exceed the 31-buffer argument-table cap
 - **THEN** the renderer raises an error naming the kernel and its buffer count,
   instead of surfacing an unlabelled Metal pipeline-creation failure
+
+#### Scenario: Over-budget is caught with no GPU present
+
+- **WHEN** a buffer global is added that pushes a Metal variant past 31 entries,
+  and the hostless test suite runs on a host with no Metal device
+- **THEN** the census test fails and names the variant and the count, before any
+  Metal pipeline is created
+
+#### Scenario: The cap has one home
+
+- **WHEN** the source tree is searched for the 31-buffer cap outside the budget
+  owner
+- **THEN** every occurrence is a reference to the owner, not a second declaration
 
 ### Requirement: Metal material preview render
 The material preview render SHALL run on the native Metal backend, not only Vulkan.
@@ -425,4 +448,23 @@ The Vulkan graphics rasteriser SHALL remain the Vulkan-backend path, unchanged.
   yet available
 - **THEN** the dock shows a "Vulkan-only on this backend" notice and does not emit
   per-frame render errors
+
+### Requirement: The spectral Metal variants regain six buffer entries
+
+The Metal spectral variants SHALL declare six fewer buffer globals than before
+the spectral table fold. The freed entries SHALL be recorded in the census
+baseline.
+
+The freed entries SHALL NOT be spent in this change. They are headroom for the
+argument-buffer changes that follow.
+
+#### Scenario: The baseline records the drop
+
+- **WHEN** the census baseline is compared before and after the fold
+- **THEN** every Metal spectral variant's buffer count falls by exactly six
+
+#### Scenario: The megakernel spectral variant fits with room
+
+- **WHEN** the census is taken for the Metal spectral megakernel variant
+- **THEN** its buffer count is below the limit by at least six entries
 

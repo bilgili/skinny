@@ -226,3 +226,86 @@ before the customData merge, SHALL be removed rather than preserved.
   resulting overrides are identical to those the current double-derivation
   produces
 
+### Requirement: The spectral table offsets are a derived part of FrameConstants
+
+`FrameConstants` SHALL carry the start offset of each region in the combined
+spectral table buffer. The offsets SHALL be derived from the authoritative
+`.slang` declaration by `slang_layout.py`, like every other mirrored field.
+
+The offsets SHALL exist only in the `SKINNY_SPECTRAL` build. The RGB
+`FrameConstants` layout SHALL be byte-identical to its layout before this change,
+and the RGB `.spv` for every kernel SHALL be byte-identical.
+
+The offsets SHALL obey the existing blob rule that keeps `tileOriginY` at the
+tail of the Metal layout.
+
+#### Scenario: RGB FrameConstants is unchanged
+
+- **WHEN** the `FrameConstants` layout is derived for the RGB build
+- **THEN** every field offset and the total size equal the pinned golden values
+  from before this change
+
+#### Scenario: Spectral FrameConstants carries the offsets
+
+- **WHEN** the `FrameConstants` layout is derived for the `SKINNY_SPECTRAL` build
+- **THEN** one offset field is present per merged spectral region, at a derived
+  offset, and the pinned spectral golden records each one
+
+#### Scenario: The Metal tail rule holds
+
+- **WHEN** the `FrameConstants` layout is derived for the Metal spectral build
+- **THEN** `tileOriginY` is still the last field
+
+### Requirement: Records may carry a field that exists only under a build gate
+
+The layout owner SHALL support a host-mirrored record that declares a field under
+a resolvable build gate. It SHALL derive that field's offset for the gated build,
+and SHALL derive the record without that field for the ungated build.
+
+Both layouts SHALL be pinned by their own golden. A record whose gated and
+ungated strides are equal SHALL fail, because it means the gate had no effect.
+
+Only `SKINNY_SPECTRAL`, `SKINNY_MLT`, and `SKINNY_METAL` are resolvable gates.
+Any other gate SHALL raise rather than guess an offset.
+
+#### Scenario: A gated field is derived for both builds
+
+- **WHEN** the layout of `FlatMaterialParams` is derived for the RGB build and
+  for the `SKINNY_SPECTRAL` build
+- **THEN** the RGB layout has 14 `float4` rows and a 256-byte stride, and the
+  spectral layout has one further row carrying the spectral emission field
+
+#### Scenario: An ineffective gate fails
+
+- **WHEN** a record declares a gated field and the derived gated and ungated
+  strides are equal
+- **THEN** the layout test fails
+
+#### Scenario: An unresolvable gate raises
+
+- **WHEN** a record declares a field under a gate that is not one of the three
+  resolvable gates
+- **THEN** the layout owner raises, rather than deriving an offset
+
+### Requirement: A gated record field is covered by the transposition gate
+
+The name-to-offset golden that owns the material field table SHALL record the
+gated fields of the gated build alongside the fields of the ungated build.
+
+Adding a field SHALL be visible in that golden as an added name-to-offset entry.
+Moving two same-typed fields past each other SHALL be visible as two changed
+entries.
+
+#### Scenario: The new field appears in the golden
+
+- **WHEN** the spectral emission field is added to `FlatMaterialParams` and the
+  name-to-offset golden is regenerated
+- **THEN** the golden gains one entry for the spectral build, and no existing
+  entry changes
+
+#### Scenario: A transposition is caught
+
+- **WHEN** the spectral emission field is placed at the offset of another
+  same-typed field
+- **THEN** two entries in the golden change and the transposition gate fails
+
