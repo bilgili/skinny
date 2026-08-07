@@ -168,19 +168,23 @@ float sigmoidPoly(float3 coeffs, float lam)
 float sigmoidLerp(float t, float a, float b) { return a + t * (b - a); }
 
 // Read float element `i` of a table region that starts at byte offset `base`
-// inside the combined `spectralTables` ByteAddressBuffer (change
-// spectral-table-fold). The five formerly-separate `StructuredBuffer<float>`
-// tables are now regions of one buffer; only these load expressions change.
-float _tblF(ByteAddressBuffer t, uint base, int i)
+// inside the combined `spectralTables` buffer (change spectral-table-fold). The
+// five formerly-separate `StructuredBuffer<float>` tables are regions of one
+// buffer. Typed as `StructuredBuffer<float>` (not `ByteAddressBuffer`): the raw
+// `.Load<float>` form faulted the native-Metal (slang-rhi) wavefront MLT+spectral
+// dispatch; every region is 16-byte aligned so the byte offset is an exact float
+// index (`base >> 2`). Backend-uniform; the host buffer + FrameConstants byte
+// offsets are unchanged (change fix-metal-typed-spectral-tables).
+float _tblF(StructuredBuffer<float> t, uint base, int i)
 {
-    return t.Load<float>(base + uint(i) * 4u);
+    return t[(base >> 2u) + uint(i)];
 }
 
 // pbrt RGBToSpectrumTable::operator() trilinear lookup. `scale` is the RES node
 // array; `data` is the flat [3][res][res][res][3] coefficient grid (row-major).
 // Bound as StructuredBuffers by the renderer (descriptor plumbing, Group 3.2).
 float3 rgbSigmoidCoeffs(float3 rgb, int res,
-                        ByteAddressBuffer tables, uint scaleOff, uint dataOff)
+                        StructuredBuffer<float> tables, uint scaleOff, uint dataOff)
 {
     rgb = clamp(rgb, float3(0.0), float3(1.0));
     if (rgb.x == rgb.y && rgb.y == rgb.z)
@@ -238,7 +242,7 @@ float3 rgbSigmoidCoeffs(float3 rgb, int res,
 
 // Evaluate an sRGB reflectance as a spectrum at the sampled wavelengths.
 float4 upsampleReflectance(float3 rgb, SampledWavelengths sw, int res,
-                           ByteAddressBuffer tables, uint scaleOff, uint dataOff)
+                           StructuredBuffer<float> tables, uint scaleOff, uint dataOff)
 {
     float3 co = rgbSigmoidCoeffs(rgb, res, tables, scaleOff, dataOff);
     float4 s;
@@ -250,7 +254,7 @@ float4 upsampleReflectance(float3 rgb, SampledWavelengths sw, int res,
 
 // Linear interp of a curve sampled on the 360–830/5 nm grid (mirrors np.interp
 // with endpoint clamp). `count` = grid length (95 for the vendored curves).
-float sampleCurve5nm(float lam, ByteAddressBuffer tables, uint curveOff, int count)
+float sampleCurve5nm(float lam, StructuredBuffer<float> tables, uint curveOff, int count)
 {
     float t = (lam - SPECTRUM_LAMBDA_MIN) / 5.0;
     int i = clamp(int(t), 0, count - 2);
@@ -266,7 +270,7 @@ float sampleCurve5nm(float lam, ByteAddressBuffer tables, uint curveOff, int cou
 // `spectral.d65_normalized()`), so a unit RGB illuminant resolves to unit
 // radiance and this mirrors `spectral.upsample_illuminant` bit-for-bit.
 float4 upsampleIlluminant(float3 rgb, SampledWavelengths sw, int res,
-                          ByteAddressBuffer tables, uint scaleOff, uint dataOff,
+                          StructuredBuffer<float> tables, uint scaleOff, uint dataOff,
                           uint d65Off, int d65Count)
 {
     float m  = max(rgb.x, max(rgb.y, rgb.z));

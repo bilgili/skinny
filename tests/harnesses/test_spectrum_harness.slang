@@ -4,11 +4,11 @@
 import spectrum;
 import common;  // Spectrum / SPECTRUM_N (spectrum.slang imports it non-exported)
 
-// One combined ByteAddressBuffer holding scale | data | D65 end to end, matching
+// One combined StructuredBuffer<float> holding scale | data | D65 end to end, matching
 // the renderer's `spectralTables` after change spectral-table-fold. The Python
 // GPU≡numpy test packs the three arrays contiguously and passes each region's
 // byte offset.
-ByteAddressBuffer gTables;
+StructuredBuffer<float> gTables;
 uniform uint gScaleOff;
 uniform uint gDataOff;
 uniform uint gD65Off;
@@ -72,26 +72,26 @@ float test_spectrumWidth()
     return float(SPECTRUM_N);
 }
 
-// The upsample wrappers take the combined `ByteAddressBuffer` + each region's
+// The upsample wrappers take the combined `StructuredBuffer<float>` + each region's
 // byte offset as explicit PARAMETERS (matching the refactored spectrum.slang
 // signatures, change spectral-table-fold): the Python GPU≡numpy test
 // (tests/kernels/test_spectrum_kernels.py) packs scale|data|d65 into one buffer
 // and feeds `tables`, `scaleOff`, `dataOff`, `d65Off` per call. The module-scope
 // globals below stay so `computeMain` (the slangc compile gate) still links.
 float3 test_rgbSigmoidCoeffs(float3 rgb, int res,
-                             ByteAddressBuffer tables, uint scaleOff, uint dataOff)
+                             StructuredBuffer<float> tables, uint scaleOff, uint dataOff)
 {
     return rgbSigmoidCoeffs(rgb, res, tables, scaleOff, dataOff);
 }
 
 float4 test_upsampleReflectance(float3 rgb, float u, int res,
-                                ByteAddressBuffer tables, uint scaleOff, uint dataOff)
+                                StructuredBuffer<float> tables, uint scaleOff, uint dataOff)
 {
     return upsampleReflectance(rgb, sampleWavelengths(u), res, tables, scaleOff, dataOff);
 }
 
 float4 test_upsampleIlluminant(float3 rgb, float u, int res,
-                               ByteAddressBuffer tables, uint scaleOff, uint dataOff,
+                               StructuredBuffer<float> tables, uint scaleOff, uint dataOff,
                                uint d65Off, int d65Count)
 {
     return upsampleIlluminant(rgb, sampleWavelengths(u), res, tables, scaleOff,

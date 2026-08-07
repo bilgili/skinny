@@ -109,11 +109,11 @@ import spectrum;
 static const int SPECTRAL_TABLE_RES = 64;   // rgb2spec_srgb.npz `res`
 static const int SPECTRAL_D65_COUNT = 95;   // spectral_curves.npz d65 grid length
 // The five read-only spectral tables (scale, sigmoid grid, D65, named-conductor
-// eta/k, per-light illuminant SPDs) share ONE ByteAddressBuffer at binding 45
+// eta/k, per-light illuminant SPDs) share ONE StructuredBuffer<float> at binding 45
 // (change spectral-table-fold). Each accessor reads its region at the byte
 // offset the host wrote into FrameConstants; the shader never computes one from
 // a table size. Bindings 46-48 and 50 are freed.
-[[vk::binding(45)]] ByteAddressBuffer spectralTables;
+[[vk::binding(45)]] StructuredBuffer<float> spectralTables;
 
 // Bound-buffer wrappers around spectrum.slang's parameter-driven upsamplers, so
 // call sites in the transport stay short. Reflectance: sigmoid only. Illuminant:

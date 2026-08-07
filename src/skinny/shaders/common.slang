@@ -431,7 +431,7 @@ struct FrameConstants
     // the oversized Vulkan UBO and at the reflected offset on Metal.
     // ── Spectral table region offsets (change spectral-table-fold;
     // SKINNY_SPECTRAL only). Byte offset of each merged region inside the
-    // combined `spectralTables` ByteAddressBuffer (binding 45). The host owns the
+    // combined `spectralTables` StructuredBuffer<float> (binding 45). The host owns the
     // layout and writes these; the shader reads an offset and NEVER computes one
     // from a table size. Declared BEFORE the SKINNY_METAL tail: the host blob
     // rule relocates only `tileOriginY` to the very end, so a field after it
