@@ -388,6 +388,34 @@ class SceneGraphDock(QDockWidget):
         # shared dispatcher (the same routing the old helpers used).
         def commit(prop: SceneGraphProperty, value: Any, _node=node) -> None:
             prop.value = value
+            # File loads (dome texture / camera lens) are the one edit whose
+            # renderer verb returns a *result* — and the Qt proxy returns it as a
+            # Future, not the bool `apply_scene_property`'s `is False` guard
+            # expects. Route these through `_await` so a failed load reports its
+            # reason off-thread (the dock owns the async file-load call, as the
+            # dispatcher's docstring states); every other edit goes through the
+            # shared dispatcher.
+            t = prop.type_name
+            if t == "texture_file":
+                ref = _node.renderer_ref
+                if ref is None or ref.kind != "light_env":
+                    self._status(f"{prop.name!r} is not a dome-light texture")
+                    return
+                self._await(
+                    self.renderer.apply_dome_light_texture(ref.index, value),
+                    lambda ok, v=value: None if ok is not False
+                    else self._status(f"could not load environment texture {v!r}"),
+                    "could not load environment texture",
+                )
+                return
+            if t == "lens_file":
+                self._await(
+                    self.renderer.apply_camera_lens_file(value),
+                    lambda ok, v=value: None if ok is not False
+                    else self._status(f"could not load lens file {v!r}"),
+                    "could not load lens file",
+                )
+                return
             reason = apply_scene_property(
                 self.renderer, _node, prop, value,
                 graph=self.renderer.scene_graph,
@@ -416,10 +444,7 @@ class SceneGraphDock(QDockWidget):
         # Stop the embedded property builder's pull timer before its host widget
         # is deleted, so a stale timer can't tick against a dead panel.
         if self._prop_builder is not None:
-            try:
-                self._prop_builder._timer.stop()
-            except (RuntimeError, AttributeError):
-                pass
+            self._prop_builder.stop()
             self._prop_builder = None
         while self._props_layout.count() > 1:  # keep trailing stretch
             item = self._props_layout.takeAt(0)

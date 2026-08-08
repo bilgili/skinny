@@ -76,3 +76,27 @@ Decision: **one node family = the existing `ui/spec.py` leaf node types**, and
 `scene_property_to_node(...)` and `graph_input_to_node(...)`. Not two node
 families, not a metadata-tagged union. This is the minimum that removes the
 duplicate switch without inventing a framework (design D2/D1).
+
+## Pre-merge review outcome (codex out of credits → Opus fallback gate)
+
+Verdict was **BLOCK** on one defect, since fixed; the rest were nits.
+
+- **BLOCKER (fixed):** the Qt commit routed dome-texture / camera-lens loads
+  through `apply_scene_property`, whose `if renderer.apply_*(...) is False`
+  guard assumes a synchronous bool. The Qt `QtRendererProxy` returns a
+  **`Future`**, so `Future is False` was always false — a failed load reported
+  nothing (Qt-only, feedback-loss, no crash). Fix: the Qt commit now handles
+  `texture_file` / `lens_file` via the dock's async `_await` + `_status`,
+  restoring the failure report and matching the dispatcher's own docstring
+  (the dock owns the async file-load call). Guarded by
+  `test_qt_scene_graph_dock.py::test_result_edits_do_not_block_the_gui_thread`.
+- **Fixed nits:** the Qt dome-texture last-used-directory key kept as `"ibl"`
+  (was silently changed to `"texture"`); `QtTreeBuilder.stop()` added so the
+  docks no longer reach into a private `._timer`; the coverage guard hardened
+  to actually render one node of each type in both backends
+  (`test_both_backends_actually_render_every_renderable_node_type`), not only
+  substring-match the dispatch source.
+- **Accepted minor loss (recorded, not fixed):** the migrated file pickers show
+  a "Load…" button but not the current filename the old Qt rows displayed.
+  Adding a current-value display to `spec.FilePicker` touches both backends and
+  the sidebar pickers — a follow-up, out of scope for this seam.

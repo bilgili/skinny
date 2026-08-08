@@ -119,7 +119,7 @@ def test_material_input_float_routes_edit_through_apply_value_edit() -> None:
         assert dock._edits and dock._edits[-1] == ("N", "amp", 0.5)
     finally:
         if dock._input_builder is not None:
-            dock._input_builder._timer.stop()
+            dock._input_builder.stop()
         app.processEvents()
 
 
@@ -141,5 +141,5 @@ def test_material_connected_input_is_readonly_no_edit() -> None:
         assert not host.findChildren(QDoubleSpinBox)
     finally:
         if dock._input_builder is not None:
-            dock._input_builder._timer.stop()
+            dock._input_builder.stop()
         app.processEvents()

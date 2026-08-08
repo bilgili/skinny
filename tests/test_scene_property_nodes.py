@@ -78,6 +78,55 @@ def test_both_backends_dispatch_every_renderable_node_type():
         assert token in panel_src, f"Panel backend does not dispatch {token}"
 
 
+def _one_of_each_renderable():
+    """A minimal instance of every node class the adapters can emit."""
+    return [
+        spec.Checkbox("b", getter=lambda: False, setter=lambda v: None),
+        spec.Slider("f", getter=lambda: 0.0, setter=lambda v: None, lo=0.0, hi=1.0),
+        spec.Color("c", getter=lambda: (0.0, 0.0, 0.0), setter=lambda v: None),
+        spec.Vector("v", 3, getter=lambda: (0.0, 0.0, 0.0), setter=lambda v: None),
+        spec.IntSpin("i", getter=lambda: 0, setter=lambda v: None, lo=0, hi=8),
+        spec.FilePicker("p", filters=[("a", "*.*")], on_pick=lambda p: None),
+        spec.Label("l", text=lambda: "x"),
+    ]
+
+
+def test_both_backends_actually_render_every_renderable_node_type():
+    """Stronger than the source-substring guard: instantiate one node of every
+    type an adapter can emit and confirm each backend produces a real widget /
+    viewable — a handler that returned None (or a token that only appears in a
+    comment) would pass the substring check but fail here.
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    from skinny.ui.panel.backend import PanelTreeBuilder
+    from skinny.ui.qt.backend import QtTreeBuilder
+
+    nodes = _one_of_each_renderable()
+    assert {type(n) for n in nodes} == set(RENDERABLE_NODE_TYPES)  # keep in sync
+
+    app = QApplication.instance() or QApplication([])
+    for node in nodes:
+        host = QWidget()
+        builder = QtTreeBuilder(spec.Section(title="", children=[node]), host)
+        try:
+            widgets = host.findChildren(QWidget)
+            assert widgets, f"Qt backend rendered no widget for {type(node).__name__}"
+            for w in widgets:
+                assert "unknown" not in (w.__class__.__name__.lower())
+        finally:
+            builder.stop()
+
+        leaf = PanelTreeBuilder(spec.Section(title="")).render_leaf(node)
+        assert leaf is not None, (
+            f"Panel backend rendered nothing for {type(node).__name__}"
+        )
+    app.processEvents()
+
+
 def test_every_editable_scene_prop_type_yields_an_editable_control():
     """No editable scene-property type may fall through to a read-only Label."""
     samples = {

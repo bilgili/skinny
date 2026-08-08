@@ -635,10 +635,7 @@ class MaterialGraphDock(QDockWidget):
     def _refresh_side(self) -> None:
         # Dispose the previous input builder's pull timer before its host dies.
         if self._input_builder is not None:
-            try:
-                self._input_builder._timer.stop()
-            except (RuntimeError, AttributeError):
-                pass
+            self._input_builder.stop()
             self._input_builder = None
         while self._side_form.count() > 1:
             item = self._side_form.takeAt(0)

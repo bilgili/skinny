@@ -29,14 +29,19 @@ def test_tick_refreshes_scene_state_on_the_worker() -> None:
 
 def test_result_edits_do_not_block_the_gui_thread() -> None:
     src = inspect.getsource(sg)
-    # Every structural return-value edit is awaited off-thread via `_await`.
-    # (lens/texture file loads moved onto the shared FilePicker node in
-    # change ui-spec-scene-properties, so they no longer live here.)
+    # Every return-value edit is awaited off-thread via `_await`. The file
+    # loads (dome texture / camera lens) route their edit through the shared
+    # FilePicker node's `commit`, but that commit still awaits the proxy Future
+    # via `_await` and reports failure — because the proxy returns a Future,
+    # not the bool `apply_scene_property`'s guard expects (change
+    # ui-spec-scene-properties, pre-merge review BLOCKER 1).
     for method in (
         "r.add_model(", "r.add_light(", "r.save_edits()", "self.renderer.remove_node(",
+        "self.renderer.apply_dome_light_texture(",
+        "self.renderer.apply_camera_lens_file(",
     ):
         assert method in src, method
-    assert src.count("self._await(") >= 4
+    assert src.count("self._await(") >= 6
     # Every `.result()` must run inside a worker-side future done-callback
     # (`_await` and `_on_scene_state_future`), never on the GUI thread.
     worker_cbs = (

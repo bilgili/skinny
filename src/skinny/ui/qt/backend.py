@@ -118,6 +118,16 @@ class QtTreeBuilder:
             for pull in dyn.pulls:
                 _safe_call(pull)
 
+    def stop(self) -> None:
+        """Stop the pull timer. Callers that embed a short-lived builder (the
+        scene docks, one per selection) call this before disposing the host so a
+        tick can't fire against a half-torn-down panel.
+        """
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
+
     # ── Section-state snapshot (open/closed) ──────────────────────
 
     def section_states(self) -> dict[str, bool]:

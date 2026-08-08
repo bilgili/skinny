@@ -128,7 +128,9 @@ def scene_property_to_node(
     if prop.editable and t == "texture_file":
         return spec.FilePicker(
             name, filters=_TEXTURE_FILTERS,
-            on_pick=lambda p: commit(prop, str(p)), category="texture",
+            # "ibl" keeps the last-used-directory key the Qt dome-texture picker
+            # used before this seam existed (no silent settings-key change).
+            on_pick=lambda p: commit(prop, str(p)), category="ibl",
         )
     return spec.Label(name, text=lambda: _format_readonly(prop, read()))
 
