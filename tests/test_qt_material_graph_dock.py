@@ -63,3 +63,83 @@ def test_preview_runs_on_the_worker() -> None:
 def test_poll_refreshes_scene_state_on_the_worker() -> None:
     poll = inspect.getsource(Dock._poll_scene_swap)
     assert "self.renderer.refresh_scene_state()" in poll
+
+
+# ── Behavioural: input rows route edits through _apply_value_edit ──────
+#
+# The per-type input-row switch moved to the shared `graph_input_to_node` mapper
+# (change ui-spec-scene-properties); these exercise the migrated `_refresh_side`
+# without a live MaterialX doc by driving a hand-built view. Bypass the heavy
+# dock `__init__` with `__new__` and supply only what `_refresh_side` reads.
+
+
+def _bare_dock(view, selected):
+    from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+    dock = Dock.__new__(Dock)
+    dock._input_builder = None
+    dock._view = view
+    dock._selected_node = selected
+    dock._side_title = QLabel()
+    host = QWidget()
+    dock._side_host = host
+    dock._side_form = QVBoxLayout(host)
+    dock._side_form.addStretch(1)  # `_add_side_widget` inserts before this
+    dock._edits = []
+    dock._apply_value_edit = lambda node, port, value: dock._edits.append(
+        (node.name, port.name, value)
+    )
+    return dock
+
+
+def _view_with(*ports):
+    from skinny.mtlx_graph_view import NodeGraphView, NodeView
+
+    node = NodeView(name="N", category="noise", inputs=list(ports))
+    return NodeGraphView(
+        material_id=0, material_name="M", target_name="T", nodes=[node],
+        flat=False, structural_signature="sig",
+    ), node
+
+
+def test_material_input_float_routes_edit_through_apply_value_edit() -> None:
+    from PySide6.QtWidgets import QApplication, QDoubleSpinBox
+
+    from skinny.mtlx_graph_view import PortView
+
+    app = QApplication.instance() or QApplication([])
+    view, _node = _view_with(PortView(name="amp", type_name="float", value=0.25))
+    dock = _bare_dock(view, "N")
+    try:
+        dock._refresh_side()
+        host = dock._input_builder.parent
+        spins = host.findChildren(QDoubleSpinBox)
+        assert spins  # an editable float control, not a read-only label
+        spins[0].setValue(0.5)
+        assert dock._edits and dock._edits[-1] == ("N", "amp", 0.5)
+    finally:
+        if dock._input_builder is not None:
+            dock._input_builder._timer.stop()
+        app.processEvents()
+
+
+def test_material_connected_input_is_readonly_no_edit() -> None:
+    from PySide6.QtWidgets import QApplication, QDoubleSpinBox
+
+    from skinny.mtlx_graph_view import PortView
+
+    app = QApplication.instance() or QApplication([])
+    view, _node = _view_with(
+        PortView(name="in", type_name="float", value=0.0,
+                 connected_from=("Up", "out")),
+    )
+    dock = _bare_dock(view, "N")
+    try:
+        dock._refresh_side()
+        host = dock._input_builder.parent
+        # A wired input shows a read-only label, no editable spinbox.
+        assert not host.findChildren(QDoubleSpinBox)
+    finally:
+        if dock._input_builder is not None:
+            dock._input_builder._timer.stop()
+        app.processEvents()

@@ -27,18 +27,20 @@ The largest single duplicate is the scene-property → widget mapping: Qt's
 (`qt/windows/scene_graph.py:397-760`, **363 lines**) against Panel's
 `_build_scene_prop_widget` (`ui/panel/windows.py:243-412`, **170 lines**) —
 the same prop-type switch (bool, float, color, vec3, vec2, int, lens file,
-texture file), written independently. Panel additionally **re-inlines the
-fan-out-first guard** from the shared `ui/scene_edit_actions.py` at two sites,
-flagged in its own comments (`windows.py:261`, `:349`). Material-graph input
-rows are the second largest: Qt `:658-830` (~173 lines) against Panel
-`:782-857` (76).
+texture file), written independently. Both switches already commit through the
+shared `ui/scene_edit_actions.py::apply_scene_property`; the duplication is the
+switch itself, not the edit routing. The independent Panel switch **omits**
+several prop types the Qt switch handles: `lens_file`, `texture_file`,
+read-only colour and vector displays, and the camera live-pull. Material-graph
+input rows are the second largest duplicate: Qt `:658-830` (~173 lines) against
+Panel `:782-857` (76), and the Panel copy omits `vector2` and `filename`.
 
 Divergence has already happened. The Camera Debug interaction surface exists in
-three forms — GLFW with a 12-key map, Qt with an 11-key map **missing
-`Key_D` → `show_dof_planes`** (D is consumed by WASD) and no Esc binding, and
-Panel with four buttons, no keyboard and no mouse. The Qt dock tests are
-`inspect.getsource(...)` substring assertions — they pin that a call *appears
-in the source*, not that it behaves.
+three forms — a GLFW viewport map, a Qt viewport map, and the Qt debug dock. The
+Qt debug dock has **no Escape binding** (the GLFW debug viewport closes on
+Escape), and the Panel debug surface has **four buttons, no keyboard and no
+mouse**. The Qt dock tests are `inspect.getsource(...)` substring assertions —
+they pin that a call *appears in the source*, not that it behaves.
 
 ## What Changes
 
@@ -47,8 +49,9 @@ in the source*, not that it behaves.
   shared edit semantics from `ui/scene_edit_actions.py` applied once.
 - Qt and Panel keep only widget construction for each node type; the mapping
   from a scene property to a node moves into the shared layer.
-- The re-inlined fan-out-first guards in the Panel windows are deleted in
-  favour of the shared ones.
+- The Panel prop-type gaps (`lens_file`, `texture_file`, read-only colour and
+  vector, camera live-pull) and the material-graph gaps (`vector2`, `filename`)
+  close by construction, because both front-ends then render the same nodes.
 - Extend the existing bind-exactly-once test to scene properties and graph
   inputs, so a property type that renders in one front-end and not the other
   fails the build.
@@ -61,8 +64,8 @@ in the source*, not that it behaves.
 
 - `usd-scene-editing-ui`: scene-property editing is declared once as spec nodes
   with shared edit semantics, and rendered by per-toolkit widget adapters —
-  replacing two independently written property-to-widget mappings and the
-  re-inlined guards.
+  replacing two independently written property-to-widget mappings and closing
+  the prop-type gaps the smaller Panel mapping had.
 
 ## Impact
 

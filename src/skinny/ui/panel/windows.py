@@ -25,7 +25,13 @@ from skinny.bxdf_math import eval_grid, render_lobe_image
 from skinny.mtlx_graph_view import (
     NodeGraphView, NodeView, build_view,
 )
+from skinny.ui import spec
+from skinny.ui.panel.backend import PanelTreeBuilder
 from skinny.ui.scene_edit_actions import apply_scene_property
+from skinny.ui.scene_property_nodes import (
+    graph_input_to_node,
+    scene_property_to_node,
+)
 
 log = logging.getLogger(__name__)
 
@@ -253,145 +259,26 @@ def _build_scene_prop_widget(
 ) -> pn.viewable.Viewable | None:
     """Build one widget for a SceneGraphProperty edit.
 
-    Every edit routes through the shared ``apply_scene_property`` dispatcher —
-    never a local copy of it. The copy this replaced handled only
-    ``light_dir``/``light_sphere``, so a dome-light (``light_env``) edit fell
-    through every branch into a silent no-op, and because it returned ``None``
-    where the shared function returns a reason string, the failure was not even
-    reportable. ``report(msg, kind)`` surfaces that reason in the status line.
+    The per-prop-type switch that used to live here is gone: the mapping from a
+    property to the control it needs is declared once in
+    ``ui.scene_property_nodes`` (change ui-spec-scene-properties), and rendered
+    by the Panel backend walker. This front-end supplies only the commit
+    transport — every edit still routes through the shared
+    ``apply_scene_property`` dispatcher on the render thread, and its returned
+    reason surfaces in the status line via ``report``. The migration also gives
+    Panel the ``lens_file`` / ``texture_file`` file pickers and the read-only
+    colour / vector rows the local switch never had.
     """
-    def _apply(p, value) -> None:
+    def commit(p, value) -> None:
+        p.value = value
         reason = session.run_on_render_thread(
             lambda r, p=p, value=value: apply_scene_property(r, node, p, value)
         )
         if reason and report is not None:
             report(f"{p.display_name}: {reason}", "warning")
 
-    if prop.type_name == "bool" and prop.editable:
-        w = pn.widgets.Checkbox(name=prop.display_name, value=bool(prop.value))
-
-        def on_bool(event, p=prop):
-            value = bool(event.new)
-            p.value = value
-            _apply(p, value)
-
-        w.param.watch(on_bool, "value")
-        return w
-
-    if prop.type_name == "float" and prop.editable:
-        lo = float(prop.metadata.get("min", 0.0))
-        hi = float(prop.metadata.get("max", 1.0))
-        step = (hi - lo) / 100.0 if hi > lo else 0.01
-
-        if prop.metadata.get("growable"):
-            w = pn.widgets.EditableFloatSlider(
-                name=prop.display_name, start=lo, end=hi,
-                fixed_start=lo, fixed_end=1e9, step=step,
-                value=float(prop.value),
-            )
-
-            def on_change(event, p=prop, sl=w):
-                _apply(p, float(event.new))
-                if float(event.new) > sl.end:
-                    sl.end = float(event.new)
-
-            w.param.watch(on_change, "value")
-            return w
-
-        w = pn.widgets.FloatSlider(
-            name=prop.display_name, start=lo, end=hi,
-            step=step, value=float(prop.value),
-        )
-
-        def on_change_plain(event, p=prop):
-            _apply(p, float(event.new))
-
-        w.param.watch(on_change_plain, "value")
-        return w
-
-    if prop.type_name == "color3f" and prop.editable:
-        c = prop.value
-        r, g, b = float(c[0]), float(c[1]), float(c[2])
-        hex_color = "#{:02x}{:02x}{:02x}".format(
-            max(0, min(255, int(round(r * 255)))),
-            max(0, min(255, int(round(g * 255)))),
-            max(0, min(255, int(round(b * 255)))),
-        )
-        cw = pn.widgets.ColorPicker(name=prop.display_name, value=hex_color)
-
-        def on_color(event, p=prop):
-            h = event.new.lstrip("#")
-            rf = int(h[0:2], 16) / 255.0
-            gf = int(h[2:4], 16) / 255.0
-            bf = int(h[4:6], 16) / 255.0
-            _apply(p, (rf, gf, bf))
-
-        cw.param.watch(on_color, "value")
-        return cw
-
-    if prop.type_name == "vec3f" and prop.editable:
-        v = prop.value
-        spins = [
-            pn.widgets.FloatInput(
-                name=f"{prop.display_name} {axis}",
-                value=float(v[i]), step=0.05,
-            )
-            for i, axis in enumerate("XYZ")
-        ]
-
-        def on_vec3(_e, p=prop, ws=spins):
-            # The shared dispatcher checks material fan-out first, so a logical
-            # input vector reaches the override path instead of the TRS recompose.
-            _apply(p, tuple(float(w.value) for w in ws))
-
-        for w in spins:
-            w.param.watch(on_vec3, "value")
-        return pn.Row(*spins)
-
-    if prop.type_name == "int" and prop.editable:
-        w = pn.widgets.IntInput(
-            name=prop.display_name, value=int(prop.value),
-            start=prop.metadata.get("min"), end=prop.metadata.get("max"),
-        )
-
-        def on_int(event, p=prop):
-            _apply(p, int(event.new))
-
-        w.param.watch(on_int, "value")
-        return w
-
-    if prop.type_name == "vec2f" and prop.editable:
-        v = prop.value
-        spins = [
-            pn.widgets.FloatInput(
-                name=f"{prop.display_name} {axis}",
-                value=float(v[i]), step=0.05,
-            )
-            for i, axis in enumerate("XY")
-        ]
-
-        def on_vec2(_e, p=prop, ws=spins):
-            _apply(p, tuple(float(w.value) for w in ws))
-
-        for w in spins:
-            w.param.watch(on_vec2, "value")
-        return pn.Row(*spins)
-
-    if prop.type_name == "vec3f":
-        v = prop.value
-        return pn.pane.Markdown(
-            f"**{prop.display_name}**: ({v[0]:.3f}, {v[1]:.3f}, {v[2]:.3f})"
-        )
-
-    if prop.type_name == "rel":
-        return pn.pane.Markdown(f"**{prop.display_name}**: → `{prop.value}`")
-    if prop.type_name == "asset":
-        return pn.pane.Markdown(f"**{prop.display_name}**: `{prop.value}`")
-
-    val_str = (
-        f"{prop.value:.4f}" if isinstance(prop.value, float) else str(prop.value)
-    )
-    return pn.pane.Markdown(f"**{prop.display_name}**: {val_str}")
+    spec_node = scene_property_to_node(prop, commit=commit)
+    return PanelTreeBuilder(spec.Section(title="")).render_leaf(spec_node)
 
 
 # ── BXDF Visualizer ───────────────────────────────────────────────
@@ -687,75 +574,20 @@ def build_material_graph_pane(
 def _build_graph_input_widget(
     session, view: NodeGraphView, node: NodeView, port,
 ) -> pn.viewable.Viewable | None:
-    label = pn.pane.Markdown(f"**{port.name}** ({port.type_name})")
+    """Build one widget for a material-graph input edit.
 
-    def _edit(value) -> None:
-        """One posted graph-port edit, whatever the port's type."""
+    The per-type switch moved to the shared ``graph_input_to_node`` mapper
+    (change ui-spec-scene-properties); this front-end supplies only the commit
+    transport (post to the render worker). The migration also gives Panel the
+    ``vector2`` and ``filename`` inputs its local switch never had.
+    """
+    def commit(p, value) -> None:
         session.run_on_render_thread(
-            lambda r, v=value: _apply_graph_edit(r, view, node, port, v)
+            lambda r, v=value: _apply_graph_edit(r, view, node, p, v)
         )
 
-    if port.connected_from:
-        up, op = port.connected_from
-        return pn.Row(
-            label,
-            pn.pane.Markdown(f"← `{up}.{op}`"),
-        )
-
-    t = port.type_name
-    if t == "float":
-        val = float(port.value) if port.value is not None else 0.0
-        hi = max(val * 2.0, 1.0)
-        w = pn.widgets.FloatSlider(
-            name=port.name, start=0.0, end=hi, step=hi / 100.0, value=val,
-        )
-
-        def on_change(event):
-            _edit(float(event.new))
-
-        w.param.watch(on_change, "value")
-        return pn.Row(label, w)
-
-    if t in ("color3", "vector3"):
-        v = port.value if isinstance(port.value, (list, tuple)) else (0.0, 0.0, 0.0)
-        sliders = [
-            pn.widgets.FloatSlider(
-                name=ch, start=0.0, end=1.0, step=0.01,
-                value=float(v[i]) if i < len(v) else 0.0,
-            )
-            for i, ch in enumerate("rgb" if t == "color3" else "xyz")
-        ]
-
-        def push(_e, ws=sliders):
-            _edit(tuple(float(w.value) for w in ws))
-
-        for s in sliders:
-            s.param.watch(push, "value")
-        return pn.Row(label, *sliders)
-
-    if t == "boolean":
-        w = pn.widgets.Checkbox(name=port.name, value=bool(port.value))
-
-        def on_change(event):
-            _edit(bool(event.new))
-
-        w.param.watch(on_change, "value")
-        return pn.Row(label, w)
-
-    if t == "integer":
-        try:
-            v = int(port.value or 0)
-        except (TypeError, ValueError):
-            v = 0
-        w = pn.widgets.IntSlider(name=port.name, start=0, end=32, value=v)
-
-        def on_change(event):
-            _edit(int(event.new))
-
-        w.param.watch(on_change, "value")
-        return pn.Row(label, w)
-
-    return pn.Row(label, pn.pane.Markdown(f"_(type {t} not editable)_"))
+    spec_node = graph_input_to_node(port, commit=commit)
+    return PanelTreeBuilder(spec.Section(title="")).render_leaf(spec_node)
 
 
 def _apply_graph_edit(renderer, view, node, port, value) -> None:

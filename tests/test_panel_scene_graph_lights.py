@@ -164,7 +164,9 @@ def test_panel_material_vec3_routes_to_override_not_transform():
     )
     node.properties = [prop]
     row = windows._build_scene_prop_widget(session, node, prop)
-    row[0].value = 1.0  # nudge X → commits the whole vector
+    inputs = [w for w in row if isinstance(w, pn.widgets.FloatInput)]
+    assert len(inputs) == 3  # three editable float fields, not read-only Markdown
+    inputs[0].value = 1.0  # nudge X → commits the whole vector
     assert rend.overrides and rend.overrides[-1][0] == 3
     assert set(rend.overrides[-1][1]) == {"u_dir"}
     assert rend.transforms == []  # not misrouted to a transform write
@@ -202,8 +204,9 @@ def test_panel_material_vec2_editable_routes_to_override(monkeypatch):
     )
     node.properties = [prop]
     row = windows._build_scene_prop_widget(session, node, prop)
-    assert len(row) == 2  # two editable float fields, not read-only Markdown
-    row[0].value = 2.0  # nudge U → commits the whole vector
+    inputs = [w for w in row if isinstance(w, pn.widgets.FloatInput)]
+    assert len(inputs) == 2  # two editable float fields, not read-only Markdown
+    inputs[0].value = 2.0  # nudge U → commits the whole vector
     assert rend.overrides and rend.overrides[-1][0] == 3
     assert set(rend.overrides[-1][1]) == {"u_uv"}
     assert rend.overrides[-1][1]["u_uv"] == (2.0, 1.0)

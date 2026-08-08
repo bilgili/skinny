@@ -46,6 +46,37 @@ and session isolation; a custom Tornado WebSocket streams encoded video.
 The sidebar widget tree comes from the same `ui/build_app_ui.build_main_ui`
 spec that the Qt app uses.
 
+### Shared property→control mapping (`ui/scene_property_nodes.py`)
+
+The scene-editing docks share more than the sidebar. The mapping from a scene
+property or a material-graph input to the control it needs is declared once, in
+`ui/scene_property_nodes.py`, and rendered by each toolkit's backend walker
+(change `ui-spec-scene-properties`). Two adapters produce the same
+toolkit-free `ui.spec` node family:
+
+- `scene_property_to_node(prop, *, commit, get_live=None)` maps one
+  `SceneGraphProperty` (Scene Graph dock).
+- `graph_input_to_node(port, *, commit)` maps one material-graph `PortView`
+  (Material Graph dock).
+
+A front-end supplies only the parts that are genuinely per-toolkit: the
+`commit` transport (the Qt dock calls the shared `apply_scene_property`
+directly; the Panel dock posts it to the render worker and reports the returned
+reason), and, for a value the user can drive without a graph rebuild (a camera
+scalar), the Qt dock's `get_live` reader. The Qt backend renders the nodes with
+`QtTreeBuilder`; the Panel backend renders one node at a time with
+`PanelTreeBuilder.render_leaf`. A read-only `spec.Label` node and a `step`
+field on `spec.Vector` were added so both front-ends show read-only rows and
+wide-range transform vectors the same way. A test
+(`tests/test_scene_property_nodes.py`) asserts every node type an adapter emits
+is dispatched by both backends, so a control type cannot render in one
+front-end and silently vanish in the other.
+
+The BXDF and Camera Debug docks are outside this seam: BXDF is a lobe
+visualizer with no property-type switch, and Camera Debug is an interaction
+surface whose key bindings are reconciled by `tests/test_gizmo_mode_parity.py`
+rather than by shared node construction.
+
 ### Session Lifecycle
 
 ![Session lifecycle: a browser connect builds a SkinnySession (headless VulkanContext, Renderer, VideoEncoder, render thread); disconnect runs cleanup (thread join, encoder close, renderer cleanup, ctx destroy).](diagrams/session_lifecycle.svg)

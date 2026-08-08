@@ -95,6 +95,8 @@ class QtTreeBuilder:
             self._build_vector(layout, node, pulls)
         elif isinstance(node, spec.IntSpin):
             self._build_int_spin(layout, node, pulls)
+        elif isinstance(node, spec.Label):
+            self._build_label(layout, node, pulls)
         elif isinstance(node, spec.Button):
             self._build_button(layout, node)
         elif isinstance(node, spec.FilePicker):
@@ -388,7 +390,7 @@ class QtTreeBuilder:
             spin = QDoubleSpinBox()
             spin.setRange(node.lo, node.hi)
             spin.setDecimals(3)
-            spin.setSingleStep((node.hi - node.lo) / 100.0)
+            spin.setSingleStep(node.step if node.step > 0.0 else (node.hi - node.lo) / 100.0)
             with QSignalBlocker(spin):
                 spin.setValue(float(cur[i]) if i < len(cur) else 0.0)
             spin.valueChanged.connect(lambda _v: push())
@@ -427,6 +429,23 @@ class QtTreeBuilder:
             if spin.value() != v:
                 with QSignalBlocker(spin):
                     spin.setValue(v)
+        pulls.append(pull)
+
+    def _build_label(
+        self, layout: QLayout, node: spec.Label,
+        pulls: list[Callable[[], None]],
+    ) -> None:
+        row = _row()
+        row.addWidget(_label(node.name))
+        value = QLabel(node.text())
+        value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        row.addWidget(value, stretch=1)
+        layout.addLayout(row)
+
+        def pull() -> None:
+            txt = node.text()
+            if value.text() != txt:
+                value.setText(txt)
         pulls.append(pull)
 
     def _build_button(self, layout: QLayout, node: spec.Button) -> None:

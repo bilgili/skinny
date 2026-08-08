@@ -8,8 +8,12 @@ proposed, applied to parameters. The docks were built before that seam existed,
 or beside it.
 
 The evidence that the duplication is costing something is the drift already
-present: a missing debug-camera key binding in Qt, a Panel dock with neither
-keyboard nor mouse, and guards re-inlined in Panel with comments admitting it.
+present: the Qt debug dock has no Escape binding, the Panel debug dock has
+neither keyboard nor mouse, and the smaller Panel property switch silently omits
+prop types the Qt switch handles (`lens_file`, `texture_file`, read-only colour
+and vector, camera live-pull). The edit routing itself is already shared through
+`scene_edit_actions.apply_scene_property`; only the property→control switch is
+duplicated.
 
 ## Goals / Non-Goals
 
@@ -41,12 +45,14 @@ The line is: deciding *what control a property needs* is shared; building the
 widget is per-toolkit. Today Qt's 363 lines and Panel's 170 both do both. After
 the split, the per-toolkit part is small and obviously parallel.
 
-### D3 — Shared edit semantics, no re-inlining
+### D3 — Shared edit semantics stay shared
 
 `ui/scene_edit_actions.py` already owns the fan-out-first guard and edit
-semantics; Panel re-inlines it at two sites and says so in comments. The node
-carries the semantics; adapters call them. Deleting the re-inlined copies is
-part of the change, not a follow-up.
+semantics, and both front-ends already route every edit through it. The change
+keeps that routing shared as the property→control switch moves into the node
+layer: the adapter builds a node whose setter calls the shared dispatcher. No
+Panel guard is re-inlined today, so none is deleted; the requirement is that the
+seam MUST NOT introduce a re-inlined copy, and a test asserts that.
 
 ### D4 — Extend the existing test, do not invent a new one
 
@@ -57,18 +63,34 @@ which is precisely the failure mode that produced the current divergence.
 
 ### D5 — One dock at a time
 
-Scene Graph first: it is the largest duplicate (363 vs 170), it has the
-re-inlined guards, and it has real behaviour to preserve. Then Material Graph,
-then BXDF, then Camera Debug. Each lands independently green.
+Scene Graph first: it is the largest duplicate (363 vs 170), it carries the
+Panel prop-type gaps to close, and it has real behaviour to preserve. Then
+Material Graph, then BXDF, then Camera Debug. Each lands independently green.
 
 ### D6 — Key maps: reconcile or record
 
 Four independent key tables exist (GLFW viewport, Qt viewport, web template, Qt
-debug dock). Some divergence is legitimate — the web has no gizmo verb at all,
-and `Key_D` is genuinely taken by WASD in the Qt debug dock. The rule: every
+debug dock). Some divergence is legitimate — the web has no gizmo verb at all.
+The genuine defects to reconcile are the Qt debug dock's missing Escape binding
+and the web debug dock's lack of any keyboard or mouse. The rule: every
 divergence is either fixed or recorded with its reason. `test_gizmo_mode_parity`
 already pins one binding across two front-ends and is the pattern; it currently
 excludes the web by construction.
+
+### D7 — One node family, two source adapters (resolves the open question)
+
+Scene properties and graph inputs share ONE node family: the existing
+`ui/spec.py` leaf node types. Two thin adapters emit them —
+`scene_property_to_node` and `graph_input_to_node`. They map onto the same
+widget vocabulary (float→slider, colour→picker, vec→vector, bool→checkbox,
+file→picker, read-only→label) and differ only in how a value is *sourced*: a
+scene property carries constraint metadata (`min`/`max`/`growable`), while a
+graph-input `PortView` carries no constraint metadata at all, so its ranges are
+per-type. That difference changes how a node is built, not which node type it
+is, so a second node family would add a seam without removing one. The spec
+grew one read-only `Label` node (both front-ends lacked a shared read-only row)
+and a `step` field on `Vector` (a transform span of ±1e6 needs a small
+single-step); the other leaf types were reused unchanged.
 
 ## Risks / Trade-offs
 
@@ -86,9 +108,10 @@ excludes the web by construction.
 
 ## Open Questions
 
-- Do graph-input rows and scene-property rows want the same node types, or two
-  families? They overlap heavily (float, color, vec, file) but graph inputs
-  carry uniform metadata. Leaning: one family with an optional metadata field.
+- ~~Do graph-input rows and scene-property rows want the same node types, or two
+  families?~~ **Resolved (D7): one family, two source adapters.** The earlier
+  premise that graph inputs "carry uniform metadata" was wrong — a `PortView`
+  carries no constraint metadata, so ranges are per-type.
 - Should the web's missing gizmo verb be added while reconciling key maps, or
   recorded as a deliberate gap? It is a command-path question as much as a UI
   one — coordinate with `renderer-command-interface`.

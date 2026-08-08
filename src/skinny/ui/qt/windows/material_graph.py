@@ -13,7 +13,7 @@ changes inside a nodegraph.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import MaterialX as mx
 import numpy as np
@@ -24,16 +24,18 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDockWidget,
-    QDoubleSpinBox, QFileDialog, QGraphicsItem, QGraphicsPathItem,
-    QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsView, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
-    QSplitter, QVBoxLayout, QWidget,
+    QComboBox, QDockWidget,
+    QGraphicsItem, QGraphicsPathItem,
+    QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsView, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
 from skinny.mtlx_graph_view import (
     _ADDABLE_CATEGORIES, NodeGraphView, NodeView, PortView, _layout,
     build_view,
 )
+from skinny.ui import spec
+from skinny.ui.qt.backend import QtTreeBuilder
+from skinny.ui.scene_property_nodes import graph_input_to_node
 
 
 # ── Worker-side MaterialX helpers ─────────────────────────────────
@@ -310,6 +312,9 @@ class MaterialGraphDock(QDockWidget):
         self._view: Optional[NodeGraphView] = None
         self._materials: list[tuple[int, str, str]] = []
         self._selected_node: Optional[str] = None
+        # Backend builder rendering the selected node's input rows; disposed on
+        # the next selection (change ui-spec-scene-properties).
+        self._input_builder: Optional[QtTreeBuilder] = None
         self._node_items: dict[str, _NodeItem] = {}
         self._wire_items: list[QGraphicsPathItem] = []
         self._last_scene_id: int = -1
@@ -628,6 +633,13 @@ class MaterialGraphDock(QDockWidget):
     # ── Side editor ───────────────────────────────────────────────
 
     def _refresh_side(self) -> None:
+        # Dispose the previous input builder's pull timer before its host dies.
+        if self._input_builder is not None:
+            try:
+                self._input_builder._timer.stop()
+            except (RuntimeError, AttributeError):
+                pass
+            self._input_builder = None
         while self._side_form.count() > 1:
             item = self._side_form.takeAt(0)
             w = item.widget()
@@ -648,183 +660,26 @@ class MaterialGraphDock(QDockWidget):
             empty.setStyleSheet("color: #808090;")
             self._add_side_widget(empty)
             return
-        for inp in node.inputs:
-            row = self._build_input_row(node, inp)
-            self._add_side_widget(row)
+
+        # Build one spec node per input via the shared mapper and render the
+        # whole set through the Qt backend walker (change ui-spec-scene-properties).
+        # The front-end supplies only the commit transport; the per-type widget
+        # switch that used to live in `_build_input_row` + six `_add_*_row`
+        # helpers is gone.
+        def commit(port: PortView, value: Any, _node=node) -> None:
+            self._apply_value_edit(_node, port, value)
+
+        nodes = [
+            graph_input_to_node(inp, commit=commit) for inp in node.inputs
+        ]
+        host = QWidget()
+        self._input_builder = QtTreeBuilder(
+            spec.Section(title="", children=nodes), host,
+        )
+        self._add_side_widget(host)
 
     def _add_side_widget(self, widget: QWidget) -> None:
         self._side_form.insertWidget(self._side_form.count() - 1, widget)
-
-    def _build_input_row(self, node: NodeView, port: PortView) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        label = QLabel(port.name)
-        label.setMinimumWidth(110)
-        layout.addWidget(label)
-
-        if port.connected_from:
-            up, op = port.connected_from
-            lbl = QLabel(f"← {up}.{op}")
-            lbl.setStyleSheet("color: #a0a0c0;")
-            layout.addWidget(lbl, stretch=1)
-            return row
-
-        t = port.type_name
-        if t == "float":
-            self._add_float_row(layout, node, port)
-        elif t in ("color3", "vector3"):
-            self._add_vec3_row(layout, node, port, is_color=(t == "color3"))
-        elif t == "vector2":
-            self._add_vec2_row(layout, node, port)
-        elif t == "integer":
-            self._add_int_row(layout, node, port)
-        elif t == "boolean":
-            self._add_bool_row(layout, node, port)
-        elif t == "filename":
-            self._add_filename_row(layout, node, port)
-        else:
-            lbl = QLabel(f"(type {t} not editable)")
-            lbl.setStyleSheet("color: #808090;")
-            layout.addWidget(lbl, stretch=1)
-        return row
-
-    def _add_float_row(
-        self, layout: QHBoxLayout, node: NodeView, port: PortView,
-    ) -> None:
-        v = float(port.value if port.value is not None else 0.0)
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setValue(int(round(v * 1000)))
-        spin = QDoubleSpinBox()
-        spin.setRange(0.0, 1.0); spin.setDecimals(3); spin.setSingleStep(0.01)
-        spin.setValue(v)
-        slider.valueChanged.connect(lambda i: spin.setValue(i / 1000.0))
-
-        def on_spin(value: float) -> None:
-            slider.blockSignals(True)
-            slider.setValue(int(round(value * 1000)))
-            slider.blockSignals(False)
-            self._apply_value_edit(node, port, float(value))
-
-        spin.valueChanged.connect(on_spin)
-        layout.addWidget(slider, stretch=1)
-        layout.addWidget(spin)
-
-    def _add_vec3_row(
-        self, layout: QHBoxLayout, node: NodeView, port: PortView,
-        is_color: bool,
-    ) -> None:
-        vals = port.value
-        if not isinstance(vals, (list, tuple)) or len(vals) < 3:
-            vals = (0.0, 0.0, 0.0)
-        spins: list[QDoubleSpinBox] = []
-        for i, ch in enumerate("rgb" if is_color else "xyz"):
-            layout.addWidget(QLabel(ch))
-            s = QDoubleSpinBox()
-            s.setRange(0.0, 1.0); s.setDecimals(3); s.setSingleStep(0.01)
-            s.setValue(float(vals[i]))
-            layout.addWidget(s)
-            spins.append(s)
-
-        def push() -> None:
-            self._apply_value_edit(
-                node, port, tuple(float(s.value()) for s in spins),
-            )
-
-        for s in spins:
-            s.valueChanged.connect(lambda _v: push())
-
-        if is_color:
-            btn = QPushButton("…")
-            btn.setFixedWidth(24)
-            layout.addWidget(btn)
-
-            def pick() -> None:
-                rgb = tuple(s.value() for s in spins)
-                init = QColor(
-                    max(0, min(255, int(round(rgb[0] * 255)))),
-                    max(0, min(255, int(round(rgb[1] * 255)))),
-                    max(0, min(255, int(round(rgb[2] * 255)))),
-                )
-                chosen = QColorDialog.getColor(init, self, port.name)
-                if not chosen.isValid():
-                    return
-                vs = (chosen.redF(), chosen.greenF(), chosen.blueF())
-                for s, v in zip(spins, vs):
-                    s.blockSignals(True); s.setValue(v); s.blockSignals(False)
-                self._apply_value_edit(node, port, vs)
-
-            btn.clicked.connect(pick)
-
-    def _add_vec2_row(
-        self, layout: QHBoxLayout, node: NodeView, port: PortView,
-    ) -> None:
-        vals = port.value
-        if not isinstance(vals, (list, tuple)) or len(vals) < 2:
-            vals = (0.0, 0.0)
-        spins: list[QDoubleSpinBox] = []
-        for i, ch in enumerate("xy"):
-            layout.addWidget(QLabel(ch))
-            s = QDoubleSpinBox()
-            s.setRange(-1e6, 1e6); s.setDecimals(3); s.setSingleStep(0.05)
-            s.setValue(float(vals[i]))
-            layout.addWidget(s)
-            spins.append(s)
-
-        def push() -> None:
-            self._apply_value_edit(
-                node, port, tuple(float(s.value()) for s in spins),
-            )
-
-        for s in spins:
-            s.valueChanged.connect(lambda _v: push())
-
-    def _add_int_row(
-        self, layout: QHBoxLayout, node: NodeView, port: PortView,
-    ) -> None:
-        s = QSpinBox()
-        s.setRange(-1024, 1024)
-        try:
-            s.setValue(int(port.value or 0))
-        except (TypeError, ValueError):
-            s.setValue(0)
-        s.valueChanged.connect(
-            lambda v: self._apply_value_edit(node, port, int(v)),
-        )
-        layout.addWidget(s)
-        layout.addStretch(1)
-
-    def _add_bool_row(
-        self, layout: QHBoxLayout, node: NodeView, port: PortView,
-    ) -> None:
-        cb = QCheckBox()
-        cb.setChecked(bool(port.value))
-        cb.toggled.connect(
-            lambda v: self._apply_value_edit(node, port, bool(v)),
-        )
-        layout.addWidget(cb)
-        layout.addStretch(1)
-
-    def _add_filename_row(
-        self, layout: QHBoxLayout, node: NodeView, port: PortView,
-    ) -> None:
-        lbl = QLabel(str(port.value or ""))
-        lbl.setStyleSheet("color: steelblue;")
-        layout.addWidget(lbl, stretch=1)
-        btn = QPushButton("…")
-        btn.setFixedWidth(24)
-
-        def browse() -> None:
-            path, _ = QFileDialog.getOpenFileName(self, port.name)
-            if not path:
-                return
-            lbl.setText(path)
-            self._apply_value_edit(node, port, path)
-
-        btn.clicked.connect(browse)
-        layout.addWidget(btn)
 
     # ── Selection ────────────────────────────────────────────────
 

@@ -15,7 +15,9 @@ contribute only widget construction for a node type. The two independently
 written property-to-widget mappings — Qt's `_build_property_widget` with its
 eight helpers and Panel's `_build_scene_prop_widget` — MUST NOT both restate
 the prop-type switch, and the shared edit semantics MUST NOT be re-inlined in a
-front-end, as the fan-out-first guard currently is at two Panel sites.
+front-end. Both front-ends already route edits through the shared
+`apply_scene_property` dispatcher; the seam MUST keep that so, and MUST NOT let
+one front-end omit a prop type the other supports.
 
 #### Scenario: Same logic in both front-ends
 
@@ -37,8 +39,7 @@ front-end, as the fan-out-first guard currently is at two Panel sites.
 #### Scenario: Interaction bindings are reconciled or recorded
 
 - **WHEN** the key and mouse bindings of a control surface present in more than
-  one front-end are compared — including the Camera Debug dock, where Qt is
-  currently missing the depth-of-field-plane binding and Panel has neither
-  keyboard nor mouse
+  one front-end are compared — including the Camera Debug dock, where the Qt
+  dock has no Escape binding and the web dock has neither keyboard nor mouse
 - **THEN** each divergence is either removed or recorded with its reason, and
   the recorded set is asserted by test

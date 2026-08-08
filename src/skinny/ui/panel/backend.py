@@ -92,6 +92,16 @@ class PanelTreeBuilder:
             for pull in dyn.pulls:
                 _safe_call(pull)
 
+    def render_leaf(
+        self, node: spec.Node, pulls: list[Callable[[], None]] | None = None,
+    ) -> pn.viewable.Viewable | None:
+        """Render a single leaf node to a viewable, for callers (the scene
+        docks) that place property rows in their own layout rather than the
+        sidebar accordion. Appends any pull callback to ``pulls`` (default: the
+        builder's own list, which the caller may tick or ignore).
+        """
+        return self._build(node, self._pulls if pulls is None else pulls)
+
     # ── Top-level walker ──────────────────────────────────────────
 
     def _build_top_level(
@@ -170,6 +180,8 @@ class PanelTreeBuilder:
             return self._build_vector(node, pulls)
         if isinstance(node, spec.IntSpin):
             return self._build_int_spin(node, pulls)
+        if isinstance(node, spec.Label):
+            return self._build_label(node, pulls)
         if isinstance(node, spec.Button):
             return self._build_button(node)
         if isinstance(node, spec.FilePicker):
@@ -316,39 +328,46 @@ class PanelTreeBuilder:
     def _build_vector(
         self, node: spec.Vector, pulls: list[Callable[[], None]],
     ) -> pn.viewable.Viewable:
+        # Numeric inputs, not sliders: a vector spans an unbounded range (a
+        # transform translate is ±1e6), which a slider cannot address, and this
+        # matches the Qt backend's per-component spinbox (one control per
+        # value across both front-ends).
         cur = node.getter()
-        sliders: list[pn.widgets.FloatSlider] = []
+        inputs: list[pn.widgets.FloatInput] = []
         labels = "xyzw"
+        step = node.step if node.step > 0.0 else (node.hi - node.lo) / 100.0
 
         def push() -> None:
-            node.setter(tuple(s.value for s in sliders))
+            node.setter(tuple(w.value for w in inputs))
 
         widgets: list[pn.viewable.Viewable] = [pn.pane.Markdown(f"**{node.name}**")]
         for i in range(node.components):
             v = float(cur[i]) if i < len(cur) else 0.0
-            sw = pn.widgets.FloatSlider(
+            iw = pn.widgets.FloatInput(
                 name=f"{node.name}.{labels[i]}", start=node.lo, end=node.hi,
-                step=(node.hi - node.lo) / 100.0, value=v,
+                step=step, value=v,
             )
-            sw.param.watch(lambda _e, _push=push: _push(), "value")
-            sliders.append(sw)
-            widgets.append(sw)
+            iw.param.watch(lambda _e, _push=push: _push(), "value")
+            inputs.append(iw)
+            widgets.append(iw)
 
         def pull() -> None:
             cur_now = node.getter()
-            for i, s in enumerate(sliders):
+            for i, w in enumerate(inputs):
                 if i >= len(cur_now):
                     continue
                 v = float(cur_now[i])
-                if abs(s.value - v) > 1e-5:
-                    s.value = v
+                if abs(w.value - v) > 1e-5:
+                    w.value = v
         pulls.append(pull)
         return pn.Column(*widgets)
 
     def _build_int_spin(
         self, node: spec.IntSpin, pulls: list[Callable[[], None]],
     ) -> pn.viewable.Viewable:
-        w = pn.widgets.IntSlider(
+        # Numeric input, not a slider: a scene-property int can be unbounded
+        # (default span ±1e6), and this matches the Qt backend's spinbox.
+        w = pn.widgets.IntInput(
             name=node.name, start=node.lo, end=node.hi, value=int(node.getter()),
         )
 
@@ -368,6 +387,18 @@ class PanelTreeBuilder:
     def _build_button(self, node: spec.Button) -> pn.viewable.Viewable:
         w = pn.widgets.Button(name=node.label)
         w.on_click(lambda _e: node.on_click())
+        return w
+
+    def _build_label(
+        self, node: spec.Label, pulls: list[Callable[[], None]],
+    ) -> pn.viewable.Viewable:
+        w = pn.pane.Markdown(f"**{node.name}**: {node.text()}")
+
+        def pull() -> None:
+            txt = f"**{node.name}**: {node.text()}"
+            if w.object != txt:
+                w.object = txt
+        pulls.append(pull)
         return w
 
     def _build_direction_picker(

@@ -29,14 +29,14 @@ def test_tick_refreshes_scene_state_on_the_worker() -> None:
 
 def test_result_edits_do_not_block_the_gui_thread() -> None:
     src = inspect.getsource(sg)
-    # Every return-value edit is awaited off-thread via `_await`.
+    # Every structural return-value edit is awaited off-thread via `_await`.
+    # (lens/texture file loads moved onto the shared FilePicker node in
+    # change ui-spec-scene-properties, so they no longer live here.)
     for method in (
         "r.add_model(", "r.add_light(", "r.save_edits()", "self.renderer.remove_node(",
-        "self.renderer.apply_camera_lens_file(",
-        "self.renderer.apply_dome_light_texture(",
     ):
         assert method in src, method
-    assert src.count("self._await(") >= 6
+    assert src.count("self._await(") >= 4
     # Every `.result()` must run inside a worker-side future done-callback
     # (`_await` and `_on_scene_state_future`), never on the GUI thread.
     worker_cbs = (
@@ -119,6 +119,12 @@ def test_add_light_requires_edit_layer_for_enablement_and_dispatch() -> None:
 
 
 # ── Editable int / vec2f material-input widgets (finding A(ii)) ────────
+#
+# Behavioural, through the migrated path (change ui-spec-scene-properties): the
+# dock builds the property panel from the shared `scene_property_to_node` mapper
+# and renders it with the Qt backend, so these drive `_build_properties(node)`
+# and reach into the embedded builder's widgets — no direct call to a
+# now-deleted per-type helper.
 
 
 class _MatRendererStub(_LightRendererStub):
@@ -151,9 +157,8 @@ def test_dock_int_widget_is_editable_and_routes_to_override() -> None:
             name="octaves", display_name="octaves", type_name="int", value=4,
             editable=True, metadata={"fanout": ["u_octaves"], "min": 1, "max": 8},
         )
-        node = _mat_node_with(prop)
-        row = dock._build_property_widget(node, prop)
-        spins = row.findChildren(QSpinBox)
+        dock._build_properties(_mat_node_with(prop))
+        spins = dock._props_host.findChildren(QSpinBox)
         assert len(spins) == 1  # an editable int spinbox, not a read-only label
         assert (spins[0].minimum(), spins[0].maximum()) == (1, 8)
         spins[0].setValue(6)
@@ -177,12 +182,10 @@ def test_dock_vec2_widget_is_editable_and_routes_to_override() -> None:
             name="uv", display_name="uv", type_name="vec2f", value=(0.0, 0.0),
             editable=True, metadata={"fanout": ["u_uv"]},
         )
-        node = _mat_node_with(prop)
-        row = dock._build_property_widget(node, prop)
-        spins = row.findChildren(QDoubleSpinBox)
+        dock._build_properties(_mat_node_with(prop))
+        spins = dock._props_host.findChildren(QDoubleSpinBox)
         assert len(spins) == 2  # two-component editable vector
         spins[0].setValue(0.5)
-        spins[0].editingFinished.emit()
         assert renderer.overrides and renderer.overrides[-1][0] == 2
         assert set(renderer.overrides[-1][1]) == {"u_uv"}  # fan-out to override
     finally:

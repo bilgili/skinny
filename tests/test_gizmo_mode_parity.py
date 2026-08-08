@@ -36,3 +36,30 @@ def test_f1_still_toggles_hud_in_both_frontends():
     assert "Qt.Key_F1" in _read("ui/qt/viewport.py")
     assert "show_hud" in _read("app.py")
     assert "show_hud" in _read("ui/qt/viewport.py")
+
+
+# ── Camera Debug key-map reconciliation (change ui-spec-scene-properties, 1.4) ──
+#
+# Two divergences were found across the four camera/viewport key maps and each
+# is resolved here — one fixed, one recorded — and asserted so it stays that way.
+
+
+def test_qt_debug_dock_binds_escape_to_close():
+    """FIXED divergence: the Qt Camera Debug dock had no Escape binding while the
+    GLFW debug viewport closes on Escape. The dock now closes on Escape too.
+    """
+    txt = _read("ui/qt/windows/debug_viewport.py")
+    assert "Qt.Key_Escape" in txt
+    assert "self.close()" in txt
+
+
+def test_web_debug_surface_is_button_only_recorded_gap():
+    """RECORDED divergence: the web (Panel) debug surface is button-only
+    (Top / Left / Back / reset) with no free-camera keyboard or mouse. The
+    browser viewport carries no gizmo or free-camera verb, so this is a
+    deliberate gap, not a missing binding — asserted so it stays intentional.
+    """
+    txt = _read("ui/panel/windows.py")
+    assert '"Top"' in txt and '"Left"' in txt and '"Back"' in txt
+    # No Qt key handler on the browser surface (Panel has no keyPressEvent).
+    assert "keyPressEvent" not in txt

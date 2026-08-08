@@ -111,13 +111,29 @@ class Checkbox(Node):
 
 @dataclass
 class Vector(Node):
-    """N-component float vector (2/3/4). Getter/setter exchange a tuple."""
+    """N-component float vector (2/3/4). Getter/setter exchange a tuple.
+
+    ``step`` is the per-component single-step; ``0.0`` means "backend chooses"
+    (``(hi - lo) / 100``). Wide-range vectors (transform translate spans
+    ±1e6) need an explicit small step so a scroll/arrow tick isn't 20000 units.
+    """
     name: str
     components: int
     getter: Callable[[], tuple[float, ...]]
     setter: Callable[[tuple[float, ...]], None]
     lo: float = 0.0
     hi: float = 1.0
+    step: float = 0.0
+
+
+@dataclass
+class Label(Node):
+    """Read-only value display. ``text`` is re-read each pull so a live value
+    (a camera scalar the user is driving) stays fresh without an editable
+    control. Both backends render it as a labelled, non-interactive row.
+    """
+    name: str
+    text: Callable[[], str]
 
 
 @dataclass
@@ -295,11 +311,14 @@ class UIBuilder:
         self, name: str, components: int,
         getter: Callable[[], tuple[float, ...]],
         setter: Callable[[tuple[float, ...]], None],
-        lo: float = 0.0, hi: float = 1.0,
+        lo: float = 0.0, hi: float = 1.0, step: float = 0.0,
     ) -> Vector:
         if components not in (2, 3, 4):
             raise ValueError("Vector.components must be 2, 3, or 4")
-        return self._append(Vector(name, components, getter, setter, lo, hi))  # type: ignore[return-value]
+        return self._append(Vector(name, components, getter, setter, lo, hi, step))  # type: ignore[return-value]
+
+    def label(self, name: str, text: Callable[[], str]) -> Label:
+        return self._append(Label(name, text))  # type: ignore[return-value]
 
     def int_spin(
         self, name: str, getter: Callable[[], int],

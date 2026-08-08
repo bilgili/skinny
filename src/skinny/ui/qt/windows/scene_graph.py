@@ -11,18 +11,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QDockWidget, QDoubleSpinBox,
-    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
-    QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QDockWidget, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from skinny.scene_graph import (
     SceneGraphNode, SceneGraphProperty, find_node_by_path, type_icon,
 )
 from skinny.settings import get_last_dir, record_last_dir
+from skinny.ui import spec
+from skinny.ui.qt.backend import QtTreeBuilder
 from skinny.ui.qt.dialogs import get_open_file_name
 from skinny.ui.scene_edit_actions import (
     SUPPORTED_LIGHT_TYPES,
@@ -31,6 +31,7 @@ from skinny.ui.scene_edit_actions import (
     has_editable_stage,
     is_deletable,
 )
+from skinny.ui.scene_property_nodes import scene_property_to_node
 
 _USD_PICKER_FILTER = "USD (*.usda *.usdc *.usdz);;All files (*)"
 
@@ -66,6 +67,9 @@ class SceneGraphDock(QDockWidget):
         # Live "pull" callbacks for the active property widgets — refresh
         # them from the camera each tick so external orbit/zoom shows up.
         self._pulls: list[Callable[[], None]] = []
+        # The embedded backend builder that renders the selected node's property
+        # nodes; owns its own pull timer, disposed on the next selection.
+        self._prop_builder: QtTreeBuilder | None = None
 
         # Container: an editing toolbar across the top, then a vertical
         # splitter (tree above, property editor below).
@@ -375,12 +379,48 @@ class SceneGraphDock(QDockWidget):
             self._add_prop_widget(QLabel("(no properties)"))
             return
 
+        # Build spec nodes from the shared mapper and render them through the
+        # Qt backend walker (change ui-spec-scene-properties). The per-prop-type
+        # switch and the eight `_add_*` helpers that used to live here are gone;
+        # the front-end supplies only the commit transport and the live-value
+        # read. `commit` sets `prop.value` before routing so a following edit of
+        # a sibling transform component reads the fresh value, then calls the
+        # shared dispatcher (the same routing the old helpers used).
+        def commit(prop: SceneGraphProperty, value: Any, _node=node) -> None:
+            prop.value = value
+            reason = apply_scene_property(
+                self.renderer, _node, prop, value,
+                graph=self.renderer.scene_graph,
+            )
+            if reason:
+                self._status(reason)
+
+        def get_live(prop: SceneGraphProperty, _node=node):
+            ref = _node.renderer_ref
+            if ref is not None and ref.kind == "renderer_camera":
+                live = _read_camera_param(self.renderer.camera, prop.name)
+                if live is not None:
+                    return live
+            return prop.value
+
+        root = spec.Section(title="")
         for prop in node.properties:
-            row = self._build_property_widget(node, prop)
-            if row is not None:
-                self._add_prop_widget(row)
+            root.children.append(
+                scene_property_to_node(prop, commit=commit, get_live=get_live)
+            )
+        host = QWidget()
+        self._prop_builder = QtTreeBuilder(root, host)
+        self._add_prop_widget(host)
 
     def _clear_props(self) -> None:
+        # Stop the embedded property builder's pull timer before its host widget
+        # is deleted, so a stale timer can't tick against a dead panel.
+        if self._prop_builder is not None:
+            try:
+                self._prop_builder._timer.stop()
+            except (RuntimeError, AttributeError):
+                pass
+            self._prop_builder = None
         while self._props_layout.count() > 1:  # keep trailing stretch
             item = self._props_layout.takeAt(0)
             w = item.widget()
@@ -391,371 +431,6 @@ class SceneGraphDock(QDockWidget):
     def _add_prop_widget(self, widget: QWidget) -> None:
         # Insert before the trailing stretch.
         self._props_layout.insertWidget(self._props_layout.count() - 1, widget)
-
-    # ── Property rows ─────────────────────────────────────────────
-
-    def _build_property_widget(
-        self, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> QWidget | None:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-
-        label = QLabel(prop.display_name)
-        label.setMinimumWidth(120)
-        layout.addWidget(label)
-
-        if prop.type_name == "bool" and prop.editable:
-            self._add_bool(layout, node, prop)
-        elif prop.type_name == "float" and prop.editable:
-            self._add_float(layout, node, prop)
-        elif prop.type_name == "color3f" and prop.editable:
-            self._add_color(layout, node, prop)
-        elif prop.type_name == "vec3f" and prop.editable:
-            self._add_vec3(layout, node, prop)
-        elif prop.type_name == "vec2f" and prop.editable:
-            self._add_vec2(layout, node, prop)
-        elif prop.type_name == "int" and prop.editable:
-            self._add_int(layout, node, prop)
-        elif prop.type_name == "vec3f":
-            v = prop.value
-            layout.addWidget(QLabel(f"({v[0]:.3f}, {v[1]:.3f}, {v[2]:.3f})"))
-            layout.addStretch(1)
-        elif prop.type_name == "vec2f":
-            v = prop.value
-            layout.addWidget(QLabel(f"({v[0]:.3f}, {v[1]:.3f})"))
-            layout.addStretch(1)
-        elif prop.type_name == "color3f":
-            self._add_color_readonly(layout, prop)
-        elif prop.type_name in ("float", "int"):
-            v = prop.value
-            txt = f"{v:.4f}" if isinstance(v, float) else str(v)
-            lbl = QLabel(txt)
-            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            layout.addWidget(lbl, stretch=1)
-        elif prop.type_name == "rel":
-            lbl = QLabel(f"→ {prop.value}")
-            lbl.setStyleSheet("color: steelblue;")
-            layout.addWidget(lbl, stretch=1)
-        elif prop.type_name == "asset":
-            lbl = QLabel(str(prop.value))
-            lbl.setStyleSheet("color: gray;")
-            layout.addWidget(lbl, stretch=1)
-        elif prop.type_name == "lens_file" and prop.editable:
-            self._add_lens_file(layout, node, prop)
-        elif prop.type_name == "texture_file" and prop.editable:
-            self._add_texture_file(layout, node, prop)
-        else:
-            layout.addWidget(QLabel(str(prop.value)), stretch=1)
-        return row
-
-    def _add_bool(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        cb = QCheckBox()
-        cb.setChecked(bool(prop.value))
-
-        def on_toggle(checked: bool) -> None:
-            value = bool(checked)
-            prop.value = value
-            self._apply_property(node, prop, value)
-
-        cb.toggled.connect(on_toggle)
-        layout.addWidget(cb)
-        layout.addStretch(1)
-
-        # Live pull for camera-bound bool props.
-        if node.renderer_ref is not None and node.renderer_ref.kind == "renderer_camera":
-            def pull() -> None:
-                live = _read_camera_param(self.renderer.camera, prop.name)
-                if live is None:
-                    return
-                if cb.isChecked() != bool(live):
-                    with QSignalBlocker(cb):
-                        cb.setChecked(bool(live))
-                    prop.value = bool(live)
-            self._pulls.append(pull)
-
-    def _add_float(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        lo = float(prop.metadata.get("min", 0.0))
-        hi = float(prop.metadata.get("max", 1.0))
-        cur = float(prop.value)
-        growable = bool(prop.metadata.get("growable"))
-
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(0, 1000)
-        spin = QDoubleSpinBox()
-        spin.setRange(lo, 1e9 if growable else hi)
-        spin.setDecimals(3)
-        # Mutable mapping bounds so a growable range can be rescaled in place
-        # without rebuilding the widget (preserves the slider grab mid-drag).
-        rng = {"hi": hi, "span": max(hi - lo, 1e-9)}
-
-        def to_int(v: float) -> int:
-            return int(round((v - lo) / rng["span"] * 1000.0))
-
-        def from_int(i: int) -> float:
-            return lo + (i / 1000.0) * rng["span"]
-
-        with QSignalBlocker(slider), QSignalBlocker(spin):
-            slider.setValue(to_int(cur))
-            spin.setValue(cur)
-
-        def apply(v: float) -> None:
-            prop.value = float(v)
-            self._apply_property(node, prop, float(v))
-
-        slider.valueChanged.connect(lambda i: (spin.setValue(from_int(i))))
-        spin.valueChanged.connect(lambda v: (
-            self._update_slider_from_spin(slider, to_int, v),
-            apply(v),
-        ))
-
-        layout.addWidget(slider, stretch=1)
-        layout.addWidget(spin)
-
-        if node.renderer_ref is not None and node.renderer_ref.kind == "renderer_camera":
-            def pull() -> None:
-                cam = self.renderer.camera
-                live = _read_camera_param(cam, prop.name)
-                if live is None:
-                    return
-                if growable:
-                    live_max = float(getattr(cam, "max_distance", rng["hi"]))
-                    if abs(live_max - rng["hi"]) > 1e-4:
-                        rng["hi"] = live_max
-                        rng["span"] = max(live_max - lo, 1e-9)
-                        with QSignalBlocker(slider):
-                            slider.setValue(to_int(float(live)))
-                if abs(spin.value() - float(live)) > 1e-4:
-                    with QSignalBlocker(slider), QSignalBlocker(spin):
-                        spin.setValue(float(live))
-                        slider.setValue(to_int(float(live)))
-                    prop.value = float(live)
-            self._pulls.append(pull)
-
-    @staticmethod
-    def _update_slider_from_spin(
-        slider: QSlider, to_int: Callable[[float], int], v: float,
-    ) -> None:
-        with QSignalBlocker(slider):
-            slider.setValue(to_int(v))
-
-    def _add_color(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        v = prop.value
-        r, g, b = float(v[0]), float(v[1]), float(v[2])
-        swatch = QPushButton()
-        swatch.setFixedWidth(36); swatch.setFixedHeight(20)
-
-        def paint_swatch(rr: float, gg: float, bb: float) -> None:
-            swatch.setStyleSheet(
-                f"background-color: rgb({_b(rr)}, {_b(gg)}, {_b(bb)}); "
-                f"border: 1px solid #555;"
-            )
-
-        paint_swatch(r, g, b)
-
-        def on_click() -> None:
-            cur = prop.value
-            init = QColor(_b(cur[0]), _b(cur[1]), _b(cur[2]))
-            chosen = QColorDialog.getColor(init, self, prop.display_name)
-            if not chosen.isValid():
-                return
-            new_color = (chosen.redF(), chosen.greenF(), chosen.blueF())
-            prop.value = new_color
-            paint_swatch(*new_color)
-            self._apply_property(node, prop, new_color)
-
-        swatch.clicked.connect(on_click)
-        layout.addWidget(swatch)
-        layout.addStretch(1)
-
-    def _add_color_readonly(
-        self, layout: QHBoxLayout, prop: SceneGraphProperty,
-    ) -> None:
-        v = prop.value
-        r, g, b = float(v[0]), float(v[1]), float(v[2])
-        swatch = QLabel()
-        swatch.setFixedSize(36, 20)
-        swatch.setStyleSheet(
-            f"background-color: rgb({_b(r)}, {_b(g)}, {_b(b)}); border: 1px solid #555;"
-        )
-        layout.addWidget(swatch)
-        layout.addWidget(QLabel(f"({r:.2f}, {g:.2f}, {b:.2f})"), stretch=1)
-
-    def _add_vec3(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        v = prop.value
-        spins: list[QDoubleSpinBox] = []
-        for i, axis in enumerate(("X", "Y", "Z")):
-            layout.addWidget(QLabel(axis))
-            s = QDoubleSpinBox()
-            s.setRange(-1e6, 1e6); s.setDecimals(4); s.setSingleStep(0.05)
-            with QSignalBlocker(s):
-                s.setValue(float(v[i]))
-            spins.append(s)
-            layout.addWidget(s)
-
-        def commit() -> None:
-            try:
-                values = tuple(float(s.value()) for s in spins)
-            except (TypeError, ValueError):
-                return
-            prop.value = values
-            self._apply_vec3_property(node, prop, values)
-
-        for s in spins:
-            s.editingFinished.connect(commit)
-
-    def _add_vec2(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        """Two-component editable vector (finding A(ii)). A reflected vector2
-        material uniform must surface as a 2-sequence so the runtime packer reads
-        both components; the shared ``apply_scene_property`` fan-out guard routes
-        the (x, y) tuple to the material-override path."""
-        v = prop.value
-        spins: list[QDoubleSpinBox] = []
-        for i, axis in enumerate(("X", "Y")):
-            layout.addWidget(QLabel(axis))
-            s = QDoubleSpinBox()
-            s.setRange(-1e6, 1e6); s.setDecimals(4); s.setSingleStep(0.05)
-            with QSignalBlocker(s):
-                s.setValue(float(v[i]))
-            spins.append(s)
-            layout.addWidget(s)
-
-        def commit() -> None:
-            try:
-                values = tuple(float(s.value()) for s in spins)
-            except (TypeError, ValueError):
-                return
-            prop.value = values
-            self._apply_property(node, prop, values)
-
-        for s in spins:
-            s.editingFinished.connect(commit)
-
-    def _add_int(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        """Integer spinbox (finding A(ii)) — e.g. a template ``octaves`` int input,
-        bounded by its declared range. Routes through the shared property path
-        (the fan-out guard reaches the material override for a descriptor int)."""
-        spin = QSpinBox()
-        lo = prop.metadata.get("min")
-        hi = prop.metadata.get("max")
-        spin.setRange(
-            int(lo) if isinstance(lo, (int, float)) else -1_000_000,
-            int(hi) if isinstance(hi, (int, float)) else 1_000_000,
-        )
-        with QSignalBlocker(spin):
-            spin.setValue(int(prop.value) if prop.value is not None else 0)
-
-        def on_change(v: int) -> None:
-            prop.value = int(v)
-            self._apply_property(node, prop, int(v))
-
-        spin.valueChanged.connect(on_change)
-        layout.addWidget(spin)
-        layout.addStretch(1)
-
-    def _add_lens_file(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        cur_label = QLabel(str(prop.value))
-        cur_label.setStyleSheet("color: steelblue;")
-        layout.addWidget(cur_label, stretch=1)
-        btn = QPushButton("Load…")
-
-        def on_pick() -> None:
-            path = get_open_file_name(
-                self, "Load lens (.usda)",
-                get_last_dir("lens"),
-                "USDA lens (*.usda);;All files (*.*)",
-            )
-            if not path:
-                return
-            if not hasattr(self.renderer, "apply_camera_lens_file"):
-                return
-
-            def on_ok(ok: bool, path=path) -> None:
-                if not ok:
-                    return
-                record_last_dir("lens", Path(path).parent)
-                name = Path(path).name
-                cur_label.setText(name)
-                prop.value = name
-
-            self._await(
-                self.renderer.apply_camera_lens_file(path), on_ok,
-                "Load lens failed",
-            )
-
-        btn.clicked.connect(on_pick)
-        layout.addWidget(btn)
-
-    def _add_texture_file(
-        self, layout: QHBoxLayout, node: SceneGraphNode, prop: SceneGraphProperty,
-    ) -> None:
-        cur = str(prop.value or "")
-        label_text = Path(cur).name if cur else "(none)"
-        cur_label = QLabel(label_text)
-        cur_label.setStyleSheet("color: steelblue;")
-        layout.addWidget(cur_label, stretch=1)
-        btn = QPushButton("Load…")
-
-        def on_pick() -> None:
-            ref = node.renderer_ref
-            if ref is None or ref.kind != "light_env":
-                return
-            path = get_open_file_name(
-                self, "Load HDR",
-                get_last_dir("ibl"),
-                "HDR images (*.hdr *.exr *.pfm);;All files (*.*)",
-            )
-            if not path:
-                return
-            if not hasattr(self.renderer, "apply_dome_light_texture"):
-                return
-
-            def on_ok(ok: bool, path=path) -> None:
-                if not ok:
-                    return
-                record_last_dir("ibl", Path(path).parent)
-                cur_label.setText(Path(path).name)
-                prop.value = path
-
-            self._await(
-                self.renderer.apply_dome_light_texture(ref.index, path), on_ok,
-                "Load HDR failed",
-            )
-
-        btn.clicked.connect(on_pick)
-        layout.addWidget(btn)
-
-    # ── Apply edits ───────────────────────────────────────────────
-
-    def _apply_property(
-        self, node: SceneGraphNode, prop: SceneGraphProperty, value: Any,
-    ) -> None:
-        apply_scene_property(
-            self.renderer, node, prop, value, graph=self.renderer.scene_graph,
-        )
-
-    def _apply_vec3_property(
-        self, node: SceneGraphNode, prop: SceneGraphProperty,
-        values: tuple[float, float, float],
-    ) -> None:
-        apply_scene_property(
-            self.renderer, node, prop, values, graph=self.renderer.scene_graph,
-        )
 
     # ── Per-tick refresh ──────────────────────────────────────────
 

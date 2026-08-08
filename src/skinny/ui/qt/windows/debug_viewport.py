@@ -368,6 +368,13 @@ class DebugViewportDock(QDockWidget):
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
+        # Escape closes the debug view, matching the GLFW debug viewport
+        # (change ui-spec-scene-properties, 1.4 key-map reconciliation). Handled
+        # directly, not via PRESS_ACTIONS, because closing is a dock action, not
+        # a worker-posted renderer call.
+        if key == Qt.Key_Escape:
+            self.close()
+            return
         if key in MOVEMENT_KEYS:
             self._wasd[key] = True
             # `D` drives both channels, as it does on the GLFW viewport: held
